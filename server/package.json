@@ -1,0 +1,13 @@
+{
+  "name": "secure-chat-server",
+  "version": "1.0.0",
+  "description": "WebSocket server for SecureChat application with WebCrypto",
+  "main": "server.js",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "ws": "^8.18.3"
+  }
+}

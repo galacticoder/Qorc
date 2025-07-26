@@ -1,0 +1,67 @@
+#!/bin/bash
+
+GREEN='\033[0;32m'
+BLUE='\033[0;34m'
+YELLOW='\033[1;33m'
+NC='\033[0m'
+
+echo -e "${BLUE}╔════════════════════════════════════════════╗${NC}"
+echo -e "${BLUE}║${GREEN}        SecureChat - Secure Messaging        ${BLUE}║${NC}"
+echo -e "${BLUE}╚════════════════════════════════════════════╝${NC}"
+
+cd "$(dirname "$0")"
+
+if ! command -v node &> /dev/null; then
+    echo -e "${YELLOW}Node.js is not installed. Please install Node.js to run the server.${NC}"
+    exit 1
+fi
+
+if ! command -v pnpm &> /dev/null; then
+    echo -e "${YELLOW}pnpm is not installed. Using npm instead.${NC}"
+    USE_NPM=true
+else
+    USE_NPM=false
+fi
+
+echo -e "${GREEN}Installing WebSocket server dependencies...${NC}"
+cd server
+npm install
+
+echo -e "${GREEN}Starting secure WebSocket server on port 8080...${NC}"
+node server.js &
+SERVER_PID=$!
+
+cd ..
+
+echo -e "${GREEN}Installing client dependencies...${NC}"
+if [ "$USE_NPM" = true ]; then
+    npm install
+else
+    pnpm install
+fi
+
+echo -e "${GREEN}Starting client application...${NC}"
+if [ "$USE_NPM" = true ]; then
+    npm run dev &
+else
+    pnpm run dev &
+fi
+CLIENT_PID=$!
+
+cleanup() {
+    echo -e "${YELLOW}Shutting down servers...${NC}"
+    kill $SERVER_PID $CLIENT_PID 2>/dev/null
+    reset
+    exit
+}
+
+trap cleanup INT TERM
+
+echo -e "${GREEN}==========================================${NC}"
+echo -e "${GREEN}SecureChat is now running!${NC}"
+echo -e "${GREEN}WebSocket server: http://localhost:8080${NC}"
+echo -e "${GREEN}Client application: http://localhost:5173${NC}"
+echo -e "${GREEN}==========================================${NC}"
+echo -e "${YELLOW}Press Ctrl+C to stop all servers${NC}"
+
+wait

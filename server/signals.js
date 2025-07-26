@@ -1,0 +1,9 @@
+export const SignalType = {
+  PUBLICKEYS: "public-keys:",
+  ENCRYPTED_MESSAGE: "encrypted-message",
+  FILE_MESSAGE: "file-message",
+  NAMEEXISTSERR: "NAMEEXISTSERR:",
+  INVALIDNAMELENGTH: "INVALIDNAMELENGTH:",
+  INVALIDNAME: "INVALIDNAME:",
+  SERVERLIMIT: "SERVERLIMIT:",
+};
