@@ -1,7 +1,7 @@
 {
-  "name": "secure-chat-server",
+  "name": "e2e-server",
   "version": "1.0.0",
-  "description": "WebSocket server for SecureChat application with WebCrypto",
+  "description": "server for e2e chat app",
   "main": "server.js",
   "type": "module",
   "scripts": {

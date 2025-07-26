@@ -20,4 +20,3 @@ Textarea.displayName = 'Textarea';
 
 export { Textarea };
 
-/* traced by end2end */

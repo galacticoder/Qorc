@@ -19,4 +19,3 @@ Separator.displayName = SeparatorPrimitive.Root.displayName;
 
 export { Separator };
 
-/* traced by end2end */

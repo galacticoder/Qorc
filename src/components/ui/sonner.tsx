@@ -26,4 +26,3 @@ const Toaster = ({ ...props }: ToasterProps) => {
 
 export { Toaster, toast };
 
-/* traced by end2end */

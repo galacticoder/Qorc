@@ -42,4 +42,3 @@ Button.displayName = 'Button';
 
 export { Button, buttonVariants };
 
-/* traced by end2end */

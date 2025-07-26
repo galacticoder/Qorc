@@ -14,4 +14,3 @@ Label.displayName = LabelPrimitive.Root.displayName;
 
 export { Label };
 
-/* traced by end2end */

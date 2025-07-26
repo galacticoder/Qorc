@@ -1,5 +1,5 @@
 {
-  "name": "shadcnui",
+  "name": "e2e-chat",
   "type": "module",
   "packageManager": "pnpm@8.10.0",
   "scripts": {

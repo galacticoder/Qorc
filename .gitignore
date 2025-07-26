@@ -1,0 +1,5 @@
+/node_modules
+/server/node_modules
+pnpm-lock.yaml
+/server/pnpm-lock.yaml
+/server/package-lock.yaml

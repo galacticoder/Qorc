@@ -28,4 +28,3 @@ function Badge({ className, variant, ...props }: BadgeProps) {
 
 export { Badge, badgeVariants };
 
-/* traced by end2end */

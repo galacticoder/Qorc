@@ -157,4 +157,3 @@ class WebSocketClient {
 const websocketClient = new WebSocketClient();
 
 export default websocketClient;
-/* traced by end2end */

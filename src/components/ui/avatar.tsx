@@ -32,4 +32,3 @@ AvatarFallback.displayName = AvatarPrimitive.Fallback.displayName;
 
 export { Avatar, AvatarImage, AvatarFallback };
 
-/* traced by end2end */

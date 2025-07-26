@@ -22,5 +22,3 @@ export default function NotFoundPage() {
     </div>
   );
 }
-
-/* traced by end2end */
