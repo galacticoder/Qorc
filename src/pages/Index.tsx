@@ -12,6 +12,7 @@ import {
   importPrivateKeyFromPEM,
   importAESKey,
   generateAESKey,
+  deserializeEncryptedDataFromUint8Array,
   encryptWithAES,
   decryptWithAES,
   decryptWithAESRaw,
@@ -19,6 +20,7 @@ import {
   decryptWithRSA,
   serializeEncryptedData,
   deserializeEncryptedData,
+  uint8ToBase64,
   base64ToArrayBuffer,
   decryptAESKeyWithRSA,
   decryptMessage
@@ -34,6 +36,8 @@ interface MessageData {
   type: SignalType;
   message: string;
 }
+
+
 
 const SERVER_ID = 'SecureChat-Server';
 
@@ -88,91 +92,179 @@ export default function Index() {
     return new TextDecoder().decode(decrypted);
   }, []);
 
-  const handleFileMessage = async (payload: any, message: any) => {
+  // const handleFileMessage = async (payload: any, message: any) => {
+  //   try {
+  //     console.log("File has been received. Decrypting...")
+  //     if (!privateKeyRef.current) {
+  //       throw new Error("Private key is not available");
+  //     }
+
+  //     console.log("📥 Received file metadata:");
+  //     console.log("Filename:", payload.filename);
+  //     console.log("Sender:", message.from);
+  //     console.log("Timestamp:", payload.timestamp || Date.now());
+  //     console.log("Encrypted AES Key:", payload.encryptedAESKey);
+  //     console.log("Encrypted File Data (string length):", payload.encryptedFile.length);
+
+  //     console.log("step 1")
+  //     const decryptedAESKey = await decryptWithRSA(
+  //       base64ToArrayBuffer(payload.encryptedAESKey),
+  //       privateKeyRef.current
+  //     );
+  //     // then:
+  //     await importAESKey(decryptedAESKey)
+
+
+  //     console.log("step 2")
+      
+  //     const { iv, authTag, encrypted } = deserializeEncryptedData(payload.encryptedFile);
+  //     console.log("step 3")
+      
+  //     const decrypted = await decryptWithAESRaw(
+  //       new Uint8Array(encrypted),
+  //       new Uint8Array(iv),
+  //       new Uint8Array(authTag),
+  //       await importAESKey(decryptedAESKey)
+  //     );
+
+  //     console.log("Decrypted ArrayBuffer byteLength:", decrypted.byteLength);
+      
+  //     console.log("step 4")
+  //     // const decompressed = pako.inflate(new Uint8Array(decrypted));
+      
+  //     // if (!decompressed) {
+  //     //   throw new Error("Failed to decompress file data.");
+  //     // }
+  //     console.log("step 5")
+      
+  //     // const blob = new Blob([decompressed], { type: "application/octet-stream" });
+      
+  //     // const downloadLink = document.createElement("a");
+  //     // downloadLink.href = URL.createObjectURL(blob);
+  //     // downloadLink.download = payload.filename || "downloaded_file";
+  //     // downloadLink.click();
+
+      
+  //     const blob = new Blob([decrypted], { type: "application/octet-stream" });
+  //     const fileUrl = URL.createObjectURL(blob);
+
+  //     // Remove auto-download
+  //     // const downloadLink = document.createElement("a");
+  //     // downloadLink.href = fileUrl;
+  //     // downloadLink.download = payload.filename || "downloaded_file";
+  //     // downloadLink.click();
+
+  //     console.log("step 6");
+
+  //     setMessages(prev => [
+  //       ...prev,
+  //       {
+  //         id: uuidv4(),
+  //         content: fileUrl,
+  //         sender: message.from,
+  //         timestamp: new Date(payload.timestamp || Date.now()),
+  //         isCurrentUser: false,
+  //         isSystemMessage: false,
+  //         type: SignalType.FILE_MESSAGE,
+  //         filename: payload.filename,
+  //         fileSize: blob.size
+  //       }
+  //     ]);
+
+
+  //   } catch (err) {
+  //     console.error("Error handling FILE_MESSAGE:", err);
+  //   }
+  // };
+
+  const incomingFileChunksRef = useRef<{
+    [key: string]: {
+      decryptedChunks: Blob[],
+      totalChunks: number,
+      encryptedAESKey: string,
+      filename: string,
+      aesKey?: CryptoKey;
+      receivedCount: number
+    }
+  }>({});
+
+  const handleFileMessageChunk = async (payload: any, message: any) => {
     try {
-      console.log("File has been received. Decrypting...")
-      if (!privateKeyRef.current) {
-        throw new Error("Private key is not available");
+      const { from } = message;
+      const {
+        chunkIndex,
+        totalChunks,
+        chunkData,
+        encryptedAESKey,
+        filename
+      } = payload;
+
+      const fileKey = `${from}-${filename}`;
+
+      let fileEntry = incomingFileChunksRef.current[fileKey];
+      if (!fileEntry) {
+        fileEntry = {
+          decryptedChunks: new Array(totalChunks),
+          totalChunks,
+          encryptedAESKey,
+          filename,
+          receivedCount: 0
+        };
+        incomingFileChunksRef.current[fileKey] = fileEntry;
       }
 
-      console.log("📥 Received file metadata:");
-      console.log("Filename:", payload.filename);
-      console.log("Sender:", message.from);
-      console.log("Timestamp:", payload.timestamp || Date.now());
-      console.log("Encrypted AES Key:", payload.encryptedAESKey);
-      console.log("Encrypted File Data (string length):", payload.encryptedFile.length);
+      const encryptedBytes = Uint8Array.from(atob(chunkData), c => c.charCodeAt(0));
 
-      console.log("step 1")
-      const decryptedAESKey = await decryptWithRSA(
-        base64ToArrayBuffer(payload.encryptedAESKey),
-        privateKeyRef.current
-      );
-      // then:
-      await importAESKey(decryptedAESKey)
+      const { iv, authTag, encrypted } = deserializeEncryptedDataFromUint8Array(encryptedBytes);
 
+      if (!fileEntry.aesKey) {
+        const decryptedAESKeyBytes = await decryptWithRSA(
+          base64ToArrayBuffer(fileEntry.encryptedAESKey),
+          privateKeyRef.current
+        );
 
-      console.log("step 2")
-      
-      const { iv, authTag, encrypted } = deserializeEncryptedData(payload.encryptedFile);
-      console.log("step 3")
-      
-      const decrypted = await decryptWithAESRaw(
+        const aesKey = await importAESKey(decryptedAESKeyBytes);
+        fileEntry.aesKey = aesKey;
+      }
+
+      const decryptedChunk = await decryptWithAESRaw(
         new Uint8Array(encrypted),
         new Uint8Array(iv),
         new Uint8Array(authTag),
-        await importAESKey(decryptedAESKey)
+        fileEntry.aesKey
       );
 
-      console.log("Decrypted ArrayBuffer byteLength:", decrypted.byteLength);
-      
-      console.log("step 4")
-      // const decompressed = pako.inflate(new Uint8Array(decrypted));
-      
-      // if (!decompressed) {
-      //   throw new Error("Failed to decompress file data.");
-      // }
-      console.log("step 5")
-      
-      // const blob = new Blob([decompressed], { type: "application/octet-stream" });
-      
-      // const downloadLink = document.createElement("a");
-      // downloadLink.href = URL.createObjectURL(blob);
-      // downloadLink.download = payload.filename || "downloaded_file";
-      // downloadLink.click();
+      fileEntry.decryptedChunks[chunkIndex] = new Blob([decryptedChunk]);
+      fileEntry.receivedCount++;
 
-      
-      const blob = new Blob([decrypted], { type: "application/octet-stream" });
-      const fileUrl = URL.createObjectURL(blob);
+      console.log(`Received and decrypted chunk ${chunkIndex + 1}/${totalChunks} for ${filename} from ${from}`);
 
-      // Remove auto-download
-      // const downloadLink = document.createElement("a");
-      // downloadLink.href = fileUrl;
-      // downloadLink.download = payload.filename || "downloaded_file";
-      // downloadLink.click();
+      if (fileEntry.receivedCount === totalChunks) {
+        const fileBlob = new Blob(fileEntry.decryptedChunks, { type: "application/octet-stream" });
+        const fileUrl = URL.createObjectURL(fileBlob);
 
-      console.log("step 6");
+        setMessages(prev => [
+          ...prev,
+          {
+            id: uuidv4(),
+            content: fileUrl,
+            sender: from,
+            timestamp: new Date(),
+            isCurrentUser: false,
+            isSystemMessage: false,
+            type: SignalType.FILE_MESSAGE,
+            filename,
+            fileSize: fileBlob.size
+          }
+        ]);
 
-      setMessages(prev => [
-        ...prev,
-        {
-          id: uuidv4(),
-          content: fileUrl,
-          sender: message.from,
-          timestamp: new Date(payload.timestamp || Date.now()),
-          isCurrentUser: false,
-          isSystemMessage: false,
-          type: SignalType.FILE_MESSAGE,
-          filename: payload.filename,
-          fileSize: blob.size
-        }
-      ]);
-
-
+        delete incomingFileChunksRef.current[fileKey];
+        console.log(`File ${filename} from ${from} fully reassembled and available.`);
+      }
     } catch (err) {
-      console.error("Error handling FILE_MESSAGE:", err);
+      console.error("Error handling FILE_MESSAGE_CHUNK:", err);
     }
   };
-
   
   const handleEncryptedMessageObject = useCallback(async (message: any) => {
     try {
@@ -369,11 +461,15 @@ export default function Index() {
 
       websocketClient.registerMessageHandler(SignalType.ENCRYPTED_MESSAGE, handleEncryptedMessageObject);
       websocketClient.registerMessageHandler(SignalType.FILE_MESSAGE, handleEncryptedMessageObject);
-      websocketClient.registerMessageHandler(SignalType.FILE_MESSAGE, async (data) => {
-        await handleFileMessage(data, {
-          from: data.from, // or whatever structure your message uses
-        });
+      websocketClient.registerMessageHandler(SignalType.FILE_MESSAGE_CHUNK, async (data) => {
+        await handleFileMessageChunk(data, { from: data.from });
       });
+
+      // websocketClient.registerMessageHandler(SignalType.FILE_MESSAGE, async (data) => {
+      //   await handleFileMessage(data, {
+      //     from: data.from, // or whatever structure your message uses
+      //   });
+      // });
       websocketClient.registerMessageHandler(SignalType.PUBLICKEYS, (data) => {
         console.log("PublicKeys received:", data);
         handleServerMessage(data as MessageData);
@@ -386,6 +482,7 @@ export default function Index() {
         websocketClient.unregisterMessageHandler("raw");
         websocketClient.unregisterMessageHandler(SignalType.ENCRYPTED_MESSAGE);
         websocketClient.unregisterMessageHandler(SignalType.FILE_MESSAGE);
+        websocketClient.unregisterMessageHandler(SignalType.FILE_MESSAGE_CHUNK);
         websocketClient.unregisterMessageHandler(SignalType.PUBLICKEYS);
       };
     }

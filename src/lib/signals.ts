@@ -1,6 +1,7 @@
 export enum SignalType {
   PUBLICKEYS = "public-keys:",
   FILE_MESSAGE = "file-message",
+  FILE_MESSAGE_CHUNK = "file-message-chunk",
   ENCRYPTED_MESSAGE = "encrypted-message",
   SERVERLIMIT = "SERVERLIMIT:",
   SERVERMESSAGE = "SERVERMESSAGE:",

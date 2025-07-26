@@ -76,37 +76,51 @@ export function ChatMessage({ message }: ChatMessageProps) {
 
           <div
             className={cn(
-              "rounded-lg px-0 py-0 text-sm max-w-[75%]",
+              "rounded-lg px-3 py-2 text-sm max-w-[75%] break-words",
               message.isCurrentUser
                 ? "bg-primary text-primary-foreground"
                 : "bg-muted"
             )}
           >
-          {hasExtension(message.filename || "", IMAGE_EXTENSIONS) ? (
-            <img src={message.content} alt={message.filename} className="max-w-full rounded-md" />
-          ) : hasExtension(message.filename || "", VIDEO_EXTENSIONS) ? (
-            <video controls className="max-w-full rounded-md">
-              <source src={message.content} />
-              Your browser does not support the video tag.
-            </video>
-          ) : (
+            {hasExtension(message.filename || "", IMAGE_EXTENSIONS) ? (
+              <img
+                src={message.content}
+                alt={message.filename}
+                className="max-w-full rounded-md"
+              />
+            ) : hasExtension(message.filename || "", VIDEO_EXTENSIONS) ? (
+              <video controls className="max-w-full rounded-md">
+                <source src={message.content} />
+                Your browser does not support the video tag.
+              </video>
+            ) : (
               <a
                 href={message.content}
                 download={message.filename}
-                className="flex items-center space-x-2 text-blue-500 underline"
+                className="flex items-start gap-2 w-full text-blue-500"
               >
-                <PaperclipIcon className="h-4 w-4" />
-                <span className="whitespace-normal break-words max-w-[300px]">
-                  {message.filename}
-                </span>
+                <PaperclipIcon className="h-5 w-5 shrink-0 mt-1" />
 
-                <span className="ml-1 text-xs text-muted-foreground">
-                  ({formatFileSize(message.fileSize ?? 0)})
-                </span>
+                <div className="flex flex-col min-w-0">
+                  <span
+                    className="text-sm truncate max-w-[300px] w-full"
+                    title={message.filename}
+                  >
+                    {message.filename}
+                  </span>
+
+                  <span className="text-xs text-muted-foreground leading-tight">
+                    ({formatFileSize(message.fileSize ?? 0)})
+                  </span>
+                </div>
               </a>
+
+
+
             )}
           </div>
         </div>
+
       </div>
     );
   }

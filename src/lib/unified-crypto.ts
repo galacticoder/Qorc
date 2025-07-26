@@ -8,6 +8,18 @@ export const CRYPTO_CONFIG = {
   HASH_ALGORITHM: 'SHA-512'
 };
 
+function uint8ToBase64(u8Arr: Uint8Array): string {
+  let CHUNK_SIZE = 0x8000; // 32k
+  let index = 0;
+  let result = '';
+  let slice;
+  while (index < u8Arr.length) {
+    slice = u8Arr.subarray(index, Math.min(index + CHUNK_SIZE, u8Arr.length));
+    result += String.fromCharCode.apply(null, slice as any);
+    index += CHUNK_SIZE;
+  }
+  return btoa(result);
+}
 
 
 export function arrayBufferToBase64(buffer: ArrayBuffer | Uint8Array): string {
@@ -258,6 +270,44 @@ export function serializeEncryptedData(iv: Uint8Array, authTag: Uint8Array, encr
   
   return arrayBufferToBase64(combined);
 }
+
+export function deserializeEncryptedDataFromUint8Array(
+  combined: Uint8Array
+): {
+  iv: Uint8Array;
+  authTag: Uint8Array;
+  encrypted: Uint8Array;
+} {
+  let offset = 0;
+
+  const version = combined[offset];
+  if (version !== 1) {
+    throw new Error(`Unsupported encryption version: ${version}`);
+  }
+  offset += 1;
+
+  const ivLength = combined[offset];
+  offset += 1;
+  const iv = combined.slice(offset, offset + ivLength);
+  offset += ivLength;
+
+  const authTagLength = combined[offset];
+  offset += 1;
+  const authTag = combined.slice(offset, offset + authTagLength);
+  offset += authTagLength;
+
+  const encryptedLength =
+    (combined[offset] << 24) |
+    (combined[offset + 1] << 16) |
+    (combined[offset + 2] << 8) |
+    combined[offset + 3];
+  offset += 4;
+
+  const encrypted = combined.slice(offset, offset + encryptedLength);
+
+  return { iv, authTag, encrypted };
+}
+
 
 export function deserializeEncryptedData(serialized: string): {
   iv: Uint8Array;

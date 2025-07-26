@@ -64,7 +64,12 @@ export function ChatInput({
     }
   };
 
-  const handleFileChange = async (event: React.ChangeEvent<HTMLInputElement>) => {
+  const CHUNK_SIZE = 128 * 1024;
+  const [progress, setProgress] = useState(0);
+  
+  const handleFileChange = async (
+    event: React.ChangeEvent<HTMLInputElement>
+  ) => {
     const file = event.target.files?.[0];
     if (!file) return;
 
@@ -74,48 +79,66 @@ export function ChatInput({
     }
 
     try {
-      console.log("File size in bytes:", file.size);
       const arrayBuffer = await file.arrayBuffer();
-      // const compressed = pako.deflate(new Uint8Array(arrayBuffer));
-      
-      
+      const rawBytes = new Uint8Array(arrayBuffer);
+
       const aesKey = await crypto.generateAESKey();
-      
-      const { iv, authTag, encrypted } = await crypto.encryptBinaryWithAES(arrayBuffer, aesKey);
-
-      console.log(`encrypted: ${encrypted}`)
-      console.log(`encrypted size: ${encrypted.size}`)
-      const encryptedData = crypto.serializeEncryptedData(iv, authTag, encrypted);
-      console.log(`encrypteddata: ${encryptedData}`)
-      console.log(`encrypteddata size after serilization: ${encryptedData.size}`)
-      
       const rawAes = await window.crypto.subtle.exportKey("raw", aesKey);
-      
-      for (const user of users) {
-        if (user.username === currentUsername || !user.publicKey) continue;
-        
-        const recipientKey = await crypto.importPublicKeyFromPEM(user.publicKey);
-        const encryptedAes = await crypto.encryptWithRSA(rawAes, recipientKey);
-        const encryptedAESKeyBase64 = btoa(String.fromCharCode(...new Uint8Array(encryptedAes)));
-        
-        const payload = {
-          type: SignalType.FILE_MESSAGE,
-          from: currentUsername,
-          to: user.username,
-          encryptedAESKey: encryptedAESKeyBase64,
-          encryptedFile: encryptedData,
-          filename: file.name,
-        };
-        
-        console.log("File payload to send:", JSON.stringify(payload, null, 2));
 
-        wsClient.send(JSON.stringify(payload));
+      const userKeys = await Promise.all(
+        users
+          .filter(user => user.username !== currentUsername && user.publicKey)
+          .map(async user => {
+            const recipientKey = await crypto.importPublicKeyFromPEM(user.publicKey);
+            const encryptedAes = await crypto.encryptWithRSA(rawAes, recipientKey);
+            return {
+              username: user.username,
+              encryptedAESKeyBase64: btoa(String.fromCharCode(...new Uint8Array(encryptedAes))),
+            };
+          })
+      );
+
+      const totalChunks = Math.ceil(rawBytes.length / CHUNK_SIZE);
+      const totalBytes = rawBytes.length * userKeys.length;
+      let bytesSent = 0;
+
+      for (let chunkIndex = 0; chunkIndex < totalChunks; chunkIndex++) {
+        const start = chunkIndex * CHUNK_SIZE;
+        const end = Math.min(start + CHUNK_SIZE, rawBytes.length);
+        const chunk = rawBytes.slice(start, end);
+
+        const { iv, authTag, encrypted } = await crypto.encryptBinaryWithAES(chunk.buffer, aesKey);
+
+        const serializedChunk = crypto.serializeEncryptedData(iv, authTag, encrypted);
+        const chunkDataBase64 = btoa(String.fromCharCode(...Uint8Array.from(atob(serializedChunk), c => c.charCodeAt(0))));
+
+        for (const userKey of userKeys) {
+          const payload = {
+            type: SignalType.FILE_MESSAGE_CHUNK,
+            from: currentUsername,
+            to: userKey.username,
+            encryptedAESKey: userKey.encryptedAESKeyBase64,
+            chunkIndex,
+            totalChunks,
+            chunkData: chunkDataBase64,
+            filename: file.name,
+            isLastChunk: chunkIndex === totalChunks - 1,
+          };
+
+          wsClient.send(JSON.stringify(payload));
+        }
+
+        bytesSent += chunk.length * userKeys.length;
+        const progress = bytesSent / totalBytes;
+        setProgress(progress);
       }
+
+      setProgress(1);
+      console.log("File sent.");
     } catch (error) {
       console.error("Failed to process and send file:", error);
     }
   };
-
 
   return (
     <div className="flex items-end gap-2 p-4 border-t bg-background">

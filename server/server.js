@@ -63,11 +63,17 @@ wss.on('connection', (ws) => {
           console.log(`Relayed message from ${parsed.from} to ${parsed.to}`);
         }
 
-        else if (parsed.type === SignalType.FILE_MESSAGE && parsed.to && clients.has(parsed.to)) {
+        if (parsed.type === SignalType.FILE_MESSAGE_CHUNK && parsed.to && clients.has(parsed.to)) {
           const target = clients.get(parsed.to);
           target.ws.send(JSON.stringify(parsed));
-          console.log(`Relayed file from ${parsed.from} to ${parsed.to}`);
+          console.log(`Relayed file chunk ${parsed.chunkIndex + 1}/${parsed.totalChunks} from ${parsed.from} to ${parsed.to}`);
         }
+
+        // else if (parsed.type === SignalType.FILE_MESSAGE && parsed.to && clients.has(parsed.to)) {
+        //   const target = clients.get(parsed.to);
+        //   target.ws.send(JSON.stringify(parsed));
+        //   console.log(`Relayed file from ${parsed.from} to ${parsed.to}`);
+        // }
       } catch (e) {
         console.warn("Non-JSON message:", str);
       }
