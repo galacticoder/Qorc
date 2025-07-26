@@ -188,6 +188,8 @@ export default function Index() {
     }
   }>({});
 
+  const [fileProgressMap, setFileProgressMap] = useState<{ [fileKey: string]: number }>({});
+
   const handleFileMessageChunk = async (payload: any, message: any) => {
     try {
       const { from } = message;
@@ -236,6 +238,15 @@ export default function Index() {
 
       fileEntry.decryptedChunks[chunkIndex] = new Blob([decryptedChunk]);
       fileEntry.receivedCount++;
+
+      const progress = fileEntry.receivedCount / fileEntry.totalChunks;
+
+      setFileProgressMap(prev => ({
+        ...prev,
+        [fileKey]: progress
+      }));
+
+      console.log(`File ${filename} progress: ${(progress * 100).toFixed(2)}%`);
 
       console.log(`Received and decrypted chunk ${chunkIndex + 1}/${totalChunks} for ${filename} from ${from}`);
 
@@ -460,7 +471,7 @@ export default function Index() {
       };
 
       websocketClient.registerMessageHandler(SignalType.ENCRYPTED_MESSAGE, handleEncryptedMessageObject);
-      websocketClient.registerMessageHandler(SignalType.FILE_MESSAGE, handleEncryptedMessageObject);
+      // websocketClient.registerMessageHandler(SignalType.FILE_MESSAGE, handleEncryptedMessageObject);
       websocketClient.registerMessageHandler(SignalType.FILE_MESSAGE_CHUNK, async (data) => {
         await handleFileMessageChunk(data, { from: data.from });
       });
@@ -481,7 +492,7 @@ export default function Index() {
         console.log("Unregistering message handlers...");
         websocketClient.unregisterMessageHandler("raw");
         websocketClient.unregisterMessageHandler(SignalType.ENCRYPTED_MESSAGE);
-        websocketClient.unregisterMessageHandler(SignalType.FILE_MESSAGE);
+        // websocketClient.unregisterMessageHandler(SignalType.FILE_MESSAGE);
         websocketClient.unregisterMessageHandler(SignalType.FILE_MESSAGE_CHUNK);
         websocketClient.unregisterMessageHandler(SignalType.PUBLICKEYS);
       };
@@ -583,10 +594,6 @@ export default function Index() {
         const rawAes = await window.crypto.subtle.exportKey('raw', aesKey);
         const encryptedAes = await encryptWithRSA(rawAes, recipientKey);
         const encryptedAESKeyBase64 = btoa(String.fromCharCode(...new Uint8Array(encryptedAes)));
-        
-
-        console.log("IFLE AES: " + encryptedAESKeyBase64)
-        console.log("mesagw: " + encryptedMessage)
         
         console.log("Preparing to send message:", encryptedMessage);
         

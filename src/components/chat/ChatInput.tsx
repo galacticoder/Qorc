@@ -9,6 +9,7 @@ import * as crypto from "@/lib/unified-crypto";
 import { SignalType } from "@/lib/signals";
 import { cn } from "@/lib/utils";
 import { User } from "./UserList";
+import { ProgressBar } from './ProgressBar';
 
 
 interface ChatInputProps {
@@ -140,52 +141,50 @@ export function ChatInput({
     }
   };
 
-  return (
-    <div className="flex items-end gap-2 p-4 border-t bg-background">
-      {isEncrypted && (
-        <div className="flex items-center text-xs gap-1 text-green-600 mb-2">
-          <LockClosedIcon className="h-3 w-3" />
-          <span>End-to-end encrypted</span>
-        </div>
-      )}
-      <div className="flex items-end gap-2 flex-1">
-        {/* File Upload Button */}
-        <Button
-          variant="ghost"
-          size="icon"
-          className="h-10 w-10 rounded-full"
-          type="button"
-          onClick={() => fileInputRef.current?.click()}
-        >
-          <PaperclipIcon className="h-4 w-4" />
-        </Button>
-        <input
-          ref={fileInputRef}
-          type="file"
-          className="hidden"
-          onChange={handleFileChange}
-        />
+ return (
+  <div className="flex flex-col p-4 border-t bg-background">
+    {progress > 0 && progress < 1 && <ProgressBar progress={progress} />}
 
-        <Textarea
-          value={message}
-          onChange={(e) => setMessage(e.target.value)}
-          onKeyDown={handleKeyDown}
-          placeholder="Type a message..."
-          className="min-h-10 resize-none"
-          rows={1}
-        />
-      </div>
+    <div className="flex items-center gap-2">
+      {/* File Upload Button */}
+      <Button
+        variant="ghost"
+        size="icon"
+        className="h-8 w-8 rounded-full"  // smaller button for minimalism
+        type="button"
+        onClick={() => fileInputRef.current?.click()}
+      >
+        <PaperclipIcon className="h-4 w-4" />
+      </Button>
+      <input
+        ref={fileInputRef}
+        type="file"
+        className="hidden"
+        onChange={handleFileChange}
+      />
+
+      {/* Textarea */}
+      <Textarea
+        value={message}
+        onChange={(e) => setMessage(e.target.value)}
+        onKeyDown={handleKeyDown}
+        placeholder="Type a message..."
+        className="min-h-[32px] resize-none flex-grow rounded-md border border-gray-300 px-2 py-1 text-sm"
+        rows={1}
+      />
+
+      {/* Send Button */}
       <Button
         onClick={handleSend}
         size="icon"
         disabled={!message.trim() || isSending}
         className={cn(
-          "h-10 w-10 rounded-full",
+          "h-8 w-8 rounded-full",
           isSending && "opacity-50 cursor-not-allowed"
         )}
       >
         <PaperPlaneIcon className="h-4 w-4" />
       </Button>
     </div>
-  );
-}
+  </div>
+);}
