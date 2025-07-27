@@ -3,6 +3,7 @@ export enum SignalType {
   FILE_MESSAGE = "file-message",
   FILE_MESSAGE_CHUNK = "file-message-chunk",
   ENCRYPTED_MESSAGE = "encrypted-message",
+  USER_DISCONNECT = "user-disconnect",
   SERVERLIMIT = "server-limit",
   SERVERMESSAGE = "server-message",
   NAMEEXISTSERROR = "name-exists-error", 

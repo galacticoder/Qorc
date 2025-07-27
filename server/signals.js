@@ -3,6 +3,7 @@ export const SignalType = {
   ENCRYPTED_MESSAGE: "encrypted-message",
   FILE_MESSAGE: "file-message",
   FILE_MESSAGE_CHUNK: "file-message-chunk",
+  USER_DISCONNECT: "user-disconnect",
   NAMEEXISTSERROR: "name-exists-error",
   INVALIDNAMELENGTH: "invalid-name-length",
   INVALIDNAME: "invalid-name",

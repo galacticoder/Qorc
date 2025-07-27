@@ -197,12 +197,12 @@ export default function Index() {
       if (!privateKeyRef.current) {
         throw new Error("Private key not available for decryption");
       }
-
-      if (message.from === SERVER_ID) {
-        console.log("Server message received. Starting decryption");
+      
+      if (message.from === SERVER_ID) { //for server messages
+        console.log("Server message received. Starting decryption...");
         const encryptedAesKey = base64ToArrayBuffer(message.encryptedAESKey);
         const decryptedAesKey = await decryptWithRSA(encryptedAesKey, privateKeyRef.current);
-
+        
         const aesKey = await window.crypto.subtle.importKey(
           "raw",
           decryptedAesKey,
@@ -213,6 +213,10 @@ export default function Index() {
 
         const decrypted = await decryptServerAESEncryptedData(message.encryptedMessage, aesKey);
         const payload = JSON.parse(decrypted);
+        
+        if (message.type == SignalType.USER_DISCONNECT) {
+          setUsers(prevUsers => prevUsers.filter(user => user.username !== payload.content.split(' ')[0]))
+        }
 
         if (payload.type === 'system') {
           const systemMessage: Message = {
@@ -226,7 +230,7 @@ export default function Index() {
           setMessages(prev => [...prev, systemMessage]);
         }
 
-      } else {
+      } else { //for user messages
         console.log("User message received. Starting decryption");
         const encryptedAesKey = base64ToArrayBuffer(message.encryptedAESKey);
         const aesKey = await decryptAESKeyWithRSA(encryptedAesKey, privateKeyRef.current);
@@ -331,6 +335,7 @@ export default function Index() {
         break;
 
       case SignalType.ENCRYPTED_MESSAGE:
+      case SignalType.USER_DISCONNECT:
         await handleEncryptedMessageObject(data);
         break;
 
@@ -353,36 +358,34 @@ export default function Index() {
   }, [handleEncryptedMessageObject]);
 
   useEffect(() => {
-    // if (isLoggedIn) {
-      console.log("User logged in, registering message handlers...");
+    console.log("User logged in, registering message handlers...");
 
-      const handler = async (data: unknown) => {
-        console.log("Raw message received:", data);
-        try {
-        } catch (err) {
-          console.error("Error handling raw WebSocket message:", err);
-        }
-      };
+    const handler = async (data: unknown) => {
+      console.log("Raw message received:", data);
+      try {
+      } catch (err) {
+        console.error("Error handling raw WebSocket message:", err);
+      }
+    };
 
-      const registeredSignalTypes = Object.values(SignalType);
+    const registeredSignalTypes = Object.values(SignalType);
 
-      registeredSignalTypes.forEach(signal => { //register all signal types so the function can axtually work without individually setting up a handler for each type
-        websocketClient.registerMessageHandler(signal, async (data: unknown) => {
-            await handleServerMessage(data);
-        });
+    registeredSignalTypes.forEach(signal => { //register all signal types so the function can axtually work without individually setting up a handler for each type
+      websocketClient.registerMessageHandler(signal, async (data: unknown) => {
+          await handleServerMessage(data);
       });
+    });
 
-      websocketClient.registerMessageHandler("raw", handler);
+    websocketClient.registerMessageHandler("raw", handler);
 
-      return () => {
-        console.log("Unregistering message handlers...");
-        registeredSignalTypes.forEach(signal => {
-          websocketClient.unregisterMessageHandler(signal);
-        });
-        websocketClient.unregisterMessageHandler("raw");
-      };
-    // }
-  }, [/*isLoggedIn,*/ handleEncryptedMessageObject, handleServerMessage]);
+    return () => {
+      console.log("Unregistering message handlers...");
+      registeredSignalTypes.forEach(signal => {
+        websocketClient.unregisterMessageHandler(signal);
+      });
+      websocketClient.unregisterMessageHandler("raw");
+    };
+  }, [handleEncryptedMessageObject, handleServerMessage]);
 
   const handleLogin = async (username: string) => {
     setLoginError("");

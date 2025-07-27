@@ -59,7 +59,7 @@ wss.on('connection', (ws) => {
           if (client.publicKey) client.ws.send(keyUpdate);
         }
 
-        await broadcastEncryptedSystemMessage(`${username} has joined the chat.`, username);
+        await broadcastEncryptedSystemMessage(`${username} has joined the chat.`, {excludeUsername: username});
 
         return;
       }
@@ -79,12 +79,6 @@ wss.on('connection', (ws) => {
           target.ws.send(JSON.stringify(parsed));
           console.log(`Relayed file chunk ${parsed.chunkIndex + 1}/${parsed.totalChunks} from ${parsed.from} to ${parsed.to}`);
         }
-
-        // else if (parsed.type === SignalType.FILE_MESSAGE && parsed.to && clients.has(parsed.to)) {
-        //   const target = clients.get(parsed.to);
-        //   target.ws.send(JSON.stringify(parsed));
-        //   console.log(`Relayed file from ${parsed.from} to ${parsed.to}`);
-        // }
       } catch (e) {
         console.warn("Non-JSON message:", str);
       }
@@ -98,12 +92,20 @@ wss.on('connection', (ws) => {
       clients.delete(username);
       console.log(`User '${username}' has disconnected.`);
 
-      await broadcastEncryptedSystemMessage(`${username} has left the chat.`);
+      await broadcastEncryptedSystemMessage(`${username} has left the chat.`, {signalType: SignalType.USER_DISCONNECT});
     }
   });
 });
 
-async function broadcastEncryptedSystemMessage(content, excludeUsername = null) {
+async function broadcastEncryptedSystemMessage(
+  content,
+  options = {}
+) {
+  const {
+    signalType = SignalType.ENCRYPTED_MESSAGE,
+    excludeUsername = null,
+  } = options;
+
   console.log(`Broadcasting system message: ${content}`);
   const systemPayload = {
     type: 'system',
@@ -134,7 +136,7 @@ async function broadcastEncryptedSystemMessage(content, excludeUsername = null) 
         const encryptedAESKeyBase64 = crypto.arrayBufferToBase64(encryptedAESKey);
         
         const finalPayload = {
-          type: SignalType.ENCRYPTED_MESSAGE,
+          type: signalType,
           from: SERVER_ID,
           to: clientUsername,
           encryptedAESKey: encryptedAESKeyBase64,
