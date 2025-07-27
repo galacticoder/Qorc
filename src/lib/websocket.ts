@@ -37,11 +37,18 @@ class WebSocketClient {
           resolve();
         };
         
-        this.ws.onclose = () => {
+        this.ws.onclose = (event) => {
           this.isConnected = false;
-          console.log('WebSocket connection closed');
+          console.warn(`WebSocket closed: ${event.reason} (code: ${event.code})`);
+
+          if (event.code === 1008 || event.code === 1013) { //if the server disconnected us on "purpose" then dont attempt to reconnect
+            console.warn('Connection rejected by server. Will not attempt to reconnect.');
+            return;
+          }
+
           this.attemptReconnect();
         };
+
         
         this.ws.onerror = (error) => {
           console.error('WebSocket error:', error);

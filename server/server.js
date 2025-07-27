@@ -1,13 +1,20 @@
 import { WebSocketServer } from 'ws';
-import { SignalType } from './signals.js';
+import { SignalType, SignalMessages } from './signals.js';
 import * as crypto from './unified-crypto.js';
 
 const PORT = 8080;
+const MAX_CLIENTS = 100;
 const SERVER_ID = 'SecureChat-Server';
 const clients = new Map();
 
 const wss = new WebSocketServer({ port: PORT });
 console.log(`SecureChat relay server running on ws://localhost:${PORT}`);
+
+function rejectConnection(ws, type, reason, code = 1008) {
+  ws.send(JSON.stringify({ type, message: reason }));
+  ws.close(code, reason);
+  console.log(`Rejected user connection for reason: ${reason}`)
+}
 
 wss.on('connection', (ws) => {
   let username = null;
@@ -16,17 +23,21 @@ wss.on('connection', (ws) => {
     try {
       const str = message.toString().trim();
 
+
       if (!username) {
         const validUsername = /^[a-zA-Z0-9_-]+$/;
-        if (!validUsername.test(str)) {
-          ws.send("Invalid username");
-          return ws.close();
-        }
+
+        if (!validUsername.test(str)) return rejectConnection(ws, SignalType.INVALIDNAME, SignalMessages.INVALIDNAME); //name contains invalid chars
+        if (str.length < 3 || str.length > 16) return rejectConnection(ws, SignalType.INVALIDNAMELENGTH, SignalMessages.INVALIDNAMELENGTH); //name is too long or too short
+        if (clients.has(str)) return rejectConnection(ws, SignalType.NAMEEXISTSERROR, SignalMessages.NAMEEXISTSERROR); //name already exists
+        if (clients.size >= MAX_CLIENTS) return rejectConnection(ws, SignalType.SERVERLIMIT, SignalMessages.SERVERLIMIT, 1013); //exceeds server limit
+
         username = str;
         clients.set(username, { ws, publicKey: null });
         console.log(`User ${username} connected.`);
         return;
       }
+
 
       if (!clients.get(username).publicKey) {
         clients.get(username).publicKey = str;

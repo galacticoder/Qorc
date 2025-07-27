@@ -154,7 +154,7 @@ export function ChatMessage({ message }: ChatMessageProps) {
                 <span className="truncate max-w-[250px] ml-1" title={message.filename}>
                   {message.filename}
                 </span>
-                <a
+                <a           
                   href={message.content}
                   download={message.filename}
                   title="Download"

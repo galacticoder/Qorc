@@ -17,8 +17,17 @@ if ! command -v node &> /dev/null; then
 fi
 
 if ! command -v pnpm &> /dev/null; then
-    echo -e "${YELLOW}pnpm is not installed. Using npm instead.${NC}"
-    USE_NPM=true
+    echo -e "${YELLOW}pnpm is not installed. Installing pnpm using npm...${NC}"
+    if ! command -v npm &> /dev/null; then
+      echo -e "${YELLOW}npm is not installed. Please install npm to install pnpm.${NC}"
+      exit 1
+    fi
+    npm install -g pnpm
+    if ! command -v pnpm &> /dev/null; then
+      echo -e "${YELLOW}Failed to install pnpm. Please install it manually.${NC}"
+      exit 1
+    fi
+    USE_NPM=false
 else
     USE_NPM=false
 fi

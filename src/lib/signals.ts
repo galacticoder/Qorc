@@ -1,11 +1,11 @@
 export enum SignalType {
-  PUBLICKEYS = "public-keys:",
+  PUBLICKEYS = "public-keys",
   FILE_MESSAGE = "file-message",
   FILE_MESSAGE_CHUNK = "file-message-chunk",
   ENCRYPTED_MESSAGE = "encrypted-message",
-  SERVERLIMIT = "SERVERLIMIT:",
-  SERVERMESSAGE = "SERVERMESSAGE:",
-  NAMEEXISTSERR = "NAMEEXISTSERR:", 
-  INVALIDNAMELENGTH = "INVALIDNAMELENGTH:",
-  INVALIDNAME = "INVALIDNAME:",
+  SERVERLIMIT = "server-limit",
+  SERVERMESSAGE = "server-message",
+  NAMEEXISTSERROR = "name-exists-error", 
+  INVALIDNAMELENGTH = "invalid-name-length",
+  INVALIDNAME = "invalid-name",
 }

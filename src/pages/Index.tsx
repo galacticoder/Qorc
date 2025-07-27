@@ -92,91 +92,6 @@ export default function Index() {
     return new TextDecoder().decode(decrypted);
   }, []);
 
-  // const handleFileMessage = async (payload: any, message: any) => {
-  //   try {
-  //     console.log("File has been received. Decrypting...")
-  //     if (!privateKeyRef.current) {
-  //       throw new Error("Private key is not available");
-  //     }
-
-  //     console.log("📥 Received file metadata:");
-  //     console.log("Filename:", payload.filename);
-  //     console.log("Sender:", message.from);
-  //     console.log("Timestamp:", payload.timestamp || Date.now());
-  //     console.log("Encrypted AES Key:", payload.encryptedAESKey);
-  //     console.log("Encrypted File Data (string length):", payload.encryptedFile.length);
-
-  //     console.log("step 1")
-  //     const decryptedAESKey = await decryptWithRSA(
-  //       base64ToArrayBuffer(payload.encryptedAESKey),
-  //       privateKeyRef.current
-  //     );
-  //     // then:
-  //     await importAESKey(decryptedAESKey)
-
-
-  //     console.log("step 2")
-      
-  //     const { iv, authTag, encrypted } = deserializeEncryptedData(payload.encryptedFile);
-  //     console.log("step 3")
-      
-  //     const decrypted = await decryptWithAESRaw(
-  //       new Uint8Array(encrypted),
-  //       new Uint8Array(iv),
-  //       new Uint8Array(authTag),
-  //       await importAESKey(decryptedAESKey)
-  //     );
-
-  //     console.log("Decrypted ArrayBuffer byteLength:", decrypted.byteLength);
-      
-  //     console.log("step 4")
-  //     // const decompressed = pako.inflate(new Uint8Array(decrypted));
-      
-  //     // if (!decompressed) {
-  //     //   throw new Error("Failed to decompress file data.");
-  //     // }
-  //     console.log("step 5")
-      
-  //     // const blob = new Blob([decompressed], { type: "application/octet-stream" });
-      
-  //     // const downloadLink = document.createElement("a");
-  //     // downloadLink.href = URL.createObjectURL(blob);
-  //     // downloadLink.download = payload.filename || "downloaded_file";
-  //     // downloadLink.click();
-
-      
-  //     const blob = new Blob([decrypted], { type: "application/octet-stream" });
-  //     const fileUrl = URL.createObjectURL(blob);
-
-  //     // Remove auto-download
-  //     // const downloadLink = document.createElement("a");
-  //     // downloadLink.href = fileUrl;
-  //     // downloadLink.download = payload.filename || "downloaded_file";
-  //     // downloadLink.click();
-
-  //     console.log("step 6");
-
-  //     setMessages(prev => [
-  //       ...prev,
-  //       {
-  //         id: uuidv4(),
-  //         content: fileUrl,
-  //         sender: message.from,
-  //         timestamp: new Date(payload.timestamp || Date.now()),
-  //         isCurrentUser: false,
-  //         isSystemMessage: false,
-  //         type: SignalType.FILE_MESSAGE,
-  //         filename: payload.filename,
-  //         fileSize: blob.size
-  //       }
-  //     ]);
-
-
-  //   } catch (err) {
-  //     console.error("Error handling FILE_MESSAGE:", err);
-  //   }
-  // };
-
   const incomingFileChunksRef = useRef<{
     [key: string]: {
       decryptedChunks: Blob[],
@@ -387,40 +302,17 @@ export default function Index() {
     generateKeys();
   }, [privateKeyPEM, publicKeyPEM, setPublicKeyPEM, setPrivateKeyPEM]);
   
-  const handleServerMessage = useCallback((data: MessageData) => {
+  const handleServerMessage = useCallback(async (data: MessageData) => {
     const { type, message } = data;
-    
-    switch (type) {      
-      case SignalType.TYPING: {
-        const typingUser = message.replace(SignalType.TYPING, "");
-        if (typingUser !== username) {
-          setUsers(prevUsers => 
-            prevUsers.map(user => 
-              user.username === typingUser 
-              ? { ...user, isTyping: true } 
-              : user
-            )
-          );
-          
-          setTimeout(() => {
-            setUsers(prevUsers => 
-              prevUsers.map(user => 
-                user.username === typingUser 
-                ? { ...user, isTyping: false } 
-                : user
-              )
-            );
-          }, 3000);
-        }
-        break;
-      }
-      
+
+    switch (type) {
       case SignalType.PUBLICKEYS:
         try {
           console.log("Parsing public keys...");
+          console.log("PublicKeys received:", data);
           const keyData = JSON.parse(message) as Record<string, string>;
           const newUsers: User[] = [];
-          
+
           for (const [username, publicKey] of Object.entries(keyData)) {
             newUsers.push({
               id: uuidv4(),
@@ -430,36 +322,38 @@ export default function Index() {
               publicKey: publicKey
             });
           }
-          
+
           setUsers(newUsers);
           console.log("Parsed public keys successfully");
         } catch (error) {
           console.error("Error parsing public keys:", error);
         }
         break;
-        
-      case SignalType.NAMEEXISTSERR:
-        setLoginError("Username already exists");
+
+      case SignalType.ENCRYPTED_MESSAGE:
+        await handleEncryptedMessageObject(data);
         break;
-        
+
+      case SignalType.FILE_MESSAGE_CHUNK:
+        await handleFileMessageChunk(data, { from: data.from });
+        break;
+
+      case SignalType.NAMEEXISTSERROR:
       case SignalType.INVALIDNAMELENGTH:
-        setLoginError("Username must be between 3 and 16 characters");
-        break;
-        
       case SignalType.INVALIDNAME:
-        setLoginError("Username contains invalid characters");
-        break;
-        
       case SignalType.SERVERLIMIT:
-        setLoginError("Server has reached the maximum number of users");
+        setIsLoggedIn(false);
+        setLoginError("Login error: " + message);
+        console.log("You have been disconnected")
         break;
-        
+
       default:
-      }
-    }, []);
+        console.warn("Unhandled signal type:", type);
+    }
+  }, [handleEncryptedMessageObject]);
 
   useEffect(() => {
-    if (isLoggedIn) {
+    // if (isLoggedIn) {
       console.log("User logged in, registering message handlers...");
 
       const handler = async (data: unknown) => {
@@ -470,34 +364,25 @@ export default function Index() {
         }
       };
 
-      websocketClient.registerMessageHandler(SignalType.ENCRYPTED_MESSAGE, handleEncryptedMessageObject);
-      // websocketClient.registerMessageHandler(SignalType.FILE_MESSAGE, handleEncryptedMessageObject);
-      websocketClient.registerMessageHandler(SignalType.FILE_MESSAGE_CHUNK, async (data) => {
-        await handleFileMessageChunk(data, { from: data.from });
-      });
+      const registeredSignalTypes = Object.values(SignalType);
 
-      // websocketClient.registerMessageHandler(SignalType.FILE_MESSAGE, async (data) => {
-      //   await handleFileMessage(data, {
-      //     from: data.from, // or whatever structure your message uses
-      //   });
-      // });
-      websocketClient.registerMessageHandler(SignalType.PUBLICKEYS, (data) => {
-        console.log("PublicKeys received:", data);
-        handleServerMessage(data as MessageData);
+      registeredSignalTypes.forEach(signal => { //register all signal types so the function can axtually work without individually setting up a handler for each type
+        websocketClient.registerMessageHandler(signal, async (data: unknown) => {
+            await handleServerMessage(data);
+        });
       });
 
       websocketClient.registerMessageHandler("raw", handler);
 
       return () => {
         console.log("Unregistering message handlers...");
+        registeredSignalTypes.forEach(signal => {
+          websocketClient.unregisterMessageHandler(signal);
+        });
         websocketClient.unregisterMessageHandler("raw");
-        websocketClient.unregisterMessageHandler(SignalType.ENCRYPTED_MESSAGE);
-        // websocketClient.unregisterMessageHandler(SignalType.FILE_MESSAGE);
-        websocketClient.unregisterMessageHandler(SignalType.FILE_MESSAGE_CHUNK);
-        websocketClient.unregisterMessageHandler(SignalType.PUBLICKEYS);
       };
-    }
-  }, [isLoggedIn, handleEncryptedMessageObject, handleServerMessage]);
+    // }
+  }, [/*isLoggedIn,*/ handleEncryptedMessageObject, handleServerMessage]);
 
   const handleLogin = async (username: string) => {
     setLoginError("");
