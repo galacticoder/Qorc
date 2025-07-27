@@ -67,10 +67,14 @@ export function ChatInput({
 
   const CHUNK_SIZE = 128 * 1024;
   const [progress, setProgress] = useState(0);
+  const [isSendingFile, setIsSendingFile] = useState(false);
   
-  const handleFileChange = async (
-    event: React.ChangeEvent<HTMLInputElement>
-  ) => {
+  const handleFileChange = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    if (isSendingFile) {
+      console.warn("A file is already being sent.");
+      return;
+    }
+
     const file = event.target.files?.[0];
     if (!file) return;
 
@@ -80,6 +84,9 @@ export function ChatInput({
     }
 
     try {
+      setIsSendingFile(true);
+      setProgress(0);
+
       const arrayBuffer = await file.arrayBuffer();
       const rawBytes = new Uint8Array(arrayBuffer);
 
@@ -130,16 +137,20 @@ export function ChatInput({
         }
 
         bytesSent += chunk.length * userKeys.length;
-        const progress = bytesSent / totalBytes;
-        setProgress(progress);
+        const progressValue = bytesSent / totalBytes;
+        setProgress(progressValue);
       }
 
       setProgress(1);
       console.log("File sent.");
     } catch (error) {
       console.error("Failed to process and send file:", error);
+    } finally {
+      setIsSendingFile(false);
+      event.target.value = "";
     }
   };
+
 
  return (
   <div className="flex flex-col p-4 border-t bg-background">
@@ -150,12 +161,14 @@ export function ChatInput({
       <Button
         variant="ghost"
         size="icon"
-        className="h-8 w-8 rounded-full"  // smaller button for minimalism
+        className="h-8 w-8 rounded-full"
         type="button"
-        onClick={() => fileInputRef.current?.click()}
+        onClick={() => !isSendingFile && fileInputRef.current?.click()}
+        disabled={isSendingFile}
       >
         <PaperclipIcon className="h-4 w-4" />
       </Button>
+
       <input
         ref={fileInputRef}
         type="file"
