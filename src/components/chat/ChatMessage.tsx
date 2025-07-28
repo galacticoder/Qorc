@@ -79,10 +79,7 @@ export function ChatMessage({ message }: ChatMessageProps) {
         {hasExtension(message.filename || "", IMAGE_EXTENSIONS) && (
           <div
             className={cn(
-              "rounded-lg px-1 py-1 text-sm max-w-[60%] break-words",
-              message.isCurrentUser
-                ? "bg-primary text-primary-foreground"
-                : "bg-muted"
+              "rounded-lg px-0 py-0 text-sm max-w-[60%] break-words","bg-muted"
             )}
           >
             <div className="relative group">
@@ -209,9 +206,6 @@ export function ChatMessage({ message }: ChatMessageProps) {
     </div>
   );
 }
-
-
-
 
 return (
   <div

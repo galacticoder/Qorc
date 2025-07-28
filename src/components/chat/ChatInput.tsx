@@ -3,14 +3,14 @@ import { Button } from "../ui/button";
 import { Textarea } from "../ui/textarea";
 import { PaperPlaneIcon, LockClosedIcon } from "@radix-ui/react-icons";
 import { PaperclipIcon } from "./icons";
+import * as cm from "./ChatMessage"
 import * as pako from "pako";
 import wsClient from '@/lib/websocket';
-import * as crypto from "@/lib/unified-crypto";
+import * as unifiedCrypto  from "@/lib/unified-crypto";
 import { SignalType } from "@/lib/signals";
 import { cn } from "@/lib/utils";
 import { User } from "./UserList";
 import { ProgressBar } from './ProgressBar';
-
 
 interface ChatInputProps {
   onSendMessage: (message: string) => void;
@@ -20,7 +20,6 @@ interface ChatInputProps {
   currentUsername: string;
   users: User[];
 }
-
 
 export function ChatInput({
   onSendMessage,
@@ -90,15 +89,15 @@ export function ChatInput({
       const arrayBuffer = await file.arrayBuffer();
       const rawBytes = new Uint8Array(arrayBuffer);
 
-      const aesKey = await crypto.generateAESKey();
+      const aesKey = await unifiedCrypto.generateAESKey();
       const rawAes = await window.crypto.subtle.exportKey("raw", aesKey);
 
       const userKeys = await Promise.all(
         users
           .filter(user => user.username !== currentUsername && user.publicKey)
           .map(async user => {
-            const recipientKey = await crypto.importPublicKeyFromPEM(user.publicKey);
-            const encryptedAes = await crypto.encryptWithRSA(rawAes, recipientKey);
+            const recipientKey = await unifiedCrypto.importPublicKeyFromPEM(user.publicKey);
+            const encryptedAes = await unifiedCrypto.encryptWithRSA(rawAes, recipientKey);
             return {
               username: user.username,
               encryptedAESKeyBase64: btoa(String.fromCharCode(...new Uint8Array(encryptedAes))),
@@ -115,9 +114,9 @@ export function ChatInput({
         const end = Math.min(start + CHUNK_SIZE, rawBytes.length);
         const chunk = rawBytes.slice(start, end);
 
-        const { iv, authTag, encrypted } = await crypto.encryptBinaryWithAES(chunk.buffer, aesKey);
+        const { iv, authTag, encrypted } = await unifiedCrypto.encryptBinaryWithAES(chunk.buffer, aesKey);
 
-        const serializedChunk = crypto.serializeEncryptedData(iv, authTag, encrypted);
+        const serializedChunk = unifiedCrypto.serializeEncryptedData(iv, authTag, encrypted);
         const chunkDataBase64 = btoa(String.fromCharCode(...Uint8Array.from(atob(serializedChunk), c => c.charCodeAt(0))));
 
         for (const userKey of userKeys) {
@@ -139,10 +138,29 @@ export function ChatInput({
         bytesSent += chunk.length * userKeys.length;
         const progressValue = bytesSent / totalBytes;
         setProgress(progressValue);
+
       }
 
       setProgress(1);
       console.log("File sent.");
+
+      const fileUrl = URL.createObjectURL(file);
+
+      const payload: cm.Message =
+        {
+          id: crypto.randomUUID(),
+          content: fileUrl,
+          timestamp: new Date(),
+          isCurrentUser: true,
+          isSystemMessage: false,
+          type: SignalType.FILE_MESSAGE,
+          filename: file.name,
+          fileSize: file.size,
+          sender: currentUsername 
+        }
+
+        console.log("Sender file payload: ", payload)
+        onSendFile(payload);
     } catch (error) {
       console.error("Failed to process and send file:", error);
     } finally {
@@ -150,7 +168,6 @@ export function ChatInput({
       event.target.value = "";
     }
   };
-
 
  return (
   <div className="flex flex-col p-4 border-t bg-background">

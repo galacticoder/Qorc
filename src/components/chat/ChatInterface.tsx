@@ -14,7 +14,7 @@ interface ChatInterfaceProps {
   messages: Message[];
   isEncrypted?: boolean;
   currentUsername: string;
-  users: User[]; 
+  users: User[];
 }
 
 export function ChatInterface({

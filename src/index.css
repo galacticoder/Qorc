@@ -3,98 +3,103 @@
 @tailwind utilities;
 
 @layer base {
-  :root {
-    --background: 0 0% 100%;
-    --foreground: 222.2 84% 4.9%;
+  :root { /* light mode colors */
+    /* Backgrounds */
+    --background: 0 0% 100%;            /* white */
+    --card: 0 0% 100%;                  /* white card background */
+    --popover: 0 0% 100%;               /* white popover background */
+    --sidebar-background: 0 0% 98%;    /* very light sidebar */
 
-    --card: 0 0% 100%;
+    /* foregrounds / text */
+    --foreground: 222.2 84% 4.9%;      /* very dark blue text */
     --card-foreground: 222.2 84% 4.9%;
-
-    --popover: 0 0% 100%;
     --popover-foreground: 222.2 84% 4.9%;
+    --sidebar-foreground: 240 5.3% 26.1%; /* dark gray sidebar text */
 
-    --primary: 222.2 47.4% 11.2%;
-    --primary-foreground: 210 40% 98%;
+    /* primary and secondary */
+    --primary: 222.2 47.4% 11.2%;      /* dark blue primary color */
+    --primary-foreground: 210 40% 98%; /* very light text on primary */
+    --secondary: 210 40% 96.1%;        /* light secondary bg */
+    --secondary-foreground: 222.2 47.4% 11.2%; /* dark text on secondary */
 
-    --secondary: 210 40% 96.1%;
-    --secondary-foreground: 222.2 47.4% 11.2%;
+    /* muted and accent */
+    --muted: 210 40% 96.1%;            /* light muted bg */
+    --muted-foreground: 215.4 16.3% 46.9%; /* gray text */
+    --accent: 210 40% 96.1%;           /* light accent bg */
+    --accent-foreground: 222.2 47.4% 11.2%; /* dark accent text */
 
-    --muted: 210 40% 96.1%;
-    --muted-foreground: 215.4 16.3% 46.9%;
+    /* destructive (error) */
+    --destructive: 0 84.2% 60.2%;      /* bright red background */
+    --destructive-foreground: 210 40% 98%; /* light text on destructive */
 
-    --accent: 210 40% 96.1%;
-    --accent-foreground: 222.2 47.4% 11.2%;
+    /* borders and inputs */
+    --border: 214.3 31.8% 91.4%;       /* light gray border */
+    --input: 214.3 31.8% 91.4%;        /* input background (same as border) */
+    --ring: 222.2 84% 4.9%;             /* dark ring (focus) */
 
-    --destructive: 0 84.2% 60.2%;
-    --destructive-foreground: 210 40% 98%;
-
-    --border: 214.3 31.8% 91.4%;
-    --input: 214.3 31.8% 91.4%;
-    --ring: 222.2 84% 4.9%;
-
+    /* border radius */
     --radius: 0.5rem;
 
-    --sidebar-background: 0 0% 98%;
-
-    --sidebar-foreground: 240 5.3% 26.1%;
-
-    --sidebar-primary: 240 5.9% 10%;
-
-    --sidebar-primary-foreground: 0 0% 98%;
-
-    --sidebar-accent: 240 4.8% 95.9%;
-
-    --sidebar-accent-foreground: 240 5.9% 10%;
-
-    --sidebar-border: 220 13% 91%;
-
-    --sidebar-ring: 217.2 91.2% 59.8%;
+    /* sidebar colors */
+    --sidebar-primary: 240 5.9% 10%;           /* very dark blue sidebar */
+    --sidebar-primary-foreground: 0 0% 98%;    /* almost white text */
+    --sidebar-accent: 240 4.8% 95.9%;          /* very light accent */
+    --sidebar-accent-foreground: 240 5.9% 10%; /* dark accent text */
+    --sidebar-border: 220 13% 91%;              /* light gray sidebar border */
+    --sidebar-ring: 217.2 91.2% 59.8%;          /* yellowish focus ring */
   }
 
-  .dark {
-    --background: 222.2 84% 4.9%;
-    --foreground: 210 40% 98%;
+  .dark { /* dark mode overrides */
+    /* backgrounds */
+    --background: 222.2 84% 4.9%;       /* very dark background */
+    --card: 222.2 84% 4.9%;             /* dark card background */
+    --popover: 222.2 84% 4.9%;          /* dark popover background */
+    --sidebar-background: 240 5.9% 10%; /* very dark sidebar */
 
-    --card: 222.2 84% 4.9%;
-    --card-foreground: 210 40% 98%;
+    /* foregrounds / text */
+    --foreground: 210 40% 98%;           /* very light text */
+    --card-foreground: 210 40% 98%;      /* very light card text */
+    --popover-foreground: 210 40% 98%;   /* very light popover text */
+    --sidebar-foreground: 240 4.8% 95.9%;/* light sidebar text */
 
-    --popover: 222.2 84% 4.9%;
-    --popover-foreground: 210 40% 98%;
+    /* primary and secondary */
+    --primary: 210 40% 98%;              /* very light primary bg */
+    --primary-foreground: 222.2 47.4% 11.2%; /* dark text on primary */
+    --secondary: 217.2 32.6% 17.5%;      /* dark secondary bg */
+    --secondary-foreground: 210 40% 98%; /* light text on secondary */
 
-    --primary: 210 40% 98%;
-    --primary-foreground: 222.2 47.4% 11.2%;
+    /* muted and accent */
+    --muted: 217.2 32.6% 17.5%;          /* dark muted bg */
+    --muted-foreground: 215 20.2% 65.1%; /* lighter gray text */
+    --accent: 217.2 32.6% 17.5%;         /* dark accent bg */
+    --accent-foreground: 210 40% 98%;    /* light accent text */
 
-    --secondary: 217.2 32.6% 17.5%;
-    --secondary-foreground: 210 40% 98%;
+    /* errors */
+    --destructive: 0 62.8% 30.6%;        /* darker red bg */
+    --destructive-foreground: 210 40% 98%; /* light text */
 
-    --muted: 217.2 32.6% 17.5%;
-    --muted-foreground: 215 20.2% 65.1%;
-
-    --accent: 217.2 32.6% 17.5%;
-    --accent-foreground: 210 40% 98%;
-
-    --destructive: 0 62.8% 30.6%;
-    --destructive-foreground: 210 40% 98%;
-
-    --border: 217.2 32.6% 17.5%;
-    --input: 217.2 32.6% 17.5%;
-    --ring: 212.7 26.8% 83.9%;
-    --sidebar-background: 240 5.9% 10%;
-    --sidebar-foreground: 240 4.8% 95.9%;
-    --sidebar-primary: 224.3 76.3% 48%;
-    --sidebar-primary-foreground: 0 0% 100%;
-    --sidebar-accent: 240 3.7% 15.9%;
-    --sidebar-accent-foreground: 240 4.8% 95.9%;
-    --sidebar-border: 240 3.7% 15.9%;
-    --sidebar-ring: 217.2 91.2% 59.8%;
+    /* borders and inputs */
+    --border: 217.2 32.6% 17.5%;          /* dark border */
+    --input: 217.2 32.6% 17.5%;           /* dark input bg */
+    --ring: 212.7 26.8% 83.9%;            /* light ring */
+    
+    /* sidebar colors */
+    --sidebar-primary: 224.3 76.3% 48%;           /* medium blue sidebar */
+    --sidebar-primary-foreground: 0 0% 100%;       /* white text */
+    --sidebar-accent: 240 3.7% 15.9%;              /* dark accent */
+    --sidebar-accent-foreground: 240 4.8% 95.9%;   /* light accent text */
+    --sidebar-border: 240 3.7% 15.9%;               /* dark sidebar border */
+    --sidebar-ring: 217.2 91.2% 59.8%;             /* yellowish focus ring */
   }
 }
 
 @layer base {
+  /* apply border color globally */
   * {
     @apply border-border;
   }
 
+  /* body background and text colors use css variables */
   body {
     @apply bg-background text-foreground;
   }

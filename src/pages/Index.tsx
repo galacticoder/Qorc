@@ -9,15 +9,10 @@ import websocketClient from "@/lib/websocket";
 import { SignalType } from "@/lib/signals";
 import { v4 as uuidv4 } from 'uuid';
 
-
 interface MessageData {
   type: SignalType;
   message: string;
 }
-
-
-
-const SERVER_ID = 'SecureChat-Server';
 
 export default function Index() {
   // User state
@@ -31,10 +26,8 @@ export default function Index() {
   const [publicKeyPEM, setPublicKeyPEM] = useLocalStorage<string>("public_key", "");
   const privateKeyRef = useRef<CryptoKey | null>(null);
   const publicKeyRef = useRef<CryptoKey | null>(null);
-  const aesKeyRef = useRef<CryptoKey | null>(null);
   const [serverPublicKeyPEM, setServerPublicKeyPEM] = useState<string | null>(null);
   const serverPublicKeyRef = useRef<CryptoKey | null>(null);
-  const [isServerKeyReady, setIsServerKeyReady] = useState(false);
 
   // Users and messages
   const [users, setUsers] = useState<User[]>([]);
@@ -111,7 +104,6 @@ export default function Index() {
       }));
 
       console.log(`File ${filename} progress: ${(progress * 100).toFixed(2)}%`);
-
       console.log(`Received and decrypted chunk ${chunkIndex + 1}/${totalChunks} for ${filename} from ${from}`);
 
       if (fileEntry.receivedCount === totalChunks) {
@@ -313,7 +305,6 @@ export default function Index() {
 
     const registeredSignalTypes = Object.values(SignalType);
 
-
     registeredSignalTypes.forEach(signal => { //register all signal types so the function can axtually work without individually setting up a handler for each type
       websocketClient.registerMessageHandler(signal, async (data: unknown) => {
           await handleServerMessage(data);
@@ -374,9 +365,12 @@ export default function Index() {
       console.error("Login failed: ", error);
     }
   };
-
   
   const handleTyping = () => {
+  };
+
+  const handleSendFile = (fileMessage: Message) => {
+    setMessages(prev => [...prev, { ...fileMessage, isCurrentUser: true, sender: loginUsernameRef.current }]);
   };
   
   const handleSendMessage = async (content: string) => {
@@ -451,6 +445,7 @@ export default function Index() {
          <ChatInterface
             messages={messages}
             onSendMessage={handleSendMessage}
+            onSendFile={handleSendFile} 
             onTyping={handleTyping}
             isEncrypted={true}
             currentUsername={loginUsernameRef.current}
