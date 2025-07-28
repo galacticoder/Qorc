@@ -33,6 +33,10 @@ export default function Index() {
   const [users, setUsers] = useState<User[]>([]);
   const [messages, setMessages] = useState<Message[]>([]);
   const loginUsernameRef = useRef<string>("");
+  const [isConnecting, setIsConnecting] = useState(false);
+  const [isReadyForLogin, setIsReadyForLogin] = useState(false);
+
+  const [fileProgressMap, setFileProgressMap] = useState<{ [fileKey: string]: number }>({});
 
   const incomingFileChunksRef = useRef<{
     [key: string]: {
@@ -45,7 +49,6 @@ export default function Index() {
     }
   }>({});
 
-  const [fileProgressMap, setFileProgressMap] = useState<{ [fileKey: string]: number }>({});
 
   const handleFileMessageChunk = async (payload: any, message: any) => {
     try {
@@ -232,6 +235,7 @@ export default function Index() {
           console.log("pem key extract: "+ pem)
           const key = await crypto.importPublicKeyFromPEM(pem);
           serverPublicKeyRef.current = key;
+          setIsReadyForLogin(true);
           console.log("Server public key imported.");
         } catch (e) {
           console.error("Failed to import server public key:", e);
@@ -322,6 +326,27 @@ export default function Index() {
     };
   }, [handleEncryptedMessagePayload, handleServerMessage]);
 
+  useEffect(() => {
+    const connect = async () => {
+      setIsConnecting(true);
+      try {
+        console.log("Connecting to WebSocket server...");
+        await websocketClient.connect();
+      } catch (error) {
+        console.error("WebSocket connection error:", error);
+        setLoginError("Failed to connect to server");
+      } finally {
+        setIsConnecting(false);
+      }
+    };
+
+    connect();
+
+    return () => {
+      websocketClient.close();
+    };
+  }, []);
+
   const handleLogin = async (username: string, password: string) => {
     setLoginError("");
 
@@ -331,12 +356,21 @@ export default function Index() {
     }
 
     try {
-      console.log("Connecting to WebSocket server...");
-      await websocketClient.connect();
-      
-      if (!serverPublicKeyPEM) {
-        console.error("Server public key not available");
+      if (!isReadyForLogin) {
+        setLoginError("Security handshake not complete yet");
         return;
+      }
+
+      if (!websocketClient.isConnectedToServer()) {
+        setIsConnecting(true);
+        try {
+          await websocketClient.connect();
+        } catch (error) {
+          setLoginError("Failed to connect to server");
+          return;
+        } finally {
+          setIsConnecting(false);
+        }
       }
 
       const passwordPayload = await crypto.encryptAndFormatPayload({
