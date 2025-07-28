@@ -4,32 +4,10 @@ import { UserList, User } from "@/components/chat/UserList";
 import { ChatInterface } from "@/components/chat/ChatInterface";
 import { Message } from "@/components/chat/ChatMessage";
 import { useLocalStorage } from "@/hooks/use-local-storage";
-import { 
-  generateRSAKeyPair,
-  exportPublicKeyToPEM, 
-  exportPrivateKeyToPEM,
-  importPublicKeyFromPEM,
-  importPrivateKeyFromPEM,
-  importAESKey,
-  generateAESKey,
-  deserializeEncryptedDataFromUint8Array,
-  encryptWithAES,
-  decryptWithAES,
-  decryptWithAESRaw,
-  encryptWithRSA,
-  decryptWithRSA,
-  serializeEncryptedData,
-  deserializeEncryptedData,
-  uint8ToBase64,
-  base64ToArrayBuffer,
-  decryptAESKeyWithRSA,
-  decryptMessage
-} from "@/lib/unified-crypto";
+import * as crypto from "@/lib/unified-crypto";
 import websocketClient from "@/lib/websocket";
 import { SignalType } from "@/lib/signals";
 import { v4 as uuidv4 } from 'uuid';
-import * as pako from "pako";
-import { Console } from "console";
 
 
 interface MessageData {
@@ -54,10 +32,14 @@ export default function Index() {
   const privateKeyRef = useRef<CryptoKey | null>(null);
   const publicKeyRef = useRef<CryptoKey | null>(null);
   const aesKeyRef = useRef<CryptoKey | null>(null);
-  
+  const [serverPublicKeyPEM, setServerPublicKeyPEM] = useState<string | null>(null);
+  const serverPublicKeyRef = useRef<CryptoKey | null>(null);
+  const [isServerKeyReady, setIsServerKeyReady] = useState(false);
+
   // Users and messages
   const [users, setUsers] = useState<User[]>([]);
   const [messages, setMessages] = useState<Message[]>([]);
+  const loginUsernameRef = useRef<string>("");
   
   const decryptServerAESEncryptedData = useCallback(async (
     encryptedData: string, 
@@ -132,19 +114,19 @@ export default function Index() {
 
       const encryptedBytes = Uint8Array.from(atob(chunkData), c => c.charCodeAt(0));
 
-      const { iv, authTag, encrypted } = deserializeEncryptedDataFromUint8Array(encryptedBytes);
+      const { iv, authTag, encrypted } = crypto.deserializeEncryptedDataFromUint8Array(encryptedBytes);
 
       if (!fileEntry.aesKey) {
-        const decryptedAESKeyBytes = await decryptWithRSA(
-          base64ToArrayBuffer(fileEntry.encryptedAESKey),
+        const decryptedAESKeyBytes = await crypto.decryptWithRSA(
+          crypto.base64ToArrayBuffer(fileEntry.encryptedAESKey),
           privateKeyRef.current
         );
 
-        const aesKey = await importAESKey(decryptedAESKeyBytes);
+        const aesKey = await crypto.importAESKey(decryptedAESKeyBytes);
         fileEntry.aesKey = aesKey;
       }
 
-      const decryptedChunk = await decryptWithAESRaw(
+      const decryptedChunk = await crypto.decryptWithAESRaw(
         new Uint8Array(encrypted),
         new Uint8Array(iv),
         new Uint8Array(authTag),
@@ -194,74 +176,24 @@ export default function Index() {
   
   const handleEncryptedMessageObject = useCallback(async (message: any) => {
     try {
-      if (!privateKeyRef.current) {
-        throw new Error("Private key not available for decryption");
+      console.log("Message received. Starting decryption...");
+      const payload = await crypto.decryptAndFormatPayload(message, privateKeyRef.current);
+      console.log("Payload decrypted. Message type: ", payload.type)
+
+      if (message.type == SignalType.USER_DISCONNECT) {
+        setUsers(prevUsers => prevUsers.filter(user => user.username !== payload.content.split(' ')[0]))
       }
       
-      if (message.from === SERVER_ID) { //for server messages
-        console.log("Server message received. Starting decryption...");
-        const encryptedAesKey = base64ToArrayBuffer(message.encryptedAESKey);
-        const decryptedAesKey = await decryptWithRSA(encryptedAesKey, privateKeyRef.current);
+      const payloadFull: Message = {
+        id: uuidv4(),
+        content: payload.content,
+        sender: message.from,
+        timestamp: new Date(payload.timestamp || Date.now()),
+        isCurrentUser: false,
+        isSystemMessage: payload.typeInside == 'system' //if sys message set true
+        };
         
-        const aesKey = await window.crypto.subtle.importKey(
-          "raw",
-          decryptedAesKey,
-          { name: "AES-GCM" },
-          true,
-          ["decrypt"]
-        );
-
-        const decrypted = await decryptServerAESEncryptedData(message.encryptedMessage, aesKey);
-        const payload = JSON.parse(decrypted);
-        
-        if (message.type == SignalType.USER_DISCONNECT) {
-          setUsers(prevUsers => prevUsers.filter(user => user.username !== payload.content.split(' ')[0]))
-        }
-
-        if (payload.type === 'system') {
-          const systemMessage: Message = {
-            id: uuidv4(),
-            content: payload.content,
-            sender: "Server",
-            timestamp: new Date(payload.timestamp || Date.now()),
-            isCurrentUser: false,
-            isSystemMessage: true
-          };
-          setMessages(prev => [...prev, systemMessage]);
-        }
-
-      } else { //for user messages
-        console.log("User message received. Starting decryption");
-        const encryptedAesKey = base64ToArrayBuffer(message.encryptedAESKey);
-        const aesKey = await decryptAESKeyWithRSA(encryptedAesKey, privateKeyRef.current);
-
-        const decryptedMessage = await decryptMessage(message.encryptedMessage, aesKey);
-        const payload = JSON.parse(decryptedMessage);
-
-        if (payload.type === 'system') {
-          const systemMessage: Message = {
-            id: uuidv4(),
-            content: payload.content,
-            sender: "Server",
-            timestamp: new Date(payload.timestamp || Date.now()),
-            isCurrentUser: false,
-            isSystemMessage: true
-          };
-          setMessages(prev => [...prev, systemMessage]);
-        }
-        
-        else {
-          const userMessage: Message = {
-            id: uuidv4(),
-            content: payload.content,
-            sender: message.from,
-            timestamp: new Date(payload.timestamp || Date.now()),
-            isCurrentUser: false,
-            isSystemMessage: false
-          };
-          setMessages(prev => [...prev, userMessage]);
-        }
-      }
+      setMessages(prev => [...prev, payloadFull]);
     } catch (error) {
       console.error("Error handling encrypted message:", error);
     }
@@ -273,9 +205,9 @@ export default function Index() {
       if (!privateKeyPEM || !publicKeyPEM) {
         setIsGeneratingKeys(true);
         try {
-          const keyPair = await generateRSAKeyPair();
-          const publicKeyString = await exportPublicKeyToPEM(keyPair.publicKey);
-          const privateKeyString = await exportPrivateKeyToPEM(keyPair.privateKey);
+          const keyPair = await crypto.generateRSAKeyPair();
+          const publicKeyString = await crypto.exportPublicKeyToPEM(keyPair.publicKey);
+          const privateKeyString = await crypto.exportPrivateKeyToPEM(keyPair.privateKey);
           
           setPublicKeyPEM(publicKeyString);
           setPrivateKeyPEM(privateKeyString);
@@ -289,8 +221,8 @@ export default function Index() {
         }
       } else {
         try {
-          const publicKey = await importPublicKeyFromPEM(publicKeyPEM);
-          const privateKey = await importPrivateKeyFromPEM(privateKeyPEM);
+          const publicKey = await crypto.importPublicKeyFromPEM(publicKeyPEM);
+          const privateKey = await crypto.importPrivateKeyFromPEM(privateKeyPEM);
           
           publicKeyRef.current = publicKey;
           privateKeyRef.current = privateKey;
@@ -333,6 +265,53 @@ export default function Index() {
           console.error("Error parsing public keys:", error);
         }
         break;
+      
+      case SignalType.SERVER_PUBLIC_KEY:
+        try {
+          const pem = (data as any).publicKey; // safely extract
+          setServerPublicKeyPEM(pem);
+          console.log("pem key extract: "+ pem)
+          const key = await crypto.importPublicKeyFromPEM(pem);
+          serverPublicKeyRef.current = key;
+          console.log("Server public key imported.");
+        } catch (e) {
+          console.error("Failed to import server public key:", e);
+        }
+        break;
+      
+      case SignalType.AUTH_SUCCESS:
+        console.log(message)
+        setUsername(loginUsernameRef.current);
+        console.log("username is: ", loginUsernameRef.current)
+
+        websocketClient.send(loginUsernameRef.current);
+        websocketClient.send(publicKeyPEM);
+        
+        setIsLoggedIn(true);
+
+        const welcomeMessage: Message = {
+          id: uuidv4(),
+          content: `Welcome to SecureChat, ${loginUsernameRef.current}! Your messages are secured with this encryption:
+        • RSA-4096 for key exchange
+        • AES-256-GCM for message encryption
+        • SHA-512 for integrity verification`,
+          sender: "System",
+          timestamp: new Date(),
+          isCurrentUser: false,
+          isSystemMessage: true
+        };
+
+        const secureConnectionMessage: Message = {
+          id: uuidv4(),
+          content: "Connected to secure WebSocket server with end-to-end encryption.",
+          sender: "System",
+          timestamp: new Date(),
+          isCurrentUser: false,
+          isSystemMessage: true
+        };
+
+        setMessages([welcomeMessage, secureConnectionMessage]);
+        break;
 
       case SignalType.ENCRYPTED_MESSAGE:
       case SignalType.USER_DISCONNECT:
@@ -346,6 +325,7 @@ export default function Index() {
       case SignalType.NAMEEXISTSERROR:
       case SignalType.INVALIDNAMELENGTH:
       case SignalType.INVALIDNAME:
+      case SignalType.AUTH_ERROR:
       case SignalType.SERVERLIMIT:
         setIsLoggedIn(false);
         setLoginError("Login error: " + message);
@@ -359,7 +339,7 @@ export default function Index() {
 
   useEffect(() => {
     console.log("User logged in, registering message handlers...");
-
+    
     const handler = async (data: unknown) => {
       console.log("Raw message received:", data);
       try {
@@ -369,6 +349,7 @@ export default function Index() {
     };
 
     const registeredSignalTypes = Object.values(SignalType);
+
 
     registeredSignalTypes.forEach(signal => { //register all signal types so the function can axtually work without individually setting up a handler for each type
       websocketClient.registerMessageHandler(signal, async (data: unknown) => {
@@ -387,7 +368,7 @@ export default function Index() {
     };
   }, [handleEncryptedMessageObject, handleServerMessage]);
 
-  const handleLogin = async (username: string) => {
+  const handleLogin = async (username: string, password: string) => {
     setLoginError("");
 
     if (!publicKeyRef.current || !privateKeyRef.current) {
@@ -404,44 +385,43 @@ export default function Index() {
 
       console.log("Connected successfully, establishing secure channel...");
 
-      console.log("Sending username to server...");
-      websocketClient.send(username);
+      if (!serverPublicKeyRef.current) {
+        console.error("❌ Cannot login: server public key is not ready.");
+        return;
+      }
+      
+      if (!serverPublicKeyPEM) return;
 
-      websocketClient.send(publicKeyPEM);
+      const serverKey = await crypto.importPublicKeyFromPEM(serverPublicKeyPEM);
+      const aesKey = await crypto.generateAESKey();
 
-      const aesKey = await generateAESKey();
-      aesKeyRef.current = aesKey;
+      const { iv, authTag, encrypted } = await crypto.encryptWithAES(
+        JSON.stringify({ password }),
+        aesKey
+      );
 
-      setUsername(username);
-      setIsLoggedIn(true);
+      const encryptedPassword = crypto.serializeEncryptedData(iv, authTag, encrypted);
+      const rawAes = await window.crypto.subtle.exportKey('raw', aesKey);
+      const encryptedAes = await crypto.encryptWithRSA(rawAes, serverKey);
+      const encryptedAESKeyBase64 = crypto.arrayBufferToBase64(encryptedAes);
 
-      const welcomeMessage: Message = {
-        id: uuidv4(),
-        content: `Welcome to SecureChat, ${username}! Your messages are secured with this encryption:
-• RSA-4096 for key exchange
-• AES-256-GCM for message encryption
-• SHA-512 for integrity verification`,
-        sender: "System",
-        timestamp: new Date(),
-        isCurrentUser: false,
-        isSystemMessage: true
+      const payload = {
+        type: SignalType.SERVER_PASSWORD_ENCRYPTED,
+        encryptedAESKey: encryptedAESKeyBase64,
+        encryptedPassword
       };
 
-      const secureConnectionMessage: Message = {
-        id: uuidv4(),
-        content: "Connected to secure WebSocket server with end-to-end encryption.",
-        sender: "System",
-        timestamp: new Date(),
-        isCurrentUser: false,
-        isSystemMessage: true
-      };
-
-      setMessages([welcomeMessage, secureConnectionMessage]);
-
+      console.log(`Sending encrypted password payload: ${JSON.stringify(payload)}`);
+      websocketClient.send(JSON.stringify(payload));
+      console.log(`Sent encrypted password payload`);
+      console.log(`Waiting for password verification signal...`);
+      // setUsername(username);
+      loginUsernameRef.current = username;
     } catch (error) {
       console.error("Login failed: ", error);
     }
   };
+
   
   const handleTyping = () => {
   };
@@ -449,13 +429,11 @@ export default function Index() {
   const handleSendMessage = async (content: string) => {
     if (!isLoggedIn || !content.trim()) return;
 
-    try {
-      const messageId = uuidv4();
-      
+    try {      
       const newMessage: Message = {
-        id: messageId,
+        id: uuidv4(),
         content,
-        sender: username,
+        sender: loginUsernameRef.current,
         timestamp: new Date(),
         isCurrentUser: true
       };
@@ -464,35 +442,16 @@ export default function Index() {
       for (const user of users) {
         if (user.username === username || !user.publicKey) continue;
         
-        const recipientKey = await importPublicKeyFromPEM(user.publicKey);
-        const aesKey = await generateAESKey();
-
-        const messagePayload = {
-          content,
-          timestamp: Date.now(),
-          type: "chat"
-        };
-
-        const { iv, authTag, encrypted } = await encryptWithAES(
-          JSON.stringify(messagePayload),
-          aesKey
-        );
-
-        const encryptedMessage = serializeEncryptedData(iv, authTag, encrypted);
-        const rawAes = await window.crypto.subtle.exportKey('raw', aesKey);
-        const encryptedAes = await encryptWithRSA(rawAes, recipientKey);
-        const encryptedAESKeyBase64 = btoa(String.fromCharCode(...new Uint8Array(encryptedAes)));
-        
-        console.log("Preparing to send message:", encryptedMessage);
-        
-        const payload = {
-          type: SignalType.ENCRYPTED_MESSAGE,
-          from: username,
+        const payload = await crypto.encryptAndFormatPayload({
+          recipientPEM: user.publicKey,
+          from: loginUsernameRef.current,
           to: user.username,
-          encryptedAESKey: encryptedAESKeyBase64,
-          encryptedMessage
-        };
-        
+          type: SignalType.ENCRYPTED_MESSAGE,
+          content: content,
+          timestamp: Date.now(),
+          typeInside: "chat"
+        });
+
         console.log(`Sending encrypted payload: ${JSON.stringify(payload)}`);
         websocketClient.send(JSON.stringify(payload));
         console.log(`Sent payload`);
@@ -532,7 +491,7 @@ export default function Index() {
       
       <div className="flex flex-1 gap-4 h-[calc(100vh-150px)]">
         <div className="hidden md:block w-64">
-          <UserList users={users} currentUser={username} />
+          <UserList users={users} currentUser={loginUsernameRef.current} />
         </div>
         
         <div className="flex-1">
@@ -541,7 +500,7 @@ export default function Index() {
             onSendMessage={handleSendMessage}
             onTyping={handleTyping}
             isEncrypted={true}
-            currentUsername={username}
+            currentUsername={loginUsernameRef.current}
             users={users}
           />
         </div>

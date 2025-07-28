@@ -15,15 +15,78 @@ export function generateSecureRandom(length) {
   return crypto.getRandomValues(new Uint8Array(length));
 }
 
+export async function encryptAndFormatPayload(input) {
+  const { recipientPEM, from, to, type, ...encryptedContent } = input;
+
+  console.log("Encrypted Content:", encryptedContent);
+
+  if (!recipientPEM) throw new Error("Missing recipientPEM");
+
+  const recipientKey = await importPublicKeyFromPEM(recipientPEM);
+  const aesKey = await generateAESKey();
+
+  const { iv, authTag, encrypted } = await encryptWithAES(
+    JSON.stringify(encryptedContent),
+    aesKey
+  );
+
+  const encryptedMessage = serializeEncryptedData(iv, authTag, encrypted);
+  const rawAes = await exportAESKey(aesKey);
+  const encryptedAes = await encryptWithRSA(rawAes, recipientKey);
+  const encryptedAESKeyBase64 = arrayBufferToBase64(encryptedAes);
+
+  return {
+    ...(from && { from }),
+    ...(to && { to }),
+    ...(type && { type }),
+    encryptedAESKey: encryptedAESKeyBase64,
+    encryptedMessage
+  };
+}
+
+export async function decryptAndFormatPayload(encryptedPayload, privateKey) {
+  if (!privateKey) {
+    throw new Error("Private key is required for decryption");
+  }
+
+  const {
+    encryptedAESKey,
+    encryptedMessage,
+    ...restFields
+  } = encryptedPayload;
+
+  if (!encryptedAESKey || !encryptedMessage) {
+    throw new Error("Invalid encrypted payload structure");
+  }
+
+  const encryptedAesKeyBuffer = base64ToArrayBuffer(encryptedAESKey);
+  const aesKey = await decryptAESKeyWithRSA(encryptedAesKeyBuffer, privateKey);
+
+  const decryptedJsonString = await decryptMessage(encryptedMessage, aesKey);
+
+  const decryptedPayload = JSON.parse(decryptedJsonString);
+
+  return {
+    ...restFields,
+    ...decryptedPayload
+  };
+}
+
+
 export function arrayBufferToBase64(buffer) {
   const bytes = buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer);
   return Buffer.from(bytes).toString('base64');
 }
 
 export function base64ToArrayBuffer(base64) {
-  const buffer = Buffer.from(base64, 'base64');
-  return buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength);
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return bytes.buffer;
 }
+
 
 export async function generateRSAKeyPair() {
   return await crypto.subtle.generateKey(
@@ -38,6 +101,17 @@ export async function generateRSAKeyPair() {
   );
 }
 
+export async function decryptAESKeyWithRSA(encryptedKey, privateKey) {
+  const keyData = await decryptWithRSA(encryptedKey, privateKey);
+  return await importAESKey(keyData);
+}
+
+export async function decryptMessage(encryptedData, aesKey) {
+  const { iv, authTag, encrypted } = deserializeEncryptedData(encryptedData);
+  return await decryptWithAES(encrypted, iv, authTag, aesKey);
+}
+
+
 export async function exportPublicKeyToPEM(publicKey) {
   const exported = await crypto.subtle.exportKey("spki", publicKey);
   const base64 = arrayBufferToBase64(exported);
@@ -47,14 +121,21 @@ export async function exportPublicKeyToPEM(publicKey) {
   return `-----BEGIN PUBLIC KEY-----\n${pem}\n-----END PUBLIC KEY-----`;
 }
 
+export async function exportPrivateKeyToPEM(privateKey) {
+  const exported = await crypto.subtle.exportKey("pkcs8", privateKey);
+  const base64 = arrayBufferToBase64(exported);
+  const pem = base64.match(/.{1,64}/g)?.join('\n') || base64;
+
+  return `-----BEGIN PRIVATE KEY-----\n${pem}\n-----END PRIVATE KEY-----`;
+}
+
 export async function importPublicKeyFromPEM(pem) {
   const pemContents = pem
-    .replace(/-----BEGIN PUBLIC KEY-----/, '')
-    .replace(/-----END PUBLIC KEY-----/, '')
-    .replace(/\\n/g, '\n')
-    .replace(/\r\n/g, '\n')
-    .replace(/\r/g, '\n')
-    .replace(/\s/g, '');
+    .replace(/-----BEGIN PUBLIC KEY-----/g, '')
+    .replace(/-----END PUBLIC KEY-----/g, '')
+    .replace(/\n/g, '')
+    .replace(/\r/g, '')
+    .trim();
   
   const binaryDer = base64ToArrayBuffer(pemContents);
   
@@ -172,43 +253,151 @@ export async function encryptWithAES(data, key) {
 
 
 export function serializeEncryptedData(iv, authTag, encrypted) {
-  const combined = new Uint8Array(1 + iv.length + 1 + authTag.length + encrypted.length);
+  const version = 1;
+  const encryptedLength = encrypted.length;
+
+  const result = new Uint8Array(
+    1 + // version
+    1 + iv.length +
+    1 + authTag.length +
+    4 + // encrypted length (4 bytes)
+    encrypted.length
+  );
+
   let offset = 0;
-  
-  combined[offset] = iv.length;
-  offset += 1;
-  
-  combined.set(iv, offset);
+  result[offset++] = version;
+
+  result[offset++] = iv.length;
+  result.set(iv, offset);
   offset += iv.length;
-  
-  combined[offset] = authTag.length;
-  offset += 1;
-  
-  combined.set(authTag, offset);
+
+  result[offset++] = authTag.length;
+  result.set(authTag, offset);
   offset += authTag.length;
-  
-  combined.set(encrypted, offset);
-  
-  return Buffer.from(combined).toString('base64');
+
+  result[offset++] = (encryptedLength >> 24) & 0xff;
+  result[offset++] = (encryptedLength >> 16) & 0xff;
+  result[offset++] = (encryptedLength >> 8) & 0xff;
+  result[offset++] = encryptedLength & 0xff;
+
+  result.set(encrypted, offset);
+
+  return Buffer.from(result).toString('base64');
 }
 
-export function deserializeEncryptedData(serialized) {
-  const combined = Buffer.from(serialized, 'base64');
+export async function decryptWithAESRaw(encryptedData, key) {
+  const combined = new Uint8Array(encryptedData.encrypted.length + encryptedData.authTag.length);
+  combined.set(encryptedData.encrypted);
+  combined.set(encryptedData.authTag, encryptedData.encrypted.length);
 
-  const ivLength = combined[0];
-  if (ivLength !== CRYPTO_CONFIG.IV_LENGTH) {
-    throw new Error(`Expected IV length ${CRYPTO_CONFIG.IV_LENGTH}, got ${ivLength}`);
-  }
-  
-  const iv = combined.slice(1, 1 + ivLength);
-  
-  const authTagLength = combined[1 + ivLength];
-  if (authTagLength !== CRYPTO_CONFIG.AUTH_TAG_LENGTH) {
-    throw new Error(`Expected auth tag length ${CRYPTO_CONFIG.AUTH_TAG_LENGTH}, got ${authTagLength}`);
-  }
-  
-  const authTag = combined.slice(1 + ivLength + 1, 1 + ivLength + 1 + authTagLength);
-  const encrypted = combined.slice(1 + ivLength + 1 + authTagLength);
-  
+  const cryptoKey = await importAESKey(key);
+  return await crypto.subtle.decrypt({
+    name: 'AES-GCM',
+    iv: encryptedData.iv,
+    tagLength: CRYPTO_CONFIG.AUTH_TAG_LENGTH * 8
+  }, cryptoKey, combined);
+}
+
+
+export function deserializeEncryptedData(base64Data) {
+  const buffer = Buffer.from(base64Data, 'base64');
+  let offset = 0;
+
+  const version = buffer[offset++];
+  if (version !== 1) throw new Error(`Unsupported version: ${version}`);
+
+  const ivLength = buffer[offset++];
+  const iv = buffer.slice(offset, offset + ivLength);
+  offset += ivLength;
+
+  const authTagLength = buffer[offset++];
+  const authTag = buffer.slice(offset, offset + authTagLength);
+  offset += authTagLength;
+
+  const encryptedLength =
+    (buffer[offset++] << 24) |
+    (buffer[offset++] << 16) |
+    (buffer[offset++] << 8) |
+    buffer[offset++];
+    
+  const encrypted = buffer.slice(offset, offset + encryptedLength);
+
   return { iv, authTag, encrypted };
+}
+
+
+
+
+export async function decryptWithRSA(encryptedData, privateKey) {
+  return await crypto.subtle.decrypt(
+    { name: "RSA-OAEP" },
+    privateKey,
+    encryptedData
+  );
+}
+
+
+export async function decryptWithAES(encryptedData, key) {
+  if (
+    !encryptedData ||
+    !encryptedData.iv ||
+    !encryptedData.authTag ||
+    !encryptedData.encrypted
+  ) {
+    throw new Error('Invalid encryptedData format for AES decryption');
+  }
+
+  const combined = new Uint8Array(
+    encryptedData.encrypted.length + encryptedData.authTag.length
+  );
+  combined.set(encryptedData.encrypted);
+  combined.set(encryptedData.authTag, encryptedData.encrypted.length);
+
+  let cryptoKey;
+  if (Buffer.isBuffer(key) || key instanceof Uint8Array) {
+    cryptoKey = await importAESKey(key);
+  } else {
+    cryptoKey = key;
+  }
+
+  try {
+    const decrypted = await crypto.subtle.decrypt(
+      {
+        name: 'AES-GCM',
+        iv: encryptedData.iv,
+        tagLength: CRYPTO_CONFIG.AUTH_TAG_LENGTH * 8,
+      },
+      cryptoKey,
+      combined
+    );
+    return new TextDecoder().decode(decrypted);
+  } catch (error) {
+    console.error('AES decryption failed:', error);
+    throw new Error('Failed to decrypt with AES: ' + error.message);
+  }
+}
+
+export async function importPrivateKeyFromPEM(pem) {
+  const pemContents = pem
+    .replace(/-----BEGIN PRIVATE KEY-----/, '')
+    .replace(/-----END PRIVATE KEY-----/, '')
+    .replace(/\s/g, '');
+
+  const binaryDer = base64ToArrayBuffer(pemContents);
+
+  try {
+    return await crypto.subtle.importKey(
+      'pkcs8',
+      binaryDer,
+      {
+        name: 'RSA-OAEP',
+        hash: CRYPTO_CONFIG.HASH_ALGORITHM,
+      },
+      true,
+      ['decrypt']
+    );
+  } catch (error) {
+    console.error('Failed to import private key:', error);
+    throw error;
+  }
 }

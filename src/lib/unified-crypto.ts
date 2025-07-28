@@ -8,7 +8,7 @@ export const CRYPTO_CONFIG = {
   HASH_ALGORITHM: 'SHA-512'
 };
 
-function uint8ToBase64(u8Arr: Uint8Array): string {
+export function uint8ToBase64(u8Arr: Uint8Array): string {
   let CHUNK_SIZE = 0x8000; // 32k
   let index = 0;
   let result = '';
@@ -20,6 +20,65 @@ function uint8ToBase64(u8Arr: Uint8Array): string {
   }
   return btoa(result);
 }
+
+export async function encryptAndFormatPayload(input: Record<string, any>) {
+  const { recipientPEM, from, to, type, ...encryptedContent } = input;
+
+  if (!recipientPEM) throw new Error("Missing recipientPEM");
+
+  const recipientKey = await importPublicKeyFromPEM(recipientPEM);
+  const aesKey = await generateAESKey();
+
+  const { iv, authTag, encrypted } = await encryptWithAES(
+    JSON.stringify(encryptedContent),
+    aesKey
+  );
+
+  const encryptedMessage = serializeEncryptedData(iv, authTag, encrypted);
+  const rawAes = await exportAESKey(aesKey);
+  const encryptedAes = await encryptWithRSA(rawAes, recipientKey);
+  const encryptedAESKeyBase64 = arrayBufferToBase64(encryptedAes);
+
+  return {
+    ...(from && { from }),
+    ...(to && { to }),
+    ...(type && { type }),
+    encryptedAESKey: encryptedAESKeyBase64,
+    encryptedMessage
+  };
+}
+
+export async function decryptAndFormatPayload(
+    encryptedPayload: Record<string, any>,
+    privateKey: CryptoKey | null
+  ) {
+    if (!privateKey) {
+      throw new Error("Private key is required for decryption");
+    }
+
+    const {
+      encryptedAESKey,
+      encryptedMessage,
+      ...restFields
+    } = encryptedPayload;
+
+    if (!encryptedAESKey || !encryptedMessage) {
+      throw new Error("Invalid encrypted payload structure");
+    }
+
+    const encryptedAesKeyBuffer = base64ToArrayBuffer(encryptedAESKey);
+    const aesKey = await decryptAESKeyWithRSA(encryptedAesKeyBuffer, privateKey);
+
+    const decryptedJsonString = await decryptMessage(encryptedMessage, aesKey);
+
+    const decryptedPayload = JSON.parse(decryptedJsonString);
+
+    return {
+      ...restFields,
+      ...decryptedPayload,
+    };
+  }
+
 
 
 export function arrayBufferToBase64(buffer: ArrayBuffer | Uint8Array): string {
@@ -48,7 +107,7 @@ export async function generateRSAKeyPair(): Promise<CryptoKeyPair> {
   );
 }
 
-export async function exportPublicKeyToPEM(publicKey: CryptoKey): Promise<string> {
+export async function exportPublicKeyToPEM(publicKey) {
   const exported = await crypto.subtle.exportKey("spki", publicKey);
   const base64 = arrayBufferToBase64(exported);
   const pem = base64.match(/.{1,64}/g)?.join('\n') || base64;
@@ -56,13 +115,14 @@ export async function exportPublicKeyToPEM(publicKey: CryptoKey): Promise<string
   return `-----BEGIN PUBLIC KEY-----\n${pem}\n-----END PUBLIC KEY-----`;
 }
 
-export async function exportPrivateKeyToPEM(privateKey: CryptoKey): Promise<string> {
+export async function exportPrivateKeyToPEM(privateKey) {
   const exported = await crypto.subtle.exportKey("pkcs8", privateKey);
   const base64 = arrayBufferToBase64(exported);
   const pem = base64.match(/.{1,64}/g)?.join('\n') || base64;
 
   return `-----BEGIN PRIVATE KEY-----\n${pem}\n-----END PRIVATE KEY-----`;
 }
+
 
 export async function importPublicKeyFromPEM(pem: string): Promise<CryptoKey> {
   const pemContents = pem

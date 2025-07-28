@@ -24,6 +24,34 @@ class WebSocketClient {
       this.url = 'wss://end2endchat.com';
     }
   }
+
+  public async login(username: string, password: string): Promise<void> {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+      await this.connect();
+    }
+
+    return new Promise((resolve, reject) => {
+      const handleAuth = (msg: any) => {
+        if (msg.type === 'AUTH_SUCCESS') {
+          this.unregisterMessageHandler('AUTH_SUCCESS');
+          this.unregisterMessageHandler('AUTH_ERROR');
+          this.send(username);
+          resolve();
+        } else if (msg.type === 'AUTH_ERROR') {
+          this.unregisterMessageHandler('AUTH_SUCCESS');
+          this.unregisterMessageHandler('AUTH_ERROR');
+          this.ws?.close(1008, "Auth failed");
+          reject(new Error(msg.message || "Authentication failed"));
+        }
+      };
+
+      this.registerMessageHandler('AUTH_SUCCESS', handleAuth);
+      this.registerMessageHandler('AUTH_ERROR', handleAuth);
+
+      this.send(password);
+    });
+  }
+
   
   public connect(): Promise<void> {
     return new Promise((resolve, reject) => {

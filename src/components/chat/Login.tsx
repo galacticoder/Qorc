@@ -15,7 +15,7 @@ import { Alert, AlertDescription } from "../ui/alert";
 import { KeyRing, EncryptionIcon } from "./icons";
 
 interface LoginProps {
-  onLogin: (username: string) => Promise<void>;
+  onLogin: (username: string, password: string) => Promise<void>;
   isGeneratingKeys: boolean;
   error?: string;
 }
@@ -23,6 +23,7 @@ interface LoginProps {
 export function Login({ onLogin, isGeneratingKeys, error }: LoginProps) {
   const [username, setUsername] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [password, setPassword] = useState("");
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -30,7 +31,7 @@ export function Login({ onLogin, isGeneratingKeys, error }: LoginProps) {
 
     setIsSubmitting(true);
     try {
-      await onLogin(username.trim());
+      await onLogin(username.trim(), password);
     } catch (err) {
       console.error("Login failed", err);
     } finally {
@@ -51,6 +52,18 @@ export function Login({ onLogin, isGeneratingKeys, error }: LoginProps) {
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-6">
+          <div className="space-y-2">
+            <Label htmlFor="password">Server Password</Label>
+            <Input
+              id="password"
+              type="password"
+              placeholder="Enter server password"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              disabled={isSubmitting || isGeneratingKeys}
+              required
+            />
+          </div>
           <div className="space-y-2">
             <Label htmlFor="username">Username</Label>
             <Input
@@ -88,7 +101,7 @@ export function Login({ onLogin, isGeneratingKeys, error }: LoginProps) {
           <Button
             type="submit"
             className="w-full"
-            disabled={!username.trim() || isSubmitting || isGeneratingKeys}
+            disabled={!username.trim() || !password.trim() || isSubmitting || isGeneratingKeys}
           >
             {isGeneratingKeys ? (
               <span className="flex items-center gap-2">

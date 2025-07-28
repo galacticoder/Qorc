@@ -8,6 +8,9 @@ export const SignalType = {
   INVALIDNAMELENGTH: "invalid-name-length",
   INVALIDNAME: "invalid-name",
   SERVERLIMIT: "server-limit",
+  SERVER_PASSWORD_ENCRYPTED: "server-password-encrypted",
+  AUTH_ERROR: "AUTH_ERROR",
+  AUTH_SUCCESS: "AUTH_SUCCESS",
 };
 
 export const SignalMessages = {
@@ -15,4 +18,5 @@ export const SignalMessages = {
   INVALIDNAMELENGTH: "Username must be between 3 and 16 characters",
   INVALIDNAME: "Username must only contain letters, numbers, underscores, or hyphens",
   SERVERLIMIT: "Server has reached the maximum number of users",
+  AUTH_ERROR: "Invalid server password",
 };
