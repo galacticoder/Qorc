@@ -23,6 +23,7 @@ async function startServer() {
     ws.send(JSON.stringify({ type, message: reason }));
     ws.close(code, reason);
     console.log(`Rejected user connection for reason: ${reason}`);
+    return;
   }
 
   wss.on('connection', async (ws) => {
@@ -37,75 +38,72 @@ async function startServer() {
     ws.on('message', async (message) => {
       try {
         const str = message.toString().trim();
-
-        if (!hasAuthenticated) {
+        
+        if (!hasAuthenticated){ //authenticate client if not already
           let parsed = JSON.parse(str);
-          if (parsed.type == SignalType.SERVER_PASSWORD_ENCRYPTED){
+
+          if (parsed.type === SignalType.LOGIN_INFO) {
+            console.log("Login info received. Processing: ", parsed);
             
-            console.log("Server password from user received. Decrypting...")
-            const payload = await crypto.decryptAndFormatPayload(parsed, serverKeyPair.privateKey);
-            console.log("Checking validity...")
-    
-            if (payload.content == SERVER_PASSWORD){
-              hasAuthenticated = true;
-              console.log("User entered password correctly.")
-              ws.send(JSON.stringify({
-                type: SignalType.AUTH_SUCCESS,
-                message: "Password accepted."
-              }));
-              return;
+            const passwordPayload = await crypto.decryptAndFormatPayload(
+              parsed.passwordData, 
+              serverKeyPair.privateKey
+            );
+            
+            if (passwordPayload.content !== SERVER_PASSWORD) return rejectConnection(ws, SignalType.AUTH_ERROR, "Incorrect password");
+
+            const userPayload = await crypto.decryptAndFormatPayload(
+              parsed.userData, 
+              serverKeyPair.privateKey
+            );
+            
+            username = userPayload.usernameSent;
+
+            const validUsername = /^[a-zA-Z0-9_-]+$/;
+            if (!validUsername.test(username)) return rejectConnection(ws, SignalType.INVALIDNAME, SignalMessages.INVALIDNAME);
+            if (username.length < 3 || username.length > 16) return rejectConnection(ws, SignalType.INVALIDNAMELENGTH, SignalMessages.INVALIDNAMELENGTH);
+            if (clients.has(username)) return rejectConnection(ws, SignalType.NAMEEXISTSERROR, SignalMessages.NAMEEXISTSERROR);
+            if (clients.size >= MAX_CLIENTS) return rejectConnection(ws, SignalType.SERVERLIMIT, SignalMessages.SERVERLIMIT, 101);
+            
+            clients.set(username, { ws, publicKey: null });
+            console.log(`User '${username}' authenticated and connected.`);
+            
+            clients.get(username).publicKey = userPayload.publicKey;
+            console.log(`Received public key from ${username}`);
+            
+            const keyMap = {};
+            for (const [uname, data] of clients.entries()) {
+              if (data.publicKey) keyMap[uname] = data.publicKey;
             }
             
-            return rejectConnection(ws, SignalType.AUTH_ERROR, "Incorrect password");
+            const keyUpdate = JSON.stringify({
+              type: SignalType.PUBLICKEYS,
+              message: JSON.stringify(keyMap),
+            });
+            
+            console.log("Broadcasting public keys: ", keyUpdate);
+            
+            for (const [, client] of clients.entries()) {
+              if (client.publicKey) client.ws.send(keyUpdate);
+            }
+            
+            await broadcastEncryptedSystemMessage(`${username} has joined the chat.`, { excludeUsername: username });
+            
+            ws.send(JSON.stringify({
+              type: SignalType.AUTH_SUCCESS,
+              message: "Authentication successful"
+            }));
+            
+            hasAuthenticated = true;
+            return;
           }
-          return rejectConnection(ws, SignalType.AUTH_ERROR, "No password returned");
+          return rejectConnection(ws, SignalType.AUTH_ERROR, "Expected login information");
         }
-
-        if (!username) {
-          const validUsername = /^[a-zA-Z0-9_-]+$/;
-
-          console.log("username: ", str);
-
-          if (!validUsername.test(str)) return rejectConnection(ws, SignalType.INVALIDNAME, SignalMessages.INVALIDNAME);
-          if (str.length < 3 || str.length > 16) return rejectConnection(ws, SignalType.INVALIDNAMELENGTH, SignalMessages.INVALIDNAMELENGTH);
-          if (clients.has(str)) return rejectConnection(ws, SignalType.NAMEEXISTSERROR, SignalMessages.NAMEEXISTSERROR);
-          if (clients.size >= MAX_CLIENTS) return rejectConnection(ws, SignalType.SERVERLIMIT, SignalMessages.SERVERLIMIT, 1013);
-
-          username = str;
-          clients.set(username, { ws, publicKey: null });
-          console.log(`User ${username} connected.`);
-          return;
-        }
-
-        if (!clients.get(username).publicKey) {
-          clients.get(username).publicKey = str;
-          console.log(`Received public key from ${username}`);
-
-          const keyMap = {};
-          for (const [uname, data] of clients.entries()) {
-            if (data.publicKey) keyMap[uname] = data.publicKey;
-          }
-
-          const keyUpdate = JSON.stringify({
-            type: SignalType.PUBLICKEYS,
-            message: JSON.stringify(keyMap),
-          });
-
-          console.log("Broadcasting public keys: ", keyUpdate);
-
-          for (const [, client] of clients.entries()) {
-            if (client.publicKey) client.ws.send(keyUpdate);
-          }
-
-          await broadcastEncryptedSystemMessage(`${username} has joined the chat.`, { excludeUsername: username });
-
-          return;
-        }
-
+        
         try {
           const parsed = JSON.parse(str);
           console.log(`Received message from ${username}:`, parsed);
-
+          
           if (parsed.type === SignalType.ENCRYPTED_MESSAGE && parsed.to && clients.has(parsed.to)) {
             const target = clients.get(parsed.to);
             target.ws.send(JSON.stringify(parsed));
@@ -121,12 +119,12 @@ async function startServer() {
           console.warn("Non-JSON message:", str);
         }
       } catch (err) {
-        console.error("Message error:", err);
+        console.error("Message error: ", err);
       }
     });
 
     ws.on('close', async () => {
-      if (username) {
+      if (username && hasAuthenticated) {
         clients.delete(username);
         console.log(`User '${username}' has disconnected.`);
 

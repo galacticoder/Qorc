@@ -40,39 +40,6 @@ export default function Index() {
   const [users, setUsers] = useState<User[]>([]);
   const [messages, setMessages] = useState<Message[]>([]);
   const loginUsernameRef = useRef<string>("");
-  
-  const decryptServerAESEncryptedData = useCallback(async (
-    encryptedData: string, 
-    aesKey: CryptoKey
-  ): Promise<string> => {
-    const combined = new Uint8Array(
-      window.atob(encryptedData).split('').map(c => c.charCodeAt(0))
-    );
-    
-    const ivLength = combined[0];
-    const iv = combined.slice(1, 1 + ivLength);
-    const authTagLength = combined[1 + ivLength];
-    const authTag = combined.slice(1 + ivLength + 1, 1 + ivLength + 1 + authTagLength);
-    const encryptedContent = combined.slice(1 + ivLength + 1 + authTagLength);
-    
-    const dataForDecryption = new Uint8Array(
-      encryptedContent.length + authTag.length
-    );
-    dataForDecryption.set(encryptedContent);
-    dataForDecryption.set(authTag, encryptedContent.length);
-    
-    const decrypted = await window.crypto.subtle.decrypt(
-      {
-        name: "AES-GCM",
-        iv: iv,
-        tagLength: 128
-      },
-      aesKey,
-      dataForDecryption
-    );
-    
-    return new TextDecoder().decode(decrypted);
-  }, []);
 
   const incomingFileChunksRef = useRef<{
     [key: string]: {
@@ -197,7 +164,7 @@ export default function Index() {
     } catch (error) {
       console.error("Error handling encrypted message:", error);
     }
-  }, [decryptServerAESEncryptedData]);
+  }, []);
 
   
   useEffect(() => {
@@ -281,12 +248,8 @@ export default function Index() {
       
       case SignalType.AUTH_SUCCESS:
         console.log(message)
-        setUsername(loginUsernameRef.current);
-        console.log("username is: ", loginUsernameRef.current)
 
-        websocketClient.send(loginUsernameRef.current);
-        websocketClient.send(publicKeyPEM);
-        
+        setUsername(loginUsernameRef.current);
         setIsLoggedIn(true);
 
         const welcomeMessage: Message = {
@@ -372,56 +335,40 @@ export default function Index() {
     setLoginError("");
 
     if (!publicKeyRef.current || !privateKeyRef.current) {
-      setLoginError("Encryption keys not ready. Please try again.");
+      setLoginError("Encryption keys not ready");
       return;
     }
 
     try {
-      console.log("Connecting to secure WebSocket server...");
-      await websocketClient.connect().catch(error => {
-        console.warn("WebSocket connection error:", error);
-        throw new Error("Could not connect to chat server.");
-      });
-
-      console.log("Connected successfully, establishing secure channel...");
-
-      if (!serverPublicKeyRef.current) {
-        console.error("❌ Cannot login: server public key is not ready.");
+      console.log("Connecting to WebSocket server...");
+      await websocketClient.connect();
+      
+      if (!serverPublicKeyPEM) {
+        console.error("Server public key not available");
         return;
       }
-      
-      if (!serverPublicKeyPEM) return;
 
-      // const serverKey = await crypto.importPublicKeyFromPEM(serverPublicKeyPEM);
-      // const aesKey = await crypto.generateAESKey();
-
-      // const { iv, authTag, encrypted } = await crypto.encryptWithAES(
-      //   JSON.stringify({ password }),
-      //   aesKey
-      // );
-
-      // const encryptedPassword = crypto.serializeEncryptedData(iv, authTag, encrypted);
-      // const rawAes = await window.crypto.subtle.exportKey('raw', aesKey);
-      // const encryptedAes = await crypto.encryptWithRSA(rawAes, serverKey);
-      // const encryptedAESKeyBase64 = crypto.arrayBufferToBase64(encryptedAes);
-
-      // const payload = {
-      //   type: SignalType.SERVER_PASSWORD_ENCRYPTED,
-      //   encryptedAESKey: encryptedAESKeyBase64,
-      //   encryptedPassword
-      // };
-
-      const payload = await crypto.encryptAndFormatPayload({
+      const passwordPayload = await crypto.encryptAndFormatPayload({
         recipientPEM: serverPublicKeyPEM,
         type: SignalType.SERVER_PASSWORD_ENCRYPTED,
-        content: password,
+        content: password
       });
 
-      console.log(`Sending encrypted password payload: ${JSON.stringify(payload)}`);
-      websocketClient.send(JSON.stringify(payload));
-      console.log(`Sent encrypted password payload`);
-      console.log(`Waiting for password verification signal...`);
-      // setUsername(username);
+      const userPayload = await crypto.encryptAndFormatPayload({
+        recipientPEM: serverPublicKeyPEM,
+        usernameSent: username,
+        publicKey: publicKeyPEM
+      });
+
+      const loginInfo = {
+        type: SignalType.LOGIN_INFO,
+        userData: userPayload,
+        passwordData: passwordPayload
+      };
+
+      console.log("Sending combined login info: ", loginInfo);
+      websocketClient.send(JSON.stringify(loginInfo));
+      
       loginUsernameRef.current = username;
     } catch (error) {
       console.error("Login failed: ", error);

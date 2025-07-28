@@ -10,6 +10,7 @@ export const SignalType = {
   SERVERLIMIT: "server-limit",
   SERVER_PASSWORD_ENCRYPTED: "server-password-encrypted",
   SERVER_PUBLIC_KEY: "server-public-key",
+  LOGIN_INFO: "login-info",
   AUTH_ERROR: "AUTH_ERROR",
   AUTH_SUCCESS: "AUTH_SUCCESS",
 };

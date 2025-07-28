@@ -53,18 +53,6 @@ export function Login({ onLogin, isGeneratingKeys, error }: LoginProps) {
         </CardHeader>
         <CardContent className="space-y-6">
           <div className="space-y-2">
-            <Label htmlFor="password">Server Password</Label>
-            <Input
-              id="password"
-              type="password"
-              placeholder="Enter server password"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              disabled={isSubmitting || isGeneratingKeys}
-              required
-            />
-          </div>
-          <div className="space-y-2">
             <Label htmlFor="username">Username</Label>
             <Input
               id="username"
@@ -75,6 +63,18 @@ export function Login({ onLogin, isGeneratingKeys, error }: LoginProps) {
               required
               minLength={3}
               maxLength={16}
+            />
+          </div>
+          <div className="space-y-2">
+            <Label htmlFor="password">Server Password</Label>
+            <Input
+              id="password"
+              type="password"
+              placeholder="Enter server password"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              disabled={isSubmitting || isGeneratingKeys}
+              required
             />
           </div>
           {error && (
