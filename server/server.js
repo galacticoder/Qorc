@@ -11,7 +11,7 @@ const clients = new Map();
 
 async function startServer() {
   const serverKeyPair = await crypto.generateRSAKeyPair();
-  console.log("✅ Server RSA key pair generated");
+  console.log("Server RSA key pair generated");
 
   const publicKeyPEM = await crypto.exportPublicKeyToPEM(serverKeyPair.publicKey);
   const privateKeyPEM = await crypto.exportPrivateKeyToPEM(serverKeyPair.privateKey);
@@ -30,34 +30,23 @@ async function startServer() {
     let username = null;
 
     ws.send(JSON.stringify({
-      type: 'SERVER_PUBLIC_KEY',
+      type: SignalType.SERVER_PUBLIC_KEY,
       publicKey: publicKeyPEM,
     }));
 
     ws.on('message', async (message) => {
       try {
         const str = message.toString().trim();
-        let parsed;
 
         if (!hasAuthenticated) {
-          parsed = JSON.parse(str);
+          let parsed = JSON.parse(str);
           if (parsed.type == SignalType.SERVER_PASSWORD_ENCRYPTED){
+            
             console.log("Server password from user received. Decrypting...")
-            
-            const { encryptedAESKey, encryptedPassword } = parsed;
-            const encryptedAESKeyBuffer = crypto.base64ToArrayBuffer(encryptedAESKey);
-            const aesKey = await crypto.decryptAESKeyWithRSA(encryptedAESKeyBuffer, serverKeyPair.privateKey);
-            const { iv, authTag, encrypted } = crypto.deserializeEncryptedData(encryptedPassword);
-            
-            const decrypted = await crypto.decryptWithAES({
-              iv, 
-              authTag,
-              encrypted
-            }, aesKey);
-            
-            const payload = JSON.parse(decrypted);
-            
-            if (payload.password == SERVER_PASSWORD){
+            const payload = await crypto.decryptAndFormatPayload(parsed, serverKeyPair.privateKey);
+            console.log("Checking validity...")
+    
+            if (payload.content == SERVER_PASSWORD){
               hasAuthenticated = true;
               console.log("User entered password correctly.")
               ws.send(JSON.stringify({
@@ -69,7 +58,6 @@ async function startServer() {
             
             return rejectConnection(ws, SignalType.AUTH_ERROR, "Incorrect password");
           }
-
           return rejectConnection(ws, SignalType.AUTH_ERROR, "No password returned");
         }
 

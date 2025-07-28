@@ -10,7 +10,7 @@ export enum SignalType {
   INVALIDNAMELENGTH = "invalid-name-length",
   INVALIDNAME = "invalid-name",
   SERVER_PASSWORD_ENCRYPTED = "server-password-encrypted",
-  SERVER_PUBLIC_KEY = "SERVER_PUBLIC_KEY",
+  SERVER_PUBLIC_KEY = "server-public-key",
   AUTH_ERROR = "AUTH_ERROR",
   AUTH_SUCCESS = "AUTH_SUCCESS",
 }

@@ -61,9 +61,7 @@ export async function decryptAndFormatPayload(encryptedPayload, privateKey) {
 
   const encryptedAesKeyBuffer = base64ToArrayBuffer(encryptedAESKey);
   const aesKey = await decryptAESKeyWithRSA(encryptedAesKeyBuffer, privateKey);
-
   const decryptedJsonString = await decryptMessage(encryptedMessage, aesKey);
-
   const decryptedPayload = JSON.parse(decryptedJsonString);
 
   return {
@@ -106,11 +104,10 @@ export async function decryptAESKeyWithRSA(encryptedKey, privateKey) {
   return await importAESKey(keyData);
 }
 
-export async function decryptMessage(encryptedData, aesKey) {
-  const { iv, authTag, encrypted } = deserializeEncryptedData(encryptedData);
-  return await decryptWithAES(encrypted, iv, authTag, aesKey);
+export async function decryptMessage(encryptedMessageBase64, aesKey) {
+  const encryptedData = deserializeEncryptedData(encryptedMessageBase64);
+  return await decryptWithAES(encryptedData, aesKey);
 }
-
 
 export async function exportPublicKeyToPEM(publicKey) {
   const exported = await crypto.subtle.exportKey("spki", publicKey);
@@ -298,7 +295,6 @@ export async function decryptWithAESRaw(encryptedData, key) {
   }, cryptoKey, combined);
 }
 
-
 export function deserializeEncryptedData(base64Data) {
   const buffer = Buffer.from(base64Data, 'base64');
   let offset = 0;
@@ -307,11 +303,11 @@ export function deserializeEncryptedData(base64Data) {
   if (version !== 1) throw new Error(`Unsupported version: ${version}`);
 
   const ivLength = buffer[offset++];
-  const iv = buffer.slice(offset, offset + ivLength);
+  const iv = new Uint8Array(buffer.slice(offset, offset + ivLength));
   offset += ivLength;
 
   const authTagLength = buffer[offset++];
-  const authTag = buffer.slice(offset, offset + authTagLength);
+  const authTag = new Uint8Array(buffer.slice(offset, offset + authTagLength));
   offset += authTagLength;
 
   const encryptedLength =
@@ -320,7 +316,7 @@ export function deserializeEncryptedData(base64Data) {
     (buffer[offset++] << 8) |
     buffer[offset++];
     
-  const encrypted = buffer.slice(offset, offset + encryptedLength);
+  const encrypted = new Uint8Array(buffer.slice(offset, offset + encryptedLength));
 
   return { iv, authTag, encrypted };
 }

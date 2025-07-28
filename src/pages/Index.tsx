@@ -174,7 +174,7 @@ export default function Index() {
     }
   };
   
-  const handleEncryptedMessageObject = useCallback(async (message: any) => {
+  const handleEncryptedMessagePayload = useCallback(async (message: any) => {
     try {
       console.log("Message received. Starting decryption...");
       const payload = await crypto.decryptAndFormatPayload(message, privateKeyRef.current);
@@ -184,14 +184,14 @@ export default function Index() {
         setUsers(prevUsers => prevUsers.filter(user => user.username !== payload.content.split(' ')[0]))
       }
       
-      const payloadFull: Message = {
+      const payloadFull: Message = { //display on screen
         id: uuidv4(),
         content: payload.content,
         sender: message.from,
         timestamp: new Date(payload.timestamp || Date.now()),
         isCurrentUser: false,
         isSystemMessage: payload.typeInside == 'system' //if sys message set true
-        };
+      };
         
       setMessages(prev => [...prev, payloadFull]);
     } catch (error) {
@@ -315,7 +315,7 @@ export default function Index() {
 
       case SignalType.ENCRYPTED_MESSAGE:
       case SignalType.USER_DISCONNECT:
-        await handleEncryptedMessageObject(data);
+        await handleEncryptedMessagePayload(data);
         break;
 
       case SignalType.FILE_MESSAGE_CHUNK:
@@ -335,7 +335,7 @@ export default function Index() {
       default:
         console.warn("Unhandled signal type:", type);
     }
-  }, [handleEncryptedMessageObject]);
+  }, [handleEncryptedMessagePayload]);
 
   useEffect(() => {
     console.log("User logged in, registering message handlers...");
@@ -366,7 +366,7 @@ export default function Index() {
       });
       websocketClient.unregisterMessageHandler("raw");
     };
-  }, [handleEncryptedMessageObject, handleServerMessage]);
+  }, [handleEncryptedMessagePayload, handleServerMessage]);
 
   const handleLogin = async (username: string, password: string) => {
     setLoginError("");
@@ -392,24 +392,30 @@ export default function Index() {
       
       if (!serverPublicKeyPEM) return;
 
-      const serverKey = await crypto.importPublicKeyFromPEM(serverPublicKeyPEM);
-      const aesKey = await crypto.generateAESKey();
+      // const serverKey = await crypto.importPublicKeyFromPEM(serverPublicKeyPEM);
+      // const aesKey = await crypto.generateAESKey();
 
-      const { iv, authTag, encrypted } = await crypto.encryptWithAES(
-        JSON.stringify({ password }),
-        aesKey
-      );
+      // const { iv, authTag, encrypted } = await crypto.encryptWithAES(
+      //   JSON.stringify({ password }),
+      //   aesKey
+      // );
 
-      const encryptedPassword = crypto.serializeEncryptedData(iv, authTag, encrypted);
-      const rawAes = await window.crypto.subtle.exportKey('raw', aesKey);
-      const encryptedAes = await crypto.encryptWithRSA(rawAes, serverKey);
-      const encryptedAESKeyBase64 = crypto.arrayBufferToBase64(encryptedAes);
+      // const encryptedPassword = crypto.serializeEncryptedData(iv, authTag, encrypted);
+      // const rawAes = await window.crypto.subtle.exportKey('raw', aesKey);
+      // const encryptedAes = await crypto.encryptWithRSA(rawAes, serverKey);
+      // const encryptedAESKeyBase64 = crypto.arrayBufferToBase64(encryptedAes);
 
-      const payload = {
+      // const payload = {
+      //   type: SignalType.SERVER_PASSWORD_ENCRYPTED,
+      //   encryptedAESKey: encryptedAESKeyBase64,
+      //   encryptedPassword
+      // };
+
+      const payload = await crypto.encryptAndFormatPayload({
+        recipientPEM: serverPublicKeyPEM,
         type: SignalType.SERVER_PASSWORD_ENCRYPTED,
-        encryptedAESKey: encryptedAESKeyBase64,
-        encryptedPassword
-      };
+        content: password,
+      });
 
       console.log(`Sending encrypted password payload: ${JSON.stringify(payload)}`);
       websocketClient.send(JSON.stringify(payload));
