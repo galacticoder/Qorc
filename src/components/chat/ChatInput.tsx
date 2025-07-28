@@ -64,23 +64,15 @@ export function ChatInput({
     }
   };
 
-  const CHUNK_SIZE = 128 * 1024;
+  const CHUNK_SIZE = 256 * 1024;
   const [progress, setProgress] = useState(0);
   const [isSendingFile, setIsSendingFile] = useState(false);
   
   const handleFileChange = async (event: React.ChangeEvent<HTMLInputElement>) => {
-    if (isSendingFile) {
-      console.warn("A file is already being sent.");
-      return;
-    }
-
     const file = event.target.files?.[0];
+    
     if (!file) return;
-
-    if (!users || users.length === 0) {
-      console.error("No users available to send the file.");
-      return;
-    }
+    if (!users || users.length === 0) return;
 
     try {
       setIsSendingFile(true);
@@ -114,7 +106,11 @@ export function ChatInput({
         const end = Math.min(start + CHUNK_SIZE, rawBytes.length);
         const chunk = rawBytes.slice(start, end);
 
-        const { iv, authTag, encrypted } = await unifiedCrypto.encryptBinaryWithAES(chunk.buffer, aesKey);
+        const compressedChunk = pako.deflate(chunk);
+
+        console.log(`Chunk ${chunkIndex + 1}: Original = ${chunk.length} bytes, Compressed = ${compressedChunk.length} bytes`);
+
+        const { iv, authTag, encrypted } = await unifiedCrypto.encryptBinaryWithAES(compressedChunk.buffer, aesKey);
 
         const serializedChunk = unifiedCrypto.serializeEncryptedData(iv, authTag, encrypted);
         const chunkDataBase64 = btoa(String.fromCharCode(...Uint8Array.from(atob(serializedChunk), c => c.charCodeAt(0))));
@@ -158,8 +154,6 @@ export function ChatInput({
           fileSize: file.size,
           sender: currentUsername 
         }
-
-        console.log("Sender file payload: ", payload)
         onSendFile(payload);
     } catch (error) {
       console.error("Failed to process and send file:", error);

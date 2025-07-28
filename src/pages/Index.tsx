@@ -8,6 +8,7 @@ import * as crypto from "@/lib/unified-crypto";
 import websocketClient from "@/lib/websocket";
 import { SignalType } from "@/lib/signals";
 import { v4 as uuidv4 } from 'uuid';
+import * as pako from 'pako';
 
 interface MessageData {
   type: SignalType;
@@ -96,7 +97,10 @@ export default function Index() {
         fileEntry.aesKey
       );
 
-      fileEntry.decryptedChunks[chunkIndex] = new Blob([decryptedChunk]);
+      const decompressedChunk = pako.inflate(new Uint8Array(decryptedChunk));//decompress
+
+      fileEntry.decryptedChunks[chunkIndex] = new Blob([decompressedChunk]);
+
       fileEntry.receivedCount++;
 
       const progress = fileEntry.receivedCount / fileEntry.totalChunks;
