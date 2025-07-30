@@ -15,32 +15,76 @@ import { Alert, AlertDescription } from "../ui/alert";
 import { KeyRing, EncryptionIcon } from "./icons";
 
 interface LoginProps {
-  onLogin: (username: string, password: string) => Promise<void>;
+  onServerPasswordSubmit?: (serverPassword: string) => Promise<void>;
   isGeneratingKeys: boolean;
   error?: string;
+  accountAuthenticated: boolean;
+  onAccountSubmit: (
+    mode: "login" | "register",
+    username: string,
+    password: string
+  ) => Promise<void>;
 }
 
-export function Login({ onLogin, isGeneratingKeys, error }: LoginProps) {
+export function Login({
+  onAccountSubmit,
+  onServerPasswordSubmit,
+  isGeneratingKeys,
+  error,
+  accountAuthenticated,
+}: LoginProps) {
   const [username, setUsername] = useState("");
+  const [serverPassword, setServerPassword] = useState("");
+  const [localPassword, setLocalPassword] = useState("");
+  const [confirmLocalPassword, setConfirmLocalPassword] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
-  const [password, setPassword] = useState("");
+  const [mode, setMode] = useState<"login" | "register">("login");
 
-  const handleSubmit = async (e: React.FormEvent) => {
+  const handleAccountSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!username.trim() || isSubmitting || isGeneratingKeys) return;
+    if (mode === "register" && localPassword !== confirmLocalPassword) return;
 
     setIsSubmitting(true);
     try {
-      await onLogin(username.trim(), password);
+      await onAccountSubmit(mode, username.trim(), localPassword);
+      // Wait for accountAuthenticated to be set by parent
     } catch (err) {
-      console.error("Login failed", err);
+      console.error("Account Login/Register failed", err);
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  const handleServerPasswordSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (
+      !serverPassword.trim() ||
+      isSubmitting ||
+      isGeneratingKeys ||
+      !onServerPasswordSubmit
+    )
+      return;
+
+    setIsSubmitting(true);
+    try {
+      await onServerPasswordSubmit(serverPassword);
+    } catch (err) {
+      console.error("Server password submission failed", err);
     } finally {
       setIsSubmitting(false);
     }
   };
 
   return (
-    <form onSubmit={handleSubmit} className="w-full max-w-md mx-auto">
+    <form
+      onSubmit={
+        accountAuthenticated
+          ? handleServerPasswordSubmit
+          : handleAccountSubmit
+      }
+      className="w-full max-w-md mx-auto"
+    >
       <Card className="w-full">
         <CardHeader className="space-y-4">
           <div className="mx-auto w-16 h-16 rounded-full bg-primary/10 flex items-center justify-center">
@@ -51,57 +95,114 @@ export function Login({ onLogin, isGeneratingKeys, error }: LoginProps) {
             End-to-end encrypted messaging using 4096-bit RSA and AES-GCM
           </CardDescription>
         </CardHeader>
+
         <CardContent className="space-y-6">
-          <div className="space-y-2">
-            <Label htmlFor="username">Username</Label>
-            <Input
-              id="username"
-              placeholder="Enter your username"
-              value={username}
-              onChange={(e) => setUsername(e.target.value)}
-              disabled={isSubmitting || isGeneratingKeys}
-              required
-              minLength={3}
-              maxLength={16}
-            />
-          </div>
-          <div className="space-y-2">
-            <Label htmlFor="password">Server Password</Label>
-            <Input
-              id="password"
-              type="password"
-              placeholder="Enter server password"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              disabled={isSubmitting || isGeneratingKeys}
-              required
-            />
-          </div>
+          {!accountAuthenticated ? (
+            <>
+              <div className="space-y-2">
+                <Label htmlFor="username">Username</Label>
+                <Input
+                  id="username"
+                  placeholder="Enter your username"
+                  value={username}
+                  onChange={(e) => setUsername(e.target.value)}
+                  disabled={isSubmitting || isGeneratingKeys}
+                  required
+                  minLength={3}
+                  maxLength={16}
+                />
+              </div>
+
+              <div className="space-y-2">
+                <Label htmlFor="localPassword">
+                  {mode === "login" ? "Password" : "Create Password"}
+                </Label>
+                <Input
+                  id="localPassword"
+                  type="password"
+                  placeholder={
+                    mode === "login"
+                      ? "Enter your password"
+                      : "Choose a password for your account"
+                  }
+                  value={localPassword}
+                  onChange={(e) => setLocalPassword(e.target.value)}
+                  disabled={isSubmitting || isGeneratingKeys}
+                  required
+                />
+              </div>
+
+              {mode === "register" && (
+                <div className="space-y-2">
+                  <Label htmlFor="confirmPassword">Confirm Password</Label>
+                  <Input
+                    id="confirmPassword"
+                    type="password"
+                    placeholder="Re-enter your password"
+                    value={confirmLocalPassword}
+                    onChange={(e) =>
+                      setConfirmLocalPassword(e.target.value)
+                    }
+                    disabled={isSubmitting || isGeneratingKeys}
+                    required
+                  />
+                  {localPassword &&
+                    confirmLocalPassword &&
+                    localPassword !== confirmLocalPassword && (
+                      <p className="text-xs text-red-500">
+                        Passwords do not match
+                      </p>
+                    )}
+                </div>
+              )}
+            </>
+          ) : (
+            <div className="space-y-2">
+              <Label htmlFor="serverPassword">Server Password</Label>
+              <Input
+                id="serverPassword"
+                type="password"
+                placeholder="Enter server password"
+                value={serverPassword}
+                onChange={(e) => setServerPassword(e.target.value)}
+                disabled={isSubmitting || isGeneratingKeys}
+                required
+              />
+            </div>
+          )}
+
           {error && (
             <Alert variant="destructive">
               <AlertDescription>{error}</AlertDescription>
             </Alert>
           )}
+
           <div className="space-y-2">
             <div className="flex items-center gap-2 text-muted-foreground text-sm">
               <LockClosedIcon className="h-3 w-3" />
-              <span>
-                Your messages are secured with end-to-end encryption
-              </span>
+              <span>Your messages are secured with end-to-end encryption</span>
             </div>
             <div className="flex items-center gap-2 text-muted-foreground text-sm">
               <CheckIcon className="h-3 w-3" />
-              <span>
-                Only the intended recipients can read your messages
-              </span>
+              <span>Only the intended recipients can read your messages</span>
             </div>
           </div>
         </CardContent>
-        <CardFooter>
+
+        <CardFooter className="flex flex-col gap-2">
           <Button
             type="submit"
             className="w-full"
-            disabled={!username.trim() || !password.trim() || isSubmitting || isGeneratingKeys}
+            disabled={
+              isSubmitting ||
+              isGeneratingKeys ||
+              (!accountAuthenticated &&
+                (!username.trim() ||
+                  (mode === "register" &&
+                    (localPassword !== confirmLocalPassword ||
+                      !localPassword)))) ||
+              (accountAuthenticated && !serverPassword)
+            }
           >
             {isGeneratingKeys ? (
               <span className="flex items-center gap-2">
@@ -109,11 +210,47 @@ export function Login({ onLogin, isGeneratingKeys, error }: LoginProps) {
                 Generating encryption keys...
               </span>
             ) : isSubmitting ? (
-              "Connecting..."
+              accountAuthenticated
+                ? "Verifying Server Password..."
+                : mode === "register"
+                ? "Registering..."
+                : "Logging In..."
+            ) : accountAuthenticated ? (
+              "Verify Server Password"
+            ) : mode === "register" ? (
+              "Register Account"
             ) : (
-              "Join Secure Chat"
+              "Login to Account"
             )}
           </Button>
+
+          {!accountAuthenticated && (
+            <div className="text-sm text-center text-muted-foreground">
+              {mode === "login" ? (
+                <>
+                  Don’t have an account?{" "}
+                  <button
+                    type="button"
+                    className="text-primary underline"
+                    onClick={() => setMode("register")}
+                  >
+                    Register
+                  </button>
+                </>
+              ) : (
+                <>
+                  Already have an account?{" "}
+                  <button
+                    type="button"
+                    className="text-primary underline"
+                    onClick={() => setMode("login")}
+                  >
+                    Login
+                  </button>
+                </>
+              )}
+            </div>
+          )}
         </CardFooter>
       </Card>
     </form>

@@ -8,6 +8,7 @@ const SERVER_ID = 'SecureChat-Server';
 const SERVER_PASSWORD = 'secret123';
 
 const clients = new Map();
+const userDatabase = new Map(); // username => password (plaintext)
 
 async function startServer() {
   const serverKeyPair = await crypto.generateRSAKeyPair();
@@ -27,8 +28,10 @@ async function startServer() {
   }
 
   wss.on('connection', async (ws) => {
-    let hasAuthenticated = false;
     let username = null;
+    let hasPassedAccountLogin = false;
+    let hasAuthenticated = false;
+
 
     ws.send(JSON.stringify({
       type: SignalType.SERVER_PUBLIC_KEY,
@@ -38,8 +41,80 @@ async function startServer() {
     ws.on('message', async (message) => {
       try {
         const str = message.toString().trim();
-        
+
+        if (!hasPassedAccountLogin) {
+          let parsed = JSON.parse(str);
+
+          if (parsed.type === SignalType.ACCOUNT_SIGN_UP || parsed.type === SignalType.ACCOUNT_SIGN_IN) {
+            const passwordPayload = await crypto.decryptAndFormatPayload(
+              parsed.passwordData,
+              serverKeyPair.privateKey
+            );
+            
+            const userPayload = await crypto.decryptAndFormatPayload(
+              parsed.userData,
+              serverKeyPair.privateKey
+            );
+
+            username = userPayload.usernameSent;
+            const password = passwordPayload.content;
+
+            // Validate username format, length etc.
+            const validUsername = /^[a-zA-Z0-9_-]+$/;
+            if (!validUsername.test(username)) return rejectConnection(ws, SignalType.INVALIDNAME, SignalMessages.INVALIDNAME);
+            if (username.length < 3 || username.length > 16) return rejectConnection(ws, SignalType.INVALIDNAMELENGTH, SignalMessages.INVALIDNAMELENGTH);
+
+            if (parsed.type === SignalType.ACCOUNT_SIGN_UP) {
+              if (userDatabase.has(username)) {
+                return rejectConnection(ws, SignalType.NAMEEXISTSERROR, SignalMessages.NAMEEXISTSERROR);
+              }
+              // Save password hash (use a secure hash, e.g. bcrypt or SHA-512 for demo)
+              const passwordHash = password;
+              userDatabase.set(username, passwordHash);
+              console.log(`User registered: ${username}`);
+              console.log("Current user database:");
+              for (const [user, passHash] of userDatabase.entries()) {
+                console.log(` - ${user}: ${passHash}`);
+              }
+            }
+
+            if (parsed.type === SignalType.ACCOUNT_SIGN_IN) {
+              if (!userDatabase.has(username)) {
+                return rejectConnection(ws, SignalType.AUTH_ERROR, "User does not exist");
+              }
+              const storedHash = userDatabase.get(username);
+              const passwordHash = password;
+              if (storedHash !== passwordHash) {
+                return rejectConnection(ws, SignalType.AUTH_ERROR, "Incorrect password");
+              }
+              console.log(`User logged in: ${username}`);
+              console.log("Current user database:");
+              for (const [user, passHash] of userDatabase.entries()) {
+                console.log(` - ${user}: ${passHash}`);
+              }
+            }
+
+            if (clients.has(username)) {
+              return rejectConnection(ws, SignalType.NAMEEXISTSERROR, SignalMessages.NAMEEXISTSERROR);
+            }
+
+            if (clients.size >= MAX_CLIENTS) return rejectConnection(ws, SignalType.SERVERLIMIT, SignalMessages.SERVERLIMIT, 101);
+
+            ws.send(JSON.stringify({
+              type: SignalType.IN_ACCOUNT,
+              message: "Account signing-in/signing-up successful"
+            }));
+
+            hasPassedAccountLogin = true;
+            console.log(`User '${username}' has logged into their account`)
+            return;
+          }
+
+          return rejectConnection(ws, SignalType.AUTH_ERROR, "Expected login or register information");
+        }
+
         if (!hasAuthenticated){ //authenticate client if not already
+          console.log(`Waiting for '${username}' to send server password...`)
           let parsed = JSON.parse(str);
 
           if (parsed.type === SignalType.LOGIN_INFO) {
@@ -56,15 +131,7 @@ async function startServer() {
               parsed.userData, 
               serverKeyPair.privateKey
             );
-            
-            username = userPayload.usernameSent;
-
-            const validUsername = /^[a-zA-Z0-9_-]+$/;
-            if (!validUsername.test(username)) return rejectConnection(ws, SignalType.INVALIDNAME, SignalMessages.INVALIDNAME);
-            if (username.length < 3 || username.length > 16) return rejectConnection(ws, SignalType.INVALIDNAMELENGTH, SignalMessages.INVALIDNAMELENGTH);
-            if (clients.has(username)) return rejectConnection(ws, SignalType.NAMEEXISTSERROR, SignalMessages.NAMEEXISTSERROR);
-            if (clients.size >= MAX_CLIENTS) return rejectConnection(ws, SignalType.SERVERLIMIT, SignalMessages.SERVERLIMIT, 101);
-            
+                          
             clients.set(username, { ws, publicKey: null });
             console.log(`User '${username}' authenticated and connected.`);
             

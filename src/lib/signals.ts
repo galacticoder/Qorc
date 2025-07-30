@@ -12,6 +12,9 @@ export enum SignalType {
   SERVER_PASSWORD_ENCRYPTED = "server-password-encrypted",
   SERVER_PUBLIC_KEY = "server-public-key",
   LOGIN_INFO = "login-info",
+  ACCOUNT_SIGN_IN = "account-sign-in",
+  ACCOUNT_SIGN_UP = "account-sign-up",
+  IN_ACCOUNT = "in-account",
   AUTH_ERROR = "AUTH_ERROR",
   AUTH_SUCCESS = "AUTH_SUCCESS",
 }

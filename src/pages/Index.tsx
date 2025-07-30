@@ -34,10 +34,7 @@ export default function Index() {
   const [users, setUsers] = useState<User[]>([]);
   const [messages, setMessages] = useState<Message[]>([]);
   const loginUsernameRef = useRef<string>("");
-  const [isConnecting, setIsConnecting] = useState(false);
-  const [isReadyForLogin, setIsReadyForLogin] = useState(false);
-
-  const [fileProgressMap, setFileProgressMap] = useState<{ [fileKey: string]: number }>({});
+  const [accountAuthenticated, setAccountAuthenticated] = useState(false);
 
   const incomingFileChunksRef = useRef<{
     [key: string]: {
@@ -104,11 +101,6 @@ export default function Index() {
       fileEntry.receivedCount++;
 
       const progress = fileEntry.receivedCount / fileEntry.totalChunks;
-
-      setFileProgressMap(prev => ({
-        ...prev,
-        [fileKey]: progress
-      }));
 
       console.log(`File ${filename} progress: ${(progress * 100).toFixed(2)}%`);
       console.log(`Received and decrypted chunk ${chunkIndex + 1}/${totalChunks} for ${filename} from ${from}`);
@@ -234,12 +226,11 @@ export default function Index() {
       
       case SignalType.SERVER_PUBLIC_KEY:
         try {
-          const pem = (data as any).publicKey; // safely extract
+          const pem = (data as any).publicKey;
           setServerPublicKeyPEM(pem);
-          console.log("pem key extract: "+ pem)
+          console.log("Server public key pem: "+ pem)
           const key = await crypto.importPublicKeyFromPEM(pem);
           serverPublicKeyRef.current = key;
-          setIsReadyForLogin(true);
           console.log("Server public key imported.");
         } catch (e) {
           console.error("Failed to import server public key:", e);
@@ -279,6 +270,11 @@ export default function Index() {
       case SignalType.ENCRYPTED_MESSAGE:
       case SignalType.USER_DISCONNECT:
         await handleEncryptedMessagePayload(data);
+        break;
+
+      case SignalType.IN_ACCOUNT:
+        console.log(message);
+        setAccountAuthenticated(true);
         break;
 
       case SignalType.FILE_MESSAGE_CHUNK:
@@ -332,7 +328,6 @@ export default function Index() {
 
   useEffect(() => {
     const connect = async () => {
-      setIsConnecting(true);
       try {
         console.log("Connecting to WebSocket server...");
         await websocketClient.connect();
@@ -340,7 +335,6 @@ export default function Index() {
         console.error("WebSocket connection error:", error);
         setLoginError("Failed to connect to server");
       } finally {
-        setIsConnecting(false);
       }
     };
 
@@ -351,41 +345,81 @@ export default function Index() {
     };
   }, []);
 
-  const handleLogin = async (username: string, password: string) => {
+  const handleAccountSubmit = async (
+    mode: "login" | "register",
+    username: string,
+    password: string
+  ) => {
     setLoginError("");
 
-    if (!publicKeyRef.current || !privateKeyRef.current) {
-      setLoginError("Encryption keys not ready");
-      return;
-    }
-
+    loginUsernameRef.current = username;
+    setUsername(username);
+        
     try {
-      if (!isReadyForLogin) {
-        setLoginError("Security handshake not complete yet");
-        return;
-      }
-
       if (!websocketClient.isConnectedToServer()) {
-        setIsConnecting(true);
         try {
           await websocketClient.connect();
         } catch (error) {
           setLoginError("Failed to connect to server");
           return;
         } finally {
-          setIsConnecting(false);
         }
       }
-
-      const passwordPayload = await crypto.encryptAndFormatPayload({
+          
+      const encryptedPasswordPayload = await crypto.encryptAndFormatPayload({
         recipientPEM: serverPublicKeyPEM,
-        type: SignalType.SERVER_PASSWORD_ENCRYPTED,
         content: password
       });
 
-      const userPayload = await crypto.encryptAndFormatPayload({
+      const encryptedUserPayload = await crypto.encryptAndFormatPayload({
         recipientPEM: serverPublicKeyPEM,
         usernameSent: username,
+        publicKey: publicKeyPEM
+      });
+
+      const info = {
+        type: mode === "register" ? SignalType.ACCOUNT_SIGN_UP : SignalType.ACCOUNT_SIGN_IN,
+        userData: encryptedUserPayload,
+        passwordData: encryptedPasswordPayload
+      };
+
+      websocketClient.send(JSON.stringify(info));
+
+      console.log("Sent account info to server")
+    } catch (error) {
+        console.error("Account submission failed: ", error);
+        setLoginError("Submission error: " + (error as Error).message);
+    }
+  };
+
+
+  const handleLogin = async (password: string) => {
+    setLoginError("");
+    if (!publicKeyRef.current || !privateKeyRef.current) {
+      setLoginError("Encryption keys not ready");
+      return;
+    }
+
+    try {
+      if (!websocketClient.isConnectedToServer()) {
+        try {
+          await websocketClient.connect();
+        } catch (error) {
+          setLoginError("Failed to connect to server");
+          return;
+        } finally {
+        }
+      }
+
+      const exportPem = await crypto.exportPublicKeyToPEM(serverPublicKeyRef.current);
+      const passwordPayload = await crypto.encryptAndFormatPayload({
+        recipientPEM: exportPem,
+        type: SignalType.SERVER_PASSWORD_ENCRYPTED,
+        content: password
+      });
+      
+      const userPayload = await crypto.encryptAndFormatPayload({
+        recipientPEM: exportPem,
         publicKey: publicKeyPEM
       });
 
@@ -423,9 +457,9 @@ export default function Index() {
         isCurrentUser: true
       };
       setMessages(prev => [...prev, newMessage]);
-      
+
       for (const user of users) {
-        if (user.username === username || !user.publicKey) continue;
+        if (user.username === loginUsernameRef.current || !user.publicKey) continue;
         
         const payload = await crypto.encryptAndFormatPayload({
           recipientPEM: user.publicKey,
@@ -436,7 +470,7 @@ export default function Index() {
           timestamp: Date.now(),
           typeInside: "chat"
         });
-
+        
         console.log(`Sending encrypted payload: ${JSON.stringify(payload)}`);
         websocketClient.send(JSON.stringify(payload));
         console.log(`Sent payload`);
@@ -455,13 +489,20 @@ export default function Index() {
     }
   };
 
+  const handleServerPasswordChange = async (password: string) => {
+    // setServerPassword(password);
+    await handleLogin(password);
+  };
+
   if (!isLoggedIn) {
     return (
       <div className="flex items-center justify-center min-h-screen p-4 bg-gradient-to-r from-gray-50 to-slate-50">
         <Login
-          onLogin={handleLogin}
           isGeneratingKeys={isGeneratingKeys}
           error={loginError}
+          onAccountSubmit={handleAccountSubmit}
+          onServerPasswordSubmit={handleServerPasswordChange}
+          accountAuthenticated={accountAuthenticated}
         />
       </div>
     );
