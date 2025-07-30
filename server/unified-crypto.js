@@ -15,6 +15,41 @@ export function generateSecureRandom(length) {
   return crypto.getRandomValues(new Uint8Array(length));
 }
 
+export function stringToArrayBuffer(str) {
+    const encoder = new TextEncoder();
+    return encoder.encode(str);
+}
+
+export async function hashData(data) {
+    const dataBuffer = stringToArrayBuffer(data);
+    const hashBuffer = await crypto.subtle.digest(CRYPTO_CONFIG.HASH_ALGORITHM, dataBuffer);
+    return arrayBufferToBase64(hashBuffer);
+}
+
+export async function deriveKeyFromPassword(password, salt) {
+    const passwordBuffer = stringToArrayBuffer(password);
+    const importedKey = await crypto.subtle.importKey(
+        "raw",
+        passwordBuffer,
+        { name: "PBKDF2" },
+        false,
+        ["deriveKey"]
+    );
+
+    return await crypto.subtle.deriveKey(
+        {
+            name: "PBKDF2",
+            salt: salt,
+            iterations: CRYPTO_CONFIG.PBKDF2_ITERATIONS,
+            hash: CRYPTO_CONFIG.HASH_ALGORITHM,
+        },
+        importedKey,
+        { name: "AES-GCM", length: CRYPTO_CONFIG.AES_KEY_SIZE },
+        true,
+        ["encrypt", "decrypt"]
+    );
+}
+
 export async function encryptAndFormatPayload(input) {
   const { recipientPEM, from, to, type, ...encryptedContent } = input;
 

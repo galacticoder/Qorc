@@ -6,7 +6,7 @@ YELLOW='\033[1;33m'
 NC='\033[0m'
 
 echo -e "${BLUE}╔════════════════════════════════════════════╗${NC}"
-echo -e "${BLUE}║${GREEN}        SecureChat - Secure Messaging        ${BLUE}║${NC}"
+echo -e "${BLUE}║${GREEN}        SecureChat - Secure Messaging       ${BLUE}║${NC}"
 echo -e "${BLUE}╚════════════════════════════════════════════╝${NC}"
 
 cd "$(dirname "$0")"
@@ -36,7 +36,7 @@ echo -e "${GREEN}Installing WebSocket server dependencies...${NC}"
 cd server
 npm install
 
-echo -e "${GREEN}Starting secure WebSocket server on port 8080...${NC}"
+echo -e "${GREEN}Starting secure WebSocket server...${NC}"
 node server.js &
 SERVER_PID=$!
 
@@ -68,8 +68,6 @@ trap cleanup INT TERM
 
 echo -e "${GREEN}==========================================${NC}"
 echo -e "${GREEN}SecureChat is now running!${NC}"
-echo -e "${GREEN}WebSocket server: http://localhost:8080${NC}"
-echo -e "${GREEN}Client application: http://localhost:5173${NC}"
 echo -e "${GREEN}==========================================${NC}"
 echo -e "${YELLOW}Press Ctrl+C to stop all servers${NC}"
 

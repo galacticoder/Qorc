@@ -1,24 +1,36 @@
+import https from 'https';
 import { WebSocketServer } from 'ws';
+import nodeCrypto from 'crypto'; // Use a different name to avoid conflict with your 'unified-crypto.js'
+import selfsigned from 'selfsigned';
 import { SignalType, SignalMessages } from './signals.js';
 import * as crypto from './unified-crypto.js';
+import * as db from './database.js'
 
-const PORT = 8080;
+const PORT = 8443;
 const MAX_CLIENTS = 100;
 const SERVER_ID = 'SecureChat-Server';
 const SERVER_PASSWORD = 'secret123';
 
 const clients = new Map();
-const userDatabase = new Map(); // username => password (plaintext)
+
+const attrs = [{ name: 'commonName', value: 'localhost' }];
+const pems = selfsigned.generate(attrs, { days: 365, keySize: 4096});
+
+const server = https.createServer({
+  key: pems.private,
+  cert: pems.cert,
+});
 
 async function startServer() {
+  await db.loadUserDatabase();
   const serverKeyPair = await crypto.generateRSAKeyPair();
   console.log("Server RSA key pair generated");
+  console.log(`For self signed certificates allow here first https://localhost:${PORT}`);
+
 
   const publicKeyPEM = await crypto.exportPublicKeyToPEM(serverKeyPair.publicKey);
-  const privateKeyPEM = await crypto.exportPrivateKeyToPEM(serverKeyPair.privateKey);
 
-  const wss = new WebSocketServer({ port: PORT });
-  console.log(`SecureChat relay server running on ws://localhost:${PORT}`);
+  const wss = new WebSocketServer({ server });
 
   function rejectConnection(ws, type, reason, code = 1008) {
     ws.send(JSON.stringify({ type, message: reason }));
@@ -59,37 +71,56 @@ async function startServer() {
             username = userPayload.usernameSent;
             const password = passwordPayload.content;
 
-            // Validate username format, length etc.
             const validUsername = /^[a-zA-Z0-9_-]+$/;
             if (!validUsername.test(username)) return rejectConnection(ws, SignalType.INVALIDNAME, SignalMessages.INVALIDNAME);
             if (username.length < 3 || username.length > 16) return rejectConnection(ws, SignalType.INVALIDNAMELENGTH, SignalMessages.INVALIDNAMELENGTH);
 
             if (parsed.type === SignalType.ACCOUNT_SIGN_UP) {
-              if (userDatabase.has(username)) {
+              if (db.userDatabase.has(username)) {
                 return rejectConnection(ws, SignalType.NAMEEXISTSERROR, SignalMessages.NAMEEXISTSERROR);
               }
-              // Save password hash (use a secure hash, e.g. bcrypt or SHA-512 for demo)
-              const passwordHash = password;
-              userDatabase.set(username, passwordHash);
+              
+              const salt = nodeCrypto.randomBytes(crypto.CRYPTO_CONFIG.SALT_LENGTH);
+              const base64Salt = crypto.arrayBufferToBase64(salt);
+        
+              const derivedKey = await crypto.deriveKeyFromPassword(password, salt);
+              
+              const exportedKeyBuffer = await crypto.exportAESKey(derivedKey);
+              const hashedPassword = crypto.arrayBufferToBase64(exportedKeyBuffer);
+
+              db.userDatabase.set(username, {
+                passwordHash: hashedPassword,
+                salt: base64Salt
+              });
+
+              await db.saveUserDatabase();
+
               console.log(`User registered: ${username}`);
               console.log("Current user database:");
-              for (const [user, passHash] of userDatabase.entries()) {
+              for (const [user, passHash] of db.userDatabase.entries()) {
                 console.log(` - ${user}: ${passHash}`);
               }
             }
 
             if (parsed.type === SignalType.ACCOUNT_SIGN_IN) {
-              if (!userDatabase.has(username)) {
-                return rejectConnection(ws, SignalType.AUTH_ERROR, "User does not exist");
+              if (!db.userDatabase.has(username)) {
+                return rejectConnection(ws, SignalType.AUTH_ERROR, "Account does not exist");
               }
-              const storedHash = userDatabase.get(username);
-              const passwordHash = password;
-              if (storedHash !== passwordHash) {
+              const userData = db.userDatabase.get(username);
+                            
+              const salt = crypto.base64ToArrayBuffer(userData.salt)
+                    
+              const derivedKey = await crypto.deriveKeyFromPassword(password, salt);
+              
+              const exportedKeyBuffer = await crypto.exportAESKey(derivedKey);
+              const hashedPassword = crypto.arrayBufferToBase64(exportedKeyBuffer);
+
+              if (userData.passwordHash !== hashedPassword) {
                 return rejectConnection(ws, SignalType.AUTH_ERROR, "Incorrect password");
               }
               console.log(`User logged in: ${username}`);
               console.log("Current user database:");
-              for (const [user, passHash] of userDatabase.entries()) {
+              for (const [user, passHash] of db.userDatabase.entries()) {
                 console.log(` - ${user}: ${passHash}`);
               }
             }
@@ -190,7 +221,7 @@ async function startServer() {
       }
     });
 
-    ws.on('close', async () => {
+    ws.on('close', async () => { 
       if (username && hasAuthenticated) {
         clients.delete(username);
         console.log(`User '${username}' has disconnected.`);
@@ -237,3 +268,7 @@ async function startServer() {
 }
 
 startServer();
+
+server.listen(PORT, () => {
+  console.log(`SecureChat relay server running on wss://localhost:${PORT}`);
+});

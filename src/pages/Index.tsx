@@ -365,7 +365,7 @@ export default function Index() {
         } finally {
         }
       }
-          
+      
       const encryptedPasswordPayload = await crypto.encryptAndFormatPayload({
         recipientPEM: serverPublicKeyPEM,
         content: password

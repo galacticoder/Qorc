@@ -18,7 +18,7 @@ class WebSocketClient {
     
     if (isDev) {
       console.log("Development environment detected, using local WebSocket server");
-      this.url = 'ws://localhost:8080';
+      this.url = 'wss://localhost:8443';
     } else {
       console.log("Production environment detected, using secure WebSocket server");
       this.url = 'wss://end2endchat.com';

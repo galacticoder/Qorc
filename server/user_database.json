@@ -1,0 +1,14 @@
+{
+  "user1": {
+    "passwordHash": "qCr4pbCEpeJAoyVsj5aOCr3n7lpYsJhddW6ppyJIFqM=",
+    "salt": "KtMYmPtNg+QeBUesKpKxO7dLXx2V/r2awX5mLyeuRCI="
+  },
+  "user2": {
+    "passwordHash": "/ZnFHpqCPXJ5D3PxB3aJ9c86DHHDspAbQ+/ZiNs8aMQ=",
+    "salt": "JqUxjA9mLYNW9UDegKEyqFEHyeAr/vl/x0d02IED33g="
+  },
+  "gfhdfg": {
+    "passwordHash": "iVGmW1CvT5S6T0qgGd2YZUjvJauWZd/M0hoWMDiq28c=",
+    "salt": "Cv6b/D718UheK0SxzB0g8bAsRbxMXFgF0JHho1Gt+GE="
+  }
+}
