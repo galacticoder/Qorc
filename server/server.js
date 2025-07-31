@@ -7,6 +7,7 @@ import * as db from './database/database.js'
 import * as ServerConfig from './config/config.js'
 import { MessagingUtils } from './messaging/messaging-utils.js'
 import * as authentication from './authentication/authentication.js'
+import { setServerPasswordOnInput } from './authentication/auth-utils.js'
 
 const clients = new Map();
 
@@ -19,6 +20,7 @@ const server = https.createServer({
 });
 
 async function startServer() {
+  await setServerPasswordOnInput();
   await db.loadUserDatabase();
   const serverKeyPair = await CryptoUtils.Keys.generateRSAKeyPair();
 
@@ -27,6 +29,10 @@ async function startServer() {
 
   console.log("Server RSA key pair generated");
   console.log(`For self signed certificates allow here first https://localhost:${ServerConfig.PORT}`);
+
+  server.listen(ServerConfig.PORT, () => {
+    console.log(`SecureChat relay server running on wss://localhost:${ServerConfig.PORT}`);
+  });
 
   const wss = new WebSocketServer({ server });
 
@@ -104,7 +110,3 @@ async function startServer() {
 }
 
 startServer();
-
-server.listen(ServerConfig.PORT, () => {
-  console.log(`SecureChat relay server running on wss://localhost:${ServerConfig.PORT}`);
-});

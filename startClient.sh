@@ -32,16 +32,6 @@ else
     USE_NPM=false
 fi
 
-echo -e "${GREEN}Installing WebSocket server dependencies...${NC}"
-cd server
-npm install
-
-echo -e "${GREEN}Starting secure WebSocket server...${NC}"
-node server.js &
-SERVER_PID=$!
-
-cd ..
-
 echo -e "${GREEN}Installing client dependencies...${NC}"
 if [ "$USE_NPM" = true ]; then
     npm install
@@ -57,9 +47,9 @@ else
 fi
 CLIENT_PID=$!
 
+
 cleanup() {
-    echo -e "${YELLOW}Shutting down servers...${NC}"
-    kill $SERVER_PID $CLIENT_PID 2>/dev/null
+    kill $CLIENT_PID 2>/dev/null
     reset
     exit
 }
@@ -69,6 +59,6 @@ trap cleanup INT TERM
 echo -e "${GREEN}==========================================${NC}"
 echo -e "${GREEN}SecureChat is now running!${NC}"
 echo -e "${GREEN}==========================================${NC}"
-echo -e "${YELLOW}Press Ctrl+C to stop all servers${NC}"
+echo -e "${YELLOW}Press Ctrl+C to stop all processes${NC}"
 
 wait

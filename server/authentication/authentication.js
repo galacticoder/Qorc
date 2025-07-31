@@ -79,7 +79,7 @@ export class ServerAuthHandler {
   constructor(serverKeyPair, clients, serverConfig) {
     this.serverKeyPair = serverKeyPair;
     this.clients = clients;
-    this.serverConfig = serverConfig;
+    this.ServerConfig = serverConfig;
   }
 
   async handleServerAuthentication(ws, str, clientState) {
@@ -96,7 +96,9 @@ export class ServerAuthHandler {
         CryptoUtils.Decrypt.decryptAndFormatPayload(parsed.userData, this.serverKeyPair.privateKey)
       ]);
 
-      if (passwordPayload.content !== this.serverConfig.SERVER_PASSWORD) return rejectConnection(ws, SignalType.AUTH_ERROR, "Incorrect password");
+      if (!await CryptoUtils.Password.verifyPassword(this.ServerConfig.SERVER_PASSWORD, passwordPayload.content)) {
+        return rejectConnection(ws, SignalType.AUTH_ERROR, "Incorrect password");
+      }
 
       this.clients.set(clientState.username, { ws, publicKey: userPayload.publicKey });
 
