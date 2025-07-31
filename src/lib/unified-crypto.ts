@@ -3,8 +3,6 @@ class CryptoConfig {
   static AES_KEY_SIZE = 256;
   static IV_LENGTH = 16;
   static AUTH_TAG_LENGTH = 16;
-  static SALT_LENGTH = 32;
-  static PBKDF2_ITERATIONS = 200000;
   static HASH_ALGORITHM = 'SHA-512';
 }
 
