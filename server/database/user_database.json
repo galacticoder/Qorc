@@ -1,10 +1,5 @@
 {
   "user1": {
-    "passwordHash": "FyE2CGSMe03tPVkl9LnGKPSz77D+bwAp/EurItYZ7co=",
-    "salt": "7zbF8H6BqQxJrP0662tHNu4URxlBhpiaDtIEJ4JpEIY="
-  },
-  "user2": {
-    "passwordHash": "izrA1apMAVHohXjFJuwflrhdYpmRhw7pAwPJ7ibDg8c=",
-    "salt": "PfgBBzdWZaaxBPZZ11zUvIP3sUOBY9nkwbFlJJqDKy4="
+    "passwordHash": "$argon2id$v=19$m=65536,t=3,p=1$KV4umqfGIbI1n15B1CLZtA$dMZC0Jb+xEMWltNHBEuhN8cOdHIt1qsN2JNg/MyFwrk"
   }
 }

@@ -1,4 +1,6 @@
 import { webcrypto } from 'crypto';
+import argon2 from 'argon2';
+
 const crypto = webcrypto;
 
 class CryptoConfig {
@@ -126,28 +128,17 @@ class KeyService {
 }
 
 class PasswordService {
-  static async deriveKeyFromPassword(password, salt) {
-    const passwordBuffer = HashService.stringToArrayBuffer(password);
-    const importedKey = await crypto.subtle.importKey(
-      "raw",
-      passwordBuffer,
-      { name: "PBKDF2" },
-      false,
-      ["deriveKey"]
-    );
+  static async hashPassword(password) {
+    return await argon2.hash(password, {
+      type: argon2.argon2id,
+      memoryCost: 2 ** 16,
+      timeCost: 3,
+      parallelism: 1,
+    });
+  }
 
-    return await crypto.subtle.deriveKey(
-      {
-        name: "PBKDF2",
-        salt: salt,
-        iterations: CryptoConfig.PBKDF2_ITERATIONS,
-        hash: CryptoConfig.HASH_ALGORITHM,
-      },
-      importedKey,
-      { name: "AES-GCM", length: CryptoConfig.AES_KEY_SIZE },
-      true,
-      ["encrypt", "decrypt"]
-    );
+  static async verifyPassword(hash, inputPassword) {
+    return await argon2.verify(hash, inputPassword);
   }
 }
 

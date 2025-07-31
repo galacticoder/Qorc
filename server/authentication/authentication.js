@@ -44,8 +44,8 @@ export class AccountAuthHandler {
   async handleSignUp(ws, username, password) {
     if (!authUtils.isUsernameAvailable(username)) return rejectConnection(ws, SignalType.NAMEEXISTSERROR, SignalMessages.NAMEEXISTSERROR);
 
-    const { hash, salt } = await authUtils.createPasswordHash(password);
-    db.userDatabase.set(username, { passwordHash: hash, salt });
+    const hash = await CryptoUtils.Password.hashPassword(password);
+    db.userDatabase.set(username, { passwordHash: hash });
     await db.saveUserDatabase();
 
     return this.finalizeAuth(ws, username, "User registered");
@@ -55,7 +55,7 @@ export class AccountAuthHandler {
     const userData = db.userDatabase.get(username);
     if (!userData) return rejectConnection(ws, SignalType.AUTH_ERROR, "Account does not exist, Register instead.");
     
-    if (!await authUtils.verifyPassword(password, userData)) return rejectConnection(ws, SignalType.AUTH_ERROR, "Incorrect password");
+    if (!await CryptoUtils.Password.verifyPassword(userData.passwordHash, password)) return rejectConnection(ws, SignalType.AUTH_ERROR, "Incorrect password");
 
     return this.finalizeAuth(ws, username, "User logged in");
   }
