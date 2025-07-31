@@ -1,7 +1,9 @@
 import { promises as fs } from 'fs';
-import path from 'path'; 
+import path from 'path';
+import { fileURLToPath } from 'url';
 
-const DB_FILE_PATH = path.join(process.cwd(), 'user_database.json');
+
+const DB_FILE_PATH = path.join(path.dirname(fileURLToPath(import.meta.url)), 'user_database.json');
 export const userDatabase = new Map();
 
 export async function loadUserDatabase() {

@@ -1,15 +1,12 @@
 import https from 'https';
 import { WebSocketServer } from 'ws';
-import nodeCrypto from 'crypto'; // Use a different name to avoid conflict with your 'unified-crypto.js'
 import selfsigned from 'selfsigned';
-import { SignalType, SignalMessages } from './signals.js';
-import * as crypto from './unified-crypto.js';
-import * as db from './database.js'
-
-const PORT = 8443;
-const MAX_CLIENTS = 100;
-const SERVER_ID = 'SecureChat-Server';
-const SERVER_PASSWORD = 'secret123';
+import { SignalType } from './signals.js';
+import  { CryptoUtils } from './crypto/unified-crypto.js';
+import * as db from './database/database.js'
+import * as ServerConfig from './config/config.js'
+import { MessagingUtils } from './messaging/messaging-utils.js'
+import * as authentication from './authentication/authentication.js'
 
 const clients = new Map();
 
@@ -23,198 +20,73 @@ const server = https.createServer({
 
 async function startServer() {
   await db.loadUserDatabase();
-  const serverKeyPair = await crypto.generateRSAKeyPair();
+  const serverKeyPair = await CryptoUtils.Keys.generateRSAKeyPair();
+
+  const authHandler = new authentication.AccountAuthHandler(serverKeyPair, clients);
+  const serverAuthHandler = new authentication.ServerAuthHandler(serverKeyPair, clients, ServerConfig);
+
   console.log("Server RSA key pair generated");
-  console.log(`For self signed certificates allow here first https://localhost:${PORT}`);
-
-
-  const publicKeyPEM = await crypto.exportPublicKeyToPEM(serverKeyPair.publicKey);
+  console.log(`For self signed certificates allow here first https://localhost:${ServerConfig.PORT}`);
 
   const wss = new WebSocketServer({ server });
 
-  function rejectConnection(ws, type, reason, code = 1008) {
-    ws.send(JSON.stringify({ type, message: reason }));
-    ws.close(code, reason);
-    console.log(`Rejected user connection for reason: ${reason}`);
-    return;
-  }
-
   wss.on('connection', async (ws) => {
-    let username = null;
-    let hasPassedAccountLogin = false;
-    let hasAuthenticated = false;
-
+    let clientState = {
+      username: null,
+      hasPassedAccountLogin: false,
+      hasAuthenticated: false
+    };
 
     ws.send(JSON.stringify({
       type: SignalType.SERVER_PUBLIC_KEY,
-      publicKey: publicKeyPEM,
+      publicKey: await CryptoUtils.Keys.exportPublicKeyToPEM(serverKeyPair.publicKey),
     }));
 
     ws.on('message', async (message) => {
       try {
         const str = message.toString().trim();
 
-        if (!hasPassedAccountLogin) {
-          let parsed = JSON.parse(str);
+        if (!clientState.hasPassedAccountLogin) { //account logging in
+          const authResult = await authHandler.processAuthRequest(ws, str);
 
-          if (parsed.type === SignalType.ACCOUNT_SIGN_UP || parsed.type === SignalType.ACCOUNT_SIGN_IN) {
-            const passwordPayload = await crypto.decryptAndFormatPayload(
-              parsed.passwordData,
-              serverKeyPair.privateKey
-            );
-            
-            const userPayload = await crypto.decryptAndFormatPayload(
-              parsed.userData,
-              serverKeyPair.privateKey
-            );
-
-            username = userPayload.usernameSent;
-            const password = passwordPayload.content;
-
-            const validUsername = /^[a-zA-Z0-9_-]+$/;
-            if (!validUsername.test(username)) return rejectConnection(ws, SignalType.INVALIDNAME, SignalMessages.INVALIDNAME);
-            if (username.length < 3 || username.length > 16) return rejectConnection(ws, SignalType.INVALIDNAMELENGTH, SignalMessages.INVALIDNAMELENGTH);
-
-            if (parsed.type === SignalType.ACCOUNT_SIGN_UP) {
-              if (db.userDatabase.has(username)) {
-                return rejectConnection(ws, SignalType.NAMEEXISTSERROR, SignalMessages.NAMEEXISTSERROR);
-              }
-              
-              const salt = nodeCrypto.randomBytes(crypto.CRYPTO_CONFIG.SALT_LENGTH);
-              const base64Salt = crypto.arrayBufferToBase64(salt);
-        
-              const derivedKey = await crypto.deriveKeyFromPassword(password, salt);
-              
-              const exportedKeyBuffer = await crypto.exportAESKey(derivedKey);
-              const hashedPassword = crypto.arrayBufferToBase64(exportedKeyBuffer);
-
-              db.userDatabase.set(username, {
-                passwordHash: hashedPassword,
-                salt: base64Salt
-              });
-
-              await db.saveUserDatabase();
-
-              console.log(`User registered: ${username}`);
-              console.log("Current user database:");
-              for (const [user, passHash] of db.userDatabase.entries()) {
-                console.log(` - ${user}: ${passHash}`);
-              }
-            }
-
-            if (parsed.type === SignalType.ACCOUNT_SIGN_IN) {
-              if (!db.userDatabase.has(username)) {
-                return rejectConnection(ws, SignalType.AUTH_ERROR, "Account does not exist");
-              }
-              const userData = db.userDatabase.get(username);
-                            
-              const salt = crypto.base64ToArrayBuffer(userData.salt)
-                    
-              const derivedKey = await crypto.deriveKeyFromPassword(password, salt);
-              
-              const exportedKeyBuffer = await crypto.exportAESKey(derivedKey);
-              const hashedPassword = crypto.arrayBufferToBase64(exportedKeyBuffer);
-
-              if (userData.passwordHash !== hashedPassword) {
-                return rejectConnection(ws, SignalType.AUTH_ERROR, "Incorrect password");
-              }
-              console.log(`User logged in: ${username}`);
-              console.log("Current user database:");
-              for (const [user, passHash] of db.userDatabase.entries()) {
-                console.log(` - ${user}: ${passHash}`);
-              }
-            }
-
-            if (clients.has(username)) {
-              return rejectConnection(ws, SignalType.NAMEEXISTSERROR, SignalMessages.NAMEEXISTSERROR);
-            }
-
-            if (clients.size >= MAX_CLIENTS) return rejectConnection(ws, SignalType.SERVERLIMIT, SignalMessages.SERVERLIMIT, 101);
-
-            ws.send(JSON.stringify({
-              type: SignalType.IN_ACCOUNT,
-              message: "Account signing-in/signing-up successful"
-            }));
-
-            hasPassedAccountLogin = true;
-            console.log(`User '${username}' has logged into their account`)
-            return;
+          if (authResult) {
+            console.log("Client has signed-in/signed-up")
+            clientState.hasPassedAccountLogin = true;
+            clientState.username = authResult.username;
           }
-
-          return rejectConnection(ws, SignalType.AUTH_ERROR, "Expected login or register information");
+          
+          return;
         }
 
-        if (!hasAuthenticated){ //authenticate client if not already
-          console.log(`Waiting for '${username}' to send server password...`)
-          let parsed = JSON.parse(str);
+        if (!clientState.hasAuthenticated && clientState.hasPassedAccountLogin){ //server password
+            const result = await serverAuthHandler.handleServerAuthentication(ws, str, clientState);
+            if (result) clientState.hasAuthenticated = true;
+            else return;
 
-          if (parsed.type === SignalType.LOGIN_INFO) {
-            console.log("Login info received. Processing: ", parsed);
-            
-            const passwordPayload = await crypto.decryptAndFormatPayload(
-              parsed.passwordData, 
-              serverKeyPair.privateKey
-            );
-            
-            if (passwordPayload.content !== SERVER_PASSWORD) return rejectConnection(ws, SignalType.AUTH_ERROR, "Incorrect password");
-
-            const userPayload = await crypto.decryptAndFormatPayload(
-              parsed.userData, 
-              serverKeyPair.privateKey
-            );
-                          
-            clients.set(username, { ws, publicKey: null });
-            console.log(`User '${username}' authenticated and connected.`);
-            
-            clients.get(username).publicKey = userPayload.publicKey;
-            console.log(`Received public key from ${username}`);
-            
-            const keyMap = {};
-            for (const [uname, data] of clients.entries()) {
-              if (data.publicKey) keyMap[uname] = data.publicKey;
-            }
-            
-            const keyUpdate = JSON.stringify({
-              type: SignalType.PUBLICKEYS,
-              message: JSON.stringify(keyMap),
-            });
-            
-            console.log("Broadcasting public keys: ", keyUpdate);
-            
-            for (const [, client] of clients.entries()) {
-              if (client.publicKey) client.ws.send(keyUpdate);
-            }
-            
-            await broadcastEncryptedSystemMessage(`${username} has joined the chat.`, { excludeUsername: username });
-            
-            ws.send(JSON.stringify({
-              type: SignalType.AUTH_SUCCESS,
-              message: "Authentication successful"
-            }));
-            
-            hasAuthenticated = true;
+            MessagingUtils.broadcastPublicKeys(clients);
+            await MessagingUtils.broadcastUserJoin(clients,clientState.username)
             return;
-          }
-          return rejectConnection(ws, SignalType.AUTH_ERROR, "Expected login information");
         }
         
         try {
           const parsed = JSON.parse(str);
-          console.log(`Received message from ${username}:`, parsed);
+          console.log(`Received message from ${clientState.username}:`, parsed);
           
-          if (parsed.type === SignalType.ENCRYPTED_MESSAGE && parsed.to && clients.has(parsed.to)) {
+          if (parsed.to && clients.has(parsed.to)) {
             const target = clients.get(parsed.to);
+            const isFileChunk = parsed.type === SignalType.FILE_MESSAGE_CHUNK;
+            
             target.ws.send(JSON.stringify(parsed));
-            console.log(`Relayed message from ${parsed.from} to ${parsed.to}`);
+            
+            console.log(
+              isFileChunk 
+                ? `Relayed file chunk ${parsed.chunkIndex + 1}/${parsed.totalChunks} from ${parsed.from} to ${parsed.to}`
+                : `Relayed message from ${parsed.from} to ${parsed.to}`
+            );
           }
 
-          if (parsed.type === SignalType.FILE_MESSAGE_CHUNK && parsed.to && clients.has(parsed.to)) {
-            const target = clients.get(parsed.to);
-            target.ws.send(JSON.stringify(parsed));
-            console.log(`Relayed file chunk ${parsed.chunkIndex + 1}/${parsed.totalChunks} from ${parsed.from} to ${parsed.to}`);
-          }
         } catch (e) {
-          console.warn("Non-JSON message:", str);
+          console.warn("Caught exception: ", e);
         }
       } catch (err) {
         console.error("Message error: ", err);
@@ -222,53 +94,17 @@ async function startServer() {
     });
 
     ws.on('close', async () => { 
-      if (username && hasAuthenticated) {
-        clients.delete(username);
-        console.log(`User '${username}' has disconnected.`);
-
-        await broadcastEncryptedSystemMessage(`${username} has left the chat.`, { signalType: SignalType.USER_DISCONNECT });
+      if (clientState.username && clientState.hasAuthenticated) {
+        clients.delete(clientState.username);
+        console.log(`User '${clientState.username}' has disconnected.`);
+        await MessagingUtils.broadcastUserLeave(clients, clientState.username);
       }
     });
   });
-
-  async function broadcastEncryptedSystemMessage(content, options = {}) {
-    const {
-      signalType = SignalType.ENCRYPTED_MESSAGE,
-      excludeUsername = null,
-    } = options;
-
-    console.log(`Broadcasting system message: ${content}`);
-
-    const promises = [];
-
-    for (const [clientUsername, client] of clients.entries()) {
-      if (clientUsername !== excludeUsername && client.publicKey) {
-        try {
-          const finalPayload = await crypto.encryptAndFormatPayload({
-            recipientPEM: client.publicKey,
-            from: SERVER_ID,
-            to: clientUsername,
-            type: signalType,
-            typeInside: "system",
-            content: content,
-            timestamp: Date.now()
-          });
-
-          console.log(`finalPayload for ${clientUsername}: `, JSON.stringify(finalPayload));
-          promises.push(client.ws.send(JSON.stringify(finalPayload)));
-          console.log(`finalPayload for ${clientUsername} sent`);
-        } catch (e) {
-          console.error(`Failed to encrypt system message for ${clientUsername}:`, e);
-        }
-      }
-    }
-
-    await Promise.allSettled(promises);
-  }
 }
 
 startServer();
 
-server.listen(PORT, () => {
-  console.log(`SecureChat relay server running on wss://localhost:${PORT}`);
+server.listen(ServerConfig.PORT, () => {
+  console.log(`SecureChat relay server running on wss://localhost:${ServerConfig.PORT}`);
 });
