@@ -46,31 +46,31 @@ export class MessagingUtils {
     } = options;
 
     console.log(`Broadcasting system message: ${content}`);
-
+    
     const promises = [];
-
+    
     for (const [clientUsername, client] of clientsMap.entries()) {
       if (clientUsername !== excludeUsername && client.publicKey) {
-      try {
-        const finalPayload = await CryptoUtils.Encrypt.encryptAndFormatPayload({
-          recipientPEM: client.publicKey,
-          from: ServerConfig.SERVER_ID,
-          to: clientUsername,
-          type: signalType,
-          typeInside: "system",
-          content: content,
-          timestamp: Date.now()
-        });
-
-        console.log(`finalPayload for ${clientUsername}: `, JSON.stringify(finalPayload));
-        promises.push(client.ws.send(JSON.stringify(finalPayload)));
-        console.log(`finalPayload for ${clientUsername} sent`);
-      } catch (e) {
-        console.error(`Failed to encrypt system message for ${clientUsername}:`, e);
-      }
+        try {
+          const finalPayload = await CryptoUtils.Encrypt.encryptAndFormatPayload({
+            recipientPEM: client.publicKey,
+            from: ServerConfig.SERVER_ID,
+            to: clientUsername,
+            type: signalType,
+            typeInside: "system",
+            content: content,
+            timestamp: Date.now()
+          });
+          
+          console.log(`finalPayload for ${clientUsername}: `, JSON.stringify(finalPayload));
+          promises.push(client.ws.send(JSON.stringify(finalPayload)));
+          console.log(`finalPayload for ${clientUsername} sent`);
+        } catch (e) {
+          console.error(`Failed to encrypt system message for ${clientUsername}:`, e);
+        }
       }
     }
-
+    
     await Promise.allSettled(promises);
   }
 }

@@ -10,7 +10,6 @@ import { SignalType } from "@/lib/signals";
 interface ChatInterfaceProps {
   onSendMessage: (message: string) => Promise<void>;
   onSendFile: (fileData: any) => void;
-  onTyping: () => void;
   messages: Message[];
   isEncrypted?: boolean;
   currentUsername: string;
@@ -20,7 +19,6 @@ interface ChatInterfaceProps {
 export function ChatInterface({
   onSendMessage,
   onSendFile,
-  onTyping,
   messages,
   isEncrypted = true,
   currentUsername,
@@ -61,7 +59,6 @@ export function ChatInterface({
         <ChatInput
           onSendMessage={onSendMessage}
           onSendFile={onSendFile}
-          onTyping={onTyping}
           isEncrypted={isEncrypted}
           currentUsername={currentUsername}
           users={users}

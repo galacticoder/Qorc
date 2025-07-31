@@ -70,8 +70,6 @@ export class AccountAuthHandler {
       message: "Account authentication successful"
     }));
 
-    console.log("here")
-
     console.log(`${logMessage}: ${username}`);
     return { username, authenticated: true };
   }

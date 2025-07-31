@@ -10,7 +10,7 @@ export const isServerFull = (clients) => clients.size >= ServerConfig.MAX_CLIENT
 
 export const createPasswordHash = async (password) => {
   const salt = nodeCrypto.randomBytes(CryptoUtils.Config.SALT_LENGTH);
-  const derivedKey = await CryptoUtils.Hash.deriveKeyFromPassword(password, salt);
+  const derivedKey = await CryptoUtils.Password.deriveKeyFromPassword(password, salt);
   const exportedKeyBuffer = await CryptoUtils.Keys.exportAESKey(derivedKey);
   return {
     hash: CryptoUtils.Hash.arrayBufferToBase64(exportedKeyBuffer),

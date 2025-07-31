@@ -6,7 +6,7 @@ import { PaperclipIcon } from "./icons";
 import * as cm from "./ChatMessage"
 import * as pako from "pako";
 import wsClient from '@/lib/websocket';
-import * as unifiedCrypto  from "@/lib/unified-crypto";
+import { CryptoUtils } from "@/lib/unified-crypto";
 import { SignalType } from "@/lib/signals";
 import { cn } from "@/lib/utils";
 import { User } from "./UserList";
@@ -15,7 +15,6 @@ import { ProgressBar } from './ProgressBar';
 interface ChatInputProps {
   onSendMessage: (message: string) => void;
   onSendFile: (fileData: any) => void;
-  onTyping: () => void;
   isEncrypted: boolean;
   currentUsername: string;
   users: User[];
@@ -24,7 +23,6 @@ interface ChatInputProps {
 export function ChatInput({
   onSendMessage,
   onSendFile,
-  onTyping,
   isEncrypted,
   currentUsername,
   users,
@@ -34,14 +32,6 @@ export function ChatInput({
   const fileInputRef = useRef<HTMLInputElement>(null);
   const lastTypingTime = useRef<number>(0);
   const typingTimeout = 2000;
-
-  useEffect(() => {
-    const currentTime = Date.now();
-    if (message && currentTime - lastTypingTime.current > typingTimeout) {
-      lastTypingTime.current = currentTime;
-      onTyping();
-    }
-  }, [message, onTyping]);
 
   const handleSend = async () => {
     if (!message.trim() || isSending) return;
@@ -81,15 +71,15 @@ export function ChatInput({
       const arrayBuffer = await file.arrayBuffer();
       const rawBytes = new Uint8Array(arrayBuffer);
 
-      const aesKey = await unifiedCrypto.generateAESKey();
+      const aesKey = await CryptoUtils.Keys.generateAESKey();
       const rawAes = await window.crypto.subtle.exportKey("raw", aesKey);
 
       const userKeys = await Promise.all(
         users
           .filter(user => user.username !== currentUsername && user.publicKey)
           .map(async user => {
-            const recipientKey = await unifiedCrypto.importPublicKeyFromPEM(user.publicKey);
-            const encryptedAes = await unifiedCrypto.encryptWithRSA(rawAes, recipientKey);
+            const recipientKey = await CryptoUtils.Keys.importPublicKeyFromPEM(user.publicKey);
+            const encryptedAes = await CryptoUtils.Encrypt.encryptWithRSA(rawAes, recipientKey);
             return {
               username: user.username,
               encryptedAESKeyBase64: btoa(String.fromCharCode(...new Uint8Array(encryptedAes))),
@@ -110,9 +100,9 @@ export function ChatInput({
 
         console.log(`Chunk ${chunkIndex + 1}: Original = ${chunk.length} bytes, Compressed = ${compressedChunk.length} bytes`);
 
-        const { iv, authTag, encrypted } = await unifiedCrypto.encryptBinaryWithAES(compressedChunk.buffer, aesKey);
+        const { iv, authTag, encrypted } = await CryptoUtils.Encrypt.encryptBinaryWithAES(compressedChunk.buffer, aesKey);
 
-        const serializedChunk = unifiedCrypto.serializeEncryptedData(iv, authTag, encrypted);
+        const serializedChunk = CryptoUtils.Encrypt.serializeEncryptedData(iv, authTag, encrypted);
         const chunkDataBase64 = btoa(String.fromCharCode(...Uint8Array.from(atob(serializedChunk), c => c.charCodeAt(0))));
 
         for (const userKey of userKeys) {
