@@ -6,6 +6,9 @@ import { User } from "./UserList";
 import { SignalType } from "@/lib/signals";
 import { ProgressBar } from './ProgressBar';
 import Linkify from 'linkify-react';
+import { CopyIcon, CheckIcon } from "@radix-ui/react-icons"; // or your preferred icon library
+export { CopyIcon, CheckIcon };
+
 
 export interface Message {
   id: string;
@@ -224,6 +227,8 @@ return (
       </AvatarFallback>
     </Avatar>
 
+    
+
     <div
       className={cn(
         "flex flex-col min-w-0",
@@ -238,16 +243,51 @@ return (
         </span>
       </div>
 
+      {/* Message bubble with copy button */}
       <div
         className={cn(
-          "rounded-lg px-3 py-2 text-sm min-w-[5rem] whitespace-pre-wrap break-words",
-          isCurrentUser ? "bg-primary text-primary-foreground" : "bg-muted"
+          "group flex items-center gap-2", // enables hover interaction
+          isCurrentUser ? "flex-row-reverse" : ""
         )}
-        style={{ wordBreak: "break-word", whiteSpace: "pre-wrap" }}
       >
-        <Linkify options={{ target: '_blank', rel: 'noopener noreferrer' }}>
-          {content}
-        </Linkify>
+        {/* Message bubble */}
+        <div
+          className={cn(
+            "rounded-lg px-3 py-2 text-sm min-w-[5rem] whitespace-pre-wrap break-words",
+            isCurrentUser ? "bg-primary text-primary-foreground" : "bg-muted"
+          )}
+          style={{ wordBreak: "break-word", whiteSpace: "pre-wrap" }}
+        >
+          <Linkify options={{ target: '_blank', rel: 'noopener noreferrer' }}>
+            {content}
+          </Linkify>
+        </div>
+
+        {/* Copy button */}
+        <button
+          className={cn(
+            "copy opacity-0 group-hover:opacity-100 transition-opacity duration-200",
+            isCurrentUser ? "mr-1" : "ml-1"
+          )}
+          onClick={() => navigator.clipboard.writeText(content)}
+          aria-label="Copy message"
+        >
+          <svg
+            width="15"
+            height="15"
+            viewBox="0 0 15 15"
+            fill="none"
+            xmlns="http://www.w3.org/2000/svg"
+          >
+            <path
+              d="M1 9.50006C1 10.3285 1.67157 11.0001 2.5 11.0001H4L4 10.0001H2.5C2.22386 10.0001 2 9.7762 2 9.50006L2 2.50006C2 2.22392 2.22386 2.00006 2.5 2.00006L9.5 2.00006C9.77614 2.00006 10 2.22392 10 2.50006V4.00002H5.5C4.67158 4.00002 4 4.67159 4 5.50002V12.5C4 13.3284 4.67158 14 5.5 14H12.5C13.3284 14 14 13.3284 14 12.5V5.50002C14 4.67159 13.3284 4.00002 12.5 4.00002H11V2.50006C11 1.67163 10.3284 1.00006 9.5 1.00006H2.5C1.67157 1.00006 1 1.67163 1 2.50006V9.50006ZM5 5.50002C5 5.22388 5.22386 5.00002 5.5 5.00002H12.5C12.7761 5.00002 13 5.22388 13 5.50002V12.5C13 12.7762 12.7761 13 12.5 13H5.5C5.22386 13 5 12.7762 5 12.5V5.50002Z"
+              fill="currentColor"
+              fillRule="evenodd"
+              clipRule="evenodd"
+            />
+          </svg>
+          <span className="tooltip" data-text-initial="Copy" data-text-end="Copied"></span>
+        </button>
       </div>
     </div>
   </div>

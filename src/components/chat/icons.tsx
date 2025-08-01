@@ -1,4 +1,7 @@
 import { SVGProps } from "react";
+import { CopyIcon as RadixCopyIcon } from "@radix-ui/react-icons";
+
+export const CopyIcon = RadixCopyIcon;
 
 export function KeyRing(props: SVGProps<SVGSVGElement>) {
   return (
