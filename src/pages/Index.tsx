@@ -66,15 +66,26 @@ export default function ChatApp() {
       if (message.type == SignalType.USER_DISCONNECT) {
         setUsers(prevUsers => prevUsers.filter(user => user.username !== payload.content.split(' ')[0]))
       }
-      
-      const payloadFull: Message = {//to show on screen message
-        id: uuidv4(),
+
+      console.log("Message ID received: ", payload.id)
+
+      const payloadFull: Message = {
+        id: payload.typeInside === 'system' ? uuidv4() : (payload.id ?? uuidv4()),
         content: payload.content,
         sender: message.from,
-        timestamp: new Date(payload.timestamp || Date.now()),
+        timestamp: new Date(payload.timestamp),
         isCurrentUser: false,
-        isSystemMessage: payload.typeInside == 'system' //if sys message set true
+        isSystemMessage: payload.typeInside === 'system',
+        ...(payload.replyTo && {
+          replyTo: {
+            id: payload.replyTo.id,
+            sender: payload.replyTo.sender,
+            content: payload.replyTo.content,
+          },
+        }),
       };
+
+      console.log("Reply field: ", payloadFull.replyTo)
         
       setMessages(prev => [...prev, payloadFull]);
     } catch (error) {

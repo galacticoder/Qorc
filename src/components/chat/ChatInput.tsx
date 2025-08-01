@@ -13,11 +13,13 @@ import { User } from "./UserList";
 import { ProgressBar } from './ProgressBar';
 
 interface ChatInputProps {
-  onSendMessage: (message: string) => void;
+  onSendMessage: (message: string, replyTo?: cm.Message | null) => void;
   onSendFile: (fileData: any) => void;
   isEncrypted: boolean;
   currentUsername: string;
   users: User[];
+  replyTo: cm.Message | null;
+  onCancelReply: () => void;
 }
 
 export function ChatInput({
@@ -26,6 +28,8 @@ export function ChatInput({
   isEncrypted,
   currentUsername,
   users,
+  replyTo,
+  onCancelReply,
 }: ChatInputProps) {
   const [message, setMessage] = useState("");
   const [isSending, setIsSending] = useState(false);
@@ -38,8 +42,9 @@ export function ChatInput({
 
     try {
       setIsSending(true);
-      await onSendMessage(message.trim());
+      await onSendMessage(message.trim(), replyTo);
       setMessage("");
+      onCancelReply();
     } catch (error) {
       console.error("Failed to send message:", error);
     } finally {
@@ -155,6 +160,20 @@ export function ChatInput({
 
  return (
   <div className="flex flex-col p-4 border-t bg-background">
+    {replyTo && (
+      <div className="mb-2 p-2 border-l-4 border-blue-500 bg-blue-50 text-sm text-gray-700 relative rounded">
+        <span className="font-medium">{replyTo.sender}</span>:{" "}
+        <span className="italic">{replyTo.content.slice(0, 100)}</span>
+        <button
+          className="absolute right-2 top-1 text-xs text-gray-400 hover:text-gray-600"
+          onClick={onCancelReply}
+          title="Cancel reply"
+        >
+          ✕
+        </button>
+      </div>
+    )}
+
     {progress > 0 && progress < 1 && <ProgressBar progress={progress} />}
 
     <div className="flex items-center gap-2">

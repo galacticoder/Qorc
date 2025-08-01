@@ -1,14 +1,13 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Card } from "@/components/ui/card";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { ChatMessage, Message } from "./ChatMessage";
 import { ChatInput } from "./ChatInput";
 import { Separator } from "@/components/ui/separator";
 import { User } from "./UserList";
-import { SignalType } from "@/lib/signals";
 
 interface ChatInterfaceProps {
-  onSendMessage: (message: string) => Promise<void>;
+  onSendMessage: (message: string, replyTo) => Promise<void>;
   onSendFile: (fileData: any) => void;
   messages: Message[];
   isEncrypted?: boolean;
@@ -25,6 +24,7 @@ export function ChatInterface({
   users
 }: ChatInterfaceProps) {
   const scrollAreaRef = useRef<HTMLDivElement>(null);
+  const [replyTo, setReplyTo] = useState<Message | null>(null);
 
   useEffect(() => {
     if (scrollAreaRef.current) {
@@ -49,7 +49,11 @@ export function ChatInterface({
             </div>
           ) : (
             messages.map((message) => (
-              <ChatMessage key={message.id} message={message} />
+              <ChatMessage
+                key={message.id}
+                message={message}
+                onReply={() => setReplyTo(message)}
+              />
             ))
           )}
         </div>
@@ -57,11 +61,16 @@ export function ChatInterface({
       <Separator />
       <div className="p-4 bg-gray-50">
         <ChatInput
-          onSendMessage={onSendMessage}
+          onSendMessage={async (msg, replyToMsg) => { 
+            await onSendMessage(msg, replyToMsg);
+            setReplyTo(null);
+          }}
           onSendFile={onSendFile}
           isEncrypted={isEncrypted}
           currentUsername={currentUsername}
           users={users}
+          replyTo={replyTo}
+          onCancelReply={() => setReplyTo(null)}
         />
       </div>
     </Card>
