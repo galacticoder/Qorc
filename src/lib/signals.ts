@@ -16,6 +16,7 @@ export enum SignalType {
   ACCOUNT_SIGN_UP = "account-sign-up",
   IN_ACCOUNT = "in-account",
   DELETE_MESSAGE = "delete-message",
+  EDIT_MESSAGE = "edit-message",
   AUTH_ERROR = "AUTH_ERROR",
   AUTH_SUCCESS = "AUTH_SUCCESS",
 }

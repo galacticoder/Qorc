@@ -6,8 +6,7 @@ import { User } from "./UserList";
 import { SignalType } from "@/lib/signals";
 import Linkify from 'linkify-react';
 import { CopyIcon, CheckIcon } from "@radix-ui/react-icons";
-import { TrashIcon } from "@radix-ui/react-icons";
-
+import { TrashIcon, Pencil1Icon } from "@radix-ui/react-icons";
 
 export interface Message {
   id: string;
@@ -25,6 +24,7 @@ export interface Message {
     content: string;
   };
   isDeleted?: boolean;
+  isEdited?: boolean;
 }
 
 interface ChatMessageProps {
@@ -32,6 +32,7 @@ interface ChatMessageProps {
   onReply?: (message: Message) => void;
   previousMessage?: Message;
   onDelete?: (message: Message) => void;
+  onEdit?: (message: Message) => void;
 }
 
 const IMAGE_EXTENSIONS = ["jpg", "jpeg", "png", "gif", "webp"];
@@ -43,7 +44,7 @@ function hasExtension(filename: string, extensions: string[]) {
   return regex.test(filename);
 }
 
-export function ChatMessage({ message, onReply, previousMessage, onDelete }: ChatMessageProps) {
+export function ChatMessage({ message, onReply, previousMessage, onDelete, onEdit }: ChatMessageProps) {
   const { content, sender, timestamp, isCurrentUser, isSystemMessage } = message;
   
   const isGrouped =
@@ -97,297 +98,311 @@ export function ChatMessage({ message, onReply, previousMessage, onDelete }: Cha
       </div>
     );
   }
+  
 
   if (message.type === SignalType.FILE_MESSAGE) {
-  return (
-    <div
-      className={cn(
-        "flex items-start gap-2 mb-4",
-        message.isCurrentUser ? "flex-row-reverse" : ""
-      )}
-    >
-      <Avatar className="w-8 h-8">
-        <AvatarFallback
-          className={cn(
-            isCurrentUser ? "bg-blue-500 text-white" : "bg-muted"
-          )}
-        >
-          {sender.charAt(0).toUpperCase()}
-        </AvatarFallback>
-      </Avatar>
+    return (
       <div
         className={cn(
-          "flex flex-col",
-          message.isCurrentUser ? "items-end" : "items-start"
+          "flex items-start gap-2 mb-4",
+          message.isCurrentUser ? "flex-row-reverse" : ""
         )}
       >
-        <div className="flex items-center gap-2 mb-1">
-          <span className="text-sm font-medium">{sender}</span>
-          <span className="text-xs text-muted-foreground">
-            {format(timestamp, "h:mm a")}
-          </span>
-        </div>
-
-        {hasExtension(message.filename || "", IMAGE_EXTENSIONS) && (
-          <div
+        <Avatar className="w-8 h-8">
+          <AvatarFallback
             className={cn(
-              "rounded-lg px-0 py-0 text-sm max-w-[60%] break-words","bg-muted"
+              isCurrentUser ? "bg-blue-500 text-white" : "bg-muted"
             )}
           >
-            <div className="relative group">
-              <img
-                src={message.content}
-                alt={message.filename}
-                className="max-w-full rounded-md"
-              />
-              <a
-                href={message.content}
-                download={message.filename}
-                className="absolute top-2 right-2 bg-white p-1 rounded-full shadow hidden group-hover:block"
-                aria-label={`Download ${message.filename}`}
-              >
-                <icons.DownloadIcon />
-              </a>
-            </div>
+            {sender.charAt(0).toUpperCase()}
+          </AvatarFallback>
+        </Avatar>
+        <div
+          className={cn(
+            "flex flex-col",
+            message.isCurrentUser ? "items-end" : "items-start"
+          )}
+        >
+          <div className="flex items-center gap-2 mb-1">
+            <span className="text-sm font-medium">{sender}</span>
+            <span className="text-xs text-muted-foreground">
+              {format(timestamp, "h:mm a")}
+            </span>
           </div>
-        )}
 
-        {hasExtension(message.filename || "", VIDEO_EXTENSIONS) && (
-          <div
-            className={cn(
-              "rounded-lg text-sm max-w-[60%] break-words",
-              message.isCurrentUser
-                ? "bg-primary text-primary-foreground"
-                : "bg-muted"
-            )}
-          >
-            <div className="flex flex-col gap-2">
-              <video controls className="max-w-full rounded-md">
-                <source src={message.content} />
-                Your browser does not support the video tag.
-              </video>
-
-              <div className="flex items-center gap-2 text-sm">
-                <span className="font-medium break-all ml-1 mb-1">{message.filename}</span>
-                <span className="text-xs text-muted-foreground">
-                  ({formatFileSize(message.fileSize ?? 0)})
-                </span>
+          {hasExtension(message.filename || "", IMAGE_EXTENSIONS) && (
+            <div
+              className={cn(
+                "rounded-lg px-0 py-0 text-sm max-w-[60%] break-words","bg-muted"
+              )}
+            >
+              <div className="relative group">
+                <img
+                  src={message.content}
+                  alt={message.filename}
+                  className="max-w-full rounded-md"
+                />
                 <a
                   href={message.content}
                   download={message.filename}
-                  className="text-blue-500 hover:text-blue-700"
-                  title="Download"
-                >
-                  <icons.DownloadIcon className="w-5 h-5 hover:scale-110 transition-transform duration-1 ease-in-out" />
-                </a>
-              </div>
-            </div>
-          </div>
-        )}
-
-        {hasExtension(message.filename || "", AUDIO_EXTENSIONS) && (
-          <div
-            className={cn(
-              "rounded-lg mr-1 py-0 text-sm max-w-[75%] break-words",
-              message.isCurrentUser
-                ? "bg-primary text-primary-foreground"
-                : "bg-muted"
-            )}
-          >
-            <div className="flex flex-col gap-1">
-              <audio controls className="w-full rounded-md">
-                <source src={message.content} />
-                Your browser does not support the audio element.
-              </audio>
-              <div className="flex justify-between items-center gap-1 text-sm text-blue-500">
-                <span className="truncate max-w-[250px] ml-1" title={message.filename}>
-                  {message.filename}
-                </span>
-                <a           
-                  href={message.content}
-                  download={message.filename}
-                  title="Download"
+                  className="absolute top-2 right-2 bg-white p-1 rounded-full shadow hidden group-hover:block"
                   aria-label={`Download ${message.filename}`}
-                 >
-                  <icons.DownloadIcon className="w-5 h-5 hover:scale-110 transition-transform duration-1 ease-in-out" />
+                >
+                  <icons.DownloadIcon />
                 </a>
               </div>
-              <span className="text-xs text-muted-foreground">
-                ({formatFileSize(message.fileSize ?? 0)})
-              </span>
             </div>
-          </div>
-        )}
+          )}
 
-        {!hasExtension(message.filename || "", [...IMAGE_EXTENSIONS, ...VIDEO_EXTENSIONS, ...AUDIO_EXTENSIONS]) && (
-          <div
-            className={cn(
-              "rounded-lg px-1 py-1 text-sm max-w-[60%] break-words",
-              message.isCurrentUser
-                ? "bg-primary text-primary-foreground"
-                : "bg-muted"
-            )}
-          >
-            <div className="flex items-start gap-2 w-full text-blue-500">
-              <icons.PaperclipIcon className="h-5 w-5 shrink-0 mt-1" />
-              <div className="flex flex-col min-w-0">
-                <div className="flex justify-between items-center gap-2">
-                  <span
-                    className="text-sm truncate max-w-[250px] w-full"
-                    title={message.filename}
-                  >
-                    {message.filename}
+          {hasExtension(message.filename || "", VIDEO_EXTENSIONS) && (
+            <div
+              className={cn(
+                "rounded-lg text-sm max-w-[60%] break-words",
+                message.isCurrentUser
+                  ? "bg-primary text-primary-foreground"
+                  : "bg-muted"
+              )}
+            >
+              <div className="flex flex-col gap-2">
+                <video controls className="max-w-full rounded-md">
+                  <source src={message.content} />
+                  Your browser does not support the video tag.
+                </video>
+
+                <div className="flex items-center gap-2 text-sm">
+                  <span className="font-medium break-all ml-1 mb-1">{message.filename}</span>
+                  <span className="text-xs text-muted-foreground">
+                    ({formatFileSize(message.fileSize ?? 0)})
                   </span>
                   <a
+                    href={message.content}
+                    download={message.filename}
+                    className="text-blue-500 hover:text-blue-700"
+                    title="Download"
+                  >
+                    <icons.DownloadIcon className="w-5 h-5 hover:scale-110 transition-transform duration-1 ease-in-out" />
+                  </a>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {hasExtension(message.filename || "", AUDIO_EXTENSIONS) && (
+            <div
+              className={cn(
+                "rounded-lg mr-1 py-0 text-sm max-w-[75%] break-words",
+                message.isCurrentUser
+                  ? "bg-primary text-primary-foreground"
+                  : "bg-muted"
+              )}
+            >
+              <div className="flex flex-col gap-1">
+                <audio controls className="w-full rounded-md">
+                  <source src={message.content} />
+                  Your browser does not support the audio element.
+                </audio>
+                <div className="flex justify-between items-center gap-1 text-sm text-blue-500">
+                  <span className="truncate max-w-[250px] ml-1" title={message.filename}>
+                    {message.filename}
+                  </span>
+                  <a           
                     href={message.content}
                     download={message.filename}
                     title="Download"
                     aria-label={`Download ${message.filename}`}
                   >
-                  <icons.DownloadIcon className="w-5 h-5 hover:scale-110 transition-transform duration-1 ease-in-out" />
+                    <icons.DownloadIcon className="w-5 h-5 hover:scale-110 transition-transform duration-1 ease-in-out" />
                   </a>
                 </div>
-                <span className="text-xs text-muted-foreground leading-tight">
+                <span className="text-xs text-muted-foreground">
                   ({formatFileSize(message.fileSize ?? 0)})
                 </span>
               </div>
             </div>
-          </div>
-        )}
-      </div>
-    </div>
-  );
-}
+          )}
 
-return (
-  <div
-    className={cn(
-      "flex items-start gap-2 mb-4",
-      isCurrentUser ? "flex-row-reverse" : ""
-    )}
-  >
-    <div className={cn("w-9 h-9", isGrouped ? "invisible" : "mb-5")}>
-        {!isGrouped && (
-          <Avatar className="w-9 h-9">
-            <AvatarFallback
+          {!hasExtension(message.filename || "", [...IMAGE_EXTENSIONS, ...VIDEO_EXTENSIONS, ...AUDIO_EXTENSIONS]) && (
+            <div
               className={cn(
-                isCurrentUser ? "bg-blue-500 text-white" : "bg-muted"
+                "rounded-lg px-1 py-1 text-sm max-w-[60%] break-words",
+                message.isCurrentUser
+                  ? "bg-primary text-primary-foreground"
+                  : "bg-muted"
               )}
             >
-              {sender.charAt(0).toUpperCase()}
-            </AvatarFallback>
-          </Avatar>
-        )}
+              <div className="flex items-start gap-2 w-full text-blue-500">
+                <icons.PaperclipIcon className="h-5 w-5 shrink-0 mt-1" />
+                <div className="flex flex-col min-w-0">
+                  <div className="flex justify-between items-center gap-2">
+                    <span
+                      className="text-sm truncate max-w-[250px] w-full"
+                      title={message.filename}
+                    >
+                      {message.filename}
+                    </span>
+                    <a
+                      href={message.content}
+                      download={message.filename}
+                      title="Download"
+                      aria-label={`Download ${message.filename}`}
+                    >
+                    <icons.DownloadIcon className="w-5 h-5 hover:scale-110 transition-transform duration-1 ease-in-out" />
+                    </a>
+                  </div>
+                  <span className="text-xs text-muted-foreground leading-tight">
+                    ({formatFileSize(message.fileSize ?? 0)})
+                  </span>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
       </div>
+    );
+  }
 
+  return (
     <div
       className={cn(
-        "flex flex-col min-w-0",
-        isCurrentUser ? "items-end" : "items-start"
+        "flex items-start gap-2 mb-4",
+        isCurrentUser ? "flex-row-reverse" : ""
       )}
-      style={{ maxWidth: "75%" }}
     >
-      {!isGrouped && (
-        <div className="flex items-center gap-2 mt-1">
-          <span className="text-sm font-medium">{sender}</span>
-          <span className="text-xs text-muted-foreground">
-            {format(timestamp, "h:mm a")}
-          </span>
+      <div className={cn("w-9 h-9", isGrouped ? "invisible" : "mb-5")}>
+          {!isGrouped && (
+            <Avatar className="w-9 h-9">
+              <AvatarFallback
+                className={cn(
+                  isCurrentUser ? "bg-blue-500 text-white" : "bg-muted"
+                )}
+              >
+                {sender.charAt(0).toUpperCase()}
+              </AvatarFallback>
+            </Avatar>
+          )}
         </div>
-      )}
 
-
-       {message.replyTo && ( //reply message
-          <div className="mb-1 p-2 border-l-2 border-blue-500 bg-blue-50 text-xs text-gray-500 rounded max-w-full truncate">
-            <span className="font-medium">{message.replyTo.sender}</span>:{" "}
-            <span className="italic">
-              {message.replyTo.content.slice(0, 100)}
-              {message.replyTo.content.length > 100 ? "..." : ""}
+      <div
+        className={cn(
+          "flex flex-col min-w-0",
+          isCurrentUser ? "items-end" : "items-start"
+        )}
+        style={{ maxWidth: "75%" }}
+      >
+        {!isGrouped && (
+          <div className="flex items-center gap-2 mt-1">
+            <span className="text-sm font-medium">{sender}</span>
+            <span className="text-xs text-muted-foreground">
+              {format(timestamp, "h:mm a")}
             </span>
           </div>
         )}
 
-      <div
-        className={cn(
-          "group flex items-center gap-2",
-          isCurrentUser ? "flex-row-reverse" : ""
-        )}
-      >
+
+        {message.replyTo && ( //reply message
+            <div className="mb-1 p-2 border-l-2 border-blue-500 bg-blue-50 text-xs text-gray-500 rounded max-w-full truncate">
+              <span className="font-medium">{message.replyTo.sender}</span>:{" "}
+              <span className="italic">
+                {message.replyTo.content.slice(0, 100)}
+                {message.replyTo.content.length > 100 ? "..." : ""}
+              </span>
+            </div>
+          )}
+
         <div
           className={cn(
-            "rounded-lg px-3 py-2 text-sm min-w-[5rem] whitespace-pre-wrap break-words",
-            isCurrentUser ? "bg-primary text-primary-foreground" : "bg-muted"
+            "group flex items-center gap-2",
+            isCurrentUser ? "flex-row-reverse" : ""
           )}
-          style={{ wordBreak: "break-word", whiteSpace: "pre-wrap" }}
         >
-          <Linkify options={{ target: '_blank', rel: 'noopener noreferrer' }}>
-            {content}
-          </Linkify>
-        </div>
-        
-
-        {/*action buttons*/}
-        <div className={cn(
-          "flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity duration-200",
-          isCurrentUser ? "mr-1 flex-row-reverse" : "ml-1"
-        )}>
-          <button //copy
-            onClick={() => navigator.clipboard.writeText(content)}
-            aria-label="Copy message"
-            className="hover:text-primary"
+          <div
+            className={cn(
+              "rounded-lg px-3 py-2 text-sm min-w-[5rem] whitespace-pre-wrap break-words",
+              isCurrentUser ? "bg-primary text-primary-foreground" : "bg-muted"
+            )}
+            style={{ wordBreak: "break-word", whiteSpace: "pre-wrap" }}
           >
-            <svg
-              width="15"
-              height="15"
-              viewBox="0 0 15 15"
-              fill="none"
-              xmlns="http://www.w3.org/2000/svg"
-            >
-              <path
-                d="M1 9.50006C1 10.3285 1.67157 11.0001 2.5 11.0001H4L4 10.0001H2.5C2.22386 10.0001 2 9.7762 2 9.50006L2 2.50006C2 2.22392 2.22386 2.00006 2.5 2.00006L9.5 2.00006C9.77614 2.00006 10 2.22392 10 2.50006V4.00002H5.5C4.67158 4.00002 4 4.67159 4 5.50002V12.5C4 13.3284 4.67158 14 5.5 14H12.5C13.3284 14 14 13.3284 14 12.5V5.50002C14 4.67159 13.3284 4.00002 12.5 4.00002H11V2.50006C11 1.67163 10.3284 1.00006 9.5 1.00006H2.5C1.67157 1.00006 1 1.67163 1 2.50006V9.50006ZM5 5.50002C5 5.22388 5.22386 5.00002 5.5 5.00002H12.5C12.7761 5.00002 13 5.22388 13 5.50002V12.5C13 12.7762 12.7761 13 12.5 13H5.5C5.22386 13 5 12.7762 5 12.5V5.50002Z"
-                fill="currentColor"
-                fillRule="evenodd"
-                clipRule="evenodd"
-              />
-            </svg>
-          </button>
+            <Linkify options={{ target: '_blank', rel: 'noopener noreferrer' }}>
+              {content}
+            </Linkify>
+          </div>
+          
 
-          <button //reply button
-            onClick={() => onReply?.(message)}
-            aria-label="Reply to message"
-            className="hover:text-primary"
-          >
-            <svg
-              xmlns="http://www.w3.org/2000/svg"
-              fill="none"
-              viewBox="0 0 24 24"
-              strokeWidth={1.5}
-              stroke="currentColor"
-              className="w-4 h-4"
+          {/*action buttons*/}
+          <div className={cn(
+            "flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity duration-200",
+            isCurrentUser ? "mr-1 flex-row-reverse" : "ml-1"
+          )}>
+            <button //copy
+              onClick={() => navigator.clipboard.writeText(content)}
+              aria-label="Copy message"
+              className="hover:text-primary"
             >
-              <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                d="M9 15 3 9m0 0 6-6M3 9h12a6 6 0 0 1 0 12h-3"
-              />
-            </svg>
-          </button>
-
-          {isCurrentUser && !isSystemMessage && ( //unsend message
-            <button
-              onClick={() => onDelete?.(message)}
-              aria-label="Delete message"
-              className="hover:text-destructive"
-            >
-              <TrashIcon className="w-4 h-4" />
+              <svg
+                width="15"
+                height="15"
+                viewBox="0 0 15 15"
+                fill="none"
+                xmlns="http://www.w3.org/2000/svg"
+              >
+                <path
+                  d="M1 9.50006C1 10.3285 1.67157 11.0001 2.5 11.0001H4L4 10.0001H2.5C2.22386 10.0001 2 9.7762 2 9.50006L2 2.50006C2 2.22392 2.22386 2.00006 2.5 2.00006L9.5 2.00006C9.77614 2.00006 10 2.22392 10 2.50006V4.00002H5.5C4.67158 4.00002 4 4.67159 4 5.50002V12.5C4 13.3284 4.67158 14 5.5 14H12.5C13.3284 14 14 13.3284 14 12.5V5.50002C14 4.67159 13.3284 4.00002 12.5 4.00002H11V2.50006C11 1.67163 10.3284 1.00006 9.5 1.00006H2.5C1.67157 1.00006 1 1.67163 1 2.50006V9.50006ZM5 5.50002C5 5.22388 5.22386 5.00002 5.5 5.00002H12.5C12.7761 5.00002 13 5.22388 13 5.50002V12.5C13 12.7762 12.7761 13 12.5 13H5.5C5.22386 13 5 12.7762 5 12.5V5.50002Z"
+                  fill="currentColor"
+                  fillRule="evenodd"
+                  clipRule="evenodd"
+                />
+              </svg>
             </button>
-          )}
+
+            <button //reply button
+              onClick={() => onReply?.(message)}
+              aria-label="Reply to message"
+              className="hover:text-primary"
+            >
+              <svg
+                xmlns="http://www.w3.org/2000/svg"
+                fill="none"
+                viewBox="0 0 24 24"
+                strokeWidth={1.5}
+                stroke="currentColor"
+                className="w-4 h-4"
+              >
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  d="M9 15 3 9m0 0 6-6M3 9h12a6 6 0 0 1 0 12h-3"
+                />
+              </svg>
+            </button>
+
+            {isCurrentUser && !isSystemMessage && ( //unsend message
+              <button
+                onClick={() => onDelete?.(message)}
+                aria-label="Delete message"
+                className="hover:text-destructive"
+              >
+                <TrashIcon className="w-4 h-4" />
+              </button>
+            )}
+
+            {message.isEdited && (
+              <span className="text-xs text-muted-foreground italic">(edited)</span>
+            )}
+
+            {isCurrentUser && !message.isDeleted && ( //edit button
+              <button
+                onClick={() => onEdit?.(message)}
+                aria-label="Edit message"
+                className="hover:text-primary"
+              >
+                <Pencil1Icon className="w-4 h-4" />
+              </button>
+            )}
+          </div>
         </div>
       </div>
     </div>
-  </div>
-);
-
+  );
 }
 
 function formatFileSize(bytes: number) {

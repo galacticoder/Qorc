@@ -14,6 +14,7 @@ interface ChatInterfaceProps {
   currentUsername: string;
   users: User[];
   onDeleteMessage?: (messageId: string) => void;
+  onEditMessage?: (messageId: string, newContent: string) => void;
 }
 
 export function ChatInterface({
@@ -23,10 +24,12 @@ export function ChatInterface({
   isEncrypted = true,
   currentUsername,
   users,
-  onDeleteMessage
+  onDeleteMessage,
+  onEditMessage
 }: ChatInterfaceProps) {
   const scrollAreaRef = useRef<HTMLDivElement>(null);
   const [replyTo, setReplyTo] = useState<Message | null>(null);
+  const [editingMessage, setEditingMessage] = useState<Message | null>(null);
 
   useEffect(() => {
     if (scrollAreaRef.current) {
@@ -57,6 +60,7 @@ export function ChatInterface({
                 previousMessage={index > 0 ? messages[index - 1] : undefined}
                 onReply={() => setReplyTo(message)}
                 onDelete={(msg) => onDeleteMessage?.(msg.id)}
+                onEdit={setEditingMessage}
               />
             ))
           )}
@@ -75,6 +79,13 @@ export function ChatInterface({
           users={users}
           replyTo={replyTo}
           onCancelReply={() => setReplyTo(null)}
+          editingMessage={editingMessage}
+          onCancelEdit={() => setEditingMessage(null)}
+          onEditMessage={async (newContent) => {
+            if (editingMessage && onEditMessage) {
+              await onEditMessage(editingMessage.id, newContent);
+              setEditingMessage(null);
+            }}}
         />
       </div>
     </Card>

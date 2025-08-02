@@ -50,7 +50,7 @@ export default function ChatApp() {
     setLoginError
   );
 
-  const { handleSendMessage, handleDeleteMessage } = useMessageSender(
+  const { handleSendMessage, handleDeleteMessage, handleEditMessage } = useMessageSender(
     isLoggedIn,
     users,
     loginUsernameRef,
@@ -76,6 +76,20 @@ export default function ChatApp() {
         return;
       }
 
+      if (payload.type === SignalType.EDIT_MESSAGE) {
+        setMessages(prev => prev.map(msg => 
+          msg.id === payload.messageId 
+            ? { 
+                ...msg, 
+                content: payload.newContent, 
+                isEdited: true,
+                timestamp: new Date(payload.timestamp)
+              } 
+            : msg
+        ));
+        return;
+      }
+
       console.log("Message ID received: ", payload.id)
 
       const payloadFull: Message = {
@@ -95,7 +109,6 @@ export default function ChatApp() {
       };
 
       console.log("Reply field: ", payloadFull.replyTo)
-        
       setMessages(prev => [...prev, payloadFull]);
     } catch (error) {
       console.error("Error handling encrypted message:", error);
@@ -132,6 +145,7 @@ export default function ChatApp() {
 
         case SignalType.ENCRYPTED_MESSAGE:
         case SignalType.USER_DISCONNECT:
+        case SignalType.EDIT_MESSAGE:
         case SignalType.DELETE_MESSAGE:
           await handleEncryptedMessagePayload(data);
           break;
@@ -206,6 +220,7 @@ export default function ChatApp() {
             currentUsername={loginUsernameRef.current}
             users={users}
             onDeleteMessage={handleDeleteMessage}
+            onEditMessage={handleEditMessage}
           />
         </div>
       </div>

@@ -143,5 +143,48 @@ export function useMessageSender(
     [isLoggedIn, users, loginUsernameRef, setMessages]
   );
 
-  return { handleSendMessage, handleDeleteMessage };
+   const handleEditMessage = useCallback(
+    async (messageId: string, newContent: string) => {
+      if (!isLoggedIn || !newContent.trim()) return;
+
+      const time = Date.now();
+
+      try {
+        setMessages(prev => prev.map(msg => 
+          msg.id === messageId 
+            ? { ...msg, content: newContent, isEdited: true } 
+            : msg
+        ));
+
+        await Promise.all(
+          users.map(async (user) => {
+            if (user.username === loginUsernameRef.current || !user.publicKey) return;
+            
+            const payload = await CryptoUtils.Encrypt.encryptAndFormatPayload({
+              type: SignalType.EDIT_MESSAGE,
+              recipientPEM: user.publicKey,
+              from: loginUsernameRef.current,
+              to: user.username,
+              messageId,
+              newContent,
+              timestamp: time,
+            });
+            
+            websocketClient.send(JSON.stringify(payload));
+          })
+        );
+      } catch (error) {
+        console.error("Failed to edit message:", error);
+        // Revert on error
+        setMessages(prev => prev.map(msg => 
+          msg.id === messageId 
+            ? { ...msg, isEdited: false } 
+            : msg
+        ));
+      }
+    },
+    [isLoggedIn, users, loginUsernameRef, setMessages]
+  );
+
+  return { handleSendMessage, handleDeleteMessage, handleEditMessage };
 }
