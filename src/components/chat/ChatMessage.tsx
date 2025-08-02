@@ -1,13 +1,12 @@
 import { cn } from "@/lib/utils";
 import { Avatar, AvatarFallback } from "../ui/avatar";
-import { format } from "date-fns";
+import { format, isSameMinute } from "date-fns";
 import * as icons from "./icons";
 import { User } from "./UserList";
 import { SignalType } from "@/lib/signals";
 import Linkify from 'linkify-react';
 import { CopyIcon, CheckIcon } from "@radix-ui/react-icons";
 export { CopyIcon, CheckIcon };
-
 
 export interface Message {
   id: string;
@@ -29,6 +28,7 @@ export interface Message {
 interface ChatMessageProps {
   message: Message;
   onReply?: (message: Message) => void;
+  previousMessage?: Message;
 }
 
 const IMAGE_EXTENSIONS = ["jpg", "jpeg", "png", "gif", "webp"];
@@ -41,8 +41,13 @@ function hasExtension(filename: string, extensions: string[]) {
 }
 
 
-export function ChatMessage({ message, onReply }: ChatMessageProps) {
+export function ChatMessage({ message, onReply, previousMessage  }: ChatMessageProps) {
   const { content, sender, timestamp, isCurrentUser, isSystemMessage } = message;
+  
+  const isGrouped =
+    previousMessage &&
+    previousMessage.sender === sender &&
+    isSameMinute(previousMessage.timestamp, timestamp);
 
   if (isSystemMessage) {
     return (
@@ -222,15 +227,19 @@ return (
       isCurrentUser ? "flex-row-reverse" : ""
     )}
   >
-    <Avatar className="w-8 h-8">
-      <AvatarFallback
-        className={cn(
-          isCurrentUser ? "bg-blue-500 text-white" : "bg-muted"
+    <div className={cn("w-9 h-9", isGrouped ? "invisible" : "mb-5")}>
+        {!isGrouped && (
+          <Avatar className="w-9 h-9">
+            <AvatarFallback
+              className={cn(
+                isCurrentUser ? "bg-blue-500 text-white" : "bg-muted"
+              )}
+            >
+              {sender.charAt(0).toUpperCase()}
+            </AvatarFallback>
+          </Avatar>
         )}
-      >
-        {sender.charAt(0).toUpperCase()}
-      </AvatarFallback>
-    </Avatar>
+      </div>
 
     <div
       className={cn(
@@ -239,12 +248,15 @@ return (
       )}
       style={{ maxWidth: "75%" }}
     >
-      <div className="flex items-center gap-2 mb-1">
-        <span className="text-sm font-medium">{sender}</span>
-        <span className="text-xs text-muted-foreground">
-          {format(timestamp, "h:mm a")}
-        </span>
-      </div>
+      {!isGrouped && (
+        <div className="flex items-center gap-2 mt-1">
+          <span className="text-sm font-medium">{sender}</span>
+          <span className="text-xs text-muted-foreground">
+            {format(timestamp, "h:mm a")}
+          </span>
+        </div>
+      )}
+
 
        {message.replyTo && ( //reply message
           <div className="mb-1 p-2 border-l-2 border-blue-500 bg-blue-50 text-xs text-gray-500 rounded max-w-full truncate">

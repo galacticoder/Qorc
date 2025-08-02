@@ -17,8 +17,8 @@ class WebSocketClient {
     const isDev = import.meta.env.DEV;
 
     this.url = isDev
-      ? 'wss://localhost:8443'
-      : 'wss://end2endchat.com';
+      ? "wss://localhost:8443/"
+      : "wss://end2endchat.com";
 
     console.log(`${isDev ? 'Development' : 'Production'} environment detected. Connecting to ${this.url}`);
   }

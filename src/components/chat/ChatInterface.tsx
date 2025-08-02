@@ -48,10 +48,11 @@ export function ChatInterface({
               No messages yet
             </div>
           ) : (
-            messages.map((message) => (
+            messages.map((message, index) => (
               <ChatMessage
                 key={message.id}
                 message={message}
+                previousMessage={index > 0 ? messages[index - 1] : undefined}
                 onReply={() => setReplyTo(message)}
               />
             ))
