@@ -4,4 +4,3 @@ pnpm-lock.yaml
 /server/pnpm-lock.yaml
 /server/package-lock.yaml
 /server/database/user_database.json
-/src/pages/HomeScreen.tsx

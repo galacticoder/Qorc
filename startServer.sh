@@ -33,11 +33,10 @@ else
 fi
 
 echo -e "${GREEN}Installing WebSocket server dependencies...${NC}"
-cd server
 npm install
 
 echo -e "${GREEN}Starting secure WebSocket server...${NC}"
-node server.js
+node server/server.js
 
 cleanup() {
     echo -e "${YELLOW}Shutting down server...${NC}"

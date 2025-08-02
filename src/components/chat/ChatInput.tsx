@@ -250,7 +250,7 @@ export function ChatInput({
         <div className={cn(
           "flex items-end gap-3 rounded-2xl border shadow-sm transition-all duration-200", "bg-slate-50 border-slate-200 focus-within:border-slate-400"
         )}>
-          {/* file Upload Button */}
+          {/* file upload button */}
           <div className="flex-shrink-0 p-2">
             <Button
               variant="ghost"
@@ -288,7 +288,7 @@ export function ChatInput({
             />
           </div>
 
-          {/* send Button */}
+          {/* send button */}
           <Button
             onClick={handleSend}
             size="sm"

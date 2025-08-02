@@ -15,7 +15,11 @@ import { useFileHandler, handleSendFile } from "@/hooks/useFileHandler";
 import { useMessageSender } from "@/hooks/useMessageSender";
 import { useWebSocket } from "@/hooks/useWebsocket";
 
-export default function ChatApp() {
+interface ChatAppProps {
+  onNavigate: (page: 'home' | 'server' | 'chat') => void;
+}
+
+const ChatApp: React.FC<ChatAppProps> = ({ onNavigate }) => {
   const {
     username,
     serverPublicKeyPEM,
@@ -227,3 +231,5 @@ export default function ChatApp() {
     </div>
   );
 }
+
+export default ChatApp;

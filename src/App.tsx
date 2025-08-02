@@ -1,26 +1,31 @@
-import { Toaster } from '@/components/ui/sonner';
-import { TooltipProvider } from '@/components/ui/tooltip';
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { BrowserRouter, Routes, Route } from 'react-router-dom';
-import Index from './pages/Index';
-import NotFound from './pages/NotFound';
-// import HomeScreen from './pages/HomeScreen';
+import React, { useState } from 'react';
+import HomeScreen from './pages/home/components/HomeScreen.tsx';
+import ServerConnection from './pages/ServerConnection.tsx';
+import ChatApp from './pages/Index.tsx';
 
-const queryClient = new QueryClient();
+type Page = 'home' | 'server' | 'chat';
 
-const App = () => (
-  <QueryClientProvider client={queryClient}>
-    <TooltipProvider>
-      <Toaster />
-      <BrowserRouter>
-        <Routes>
-          <Route path="/" element={<Index />} />
-          {/* <Route path="/home" element={<HomeScreen />} /> */}
-          <Route path="*" element={<NotFound />} />
-        </Routes>
-      </BrowserRouter>
-    </TooltipProvider>
-  </QueryClientProvider>
-);
+function App() {
+  const [currentPage, setCurrentPage] = useState<Page>('home');
+
+  const renderPage = () => {
+    switch (currentPage) {
+      case 'home':
+        return <HomeScreen onNavigate={setCurrentPage} />;
+      case 'server':
+        return <ServerConnection onNavigate={setCurrentPage} />;
+      case 'chat':
+        return <ChatApp onNavigate={setCurrentPage}/>;
+      default:
+        return <HomeScreen onNavigate={setCurrentPage} />;
+    }
+  };
+
+  return (
+    <div className="App">
+      {renderPage()}
+    </div>
+  );
+}
 
 export default App;
