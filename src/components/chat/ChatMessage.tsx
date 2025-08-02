@@ -6,7 +6,8 @@ import { User } from "./UserList";
 import { SignalType } from "@/lib/signals";
 import Linkify from 'linkify-react';
 import { CopyIcon, CheckIcon } from "@radix-ui/react-icons";
-export { CopyIcon, CheckIcon };
+import { TrashIcon } from "@radix-ui/react-icons";
+
 
 export interface Message {
   id: string;
@@ -23,12 +24,14 @@ export interface Message {
     sender: string;
     content: string;
   };
+  isDeleted?: boolean;
 }
 
 interface ChatMessageProps {
   message: Message;
   onReply?: (message: Message) => void;
   previousMessage?: Message;
+  onDelete?: (message: Message) => void;
 }
 
 const IMAGE_EXTENSIONS = ["jpg", "jpeg", "png", "gif", "webp"];
@@ -40,8 +43,7 @@ function hasExtension(filename: string, extensions: string[]) {
   return regex.test(filename);
 }
 
-
-export function ChatMessage({ message, onReply, previousMessage  }: ChatMessageProps) {
+export function ChatMessage({ message, onReply, previousMessage, onDelete }: ChatMessageProps) {
   const { content, sender, timestamp, isCurrentUser, isSystemMessage } = message;
   
   const isGrouped =
@@ -54,6 +56,43 @@ export function ChatMessage({ message, onReply, previousMessage  }: ChatMessageP
       <div className="flex items-center justify-center my-2">
         <div className="bg-muted text-muted-foreground text-xs rounded-full px-3 py-1">
           {content}
+        </div>
+      </div>
+    );
+  }
+
+  if (message.isDeleted) {
+    return (
+      <div className={cn(
+        "flex items-start gap-2 mb-4",
+        isCurrentUser ? "flex-row-reverse" : ""
+      )}>
+        <Avatar className="w-8 h-8">
+          <AvatarFallback className={cn(
+            isCurrentUser ? "bg-blue-500 text-white" : "bg-muted"
+          )}>
+            {sender.charAt(0).toUpperCase()}
+          </AvatarFallback>
+        </Avatar>
+
+        <div className={cn(
+          "flex flex-col min-w-0",
+          isCurrentUser ? "items-end" : "items-start"
+        )} style={{ maxWidth: "75%" }}>
+          <div className="flex items-center gap-2 mb-1">
+            <span className="text-sm font-medium">{sender}</span>
+            <span className="text-xs text-muted-foreground">
+              {format(timestamp, "h:mm a")}
+            </span>
+          </div>
+
+          <div className={cn(
+            "rounded-lg px-3 py-2 text-sm min-w-[5rem] whitespace-pre-wrap break-words",
+            isCurrentUser ? "bg-primary text-primary-foreground" : "bg-muted",
+            "italic text-gray-500"
+          )}>
+            Message deleted
+          </div>
         </div>
       </div>
     );
@@ -285,12 +324,14 @@ return (
             {content}
           </Linkify>
         </div>
+        
 
+        {/*action buttons*/}
         <div className={cn(
           "flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity duration-200",
           isCurrentUser ? "mr-1 flex-row-reverse" : "ml-1"
         )}>
-          <button
+          <button //copy
             onClick={() => navigator.clipboard.writeText(content)}
             aria-label="Copy message"
             className="hover:text-primary"
@@ -311,7 +352,7 @@ return (
             </svg>
           </button>
 
-          <button
+          <button //reply button
             onClick={() => onReply?.(message)}
             aria-label="Reply to message"
             className="hover:text-primary"
@@ -331,6 +372,16 @@ return (
               />
             </svg>
           </button>
+
+          {isCurrentUser && !isSystemMessage && ( //unsend message
+            <button
+              onClick={() => onDelete?.(message)}
+              aria-label="Delete message"
+              className="hover:text-destructive"
+            >
+              <TrashIcon className="w-4 h-4" />
+            </button>
+          )}
         </div>
       </div>
     </div>

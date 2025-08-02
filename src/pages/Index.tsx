@@ -50,7 +50,7 @@ export default function ChatApp() {
     setLoginError
   );
 
-  const { handleSendMessage } = useMessageSender(
+  const { handleSendMessage, handleDeleteMessage } = useMessageSender(
     isLoggedIn,
     users,
     loginUsernameRef,
@@ -65,6 +65,15 @@ export default function ChatApp() {
 
       if (message.type == SignalType.USER_DISCONNECT) {
         setUsers(prevUsers => prevUsers.filter(user => user.username !== payload.content.split(' ')[0]))
+      }
+
+      if (payload.type === SignalType.DELETE_MESSAGE) {
+        setMessages(prev => prev.map(msg => 
+          msg.id === payload.messageId 
+            ? { ...msg, isDeleted: true, content: "Message deleted" } 
+            : msg
+        ));
+        return;
       }
 
       console.log("Message ID received: ", payload.id)
@@ -123,6 +132,7 @@ export default function ChatApp() {
 
         case SignalType.ENCRYPTED_MESSAGE:
         case SignalType.USER_DISCONNECT:
+        case SignalType.DELETE_MESSAGE:
           await handleEncryptedMessagePayload(data);
           break;
 
@@ -195,6 +205,7 @@ export default function ChatApp() {
             isEncrypted={true}
             currentUsername={loginUsernameRef.current}
             users={users}
+            onDeleteMessage={handleDeleteMessage}
           />
         </div>
       </div>

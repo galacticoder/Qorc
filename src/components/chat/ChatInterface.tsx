@@ -13,6 +13,7 @@ interface ChatInterfaceProps {
   isEncrypted?: boolean;
   currentUsername: string;
   users: User[];
+  onDeleteMessage?: (messageId: string) => void;
 }
 
 export function ChatInterface({
@@ -21,7 +22,8 @@ export function ChatInterface({
   messages,
   isEncrypted = true,
   currentUsername,
-  users
+  users,
+  onDeleteMessage
 }: ChatInterfaceProps) {
   const scrollAreaRef = useRef<HTMLDivElement>(null);
   const [replyTo, setReplyTo] = useState<Message | null>(null);
@@ -54,6 +56,7 @@ export function ChatInterface({
                 message={message}
                 previousMessage={index > 0 ? messages[index - 1] : undefined}
                 onReply={() => setReplyTo(message)}
+                onDelete={(msg) => onDeleteMessage?.(msg.id)}
               />
             ))
           )}

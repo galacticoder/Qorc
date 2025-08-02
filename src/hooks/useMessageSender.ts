@@ -103,5 +103,45 @@ export function useMessageSender(
     [isLoggedIn, users, loginUsernameRef, setMessages]
   );
 
-  return { handleSendMessage };
+  const handleDeleteMessage = useCallback(
+    async (messageId: string) => {
+      if (!isLoggedIn) return;
+
+      try {
+        setMessages(prev => prev.map(msg => 
+          msg.id === messageId 
+            ? { ...msg, isDeleted: true, content: "Message deleted" } 
+            : msg
+        ));
+
+        await Promise.all(
+          users.map(async (user) => {
+            if (user.username === loginUsernameRef.current || !user.publicKey) return;
+            
+            const payload = await CryptoUtils.Encrypt.encryptAndFormatPayload({
+              type: SignalType.DELETE_MESSAGE,
+              recipientPEM: user.publicKey,
+              from: loginUsernameRef.current,
+              to: user.username,
+              messageId,
+              timestamp: Date.now(),
+            });
+            
+            websocketClient.send(JSON.stringify(payload));
+          })
+        );
+      } catch (error) {
+        console.error("Delete failed:", error);
+
+        setMessages(prev => prev.map(msg => 
+          msg.id === messageId 
+            ? { ...msg, isDeleted: false } 
+            : msg
+        ));
+      }
+    },
+    [isLoggedIn, users, loginUsernameRef, setMessages]
+  );
+
+  return { handleSendMessage, handleDeleteMessage };
 }
