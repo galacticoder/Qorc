@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect } from "react";
 import { Button } from "../ui/button";
 import { Textarea } from "../ui/textarea";
-import { PaperPlaneIcon, LockClosedIcon } from "@radix-ui/react-icons";
+import { PaperPlaneIcon, LockClosedIcon, Cross2Icon } from "@radix-ui/react-icons";
 import { PaperclipIcon } from "./icons";
 import * as cm from "./ChatMessage"
 import * as pako from "pako";
@@ -34,8 +34,16 @@ export function ChatInput({
   const [message, setMessage] = useState("");
   const [isSending, setIsSending] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
   const lastTypingTime = useRef<number>(0);
   const typingTimeout = 2000;
+
+  useEffect(() => {
+    if (textareaRef.current) {
+      textareaRef.current.style.height = 'auto';
+      textareaRef.current.style.height = Math.min(textareaRef.current.scrollHeight, 120) + 'px';
+    }
+  }, [message]);
 
   const handleSend = async () => {
     if (!message.trim() || isSending) return;
@@ -158,66 +166,119 @@ export function ChatInput({
     }
   };
 
- return (
-  <div className="flex flex-col p-4 border-t bg-background">
-    {replyTo && (
-      <div className="mb-2 p-2 border-l-4 border-blue-500 bg-blue-50 text-sm text-gray-700 relative rounded">
-        <span className="font-medium">{replyTo.sender}</span>:{" "}
-        <span className="italic">{replyTo.content.slice(0, 100)}</span>
-        <button
-          className="absolute right-2 top-1 text-xs text-gray-400 hover:text-gray-600"
-          onClick={onCancelReply}
-          title="Cancel reply"
-        >
-          ✕
-        </button>
-      </div>
-    )}
+  return (
+    <div className={cn("relative border-t", "bg-white border-slate-200")}>
+      {replyTo && (
+        <div className="px-4 pt-3 pb-0">
+          <div className={cn(
+            "flex items-start gap-3 p-3 border-l-4 rounded-lg shadow-sm transition-colors duration-200", "bg-gradient-to-r from-slate-50 to-slate-100 border-slate-400 text-slate-900"
+          )}>
+            <div className="flex-1 min-w-0">
+              <div className="flex items-center gap-2 mb-1">
+                <svg className={cn("w-4 h-4", "text-slate-500")} fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 10h10a8 8 0 018 8v2M3 10l6 6m-6-6l6-6" />
+                </svg>
+                <span className={cn("text-sm font-semibold", "text-slate-700")}>{replyTo.sender}</span>
+              </div>
+              <p className={cn("text-sm line-clamp-2", "text-slate-600")}>
+                {replyTo.content.slice(0, 100)}
+                {replyTo.content.length > 100 && "..."}
+              </p>
+            </div>
+            <Button
+              variant="ghost"
+              size="sm"
+              className={cn(
+                "h-8 w-8 p-0 transition-colors", "hover:bg-slate-200 text-slate-500 hover:text-slate-700"
+              )}
+              onClick={onCancelReply}
+            >
+              <Cross2Icon className="h-4 w-4" />
+            </Button>
+          </div>
+        </div>
+      )}
 
-    {progress > 0 && progress < 1 && <ProgressBar progress={progress} />}
+      {progress > 0 && progress < 1 && (
+        <div className="px-4 pt-2">
+          <ProgressBar progress={progress} />
+        </div>
+      )}
 
-    <div className="flex items-center gap-2">
-      {/* File Upload Button */}
-      <Button
-        variant="ghost"
-        size="icon"
-        className="h-8 w-8 rounded-full"
-        type="button"
-        onClick={() => !isSendingFile && fileInputRef.current?.click()}
-        disabled={isSendingFile}
-      >
-        <PaperclipIcon className="h-4 w-4" />
-      </Button>
+      <div className="p-4">
+        <div className={cn(
+          "flex items-end gap-3 rounded-2xl border shadow-sm transition-all duration-200", "bg-slate-50 border-slate-200 focus-within:border-slate-400"
+        )}>
+          {/* file Upload Button */}
+          <div className="flex-shrink-0 p-2">
+            <Button
+              variant="ghost"
+              size="sm"
+              className={cn(
+                "h-10 w-10 rounded-full transition-all duration-200",
+                isSendingFile && "opacity-50 cursor-not-allowed", "hover:bg-slate-200 text-slate-500 hover:text-slate-700"
+              )}
+              type="button"
+              onClick={() => !isSendingFile && fileInputRef.current?.click()}
+              disabled={isSendingFile}
+            >
+              <PaperclipIcon className="h-5 w-5" />
+            </Button>
+            <input
+              ref={fileInputRef}
+              type="file"
+              className="hidden"
+              onChange={handleFileChange}
+            />
+          </div>
 
-      <input
-        ref={fileInputRef}
-        type="file"
-        className="hidden"
-        onChange={handleFileChange}
-      />
+          {/* textarea */}
+          <div className="flex-1 py-2">
+            <Textarea
+              ref={textareaRef}
+              value={message}
+              onChange={(e) => setMessage(e.target.value)}
+              onKeyDown={handleKeyDown}
+              placeholder="Type a message..."
+              className={cn(
+                "min-h-[39px] max-h-[100px] resize-none border-0 bg-transparent px-0 py-2 text-sm focus-visible:ring-0 focus-visible:ring-offset-0", "text-slate-900 placeholder:text-slate-500"
+              )}
+              rows={1}
+            />
+          </div>
 
-      {/* Textarea */}
-      <Textarea
-        value={message}
-        onChange={(e) => setMessage(e.target.value)}
-        onKeyDown={handleKeyDown}
-        placeholder="Type a message..."
-        className="min-h-[32px] resize-none flex-grow rounded-md border border-gray-300 px-2 py-1 text-sm"
-        rows={1}
-      />
+          {/* send Button */}
+          <div className="flex-shrink-0 p-2">
+            <Button
+              onClick={handleSend}
+              size="sm"
+              disabled={!message.trim() || isSending}
+              className={cn(
+                "h-10 w-10 rounded-full text-white shadow-md transition-all duration-200",
+                (!message.trim() || isSending) && "opacity-50 cursor-not-allowed bg-gray-400",
+                message.trim() && !isSending && "bg-slate-600 hover:bg-slate-700"
+              )}
+            >
+              {isSending ? (
+                <svg className="h-5 w-5 animate-spin" fill="none" viewBox="0 0 24 24">
+                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                </svg>
+              ) : (
+                <PaperPlaneIcon className="h-5 w-5" />
+              )}
+            </Button>
+          </div>
+        </div>
 
-      {/* Send Button */}
-      <Button
-        onClick={handleSend}
-        size="icon"
-        disabled={!message.trim() || isSending}
-        className={cn(
-          "h-8 w-8 rounded-full",
-          isSending && "opacity-50 cursor-not-allowed"
+        {/* encryption indicator */}
+        {isEncrypted && (
+          <div className={cn("flex items-center gap-1 mt-2 text-xs", "text-slate-500")}>
+            <LockClosedIcon className="h-3 w-3" />
+            <span>End-to-end encrypted</span>
+          </div>
         )}
-      >
-        <PaperPlaneIcon className="h-4 w-4" />
-      </Button>
+      </div>
     </div>
-  </div>
-);}
+  );
+}
