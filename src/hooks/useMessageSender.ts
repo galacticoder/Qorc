@@ -10,6 +10,7 @@ export function useMessageSender(
   isLoggedIn: boolean,
   users: User[],
   loginUsernameRef: React.MutableRefObject<string>,
+  onNewMessage: (message: Message) => void,
   setMessages: React.Dispatch<React.SetStateAction<Message[]>>
 ) {
   async function getDeterministicMessageId(message: {
@@ -55,9 +56,8 @@ export function useMessageSender(
           ...(replyTo ? { replyTo } : {}),
         };
         
-        setMessages(prev => [...prev, newMessage]);
+        onNewMessage(newMessage);
 
-        
         await Promise.all(
           users.map(async (user) => {
             if (user.username === loginUsernameRef.current || !user.publicKey) return;
@@ -87,20 +87,17 @@ export function useMessageSender(
       } catch (error) {
         console.error("E2EE send error:", error);
 
-        setMessages(prev => [
-          ...prev,
-          {
-            id: uuidv4(),
-            content: `Failed to send message: ${error instanceof Error ? error.message : "Unknown error"}`,
-            sender: "System",
-            timestamp: new Date(),
-            isCurrentUser: false,
-            isSystemMessage: true,
-          },
-        ]);
+        onNewMessage({
+          id: uuidv4(),
+          content: `Failed to send message: ${error instanceof Error ? error.message : "Unknown error"}`,
+          sender: "System",
+          timestamp: new Date(),
+          isCurrentUser: false,
+          isSystemMessage: true,
+        });
       }
     },
-    [isLoggedIn, users, loginUsernameRef, setMessages]
+    [isLoggedIn, users, loginUsernameRef, onNewMessage]
   );
 
   const handleDeleteMessage = useCallback(
@@ -108,12 +105,7 @@ export function useMessageSender(
       if (!isLoggedIn) return;
 
       try {
-        setMessages(prev => prev.map(msg => 
-          msg.id === messageId 
-            ? { ...msg, isDeleted: true, content: "Message deleted" } 
-            : msg
-        ));
-
+        
         await Promise.all(
           users.map(async (user) => {
             if (user.username === loginUsernameRef.current || !user.publicKey) return;
@@ -128,19 +120,19 @@ export function useMessageSender(
             });
             
             websocketClient.send(JSON.stringify(payload));
+
+            setMessages(prev => prev.map(msg => 
+             msg.id === messageId 
+               ? { ...msg, isDeleted: true, content: "Message deleted" } 
+               : msg
+           ));
           })
         );
       } catch (error) {
         console.error("Delete failed:", error);
-
-        setMessages(prev => prev.map(msg => 
-          msg.id === messageId 
-            ? { ...msg, isDeleted: false } 
-            : msg
-        ));
       }
     },
-    [isLoggedIn, users, loginUsernameRef, setMessages]
+    [isLoggedIn, users, loginUsernameRef]
   );
 
    const handleEditMessage = useCallback(
@@ -150,12 +142,6 @@ export function useMessageSender(
       const time = Date.now();
 
       try {
-        setMessages(prev => prev.map(msg => 
-          msg.id === messageId 
-            ? { ...msg, content: newContent, isEdited: true } 
-            : msg
-        ));
-
         await Promise.all(
           users.map(async (user) => {
             if (user.username === loginUsernameRef.current || !user.publicKey) return;
@@ -171,19 +157,19 @@ export function useMessageSender(
             });
             
             websocketClient.send(JSON.stringify(payload));
+
+            setMessages(prev => prev.map(msg => 
+              msg.id === messageId 
+                ? { ...msg, content: newContent, isEdited: true } 
+                : msg
+            ));
           })
         );
       } catch (error) {
         console.error("Failed to edit message:", error);
-        // Revert on error
-        setMessages(prev => prev.map(msg => 
-          msg.id === messageId 
-            ? { ...msg, isEdited: false } 
-            : msg
-        ));
       }
     },
-    [isLoggedIn, users, loginUsernameRef, setMessages]
+    [isLoggedIn, users, loginUsernameRef]
   );
 
   return { handleSendMessage, handleDeleteMessage, handleEditMessage };

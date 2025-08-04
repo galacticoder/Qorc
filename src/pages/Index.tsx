@@ -9,6 +9,7 @@ import { SignalType } from "@/lib/signals";
 import { v4 as uuidv4 } from 'uuid';
 import * as pako from 'pako';
 import { AuthProps, IncomingFileChunks } from "./types";
+import { SecureDB } from "@/lib/secureDB";
 
 import { useAuth } from "@/hooks/useAuth";
 import { useFileHandler, handleSendFile } from "@/hooks/useFileHandler";
@@ -37,20 +38,94 @@ const ChatApp: React.FC<ChatAppProps> = ({ onNavigate }) => {
     loginUsernameRef,
     initializeKeys,
     setAccountAuthenticated,
+    passwordRef,
     serverPublicKeyRef,
     setLoginError
   } = useAuth();
   
   const [messages, setMessages] = useState<Message[]>([]);
   const [users, setUsers] = useState<User[]>([]);
+  const secureDBRef = useRef<SecureDB | null>(null);
+  const [dbInitialized, setDbInitialized] = useState(false);
   
-  useEffect(() => { //make keys
+  useEffect(() => {
     initializeKeys();
   }, [initializeKeys]);
+
+  useEffect(() => { //init db after login
+    if (isLoggedIn && username && passwordRef.current) {
+      secureDBRef.current = new SecureDB(username);
+      secureDBRef.current.initialize(passwordRef.current)
+        .then(() => setDbInitialized(true))
+        .catch(error => {
+          console.error("Database initialization failed:", error);
+          setLoginError("Failed to initialize secure storage");
+        });
+    }
+  }, [isLoggedIn, username]);
+
+  useEffect(() => {  //load from data secure db
+    if (!isLoggedIn || !dbInitialized || !secureDBRef.current) return;
+    
+    const loadData = async () => {
+      try {
+        const savedMessages = await secureDBRef.current!.loadMessages();
+        const savedUsers = await secureDBRef.current!.loadUsers();
+        
+        const processedMessages = savedMessages.map((msg: any) => ({
+          ...msg,
+          timestamp: new Date(msg.timestamp),
+          isCurrentUser: msg.sender === loginUsernameRef.current
+        }));
+        
+        setMessages(processedMessages);
+        
+        if (savedUsers.length > 0) {
+          setUsers(savedUsers);
+        }
+      } catch (error) {
+        console.error("Secure DB load error:", error);
+        setLoginError("Failed to load secure data");
+      }
+    };
+    
+    loadData();
+  }, [isLoggedIn, dbInitialized]);
+
+  useEffect(() => {
+    if (!isLoggedIn || users.length === 0 || !dbInitialized || !secureDBRef.current) return;
+    
+    secureDBRef.current.saveUsers(users)
+      .catch(error => console.error("Failed to save users:", error));
+  }, [users, isLoggedIn, dbInitialized]);
+
+  const handleNewMessage = useCallback(async (message: Message) => {
+    if (!dbInitialized || !secureDBRef.current) return;
+    
+    const shouldPersist = !message.isSystemMessage || 
+                         (message.content.includes('joined') || 
+                          message.content.includes('left'));
+                          
+    if (shouldPersist) {
+      try {
+        setMessages(prev => [...prev, message]);
+        
+        const currentMessages = await secureDBRef.current!.loadMessages();
+        const newMessages = [...currentMessages, message];
+        
+        await secureDBRef.current!.saveMessages(newMessages);
+      } catch (error) {
+        console.error("Failed to save message:", error);
+      }
+    } else {
+      setMessages(prev => [...prev, message]);
+    }
+  }, [dbInitialized]);
+
   
   const { handleFileMessageChunk } = useFileHandler(
     privateKeyRef,
-    setMessages,
+    handleNewMessage,
     setLoginError
   );
 
@@ -58,6 +133,7 @@ const ChatApp: React.FC<ChatAppProps> = ({ onNavigate }) => {
     isLoggedIn,
     users,
     loginUsernameRef,
+    handleNewMessage,
     setMessages
   );
 
@@ -94,6 +170,8 @@ const ChatApp: React.FC<ChatAppProps> = ({ onNavigate }) => {
         return;
       }
 
+      const isJoinLeave = payload.content.includes('joined') || payload.content.includes('left');
+
       console.log("Message ID received: ", payload.id)
 
       const payloadFull: Message = {
@@ -103,6 +181,7 @@ const ChatApp: React.FC<ChatAppProps> = ({ onNavigate }) => {
         timestamp: new Date(payload.timestamp),
         isCurrentUser: false,
         isSystemMessage: payload.typeInside === 'system',
+        shouldPersist: isJoinLeave,
         ...(payload.replyTo && {
           replyTo: {
             id: payload.replyTo.id,
@@ -113,11 +192,11 @@ const ChatApp: React.FC<ChatAppProps> = ({ onNavigate }) => {
       };
 
       console.log("Reply field: ", payloadFull.replyTo)
-      setMessages(prev => [...prev, payloadFull]);
+      await handleNewMessage(payloadFull);
     } catch (error) {
       console.error("Error handling encrypted message:", error);
     }
-  }, []);
+  }, [handleNewMessage]);
 
   const handleSignalMessages = useCallback(async (data: any) => {
     const { type, message } = data;
@@ -143,7 +222,7 @@ const ChatApp: React.FC<ChatAppProps> = ({ onNavigate }) => {
         
         case SignalType.AUTH_SUCCESS:
           handleAuthSuccess(loginUsernameRef.current, (welcomeMessages) => {
-            setMessages(welcomeMessages);
+            welcomeMessages.forEach(msg => handleNewMessage(msg));
           });
           break;
 
@@ -184,10 +263,35 @@ const ChatApp: React.FC<ChatAppProps> = ({ onNavigate }) => {
     setAccountAuthenticated,
     setIsLoggedIn,
     setLoginError,
-    loginUsernameRef
+    loginUsernameRef,
+    handleNewMessage,
+    handleFileMessageChunk,
+    setServerPublicKeyPEM,
+    setUsers
   ]);
   
-  useWebSocket(handleSignalMessages, handleEncryptedMessagePayload, setLoginError); //to connect to the server
+  useWebSocket(handleSignalMessages, handleEncryptedMessagePayload, setLoginError);
+
+   const handleSendFileWrapper = useCallback((fileMessage: Message) => {
+    handleSendFile(
+      fileMessage,
+      loginUsernameRef,
+      handleNewMessage,
+      users
+    );
+  }, [loginUsernameRef, handleNewMessage, users]);
+
+  const handleLogout = useCallback(() => {
+    if (secureDBRef.current) {
+      secureDBRef.current = null;
+      passwordRef.current = "";
+    }
+    
+    setIsLoggedIn(false);
+    setMessages([]);
+    setUsers([]);
+    setLoginError("");
+  }, []);
 
   if (!isLoggedIn) {
     return (
@@ -205,9 +309,18 @@ const ChatApp: React.FC<ChatAppProps> = ({ onNavigate }) => {
   
   return (
     <div className="flex flex-col h-screen p-4 md:p-6 bg-gradient-to-r from-gray-50 to-slate-50">
-      <header className="mb-4">
-        <h1 className="text-2xl font-bold">SecureChat</h1>
-        <p className="text-muted-foreground">End-to-end encrypted messaging</p>
+      
+      <header className="mb-4 flex justify-between items-center">
+        <div>
+          <h1 className="text-2xl font-bold">SecureChat</h1>
+          <p className="text-muted-foreground">End-to-end encrypted messaging</p>
+        </div>
+        <button 
+          onClick={handleLogout}
+          className="px-4 py-2 bg-red-500 text-white rounded-lg hover:bg-red-600 transition"
+        >
+          Logout
+        </button>
       </header>
       
       <div className="flex flex-1 gap-4 h-[calc(100vh-150px)]">
@@ -219,7 +332,7 @@ const ChatApp: React.FC<ChatAppProps> = ({ onNavigate }) => {
           <ChatInterface
             messages={messages}
             onSendMessage={handleSendMessage}
-            onSendFile={(fileMessage) => handleSendFile(fileMessage, loginUsernameRef, setMessages)}//put in wrapper because i want to pass in 2 other args
+            onSendFile={handleSendFileWrapper}
             isEncrypted={true}
             currentUsername={loginUsernameRef.current}
             users={users}

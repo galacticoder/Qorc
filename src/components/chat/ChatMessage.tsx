@@ -13,18 +13,22 @@ export interface Message {
   content: string;
   sender: string;
   timestamp: Date;
-  isCurrentUser: boolean;
+  isCurrentUser?: boolean;
   isSystemMessage?: boolean;
-  type?: SignalType;
-  filename?: string;
-  fileSize?: number;
+  isDeleted?: boolean;
+  isEdited?: boolean;
+  shouldPersist?: boolean;
   replyTo?: {
     id: string;
     sender: string;
     content: string;
   };
-  isDeleted?: boolean;
-  isEdited?: boolean;
+  fileInfo?: {
+    name: string;
+    type: string;
+    size: number;
+    data: ArrayBuffer;
+  };
 }
 
 interface ChatMessageProps {

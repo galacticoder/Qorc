@@ -24,6 +24,11 @@ class Base64Utils {
     }
     return bytes.buffer;
   }
+
+  static stringToArrayBuffer(str: string): ArrayBuffer {
+    const encoder = new TextEncoder();
+    return encoder.encode(str);
+  }
 }
 
 class KeyService {

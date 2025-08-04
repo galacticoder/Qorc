@@ -4,10 +4,11 @@ import * as pako from "pako";
 import { SignalType } from "@/lib/signals";
 import { Message, IncomingFileChunks } from "@/pages/types";
 import { CryptoUtils } from "@/lib/unified-crypto";
+import { User } from "@/components/chat/UserList";
 
 export function useFileHandler(
   privateKeyRef: React.MutableRefObject<CryptoKey | null>,
-  setMessages: React.Dispatch<React.SetStateAction<Message[]>>,
+  onNewMessage: (message: Message) => void,
   setLoginError: (err: string) => void
 ) {
   const incomingFileChunksRef = useRef<IncomingFileChunks>({});
@@ -57,20 +58,17 @@ export function useFileHandler(
           const fileBlob = new Blob(fileEntry.decryptedChunks, { type: "application/octet-stream" });
           const fileUrl = URL.createObjectURL(fileBlob);
 
-          setMessages(prev => [
-            ...prev,
-            {
-              id: uuidv4(),
-              content: fileUrl,
-              sender: from,
-              timestamp: new Date(),
-              isCurrentUser: false,
-              isSystemMessage: false,
-              type: SignalType.FILE_MESSAGE,
-              filename,
-              fileSize: fileBlob.size
-            }
-          ]);
+          onNewMessage({
+            id: uuidv4(),
+            content: fileUrl,
+            sender: from,
+            timestamp: new Date(),
+            isCurrentUser: false,
+            isSystemMessage: false,
+            type: SignalType.FILE_MESSAGE,
+            filename,
+            fileSize: fileBlob.size
+          });
 
           delete incomingFileChunksRef.current[fileKey];
         }
@@ -79,7 +77,7 @@ export function useFileHandler(
         setLoginError("Failed to process file chunk");
       }
     },
-    [privateKeyRef, setMessages, setLoginError]
+    [privateKeyRef, onNewMessage, setLoginError]
   );
 
   return { handleFileMessageChunk };
@@ -88,10 +86,15 @@ export function useFileHandler(
 export function handleSendFile(
   fileMessage: Message,
   loginUsernameRef: React.MutableRefObject<string>,
-  setMessages: React.Dispatch<React.SetStateAction<Message[]>>
+  onNewMessage: (message: Message) => void,
+  users: User[]
 ) {
-  setMessages(prev => [
-    ...prev,
-    { ...fileMessage, isCurrentUser: true, sender: loginUsernameRef.current }
-  ]);
+  const userFileMessage: Message = { 
+    ...fileMessage, 
+    isCurrentUser: true, 
+    sender: loginUsernameRef.current,
+    shouldPersist: false
+  };
+  
+  onNewMessage(userFileMessage);
 }

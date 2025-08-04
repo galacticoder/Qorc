@@ -22,6 +22,7 @@ export const useAuth = () => {
   const [serverPublicKeyPEM, setServerPublicKeyPEM] = useState<string | null>(null);
   const loginUsernameRef = useRef("");
   const serverPublicKeyRef = useRef<CryptoKey | null>(null);
+  const passwordRef = useRef<string>("");
 
   const initializeKeys = useCallback(async () => {
     if (!privateKeyPEM || !publicKeyPEM) {
@@ -64,6 +65,7 @@ export const useAuth = () => {
     setLoginError("");
     loginUsernameRef.current = username;
     setUsername(username);
+    passwordRef.current = password; 
 
     try {
       if (!serverPublicKeyPEM) throw new Error("Server public key not available");
@@ -108,7 +110,6 @@ export const useAuth = () => {
         } catch (error) {
           setLoginError("Failed to connect to server");
           return;
-        } finally {
         }
       }
 
@@ -191,6 +192,7 @@ export const useAuth = () => {
     getWelcomeMessages,
     setAccountAuthenticated,
     serverPublicKeyRef,
+    passwordRef,
     setLoginError
   };
 };
