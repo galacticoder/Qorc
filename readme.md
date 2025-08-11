@@ -16,13 +16,16 @@ To quickly get the application running, you can use the provided bash script:
     ```bash
     cd end2end-chat-site
     ```
-2.  **Run the start script:**
+2.  **Run the start server script:**
     ```bash
-    ./start.sh
+    ./startServer.sh
     ```
-    This script will handle both backend and frontend setup and startup.
-
-3.  **Access the application:**
+3.  **Run the start client script in anothet terminal:**
+   ```bash
+    ./startClient.sh
+   ```
+    
+5.  **Access the application:**
     Once the script has finished, open your web browser and navigate to `http://localhost:5173` (or the address indicated by the script if different).
 
 ## Usage
