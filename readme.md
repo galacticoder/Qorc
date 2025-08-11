@@ -20,10 +20,10 @@ To quickly get the application running, you can use the provided bash script:
     ```bash
     ./startServer.sh
     ```
-3.  **Run the start client script in anothet terminal:**
-   ```bash
-    ./startClient.sh
-   ```
+3.  **Run the start client script in another terminal:**
+    ```bash
+     ./startClient.sh
+    ```
     
 5.  **Access the application:**
     Once the script has finished, open your web browser and navigate to `http://localhost:5173` (or the address indicated by the script if different).
