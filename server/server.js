@@ -43,7 +43,7 @@ async function startServer() {
       hasAuthenticated: false
     };
 
-    ws.send(JSON.stringify({
+    ws.send(JSON.stringify({ //send server key on connect
       type: SignalType.SERVER_PUBLIC_KEY,
       publicKey: await CryptoUtils.Keys.exportPublicKeyToPEM(serverKeyPair.publicKey),
     }));
@@ -51,62 +51,133 @@ async function startServer() {
     ws.on('message', async (message) => {
       try {
         const str = message.toString().trim();
+        let parsed;
 
-        if (!clientState.hasPassedAccountLogin) { //account logging in
-          const authResult = await authHandler.processAuthRequest(ws, str);
-
-          if (authResult) {
-            console.log("Client has signed-in/signed-up")
-            clientState.hasPassedAccountLogin = true;
-            clientState.username = authResult.username;
-          }
-          
+        try {
+          parsed = JSON.parse(str);
+        } catch {
+          console.log("Invalid JSON format");
           return;
         }
 
-        if (!clientState.hasAuthenticated && clientState.hasPassedAccountLogin){ //server password
-            const result = await serverAuthHandler.handleServerAuthentication(ws, str, clientState);
-            if (result) clientState.hasAuthenticated = true;
-            else return;
+        switch (parsed.type) {
+          case SignalType.ACCOUNT_SIGN_IN:
+          case SignalType.ACCOUNT_SIGN_UP:
+            const authResult = await authHandler.processAuthRequest(ws, str);
 
-            MessagingUtils.broadcastPublicKeys(clients);
-            await MessagingUtils.broadcastUserJoin(clients,clientState.username)
-            return;
-        }
-        
-        try {
-          const parsed = JSON.parse(str);
-          console.log(`Received message from ${clientState.username}:`, parsed);
-          
-          if (parsed.to && clients.has(parsed.to)) {
+            if (authResult && authResult.authenticated) {
+              clientState.hasPassedAccountLogin = true;
+              clientState.username = authResult.username;
+
+              ws.send(JSON.stringify({ type: SignalType.IN_ACCOUNT, message: "Logged in successfully" }));
+              clients.set(clientState.username, { ws, clientState });
+            } else if (authResult && authResult.pending) {
+              clientState.hasPassedAccountLogin = true;
+              clientState.username = authResult.username;
+              
+              ws.send(JSON.stringify({ type: SignalType.IN_ACCOUNT, message: "Logged in successfully" }));
+              console.log(`User ${authResult.username} registration pending passphrase`);
+            } else {
+              ws.send(JSON.stringify({ type: SignalType.ERROR, message: "Login failed" })); //add error signal handling on client side later maybe just filler for now
+            }
+            break;
+
+
+          case SignalType.PASSPHRASE_HASH: //for sign in
+            console.log("Passphrase hash: ", parsed)
+            if (!clientState.username) {
+              ws.send(JSON.stringify({ type: SignalType.ERROR, message: "Username not set" }));
+              break;
+            }
+            if (!parsed.passphraseHash) {
+              ws.send(JSON.stringify({ type: SignalType.ERROR, message: "Passphrase hash missing" }));
+              break;
+            }
+            await authHandler.handlePassphraseReceived(ws, clientState.username, parsed.passphraseHash);
+            ws.send(JSON.stringify({ type: SignalType.PASSPHRASE_SUCCESS, message: "Passphrase verified successfully" }));
+            break;
+
+          case SignalType.PASSPHRASE_HASH_NEW: //for sign up . combine with sign in later maybe for better management
+            console.log("Passphrase hash new: ", parsed)
+            if (!clientState.username) {
+              ws.send(JSON.stringify({ type: SignalType.ERROR, message: "Username not set" }));
+              break;
+            }
+            if (!parsed.passphraseHash) {
+              ws.send(JSON.stringify({ type: SignalType.ERROR, message: "Passphrase hash missing" }));
+              break;
+            }
+            await authHandler.handleNewPassphraseReceived(ws, clientState.username, parsed.passphraseHash);
+            ws.send(JSON.stringify({ type: SignalType.PASSPHRASE_SUCCESS, message: "Passphrase saved successfully" }));
+            break;
+
+
+          case SignalType.SERVER_LOGIN:
+            if (!clientState.hasPassedAccountLogin) {
+              ws.send(JSON.stringify({ type: SignalType.ERROR, message: "Account login required first" }));
+              break;
+            }
+            if (clientState.hasAuthenticated) {
+              ws.send(JSON.stringify({ type: SignalType.ERROR, message: "Already authenticated" }));
+              break;
+            }
+            const serverAuthSuccess = await serverAuthHandler.handleServerAuthentication(ws, str, clientState);
+            if (serverAuthSuccess) {
+              clientState.hasAuthenticated = true;
+              ws.send(JSON.stringify({ type: SignalType.AUTH_SUCCESS, message: "Server authentication successful" }));
+              MessagingUtils.broadcastPublicKeys(clients);
+              await MessagingUtils.broadcastUserJoin(clients, clientState.username);
+            } else {
+              ws.send(JSON.stringify({ type: SignalType.AUTH_ERROR, message: "Server authentication failed" }));
+            }
+            break;
+
+          case SignalType.ENCRYPTED_MESSAGE:
+          case SignalType.FILE_MESSAGE_CHUNK:
+            if (!clientState.hasAuthenticated) {
+              ws.send(JSON.stringify({ type: SignalType.ERROR, message: "Not authenticated yet" }));
+              break;
+            }
+            if (!parsed.to || !clients.has(parsed.to)) {
+              ws.send(JSON.stringify({ type: SignalType.ERROR, message: "Target user not found" }));
+              break;
+            }
+
             const target = clients.get(parsed.to);
-            const isFileChunk = parsed.type === SignalType.FILE_MESSAGE_CHUNK;
-            
             target.ws.send(JSON.stringify(parsed));
-            
+
+            const isFileChunk = parsed.type === SignalType.FILE_MESSAGE_CHUNK;
             console.log(
-              isFileChunk 
+              isFileChunk
                 ? `Relayed file chunk ${parsed.chunkIndex + 1}/${parsed.totalChunks} from ${parsed.from} to ${parsed.to}`
                 : `Relayed message from ${parsed.from} to ${parsed.to}`
             );
-          }
+            break;
 
-        } catch (e) {
-          console.warn("Caught exception: ", e);
+          default:
+            ws.send(JSON.stringify({ type: SignalType.ERROR, message: `Unknown message type: ${parsed}` }));
         }
+
       } catch (err) {
-        console.error("Message error: ", err);
+        console.error("Message handler error:", err);
       }
     });
 
-    ws.on('close', async () => { 
-      if (clientState.username && clientState.hasAuthenticated) {
-        clients.delete(clientState.username);
-        console.log(`User '${clientState.username}' has disconnected.`);
-        await MessagingUtils.broadcastUserLeave(clients, clientState.username);
+    ws.on('close', async () => {
+      if (clientState.username) {
+        if (clients.has(clientState.username)) {
+          clients.delete(clientState.username);
+          console.log(`User '${clientState.username}' has disconnected.`);
+          await MessagingUtils.broadcastUserLeave(clients, clientState.username);
+        } else {
+          console.log(`User '${clientState.username}' disconnected but was not in clients map.`);
+        }
+      } else {
+        console.log(`A connection without username disconnected.`);
       }
     });
   });
+
 }
 
 startServer();

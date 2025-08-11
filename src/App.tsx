@@ -9,16 +9,17 @@ function App() {
   const [currentPage, setCurrentPage] = useState<Page>('home');
 
   const renderPage = () => {
-    switch (currentPage) {
-      case 'home':
-        return <HomeScreen onNavigate={setCurrentPage} />;
-      case 'server':
-        return <ServerConnection onNavigate={setCurrentPage} />;
-      case 'chat':
-        return <ChatApp onNavigate={setCurrentPage}/>;
-      default:
-        return <HomeScreen onNavigate={setCurrentPage} />;
-    }
+    return <ChatApp onNavigate={setCurrentPage}/>;
+    // switch (currentPage) {
+    //   case 'home':
+    //     return <HomeScreen onNavigate={setCurrentPage} />;
+    //   case 'server':
+    //     return <ServerConnection onNavigate={setCurrentPage} />;
+    //   case 'chat':
+    //     return <ChatApp onNavigate={setCurrentPage}/>;
+    //   default:
+    //     return <HomeScreen onNavigate={setCurrentPage} />;
+    // }
   };
 
   return (

@@ -1,5 +1,4 @@
 import { useState, useRef, useCallback } from "react";
-import { v4 as uuidv4 } from 'uuid';
 import { useLocalStorage } from "./use-local-storage";
 import { Message } from "@/components/chat/ChatMessage";
 import { SignalType } from "@/lib/signals";
@@ -13,6 +12,8 @@ export const useAuth = () => {
   const [isGeneratingKeys, setIsGeneratingKeys] = useState(false);
   const [loginError, setLoginError] = useState("");
   const [accountAuthenticated, setAccountAuthenticated] = useState(false);
+  const passphraseRef = useRef<string>("");
+
   
   // keys
   const [privateKeyPEM, setPrivateKeyPEM] = useLocalStorage<string>("private_key", "");
@@ -23,6 +24,8 @@ export const useAuth = () => {
   const loginUsernameRef = useRef("");
   const serverPublicKeyRef = useRef<CryptoKey | null>(null);
   const passwordRef = useRef<string>("");
+  const [passphraseHashParams, setPassphraseHashParams] = useState(null);
+
 
   const initializeKeys = useCallback(async () => {
     if (!privateKeyPEM || !publicKeyPEM) {
@@ -60,16 +63,20 @@ export const useAuth = () => {
   const handleAccountSubmit = async (
     mode: "login" | "register",
     username: string,
-    password: string
+    password: string,
+    passphrase?: string
   ) => {
     setLoginError("");
     loginUsernameRef.current = username;
     setUsername(username);
-    passwordRef.current = password; 
+    passwordRef.current = password;
+    passphraseRef.current = passphrase || "";
 
     try {
       if (!serverPublicKeyPEM) throw new Error("Server public key not available");
       if (!websocketClient.isConnectedToServer()) await websocketClient.connect();
+
+      await initializeKeys();
 
       const encryptedPasswordPayload = await CryptoUtils.Encrypt.encryptAndFormatPayload({
         recipientPEM: serverPublicKeyPEM,
@@ -87,6 +94,8 @@ export const useAuth = () => {
         userData: encryptedUserPayload,
         passwordData: encryptedPasswordPayload
       };
+
+      console.log("Sent account info")
 
       websocketClient.send(JSON.stringify(payload));
     } catch (error) {
@@ -126,7 +135,7 @@ export const useAuth = () => {
       });
 
       const loginInfo = {
-        type: SignalType.LOGIN_INFO,
+        type: SignalType.SERVER_LOGIN,
         userData: userPayload,
         passwordData: passwordPayload
       };
@@ -140,37 +149,53 @@ export const useAuth = () => {
     }
   };
 
-  const getWelcomeMessages = (username: string): Message[] => {
-    return [
-      {
-        id: uuidv4(),
-        content: `Welcome to SecureChat, ${username}! Your messages are secured with this encryption:
-          • RSA-4096 for key exchange
-          • AES-256-GCM for message encryption
-          • SHA-512 for integrity verification`,
-        sender: "System",
-        timestamp: new Date(),
-        isCurrentUser: false,
-        isSystemMessage: true
-      },
-      {
-        id: uuidv4(),
-        content: "Connected to secure WebSocket server with end-to-end encryption.",
-        sender: "System",
-        timestamp: new Date(),
-        isCurrentUser: false,
-        isSystemMessage: true
+  const handlePassphraseSubmit = async (passphrase: string, mode: "login" | "register") => {
+    if (mode === "login") {
+      if (!passphraseHashParams) {
+        setLoginError("Missing passphrase hashing parameters from server.");
+        return;
       }
-    ];
+      try {
+        console.log("Hashing passphrase for login...");
+        const passphraseHash = await CryptoUtils.Hash.hashDataUsingInfo(passphrase, passphraseHashParams);
+        passphraseRef.current = passphraseHash;
+
+        websocketClient.send(JSON.stringify({
+          type: SignalType.PASSPHRASE_HASH,
+          passphraseHash: passphraseHash,
+        }));
+
+        console.log("Sent hashed passphrase to server for login");
+      } catch (error) {
+        console.error("Passphrase hashing failed:", error);
+        setLoginError("Failed to hash passphrase.");
+      }
+    } else if (mode === "register") {
+      try {
+        console.log("Generating new hashing passphrase for registration...");
+
+        const passphraseHash = await CryptoUtils.Hash.hashData(passphrase);
+
+        passphraseRef.current = passphraseHash;
+
+        websocketClient.send(JSON.stringify({ //encrypt with server key later after committing
+          type: SignalType.PASSPHRASE_HASH_NEW,
+          passphraseHash: passphraseHash,
+        }));
+
+        console.log("Sent hashed passphrase and new salt to server for registration");
+      } catch (error) {
+        console.error("Passphrase hashing failed:", error);
+        setLoginError("Failed to hash passphrase.");
+      }
+    }
   };
 
   const handleAuthSuccess = (username: string, onSuccess?: (messages: Message[]) => void) => {
+    console.log("Auth success")
     setUsername(username);
     setIsLoggedIn(true);
     setLoginError("");
-    
-    const welcomeMessages = getWelcomeMessages(username);
-    onSuccess?.(welcomeMessages);
   };
   
   return {
@@ -187,12 +212,14 @@ export const useAuth = () => {
     loginUsernameRef,
     initializeKeys,
     handleAccountSubmit,
+    handlePassphraseSubmit,
     handleServerPasswordSubmit,
     handleAuthSuccess,
-    getWelcomeMessages,
     setAccountAuthenticated,
     serverPublicKeyRef,
     passwordRef,
-    setLoginError
+    setLoginError,
+    passphraseHashParams,
+    setPassphraseHashParams,
   };
 };

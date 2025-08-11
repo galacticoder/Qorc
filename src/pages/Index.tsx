@@ -7,8 +7,6 @@ import { CryptoUtils } from "@/lib/unified-crypto";
 import websocketClient from "@/lib/websocket";
 import { SignalType } from "@/lib/signals";
 import { v4 as uuidv4 } from 'uuid';
-import * as pako from 'pako';
-import { AuthProps, IncomingFileChunks } from "./types";
 import { SecureDB } from "@/lib/secureDB";
 
 import { useAuth } from "@/hooks/useAuth";
@@ -31,6 +29,7 @@ const ChatApp: React.FC<ChatAppProps> = ({ onNavigate }) => {
     loginError,
     accountAuthenticated,
     handleAccountSubmit: authHandleAccountSubmit,
+    handlePassphraseSubmit,
     handleServerPasswordSubmit: authHandleServerPasswordSubmit,
     handleAuthSuccess,
     privateKeyRef,
@@ -40,13 +39,15 @@ const ChatApp: React.FC<ChatAppProps> = ({ onNavigate }) => {
     setAccountAuthenticated,
     passwordRef,
     serverPublicKeyRef,
-    setLoginError
+    setLoginError,
+    setPassphraseHashParams,
   } = useAuth();
   
   const [messages, setMessages] = useState<Message[]>([]);
   const [users, setUsers] = useState<User[]>([]);
   const secureDBRef = useRef<SecureDB | null>(null);
   const [dbInitialized, setDbInitialized] = useState(false);
+  const [showPassphrasePrompt, setShowPassphrasePrompt] = useState(false);
   
   useEffect(() => {
     initializeKeys();
@@ -221,9 +222,52 @@ const ChatApp: React.FC<ChatAppProps> = ({ onNavigate }) => {
           break;
         
         case SignalType.AUTH_SUCCESS:
+          console.log("Auth success message: ", data)
           handleAuthSuccess(loginUsernameRef.current, (welcomeMessages) => {
             welcomeMessages.forEach(msg => handleNewMessage(msg));
           });
+          break;
+        
+        case SignalType.PASSPHRASE_HASH:
+          console.log("Passphrase hash signal received")
+          if (data && typeof data === "object") {
+            const {
+              version,
+              algorithm,
+              salt,
+              memoryCost,
+              timeCost,
+              parallelism,
+              message: serverMessage
+            } = data || {};
+
+            if (
+              version !== undefined &&
+              algorithm !== undefined &&
+              salt !== undefined &&
+              memoryCost !== undefined &&
+              timeCost !== undefined &&
+              parallelism !== undefined &&
+              serverMessage !== undefined
+            ) {
+              setPassphraseHashParams({
+                version,
+                algorithm,
+                salt,
+                memoryCost,
+                timeCost,
+                parallelism,
+                message: serverMessage
+              });
+
+              console.log("Received Passphrase hash info: ", data);
+            }
+          }
+          setShowPassphrasePrompt(true);
+          break;
+        
+        case SignalType.PASSPHRASE_SUCCESS:
+          setShowPassphrasePrompt(false);
           break;
 
         case SignalType.ENCRYPTED_MESSAGE:
@@ -234,7 +278,9 @@ const ChatApp: React.FC<ChatAppProps> = ({ onNavigate }) => {
           break;
 
         case SignalType.IN_ACCOUNT:
+          console.log("In account signal received")
           setAccountAuthenticated(true);
+          // setIsLoggedIn(true);
           break;
 
         case SignalType.FILE_MESSAGE_CHUNK:
@@ -302,6 +348,9 @@ const ChatApp: React.FC<ChatAppProps> = ({ onNavigate }) => {
           onAccountSubmit={authHandleAccountSubmit}
           onServerPasswordSubmit={authHandleServerPasswordSubmit}
           accountAuthenticated={accountAuthenticated}
+          showPassphrasePrompt={showPassphrasePrompt}
+          setShowPassphrasePrompt={setShowPassphrasePrompt}
+          onPassphraseSubmit={handlePassphraseSubmit}
         />
       </div>
     );

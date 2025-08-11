@@ -11,7 +11,7 @@ export enum SignalType {
   INVALIDNAME = "invalid-name",
   SERVER_PASSWORD_ENCRYPTED = "server-password-encrypted",
   SERVER_PUBLIC_KEY = "server-public-key",
-  LOGIN_INFO = "login-info",
+  SERVER_LOGIN = "server-login",
   ACCOUNT_SIGN_IN = "account-sign-in",
   ACCOUNT_SIGN_UP = "account-sign-up",
   IN_ACCOUNT = "in-account",
@@ -19,4 +19,7 @@ export enum SignalType {
   EDIT_MESSAGE = "edit-message",
   AUTH_ERROR = "AUTH_ERROR",
   AUTH_SUCCESS = "AUTH_SUCCESS",
+  PASSPHRASE_HASH = "passphrase-hash",
+  PASSPHRASE_HASH_NEW = "passphrase-hash-new",
+  PASSPHRASE_SUCCESS = "passphrase-success"
 }

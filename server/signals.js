@@ -1,7 +1,7 @@
 export const SignalType = {
   //connection and auth
   SERVER_PUBLIC_KEY: "server-public-key",
-  LOGIN_INFO: "login-info",
+  SERVER_LOGIN: "server-login",
   ACCOUNT_SIGN_IN: "account-sign-in",
   ACCOUNT_SIGN_UP: "account-sign-up",
   IN_ACCOUNT: "in-account",
@@ -20,7 +20,11 @@ export const SignalType = {
   NAMEEXISTSERROR: "name-exists-error",
   INVALIDNAME: "invalid-name",
   INVALIDNAMELENGTH: "invalid-name-length",
-  SERVERLIMIT: "server-limit"
+  SERVERLIMIT: "server-limit",
+
+  PASSPHRASE_HASH: "passphrase-hash",
+  PASSPHRASE_HASH_NEW: "passphrase-hash-new",
+  PASSPHRASE_SUCCESS: "passphrase-success"
 };
 
 export const SignalMessages = {

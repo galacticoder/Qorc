@@ -8,11 +8,13 @@ import {
   CardHeader,
   CardTitle,
 } from "../ui/card";
-import { Input } from "../ui/input";
 import { Label } from "../ui/label";
 import { LockClosedIcon, CheckIcon } from "@radix-ui/react-icons";
 import { Alert, AlertDescription } from "../ui/alert";
 import { KeyRing, EncryptionIcon } from "./icons";
+import { PasswordFieldWithConfirm } from "./PasswordFieldWithConfirm.tsx";
+import { Input } from "../ui/input";
+
 
 interface LoginProps {
   onServerPasswordSubmit?: (serverPassword: string) => Promise<void>;
@@ -22,8 +24,12 @@ interface LoginProps {
   onAccountSubmit: (
     mode: "login" | "register",
     username: string,
-    password: string
+    password: string,
+    passphrase?: string
   ) => Promise<void>;
+  onPassphraseSubmit?: (passphrase: string, mode: "login" | "register") => Promise<void>;
+  showPassphrasePrompt: boolean;
+  setShowPassphrasePrompt: (show: boolean) => void;
 }
 
 export function Login({
@@ -31,24 +37,33 @@ export function Login({
   onServerPasswordSubmit,
   isGeneratingKeys,
   error,
+  onPassphraseSubmit,
   accountAuthenticated,
+  showPassphrasePrompt
 }: LoginProps) {
   const [username, setUsername] = useState("");
   const [serverPassword, setServerPassword] = useState("");
   const [localPassword, setLocalPassword] = useState("");
   const [confirmLocalPassword, setConfirmLocalPassword] = useState("");
+  const [passphrase, setPassphrase] = useState("");
+  const [confirmPassphrase, setConfirmPassphrase] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [mode, setMode] = useState<"login" | "register">("login");
 
   const handleAccountSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!username.trim() || isSubmitting || isGeneratingKeys) return;
-    if (mode === "register" && localPassword !== confirmLocalPassword) return;
+    if (mode === "register") {
+      if (
+        localPassword !== confirmLocalPassword
+      ) {
+        return;
+      }
+    }
 
     setIsSubmitting(true);
     try {
-      await onAccountSubmit(mode, username.trim(), localPassword);
-      // Wait for accountAuthenticated to be set by parent
+      await onAccountSubmit(mode, username.trim(), localPassword, passphrase);
     } catch (err) {
       console.error("Account Login/Register failed", err);
     } finally {
@@ -76,10 +91,28 @@ export function Login({
     }
   };
 
+  const handlePassphraseSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!passphrase.trim() || isSubmitting || isGeneratingKeys || !onPassphraseSubmit) return;
+
+    setIsSubmitting(true);
+    try {
+      // Pass mode along so parent knows if login or register
+      await onPassphraseSubmit(passphrase, mode);
+    } catch (err) {
+      console.error("Passphrase submission failed", err);
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+
   return (
     <form
       onSubmit={
-        accountAuthenticated
+        showPassphrasePrompt
+          ? handlePassphraseSubmit
+          : accountAuthenticated
           ? handleServerPasswordSubmit
           : handleAccountSubmit
       }
@@ -97,7 +130,61 @@ export function Login({
         </CardHeader>
 
         <CardContent className="space-y-6">
-          {!accountAuthenticated ? (
+          {/* passphrase after login/register form always*/}
+          {showPassphrasePrompt ? (
+            <div className="space-y-4">
+              {mode === "register" ? (
+                <PasswordFieldWithConfirm
+                  label="Secure Encryption Passphrase"
+                  value={passphrase}
+                  confirmValue={confirmPassphrase}
+                  onChange={setPassphrase}
+                  onConfirmChange={setConfirmPassphrase}
+                  required
+                  minLength={12}
+                  strengthCheck
+                  warningMessage={
+                    <>
+                      This passphrase encrypts all your account data. If you forget it,{" "}
+                      <strong>you will lose access</strong> to all your messages and files.
+                    </>
+                  }
+                />
+              ) : (
+                <div className="space-y-2">
+                  <Label htmlFor="passphrase">Secure Encryption Passphrase</Label>
+                  <Input
+                    id="passphrase"
+                    type="password"
+                    placeholder="Enter your encryption passphrase"
+                    value={passphrase}
+                    onChange={(e) => setPassphrase(e.target.value)}
+                    disabled={isSubmitting || isGeneratingKeys}
+                    required
+                    minLength={12}
+                  />
+                </div>
+              )}
+              <Button type="submit" disabled={isSubmitting}>
+                Submit Passphrase
+              </Button>
+            </div>
+          ) : accountAuthenticated ? (
+            /* server password */
+            <div className="space-y-2">
+              <Label htmlFor="serverPassword">Server Password</Label>
+              <Input
+                id="serverPassword"
+                type="password"
+                placeholder="Enter server password"
+                value={serverPassword}
+                onChange={(e) => setServerPassword(e.target.value)}
+                disabled={isSubmitting || isGeneratingKeys}
+                required
+              />
+            </div>
+          ) : (
+            /* login/register*/
             <>
               <div className="space-y-2">
                 <Label htmlFor="username">Username</Label>
@@ -140,35 +227,18 @@ export function Login({
                     type="password"
                     placeholder="Re-enter your password"
                     value={confirmLocalPassword}
-                    onChange={(e) =>
-                      setConfirmLocalPassword(e.target.value)
-                    }
+                    onChange={(e) => setConfirmLocalPassword(e.target.value)}
                     disabled={isSubmitting || isGeneratingKeys}
                     required
                   />
                   {localPassword &&
                     confirmLocalPassword &&
                     localPassword !== confirmLocalPassword && (
-                      <p className="text-xs text-red-500">
-                        Passwords do not match
-                      </p>
+                      <p className="text-xs text-red-500">Passwords do not match</p>
                     )}
                 </div>
               )}
             </>
-          ) : (
-            <div className="space-y-2">
-              <Label htmlFor="serverPassword">Server Password</Label>
-              <Input
-                id="serverPassword"
-                type="password"
-                placeholder="Enter server password"
-                value={serverPassword}
-                onChange={(e) => setServerPassword(e.target.value)}
-                disabled={isSubmitting || isGeneratingKeys}
-                required
-              />
-            </div>
           )}
 
           {error && (
@@ -196,12 +266,14 @@ export function Login({
             disabled={
               isSubmitting ||
               isGeneratingKeys ||
+              (accountAuthenticated && !serverPassword) ||
               (!accountAuthenticated &&
+                !showPassphrasePrompt &&
                 (!username.trim() ||
                   (mode === "register" &&
-                    (localPassword !== confirmLocalPassword ||
-                      !localPassword)))) ||
-              (accountAuthenticated && !serverPassword)
+                    (localPassword !== confirmLocalPassword || !localPassword)))) ||
+              (showPassphrasePrompt &&
+                (!passphrase || (mode === "register" && passphrase !== confirmPassphrase)))
             }
           >
             {isGeneratingKeys ? (
@@ -210,11 +282,15 @@ export function Login({
                 Generating encryption keys...
               </span>
             ) : isSubmitting ? (
-              accountAuthenticated
+              showPassphrasePrompt
+                ? "Submitting Passphrase..."
+                : accountAuthenticated
                 ? "Verifying Server Password..."
                 : mode === "register"
                 ? "Registering..."
                 : "Logging In..."
+            ) : showPassphrasePrompt ? (
+              "Submit Passphrase"
             ) : accountAuthenticated ? (
               "Verify Server Password"
             ) : mode === "register" ? (
@@ -224,7 +300,7 @@ export function Login({
             )}
           </Button>
 
-          {!accountAuthenticated && (
+          {!accountAuthenticated && !showPassphrasePrompt && (
             <div className="text-sm text-center text-muted-foreground">
               {mode === "login" ? (
                 <>

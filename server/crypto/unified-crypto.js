@@ -125,7 +125,7 @@ class KeyService {
   }
 }
 
-class PasswordService {
+class HashingService {
   static async hashPassword(password) {
     return await argon2.hash(password, {
       type: argon2.argon2id,
@@ -137,6 +137,36 @@ class PasswordService {
 
   static async verifyPassword(hash, inputPassword) {
     return await argon2.verify(hash, inputPassword);
+  }
+
+  static async parseArgon2Hash(encodedHash) {
+    const parts = encodedHash.split('$');
+    if (parts.length !== 6) {
+      throw new Error('Invalid Argon2 encoded hash format');
+    }
+
+    const [, algorithm, versionPart, paramsPart, saltB64, hashB64] = parts;//extract all hash info
+
+    const version = parseInt(versionPart.split('=')[1], 10); //version number extract
+
+    const params = {};
+    paramsPart.split(',').forEach(param => {
+      const [key, value] = param.split('=');
+      params[key] = Number(value);
+    });
+
+    const salt = Buffer.from(saltB64, 'base64');
+    const hash = Buffer.from(hashB64, 'base64');
+
+    return {
+      algorithm,
+      version,
+      memoryCost: params.m,
+      timeCost: params.t,
+      parallelism: params.p,
+      salt,
+      hash
+    };
   }
 }
 
@@ -386,7 +416,7 @@ export const CryptoUtils = {
   Random: RandomGenerator,
   Hash: HashService,
   Keys: KeyService,
-  Password: PasswordService,
+  Password: HashingService,
   Encrypt: EncryptionService,
   Decrypt: DecryptionService,
 };

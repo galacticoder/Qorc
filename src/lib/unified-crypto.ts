@@ -1,3 +1,5 @@
+import * as argon2 from "argon2-wasm";
+
 class CryptoConfig {
   static RSA_KEY_SIZE = 4096;
   static AES_KEY_SIZE = 256;
@@ -30,6 +32,85 @@ class Base64Utils {
     return encoder.encode(str);
   }
 }
+
+class HashingService {
+    static async hashDataUsingInfo(data: string, optionsFromServer: {
+      version?: number;
+      algorithm?: string;
+      salt: string;
+      memoryCost?: number;
+      timeCost?: number;
+      parallelism?: number;
+    }): Promise<string> {
+      if (!optionsFromServer?.salt) {
+        throw new Error("Salt is required");
+      }
+
+      console.log("IN HASHING SERVER INFO: ", optionsFromServer)
+
+      const saltBufferRaw = CryptoUtils.Base64.base64ToArrayBuffer(optionsFromServer.salt);
+      const saltBuffer = new Uint8Array(saltBufferRaw);
+
+      console.log("Decoded salt buffer length:", saltBuffer.byteLength);
+      if (saltBuffer.byteLength < 8) {
+        throw new Error("Salt length is too short for Argon2 hashing.");
+      }
+
+      // map string alg to argon2 enum
+      const algMap: Record<string, number> = {
+        argon2d: 0,
+        argon2i: 1,
+        argon2id: 2,
+      };
+
+      const algEnum = algMap[(optionsFromServer.algorithm ?? 'argon2id').toLowerCase()] ?? 2;
+
+
+      const hashOptions = {
+        pass: data,
+        salt: saltBuffer,
+        time: optionsFromServer.timeCost ?? 3,
+        mem: optionsFromServer.memoryCost ?? 65536,
+        parallelism: optionsFromServer.parallelism ?? 1,
+        type: algEnum,
+        version: optionsFromServer.version ?? 0x13,
+        hashLen: 32,
+      };
+
+      const result = await argon2.hash(hashOptions);
+      return result.encoded;
+    }
+
+   static async hashData(data: string): Promise<string> {
+    const salt = crypto.getRandomValues(new Uint8Array(16)); //gen 16 byte salt
+
+    const hashOptions = {
+      pass: data,
+      salt: salt,
+      time: 3,
+      mem: 2 ** 16,
+      parallelism: 1,
+      type: 2,
+      version: 0x13,
+      hashLen: 32,
+    };
+
+
+    const encodedHash = await argon2.hash(hashOptions);
+
+    console.log("Argon2 hash created: ", encodedHash.encoded)
+    return encodedHash.encoded;
+  }
+
+  static async verifyHash(hash: string, data: string): Promise<boolean> {
+    const result = await argon2.verify({
+      pass: data,
+      encoded: hash,
+    });
+    return result.verified;
+  }
+}
+
 
 class KeyService {
   static async generateRSAKeyPair(): Promise<CryptoKeyPair> {
@@ -415,6 +496,7 @@ class DecryptionService {
 export const CryptoUtils = {
   Config: CryptoConfig,
   Base64: Base64Utils,
+  Hash: HashingService,
   Keys: KeyService,
   Encrypt: EncryptionService,
   Decrypt: DecryptionService,
