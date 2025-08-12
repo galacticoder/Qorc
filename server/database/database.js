@@ -61,6 +61,7 @@ export class MessageDatabase{
   static async saveMessageInDB(payload, privateKey) {
     const decryptedPayload = await CryptoUtils.Decrypt.decryptAndFormatPayload(payload, privateKey);
     const stringifiedPayload = JSON.stringify(decryptedPayload);
+    console.log("STRINGIFIED: ", stringifiedPayload)
     db.prepare(`
       INSERT INTO messages (payload)
       VALUES (?)
@@ -68,14 +69,21 @@ export class MessageDatabase{
     console.log(`Saved message from '${decryptedPayload.from}' to db: ${decryptedPayload}`)
   }
   
-  static getMessagesForUser(username, limit = 50) { //get recent user messages from message history and only load 'limit' amount of messages
-    const rows = db.prepare(`
+  static getMessagesForUser(username, limit = 50) {
+    const stmt = db.prepare(`
       SELECT id, payload FROM messages
       WHERE json_extract(payload, '$.from') = ?
-         OR json_extract(payload, '$.to') = ?
-      ORDER BY json_extract(payload, '$.timestamp') DESC
+        OR json_extract(payload, '$.to') = ?
+      ORDER BY COALESCE(json_extract(payload, '$.timestamp'), 0) DESC
       LIMIT ?
-    `).all(username, username, limit);
+    `);
+
+    const rows = stmt.all(username, username, limit);
+
+    console.log(`Found ${rows.length} messages for user '${username}':`);
+    rows.forEach(row => {
+      console.log(` - id: ${row.id}, payload: ${row.payload}`);
+    });
 
     return rows.map(row => ({
       id: row.id,

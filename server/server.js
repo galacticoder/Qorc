@@ -130,6 +130,11 @@ async function startServer() {
           case SignalType.UPDATE_DB:
             console.log(`Update db message sent from '${clientState.username}': ${parsed}`)
             await MessageDatabase.saveMessageInDB(parsed, serverKeyPair.privateKey)
+
+            console.log("Loading user messages...__________________________((((((((")
+            const userMessagesHistory = MessageDatabase.getMessagesForUser(clientState.username, 50) //message history to send to client
+            // console.log("usermessage hiostory: ", userMessagesHistory)
+            console.log("Loaded user messages__________________________)))))))")
             break;
 
           case SignalType.ENCRYPTED_MESSAGE:
