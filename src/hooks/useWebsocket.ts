@@ -11,16 +11,17 @@ export const useWebSocket = (
 ) => {
   useEffect(() => {
     console.log("Initializing WebSocket connection...");
+    websocketClient.setLoginErrorCallback(setLoginError)
 
     const connect = async () => {
       try {
         if (!websocketClient.isConnectedToServer()) {
           console.log("Connecting to WebSocket server...");
           await websocketClient.connect();
+          console.log("Connected to server")
         }
       } catch (error) {
         console.error("WebSocket connection error:", error);
-        setLoginError("Failed to connect to server");
       }
     };
 

@@ -12,6 +12,7 @@ class WebSocketClient {
   private readonly maxReconnectAttempts: number = 5;
   private readonly reconnectTimeout: number = 2000;
   private messageHandlers: Map<string, MessageHandler> = new Map();
+  private setLoginError?: (error: string) => void;
 
   constructor() {
     const isDev = import.meta.env.DEV;
@@ -21,6 +22,10 @@ class WebSocketClient {
       : "wss://end2endchat.com";
 
     console.log(`${isDev ? 'Development' : 'Production'} environment detected. Connecting to ${this.url}`);
+  }
+
+  public setLoginErrorCallback(fn: (error: string) => void) {
+    this.setLoginError = fn;
   }
 
   public async login(username: string, password: string): Promise<void> {
@@ -59,6 +64,7 @@ class WebSocketClient {
           this.isConnected = true;
           this.reconnectAttempts = 0;
           console.log('WebSocket connection established');
+          if (this.setLoginError) this.setLoginError("");
           resolve();
         };
 
@@ -103,6 +109,7 @@ class WebSocketClient {
     setTimeout(() => {
       this.connect().catch(error => {
         console.warn('Reconnection failed:', error);
+        this.setLoginError("Failed to connect to server")
       });
     }, this.reconnectTimeout * this.reconnectAttempts);
   }

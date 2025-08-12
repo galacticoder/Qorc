@@ -336,7 +336,7 @@ const ChatApp: React.FC<ChatAppProps> = ({ onNavigate }) => {
   
   useWebSocket(handleSignalMessages, handleEncryptedMessagePayload, setLoginError);
 
-   const handleSendFileWrapper = useCallback((fileMessage: Message) => {
+  const handleSendFileWrapper = useCallback((fileMessage: Message) => {
     handleSendFile(
       fileMessage,
       loginUsernameRef,
