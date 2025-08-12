@@ -177,7 +177,7 @@ export class ServerAuthHandler {
     if (parsed.type !== SignalType.SERVER_LOGIN)
       return rejectConnection(ws, SignalType.AUTH_ERROR, "Expected login information");
 
-    console.log("Login info received. Processing: ", parsed);
+    console.log("Server password info received. Processing: ", parsed);
 
     try {
       const [passwordPayload, userPayload] = await Promise.all([
@@ -192,7 +192,6 @@ export class ServerAuthHandler {
       this.clients.set(clientState.username, { ws, publicKey: userPayload.publicKey });
 
       console.log(`User '${clientState.username}' authenticated and connected.`);
-      console.log(`Received public key from ${clientState.username}`);
 
       ws.send(JSON.stringify({
         type: SignalType.AUTH_SUCCESS,
