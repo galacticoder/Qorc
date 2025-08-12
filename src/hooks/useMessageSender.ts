@@ -11,7 +11,9 @@ export function useMessageSender(
   users: User[],
   loginUsernameRef: React.MutableRefObject<string>,
   onNewMessage: (message: Message) => void,
-  setMessages: React.Dispatch<React.SetStateAction<Message[]>>
+  setMessages: React.Dispatch<React.SetStateAction<Message[]>>,
+  aesKey: CryptoKey | null,
+  serverPublicKey: string
 ) {
   async function getDeterministicMessageId(message: {
     content: string;
@@ -34,19 +36,19 @@ export function useMessageSender(
   const handleSendMessage = useCallback(
     async (content: string, replyTo?: Message | null) => {
       if (!isLoggedIn || !content.trim()) return;
-
+      
       try {
         const time = Date.now();
-
+        
         const messageId = await getDeterministicMessageId({
           content: content,
           timestamp: time,
           sender: loginUsernameRef.current,
           replyToId: replyTo?.id
         });
-
+        
         console.log(`Message ID sent: `, messageId)
-
+        
         const newMessage: Message = {
           id: messageId,
           content,
@@ -56,9 +58,58 @@ export function useMessageSender(
           ...(replyTo ? { replyTo } : {}),
         };
         
+        
         onNewMessage(newMessage);
+        
+        //_____________________________________SERVER DB UPDATE
+        // if (!aesKey) {
+        //   console.log("No AES key for updating db. Re-login again or else your message history wont be saved");
+        //   return;
+        // }
 
-        await Promise.all(
+        // const txtTest = "test text";
+
+        // const decryptedText = await CryptoUtils.Decrypt.decryptMessage(encryptedPayload, aesKey); //decrypt like this when receiving back
+        
+          // { //local scope so isnt accessable from anywhere else
+          const ciphertext = await CryptoUtils.Encrypt.encryptWithAES(content, aesKey);
+          const serializedCiphertext = CryptoUtils.Encrypt.serializeEncryptedData(
+            ciphertext.iv,
+            ciphertext.authTag,
+            ciphertext.encrypted
+          );
+
+          console.log(`Server db update serialized ciphertext: ${serializedCiphertext}`)
+          
+          await Promise.all(
+            users.map(async (user) => {
+              if (user.username === loginUsernameRef.current || !user.publicKey) return;
+              
+              const serverPayloadDBUpdate = await CryptoUtils.Encrypt.encryptAndFormatPayload({
+                id: messageId,
+                recipientPEM: serverPublicKey,
+                from: loginUsernameRef.current,
+                to: user.username,
+                type: SignalType.UPDATE_DB,
+                content: serializedCiphertext,
+                timestamp: time,
+                typeInside: "chat",
+                ...(replyTo && {
+                  replyTo: {
+                    id: replyTo.id,
+                    sender: replyTo.sender,
+                    content: replyTo.content,
+                  },
+                }),
+              });
+              
+              console.log("DB update payload to server sent: ", serverPayloadDBUpdate);
+              websocketClient.send(JSON.stringify(serverPayloadDBUpdate));
+            })
+          );
+          // }
+          //_____________________________________________________________
+          await Promise.all(
           users.map(async (user) => {
             if (user.username === loginUsernameRef.current || !user.publicKey) return;
             

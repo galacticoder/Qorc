@@ -3,7 +3,7 @@ import { WebSocketServer } from 'ws';
 import selfsigned from 'selfsigned';
 import { SignalType } from './signals.js';
 import  { CryptoUtils } from './crypto/unified-crypto.js';
-import * as db from './database/database.js'
+import { MessageDatabase } from './database/database.js'
 import * as ServerConfig from './config/config.js'
 import { MessagingUtils } from './messaging/messaging-utils.js'
 import * as authentication from './authentication/authentication.js'
@@ -21,7 +21,6 @@ const server = https.createServer({
 
 async function startServer() {
   await setServerPasswordOnInput();
-  await db.loadUserDatabase();
   const serverKeyPair = await CryptoUtils.Keys.generateRSAKeyPair();
 
   const authHandler = new authentication.AccountAuthHandler(serverKeyPair, clients);
@@ -30,8 +29,8 @@ async function startServer() {
   console.log("Server RSA key pair generated");
   console.log(`For self signed certificates allow here first https://localhost:${ServerConfig.PORT}`);
 
-  server.listen(ServerConfig.PORT, () => {
-    console.log(`SecureChat relay server running on wss://localhost:${ServerConfig.PORT}`);
+  server.listen(ServerConfig.PORT, '0.0.0.0', () => {
+    console.log(`SecureChat relay server running on wss://0.0.0.0:${ServerConfig.PORT}`);
   });
 
   const wss = new WebSocketServer({ server });
@@ -51,6 +50,7 @@ async function startServer() {
     ws.on('message', async (message) => {
       try {
         const str = message.toString().trim();
+        console.log("Exact receive log: ", str)
         let parsed;
 
         try {
@@ -65,52 +65,47 @@ async function startServer() {
           case SignalType.ACCOUNT_SIGN_UP:
             const authResult = await authHandler.processAuthRequest(ws, str);
 
-            if (authResult && authResult.authenticated) {
+            if (authResult && (authResult.authenticated || authResult.pending)) {
               clientState.hasPassedAccountLogin = true;
               clientState.username = authResult.username;
 
               ws.send(JSON.stringify({ type: SignalType.IN_ACCOUNT, message: "Logged in successfully" }));
-              clients.set(clientState.username, { ws, clientState });
-            } else if (authResult && authResult.pending) {
-              clientState.hasPassedAccountLogin = true;
-              clientState.username = authResult.username;
               
-              ws.send(JSON.stringify({ type: SignalType.IN_ACCOUNT, message: "Logged in successfully" }));
-              console.log(`User ${authResult.username} registration pending passphrase`);
-            } else {
-              ws.send(JSON.stringify({ type: SignalType.ERROR, message: "Login failed" })); //add error signal handling on client side later maybe just filler for now
+              if (authResult.pending) console.log(`User '${authResult.username}' pending passphrase`);
+              else clients.set(clientState.username, { ws, clientState });
             }
+            else {
+              ws.send(JSON.stringify({ type: SignalType.ERROR, message: "Login failed" }));
+            }
+
             break;
+          
 
+          case SignalType.PASSPHRASE_HASH:
+          case SignalType.PASSPHRASE_HASH_NEW: {
+            console.log(`Passphrase hash signal received: ${parsed.type}`);
 
-          case SignalType.PASSPHRASE_HASH: //for sign in
-            console.log("Passphrase hash: ", parsed)
             if (!clientState.username) {
               ws.send(JSON.stringify({ type: SignalType.ERROR, message: "Username not set" }));
               break;
             }
+
             if (!parsed.passphraseHash) {
               ws.send(JSON.stringify({ type: SignalType.ERROR, message: "Passphrase hash missing" }));
               break;
             }
-            await authHandler.handlePassphraseReceived(ws, clientState.username, parsed.passphraseHash);
-            ws.send(JSON.stringify({ type: SignalType.PASSPHRASE_SUCCESS, message: "Passphrase verified successfully" }));
-            break;
 
-          case SignalType.PASSPHRASE_HASH_NEW: //for sign up . combine with sign in later maybe for better management
-            console.log("Passphrase hash new: ", parsed)
-            if (!clientState.username) {
-              ws.send(JSON.stringify({ type: SignalType.ERROR, message: "Username not set" }));
-              break;
-            }
-            if (!parsed.passphraseHash) {
-              ws.send(JSON.stringify({ type: SignalType.ERROR, message: "Passphrase hash missing" }));
-              break;
-            }
-            await authHandler.handleNewPassphraseReceived(ws, clientState.username, parsed.passphraseHash);
-            ws.send(JSON.stringify({ type: SignalType.PASSPHRASE_SUCCESS, message: "Passphrase saved successfully" }));
-            break;
+            await authHandler.handlePassphrase(ws, clientState.username, parsed.passphraseHash, parsed.type === SignalType.PASSPHRASE_HASH_NEW)
+                        
+            ws.send(JSON.stringify({
+              type: SignalType.PASSPHRASE_SUCCESS,
+              message: parsed.type === SignalType.PASSPHRASE_HASH_NEW
+                ? "Passphrase saved successfully"
+                : "Passphrase verified successfully"
+            }));
 
+            break;
+          }
 
           case SignalType.SERVER_LOGIN:
             if (!clientState.hasPassedAccountLogin) {
@@ -130,6 +125,11 @@ async function startServer() {
             } else {
               ws.send(JSON.stringify({ type: SignalType.AUTH_ERROR, message: "Server authentication failed" }));
             }
+            break;
+
+          case SignalType.UPDATE_DB:
+            console.log(`Update db message sent from '${clientState.username}': ${parsed}`)
+            await MessageDatabase.saveMessageInDB(parsed, serverKeyPair.privateKey)
             break;
 
           case SignalType.ENCRYPTED_MESSAGE:

@@ -3,4 +3,4 @@
 pnpm-lock.yaml
 /server/pnpm-lock.yaml
 /server/package-lock.yaml
-/server/database/user_database.json
+/server/database/user_database.sqlite

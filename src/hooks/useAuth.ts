@@ -13,7 +13,8 @@ export const useAuth = () => {
   const [loginError, setLoginError] = useState("");
   const [accountAuthenticated, setAccountAuthenticated] = useState(false);
   const passphraseRef = useRef<string>("");
-
+  const passphrasePlaintextRef = useRef<string>("");
+  
   
   // keys
   const [privateKeyPEM, setPrivateKeyPEM] = useLocalStorage<string>("private_key", "");
@@ -106,7 +107,7 @@ export const useAuth = () => {
 
   //server password submitting
   const handleServerPasswordSubmit = async (password: string) => {
-     setLoginError("");
+    setLoginError("");
     if (!publicKeyRef.current || !privateKeyRef.current) {
       setLoginError("Encryption keys not ready");
       return;
@@ -150,6 +151,7 @@ export const useAuth = () => {
   };
 
   const handlePassphraseSubmit = async (passphrase: string, mode: "login" | "register") => {
+    passphrasePlaintextRef.current = passphrase;
     if (mode === "login") {
       if (!passphraseHashParams) {
         setLoginError("Missing passphrase hashing parameters from server.");
@@ -221,5 +223,7 @@ export const useAuth = () => {
     setLoginError,
     passphraseHashParams,
     setPassphraseHashParams,
+    passphrasePlaintextRef,
+    passphraseRef
   };
 };

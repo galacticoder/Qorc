@@ -34,52 +34,70 @@ class Base64Utils {
 }
 
 class HashingService {
-    static async hashDataUsingInfo(data: string, optionsFromServer: {
-      version?: number;
-      algorithm?: string;
-      salt: string;
-      memoryCost?: number;
-      timeCost?: number;
-      parallelism?: number;
-    }): Promise<string> {
-      if (!optionsFromServer?.salt) {
-        throw new Error("Salt is required");
-      }
-
-      console.log("IN HASHING SERVER INFO: ", optionsFromServer)
-
-      const saltBufferRaw = CryptoUtils.Base64.base64ToArrayBuffer(optionsFromServer.salt);
-      const saltBuffer = new Uint8Array(saltBufferRaw);
-
-      console.log("Decoded salt buffer length:", saltBuffer.byteLength);
-      if (saltBuffer.byteLength < 8) {
-        throw new Error("Salt length is too short for Argon2 hashing.");
-      }
-
-      // map string alg to argon2 enum
-      const algMap: Record<string, number> = {
-        argon2d: 0,
-        argon2i: 1,
-        argon2id: 2,
-      };
-
-      const algEnum = algMap[(optionsFromServer.algorithm ?? 'argon2id').toLowerCase()] ?? 2;
-
-
-      const hashOptions = {
-        pass: data,
-        salt: saltBuffer,
-        time: optionsFromServer.timeCost ?? 3,
-        mem: optionsFromServer.memoryCost ?? 65536,
-        parallelism: optionsFromServer.parallelism ?? 1,
-        type: algEnum,
-        version: optionsFromServer.version ?? 0x13,
-        hashLen: 32,
-      };
-
-      const result = await argon2.hash(hashOptions);
-      return result.encoded;
+  static extractSaltBase64FromEncodedHash(encodedHash: string): string {
+    const parts = encodedHash.split('$');
+    if (parts.length !== 6) {
+      throw new Error('Invalid Argon2 encoded hash format');
     }
+
+    let saltBase64 = parts[4];
+
+    saltBase64 = saltBase64.replace(/-/g, '+').replace(/_/g, '/');
+
+    while (saltBase64.length % 4 !== 0) {
+      saltBase64 += '=';
+    }
+
+    return saltBase64;
+  }
+
+
+  static async hashDataUsingInfo(data: string, optionsFromServer: {
+    version?: number;
+    algorithm?: string;
+    salt: string;
+    memoryCost?: number;
+    timeCost?: number;
+    parallelism?: number;
+  }): Promise<string> {
+    if (!optionsFromServer?.salt) {
+      throw new Error("Salt is required");
+    }
+
+    console.log("Server hashing info received: ", optionsFromServer)
+
+    const saltBufferRaw = CryptoUtils.Base64.base64ToArrayBuffer(optionsFromServer.salt);
+    const saltBuffer = new Uint8Array(saltBufferRaw);
+
+    console.log("Decoded salt buffer length:", saltBuffer.byteLength);
+    if (saltBuffer.byteLength < 8) {
+      throw new Error("Salt length is too short for Argon2 hashing.");
+    }
+
+    // map string alg to argon2 enum
+    const algMap: Record<string, number> = {
+      argon2d: 0,
+      argon2i: 1,
+      argon2id: 2,
+    };
+
+    const algEnum = algMap[(optionsFromServer.algorithm ?? 'argon2id').toLowerCase()] ?? 2;
+
+
+    const hashOptions = {
+      pass: data,
+      salt: saltBuffer,
+      time: optionsFromServer.timeCost ?? 3,
+      mem: optionsFromServer.memoryCost ?? 65536,
+      parallelism: optionsFromServer.parallelism ?? 1,
+      type: algEnum,
+      version: optionsFromServer.version ?? 0x13,
+      hashLen: 32,
+    };
+
+    const result = await argon2.hash(hashOptions);
+    return result.encoded;
+  }
 
    static async hashData(data: string): Promise<string> {
     const salt = crypto.getRandomValues(new Uint8Array(16)); //gen 16 byte salt
@@ -113,6 +131,32 @@ class HashingService {
 
 
 class KeyService {
+  static async deriveAESKeyFromPassphrase(passphrase, saltBase64) {
+    const saltBytes = Uint8Array.from(atob(saltBase64), c => c.charCodeAt(0)); //decode salt from base64
+
+    const hashOptions = {
+      pass: passphrase,
+      salt: saltBytes,
+      time: 5,
+      mem: 2 ** 17,
+      parallelism: 2,
+      type: 2,
+      version: 0x13,
+      hashLen: 32,
+    };
+
+    const result = await argon2.hash(hashOptions);
+
+    const rawKeyBytes = result.hash; //raw uint8array key bytes
+
+    const aesKey = await KeyService.importAESKey(rawKeyBytes.buffer);
+
+    return {
+      aesKey,
+      encodedHash: result.encoded,  // optionally store this for verification
+    };
+  }
+
   static async generateRSAKeyPair(): Promise<CryptoKeyPair> {
     return await crypto.subtle.generateKey(
       {

@@ -38,9 +38,11 @@ const ChatApp: React.FC<ChatAppProps> = ({ onNavigate }) => {
     initializeKeys,
     setAccountAuthenticated,
     passwordRef,
-    serverPublicKeyRef,
+    serverPublicKeyRef, //pass this to the useMessage hook
     setLoginError,
     setPassphraseHashParams,
+    passphrasePlaintextRef, //clear this later maybe
+    passphraseRef
   } = useAuth();
   
   const [messages, setMessages] = useState<Message[]>([]);
@@ -48,6 +50,8 @@ const ChatApp: React.FC<ChatAppProps> = ({ onNavigate }) => {
   const secureDBRef = useRef<SecureDB | null>(null);
   const [dbInitialized, setDbInitialized] = useState(false);
   const [showPassphrasePrompt, setShowPassphrasePrompt] = useState(false);
+  const aesKeyRef = useRef<CryptoKey | null>(null);
+
   
   useEffect(() => {
     initializeKeys();
@@ -135,7 +139,9 @@ const ChatApp: React.FC<ChatAppProps> = ({ onNavigate }) => {
     users,
     loginUsernameRef,
     handleNewMessage,
-    setMessages
+    setMessages,
+    aesKeyRef.current,
+    serverPublicKeyPEM
   );
 
   const handleEncryptedMessagePayload = useCallback(async (message: any) => {
@@ -267,6 +273,18 @@ const ChatApp: React.FC<ChatAppProps> = ({ onNavigate }) => {
           break;
         
         case SignalType.PASSPHRASE_SUCCESS:
+          //genrtaye aes key here from passphrase
+          console.log("passphraseref: ", passphrasePlaintextRef.current)
+
+          const salt = CryptoUtils.Hash.extractSaltBase64FromEncodedHash(passphraseRef.current)
+
+          console.log(`Hash: ${passphraseRef.current}\nSalt extracted base64: ${salt}`)
+          
+          const { aesKey: derivedKey } = await CryptoUtils.Keys.deriveAESKeyFromPassphrase(passphrasePlaintextRef.current, salt);
+          aesKeyRef.current = derivedKey;
+
+          console.log("AES key derived and stored!");
+
           setShowPassphrasePrompt(false);
           break;
 

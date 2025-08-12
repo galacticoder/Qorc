@@ -24,7 +24,9 @@ export const SignalType = {
 
   PASSPHRASE_HASH: "passphrase-hash",
   PASSPHRASE_HASH_NEW: "passphrase-hash-new",
-  PASSPHRASE_SUCCESS: "passphrase-success"
+  PASSPHRASE_SUCCESS: "passphrase-success",
+
+  UPDATE_DB: "update-db",
 };
 
 export const SignalMessages = {

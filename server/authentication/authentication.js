@@ -1,8 +1,7 @@
 import * as authUtils from './auth-utils.js';
 import { SignalType, SignalMessages } from '../signals.js';
 import { CryptoUtils } from '../crypto/unified-crypto.js';
-import * as db from '../database/database.js';
-import { type } from 'os';
+import { UserDatabase } from '../database/database.js';
 
 function rejectConnection(ws, type, reason, code = 1008) {
   ws.send(JSON.stringify({ type, message: reason }));
@@ -48,31 +47,38 @@ export class AccountAuthHandler {
   }
 
   async handleSignUp(ws, username, password) {
-    if (!authUtils.isUsernameAvailable(username))
+    const existingUser = UserDatabase.loadUser(username);
+    if (existingUser)
       return rejectConnection(ws, SignalType.NAMEEXISTSERROR, SignalMessages.NAMEEXISTSERROR);
 
-    const passwordHash = await CryptoUtils.Password.hashPassword(password); //change to be like passphrase hashing on the client side so its not viewable on the server side
+    const passwordHash = await CryptoUtils.Password.hashPassword(password);
 
     const userRecord = {
-      passwordHash, //passphrase going to be added later
+      username,
+      passwordHash,
+      passphraseHash: null,
+      version: null,
+      algorithm: null,
+      salt: null,
+      memoryCost: null,
+      timeCost: null,
+      parallelism: null
     };
 
-    db.userDatabase.set(username, userRecord);
-    await db.saveUserDatabase();
+    UserDatabase.saveUserRecord(userRecord);
 
     ws.send(JSON.stringify({
       type: SignalType.PASSPHRASE_HASH,
-      message: "Please hash your passphrase and send this back"
+      message: "Please hash your passphrase and send it back"
     }));
 
-
-    this.pendingPassphrases.set(username, ws); //marked as pending
-
+    this.pendingPassphrases.set(username, ws);
     return { username, pending: true };
   }
 
+
   async handleSignIn(ws, username, password) {
-    const userData = db.userDatabase.get(username);
+    const userData = UserDatabase.loadUser(username);
     if (!userData)
       return rejectConnection(ws, SignalType.AUTH_ERROR, "Account does not exist, Register instead.");
 
@@ -98,36 +104,37 @@ export class AccountAuthHandler {
     return rejectConnection(ws, SignalType.AUTH_ERROR, "No passphrase hash info stored. Sign up instead");
   }
 
-  async handleNewPassphraseReceived(ws, username, passphraseHash) { //for sign ups
-    console.log("Received new hash")
-    if (!this.pendingPassphrases.has(username)) {
+
+  async handlePassphrase(ws, username, passphraseHash, isNewUser = false) {
+    if (!this.pendingPassphrases.has(username))
       return rejectConnection(ws, SignalType.AUTH_ERROR, "Unexpected passphrase submission");
-    }
-    if (!db.userDatabase.has(username)) {
+
+    const userRecord = UserDatabase.loadUser(username);
+    if (!userRecord)
       return rejectConnection(ws, SignalType.AUTH_ERROR, "User does not exist");
+
+    if (isNewUser) {
+      userRecord.passphraseHash = passphraseHash;
+      try {
+        const parsed = await CryptoUtils.Password.parseArgon2Hash(passphraseHash);
+        userRecord.version = parsed.version;
+        userRecord.algorithm = parsed.algorithm;
+        userRecord.salt = parsed.salt.toString('base64');
+        userRecord.memoryCost = parsed.memoryCost;
+        userRecord.timeCost = parsed.timeCost;
+        userRecord.parallelism = parsed.parallelism;
+      } catch (e) {
+        console.warn("Failed to parse passphrase hash params:", e);
+      }
+      UserDatabase.saveUserRecord(userRecord);
+    } else {
+      if (userRecord.passphraseHash !== passphraseHash) {
+        return rejectConnection(ws, SignalType.AUTH_ERROR, "Passphrase hash mismatch");
+      }
     }
-
-    const userRecord = db.userDatabase.get(username);
-    userRecord.passphraseHash = passphraseHash;
-
-    try { //extract all info from passphrase hash for signing in
-      const parsed = await CryptoUtils.Password.parseArgon2Hash(passphraseHash);
-      userRecord.version = parsed.version;
-      userRecord.algorithm = parsed.algorithm;
-      userRecord.salt = parsed.salt.toString('base64');
-      userRecord.memoryCost = parsed.memoryCost;
-      userRecord.timeCost = parsed.timeCost;
-      userRecord.parallelism = parsed.parallelism;
-    } catch (e) {
-      console.warn("Failed to parse passphrase hash params:", e);
-    }
-
-    db.userDatabase.set(username, userRecord);
-    await db.saveUserDatabase();
 
     this.pendingPassphrases.delete(username);
-
-    const auth = await this.finalizeAuth(ws, username, "User registered with passphrase");
+    const auth = await this.finalizeAuth(ws, username, isNewUser ? "User registered with passphrase" : "User logged in with passphrase");
 
     this.clients.set(username, {
       ws,
@@ -137,31 +144,7 @@ export class AccountAuthHandler {
     return auth;
   }
 
-  async handlePassphraseReceived(ws, username, passphraseHash) { //for signing in
-    if (!this.pendingPassphrases.has(username)) {
-      return rejectConnection(ws, SignalType.AUTH_ERROR, "Unexpected passphrase submission");
-    }
-    if (!db.userDatabase.has(username)) {
-      return rejectConnection(ws, SignalType.AUTH_ERROR, "User does not exist");
-    }
 
-    const userRecord = db.userDatabase.get(username);
-
-    if (userRecord.passphraseHash !== passphraseHash) { //check if hashed passphrasse sent by user matches saved
-      return rejectConnection(ws, SignalType.AUTH_ERROR, "Passphrase hash mismatch");
-    }
-
-    this.pendingPassphrases.delete(username);
-
-    const auth = await this.finalizeAuth(ws, username, "User logged in with passphrase");
-
-    this.clients.set(username, {
-      ws,
-      clientState: { username, hasPassedAccountLogin: true, hasAuthenticated: true }
-    });
-
-    return auth;
-  }
 
   finalizeAuth(ws, username, logMessage) {
     if (this.clients.has(username))
