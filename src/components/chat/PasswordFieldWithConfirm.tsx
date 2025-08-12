@@ -47,9 +47,6 @@ export function PasswordFieldWithConfirm({
             {label} should be at least {minLength} characters long.
           </p>
         )}
-        {warningMessage && (
-          <p className="text-xs text-yellow-600">{warningMessage}</p>
-        )}
       </div>
 
       <div className="space-y-2">
@@ -62,9 +59,12 @@ export function PasswordFieldWithConfirm({
           onChange={(e) => onConfirmChange(e.target.value)}
           required={required}
           minLength={minLength}
-        />
+          />
         {showMismatch && (
           <p className="text-xs text-red-500">{label}s do not match</p>
+        )}
+        {warningMessage && (
+          <p className="text-xs text-yellow-600">{warningMessage}</p>
         )}
       </div>
     </>

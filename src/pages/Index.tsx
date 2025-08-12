@@ -333,7 +333,7 @@ const ChatApp: React.FC<ChatAppProps> = ({ onNavigate }) => {
     setServerPublicKeyPEM,
     setUsers
   ]);
-  
+
   useWebSocket(handleSignalMessages, handleEncryptedMessagePayload, setLoginError);
 
   const handleSendFileWrapper = useCallback((fileMessage: Message) => {

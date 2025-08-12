@@ -50,6 +50,12 @@ export function Login({
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [mode, setMode] = useState<"login" | "register">("login");
 
+  const isPassphraseValid = passphrase.length >= 12;
+  const isLocalPasswordValid = localPassword.length > 0; // optional, you can add min length if you want
+  const doPasswordsMatch = localPassword === confirmLocalPassword;
+  const doPassphrasesMatch = passphrase === confirmPassphrase;  
+
+
   const handleAccountSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!username.trim() || isSubmitting || isGeneratingKeys) return;
@@ -106,7 +112,6 @@ export function Login({
     }
   };
 
-
   return (
     <form
       onSubmit={
@@ -161,13 +166,9 @@ export function Login({
                     onChange={(e) => setPassphrase(e.target.value)}
                     disabled={isSubmitting || isGeneratingKeys}
                     required
-                    minLength={12}
                   />
                 </div>
               )}
-              <Button type="submit" disabled={isSubmitting}>
-                Submit Passphrase
-              </Button>
             </div>
           ) : accountAuthenticated ? (
             /* server password */
@@ -266,15 +267,14 @@ export function Login({
             disabled={
               isSubmitting ||
               isGeneratingKeys ||
-              (accountAuthenticated && !serverPassword) ||
-              (!accountAuthenticated &&
-                !showPassphrasePrompt &&
-                (!username.trim() ||
-                  (mode === "register" &&
-                    (localPassword !== confirmLocalPassword || !localPassword)))) ||
-              (showPassphrasePrompt &&
-                (!passphrase || (mode === "register" && passphrase !== confirmPassphrase)))
+              (showPassphrasePrompt
+                ? !isPassphraseValid || (mode === "register" && !doPassphrasesMatch)
+                : accountAuthenticated
+                  ? !serverPassword
+                  : !username.trim() || (mode === "register" && (!isLocalPasswordValid || !doPasswordsMatch))
+              )
             }
+
           >
             {isGeneratingKeys ? (
               <span className="flex items-center gap-2">
