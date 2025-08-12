@@ -154,7 +154,8 @@ const ChatApp: React.FC<ChatAppProps> = ({ onNavigate }) => {
         setUsers(prevUsers => prevUsers.filter(user => user.username !== payload.content.split(' ')[0]))
       }
 
-      if (payload.type === SignalType.DELETE_MESSAGE) {
+      if (payload.typeInside === SignalType.DELETE_MESSAGE) {
+        console.log("payload delete: ", payload)
         setMessages(prev => prev.map(msg => 
           msg.id === payload.messageId 
             ? { ...msg, isDeleted: true, content: "Message deleted" } 
@@ -163,12 +164,13 @@ const ChatApp: React.FC<ChatAppProps> = ({ onNavigate }) => {
         return;
       }
 
-      if (payload.type === SignalType.EDIT_MESSAGE) {
+      if (payload.typeInside === SignalType.EDIT_MESSAGE) {
+        console.log("payload edit: ", payload)
         setMessages(prev => prev.map(msg => 
           msg.id === payload.messageId 
             ? { 
                 ...msg, 
-                content: payload.newContent, 
+                content: payload.content, 
                 isEdited: true,
                 timestamp: new Date(payload.timestamp)
               } 

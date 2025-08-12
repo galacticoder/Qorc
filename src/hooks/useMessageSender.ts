@@ -121,7 +121,7 @@ export function useMessageSender(
               type: SignalType.ENCRYPTED_MESSAGE,
               content,
               timestamp: time,
-              typeInside: "chat",
+              typeInside: "chat", //forgot to adapt the delete and edit buttons
               ...(replyTo && {
                 replyTo: {
                   id: replyTo.id,
@@ -156,16 +156,18 @@ export function useMessageSender(
       if (!isLoggedIn) return;
 
       try {
+        console.log("messGEW deleted")
         
         await Promise.all(
           users.map(async (user) => {
             if (user.username === loginUsernameRef.current || !user.publicKey) return;
             
             const payload = await CryptoUtils.Encrypt.encryptAndFormatPayload({
-              type: SignalType.DELETE_MESSAGE,
               recipientPEM: user.publicKey,
               from: loginUsernameRef.current,
               to: user.username,
+              type: SignalType.ENCRYPTED_MESSAGE,
+              typeInside: SignalType.DELETE_MESSAGE,
               messageId,
               timestamp: Date.now(),
             });
@@ -190,6 +192,8 @@ export function useMessageSender(
     async (messageId: string, newContent: string) => {
       if (!isLoggedIn || !newContent.trim()) return;
 
+      console.log("message eddited")
+
       const time = Date.now();
 
       try {
@@ -198,14 +202,34 @@ export function useMessageSender(
             if (user.username === loginUsernameRef.current || !user.publicKey) return;
             
             const payload = await CryptoUtils.Encrypt.encryptAndFormatPayload({
-              type: SignalType.EDIT_MESSAGE,
               recipientPEM: user.publicKey,
               from: loginUsernameRef.current,
               to: user.username,
+              type: SignalType.ENCRYPTED_MESSAGE,
               messageId,
-              newContent,
+              typeInside: SignalType.EDIT_MESSAGE,
+              content: newContent,
               timestamp: time,
             });
+
+            /*
+            
+            {
+              "from": "loginUsernameHere",
+              "to": "userUsernameHere",
+              "type": "ENCRYPTED_MESSAGE",       // from SignalType.ENCRYPTED_MESSAGE
+              "encryptedAESKey": "<base64 string>", // RSA encrypted AES key (base64)
+              "encryptedMessage": "<string>"        // AES encrypted and serialized JSON of:
+              // {
+              //   "messageId": "...",
+              //   "typeInside": "EDIT_MESSAGE",
+              //   "content": "...",
+              //   "timestamp": "..."
+              // }
+            }
+
+            
+            */
             
             websocketClient.send(JSON.stringify(payload));
 

@@ -146,7 +146,8 @@ async function startServer() {
           }
 
           default:
-            ws.send(JSON.stringify({ type: SignalType.ERROR, message: `Unknown message type: ${parsed.type}` }));
+            ws.send(JSON.stringify({ type: SignalType.ERROR, message: `Unknown message type: ${msg}` }));
+            console.log(`Unknown message type: ${msg}`);
         }
       } catch (err) {
         console.error('Message handler error:', err);
