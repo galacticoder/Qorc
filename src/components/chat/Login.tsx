@@ -1,5 +1,4 @@
-import { useState } from "react";
-import { Button } from "../ui/button";
+import React, { useState } from "react";
 import {
   Card,
   CardContent,
@@ -8,13 +7,13 @@ import {
   CardHeader,
   CardTitle,
 } from "../ui/card";
-import { Label } from "../ui/label";
-import { LockClosedIcon, CheckIcon } from "@radix-ui/react-icons";
 import { Alert, AlertDescription } from "../ui/alert";
-import { KeyRing, EncryptionIcon } from "./icons";
-import { PasswordFieldWithConfirm } from "./PasswordFieldWithConfirm.tsx";
-import { Input } from "../ui/input";
+import { EncryptionIcon, LockClosedIcon, CheckIcon } from "./icons";
 
+import { SignInForm } from "./Login/SignIn.tsx";
+import { SignUpForm } from "./Login/SignUp.tsx";
+import { PassphrasePrompt } from "./Login/PassphrasePrompt.tsx";
+import { ServerPasswordForm } from "./Login/ServerPassword.tsx";
 
 interface LoginProps {
   onServerPasswordSubmit?: (serverPassword: string) => Promise<void>;
@@ -39,37 +38,16 @@ export function Login({
   error,
   onPassphraseSubmit,
   accountAuthenticated,
-  showPassphrasePrompt
+  showPassphrasePrompt,
 }: LoginProps) {
-  const [username, setUsername] = useState("");
   const [serverPassword, setServerPassword] = useState("");
-  const [localPassword, setLocalPassword] = useState("");
-  const [confirmLocalPassword, setConfirmLocalPassword] = useState("");
-  const [passphrase, setPassphrase] = useState("");
-  const [confirmPassphrase, setConfirmPassphrase] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [mode, setMode] = useState<"login" | "register">("login");
 
-  const isPassphraseValid = passphrase.length >= 12;
-  const isLocalPasswordValid = localPassword.length > 0; // optional, you can add min length if you want
-  const doPasswordsMatch = localPassword === confirmLocalPassword;
-  const doPassphrasesMatch = passphrase === confirmPassphrase;  
-
-
-  const handleAccountSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!username.trim() || isSubmitting || isGeneratingKeys) return;
-    if (mode === "register") {
-      if (
-        localPassword !== confirmLocalPassword
-      ) {
-        return;
-      }
-    }
-
+  const handleAccountSubmit = async (username: string, password: string) => {
     setIsSubmitting(true);
     try {
-      await onAccountSubmit(mode, username.trim(), localPassword, passphrase);
+      await onAccountSubmit(mode, username, password);
     } catch (err) {
       console.error("Account Login/Register failed", err);
     } finally {
@@ -77,14 +55,20 @@ export function Login({
     }
   };
 
+  const handlePassphraseSubmit = async (passphrase: string) => {
+    setIsSubmitting(true);
+    try {
+      await onPassphraseSubmit?.(passphrase, mode);
+    } catch (err) {
+      console.error("Passphrase submission failed", err);
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
   const handleServerPasswordSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (
-      !serverPassword.trim() ||
-      isSubmitting ||
-      isGeneratingKeys ||
-      !onServerPasswordSubmit
-    )
+    if (!serverPassword.trim() || isSubmitting || isGeneratingKeys || !onServerPasswordSubmit)
       return;
 
     setIsSubmitting(true);
@@ -97,30 +81,9 @@ export function Login({
     }
   };
 
-  const handlePassphraseSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!passphrase.trim() || isSubmitting || isGeneratingKeys || !onPassphraseSubmit) return;
-
-    setIsSubmitting(true);
-    try {
-      // Pass mode along so parent knows if login or register
-      await onPassphraseSubmit(passphrase, mode);
-    } catch (err) {
-      console.error("Passphrase submission failed", err);
-    } finally {
-      setIsSubmitting(false);
-    }
-  };
-
   return (
-    <form
-      onSubmit={
-        showPassphrasePrompt
-          ? handlePassphraseSubmit
-          : accountAuthenticated
-          ? handleServerPasswordSubmit
-          : handleAccountSubmit
-      }
+    <div
+      
       className="w-full max-w-md mx-auto"
     >
       <Card className="w-full">
@@ -135,111 +98,31 @@ export function Login({
         </CardHeader>
 
         <CardContent className="space-y-6">
-          {/* passphrase after login/register form always*/}
           {showPassphrasePrompt ? (
-            <div className="space-y-4">
-              {mode === "register" ? (
-                <PasswordFieldWithConfirm
-                  label="Secure Encryption Passphrase"
-                  value={passphrase}
-                  confirmValue={confirmPassphrase}
-                  onChange={setPassphrase}
-                  onConfirmChange={setConfirmPassphrase}
-                  required
-                  minLength={12}
-                  strengthCheck
-                  warningMessage={
-                    <>
-                      This passphrase encrypts all your account data. If you forget it,{" "}
-                      <strong>you will lose access</strong> to all your messages and files.
-                    </>
-                  }
-                />
-              ) : (
-                <div className="space-y-2">
-                  <Label htmlFor="passphrase">Secure Encryption Passphrase</Label>
-                  <Input
-                    id="passphrase"
-                    type="password"
-                    placeholder="Enter your encryption passphrase"
-                    value={passphrase}
-                    onChange={(e) => setPassphrase(e.target.value)}
-                    disabled={isSubmitting || isGeneratingKeys}
-                    required
-                  />
-                </div>
-              )}
-            </div>
+            <PassphrasePrompt
+              mode={mode}
+              onSubmit={handlePassphraseSubmit}
+              disabled={isSubmitting || isGeneratingKeys}
+            />
           ) : accountAuthenticated ? (
-            /* server password */
-            <div className="space-y-2">
-              <Label htmlFor="serverPassword">Server Password</Label>
-              <Input
-                id="serverPassword"
-                type="password"
-                placeholder="Enter server password"
-                value={serverPassword}
-                onChange={(e) => setServerPassword(e.target.value)}
+              <ServerPasswordForm
+                serverPassword={serverPassword}
+                setServerPassword={setServerPassword}
                 disabled={isSubmitting || isGeneratingKeys}
-                required
+                onSubmit={handleServerPasswordSubmit}
               />
-            </div>
+          ) : mode === "register" ? (
+            <SignUpForm
+              onSubmit={handleAccountSubmit}
+              disabled={isSubmitting || isGeneratingKeys}
+              error={error}
+            />
           ) : (
-            /* login/register*/
-            <>
-              <div className="space-y-2">
-                <Label htmlFor="username">Username</Label>
-                <Input
-                  id="username"
-                  placeholder="Enter your username"
-                  value={username}
-                  onChange={(e) => setUsername(e.target.value)}
-                  disabled={isSubmitting || isGeneratingKeys}
-                  required
-                  minLength={3}
-                  maxLength={16}
-                />
-              </div>
-
-              <div className="space-y-2">
-                <Label htmlFor="localPassword">
-                  {mode === "login" ? "Password" : "Create Password"}
-                </Label>
-                <Input
-                  id="localPassword"
-                  type="password"
-                  placeholder={
-                    mode === "login"
-                      ? "Enter your password"
-                      : "Choose a password for your account"
-                  }
-                  value={localPassword}
-                  onChange={(e) => setLocalPassword(e.target.value)}
-                  disabled={isSubmitting || isGeneratingKeys}
-                  required
-                />
-              </div>
-
-              {mode === "register" && (
-                <div className="space-y-2">
-                  <Label htmlFor="confirmPassword">Confirm Password</Label>
-                  <Input
-                    id="confirmPassword"
-                    type="password"
-                    placeholder="Re-enter your password"
-                    value={confirmLocalPassword}
-                    onChange={(e) => setConfirmLocalPassword(e.target.value)}
-                    disabled={isSubmitting || isGeneratingKeys}
-                    required
-                  />
-                  {localPassword &&
-                    confirmLocalPassword &&
-                    localPassword !== confirmLocalPassword && (
-                      <p className="text-xs text-red-500">Passwords do not match</p>
-                    )}
-                </div>
-              )}
-            </>
+            <SignInForm
+              onSubmit={handleAccountSubmit}
+              disabled={isSubmitting || isGeneratingKeys}
+              error={error}
+            />
           )}
 
           {error && (
@@ -261,45 +144,6 @@ export function Login({
         </CardContent>
 
         <CardFooter className="flex flex-col gap-2">
-          <Button
-            type="submit"
-            className="w-full"
-            disabled={
-              isSubmitting ||
-              isGeneratingKeys ||
-              (showPassphrasePrompt
-                ? !isPassphraseValid || (mode === "register" && !doPassphrasesMatch)
-                : accountAuthenticated
-                  ? !serverPassword
-                  : !username.trim() || (mode === "register" && (!isLocalPasswordValid || !doPasswordsMatch))
-              )
-            }
-
-          >
-            {isGeneratingKeys ? (
-              <span className="flex items-center gap-2">
-                <KeyRing className="animate-spin h-4 w-4" />
-                Generating encryption keys...
-              </span>
-            ) : isSubmitting ? (
-              showPassphrasePrompt
-                ? "Submitting Passphrase..."
-                : accountAuthenticated
-                ? "Verifying Server Password..."
-                : mode === "register"
-                ? "Registering..."
-                : "Logging In..."
-            ) : showPassphrasePrompt ? (
-              "Submit Passphrase"
-            ) : accountAuthenticated ? (
-              "Verify Server Password"
-            ) : mode === "register" ? (
-              "Register Account"
-            ) : (
-              "Login to Account"
-            )}
-          </Button>
-
           {!accountAuthenticated && !showPassphrasePrompt && (
             <div className="text-sm text-center text-muted-foreground">
               {mode === "login" ? (
@@ -329,6 +173,6 @@ export function Login({
           )}
         </CardFooter>
       </Card>
-    </form>
+    </div>
   );
 }

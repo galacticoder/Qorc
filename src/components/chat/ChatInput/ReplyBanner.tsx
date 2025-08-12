@@ -1,10 +1,11 @@
 import { Button } from "../../ui/button";
-import { Cross2Icon } from "@radix-ui/react-icons";
+import { Cross2Icon } from "../icons";
 import { cn } from "@/lib/utils";
 import * as cm from "../ChatMessage";
+import { Message } from "../types"
 
 interface ReplyBannerProps {
-  replyTo: cm.Message;
+  replyTo: Message;
   onCancelReply: () => void;
 }
 

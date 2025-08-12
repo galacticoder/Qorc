@@ -1,324 +1,69 @@
+import React from "react";
 import { cn } from "@/lib/utils";
 import { Avatar, AvatarFallback } from "../ui/avatar";
 import { format, isSameMinute } from "date-fns";
-import * as icons from "./icons";
-import { User } from "./UserList";
-import { SignalType } from "@/lib/signals";
-import Linkify from 'linkify-react';
-import { CopyIcon, CheckIcon } from "@radix-ui/react-icons";
-import { TrashIcon, Pencil1Icon } from "@radix-ui/react-icons";
+import Linkify from "linkify-react";
+import { TrashIcon, Pencil1Icon } from "./icons.tsx";
 
-export interface Message {
-  id: string;
-  content: string;
-  sender: string;
-  timestamp: Date;
-  isCurrentUser?: boolean;
-  isSystemMessage?: boolean;
-  isDeleted?: boolean;
-  isEdited?: boolean;
-  shouldPersist?: boolean;
-  replyTo?: {
-    id: string;
-    sender: string;
-    content: string;
-  };
-  fileInfo?: {
-    name: string;
-    type: string;
-    size: number;
-    data: ArrayBuffer;
-  };
-}
-
-interface ChatMessageProps {
-  message: Message;
-  onReply?: (message: Message) => void;
-  previousMessage?: Message;
-  onDelete?: (message: Message) => void;
-  onEdit?: (message: Message) => void;
-}
-
-const IMAGE_EXTENSIONS = ["jpg", "jpeg", "png", "gif", "webp"];
-const VIDEO_EXTENSIONS = ["mp4", "webm", "ogg"];
-const AUDIO_EXTENSIONS = ["mp3", "wav", "ogg", "m4a"];
-
-function hasExtension(filename: string, extensions: string[]) {
-  const regex = new RegExp(`\\.(${extensions.join("|")})$`, "i");
-  return regex.test(filename);
-}
+import { Message, ChatMessageProps } from "./types.ts";
+import { SystemMessage } from "./ChatMessage/SystemMessage.tsx";
+import { DeletedMessage } from "./ChatMessage/DeletedMessage.tsx";
+import { FileMessage } from "./ChatMessage/FileMessage.tsx";
 
 export function ChatMessage({ message, onReply, previousMessage, onDelete, onEdit }: ChatMessageProps) {
-  const { content, sender, timestamp, isCurrentUser, isSystemMessage } = message;
-  
+  const { content, sender, timestamp, isCurrentUser, isSystemMessage, isDeleted, type } = message;
+
   const isGrouped =
     previousMessage &&
     previousMessage.sender === sender &&
     isSameMinute(previousMessage.timestamp, timestamp);
 
   if (isSystemMessage) {
-    return (
-      <div className="flex items-center justify-center my-2">
-        <div className="bg-muted text-muted-foreground text-xs rounded-full px-3 py-1">
-          {content}
-        </div>
-      </div>
-    );
+    return <SystemMessage content={content} />;
   }
 
-  if (message.isDeleted) {
-    return (
-      <div className={cn(
-        "flex items-start gap-2 mb-4",
-        isCurrentUser ? "flex-row-reverse" : ""
-      )}>
-        <Avatar className="w-8 h-8">
-          <AvatarFallback className={cn(
-            isCurrentUser ? "bg-blue-500 text-white" : "bg-muted"
-          )}>
-            {sender.charAt(0).toUpperCase()}
-          </AvatarFallback>
-        </Avatar>
-
-        <div className={cn(
-          "flex flex-col min-w-0",
-          isCurrentUser ? "items-end" : "items-start"
-        )} style={{ maxWidth: "75%" }}>
-          <div className="flex items-center gap-2 mb-1">
-            <span className="text-sm font-medium">{sender}</span>
-            <span className="text-xs text-muted-foreground">
-              {format(timestamp, "h:mm a")}
-            </span>
-          </div>
-
-          <div className={cn(
-            "rounded-lg px-3 py-2 text-sm min-w-[5rem] whitespace-pre-wrap break-words",
-            isCurrentUser ? "bg-primary text-primary-foreground" : "bg-muted",
-            "italic text-gray-500"
-          )}>
-            Message deleted
-          </div>
-        </div>
-      </div>
-    );
+  if (isDeleted) {
+    return <DeletedMessage sender={sender} timestamp={timestamp} isCurrentUser={isCurrentUser} />;
   }
-  
 
-  if (message.type === SignalType.FILE_MESSAGE) {
-    return (
-      <div
-        className={cn(
-          "flex items-start gap-2 mb-4",
-          message.isCurrentUser ? "flex-row-reverse" : ""
-        )}
-      >
-        <Avatar className="w-8 h-8">
-          <AvatarFallback
-            className={cn(
-              isCurrentUser ? "bg-blue-500 text-white" : "bg-muted"
-            )}
-          >
-            {sender.charAt(0).toUpperCase()}
-          </AvatarFallback>
-        </Avatar>
-        <div
-          className={cn(
-            "flex flex-col",
-            message.isCurrentUser ? "items-end" : "items-start"
-          )}
-        >
-          <div className="flex items-center gap-2 mb-1">
-            <span className="text-sm font-medium">{sender}</span>
-            <span className="text-xs text-muted-foreground">
-              {format(timestamp, "h:mm a")}
-            </span>
-          </div>
-
-          {hasExtension(message.filename || "", IMAGE_EXTENSIONS) && (
-            <div
-              className={cn(
-                "rounded-lg px-0 py-0 text-sm max-w-[60%] break-words","bg-muted"
-              )}
-            >
-              <div className="relative group">
-                <img
-                  src={message.content}
-                  alt={message.filename}
-                  className="max-w-full rounded-md"
-                />
-                <a
-                  href={message.content}
-                  download={message.filename}
-                  className="absolute top-2 right-2 bg-white p-1 rounded-full shadow hidden group-hover:block"
-                  aria-label={`Download ${message.filename}`}
-                >
-                  <icons.DownloadIcon />
-                </a>
-              </div>
-            </div>
-          )}
-
-          {hasExtension(message.filename || "", VIDEO_EXTENSIONS) && (
-            <div
-              className={cn(
-                "rounded-lg text-sm max-w-[60%] break-words",
-                message.isCurrentUser
-                  ? "bg-primary text-primary-foreground"
-                  : "bg-muted"
-              )}
-            >
-              <div className="flex flex-col gap-2">
-                <video controls className="max-w-full rounded-md">
-                  <source src={message.content} />
-                  Your browser does not support the video tag.
-                </video>
-
-                <div className="flex items-center gap-2 text-sm">
-                  <span className="font-medium break-all ml-1 mb-1">{message.filename}</span>
-                  <span className="text-xs text-muted-foreground">
-                    ({formatFileSize(message.fileSize ?? 0)})
-                  </span>
-                  <a
-                    href={message.content}
-                    download={message.filename}
-                    className="text-blue-500 hover:text-blue-700"
-                    title="Download"
-                  >
-                    <icons.DownloadIcon className="w-5 h-5 hover:scale-110 transition-transform duration-1 ease-in-out" />
-                  </a>
-                </div>
-              </div>
-            </div>
-          )}
-
-          {hasExtension(message.filename || "", AUDIO_EXTENSIONS) && (
-            <div
-              className={cn(
-                "rounded-lg mr-1 py-0 text-sm max-w-[75%] break-words",
-                message.isCurrentUser
-                  ? "bg-primary text-primary-foreground"
-                  : "bg-muted"
-              )}
-            >
-              <div className="flex flex-col gap-1">
-                <audio controls className="w-full rounded-md">
-                  <source src={message.content} />
-                  Your browser does not support the audio element.
-                </audio>
-                <div className="flex justify-between items-center gap-1 text-sm text-blue-500">
-                  <span className="truncate max-w-[250px] ml-1" title={message.filename}>
-                    {message.filename}
-                  </span>
-                  <a           
-                    href={message.content}
-                    download={message.filename}
-                    title="Download"
-                    aria-label={`Download ${message.filename}`}
-                  >
-                    <icons.DownloadIcon className="w-5 h-5 hover:scale-110 transition-transform duration-1 ease-in-out" />
-                  </a>
-                </div>
-                <span className="text-xs text-muted-foreground">
-                  ({formatFileSize(message.fileSize ?? 0)})
-                </span>
-              </div>
-            </div>
-          )}
-
-          {!hasExtension(message.filename || "", [...IMAGE_EXTENSIONS, ...VIDEO_EXTENSIONS, ...AUDIO_EXTENSIONS]) && (
-            <div
-              className={cn(
-                "rounded-lg px-1 py-1 text-sm max-w-[60%] break-words",
-                message.isCurrentUser
-                  ? "bg-primary text-primary-foreground"
-                  : "bg-muted"
-              )}
-            >
-              <div className="flex items-start gap-2 w-full text-blue-500">
-                <icons.PaperclipIcon className="h-5 w-5 shrink-0 mt-1" />
-                <div className="flex flex-col min-w-0">
-                  <div className="flex justify-between items-center gap-2">
-                    <span
-                      className="text-sm truncate max-w-[250px] w-full"
-                      title={message.filename}
-                    >
-                      {message.filename}
-                    </span>
-                    <a
-                      href={message.content}
-                      download={message.filename}
-                      title="Download"
-                      aria-label={`Download ${message.filename}`}
-                    >
-                    <icons.DownloadIcon className="w-5 h-5 hover:scale-110 transition-transform duration-1 ease-in-out" />
-                    </a>
-                  </div>
-                  <span className="text-xs text-muted-foreground leading-tight">
-                    ({formatFileSize(message.fileSize ?? 0)})
-                  </span>
-                </div>
-              </div>
-            </div>
-          )}
-        </div>
-      </div>
-    );
+  if (type === "FILE_MESSAGE") {
+    return <FileMessage message={message} isCurrentUser={isCurrentUser} />;
   }
 
   return (
-    <div
-      className={cn(
-        "flex items-start gap-2 mb-4",
-        isCurrentUser ? "flex-row-reverse" : ""
-      )}
-    >
+    <div className={cn("flex items-start gap-2 mb-4", isCurrentUser ? "flex-row-reverse" : "")}>
       <div className={cn("w-9 h-9", isGrouped ? "invisible" : "mb-5")}>
-          {!isGrouped && (
-            <Avatar className="w-9 h-9">
-              <AvatarFallback
-                className={cn(
-                  isCurrentUser ? "bg-blue-500 text-white" : "bg-muted"
-                )}
-              >
-                {sender.charAt(0).toUpperCase()}
-              </AvatarFallback>
-            </Avatar>
-          )}
-        </div>
+        {!isGrouped && (
+          <Avatar className="w-9 h-9">
+            <AvatarFallback className={cn(isCurrentUser ? "bg-blue-500 text-white" : "bg-muted")}>
+              {sender.charAt(0).toUpperCase()}
+            </AvatarFallback>
+          </Avatar>
+        )}
+      </div>
 
       <div
-        className={cn(
-          "flex flex-col min-w-0",
-          isCurrentUser ? "items-end" : "items-start"
-        )}
+        className={cn("flex flex-col min-w-0", isCurrentUser ? "items-end" : "items-start")}
         style={{ maxWidth: "75%" }}
       >
         {!isGrouped && (
           <div className="flex items-center gap-2 mt-1">
             <span className="text-sm font-medium">{sender}</span>
-            <span className="text-xs text-muted-foreground">
-              {format(timestamp, "h:mm a")}
+            <span className="text-xs text-muted-foreground">{format(timestamp, "h:mm a")}</span>
+          </div>
+        )}
+
+        {message.replyTo && (
+          <div className="mb-1 p-2 border-l-2 border-blue-500 bg-blue-50 text-xs text-gray-500 rounded max-w-full truncate">
+            <span className="font-medium">{message.replyTo.sender}</span>:{" "}
+            <span className="italic">
+              {message.replyTo.content.slice(0, 100)}
+              {message.replyTo.content.length > 100 ? "..." : ""}
             </span>
           </div>
         )}
 
-
-        {message.replyTo && ( //reply message
-            <div className="mb-1 p-2 border-l-2 border-blue-500 bg-blue-50 text-xs text-gray-500 rounded max-w-full truncate">
-              <span className="font-medium">{message.replyTo.sender}</span>:{" "}
-              <span className="italic">
-                {message.replyTo.content.slice(0, 100)}
-                {message.replyTo.content.length > 100 ? "..." : ""}
-              </span>
-            </div>
-          )}
-
-        <div
-          className={cn(
-            "group flex items-center gap-2",
-            isCurrentUser ? "flex-row-reverse" : ""
-          )}
-        >
+        <div className={cn("group flex items-center gap-2", isCurrentUser ? "flex-row-reverse" : "")}>
           <div
             className={cn(
               "rounded-lg px-3 py-2 text-sm min-w-[5rem] whitespace-pre-wrap break-words",
@@ -326,22 +71,22 @@ export function ChatMessage({ message, onReply, previousMessage, onDelete, onEdi
             )}
             style={{ wordBreak: "break-word", whiteSpace: "pre-wrap" }}
           >
-            <Linkify options={{ target: '_blank', rel: 'noopener noreferrer' }}>
-              {content}
-            </Linkify>
+            <Linkify options={{ target: "_blank", rel: "noopener noreferrer" }}>{content}</Linkify>
           </div>
-          
 
-          {/*action buttons*/}
-          <div className={cn(
-            "flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity duration-200",
-            isCurrentUser ? "mr-1 flex-row-reverse" : "ml-1"
-          )}>
-            <button //copy
+          {/* Action Buttons */}
+          <div
+            className={cn(
+              "flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity duration-200",
+              isCurrentUser ? "mr-1 flex-row-reverse" : "ml-1"
+            )}
+          >
+            <button
               onClick={() => navigator.clipboard.writeText(content)}
               aria-label="Copy message"
               className="hover:text-primary"
             >
+              {/* Inline SVG copy icon */}
               <svg
                 width="15"
                 height="15"
@@ -358,7 +103,7 @@ export function ChatMessage({ message, onReply, previousMessage, onDelete, onEdi
               </svg>
             </button>
 
-            <button //reply button
+            <button
               onClick={() => onReply?.(message)}
               aria-label="Reply to message"
               className="hover:text-primary"
@@ -371,34 +116,20 @@ export function ChatMessage({ message, onReply, previousMessage, onDelete, onEdi
                 stroke="currentColor"
                 className="w-4 h-4"
               >
-                <path
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  d="M9 15 3 9m0 0 6-6M3 9h12a6 6 0 0 1 0 12h-3"
-                />
+                <path strokeLinecap="round" strokeLinejoin="round" d="M9 15 3 9m0 0 6-6M3 9h12a6 6 0 0 1 0 12h-3" />
               </svg>
             </button>
 
-            {isCurrentUser && !isSystemMessage && ( //unsend message
-              <button
-                onClick={() => onDelete?.(message)}
-                aria-label="Delete message"
-                className="hover:text-destructive"
-              >
+            {isCurrentUser && !isSystemMessage && (
+              <button onClick={() => onDelete?.(message)} aria-label="Delete message" className="hover:text-destructive">
                 <TrashIcon className="w-4 h-4" />
               </button>
             )}
 
-            {message.isEdited && (
-              <span className="text-xs text-muted-foreground italic">(edited)</span>
-            )}
+            {message.isEdited && <span className="text-xs text-muted-foreground italic">(edited)</span>}
 
-            {isCurrentUser && !message.isDeleted && ( //edit button
-              <button
-                onClick={() => onEdit?.(message)}
-                aria-label="Edit message"
-                className="hover:text-primary"
-              >
+            {isCurrentUser && !message.isDeleted && (
+              <button onClick={() => onEdit?.(message)} aria-label="Edit message" className="hover:text-primary">
                 <Pencil1Icon className="w-4 h-4" />
               </button>
             )}
@@ -407,12 +138,4 @@ export function ChatMessage({ message, onReply, previousMessage, onDelete, onEdi
       </div>
     </div>
   );
-}
-
-function formatFileSize(bytes: number) {
-  if (bytes === 0) return "0 Bytes";
-  const k = 1024;
-  const sizes = ["Bytes", "KB", "MB", "GB"];
-  const i = Math.floor(Math.log(bytes) / Math.log(k));
-  return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + " " + sizes[i];
 }

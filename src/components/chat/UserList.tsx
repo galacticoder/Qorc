@@ -7,7 +7,6 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 export interface User {
   id: string;
   username: string;
-  isTyping: boolean;
   isOnline: boolean;
   publicKey: string;
 }
@@ -71,11 +70,6 @@ export function UserList({ users, currentUser, className }: UserListProps) {
                     {user.username === currentUser && " (you)"}
                   </span>
                 </div>
-                {user.isTyping && user.username !== currentUser && (
-                  <Badge variant="outline" className="text-xs animate-pulse">
-                    typing...
-                  </Badge>
-                )}
               </div>
             ))}
           </div>

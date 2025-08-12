@@ -1,27 +1,5 @@
 import { SignalType } from "@/lib/signals";
-
-export interface Message {
-  id: string;
-  content: string;
-  sender: string;
-  timestamp: Date;
-  isCurrentUser?: boolean;
-  isSystemMessage?: boolean;
-  isDeleted?: boolean;
-  isEdited?: boolean;
-  shouldPersist?: boolean;
-  replyTo?: {
-    id: string;
-    sender: string;
-    content: string;
-  };
-  fileInfo?: {
-    name: string;
-    type: string;
-    size: number;
-    data: ArrayBuffer;
-  };
-}
+import { Message } from "@/components/chat/types";
 
 export interface AuthProps {
   username: string;

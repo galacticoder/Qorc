@@ -1,6 +1,6 @@
 import { useState, useRef, useCallback } from "react";
 import { useLocalStorage } from "./use-local-storage";
-import { Message } from "@/components/chat/ChatMessage";
+import { Message } from "@/components/chat/types";
 import { SignalType } from "@/lib/signals";
 import websocketClient from "@/lib/websocket";
 import { CryptoUtils }from "@/lib/unified-crypto";

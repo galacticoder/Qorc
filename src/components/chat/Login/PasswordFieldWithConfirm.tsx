@@ -1,7 +1,6 @@
-// PasswordFieldWithConfirm.tsx
 import React from "react";
-import { Input } from "../ui/input";
-import { Label } from "../ui/label";
+import { Input } from "../../ui/input";
+import { Label } from "../../ui/label";
 
 interface PasswordFieldWithConfirmProps {
   label: string;
@@ -13,6 +12,7 @@ interface PasswordFieldWithConfirmProps {
   minLength?: number;
   strengthCheck?: boolean;
   warningMessage?: React.ReactNode;
+  disabled?: boolean; // added here
 }
 
 export function PasswordFieldWithConfirm({
@@ -25,6 +25,7 @@ export function PasswordFieldWithConfirm({
   minLength = 0,
   strengthCheck = false,
   warningMessage,
+  disabled = false, // default false
 }: PasswordFieldWithConfirmProps) {
   const isStrongEnough = value.length >= minLength;
   const showMismatch = value && confirmValue && value !== confirmValue;
@@ -41,6 +42,7 @@ export function PasswordFieldWithConfirm({
           onChange={(e) => onChange(e.target.value)}
           required={required}
           minLength={minLength}
+          disabled={disabled}
         />
         {strengthCheck && !isStrongEnough && value.length > 0 && (
           <p className="text-xs text-red-500">
@@ -59,7 +61,8 @@ export function PasswordFieldWithConfirm({
           onChange={(e) => onConfirmChange(e.target.value)}
           required={required}
           minLength={minLength}
-          />
+          disabled={disabled}
+        />
         {showMismatch && (
           <p className="text-xs text-red-500">{label}s do not match</p>
         )}

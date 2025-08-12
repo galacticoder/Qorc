@@ -4,10 +4,9 @@ import DatabaseDriver from 'better-sqlite3';
 import { CryptoUtils } from '../crypto/unified-crypto.js';
 
 const DB_PATH = path.join(path.dirname(fileURLToPath(import.meta.url)), 'user_database.sqlite');
-
 const db = new DatabaseDriver(DB_PATH);
 
-//create users table
+//users info table
 db.exec(`
   CREATE TABLE IF NOT EXISTS users (
     username TEXT PRIMARY KEY,
@@ -22,10 +21,11 @@ db.exec(`
   )
 `);
 
-//create message history table
+//message history table
 db.exec(`
   CREATE TABLE IF NOT EXISTS messages (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
+    messageId TEXT NOT NULL UNIQUE,
     payload TEXT NOT NULL
   );
 `);
@@ -37,7 +37,7 @@ export class UserDatabase {
     return row;
   }
 
-  static saveUserRecord(userRecord) { //save or update user info in db
+  static saveUserRecord(userRecord) { // save or update user info in db
     db.prepare(`
       INSERT INTO users (
         username, passwordHash, passphraseHash,
@@ -57,37 +57,38 @@ export class UserDatabase {
     `).run(userRecord);
   }
 }
-export class MessageDatabase{
+
+export class MessageDatabase {
   static async saveMessageInDB(payload, privateKey) {
     const decryptedPayload = await CryptoUtils.Decrypt.decryptAndFormatPayload(payload, privateKey);
     const stringifiedPayload = JSON.stringify(decryptedPayload);
-    console.log("STRINGIFIED: ", stringifiedPayload)
+    const messageId = decryptedPayload.id;
+
     db.prepare(`
-      INSERT INTO messages (payload)
-      VALUES (?)
-    `).run(stringifiedPayload);
-    console.log(`Saved message from '${decryptedPayload.from}' to db: ${decryptedPayload}`)
+      INSERT INTO messages (messageId, payload)
+      VALUES (?, ?)
+      ON CONFLICT(messageId) DO UPDATE SET
+        payload = excluded.payload
+    `).run(messageId, stringifiedPayload);
+
+    console.log(`Saved message '${messageId}' from '${decryptedPayload.from}' to db`);
   }
-  
+
   static getMessagesForUser(username, limit = 50) {
     const stmt = db.prepare(`
-      SELECT id, payload FROM messages
+      SELECT id, messageId, payload FROM messages
       WHERE json_extract(payload, '$.from') = ?
-        OR json_extract(payload, '$.to') = ?
+         OR json_extract(payload, '$.to') = ?
       ORDER BY COALESCE(json_extract(payload, '$.timestamp'), 0) DESC
       LIMIT ?
     `);
 
     const rows = stmt.all(username, username, limit);
 
-    console.log(`Found ${rows.length} messages for user '${username}':`);
-    rows.forEach(row => {
-      console.log(` - id: ${row.id}, payload: ${row.payload}`);
-    });
-
     return rows.map(row => ({
-      id: row.id,
+      dbId: row.id,
+      messageId: row.messageId,//payload id
       ...JSON.parse(row.payload)
     }));
-  }
+  } //add get message by id func later for speed
 }

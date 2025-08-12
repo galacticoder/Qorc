@@ -129,7 +129,6 @@ class HashingService {
   }
 }
 
-
 class KeyService {
   static async deriveAESKeyFromPassphrase(passphrase, saltBase64) {
     const saltBytes = Uint8Array.from(atob(saltBase64), c => c.charCodeAt(0)); //decode salt from base64

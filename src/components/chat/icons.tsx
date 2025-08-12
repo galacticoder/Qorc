@@ -1,7 +1,5 @@
 import { SVGProps } from "react";
-import { CopyIcon as RadixCopyIcon } from "@radix-ui/react-icons";
-
-export const CopyIcon = RadixCopyIcon;
+export { Cross2Icon, PaperPlaneIcon, TrashIcon, Pencil1Icon, CheckIcon, CopyIcon as RadixCopyIcon } from "@radix-ui/react-icons";
 
 export function KeyRing(props: SVGProps<SVGSVGElement>) {
   return (
@@ -96,6 +94,24 @@ export function DownloadIcon(props: React.SVGProps<SVGSVGElement>) {
         strokeLinejoin="round"
         d="M3 16.5v2.25A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75V16.5M16.5 12 12 16.5m0 0L7.5 12m4.5 4.5V3"
       />
+    </svg>
+  );
+}
+
+export function LockClosedIcon(props: SVGProps<SVGSVGElement>) {
+  return (
+    <svg
+      {...props}
+      xmlns="http://www.w3.org/2000/svg"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
+      <path d="M7 11V7a5 5 0 0 1 10 0v4" />
     </svg>
   );
 }

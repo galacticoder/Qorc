@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { Card } from "@/components/ui/card";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { ChatMessage, Message } from "./ChatMessage";
+import { ChatMessage } from "./ChatMessage";
+import { Message } from "./types"
 import { ChatInput } from "./ChatInput.tsx";
 import { Separator } from "@/components/ui/separator";
 import { User } from "./UserList";

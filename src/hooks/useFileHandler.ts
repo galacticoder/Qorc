@@ -2,7 +2,8 @@ import { useRef, useCallback } from "react";
 import { v4 as uuidv4 } from "uuid";
 import * as pako from "pako";
 import { SignalType } from "@/lib/signals";
-import { Message, IncomingFileChunks } from "@/pages/types";
+import { IncomingFileChunks } from "@/pages/types";
+import { Message } from "@/components/chat/types";
 import { CryptoUtils } from "@/lib/unified-crypto";
 import { User } from "@/components/chat/UserList";
 

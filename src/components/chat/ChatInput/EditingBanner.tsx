@@ -1,6 +1,6 @@
 import { Button } from "../../ui/button";
-import { Cross2Icon } from "@radix-ui/react-icons";
 import { cn } from "@/lib/utils";
+import { Cross2Icon } from "../icons";
 
 interface EditingBannerProps {
   onCancelEdit?: () => void;

@@ -123,8 +123,8 @@ async function startServer() {
             await MessageDatabase.saveMessageInDB(parsed, serverKeyPair.privateKey)
 
             console.log("Loading user messages...__________________________((((((((")
-            const userMessagesHistory = MessageDatabase.getMessagesForUser(clientState.username, 50) //message history to send to client
-            // console.log("usermessage hiostory: ", userMessagesHistory)
+            const userMessagesHistory = MessageDatabase.getMessagesForUser(clientState.username, 50) //message history to send to client later
+            console.log("usermessage hiostory: ", userMessagesHistory)
             console.log("Loaded user messages__________________________)))))))")
             break;
           }

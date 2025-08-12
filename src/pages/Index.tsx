@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import { Login } from "@/components/chat/Login";
 import { UserList, User } from "@/components/chat/UserList";
 import { ChatInterface } from "@/components/chat/ChatInterface";
-import { Message } from "@/components/chat/ChatMessage";
+import { Message } from "@/components/chat/types";
 import { CryptoUtils } from "@/lib/unified-crypto";
 import websocketClient from "@/lib/websocket";
 import { SignalType } from "@/lib/signals";
@@ -157,7 +157,7 @@ const ChatApp: React.FC<ChatAppProps> = ({ onNavigate }) => {
       if (payload.typeInside === SignalType.DELETE_MESSAGE) {
         console.log("payload delete: ", payload)
         setMessages(prev => prev.map(msg => 
-          msg.id === payload.messageId 
+          msg.id === payload.id 
             ? { ...msg, isDeleted: true, content: "Message deleted" } 
             : msg
         ));
@@ -167,7 +167,7 @@ const ChatApp: React.FC<ChatAppProps> = ({ onNavigate }) => {
       if (payload.typeInside === SignalType.EDIT_MESSAGE) {
         console.log("payload edit: ", payload)
         setMessages(prev => prev.map(msg => 
-          msg.id === payload.messageId 
+          msg.id === payload.id 
             ? { 
                 ...msg, 
                 content: payload.content, 
