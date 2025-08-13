@@ -1,4 +1,5 @@
 import { v4 as uuidv4 } from 'uuid';
+import { SignalType } from './signals';
 
 interface MessageHandler {
   (message: unknown): void;
@@ -35,21 +36,21 @@ class WebSocketClient {
 
     return new Promise((resolve, reject) => {
       const handleAuth = (msg: any) => {
-        if (msg.type === 'AUTH_SUCCESS') {
-          this.unregisterMessageHandler('AUTH_SUCCESS');
-          this.unregisterMessageHandler('AUTH_ERROR');
+        if (msg.type === SignalType.AUTH_SUCCESS) {
+          this.unregisterMessageHandler(SignalType.AUTH_SUCCESS);
+          this.unregisterMessageHandler(SignalType.AUTH_ERROR);
           this.send(username);
           resolve();
-        } else if (msg.type === 'AUTH_ERROR') {
-          this.unregisterMessageHandler('AUTH_SUCCESS');
-          this.unregisterMessageHandler('AUTH_ERROR');
+        } else if (msg.type === SignalType.AUTH_ERROR) {
+          this.unregisterMessageHandler(SignalType.AUTH_SUCCESS);
+          this.unregisterMessageHandler(SignalType.AUTH_ERROR);
           this.ws?.close(1008, "Auth failed");
           reject(new Error(msg.message || "Authentication failed"));
         }
       };
 
-      this.registerMessageHandler('AUTH_SUCCESS', handleAuth);
-      this.registerMessageHandler('AUTH_ERROR', handleAuth);
+      this.registerMessageHandler(SignalType.AUTH_SUCCESS, handleAuth);
+      this.registerMessageHandler(SignalType.AUTH_ERROR, handleAuth);
 
       this.send(password);
     });

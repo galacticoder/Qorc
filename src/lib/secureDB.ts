@@ -1,4 +1,3 @@
-import { argon2id } from "@noble/hashes/argon2";
 import { CryptoUtils } from "./unified-crypto";
 
 export class SecureDB {
@@ -11,53 +10,27 @@ export class SecureDB {
     this.dbName = `securechat_${username}_db`;
   }
 
-  async initialize(password: string): Promise<void> {
-    this.encryptionKey = await this.deriveKey(password);
+  async initializeWithKey(key: CryptoKey): Promise<void> {
+    this.encryptionKey = key;
+    console.log("[SecureDB] SecureDB initialized");
   }
 
-  private async deriveKey(password: string): Promise<CryptoKey> {
-    const encoder = new TextEncoder();
-    const passwordBuffer = encoder.encode(password);
-    const salt = encoder.encode(`SecureChatSalt-${this.username}`);
-    
-    const derivedKey = argon2id(passwordBuffer, salt, {
-      t: 3,
-      m: 65536,
-      p: 1,
-      dkLen: 32
-    });
-    
-    return crypto.subtle.importKey(
-      "raw",
-      derivedKey,
-      { name: "AES-GCM" },
-      false,
-      ["encrypt", "decrypt"]
-    );
-  }
-
-  private async encryptData(data: any): Promise<Uint8Array> {
+  private async encryptData(data: any): Promise<Uint8Array> { //change later
     if (!this.encryptionKey) throw new Error("Encryption key not initialized");
-    
+
     const iv = crypto.getRandomValues(new Uint8Array(CryptoUtils.Config.IV_LENGTH));
     const encoder = new TextEncoder();
-    const dataString = JSON.stringify(data);
-    const dataBuffer = encoder.encode(dataString);
-    
+    const dataBuffer = encoder.encode(JSON.stringify(data));
+
     const encrypted = await crypto.subtle.encrypt(
-      { 
-        name: "AES-GCM", 
-        iv,
-        tagLength: CryptoUtils.Config.AUTH_TAG_LENGTH * 8
-      },
+      { name: "AES-GCM", iv, tagLength: CryptoUtils.Config.AUTH_TAG_LENGTH * 8 },
       this.encryptionKey,
       dataBuffer
     );
-    
+
     const combined = new Uint8Array(iv.length + encrypted.byteLength);
     combined.set(iv);
     combined.set(new Uint8Array(encrypted), iv.length);
-    
     return combined;
   }
 
@@ -66,118 +39,99 @@ export class SecureDB {
 
     const iv = encryptedData.slice(0, CryptoUtils.Config.IV_LENGTH);
     const data = encryptedData.slice(CryptoUtils.Config.IV_LENGTH);
-    
+
     const decrypted = await crypto.subtle.decrypt(
-      { 
-        name: "AES-GCM", 
-        iv,
-        tagLength: CryptoUtils.Config.AUTH_TAG_LENGTH * 8
-      },
+      { name: "AES-GCM", iv, tagLength: CryptoUtils.Config.AUTH_TAG_LENGTH * 8 },
       this.encryptionKey,
       data
     );
-    
-    const decoder = new TextDecoder();
-    return JSON.parse(decoder.decode(decrypted));
+
+    return JSON.parse(new TextDecoder().decode(decrypted));
   }
 
-  async saveMessages(messages: any[]): Promise<void> {
-    const encrypted = await this.encryptData(messages);
+  private openDB(): Promise<IDBDatabase> {
     return new Promise((resolve, reject) => {
       const request = indexedDB.open(this.dbName, 1);
-      
-      request.onerror = () => reject(request.error);
-      request.onsuccess = () => {
-        const db = request.result;
-        const tx = db.transaction("data", "readwrite");
-        const store = tx.objectStore("data");
-        store.put(encrypted, "messages");
-        tx.oncomplete = () => resolve();
-        tx.onerror = () => reject(tx.error);
-      };
-      
-      request.onupgradeneeded = (event) => {
+
+      request.onupgradeneeded = () => {
         const db = request.result;
         if (!db.objectStoreNames.contains("data")) {
           db.createObjectStore("data");
         }
       };
+
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+  }
+
+  async saveMessages(messages: any[]): Promise<void> {
+    if (!this.encryptionKey) throw new Error("Encryption key not initialized");
+    const encrypted = await this.encryptData(messages);
+
+    const db = await this.openDB();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction("data", "readwrite");
+      const store = tx.objectStore("data");
+      store.put(encrypted, "messages");
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
     });
   }
 
   async loadMessages(): Promise<any[]> {
+    const db = await this.openDB();
     return new Promise((resolve, reject) => {
-      const request = indexedDB.open(this.dbName, 1);
-      
-      request.onerror = () => reject(request.error);
-      request.onsuccess = () => {
-        const db = request.result;
-        const tx = db.transaction("data", "readonly");
-        const store = tx.objectStore("data");
-        const getRequest = store.get("messages");
-        
-        getRequest.onerror = () => reject(getRequest.error);
-        getRequest.onsuccess = () => {
-          if (!getRequest.result) {
-            resolve([]);
-            return;
-          }
-          
-          this.decryptData(getRequest.result)
-            .then(resolve)
-            .catch(reject);
-        };
-      };
-      
-      request.onupgradeneeded = (event) => {
-        const db = request.result;
-        if (!db.objectStoreNames.contains("data")) {
-          db.createObjectStore("data");
+      const tx = db.transaction("data", "readonly");
+      const store = tx.objectStore("data");
+      const request = store.get("messages");
+
+      request.onsuccess = async () => {
+        if (!request.result) return resolve([]);
+        try {
+          const data = await this.decryptData(request.result);
+          resolve(data);
+        } catch (err) {
+          reject(err);
         }
       };
+
+      request.onerror = () => reject(request.error);
     });
   }
 
   async saveUsers(users: any[]): Promise<void> {
+    if (!this.encryptionKey) throw new Error("Encryption key not initialized");
     const encrypted = await this.encryptData(users);
+
+    const db = await this.openDB();
     return new Promise((resolve, reject) => {
-      const request = indexedDB.open(this.dbName, 1);
-      
-      request.onerror = () => reject(request.error);
-      request.onsuccess = () => {
-        const db = request.result;
-        const tx = db.transaction("data", "readwrite");
-        const store = tx.objectStore("data");
-        store.put(encrypted, "users");
-        tx.oncomplete = () => resolve();
-        tx.onerror = () => reject(tx.error);
-      };
+      const tx = db.transaction("data", "readwrite");
+      const store = tx.objectStore("data");
+      store.put(encrypted, "users");
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
     });
   }
 
   async loadUsers(): Promise<any[]> {
+    const db = await this.openDB();
     return new Promise((resolve, reject) => {
-      const request = indexedDB.open(this.dbName, 1);
-      
-      request.onerror = () => reject(request.error);
-      request.onsuccess = () => {
-        const db = request.result;
-        const tx = db.transaction("data", "readonly");
-        const store = tx.objectStore("data");
-        const getRequest = store.get("users");
-        
-        getRequest.onerror = () => reject(getRequest.error);
-        getRequest.onsuccess = () => {
-          if (!getRequest.result) {
-            resolve([]);
-            return;
-          }
-          
-          this.decryptData(getRequest.result)
-            .then(resolve)
-            .catch(reject);
-        };
+      const tx = db.transaction("data", "readonly");
+      const store = tx.objectStore("data");
+      const request = store.get("users");
+
+      request.onsuccess = async () => {
+        if (!request.result) return resolve([]);
+        try {
+          const data = await this.decryptData(request.result);
+          resolve(data);
+        } catch (err) {
+          reject(err);
+        }
       };
+
+      request.onerror = () => reject(request.error);
     });
   }
 

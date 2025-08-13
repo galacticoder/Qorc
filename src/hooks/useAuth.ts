@@ -14,7 +14,7 @@ export const useAuth = () => {
   const [accountAuthenticated, setAccountAuthenticated] = useState(false);
   const passphraseRef = useRef<string>("");
   const passphrasePlaintextRef = useRef<string>("");
-  
+  const aesKeyRef = useRef<CryptoKey | null>(null);
   
   // keys
   const [privateKeyPEM, setPrivateKeyPEM] = useLocalStorage<string>("private_key", "");
@@ -26,8 +26,8 @@ export const useAuth = () => {
   const serverPublicKeyRef = useRef<CryptoKey | null>(null);
   const passwordRef = useRef<string>("");
   const [passphraseHashParams, setPassphraseHashParams] = useState(null);
-
-
+  const [showPassphrasePrompt, setShowPassphrasePrompt] = useState(false);  
+  
   const initializeKeys = useCallback(async () => {
     if (!privateKeyPEM || !publicKeyPEM) {
       setIsGeneratingKeys(true);
@@ -177,15 +177,14 @@ export const useAuth = () => {
         console.log("Generating new hashing passphrase for registration...");
 
         const passphraseHash = await CryptoUtils.Hash.hashData(passphrase);
-
         passphraseRef.current = passphraseHash;
 
-        websocketClient.send(JSON.stringify({ //encrypt with server key later after committing
+        websocketClient.send(JSON.stringify({
           type: SignalType.PASSPHRASE_HASH_NEW,
           passphraseHash: passphraseHash,
         }));
 
-        console.log("Sent hashed passphrase and new salt to server for registration");
+        console.log("Sent hashed passphrase to server for registration");
       } catch (error) {
         console.error("Passphrase hashing failed:", error);
         setLoginError("Failed to hash passphrase.");
@@ -193,11 +192,33 @@ export const useAuth = () => {
     }
   };
 
-  const handleAuthSuccess = (username: string, onSuccess?: (messages: Message[]) => void) => {
+  const handleAuthSuccess = (username: string) => {
     console.log("Auth success")
     setUsername(username);
     setIsLoggedIn(true);
     setLoginError("");
+  };
+
+  const useLogout = (auth: ReturnType<typeof useAuth>, Database: any) => {
+    return useCallback(() => {
+      if (Database.secureDBRef?.current) Database.secureDBRef.current = null; //clear db ref
+
+      //clear again just in case values didnt clear before (it will always be cleared this is just in case)
+      auth.passwordRef.current = "";
+      auth.passphraseRef.current = "";
+      auth.passphrasePlaintextRef.current = "";
+
+      auth.aesKeyRef.current = null; //clear key
+
+      auth.setIsLoggedIn(false);
+      auth.setLoginError("");
+      auth.setAccountAuthenticated(false);
+
+      // Database.setMessages([]); //later dont do this so the messages stay in the encrypted db
+      // Database.setUsers([]);
+
+      console.log("Logged out successfully");
+    }, [auth, Database]);
   };
   
   return {
@@ -224,6 +245,10 @@ export const useAuth = () => {
     passphraseHashParams,
     setPassphraseHashParams,
     passphrasePlaintextRef,
-    passphraseRef
+    passphraseRef,
+    aesKeyRef,
+    setShowPassphrasePrompt,
+    showPassphrasePrompt,
+    useLogout
   };
 };

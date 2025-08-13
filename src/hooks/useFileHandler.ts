@@ -81,21 +81,20 @@ export function useFileHandler(
     [privateKeyRef, onNewMessage, setLoginError]
   );
 
-  return { handleFileMessageChunk };
-}
+  const handleSendFile = async (
+    fileMessage: Message,
+    loginUsernameRef: string,
+    onNewMessage: (message: Message) => void,
+  ) => {
+    const userFileMessage: Message = { 
+      ...fileMessage, 
+      isCurrentUser: true, 
+      sender: loginUsernameRef,
+      shouldPersist: false
+    };
+    
+    onNewMessage(userFileMessage);
+  }
 
-export function handleSendFile(
-  fileMessage: Message,
-  loginUsernameRef: React.MutableRefObject<string>,
-  onNewMessage: (message: Message) => void,
-  users: User[]
-) {
-  const userFileMessage: Message = { 
-    ...fileMessage, 
-    isCurrentUser: true, 
-    sender: loginUsernameRef.current,
-    shouldPersist: false
-  };
-  
-  onNewMessage(userFileMessage);
+  return { handleFileMessageChunk, handleSendFile };
 }

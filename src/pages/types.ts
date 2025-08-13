@@ -1,6 +1,3 @@
-import { SignalType } from "@/lib/signals";
-import { Message } from "@/components/chat/types";
-
 export interface AuthProps {
   username: string;
   isLoggedIn: boolean;
@@ -18,8 +15,7 @@ export interface AuthProps {
   ) => Promise<void>;
   handleServerPasswordSubmit: (password: string) => Promise<void>;
   handleAuthSuccess: (
-    username: string,
-    onSuccess?: (messages: Message[]) => void
+    username: string
   ) => void;
   setAccountAuthenticated: React.Dispatch<React.SetStateAction<boolean>>;
   setLoginError: React.Dispatch<React.SetStateAction<string>>;
