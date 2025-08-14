@@ -12,7 +12,7 @@ export enum SignalType {
   USER_DISCONNECT = "user-disconnect",
   SERVERLIMIT = "server-limit",
   SERVERMESSAGE = "server-message",
-  NAMEEXISTSERROR = "name-exists-error", 
+  NAMEEXISTSERROR = "name-exists-error",
   INVALIDNAMELENGTH = "invalid-name-length",
   INVALIDNAME = "invalid-name",
   SERVER_PASSWORD_ENCRYPTED = "server-password-encrypted",
@@ -42,7 +42,7 @@ export async function handleSignalMessages(
   data: any,
   handlers: SignalHandlers
 ) {
-  
+
   const { Authentication, Database, handleFileMessageChunk, handleEncryptedMessagePayload } = handlers;
   const { type, message } = data;
 
@@ -83,7 +83,7 @@ export async function handleSignalMessages(
         const pem = (data as any).publicKey;
         setServerPublicKeyPEM(pem);
         serverPublicKeyRef.current = await CryptoUtils.Keys.importPublicKeyFromPEM(pem);
-        
+
         console.log("Server public key received: ", pem);
         break;
 
@@ -128,14 +128,17 @@ export async function handleSignalMessages(
         break;
 
       case SignalType.PASSPHRASE_SUCCESS:
-        const saltExtracted = CryptoUtils.Hash.extractSaltBase64FromEncodedHash(passphraseRef.current);
-        const { aesKey: derivedKey } = await CryptoUtils.Keys.deriveAESKeyFromPassphrase(passphrasePlaintextRef.current, saltExtracted);
-        aesKeyRef.current = derivedKey;
+        const parsedStoredHash = CryptoUtils.Hash.parseArgon2Hash(passphraseRef.current)
+        const { aesKey: derivedKey } = await CryptoUtils.Keys.deriveAESKeyFromPassphrase(passphrasePlaintextRef.current, {
+          saltBase64: parsedStoredHash.salt,
+          time: parsedStoredHash.timeCost,
+          memoryCost: parsedStoredHash.memoryCost,
+          parallelism: parsedStoredHash.parallelism,
+          algorithm: parsedStoredHash.algorithm,
+          version: parsedStoredHash.version,
+        });
 
-        //clear after because no need for use again
-        passphraseRef.current = "";
-        passphrasePlaintextRef.current = "";
-        
+        aesKeyRef.current = derivedKey;
         console.log("AES key derived and stored for encrypting messages for server db");
         setShowPassphrasePrompt(false);
         break;
@@ -145,12 +148,12 @@ export async function handleSignalMessages(
       case SignalType.EDIT_MESSAGE:
       case SignalType.DELETE_MESSAGE:
         if (handlers['handleEncryptedMessagePayload'])
-          await (handlers as any).handleEncryptedMessagePayload(data);        
+          await (handlers as any).handleEncryptedMessagePayload(data);
         break;
 
       case SignalType.IN_ACCOUNT:
         setAccountAuthenticated(true);
-        passwordRef.current = ""; //clearing this causes problems for 
+        passwordRef.current = "";
         break;
 
       case SignalType.FILE_MESSAGE_CHUNK:

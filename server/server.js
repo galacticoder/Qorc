@@ -61,7 +61,7 @@ async function startServer() {
               clientState.hasPassedAccountLogin = true;
               clientState.username = result.username;
 
-              if (result.pending) 
+              if (result.pending)
                 console.log(`User '${result.username}' pending passphrase`);
 
               ws.send(JSON.stringify({ type: SignalType.IN_ACCOUNT, message: 'Logged in successfully' }));
@@ -122,10 +122,8 @@ async function startServer() {
             console.log(`Update db message sent from '${clientState.username}': ${parsed}`)
             await MessageDatabase.saveMessageInDB(parsed, serverKeyPair.privateKey)
 
-            console.log("Loading user messages...__________________________((((((((")
-            const userMessagesHistory = MessageDatabase.getMessagesForUser(clientState.username, 50) //message history to send to client later
-            console.log("usermessage hiostory: ", userMessagesHistory)
-            console.log("Loaded user messages__________________________)))))))")
+            const userMessagesHistory = MessageDatabase.getMessagesForUser(clientState.username, 3) //message history to send to client later
+            console.log(`User '${clientState.username}' message history: `, userMessagesHistory)
             break;
           }
 

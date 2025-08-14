@@ -8,7 +8,7 @@ export function useEncryptedMessageHandler(
   privateKeyRef: React.RefObject<CryptoKey>,
   setUsers: React.Dispatch<React.SetStateAction<any[]>>,
   setMessages: React.Dispatch<React.SetStateAction<Message[]>>,
-  handleNewMessage: (msg: Message) => Promise<void>
+  saveMessageToLocalDB: (msg: Message) => Promise<void>
 ) {
   return useCallback(
     async (message: any) => {
@@ -46,11 +46,11 @@ export function useEncryptedMessageHandler(
             prev.map(msg =>
               msg.id === payload.id
                 ? {
-                    ...msg,
-                    content: payload.content,
-                    isEdited: true,
-                    timestamp: new Date(payload.timestamp),
-                  }
+                  ...msg,
+                  content: payload.content,
+                  isEdited: true,
+                  timestamp: new Date(payload.timestamp),
+                }
                 : msg
             )
           );
@@ -80,12 +80,14 @@ export function useEncryptedMessageHandler(
             },
           }),
         };
-        
-        await handleNewMessage(payloadFull);
+
+        //send to server db when done saving the user message
+
+        await saveMessageToLocalDB(payloadFull);
       } catch (error) {
         console.error("Error handling encrypted message:", error);
       }
     },
-    [handleNewMessage, privateKeyRef, setUsers, setMessages]
+    [saveMessageToLocalDB, privateKeyRef, setUsers, setMessages]
   );
 }

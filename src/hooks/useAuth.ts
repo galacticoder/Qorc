@@ -1,9 +1,11 @@
-import { useState, useRef, useCallback } from "react";
+import { useState, useRef, useCallback, MutableRefObject } from "react";
 import { useLocalStorage } from "./use-local-storage";
 import { Message } from "@/components/chat/types";
 import { SignalType } from "@/lib/signals";
 import websocketClient from "@/lib/websocket";
-import { CryptoUtils }from "@/lib/unified-crypto";
+import { CryptoUtils } from "@/lib/unified-crypto";
+import { SecureDB } from "@/lib/secureDB";
+
 
 export const useAuth = () => {
   //states
@@ -15,7 +17,7 @@ export const useAuth = () => {
   const passphraseRef = useRef<string>("");
   const passphrasePlaintextRef = useRef<string>("");
   const aesKeyRef = useRef<CryptoKey | null>(null);
-  
+
   // keys
   const [privateKeyPEM, setPrivateKeyPEM] = useLocalStorage<string>("private_key", "");
   const [publicKeyPEM, setPublicKeyPEM] = useLocalStorage<string>("public_key", "");
@@ -26,8 +28,8 @@ export const useAuth = () => {
   const serverPublicKeyRef = useRef<CryptoKey | null>(null);
   const passwordRef = useRef<string>("");
   const [passphraseHashParams, setPassphraseHashParams] = useState(null);
-  const [showPassphrasePrompt, setShowPassphrasePrompt] = useState(false);  
-  
+  const [showPassphrasePrompt, setShowPassphrasePrompt] = useState(false);
+
   const initializeKeys = useCallback(async () => {
     if (!privateKeyPEM || !publicKeyPEM) {
       setIsGeneratingKeys(true);
@@ -35,10 +37,10 @@ export const useAuth = () => {
         const keyPair = await CryptoUtils.Keys.generateRSAKeyPair();
         const publicKeyString = await CryptoUtils.Keys.exportPublicKeyToPEM(keyPair.publicKey);
         const privateKeyString = await CryptoUtils.Keys.exportPrivateKeyToPEM(keyPair.privateKey);
-        
+
         setPublicKeyPEM(publicKeyString);
         setPrivateKeyPEM(privateKeyString);
-        
+
         publicKeyRef.current = keyPair.publicKey;
         privateKeyRef.current = keyPair.privateKey;
       } catch (error) {
@@ -50,7 +52,7 @@ export const useAuth = () => {
       try {
         const publicKey = await CryptoUtils.Keys.importPublicKeyFromPEM(publicKeyPEM);
         const privateKey = await CryptoUtils.Keys.importPrivateKeyFromPEM(privateKeyPEM);
-        
+
         publicKeyRef.current = publicKey;
         privateKeyRef.current = privateKey;
       } catch (error) {
@@ -129,7 +131,7 @@ export const useAuth = () => {
         type: SignalType.SERVER_PASSWORD_ENCRYPTED,
         content: password
       });
-      
+
       const userPayload = await CryptoUtils.Encrypt.encryptAndFormatPayload({
         recipientPEM: exportPem,
         publicKey: publicKeyPEM
@@ -143,7 +145,7 @@ export const useAuth = () => {
 
       console.log("Sending combined login info: ", loginInfo);
       websocketClient.send(JSON.stringify(loginInfo));
-      
+
       loginUsernameRef.current = username;
     } catch (error) {
       console.error("Login failed: ", error);
@@ -193,34 +195,49 @@ export const useAuth = () => {
   };
 
   const handleAuthSuccess = (username: string) => {
+    if (!accountAuthenticated) return;
+
     console.log("Auth success")
     setUsername(username);
     setIsLoggedIn(true);
     setLoginError("");
   };
 
-  const useLogout = (auth: ReturnType<typeof useAuth>, Database: any) => {
+  const logout = (secureDBRef?: MutableRefObject<SecureDB | null>, setLoginErrorMessage: string = "") => {
+    if (secureDBRef?.current) secureDBRef.current = null;
+
+    passwordRef.current = "";
+    passphraseRef.current = "";
+    passphrasePlaintextRef.current = "";
+
+    aesKeyRef.current = null;
+
+    setIsLoggedIn(false);
+    setLoginError(setLoginErrorMessage);
+    setAccountAuthenticated(false);
+
+    console.log("Logged out successfully");
+  };
+
+  const useLogout = (Database: any) => {
     return useCallback(() => {
       if (Database.secureDBRef?.current) Database.secureDBRef.current = null; //clear db ref
 
       //clear again just in case values didnt clear before (it will always be cleared this is just in case)
-      auth.passwordRef.current = "";
-      auth.passphraseRef.current = "";
-      auth.passphrasePlaintextRef.current = "";
+      passwordRef.current = "";
+      passphraseRef.current = "";
+      passphrasePlaintextRef.current = "";
 
-      auth.aesKeyRef.current = null; //clear key
+      aesKeyRef.current = null; //clear key
 
-      auth.setIsLoggedIn(false);
-      auth.setLoginError("");
-      auth.setAccountAuthenticated(false);
-
-      // Database.setMessages([]); //later dont do this so the messages stay in the encrypted db
-      // Database.setUsers([]);
+      setIsLoggedIn(false);
+      setLoginError("");
+      setAccountAuthenticated(false);
 
       console.log("Logged out successfully");
-    }, [auth, Database]);
+    }, [Database]);
   };
-  
+
   return {
     username,
     serverPublicKeyPEM,
@@ -249,6 +266,7 @@ export const useAuth = () => {
     aesKeyRef,
     setShowPassphrasePrompt,
     showPassphrasePrompt,
+    logout,
     useLogout
   };
 };

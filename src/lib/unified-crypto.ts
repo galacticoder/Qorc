@@ -34,25 +34,35 @@ class Base64Utils {
 }
 
 class HashingService {
-  static extractSaltBase64FromEncodedHash(encodedHash: string): string {
+  static parseArgon2Hash(encodedHash: string) {
     const parts = encodedHash.split('$');
-    if (parts.length !== 6) {
-      throw new Error('Invalid Argon2 encoded hash format');
-    }
+    if (parts.length !== 6) throw new Error('Invalid Argon2 encoded hash format');
 
-    let saltBase64 = parts[4];
+    const [, algorithm, versionPart, paramsPart, saltB64, hashB64] = parts;
 
-    saltBase64 = saltBase64.replace(/-/g, '+').replace(/_/g, '/');
+    const version = parseInt(versionPart.split('=')[1], 10);
 
-    while (saltBase64.length % 4 !== 0) {
-      saltBase64 += '=';
-    }
+    const params: { [key: string]: number } = {};
+    paramsPart.split(',').forEach(param => {
+      const [key, value] = param.split('=');
+      if (key && value) params[key] = Number(value);
+    });
 
-    return saltBase64;
+    const saltBase64 = saltB64;
+    const hashBytes = Uint8Array.from(atob(hashB64), c => c.charCodeAt(0));
+
+    return {
+      version,
+      algorithm,
+      salt: saltBase64,
+      memoryCost: params.m,
+      timeCost: params.t,
+      parallelism: params.p,
+      hash: hashBytes,
+    };
   }
 
-
-  static async hashDataUsingInfo(data: string, optionsFromServer: {
+  static async hashDataUsingInfo(data: string, args: {
     version?: number;
     algorithm?: string;
     salt: string;
@@ -60,13 +70,13 @@ class HashingService {
     timeCost?: number;
     parallelism?: number;
   }): Promise<string> {
-    if (!optionsFromServer?.salt) {
+    if (!args?.salt) {
       throw new Error("Salt is required");
     }
 
-    console.log("Server hashing info received: ", optionsFromServer)
+    console.log("Server hashing info received: ", args)
 
-    const saltBufferRaw = CryptoUtils.Base64.base64ToArrayBuffer(optionsFromServer.salt);
+    const saltBufferRaw = CryptoUtils.Base64.base64ToArrayBuffer(args.salt);
     const saltBuffer = new Uint8Array(saltBufferRaw);
 
     console.log("Decoded salt buffer length:", saltBuffer.byteLength);
@@ -81,17 +91,17 @@ class HashingService {
       argon2id: 2,
     };
 
-    const algEnum = algMap[(optionsFromServer.algorithm ?? 'argon2id').toLowerCase()] ?? 2;
+    const algEnum = algMap[(args.algorithm ?? 'argon2id').toLowerCase()] ?? 2;
 
 
     const hashOptions = {
       pass: data,
       salt: saltBuffer,
-      time: optionsFromServer.timeCost ?? 3,
-      mem: optionsFromServer.memoryCost ?? 65536,
-      parallelism: optionsFromServer.parallelism ?? 1,
+      time: args.timeCost ?? 3,
+      mem: args.memoryCost ?? 65536,
+      parallelism: args.parallelism ?? 1,
       type: algEnum,
-      version: optionsFromServer.version ?? 0x13,
+      version: args.version ?? 0x13,
       hashLen: 32,
     };
 
@@ -99,7 +109,18 @@ class HashingService {
     return result.encoded;
   }
 
-   static async hashData(data: string): Promise<string> {
+  static compareHashes(hash1: Buffer, hash2: Buffer): boolean {
+    if (hash1.length !== hash2.length) return false;
+
+    let diff = 0;
+    for (let i = 0; i < hash1.length; i++) {
+      diff |= hash1[i] ^ hash2[i];
+    }
+    return diff === 0;
+  }
+
+
+  static async hashData(data: string): Promise<string> {
     const salt = crypto.getRandomValues(new Uint8Array(16)); //gen 16 byte salt
 
     const hashOptions = {
@@ -112,7 +133,6 @@ class HashingService {
       version: 0x13,
       hashLen: 32,
     };
-
 
     const encodedHash = await argon2.hash(hashOptions);
 
@@ -130,29 +150,60 @@ class HashingService {
 }
 
 class KeyService {
-  static async deriveAESKeyFromPassphrase(passphrase, saltBase64) {
-    const saltBytes = Uint8Array.from(atob(saltBase64), c => c.charCodeAt(0)); //decode salt from base64
+  static async deriveAESKeyFromPassphrase(
+    passphrase: string,
+    options?: {
+      saltBase64?: string;
+      time?: number;
+      memoryCost?: number;
+      parallelism?: number;
+      algorithm?: number | string;
+      version?: number;
+      hashLen?: number;
+    }
+  ) {
+
+    const saltBytes = options?.saltBase64 //decode or gen salt
+      ? Uint8Array.from(atob(options.saltBase64), c => c.charCodeAt(0))
+      : crypto.getRandomValues(new Uint8Array(16));
+
+    //merge options with defaults
+    let { time = 5, memoryCost = 2 ** 17, parallelism = 2, algorithm = 2, version = 0x13, hashLen = 32 } = options || {};
+
+    if (typeof algorithm === "string") {
+      switch (algorithm.toLowerCase()) {
+        case "argon2d":
+          algorithm = 0;
+          break;
+        case "argon2i":
+          algorithm = 1;
+          break;
+        case "argon2id":
+          algorithm = 2;
+          break;
+        default:
+          throw new Error(`Unknown Argon2 algorithm: ${algorithm}`);
+      }
+    }
 
     const hashOptions = {
       pass: passphrase,
       salt: saltBytes,
-      time: 5,
-      mem: 2 ** 17,
-      parallelism: 2,
-      type: 2,
-      version: 0x13,
-      hashLen: 32,
+      time,
+      mem: memoryCost,
+      parallelism,
+      type: algorithm,
+      version,
+      hashLen,
     };
 
     const result = await argon2.hash(hashOptions);
-
-    const rawKeyBytes = result.hash; //raw uint8array key bytes
-
+    const rawKeyBytes = result.hash;
     const aesKey = await KeyService.importAESKey(rawKeyBytes.buffer);
 
     return {
       aesKey,
-      encodedHash: result.encoded,  // optionally store this for verification
+      encodedHash: result.encoded, //for verification
     };
   }
 
@@ -372,168 +423,168 @@ class EncryptionService {
 }
 
 class DecryptionService {
-    static async decryptWithRSA(encryptedData: ArrayBuffer, privateKey: CryptoKey): Promise<ArrayBuffer> {
-        return await crypto.subtle.decrypt(
-        { name: "RSA-OAEP" },
-        privateKey,
-        encryptedData
-        );
+  static async decryptWithRSA(encryptedData: ArrayBuffer, privateKey: CryptoKey): Promise<ArrayBuffer> {
+    return await crypto.subtle.decrypt(
+      { name: "RSA-OAEP" },
+      privateKey,
+      encryptedData
+    );
+  }
+
+  static async decryptWithAES(
+    encrypted: Uint8Array,
+    iv: Uint8Array,
+    authTag: Uint8Array,
+    key: CryptoKey
+  ): Promise<string> {
+    const combined = new Uint8Array(encrypted.length + authTag.length);
+    combined.set(encrypted);
+    combined.set(authTag, encrypted.length);
+
+    const decrypted = await crypto.subtle.decrypt(
+      {
+        name: "AES-GCM",
+        iv: iv,
+        tagLength: CryptoConfig.AUTH_TAG_LENGTH * 8,
+      },
+      key,
+      combined.buffer
+    );
+
+    const decoder = new TextDecoder();
+    return decoder.decode(decrypted);
+  }
+
+  static async decryptWithAESRaw(
+    encrypted: Uint8Array,
+    iv: Uint8Array,
+    authTag: Uint8Array,
+    key: CryptoKey
+  ): Promise<ArrayBuffer> {
+    const combined = new Uint8Array(encrypted.length + authTag.length);
+    combined.set(encrypted);
+    combined.set(authTag, encrypted.length);
+
+    return await crypto.subtle.decrypt(
+      {
+        name: "AES-GCM",
+        iv: iv,
+        tagLength: CryptoConfig.AUTH_TAG_LENGTH * 8,
+      },
+      key,
+      combined.buffer
+    );
+  }
+
+  static deserializeEncryptedData(serialized: string): {
+    iv: Uint8Array;
+    authTag: Uint8Array;
+    encrypted: Uint8Array;
+  } {
+    const combined = new Uint8Array(Base64Utils.base64ToArrayBuffer(serialized));
+    let offset = 0;
+
+    const version = combined[offset];
+    if (version !== 1) {
+      throw new Error(`Unsupported encryption version: ${version}`);
     }
-        
-    static async decryptWithAES(
-        encrypted: Uint8Array,
-        iv: Uint8Array,
-        authTag: Uint8Array,
-        key: CryptoKey
-    ): Promise<string> {
-        const combined = new Uint8Array(encrypted.length + authTag.length);
-        combined.set(encrypted);
-        combined.set(authTag, encrypted.length);
+    offset += 1;
 
-        const decrypted = await crypto.subtle.decrypt(
-        {
-            name: "AES-GCM",
-            iv: iv,
-            tagLength: CryptoConfig.AUTH_TAG_LENGTH * 8,
-        },
-        key,
-        combined.buffer
-        );
+    const ivLength = combined[offset];
+    offset += 1;
+    const iv = combined.slice(offset, offset + ivLength);
+    offset += ivLength;
 
-        const decoder = new TextDecoder();
-        return decoder.decode(decrypted);
+    const authTagLength = combined[offset];
+    offset += 1;
+    const authTag = combined.slice(offset, offset + authTagLength);
+    offset += authTagLength;
+
+    const encryptedLength =
+      (combined[offset] << 24) |
+      (combined[offset + 1] << 16) |
+      (combined[offset + 2] << 8) |
+      combined[offset + 3];
+    offset += 4;
+
+    const encrypted = combined.slice(offset, offset + encryptedLength);
+
+    return { iv, authTag, encrypted };
+  }
+
+  static deserializeEncryptedDataFromUint8Array(
+    combined: Uint8Array
+  ): {
+    iv: Uint8Array;
+    authTag: Uint8Array;
+    encrypted: Uint8Array;
+  } {
+    let offset = 0;
+
+    const version = combined[offset];
+    if (version !== 1) {
+      throw new Error(`Unsupported encryption version: ${version}`);
+    }
+    offset += 1;
+
+    const ivLength = combined[offset];
+    offset += 1;
+    const iv = combined.slice(offset, offset + ivLength);
+    offset += ivLength;
+
+    const authTagLength = combined[offset];
+    offset += 1;
+    const authTag = combined.slice(offset, offset + authTagLength);
+    offset += authTagLength;
+
+    const encryptedLength =
+      (combined[offset] << 24) |
+      (combined[offset + 1] << 16) |
+      (combined[offset + 2] << 8) |
+      combined[offset + 3];
+    offset += 4;
+
+    const encrypted = combined.slice(offset, offset + encryptedLength);
+
+    return { iv, authTag, encrypted };
+  }
+
+  static async decryptAESKeyWithRSA(encryptedKey: ArrayBuffer, privateKey: CryptoKey): Promise<CryptoKey> {
+    const keyData = await DecryptionService.decryptWithRSA(encryptedKey, privateKey);
+    return await KeyService.importAESKey(keyData);
+  }
+
+  static async decryptMessage(encryptedData: string, aesKey: CryptoKey): Promise<string> {
+    const { iv, authTag, encrypted } = this.deserializeEncryptedData(encryptedData);
+    return await this.decryptWithAES(encrypted, iv, authTag, aesKey);
+  }
+
+  static async decryptAndFormatPayload(
+    encryptedPayload: Record<string, any>,
+    privateKey: CryptoKey | null
+  ) {
+    if (!privateKey) {
+      throw new Error("Private key is required for decryption");
     }
 
-    static async decryptWithAESRaw(
-        encrypted: Uint8Array,
-        iv: Uint8Array,
-        authTag: Uint8Array,
-        key: CryptoKey
-    ): Promise<ArrayBuffer> {
-        const combined = new Uint8Array(encrypted.length + authTag.length);
-        combined.set(encrypted);
-        combined.set(authTag, encrypted.length);
+    const { encryptedAESKey, encryptedMessage, ...restFields } = encryptedPayload;
 
-        return await crypto.subtle.decrypt(
-        {
-            name: "AES-GCM",
-            iv: iv,
-            tagLength: CryptoConfig.AUTH_TAG_LENGTH * 8,
-        },
-        key,
-        combined.buffer
-        );
+    if (!encryptedAESKey || !encryptedMessage) {
+      throw new Error("Invalid encrypted payload structure");
     }
 
-    static deserializeEncryptedData(serialized: string): {
-        iv: Uint8Array;
-        authTag: Uint8Array;
-        encrypted: Uint8Array;
-    } {
-        const combined = new Uint8Array(Base64Utils.base64ToArrayBuffer(serialized));
-        let offset = 0;
+    const encryptedAesKeyBuffer = Base64Utils.base64ToArrayBuffer(encryptedAESKey);
+    const aesKey = await DecryptionService.decryptAESKeyWithRSA(encryptedAesKeyBuffer, privateKey);
 
-        const version = combined[offset];
-        if (version !== 1) {
-        throw new Error(`Unsupported encryption version: ${version}`);
-        }
-        offset += 1;
+    const decryptedJsonString = await this.decryptMessage(encryptedMessage, aesKey);
 
-        const ivLength = combined[offset];
-        offset += 1;
-        const iv = combined.slice(offset, offset + ivLength);
-        offset += ivLength;
+    const decryptedPayload = JSON.parse(decryptedJsonString);
 
-        const authTagLength = combined[offset];
-        offset += 1;
-        const authTag = combined.slice(offset, offset + authTagLength);
-        offset += authTagLength;
-
-        const encryptedLength =
-        (combined[offset] << 24) |
-        (combined[offset + 1] << 16) |
-        (combined[offset + 2] << 8) |
-        combined[offset + 3];
-        offset += 4;
-
-        const encrypted = combined.slice(offset, offset + encryptedLength);
-
-        return { iv, authTag, encrypted };
-    }
-
-    static deserializeEncryptedDataFromUint8Array(
-        combined: Uint8Array
-    ): {
-        iv: Uint8Array;
-        authTag: Uint8Array;
-        encrypted: Uint8Array;
-    } {
-        let offset = 0;
-
-        const version = combined[offset];
-        if (version !== 1) {
-        throw new Error(`Unsupported encryption version: ${version}`);
-        }
-        offset += 1;
-
-        const ivLength = combined[offset];
-        offset += 1;
-        const iv = combined.slice(offset, offset + ivLength);
-        offset += ivLength;
-
-        const authTagLength = combined[offset];
-        offset += 1;
-        const authTag = combined.slice(offset, offset + authTagLength);
-        offset += authTagLength;
-
-        const encryptedLength =
-        (combined[offset] << 24) |
-        (combined[offset + 1] << 16) |
-        (combined[offset + 2] << 8) |
-        combined[offset + 3];
-        offset += 4;
-
-        const encrypted = combined.slice(offset, offset + encryptedLength);
-
-        return { iv, authTag, encrypted };
-    }
-
-    static async decryptAESKeyWithRSA(encryptedKey: ArrayBuffer, privateKey: CryptoKey): Promise<CryptoKey> {
-        const keyData = await DecryptionService.decryptWithRSA(encryptedKey, privateKey);
-        return await KeyService.importAESKey(keyData);
-    }
-
-    static async decryptMessage(encryptedData: string, aesKey: CryptoKey): Promise<string> {
-        const { iv, authTag, encrypted } = this.deserializeEncryptedData(encryptedData);
-        return await this.decryptWithAES(encrypted, iv, authTag, aesKey);
-    }
-
-    static async decryptAndFormatPayload(
-        encryptedPayload: Record<string, any>,
-        privateKey: CryptoKey | null
-    ) {
-        if (!privateKey) {
-        throw new Error("Private key is required for decryption");
-        }
-
-        const { encryptedAESKey, encryptedMessage, ...restFields } = encryptedPayload;
-
-        if (!encryptedAESKey || !encryptedMessage) {
-        throw new Error("Invalid encrypted payload structure");
-        }
-
-        const encryptedAesKeyBuffer = Base64Utils.base64ToArrayBuffer(encryptedAESKey);
-        const aesKey = await DecryptionService.decryptAESKeyWithRSA(encryptedAesKeyBuffer, privateKey);
-
-        const decryptedJsonString = await this.decryptMessage(encryptedMessage, aesKey);
-
-        const decryptedPayload = JSON.parse(decryptedJsonString);
-
-        return {
-        ...restFields,
-        ...decryptedPayload,
-        };
-    }
+    return {
+      ...restFields,
+      ...decryptedPayload,
+    };
+  }
 }
 
 export const CryptoUtils = {

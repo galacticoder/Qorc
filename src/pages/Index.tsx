@@ -20,14 +20,14 @@ const ChatApp: React.FC<ChatAppProps> = ({ onNavigate }) => {
   const [messages, setMessages] = useState<Message[]>([]);
 
   const Authentication = useAuth();
-  const Database = useSecureDB({ 
-    Authentication, 
-    messages, 
-    setMessages 
+  const Database = useSecureDB({
+    Authentication,
+    messages,
+    setMessages,
   });
   const fileHandler = useFileHandler(
     Authentication.privateKeyRef,
-    Database.handleNewMessage,
+    Database.saveMessageToLocalDB,
     Authentication.setLoginError
   );
 
@@ -35,17 +35,17 @@ const ChatApp: React.FC<ChatAppProps> = ({ onNavigate }) => {
     true,
     Database.users,
     Authentication.loginUsernameRef,
-    Database.handleNewMessage,
+    Database.saveMessageToLocalDB,
     setMessages,
     Authentication.aesKeyRef.current,
-    Authentication.serverPublicKeyPEM
+    Authentication.serverPublicKeyPEM,
   );
 
   const encryptedHandler = useEncryptedMessageHandler(
     Authentication.privateKeyRef,
     Database.setUsers,
     setMessages,
-    Database.handleNewMessage
+    Database.saveMessageToLocalDB
   );
 
   const signalHandler = useChatSignals({ Authentication, Database, fileHandler, encryptedHandler });
@@ -55,27 +55,26 @@ const ChatApp: React.FC<ChatAppProps> = ({ onNavigate }) => {
       return fileHandler.handleSendFile(
         fileMessage,
         Authentication.loginUsernameRef.current,
-        Database.handleNewMessage
+        Database.saveMessageToLocalDB
       );
     },
-    [fileHandler, Authentication.loginUsernameRef, Database.handleNewMessage]
+    [fileHandler, Authentication.loginUsernameRef, Database.saveMessageToLocalDB]
   );
 
   useWebSocket(signalHandler, encryptedHandler, Authentication.setLoginError);
-
 
   if (!Authentication.isLoggedIn) {
     return (
       <div className="flex items-center justify-center min-h-screen p-4 bg-gradient-to-r from-gray-50 to-slate-50">
         <Login
-            isGeneratingKeys={Authentication.isGeneratingKeys}
-            error={Authentication.loginError}
-            onAccountSubmit={Authentication.handleAccountSubmit}
-            onServerPasswordSubmit={Authentication.handleServerPasswordSubmit}
-            accountAuthenticated={Authentication.accountAuthenticated}
-            showPassphrasePrompt={Authentication.showPassphrasePrompt}
-            setShowPassphrasePrompt={Authentication.setShowPassphrasePrompt}
-            onPassphraseSubmit={Authentication.handlePassphraseSubmit}
+          isGeneratingKeys={Authentication.isGeneratingKeys}
+          error={Authentication.loginError}
+          onAccountSubmit={Authentication.handleAccountSubmit}
+          onServerPasswordSubmit={Authentication.handleServerPasswordSubmit}
+          accountAuthenticated={Authentication.accountAuthenticated}
+          showPassphrasePrompt={Authentication.showPassphrasePrompt}
+          setShowPassphrasePrompt={Authentication.setShowPassphrasePrompt}
+          onPassphraseSubmit={Authentication.handlePassphraseSubmit}
         />
       </div>
     );

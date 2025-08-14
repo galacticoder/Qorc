@@ -2,129 +2,241 @@ import { useRef, useEffect, useCallback, useState } from "react";
 import { SecureDB } from "@/lib/secureDB";
 import { Message } from "@/components/chat/types";
 import { User } from "@/components/chat/UserList";
+import { CryptoUtils } from "@/lib/unified-crypto";
+import { SignalType } from "@/lib/signals";
+import websocketClient from "@/lib/websocket";
 
 interface UseSecureDBProps {
-  Authentication: any;
-  messages: Message[];
-  setMessages: React.Dispatch<React.SetStateAction<Message[]>>;
+	Authentication: any;
+	messages: Message[];
+	setMessages: React.Dispatch<React.SetStateAction<Message[]>>;
 }
 
 export const useSecureDB = ({ Authentication, messages, setMessages }: UseSecureDBProps) => {
-  const secureDBRef = useRef<SecureDB | null>(null);
-  const [dbInitialized, setDbInitialized] = useState(false);
-  const [users, setUsers] = useState<User[]>([]);
-  const pendingMessagesRef = useRef<Message[]>([]);
+	const secureDBRef = useRef<SecureDB | null>(null);
+	const [dbInitialized, setDbInitialized] = useState(false);
+	const [users, setUsers] = useState<User[]>([]);
+	const pendingMessagesRef = useRef<Message[]>([]);
 
-  useEffect(() => { //init db using aes key derived from passphrase
-	if (!Authentication?.isLoggedIn) return;
+	useEffect(() => { //init db
+		if (!Authentication?.isLoggedIn) return;
 
-	const username = Authentication?.username ?? Authentication?.loginUsernameRef?.current;
-	const key = Authentication?.aesKeyRef?.current;
-
-	if (!username || !key) {
-		console.error("[useSecureDB] Cannot initialize DB: missing username or AES key");
-		return;
-	}
-
-	const initializeDB = async () => {
-		try {
-		secureDBRef.current = new SecureDB(username);
-		await secureDBRef.current.initializeWithKey(key);
-		setDbInitialized(true);
-		console.log("[useSecureDB] SecureDB initialized");
-		} catch (err) {
-		console.error("[useSecureDB] Failed to initialize SecureDB", err);
-		Authentication.setLoginError?.("Failed to initialize secure storage");
+		if (!Authentication.loginUsernameRef.current || !Authentication.passphraseRef.current || !Authentication.passphrasePlaintextRef.current) {
+			console.error("[useSecureDB] Cannot initialize DB: missing username, passphrase, or hash");
+			return;
 		}
-	};
 
-	initializeDB();
-	}, [Authentication?.isLoggedIn, Authentication?.username, Authentication?.loginUsernameRef?.current, Authentication?.aesKeyRef?.current]);
+		const initializeDB = async () => {
+			try {
+				//check if key and hashed passphrase are correct and exit if not
+				const parsedStoredHash = CryptoUtils.Hash.parseArgon2Hash(Authentication.passphraseRef.current)
 
-  useEffect(() => { //load saved messages and users
-    if (!Authentication?.isLoggedIn || !dbInitialized || !secureDBRef.current) return;
+				const { aesKey: newKey, encodedHash } = await CryptoUtils.Keys.deriveAESKeyFromPassphrase(Authentication.passphrasePlaintextRef.current, {
+					saltBase64: parsedStoredHash.salt,
+					time: parsedStoredHash.timeCost,
+					memoryCost: parsedStoredHash.memoryCost,
+					parallelism: parsedStoredHash.parallelism,
+					algorithm: parsedStoredHash.algorithm,
+					version: parsedStoredHash.version,
+				});
 
-    const loadData = async () => {
-		try {
-			if (!secureDBRef.current) return;
+				const exportedStoredKey = await CryptoUtils.Keys.exportAESKey(Authentication.aesKeyRef.current);
+				const exportedNewCheckKey = await CryptoUtils.Keys.exportAESKey(newKey)
 
-			const savedMessages = (await secureDBRef.current.loadMessages().catch(() => [])) || [];
-			const savedUsers = (await secureDBRef.current.loadUsers().catch(() => [])) || [];
+				const keysMatch =
+					exportedStoredKey.byteLength === exportedNewCheckKey.byteLength &&
+					new Uint8Array(exportedStoredKey).every((b, i) => b === new Uint8Array(exportedNewCheckKey)[i]);
 
-			setMessages(
-			savedMessages.map((msg: any) => ({
-				...msg,
-				timestamp: new Date(msg.timestamp),
-				isCurrentUser:
-				msg.sender ===
-				(Authentication?.loginUsernameRef?.current ?? Authentication?.username),
-			}))
-			);
+				if (!keysMatch) { //if keys dont match
+					console.error("[useSecureDB] Stored key is not the correct key for this account — aborting initialization");
+					Authentication.setLoginError?.("Stored key is not the correct key for this account, cannot initialize secure storage");
+					secureDBRef.current = null;
+					Authentication.logout(secureDBRef);
+					return;
+				}
 
-			if (savedUsers.length) setUsers(savedUsers);
-		} catch (err) {
-			console.error("[useSecureDB] Failed to load secure data", err);
-			Authentication.setLoginError?.("Failed to load secure data");
-		}
+				console.log("[useSecureDB] Passphrase derived aes key verified");
+
+				if (encodedHash !== Authentication.passphraseRef.current) { //if passphrase hashes dont match
+					console.error("[useSecureDB] Passphrase does not match stored hash — aborting initialization");
+					Authentication.setLoginError?.("Incorrect passphrase, cannot initialize secure storage");
+					secureDBRef.current = null;
+					Authentication.logout(secureDBRef);
+					return;
+				}
+
+				console.log("[useSecureDB] Passphrase hash verified");
+
+				secureDBRef.current = new SecureDB(Authentication.loginUsernameRef.current);
+				await secureDBRef.current.initializeWithKey(Authentication.aesKeyRef.current);
+				setDbInitialized(true);
+
+				Authentication.passphrasePlaintextRef.current = "";
+				Authentication.passphraseRef.current = "";
+				console.log("[useSecureDB] SecureDB initialized successfully");
+			} catch (err) {
+				console.error("[useSecureDB] Failed to initialize SecureDB", err);
+				Authentication.setLoginError?.("Failed to initialize secure storage");
+			}
+		};
+
+		initializeDB();
+	}, [
+		Authentication?.isLoggedIn,
+		Authentication?.username,
+		Authentication?.loginUsernameRef?.current,
+		Authentication?.passphraseRef?.current,
+		Authentication?.passphrasePlaintextRef?.current
+	]);
+
+
+	useEffect(() => { //load saved messages and users
+		if (!Authentication?.isLoggedIn || !dbInitialized || !secureDBRef.current) return;
+
+		const loadData = async () => {
+			try {
+				if (!secureDBRef.current) return;
+
+				const savedMessages = (await secureDBRef.current.loadMessages().catch(() => [])) || [];
+				const savedUsers = (await secureDBRef.current.loadUsers().catch(() => [])) || [];
+
+				setMessages(
+					savedMessages.map((msg: any) => ({
+						...msg,
+						timestamp: new Date(msg.timestamp),
+						isCurrentUser:
+							msg.sender ===
+							(Authentication?.loginUsernameRef?.current ?? Authentication?.username),
+					}))
+				);
+
+				if (savedUsers.length) setUsers(savedUsers);
+			} catch (err) {
+				console.error("[useSecureDB] Failed to load secure data", err);
+				Authentication.setLoginError?.("Failed to load secure data");
+			}
 		};
 
 
-    loadData();
-  }, [Authentication?.isLoggedIn, dbInitialized]);
+		loadData();
+	}, [Authentication?.isLoggedIn, dbInitialized]);
 
-  useEffect(() => { //flush messages pending
-    if (!dbInitialized || !secureDBRef.current || pendingMessagesRef.current.length === 0) return;
+	useEffect(() => { //flush messages pending
+		if (!dbInitialized || !secureDBRef.current || pendingMessagesRef.current.length === 0) return;
 
-    const flushPending = async () => {
-      try {
-        const currentMessages = (await secureDBRef.current!.loadMessages()) || [];
-        await secureDBRef.current!.saveMessages([...currentMessages, ...pendingMessagesRef.current]);
-        pendingMessagesRef.current = [];
-      } catch (err) {
-        console.error("[useSecureDB] Failed to flush pending messages", err);
-      }
-    };
+		const flushPending = async () => {
+			try {
+				const currentMessages = (await secureDBRef.current!.loadMessages()) || [];
+				await secureDBRef.current!.saveMessages([...currentMessages, ...pendingMessagesRef.current]);
+				pendingMessagesRef.current = [];
+			} catch (err) {
+				console.error("[useSecureDB] Failed to flush pending messages", err);
+			}
+		};
 
-    flushPending();
-  }, [dbInitialized]);
+		flushPending();
+	}, [dbInitialized]);
 
-  useEffect(() => { //save users when they change
-    if (!Authentication?.isLoggedIn || !dbInitialized || !secureDBRef.current || users.length === 0) return;
+	useEffect(() => { //save users when they change
+		if (!Authentication?.isLoggedIn || !dbInitialized || !secureDBRef.current || users.length === 0) return;
 
-    secureDBRef.current.saveUsers(users).catch((err) => console.error("[useSecureDB] saveUsers error:", err));
-  }, [users, Authentication?.isLoggedIn, dbInitialized]);
+		secureDBRef.current.saveUsers(users).catch((err) => console.error("[useSecureDB] saveUsers error:", err));
+	}, [users, Authentication?.isLoggedIn, dbInitialized]);
 
-  const saveMessageToLocalDB = useCallback( //save to db
-	async (message: Message) => {
-		setMessages((prev) => [...prev, message]);
+	const saveMessageToLocalDB = useCallback( //save to db
+		async (message: Message) => {
+			setMessages((prev) => [...prev, message]);
 
-		const shouldPersist =
-		!message.isSystemMessage || message.content.includes("joined") || message.content.includes("left");
+			const shouldPersist =
+				!message.isSystemMessage || message.content.includes("joined") || message.content.includes("left");
 
-		if (!shouldPersist) return;
+			if (!shouldPersist) return;
 
-		if (!dbInitialized || !secureDBRef.current) {
-		pendingMessagesRef.current.push(message);
-		return;
-		}
+			if (!dbInitialized || !secureDBRef.current) {
+				pendingMessagesRef.current.push(message);
+				return;
+			}
 
-		try {
-		const currentMessages = (await secureDBRef.current.loadMessages().catch(() => [])) || [];
-		await secureDBRef.current.saveMessages([...currentMessages, message]).catch((err) => {
-			console.error("[useSecureDB] saveMessages failed", err);
-			pendingMessagesRef.current.push(message);
-		});
-		console.log("[useSecureDB] Saved message to db")
-		} catch (err) {
-		console.error("[useSecureDB] Failed to persist message:", err);
-		pendingMessagesRef.current.push(message);
-		}
-	},
-	[dbInitialized, setMessages]
+			try {
+				const currentMessages = (await secureDBRef.current.loadMessages().catch(() => [])) || [];
+				await secureDBRef.current.saveMessages([...currentMessages, message]).catch((err) => {
+					console.error("[useSecureDB] saveMessages failed", err);
+					pendingMessagesRef.current.push(message);
+				});
+				console.log("[useSecureDB] Saved message to local db")
+			} catch (err) {
+				console.error("[useSecureDB] Failed to persist message:", err);
+				pendingMessagesRef.current.push(message);
+			}
+		},
+		[dbInitialized, setMessages]
 	);
 
-
-  return { users, setUsers, dbInitialized, secureDBRef, handleNewMessage: saveMessageToLocalDB };
+	return { users, setUsers, dbInitialized, secureDBRef, saveMessageToLocalDB };
 };
+
+export class ServerDatabase {
+	static async sendDataToServerDb(args: {
+		content: string;
+		messageId: string;
+		serverPemKey: string;
+		fromUsername: string;
+		toUsername?: string;
+		timestamp: number;
+		typeInside: string;
+		aesKey: CryptoKey | null;
+		replyTo?: { id: string; sender: string; content?: string } | null;
+	}) {
+		try {
+			if (!args.aesKey) throw new Error("AES key is required to encrypt data");
+
+			let replyContent = "";
+			const ciphertext = await CryptoUtils.Encrypt.encryptWithAES(args.content, args.aesKey);
+			const serializedCiphertext = CryptoUtils.Encrypt.serializeEncryptedData(
+				ciphertext.iv,
+				ciphertext.authTag,
+				ciphertext.encrypted
+			);
+
+			if (args.replyTo) {
+				const replyContentCiphertext = await CryptoUtils.Encrypt.encryptWithAES(
+					args.replyTo.content ?? args.content,
+					args.aesKey
+				);
+				replyContent = CryptoUtils.Encrypt.serializeEncryptedData(
+					replyContentCiphertext.iv,
+					replyContentCiphertext.authTag,
+					replyContentCiphertext.encrypted
+				);
+			}
+
+			console.log("[useSecureDB] Server db update serialized ciphertext:", serializedCiphertext);
+
+			const serverPayloadDBUpdate = await CryptoUtils.Encrypt.encryptAndFormatPayload({
+				id: args.messageId,
+				recipientPEM: args.serverPemKey,
+				from: args.fromUsername,
+				to: args.toUsername ?? "",
+				type: SignalType.UPDATE_DB,
+				content: serializedCiphertext,
+				timestamp: args.timestamp,
+				typeInside: args.typeInside,
+				...(args.replyTo && {
+					replyTo: {
+						id: args.replyTo.id,
+						sender: args.replyTo.sender,
+						content: replyContent,
+					},
+				}),
+			});
+
+			console.log("[useSecureDB] DB update payload to server sent: ", serverPayloadDBUpdate);
+			websocketClient.send(JSON.stringify(serverPayloadDBUpdate));
+		} catch (err) {
+			console.error("[useSecureDB] Failed to send encrypted server update", err);
+		}
+	}
+}
+
 
 export default useSecureDB;
