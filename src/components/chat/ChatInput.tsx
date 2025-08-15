@@ -12,9 +12,10 @@ import { ProgressBar } from "./ChatInput/ProgressBar.tsx";
 import { FileUploader } from "./ChatInput/FileUploader.tsx";
 import { MessageTextarea } from "./ChatInput/MessageTextarea.tsx";
 import { SendButton } from "./ChatInput/SendButton.tsx";
+import { MessageReply } from "./types";
 
 interface ChatInputProps {
-  onSendMessage: (messageId: string, content: string, messageSignalType: string, replyTo?: Message | null) => void;
+  onSendMessage: (messageId: string, content: string, messageSignalType: string, replyTo?: MessageReply | null) => void;
   onSendFile: (fileData: any) => void;
   isEncrypted: boolean;
   currentUsername: string;
@@ -58,11 +59,9 @@ export function ChatInput({
       setIsSending(true);
 
       if (editingMessage && onEditMessage) {
-        // Use SignalType.EDIT_MESSAGE for edits
-        await onSendMessage(editingMessage.id, message.trim(), SignalType.EDIT_MESSAGE);
+        await onSendMessage(editingMessage.id, message.trim(), SignalType.EDIT_MESSAGE, editingMessage.replyTo);
         onCancelEdit?.();
       } else {
-        // New message uses SignalType.CHAT
         await onSendMessage("", message.trim(), "chat", replyTo ?? null);
         onCancelReply?.();
       }

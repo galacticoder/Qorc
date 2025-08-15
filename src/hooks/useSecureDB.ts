@@ -151,7 +151,7 @@ export const useSecureDB = ({ Authentication, messages, setMessages }: UseSecure
 			}
 
 			const log = (where: string, action: "Added" | "Replaced") =>
-				console.log(`[useSecureDB] ${action} in ${where}: ${message.id}`);
+				console.log(`[useSecureDB] ${action} in ${where}: ${message.id} : ${message.content}`);
 
 			setMessages((prev) => {
 				const idx = prev.findIndex((m) => m.id === message.id);
@@ -165,12 +165,6 @@ export const useSecureDB = ({ Authentication, messages, setMessages }: UseSecure
 					return [...prev, message];
 				}
 			});
-
-			const shouldPersist =
-				!message.isSystemMessage ||
-				message.content.includes("joined") ||
-				message.content.includes("left");
-			if (!shouldPersist) return;
 
 			const saveToPending = () => {
 				const idx = pendingMessagesRef.current.findIndex((m) => m.id === message.id);
@@ -196,6 +190,9 @@ export const useSecureDB = ({ Authentication, messages, setMessages }: UseSecure
 					msgs.push(message);
 				}
 				await secureDBRef.current.saveMessages(msgs).catch(saveToPending);
+
+				const lastThree = msgs.slice(-3);
+				console.log("[useSecureDB] Last 3 saved DB messages:", lastThree);
 			} catch (err) {
 				console.error("[useSecureDB] DB save failed, saving to pending", err);
 				saveToPending();

@@ -6,6 +6,7 @@ import { Message } from "@/components/chat/types";
 
 export function useEncryptedMessageHandler(
   privateKeyRef: React.RefObject<CryptoKey>,
+  loginUsernameRef: React.MutableRefObject<string>,
   setUsers: React.Dispatch<React.SetStateAction<any[]>>,
   setMessages: React.Dispatch<React.SetStateAction<Message[]>>,
   saveMessageToLocalDB: (msg: Message) => Promise<void>
@@ -28,35 +29,6 @@ export function useEncryptedMessageHandler(
           );
         }
 
-        if (payload.typeInside === SignalType.DELETE_MESSAGE) {//SAVE THIS AND THE EDIT MESSAGE TO DB LATER TOO
-          console.log("payload delete: ", payload);
-          setMessages(prev =>
-            prev.map(msg =>
-              msg.id === payload.id
-                ? { ...msg, isDeleted: true, content: "Message deleted" }
-                : msg
-            )
-          );
-          return;
-        }
-
-        if (payload.typeInside === SignalType.EDIT_MESSAGE) {
-          console.log("payload edit: ", payload);
-          setMessages(prev =>
-            prev.map(msg =>
-              msg.id === payload.id
-                ? {
-                  ...msg,
-                  content: payload.content,
-                  isEdited: true,
-                  timestamp: new Date(payload.timestamp),
-                }
-                : msg
-            )
-          );
-          return;
-        }
-
         const isJoinLeave = payload.content.includes("joined") || payload.content.includes("left");
 
         console.log("Message ID received: ", payload.id);
@@ -69,8 +41,10 @@ export function useEncryptedMessageHandler(
           content: payload.content,
           sender: message.from,
           timestamp: new Date(payload.timestamp),
-          isCurrentUser: false,
+          isCurrentUser: payload.from == loginUsernameRef.current,
           isSystemMessage: payload.typeInside === "system",
+          isDeleted: payload.typeInside == SignalType.DELETE_MESSAGE,
+          isEdited: payload.typeInside == SignalType.EDIT_MESSAGE,
           shouldPersist: isJoinLeave,
           ...(payload.replyTo && {
             replyTo: {
@@ -81,9 +55,29 @@ export function useEncryptedMessageHandler(
           }),
         };
 
-        //send to server db when done saving the user message
-
+        //send to server db when done saving the user message to local db later
         await saveMessageToLocalDB(payloadFull);
+
+        //started handling after saving edited or deleted message to db since before wasnt working for hours
+        if (payloadFull.isEdited || payloadFull.isDeleted) {
+          setMessages(prev =>
+            prev.map(msg => {
+              const updated = { ...msg };
+              const content = payload.isEdited ? payload.content : "Message Deleted";
+
+              //update reply fields of messages replying to the edited message
+              if (msg.replyTo?.id === payload.id) {
+                console.log("Updating message reply fields")
+                updated.replyTo = { ...updated.replyTo, content: content };
+                saveMessageToLocalDB(updated);
+              }
+
+              console.log("Updated all reply fields to new edited or deleted message")
+              return updated;
+            })
+          );
+          return;
+        }
       } catch (error) {
         console.error("Error handling encrypted message:", error);
       }

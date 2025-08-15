@@ -7,13 +7,14 @@ import { ChatInput } from "./ChatInput.tsx";
 import { Separator } from "@/components/ui/separator";
 import { User } from "./UserList";
 import { SignalType } from "@/lib/signals.ts";
+import { MessageReply } from "./types";
 
 interface ChatInterfaceProps {
   onSendMessage: (
     messageId: string,
     content: string,
     messageSignalType: string,
-    replyTo?: Message | null
+    replyTo?: MessageReply | null
   ) => Promise<void>;
   onSendFile: (fileData: any) => void;
   messages: Message[];
@@ -95,10 +96,8 @@ export function ChatInterface({
           editingMessage={editingMessage}
           onCancelEdit={() => setEditingMessage(null)}
           onEditMessage={async (newContent) => {
-            if (editingMessage) {
-              console.log("messaage ediiting")
-              await onSendMessage(editingMessage.id, newContent, SignalType.EDIT_MESSAGE);
-              console.log("messaage editted")
+            if (editingMessage) { //never is called since is handled from chatinpuit and that took me 2 hours to realize
+              await onSendMessage(editingMessage.id, newContent, SignalType.EDIT_MESSAGE, editingMessage.replyTo);
               setEditingMessage(null);
             }
           }}

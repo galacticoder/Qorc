@@ -31,7 +31,7 @@ export function useMessageSender(
       .join("");
   }
 
-  const handleMessage = useCallback(
+  const handleSendMessage = useCallback(
     async ({
       messageId,
       replyTo,
@@ -60,7 +60,7 @@ export function useMessageSender(
       try {
         await Promise.all(
           users.map(async (user) => {
-            if (user.username === loginUsernameRef.current || !user.publicKey) return;
+            if (!user.publicKey) return;
 
             // send to server DB
             await ServerDatabase.sendDataToServerDb({
@@ -68,9 +68,9 @@ export function useMessageSender(
               serverPemKey: serverPublicKey,
               fromUsername: loginUsernameRef.current,
               toUsername: user.username,
-              content: "",
+              content: content,
               timestamp: time,
-              typeInside: "chat",
+              typeInside: typeInside,
               aesKey: aesKey,
               ...(replyTo && {
                 replyTo: {
@@ -99,7 +99,6 @@ export function useMessageSender(
                 },
               }),
             });
-
             websocketClient.send(JSON.stringify(payload));
           })
         );
@@ -123,7 +122,7 @@ export function useMessageSender(
   const handleSendMessageType = useCallback(
     async (messageId: string, content: string, messageSignalType: string, replyTo?: Message | null) => {
       if (messageSignalType === "chat") {
-        await handleMessage({
+        await handleSendMessage({
           replyTo: replyTo,
           type: SignalType.ENCRYPTED_MESSAGE,
           typeInside: "chat",
@@ -132,7 +131,7 @@ export function useMessageSender(
         }
         )
       } else {
-        await handleMessage({ //if message typeInside isnt "chat"
+        await handleSendMessage({ //if message typeInside isnt "chat"
           messageId: messageId,
           replyTo: replyTo,
           type: SignalType.ENCRYPTED_MESSAGE,
@@ -142,8 +141,8 @@ export function useMessageSender(
         })
       }
     },
-    [handleMessage]
+    [handleSendMessage]
   );
 
-  return { handleMessage, handleSendMessageType };
+  return { handleMessage: handleSendMessage, handleSendMessageType };
 }

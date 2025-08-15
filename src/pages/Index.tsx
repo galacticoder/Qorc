@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback } from "react";
+import { useState, useCallback } from "react";
 import { Login } from "@/components/chat/Login";
 import { UserList } from "@/components/chat/UserList";
 import { ChatInterface } from "@/components/chat/ChatInterface";
@@ -41,6 +41,7 @@ const ChatApp: React.FC<ChatAppProps> = ({ onNavigate }) => {
 
   const encryptedHandler = useEncryptedMessageHandler(
     Authentication.privateKeyRef,
+    Authentication.loginUsernameRef,
     Database.setUsers,
     setMessages,
     Database.saveMessageToLocalDB

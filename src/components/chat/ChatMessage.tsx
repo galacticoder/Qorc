@@ -5,7 +5,7 @@ import { format, isSameMinute } from "date-fns";
 import Linkify from "linkify-react";
 import { TrashIcon, Pencil1Icon } from "./icons.tsx";
 
-import { Message, ChatMessageProps } from "./types.ts";
+import { ChatMessageProps } from "./types.ts";
 import { SystemMessage } from "./ChatMessage/SystemMessage.tsx";
 import { DeletedMessage } from "./ChatMessage/DeletedMessage.tsx";
 import { FileMessage } from "./ChatMessage/FileMessage.tsx";
@@ -57,8 +57,10 @@ export function ChatMessage({ message, onReply, previousMessage, onDelete, onEdi
           <div className="mb-1 p-2 border-l-2 border-blue-500 bg-blue-50 text-xs text-gray-500 rounded max-w-full truncate">
             <span className="font-medium">{message.replyTo.sender}</span>:{" "}
             <span className="italic">
-              {message.replyTo.content.slice(0, 100)}
-              {message.replyTo.content.length > 100 ? "..." : ""}
+              {message.replyTo.content === "Message deleted"
+                ? "Message deleted"
+                : message.replyTo.content.slice(0, 100) +
+                (message.replyTo.content.length > 100 ? "..." : "")}
             </span>
           </div>
         )}
