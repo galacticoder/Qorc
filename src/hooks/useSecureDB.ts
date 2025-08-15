@@ -19,7 +19,7 @@ export const useSecureDB = ({ Authentication, messages, setMessages }: UseSecure
 	const pendingMessagesRef = useRef<Message[]>([]);
 
 	useEffect(() => { //init db
-		if (!Authentication?.isLoggedIn) return;
+		if (!Authentication?.isLoggedIn || dbInitialized || secureDBRef.current) return;
 
 		if (!Authentication.loginUsernameRef.current || !Authentication.passphraseRef.current || !Authentication.passphrasePlaintextRef.current) {
 			console.error("[useSecureDB] Cannot initialize DB: missing username, passphrase, or hash");
@@ -143,30 +143,62 @@ export const useSecureDB = ({ Authentication, messages, setMessages }: UseSecure
 		secureDBRef.current.saveUsers(users).catch((err) => console.error("[useSecureDB] saveUsers error:", err));
 	}, [users, Authentication?.isLoggedIn, dbInitialized]);
 
-	const saveMessageToLocalDB = useCallback( //save to db
+	const saveMessageToLocalDB = useCallback(
 		async (message: Message) => {
-			setMessages((prev) => [...prev, message]);
-
-			const shouldPersist =
-				!message.isSystemMessage || message.content.includes("joined") || message.content.includes("left");
-
-			if (!shouldPersist) return;
-
-			if (!dbInitialized || !secureDBRef.current) {
-				pendingMessagesRef.current.push(message);
+			if (!message.id) {
+				console.error("[useSecureDB] No message id provided");
 				return;
 			}
 
-			try {
-				const currentMessages = (await secureDBRef.current.loadMessages().catch(() => [])) || [];
-				await secureDBRef.current.saveMessages([...currentMessages, message]).catch((err) => {
-					console.error("[useSecureDB] saveMessages failed", err);
+			const log = (where: string, action: "Added" | "Replaced") =>
+				console.log(`[useSecureDB] ${action} in ${where}: ${message.id}`);
+
+			setMessages((prev) => {
+				const idx = prev.findIndex((m) => m.id === message.id);
+				if (idx !== -1) {
+					log("state", "Replaced");
+					const updated = [...prev];
+					updated[idx] = message;
+					return updated;
+				} else {
+					log("state", "Added");
+					return [...prev, message];
+				}
+			});
+
+			const shouldPersist =
+				!message.isSystemMessage ||
+				message.content.includes("joined") ||
+				message.content.includes("left");
+			if (!shouldPersist) return;
+
+			const saveToPending = () => {
+				const idx = pendingMessagesRef.current.findIndex((m) => m.id === message.id);
+				if (idx !== -1) {
+					log("pending", "Replaced");
+					pendingMessagesRef.current[idx] = message;
+				} else {
+					log("pending", "Added");
 					pendingMessagesRef.current.push(message);
-				});
-				console.log("[useSecureDB] Saved message to local db")
+				}
+			};
+
+			if (!dbInitialized || !secureDBRef.current) return saveToPending();
+
+			try {
+				const msgs = (await secureDBRef.current.loadMessages().catch(() => [])) || [];
+				const idx = msgs.findIndex((m: Message) => m.id === message.id);
+				if (idx !== -1) {
+					log("db", "Replaced");
+					msgs[idx] = message;
+				} else {
+					log("db", "Added");
+					msgs.push(message);
+				}
+				await secureDBRef.current.saveMessages(msgs).catch(saveToPending);
 			} catch (err) {
-				console.error("[useSecureDB] Failed to persist message:", err);
-				pendingMessagesRef.current.push(message);
+				console.error("[useSecureDB] DB save failed, saving to pending", err);
+				saveToPending();
 			}
 		},
 		[dbInitialized, setMessages]
@@ -237,6 +269,5 @@ export class ServerDatabase {
 		}
 	}
 }
-
 
 export default useSecureDB;

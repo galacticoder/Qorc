@@ -2,20 +2,24 @@ import { useEffect, useRef, useState } from "react";
 import { Card } from "@/components/ui/card";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { ChatMessage } from "./ChatMessage";
-import { Message } from "./types"
+import { Message } from "./types";
 import { ChatInput } from "./ChatInput.tsx";
 import { Separator } from "@/components/ui/separator";
 import { User } from "./UserList";
+import { SignalType } from "@/lib/signals.ts";
 
 interface ChatInterfaceProps {
-  onSendMessage: (message: string, replyTo) => Promise<void>;
+  onSendMessage: (
+    messageId: string,
+    content: string,
+    messageSignalType: string,
+    replyTo?: Message | null
+  ) => Promise<void>;
   onSendFile: (fileData: any) => void;
   messages: Message[];
   isEncrypted?: boolean;
   currentUsername: string;
   users: User[];
-  onDeleteMessage?: (messageId: string) => void;
-  onEditMessage?: (messageId: string, newContent: string) => void;
 }
 
 export function ChatInterface({
@@ -25,8 +29,6 @@ export function ChatInterface({
   isEncrypted = true,
   currentUsername,
   users,
-  onDeleteMessage,
-  onEditMessage
 }: ChatInterfaceProps) {
   const scrollAreaRef = useRef<HTMLDivElement>(null);
   const [replyTo, setReplyTo] = useState<Message | null>(null);
@@ -34,7 +36,10 @@ export function ChatInterface({
 
   useEffect(() => {
     if (scrollAreaRef.current) {
-      const scrollContainer = scrollAreaRef.current.querySelector('[data-radix-scroll-area-viewport]');
+      const scrollContainer =
+        scrollAreaRef.current.querySelector(
+          '[data-radix-scroll-area-viewport]'
+        );
       if (scrollContainer) {
         scrollContainer.scrollTop = scrollContainer.scrollHeight;
       }
@@ -60,8 +65,10 @@ export function ChatInterface({
                 message={message}
                 previousMessage={index > 0 ? messages[index - 1] : undefined}
                 onReply={() => setReplyTo(message)}
-                onDelete={(msg) => onDeleteMessage?.(msg.id)}
-                onEdit={setEditingMessage}
+                onDelete={() =>
+                  onSendMessage(message.id, "", SignalType.DELETE_MESSAGE, null) // add reply field later
+                }
+                onEdit={() => setEditingMessage(message)}
               />
             ))
           )}
@@ -70,8 +77,13 @@ export function ChatInterface({
       <Separator />
       <div className="p-4 bg-gray-50">
         <ChatInput
-          onSendMessage={async (msg, replyToMsg) => { 
-            await onSendMessage(msg, replyToMsg);
+          onSendMessage={async (
+            messageId: string | undefined,
+            content: string,
+            messageSignalType: string,
+            replyToMsg?: Message | null
+          ) => {
+            await onSendMessage(messageId ?? "", content, messageSignalType, replyToMsg);
             setReplyTo(null);
           }}
           onSendFile={onSendFile}
@@ -83,10 +95,13 @@ export function ChatInterface({
           editingMessage={editingMessage}
           onCancelEdit={() => setEditingMessage(null)}
           onEditMessage={async (newContent) => {
-            if (editingMessage && onEditMessage) {
-              await onEditMessage(editingMessage.id, newContent);
+            if (editingMessage) {
+              console.log("messaage ediiting")
+              await onSendMessage(editingMessage.id, newContent, SignalType.EDIT_MESSAGE);
+              console.log("messaage editted")
               setEditingMessage(null);
-            }}}
+            }
+          }}
         />
       </div>
     </Card>

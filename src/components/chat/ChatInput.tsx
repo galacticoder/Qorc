@@ -6,7 +6,6 @@ import { Message } from "./types";
 import { EditingBanner } from "./ChatInput/EditingBanner";
 import { ReplyBanner } from "./ChatInput/ReplyBanner";
 
-import { LockClosedIcon } from "./icons.tsx";
 import { useFileSender } from "./ChatInput/useFileSender";
 import { ProgressBar } from "./ChatInput/ProgressBar.tsx";
 
@@ -15,7 +14,7 @@ import { MessageTextarea } from "./ChatInput/MessageTextarea.tsx";
 import { SendButton } from "./ChatInput/SendButton.tsx";
 
 interface ChatInputProps {
-  onSendMessage: (message: string, replyTo?: Message | null) => void;
+  onSendMessage: (messageId: string, content: string, messageSignalType: string, replyTo?: Message | null) => void;
   onSendFile: (fileData: any) => void;
   isEncrypted: boolean;
   currentUsername: string;
@@ -57,13 +56,17 @@ export function ChatInput({
 
     try {
       setIsSending(true);
+
       if (editingMessage && onEditMessage) {
-        await onEditMessage(message.trim());
+        // Use SignalType.EDIT_MESSAGE for edits
+        await onSendMessage(editingMessage.id, message.trim(), SignalType.EDIT_MESSAGE);
         onCancelEdit?.();
       } else {
-        await onSendMessage(message.trim(), replyTo);
+        // New message uses SignalType.CHAT
+        await onSendMessage("", message.trim(), "chat", replyTo ?? null);
         onCancelReply?.();
       }
+
       setMessage("");
     } catch (e) {
       console.error("Failed to send message:", e);

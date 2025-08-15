@@ -86,7 +86,6 @@ export function ChatMessage({ message, onReply, previousMessage, onDelete, onEdi
               aria-label="Copy message"
               className="hover:text-primary"
             >
-              {/* Inline SVG copy icon */}
               <svg
                 width="15"
                 height="15"
@@ -129,7 +128,7 @@ export function ChatMessage({ message, onReply, previousMessage, onDelete, onEdi
             {message.isEdited && <span className="text-xs text-muted-foreground italic">(edited)</span>}
 
             {isCurrentUser && !message.isDeleted && (
-              <button onClick={() => onEdit?.(message)} aria-label="Edit message" className="hover:text-primary">
+              <button onClick={() => onEdit?.(message.content)} aria-label="Edit message" className="hover:text-primary">
                 <Pencil1Icon className="w-4 h-4" />
               </button>
             )}

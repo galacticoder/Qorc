@@ -32,11 +32,9 @@ const ChatApp: React.FC<ChatAppProps> = ({ onNavigate }) => {
   );
 
   const messageSender = useMessageSender(
-    true,
     Database.users,
     Authentication.loginUsernameRef,
     Database.saveMessageToLocalDB,
-    setMessages,
     Authentication.aesKeyRef.current,
     Authentication.serverPublicKeyPEM,
   );
@@ -100,10 +98,8 @@ const ChatApp: React.FC<ChatAppProps> = ({ onNavigate }) => {
         <div className="flex-1">
           <ChatInterface
             messages={messages}
-            onSendMessage={messageSender.handleSendMessage}
+            onSendMessage={messageSender.handleSendMessageType}
             onSendFile={handleSendFileWrapper}
-            onDeleteMessage={messageSender.handleDeleteMessage}
-            onEditMessage={messageSender.handleEditMessage}
             isEncrypted={true}
             currentUsername={Authentication.loginUsernameRef.current}
             users={Database.users}

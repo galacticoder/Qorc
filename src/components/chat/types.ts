@@ -33,5 +33,5 @@ export interface ChatMessageProps {
   onReply?: (message: Message) => void;
   previousMessage?: Message;
   onDelete?: (message: Message) => void;
-  onEdit?: (message: Message) => void;
+  onEdit?: (newContent: string) => void;
 }
