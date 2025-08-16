@@ -5,7 +5,7 @@ import wasm from "vite-plugin-wasm";
 export default defineConfig({
   plugins: [
     react(),
-    wasm(), // <-- add this here
+    wasm(),
   ],
   server: {
     port: 5173,
@@ -15,4 +15,7 @@ export default defineConfig({
       "@": "/src",
     },
   },
+  optimizeDeps: {
+    exclude: ['mlkem']
+  }
 });

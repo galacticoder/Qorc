@@ -76,7 +76,7 @@ export function Login({
 
   return (
     <div
-      
+
       className="w-full max-w-md mx-auto"
     >
       <Card className="w-full">
@@ -86,7 +86,7 @@ export function Login({
           </div>
           <CardTitle className="text-2xl text-center">SecureChat</CardTitle>
           <CardDescription className="text-center">
-            End-to-end encrypted messaging using 4096-bit RSA and AES-GCM
+            End-to-end encrypted messaging using X25519 + Kyber768 hybrid encryption and AES-GCM
           </CardDescription>
         </CardHeader>
 
@@ -98,12 +98,12 @@ export function Login({
               disabled={isSubmitting || isGeneratingKeys}
             />
           ) : accountAuthenticated ? (
-              <ServerPasswordForm
-                serverPassword={serverPassword}
-                setServerPassword={setServerPassword}
-                disabled={isSubmitting || isGeneratingKeys}
-                onSubmit={handleServerPasswordSubmit}
-              />
+            <ServerPasswordForm
+              serverPassword={serverPassword}
+              setServerPassword={setServerPassword}
+              disabled={isSubmitting || isGeneratingKeys}
+              onSubmit={handleServerPasswordSubmit}
+            />
           ) : mode === "register" ? (
             <SignUpForm
               onSubmit={handleAccountSubmit}

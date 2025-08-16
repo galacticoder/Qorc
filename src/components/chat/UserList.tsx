@@ -8,7 +8,11 @@ export interface User {
   id: string;
   username: string;
   isOnline: boolean;
-  publicKey: string;
+  isTyping?: boolean;
+  hybridPublicKeys?: {
+    x25519PublicBase64: string;
+    kyberPublicBase64: string;
+  };
 }
 
 interface UserListProps {

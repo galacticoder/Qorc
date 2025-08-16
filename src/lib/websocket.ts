@@ -17,12 +17,7 @@ class WebSocketClient {
 
   constructor() {
     const isDev = import.meta.env.DEV;
-
-    this.url = isDev
-      ? "wss://localhost:8443/"
-      : "wss://end2endchat.com";
-
-    console.log(`${isDev ? 'Development' : 'Production'} environment detected. Connecting to ${this.url}`);
+    this.url = isDev ? "wss://localhost:8443/" : "wss://end2endchat.com";
   }
 
   public setLoginErrorCallback(fn: (error: string) => void) {
@@ -64,17 +59,14 @@ class WebSocketClient {
         this.ws.onopen = () => {
           this.isConnected = true;
           this.reconnectAttempts = 0;
-          console.log('WebSocket connection established');
           if (this.setLoginError) this.setLoginError("");
           resolve();
         };
 
         this.ws.onclose = (event) => {
           this.isConnected = false;
-          console.warn(`WebSocket closed: ${event.reason} (code: ${event.code})`);
 
           if (event.code === 1008 || event.code === 1013) {
-            console.warn('Connection rejected by server. Will not attempt to reconnect.');
             return;
           }
 
@@ -82,7 +74,6 @@ class WebSocketClient {
         };
 
         this.ws.onerror = (error) => {
-          console.error('WebSocket error:', error);
           if (!this.isConnected) {
             reject(error);
           }
@@ -92,7 +83,6 @@ class WebSocketClient {
           this.handleMessage(event.data);
         };
       } catch (error) {
-        console.error('WebSocket connection error:', error);
         reject(error);
       }
     });
@@ -100,16 +90,13 @@ class WebSocketClient {
 
   private attemptReconnect(): void {
     if (this.reconnectAttempts >= this.maxReconnectAttempts) {
-      console.warn('Max reconnection attempts reached. Giving up.');
       return;
     }
 
     this.reconnectAttempts++;
-    console.log(`Attempting to reconnect (${this.reconnectAttempts}/${this.maxReconnectAttempts})...`);
 
     setTimeout(() => {
       this.connect().catch(error => {
-        console.warn('Reconnection failed:', error);
         this.setLoginError("Failed to connect to server")
       });
     }, this.reconnectTimeout * this.reconnectAttempts);
@@ -117,7 +104,6 @@ class WebSocketClient {
 
   public send(data: unknown): void {
     if (!this.ws || !this.isConnected) {
-      console.warn('Cannot send message: WebSocket is not connected');
       return;
     }
 
@@ -150,16 +136,12 @@ class WebSocketClient {
         const handler = this.messageHandlers.get(message.type);
         if (handler) {
           handler(message);
-        } else {
-          console.warn(`No handler registered for message type: ${message.type}`);
         }
       } else {
         const rawHandler = this.messageHandlers.get('raw');
         if (rawHandler) {
           rawHandler(data);
         } else {
-          console.log('Received unhandled message:', data);
-
           const chatHandler = this.messageHandlers.get('chat');
           if (chatHandler) {
             chatHandler({

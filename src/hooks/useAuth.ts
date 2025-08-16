@@ -1,14 +1,11 @@
 import { useState, useRef, useCallback, MutableRefObject } from "react";
-import { useLocalStorage } from "./use-local-storage";
-import { Message } from "@/components/chat/types";
 import { SignalType } from "@/lib/signals";
 import websocketClient from "@/lib/websocket";
 import { CryptoUtils } from "@/lib/unified-crypto";
 import { SecureDB } from "@/lib/secureDB";
-
+import { SecureKeyManager } from "@/lib/secure-key-manager";
 
 export const useAuth = () => {
-  //states
   const [username, setUsername] = useState("");
   const [isLoggedIn, setIsLoggedIn] = useState(false);
   const [isGeneratingKeys, setIsGeneratingKeys] = useState(false);
@@ -18,50 +15,101 @@ export const useAuth = () => {
   const passphrasePlaintextRef = useRef<string>("");
   const aesKeyRef = useRef<CryptoKey | null>(null);
 
-  // keys
-  const [privateKeyPEM, setPrivateKeyPEM] = useLocalStorage<string>("private_key", "");
-  const [publicKeyPEM, setPublicKeyPEM] = useLocalStorage<string>("public_key", "");
-  const privateKeyRef = useRef<CryptoKey | null>(null);
-  const publicKeyRef = useRef<CryptoKey | null>(null);
-  const [serverPublicKeyPEM, setServerPublicKeyPEM] = useState<string | null>(null);
+  const [serverHybridPublic, setServerHybridPublic] = useState<{
+    x25519PublicBase64: string;
+    kyberPublicBase64: string
+  } | null>(null);
+
+  const hybridKeysRef = useRef<{
+    x25519: { private: any; publicKeyBase64: string };
+    kyber: { publicKeyBase64: string; secretKey: Uint8Array };
+  } | null>(null);
+
+  const keyManagerRef = useRef<SecureKeyManager | null>(null);
   const loginUsernameRef = useRef("");
-  const serverPublicKeyRef = useRef<CryptoKey | null>(null);
+
+  const getKeysOnDemand = useCallback(async () => {
+    console.log('[AUTH] Getting keys on demand');
+    if (!keyManagerRef.current) {
+      console.error("[AUTH] Key manager not initialized");
+      return null;
+    }
+
+    if (!passphrasePlaintextRef.current) {
+      console.error("[AUTH] Passphrase not available");
+      return null;
+    }
+
+    try {
+      const metadata = await keyManagerRef.current.getKeyMetadata();
+      if (metadata) {
+        await keyManagerRef.current.initialize(passphrasePlaintextRef.current, metadata.salt);
+      } else {
+        await keyManagerRef.current.initialize(passphrasePlaintextRef.current);
+      }
+
+      const keys = await keyManagerRef.current.getKeys();
+      console.log('[AUTH] Keys retrieved successfully');
+      return keys;
+    } catch (error) {
+      console.error("[AUTH] Error loading keys on demand:", error);
+      return null;
+    }
+  }, []);
+
   const passwordRef = useRef<string>("");
   const [passphraseHashParams, setPassphraseHashParams] = useState(null);
   const [showPassphrasePrompt, setShowPassphrasePrompt] = useState(false);
 
   const initializeKeys = useCallback(async () => {
-    if (!privateKeyPEM || !publicKeyPEM) {
-      setIsGeneratingKeys(true);
-      try {
-        const keyPair = await CryptoUtils.Keys.generateRSAKeyPair();
-        const publicKeyString = await CryptoUtils.Keys.exportPublicKeyToPEM(keyPair.publicKey);
-        const privateKeyString = await CryptoUtils.Keys.exportPrivateKeyToPEM(keyPair.privateKey);
-
-        setPublicKeyPEM(publicKeyString);
-        setPrivateKeyPEM(privateKeyString);
-
-        publicKeyRef.current = keyPair.publicKey;
-        privateKeyRef.current = keyPair.privateKey;
-      } catch (error) {
-        console.error("Error generating keys: ", error);
-      } finally {
-        setIsGeneratingKeys(false);
+    console.log('[AUTH] Starting key initialization process');
+    setIsGeneratingKeys(true);
+    try {
+      const passphrase = passphrasePlaintextRef.current;
+      if (!passphrase) {
+        console.error("[AUTH] Passphrase not available for key generation");
+        throw new Error("Passphrase not available for key generation");
       }
-    } else {
-      try {
-        const publicKey = await CryptoUtils.Keys.importPublicKeyFromPEM(publicKeyPEM);
-        const privateKey = await CryptoUtils.Keys.importPrivateKeyFromPEM(privateKeyPEM);
 
-        publicKeyRef.current = publicKey;
-        privateKeyRef.current = privateKey;
-      } catch (error) {
-        console.error("Error importing existing keys: ", error);
-        setPublicKeyPEM("");
-        setPrivateKeyPEM("");
+      const currentUsername = loginUsernameRef.current;
+      if (!currentUsername) {
+        console.error("[AUTH] Username not available for key generation");
+        throw new Error("Username not available for key generation");
       }
+
+      console.log(`[AUTH] Initializing key manager for user: ${currentUsername}`);
+      if (!keyManagerRef.current) {
+        keyManagerRef.current = new SecureKeyManager(currentUsername);
+      }
+
+      const hasExistingKeys = await keyManagerRef.current.hasKeys();
+
+      if (hasExistingKeys) {
+        console.log('[AUTH] Loading existing keys');
+        await keyManagerRef.current.initialize(passphrase);
+        const existingKeys = await keyManagerRef.current.getKeys();
+        if (existingKeys) {
+          console.log('[AUTH] Existing keys loaded successfully');
+          hybridKeysRef.current = existingKeys;
+        }
+      } else {
+        console.log('[AUTH] Generating new hybrid key pair');
+        const seed = await CryptoUtils.Hash.hashData(passphrase + currentUsername);
+        const hybridKeyPair = await CryptoUtils.Hybrid.generateHybridKeyPairFromSeed(seed);
+
+        await keyManagerRef.current.initialize(passphrase);
+        await keyManagerRef.current.storeKeys(hybridKeyPair);
+
+        console.log('[AUTH] New keys generated and stored successfully');
+        hybridKeysRef.current = hybridKeyPair;
+      }
+    } catch (error) {
+      console.error("[AUTH] Error generating keys: ", error);
+      setLoginError("Key generation failed");
+    } finally {
+      setIsGeneratingKeys(false);
     }
-  }, [privateKeyPEM, publicKeyPEM, setPublicKeyPEM, setPrivateKeyPEM]);
+  }, []);
 
   const handleAccountSubmit = async (
     mode: "login" | "register",
@@ -69,6 +117,7 @@ export const useAuth = () => {
     password: string,
     passphrase?: string
   ) => {
+    console.log(`[AUTH] Starting ${mode} process for user: ${username}`);
     setLoginError("");
     loginUsernameRef.current = username;
     setUsername(username);
@@ -76,42 +125,59 @@ export const useAuth = () => {
     passphraseRef.current = passphrase || "";
 
     try {
-      if (!serverPublicKeyPEM) throw new Error("Server public key not available");
-      if (!websocketClient.isConnectedToServer()) await websocketClient.connect();
+      if (!serverHybridPublic) {
+        console.error("[AUTH] Server public keys not available");
+        throw new Error("Server public keys not available");
+      }
 
-      await initializeKeys();
+      if (!websocketClient.isConnectedToServer()) {
+        console.log('[AUTH] Connecting to WebSocket server');
+        await websocketClient.connect();
+      }
 
-      const encryptedPasswordPayload = await CryptoUtils.Encrypt.encryptAndFormatPayload({
-        recipientPEM: serverPublicKeyPEM,
-        content: password
-      });
+      if (passphrase) {
+        console.log('[AUTH] Passphrase provided, initializing keys');
+        passphrasePlaintextRef.current = passphrase;
+        await initializeKeys();
+      }
 
-      const encryptedUserPayload = await CryptoUtils.Encrypt.encryptAndFormatPayload({
-        recipientPEM: serverPublicKeyPEM,
+      const userPayload = {
         usernameSent: username,
-        publicKey: publicKeyPEM
-      });
+        hybridPublicKeys: {
+          x25519PublicBase64: "",
+          kyberPublicBase64: ""
+        }
+      };
+
+      const encryptedPayload = await CryptoUtils.Hybrid.encryptHybridPayload(
+        userPayload,
+        serverHybridPublic
+      );
+
+      const encryptedPassword = await CryptoUtils.Hybrid.encryptHybridPayload(
+        { content: password },
+        serverHybridPublic
+      );
 
       const payload = {
         type: mode === "register" ? SignalType.ACCOUNT_SIGN_UP : SignalType.ACCOUNT_SIGN_IN,
-        userData: encryptedUserPayload,
-        passwordData: encryptedPasswordPayload
+        userData: encryptedPayload,
+        passwordData: encryptedPassword
       };
 
-      console.log("Sent account info")
-
+      console.log(`[AUTH] Sending ${mode} request to server`);
       websocketClient.send(JSON.stringify(payload));
     } catch (error) {
-      console.error("Account submission failed:", error);
+      console.error(`[AUTH] ${mode} submission failed:`, error);
       setLoginError(`Submission error: ${error instanceof Error ? error.message : "Unknown error"}`);
     }
   };
 
-  //server password submitting
   const handleServerPasswordSubmit = async (password: string) => {
+    console.log('[AUTH] Submitting server password');
     setLoginError("");
-    if (!publicKeyRef.current || !privateKeyRef.current) {
-      setLoginError("Encryption keys not ready");
+    if (!serverHybridPublic) {
+      setLoginError("Server keys not available");
       return;
     }
 
@@ -120,135 +186,141 @@ export const useAuth = () => {
         try {
           await websocketClient.connect();
         } catch (error) {
-          setLoginError("Failed to connect to server");
+          setLoginError(`Failed to connect to server: ${error}`);
           return;
         }
       }
 
-      const exportPem = await CryptoUtils.Keys.exportPublicKeyToPEM(serverPublicKeyRef.current);
-      const passwordPayload = await CryptoUtils.Encrypt.encryptAndFormatPayload({
-        recipientPEM: exportPem,
-        type: SignalType.SERVER_PASSWORD_ENCRYPTED,
-        content: password
-      });
-
-      const userPayload = await CryptoUtils.Encrypt.encryptAndFormatPayload({
-        recipientPEM: exportPem,
-        publicKey: publicKeyPEM
-      });
+      const encryptedPassword = await CryptoUtils.Hybrid.encryptHybridPayload(
+        { content: password },
+        serverHybridPublic
+      );
 
       const loginInfo = {
         type: SignalType.SERVER_LOGIN,
-        userData: userPayload,
-        passwordData: passwordPayload
+        passwordData: encryptedPassword
       };
 
-      console.log("Sending combined login info: ", loginInfo);
+      console.log('[AUTH] Sending server password to server');
       websocketClient.send(JSON.stringify(loginInfo));
-
       loginUsernameRef.current = username;
     } catch (error) {
       console.error("Login failed: ", error);
+      setLoginError("Password encryption failed");
     }
   };
 
   const handlePassphraseSubmit = async (passphrase: string, mode: "login" | "register") => {
+    console.log(`[AUTH] Submitting passphrase for ${mode} mode`);
     passphrasePlaintextRef.current = passphrase;
-    if (mode === "login") {
-      if (!passphraseHashParams) {
-        setLoginError("Missing passphrase hashing parameters from server.");
-        return;
+
+    try {
+      await initializeKeys();
+
+      let passphraseHash;
+
+      if (mode === "login") {
+        if (!passphraseHashParams) {
+          throw new Error("Missing passphrase parameters");
+        }
+
+        passphraseHash = await CryptoUtils.Hash.hashDataUsingInfo(
+          passphrase,
+          passphraseHashParams
+        );
+      } else {
+        passphraseHash = await CryptoUtils.Hash.hashData(passphrase);
       }
-      try {
-        console.log("Hashing passphrase for login...");
-        const passphraseHash = await CryptoUtils.Hash.hashDataUsingInfo(passphrase, passphraseHashParams);
-        passphraseRef.current = passphraseHash;
 
-        websocketClient.send(JSON.stringify({
-          type: SignalType.PASSPHRASE_HASH,
-          passphraseHash: passphraseHash,
-        }));
+      passphraseRef.current = passphraseHash;
 
-        console.log("Sent hashed passphrase to server for login");
-      } catch (error) {
-        console.error("Passphrase hashing failed:", error);
-        setLoginError("Failed to hash passphrase.");
+      console.log(`[AUTH] Sending passphrase hash to server`);
+      websocketClient.send(JSON.stringify({
+        type: mode === "register"
+          ? SignalType.PASSPHRASE_HASH_NEW
+          : SignalType.PASSPHRASE_HASH,
+        passphraseHash
+      }));
+
+      if (keyManagerRef.current && serverHybridPublic) {
+        const publicKeys = await keyManagerRef.current.getPublicKeys();
+        if (publicKeys) {
+          const hybridKeysPayload = {
+            usernameSent: loginUsernameRef.current,
+            hybridPublicKeys: {
+              x25519PublicBase64: publicKeys.x25519PublicBase64,
+              kyberPublicBase64: publicKeys.kyberPublicBase64
+            }
+          };
+
+          const encryptedHybridKeys = await CryptoUtils.Hybrid.encryptHybridPayload(
+            hybridKeysPayload,
+            serverHybridPublic
+          );
+
+          console.log('[AUTH] Sending hybrid keys update to server');
+          websocketClient.send(JSON.stringify({
+            type: SignalType.HYBRID_KEYS_UPDATE,
+            userData: encryptedHybridKeys
+          }));
+        }
       }
-    } else if (mode === "register") {
-      try {
-        console.log("Generating new hashing passphrase for registration...");
-
-        const passphraseHash = await CryptoUtils.Hash.hashData(passphrase);
-        passphraseRef.current = passphraseHash;
-
-        websocketClient.send(JSON.stringify({
-          type: SignalType.PASSPHRASE_HASH_NEW,
-          passphraseHash: passphraseHash,
-        }));
-
-        console.log("Sent hashed passphrase to server for registration");
-      } catch (error) {
-        console.error("Passphrase hashing failed:", error);
-        setLoginError("Failed to hash passphrase.");
-      }
+    } catch (error) {
+      console.error("Passphrase hashing failed:", error);
+      setLoginError("Passphrase processing failed");
     }
   };
 
   const handleAuthSuccess = (username: string) => {
+    console.log(`[AUTH] Authentication success for user: ${username}`);
     if (!accountAuthenticated) return;
 
-    console.log("Auth success")
     setUsername(username);
     setIsLoggedIn(true);
     setLoginError("");
+
+    if (keyManagerRef.current && passphrasePlaintextRef.current) {
+      keyManagerRef.current.initialize(passphrasePlaintextRef.current).catch(error => {
+        console.error("Failed to initialize key manager after auth success:", error);
+      });
+    }
   };
 
-  const logout = (secureDBRef?: MutableRefObject<SecureDB | null>, setLoginErrorMessage: string = "") => {
+  const logout = (secureDBRef?: MutableRefObject<SecureDB | null>, loginErrorMessage: string = "") => {
+    console.log('[AUTH] Logging out user');
     if (secureDBRef?.current) secureDBRef.current = null;
 
     passwordRef.current = "";
     passphraseRef.current = "";
     passphrasePlaintextRef.current = "";
-
     aesKeyRef.current = null;
+    hybridKeysRef.current = null;
+
+    if (keyManagerRef.current) {
+      keyManagerRef.current.clearKeys();
+      keyManagerRef.current.deleteDatabase().catch(error => {
+        console.error("Failed to delete user database:", error);
+      });
+    }
 
     setIsLoggedIn(false);
-    setLoginError(setLoginErrorMessage);
+    setLoginError(loginErrorMessage);
     setAccountAuthenticated(false);
-
-    console.log("Logged out successfully");
   };
 
   const useLogout = (Database: any) => {
-    return useCallback(() => {
-      if (Database.secureDBRef?.current) Database.secureDBRef.current = null; //clear db ref
-
-      //clear again just in case values didnt clear before (it will always be cleared this is just in case)
-      passwordRef.current = "";
-      passphraseRef.current = "";
-      passphrasePlaintextRef.current = "";
-
-      aesKeyRef.current = null; //clear key
-
-      setIsLoggedIn(false);
-      setLoginError("");
-      setAccountAuthenticated(false);
-
-      console.log("Logged out successfully");
-    }, [Database]);
+    return () => logout(Database.secureDBRef, "Logged out");
   };
 
   return {
     username,
-    serverPublicKeyPEM,
-    setServerPublicKeyPEM,
+    serverHybridPublic,
+    setServerHybridPublic,
     isLoggedIn,
     setIsLoggedIn,
     isGeneratingKeys,
     loginError,
     accountAuthenticated,
-    privateKeyRef,
-    publicKeyRef,
     loginUsernameRef,
     initializeKeys,
     handleAccountSubmit,
@@ -256,7 +328,6 @@ export const useAuth = () => {
     handleServerPasswordSubmit,
     handleAuthSuccess,
     setAccountAuthenticated,
-    serverPublicKeyRef,
     passwordRef,
     setLoginError,
     passphraseHashParams,
@@ -267,6 +338,9 @@ export const useAuth = () => {
     setShowPassphrasePrompt,
     showPassphrasePrompt,
     logout,
-    useLogout
+    useLogout,
+    hybridKeysRef,
+    keyManagerRef,
+    getKeysOnDemand
   };
 };

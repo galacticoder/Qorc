@@ -1,5 +1,7 @@
 # End-to-End Encrypted Chat Site
 
+# ATTENTION: THIS READ ME FILE IS CURRENTLY OUTDATED I WILL UPDATE THIS LATER TO REFLECT CHANGES BUT FOR NOW IS OUTDATED INFORMATION
+
 This is my end2end encrypted chat app. I originally made 2 different versions in c++ but was very limited, So i decided to make it into a site and not use c++.
 
 

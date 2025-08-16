@@ -10,8 +10,12 @@ export function useMessageSender(
   users: User[],
   loginUsernameRef: React.MutableRefObject<string>,
   onNewMessage: (message: Message) => void,
-  aesKey: CryptoKey | null,
-  serverPublicKey: string,
+  serverHybridPublic: { x25519PublicBase64: string; kyberPublicBase64: string } | null,
+  getKeysOnDemand: () => Promise<{ x25519: { private: any; publicKeyBase64: string }; kyber: { publicKeyBase64: string; secretKey: Uint8Array } } | null>,
+  aesKeyRef: React.MutableRefObject<CryptoKey | null>,
+  keyManagerRef?: React.MutableRefObject<any>,
+  passphraseRef?: React.MutableRefObject<string>,
+  isLoggedIn?: boolean
 ) {
   async function getDeterministicMessageId(message: {
     content: string;
@@ -20,12 +24,10 @@ export function useMessageSender(
     replyToId?: string;
   }): Promise<string> {
     const encoder = new TextEncoder();
-
     const replyPart = message.replyToId ? `:${message.replyToId}` : '';
     const normalized = `${message.content.trim()}:${message.timestamp}:${message.sender.trim().toLowerCase()}${replyPart}`;
 
     const hashBuffer = await crypto.subtle.digest("SHA-512", encoder.encode(normalized));
-
     return Array.from(new Uint8Array(hashBuffer))
       .map((b) => b.toString(16).padStart(2, "0"))
       .join("");
@@ -38,20 +40,27 @@ export function useMessageSender(
       type,
       typeInside,
       content,
-      aesKey
     }: {
-      messageId?: string,
-      replyTo?: Message | null,
-      type?: string,
-      typeInside?: string,
-      content?: string,
-      aesKey?: CryptoKey | null
+      messageId?: string;
+      replyTo?: Message | null;
+      type?: string;
+      typeInside?: string;
+      content?: string;
     }) => {
+      if (!serverHybridPublic) {
+        console.error("Server keys not available");
+        return;
+      }
+
+      const hybridKeys = await getKeysOnDemand();
+      if (!hybridKeys) {
+        console.error("Client keys not available");
+        return;
+      }
 
       const time = Date.now();
-
-      const id = messageId || await getDeterministicMessageId({ //make new message id for normal chat messages
-        content: content,
+      const id = messageId || await getDeterministicMessageId({
+        content: content || "",
         timestamp: time,
         sender: loginUsernameRef.current,
         replyToId: replyTo?.id
@@ -60,31 +69,10 @@ export function useMessageSender(
       try {
         await Promise.all(
           users.map(async (user) => {
-            if (!user.publicKey) return;
+            if (!user.hybridPublicKeys) return;
 
-            // send to server DB
-            await ServerDatabase.sendDataToServerDb({
-              messageId: id,
-              serverPemKey: serverPublicKey,
-              fromUsername: loginUsernameRef.current,
-              toUsername: user.username,
-              content: content,
-              timestamp: time,
-              typeInside: typeInside,
-              aesKey: aesKey,
-              ...(replyTo && {
-                replyTo: {
-                  id: replyTo.id,
-                  sender: replyTo.sender,
-                  content: replyTo.content,
-                },
-              }),
-            });
-
-            // send to other users
-            const payload = await CryptoUtils.Encrypt.encryptAndFormatPayload({
+            const messagePayload = {
               id: id,
-              recipientPEM: user.publicKey,
               from: loginUsernameRef.current,
               to: user.username,
               type: type,
@@ -98,25 +86,90 @@ export function useMessageSender(
                   content: replyTo.content,
                 },
               }),
-            });
-            websocketClient.send(JSON.stringify(payload));
+            };
+
+            const userEncrypted = await CryptoUtils.Hybrid.encryptHybridPayload(
+              messagePayload,
+              user.hybridPublicKeys
+            );
+
+            const finalUserPayload = {
+              type: SignalType.ENCRYPTED_MESSAGE,
+              from: loginUsernameRef.current,
+              to: user.username,
+              encryptedPayload: userEncrypted
+            };
+
+            websocketClient.send(JSON.stringify(finalUserPayload));
+
+            console.log(`Sent to user ${user.username}: `, finalUserPayload);
+
+            //send to server db for storage
+            if (serverHybridPublic && aesKeyRef.current) {
+              const { iv, authTag, encrypted } = await CryptoUtils.AES.encryptWithAesGcmRaw(
+                content,
+                aesKeyRef.current
+              );
+              const encryptedContent = CryptoUtils.AES.serializeEncryptedData(iv, authTag, encrypted);
+
+              let encryptedReplyContent = "";
+              if (replyTo) {
+                const replyContent = replyTo.content || "";
+                const { iv: replyIv, authTag: replyAuthTag, encrypted: replyEncrypted } = await CryptoUtils.AES.encryptWithAesGcmRaw(
+                  replyContent,
+                  aesKeyRef.current
+                );
+                encryptedReplyContent = CryptoUtils.AES.serializeEncryptedData(replyIv, replyAuthTag, replyEncrypted);
+              }
+
+              const serverPayload = {
+                messageId: id,
+                fromUsername: loginUsernameRef.current,
+                toUsername: user.username,
+                encryptedContent: encryptedContent,
+                timestamp: time,
+                typeInside: typeInside,
+                ...(replyTo && {
+                  replyTo: {
+                    id: replyTo.id,
+                    sender: replyTo.sender,
+                    encryptedContent: encryptedReplyContent,
+                  },
+                }),
+              };
+
+              const serverEncrypted = await CryptoUtils.Hybrid.encryptHybridPayload(
+                serverPayload,
+                serverHybridPublic
+              );
+
+              const dbPayload = {
+                type: SignalType.UPDATE_DB,
+                ...serverEncrypted
+              };
+
+              websocketClient.send(JSON.stringify(dbPayload));
+
+              console.log(`Sent to server database:`, serverPayload.messageId);
+            }
           })
         );
 
-        onNewMessage({ //save to localdb
+        //save to local db
+        onNewMessage({
           id: id,
-          content: content,
+          content: content || "",
           sender: loginUsernameRef.current,
           timestamp: new Date(),
           isCurrentUser: true,
-          isDeleted: typeInside == SignalType.DELETE_MESSAGE,
+          isDeleted: typeInside === SignalType.DELETE_MESSAGE,
           ...(replyTo ? { replyTo } : {})
         });
       } catch (error) {
         console.error("handleMessage failed:", error);
       }
     },
-    [users, loginUsernameRef, serverPublicKey, aesKey, onNewMessage]
+    [users, loginUsernameRef, serverHybridPublic, getKeysOnDemand, aesKeyRef, onNewMessage]
   );
 
   const handleSendMessageType = useCallback(
@@ -127,18 +180,15 @@ export function useMessageSender(
           type: SignalType.ENCRYPTED_MESSAGE,
           typeInside: "chat",
           content: content,
-          aesKey: aesKey
-        }
-        )
+        });
       } else {
-        await handleSendMessage({ //if message typeInside isnt "chat"
+        await handleSendMessage({
           messageId: messageId,
           replyTo: replyTo,
           type: SignalType.ENCRYPTED_MESSAGE,
           typeInside: messageSignalType,
           content: content,
-          aesKey: aesKey
-        })
+        });
       }
     },
     [handleSendMessage]

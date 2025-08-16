@@ -5,8 +5,15 @@ import * as ServerConfig from '../config/config.js';
 
 const prompt = promptSync({ sigint: true });
 
-export const validateUsernameFormat = (username) => /^[a-zA-Z0-9_-]+$/.test(username);
-export const validateUsernameLength = (username) => username.length >= 3 && username.length <= 16;
+export const validateUsernameFormat = (username) => {
+  if (!username || typeof username !== 'string') return false;
+  return /^[a-zA-Z0-9_-]+$/.test(username);
+};
+
+export const validateUsernameLength = (username) => {
+  if (!username || typeof username !== 'string') return false;
+  return username.length >= 3 && username.length <= 16;
+};
 export const isUsernameAvailable = (username) => !db.userDatabase.has(username);
 export const isServerFull = (clients) => clients.size >= ServerConfig.MAX_CLIENTS;
 

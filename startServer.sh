@@ -31,7 +31,6 @@ cleanup() {
 
 trap cleanup INT TERM
 
-
 echo -e "${GREEN}==========================================${NC}"
 echo -e "${GREEN}end2end server is now running!${NC}"
 echo -e "${GREEN}==========================================${NC}"

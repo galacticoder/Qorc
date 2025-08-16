@@ -10,6 +10,7 @@
   },
   "dependencies": {
     "@hookform/resolvers": "^3.9.0",
+    "@noble/curves": "^1.9.7",
     "@noble/hashes": "^1.8.0",
     "@radix-ui/react-accordion": "^1.2.0",
     "@radix-ui/react-alert-dialog": "^1.1.1",
@@ -41,6 +42,7 @@
     "@radix-ui/react-tooltip": "^1.1.4",
     "@supabase/supabase-js": "^2.50.3",
     "@tanstack/react-query": "^5.56.2",
+    "@types/uuid": "^10.0.0",
     "argon2": "^0.43.1",
     "argon2-browser": "^1.18.0",
     "argon2-wasm": "^0.9.0",
@@ -53,6 +55,7 @@
     "input-otp": "^1.2.4",
     "linkify-react": "^4.3.2",
     "lucide-react": "^0.462.0",
+    "mlkem": "^2.5.0",
     "next-themes": "^0.3.0",
     "pako": "^2.1.0",
     "prompt-sync": "^4.2.0",

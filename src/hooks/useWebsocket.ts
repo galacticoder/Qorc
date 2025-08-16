@@ -10,15 +10,12 @@ export const useWebSocket = (
   setLoginError: (error: string) => void
 ) => {
   useEffect(() => {
-    console.log("Initializing WebSocket connection...");
     websocketClient.setLoginErrorCallback(setLoginError)
 
     const connect = async () => {
       try {
         if (!websocketClient.isConnectedToServer()) {
-          console.log("Connecting to WebSocket server...");
           await websocketClient.connect();
-          console.log("Connected to server")
         }
       } catch (error) {
         console.error("WebSocket connection error:", error);
@@ -28,25 +25,27 @@ export const useWebSocket = (
     connect();
 
     return () => {
-      console.log("Cleaning up WebSocket connection...");
       websocketClient.close();
     };
   }, [setLoginError]);
 
   useEffect(() => {
     const registeredSignalTypes = Object.values(SignalType);
-    const rawHandler = (data: unknown) => {
-      console.log("Raw message received:", data);
+    const rawHandler = async (data: unknown) => {
+      await handleEncryptedMessage(data);
     };
 
     registeredSignalTypes.forEach(signal => {
-      websocketClient.registerMessageHandler(signal, handleServerMessage);
+      if (signal !== SignalType.ENCRYPTED_MESSAGE) {
+        websocketClient.registerMessageHandler(signal, handleServerMessage);
+      }
     });
 
+    websocketClient.registerMessageHandler(SignalType.ENCRYPTED_MESSAGE, handleEncryptedMessage);
     websocketClient.registerMessageHandler("raw", rawHandler);
 
     return () => {
-      	registeredSignalTypes.forEach(signal => {
+      registeredSignalTypes.forEach(signal => {
         websocketClient.unregisterMessageHandler(signal);
       });
       websocketClient.unregisterMessageHandler("raw");

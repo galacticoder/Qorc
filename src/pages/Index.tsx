@@ -1,4 +1,4 @@
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect } from "react";
 import { Login } from "@/components/chat/Login";
 import { UserList } from "@/components/chat/UserList";
 import { ChatInterface } from "@/components/chat/ChatInterface";
@@ -20,13 +20,15 @@ const ChatApp: React.FC<ChatAppProps> = ({ onNavigate }) => {
   const [messages, setMessages] = useState<Message[]>([]);
 
   const Authentication = useAuth();
+
   const Database = useSecureDB({
     Authentication,
     messages,
     setMessages,
   });
+
   const fileHandler = useFileHandler(
-    Authentication.privateKeyRef,
+    Authentication.getKeysOnDemand,
     Database.saveMessageToLocalDB,
     Authentication.setLoginError
   );
@@ -35,19 +37,28 @@ const ChatApp: React.FC<ChatAppProps> = ({ onNavigate }) => {
     Database.users,
     Authentication.loginUsernameRef,
     Database.saveMessageToLocalDB,
-    Authentication.aesKeyRef.current,
-    Authentication.serverPublicKeyPEM,
+    Authentication.serverHybridPublic,
+    Authentication.getKeysOnDemand,
+    Authentication.aesKeyRef,
+    Authentication.keyManagerRef,
+    Authentication.passphrasePlaintextRef,
+    Authentication.isLoggedIn
   );
 
   const encryptedHandler = useEncryptedMessageHandler(
-    Authentication.privateKeyRef,
+    Authentication.getKeysOnDemand,
     Authentication.loginUsernameRef,
     Database.setUsers,
     setMessages,
     Database.saveMessageToLocalDB
   );
 
-  const signalHandler = useChatSignals({ Authentication, Database, fileHandler, encryptedHandler });
+  const signalHandler = useChatSignals({
+    Authentication,
+    Database,
+    fileHandler,
+    encryptedHandler
+  });
 
   const handleSendFileWrapper = useCallback(
     (fileMessage: Message) => {
@@ -84,7 +95,7 @@ const ChatApp: React.FC<ChatAppProps> = ({ onNavigate }) => {
       <header className="mb-4 flex justify-between items-center">
         <h1 className="text-2xl font-bold">SecureChat</h1>
         <button
-          onClick={Authentication.useLogout}
+          onClick={() => Authentication.logout()}
           className="px-4 py-2 bg-red-500 text-white rounded-lg hover:bg-red-600 transition"
         >
           Logout

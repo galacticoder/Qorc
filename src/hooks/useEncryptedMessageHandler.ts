@@ -5,46 +5,55 @@ import { SignalType } from "@/lib/signals";
 import { Message } from "@/components/chat/types";
 
 export function useEncryptedMessageHandler(
-  privateKeyRef: React.RefObject<CryptoKey>,
+  getKeysOnDemand: () => Promise<{ x25519: { private: any; publicKeyBase64: string }; kyber: { publicKeyBase64: string; secretKey: Uint8Array } } | null>,
   loginUsernameRef: React.MutableRefObject<string>,
   setUsers: React.Dispatch<React.SetStateAction<any[]>>,
   setMessages: React.Dispatch<React.SetStateAction<Message[]>>,
   saveMessageToLocalDB: (msg: Message) => Promise<void>
 ) {
   return useCallback(
-    async (message: any) => {
+    async (encryptedMessage: any) => {
       try {
-        console.log("Message received. Starting decryption...");
-        const payload = await CryptoUtils.Decrypt.decryptAndFormatPayload(
-          message,
-          privateKeyRef.current
-        );
-        console.log("Payload decrypted. Message type: ", payload.type);
-
-        if (message.type == SignalType.USER_DISCONNECT) {
-          setUsers(prevUsers =>
-            prevUsers.filter(
-              user => user.username !== payload.content.split(" ")[0]
-            )
-          );
+        const hybridKeys = await getKeysOnDemand();
+        if (!hybridKeys) {
+          console.error("Client hybrid keys not available for decryption");
+          return;
         }
 
-        const isJoinLeave = payload.content.includes("joined") || payload.content.includes("left");
+        const payload = await CryptoUtils.Hybrid.decryptHybridPayload(
+          encryptedMessage,
+          {
+            x25519: { private: hybridKeys.x25519.private },
+            kyber: { secretKey: hybridKeys.kyber.secretKey }
+          }
+        );
 
-        console.log("Message ID received: ", payload.id);
+        if (payload.type === SignalType.USER_DISCONNECT) {
+          const username = payload.content?.split(" ")[0];
+          if (username) {
+            setUsers(prevUsers =>
+              prevUsers.filter(user => user.username !== username)
+            );
+          }
+          return;
+        }
+
+        const isJoinLeave = payload.content?.includes("joined") ||
+          payload.content?.includes("left");
+
+        const messageId = payload.typeInside === "system"
+          ? uuidv4()
+          : payload.id ?? uuidv4();
 
         const payloadFull: Message = {
-          id:
-            payload.typeInside === "system"
-              ? uuidv4()
-              : payload.id ?? uuidv4(),
-          content: payload.content,
-          sender: message.from,
-          timestamp: new Date(payload.timestamp),
-          isCurrentUser: payload.from == loginUsernameRef.current,
+          id: messageId,
+          content: payload.content || "",
+          sender: payload.from || "system",
+          timestamp: new Date(payload.timestamp || Date.now()),
+          isCurrentUser: payload.from === loginUsernameRef.current,
           isSystemMessage: payload.typeInside === "system",
-          isDeleted: payload.typeInside == SignalType.DELETE_MESSAGE,
-          isEdited: payload.typeInside == SignalType.EDIT_MESSAGE,
+          isDeleted: payload.typeInside === SignalType.DELETE_MESSAGE,
+          isEdited: payload.typeInside === SignalType.EDIT_MESSAGE,
           shouldPersist: isJoinLeave,
           ...(payload.replyTo && {
             replyTo: {
@@ -55,33 +64,37 @@ export function useEncryptedMessageHandler(
           }),
         };
 
-        //send to server db when done saving the user message to local db later
         await saveMessageToLocalDB(payloadFull);
 
-        //started handling after saving edited or deleted message to db since before wasnt working for hours
+        console.log("Received payload: ", payload)
+
+        setMessages(prev => {
+          const exists = prev.some(msg => msg.id === payloadFull.id);
+          if (exists) {
+            return prev;
+          }
+          return [...prev, payloadFull];
+        });
+
         if (payloadFull.isEdited || payloadFull.isDeleted) {
-          setMessages(prev =>
-            prev.map(msg => {
-              const updated = { ...msg };
-              const content = payload.isEdited ? payload.content : "Message Deleted";
+          setMessages(prev => prev.map(msg => {
+            const updated = { ...msg };
+            const content = payloadFull.isEdited
+              ? payload.content
+              : "Message Deleted";
 
-              //update reply fields of messages replying to the edited message
-              if (msg.replyTo?.id === payload.id) {
-                console.log("Updating message reply fields")
-                updated.replyTo = { ...updated.replyTo, content: content };
-                saveMessageToLocalDB(updated);
-              }
+            if (msg.replyTo?.id === payload.id) {
+              updated.replyTo = { ...updated.replyTo, content: content };
+              saveMessageToLocalDB(updated);
+            }
 
-              console.log("Updated all reply fields to new edited or deleted message")
-              return updated;
-            })
-          );
-          return;
+            return updated;
+          }));
         }
       } catch (error) {
         console.error("Error handling encrypted message:", error);
       }
     },
-    [saveMessageToLocalDB, privateKeyRef, setUsers, setMessages]
+    [saveMessageToLocalDB, getKeysOnDemand, setUsers, setMessages]
   );
 }

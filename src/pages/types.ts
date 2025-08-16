@@ -4,8 +4,7 @@ export interface AuthProps {
   isGeneratingKeys: boolean;
   loginError: string;
   accountAuthenticated: boolean;
-  privateKeyRef: React.MutableRefObject<CryptoKey | null>;
-  publicKeyRef: React.MutableRefObject<CryptoKey | null>;
+  hybridKeysRef: React.MutableRefObject<{ x25519: { private: CryptoKey | Uint8Array }, kyber: { secretKey: Uint8Array } } | null>;
   loginUsernameRef: React.MutableRefObject<string>;
   initializeKeys: () => Promise<void>;
   handleAccountSubmit: (
@@ -25,6 +24,8 @@ export interface FileChunkData {
   decryptedChunks: Blob[];
   totalChunks: number;
   encryptedAESKey: string;
+  ephemeralX25519Public?: string;
+  kyberCiphertext?: string;
   filename: string;
   aesKey?: CryptoKey;
   receivedCount: number;

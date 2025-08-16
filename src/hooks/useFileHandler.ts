@@ -8,7 +8,7 @@ import { CryptoUtils } from "@/lib/unified-crypto";
 import { User } from "@/components/chat/UserList";
 
 export function useFileHandler(
-  privateKeyRef: React.MutableRefObject<CryptoKey | null>,
+  getKeysOnDemand: () => Promise<{ x25519: { private: any; publicKeyBase64: string }; kyber: { publicKeyBase64: string; secretKey: Uint8Array } } | null>,
   onNewMessage: (message: Message) => void,
   setLoginError: (err: string) => void
 ) {
@@ -18,7 +18,7 @@ export function useFileHandler(
     async (payload: any, message: any) => {
       try {
         const { from } = message;
-        const { chunkIndex, totalChunks, chunkData, encryptedAESKey, filename } = payload;
+        const { chunkIndex, totalChunks, chunkData, encryptedAESKey, ephemeralX25519Public, kyberCiphertext, filename } = payload;
         const fileKey = `${from}-${filename}`;
 
         let fileEntry = incomingFileChunksRef.current[fileKey];
@@ -27,6 +27,8 @@ export function useFileHandler(
             decryptedChunks: new Array(totalChunks),
             totalChunks,
             encryptedAESKey,
+            ephemeralX25519Public: payload.ephemeralX25519Public,
+            kyberCiphertext: payload.kyberCiphertext,
             filename,
             receivedCount: 0
           };
@@ -37,17 +39,31 @@ export function useFileHandler(
         const { iv, authTag, encrypted } = CryptoUtils.Decrypt.deserializeEncryptedDataFromUint8Array(encryptedBytes);
 
         if (!fileEntry.aesKey) {
-          const decryptedAESKeyBytes = await CryptoUtils.Decrypt.decryptWithRSA(
-            CryptoUtils.Base64.base64ToArrayBuffer(fileEntry.encryptedAESKey),
-            privateKeyRef.current
+          const hybridKeys = await getKeysOnDemand();
+          if (!hybridKeys) {
+            throw new Error("Hybrid keys not available for file decryption");
+          }
+
+          const hybridPayload = {
+            version: "hybrid-v1",
+            ephemeralX25519Public: fileEntry.ephemeralX25519Public,
+            kyberCiphertext: fileEntry.kyberCiphertext,
+            encryptedMessage: fileEntry.encryptedAESKey
+          };
+
+          const decryptedPayload = await CryptoUtils.Hybrid.decryptHybridPayload(
+            hybridPayload,
+            hybridKeys
           );
-          fileEntry.aesKey = await CryptoUtils.Keys.importAESKey(decryptedAESKeyBytes);
+
+          const aesKeyBytes = CryptoUtils.Base64.base64ToUint8Array(decryptedPayload.aesKey as string);
+          fileEntry.aesKey = await CryptoUtils.Keys.importAESKey(aesKeyBytes);
         }
 
         const decryptedChunk = await CryptoUtils.Decrypt.decryptWithAESRaw(
-          new Uint8Array(encrypted),
           new Uint8Array(iv),
           new Uint8Array(authTag),
+          new Uint8Array(encrypted),
           fileEntry.aesKey
         );
 
@@ -78,7 +94,7 @@ export function useFileHandler(
         setLoginError("Failed to process file chunk");
       }
     },
-    [privateKeyRef, onNewMessage, setLoginError]
+    [getKeysOnDemand, onNewMessage, setLoginError]
   );
 
   const handleSendFile = async (
@@ -86,13 +102,13 @@ export function useFileHandler(
     loginUsernameRef: string,
     onNewMessage: (message: Message) => void,
   ) => {
-    const userFileMessage: Message = { 
-      ...fileMessage, 
-      isCurrentUser: true, 
+    const userFileMessage: Message = {
+      ...fileMessage,
+      isCurrentUser: true,
       sender: loginUsernameRef,
       shouldPersist: false
     };
-    
+
     onNewMessage(userFileMessage);
   }
 

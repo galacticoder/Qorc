@@ -6,14 +6,14 @@ export const SignalType = {
   ACCOUNT_SIGN_UP: "account-sign-up",
   IN_ACCOUNT: "in-account",
   AUTH_SUCCESS: "AUTH_SUCCESS",
-  
+
   //messaging
   ENCRYPTED_MESSAGE: "encrypted-message",
   FILE_MESSAGE: "file-message",
   FILE_MESSAGE_CHUNK: "file-message-chunk",
   PUBLICKEYS: "public-keys",
   SERVER_PASSWORD_ENCRYPTED: "server-password-encrypted",
-  
+
   //errors and status
   USER_DISCONNECT: "user-disconnect",
   AUTH_ERROR: "AUTH_ERROR",
@@ -27,17 +27,18 @@ export const SignalType = {
   PASSPHRASE_SUCCESS: "passphrase-success",
 
   UPDATE_DB: "update-db",
+  HYBRID_KEYS_UPDATE: "hybrid-keys-update",
 };
 
 export const SignalMessages = {
   //auth messages
   AUTH_ERROR: "Authentication failed",
-  
+
   //username validation
   NAMEEXISTSERROR: "Username already exists",
   INVALIDNAME: "Username must only contain letters, numbers, underscores, or hyphens",
   INVALIDNAMELENGTH: "Username must be between 3 and 16 characters",
-  
+
   //server status
   SERVERLIMIT: "Server has reached maximum capacity",
 };

@@ -4,16 +4,19 @@ import { CryptoUtils } from "../crypto/unified-crypto.js";
 
 export class MessagingUtils {
   static async broadcastUserJoin(clients, username) {
+    console.log(`[MESSAGING] Broadcasting user join for: ${username}`);
     await this.broadcastEncryptedSystemMessage(
       `${username} has joined the chat.`,
       clients,
       { excludeUsername: username }
     );
-    
+
+    console.log(`[MESSAGING] Broadcasting public keys after user join`);
     this.broadcastPublicKeys(clients);
   }
 
   static async broadcastUserLeave(clients, username) {
+    console.log(`[MESSAGING] Broadcasting user leave for: ${username}`);
     await this.broadcastEncryptedSystemMessage(
       `${username} has left the chat.`,
       clients,
@@ -22,20 +25,31 @@ export class MessagingUtils {
   }
 
   static broadcastPublicKeys(clients) {
+    console.log(`[MESSAGING] Broadcasting public keys to ${clients.size} clients`);
     const keyMap = {};
+
     for (const [uname, data] of clients.entries()) {
-      if (data.publicKey) keyMap[uname] = data.publicKey;
+      if (data.hybridPublicKeys) {
+        keyMap[uname] = data.hybridPublicKeys;
+        console.log(`[MESSAGING] Added public keys for user: ${uname}`);
+      } else {
+        console.log(`[MESSAGING] No public keys available for user: ${uname}`);
+      }
     }
-    
+
     const keyUpdate = JSON.stringify({
       type: SignalType.PUBLICKEYS,
       message: JSON.stringify(keyMap),
     });
-    
-    console.log("Broadcasting public keys: ", keyUpdate);
-    
-    for (const [, client] of clients.entries()) {
-      if (client.publicKey) client.ws.send(keyUpdate);
+
+    console.log(`[MESSAGING] Sending public keys update to ${Object.keys(keyMap).length} users`);
+    for (const [uname, client] of clients.entries()) {
+      if (client.ws) {
+        console.log(`[MESSAGING] Sending public keys to user: ${uname}`);
+        client.ws.send(keyUpdate);
+      } else {
+        console.warn(`[MESSAGING] No WebSocket available for user: ${uname}`);
+      }
     }
   }
 
@@ -45,45 +59,43 @@ export class MessagingUtils {
       excludeUsername = null,
     } = options;
 
-    console.log(`Broadcasting system message: ${content}`);
-    
+    console.log(`[MESSAGING] Broadcasting encrypted system message: "${content}"`);
+    console.log(`[MESSAGING] Signal type: ${signalType}, exclude username: ${excludeUsername || 'none'}`);
+
     const promises = [];
-    
+
     for (const [clientUsername, client] of clientsMap.entries()) {
-      if (clientUsername !== excludeUsername && client.publicKey) {
+      if (clientUsername !== excludeUsername && client.hybridPublicKeys) {
         try {
-          const finalPayload = await CryptoUtils.Encrypt.encryptAndFormatPayload({
-            recipientPEM: client.publicKey,
+          console.log(`[MESSAGING] Encrypting system message for user: ${clientUsername}`);
+          const finalPayload = await CryptoUtils.Hybrid.encryptHybridPayload({
             from: ServerConfig.SERVER_ID,
             to: clientUsername,
             type: signalType,
             typeInside: "system",
             content: content,
             timestamp: Date.now()
-          });
+          }, client.hybridPublicKeys);
 
-          /*
+          const messageToSend = {
+            type: signalType,
+            ...finalPayload
+          };
 
-          
-          {
-            "from": "SecureChat-Server",
-            "to": "user1",
-            "type": "user-disconnect",
-            "encryptedAESKey": "pd/rgD+8R28Qr6kolrdipLby3QtpSjWcoCqPwW0KFgrVho9IWkmHSb/Z8GW4CgT5RLu5QzrSWvEX4bF8FyKJ/n1KMTuT/yuhl4aB3Lsv3NdjqCkiX6L1H3gngkbBOZZPr6Jd4YxL+Eb+NMefQyz/dStJ0jnYh2el2yBsunVoEe4LVxiqS1UmX7VDrWZF+EZ8ednzd3iFrcREjqRuB7qTKT5gBYn+BlVZm+PZlC8hDJKvEt9fGMgI6zw9f9ZMNI6vE/sNHKr1JQRVEgCLDiB/F7uBceRe8HpRiRpRQ5CuHuKZqw69igKF63vXfJNFBxT90U6bibxX2ZrmE1Kc6hxRUpMH8kYh7PasnmEswrnCeEdOMMmjOX+NyGFKEdSap+6uOu3wyl173POCEGnkxqYkYRlEWZZ1+zHSrp98dy3XS9hwsfYj5SIM74qnUX1OA4UFuSpG1uJ6PEhWIFVOyrx/u213+P+X0ss3F8AVDPN/a80uf1B3dvSVha3vH0rU3IDTY9Wb0hAgPPAcX/41HY1QJ2l8LmyYFPdWiJgxRAdG5Ukzj8UiThIpFe8rGfsb6OR1A++T2i+7g82nKDPPdqav45OKQ+/35yKZFyH/gbteIvtOyzK5PdzucBuR7Fx3fUK64ly6NdQG/4BUywh7cBaEUO5MLm70UerIY3WnEQKtSN4=",
-            "encryptedMessage": "ARAgd6Dhyo/yNVS5L34Eb8eoEIfiMIw4JZ+SXTKqDY8q8UYAAABWDxsR2GrSH+AOddaqTjfFr4kN/CAAoRdGYo2JGLII4p16MCS8QFuLr0wNuvqPnIVA3aqIVT2AjRzQ1pdLvrf++7zEJM1i2j9kUobXlB+lWiJwghwq09g="
-          }
-
-          */
-          
-          console.log(`finalPayload for ${clientUsername}: `, JSON.stringify(finalPayload));
-          promises.push(client.ws.send(JSON.stringify(finalPayload)));
-          console.log(`finalPayload for ${clientUsername} sent`);
+          console.log(`[MESSAGING] Sending encrypted system message to user: ${clientUsername}`);
+          promises.push(client.ws.send(JSON.stringify(messageToSend)));
         } catch (e) {
-          console.error(`Failed to encrypt system message for ${clientUsername}:`, e);
+          console.error(`[MESSAGING] Failed to encrypt system message for ${clientUsername}:`, e);
         }
+      } else if (clientUsername === excludeUsername) {
+        console.log(`[MESSAGING] Skipping system message for excluded user: ${clientUsername}`);
+      } else if (!client.hybridPublicKeys) {
+        console.log(`[MESSAGING] Skipping system message for user without public keys: ${clientUsername}`);
       }
     }
-    
+
+    console.log(`[MESSAGING] Sending ${promises.length} encrypted system messages`);
     await Promise.allSettled(promises);
+    console.log(`[MESSAGING] System message broadcast completed`);
   }
 }

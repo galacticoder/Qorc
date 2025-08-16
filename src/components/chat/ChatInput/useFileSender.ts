@@ -1,14 +1,17 @@
 import { useState } from "react";
 import * as pako from "pako";
 import { CryptoUtils } from "@/lib/unified-crypto";
-import wsClient from "@/lib/websocket";
+import websocketClient from "@/lib/websocket";
 import { SignalType } from "@/lib/signals";
 
 const CHUNK_SIZE = 256 * 1024;
 
 interface User {
   username: string;
-  publicKey?: string;
+  hybridPublicKeys?: {
+    x25519PublicBase64: string;
+    kyberPublicBase64: string;
+  };
 }
 
 export function useFileSender(currentUsername: string, users: User[]) {
@@ -26,16 +29,26 @@ export function useFileSender(currentUsername: string, users: User[]) {
 
       const aesKey = await CryptoUtils.Keys.generateAESKey();
       const rawAes = await window.crypto.subtle.exportKey("raw", aesKey);
+      const aesKeyBase64 = CryptoUtils.Base64.arrayBufferToBase64(rawAes);
 
       const userKeys = await Promise.all(
         users
-          .filter((user) => user.username !== currentUsername && user.publicKey)
+          .filter((user) => user.username !== currentUsername && user.hybridPublicKeys)
           .map(async (user) => {
-            const recipientKey = await CryptoUtils.Keys.importPublicKeyFromPEM(user.publicKey!);
-            const encryptedAes = await CryptoUtils.Encrypt.encryptWithRSA(rawAes, recipientKey);
+            // Create a payload with the AES key
+            const aesKeyPayload = { aesKey: aesKeyBase64 };
+
+            // Encrypt the AES key using hybrid encryption
+            const encryptedPayload = await CryptoUtils.Hybrid.encryptHybridPayload(
+              aesKeyPayload,
+              user.hybridPublicKeys!
+            );
+
             return {
               username: user.username,
-              encryptedAESKeyBase64: btoa(String.fromCharCode(...new Uint8Array(encryptedAes))),
+              encryptedAESKey: encryptedPayload.encryptedMessage,
+              ephemeralX25519Public: encryptedPayload.ephemeralX25519Public,
+              kyberCiphertext: encryptedPayload.kyberCiphertext,
             };
           })
       );
@@ -64,7 +77,9 @@ export function useFileSender(currentUsername: string, users: User[]) {
             type: SignalType.FILE_MESSAGE_CHUNK,
             from: currentUsername,
             to: userKey.username,
-            encryptedAESKey: userKey.encryptedAESKeyBase64,
+            encryptedAESKey: userKey.encryptedAESKey,
+            ephemeralX25519Public: userKey.ephemeralX25519Public,
+            kyberCiphertext: userKey.kyberCiphertext,
             chunkIndex,
             totalChunks,
             chunkData: chunkDataBase64,
@@ -72,7 +87,7 @@ export function useFileSender(currentUsername: string, users: User[]) {
             isLastChunk: chunkIndex === totalChunks - 1,
           };
 
-          wsClient.send(JSON.stringify(payload));
+          websocketClient.send(JSON.stringify(payload));
         }
 
         bytesSent += chunk.length * userKeys.length;
@@ -82,7 +97,7 @@ export function useFileSender(currentUsername: string, users: User[]) {
       setProgress(1);
     } catch (error) {
       console.error("Failed to process and send file:", error);
-      throw error; // rethrow so caller can handle if needed
+      throw error;
     } finally {
       setIsSendingFile(false);
     }
