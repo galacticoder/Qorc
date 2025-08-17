@@ -13,6 +13,12 @@ interface LoginProps {
   isGeneratingKeys: boolean;
   error?: string;
   accountAuthenticated: boolean;
+  serverTrustRequest?: { //trust prompt for new changed server keys
+    newKeys: { x25519PublicBase64: string; kyberPublicBase64: string };
+    pinned: { x25519PublicBase64: string; kyberPublicBase64: string } | null;
+  } | null;
+  onAcceptServerTrust?: () => void;
+  onRejectServerTrust?: () => void;
   onAccountSubmit: (
     mode: "login" | "register",
     username: string,
@@ -32,6 +38,9 @@ export function Login({
   onPassphraseSubmit,
   accountAuthenticated,
   showPassphrasePrompt,
+  serverTrustRequest,
+  onAcceptServerTrust,
+  onRejectServerTrust,
 }: LoginProps) {
   const [serverPassword, setServerPassword] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -91,6 +100,44 @@ export function Login({
         </CardHeader>
 
         <CardContent className="space-y-6">
+          {serverTrustRequest && (
+            <div className="p-3 border rounded-md bg-amber-50 border-amber-200">
+              <div className="font-semibold mb-2">Server identity changed</div>
+              <div className="text-sm mb-2">Verify the new server keys below before trusting.</div>
+              <div className="text-xs font-mono break-all">
+                <div className="mb-1">
+                  <span className="font-semibold">Old X25519:</span> {(serverTrustRequest.pinned?.x25519PublicBase64 || '').slice(0, 44)}...
+                </div>
+                <div className="mb-2">
+                  <span className="font-semibold">Old Kyber:</span> {(serverTrustRequest.pinned?.kyberPublicBase64 || '').slice(0, 44)}...
+                </div>
+                <div className="mb-1">
+                  <span className="font-semibold">New X25519:</span> {serverTrustRequest.newKeys.x25519PublicBase64.slice(0, 44)}...
+                </div>
+                <div className="mb-3">
+                  <span className="font-semibold">New Kyber:</span> {serverTrustRequest.newKeys.kyberPublicBase64.slice(0, 44)}...
+                </div>
+              </div>
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  className="px-3 py-1.5 rounded-md bg-primary text-white"
+                  onClick={onAcceptServerTrust}
+                  disabled={isSubmitting || isGeneratingKeys}
+                >
+                  Trust new server
+                </button>
+                <button
+                  type="button"
+                  className="px-3 py-1.5 rounded-md border"
+                  onClick={onRejectServerTrust}
+                  disabled={isSubmitting || isGeneratingKeys}
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          )}
           {showPassphrasePrompt ? (
             <PassphrasePrompt
               mode={mode}
@@ -107,14 +154,16 @@ export function Login({
           ) : mode === "register" ? (
             <SignUpForm
               onSubmit={handleAccountSubmit}
-              disabled={isSubmitting || isGeneratingKeys}
+              disabled={isSubmitting || isGeneratingKeys || !!serverTrustRequest}
               error={error}
+              hasServerTrustRequest={!!serverTrustRequest}
             />
           ) : (
             <SignInForm
               onSubmit={handleAccountSubmit}
-              disabled={isSubmitting || isGeneratingKeys}
+              disabled={isSubmitting || isGeneratingKeys || !!serverTrustRequest}
               error={error}
+              hasServerTrustRequest={!!serverTrustRequest}
             />
           )}
 

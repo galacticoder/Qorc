@@ -5,6 +5,7 @@ import { User } from "@/components/chat/UserList";
 import { CryptoUtils } from "@/lib/unified-crypto";
 import { SignalType } from "@/lib/signals";
 import websocketClient from "@/lib/websocket";
+import { SessionStore } from "@/lib/ratchet/session-store";
 
 interface UseSecureDBProps {
 	Authentication: any;
@@ -28,6 +29,12 @@ export const useSecureDB = ({ Authentication, messages, setMessages }: UseSecure
 
 		const initializeDB = async () => {
 			try {
+				console.debug('[useSecureDB] Initializing SecureDB with auth context', {
+					username: Authentication.loginUsernameRef.current,
+					hasPassphraseHash: !!Authentication.passphraseRef.current,
+					hasPassphrasePlaintext: !!Authentication.passphrasePlaintextRef.current,
+					hasAesKey: !!Authentication.aesKeyRef.current,
+				});
 				const parsedStoredHash = CryptoUtils.Hash.parseArgon2Hash(Authentication.passphraseRef.current)
 
 				const { aesKey: newKey, encodedHash } = await CryptoUtils.Keys.deriveAESKeyFromPassphrase(Authentication.passphrasePlaintextRef.current, {
@@ -65,6 +72,8 @@ export const useSecureDB = ({ Authentication, messages, setMessages }: UseSecure
 				secureDBRef.current = new SecureDB(Authentication.loginUsernameRef.current);
 				await secureDBRef.current.initializeWithKey(Authentication.aesKeyRef.current);
 				setDbInitialized(true);
+				await SessionStore.initUserContext(Authentication.loginUsernameRef.current, Authentication.aesKeyRef.current);
+				console.debug('[useSecureDB] SecureDB initialized and session context set');
 
 				Authentication.passphraseRef.current = "";
 			} catch (err) {
@@ -91,6 +100,7 @@ export const useSecureDB = ({ Authentication, messages, setMessages }: UseSecure
 
 				const savedMessages = (await secureDBRef.current.loadMessages().catch(() => [])) || [];
 				const savedUsers = (await secureDBRef.current.loadUsers().catch(() => [])) || [];
+				console.debug('[useSecureDB] Loaded persisted data', { savedMessages: savedMessages.length, savedUsers: savedUsers.length });
 
 				const processedMessages = savedMessages.map((msg: any) => ({
 					...msg,
@@ -119,6 +129,7 @@ export const useSecureDB = ({ Authentication, messages, setMessages }: UseSecure
 			try {
 				const currentMessages = (await secureDBRef.current!.loadMessages()) || [];
 				await secureDBRef.current!.saveMessages([...currentMessages, ...pendingMessagesRef.current]);
+				console.debug('[useSecureDB] Flushed pending messages', { count: pendingMessagesRef.current.length });
 				pendingMessagesRef.current = [];
 			} catch (err) {
 				console.error("[useSecureDB] Failed to flush pending messages", err);

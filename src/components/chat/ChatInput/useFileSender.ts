@@ -35,10 +35,9 @@ export function useFileSender(currentUsername: string, users: User[]) {
         users
           .filter((user) => user.username !== currentUsername && user.hybridPublicKeys)
           .map(async (user) => {
-            // Create a payload with the AES key
+
             const aesKeyPayload = { aesKey: aesKeyBase64 };
 
-            // Encrypt the AES key using hybrid encryption
             const encryptedPayload = await CryptoUtils.Hybrid.encryptHybridPayload(
               aesKeyPayload,
               user.hybridPublicKeys!

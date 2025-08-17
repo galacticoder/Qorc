@@ -15,7 +15,7 @@ export class SecureDB {
     console.log("[SecureDB] SecureDB initialized");
   }
 
-  private async encryptData(data: any): Promise<Uint8Array> { //change later
+  private async encryptData(data: any): Promise<Uint8Array> { //change this later
     if (!this.encryptionKey) throw new Error("Encryption key not initialized");
 
     const iv = crypto.getRandomValues(new Uint8Array(CryptoUtils.Config.IV_LENGTH));

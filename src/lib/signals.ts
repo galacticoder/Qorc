@@ -1,6 +1,7 @@
 import { v4 as uuidv4 } from 'uuid';
 import { CryptoUtils } from '@/lib/unified-crypto';
 import { useAuth } from '@/hooks/useAuth';
+import { PinnedServer } from '@/lib/ratchet/pinned-server';
 import { Message } from '@/components/chat/types';
 import { SecureDB } from '@/lib/secureDB';
 
@@ -31,6 +32,11 @@ export enum SignalType {
   UPDATE_DB = "update-db",
   HYBRID_KEYS = "hybrid-keys",
   HYBRID_KEYS_UPDATE = "hybrid-keys-update",
+  // ratchet and x3dh stuff
+  X3DH_PUBLISH_BUNDLE = "x3dh-publish-bundle",
+  X3DH_REQUEST_BUNDLE = "x3dh-request-bundle",
+  X3DH_DELIVER_BUNDLE = "x3dh-deliver-bundle",
+  DR_SEND = "dr-send",
 }
 
 interface SignalHandlers {
@@ -100,8 +106,33 @@ export async function handleSignalMessages(
         });
 
         if (hybridKeys?.x25519PublicBase64 && hybridKeys?.kyberPublicBase64) {
-          setServerHybridPublic(hybridKeys);
-          console.log("Server hybrid keys stored");
+          // enforce tofu pinning for server hybrid keys
+          const pinned = PinnedServer.get();
+          if (!pinned) {
+            PinnedServer.set({ x25519PublicBase64: hybridKeys.x25519PublicBase64, kyberPublicBase64: hybridKeys.kyberPublicBase64 });
+            setServerHybridPublic(hybridKeys);
+            console.log("Server hybrid keys stored (pinned)");
+          } else if (
+            pinned.x25519PublicBase64 !== hybridKeys.x25519PublicBase64 ||
+            pinned.kyberPublicBase64 !== hybridKeys.kyberPublicBase64
+          ) {
+            console.error('[Signals] Server hybrid keys changed! Prompting user to trust new server keys.');
+            // surface trust prompt via authentication hook state
+            handlers.Authentication.setServerTrustRequest?.({
+              newKeys: { x25519PublicBase64: hybridKeys.x25519PublicBase64, kyberPublicBase64: hybridKeys.kyberPublicBase64 },
+              pinned,
+            });
+            setLoginError?.('Server identity changed. Review and trust to continue.');
+            break;
+          } else {
+            setServerHybridPublic(hybridKeys);
+          }
+          try {
+            console.debug('[Signals] Server hybrid keys set', {
+              x25519Len: (hybridKeys?.x25519PublicBase64 || '').length,
+              kyberLen: (hybridKeys?.kyberPublicBase64 || '').length,
+            });
+          } catch { }
         } else {
           console.error("Invalid server hybrid keys format");
         }
@@ -186,11 +217,20 @@ export async function handleSignalMessages(
       }
 
       case SignalType.ENCRYPTED_MESSAGE:
+      case SignalType.DR_SEND:
       case SignalType.USER_DISCONNECT:
       case SignalType.EDIT_MESSAGE:
       case SignalType.DELETE_MESSAGE: {
-        if (handlers['handleEncryptedMessagePayload'])
+        if (handlers['handleEncryptedMessagePayload']) {
+          try {
+            console.debug('[Signals] Dispatching to encrypted handler', { type, keys: Object.keys(data || {}) });
+          } catch { }
           await (handlers as any).handleEncryptedMessagePayload(data);
+        }
+        break;
+      }
+      case SignalType.X3DH_DELIVER_BUNDLE: {
+        // session setup is handled in encrypted handler and ratchet initiator
         break;
       }
 

@@ -47,6 +47,7 @@ const ChatApp: React.FC<ChatAppProps> = ({ onNavigate }) => {
 
   const encryptedHandler = useEncryptedMessageHandler(
     Authentication.getKeysOnDemand,
+    Authentication.keyManagerRef,
     Authentication.loginUsernameRef,
     Database.setUsers,
     setMessages,
@@ -82,6 +83,9 @@ const ChatApp: React.FC<ChatAppProps> = ({ onNavigate }) => {
           onAccountSubmit={Authentication.handleAccountSubmit}
           onServerPasswordSubmit={Authentication.handleServerPasswordSubmit}
           accountAuthenticated={Authentication.accountAuthenticated}
+          serverTrustRequest={Authentication.serverTrustRequest}
+          onAcceptServerTrust={Authentication.acceptServerTrust}
+          onRejectServerTrust={Authentication.rejectServerTrust}
           showPassphrasePrompt={Authentication.showPassphrasePrompt}
           setShowPassphrasePrompt={Authentication.setShowPassphrasePrompt}
           onPassphraseSubmit={Authentication.handlePassphraseSubmit}

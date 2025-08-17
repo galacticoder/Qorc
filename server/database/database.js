@@ -30,6 +30,30 @@ db.exec(`
   );
 `);
 
+db.exec(`
+  CREATE TABLE IF NOT EXISTS prekey_bundles (
+    username TEXT PRIMARY KEY,
+    identityEd25519PublicBase64 TEXT NOT NULL,
+    identityX25519PublicBase64 TEXT NOT NULL,
+    signedPreKeyId TEXT NOT NULL,
+    signedPreKeyPublicBase64 TEXT NOT NULL,
+    signedPreKeySignatureBase64 TEXT NOT NULL,
+    ratchetPublicBase64 TEXT NOT NULL,
+    updatedAt INTEGER NOT NULL
+  );
+`);
+
+db.exec(`
+  CREATE TABLE IF NOT EXISTS one_time_prekeys (
+    username TEXT NOT NULL,
+    keyId TEXT NOT NULL,
+    publicKeyBase64 TEXT NOT NULL,
+    consumed INTEGER NOT NULL DEFAULT 0,
+    consumedAt INTEGER,
+    PRIMARY KEY (username, keyId)
+  );
+`);
+
 console.log('[DB] Database tables initialized');
 
 export class UserDatabase {
@@ -133,5 +157,66 @@ export class MessageDatabase {
       console.error(`[DB] Error loading messages for user ${username}:`, error);
       return [];
     }
+  }
+}
+
+export class PrekeyDatabase {
+  static publishBundle(username, bundle) {
+    const now = Date.now();
+    db.prepare(`
+      INSERT INTO prekey_bundles (
+        username, identityEd25519PublicBase64, identityX25519PublicBase64,
+        signedPreKeyId, signedPreKeyPublicBase64, signedPreKeySignatureBase64,
+        ratchetPublicBase64, updatedAt
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(username) DO UPDATE SET
+        identityEd25519PublicBase64=excluded.identityEd25519PublicBase64,
+        identityX25519PublicBase64=excluded.identityX25519PublicBase64,
+        signedPreKeyId=excluded.signedPreKeyId,
+        signedPreKeyPublicBase64=excluded.signedPreKeyPublicBase64,
+        signedPreKeySignatureBase64=excluded.signedPreKeySignatureBase64,
+        ratchetPublicBase64=excluded.ratchetPublicBase64,
+        updatedAt=excluded.updatedAt
+    `).run(
+      username,
+      bundle.identityEd25519PublicBase64,
+      bundle.identityX25519PublicBase64,
+      bundle.signedPreKey.id,
+      bundle.signedPreKey.publicKeyBase64,
+      bundle.signedPreKey.signatureBase64,
+      //prefer ratchet and use signed prekey pub if not available
+      bundle.ratchetPublicBase64 || bundle.signedPreKey.publicKeyBase64,
+      now
+    );
+
+    db.prepare(`DELETE FROM one_time_prekeys WHERE username = ?`).run(username);
+    if (Array.isArray(bundle.oneTimePreKeys)) {
+      const insertStmt = db.prepare(`INSERT INTO one_time_prekeys (username, keyId, publicKeyBase64, consumed) VALUES (?, ?, ?, 0)`);
+      const insertMany = db.transaction((rows) => {
+        for (const r of rows) insertStmt.run(username, r.id, r.publicKeyBase64);
+      });
+      insertMany(bundle.oneTimePreKeys);
+    }
+  }
+
+  static takeBundleForRecipient(username) {
+    const bundle = db.prepare(`SELECT * FROM prekey_bundles WHERE username = ?`).get(username);
+    if (!bundle) return null;
+    const ot = db.prepare(`SELECT keyId, publicKeyBase64 FROM one_time_prekeys WHERE username = ? AND consumed = 0 ORDER BY keyId LIMIT 1`).get(username);
+    if (ot) {
+      db.prepare(`UPDATE one_time_prekeys SET consumed = 1, consumedAt = ? WHERE username = ? AND keyId = ?`).run(Date.now(), username, ot.keyId);
+    }
+    return {
+      username,
+      identityEd25519PublicBase64: bundle.identityEd25519PublicBase64,
+      identityX25519PublicBase64: bundle.identityX25519PublicBase64,
+      signedPreKey: {
+        id: bundle.signedPreKeyId,
+        publicKeyBase64: bundle.signedPreKeyPublicBase64,
+        signatureBase64: bundle.signedPreKeySignatureBase64
+      },
+      ratchetPublicBase64: bundle.ratchetPublicBase64,
+      oneTimePreKey: ot ? { id: ot.keyId, publicKeyBase64: ot.publicKeyBase64 } : null
+    };
   }
 }

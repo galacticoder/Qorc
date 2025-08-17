@@ -4,6 +4,9 @@ import websocketClient from "@/lib/websocket";
 import { CryptoUtils } from "@/lib/unified-crypto";
 import { SecureDB } from "@/lib/secureDB";
 import { SecureKeyManager } from "@/lib/secure-key-manager";
+import { X3DH } from "@/lib/ratchet/x3dh";
+import { SessionStore } from "@/lib/ratchet/session-store";
+import { PinnedServer } from "@/lib/ratchet/pinned-server";
 
 export const useAuth = () => {
   const [username, setUsername] = useState("");
@@ -19,6 +22,26 @@ export const useAuth = () => {
     x25519PublicBase64: string;
     kyberPublicBase64: string
   } | null>(null);
+
+  //trust prompt for server key changes
+  const [serverTrustRequest, setServerTrustRequest] = useState<{
+    newKeys: { x25519PublicBase64: string; kyberPublicBase64: string };
+    pinned: { x25519PublicBase64: string; kyberPublicBase64: string } | null;
+  } | null>(null);
+
+  const acceptServerTrust = useCallback(() => {
+    if (!serverTrustRequest) return;
+    const { newKeys } = serverTrustRequest;
+    try { PinnedServer.set(newKeys); } catch { }
+    setServerHybridPublic(newKeys);
+    setServerTrustRequest(null);
+    setLoginError("");
+  }, [serverTrustRequest]);
+
+  const rejectServerTrust = useCallback(() => {
+    setServerTrustRequest(null);
+    setLoginError("Server key changed. Trust not granted.");
+  }, []);
 
   const hybridKeysRef = useRef<{
     x25519: { private: any; publicKeyBase64: string };
@@ -90,6 +113,14 @@ export const useAuth = () => {
         const existingKeys = await keyManagerRef.current.getKeys();
         if (existingKeys) {
           console.log('[AUTH] Existing keys loaded successfully');
+          try {
+            console.debug('[AUTH] Existing keys summary', {
+              x25519PublicBase64: existingKeys.x25519.publicKeyBase64?.slice(0, 28) + '...',
+              kyberPublicBase64: existingKeys.kyber.publicKeyBase64?.slice(0, 28) + '...',
+              x25519PrivateLen: existingKeys.x25519.private?.length,
+              kyberSecretLen: existingKeys.kyber.secretKey?.length,
+            });
+          } catch { }
           hybridKeysRef.current = existingKeys;
         }
       } else {
@@ -101,6 +132,14 @@ export const useAuth = () => {
         await keyManagerRef.current.storeKeys(hybridKeyPair);
 
         console.log('[AUTH] New keys generated and stored successfully');
+        try {
+          console.debug('[AUTH] New keys summary', {
+            x25519PublicBase64: hybridKeyPair.x25519.publicKeyBase64?.slice(0, 28) + '...',
+            kyberPublicBase64: hybridKeyPair.kyber.publicKeyBase64?.slice(0, 28) + '...',
+            x25519PrivateLen: hybridKeyPair.x25519.private?.length,
+            kyberSecretLen: hybridKeyPair.kyber.secretKey?.length,
+          });
+        } catch { }
         hybridKeysRef.current = hybridKeyPair;
       }
     } catch (error) {
@@ -119,6 +158,8 @@ export const useAuth = () => {
   ) => {
     console.log(`[AUTH] Starting ${mode} process for user: ${username}`);
     setLoginError("");
+
+    try { SessionStore.clearAllForCurrentUser(); } catch { } //clear any stale ratchet sessions before starting a fresh auth flow
     loginUsernameRef.current = username;
     setUsername(username);
     passwordRef.current = password;
@@ -195,6 +236,13 @@ export const useAuth = () => {
         { content: password },
         serverHybridPublic
       );
+      try {
+        console.debug('[AUTH] Password payload encrypted (hybrid-v1)', {
+          hasEphemeralX25519Public: !!(encryptedPassword as any).ephemeralX25519Public,
+          kyberCiphertextLen: ((encryptedPassword as any).kyberCiphertext || '').length,
+          encryptedMessageLen: ((encryptedPassword as any).encryptedMessage || '').length,
+        });
+      } catch { }
 
       const loginInfo = {
         type: SignalType.SERVER_LOGIN,
@@ -242,27 +290,80 @@ export const useAuth = () => {
         passphraseHash
       }));
 
-      if (keyManagerRef.current && serverHybridPublic) {
-        const publicKeys = await keyManagerRef.current.getPublicKeys();
-        if (publicKeys) {
-          const hybridKeysPayload = {
-            usernameSent: loginUsernameRef.current,
-            hybridPublicKeys: {
-              x25519PublicBase64: publicKeys.x25519PublicBase64,
-              kyberPublicBase64: publicKeys.kyberPublicBase64
-            }
+      //publish prekey bundle for X3DH
+      if (keyManagerRef.current) {
+        let ratchetId = await keyManagerRef.current.getRatchetIdentity();
+        if (!ratchetId) {
+          const id = await X3DH.generateIdentityKeyPair();
+          await keyManagerRef.current.storeRatchetIdentity({
+            ed25519Private: id.ed25519Private,
+            ed25519PublicBase64: CryptoUtils.Base64.arrayBufferToBase64(id.ed25519Public),
+            x25519Private: id.x25519Private,
+            x25519PublicBase64: CryptoUtils.Base64.arrayBufferToBase64(id.x25519Public),
+          });
+          ratchetId = await keyManagerRef.current.getRatchetIdentity();
+        }
+
+        //reuse existing prekeys if available and if not then generate new
+        let existing = await keyManagerRef.current.getRatchetPrekeys();
+        let signedPreKey = existing?.signedPreKey ?? null;
+        let oneTimePreKeys = existing?.oneTimePreKeys ?? [];
+        if (!signedPreKey) {
+          const gen = await X3DH.generateSignedPreKey(ratchetId!.ed25519Private);
+          signedPreKey = {
+            id: gen.id,
+            private: gen.privateKey!,
+            publicBase64: CryptoUtils.Base64.arrayBufferToBase64(gen.publicKey),
+            signatureBase64: CryptoUtils.Base64.arrayBufferToBase64(gen.signature),
           };
+        }
+        if (!oneTimePreKeys || oneTimePreKeys.length === 0) {
+          const genOtks = await X3DH.generateOneTimePreKeys(25);
+          oneTimePreKeys = genOtks.map(k => ({ id: k.id, private: k.privateKey!, publicBase64: CryptoUtils.Base64.arrayBufferToBase64(k.publicKey) }));
+        }
 
-          const encryptedHybridKeys = await CryptoUtils.Hybrid.encryptHybridPayload(
-            hybridKeysPayload,
-            serverHybridPublic
-          );
+        //store merged prekeys back and preserve any existing
+        await keyManagerRef.current.storeRatchetPrekeys({ signedPreKey, oneTimePreKeys });
 
-          console.log('[AUTH] Sending hybrid keys update to server');
-          websocketClient.send(JSON.stringify({
-            type: SignalType.HYBRID_KEYS_UPDATE,
-            userData: encryptedHybridKeys
-          }));
+        //publish bundle (no secrets) to server using base64 strings
+        websocketClient.send(JSON.stringify({
+          type: SignalType.X3DH_PUBLISH_BUNDLE,
+          bundle: {
+            username: loginUsernameRef.current,
+            identityEd25519PublicBase64: ratchetId!.ed25519PublicBase64,
+            identityX25519PublicBase64: ratchetId!.x25519PublicBase64,
+            ratchetPublicBase64: signedPreKey.publicBase64,
+            signedPreKey: {
+              id: signedPreKey.id,
+              publicKeyBase64: signedPreKey.publicBase64,
+              signatureBase64: signedPreKey.signatureBase64,
+            },
+            oneTimePreKeys: oneTimePreKeys.map(k => ({ id: k.id, publicKeyBase64: k.publicBase64 })),
+          }
+        }));
+
+        //and alsi publish legacy hybrid public keys so server can encrypt system messages immediately
+        if (keyManagerRef.current && serverHybridPublic) {
+          const publicKeys = await keyManagerRef.current.getPublicKeys();
+          if (publicKeys) {
+            const hybridKeysPayload = {
+              usernameSent: loginUsernameRef.current,
+              hybridPublicKeys: {
+                x25519PublicBase64: publicKeys.x25519PublicBase64,
+                kyberPublicBase64: publicKeys.kyberPublicBase64,
+              },
+            };
+
+            const encryptedHybridKeys = await CryptoUtils.Hybrid.encryptHybridPayload(
+              hybridKeysPayload,
+              serverHybridPublic
+            );
+
+            websocketClient.send(JSON.stringify({
+              type: SignalType.HYBRID_KEYS_UPDATE,
+              userData: encryptedHybridKeys,
+            }));
+          }
         }
       }
     } catch (error) {
@@ -288,6 +389,8 @@ export const useAuth = () => {
 
   const logout = (secureDBRef?: MutableRefObject<SecureDB | null>, loginErrorMessage: string = "") => {
     console.log('[AUTH] Logging out user');
+    //drop all ratchet sessions for this user to avoid annoying chain drift on next login
+    try { SessionStore.clearAllForCurrentUser(); } catch { }
     if (secureDBRef?.current) secureDBRef.current = null;
 
     passwordRef.current = "";
@@ -316,6 +419,10 @@ export const useAuth = () => {
     username,
     serverHybridPublic,
     setServerHybridPublic,
+    serverTrustRequest,
+    setServerTrustRequest,
+    acceptServerTrust,
+    rejectServerTrust,
     isLoggedIn,
     setIsLoggedIn,
     isGeneratingKeys,

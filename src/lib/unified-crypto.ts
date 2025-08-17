@@ -247,6 +247,10 @@ class KeyService {
       encodedHash: result.encoded,
     };
   }
+
+  static async importRawAesKey(rawBytes: Uint8Array): Promise<CryptoKey> {
+    return await this.importAESKey(rawBytes);
+  }
 }
 
 class X25519Service {
@@ -418,6 +422,16 @@ class KDF {
       ["encrypt", "decrypt"]
     );
     return derivedKey;
+  }
+
+  static async hkdfDerive(ikm: Uint8Array, salt: Uint8Array, info: Uint8Array, outLen: number): Promise<Uint8Array> {
+    const baseKey = await (subtle as SubtleCrypto).importKey("raw", ikm, { name: "HKDF" }, false, ["deriveBits"]);
+    const bits = await (subtle as SubtleCrypto).deriveBits(
+      { name: "HKDF", hash: CryptoConfig.HKDF_HASH, salt, info },
+      baseKey,
+      outLen * 8
+    );
+    return new Uint8Array(bits as ArrayBuffer);
   }
 }
 

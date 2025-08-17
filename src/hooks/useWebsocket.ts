@@ -36,12 +36,18 @@ export const useWebSocket = (
     };
 
     registeredSignalTypes.forEach(signal => {
-      if (signal !== SignalType.ENCRYPTED_MESSAGE) {
+      if (
+        signal !== SignalType.ENCRYPTED_MESSAGE &&
+        signal !== SignalType.DR_SEND &&
+        signal !== SignalType.X3DH_DELIVER_BUNDLE
+      ) {
         websocketClient.registerMessageHandler(signal, handleServerMessage);
       }
     });
 
     websocketClient.registerMessageHandler(SignalType.ENCRYPTED_MESSAGE, handleEncryptedMessage);
+    websocketClient.registerMessageHandler(SignalType.DR_SEND, handleEncryptedMessage);
+    websocketClient.registerMessageHandler(SignalType.X3DH_DELIVER_BUNDLE, handleEncryptedMessage);
     websocketClient.registerMessageHandler("raw", rawHandler);
 
     return () => {

@@ -109,6 +109,12 @@ class WebSocketClient {
 
     try {
       const message = typeof data === 'object' ? JSON.stringify(data) : String(data);
+      try {
+        const preview = (() => {
+          try { return typeof data === 'object' ? JSON.parse(message) : message.slice(0, 200); } catch { return message.slice(0, 200); }
+        })();
+        console.debug('[WS] send ->', preview);
+      } catch { }
       this.ws.send(message);
     } catch (error) {
       console.error('Error sending message:', error);
@@ -131,6 +137,11 @@ class WebSocketClient {
       } catch {
         message = { type: 'raw', data };
       }
+
+      try {
+        const dbg = typeof message === 'object' ? { type: message.type, keys: Object.keys(message || {}) } : { raw: String(message).slice(0, 200) };
+        console.debug('[WS] recv <-', dbg);
+      } catch { }
 
       if (typeof message === 'object' && message.type) {
         const handler = this.messageHandlers.get(message.type);

@@ -1,4 +1,3 @@
-// SignUp.tsx
 import React, { useState } from "react";
 import { Input } from "../../ui/input";
 import { Label } from "../../ui/label";
@@ -8,9 +7,10 @@ interface SignUpFormProps {
   onSubmit: (username: string, password: string) => Promise<void>;
   disabled: boolean;
   error?: string;
+  hasServerTrustRequest?: boolean;
 }
 
-export function SignUpForm({ onSubmit, disabled, error }: SignUpFormProps) {
+export function SignUpForm({ onSubmit, disabled, error, hasServerTrustRequest }: SignUpFormProps) {
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
@@ -79,6 +79,12 @@ export function SignUpForm({ onSubmit, disabled, error }: SignUpFormProps) {
       </div>
 
       {/* {error && <p className="text-red-500 text-sm">{error}</p>} */}
+
+      {hasServerTrustRequest && !isSubmitting && (
+        <p className="text-amber-600 text-sm text-center">
+          Please verify the server identity before registering
+        </p>
+      )}
 
       <Button
         type="submit"

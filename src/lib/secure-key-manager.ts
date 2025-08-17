@@ -357,4 +357,149 @@ export class SecureKeyManager {
 			request.onerror = () => reject(request.error);
 		});
 	}
+
+	// ratchet identity and prekeys storage
+
+	async storeRatchetIdentity(identity: {
+		ed25519Private: Uint8Array;
+		ed25519PublicBase64: string;
+		x25519Private: Uint8Array;
+		x25519PublicBase64: string;
+	}): Promise<void> {
+		if (!this.masterKey) throw new Error('Key manager not initialized');
+		const metadata = await this.getKeyMetadata();
+		if (!metadata) throw new Error('Key metadata not found');
+		const iv = CryptoUtils.Base64.base64ToUint8Array(metadata.iv);
+
+		const payload = {
+			ed25519Private: Array.from(identity.ed25519Private),
+			ed25519PublicBase64: identity.ed25519PublicBase64,
+			x25519Private: Array.from(identity.x25519Private),
+			x25519PublicBase64: identity.x25519PublicBase64,
+		};
+		const bytes = new TextEncoder().encode(JSON.stringify(payload));
+		const ciphertext = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, this.masterKey, bytes);
+
+		const db = await this.openDB();
+		await new Promise<void>((resolve, reject) => {
+			const tx = db.transaction(this.storeName, 'readwrite');
+			const store = tx.objectStore(this.storeName);
+			const request = store.put({ username: 'ratchet-identity', type: 'ratchet-identity', data: CryptoUtils.Base64.arrayBufferToBase64(ciphertext) });
+			request.onsuccess = () => { tx.oncomplete = () => resolve(); tx.onerror = () => reject(tx.error); };
+			request.onerror = () => reject(request.error);
+		});
+	}
+
+	async getRatchetIdentity(): Promise<{
+		ed25519Private: Uint8Array;
+		ed25519PublicBase64: string;
+		x25519Private: Uint8Array;
+		x25519PublicBase64: string;
+	} | null> {
+		if (!this.masterKey) throw new Error('Key manager not initialized');
+		const metadata = await this.getKeyMetadata();
+		if (!metadata) throw new Error('Key metadata not found');
+		const iv = CryptoUtils.Base64.base64ToUint8Array(metadata.iv);
+
+		const db = await this.openDB();
+		return new Promise((resolve, reject) => {
+			const tx = db.transaction(this.storeName, 'readonly');
+			const store = tx.objectStore(this.storeName);
+			const request = store.get('ratchet-identity');
+			request.onsuccess = async () => {
+				const row = request.result;
+				if (!row) return resolve(null);
+				try {
+					const enc = CryptoUtils.Base64.base64ToUint8Array(row.data);
+					const plain = await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, this.masterKey as CryptoKey, enc);
+					const payload = JSON.parse(new TextDecoder().decode(plain));
+					resolve({
+						ed25519Private: new Uint8Array(payload.ed25519Private),
+						ed25519PublicBase64: payload.ed25519PublicBase64,
+						x25519Private: new Uint8Array(payload.x25519Private),
+						x25519PublicBase64: payload.x25519PublicBase64,
+					});
+				} catch (e) { reject(e); }
+			};
+			request.onerror = () => reject(request.error);
+		});
+	}
+
+	async storeRatchetPrekeys(prekeys: {
+		signedPreKey: { id: string; private: Uint8Array; publicBase64: string; signatureBase64: string };
+		oneTimePreKeys: { id: string; private: Uint8Array; publicBase64: string }[];
+	}): Promise<void> {
+		if (!this.masterKey) throw new Error('Key manager not initialized');
+		const metadata = await this.getKeyMetadata();
+		if (!metadata) throw new Error('Key metadata not found');
+		const iv = CryptoUtils.Base64.base64ToUint8Array(metadata.iv);
+
+		const payload = {
+			signedPreKey: {
+				id: prekeys.signedPreKey.id,
+				private: Array.from(prekeys.signedPreKey.private),
+				publicBase64: prekeys.signedPreKey.publicBase64,
+				signatureBase64: prekeys.signedPreKey.signatureBase64,
+			},
+			oneTimePreKeys: prekeys.oneTimePreKeys.map(k => ({ id: k.id, private: Array.from(k.private), publicBase64: k.publicBase64 }))
+		};
+		const bytes = new TextEncoder().encode(JSON.stringify(payload));
+		const ciphertext = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, this.masterKey, bytes);
+
+		const db = await this.openDB();
+		await new Promise<void>((resolve, reject) => {
+			const tx = db.transaction(this.storeName, 'readwrite');
+			const store = tx.objectStore(this.storeName);
+			const request = store.put({ username: 'ratchet-prekeys', type: 'ratchet-prekeys', data: CryptoUtils.Base64.arrayBufferToBase64(ciphertext) });
+			request.onsuccess = () => { tx.oncomplete = () => resolve(); tx.onerror = () => reject(tx.error); };
+			request.onerror = () => reject(request.error);
+		});
+	}
+
+	async getRatchetPrekeys(): Promise<{
+		signedPreKey: { id: string; private: Uint8Array; publicBase64: string; signatureBase64: string } | null;
+		oneTimePreKeys: { id: string; private: Uint8Array; publicBase64: string }[];
+	} | null> {
+		if (!this.masterKey) throw new Error('Key manager not initialized');
+		const metadata = await this.getKeyMetadata();
+		if (!metadata) throw new Error('Key metadata not found');
+		const iv = CryptoUtils.Base64.base64ToUint8Array(metadata.iv);
+
+		const db = await this.openDB();
+		return new Promise((resolve, reject) => {
+			const tx = db.transaction(this.storeName, 'readonly');
+			const store = tx.objectStore(this.storeName);
+			const request = store.get('ratchet-prekeys');
+			request.onsuccess = async () => {
+				const row = request.result;
+				if (!row) return resolve(null);
+				try {
+					const enc = CryptoUtils.Base64.base64ToUint8Array(row.data);
+					const plain = await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, this.masterKey as CryptoKey, enc);
+					const payload = JSON.parse(new TextDecoder().decode(plain));
+					resolve({
+						signedPreKey: payload.signedPreKey
+							? {
+								id: payload.signedPreKey.id,
+								private: new Uint8Array(payload.signedPreKey.private),
+								publicBase64: payload.signedPreKey.publicBase64,
+								signatureBase64: payload.signedPreKey.signatureBase64,
+							}
+							: null,
+						oneTimePreKeys: Array.isArray(payload.oneTimePreKeys)
+							? payload.oneTimePreKeys.map((k: any) => ({ id: k.id, private: new Uint8Array(k.private), publicBase64: k.publicBase64 }))
+							: []
+					});
+				} catch (e) { reject(e); }
+			};
+			request.onerror = () => reject(request.error);
+		});
+	}
+
+	async consumeOneTimePreKey(id: string): Promise<void> {
+		const pre = await this.getRatchetPrekeys();
+		if (!pre) return;
+		const filtered = pre.oneTimePreKeys.filter(k => k.id !== id);
+		await this.storeRatchetPrekeys({ signedPreKey: pre.signedPreKey!, oneTimePreKeys: filtered });
+	}
 }

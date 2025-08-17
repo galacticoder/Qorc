@@ -1,22 +1,35 @@
 import https from 'https';
+import fs from 'fs';
 import { WebSocketServer } from 'ws';
 import selfsigned from 'selfsigned';
 import { SignalType } from './signals.js';
 import { CryptoUtils } from './crypto/unified-crypto.js';
-import { MessageDatabase } from './database/database.js';
+import { MessageDatabase, PrekeyDatabase } from './database/database.js';
 import * as ServerConfig from './config/config.js';
 import { MessagingUtils } from './messaging/messaging-utils.js';
 import * as authentication from './authentication/authentication.js';
 import { setServerPasswordOnInput } from './authentication/auth-utils.js';
+import { ed25519 } from '@noble/curves/ed25519';
 
 const clients = new Map();
 
-const { private: key, cert } = selfsigned.generate([{ name: 'commonName', value: 'localhost' }], {
-  days: 365,
-  keySize: 4096,
-});
+const CERT_PATH = process.env.TLS_CERT_PATH; //use real later for production and in dev use selfsigned
+const KEY_PATH = process.env.TLS_KEY_PATH;
 
-const server = https.createServer({ key, cert });
+let server;
+if (CERT_PATH && KEY_PATH && fs.existsSync(CERT_PATH) && fs.existsSync(KEY_PATH)) {
+  console.log('[SERVER] Using provided TLS certificate and key');
+  const key = fs.readFileSync(KEY_PATH);
+  const cert = fs.readFileSync(CERT_PATH);
+  server = https.createServer({ key, cert });
+} else {
+  console.warn('[SERVER] No TLS_CERT_PATH/TLS_KEY_PATH provided; generating self-signed certificate for development');
+  const { private: key, cert } = selfsigned.generate([{ name: 'commonName', value: 'localhost' }], {
+    days: 365,
+    keySize: 4096,
+  });
+  server = https.createServer({ key, cert });
+}
 
 async function startServer() {
   console.log('[SERVER] Starting SecureChat server');
@@ -60,6 +73,57 @@ async function startServer() {
 
       try {
         switch (parsed.type) {
+          case SignalType.X3DH_PUBLISH_BUNDLE: {
+            if (!clientState.hasPassedAccountLogin || !clientState.username) {
+              return ws.send(JSON.stringify({ type: SignalType.ERROR, message: 'Account login required first' }));
+            }
+            try {
+              console.log(`[SERVER] Received ${SignalType.X3DH_PUBLISH_BUNDLE} from user: ${clientState.username}`);
+              const b = parsed.bundle || {};
+              console.log('[SERVER] Bundle summary:', {
+                identityEd25519PublicBase64: (b.identityEd25519PublicBase64 || '').slice(0, 16) + '...',
+                identityX25519PublicBase64: (b.identityX25519PublicBase64 || '').slice(0, 16) + '...',
+                signedPreKey: b.signedPreKey ? { id: b.signedPreKey.id, publicKeyBase64: (b.signedPreKey.publicKeyBase64 || '').slice(0, 16) + '...' } : null,
+                oneTimePreKeysCount: Array.isArray(b.oneTimePreKeys) ? b.oneTimePreKeys.length : 0,
+                ratchetPublicBase64: (b.ratchetPublicBase64 || '').slice(0, 16) + '...'
+              });
+              // Minimal signature verification: ensure signedPreKey was signed by identity Ed25519 key
+              try {
+                const idEd = Buffer.from(b.identityEd25519PublicBase64 || '', 'base64');
+                const spk = Buffer.from(b.signedPreKey?.publicKeyBase64 || '', 'base64');
+                const sig = Buffer.from(b.signedPreKey?.signatureBase64 || '', 'base64');
+                const valid = idEd.length === 32 && spk.length === 32 && sig.length === 64 && ed25519.verify(sig, spk, idEd);
+                if (!valid) {
+                  console.warn('[SERVER] Rejected bundle due to invalid signedPreKey signature for user', clientState.username);
+                  return ws.send(JSON.stringify({ type: SignalType.ERROR, message: 'Invalid signedPreKey signature' }));
+                }
+              } catch (e) {
+                console.warn('[SERVER] Bundle verification failed (continuing may be insecure):', e?.message || e);
+              }
+              PrekeyDatabase.publishBundle(clientState.username, parsed.bundle);
+              ws.send(JSON.stringify({ type: 'ok', message: 'bundle-published' }));
+            } catch (e) {
+              ws.send(JSON.stringify({ type: SignalType.ERROR, message: 'Failed to publish bundle' }));
+            }
+            break;
+          }
+
+          case SignalType.X3DH_REQUEST_BUNDLE: {
+            if (!clientState.hasPassedAccountLogin) {
+              return ws.send(JSON.stringify({ type: SignalType.ERROR, message: 'Account login required first' }));
+            }
+            const target = parsed.username;
+            const out = PrekeyDatabase.takeBundleForRecipient(target);
+            if (!out) {
+              return ws.send(JSON.stringify({ type: SignalType.ERROR, message: 'No bundle available' }));
+            }
+            console.log(`[SERVER] Delivering prekey bundle for ${target} to ${clientState.username}`, {
+              hasOneTime: !!out.oneTimePreKey,
+              signedPreKeyId: out.signedPreKey?.id
+            });
+            ws.send(JSON.stringify({ type: SignalType.X3DH_DELIVER_BUNDLE, bundle: out, username: target }));
+            break;
+          }
           case SignalType.ACCOUNT_SIGN_IN:
           case SignalType.ACCOUNT_SIGN_UP: {
             console.log(`[SERVER] Processing ${parsed.type} request`);
@@ -180,7 +244,8 @@ async function startServer() {
           }
 
           case SignalType.ENCRYPTED_MESSAGE:
-          case SignalType.FILE_MESSAGE_CHUNK: {
+          case SignalType.FILE_MESSAGE_CHUNK:
+          case SignalType.DR_SEND: {
             console.log(`[SERVER] Processing ${parsed.type} from user: ${clientState.username} to user: ${parsed.to}`);
             if (!clientState.hasAuthenticated) {
               console.error('[SERVER] User not authenticated for message sending');
@@ -194,10 +259,9 @@ async function startServer() {
             const recipient = clients.get(parsed.to);
             if (recipient && recipient.ws) {
               console.log(`[SERVER] Forwarding message from ${clientState.username} to ${parsed.to}`);
-              const messageToSend = {
-                type: SignalType.ENCRYPTED_MESSAGE,
-                ...parsed.encryptedPayload
-              };
+              const messageToSend = parsed.type === SignalType.DR_SEND
+                ? { type: SignalType.DR_SEND, from: clientState.username, to: parsed.to, payload: parsed.payload }
+                : { type: SignalType.ENCRYPTED_MESSAGE, ...parsed.encryptedPayload };
               recipient.ws.send(JSON.stringify(messageToSend));
               console.log(`[SERVER] Message relayed`);
             } else {
