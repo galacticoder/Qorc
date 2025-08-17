@@ -1,4 +1,5 @@
 import { CryptoUtils } from './unified-crypto';
+import * as argon2 from "argon2-wasm";
 
 interface EncryptedKeyData {
 	encryptedX25519Private: string;
@@ -7,6 +8,13 @@ interface EncryptedKeyData {
 	kyberPublicBase64: string;
 	salt: string;
 	iv: string;
+	argon2Params?: {
+		version: number;
+		algorithm: string;
+		memoryCost: number;
+		timeCost: number;
+		parallelism: number;
+	};
 }
 
 interface DecryptedKeys {
@@ -31,13 +39,14 @@ export class SecureKeyManager {
 		this.dbName = `SecureKeyDB_${username}`;
 	}
 
-	async initialize(passphrase: string, salt?: string): Promise<void> {
+	async initialize(passphrase: string, salt?: string, argon2Params?: { version: number; algorithm: string; memoryCost: number; timeCost: number; parallelism: number }): Promise<void> {
 		if (this.masterKey) {
 			return;
 		}
 
 		let keySalt: Uint8Array;
 		let keyIv: Uint8Array;
+		let storedArgon2Params: { version: number; algorithm: string; memoryCost: number; timeCost: number; parallelism: number };
 
 		if (salt) {
 			keySalt = CryptoUtils.Base64.base64ToUint8Array(salt);
@@ -47,33 +56,78 @@ export class SecureKeyManager {
 			keyIv = crypto.getRandomValues(new Uint8Array(12));
 		}
 
-		const masterKey = await crypto.subtle.importKey(
-			'raw',
-			new TextEncoder().encode(passphrase),
-			{ name: 'PBKDF2' },
-			false,
-			['deriveKey']
-		);
+		// check if we have existing metadata to determine key derivation method
+		const existingMetadata = await this.getKeyMetadata();
+		const useArgon2 = !existingMetadata || existingMetadata.argon2Params;
 
-		const derivedKey = await crypto.subtle.deriveKey(
-			{
-				name: 'PBKDF2',
+		if (useArgon2) {
+			if (argon2Params) {
+				storedArgon2Params = argon2Params;
+			} else if (existingMetadata?.argon2Params) {
+				storedArgon2Params = existingMetadata.argon2Params;
+			} else {
+				storedArgon2Params = {
+					version: 0x13,
+					algorithm: 'argon2id',
+					memoryCost: 131072,
+					timeCost: 3,
+					parallelism: 1
+				};
+			}
+
+			// derive master key using argon2id
+			const argon2Result = await argon2.hash({
+				pass: passphrase,
 				salt: keySalt,
-				iterations: 100000,
-				hash: 'SHA-256'
-			},
-			masterKey,
-			{ name: 'AES-GCM', length: 256 },
-			false,
-			['encrypt', 'decrypt']
-		);
+				time: storedArgon2Params.timeCost,
+				mem: storedArgon2Params.memoryCost,
+				parallelism: storedArgon2Params.parallelism,
+				type: 2, // argon2id
+				version: storedArgon2Params.version,
+				hashLen: 32
+			});
 
-		this.masterKey = derivedKey;
+			// import the derived hash as a crypto key
+			const masterKey = await crypto.subtle.importKey(
+				'raw',
+				argon2Result.hash,
+				{ name: 'AES-GCM' },
+				false,
+				['encrypt', 'decrypt']
+			);
+
+			this.masterKey = masterKey;
+		} else {
+			// fallback to pbkdf2 for backward compatibility with existing users
+			const masterKey = await crypto.subtle.importKey(
+				'raw',
+				new TextEncoder().encode(passphrase),
+				{ name: 'PBKDF2' },
+				false,
+				['deriveKey']
+			);
+
+			const derivedKey = await crypto.subtle.deriveKey(
+				{
+					name: 'PBKDF2',
+					salt: keySalt,
+					iterations: 100000,
+					hash: 'SHA-256'
+				},
+				masterKey,
+				{ name: 'AES-GCM', length: 256 },
+				false,
+				['encrypt', 'decrypt']
+			);
+
+			this.masterKey = derivedKey;
+		}
 
 		if (!salt) {
 			await this.storeKeyMetadata({
 				salt: CryptoUtils.Base64.arrayBufferToBase64(keySalt),
-				iv: CryptoUtils.Base64.arrayBufferToBase64(keyIv)
+				iv: CryptoUtils.Base64.arrayBufferToBase64(keyIv),
+				argon2Params: useArgon2 ? storedArgon2Params : undefined
 			});
 
 			const storedMetadata = await this.getKeyMetadata();
@@ -117,7 +171,8 @@ export class SecureKeyManager {
 			x25519PublicBase64: keys.x25519.publicKeyBase64,
 			kyberPublicBase64: keys.kyber.publicKeyBase64,
 			salt: metadata.salt,
-			iv: metadata.iv
+			iv: metadata.iv,
+			argon2Params: metadata.argon2Params
 		};
 
 		await this.storeEncryptedKeys(encryptedData);
@@ -212,6 +267,24 @@ export class SecureKeyManager {
 		return encryptedData !== null;
 	}
 
+	async migrateToArgon2(passphrase: string): Promise<boolean> {
+		// check if migration is needed
+		const metadata = await this.getKeyMetadata();
+		if (!metadata || metadata.argon2Params) {
+			return false; // already using argon2 or no keys exist
+		}
+
+		// decrypt existing keys using pbkdf2
+		const existingKeys = await this.getKeys();
+		if (!existingKeys) {
+			return false;
+		}
+
+		// re-encrypt with argon2id
+		await this.storeKeys(existingKeys);
+		return true;
+	}
+
 	async deleteKeys(): Promise<void> {
 		const db = await this.openDB();
 		return new Promise((resolve, reject) => {
@@ -262,7 +335,7 @@ export class SecureKeyManager {
 		});
 	}
 
-	private async storeKeyMetadata(metadata: { salt: string; iv: string }): Promise<void> {
+	private async storeKeyMetadata(metadata: { salt: string; iv: string; argon2Params?: { version: number; algorithm: string; memoryCost: number; timeCost: number; parallelism: number } }): Promise<void> {
 		const db = await this.openDB();
 		return new Promise((resolve, reject) => {
 			const tx = db.transaction(this.storeName, 'readwrite');
@@ -283,7 +356,7 @@ export class SecureKeyManager {
 		});
 	}
 
-	async getKeyMetadata(): Promise<{ salt: string; iv: string } | null> {
+	async getKeyMetadata(): Promise<{ salt: string; iv: string; argon2Params?: { version: number; algorithm: string; memoryCost: number; timeCost: number; parallelism: number } } | null> {
 		const db = await this.openDB();
 		return new Promise((resolve, reject) => {
 			const tx = db.transaction(this.storeName, 'readonly');
