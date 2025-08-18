@@ -122,7 +122,6 @@ export async function handleSignalMessages(
               newKeys: { x25519PublicBase64: hybridKeys.x25519PublicBase64, kyberPublicBase64: hybridKeys.kyberPublicBase64 },
               pinned,
             });
-            setLoginError?.('Server identity changed. Review and trust to continue.');
             break;
           } else {
             setServerHybridPublic(hybridKeys);

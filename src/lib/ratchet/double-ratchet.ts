@@ -63,30 +63,49 @@ export class DoubleRatchet {
 		const aesKey = await CryptoUtils.Keys.importRawAesKey(messageKey);
 		const { iv, authTag, encrypted } = await CryptoUtils.AES.encryptWithAesGcmRaw(plaintext, aesKey);
 		const ciphertext = CryptoUtils.AES.serializeEncryptedData(iv, authTag, encrypted);
+
+		// Generate BLAKE3 MAC for additional message authentication
+		const messageBytes = new TextEncoder().encode(plaintext);
+		const blake3Mac = await CryptoUtils.Hash.generateBlake3Mac(messageBytes, messageKey);
+		const blake3MacBase64 = CryptoUtils.Base64.arrayBufferToBase64(blake3Mac);
+
 		try {
 			console.debug('[DR] encrypt', {
 				pn: header.pn,
 				n: header.n,
 				ciphertextLen: ciphertext.length,
+				blake3MacLen: blake3Mac.length,
 			});
 		} catch { }
-		return { header, ciphertext };
+		return { header, ciphertext, blake3Mac: blake3MacBase64 };
 	}
 
-	static async tryDecryptWithSkipped(state: SessionState, headerKey: string, ciphertext: string): Promise<string | null> {
+	static async tryDecryptWithSkipped(state: SessionState, headerKey: string, ciphertext: string, blake3Mac?: string): Promise<string | null> {
 		const mk = state.skippedMessageKeys.get(headerKey);
 		if (!mk) return null;
 		state.skippedMessageKeys.delete(headerKey);
 		const aesKey = await CryptoUtils.Keys.importRawAesKey(mk);
 		const des = CryptoUtils.AES.deserializeEncryptedData(ciphertext);
-		return await CryptoUtils.AES.decryptWithAesGcmRaw(des.iv, des.authTag, des.encrypted, aesKey);
+		const out = await CryptoUtils.AES.decryptWithAesGcmRaw(des.iv, des.authTag, des.encrypted, aesKey);
+
+		// Verify BLAKE3 MAC if present
+		if (blake3Mac) {
+			const messageBytes = new TextEncoder().encode(out);
+			const expectedMac = CryptoUtils.Base64.base64ToUint8Array(blake3Mac);
+			const isValid = await CryptoUtils.Hash.verifyBlake3Mac(messageBytes, mk, expectedMac);
+			if (!isValid) {
+				throw new Error('BLAKE3 MAC verification failed for skipped message - message integrity compromised');
+			}
+		}
+
+		return out;
 	}
 
 	static async decrypt(state: SessionState, message: RatchetMessage): Promise<string> {
 		const x = await (await import("@noble/curves/ed25519")).x25519 || (await import("@noble/curves")).x25519;
 		const headerKey = `${CryptoUtils.Base64.arrayBufferToBase64(message.header.dhPub)}:${message.header.n}`;
 		try { console.debug('[DR] decrypt begin', { pn: message.header.pn, n: message.header.n, ctLen: (message.ciphertext || '').length }); } catch { }
-		const trySkipped = await this.tryDecryptWithSkipped(state, headerKey, message.ciphertext);
+		const trySkipped = await this.tryDecryptWithSkipped(state, headerKey, message.ciphertext, message.blake3Mac);
 		if (trySkipped !== null) return trySkipped;
 
 		const sameRemote = (() => {
@@ -159,6 +178,20 @@ export class DoubleRatchet {
 			console.debug('[DR] aes params', { ivLen: des.iv.length, tagLen: des.authTag.length, encLen: des.encrypted.length });
 		} catch { }
 		const out = await CryptoUtils.AES.decryptWithAesGcmRaw(des.iv, des.authTag, des.encrypted, aesKey);
+
+		// Verify BLAKE3 MAC if present
+		if (message.blake3Mac) {
+			const messageBytes = new TextEncoder().encode(out);
+			const expectedMac = CryptoUtils.Base64.base64ToUint8Array(message.blake3Mac);
+			const isValid = await CryptoUtils.Hash.verifyBlake3Mac(messageBytes, messageKey, expectedMac);
+			if (!isValid) {
+				throw new Error('BLAKE3 MAC verification failed - message integrity compromised');
+			}
+			try {
+				console.debug('[DR] BLAKE3 MAC verified successfully');
+			} catch { }
+		}
+
 		try { console.debug('[DR] decrypt ok, length', (out || '').length); } catch { }
 		return out;
 	}

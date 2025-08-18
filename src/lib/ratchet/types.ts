@@ -52,6 +52,7 @@ export interface RatchetHeader {
 export interface RatchetMessage {
 	header: RatchetHeader;
 	ciphertext: string; // base64 encoded aes gcm ciphertext
+	blake3Mac?: string; // base64 encoded BLAKE3 MAC for additional integrity
 }
 
 export interface SessionState {

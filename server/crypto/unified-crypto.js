@@ -1,6 +1,7 @@
 import { webcrypto } from 'crypto';
 import argon2 from 'argon2';
 import { MlKem768 } from 'mlkem';
+import { blake3 } from '@noble/hashes/blake3';
 
 const crypto = webcrypto;
 
@@ -298,11 +299,18 @@ class HybridService {
 
     const serializedMessage = AESService.serializeEncryptedData(iv, authTag, encrypted);
 
+    // Generate BLAKE3 MAC for additional integrity
+    const messageBytes = new TextEncoder().encode(jsonStr);
+    const macKey = ikm.slice(0, 32); // BLAKE3 expects 32-byte key
+    const blake3Mac = await HashingService.generateBlake3Mac(messageBytes, macKey);
+    const blake3MacBase64 = HashService.arrayBufferToBase64(blake3Mac);
+
     return {
       version: 'hybrid-v1',
       ephemeralX25519Public: HashService.arrayBufferToBase64(ephPubRaw),
       kyberCiphertext: HashService.arrayBufferToBase64(kyberCiphertext),
-      encryptedMessage: serializedMessage
+      encryptedMessage: serializedMessage,
+      blake3Mac: blake3MacBase64
     };
   }
 
@@ -344,6 +352,17 @@ class HybridService {
       return await AESService.decryptWithAesGcmRaw(deserialized.iv, deserialized.authTag, deserialized.encrypted, aesCryptoKey);
     })();
 
+    // Verify BLAKE3 MAC if present
+    if (encryptedPayload.blake3Mac) {
+      const messageBytes = new TextEncoder().encode(decryptedJson);
+      const expectedMac = HashService.base64ToUint8Array(encryptedPayload.blake3Mac);
+      const macKey = ikm.slice(0, 32); // BLAKE3 expects 32-byte key
+      const isValid = await HashingService.verifyBlake3Mac(messageBytes, macKey, expectedMac);
+      if (!isValid) {
+        throw new Error('BLAKE3 MAC verification failed - hybrid payload integrity compromised');
+      }
+    }
+
     return JSON.parse(decryptedJson);
   }
 }
@@ -360,6 +379,25 @@ class HashingService {
 
   static async verifyPassword(hash, inputPassword) {
     return await argon2.verify(hash, inputPassword);
+  }
+
+  // BLAKE3-based MAC for additional message authentication
+  static async generateBlake3Mac(message, key) {
+    const keyedHash = blake3.create({ key });
+    keyedHash.update(message);
+    return keyedHash.digest();
+  }
+
+  static async verifyBlake3Mac(message, key, expectedMac) {
+    const computedMac = await this.generateBlake3Mac(message, key);
+    if (computedMac.length !== expectedMac.length) return false;
+
+    // Constant-time comparison to prevent timing attacks
+    let result = 0;
+    for (let i = 0; i < computedMac.length; i++) {
+      result |= computedMac[i] ^ expectedMac[i];
+    }
+    return result === 0;
   }
 
   static async parseArgon2Hash(encodedHash) {

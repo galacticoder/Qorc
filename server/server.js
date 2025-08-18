@@ -228,12 +228,30 @@ async function startServer() {
               const username = userPayload.usernameSent;
               const hybridPublicKeys = userPayload.hybridPublicKeys;
 
+              console.log(`[SERVER] Decrypted hybrid keys update:`, {
+                username,
+                hasHybridKeys: !!hybridPublicKeys,
+                hybridKeysStructure: hybridPublicKeys ? Object.keys(hybridPublicKeys) : null
+              });
+
               if (username === clientState.username && hybridPublicKeys) {
                 console.log(`[SERVER] Updating hybrid keys for user: ${username}`);
                 const existingClient = clients.get(username);
+                console.log(`[SERVER] Existing client for ${username}:`, {
+                  exists: !!existingClient,
+                  hasHybridKeys: existingClient ? !!existingClient.hybridPublicKeys : false,
+                  clientKeys: existingClient ? Object.keys(existingClient) : null
+                });
+
                 if (existingClient) {
                   existingClient.hybridPublicKeys = hybridPublicKeys;
                   console.log(`[SERVER] Hybrid keys updated successfully for user: ${username}`);
+                  console.log(`[SERVER] Client after update:`, {
+                    hasHybridKeys: !!existingClient.hybridPublicKeys,
+                    hybridKeysStructure: existingClient.hybridPublicKeys ? Object.keys(existingClient.hybridPublicKeys) : null
+                  });
+                } else {
+                  console.error(`[SERVER] No existing client found for user: ${username}`);
                 }
               }
             } catch (error) {

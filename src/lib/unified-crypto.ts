@@ -1,5 +1,6 @@
 import * as argon2 from "argon2-wasm";
 import { MlKem768 } from "mlkem";
+import { blake3 } from "@noble/hashes/blake3";
 
 type Uint8ArrOrBuf = Uint8Array | ArrayBuffer;
 
@@ -115,6 +116,25 @@ class HashingService {
   static async verifyHash(encoded: string, data: string) {
     const r = await argon2.verify({ pass: data, encoded });
     return r.verified;
+  }
+
+  // BLAKE3-based MAC for additional message authentication
+  static async generateBlake3Mac(message: Uint8Array, key: Uint8Array): Promise<Uint8Array> {
+    const keyedHash = blake3.create({ key });
+    keyedHash.update(message);
+    return keyedHash.digest();
+  }
+
+  static async verifyBlake3Mac(message: Uint8Array, key: Uint8Array, expectedMac: Uint8Array): Promise<boolean> {
+    const computedMac = await this.generateBlake3Mac(message, key);
+    if (computedMac.length !== expectedMac.length) return false;
+
+    // Constant-time comparison to prevent timing attacks
+    let result = 0;
+    for (let i = 0; i < computedMac.length; i++) {
+      result |= computedMac[i] ^ expectedMac[i];
+    }
+    return result === 0;
   }
 
   static async deriveKeyFromPassphrase(
@@ -657,11 +677,18 @@ class Hybrid {
     const { iv, authTag, encrypted } = await AES.encryptWithAesGcmRaw(jsonStr, aesKey);
     const serialized = AES.serializeEncryptedData(iv, authTag, encrypted);
 
+    // Generate BLAKE3 MAC for additional integrity
+    const messageBytes = new TextEncoder().encode(jsonStr);
+    const macKey = ikm.slice(0, 32); // BLAKE3 expects 32-byte key
+    const blake3Mac = await HashingService.generateBlake3Mac(messageBytes, macKey);
+    const blake3MacBase64 = Base64.arrayBufferToBase64(blake3Mac);
+
     return {
       version: "hybrid-v1",
       ephemeralX25519Public: Base64.arrayBufferToBase64(ephPubRaw),
       kyberCiphertext: Base64.arrayBufferToBase64(kyberCiphertext),
       encryptedMessage: serialized,
+      blake3Mac: blake3MacBase64,
     };
   }
 
@@ -698,6 +725,17 @@ class Hybrid {
 
     const des = AES.deserializeEncryptedData(encryptedMessage);
     const decryptedJson = await AES.decryptWithAesGcmRaw(des.iv, des.authTag, des.encrypted, aesKey);
+
+    // Verify BLAKE3 MAC if present
+    if (encryptedPayload.blake3Mac) {
+      const messageBytes = new TextEncoder().encode(decryptedJson);
+      const expectedMac = Base64.base64ToUint8Array(encryptedPayload.blake3Mac);
+      const macKey = ikm.slice(0, 32); // BLAKE3 expects 32-byte key
+      const isValid = await HashingService.verifyBlake3Mac(messageBytes, macKey, expectedMac);
+      if (!isValid) {
+        throw new Error('BLAKE3 MAC verification failed - hybrid payload integrity compromised');
+      }
+    }
 
     return JSON.parse(decryptedJson);
   }

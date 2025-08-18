@@ -65,6 +65,13 @@ export class MessagingUtils {
     const promises = [];
 
     for (const [clientUsername, client] of clientsMap.entries()) {
+      console.log(`[MESSAGING] Checking client ${clientUsername}:`, {
+        isExcluded: clientUsername === excludeUsername,
+        hasHybridKeys: !!client.hybridPublicKeys,
+        clientKeys: Object.keys(client),
+        hybridKeysStructure: client.hybridPublicKeys ? Object.keys(client.hybridPublicKeys) : null
+      });
+
       if (clientUsername !== excludeUsername && client.hybridPublicKeys) {
         try {
           console.log(`[MESSAGING] Encrypting system message for user: ${clientUsername}`);
