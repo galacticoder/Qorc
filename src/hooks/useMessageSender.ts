@@ -21,6 +21,19 @@ export function useMessageSender(
   passphraseRef?: React.MutableRefObject<string>,
   isLoggedIn?: boolean
 ) {
+  const pendingSendsRef = { current: [] as Array<() => Promise<void>> } as any;
+  let flushTimer: any = null;
+
+  function scheduleFlush(delayMs: number) {
+    if (flushTimer) return;
+    flushTimer = setTimeout(async () => {
+      flushTimer = null;
+      const tasks = pendingSendsRef.current.splice(0, pendingSendsRef.current.length);
+      for (const task of tasks) {
+        try { await task(); } catch { /* keep quiet */ }
+      }
+    }, delayMs);
+  }
   async function waitForSessionAvailability(currentUser: string, peer: string, totalMs = 5000, intervalMs = 100): Promise<boolean> {
     const start = Date.now();
     let attempt = 0;
@@ -123,16 +136,23 @@ export function useMessageSender(
       });
       console.log("[Sender] Using messageId:", id, "timestamp:", time);
 
+      const enqueueAndBackoff = (fn: () => Promise<void>, baseMs = 1000) => {
+        pendingSendsRef.current.push(fn);
+        scheduleFlush(baseMs);
+      };
+
       try {
         console.debug("[Sender] Recipients count:", users.length, users.map(u => u.username));
+
+        // Determine recipients; only send to online users
+        const onlineRecipients = users.filter(u => u.username !== loginUsernameRef.current && u.isOnline);
+        if (onlineRecipients.length === 0) {
+          console.log("[Sender] No online recipients; not delivering");
+        }
+
         await Promise.all(
-          users.map(async (user) => {
+          onlineRecipients.map(async (user) => {
             const currentUser = loginUsernameRef.current;
-            // skip sending to self we already persist locally below
-            if (user.username === currentUser) {
-              console.debug("[Sender] Skipping self-recipient:", user.username);
-              return;
-            }
             // init persistent session context
             await SessionStore.initUserContext(currentUser, aesKeyRef.current);
             // build or fetch a session
@@ -153,7 +173,7 @@ export function useMessageSender(
               session = SessionStore.get(currentUser, user.username);
               if (!available || !session) {
                 console.warn("[Sender] Session still unavailable for", user.username, "after wait; skipping send");
-                return; // could queue for later for now skip with clear log
+                return;
               }
               // verify session has valid remote public key
               if (session.remoteDhPublic.every(b => b === 0)) {
@@ -325,11 +345,19 @@ export function useMessageSender(
               header: drPayload.payload.header,
               ciphertextLen: (drPayload.payload.ciphertext || '').length,
             });
-            websocketClient.send(
-              JSON.stringify({
-                ...drPayload
-              })
-            );
+            const sendFn = async () => {
+              // if globally rate limited, re-enqueue
+              if ((websocketClient as any).isGloballyRateLimited?.()) {
+                enqueueAndBackoff(sendFn, 1000);
+                return;
+              }
+              websocketClient.send(
+                JSON.stringify({
+                  ...drPayload
+                })
+              );
+            };
+            await sendFn();
 
             console.log(`Sent DR message to user ${user.username}: `, drPayload);
 
@@ -407,7 +435,14 @@ export function useMessageSender(
                 ...serverEncrypted
               };
 
-              websocketClient.send(JSON.stringify(dbPayload));
+              const sendDbFn = async () => {
+                if ((websocketClient as any).isGloballyRateLimited?.()) {
+                  enqueueAndBackoff(sendDbFn, 1000);
+                  return;
+                }
+                websocketClient.send(JSON.stringify(dbPayload));
+              }
+              await sendDbFn();
 
               console.log(`Sent to server database:`, serverPayload.messageId);
             }
@@ -461,5 +496,8 @@ export function useMessageSender(
     [handleSendMessage]
   );
 
-  return { handleMessage: handleSendMessage, handleSendMessageType };
+  return {
+    handleMessage: handleSendMessage,
+    handleSendMessageType
+  };
 }

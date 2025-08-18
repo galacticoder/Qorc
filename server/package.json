@@ -13,7 +13,9 @@
     "@noble/curves": "^1.9.7",
     "argon2": "^0.43.1",
     "better-sqlite3": "^12.2.0",
+    "ioredis": "^5.7.0",
     "mlkem": "^2.5.0",
+    "rate-limiter-flexible": "^7.2.0",
     "selfsigned": "^3.0.1",
     "ws": "^8.18.3"
   },

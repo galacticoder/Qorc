@@ -94,8 +94,27 @@ The application is designed with a strong focus on security and privacy:
 *   **pako:** Zlib port to javascript for compression/decompression.
 
 
-## Future plans
-I want to add rate limiting and other things and make the security much better and im fully focused on security at this moment and will update the ui as i upgrade the security more. 
+## Security Features
+
+### Rate Limiting System ✅
+A **privacy-first rate limiting system** has been implemented that protects against:
+- **Connection flooding** - Prevents rapid connection attempts
+- **Authentication brute force** - Limits login attempts per connection  
+- **Message spam** - Prevents message flooding by authenticated users
+- **Resource exhaustion** - Protects server resources from abuse
+
+**Key Privacy Features:**
+- **No IP tracking** - The server doesn't collect or store client IP addresses
+- **Connection-based limits** - Rate limits are applied per WebSocket connection
+- **User-based limits** - After authentication, limits are applied per username
+- **Minimal data collection** - Only essential rate limiting data is stored
+
+### Future Security Plans
+I'm fully focused on security and will continue to add:
+- Enhanced authentication mechanisms
+- Advanced threat detection
+- Improved encryption protocols
+- Security monitoring and alerting 
 
 
 ## Contributing

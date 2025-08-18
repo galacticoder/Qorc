@@ -10,6 +10,7 @@ import { MessagingUtils } from './messaging/messaging-utils.js';
 import * as authentication from './authentication/authentication.js';
 import { setServerPasswordOnInput } from './authentication/auth-utils.js';
 import { ed25519 } from '@noble/curves/ed25519';
+import { rateLimitMiddleware } from './rate-limiting/rate-limit-middleware.js';
 
 const clients = new Map();
 
@@ -38,6 +39,12 @@ async function startServer() {
 
   console.log('[SERVER] Server hybrid key pair generated (X25519 + Kyber768)');
   console.log(`[SERVER] Allow self-signed cert: https://localhost:${ServerConfig.PORT}`);
+  console.log('[SERVER] Rate limiting enabled with privacy-first approach');
+  try {
+    console.log('[SERVER] Rate limiter backend:', rateLimitMiddleware.getStats().backend);
+  } catch (error) {
+    console.error('[SERVER] Failed to get rate limiter stats:', error);
+  }
 
   server.listen(ServerConfig.PORT, '0.0.0.0', () =>
     console.log(`[SERVER] SecureChat relay running on wss://0.0.0.0:${ServerConfig.PORT}`)
@@ -48,8 +55,42 @@ async function startServer() {
   const authHandler = new authentication.AccountAuthHandler(serverHybridKeyPair, clients);
   const serverAuthHandler = new authentication.ServerAuthHandler(serverHybridKeyPair, clients, ServerConfig);
 
+  // Periodic rate limiting status logging
+  setInterval(async () => {
+    try {
+      const stats = rateLimitMiddleware.getStats();
+      const globalStatus = await rateLimitMiddleware.getGlobalConnectionStatus();
+
+      if (globalStatus.isBlocked || stats.userMessageLimiters > 0 || stats.userBundleLimiters > 0) {
+        console.log('[RATE-LIMIT-STATUS]', {
+          globalConnectionBlocked: globalStatus.isBlocked,
+          globalConnectionAttempts: globalStatus.attempts,
+          activeUserLimiters: stats.totalUserLimiters,
+          timestamp: new Date().toISOString()
+        });
+      }
+    } catch (error) {
+      console.error('[SERVER] Error in rate limiting status logging:', error);
+    }
+  }, 60000); // Log every minute
+
   wss.on('connection', async (ws) => {
+    // Apply connection rate limiting before processing the connection
+    try {
+      if (!(await rateLimitMiddleware.checkConnectionLimit(ws))) {
+        console.log('[SERVER] Connection rejected due to rate limiting');
+        return; // Connection will be closed by the middleware
+      }
+    } catch (error) {
+      console.error('[SERVER] Rate limiting error during connection:', error);
+      ws.close();
+      return;
+    }
+
     let clientState = { username: null, hasPassedAccountLogin: false, hasAuthenticated: false };
+
+    // Store rate limiting info in client state for monitoring
+    clientState.connectionTime = Date.now();
 
     ws.send(
       JSON.stringify({
@@ -76,6 +117,17 @@ async function startServer() {
           case SignalType.X3DH_PUBLISH_BUNDLE: {
             if (!clientState.hasPassedAccountLogin || !clientState.username) {
               return ws.send(JSON.stringify({ type: SignalType.ERROR, message: 'Account login required first' }));
+            }
+
+            // Apply bundle operation rate limiting
+            try {
+              if (!(await rateLimitMiddleware.checkBundleLimit(ws, clientState.username))) {
+                console.log(`[SERVER] Bundle operation blocked due to rate limiting for user: ${clientState.username}`);
+                break;
+              }
+            } catch (error) {
+              console.error(`[SERVER] Rate limiting error during bundle operation for user ${clientState.username}:`, error);
+              break;
             }
             try {
               console.log(`[SERVER] Received ${SignalType.X3DH_PUBLISH_BUNDLE} from user: ${clientState.username}`);
@@ -146,6 +198,17 @@ async function startServer() {
             if (!clientState.hasPassedAccountLogin) {
               return ws.send(JSON.stringify({ type: SignalType.ERROR, message: 'Account login required first' }));
             }
+
+            // Apply bundle operation rate limiting
+            try {
+              if (!(await rateLimitMiddleware.checkBundleLimit(ws, clientState.username))) {
+                console.log(`[SERVER] Bundle operation blocked due to rate limiting for user: ${clientState.username}`);
+                break;
+              }
+            } catch (error) {
+              console.error(`[SERVER] Rate limiting error during bundle operation for user ${clientState.username}:`, error);
+              break;
+            }
             const target = parsed.username;
             console.log(`[SERVER] Bundle request from ${clientState.username} for ${target}`);
             const out = PrekeyDatabase.takeBundleForRecipient(target);
@@ -164,6 +227,17 @@ async function startServer() {
           }
           case SignalType.ACCOUNT_SIGN_IN:
           case SignalType.ACCOUNT_SIGN_UP: {
+            // Apply authentication rate limiting
+            try {
+              if (!(await rateLimitMiddleware.checkAuthLimit(ws))) {
+                console.log(`[SERVER] Authentication blocked due to rate limiting for ${parsed.type}`);
+                break;
+              }
+            } catch (error) {
+              console.error('[SERVER] Rate limiting error during authentication:', error);
+              break;
+            }
+
             console.log(`[SERVER] Processing ${parsed.type} request`);
             const result = await authHandler.processAuthRequest(ws, msg.toString());
             if (result?.authenticated || result?.pending) {
@@ -239,6 +313,8 @@ async function startServer() {
               console.log(`[SERVER] Broadcasting public keys and user join for: ${clientState.username}`);
               MessagingUtils.broadcastPublicKeys(clients);
               await MessagingUtils.broadcastUserJoin(clients, clientState.username);
+
+              // Offline message delivery removed
             } else {
               console.error(`[SERVER] Server authentication failed for user: ${clientState.username}`);
               ws.send(JSON.stringify({ type: SignalType.AUTH_ERROR, message: 'Server authentication failed' }));
@@ -308,8 +384,19 @@ async function startServer() {
               return ws.send(JSON.stringify({ type: SignalType.ERROR, message: 'Not authenticated yet' }));
             }
             if (!parsed.to || !clients.has(parsed.to)) {
-              console.error(`[SERVER] Target user not found: ${parsed.to}`);
-              return ws.send(JSON.stringify({ type: SignalType.ERROR, message: 'Target user not found' }));
+              console.warn(`[SERVER] Target user offline or not found: ${parsed.to}, not delivering`);
+              return ws.send(JSON.stringify({ type: SignalType.ERROR, message: 'Recipient offline; message not delivered' }));
+            }
+
+            // Apply message rate limiting
+            try {
+              if (!(await rateLimitMiddleware.checkMessageLimit(ws, clientState.username))) {
+                console.log(`[SERVER] Message blocked due to rate limiting for user: ${clientState.username}`);
+                break;
+              }
+            } catch (error) {
+              console.error(`[SERVER] Rate limiting error during message for user ${clientState.username}:`, error);
+              break;
             }
 
             const recipient = clients.get(parsed.to);
@@ -322,6 +409,49 @@ async function startServer() {
               console.log(`[SERVER] Message relayed`);
             } else {
               console.error(`[SERVER] Recipient WebSocket not available for user: ${parsed.to}`);
+            }
+            break;
+          }
+
+          case SignalType.RATE_LIMIT_STATUS: {
+            // Admin function: Get rate limiting statistics
+            // This could be restricted to admin users in production
+            console.log(`[SERVER] Rate limit status request from user: ${clientState.username || 'unknown'}`);
+            const stats = rateLimitMiddleware.getStats();
+            const globalStatus = await rateLimitMiddleware.getGlobalConnectionStatus();
+            const userStatus = clientState.username ? await rateLimitMiddleware.getUserStatus(clientState.username) : null;
+
+            ws.send(JSON.stringify({
+              type: SignalType.RATE_LIMIT_STATUS,
+              stats,
+              globalConnectionStatus: globalStatus,
+              userStatus
+            }));
+            break;
+          }
+
+          case SignalType.RATE_LIMIT_RESET: {
+            // Admin function: Reset rate limits
+            // This could be restricted to admin users in production
+            console.log(`[SERVER] Rate limit reset request from user: ${clientState.username || 'unknown'}`);
+
+            if (parsed.resetType === 'global') {
+              await rateLimitMiddleware.resetGlobalConnectionLimits();
+              ws.send(JSON.stringify({
+                type: SignalType.RATE_LIMIT_STATUS,
+                message: 'Global connection rate limits reset successfully'
+              }));
+            } else if (parsed.resetType === 'user' && parsed.username) {
+              await rateLimitMiddleware.resetUserLimits(parsed.username);
+              ws.send(JSON.stringify({
+                type: SignalType.RATE_LIMIT_STATUS,
+                message: `Rate limits reset successfully for user: ${parsed.username}`
+              }));
+            } else {
+              ws.send(JSON.stringify({
+                type: SignalType.ERROR,
+                message: 'Invalid reset type or missing username'
+              }));
             }
             break;
           }

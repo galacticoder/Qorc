@@ -2,6 +2,7 @@ import * as authUtils from './auth-utils.js';
 import { SignalType, SignalMessages } from '../signals.js';
 import { CryptoUtils } from '../crypto/unified-crypto.js';
 import { UserDatabase } from '../database/database.js';
+import { rateLimitMiddleware } from '../rate-limiting/rate-limit-middleware.js';
 
 function rejectConnection(ws, type, reason, code = 1008) {
   console.log(`[AUTH] Rejecting connection: ${type} - ${reason}`);
@@ -44,6 +45,15 @@ export class AccountAuthHandler {
         console.error('[AUTH] Invalid authentication data format');
         return rejectConnection(ws, SignalType.AUTH_ERROR, "Invalid authentication data format");
       }
+
+      // Per-user auth limiter before processing (across connections)
+      try {
+        const userAuthCheck = await rateLimitMiddleware.checkUserAuthLimit(username);
+        if (!userAuthCheck.allowed) {
+          console.warn(`[AUTH] User auth blocked by rate limit for ${username}: ${userAuthCheck.reason}`);
+          return rejectConnection(ws, SignalType.AUTH_ERROR, userAuthCheck.reason);
+        }
+      } catch {}
 
       if (!authUtils.validateUsernameFormat(username)) {
         console.error(`[AUTH] Invalid username format: ${username}`);
@@ -123,6 +133,7 @@ export class AccountAuthHandler {
 
     if (!await CryptoUtils.Password.verifyPassword(userData.passwordHash, password)) {
       console.error(`[AUTH] Incorrect password for user: ${username}`);
+      try { await rateLimitMiddleware.rateLimiter.userAuthLimiter.consume(username, 1); } catch {}
       return rejectConnection(ws, SignalType.AUTH_ERROR, "Incorrect password");
     }
 

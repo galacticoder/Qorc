@@ -45,15 +45,29 @@ export const useWebSocket = (
       }
     });
 
+    // Ensure generic ERROR messages are handled too
+    websocketClient.registerMessageHandler(SignalType.ERROR, handleServerMessage);
+
     websocketClient.registerMessageHandler(SignalType.ENCRYPTED_MESSAGE, handleEncryptedMessage);
     websocketClient.registerMessageHandler(SignalType.DR_SEND, handleEncryptedMessage);
     websocketClient.registerMessageHandler(SignalType.X3DH_DELIVER_BUNDLE, handleEncryptedMessage);
     websocketClient.registerMessageHandler("raw", rawHandler);
 
+    // Capture rate-limit messages to configure client backoff
+    websocketClient.registerMessageHandler(SignalType.ERROR, (msg: any) => {
+      const rl = msg?.rateLimitInfo;
+      if (rl?.blocked && typeof rl.remainingBlockTime === 'number') {
+        // remainingBlockTime is seconds from server
+        websocketClient.setGlobalRateLimit(rl.remainingBlockTime);
+      }
+      return handleServerMessage(msg);
+    });
+
     return () => {
       registeredSignalTypes.forEach(signal => {
         websocketClient.unregisterMessageHandler(signal);
       });
+      websocketClient.unregisterMessageHandler(SignalType.ERROR);
       websocketClient.unregisterMessageHandler("raw");
     };
   }, [handleServerMessage, handleEncryptedMessage]);

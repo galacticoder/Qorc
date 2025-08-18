@@ -14,6 +14,7 @@ class WebSocketClient {
   private readonly reconnectTimeout: number = 2000;
   private messageHandlers: Map<string, MessageHandler> = new Map();
   private setLoginError?: (error: string) => void;
+  private globalRateLimitUntil: number = 0;
 
   constructor() {
     const isDev = import.meta.env.DEV;
@@ -59,6 +60,7 @@ class WebSocketClient {
         this.ws.onopen = () => {
           this.isConnected = true;
           this.reconnectAttempts = 0;
+          this.globalRateLimitUntil = 0;
           if (this.setLoginError) this.setLoginError("");
           resolve();
         };
@@ -106,6 +108,11 @@ class WebSocketClient {
     if (!this.ws || !this.isConnected) {
       return;
     }
+    if (this.isGloballyRateLimited()) {
+      // Drop to caller; caller can queue
+      try { console.warn('[WS] send suppressed due to global rate limit'); } catch { }
+      return;
+    }
 
     try {
       const message = typeof data === 'object' ? JSON.stringify(data) : String(data);
@@ -119,6 +126,17 @@ class WebSocketClient {
     } catch (error) {
       console.error('Error sending message:', error);
     }
+  }
+
+  public setGlobalRateLimit(seconds: number) {
+    const ms = Math.max(0, Math.floor(seconds * 1000));
+    const until = Date.now() + ms;
+    this.globalRateLimitUntil = Math.max(this.globalRateLimitUntil, until);
+    try { console.warn('[WS] Global rate limit set for seconds:', seconds); } catch { }
+  }
+
+  public isGloballyRateLimited(): boolean {
+    return Date.now() < this.globalRateLimitUntil;
   }
 
   public registerMessageHandler(type: string, handler: MessageHandler): void {

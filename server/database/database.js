@@ -30,6 +30,8 @@ db.exec(`
   );
 `);
 
+// offline_messages table removed
+
 db.exec(`
   CREATE TABLE IF NOT EXISTS prekey_bundles (
     username TEXT PRIMARY KEY,
@@ -161,6 +163,8 @@ export class MessageDatabase {
     }
   }
 }
+
+// OfflineMessageQueue removed
 
 export class PrekeyDatabase {
   static publishBundle(username, bundle) {

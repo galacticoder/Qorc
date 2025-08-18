@@ -34,6 +34,10 @@ export const SignalType = {
   X3DH_REQUEST_BUNDLE: "x3dh-request-bundle",
   X3DH_DELIVER_BUNDLE: "x3dh-deliver-bundle",
   DR_SEND: "dr-send",
+
+  //rate limiting and admin
+  RATE_LIMIT_STATUS: "rate-limit-status",
+  RATE_LIMIT_RESET: "rate-limit-reset",
 };
 
 export const SignalMessages = {

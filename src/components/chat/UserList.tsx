@@ -9,6 +9,7 @@ export interface User {
   username: string;
   isOnline: boolean;
   isTyping?: boolean;
+  // offlineMessageCount removed
   hybridPublicKeys?: {
     x25519PublicBase64: string;
     kyberPublicBase64: string;
@@ -73,6 +74,7 @@ export function UserList({ users, currentUser, className }: UserListProps) {
                     {user.username}
                     {user.username === currentUser && " (you)"}
                   </span>
+                  {/* offline message badge removed */}
                 </div>
               </div>
             ))}

@@ -11,6 +11,16 @@ echo -e "${BLUE}╚════════════════════�
 
 cd "$(dirname "$0")"
 
+# Configure Redis URL (override by exporting REDIS_URL before running this script)
+if [ -z "$REDIS_URL" ]; then
+    export REDIS_URL="redis://127.0.0.1:6379"
+fi
+echo -e "${GREEN}Using Redis at: ${REDIS_URL}${NC}"
+
+# Disable global connection limiter by default when using this start script
+export DISABLE_CONNECTION_LIMIT="true"
+echo -e "${GREEN}Global connection limiter: disabled by start script${NC}"
+
 if ! command -v node &> /dev/null; then
     echo -e "${YELLOW}Node.js is not installed. Please install Node.js to run the server.${NC}"
     exit 1

@@ -12,6 +12,7 @@ export enum SignalType {
   ENCRYPTED_MESSAGE = "encrypted-message",
   USER_DISCONNECT = "user-disconnect",
   SERVERLIMIT = "server-limit",
+  ERROR = "ERROR",
   SERVERMESSAGE = "server-message",
   NAMEEXISTSERROR = "name-exists-error",
   INVALIDNAMELENGTH = "invalid-name-length",

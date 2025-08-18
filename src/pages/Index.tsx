@@ -11,6 +11,7 @@ import { useMessageSender } from "@/hooks/useMessageSender";
 import { useEncryptedMessageHandler } from "@/hooks/useEncryptedMessageHandler";
 import { useChatSignals } from "@/hooks/useChatSignals";
 import { useWebSocket } from "@/hooks/useWebsocket";
+// offline message queue removed
 
 interface ChatAppProps {
   onNavigate: (page: "home" | "server" | "chat") => void;
@@ -32,6 +33,8 @@ const ChatApp: React.FC<ChatAppProps> = ({ onNavigate }) => {
     Database.saveMessageToLocalDB,
     Authentication.setLoginError
   );
+
+  // offline queue removed
 
   const messageSender = useMessageSender(
     Database.users,
@@ -74,6 +77,8 @@ const ChatApp: React.FC<ChatAppProps> = ({ onNavigate }) => {
 
   useWebSocket(signalHandler, encryptedHandler, Authentication.setLoginError);
 
+  // offline queue effects removed
+
   if (!Authentication.isLoggedIn) {
     return (
       <div className="flex items-center justify-center min-h-screen p-4 bg-gradient-to-r from-gray-50 to-slate-50">
@@ -108,7 +113,10 @@ const ChatApp: React.FC<ChatAppProps> = ({ onNavigate }) => {
 
       <div className="flex flex-1 gap-4 h-[calc(100vh-150px)]">
         <div className="hidden md:block w-64">
-          <UserList users={Database.users} currentUser={Authentication.loginUsernameRef.current} />
+          <UserList
+            users={Database.users}
+            currentUser={Authentication.loginUsernameRef.current}
+          />
         </div>
 
         <div className="flex-1">
