@@ -123,18 +123,14 @@ class KyberService {
 class DilithiumService {
   static async generateKeyPair() {
     const kp = await ml_dsa87.keygen(undefined);
-    if (Array.isArray(kp)) {
-      const [pub, sec] = kp;
-      return { publicKey: new Uint8Array(pub), secretKey: new Uint8Array(sec) };
-    } else if (kp.publicKey && kp.secretKey) {
-      return { publicKey: new Uint8Array(kp.publicKey), secretKey: new Uint8Array(kp.secretKey) };
-    } else {
-      throw new Error("Unexpected Dilithium keygen result");
-    }
+    return {
+      publicKey: new Uint8Array(kp.publicKey),
+      secretKey: new Uint8Array(kp.secretKey)
+    };
   }
 
-  static async sign(message, secretKey) {
-    const signature = await ml_dsa87.sign(message, secretKey);
+  static async sign(secretKey, message) {
+    const signature = await ml_dsa87.sign(secretKey, message);
     return new Uint8Array(signature);
   }
 

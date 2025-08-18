@@ -170,7 +170,7 @@ export class PrekeyDatabase {
         username, 		identityEd25519PublicBase64, identityDilithiumPublicBase64, identityX25519PublicBase64,
 		signedPreKeyId, signedPreKeyPublicBase64, signedPreKeyEd25519SignatureBase64, signedPreKeyDilithiumSignatureBase64,
         ratchetPublicBase64, updatedAt
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(username) DO UPDATE SET
         		identityEd25519PublicBase64=excluded.identityEd25519PublicBase64,
 		identityDilithiumPublicBase64=excluded.identityDilithiumPublicBase64,
@@ -183,13 +183,13 @@ export class PrekeyDatabase {
         updatedAt=excluded.updatedAt
     `).run(
       username,
-      		bundle.identityEd25519PublicBase64,
-		bundle.identityDilithiumPublicBase64,
-		bundle.identityX25519PublicBase64,
-		bundle.signedPreKey.id,
-		bundle.signedPreKey.publicKeyBase64,
-		bundle.signedPreKey.ed25519SignatureBase64,
-		bundle.signedPreKey.dilithiumSignatureBase64,
+      bundle.identityEd25519PublicBase64,
+      bundle.identityDilithiumPublicBase64,
+      bundle.identityX25519PublicBase64,
+      bundle.signedPreKey.id,
+      bundle.signedPreKey.publicKeyBase64,
+      bundle.signedPreKey.ed25519SignatureBase64,
+      bundle.signedPreKey.dilithiumSignatureBase64,
       //prefer ratchet and use signed prekey pub if not available
       bundle.ratchetPublicBase64 || bundle.signedPreKey.publicKeyBase64,
       now
@@ -214,15 +214,15 @@ export class PrekeyDatabase {
     }
     return {
       username,
-      		identityEd25519PublicBase64: bundle.identityEd25519PublicBase64,
-		identityDilithiumPublicBase64: bundle.identityDilithiumPublicBase64,
-		identityX25519PublicBase64: bundle.identityX25519PublicBase64,
-      		signedPreKey: {
-			id: bundle.signedPreKeyId,
-			publicKeyBase64: bundle.signedPreKeyPublicBase64,
-			ed25519SignatureBase64: bundle.signedPreKeyEd25519SignatureBase64,
-			dilithiumSignatureBase64: bundle.signedPreKeyDilithiumSignatureBase64
-		},
+      identityEd25519PublicBase64: bundle.identityEd25519PublicBase64,
+      identityDilithiumPublicBase64: bundle.identityDilithiumPublicBase64,
+      identityX25519PublicBase64: bundle.identityX25519PublicBase64,
+      signedPreKey: {
+        id: bundle.signedPreKeyId,
+        publicKeyBase64: bundle.signedPreKeyPublicBase64,
+        ed25519SignatureBase64: bundle.signedPreKeyEd25519SignatureBase64,
+        dilithiumSignatureBase64: bundle.signedPreKeyDilithiumSignatureBase64
+      },
       ratchetPublicBase64: bundle.ratchetPublicBase64,
       oneTimePreKey: ot ? { id: ot.keyId, publicKeyBase64: ot.publicKeyBase64 } : null
     };

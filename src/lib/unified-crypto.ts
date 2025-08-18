@@ -435,23 +435,30 @@ class KyberService {
 class DilithiumService {
   static async generateKeyPair(): Promise<{ publicKey: Uint8Array; secretKey: Uint8Array }> {
     const kp = await ml_dsa87.keygen(undefined);
-    if (Array.isArray(kp)) {
-      const [pub, sec] = kp;
-      return { publicKey: new Uint8Array(pub), secretKey: new Uint8Array(sec) };
-    } else if ((kp as any).publicKey && (kp as any).secretKey) {
-      return { publicKey: new Uint8Array((kp as any).publicKey), secretKey: new Uint8Array((kp as any).secretKey) };
-    } else {
-      throw new Error("Unexpected Dilithium keygen result");
-    }
+    return {
+      publicKey: new Uint8Array(kp.publicKey),
+      secretKey: new Uint8Array(kp.secretKey)
+    };
   }
 
-  static async sign(message: Uint8Array, secretKey: Uint8Array): Promise<Uint8Array> {
-    const signature = await ml_dsa87.sign(message, secretKey);
+  static async sign(secretKey: Uint8Array, message: Uint8Array): Promise<Uint8Array> {
+    const signature = await ml_dsa87.sign(secretKey, message);
     return new Uint8Array(signature);
   }
 
   static async verify(signature: Uint8Array, message: Uint8Array, publicKey: Uint8Array): Promise<boolean> {
-    return await ml_dsa87.verify(signature, message, publicKey);
+    try {
+      // Correct order for @noble/post-quantum: publicKey, message, signature
+      return await ml_dsa87.verify(publicKey, message, signature);
+    } catch (e1) {
+      try {
+        // Fallback: try alternative order if the first fails
+        return await ml_dsa87.verify(signature, message, publicKey);
+      } catch (e2) {
+        console.warn('[Dilithium] verify failed with both orders:', (e1 as any)?.message || e1, '|', (e2 as any)?.message || e2);
+        return false;
+      }
+    }
   }
 }
 

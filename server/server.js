@@ -92,19 +92,40 @@ async function startServer() {
                 const idEd = Buffer.from(b.identityEd25519PublicBase64 || '', 'base64');
                 const spk = Buffer.from(b.signedPreKey?.publicKeyBase64 || '', 'base64');
                 const ed25519Sig = Buffer.from(b.signedPreKey?.ed25519SignatureBase64 || b.signedPreKey?.signatureBase64 || '', 'base64');
-                
+
                 // Verify Ed25519 signature
                 const ed25519Valid = idEd.length === 32 && spk.length === 32 && ed25519Sig.length === 64 && ed25519.verify(ed25519Sig, spk, idEd);
-                
+
                 // Verify Dilithium signature if present
                 let dilithiumValid = true;
                 if (b.signedPreKey?.dilithiumSignatureBase64 && b.identityDilithiumPublicBase64) {
-                  const { ml_dsa87 } = await import("@noble/post-quantum/ml-dsa");
-                  const idDilithium = Buffer.from(b.identityDilithiumPublicBase64, 'base64');
-                  const dilithiumSig = Buffer.from(b.signedPreKey.dilithiumSignatureBase64, 'base64');
-                  dilithiumValid = await ml_dsa87.verify(dilithiumSig, spk, idDilithium);
+                  try {
+                    const { ml_dsa87 } = await import("@noble/post-quantum/ml-dsa");
+                    const idDilithium = Buffer.from(b.identityDilithiumPublicBase64, 'base64');
+                    const dilithiumSig = Buffer.from(b.signedPreKey.dilithiumSignatureBase64, 'base64');
+
+                    console.log('[SERVER] Dilithium key lengths:', {
+                      publicKeyLength: idDilithium.length,
+                      signatureLength: dilithiumSig.length,
+                      signedPreKeyLength: spk.length
+                    });
+
+                    console.log('[SERVER] ml_dsa87 object:', Object.keys(ml_dsa87));
+
+                    try {
+                      // Correct order: publicKey, message, signature
+                      dilithiumValid = await ml_dsa87.verify(idDilithium, spk, dilithiumSig);
+                    } catch (error) {
+                      // Try alternative parameter order if the first fails
+                      console.warn('[SERVER] Dilithium verification failed with standard order, trying alternative:', error);
+                      dilithiumValid = await ml_dsa87.verify(dilithiumSig, spk, idDilithium);
+                    }
+                  } catch (dilithiumError) {
+                    console.error('[SERVER] Dilithium signature verification failed:', dilithiumError?.message || dilithiumError);
+                    dilithiumValid = false; // Fail the verification if Dilithium verification fails
+                  }
                 }
-                
+
                 const valid = ed25519Valid && dilithiumValid;
                 if (!valid) {
                   console.warn('[SERVER] Rejected bundle due to invalid signedPreKey signature for user', clientState.username);
@@ -126,13 +147,17 @@ async function startServer() {
               return ws.send(JSON.stringify({ type: SignalType.ERROR, message: 'Account login required first' }));
             }
             const target = parsed.username;
+            console.log(`[SERVER] Bundle request from ${clientState.username} for ${target}`);
             const out = PrekeyDatabase.takeBundleForRecipient(target);
             if (!out) {
+              console.log(`[SERVER] No bundle available for ${target}`);
               return ws.send(JSON.stringify({ type: SignalType.ERROR, message: 'No bundle available' }));
             }
             console.log(`[SERVER] Delivering prekey bundle for ${target} to ${clientState.username}`, {
               hasOneTime: !!out.oneTimePreKey,
-              signedPreKeyId: out.signedPreKey?.id
+              signedPreKeyId: out.signedPreKey?.id,
+              bundleKeys: Object.keys(out),
+              signedPreKeyKeys: Object.keys(out.signedPreKey || {})
             });
             ws.send(JSON.stringify({ type: SignalType.X3DH_DELIVER_BUNDLE, bundle: out, username: target }));
             break;

@@ -282,11 +282,13 @@ export function useEncryptedMessageHandler(
           const prekeyBundle = {
             username: targetUser,
             identityEd25519Public: CryptoUtils.Base64.base64ToUint8Array(bundle.identityEd25519PublicBase64),
+            identityDilithiumPublic: bundle.identityDilithiumPublicBase64 ? CryptoUtils.Base64.base64ToUint8Array(bundle.identityDilithiumPublicBase64) : undefined,
             identityX25519Public: CryptoUtils.Base64.base64ToUint8Array(bundle.identityX25519PublicBase64),
             signedPreKey: {
               id: bundle.signedPreKey.id,
               publicKey: CryptoUtils.Base64.base64ToUint8Array(bundle.signedPreKey.publicKeyBase64),
-              signature: CryptoUtils.Base64.base64ToUint8Array(bundle.signedPreKey.signatureBase64),
+              ed25519Signature: CryptoUtils.Base64.base64ToUint8Array(bundle.signedPreKey.ed25519SignatureBase64),
+              dilithiumSignature: bundle.signedPreKey.dilithiumSignatureBase64 ? CryptoUtils.Base64.base64ToUint8Array(bundle.signedPreKey.dilithiumSignatureBase64) : undefined,
             },
             ratchetPublic: CryptoUtils.Base64.base64ToUint8Array(bundle.ratchetPublicBase64),
             oneTimePreKey: bundle.oneTimePreKey ? { id: bundle.oneTimePreKey.id, publicKey: CryptoUtils.Base64.base64ToUint8Array(bundle.oneTimePreKey.publicKeyBase64) } : undefined,

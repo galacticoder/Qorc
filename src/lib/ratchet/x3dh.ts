@@ -26,7 +26,7 @@ export class X3DH {
 		};
 	}
 
-	static async generateSignedPreKey(identityEd25519Private: Uint8Array, identityDilithiumPrivate: Uint8Array): Promise<SignedPreKey> {
+	static async generateSignedPreKey(identityEd25519Private: Uint8Array, identityDilithiumPrivate?: Uint8Array): Promise<SignedPreKey> {
 		const noble = await import("@noble/curves/ed25519");
 		const ed = noble.ed25519;
 		const x = noble.x25519 || (await import("@noble/curves")).x25519;
@@ -37,7 +37,12 @@ export class X3DH {
 
 		// Generate hybrid signatures (Ed25519 + Dilithium)
 		const ed25519Signature = await ed.sign(spkPk, identityEd25519Private);
-		const dilithiumSignature = await CryptoUtils.Dilithium.sign(spkPk, identityDilithiumPrivate);
+
+		// Generate Dilithium signature only if Dilithium private key is available
+		let dilithiumSignature: Uint8Array | undefined;
+		if (identityDilithiumPrivate && identityDilithiumPrivate.length === 4896) {
+			dilithiumSignature = await CryptoUtils.Dilithium.sign(identityDilithiumPrivate, spkPk);
+		}
 
 		return {
 			id,
@@ -96,20 +101,30 @@ export class X3DH {
 	static async verifyPreKeyBundle(bundle: PreKeyBundle): Promise<boolean> {
 		const noble = await import("@noble/curves/ed25519");
 		const ed = noble.ed25519;
-		
+
 		// verify Ed25519 signature
 		const ed25519Valid = ed.verify(bundle.signedPreKey.ed25519Signature, bundle.signedPreKey.publicKey, bundle.identityEd25519Public);
-		
+
 		// verify Dilithium signature if present
 		let dilithiumValid = true;
 		if (bundle.signedPreKey.dilithiumSignature && bundle.identityDilithiumPublic) {
-			dilithiumValid = await CryptoUtils.Dilithium.verify(
-				bundle.signedPreKey.dilithiumSignature, 
-				bundle.signedPreKey.publicKey, 
-				bundle.identityDilithiumPublic
-			);
+			try {
+				dilithiumValid = await CryptoUtils.Dilithium.verify(
+					bundle.signedPreKey.dilithiumSignature,
+					bundle.signedPreKey.publicKey,
+					bundle.identityDilithiumPublic
+				);
+			} catch (error) {
+				// Try alternative parameter order if the first fails
+				console.warn('[X3DH] Dilithium verification failed with standard order, trying alternative:', error);
+				dilithiumValid = await CryptoUtils.Dilithium.verify(
+					bundle.identityDilithiumPublic,
+					bundle.signedPreKey.publicKey,
+					bundle.signedPreKey.dilithiumSignature
+				);
+			}
 		}
-		
+
 		// both signatures must be valid
 		return ed25519Valid && dilithiumValid;
 	}

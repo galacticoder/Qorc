@@ -295,6 +295,11 @@ export const useAuth = () => {
         let ratchetId = await keyManagerRef.current.getRatchetIdentity();
         if (!ratchetId) {
           const id = await X3DH.generateIdentityKeyPair();
+          console.log('[AUTH] Generated new ratchet identity:', {
+            ed25519PrivateLen: id.ed25519Private.length,
+            dilithiumPrivateLen: id.dilithiumPrivate.length,
+            x25519PrivateLen: id.x25519Private.length
+          });
           await keyManagerRef.current.storeRatchetIdentity({
             ed25519Private: id.ed25519Private,
             ed25519PublicBase64: CryptoUtils.Base64.arrayBufferToBase64(id.ed25519Public),
@@ -306,13 +311,24 @@ export const useAuth = () => {
           ratchetId = await keyManagerRef.current.getRatchetIdentity();
         }
 
+        console.log('[AUTH] Retrieved ratchet identity:', {
+          ed25519PrivateLen: ratchetId?.ed25519Private?.length,
+          dilithiumPrivateLen: ratchetId?.dilithiumPrivate?.length,
+          x25519PrivateLen: ratchetId?.x25519Private?.length
+        });
+
         //reuse existing prekeys if available and if not then generate new
         let existing = await keyManagerRef.current.getRatchetPrekeys();
         let signedPreKey = existing?.signedPreKey ?? null;
         let oneTimePreKeys = existing?.oneTimePreKeys ?? [];
         let generatedSignedPreKey = null;
         if (!signedPreKey) {
-          				const gen = await X3DH.generateSignedPreKey(ratchetId!.ed25519Private, ratchetId!.dilithiumPrivate);
+          console.log('[AUTH] Generating signed prekey with keys:', {
+            ed25519PrivateLen: ratchetId!.ed25519Private.length,
+            dilithiumPrivateLen: ratchetId!.dilithiumPrivate?.length,
+            hasDilithium: !!ratchetId!.dilithiumPrivate
+          });
+          const gen = await X3DH.generateSignedPreKey(ratchetId!.ed25519Private, ratchetId!.dilithiumPrivate || undefined);
           generatedSignedPreKey = gen;
           signedPreKey = {
             id: gen.id,
