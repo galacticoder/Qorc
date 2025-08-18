@@ -38,6 +38,8 @@ export enum SignalType {
   X3DH_REQUEST_BUNDLE = "x3dh-request-bundle",
   X3DH_DELIVER_BUNDLE = "x3dh-deliver-bundle",
   DR_SEND = "dr-send",
+  TYPING_START = "typing-start",
+  TYPING_STOP = "typing-stop",
 }
 
 interface SignalHandlers {

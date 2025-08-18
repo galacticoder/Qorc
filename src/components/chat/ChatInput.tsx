@@ -25,6 +25,7 @@ interface ChatInputProps {
   editingMessage?: Message | null;
   onCancelEdit?: () => void;
   onEditMessage?: (newContent: string) => void;
+  onTyping: () => void;
 }
 
 export function ChatInput({
@@ -38,6 +39,7 @@ export function ChatInput({
   editingMessage,
   onCancelEdit,
   onEditMessage,
+  onTyping,
 }: ChatInputProps) {
   const [message, setMessage] = useState("");
   const [isSending, setIsSending] = useState(false);
@@ -123,7 +125,10 @@ export function ChatInput({
 
           <MessageTextarea
             value={message}
-            onChange={(e) => setMessage(e.target.value)}
+            onChange={(e) => {
+              setMessage(e.target.value);
+              onTyping();
+            }}
             onKeyDown={handleKeyDown}
             textareaRef={textareaRef}
           />

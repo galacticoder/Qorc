@@ -8,6 +8,9 @@ import { Separator } from "@/components/ui/separator";
 import { User } from "./UserList";
 import { SignalType } from "@/lib/signals.ts";
 import { MessageReply } from "./types";
+import { useTypingIndicator } from "@/hooks/useTypingIndicator";
+import { TypingIndicator } from "./TypingIndicator";
+import { useTypingIndicatorContext } from "@/contexts/TypingIndicatorContext";
 
 interface ChatInterfaceProps {
   onSendMessage: (
@@ -34,6 +37,10 @@ export function ChatInterface({
   const scrollAreaRef = useRef<HTMLDivElement>(null);
   const [replyTo, setReplyTo] = useState<Message | null>(null);
   const [editingMessage, setEditingMessage] = useState<Message | null>(null);
+
+  // Typing hook
+  const { handleLocalTyping } = useTypingIndicator(currentUsername, onSendMessage);
+  const { typingUsers } = useTypingIndicatorContext();
 
   useEffect(() => {
     if (scrollAreaRef.current) {
@@ -76,6 +83,13 @@ export function ChatInterface({
         </div>
       </ScrollArea>
       <Separator />
+      {typingUsers.length > 0 && (
+        <div className="px-4 py-2 bg-gray-50 border-t">
+          {typingUsers.map((username) => (
+            <TypingIndicator key={username} username={username} />
+          ))}
+        </div>
+      )}
       <div className="p-4 bg-gray-50">
         <ChatInput
           onSendMessage={async (
@@ -101,6 +115,7 @@ export function ChatInterface({
               setEditingMessage(null);
             }
           }}
+          onTyping={handleLocalTyping}
         />
       </div>
     </Card>

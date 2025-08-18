@@ -361,8 +361,8 @@ export function useMessageSender(
 
             console.log(`Sent DR message to user ${user.username}: `, drPayload);
 
-            // send to server db for storage
-            if (serverHybridPublic && aesKeyRef.current) {
+            // Send to server db (skip typing)
+            if (typeInside !== 'typing-start' && typeInside !== 'typing-stop' && serverHybridPublic && aesKeyRef.current) {
               const { iv, authTag, encrypted } = await CryptoUtils.AES.encryptWithAesGcmRaw(
                 content,
                 aesKeyRef.current
@@ -449,16 +449,18 @@ export function useMessageSender(
           })
         );
 
-        // save to local db
-        onNewMessage({
-          id: id,
-          content: content || "",
-          sender: loginUsernameRef.current,
-          timestamp: new Date(),
-          isCurrentUser: true,
-          isDeleted: typeInside === SignalType.DELETE_MESSAGE,
-          ...(replyTo ? { replyTo } : {})
-        });
+        // Save to local db (skip typing)
+        if (typeInside !== 'typing-start' && typeInside !== 'typing-stop') {
+          onNewMessage({
+            id: id,
+            content: content || "",
+            sender: loginUsernameRef.current,
+            timestamp: new Date(),
+            isCurrentUser: true,
+            isDeleted: typeInside === SignalType.DELETE_MESSAGE,
+            ...(replyTo ? { replyTo } : {})
+          });
+        }
         try {
           console.debug("[Sender] Locally persisted outbound message", {
             id,

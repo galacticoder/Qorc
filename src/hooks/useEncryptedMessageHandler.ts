@@ -366,6 +366,30 @@ export function useEncryptedMessageHandler(
           }
         }
 
+        // Handle typing indicators - don't save them
+        if (payload?.typeInside === 'typing-start' || payload?.typeInside === 'typing-stop') {
+          try {
+            const typingData = JSON.parse(payload.content || '{}');
+            if (typingData.type === 'typing-start' || typingData.type === 'typing-stop') {
+              const event = new CustomEvent('typing-indicator', {
+                detail: {
+                  type: typingData.type === 'typing-start' ? 'start' : 'stop',
+                  username: payload.from,
+                }
+              });
+              window.dispatchEvent(event);
+              return; // Don't save typing as messages
+            }
+          } catch (error) {
+            console.error('[Recv] Failed to parse typing indicator:', error);
+            return;
+          }
+        }
+
+
+
+
+
         const isJoinLeave = payload.content?.includes("joined") ||
           payload.content?.includes("left");
 

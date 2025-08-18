@@ -11,6 +11,7 @@ import { useMessageSender } from "@/hooks/useMessageSender";
 import { useEncryptedMessageHandler } from "@/hooks/useEncryptedMessageHandler";
 import { useChatSignals } from "@/hooks/useChatSignals";
 import { useWebSocket } from "@/hooks/useWebsocket";
+import { TypingIndicatorProvider } from "@/contexts/TypingIndicatorContext";
 // offline message queue removed
 
 interface ChatAppProps {
@@ -100,37 +101,39 @@ const ChatApp: React.FC<ChatAppProps> = ({ onNavigate }) => {
   }
 
   return (
-    <div className="flex flex-col h-screen p-4 md:p-6 bg-gradient-to-r from-gray-50 to-slate-50">
-      <header className="mb-4 flex justify-between items-center">
-        <h1 className="text-2xl font-bold">SecureChat</h1>
-        <button
-          onClick={() => Authentication.logout()}
-          className="px-4 py-2 bg-red-500 text-white rounded-lg hover:bg-red-600 transition"
-        >
-          Logout
-        </button>
-      </header>
+    <TypingIndicatorProvider>
+      <div className="flex flex-col h-screen p-4 md:p-6 bg-gradient-to-r from-gray-50 to-slate-50">
+        <header className="mb-4 flex justify-between items-center">
+          <h1 className="text-2xl font-bold">SecureChat</h1>
+          <button
+            onClick={() => Authentication.logout()}
+            className="px-4 py-2 bg-red-500 text-white rounded-lg hover:bg-red-600 transition"
+          >
+            Logout
+          </button>
+        </header>
 
-      <div className="flex flex-1 gap-4 h-[calc(100vh-150px)]">
-        <div className="hidden md:block w-64">
-          <UserList
-            users={Database.users}
-            currentUser={Authentication.loginUsernameRef.current}
-          />
-        </div>
+        <div className="flex flex-1 gap-4 h-[calc(100vh-150px)]">
+          <div className="hidden md:block w-64">
+            <UserList
+              users={Database.users}
+              currentUser={Authentication.loginUsernameRef.current}
+            />
+          </div>
 
-        <div className="flex-1">
-          <ChatInterface
-            messages={messages}
-            onSendMessage={messageSender.handleSendMessageType}
-            onSendFile={handleSendFileWrapper}
-            isEncrypted={true}
-            currentUsername={Authentication.loginUsernameRef.current}
-            users={Database.users}
-          />
+          <div className="flex-1">
+            <ChatInterface
+              messages={messages}
+              onSendMessage={messageSender.handleSendMessageType}
+              onSendFile={handleSendFileWrapper}
+              isEncrypted={true}
+              currentUsername={Authentication.loginUsernameRef.current}
+              users={Database.users}
+            />
+          </div>
         </div>
       </div>
-    </div>
+    </TypingIndicatorProvider>
   );
 };
 

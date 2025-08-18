@@ -38,6 +38,10 @@ export const SignalType = {
   //rate limiting and admin
   RATE_LIMIT_STATUS: "rate-limit-status",
   RATE_LIMIT_RESET: "rate-limit-reset",
+  
+  //typing indicators
+  TYPING_START: "typing-start",
+  TYPING_STOP: "typing-stop",
 };
 
 export const SignalMessages = {
