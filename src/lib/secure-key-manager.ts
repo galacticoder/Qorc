@@ -436,6 +436,8 @@ export class SecureKeyManager {
 	async storeRatchetIdentity(identity: {
 		ed25519Private: Uint8Array;
 		ed25519PublicBase64: string;
+		dilithiumPrivate: Uint8Array;
+		dilithiumPublicBase64: string;
 		x25519Private: Uint8Array;
 		x25519PublicBase64: string;
 	}): Promise<void> {
@@ -447,6 +449,8 @@ export class SecureKeyManager {
 		const payload = {
 			ed25519Private: Array.from(identity.ed25519Private),
 			ed25519PublicBase64: identity.ed25519PublicBase64,
+			dilithiumPrivate: Array.from(identity.dilithiumPrivate),
+			dilithiumPublicBase64: identity.dilithiumPublicBase64,
 			x25519Private: Array.from(identity.x25519Private),
 			x25519PublicBase64: identity.x25519PublicBase64,
 		};
@@ -466,6 +470,8 @@ export class SecureKeyManager {
 	async getRatchetIdentity(): Promise<{
 		ed25519Private: Uint8Array;
 		ed25519PublicBase64: string;
+		dilithiumPrivate: Uint8Array;
+		dilithiumPublicBase64: string;
 		x25519Private: Uint8Array;
 		x25519PublicBase64: string;
 	} | null> {
@@ -489,6 +495,8 @@ export class SecureKeyManager {
 					resolve({
 						ed25519Private: new Uint8Array(payload.ed25519Private),
 						ed25519PublicBase64: payload.ed25519PublicBase64,
+						dilithiumPrivate: new Uint8Array(payload.dilithiumPrivate),
+						dilithiumPublicBase64: payload.dilithiumPublicBase64,
 						x25519Private: new Uint8Array(payload.x25519Private),
 						x25519PublicBase64: payload.x25519PublicBase64,
 					});

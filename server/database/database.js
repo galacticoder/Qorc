@@ -33,11 +33,13 @@ db.exec(`
 db.exec(`
   CREATE TABLE IF NOT EXISTS prekey_bundles (
     username TEXT PRIMARY KEY,
-    identityEd25519PublicBase64 TEXT NOT NULL,
-    identityX25519PublicBase64 TEXT NOT NULL,
+    		identityEd25519PublicBase64 TEXT NOT NULL,
+		identityDilithiumPublicBase64 TEXT,
+		identityX25519PublicBase64 TEXT NOT NULL,
     signedPreKeyId TEXT NOT NULL,
     signedPreKeyPublicBase64 TEXT NOT NULL,
-    signedPreKeySignatureBase64 TEXT NOT NULL,
+    		signedPreKeyEd25519SignatureBase64 TEXT NOT NULL,
+		signedPreKeyDilithiumSignatureBase64 TEXT,
     ratchetPublicBase64 TEXT NOT NULL,
     updatedAt INTEGER NOT NULL
   );
@@ -165,25 +167,29 @@ export class PrekeyDatabase {
     const now = Date.now();
     db.prepare(`
       INSERT INTO prekey_bundles (
-        username, identityEd25519PublicBase64, identityX25519PublicBase64,
-        signedPreKeyId, signedPreKeyPublicBase64, signedPreKeySignatureBase64,
+        username, 		identityEd25519PublicBase64, identityDilithiumPublicBase64, identityX25519PublicBase64,
+		signedPreKeyId, signedPreKeyPublicBase64, signedPreKeyEd25519SignatureBase64, signedPreKeyDilithiumSignatureBase64,
         ratchetPublicBase64, updatedAt
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(username) DO UPDATE SET
-        identityEd25519PublicBase64=excluded.identityEd25519PublicBase64,
-        identityX25519PublicBase64=excluded.identityX25519PublicBase64,
-        signedPreKeyId=excluded.signedPreKeyId,
-        signedPreKeyPublicBase64=excluded.signedPreKeyPublicBase64,
-        signedPreKeySignatureBase64=excluded.signedPreKeySignatureBase64,
+        		identityEd25519PublicBase64=excluded.identityEd25519PublicBase64,
+		identityDilithiumPublicBase64=excluded.identityDilithiumPublicBase64,
+		identityX25519PublicBase64=excluded.identityX25519PublicBase64,
+		signedPreKeyId=excluded.signedPreKeyId,
+		signedPreKeyPublicBase64=excluded.signedPreKeyPublicBase64,
+		signedPreKeyEd25519SignatureBase64=excluded.signedPreKeyEd25519SignatureBase64,
+		signedPreKeyDilithiumSignatureBase64=excluded.signedPreKeyDilithiumSignatureBase64,
         ratchetPublicBase64=excluded.ratchetPublicBase64,
         updatedAt=excluded.updatedAt
     `).run(
       username,
-      bundle.identityEd25519PublicBase64,
-      bundle.identityX25519PublicBase64,
-      bundle.signedPreKey.id,
-      bundle.signedPreKey.publicKeyBase64,
-      bundle.signedPreKey.signatureBase64,
+      		bundle.identityEd25519PublicBase64,
+		bundle.identityDilithiumPublicBase64,
+		bundle.identityX25519PublicBase64,
+		bundle.signedPreKey.id,
+		bundle.signedPreKey.publicKeyBase64,
+		bundle.signedPreKey.ed25519SignatureBase64,
+		bundle.signedPreKey.dilithiumSignatureBase64,
       //prefer ratchet and use signed prekey pub if not available
       bundle.ratchetPublicBase64 || bundle.signedPreKey.publicKeyBase64,
       now
@@ -208,13 +214,15 @@ export class PrekeyDatabase {
     }
     return {
       username,
-      identityEd25519PublicBase64: bundle.identityEd25519PublicBase64,
-      identityX25519PublicBase64: bundle.identityX25519PublicBase64,
-      signedPreKey: {
-        id: bundle.signedPreKeyId,
-        publicKeyBase64: bundle.signedPreKeyPublicBase64,
-        signatureBase64: bundle.signedPreKeySignatureBase64
-      },
+      		identityEd25519PublicBase64: bundle.identityEd25519PublicBase64,
+		identityDilithiumPublicBase64: bundle.identityDilithiumPublicBase64,
+		identityX25519PublicBase64: bundle.identityX25519PublicBase64,
+      		signedPreKey: {
+			id: bundle.signedPreKeyId,
+			publicKeyBase64: bundle.signedPreKeyPublicBase64,
+			ed25519SignatureBase64: bundle.signedPreKeyEd25519SignatureBase64,
+			dilithiumSignatureBase64: bundle.signedPreKeyDilithiumSignatureBase64
+		},
       ratchetPublicBase64: bundle.ratchetPublicBase64,
       oneTimePreKey: ot ? { id: ot.keyId, publicKeyBase64: ot.publicKeyBase64 } : null
     };

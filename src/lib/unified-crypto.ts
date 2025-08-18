@@ -1,6 +1,7 @@
 import * as argon2 from "argon2-wasm";
 import { MlKem768 } from "mlkem";
 import { blake3 } from "@noble/hashes/blake3";
+import { ml_dsa87 } from "@noble/post-quantum/ml-dsa";
 
 type Uint8ArrOrBuf = Uint8Array | ArrayBuffer;
 
@@ -431,6 +432,29 @@ class KyberService {
   }
 }
 
+class DilithiumService {
+  static async generateKeyPair(): Promise<{ publicKey: Uint8Array; secretKey: Uint8Array }> {
+    const kp = await ml_dsa87.keygen(undefined);
+    if (Array.isArray(kp)) {
+      const [pub, sec] = kp;
+      return { publicKey: new Uint8Array(pub), secretKey: new Uint8Array(sec) };
+    } else if ((kp as any).publicKey && (kp as any).secretKey) {
+      return { publicKey: new Uint8Array((kp as any).publicKey), secretKey: new Uint8Array((kp as any).secretKey) };
+    } else {
+      throw new Error("Unexpected Dilithium keygen result");
+    }
+  }
+
+  static async sign(message: Uint8Array, secretKey: Uint8Array): Promise<Uint8Array> {
+    const signature = await ml_dsa87.sign(message, secretKey);
+    return new Uint8Array(signature);
+  }
+
+  static async verify(signature: Uint8Array, message: Uint8Array, publicKey: Uint8Array): Promise<boolean> {
+    return await ml_dsa87.verify(signature, message, publicKey);
+  }
+}
+
 class KDF {
   static async deriveAesCryptoKeyFromIkm(ikm: Uint8Array, salt: Uint8Array) {
     const baseKey = await (subtle as SubtleCrypto).importKey("raw", ikm, { name: "HKDF" }, false, ["deriveKey"]);
@@ -751,6 +775,7 @@ export const CryptoUtils = {
   Hybrid,
   X25519: X25519Service,
   Kyber: KyberService,
+  Dilithium: DilithiumService,
   AES,
   KDF,
 };

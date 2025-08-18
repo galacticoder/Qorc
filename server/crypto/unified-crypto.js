@@ -2,6 +2,7 @@ import { webcrypto } from 'crypto';
 import argon2 from 'argon2';
 import { MlKem768 } from 'mlkem';
 import { blake3 } from '@noble/hashes/blake3';
+import { ml_dsa87 } from '@noble/post-quantum/ml-dsa';
 
 const crypto = webcrypto;
 
@@ -116,6 +117,29 @@ class KyberService {
     const kyber = this.kyberInstance();
     const shared = await kyber.decap(ciphertextBytes, secretKeyBytes);
     return new Uint8Array(shared);
+  }
+}
+
+class DilithiumService {
+  static async generateKeyPair() {
+    const kp = await ml_dsa87.keygen(undefined);
+    if (Array.isArray(kp)) {
+      const [pub, sec] = kp;
+      return { publicKey: new Uint8Array(pub), secretKey: new Uint8Array(sec) };
+    } else if (kp.publicKey && kp.secretKey) {
+      return { publicKey: new Uint8Array(kp.publicKey), secretKey: new Uint8Array(kp.secretKey) };
+    } else {
+      throw new Error("Unexpected Dilithium keygen result");
+    }
+  }
+
+  static async sign(message, secretKey) {
+    const signature = await ml_dsa87.sign(message, secretKey);
+    return new Uint8Array(signature);
+  }
+
+  static async verify(signature, message, publicKey) {
+    return await ml_dsa87.verify(signature, message, publicKey);
   }
 }
 
@@ -435,6 +459,7 @@ export const CryptoUtils = {
   Hash: HashService,
   X25519: X25519Service,
   Kyber: KyberService,
+  Dilithium: DilithiumService,
   KDF: KDFService,
   AES: AESService,
   Hybrid: HybridService,

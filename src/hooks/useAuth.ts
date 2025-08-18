@@ -298,6 +298,8 @@ export const useAuth = () => {
           await keyManagerRef.current.storeRatchetIdentity({
             ed25519Private: id.ed25519Private,
             ed25519PublicBase64: CryptoUtils.Base64.arrayBufferToBase64(id.ed25519Public),
+            dilithiumPrivate: id.dilithiumPrivate,
+            dilithiumPublicBase64: CryptoUtils.Base64.arrayBufferToBase64(id.dilithiumPublic),
             x25519Private: id.x25519Private,
             x25519PublicBase64: CryptoUtils.Base64.arrayBufferToBase64(id.x25519Public),
           });
@@ -308,13 +310,15 @@ export const useAuth = () => {
         let existing = await keyManagerRef.current.getRatchetPrekeys();
         let signedPreKey = existing?.signedPreKey ?? null;
         let oneTimePreKeys = existing?.oneTimePreKeys ?? [];
+        let generatedSignedPreKey = null;
         if (!signedPreKey) {
-          const gen = await X3DH.generateSignedPreKey(ratchetId!.ed25519Private);
+          				const gen = await X3DH.generateSignedPreKey(ratchetId!.ed25519Private, ratchetId!.dilithiumPrivate);
+          generatedSignedPreKey = gen;
           signedPreKey = {
             id: gen.id,
             private: gen.privateKey!,
             publicBase64: CryptoUtils.Base64.arrayBufferToBase64(gen.publicKey),
-            signatureBase64: CryptoUtils.Base64.arrayBufferToBase64(gen.signature),
+            signatureBase64: CryptoUtils.Base64.arrayBufferToBase64(gen.ed25519Signature),
           };
         }
         if (!oneTimePreKeys || oneTimePreKeys.length === 0) {
@@ -331,12 +335,14 @@ export const useAuth = () => {
           bundle: {
             username: loginUsernameRef.current,
             identityEd25519PublicBase64: ratchetId!.ed25519PublicBase64,
+            identityDilithiumPublicBase64: ratchetId!.dilithiumPublicBase64,
             identityX25519PublicBase64: ratchetId!.x25519PublicBase64,
             ratchetPublicBase64: signedPreKey.publicBase64,
             signedPreKey: {
               id: signedPreKey.id,
               publicKeyBase64: signedPreKey.publicBase64,
-              signatureBase64: signedPreKey.signatureBase64,
+              ed25519SignatureBase64: signedPreKey.signatureBase64,
+              dilithiumSignatureBase64: generatedSignedPreKey ? CryptoUtils.Base64.arrayBufferToBase64(generatedSignedPreKey.dilithiumSignature!) : undefined,
             },
             oneTimePreKeys: oneTimePreKeys.map(k => ({ id: k.id, publicKeyBase64: k.publicBase64 })),
           }

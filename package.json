@@ -12,6 +12,7 @@
     "@hookform/resolvers": "^3.9.0",
     "@noble/curves": "^1.9.7",
     "@noble/hashes": "^1.8.0",
+    "@noble/post-quantum": "^0.4.1",
     "@radix-ui/react-accordion": "^1.2.0",
     "@radix-ui/react-alert-dialog": "^1.1.1",
     "@radix-ui/react-aspect-ratio": "^1.1.0",

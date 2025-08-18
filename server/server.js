@@ -87,12 +87,25 @@ async function startServer() {
                 oneTimePreKeysCount: Array.isArray(b.oneTimePreKeys) ? b.oneTimePreKeys.length : 0,
                 ratchetPublicBase64: (b.ratchetPublicBase64 || '').slice(0, 16) + '...'
               });
-              // ensure signedPreKey was signed by identity Ed25519 key
+              // ensure signedPreKey was signed by identity Ed25519 key and optionally Dilithium key
               try {
                 const idEd = Buffer.from(b.identityEd25519PublicBase64 || '', 'base64');
                 const spk = Buffer.from(b.signedPreKey?.publicKeyBase64 || '', 'base64');
-                const sig = Buffer.from(b.signedPreKey?.signatureBase64 || '', 'base64');
-                const valid = idEd.length === 32 && spk.length === 32 && sig.length === 64 && ed25519.verify(sig, spk, idEd);
+                const ed25519Sig = Buffer.from(b.signedPreKey?.ed25519SignatureBase64 || b.signedPreKey?.signatureBase64 || '', 'base64');
+                
+                // Verify Ed25519 signature
+                const ed25519Valid = idEd.length === 32 && spk.length === 32 && ed25519Sig.length === 64 && ed25519.verify(ed25519Sig, spk, idEd);
+                
+                // Verify Dilithium signature if present
+                let dilithiumValid = true;
+                if (b.signedPreKey?.dilithiumSignatureBase64 && b.identityDilithiumPublicBase64) {
+                  const { ml_dsa87 } = await import("@noble/post-quantum/ml-dsa");
+                  const idDilithium = Buffer.from(b.identityDilithiumPublicBase64, 'base64');
+                  const dilithiumSig = Buffer.from(b.signedPreKey.dilithiumSignatureBase64, 'base64');
+                  dilithiumValid = await ml_dsa87.verify(dilithiumSig, spk, idDilithium);
+                }
+                
+                const valid = ed25519Valid && dilithiumValid;
                 if (!valid) {
                   console.warn('[SERVER] Rejected bundle due to invalid signedPreKey signature for user', clientState.username);
                   return ws.send(JSON.stringify({ type: SignalType.ERROR, message: 'Invalid signedPreKey signature' }));

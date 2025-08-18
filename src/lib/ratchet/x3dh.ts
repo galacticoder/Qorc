@@ -3,7 +3,7 @@ import type { IdentityKeyPair, OneTimePreKey, PreKeyBundle, SignedPreKey } from 
 
 export class X3DH {
 	static async generateIdentityKeyPair(): Promise<IdentityKeyPair> {
-		// ed25519 for signing x25519 for dh
+		// ed25519 + dilithium for signing, x25519 for dh
 		const noble = await import("@noble/curves/ed25519");
 		const ed = noble.ed25519;
 		const x = noble.x25519 || (await import("@noble/curves")).x25519;
@@ -11,18 +11,22 @@ export class X3DH {
 		const edSk = ed.utils.randomPrivateKey();
 		const edPk = ed.getPublicKey(edSk);
 
+		const dilithiumKP = await CryptoUtils.Dilithium.generateKeyPair();
+
 		const xSk = x.utils.randomPrivateKey();
 		const xPk = x.getPublicKey(xSk);
 
 		return {
 			ed25519Private: edSk,
 			ed25519Public: edPk,
+			dilithiumPrivate: dilithiumKP.secretKey,
+			dilithiumPublic: dilithiumKP.publicKey,
 			x25519Private: xSk,
 			x25519Public: xPk,
 		};
 	}
 
-	static async generateSignedPreKey(identityEd25519Private: Uint8Array): Promise<SignedPreKey> {
+	static async generateSignedPreKey(identityEd25519Private: Uint8Array, identityDilithiumPrivate: Uint8Array): Promise<SignedPreKey> {
 		const noble = await import("@noble/curves/ed25519");
 		const ed = noble.ed25519;
 		const x = noble.x25519 || (await import("@noble/curves")).x25519;
@@ -31,12 +35,15 @@ export class X3DH {
 		const spkPk = x.getPublicKey(spkSk);
 		const id = crypto.randomUUID();
 
-		const sig = await ed.sign(spkPk, identityEd25519Private);
+		// Generate hybrid signatures (Ed25519 + Dilithium)
+		const ed25519Signature = await ed.sign(spkPk, identityEd25519Private);
+		const dilithiumSignature = await CryptoUtils.Dilithium.sign(spkPk, identityDilithiumPrivate);
 
 		return {
 			id,
 			publicKey: spkPk,
-			signature: sig,
+			ed25519Signature: ed25519Signature,
+			dilithiumSignature: dilithiumSignature,
 			privateKey: spkSk,
 		};
 	}
@@ -89,8 +96,22 @@ export class X3DH {
 	static async verifyPreKeyBundle(bundle: PreKeyBundle): Promise<boolean> {
 		const noble = await import("@noble/curves/ed25519");
 		const ed = noble.ed25519;
-		// verify that signed prekey signature is made by the identity signing key
-		return ed.verify(bundle.signedPreKey.signature, bundle.signedPreKey.publicKey, bundle.identityEd25519Public);
+		
+		// verify Ed25519 signature
+		const ed25519Valid = ed.verify(bundle.signedPreKey.ed25519Signature, bundle.signedPreKey.publicKey, bundle.identityEd25519Public);
+		
+		// verify Dilithium signature if present
+		let dilithiumValid = true;
+		if (bundle.signedPreKey.dilithiumSignature && bundle.identityDilithiumPublic) {
+			dilithiumValid = await CryptoUtils.Dilithium.verify(
+				bundle.signedPreKey.dilithiumSignature, 
+				bundle.signedPreKey.publicKey, 
+				bundle.identityDilithiumPublic
+			);
+		}
+		
+		// both signatures must be valid
+		return ed25519Valid && dilithiumValid;
 	}
 
 	// derive the x3dh shared secret for sender a using recipient b prekey bundle

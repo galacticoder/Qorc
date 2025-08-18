@@ -1,7 +1,9 @@
 export interface IdentityKeyPair {
-	// long term signing identity (ed25519)
+	// long term signing identity (ed25519 + dilithium)
 	ed25519Public: Uint8Array;
 	ed25519Private: Uint8Array;
+	dilithiumPublic: Uint8Array;
+	dilithiumPrivate: Uint8Array;
 
 	// long term dh identity (x25519)
 	x25519Public: Uint8Array;
@@ -11,7 +13,8 @@ export interface IdentityKeyPair {
 export interface SignedPreKey {
 	id: string; // unique id for rotation
 	publicKey: Uint8Array; // x25519 public
-	signature: Uint8Array; // signature over identity and signed prekey
+	ed25519Signature: Uint8Array; // ed25519 signature over identity and signed prekey
+	dilithiumSignature?: Uint8Array; // dilithium signature over identity and signed prekey
 	privateKey?: Uint8Array; // stored locally only
 }
 
@@ -24,6 +27,7 @@ export interface OneTimePreKey {
 export interface PreKeyBundle {
 	username: string;
 	identityEd25519Public: Uint8Array;
+	identityDilithiumPublic?: Uint8Array;
 	identityX25519Public: Uint8Array;
 	signedPreKey: SignedPreKey;
 	oneTimePreKey?: OneTimePreKey | null; // dispensed one time prekey
