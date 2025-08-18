@@ -87,7 +87,7 @@ async function startServer() {
                 oneTimePreKeysCount: Array.isArray(b.oneTimePreKeys) ? b.oneTimePreKeys.length : 0,
                 ratchetPublicBase64: (b.ratchetPublicBase64 || '').slice(0, 16) + '...'
               });
-              // Minimal signature verification: ensure signedPreKey was signed by identity Ed25519 key
+              // ensure signedPreKey was signed by identity Ed25519 key
               try {
                 const idEd = Buffer.from(b.identityEd25519PublicBase64 || '', 'base64');
                 const spk = Buffer.from(b.signedPreKey?.publicKeyBase64 || '', 'base64');

@@ -362,7 +362,6 @@ export function useEncryptedMessageHandler(
               prevUsers.filter(user => user.username !== username)
             );
           }
-          return;
         }
 
         const isJoinLeave = payload.content?.includes("joined") ||
