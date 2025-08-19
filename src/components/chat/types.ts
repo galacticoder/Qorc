@@ -11,6 +11,13 @@ export interface FileInfo {
   data: ArrayBuffer;
 }
 
+export interface MessageReceipt {
+  delivered: boolean;
+  read: boolean;
+  deliveredAt?: Date;
+  readAt?: Date;
+}
+
 export interface Message {
   id: string;
   content: string;
@@ -26,6 +33,7 @@ export interface Message {
   filename?: string;
   fileSize?: number;
   type?: string;
+  receipt?: MessageReceipt;
 }
 
 export interface ChatMessageProps {

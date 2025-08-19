@@ -40,6 +40,9 @@ export enum SignalType {
   DR_SEND = "dr-send",
   TYPING_START = "typing-start",
   TYPING_STOP = "typing-stop",
+  // Receipt signals
+  MESSAGE_DELIVERED = "message-delivered",
+  MESSAGE_READ = "message-read",
 }
 
 interface SignalHandlers {
@@ -215,6 +218,19 @@ export async function handleSignalMessages(
 
         aesKeyRef.current = derivedKey;
         setShowPassphrasePrompt(false);
+        break;
+      }
+
+      case SignalType.MESSAGE_DELIVERED: {
+        // Handle message delivery receipt
+        const { messageId, from } = data || {};
+        if (messageId && from) {
+          // Dispatch delivery receipt event
+          const event = new CustomEvent('message-delivered', {
+            detail: { messageId, from }
+          });
+          window.dispatchEvent(event);
+        }
         break;
       }
 

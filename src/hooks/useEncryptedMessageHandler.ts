@@ -22,6 +22,36 @@ export function useEncryptedMessageHandler(
   setMessages: React.Dispatch<React.SetStateAction<Message[]>>,
   saveMessageToLocalDB: (msg: Message) => Promise<void>
 ) {
+  // Helper function to handle read receipts
+  const handleReadReceipt = useCallback((payload: any) => {
+    if (payload?.typeInside === 'read-receipt') {
+      try {
+        // Parse the content to extract the read receipt data
+        const receiptData = JSON.parse(payload.content);
+        if (receiptData.type === 'read-receipt' && receiptData.messageId) {
+          console.debug('[Recv] Processing read receipt:', {
+            messageId: receiptData.messageId,
+            from: payload.from,
+            timestamp: receiptData.timestamp
+          });
+
+          const event = new CustomEvent('message-read', {
+            detail: {
+              messageId: receiptData.messageId,
+              from: payload.from
+            }
+          });
+          window.dispatchEvent(event);
+          return true; // Indicates this was a read receipt that should not be processed as a message
+        }
+      } catch (error) {
+        console.error('[Recv] Failed to parse read receipt:', error);
+        return true; // Return true to prevent processing as message even if parsing fails
+      }
+    }
+    return false; // Not a read receipt, can process as normal message
+  }, []);
+
   return useCallback(
     async (encryptedMessage: any) => {
       try {
@@ -55,7 +85,7 @@ export function useEncryptedMessageHandler(
             hasSession: !!session,
             sessionHasValidRemoteKey: session ? !session.remoteDhPublic.every(b => b === 0) : false,
           });
-          //if we dont have a session yet but the message has x3dh data then create one
+          //ifwe dont have a session yet but the message has x3dh data then create one
           const dr = encryptedMessage.payload || {};
           try {
             console.debug("[Recv] DR header", {
@@ -75,7 +105,7 @@ export function useEncryptedMessageHandler(
             shouldBootstrap: !session && !!dr?.x3dh?.ephX25519PublicBase64,
           });
 
-          //if we have a session but the DH key doesnt match and this is the first message reset everything
+          //ifwe have a session but the DH key doesnt match and this is the first message reset everything
           if (session && dr?.x3dh?.ephX25519PublicBase64 && dr.header.n === 0) {
             const messageDhPublic = CryptoUtils.Base64.base64ToUint8Array(dr.header.dhPub);
             const currentRemoteDhPublic = session.remoteDhPublic;
@@ -196,9 +226,28 @@ export function useEncryptedMessageHandler(
             if ((session as any).usedOneTimePreKeyId && keyManagerRef.current?.consumeOneTimePreKey) {
               try { await keyManagerRef.current.consumeOneTimePreKey((session as any).usedOneTimePreKeyId); } catch { }
             }
+            // Successfully decrypted, continue with normal processing
+            console.debug("[Recv] DR decrypt successful, continuing with message processing");
           } catch (e) {
+            console.warn("[Recv] DR decrypt failed, attempting fallback:", {
+              error: e.message || e,
+              from: fromUser,
+              messageNumber: header.n,
+              sessionRecvNumber: session.recvMessageNumber,
+              isTyping: dr?.typeInside === 'typing-start' || dr?.typeInside === 'typing-stop'
+            });
+
+            // Preserve any skipped keys derived during this attempt so late/out-of-order messages can still decrypt
+            const skippedBeforeRestore = new Map(session.skippedMessageKeys);
+
             //put session back to how it was before trying to decrypt
             restore(snapshot);
+            // Merge skipped keys (snapshot keys + newly derived ones)
+            session.skippedMessageKeys = new Map([
+              ...snapshot.skippedMessageKeys,
+              ...skippedBeforeRestore,
+            ]);
+
             //if this is the first message try some other ways to decrypt
             if (dr?.x3dh && header.n === 0) {
               const ratchetId2 = await keyManagerRef.current?.getRatchetIdentity?.();
@@ -206,36 +255,44 @@ export function useEncryptedMessageHandler(
               if (ratchetId2 && prekeys2?.signedPreKey) {
                 const ephPub = CryptoUtils.Base64.base64ToUint8Array(dr.x3dh.ephX25519PublicBase64);
                 const tryDecryptWith = async (oneTimeSk?: Uint8Array, otkId?: string): Promise<string | null> => {
-                  const rootKey2 = await X3DH.deriveReceiverSecret(
-                    ratchetId2.x25519Private,
-                    prekeys2.signedPreKey.private,
-                    ephPub,
-                    oneTimeSk
-                  );
-                  const alt = {
-                    rootKey: rootKey2,
-                    currentDhPrivate: prekeys2.signedPreKey.private,
-                    currentDhPublic: CryptoUtils.Base64.base64ToUint8Array(prekeys2.signedPreKey.publicBase64),
-                    remoteDhPublic: CryptoUtils.Base64.base64ToUint8Array(dr.header?.dhPub || dr.x3dh.ephX25519PublicBase64),
-                    sendChainKey: new Uint8Array(32),
-                    recvChainKey: new Uint8Array(32),
-                    sendMessageNumber: 0,
-                    recvMessageNumber: 0,
-                    previousSendMessageCount: 0,
-                    skippedMessageKeys: new Map(),
-                    usedSignedPreKeyId: prekeys2.signedPreKey.id,
-                    ...(otkId ? { usedOneTimePreKeyId: otkId } : {}),
-                  } as any;
                   try {
-                    const out = await DoubleRatchet.decrypt(alt, ratchetMsg);
-                    //save the session that worked
-                    SessionStore.set(currentUser, fromUser, alt);
-                    if (otkId && keyManagerRef.current?.consumeOneTimePreKey) {
-                      try { await keyManagerRef.current.consumeOneTimePreKey(otkId); } catch { }
+                    const rootKey2 = await X3DH.deriveReceiverSecret(
+                      ratchetId2.x25519Private,
+                      prekeys2.signedPreKey.private,
+                      ephPub,
+                      oneTimeSk
+                    );
+                    const alt = {
+                      rootKey: rootKey2,
+                      currentDhPrivate: prekeys2.signedPreKey.private,
+                      currentDhPublic: CryptoUtils.Base64.base64ToUint8Array(prekeys2.signedPreKey.publicBase64),
+                      remoteDhPublic: CryptoUtils.Base64.base64ToUint8Array(dr.header?.dhPub || dr.x3dh.ephX25519PublicBase64),
+                      sendChainKey: new Uint8Array(32),
+                      recvChainKey: new Uint8Array(32),
+                      sendMessageNumber: 0,
+                      recvMessageNumber: 0,
+                      previousSendMessageCount: 0,
+                      skippedMessageKeys: new Map(),
+                      usedSignedPreKeyId: prekeys2.signedPreKey.id,
+                      ...(otkId ? { usedOneTimePreKeyId: otkId } : {}),
+                    } as any;
+                    try {
+                      const out = await DoubleRatchet.decrypt(alt, ratchetMsg);
+                      //save the session that worked
+                      SessionStore.set(currentUser, fromUser, alt);
+                      if (otkId && keyManagerRef.current?.consumeOneTimePreKey) {
+                        try { await keyManagerRef.current.consumeOneTimePreKey(otkId); } catch { }
+                      }
+                      session = alt;
+                      return out;
+                    } catch (fallbackError) {
+                      console.debug("[Recv] Fallback decrypt failed:", fallbackError.message || fallbackError);
+                      return null;
                     }
-                    session = alt;
-                    return out;
-                  } catch { return null; }
+                  } catch (x3dhError) {
+                    console.debug("[Recv] X3DH derivation failed:", x3dhError.message || x3dhError);
+                    return null;
+                  }
                 };
 
                 //1) if message says it used a one time key first try without it //(maybe sender didnt actually use it)
@@ -252,12 +309,77 @@ export function useEncryptedMessageHandler(
                   }
                 }
 
-                if (!plaintext) { throw e; }
+                if (!plaintext) {
+                  console.error("[Recv] All decrypt attempts failed for message:", {
+                    from: fromUser,
+                    messageNumber: header.n,
+                    error: e.message || e
+                  });
+                  throw e;
+                }
               } else {
+                console.error("[Recv] No ratchet identity or prekeys available for fallback");
                 throw e;
               }
             } else {
-              throw e;
+              // For non-first messages or messages without X3DH, log the failure but don't throw
+              // This prevents the entire message processing from failing
+              console.warn("[Recv] DR decrypt failed for non-first message, skipping:", {
+                from: fromUser,
+                messageNumber: header.n,
+                sessionRecvNumber: session.recvMessageNumber,
+                hasX3dh: !!dr?.x3dh
+              });
+
+              // If this is a typing message, just skip it entirely since it's not critical
+              if (dr?.typeInside === 'typing-start' || dr?.typeInside === 'typing-stop') {
+                console.debug("[Recv] Skipping failed typing message");
+                return;
+              }
+
+              // Check if the session is severely out of sync (more than 10 messages behind)
+              const messageGap = header.n - session.recvMessageNumber;
+              if (messageGap > 10) {
+                console.warn("[Recv] Session severely out of sync, attempting recovery:", {
+                  from: fromUser,
+                  messageGap,
+                  sessionRecvNumber: session.recvMessageNumber,
+                  incomingMessageNumber: header.n
+                });
+
+                // Try to recover by advancing the session to the current message number
+                try {
+                  while (session.recvMessageNumber < header.n) {
+                    const { nextChainKey, messageKey } = await (await import('@/lib/ratchet/double-ratchet')).DoubleRatchet.kdfChain(session.recvChainKey);
+                    session.recvChainKey = nextChainKey;
+                    session.recvMessageNumber++;
+                  }
+
+                  // Now try to decrypt the message
+                  const ratchetMsg = {
+                    header: { dhPub: CryptoUtils.Base64.base64ToUint8Array(dr.header.dhPub), pn: dr.header.pn, n: dr.header.n },
+                    ciphertext: dr.ciphertext,
+                  };
+
+                  const plaintext = await (await import('@/lib/ratchet/double-ratchet')).DoubleRatchet.decrypt(session, ratchetMsg);
+                  if (plaintext) {
+                    console.log("[Recv] Session recovery successful, message decrypted");
+                    // Continue with normal message processing
+                    payload = JSON.parse(plaintext);
+                    // Don't return here, let the normal flow continue
+                  } else {
+                    // Recovery failed, return early
+                    return;
+                  }
+                } catch (recoveryError) {
+                  console.warn("[Recv] Session recovery failed:", recoveryError.message || recoveryError);
+                  // Recovery failed, return early
+                  return;
+                }
+              } else {
+                // Return early to skip processing this message
+                return;
+              }
             }
           }
           console.debug("[Recv] DR decrypted plaintext length:", (plaintext || '').length);
@@ -271,6 +393,11 @@ export function useEncryptedMessageHandler(
             ts: payload?.timestamp,
             hasReply: !!payload?.replyTo,
           });
+
+          // Handle read receipts from double ratchet messages
+          if (handleReadReceipt(payload)) {
+            return; // Don't save read receipts as messages
+          }
         } else if (encryptedMessage?.type === SignalType.X3DH_DELIVER_BUNDLE) {
           //create a new session from the other users bundle because were sending to them
           const currentUser = loginUsernameRef.current;
@@ -357,33 +484,26 @@ export function useEncryptedMessageHandler(
           });
         }
 
-        if (payload.type === SignalType.USER_DISCONNECT) {
-          const username = payload.content?.split(" ")[0];
-          if (username) {
-            setUsers(prevUsers =>
-              prevUsers.filter(user => user.username !== username)
-            );
-          }
-        }
-
-        // Handle typing indicators - don't save them
-        if (payload?.typeInside === 'typing-start' || payload?.typeInside === 'typing-stop') {
+        // Handle typing indicators
+        if (payload.typeInside === 'typing-start' || payload.typeInside === 'typing-stop') {
           try {
-            const typingData = JSON.parse(payload.content || '{}');
-            if (typingData.type === 'typing-start' || typingData.type === 'typing-stop') {
-              const event = new CustomEvent('typing-indicator', {
-                detail: {
-                  type: typingData.type === 'typing-start' ? 'start' : 'stop',
-                  username: payload.from,
-                }
-              });
-              window.dispatchEvent(event);
-              return; // Don't save typing as messages
-            }
+            const event = new CustomEvent('typing-indicator', {
+              detail: {
+                type: payload.typeInside,
+                username: payload.from,
+              }
+            });
+            window.dispatchEvent(event);
+            return; // Don't save typing as messages
           } catch (error) {
             console.error('[Recv] Failed to parse typing indicator:', error);
             return;
           }
+        }
+
+        // Handle read receipts - check this BEFORE processing as regular message
+        if (handleReadReceipt(payload)) {
+          return; // Don't save read receipts as messages
         }
 
 
@@ -407,6 +527,7 @@ export function useEncryptedMessageHandler(
           isDeleted: payload.typeInside === SignalType.DELETE_MESSAGE,
           isEdited: payload.typeInside === SignalType.EDIT_MESSAGE,
           shouldPersist: isJoinLeave,
+          receipt: payload.from === loginUsernameRef.current ? undefined : { delivered: false, read: false },
           ...(payload.replyTo && {
             replyTo: {
               id: payload.replyTo.id,
@@ -425,6 +546,20 @@ export function useEncryptedMessageHandler(
           ts: payloadFull.timestamp?.toISOString?.() ?? payloadFull.timestamp,
         });
         await saveMessageToLocalDB(payloadFull);
+
+        // Send delivery receipt for non-system messages
+        if (!payloadFull.isSystemMessage && payloadFull.sender !== loginUsernameRef.current) {
+          try {
+            websocketClient.send(JSON.stringify({
+              type: SignalType.MESSAGE_DELIVERED,
+              messageId: payloadFull.id,
+              from: loginUsernameRef.current,
+              to: payloadFull.sender
+            }));
+          } catch (error) {
+            console.error('[Recv] Failed to send delivery receipt:', error);
+          }
+        }
 
         console.log("[Recv] Received payload:", payload)
 

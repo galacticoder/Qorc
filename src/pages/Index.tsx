@@ -124,6 +124,7 @@ const ChatApp: React.FC<ChatAppProps> = ({ onNavigate }) => {
           <div className="flex-1">
             <ChatInterface
               messages={messages}
+              setMessages={setMessages}
               onSendMessage={messageSender.handleSendMessageType}
               onSendFile={handleSendFileWrapper}
               isEncrypted={true}

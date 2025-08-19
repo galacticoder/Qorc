@@ -6,15 +6,18 @@ export function useTypingIndicator(
 ) {
 	const typingTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 	const lastTypingTimeRef = useRef<number>(0);
+	const isTypingRef = useRef<boolean>(false);
 
-	// Wait 2 seconds before stopping typing
-	const TYPING_STOP_DELAY = 2000;
+	// Wait 3 seconds before stopping typing i'll change later to be lower for better accuracy
+	const TYPING_STOP_DELAY = 3000;
+	// Minimum time between typing start messages
+	const MIN_TYPING_INTERVAL = 2000;
 
 	// Send typing start signal
 	const sendTypingStart = useCallback(async () => {
 		const now = Date.now();
-		// Only send if not sent recently (prevent spam)
-		if (now - lastTypingTimeRef.current > 1000) {
+		// Only send if not already typing and not sent recently
+		if (!isTypingRef.current && now - lastTypingTimeRef.current > MIN_TYPING_INTERVAL) {
 			try {
 				await sendEncryptedMessage(
 					crypto.randomUUID(),
@@ -22,6 +25,7 @@ export function useTypingIndicator(
 					'typing-start'
 				);
 				lastTypingTimeRef.current = now;
+				isTypingRef.current = true;
 			} catch (error) {
 				console.error('Failed to send typing start:', error);
 			}
@@ -30,14 +34,18 @@ export function useTypingIndicator(
 
 	// Send typing stop signal
 	const sendTypingStop = useCallback(async () => {
-		try {
-			await sendEncryptedMessage(
-				crypto.randomUUID(),
-				JSON.stringify({ type: 'typing-stop', timestamp: Date.now() }),
-				'typing-stop'
-			);
-		} catch (error) {
-			console.error('Failed to send typing stop:', error);
+		// Only send if we were actually typing
+		if (isTypingRef.current) {
+			try {
+				await sendEncryptedMessage(
+					crypto.randomUUID(),
+					JSON.stringify({ type: 'typing-stop', timestamp: Date.now() }),
+					'typing-stop'
+				);
+				isTypingRef.current = false;
+			} catch (error) {
+				console.error('Failed to send typing stop:', error);
+			}
 		}
 	}, [sendEncryptedMessage]);
 

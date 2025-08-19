@@ -45,26 +45,30 @@ export function TypingIndicatorProvider({ children }: TypingIndicatorProviderPro
 
 	// Listen for typing indicator events from encrypted messages
 	useEffect(() => {
-		const handleTypingEvent = (event: CustomEvent) => {
+		const handleTypingIndicator = (event: CustomEvent) => {
 			const { type, username } = event.detail;
-			if (type === 'start') {
-				setTypingUser(username, true);
 
-				// Auto-remove typing indicator after 2 seconds
-				setTimeout(() => {
-					setTypingUser(username, false);
-				}, 2000);
-			} else if (type === 'stop') {
-				setTypingUser(username, false);
+			if (type === 'typing-start') {
+				setTypingUsers(prev => {
+					const newSet = new Set(prev);
+					newSet.add(username);
+					return newSet;
+				});
+			} else if (type === 'typing-stop') {
+				setTypingUsers(prev => {
+					const newSet = new Set(prev);
+					newSet.delete(username);
+					return newSet;
+				});
 			}
 		};
 
-		window.addEventListener('typing-indicator', handleTypingEvent as EventListener);
+		window.addEventListener('typing-indicator', handleTypingIndicator as EventListener);
 
 		return () => {
-			window.removeEventListener('typing-indicator', handleTypingEvent as EventListener);
+			window.removeEventListener('typing-indicator', handleTypingIndicator as EventListener);
 		};
-	}, [setTypingUser]);
+	}, []);
 
 	const value: TypingIndicatorContextType = {
 		typingUsers: Array.from(typingUsers),

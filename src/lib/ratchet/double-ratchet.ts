@@ -163,6 +163,42 @@ export class DoubleRatchet {
 			state.recvMessageNumber++;
 		}
 
+		// Check if we already have the message key for this message number
+		const currentMessageKey = `${CryptoUtils.Base64.arrayBufferToBase64(state.remoteDhPublic)}:${message.header.n}`;
+		if (state.skippedMessageKeys.has(currentMessageKey)) {
+			// We already have this message key, use it directly
+			const messageKey = state.skippedMessageKeys.get(currentMessageKey)!;
+			state.skippedMessageKeys.delete(currentMessageKey);
+			
+			try {
+				console.debug('[DR] Using existing skipped message key for message', message.header.n);
+			} catch { }
+			
+			const aesKey = await CryptoUtils.Keys.importRawAesKey(messageKey);
+			const des = CryptoUtils.AES.deserializeEncryptedData(message.ciphertext);
+			try {
+				console.debug('[DR] aes params from skipped key', { ivLen: des.iv.length, tagLen: des.authTag.length, encLen: des.encrypted.length });
+			} catch { }
+			const out = await CryptoUtils.AES.decryptWithAesGcmRaw(des.iv, des.authTag, des.encrypted, aesKey);
+
+			// Verify BLAKE3 MAC if present
+			if (message.blake3Mac) {
+				const messageBytes = new TextEncoder().encode(out);
+				const expectedMac = CryptoUtils.Base64.base64ToUint8Array(message.blake3Mac);
+				const isValid = await CryptoUtils.Hash.verifyBlake3Mac(messageBytes, messageKey, expectedMac);
+				if (!isValid) {
+					throw new Error('BLAKE3 MAC verification failed - message integrity compromised');
+				}
+				try {
+					console.debug('[DR] BLAKE3 MAC verified successfully');
+				} catch { }
+			}
+
+			try { console.debug('[DR] decrypt ok from skipped key, length', (out || '').length); } catch { }
+			return out;
+		}
+
+		// Derive the message key for the current message
 		const { nextChainKey, messageKey } = await this.kdfChain(state.recvChainKey);
 		state.recvChainKey = nextChainKey;
 		state.recvMessageNumber++;

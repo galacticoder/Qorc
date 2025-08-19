@@ -9,6 +9,7 @@ import { ChatMessageProps } from "./types.ts";
 import { SystemMessage } from "./ChatMessage/SystemMessage.tsx";
 import { DeletedMessage } from "./ChatMessage/DeletedMessage.tsx";
 import { FileMessage } from "./ChatMessage/FileMessage.tsx";
+import { MessageReceipt } from "./MessageReceipt.tsx";
 
 export function ChatMessage({ message, onReply, previousMessage, onDelete, onEdit }: ChatMessageProps) {
   const { content, sender, timestamp, isCurrentUser, isSystemMessage, isDeleted, type } = message;
@@ -136,6 +137,13 @@ export function ChatMessage({ message, onReply, previousMessage, onDelete, onEdi
             )}
           </div>
         </div>
+
+        {/* Message Receipt */}
+        <MessageReceipt
+          receipt={message.receipt}
+          isCurrentUser={isCurrentUser}
+          className="mt-1"
+        />
       </div>
     </div>
   );

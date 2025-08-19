@@ -11,6 +11,7 @@ import { MessageReply } from "./types";
 import { useTypingIndicator } from "@/hooks/useTypingIndicator";
 import { TypingIndicator } from "./TypingIndicator";
 import { useTypingIndicatorContext } from "@/contexts/TypingIndicatorContext";
+import { useMessageReceipts } from "@/hooks/useMessageReceipts";
 
 interface ChatInterfaceProps {
   onSendMessage: (
@@ -21,6 +22,7 @@ interface ChatInterfaceProps {
   ) => Promise<void>;
   onSendFile: (fileData: any) => void;
   messages: Message[];
+  setMessages: React.Dispatch<React.SetStateAction<Message[]>>;
   isEncrypted?: boolean;
   currentUsername: string;
   users: User[];
@@ -30,6 +32,7 @@ export function ChatInterface({
   onSendMessage,
   onSendFile,
   messages,
+  setMessages,
   isEncrypted = true,
   currentUsername,
   users,
@@ -42,6 +45,9 @@ export function ChatInterface({
   const { handleLocalTyping } = useTypingIndicator(currentUsername, onSendMessage);
   const { typingUsers } = useTypingIndicatorContext();
 
+  // Message receipts hook
+  const { sendReadReceipt, markMessageAsRead, getSmartReceiptStatus } = useMessageReceipts(messages, setMessages, currentUsername, onSendMessage);
+
   useEffect(() => {
     if (scrollAreaRef.current) {
       const scrollContainer =
@@ -53,6 +59,59 @@ export function ChatInterface({
       }
     }
   }, [messages]);
+
+  // Mark messages as read when they come into view
+  useEffect(() => {
+    const scrollContainer = scrollAreaRef.current?.querySelector('[data-radix-scroll-area-viewport]');
+    if (!scrollContainer) return;
+
+    const isTabActive = () => document.visibilityState === 'visible' && document.hasFocus();
+
+    const handleScroll = () => {
+      if (!isTabActive()) return; // Do not mark as read if tab is not active
+
+      const containerRect = scrollContainer.getBoundingClientRect();
+      const containerBottom = containerRect.bottom;
+
+      // Check each message to see if it's visible
+      messages.forEach(message => {
+        // Only process messages from OTHER users (not current user) and not already read
+        if (message.sender === currentUsername || message.receipt?.read) return;
+
+        const messageElement = document.getElementById(`message-${message.id}`);
+        if (messageElement) {
+          const messageRect = messageElement.getBoundingClientRect();
+          const messageBottom = messageRect.bottom;
+
+          // If message is visible in the scroll container
+          if (messageBottom <= containerBottom && messageBottom >= containerRect.top) {
+            // Only mark as read if the sender is actually online to receive the read receipt
+            // Check if the sender is in the users list (indicating they're online)
+            const senderIsOnline = users.some(user => user.username === message.sender);
+
+            if (senderIsOnline) {
+              // Mark as read locally and send read receipt to sender
+              markMessageAsRead(message.id);
+              sendReadReceipt(message.id, message.sender);
+            }
+          }
+        }
+      });
+    };
+
+    scrollContainer.addEventListener('scroll', handleScroll);
+    window.addEventListener('visibilitychange', handleScroll);
+    window.addEventListener('focus', handleScroll);
+    window.addEventListener('blur', handleScroll);
+    handleScroll(); // Check initial state
+
+    return () => {
+      scrollContainer.removeEventListener('scroll', handleScroll);
+      window.removeEventListener('visibilitychange', handleScroll);
+      window.removeEventListener('focus', handleScroll);
+      window.removeEventListener('blur', handleScroll);
+    };
+  }, [messages, currentUsername, markMessageAsRead, sendReadReceipt, users]);
 
   return (
     <Card className="flex flex-col h-full border border-gray-300 shadow-lg rounded-lg">
@@ -68,16 +127,20 @@ export function ChatInterface({
             </div>
           ) : (
             messages.map((message, index) => (
-              <ChatMessage
-                key={message.id}
-                message={message}
-                previousMessage={index > 0 ? messages[index - 1] : undefined}
-                onReply={() => setReplyTo(message)}
-                onDelete={() =>
-                  onSendMessage(message.id, "", SignalType.DELETE_MESSAGE, null) // add reply field later
-                }
-                onEdit={() => setEditingMessage(message)}
-              />
+              <div key={message.id} id={`message-${message.id}`}>
+                <ChatMessage
+                  message={{
+                    ...message,
+                    receipt: getSmartReceiptStatus(messages.find(m => m.id === message.id) || message)
+                  }}
+                  previousMessage={index > 0 ? messages[index - 1] : undefined}
+                  onReply={() => setReplyTo(message)}
+                  onDelete={() =>
+                    onSendMessage(message.id, "", SignalType.DELETE_MESSAGE, null) // add reply field later
+                  }
+                  onEdit={() => setEditingMessage(message)}
+                />
+              </div>
             ))
           )}
         </div>

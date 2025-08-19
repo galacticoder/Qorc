@@ -148,6 +148,23 @@ export function useMessageSender(
         const onlineRecipients = users.filter(u => u.username !== loginUsernameRef.current && u.isOnline);
         if (onlineRecipients.length === 0) {
           console.log("[Sender] No online recipients; not delivering");
+          // Don't mark as delivered if no one is online to receive it
+          return;
+        }
+
+        // Mark message as delivered locally since we have online recipients
+        if (typeInside !== 'typing-start' && typeInside !== 'typing-stop' && typeInside !== 'read-receipt') {
+          const updatedMessage = {
+            id: id,
+            content: content || "",
+            sender: loginUsernameRef.current,
+            timestamp: new Date(),
+            isCurrentUser: true,
+            isDeleted: typeInside === SignalType.DELETE_MESSAGE,
+            receipt: { delivered: true, deliveredAt: new Date(), read: false },
+            ...(replyTo ? { replyTo } : {})
+          };
+          onNewMessage(updatedMessage);
         }
 
         await Promise.all(
@@ -449,18 +466,6 @@ export function useMessageSender(
           })
         );
 
-        // Save to local db (skip typing)
-        if (typeInside !== 'typing-start' && typeInside !== 'typing-stop') {
-          onNewMessage({
-            id: id,
-            content: content || "",
-            sender: loginUsernameRef.current,
-            timestamp: new Date(),
-            isCurrentUser: true,
-            isDeleted: typeInside === SignalType.DELETE_MESSAGE,
-            ...(replyTo ? { replyTo } : {})
-          });
-        }
         try {
           console.debug("[Sender] Locally persisted outbound message", {
             id,
