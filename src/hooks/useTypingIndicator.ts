@@ -5,20 +5,23 @@ export function useTypingIndicator(
 	sendEncryptedMessage: (messageId: string, content: string, messageSignalType: string, replyTo?: any) => Promise<void>
 ) {
 	const typingTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+	const debounceTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 	const lastTypingTimeRef = useRef<number>(0);
 	const isTypingRef = useRef<boolean>(false);
+	const pendingTypingRef = useRef<boolean>(false);
 
-	// Wait 3 seconds before stopping typing i'll change later to be lower for better accuracy
-	const TYPING_STOP_DELAY = 3000;
-	// Minimum time between typing start messages
-	const MIN_TYPING_INTERVAL = 2000;
+	// Optimized timing for better UX and performance
+	const TYPING_STOP_DELAY = 1500; // Reduced from 3000ms - more responsive
+	const MIN_TYPING_INTERVAL = 3000; // Increased from 2000ms - less network traffic
+	const DEBOUNCE_DELAY = 300; // Debounce keystrokes to prevent spam
 
-	// Send typing start signal
+	// Send typing start signal with smart throttling
 	const sendTypingStart = useCallback(async () => {
 		const now = Date.now();
-		// Only send if not already typing and not sent recently
+		// Only send if not already typing and enough time has passed
 		if (!isTypingRef.current && now - lastTypingTimeRef.current > MIN_TYPING_INTERVAL) {
 			try {
+				console.debug('[Typing] Sending typing-start signal');
 				await sendEncryptedMessage(
 					crypto.randomUUID(),
 					JSON.stringify({ type: 'typing-start', timestamp: now }),
@@ -26,9 +29,14 @@ export function useTypingIndicator(
 				);
 				lastTypingTimeRef.current = now;
 				isTypingRef.current = true;
+				pendingTypingRef.current = false;
 			} catch (error) {
-				console.error('Failed to send typing start:', error);
+				console.error('[Typing] Failed to send typing start:', error);
+				isTypingRef.current = false;
 			}
+		} else if (!isTypingRef.current) {
+			// Mark that we want to send typing but are throttled
+			pendingTypingRef.current = true;
 		}
 	}, [sendEncryptedMessage]);
 
@@ -37,46 +45,105 @@ export function useTypingIndicator(
 		// Only send if we were actually typing
 		if (isTypingRef.current) {
 			try {
+				console.debug('[Typing] Sending typing-stop signal');
 				await sendEncryptedMessage(
 					crypto.randomUUID(),
 					JSON.stringify({ type: 'typing-stop', timestamp: Date.now() }),
 					'typing-stop'
 				);
 				isTypingRef.current = false;
+				pendingTypingRef.current = false;
 			} catch (error) {
-				console.error('Failed to send typing stop:', error);
+				console.error('[Typing] Failed to send typing stop:', error);
+				// Still mark as stopped locally even if network fails
+				isTypingRef.current = false;
+				pendingTypingRef.current = false;
 			}
 		}
 	}, [sendEncryptedMessage]);
 
-	// Handle typing with delay
+	// Debounced typing handler - much more efficient
 	const handleLocalTyping = useCallback(() => {
-		// Clear old timeout
+		// Clear existing debounce timeout
+		if (debounceTimeoutRef.current) {
+			clearTimeout(debounceTimeoutRef.current);
+		}
+
+		// Clear existing stop timeout
 		if (typingTimeoutRef.current) {
 			clearTimeout(typingTimeoutRef.current);
 		}
 
-		// Send typing start
-		sendTypingStart();
+		// Debounce the typing start signal to avoid spam
+		debounceTimeoutRef.current = setTimeout(() => {
+			sendTypingStart();
+		}, DEBOUNCE_DELAY);
 
-		// Stop typing after delay
+		// Always set the stop timeout
 		typingTimeoutRef.current = setTimeout(() => {
 			sendTypingStop();
 		}, TYPING_STOP_DELAY);
 	}, [sendTypingStart, sendTypingStop]);
 
-	// Cleanup when component unmounts
+	// Handle conversation changes - immediately stop typing
+	const handleConversationChange = useCallback(() => {
+		// Clear all timeouts
+		if (debounceTimeoutRef.current) {
+			clearTimeout(debounceTimeoutRef.current);
+			debounceTimeoutRef.current = null;
+		}
+		if (typingTimeoutRef.current) {
+			clearTimeout(typingTimeoutRef.current);
+			typingTimeoutRef.current = null;
+		}
+
+		// Immediately send stop if we were typing
+		if (isTypingRef.current) {
+			sendTypingStop();
+		}
+
+		// Reset all state
+		pendingTypingRef.current = false;
+	}, [sendTypingStop]);
+
+	// Cleanup when component unmounts or conversation changes
 	useEffect(() => {
 		return () => {
+			// Clear all timeouts
+			if (debounceTimeoutRef.current) {
+				clearTimeout(debounceTimeoutRef.current);
+			}
 			if (typingTimeoutRef.current) {
 				clearTimeout(typingTimeoutRef.current);
 			}
 			// Stop typing when leaving
-			sendTypingStop();
+			if (isTypingRef.current) {
+				sendTypingStop();
+			}
 		};
 	}, [sendTypingStop]);
 
+	// Auto-retry pending typing signals when throttle period expires
+	useEffect(() => {
+		if (pendingTypingRef.current && !isTypingRef.current) {
+			const now = Date.now();
+			const timeUntilNextAllowed = MIN_TYPING_INTERVAL - (now - lastTypingTimeRef.current);
+
+			if (timeUntilNextAllowed > 0) {
+				const retryTimeout = setTimeout(() => {
+					if (pendingTypingRef.current && !isTypingRef.current) {
+						sendTypingStart();
+					}
+				}, timeUntilNextAllowed);
+
+				return () => clearTimeout(retryTimeout);
+			}
+		}
+	}, [sendTypingStart]);
+
 	return {
-		handleLocalTyping
+		handleLocalTyping,
+		handleConversationChange,
+		isTyping: isTypingRef.current
 	};
 }

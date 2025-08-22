@@ -46,8 +46,13 @@ export function ChatInterface({
   const [editingMessage, setEditingMessage] = useState<Message | null>(null);
 
   // Typing hook
-  const { handleLocalTyping } = useTypingIndicator(currentUsername, onSendMessage);
+  const { handleLocalTyping, handleConversationChange } = useTypingIndicator(currentUsername, onSendMessage);
   const { typingUsers } = useTypingIndicatorContext();
+
+  // Handle conversation changes to stop typing indicators
+  useEffect(() => {
+    handleConversationChange();
+  }, [selectedConversation, handleConversationChange]);
 
   // Message receipts hook
   const { sendReadReceipt, markMessageAsRead, getSmartReceiptStatus } = useMessageReceipts(messages, setMessages, currentUsername, onSendMessage, saveMessageToLocalDB);
@@ -159,10 +164,12 @@ export function ChatInterface({
       </ScrollArea>
       <Separator />
       {typingUsers.length > 0 && (
-        <div className="px-4 py-2 bg-gray-50 border-t">
-          {typingUsers.map((username) => (
-            <TypingIndicator key={username} username={username} />
-          ))}
+        <div className="px-4 py-3 bg-muted/30 border-t border-border/50 animate-in slide-in-from-bottom duration-200">
+          <div className="flex flex-col gap-1">
+            {typingUsers.map((username) => (
+              <TypingIndicator key={username} username={username} />
+            ))}
+          </div>
         </div>
       )}
       <div className="p-4 bg-gray-50">
