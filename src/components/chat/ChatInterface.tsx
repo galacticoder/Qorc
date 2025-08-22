@@ -26,6 +26,8 @@ interface ChatInterfaceProps {
   isEncrypted?: boolean;
   currentUsername: string;
   users: User[];
+  selectedConversation?: string;
+  saveMessageToLocalDB: (msg: Message) => Promise<void>;
 }
 
 export function ChatInterface({
@@ -36,6 +38,8 @@ export function ChatInterface({
   isEncrypted = true,
   currentUsername,
   users,
+  selectedConversation,
+  saveMessageToLocalDB,
 }: ChatInterfaceProps) {
   const scrollAreaRef = useRef<HTMLDivElement>(null);
   const [replyTo, setReplyTo] = useState<Message | null>(null);
@@ -46,7 +50,7 @@ export function ChatInterface({
   const { typingUsers } = useTypingIndicatorContext();
 
   // Message receipts hook
-  const { sendReadReceipt, markMessageAsRead, getSmartReceiptStatus } = useMessageReceipts(messages, setMessages, currentUsername, onSendMessage);
+  const { sendReadReceipt, markMessageAsRead, getSmartReceiptStatus } = useMessageReceipts(messages, setMessages, currentUsername, onSendMessage, saveMessageToLocalDB);
 
   useEffect(() => {
     if (scrollAreaRef.current) {
@@ -85,28 +89,32 @@ export function ChatInterface({
 
           // If message is visible in the scroll container
           if (messageBottom <= containerBottom && messageBottom >= containerRect.top) {
-            // Only mark as read if the sender is actually online to receive the read receipt
-            // Check if the sender is in the users list (indicating they're online)
-            const senderIsOnline = users.some(user => user.username === message.sender);
-
-            if (senderIsOnline) {
-              // Mark as read locally and send read receipt to sender
-              markMessageAsRead(message.id);
-              sendReadReceipt(message.id, message.sender);
-            }
+            // Mark as read locally and send read receipt to sender
+            markMessageAsRead(message.id);
+            sendReadReceipt(message.id, message.sender);
           }
         }
       });
     };
 
-    scrollContainer.addEventListener('scroll', handleScroll);
+    // Debounce the scroll handler to prevent excessive calls
+    let scrollTimeout: NodeJS.Timeout;
+    const debouncedHandleScroll = () => {
+      clearTimeout(scrollTimeout);
+      scrollTimeout = setTimeout(handleScroll, 100);
+    };
+
+    scrollContainer.addEventListener('scroll', debouncedHandleScroll);
     window.addEventListener('visibilitychange', handleScroll);
     window.addEventListener('focus', handleScroll);
     window.addEventListener('blur', handleScroll);
-    handleScroll(); // Check initial state
+
+    // Initial check with a small delay to ensure DOM is ready
+    setTimeout(handleScroll, 100);
 
     return () => {
-      scrollContainer.removeEventListener('scroll', handleScroll);
+      clearTimeout(scrollTimeout);
+      scrollContainer.removeEventListener('scroll', debouncedHandleScroll);
       window.removeEventListener('visibilitychange', handleScroll);
       window.removeEventListener('focus', handleScroll);
       window.removeEventListener('blur', handleScroll);
@@ -116,14 +124,18 @@ export function ChatInterface({
   return (
     <Card className="flex flex-col h-full border border-gray-300 shadow-lg rounded-lg">
       <div className="p-4 border-b bg-gray-100">
-        <h2 className="text-lg font-semibold">Chat Room</h2>
-        <p className="text-sm text-gray-500">Secure and encrypted messaging</p>
+        <h2 className="text-lg font-semibold">
+          {selectedConversation ? `Chat with ${selectedConversation}` : "Chat"}
+        </h2>
+        <p className="text-sm text-gray-500">
+          {selectedConversation ? "Secure end-to-end encrypted messaging" : "Select a conversation to start chatting"}
+        </p>
       </div>
       <ScrollArea className="flex-1 p-4 bg-white" ref={scrollAreaRef}>
         <div className="space-y-4">
           {messages.length === 0 ? (
             <div className="flex items-center justify-center h-full min-h-[200px] text-gray-400 text-sm">
-              No messages yet
+              {selectedConversation ? "No messages yet. Start the conversation!" : "Select a conversation to view messages"}
             </div>
           ) : (
             messages.map((message, index) => (
@@ -179,6 +191,7 @@ export function ChatInterface({
             }
           }}
           onTyping={handleLocalTyping}
+          selectedConversation={selectedConversation}
         />
       </div>
     </Card>

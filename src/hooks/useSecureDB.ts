@@ -57,7 +57,7 @@ export const useSecureDB = ({ Authentication, messages, setMessages }: UseSecure
 					console.error("[useSecureDB] Stored key is not the correct key for this account — aborting initialization");
 					Authentication.setLoginError?.("Stored key is not the correct key for this account, cannot initialize secure storage");
 					secureDBRef.current = null;
-					Authentication.logout(secureDBRef);
+					Authentication.logout(secureDBRef).catch(console.error);
 					return;
 				}
 
@@ -65,7 +65,7 @@ export const useSecureDB = ({ Authentication, messages, setMessages }: UseSecure
 					console.error("[useSecureDB] Passphrase does not match stored hash — aborting initialization");
 					Authentication.setLoginError?.("Incorrect passphrase, cannot initialize secure storage");
 					secureDBRef.current = null;
-					Authentication.logout(secureDBRef);
+					Authentication.logout(secureDBRef).catch(console.error);
 					return;
 				}
 
@@ -108,6 +108,12 @@ export const useSecureDB = ({ Authentication, messages, setMessages }: UseSecure
 					isCurrentUser:
 						msg.sender ===
 						(Authentication?.loginUsernameRef?.current ?? Authentication?.username),
+					// Ensure receipt information is properly restored
+					receipt: msg.receipt ? {
+						...msg.receipt,
+						deliveredAt: msg.receipt.deliveredAt ? new Date(msg.receipt.deliveredAt) : undefined,
+						readAt: msg.receipt.readAt ? new Date(msg.receipt.readAt) : undefined,
+					} : undefined,
 				}));
 
 				setMessages(processedMessages);

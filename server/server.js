@@ -310,9 +310,8 @@ async function startServer() {
               console.log(`[SERVER] Server authentication successful for user: ${clientState.username}`);
               ws.send(JSON.stringify({ type: SignalType.AUTH_SUCCESS, message: 'Server authentication successful' }));
 
-              console.log(`[SERVER] Broadcasting public keys and user join for: ${clientState.username}`);
+              console.log(`[SERVER] Broadcasting public keys for: ${clientState.username}`);
               MessagingUtils.broadcastPublicKeys(clients);
-              await MessagingUtils.broadcastUserJoin(clients, clientState.username);
 
               // Offline message delivery removed
             } else {
@@ -522,7 +521,6 @@ async function startServer() {
     ws.on('close', async () => {
       if (clientState.username && clients.has(clientState.username)) {
         clients.delete(clientState.username);
-        await MessagingUtils.broadcastUserLeave(clients, clientState.username);
         console.log(`[SERVER] User '${clientState.username}' disconnected`);
       }
     });

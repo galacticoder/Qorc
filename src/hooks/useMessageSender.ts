@@ -87,12 +87,14 @@ export function useMessageSender(
       type,
       typeInside,
       content,
+      recipient,
     }: {
       messageId?: string;
       replyTo?: Message | null;
       type?: string;
       typeInside?: string;
       content?: string;
+      recipient?: string;
     }) => {
       console.log("[Sender] handleSendMessage invoked", {
         messageId,
@@ -142,15 +144,16 @@ export function useMessageSender(
       };
 
       try {
-        console.debug("[Sender] Recipients count:", users.length, users.map(u => u.username));
+        console.debug("[Sender] Target recipient:", recipient);
 
-        // Determine recipients; only send to online users
-        const onlineRecipients = users.filter(u => u.username !== loginUsernameRef.current && u.isOnline);
-        if (onlineRecipients.length === 0) {
-          console.log("[Sender] No online recipients; not delivering");
-          // Don't mark as delivered if no one is online to receive it
+        // Determine recipients; send only to the specified recipient if they're online
+        const targetUser = recipient ? users.find(u => u.username === recipient && u.isOnline) : null;
+        if (!targetUser) {
+          console.log("[Sender] Target recipient not online or not found; not delivering");
+          // Don't mark as delivered if recipient is not online
           return;
         }
+        const onlineRecipients = [targetUser];
 
         // Mark message as delivered locally since we have online recipients
         if (typeInside !== 'typing-start' && typeInside !== 'typing-stop' && typeInside !== 'read-receipt') {
@@ -158,6 +161,7 @@ export function useMessageSender(
             id: id,
             content: content || "",
             sender: loginUsernameRef.current,
+            recipient: recipient,
             timestamp: new Date(),
             isCurrentUser: true,
             isDeleted: typeInside === SignalType.DELETE_MESSAGE,
@@ -482,13 +486,14 @@ export function useMessageSender(
   );
 
   const handleSendMessageType = useCallback(
-    async (messageId: string, content: string, messageSignalType: string, replyTo?: Message | null) => {
+    async (messageId: string, content: string, messageSignalType: string, replyTo?: Message | null, recipient?: string) => {
       if (messageSignalType === "chat") {
         await handleSendMessage({
           replyTo: replyTo,
           type: SignalType.ENCRYPTED_MESSAGE,
           typeInside: "chat",
           content: content,
+          recipient: recipient,
         });
       } else {
         await handleSendMessage({
@@ -497,6 +502,7 @@ export function useMessageSender(
           type: SignalType.ENCRYPTED_MESSAGE,
           typeInside: messageSignalType,
           content: content,
+          recipient: recipient,
         });
       }
     },

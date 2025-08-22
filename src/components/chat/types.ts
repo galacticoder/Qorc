@@ -22,6 +22,7 @@ export interface Message {
   id: string;
   content: string;
   sender: string;
+  recipient?: string;
   timestamp: Date;
   isCurrentUser?: boolean;
   isSystemMessage?: boolean;

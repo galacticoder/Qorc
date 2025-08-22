@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback, MutableRefObject } from "react";
+import { useState, useRef, useCallback, useEffect, MutableRefObject } from "react";
 import { SignalType } from "@/lib/signals";
 import websocketClient from "@/lib/websocket";
 import { CryptoUtils } from "@/lib/unified-crypto";
@@ -17,6 +17,7 @@ export const useAuth = () => {
   const passphraseRef = useRef<string>("");
   const passphrasePlaintextRef = useRef<string>("");
   const aesKeyRef = useRef<CryptoKey | null>(null);
+  const [initialCleanupDone, setInitialCleanupDone] = useState(false);
 
   const [serverHybridPublic, setServerHybridPublic] = useState<{
     x25519PublicBase64: string;
@@ -409,11 +410,46 @@ export const useAuth = () => {
     }
   };
 
-  const logout = (secureDBRef?: MutableRefObject<SecureDB | null>, loginErrorMessage: string = "") => {
+  const logout = async (secureDBRef?: MutableRefObject<SecureDB | null>, loginErrorMessage: string = "") => {
     console.log('[AUTH] Logging out user');
+
+    // Clear SecureDB database
+    if (secureDBRef?.current) {
+      try {
+        console.log('[AUTH] Clearing SecureDB database');
+        await secureDBRef.current.clearDatabase();
+        console.log('[AUTH] SecureDB database cleared successfully');
+      } catch (error) {
+        console.error('[AUTH] Failed to clear SecureDB database:', error);
+      }
+      secureDBRef.current = null;
+    }
+
     //drop all ratchet sessions for this user to avoid annoying chain drift on next login
     try { SessionStore.clearAllForCurrentUser(); } catch { }
-    if (secureDBRef?.current) secureDBRef.current = null;
+
+    // Clear localStorage data for the current user
+    if (loginUsernameRef.current) {
+      try {
+        console.log('[AUTH] Clearing localStorage data for user');
+        // Clear session store data
+        localStorage.removeItem(`securechat_sessions_${loginUsernameRef.current}`);
+        // Clear pinned identities
+        localStorage.removeItem(`securechat_pins_${loginUsernameRef.current}`);
+        // Clear read receipt tracking data
+        localStorage.removeItem(`sentReadReceipts_${loginUsernameRef.current}`);
+        console.log('[AUTH] localStorage data cleared successfully');
+      } catch (error) {
+        console.error('[AUTH] Failed to clear localStorage data:', error);
+      }
+    }
+
+    // Clear server pinned keys (global)
+    try {
+      localStorage.removeItem('securechat_server_pin_v1');
+    } catch (error) {
+      console.error('[AUTH] Failed to clear server pin:', error);
+    }
 
     passwordRef.current = "";
     passphraseRef.current = "";
@@ -434,8 +470,98 @@ export const useAuth = () => {
   };
 
   const useLogout = (Database: any) => {
-    return () => logout(Database.secureDBRef, "Logged out");
+    return async () => await logout(Database.secureDBRef, "Logged out");
   };
+
+  // Add cleanup on page unload/refresh and check for pending cleanup on mount
+  useEffect(() => {
+    // Comprehensive cleanup on app initialization
+    const performInitialCleanup = async () => {
+      if (initialCleanupDone) return;
+
+      try {
+        console.log('[AUTH] Performing initial cleanup check');
+
+        // Check for pending cleanup flag
+        const pendingCleanup = localStorage.getItem('securechat_pending_cleanup');
+        if (pendingCleanup) {
+          try {
+            const { username } = JSON.parse(pendingCleanup);
+            console.log('[AUTH] Found pending cleanup for user:', username);
+
+            // Clear SecureKeyManager database
+            const tempKeyManager = new SecureKeyManager(username);
+            await tempKeyManager.deleteDatabase();
+            console.log('[AUTH] Cleared SecureKeyManager database for:', username);
+
+            // Remove the pending cleanup flag
+            localStorage.removeItem('securechat_pending_cleanup');
+            console.log('[AUTH] Pending cleanup completed');
+          } catch (error) {
+            console.error('[AUTH] Failed to complete pending cleanup:', error);
+            // Remove the flag anyway to prevent infinite attempts
+            localStorage.removeItem('securechat_pending_cleanup');
+          }
+        }
+
+        // Also clear any SecureDB databases that might be lingering
+        try {
+          // Get all databases and clear any that look like SecureDB databases
+          if ('indexedDB' in window) {
+            // Clear any databases that start with 'SecureKeyDB_'
+            const databases = await indexedDB.databases?.() || [];
+            for (const db of databases) {
+              if (db.name && (db.name.startsWith('SecureKeyDB_'))) {
+                console.log('[AUTH] Clearing orphaned database:', db.name);
+                const deleteRequest = indexedDB.deleteDatabase(db.name);
+                await new Promise((resolve, reject) => {
+                  deleteRequest.onsuccess = () => resolve(undefined);
+                  deleteRequest.onerror = () => reject(deleteRequest.error);
+                });
+              }
+            }
+          }
+        } catch (error) {
+          console.warn('[AUTH] Could not clear orphaned databases:', error);
+        }
+
+        setInitialCleanupDone(true);
+        console.log('[AUTH] Initial cleanup completed');
+      } catch (error) {
+        console.error('[AUTH] Initial cleanup failed:', error);
+        setInitialCleanupDone(true); // Set anyway to prevent infinite retries
+      }
+    };
+
+    performInitialCleanup();
+
+    const handleBeforeUnload = () => {
+      // Only clear if user is logged in
+      if (isLoggedIn && loginUsernameRef.current) {
+        try {
+          // Set a flag for cleanup on next app load
+          localStorage.setItem('securechat_pending_cleanup', JSON.stringify({
+            username: loginUsernameRef.current,
+            timestamp: Date.now()
+          }));
+
+          // Clear localStorage data synchronously (async won't work in beforeunload)
+          localStorage.removeItem(`securechat_sessions_${loginUsernameRef.current}`);
+          localStorage.removeItem(`securechat_pins_${loginUsernameRef.current}`);
+          localStorage.removeItem('securechat_server_pin_v1');
+          console.log('[AUTH] Emergency cleanup on page unload completed');
+        } catch (error) {
+          console.error('[AUTH] Emergency cleanup failed:', error);
+        }
+      }
+    };
+
+    window.addEventListener('beforeunload', handleBeforeUnload);
+
+    return () => {
+      window.removeEventListener('beforeunload', handleBeforeUnload);
+    };
+  }, [isLoggedIn]);
 
   return {
     username,

@@ -510,9 +510,6 @@ export function useEncryptedMessageHandler(
 
 
 
-        const isJoinLeave = payload.content?.includes("joined") ||
-          payload.content?.includes("left");
-
         const messageId = payload.typeInside === "system"
           ? uuidv4()
           : payload.id ?? uuidv4();
@@ -521,12 +518,13 @@ export function useEncryptedMessageHandler(
           id: messageId,
           content: payload.content || "",
           sender: payload.from || "system",
+          recipient: payload.to,
           timestamp: new Date(payload.timestamp || Date.now()),
           isCurrentUser: payload.from === loginUsernameRef.current,
           isSystemMessage: payload.typeInside === "system",
           isDeleted: payload.typeInside === SignalType.DELETE_MESSAGE,
           isEdited: payload.typeInside === SignalType.EDIT_MESSAGE,
-          shouldPersist: isJoinLeave,
+          shouldPersist: false,
           receipt: payload.from === loginUsernameRef.current ? undefined : { delivered: false, read: false },
           ...(payload.replyTo && {
             replyTo: {

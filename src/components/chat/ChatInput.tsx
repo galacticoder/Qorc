@@ -26,6 +26,7 @@ interface ChatInputProps {
   onCancelEdit?: () => void;
   onEditMessage?: (newContent: string) => void;
   onTyping: () => void;
+  selectedConversation?: string;
 }
 
 export function ChatInput({
@@ -40,6 +41,7 @@ export function ChatInput({
   onCancelEdit,
   onEditMessage,
   onTyping,
+  selectedConversation,
 }: ChatInputProps) {
   const [message, setMessage] = useState("");
   const [isSending, setIsSending] = useState(false);
@@ -55,7 +57,7 @@ export function ChatInput({
   }, [editingMessage]);
 
   async function handleSend() {
-    if (!message.trim() || isSending) return;
+    if (!message.trim() || isSending || !selectedConversation) return;
 
     try {
       setIsSending(true);
@@ -134,7 +136,7 @@ export function ChatInput({
           />
 
           <SendButton
-            disabled={!message.trim() || isSending}
+            disabled={!message.trim() || isSending || !selectedConversation}
             isSending={isSending}
             editingMessage={editingMessage}
             onClick={handleSend}
