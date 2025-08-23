@@ -64,6 +64,7 @@ export class AccountAuthHandler {
         return rejectConnection(ws, SignalType.INVALIDNAMELENGTH, SignalMessages.INVALIDNAMELENGTH);
       }
 
+      // Map consistently by username only; server maintains ws->username mapping
       this.clients.set(username, {
         ws,
         hybridPublicKeys,

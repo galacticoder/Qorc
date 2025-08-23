@@ -13,6 +13,8 @@ import { ed25519 } from '@noble/curves/ed25519';
 import { rateLimitMiddleware } from './rate-limiting/rate-limit-middleware.js';
 
 const clients = new Map();
+const wsToUsername = new WeakMap(); // Map WebSocket -> username for consistent client tracking
+
 const bundleCache = new Map(); // Cache for bundle requests to prevent redundant operations
 
 // Message batching for database operations
@@ -147,13 +149,11 @@ async function startServer() {
       lastActivity: Date.now()
     };
 
-    // Start status logging if this is the first active connection
-    if (clients.size === 0) {
-      startStatusLogging();
-    }
+    // Start status logging on first active connection (guarded internally)
+    startStatusLogging();
 
-    // Add client to the pool
-    clients.set(ws, clientState);
+    // Note: Do not add WebSocket to `clients` map.
+    // `clients` is keyed by username only (set during/after authentication).
 
     ws.send(
       JSON.stringify({
@@ -334,6 +334,8 @@ async function startServer() {
             if (result?.authenticated || result?.pending) {
               clientState.hasPassedAccountLogin = true;
               clientState.username = result.username;
+              // Maintain ws->username mapping for cleanup and quick lookup
+              wsToUsername.set(ws, result.username);
 
               if (result.pending) {
                 console.log(`[SERVER] User '${result.username}' pending passphrase`);
@@ -343,6 +345,9 @@ async function startServer() {
 
               if (!result.pending) {
                 console.log(`[SERVER] User '${clientState.username}' completed account authentication`);
+                // Ensure username entry exists in clients with ws attached (set by AccountAuthHandler)
+                const existing = clients.get(clientState.username);
+                if (existing && !existing.ws) existing.ws = ws;
               }
             } else {
               console.error(`[SERVER] Login failed for user: ${clientState.username || 'unknown'}`);
@@ -473,9 +478,13 @@ async function startServer() {
 
           case SignalType.MESSAGE_DELIVERED: {
             // Handle message delivery receipt
-            if (!clientState.hasAuthenticated) {
-              console.error('[SERVER] User not authenticated for delivery receipt');
-              return ws.send(JSON.stringify({ type: SignalType.ERROR, message: 'Not authenticated yet' }));
+            {
+              const entry = clientState.username ? clients.get(clientState.username) : null;
+              const isAuthed = entry?.clientState?.hasAuthenticated ?? clientState.hasAuthenticated;
+              if (!isAuthed) {
+                console.error('[SERVER] User not authenticated for delivery receipt');
+                return ws.send(JSON.stringify({ type: SignalType.ERROR, message: 'Not authenticated yet' }));
+              }
             }
 
             console.log(`[SERVER] Processing delivery receipt from ${clientState.username} for message ${parsed.messageId}`);
@@ -500,9 +509,13 @@ async function startServer() {
 
           case SignalType.MESSAGE_READ: {
             // Handle message read receipt
-            if (!clientState.hasAuthenticated) {
-              console.error('[SERVER] User not authenticated for read receipt');
-              return ws.send(JSON.stringify({ type: SignalType.ERROR, message: 'Not authenticated yet' }));
+            {
+              const entry = clientState.username ? clients.get(clientState.username) : null;
+              const isAuthed = entry?.clientState?.hasAuthenticated ?? clientState.hasAuthenticated;
+              if (!isAuthed) {
+                console.error('[SERVER] User not authenticated for read receipt');
+                return ws.send(JSON.stringify({ type: SignalType.ERROR, message: 'Not authenticated yet' }));
+              }
             }
 
             console.log(`[SERVER] Processing read receipt from ${clientState.username} for message ${parsed.messageId}`);
@@ -529,9 +542,13 @@ async function startServer() {
           case SignalType.FILE_MESSAGE_CHUNK:
           case SignalType.DR_SEND: {
             console.log(`[SERVER] Processing ${parsed.type} from user: ${clientState.username} to user: ${parsed.to}`);
-            if (!clientState.hasAuthenticated) {
-              console.error('[SERVER] User not authenticated for message sending');
-              return ws.send(JSON.stringify({ type: SignalType.ERROR, message: 'Not authenticated yet' }));
+            {
+              const entry = clientState.username ? clients.get(clientState.username) : null;
+              const isAuthed = entry?.clientState?.hasAuthenticated ?? clientState.hasAuthenticated;
+              if (!isAuthed) {
+                console.error('[SERVER] User not authenticated for message sending');
+                return ws.send(JSON.stringify({ type: SignalType.ERROR, message: 'Not authenticated yet' }));
+              }
             }
             if (!parsed.to || !clients.has(parsed.to)) {
               console.warn(`[SERVER] Target user offline or not found: ${parsed.to}, not delivering`);
@@ -617,16 +634,16 @@ async function startServer() {
 
     ws.on('close', async () => {
       // Clean up client state
-      if (clientState.username && clients.has(clientState.username)) {
-        clients.delete(clientState.username);
-        console.log(`[SERVER] User '${clientState.username}' disconnected`);
+      const mappedUsername = wsToUsername.get(ws) || clientState.username;
+      if (mappedUsername && clients.has(mappedUsername)) {
+        clients.delete(mappedUsername);
+        console.log(`[SERVER] User '${mappedUsername}' disconnected`);
       }
-
-      // Remove from client pool
-      clients.delete(ws);
+      // Remove mapping
+      if (wsToUsername.has(ws)) wsToUsername.delete(ws);
 
       // Stop status logging if no more active connections
-      if (clients.size === 0 && statusLogInterval) {
+      if (wss.clients.size === 0 && statusLogInterval) {
         clearInterval(statusLogInterval);
         statusLogInterval = null;
         console.log('[SERVER] No active connections, stopped status logging');
