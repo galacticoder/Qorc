@@ -13,6 +13,48 @@ import { ed25519 } from '@noble/curves/ed25519';
 import { rateLimitMiddleware } from './rate-limiting/rate-limit-middleware.js';
 
 const clients = new Map();
+const bundleCache = new Map(); // Cache for bundle requests to prevent redundant operations
+
+// Message batching for database operations
+const messageBatch = [];
+const BATCH_SIZE = 10;
+const BATCH_TIMEOUT = 1000; // 1 second
+let batchTimer = null;
+
+// Batch processing function for database operations
+async function processBatch() {
+  if (messageBatch.length === 0) return;
+
+  const batch = messageBatch.splice(0, messageBatch.length);
+  console.log(`[SERVER] Processing batch of ${batch.length} database operations`);
+
+  // Process all batched operations
+  for (const operation of batch) {
+    try {
+      await operation.execute();
+    } catch (error) {
+      console.error('[SERVER] Batch operation failed:', error);
+    }
+  }
+
+  if (batchTimer) {
+    clearTimeout(batchTimer);
+    batchTimer = null;
+  }
+}
+
+// Add operation to batch
+function addToBatch(operation) {
+  messageBatch.push(operation);
+
+  // Process immediately if batch is full
+  if (messageBatch.length >= BATCH_SIZE) {
+    processBatch();
+  } else if (!batchTimer) {
+    // Set timer for partial batch
+    batchTimer = setTimeout(processBatch, BATCH_TIMEOUT);
+  }
+}
 
 const CERT_PATH = process.env.TLS_CERT_PATH; //use real later for production and in dev use selfsigned
 const KEY_PATH = process.env.TLS_KEY_PATH;
@@ -55,24 +97,33 @@ async function startServer() {
   const authHandler = new authentication.AccountAuthHandler(serverHybridKeyPair, clients);
   const serverAuthHandler = new authentication.ServerAuthHandler(serverHybridKeyPair, clients, ServerConfig);
 
-  // Periodic rate limiting status logging
-  setInterval(async () => {
-    try {
-      const stats = rateLimitMiddleware.getStats();
-      const globalStatus = await rateLimitMiddleware.getGlobalConnectionStatus();
+  // Optimized periodic rate limiting status logging - only when needed
+  let statusLogInterval = null;
+  const startStatusLogging = () => {
+    if (statusLogInterval) return;
+    statusLogInterval = setInterval(async () => {
+      try {
+        const stats = rateLimitMiddleware.getStats();
+        const globalStatus = await rateLimitMiddleware.getGlobalConnectionStatus();
 
-      if (globalStatus.isBlocked || stats.userMessageLimiters > 0 || stats.userBundleLimiters > 0) {
-        console.log('[RATE-LIMIT-STATUS]', {
-          globalConnectionBlocked: globalStatus.isBlocked,
-          globalConnectionAttempts: globalStatus.attempts,
-          activeUserLimiters: stats.totalUserLimiters,
-          timestamp: new Date().toISOString()
-        });
+        // Only log if there's actually something to report
+        if (globalStatus.isBlocked || stats.userMessageLimiters > 0 || stats.userBundleLimiters > 0) {
+          console.log('[RATE-LIMIT-STATUS]', {
+            globalConnectionBlocked: globalStatus.isBlocked,
+            globalConnectionAttempts: globalStatus.attempts,
+            activeUserLimiters: stats.totalUserLimiters,
+            timestamp: new Date().toISOString()
+          });
+        } else {
+          // Stop logging if nothing to report for efficiency
+          clearInterval(statusLogInterval);
+          statusLogInterval = null;
+        }
+      } catch (error) {
+        console.error('[SERVER] Error in rate limiting status logging:', error);
       }
-    } catch (error) {
-      console.error('[SERVER] Error in rate limiting status logging:', error);
-    }
-  }, 60000); // Log every minute
+    }, 60000); // Log every minute
+  };
 
   wss.on('connection', async (ws) => {
     // Apply connection rate limiting before processing the connection
@@ -87,10 +138,22 @@ async function startServer() {
       return;
     }
 
-    let clientState = { username: null, hasPassedAccountLogin: false, hasAuthenticated: false };
+    let clientState = {
+      username: null,
+      hasPassedAccountLogin: false,
+      hasAuthenticated: false,
+      connectionTime: Date.now(),
+      messageCount: 0,
+      lastActivity: Date.now()
+    };
 
-    // Store rate limiting info in client state for monitoring
-    clientState.connectionTime = Date.now();
+    // Start status logging if this is the first active connection
+    if (clients.size === 0) {
+      startStatusLogging();
+    }
+
+    // Add client to the pool
+    clients.set(ws, clientState);
 
     ws.send(
       JSON.stringify({
@@ -103,6 +166,10 @@ async function startServer() {
     );
 
     ws.on('message', async (msg) => {
+      // Update activity tracking
+      clientState.lastActivity = Date.now();
+      clientState.messageCount++;
+
       let parsed;
       try {
         parsed = JSON.parse(msg.toString().trim());
@@ -210,12 +277,36 @@ async function startServer() {
               break;
             }
             const target = parsed.username;
+            const cacheKey = `${clientState.username}->${target}`;
+
+            // Check if we recently served this bundle to prevent spam
+            const now = Date.now();
+            const lastRequest = bundleCache.get(cacheKey);
+            if (lastRequest && (now - lastRequest) < 1000) { // 1 second cooldown
+              console.log(`[SERVER] Bundle request throttled for ${clientState.username} -> ${target} (too frequent)`);
+              return;
+            }
+
             console.log(`[SERVER] Bundle request from ${clientState.username} for ${target}`);
             const out = PrekeyDatabase.takeBundleForRecipient(target);
             if (!out) {
               console.log(`[SERVER] No bundle available for ${target}`);
               return ws.send(JSON.stringify({ type: SignalType.ERROR, message: 'No bundle available' }));
             }
+
+            // Cache this request
+            bundleCache.set(cacheKey, now);
+
+            // Clean old cache entries (older than 5 minutes)
+            if (bundleCache.size > 1000) {
+              const fiveMinutesAgo = now - 300000;
+              for (const [key, timestamp] of bundleCache.entries()) {
+                if (timestamp < fiveMinutesAgo) {
+                  bundleCache.delete(key);
+                }
+              }
+            }
+
             console.log(`[SERVER] Delivering prekey bundle for ${target} to ${clientState.username}`, {
               hasOneTime: !!out.oneTimePreKey,
               signedPreKeyId: out.signedPreKey?.id,
@@ -322,10 +413,16 @@ async function startServer() {
           }
 
           case SignalType.UPDATE_DB: {
-            console.log(`[SERVER] Saving message to database from user: ${clientState.username}`);
-            await MessageDatabase.saveMessageInDB(parsed, serverHybridKeyPair);
-            console.log(`[SERVER] Message saved to database successfully`);
-            //send to user after
+            console.log(`[SERVER] Queuing message for batch database save from user: ${clientState.username}`);
+
+            // Add to batch instead of immediate processing
+            addToBatch({
+              execute: async () => {
+                await MessageDatabase.saveMessageInDB(parsed, serverHybridKeyPair);
+                console.log(`[SERVER] Message saved to database successfully (batched)`);
+              }
+            });
+
             break;
           }
 
@@ -519,10 +616,25 @@ async function startServer() {
     });
 
     ws.on('close', async () => {
+      // Clean up client state
       if (clientState.username && clients.has(clientState.username)) {
         clients.delete(clientState.username);
         console.log(`[SERVER] User '${clientState.username}' disconnected`);
       }
+
+      // Remove from client pool
+      clients.delete(ws);
+
+      // Stop status logging if no more active connections
+      if (clients.size === 0 && statusLogInterval) {
+        clearInterval(statusLogInterval);
+        statusLogInterval = null;
+        console.log('[SERVER] No active connections, stopped status logging');
+      }
+
+      // Log connection stats
+      const connectionDuration = Date.now() - clientState.connectionTime;
+      console.log(`[SERVER] Connection closed - Duration: ${connectionDuration}ms, Messages: ${clientState.messageCount}`);
     });
   });
 }

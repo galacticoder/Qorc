@@ -9,15 +9,18 @@ import { SessionStore } from "@/lib/ratchet/session-store";
 
 interface UseSecureDBProps {
 	Authentication: any;
-	messages: Message[];
 	setMessages: React.Dispatch<React.SetStateAction<Message[]>>;
 }
 
-export const useSecureDB = ({ Authentication, messages, setMessages }: UseSecureDBProps) => {
+export const useSecureDB = ({ Authentication, setMessages }: UseSecureDBProps) => {
 	const secureDBRef = useRef<SecureDB | null>(null);
 	const [dbInitialized, setDbInitialized] = useState(false);
 	const [users, setUsers] = useState<User[]>([]);
 	const pendingMessagesRef = useRef<Message[]>([]);
+
+	// Debounced save optimization
+	const debouncedSaveRef = useRef<NodeJS.Timeout | null>(null);
+	const pendingSavesRef = useRef<Set<string>>(new Set());
 
 	useEffect(() => {
 		if (!Authentication?.isLoggedIn || dbInitialized || secureDBRef.current) return;
@@ -170,29 +173,57 @@ export const useSecureDB = ({ Authentication, messages, setMessages }: UseSecure
 			});
 
 			const saveToPending = () => {
+				// Prevent memory leak by limiting pending messages
+				const maxPending = 100;
 				const idx = pendingMessagesRef.current.findIndex((m) => m.id === message.id);
 				if (idx !== -1) {
 					pendingMessagesRef.current[idx] = message;
 				} else {
 					pendingMessagesRef.current.push(message);
+					// Trim to prevent memory leak
+					if (pendingMessagesRef.current.length > maxPending) {
+						pendingMessagesRef.current = pendingMessagesRef.current.slice(-maxPending);
+					}
 				}
 			};
 
 			if (!dbInitialized || !secureDBRef.current) return saveToPending();
 
-			try {
-				const msgs = (await secureDBRef.current.loadMessages().catch(() => [])) || [];
-				const idx = msgs.findIndex((m: Message) => m.id === message.id);
-				if (idx !== -1) {
-					msgs[idx] = message;
-				} else {
-					msgs.push(message);
-				}
-				await secureDBRef.current.saveMessages(msgs).catch(saveToPending);
-			} catch (err) {
-				console.error("[useSecureDB] DB save failed, saving to pending", err);
-				saveToPending();
+			// Debounce saves to prevent excessive database operations
+			if (pendingSavesRef.current.has(message.id)) {
+				return; // Already pending save for this message
 			}
+
+			pendingSavesRef.current.add(message.id);
+
+			// Clear existing debounce timer
+			if (debouncedSaveRef.current) {
+				clearTimeout(debouncedSaveRef.current);
+			}
+
+			// Debounce the save operation
+			debouncedSaveRef.current = setTimeout(async () => {
+				try {
+					const msgs = (await secureDBRef.current!.loadMessages().catch(() => [])) || [];
+					const idx = msgs.findIndex((m: Message) => m.id === message.id);
+					if (idx !== -1) {
+						msgs[idx] = message;
+					} else {
+						msgs.push(message);
+					}
+
+					// Limit total messages to prevent memory issues
+					const maxMessages = 1000;
+					const limitedMsgs = msgs.length > maxMessages ? msgs.slice(-maxMessages) : msgs;
+
+					await secureDBRef.current!.saveMessages(limitedMsgs).catch(saveToPending);
+					pendingSavesRef.current.delete(message.id);
+				} catch (err) {
+					console.error("[useSecureDB] DB save failed, saving to pending", err);
+					pendingSavesRef.current.delete(message.id);
+					saveToPending();
+				}
+			}, 100); // 100ms debounce
 		},
 		[dbInitialized, setMessages]
 	);

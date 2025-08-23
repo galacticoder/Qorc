@@ -193,6 +193,11 @@ class WebSocketClient {
       this.ws = null;
       this.isConnected = false;
     }
+    // Clear all message handlers to prevent memory leaks
+    this.messageHandlers.clear();
+    this.setLoginError = undefined;
+    this.globalRateLimitUntil = 0;
+    this.reconnectAttempts = 0;
   }
 
   public isConnectedToServer(): boolean {

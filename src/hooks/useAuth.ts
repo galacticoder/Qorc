@@ -65,15 +65,49 @@ export const useAuth = () => {
     }
 
     try {
-      const metadata = await keyManagerRef.current.getKeyMetadata();
-      if (metadata) {
-        await keyManagerRef.current.initialize(passphrasePlaintextRef.current, metadata.salt);
-      } else {
-        await keyManagerRef.current.initialize(passphrasePlaintextRef.current);
+      // Check if we already have keys in memory first
+      if (hybridKeysRef.current) {
+        console.debug('[AUTH] Using cached keys from memory');
+        return hybridKeysRef.current;
       }
 
-      const keys = await keyManagerRef.current.getKeys();
+      // Try to get keys without re-initializing first
+      let keys = await keyManagerRef.current.getKeys().catch(() => null);
+
+      if (!keys) {
+        console.log('[AUTH] Keys not available, initializing key manager');
+        const metadata = await keyManagerRef.current.getKeyMetadata();
+        if (metadata) {
+          await keyManagerRef.current.initialize(passphrasePlaintextRef.current, metadata.salt);
+        } else {
+          await keyManagerRef.current.initialize(passphrasePlaintextRef.current);
+        }
+        keys = await keyManagerRef.current.getKeys();
+      }
+
       console.log('[AUTH] Keys retrieved successfully');
+
+      if (!keys) {
+        console.error('[AUTH] Keys are null after retrieval');
+        return null;
+      }
+
+      // Validate key structure
+      if (!keys.x25519 || !keys.kyber) {
+        console.error('[AUTH] Invalid key structure:', { hasX25519: !!keys.x25519, hasKyber: !!keys.kyber });
+        return null;
+      }
+
+      console.debug('[AUTH] Keys validation passed', {
+        x25519PublicLen: keys.x25519.publicKeyBase64?.length,
+        kyberPublicLen: keys.kyber.publicKeyBase64?.length,
+        x25519PrivateLen: keys.x25519.private?.byteLength,
+        kyberSecretLen: keys.kyber.secretKey?.byteLength
+      });
+
+      // Cache the keys for future use
+      hybridKeysRef.current = keys;
+
       return keys;
     } catch (error) {
       console.error("[AUTH] Error loading keys on demand:", error);
@@ -266,7 +300,7 @@ export const useAuth = () => {
     try {
       await initializeKeys();
 
-      let passphraseHash;
+      let passphraseHash: string;
 
       if (mode === "login") {
         if (!passphraseHashParams) {

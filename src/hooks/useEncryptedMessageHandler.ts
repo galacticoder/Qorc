@@ -400,66 +400,111 @@ export function useEncryptedMessageHandler(
           }
         } else if (encryptedMessage?.type === SignalType.X3DH_DELIVER_BUNDLE) {
           //create a new session from the other users bundle because were sending to them
-          const currentUser = loginUsernameRef.current;
-          const targetUser = encryptedMessage.username;
-          const bundle = encryptedMessage.bundle;
-          const ratchetId = await keyManagerRef.current?.getRatchetIdentity?.();
-          if (!ratchetId) return;
-          const eph = await X3DH.generateEphemeralX25519KeyPair();
-          const prekeyBundle = {
-            username: targetUser,
-            identityEd25519Public: CryptoUtils.Base64.base64ToUint8Array(bundle.identityEd25519PublicBase64),
-            identityDilithiumPublic: bundle.identityDilithiumPublicBase64 ? CryptoUtils.Base64.base64ToUint8Array(bundle.identityDilithiumPublicBase64) : undefined,
-            identityX25519Public: CryptoUtils.Base64.base64ToUint8Array(bundle.identityX25519PublicBase64),
-            signedPreKey: {
-              id: bundle.signedPreKey.id,
-              publicKey: CryptoUtils.Base64.base64ToUint8Array(bundle.signedPreKey.publicKeyBase64),
-              ed25519Signature: CryptoUtils.Base64.base64ToUint8Array(bundle.signedPreKey.ed25519SignatureBase64),
-              dilithiumSignature: bundle.signedPreKey.dilithiumSignatureBase64 ? CryptoUtils.Base64.base64ToUint8Array(bundle.signedPreKey.dilithiumSignatureBase64) : undefined,
-            },
-            ratchetPublic: CryptoUtils.Base64.base64ToUint8Array(bundle.ratchetPublicBase64),
-            oneTimePreKey: bundle.oneTimePreKey ? { id: bundle.oneTimePreKey.id, publicKey: CryptoUtils.Base64.base64ToUint8Array(bundle.oneTimePreKey.publicKeyBase64) } : undefined,
-          } as any;
+          console.log('[Recv] Processing X3DH bundle delivery');
+          try {
+            const currentUser = loginUsernameRef.current;
+            const targetUser = encryptedMessage.username;
+            const bundle = encryptedMessage.bundle;
 
-          //remember their identity and warn if it changes later
-          const pinned = PinnedIdentities.get(currentUser, targetUser);
-          if (!pinned) {
-            PinnedIdentities.set(currentUser, targetUser, bundle.identityEd25519PublicBase64);
-          } else if (pinned !== bundle.identityEd25519PublicBase64) {
-            console.warn('[Recv] Remote identity changed for', targetUser);
-            //for now just log 
-          }
+            console.debug('[Recv] X3DH bundle details', {
+              targetUser,
+              hasBundle: !!bundle,
+              bundleKeys: bundle ? Object.keys(bundle) : [],
+              hasOneTimePreKey: !!bundle?.oneTimePreKey
+            });
 
-          //make sure the signed prekey is actually signed by their identity key
-          const ok = await X3DH.verifyPreKeyBundle(prekeyBundle);
-          if (!ok) {
-            console.warn('[Recv] Invalid X3DH bundle signature for', targetUser);
+            const ratchetId = await keyManagerRef.current?.getRatchetIdentity?.();
+            if (!ratchetId) {
+              console.error('[Recv] Ratchet identity not available for X3DH');
+              return;
+            }
+
+            console.debug('[Recv] Ratchet identity available', {
+              hasEd25519: !!ratchetId.ed25519Private,
+              hasX25519: !!ratchetId.x25519Private,
+              hasDilithium: !!ratchetId.dilithiumPrivate
+            });
+
+            const eph = await X3DH.generateEphemeralX25519KeyPair();
+            console.debug('[Recv] Generated ephemeral key pair');
+
+            const prekeyBundle = {
+              username: targetUser,
+              identityEd25519Public: CryptoUtils.Base64.base64ToUint8Array(bundle.identityEd25519PublicBase64),
+              identityDilithiumPublic: bundle.identityDilithiumPublicBase64 ? CryptoUtils.Base64.base64ToUint8Array(bundle.identityDilithiumPublicBase64) : undefined,
+              identityX25519Public: CryptoUtils.Base64.base64ToUint8Array(bundle.identityX25519PublicBase64),
+              signedPreKey: {
+                id: bundle.signedPreKey.id,
+                publicKey: CryptoUtils.Base64.base64ToUint8Array(bundle.signedPreKey.publicKeyBase64),
+                ed25519Signature: CryptoUtils.Base64.base64ToUint8Array(bundle.signedPreKey.ed25519SignatureBase64),
+                dilithiumSignature: bundle.signedPreKey.dilithiumSignatureBase64 ? CryptoUtils.Base64.base64ToUint8Array(bundle.signedPreKey.dilithiumSignatureBase64) : undefined,
+              },
+              ratchetPublic: CryptoUtils.Base64.base64ToUint8Array(bundle.ratchetPublicBase64),
+              oneTimePreKey: bundle.oneTimePreKey ? { id: bundle.oneTimePreKey.id, publicKey: CryptoUtils.Base64.base64ToUint8Array(bundle.oneTimePreKey.publicKeyBase64) } : undefined,
+            } as any;
+
+            console.debug('[Recv] Prekey bundle constructed');
+
+            //remember their identity and warn if it changes later
+            const pinned = PinnedIdentities.get(currentUser, targetUser);
+            if (!pinned) {
+              PinnedIdentities.set(currentUser, targetUser, bundle.identityEd25519PublicBase64);
+              console.debug('[Recv] Pinned identity for', targetUser);
+            } else if (pinned !== bundle.identityEd25519PublicBase64) {
+              console.warn('[Recv] Remote identity changed for', targetUser);
+              //for now just log
+            }
+
+            //make sure the signed prekey is actually signed by their identity key
+            console.debug('[Recv] Verifying prekey bundle signatures');
+            const ok = await X3DH.verifyPreKeyBundle(prekeyBundle);
+            if (!ok) {
+              console.error('[Recv] Invalid X3DH bundle signature for', targetUser);
+              return;
+            }
+            console.debug('[Recv] Prekey bundle signatures verified');
+
+            console.debug('[Recv] Deriving sender secret');
+            const rootKey = await X3DH.deriveSenderSecret(
+              ratchetId.x25519Private,
+              eph.privateKey,
+              prekeyBundle,
+              prekeyBundle.oneTimePreKey
+            );
+            console.debug('[Recv] Sender secret derived');
+
+            //set up basic session state
+            const state = {
+              rootKey,
+              currentDhPrivate: eph.privateKey,
+              currentDhPublic: eph.publicKey,
+              remoteDhPublic: CryptoUtils.Base64.base64ToUint8Array(bundle.ratchetPublicBase64),
+              sendChainKey: new Uint8Array(32),
+              recvChainKey: new Uint8Array(32),
+              sendMessageNumber: 0,
+              recvMessageNumber: 0,
+              previousSendMessageCount: 0,
+              skippedMessageKeys: new Map(),
+              usedSignedPreKeyId: bundle.signedPreKey.id,
+              usedOneTimePreKeyId: bundle.oneTimePreKey?.id,
+            };
+
+            console.log('[Recv] Creating X3DH session for', targetUser, {
+              hasRootKey: !!state.rootKey,
+              rootKeyLen: state.rootKey?.byteLength,
+              remoteDhPublicLen: state.remoteDhPublic?.byteLength,
+              usedSignedPreKeyId: state.usedSignedPreKeyId,
+              usedOneTimePreKeyId: state.usedOneTimePreKeyId
+            });
+
+            SessionStore.set(currentUser, targetUser, state);
+            console.log('[Recv] X3DH session created successfully for', targetUser);
+            return;
+
+          } catch (error) {
+            console.error('[Recv] Error creating X3DH session:', error);
             return;
           }
-
-          const rootKey = await X3DH.deriveSenderSecret(
-            ratchetId.x25519Private,
-            eph.privateKey,
-            prekeyBundle,
-            prekeyBundle.oneTimePreKey
-          );
-          //set up basic session state
-          const state = {
-            rootKey,
-            currentDhPrivate: eph.privateKey,
-            currentDhPublic: eph.publicKey,
-            remoteDhPublic: CryptoUtils.Base64.base64ToUint8Array(bundle.ratchetPublicBase64),
-            sendChainKey: new Uint8Array(32),
-            recvChainKey: new Uint8Array(32),
-            sendMessageNumber: 0,
-            recvMessageNumber: 0,
-            previousSendMessageCount: 0,
-            skippedMessageKeys: new Map(),
-            usedSignedPreKeyId: bundle.signedPreKey.id,
-            usedOneTimePreKeyId: bundle.oneTimePreKey?.id,
-          };
-          SessionStore.set(currentUser, targetUser, state);
-          return;
         } else if (encryptedMessage?.version === "hybrid-v1") {
           //old hybrid encryption system messages
           const hybridKeys = await getKeysOnDemand();

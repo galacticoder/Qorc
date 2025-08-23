@@ -115,6 +115,14 @@ export function useMessageSender(
       } catch { }
 
       const hybridKeys = await getKeysOnDemand();
+      console.debug("[Sender] getKeysOnDemand result:", {
+        isNull: hybridKeys === null,
+        isUndefined: hybridKeys === undefined,
+        type: typeof hybridKeys,
+        hasX25519: hybridKeys?.x25519 ? true : false,
+        hasKyber: hybridKeys?.kyber ? true : false
+      });
+
       if (!hybridKeys) {
         console.error("Client keys not available");
         return;
@@ -266,15 +274,26 @@ export function useMessageSender(
 
             // for the very first outbound message force refresh a proper sender session
             // to avoid using stale or receiver initialized state from persistence
+            // BUT only if the session looks like it might be stale/receiver-initialized
             if (includeX3dh) {
-              console.warn("[Sender] Forcing fresh sender session for first message");
-              SessionStore.clear(currentUser, user.username);
-              websocketClient.send(JSON.stringify({ type: SignalType.X3DH_REQUEST_BUNDLE, username: user.username }));
-              const available = await waitForSessionAvailability(currentUser, user.username, 5000, 100);
-              session = SessionStore.get(currentUser, user.username);
-              if (!available || !session) {
-                console.warn("[Sender] Sender session unavailable after forced refresh; skipping send", { peer: user.username });
-                return;
+              // Check if this session was just created (fresh) or is potentially stale
+              const sessionLooksFresh = session.sendMessageNumber === 0 &&
+                                      session.recvMessageNumber === 0 &&
+                                      session.previousSendMessageCount === 0 &&
+                                      session.sendChainKey.every(b => b === 0);
+
+              if (sessionLooksFresh) {
+                console.debug("[Sender] Session appears fresh, using existing session");
+              } else {
+                console.warn("[Sender] Forcing fresh sender session for first message");
+                SessionStore.clear(currentUser, user.username);
+                websocketClient.send(JSON.stringify({ type: SignalType.X3DH_REQUEST_BUNDLE, username: user.username }));
+                const available = await waitForSessionAvailability(currentUser, user.username, 5000, 100);
+                session = SessionStore.get(currentUser, user.username);
+                if (!available || !session) {
+                  console.warn("[Sender] Sender session unavailable after forced refresh; skipping send", { peer: user.username });
+                  return;
+                }
               }
               try {
                 console.debug("[Sender] Sender session ready after forced refresh", {

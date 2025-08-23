@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect } from "react";
+import { useState, useCallback, useEffect, useMemo } from "react";
 import { Conversation } from "@/components/chat/ConversationList";
 import { Message } from "@/components/chat/types";
 import { User } from "@/components/chat/UserList";
@@ -51,13 +51,28 @@ export function useConversations(currentUsername: string, users: User[], message
     );
   }, [messages, currentUsername]);
 
-  // Update conversations when users change (online status)
-  useEffect(() => {
-    setConversations(prev => prev.map(conv => ({
-      ...conv,
-      isOnline: users.some(user => user.username === conv.username && user.isOnline)
-    })));
+  // Memoize user lookup for better performance
+  const userLookup = useMemo(() => {
+    const lookup = new Map<string, boolean>();
+    users.forEach(user => lookup.set(user.username, user.isOnline));
+    return lookup;
   }, [users]);
+
+  // Update conversations when users change (online status) - optimized
+  useEffect(() => {
+    setConversations(prev => {
+      let hasChanges = false;
+      const updated = prev.map(conv => {
+        const isOnline = userLookup.get(conv.username) || false;
+        if (conv.isOnline !== isOnline) {
+          hasChanges = true;
+          return { ...conv, isOnline };
+        }
+        return conv;
+      });
+      return hasChanges ? updated : prev;
+    });
+  }, [userLookup]);
 
   // Update conversations when messages change
   useEffect(() => {
