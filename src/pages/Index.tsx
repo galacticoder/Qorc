@@ -44,7 +44,10 @@ const ChatApp: React.FC<ChatAppProps> = ({ onNavigate }) => {
   const messageSender = useMessageSender(
     Database.users,
     Authentication.loginUsernameRef,
-    Database.saveMessageToLocalDB,
+    (message: Message) => {
+      // Add the message to the UI state
+      setMessages(prev => [...prev, message]);
+    },
     Authentication.serverHybridPublic,
     Authentication.getKeysOnDemand,
     Authentication.aesKeyRef,
@@ -93,6 +96,14 @@ const ChatApp: React.FC<ChatAppProps> = ({ onNavigate }) => {
 
   // Get messages for the selected conversation
   const conversationMessages = getConversationMessages(selectedConversation);
+  
+  // Debug conversation state
+  console.log('[Index] Conversation state:', {
+    conversationsCount: conversations.length,
+    selectedConversation,
+    usersCount: Database.users.length,
+    hasSelectedConversation: !!selectedConversation
+  });
 
   // offline queue effects removed
 
@@ -117,7 +128,7 @@ const ChatApp: React.FC<ChatAppProps> = ({ onNavigate }) => {
   }
 
   return (
-    <TypingIndicatorProvider>
+    <TypingIndicatorProvider currentUsername={Authentication.loginUsernameRef.current}>
       <div className="flex h-screen bg-gradient-to-r from-gray-50 to-slate-50 relative">
         <Sidebar
           currentUsername={Authentication.loginUsernameRef.current}
@@ -141,9 +152,26 @@ const ChatApp: React.FC<ChatAppProps> = ({ onNavigate }) => {
             <ChatInterface
               messages={conversationMessages}
               setMessages={setMessages}
-              onSendMessage={(messageId, content, messageSignalType, replyTo) =>
-                messageSender.handleSendMessageType(messageId, content, messageSignalType, replyTo, selectedConversation)
-              }
+              onSendMessage={(messageId, content, messageSignalType, replyTo) => {
+                console.log('[Index] Attempting to send message:', {
+                  messageId,
+                  content,
+                  messageSignalType,
+                  selectedConversation,
+                  usersCount: Database.users.length,
+                  users: Database.users.map(u => u.username)
+                });
+                
+                // Find the user object for the selected conversation
+                const targetUser = Database.users.find(user => user.username === selectedConversation);
+                if (!targetUser) {
+                  console.error('[Index] User not found for conversation:', selectedConversation);
+                  return;
+                }
+                
+                console.log('[Index] Found target user:', targetUser);
+                return messageSender.handleSendMessage(targetUser, content, replyTo?.id);
+              }}
               onSendFile={handleSendFileWrapper}
               isEncrypted={true}
               currentUsername={Authentication.loginUsernameRef.current}

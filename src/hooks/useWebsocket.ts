@@ -1,5 +1,5 @@
 import { useEffect } from "react";
-import websocketClient from "@/lib/websocket";
+// WebSocket moved to Electron main; listen via IPC and send via edgeApi
 import { SignalType } from "@/lib/signals";
 
 type MessageHandler = (data: any) => Promise<void>;
@@ -10,65 +10,45 @@ export const useWebSocket = (
   setLoginError: (error: string) => void
 ) => {
   useEffect(() => {
-    websocketClient.setLoginErrorCallback(setLoginError)
-
-    const connect = async () => {
+    const handler = async (data: any) => {
       try {
-        if (!websocketClient.isConnectedToServer()) {
-          await websocketClient.connect();
+        console.log('[useWebSocket] Received message from main process:', {
+          type: data?.type,
+          dataType: typeof data,
+          keys: data ? Object.keys(data) : [],
+          hasEncryptedPayload: !!data?.encryptedPayload,
+          encryptedPayloadKeys: data?.encryptedPayload ? Object.keys(data.encryptedPayload) : []
+        });
+        
+        // Skip IPC responses and invalid messages
+        if (!data || typeof data !== 'object' || !data.type || data.type === 'ok') {
+          console.log('[useWebSocket] Skipping non-server message:', data);
+          return;
         }
-      } catch (error) {
-        console.error("WebSocket connection error:", error);
+        
+        // Route encrypted types to encrypted handler; others to server handler
+        if (data?.type === 'encrypted-message' || data?.type === 'dr-send' || data?.type === 'x3dh-deliver-bundle') {
+          console.log('[useWebSocket] Routing to encrypted handler:', {
+            type: data.type,
+            hasEncryptedPayload: !!data.encryptedPayload,
+            encryptedPayloadKeys: data.encryptedPayload ? Object.keys(data.encryptedPayload) : []
+          });
+          await handleEncryptedMessage(data);
+        } else {
+          console.log('[useWebSocket] Routing to server handler:', {
+            type: data.type,
+            keys: Object.keys(data)
+          });
+          await handleServerMessage(data);
+        }
+      } catch (e) {
+        console.error('IPC server-message handler error:', e);
       }
     };
-
-    connect();
-
-    return () => {
-      websocketClient.close();
-    };
-  }, [setLoginError]);
-
-  useEffect(() => {
-    const registeredSignalTypes = Object.values(SignalType);
-    const rawHandler = async (data: unknown) => {
-      await handleEncryptedMessage(data);
-    };
-
-    registeredSignalTypes.forEach(signal => {
-      if (
-        signal !== SignalType.ENCRYPTED_MESSAGE &&
-        signal !== SignalType.DR_SEND &&
-        signal !== SignalType.X3DH_DELIVER_BUNDLE
-      ) {
-        websocketClient.registerMessageHandler(signal, handleServerMessage);
-      }
-    });
-
-    // Ensure generic ERROR messages are handled too
-    websocketClient.registerMessageHandler(SignalType.ERROR, handleServerMessage);
-
-    websocketClient.registerMessageHandler(SignalType.ENCRYPTED_MESSAGE, handleEncryptedMessage);
-    websocketClient.registerMessageHandler(SignalType.DR_SEND, handleEncryptedMessage);
-    websocketClient.registerMessageHandler(SignalType.X3DH_DELIVER_BUNDLE, handleEncryptedMessage);
-    websocketClient.registerMessageHandler("raw", rawHandler);
-
-    // Capture rate-limit messages to configure client backoff
-    websocketClient.registerMessageHandler(SignalType.ERROR, (msg: any) => {
-      const rl = msg?.rateLimitInfo;
-      if (rl?.blocked && typeof rl.remainingBlockTime === 'number') {
-        // remainingBlockTime is seconds from server
-        websocketClient.setGlobalRateLimit(rl.remainingBlockTime);
-      }
-      return handleServerMessage(msg);
-    });
-
-    return () => {
-      registeredSignalTypes.forEach(signal => {
-        websocketClient.unregisterMessageHandler(signal);
-      });
-      websocketClient.unregisterMessageHandler(SignalType.ERROR);
-      websocketClient.unregisterMessageHandler("raw");
-    };
+    const listener = (evt: any) => handler(evt?.detail ?? evt);
+    window.addEventListener('edge:server-message', listener as any);
+    return () => window.removeEventListener('edge:server-message', listener as any);
   }, [handleServerMessage, handleEncryptedMessage]);
+
+  // Remaining registration replaced by IPC routing above
 };

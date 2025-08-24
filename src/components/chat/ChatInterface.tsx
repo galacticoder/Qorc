@@ -44,7 +44,11 @@ export function ChatInterface({
   const scrollAreaRef = useRef<HTMLDivElement>(null);
   const [replyTo, setReplyTo] = useState<Message | null>(null);
   const [editingMessage, setEditingMessage] = useState<Message | null>(null);
-
+  
+  // Track which messages have been processed in the current scroll event to prevent duplicates
+  const processedInScrollRef = useRef<Set<string>>(new Set());
+  const lastScrollTimeRef = useRef<number>(0);
+  
   // Typing hook
   const { handleLocalTyping, handleConversationChange } = useTypingIndicator(currentUsername, onSendMessage);
   const { typingUsers } = useTypingIndicatorContext();
@@ -52,10 +56,13 @@ export function ChatInterface({
   // Handle conversation changes to stop typing indicators
   useEffect(() => {
     handleConversationChange();
+    // Clear processed messages tracking when conversation changes
+    processedInScrollRef.current.clear();
+    lastScrollTimeRef.current = 0;
   }, [selectedConversation, handleConversationChange]);
 
   // Message receipts hook
-  const { sendReadReceipt, markMessageAsRead, getSmartReceiptStatus } = useMessageReceipts(messages, setMessages, currentUsername, onSendMessage, saveMessageToLocalDB);
+  const { sendReadReceipt, markMessageAsRead, getSmartReceiptStatus } = useMessageReceipts(messages, setMessages, currentUsername, saveMessageToLocalDB);
 
   useEffect(() => {
     if (scrollAreaRef.current) {
@@ -79,6 +86,16 @@ export function ChatInterface({
     const handleScroll = () => {
       if (!isTabActive()) return; // Do not mark as read if tab is not active
 
+      const now = Date.now();
+      // Prevent multiple scroll calls in quick succession (within 500ms)
+      if (now - lastScrollTimeRef.current < 500) {
+        return;
+      }
+      lastScrollTimeRef.current = now;
+
+      // Clear the processed messages set for this scroll event
+      processedInScrollRef.current.clear();
+
       const containerRect = scrollContainer.getBoundingClientRect();
       const containerBottom = containerRect.bottom;
 
@@ -86,6 +103,9 @@ export function ChatInterface({
       messages.forEach(message => {
         // Only process messages from OTHER users (not current user) and not already read
         if (message.sender === currentUsername || message.receipt?.read) return;
+
+        // Skip if we've already processed this message in this scroll event
+        if (processedInScrollRef.current.has(message.id)) return;
 
         const messageElement = document.getElementById(`message-${message.id}`);
         if (messageElement) {
@@ -95,8 +115,13 @@ export function ChatInterface({
           // If message is visible in the scroll container
           if (messageBottom <= containerBottom && messageBottom >= containerRect.top) {
             // Mark as read locally and send read receipt to sender
-            markMessageAsRead(message.id);
-            sendReadReceipt(message.id, message.sender);
+            // Only send read receipt if the message isn't already marked as read
+            if (!message.receipt?.read) {
+              markMessageAsRead(message.id);
+              sendReadReceipt(message.id, message.sender);
+              // Mark this message as processed in this scroll event
+              processedInScrollRef.current.add(message.id);
+            }
           }
         }
       });
@@ -174,15 +199,21 @@ export function ChatInterface({
       )}
       <div className="p-4 bg-gray-50">
         <ChatInput
-          onSendMessage={async (
-            messageId: string | undefined,
-            content: string,
-            messageSignalType: string,
-            replyToMsg?: Message | null
-          ) => {
-            await onSendMessage(messageId ?? "", content, messageSignalType, replyToMsg);
-            setReplyTo(null);
-          }}
+                        onSendMessage={async (
+                messageId: string | undefined,
+                content: string,
+                messageSignalType: string,
+                replyToMsg?: Message | null
+              ) => {
+                // For typing indicators, we don't need to send actual messages
+                if (messageSignalType === 'typing-start' || messageSignalType === 'typing-stop') {
+                  // Just handle typing locally, no need to send to server
+                  return;
+                }
+                // For other message types, call the parent handler
+                await onSendMessage(messageId ?? "", content, messageSignalType, replyToMsg);
+                setReplyTo(null);
+              }}
           onSendFile={onSendFile}
           isEncrypted={isEncrypted}
           currentUsername={currentUsername}

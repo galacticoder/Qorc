@@ -103,6 +103,24 @@ db.exec(`
 `);
 
 db.exec(`
+  CREATE TABLE IF NOT EXISTS libsignal_bundles (
+    username TEXT PRIMARY KEY,
+    registrationId INTEGER NOT NULL,
+    deviceId INTEGER NOT NULL,
+    identityKeyBase64 TEXT NOT NULL,
+    preKeyId INTEGER,
+    preKeyPublicBase64 TEXT,
+    signedPreKeyId INTEGER NOT NULL,
+    signedPreKeyPublicBase64 TEXT NOT NULL,
+    signedPreKeySignatureBase64 TEXT NOT NULL,
+    kyberPreKeyId INTEGER NOT NULL,
+    kyberPreKeyPublicBase64 TEXT NOT NULL,
+    kyberPreKeySignatureBase64 TEXT NOT NULL,
+    updatedAt INTEGER NOT NULL
+  );
+`);
+
+db.exec(`
   CREATE TABLE IF NOT EXISTS one_time_prekeys (
     username TEXT NOT NULL,
     keyId TEXT NOT NULL,
@@ -292,6 +310,66 @@ export class PrekeyDatabase {
       },
       ratchetPublicBase64: bundle.ratchetPublicBase64,
       oneTimePreKey: ot ? { id: ot.keyId, publicKeyBase64: ot.publicKeyBase64 } : null
+    };
+  }
+}
+
+export class LibsignalBundleDB {
+  static publish(username, bundle) {
+    const now = Date.now();
+    db.prepare(`
+      INSERT INTO libsignal_bundles (
+        username, registrationId, deviceId, identityKeyBase64,
+        preKeyId, preKeyPublicBase64,
+        signedPreKeyId, signedPreKeyPublicBase64, signedPreKeySignatureBase64,
+        kyberPreKeyId, kyberPreKeyPublicBase64, kyberPreKeySignatureBase64,
+        updatedAt
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(username) DO UPDATE SET
+        registrationId=excluded.registrationId,
+        deviceId=excluded.deviceId,
+        identityKeyBase64=excluded.identityKeyBase64,
+        preKeyId=excluded.preKeyId,
+        preKeyPublicBase64=excluded.preKeyPublicBase64,
+        signedPreKeyId=excluded.signedPreKeyId,
+        signedPreKeyPublicBase64=excluded.signedPreKeyPublicBase64,
+        signedPreKeySignatureBase64=excluded.signedPreKeySignatureBase64,
+        kyberPreKeyId=excluded.kyberPreKeyId,
+        kyberPreKeyPublicBase64=excluded.kyberPreKeyPublicBase64,
+        kyberPreKeySignatureBase64=excluded.kyberPreKeySignatureBase64,
+        updatedAt=excluded.updatedAt
+    `).run(
+      username,
+      bundle.registrationId,
+      bundle.deviceId,
+      bundle.identityKeyBase64,
+      bundle.preKeyId ?? null,
+      bundle.preKeyPublicBase64 ?? null,
+      bundle.signedPreKeyId,
+      bundle.signedPreKeyPublicBase64,
+      bundle.signedPreKeySignatureBase64,
+      bundle.kyberPreKeyId,
+      bundle.kyberPreKeyPublicBase64,
+      bundle.kyberPreKeySignatureBase64,
+      now
+    );
+  }
+
+  static take(username) {
+    const row = db.prepare(`SELECT * FROM libsignal_bundles WHERE username = ?`).get(username);
+    if (!row) return null;
+    return {
+      registrationId: row.registrationId,
+      deviceId: row.deviceId,
+      identityKeyBase64: row.identityKeyBase64,
+      preKeyId: row.preKeyId,
+      preKeyPublicBase64: row.preKeyPublicBase64,
+      signedPreKeyId: row.signedPreKeyId,
+      signedPreKeyPublicBase64: row.signedPreKeyPublicBase64,
+      signedPreKeySignatureBase64: row.signedPreKeySignatureBase64,
+      kyberPreKeyId: row.kyberPreKeyId,
+      kyberPreKeyPublicBase64: row.kyberPreKeyPublicBase64,
+      kyberPreKeySignatureBase64: row.kyberPreKeySignatureBase64,
     };
   }
 }

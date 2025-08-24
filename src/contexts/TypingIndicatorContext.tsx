@@ -18,9 +18,10 @@ export function useTypingIndicatorContext() {
 
 interface TypingIndicatorProviderProps {
 	children: ReactNode;
+	currentUsername?: string; // Add current username to filter out own typing indicators
 }
 
-export function TypingIndicatorProvider({ children }: TypingIndicatorProviderProps) {
+export function TypingIndicatorProvider({ children, currentUsername }: TypingIndicatorProviderProps) {
 	const [typingUsers, setTypingUsers] = useState<Set<string>>(new Set());
 	const typingTimeoutsRef = useRef<Map<string, NodeJS.Timeout>>(new Map());
 
@@ -59,8 +60,46 @@ export function TypingIndicatorProvider({ children }: TypingIndicatorProviderPro
 	// Listen for typing indicator events from encrypted messages
 	useEffect(() => {
 		const handleTypingIndicator = (event: CustomEvent) => {
-			const { type, username } = event.detail;
+			const { type, username, fromUsername, isTypingIndicator, excludeSender } = event.detail;
 
+			// Handle new direct typing indicator events
+			if (isTypingIndicator && fromUsername) {
+				const username = fromUsername;
+				
+				// Skip if this is from the current user
+				if (currentUsername && username === currentUsername) {
+					return;
+				}
+				
+				if (type === 'typing-start') {
+					// Clear any existing timeout for this user
+					const existingTimeout = typingTimeoutsRef.current.get(username);
+					if (existingTimeout) {
+						clearTimeout(existingTimeout);
+					}
+
+					// Add user to typing list
+					setTypingUsers(prev => {
+						if (prev.has(username)) return prev; // Already typing, no change
+						const newSet = new Set(prev);
+						newSet.add(username);
+						return newSet;
+					});
+
+					// Set auto-clear timeout (fallback in case typing-stop is missed)
+					const timeout = setTimeout(() => {
+						clearTypingUser(username);
+					}, 5000); // 5 second fallback timeout
+
+					typingTimeoutsRef.current.set(username, timeout);
+
+				} else if (type === 'typing-stop') {
+					clearTypingUser(username);
+				}
+				return;
+			}
+
+			// Handle legacy encrypted message typing indicators
 			if (type === 'typing-start') {
 				// Clear any existing timeout for this user
 				const existingTimeout = typingTimeoutsRef.current.get(username);
@@ -88,10 +127,13 @@ export function TypingIndicatorProvider({ children }: TypingIndicatorProviderPro
 			}
 		};
 
+		// Listen for both new direct typing indicators and legacy encrypted message events
 		window.addEventListener('typing-indicator', handleTypingIndicator as EventListener);
+		window.addEventListener('edge:typing-indicator', handleTypingIndicator as EventListener);
 
 		return () => {
 			window.removeEventListener('typing-indicator', handleTypingIndicator as EventListener);
+			window.removeEventListener('edge:typing-indicator', handleTypingIndicator as EventListener);
 			// Clear all timeouts on unmount
 			typingTimeoutsRef.current.forEach(timeout => clearTimeout(timeout));
 			typingTimeoutsRef.current.clear();

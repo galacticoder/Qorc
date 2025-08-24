@@ -2,9 +2,13 @@
   "name": "e2e-chat",
   "type": "module",
   "packageManager": "pnpm@8.10.0",
+  "main": "main.cjs",
   "scripts": {
-    "dev": "vite",
+    "dev": "concurrently -k --success first \"pnpm:vite\" \"pnpm:electron\"",
+    "vite": "vite --port 5173 --strictPort --open=false",
+    "electron": "wait-on http://localhost:5173 && cross-env VITE_DEV_SERVER_URL=http://localhost:5173 electron .",
     "build": "vite build",
+    "build:electron": "electron-builder -c.extraMetadata.name=e2e-chat -c.appId=com.end2end.chat -c.productName=End2EndChat -c.directories.output=dist-electron",
     "lint": "eslint --quiet ./src",
     "preview": "vite preview"
   },
@@ -41,6 +45,7 @@
     "@radix-ui/react-toggle": "^1.1.0",
     "@radix-ui/react-toggle-group": "^1.1.0",
     "@radix-ui/react-tooltip": "^1.1.4",
+    "@signalapp/libsignal-client": "^0.79.0",
     "@supabase/supabase-js": "^2.50.3",
     "@tanstack/react-query": "^5.56.2",
     "@types/uuid": "^10.0.0",
@@ -75,7 +80,8 @@
     "uuid": "^11.1.0",
     "vaul": "^0.9.3",
     "vite-plugin-top-level-await": "^1.6.0",
-    "zod": "^3.23.8"
+    "zod": "^3.23.8",
+    "ws": "^8.18.3"
   },
   "devDependencies": {
     "@eslint/js": "^9.32.0",
@@ -87,6 +93,10 @@
     "@types/react-dom": "^18.3.0",
     "@vitejs/plugin-react-swc": "^3.5.0",
     "autoprefixer": "^10.4.20",
+    "concurrently": "^9.2.0",
+    "cross-env": "^10.0.0",
+    "electron": "^37.3.1",
+    "electron-builder": "^26.0.12",
     "eslint": "^9.32.0",
     "eslint-plugin-react": "^7.37.5",
     "eslint-plugin-react-hooks": "^5.1.0-rc.0",
@@ -98,6 +108,7 @@
     "typescript": "^5.5.3",
     "typescript-eslint": "^8.38.0",
     "vite": "^5.4.19",
-    "vite-plugin-wasm": "^3.5.0"
+    "vite-plugin-wasm": "^3.5.0",
+    "wait-on": "^8.0.4"
   }
 }

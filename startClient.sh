@@ -11,11 +11,24 @@ echo -e "${BLUE}╚════════════════════�
 cd "$(dirname "$0")"
 
 echo -e "${GREEN}Installing client dependencies...${NC}"
-npm install
+pnpm install
 
-echo -e "${GREEN}Starting client application...${NC}"
+# Prevent auto-opening external browser and enable Electron DevTools
+export BROWSER=none
+export ELECTRON_OPEN_DEVTOOLS=1
 
-npm run dev &
+# Ensure Vite uses fixed port and won't open
+export VITE_PORT=5173
+
+START_ELECTRON="${START_ELECTRON:-1}"
+
+if [ "$START_ELECTRON" = "1" ]; then
+    echo -e "${GREEN}Starting client application (Vite + Electron)...${NC}"
+    pnpm run dev &
+else
+    echo -e "${GREEN}Starting client application (Vite only; no window). Set START_ELECTRON=1 to launch Electron.${NC}"
+    pnpm run vite &
+fi
 
 CLIENT_PID=$!
 

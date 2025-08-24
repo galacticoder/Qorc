@@ -4,6 +4,9 @@ export class SecureDB {
   private dbName: string;
   private username: string;
   private encryptionKey: CryptoKey | null = null;
+  // In-memory fallback when IndexedDB isn't available (e.g., dev sandbox issues)
+  private memoryMode: boolean = false;
+  private memoryStore = new Map<string, Uint8Array>();
 
   constructor(username: string) {
     this.username = username;
@@ -68,18 +71,29 @@ export class SecureDB {
   async saveMessages(messages: any[]): Promise<void> {
     if (!this.encryptionKey) throw new Error("Encryption key not initialized");
     const encrypted = await this.encryptData(messages);
-
-    const db = await this.openDB();
-    return new Promise((resolve, reject) => {
-      const tx = db.transaction("data", "readwrite");
-      const store = tx.objectStore("data");
-      store.put(encrypted, "messages");
-      tx.oncomplete = () => resolve();
-      tx.onerror = () => reject(tx.error);
-    });
+    try {
+      const db = await this.openDB();
+      return new Promise((resolve, reject) => {
+        const tx = db.transaction("data", "readwrite");
+        const store = tx.objectStore("data");
+        store.put(encrypted, "messages");
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => reject(tx.error);
+      });
+    } catch (e) {
+      // Fallback to memory mode
+      console.warn('[SecureDB] IndexedDB unavailable; using in-memory storage for messages');
+      this.memoryMode = true;
+      this.memoryStore.set('messages', encrypted);
+    }
   }
 
   async loadMessages(): Promise<any[]> {
+    if (this.memoryMode) {
+      const buf = this.memoryStore.get('messages');
+      if (!buf) return [];
+      return await this.decryptData(buf);
+    }
     const db = await this.openDB();
     return new Promise((resolve, reject) => {
       const tx = db.transaction("data", "readonly");
@@ -103,18 +117,28 @@ export class SecureDB {
   async saveUsers(users: any[]): Promise<void> {
     if (!this.encryptionKey) throw new Error("Encryption key not initialized");
     const encrypted = await this.encryptData(users);
-
-    const db = await this.openDB();
-    return new Promise((resolve, reject) => {
-      const tx = db.transaction("data", "readwrite");
-      const store = tx.objectStore("data");
-      store.put(encrypted, "users");
-      tx.oncomplete = () => resolve();
-      tx.onerror = () => reject(tx.error);
-    });
+    try {
+      const db = await this.openDB();
+      return new Promise((resolve, reject) => {
+        const tx = db.transaction("data", "readwrite");
+        const store = tx.objectStore("data");
+        store.put(encrypted, "users");
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => reject(tx.error);
+      });
+    } catch (e) {
+      console.warn('[SecureDB] IndexedDB unavailable; using in-memory storage for users');
+      this.memoryMode = true;
+      this.memoryStore.set('users', encrypted);
+    }
   }
 
   async loadUsers(): Promise<any[]> {
+    if (this.memoryMode) {
+      const buf = this.memoryStore.get('users');
+      if (!buf) return [];
+      return await this.decryptData(buf);
+    }
     const db = await this.openDB();
     return new Promise((resolve, reject) => {
       const tx = db.transaction("data", "readonly");

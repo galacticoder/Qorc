@@ -4,9 +4,15 @@ import websocketClient from "@/lib/websocket";
 import { CryptoUtils } from "@/lib/unified-crypto";
 import { SecureDB } from "@/lib/secureDB";
 import { SecureKeyManager } from "@/lib/secure-key-manager";
-import { X3DH } from "@/lib/ratchet/x3dh";
-import { SessionStore } from "@/lib/ratchet/session-store";
-import { PinnedServer } from "@/lib/ratchet/pinned-server";
+// Legacy pinned server removed; use simple in-memory pinning here
+const PinnedServer = {
+  get() {
+    try { return JSON.parse(localStorage.getItem('securechat_server_pin_v1') || 'null'); } catch { return null; }
+  },
+  set(val: any) {
+    try { localStorage.setItem('securechat_server_pin_v1', JSON.stringify(val)); } catch {}
+  }
+};
 
 export const useAuth = () => {
   const [username, setUsername] = useState("");
@@ -194,7 +200,7 @@ export const useAuth = () => {
     console.log(`[AUTH] Starting ${mode} process for user: ${username}`);
     setLoginError("");
 
-    try { SessionStore.clearAllForCurrentUser(); } catch { } //clear any stale ratchet sessions before starting a fresh auth flow
+    // legacy ratchet sessions no longer used
     loginUsernameRef.current = username;
     setUsername(username);
     passwordRef.current = password;
@@ -325,81 +331,18 @@ export const useAuth = () => {
         passphraseHash
       }));
 
-      //publish prekey bundle for X3DH
+      // publish official libsignal bundle via edge IPC and publish to server; keep legacy hybrid pub for DB
       if (keyManagerRef.current) {
-        let ratchetId = await keyManagerRef.current.getRatchetIdentity();
-        if (!ratchetId) {
-          const id = await X3DH.generateIdentityKeyPair();
-          console.log('[AUTH] Generated new ratchet identity:', {
-            ed25519PrivateLen: id.ed25519Private.length,
-            dilithiumPrivateLen: id.dilithiumPrivate.length,
-            x25519PrivateLen: id.x25519Private.length
-          });
-          await keyManagerRef.current.storeRatchetIdentity({
-            ed25519Private: id.ed25519Private,
-            ed25519PublicBase64: CryptoUtils.Base64.arrayBufferToBase64(id.ed25519Public),
-            dilithiumPrivate: id.dilithiumPrivate,
-            dilithiumPublicBase64: CryptoUtils.Base64.arrayBufferToBase64(id.dilithiumPublic),
-            x25519Private: id.x25519Private,
-            x25519PublicBase64: CryptoUtils.Base64.arrayBufferToBase64(id.x25519Public),
-          });
-          ratchetId = await keyManagerRef.current.getRatchetIdentity();
+        try {
+          const idOut = await (window as any).edgeApi.generateIdentity({ username: loginUsernameRef.current });
+          const prekeys = await (window as any).edgeApi.generatePreKeys({ username: loginUsernameRef.current });
+          const bundle = await (window as any).edgeApi.getPreKeyBundle({ username: loginUsernameRef.current });
+          websocketClient.send(JSON.stringify({ type: SignalType.LIBSIGNAL_PUBLISH_BUNDLE, bundle: { ...bundle } }));
+        } catch (err) {
+          console.error('[AUTH] Failed to publish libsignal bundle:', err);
         }
 
-        console.log('[AUTH] Retrieved ratchet identity:', {
-          ed25519PrivateLen: ratchetId?.ed25519Private?.length,
-          dilithiumPrivateLen: ratchetId?.dilithiumPrivate?.length,
-          x25519PrivateLen: ratchetId?.x25519Private?.length
-        });
-
-        //reuse existing prekeys if available and if not then generate new
-        let existing = await keyManagerRef.current.getRatchetPrekeys();
-        let signedPreKey = existing?.signedPreKey ?? null;
-        let oneTimePreKeys = existing?.oneTimePreKeys ?? [];
-        let generatedSignedPreKey = null;
-        if (!signedPreKey) {
-          console.log('[AUTH] Generating signed prekey with keys:', {
-            ed25519PrivateLen: ratchetId!.ed25519Private.length,
-            dilithiumPrivateLen: ratchetId!.dilithiumPrivate?.length,
-            hasDilithium: !!ratchetId!.dilithiumPrivate
-          });
-          const gen = await X3DH.generateSignedPreKey(ratchetId!.ed25519Private, ratchetId!.dilithiumPrivate || undefined);
-          generatedSignedPreKey = gen;
-          signedPreKey = {
-            id: gen.id,
-            private: gen.privateKey!,
-            publicBase64: CryptoUtils.Base64.arrayBufferToBase64(gen.publicKey),
-            signatureBase64: CryptoUtils.Base64.arrayBufferToBase64(gen.ed25519Signature),
-          };
-        }
-        if (!oneTimePreKeys || oneTimePreKeys.length === 0) {
-          const genOtks = await X3DH.generateOneTimePreKeys(25);
-          oneTimePreKeys = genOtks.map(k => ({ id: k.id, private: k.privateKey!, publicBase64: CryptoUtils.Base64.arrayBufferToBase64(k.publicKey) }));
-        }
-
-        //store merged prekeys back and preserve any existing
-        await keyManagerRef.current.storeRatchetPrekeys({ signedPreKey, oneTimePreKeys });
-
-        //publish bundle (no secrets) to server using base64 strings
-        websocketClient.send(JSON.stringify({
-          type: SignalType.X3DH_PUBLISH_BUNDLE,
-          bundle: {
-            username: loginUsernameRef.current,
-            identityEd25519PublicBase64: ratchetId!.ed25519PublicBase64,
-            identityDilithiumPublicBase64: ratchetId!.dilithiumPublicBase64,
-            identityX25519PublicBase64: ratchetId!.x25519PublicBase64,
-            ratchetPublicBase64: signedPreKey.publicBase64,
-            signedPreKey: {
-              id: signedPreKey.id,
-              publicKeyBase64: signedPreKey.publicBase64,
-              ed25519SignatureBase64: signedPreKey.signatureBase64,
-              dilithiumSignatureBase64: generatedSignedPreKey ? CryptoUtils.Base64.arrayBufferToBase64(generatedSignedPreKey.dilithiumSignature!) : undefined,
-            },
-            oneTimePreKeys: oneTimePreKeys.map(k => ({ id: k.id, publicKeyBase64: k.publicBase64 })),
-          }
-        }));
-
-        //and alsi publish legacy hybrid public keys so server can encrypt system messages immediately
+        // also publish legacy hybrid public keys so server can encrypt system messages immediately
         if (keyManagerRef.current && serverHybridPublic) {
           const publicKeys = await keyManagerRef.current.getPublicKeys();
           if (publicKeys) {

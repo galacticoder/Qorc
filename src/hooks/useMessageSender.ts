@@ -1,12 +1,8 @@
 import { useCallback } from "react";
-// websocketclient imported at top already
 import { Message } from "@/components/chat/types";
 import { SignalType } from "@/lib/signals";
 import { User } from "@/components/chat/UserList";
 import { CryptoUtils } from "@/lib/unified-crypto";
-import { X3DH } from "@/lib/ratchet/x3dh";
-import { SessionStore } from "@/lib/ratchet/session-store";
-import { DoubleRatchet } from "@/lib/ratchet/double-ratchet";
 import websocketClient from "@/lib/websocket";
 import { ServerDatabase } from "./useSecureDB";
 
@@ -34,502 +30,221 @@ export function useMessageSender(
       }
     }, delayMs);
   }
+
   async function waitForSessionAvailability(currentUser: string, peer: string, totalMs = 5000, intervalMs = 100): Promise<boolean> {
     const start = Date.now();
     let attempt = 0;
-    while (Date.now() - start < totalMs) {
-      const s = SessionStore.get(currentUser, peer);
-      if (s) {
-        try {
-          console.debug("[Sender] Session became available", {
-            peer,
-            attempts: attempt,
-            waitedMs: Date.now() - start,
-            sendMessageNumber: s.sendMessageNumber,
-            prevSendCount: s.previousSendMessageCount,
-          });
-        } catch { }
+    
+    // First check if session already exists
+    try {
+      const sessionCheck = await (window as any).edgeApi?.hasSession?.({ selfUsername: currentUser, peerUsername: peer, deviceId: 1 });
+      if (sessionCheck?.hasSession) {
         return true;
       }
-      attempt++;
-      await new Promise(res => setTimeout(res, intervalMs));
+    } catch (e) {
+      // Session check failed
     }
-    console.warn("[Sender] Session did not become available in time", { peer, waitedMs: totalMs });
-    return false;
+    
+    // Listen for session ready event
+    return new Promise((resolve) => {
+      const eventListener = (event: any) => {
+        if (event.detail?.peer === peer) {
+          window.removeEventListener('libsignal-session-ready', eventListener);
+          resolve(true);
+        }
+      };
+      
+      window.addEventListener('libsignal-session-ready', eventListener);
+      
+      // Fallback polling mechanism with timeout
+      const pollForSession = async () => {
+        while (Date.now() - start < totalMs) {
+          try {
+            const sessionCheck = await (window as any).edgeApi?.hasSession?.({ selfUsername: currentUser, peerUsername: peer, deviceId: 1 });
+            if (sessionCheck?.hasSession) {
+              window.removeEventListener('libsignal-session-ready', eventListener);
+              resolve(true);
+              return;
+            }
+          } catch (e) {
+            // Session check failed
+          }
+          attempt++;
+          await new Promise(res => setTimeout(res, intervalMs));
+        }
+        
+        window.removeEventListener('libsignal-session-ready', eventListener);
+        resolve(false);
+      };
+      
+      pollForSession();
+    });
   }
+
   async function getDeterministicMessageId(message: {
     content: string;
     timestamp: number;
     sender: string;
     replyToId?: string;
   }): Promise<string> {
+    const normalized = `${message.sender}:${message.content}:${message.timestamp}${message.replyToId ? `:${message.replyToId}` : ''}`;
     const encoder = new TextEncoder();
-    const replyPart = message.replyToId ? `:${message.replyToId}` : '';
-    const normalized = `${message.content.trim()}:${message.timestamp}:${message.sender.trim().toLowerCase()}${replyPart}`;
-    try {
-      console.debug("[Sender] Deterministic ID input:", { normalized });
-    } catch { }
-
-    const hashBuffer = await crypto.subtle.digest("SHA-512", encoder.encode(normalized));
-    const idHex = Array.from(new Uint8Array(hashBuffer))
-      .map((b) => b.toString(16).padStart(2, "0"))
-      .join("");
-    try {
-      console.debug("[Sender] Deterministic ID computed:", idHex);
-    } catch { }
-    return idHex;
+    const data = encoder.encode(normalized);
+    const hashBuffer = await crypto.subtle.digest('SHA-256', data);
+    const hashArray = Array.from(new Uint8Array(hashBuffer));
+    const idHex = hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+    return idHex.slice(0, 16);
   }
 
-  const handleSendMessage = useCallback(
-    async ({
-      messageId,
-      replyTo,
-      type,
-      typeInside,
+  const handleSendMessage = useCallback(async (user: User, content: string, replyToId?: string, fileData?: string) => {
+    if (!isLoggedIn || !loginUsernameRef.current) return;
+
+    const currentUser = loginUsernameRef.current;
+    const messageId = await getDeterministicMessageId({
       content,
-      recipient,
-    }: {
-      messageId?: string;
-      replyTo?: Message | null;
-      type?: string;
-      typeInside?: string;
-      content?: string;
-      recipient?: string;
-    }) => {
-      console.log("[Sender] handleSendMessage invoked", {
-        messageId,
-        replyToId: replyTo?.id,
-        type,
-        typeInside,
-        contentPreview: (content || '').slice(0, 80),
+      timestamp: Date.now(),
+      sender: currentUser,
+      replyToId
+    });
+
+    // Check if we have a session with this user
+    try {
+      console.log('[MessageSender] Checking session availability for:', {
+        selfUsername: currentUser,
+        peerUsername: user.username,
+        deviceId: 1
       });
-      if (!serverHybridPublic) {
-        console.error("Server keys not available");
-        return;
-      }
-      try {
-        console.debug("[Sender] Server hybrid public keys", {
-          x25519PublicBase64: serverHybridPublic.x25519PublicBase64?.slice(0, 24) + '...',
-          kyberPublicBase64: serverHybridPublic.kyberPublicBase64?.slice(0, 24) + '...',
-        });
-      } catch { }
-
-      const hybridKeys = await getKeysOnDemand();
-      console.debug("[Sender] getKeysOnDemand result:", {
-        isNull: hybridKeys === null,
-        isUndefined: hybridKeys === undefined,
-        type: typeof hybridKeys,
-        hasX25519: hybridKeys?.x25519 ? true : false,
-        hasKyber: hybridKeys?.kyber ? true : false
+      
+      const sessionCheck = await (window as any).edgeApi?.hasSession?.({ 
+        selfUsername: currentUser, 
+        peerUsername: user.username, 
+        deviceId: 1 
       });
-
-      if (!hybridKeys) {
-        console.error("Client keys not available");
-        return;
-      }
-      try {
-        console.debug("[Sender] Client hybrid keys", {
-          x25519PublicBase64: hybridKeys.x25519.publicKeyBase64?.slice(0, 24) + '...',
-          kyberPublicBase64: hybridKeys.kyber.publicKeyBase64?.slice(0, 24) + '...',
-          x25519PrivateLen: (hybridKeys.x25519.private as Uint8Array)?.byteLength ?? 'n/a',
-          kyberSecretLen: hybridKeys.kyber.secretKey?.byteLength ?? 'n/a',
-          aesKeyPresent: !!aesKeyRef.current,
-        });
-      } catch { }
-
-      const time = Date.now();
-      const id = messageId || await getDeterministicMessageId({
-        content: content || "",
-        timestamp: time,
-        sender: loginUsernameRef.current,
-        replyToId: replyTo?.id
-      });
-      console.log("[Sender] Using messageId:", id, "timestamp:", time);
-
-      const enqueueAndBackoff = (fn: () => Promise<void>, baseMs = 1000) => {
-        pendingSendsRef.current.push(fn);
-        scheduleFlush(baseMs);
-      };
-
-      try {
-        console.debug("[Sender] Target recipient:", recipient);
-
-        // Determine recipients; send only to the specified recipient if they're online
-        const targetUser = recipient ? users.find(u => u.username === recipient && u.isOnline) : null;
-        if (!targetUser) {
-          console.log("[Sender] Target recipient not online or not found; not delivering");
-          // Don't mark as delivered if recipient is not online
+      
+      console.log('[MessageSender] Session check result:', sessionCheck);
+      
+      if (!sessionCheck?.hasSession) {
+        console.log('[MessageSender] No session exists, requesting prekey bundle');
+        // No session exists, request a prekey bundle
+        websocketClient.send(JSON.stringify({ 
+          type: SignalType.LIBSIGNAL_REQUEST_BUNDLE, 
+          username: user.username 
+        }));
+        
+        // Wait for session to become available
+        const sessionAvailable = await waitForSessionAvailability(currentUser, user.username);
+        console.log('[MessageSender] Session availability wait result:', sessionAvailable);
+        if (!sessionAvailable) {
+          console.error('[MessageSender] Session not available after waiting');
           return;
         }
-        const onlineRecipients = [targetUser];
-
-        // Mark message as delivered locally since we have online recipients
-        if (typeInside !== 'typing-start' && typeInside !== 'typing-stop' && typeInside !== 'read-receipt') {
-          const updatedMessage = {
-            id: id,
-            content: content || "",
-            sender: loginUsernameRef.current,
-            recipient: recipient,
-            timestamp: new Date(),
-            isCurrentUser: true,
-            isDeleted: typeInside === SignalType.DELETE_MESSAGE,
-            receipt: { delivered: true, deliveredAt: new Date(), read: false },
-            ...(replyTo ? { replyTo } : {})
-          };
-          onNewMessage(updatedMessage);
-        }
-
-        await Promise.all(
-          onlineRecipients.map(async (user) => {
-            const currentUser = loginUsernameRef.current;
-            // init persistent session context
-            await SessionStore.initUserContext(currentUser, aesKeyRef.current);
-            // build or fetch a session
-            let session = SessionStore.get(currentUser, user.username);
-            if (session) {
-              console.debug("[Sender] Found existing session", {
-                peer: user.username,
-                hasValidRemoteKey: !session.remoteDhPublic.every(b => b === 0),
-                remoteDhPublicPrefix: CryptoUtils.Base64.arrayBufferToBase64(session.remoteDhPublic).slice(0, 24) + '...',
-              });
-            }
-            if (!session) {
-              console.warn("[Sender] No session found, requesting X3DH bundle for", user.username);
-              // request recipient bundle
-              websocketClient.send(JSON.stringify({ type: SignalType.X3DH_REQUEST_BUNDLE, username: user.username }));
-              // wait briefly for session creation and then proceed
-              const available = await waitForSessionAvailability(currentUser, user.username, 5000, 100);
-              session = SessionStore.get(currentUser, user.username);
-              if (!available || !session) {
-                console.warn("[Sender] Session still unavailable for", user.username, "after wait; skipping send");
-                return;
-              }
-              // verify session has valid remote public key
-              if (session.remoteDhPublic.every(b => b === 0)) {
-                console.warn("[Sender] Session has invalid remote public key (all zeros); skipping send");
-                return;
-              }
-            }
-            try {
-              console.debug("[Sender] Session state before encrypt", {
-                to: user.username,
-                from: currentUser,
-                sendMessageNumber: session.sendMessageNumber,
-                recvMessageNumber: session.recvMessageNumber,
-                previousSendMessageCount: session.previousSendMessageCount,
-                currentDhPublicPrefix: CryptoUtils.Base64.arrayBufferToBase64(session.currentDhPublic).slice(0, 24) + '...',
-                remoteDhPublicPrefix: CryptoUtils.Base64.arrayBufferToBase64(session.remoteDhPublic).slice(0, 24) + '...',
-              });
-            } catch { }
-
-            // check if session has valid remote public key
-            if (session.remoteDhPublic.every(b => b === 0)) {
-              console.warn("[Sender] Session has invalid remote public key (all zeros); clearing and requesting new bundle");
-              SessionStore.clear(currentUser, user.username);
-              websocketClient.send(JSON.stringify({ type: SignalType.X3DH_REQUEST_BUNDLE, username: user.username }));
-              const available = await waitForSessionAvailability(currentUser, user.username, 5000, 100);
-              session = SessionStore.get(currentUser, user.username);
-              if (!available || !session || session.remoteDhPublic.every(b => b === 0)) {
-                console.warn("[Sender] Session still invalid after retry; skipping send");
-                return;
-              }
-            }
-
-            const messagePayload = {
-              id: id,
-              from: currentUser,
-              to: user.username,
-              type: type,
-              content: content,
-              timestamp: time,
-              typeInside: typeInside,
-              ...(replyTo && {
-                replyTo: {
-                  id: replyTo.id,
-                  sender: replyTo.sender,
-                  content: replyTo.content,
-                },
-              }),
-            };
-            console.debug("[Sender] Built messagePayload", {
-              id: messagePayload.id,
-              from: messagePayload.from,
-              to: messagePayload.to,
-              type: messagePayload.type,
-              typeInside: messagePayload.typeInside,
-              hasReplyTo: !!replyTo,
-              contentPreview: (messagePayload.content || '').slice(0, 120),
-            });
-
-            const includeX3dh = session.sendMessageNumber === 0 && session.previousSendMessageCount === 0;
-            console.debug("[Sender] includeX3dh:", includeX3dh);
-            console.debug("[Sender] Session before encrypt", {
-              sendMessageNumber: session.sendMessageNumber,
-              previousSendMessageCount: session.previousSendMessageCount,
-              sendChainKeyAllZeros: session.sendChainKey.every(b => b === 0),
-              sendChainKeyPrefix: CryptoUtils.Base64.arrayBufferToBase64(session.sendChainKey).slice(0, 24) + '...',
-              currentDhPublicPrefix: CryptoUtils.Base64.arrayBufferToBase64(session.currentDhPublic).slice(0, 24) + '...',
-              remoteDhPublicPrefix: CryptoUtils.Base64.arrayBufferToBase64(session.remoteDhPublic).slice(0, 24) + '...',
-            });
-
-            // for the very first outbound message force refresh a proper sender session
-            // to avoid using stale or receiver initialized state from persistence
-            // BUT only if the session looks like it might be stale/receiver-initialized
-            if (includeX3dh) {
-              // Check if this session was just created (fresh) or is potentially stale
-              const sessionLooksFresh = session.sendMessageNumber === 0 &&
-                                      session.recvMessageNumber === 0 &&
-                                      session.previousSendMessageCount === 0 &&
-                                      session.sendChainKey.every(b => b === 0);
-
-              if (sessionLooksFresh) {
-                console.debug("[Sender] Session appears fresh, using existing session");
-              } else {
-                console.warn("[Sender] Forcing fresh sender session for first message");
-                SessionStore.clear(currentUser, user.username);
-                websocketClient.send(JSON.stringify({ type: SignalType.X3DH_REQUEST_BUNDLE, username: user.username }));
-                const available = await waitForSessionAvailability(currentUser, user.username, 5000, 100);
-                session = SessionStore.get(currentUser, user.username);
-                if (!available || !session) {
-                  console.warn("[Sender] Sender session unavailable after forced refresh; skipping send", { peer: user.username });
-                  return;
-                }
-              }
-              try {
-                console.debug("[Sender] Sender session ready after forced refresh", {
-                  sendMessageNumber: session.sendMessageNumber,
-                  recvMessageNumber: session.recvMessageNumber,
-                  currentDhPublicPrefix: CryptoUtils.Base64.arrayBufferToBase64(session.currentDhPublic).slice(0, 24) + '...',
-                  remoteDhPublicPrefix: CryptoUtils.Base64.arrayBufferToBase64(session.remoteDhPublic).slice(0, 24) + '...',
-                });
-              } catch { }
-            }
-
-            // additionally if the session was initialized as a receiver using our local signed prekey
-            // refresh again to guarantee a proper sender session
-            if (includeX3dh && keyManagerRef?.current?.getRatchetPrekeys) {
-              try {
-                const pre = await keyManagerRef.current.getRatchetPrekeys();
-                const localSpkId = pre?.signedPreKey?.id;
-                const localSpkPubB64 = pre?.signedPreKey?.publicBase64;
-                const sessionSpkId = (session as any).usedSignedPreKeyId as string | undefined;
-                const sessionDhPubB64 = CryptoUtils.Base64.arrayBufferToBase64(session.currentDhPublic);
-                const looksReceiverInitialized =
-                  // session was previously used to receive messages but never sent
-                  session.recvMessageNumber > 0 ||
-                  // sessions current dh pub equals our signed prekey pub receiver bootstrap signature
-                  (localSpkPubB64 && sessionDhPubB64 === localSpkPubB64) ||
-                  // session metadata indicates it was created referencing our own spk id
-                  (localSpkId && sessionSpkId && localSpkId === sessionSpkId);
-                if (looksReceiverInitialized) {
-                  console.warn("[Sender] Existing session is receiver-initialized; requesting bundle to bootstrap sender session");
-                  SessionStore.clear(currentUser, user.username);
-                  websocketClient.send(JSON.stringify({ type: SignalType.X3DH_REQUEST_BUNDLE, username: user.username }));
-                  const available = await waitForSessionAvailability(currentUser, user.username, 5000, 100);
-                  session = SessionStore.get(currentUser, user.username);
-                  if (!available || !session) {
-                    console.warn("[Sender] Sender session unavailable after refresh; skipping send", { peer: user.username });
-                    return;
-                  }
-                  try {
-                    console.debug("[Sender] Sender session ready after refresh", {
-                      sendMessageNumber: session.sendMessageNumber,
-                      recvMessageNumber: session.recvMessageNumber,
-                      currentDhPublicPrefix: CryptoUtils.Base64.arrayBufferToBase64(session.currentDhPublic).slice(0, 24) + '...',
-                      remoteDhPublicPrefix: CryptoUtils.Base64.arrayBufferToBase64(session.remoteDhPublic).slice(0, 24) + '...',
-                    });
-                  } catch { }
-                }
-              } catch { }
-            }
-            const ratchetMessage = await DoubleRatchet.encrypt(session, JSON.stringify(messagePayload));
-            try {
-              console.debug("[Sender] Ratchet header", {
-                dhPubPrefix: CryptoUtils.Base64.arrayBufferToBase64(ratchetMessage.header.dhPub).slice(0, 24) + '...',
-                pn: ratchetMessage.header.pn,
-                n: ratchetMessage.header.n,
-                ciphertextLen: (ratchetMessage.ciphertext || '').length,
-              });
-            } catch { }
-
-            const drPayload: any = {
-              type: SignalType.DR_SEND,
-              from: currentUser,
-              to: user.username,
-              payload: {
-                header: {
-                  dhPub: CryptoUtils.Base64.arrayBufferToBase64(ratchetMessage.header.dhPub),
-                  pn: ratchetMessage.header.pn,
-                  n: ratchetMessage.header.n,
-                },
-                ciphertext: ratchetMessage.ciphertext,
-              },
-            };
-            // if first send on this session include x3dh envelope inside payload to help receiver
-            if (includeX3dh) {
-              const x3dhMeta: any = {
-                ephX25519PublicBase64: CryptoUtils.Base64.arrayBufferToBase64(session.currentDhPublic),
-              };
-              if ((session as any).usedSignedPreKeyId) {
-                x3dhMeta.usedSignedPreKeyId = (session as any).usedSignedPreKeyId;
-              }
-              if ((session as any).usedOneTimePreKeyId) {
-                x3dhMeta.usedOneTimePreKeyId = (session as any).usedOneTimePreKeyId;
-              }
-              drPayload.payload.x3dh = x3dhMeta;
-            }
-            console.log("[Sender] Sending DR payload", {
-              to: drPayload.to,
-              from: drPayload.from,
-              includeX3dh,
-              header: drPayload.payload.header,
-              ciphertextLen: (drPayload.payload.ciphertext || '').length,
-            });
-            const sendFn = async () => {
-              // if globally rate limited, re-enqueue
-              if ((websocketClient as any).isGloballyRateLimited?.()) {
-                enqueueAndBackoff(sendFn, 1000);
-                return;
-              }
-              websocketClient.send(
-                JSON.stringify({
-                  ...drPayload
-                })
-              );
-            };
-            await sendFn();
-
-            console.log(`Sent DR message to user ${user.username}: `, drPayload);
-
-            // Send to server db (skip typing)
-            if (typeInside !== 'typing-start' && typeInside !== 'typing-stop' && serverHybridPublic && aesKeyRef.current) {
-              const { iv, authTag, encrypted } = await CryptoUtils.AES.encryptWithAesGcmRaw(
-                content,
-                aesKeyRef.current
-              );
-              const encryptedContent = CryptoUtils.AES.serializeEncryptedData(iv, authTag, encrypted);
-              try {
-                console.debug("[Sender] Local AES-GCM for server payload", {
-                  ivLen: iv.length,
-                  authTagLen: authTag.length,
-                  encryptedLen: encrypted.length,
-                  serializedLen: encryptedContent.length,
-                });
-              } catch { }
-
-              let encryptedReplyContent = "";
-              if (replyTo) {
-                const replyContent = replyTo.content || "";
-                const { iv: replyIv, authTag: replyAuthTag, encrypted: replyEncrypted } = await CryptoUtils.AES.encryptWithAesGcmRaw(
-                  replyContent,
-                  aesKeyRef.current
-                );
-                encryptedReplyContent = CryptoUtils.AES.serializeEncryptedData(replyIv, replyAuthTag, replyEncrypted);
-                try {
-                  console.debug("[Sender] Reply content encrypted", {
-                    replyIvLen: replyIv.length,
-                    replyAuthTagLen: replyAuthTag.length,
-                    replyEncryptedLen: replyEncrypted.length,
-                    replySerializedLen: encryptedReplyContent.length,
-                  });
-                } catch { }
-              }
-
-              const serverPayload = {
-                messageId: id,
-                fromUsername: loginUsernameRef.current,
-                toUsername: user.username,
-                encryptedContent: encryptedContent,
-                timestamp: time,
-                typeInside: typeInside,
-                ...(replyTo && {
-                  replyTo: {
-                    id: replyTo.id,
-                    sender: replyTo.sender,
-                    encryptedContent: encryptedReplyContent,
-                  },
-                }),
-              };
-              console.debug("[Sender] ServerPayload before hybrid encryption", {
-                messageId: serverPayload.messageId,
-                from: serverPayload.fromUsername,
-                to: serverPayload.toUsername,
-                typeInside: serverPayload.typeInside,
-                payloadLen: JSON.stringify(serverPayload).length,
-              });
-
-              const serverEncrypted = await CryptoUtils.Hybrid.encryptHybridPayload(
-                serverPayload,
-                serverHybridPublic
-              );
-              try {
-                console.debug("[Sender] Server payload encrypted (hybrid-v1)", {
-                  hasEphemeralX25519Public: !!(serverEncrypted as any).ephemeralX25519Public,
-                  kyberCiphertextLen: ((serverEncrypted as any).kyberCiphertext || '').length,
-                  encryptedMessageLen: ((serverEncrypted as any).encryptedMessage || '').length,
-                });
-              } catch { }
-
-              const dbPayload = {
-                type: SignalType.UPDATE_DB,
-                ...serverEncrypted
-              };
-
-              const sendDbFn = async () => {
-                if ((websocketClient as any).isGloballyRateLimited?.()) {
-                  enqueueAndBackoff(sendDbFn, 1000);
-                  return;
-                }
-                websocketClient.send(JSON.stringify(dbPayload));
-              }
-              await sendDbFn();
-
-              console.log(`Sent to server database:`, serverPayload.messageId);
-            }
-          })
-        );
-
-        try {
-          console.debug("[Sender] Locally persisted outbound message", {
-            id,
-            sender: loginUsernameRef.current,
-            typeInside,
-            hasReply: !!replyTo,
-          });
-        } catch { }
-      } catch (error) {
-        console.error("handleMessage failed:", error);
-      }
-    },
-    [users, loginUsernameRef, serverHybridPublic, getKeysOnDemand, aesKeyRef, onNewMessage]
-  );
-
-  const handleSendMessageType = useCallback(
-    async (messageId: string, content: string, messageSignalType: string, replyTo?: Message | null, recipient?: string) => {
-      if (messageSignalType === "chat") {
-        await handleSendMessage({
-          replyTo: replyTo,
-          type: SignalType.ENCRYPTED_MESSAGE,
-          typeInside: "chat",
-          content: content,
-          recipient: recipient,
-        });
       } else {
-        await handleSendMessage({
-          messageId: messageId,
-          replyTo: replyTo,
-          type: SignalType.ENCRYPTED_MESSAGE,
-          typeInside: messageSignalType,
-          content: content,
-          recipient: recipient,
-        });
+        console.log('[MessageSender] Session already exists, proceeding with encryption');
       }
-    },
-    [handleSendMessage]
-  );
+    } catch (error) {
+      console.error('[MessageSender] Session check failed:', error);
+      return;
+    }
 
-  return {
-    handleMessage: handleSendMessage,
-    handleSendMessageType
-  };
+    // Encrypt the message using Signal Protocol
+    try {
+      console.log('[MessageSender] Attempting to encrypt message:', {
+        fromUsername: currentUser,
+        toUsername: user.username,
+        contentLength: content.length,
+        messageId
+      });
+
+      const encryptedMessage = await (window as any).edgeApi.encrypt({
+        fromUsername: currentUser,
+        toUsername: user.username,
+        plaintext: JSON.stringify({
+          messageId: messageId,  // Use 'messageId' to match receiver expectations
+          from: currentUser,
+          to: user.username,
+          content: content,
+          timestamp: Date.now(),
+          messageType: 'signal-protocol',  // Add message type identifier
+          signalType: 'signal-protocol',   // Add signal type for server validation
+          protocolType: 'signal',          // Add protocol type identifier
+          type: fileData ? 'file-message' : 'message',  // Use 'message' for text, 'file-message' for files
+          ...(replyToId && { replyTo: { id: replyToId } }),
+          ...(fileData && { fileData })
+        })
+      });
+
+      console.log('[MessageSender] Raw encryption result from edgeApi:', encryptedMessage);
+      console.log('[MessageSender] Encryption result details:', {
+        hasResult: !!encryptedMessage,
+        resultType: typeof encryptedMessage,
+        resultKeys: encryptedMessage ? Object.keys(encryptedMessage) : [],
+        hasCiphertext: !!encryptedMessage?.ciphertextBase64,
+        ciphertextLength: encryptedMessage?.ciphertextBase64?.length || 0,
+        hasType: !!encryptedMessage?.type,
+        typeValue: encryptedMessage?.type,
+        hasSessionId: !!encryptedMessage?.sessionId,
+        sessionIdValue: encryptedMessage?.sessionId
+      });
+
+      // Check for encryption errors
+      if (encryptedMessage?.error) {
+        console.error('[MessageSender] Encryption failed:', encryptedMessage.message || 'Unknown error');
+        // Try to handle specific error types
+        if (encryptedMessage.code === 'EBADF') {
+          console.error('[MessageSender] File descriptor error - this should not happen with the new error handling');
+        }
+        return;
+      }
+
+      if (!encryptedMessage?.ciphertextBase64) {
+        console.error('[MessageSender] Encryption returned no ciphertext');
+        return;
+      }
+
+      // Create the message payload
+      const messagePayload = {
+        type: SignalType.ENCRYPTED_MESSAGE,
+        to: user.username,  // Add 'to' field at root level for server parsing
+        encryptedPayload: {
+          from: currentUser,
+          to: user.username,
+          content: encryptedMessage.ciphertextBase64,
+          messageId: messageId,
+          type: encryptedMessage.type,  // Use the actual Signal Protocol message type (1 or 3)
+          sessionId: encryptedMessage.sessionId  // Add session ID for server validation
+        }
+      };
+
+      // Send the encrypted message
+      websocketClient.send(JSON.stringify(messagePayload));
+
+      // Create local message for UI
+      const localMessage: Message = {
+        id: messageId,
+        content: content,
+        sender: currentUser,
+        recipient: user.username,  // Add recipient field for proper filtering
+        timestamp: new Date(),
+        type: fileData ? 'file' : 'text',
+        isCurrentUser: true,  // Sent messages are from current user
+        receipt: {
+          delivered: false,
+          read: false
+        },
+        ...(fileData && { fileInfo: { name: fileData, type: 'text/plain', size: 0, data: new ArrayBuffer(0) } })
+      };
+
+      onNewMessage(localMessage);
+
+      // Note: Delivery receipt should be sent by the recipient when they receive the message
+      // Not by the sender immediately after sending
+      // This will be implemented when proper delivery receipt handling is added
+
+    } catch (error) {
+      // Encryption failed
+      return;
+    }
+  }, [isLoggedIn, onNewMessage, getKeysOnDemand]);
+
+  return { handleSendMessage };
 }

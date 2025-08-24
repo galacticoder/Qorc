@@ -4,7 +4,7 @@ import { WebSocketServer } from 'ws';
 import selfsigned from 'selfsigned';
 import { SignalType } from './signals.js';
 import { CryptoUtils } from './crypto/unified-crypto.js';
-import { MessageDatabase, PrekeyDatabase } from './database/database.js';
+import { MessageDatabase, PrekeyDatabase, LibsignalBundleDB } from './database/database.js';
 import * as ServerConfig from './config/config.js';
 import { MessagingUtils } from './messaging/messaging-utils.js';
 import * as authentication from './authentication/authentication.js';
@@ -174,6 +174,17 @@ async function startServer() {
       try {
         parsed = JSON.parse(msg.toString().trim());
         console.log(`[SERVER] Received message type: ${parsed.type} from user: ${clientState.username || 'unknown'}`);
+        
+        // Debug message structure for encrypted messages
+        if (parsed.type === SignalType.ENCRYPTED_MESSAGE) {
+          console.log(`[SERVER] Message structure:`, {
+            hasTo: 'to' in parsed,
+            hasEncryptedPayload: 'encryptedPayload' in parsed,
+            toValue: parsed.to,
+            encryptedPayloadTo: parsed.encryptedPayload?.to,
+            allKeys: Object.keys(parsed)
+          });
+        }
       } catch {
         console.error('[SERVER] Invalid JSON format received');
         return ws.send(JSON.stringify({ type: SignalType.ERROR, message: 'Invalid JSON format' }));
@@ -181,139 +192,33 @@ async function startServer() {
 
       try {
         switch (parsed.type) {
-          case SignalType.X3DH_PUBLISH_BUNDLE: {
+
+
+          case SignalType.LIBSIGNAL_PUBLISH_BUNDLE: {
             if (!clientState.hasPassedAccountLogin || !clientState.username) {
               return ws.send(JSON.stringify({ type: SignalType.ERROR, message: 'Account login required first' }));
             }
-
-            // Apply bundle operation rate limiting
             try {
-              if (!(await rateLimitMiddleware.checkBundleLimit(ws, clientState.username))) {
-                console.log(`[SERVER] Bundle operation blocked due to rate limiting for user: ${clientState.username}`);
-                break;
-              }
-            } catch (error) {
-              console.error(`[SERVER] Rate limiting error during bundle operation for user ${clientState.username}:`, error);
-              break;
-            }
-            try {
-              console.log(`[SERVER] Received ${SignalType.X3DH_PUBLISH_BUNDLE} from user: ${clientState.username}`);
-              const b = parsed.bundle || {};
-              console.log('[SERVER] Bundle summary:', {
-                identityEd25519PublicBase64: (b.identityEd25519PublicBase64 || '').slice(0, 16) + '...',
-                identityX25519PublicBase64: (b.identityX25519PublicBase64 || '').slice(0, 16) + '...',
-                signedPreKey: b.signedPreKey ? { id: b.signedPreKey.id, publicKeyBase64: (b.signedPreKey.publicKeyBase64 || '').slice(0, 16) + '...' } : null,
-                oneTimePreKeysCount: Array.isArray(b.oneTimePreKeys) ? b.oneTimePreKeys.length : 0,
-                ratchetPublicBase64: (b.ratchetPublicBase64 || '').slice(0, 16) + '...'
-              });
-              // ensure signedPreKey was signed by identity Ed25519 key and optionally Dilithium key
-              try {
-                const idEd = Buffer.from(b.identityEd25519PublicBase64 || '', 'base64');
-                const spk = Buffer.from(b.signedPreKey?.publicKeyBase64 || '', 'base64');
-                const ed25519Sig = Buffer.from(b.signedPreKey?.ed25519SignatureBase64 || b.signedPreKey?.signatureBase64 || '', 'base64');
-
-                // Verify Ed25519 signature
-                const ed25519Valid = idEd.length === 32 && spk.length === 32 && ed25519Sig.length === 64 && ed25519.verify(ed25519Sig, spk, idEd);
-
-                // Verify Dilithium signature if present
-                let dilithiumValid = true;
-                if (b.signedPreKey?.dilithiumSignatureBase64 && b.identityDilithiumPublicBase64) {
-                  try {
-                    const { ml_dsa87 } = await import("@noble/post-quantum/ml-dsa");
-                    const idDilithium = Buffer.from(b.identityDilithiumPublicBase64, 'base64');
-                    const dilithiumSig = Buffer.from(b.signedPreKey.dilithiumSignatureBase64, 'base64');
-
-                    console.log('[SERVER] Dilithium key lengths:', {
-                      publicKeyLength: idDilithium.length,
-                      signatureLength: dilithiumSig.length,
-                      signedPreKeyLength: spk.length
-                    });
-
-                    console.log('[SERVER] ml_dsa87 object:', Object.keys(ml_dsa87));
-
-                    try {
-                      // Correct order: publicKey, message, signature
-                      dilithiumValid = await ml_dsa87.verify(idDilithium, spk, dilithiumSig);
-                    } catch (error) {
-                      // Try alternative parameter order if the first fails
-                      console.warn('[SERVER] Dilithium verification failed with standard order, trying alternative:', error);
-                      dilithiumValid = await ml_dsa87.verify(dilithiumSig, spk, idDilithium);
-                    }
-                  } catch (dilithiumError) {
-                    console.error('[SERVER] Dilithium signature verification failed:', dilithiumError?.message || dilithiumError);
-                    dilithiumValid = false; // Fail the verification if Dilithium verification fails
-                  }
-                }
-
-                const valid = ed25519Valid && dilithiumValid;
-                if (!valid) {
-                  console.warn('[SERVER] Rejected bundle due to invalid signedPreKey signature for user', clientState.username);
-                  return ws.send(JSON.stringify({ type: SignalType.ERROR, message: 'Invalid signedPreKey signature' }));
-                }
-              } catch (e) {
-                console.warn('[SERVER] Bundle verification failed (continuing may be insecure):', e?.message || e);
-              }
-              PrekeyDatabase.publishBundle(clientState.username, parsed.bundle);
-              ws.send(JSON.stringify({ type: 'ok', message: 'bundle-published' }));
+              LibsignalBundleDB.publish(clientState.username, parsed.bundle);
+              ws.send(JSON.stringify({ type: 'ok', message: 'libsignal-bundle-published' }));
             } catch (e) {
-              ws.send(JSON.stringify({ type: SignalType.ERROR, message: 'Failed to publish bundle' }));
+              ws.send(JSON.stringify({ type: SignalType.ERROR, message: 'Failed to publish libsignal bundle' }));
             }
             break;
           }
 
-          case SignalType.X3DH_REQUEST_BUNDLE: {
+
+
+          case SignalType.LIBSIGNAL_REQUEST_BUNDLE: {
             if (!clientState.hasPassedAccountLogin) {
               return ws.send(JSON.stringify({ type: SignalType.ERROR, message: 'Account login required first' }));
             }
-
-            // Apply bundle operation rate limiting
-            try {
-              if (!(await rateLimitMiddleware.checkBundleLimit(ws, clientState.username))) {
-                console.log(`[SERVER] Bundle operation blocked due to rate limiting for user: ${clientState.username}`);
-                break;
-              }
-            } catch (error) {
-              console.error(`[SERVER] Rate limiting error during bundle operation for user ${clientState.username}:`, error);
-              break;
-            }
             const target = parsed.username;
-            const cacheKey = `${clientState.username}->${target}`;
-
-            // Check if we recently served this bundle to prevent spam
-            const now = Date.now();
-            const lastRequest = bundleCache.get(cacheKey);
-            if (lastRequest && (now - lastRequest) < 1000) { // 1 second cooldown
-              console.log(`[SERVER] Bundle request throttled for ${clientState.username} -> ${target} (too frequent)`);
-              return;
-            }
-
-            console.log(`[SERVER] Bundle request from ${clientState.username} for ${target}`);
-            const out = PrekeyDatabase.takeBundleForRecipient(target);
+            const out = LibsignalBundleDB.take(target);
             if (!out) {
-              console.log(`[SERVER] No bundle available for ${target}`);
-              return ws.send(JSON.stringify({ type: SignalType.ERROR, message: 'No bundle available' }));
+              return ws.send(JSON.stringify({ type: SignalType.ERROR, message: 'No libsignal bundle available' }));
             }
-
-            // Cache this request
-            bundleCache.set(cacheKey, now);
-
-            // Clean old cache entries (older than 5 minutes)
-            if (bundleCache.size > 1000) {
-              const fiveMinutesAgo = now - 300000;
-              for (const [key, timestamp] of bundleCache.entries()) {
-                if (timestamp < fiveMinutesAgo) {
-                  bundleCache.delete(key);
-                }
-              }
-            }
-
-            console.log(`[SERVER] Delivering prekey bundle for ${target} to ${clientState.username}`, {
-              hasOneTime: !!out.oneTimePreKey,
-              signedPreKeyId: out.signedPreKey?.id,
-              bundleKeys: Object.keys(out),
-              signedPreKeyKeys: Object.keys(out.signedPreKey || {})
-            });
-            ws.send(JSON.stringify({ type: SignalType.X3DH_DELIVER_BUNDLE, bundle: out, username: target }));
+            ws.send(JSON.stringify({ type: SignalType.LIBSIGNAL_DELIVER_BUNDLE, bundle: out, username: target }));
             break;
           }
           case SignalType.ACCOUNT_SIGN_IN:
@@ -542,6 +447,22 @@ async function startServer() {
           case SignalType.FILE_MESSAGE_CHUNK:
           case SignalType.DR_SEND: {
             console.log(`[SERVER] Processing ${parsed.type} from user: ${clientState.username} to user: ${parsed.to}`);
+            
+            // Log encrypted message details to verify it's ciphertext
+            if (parsed.type === SignalType.ENCRYPTED_MESSAGE && parsed.encryptedPayload) {
+              console.log(`[SERVER] Signal Protocol encrypted message details:`, {
+                from: parsed.encryptedPayload.from,
+                to: parsed.encryptedPayload.to,
+                messageType: parsed.encryptedPayload.type,
+                sessionId: parsed.encryptedPayload.sessionId,
+                contentLength: parsed.encryptedPayload.content?.length || 0,
+                contentPreview: parsed.encryptedPayload.content?.substring(0, 50) + '...',
+                isBase64: /^[A-Za-z0-9+/]*={0,2}$/.test(parsed.encryptedPayload.content || ''),
+                messageStructure: Object.keys(parsed),
+                isSignalProtocol: parsed.encryptedPayload.type === 1 || parsed.encryptedPayload.type === 3 // Signal Protocol message types
+              });
+            }
+            
             {
               const entry = clientState.username ? clients.get(clientState.username) : null;
               const isAuthed = entry?.clientState?.hasAuthenticated ?? clientState.hasAuthenticated;
@@ -566,14 +487,46 @@ async function startServer() {
               break;
             }
 
-            const recipient = clients.get(parsed.to);
+            const toUser = parsed.to || parsed.encryptedPayload?.to;
+            const recipient = clients.get(toUser);
             if (recipient && recipient.ws) {
               console.log(`[SERVER] Forwarding message from ${clientState.username} to ${parsed.to}`);
-              const messageToSend = parsed.type === SignalType.DR_SEND
-                ? { type: SignalType.DR_SEND, from: clientState.username, to: parsed.to, payload: parsed.payload }
-                : { type: SignalType.ENCRYPTED_MESSAGE, ...parsed.encryptedPayload };
+              
+              let messageToSend;
+              if (parsed.type === SignalType.DR_SEND) {
+                messageToSend = { type: SignalType.DR_SEND, from: clientState.username, to: toUser, payload: parsed.payload };
+              } else if (parsed.type === SignalType.ENCRYPTED_MESSAGE) {
+                // Verify Signal Protocol message integrity before relaying
+                const encryptedPayload = parsed.encryptedPayload;
+                if (!encryptedPayload || !encryptedPayload.content || !encryptedPayload.type) {
+                  console.error(`[SERVER] Invalid Signal Protocol message structure:`, {
+                    hasEncryptedPayload: !!encryptedPayload,
+                    hasContent: !!encryptedPayload?.content,
+                    hasType: !!encryptedPayload?.type,
+                    structure: encryptedPayload ? Object.keys(encryptedPayload) : []
+                  });
+                  return ws.send(JSON.stringify({ type: SignalType.ERROR, message: 'Invalid message structure' }));
+                }
+                
+                // Preserve the full message structure for Signal Protocol decryption
+                messageToSend = { 
+                  type: SignalType.ENCRYPTED_MESSAGE, 
+                  encryptedPayload: encryptedPayload 
+                };
+                
+                console.log(`[SERVER] Signal Protocol message validated and ready for relay`);
+              } else {
+                messageToSend = parsed;
+              }
+              
               recipient.ws.send(JSON.stringify(messageToSend));
-              console.log(`[SERVER] Message relayed`);
+              console.log(`[SERVER] Message relayed to ${toUser}:`, {
+                type: messageToSend.type,
+                hasEncryptedPayload: !!messageToSend.encryptedPayload,
+                encryptedPayloadKeys: messageToSend.encryptedPayload ? Object.keys(messageToSend.encryptedPayload) : [],
+                messageStructure: Object.keys(messageToSend),
+                isSignalProtocol: messageToSend.type === SignalType.ENCRYPTED_MESSAGE
+              });
             } else {
               console.error(`[SERVER] Recipient WebSocket not available for user: ${parsed.to}`);
             }
@@ -620,6 +573,20 @@ async function startServer() {
                 message: 'Invalid reset type or missing username'
               }));
             }
+            break;
+          }
+
+          case 'request-server-public-key': {
+            // Re-send server public key on request
+            ws.send(
+              JSON.stringify({
+                type: SignalType.SERVER_PUBLIC_KEY,
+                hybridKeys: {
+                  x25519PublicBase64: await CryptoUtils.Hybrid.exportX25519PublicBase64(serverHybridKeyPair.x25519.publicKey),
+                  kyberPublicBase64: await CryptoUtils.Hybrid.exportKyberPublicBase64(serverHybridKeyPair.kyber.publicKey)
+                }
+              })
+            );
             break;
           }
 

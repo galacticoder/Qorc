@@ -4,8 +4,8 @@ import { Message } from "@/components/chat/types";
 import { User } from "@/components/chat/UserList";
 import { CryptoUtils } from "@/lib/unified-crypto";
 import { SignalType } from "@/lib/signals";
+
 import websocketClient from "@/lib/websocket";
-import { SessionStore } from "@/lib/ratchet/session-store";
 
 interface UseSecureDBProps {
 	Authentication: any;
@@ -75,7 +75,7 @@ export const useSecureDB = ({ Authentication, setMessages }: UseSecureDBProps) =
 				secureDBRef.current = new SecureDB(Authentication.loginUsernameRef.current);
 				await secureDBRef.current.initializeWithKey(Authentication.aesKeyRef.current);
 				setDbInitialized(true);
-				await SessionStore.initUserContext(Authentication.loginUsernameRef.current, Authentication.aesKeyRef.current);
+
 				console.debug('[useSecureDB] SecureDB initialized and session context set');
 
 				Authentication.passphraseRef.current = "";

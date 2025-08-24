@@ -59,20 +59,30 @@ export function ChatInput({
   async function handleSend() {
     if (!message.trim() || isSending || !selectedConversation) return;
 
+    console.log('[ChatInput] Attempting to send message:', {
+      content: message.trim(),
+      selectedConversation,
+      editingMessage: !!editingMessage,
+      replyTo: !!replyTo
+    });
+
     try {
       setIsSending(true);
 
       if (editingMessage && onEditMessage) {
+        console.log('[ChatInput] Sending edit message');
         await onSendMessage(editingMessage.id, message.trim(), SignalType.EDIT_MESSAGE, editingMessage.replyTo);
         onCancelEdit?.();
       } else {
+        console.log('[ChatInput] Sending new message');
         await onSendMessage("", message.trim(), "chat", replyTo ?? null);
         onCancelReply?.();
       }
 
+      console.log('[ChatInput] Message sent successfully');
       setMessage("");
     } catch (e) {
-      console.error("Failed to send message:", e);
+      console.error("[ChatInput] Failed to send message:", e);
     } finally {
       setIsSending(false);
     }

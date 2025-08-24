@@ -1,7 +1,14 @@
 import { v4 as uuidv4 } from 'uuid';
 import { CryptoUtils } from '@/lib/unified-crypto';
 import { useAuth } from '@/hooks/useAuth';
-import { PinnedServer } from '@/lib/ratchet/pinned-server';
+const PinnedServer = {
+  get() {
+    try { return JSON.parse(localStorage.getItem('securechat_server_pin_v1') || 'null'); } catch { return null; }
+  },
+  set(val: any) {
+    try { localStorage.setItem('securechat_server_pin_v1', JSON.stringify(val)); } catch {}
+  }
+};
 import { Message } from '@/components/chat/types';
 import { SecureDB } from '@/lib/secureDB';
 
@@ -33,11 +40,12 @@ export enum SignalType {
   UPDATE_DB = "update-db",
   HYBRID_KEYS = "hybrid-keys",
   HYBRID_KEYS_UPDATE = "hybrid-keys-update",
-  // ratchet and x3dh stuff
-  X3DH_PUBLISH_BUNDLE = "x3dh-publish-bundle",
-  X3DH_REQUEST_BUNDLE = "x3dh-request-bundle",
-  X3DH_DELIVER_BUNDLE = "x3dh-deliver-bundle",
+
   DR_SEND = "dr-send",
+  // libsignal (official) session bootstrap
+  LIBSIGNAL_PUBLISH_BUNDLE = "libsignal-publish-bundle",
+  LIBSIGNAL_REQUEST_BUNDLE = "libsignal-request-bundle",
+  LIBSIGNAL_DELIVER_BUNDLE = "libsignal-deliver-bundle",
   TYPING_START = "typing-start",
   TYPING_STOP = "typing-stop",
   // Receipt signals
@@ -99,6 +107,7 @@ export async function handleSignalMessages(
       }
 
       case SignalType.SERVER_PUBLIC_KEY: {
+        console.log('[Signals] Processing SERVER_PUBLIC_KEY message:', data);
         const hybridKeys = data.hybridKeys as {
           x25519PublicBase64: string;
           kyberPublicBase64: string;
@@ -234,6 +243,19 @@ export async function handleSignalMessages(
         break;
       }
 
+      case SignalType.MESSAGE_READ: {
+        // Handle message read receipt
+        const { messageId, from } = data || {};
+        if (messageId && from) {
+          // Dispatch read receipt event
+          const event = new CustomEvent('message-read', {
+            detail: { messageId, from }
+          });
+          window.dispatchEvent(event);
+        }
+        break;
+      }
+
       case SignalType.ENCRYPTED_MESSAGE:
       case SignalType.DR_SEND:
       case SignalType.USER_DISCONNECT:
@@ -241,14 +263,32 @@ export async function handleSignalMessages(
       case SignalType.DELETE_MESSAGE: {
         if (handlers['handleEncryptedMessagePayload']) {
           try {
-            console.debug('[Signals] Dispatching to encrypted handler', { type, keys: Object.keys(data || {}) });
+            console.debug('[Signals] Dispatching to encrypted handler', { 
+              type, 
+              keys: Object.keys(data || {}),
+              isSignalProtocol: data?.encryptedPayload?.type === 1 || data?.encryptedPayload?.type === 3,
+              hasSessionId: !!data?.encryptedPayload?.sessionId
+            });
           } catch { }
           await (handlers as any).handleEncryptedMessagePayload(data);
         }
         break;
       }
-      case SignalType.X3DH_DELIVER_BUNDLE: {
-        // session setup is handled in encrypted handler and ratchet initiator
+
+
+      case SignalType.LIBSIGNAL_DELIVER_BUNDLE: {
+        try {
+          const currentUser = Authentication.loginUsernameRef.current;
+          const targetUser = (data as any).username;
+          const bundle = (data as any).bundle;
+          await (window as any).edgeApi.processPreKeyBundle({ selfUsername: currentUser, peerUsername: targetUser, bundle });
+          try {
+            const evt = new CustomEvent('libsignal-session-ready', { detail: { peer: targetUser } });
+            window.dispatchEvent(evt);
+          } catch {}
+        } catch (err) {
+          console.error('[Signals] Failed to process libsignal bundle:', err);
+        }
         break;
       }
 

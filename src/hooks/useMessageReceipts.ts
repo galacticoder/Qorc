@@ -7,7 +7,6 @@ export function useMessageReceipts(
 	messages: Message[],
 	setMessages: React.Dispatch<React.SetStateAction<Message[]>>,
 	currentUsername: string,
-	sendEncryptedMessage: (messageId: string, content: string, messageSignalType: string, replyTo?: any) => Promise<void>,
 	saveMessageToLocalDB: (msg: Message) => Promise<void>
 ) {
 	// Track which messages have already had read receipts sent to avoid duplicates
@@ -38,9 +37,14 @@ export function useMessageReceipts(
 		}
 	}, [currentUsername]);
 
-	// Send read receipt when message is viewed (as encrypted message to hide from server)
+	// Send read receipt when message is viewed (as server signal to avoid appearing as chat message)
 	const sendReadReceipt = useCallback(async (messageId: string, sender: string) => {
-		if (sender === currentUsername) return; // Don't send receipt for own messages
+		console.log('[Receipt] sendReadReceipt called:', { messageId, sender, currentUsername });
+		
+		if (sender === currentUsername) {
+			console.log('[Receipt] Skipping read receipt for own message');
+			return; // Don't send receipt for own messages
+		}
 
 		// Check if we've already sent a read receipt for this message
 		if (sentReadReceiptsRef.current.has(messageId)) {
@@ -48,13 +52,18 @@ export function useMessageReceipts(
 			return;
 		}
 
+		console.log('[Receipt] Sending read receipt for message:', messageId);
+
 		try {
-			// Send as encrypted message to hide read status from server
-			await sendEncryptedMessage(
-				crypto.randomUUID(),
-				JSON.stringify({ type: 'read-receipt', messageId, timestamp: Date.now() }),
-				'read-receipt'
-			);
+			// Send as server signal to avoid appearing as chat message
+			const readReceiptPayload = {
+				type: SignalType.MESSAGE_READ,
+				messageId: messageId,
+				to: sender
+			};
+			
+			// Use websocketClient directly to send the read receipt signal
+			websocketClient.send(JSON.stringify(readReceiptPayload));
 
 			// Mark this message as having a read receipt sent
 			sentReadReceiptsRef.current.add(messageId);
@@ -64,14 +73,17 @@ export function useMessageReceipts(
 		} catch (error) {
 			console.error('Failed to send read receipt:', error);
 		}
-	}, [currentUsername, sendEncryptedMessage, saveSentReadReceipts]);
+	}, [currentUsername, saveSentReadReceipts]);
 
 	// Mark message as read and persist to database
 	const markMessageAsRead = useCallback(async (messageId: string) => {
+		console.log('[Receipt] markMessageAsRead called for message:', messageId);
+		
 		let updatedMessage: Message | null = null;
 
 		setMessages(prev => prev.map(msg => {
 			if (msg.id === messageId && !msg.receipt?.read && msg.sender !== currentUsername) {
+				console.log('[Receipt] Marking message as read:', messageId);
 				updatedMessage = {
 					...msg,
 					receipt: {
@@ -93,34 +105,45 @@ export function useMessageReceipts(
 			} catch (error) {
 				console.error('[Receipt] Failed to persist read status:', error);
 			}
+		} else {
+			console.log('[Receipt] Message already marked as read or not found:', messageId);
 		}
 	}, [setMessages, currentUsername, saveMessageToLocalDB]);
 
-	// Smart status management: show read status on most recent read message, delivery on latest message
+	// Smart status management: show receipt status only for latest read and latest delivered messages
 	const getSmartReceiptStatus = useCallback((message: Message) => {
 		// Only process messages sent by the current user (to show receipt status)
-		if (!message.receipt || message.sender !== currentUsername) return message.receipt;
+		if (!message.receipt || message.sender !== currentUsername) {
+			return undefined; // No receipt status for other users' messages
+		}
 
 		// Find messages from this user
 		const userMessages = messages.filter(m => m.sender === currentUsername);
-		const latestMessage = userMessages[userMessages.length - 1];
-
+		
 		// Find the most recent read message from this user
 		const mostRecentReadMessage = userMessages
 			.filter(m => m.receipt?.read)
 			.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())[0];
 
-		// If this message is read and it's the most recent read message, show read status
+		// Find the most recent delivered message from this user
+		const mostRecentDeliveredMessage = userMessages
+			.filter(m => m.receipt?.delivered)
+			.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())[0];
+
+		// If this message is the most recent read message, show read status
 		if (message.receipt?.read && message.id === mostRecentReadMessage?.id) {
+			console.log('[Receipt] Showing READ status for latest read message:', message.id);
 			return message.receipt;
 		}
 
-		// If this is the latest message and it's not read, show delivery status
-		if (message.id === latestMessage.id && !message.receipt?.read) {
+		// If this message is the most recent delivered message (and not the same as the latest read), show delivered status
+		if (message.receipt?.delivered && message.id === mostRecentDeliveredMessage?.id && message.id !== mostRecentReadMessage?.id) {
+			console.log('[Receipt] Showing DELIVERED status for latest delivered message:', message.id);
 			return message.receipt;
 		}
 
 		// For all other messages, don't show any receipt status
+		console.log('[Receipt] No receipt status shown for message:', message.id);
 		return undefined;
 	}, [messages, currentUsername]);
 
@@ -128,13 +151,14 @@ export function useMessageReceipts(
 	useEffect(() => {
 		const handleDeliveryReceipt = async (event: CustomEvent) => {
 			const { messageId, from } = event.detail;
-			console.debug('[Receipt] Received delivery receipt:', { messageId, from });
+			console.log('[Receipt] Received delivery receipt event:', { messageId, from, currentUsername });
 
 			let updatedMessage: Message | null = null;
 
 			setMessages(prev => {
 				return prev.map(msg => {
 					if (msg.id === messageId && msg.sender === currentUsername) {
+						console.log('[Receipt] Updating message with delivery status:', messageId);
 						updatedMessage = {
 							...msg,
 							receipt: {
@@ -157,6 +181,8 @@ export function useMessageReceipts(
 				} catch (error) {
 					console.error('[Receipt] Failed to persist delivery status:', error);
 				}
+			} else {
+				console.log('[Receipt] Message not found or not from current user for delivery receipt:', messageId);
 			}
 		};
 
@@ -171,13 +197,14 @@ export function useMessageReceipts(
 	useEffect(() => {
 		const handleReadReceipt = async (event: CustomEvent) => {
 			const { messageId, from } = event.detail;
-			console.debug('[Receipt] Received read receipt:', { messageId, from });
+			console.log('[Receipt] Received read receipt event:', { messageId, from, currentUsername });
 
 			let updatedMessage: Message | null = null;
 
 			setMessages(prev => {
 				return prev.map(msg => {
 					if (msg.id === messageId && msg.sender === currentUsername) {
+						console.log('[Receipt] Updating message with read status:', messageId);
 						updatedMessage = {
 							...msg,
 							receipt: {
@@ -200,6 +227,8 @@ export function useMessageReceipts(
 				} catch (error) {
 					console.error('[Receipt] Failed to persist read receipt status:', error);
 				}
+			} else {
+				console.log('[Receipt] Message not found or not from current user for read receipt:', messageId);
 			}
 		};
 

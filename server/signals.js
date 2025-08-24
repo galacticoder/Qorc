@@ -29,11 +29,12 @@ export const SignalType = {
   UPDATE_DB: "update-db",
   HYBRID_KEYS_UPDATE: "hybrid-keys-update",
 
-  //ratchet / x3dh
-  X3DH_PUBLISH_BUNDLE: "x3dh-publish-bundle",
-  X3DH_REQUEST_BUNDLE: "x3dh-request-bundle",
-  X3DH_DELIVER_BUNDLE: "x3dh-deliver-bundle",
+  
   DR_SEND: "dr-send",
+  // libsignal (official) session bootstrap
+  LIBSIGNAL_PUBLISH_BUNDLE: "libsignal-publish-bundle",
+  LIBSIGNAL_REQUEST_BUNDLE: "libsignal-request-bundle",
+  LIBSIGNAL_DELIVER_BUNDLE: "libsignal-deliver-bundle",
 
   //rate limiting and admin
   RATE_LIMIT_STATUS: "rate-limit-status",

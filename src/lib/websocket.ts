@@ -6,20 +6,9 @@ interface MessageHandler {
 }
 
 class WebSocketClient {
-  private ws: WebSocket | null = null;
-  private url: string;
-  private isConnected: boolean = false;
-  private reconnectAttempts: number = 0;
-  private readonly maxReconnectAttempts: number = 5;
-  private readonly reconnectTimeout: number = 2000;
   private messageHandlers: Map<string, MessageHandler> = new Map();
   private setLoginError?: (error: string) => void;
   private globalRateLimitUntil: number = 0;
-
-  constructor() {
-    const isDev = import.meta.env.DEV;
-    this.url = isDev ? "wss://localhost:8443/" : "wss://end2endchat.com";
-  }
 
   public setLoginErrorCallback(fn: (error: string) => void) {
     this.setLoginError = fn;
@@ -52,43 +41,7 @@ class WebSocketClient {
     });
   }
 
-  public connect(): Promise<void> {
-    return new Promise((resolve, reject) => {
-      try {
-        this.ws = new WebSocket(this.url);
-
-        this.ws.onopen = () => {
-          this.isConnected = true;
-          this.reconnectAttempts = 0;
-          this.globalRateLimitUntil = 0;
-          if (this.setLoginError) this.setLoginError("");
-          resolve();
-        };
-
-        this.ws.onclose = (event) => {
-          this.isConnected = false;
-
-          if (event.code === 1008 || event.code === 1013) {
-            return;
-          }
-
-          this.attemptReconnect();
-        };
-
-        this.ws.onerror = (error) => {
-          if (!this.isConnected) {
-            reject(error);
-          }
-        };
-
-        this.ws.onmessage = (event) => {
-          this.handleMessage(event.data);
-        };
-      } catch (error) {
-        reject(error);
-      }
-    });
-  }
+  public connect(): Promise<void> { return Promise.resolve(); }
 
   private attemptReconnect(): void {
     if (this.reconnectAttempts >= this.maxReconnectAttempts) {
@@ -105,9 +58,7 @@ class WebSocketClient {
   }
 
   public send(data: unknown): void {
-    if (!this.ws || !this.isConnected) {
-      return;
-    }
+    // Forward to Electron edgeApi
     if (this.isGloballyRateLimited()) {
       // Drop to caller; caller can queue
       try { console.warn('[WS] send suppressed due to global rate limit'); } catch { }
@@ -122,7 +73,11 @@ class WebSocketClient {
         })();
         console.debug('[WS] send ->', preview);
       } catch { }
-      this.ws.send(message);
+      // @ts-ignore
+      if (window?.edgeApi?.wsSend) {
+        // @ts-ignore
+        window.edgeApi.wsSend(message);
+      }
     } catch (error) {
       console.error('Error sending message:', error);
     }
@@ -187,22 +142,9 @@ class WebSocketClient {
     }
   }
 
-  public close(): void {
-    if (this.ws) {
-      this.ws.close();
-      this.ws = null;
-      this.isConnected = false;
-    }
-    // Clear all message handlers to prevent memory leaks
-    this.messageHandlers.clear();
-    this.setLoginError = undefined;
-    this.globalRateLimitUntil = 0;
-    this.reconnectAttempts = 0;
-  }
+  public close(): void { this.messageHandlers.clear(); this.setLoginError = undefined; this.globalRateLimitUntil = 0; }
 
-  public isConnectedToServer(): boolean {
-    return this.isConnected;
-  }
+  public isConnectedToServer(): boolean { return true; }
 }
 
 const websocketClient = new WebSocketClient();

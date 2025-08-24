@@ -18,6 +18,15 @@ export interface MessageReceipt {
   readAt?: Date;
 }
 
+export interface TypingIndicator {
+  id: string;
+  type: 'typing-start' | 'typing-stop';
+  fromUsername: string;
+  toUsername: string;
+  timestamp: number;
+  isTypingIndicator: true;
+}
+
 export interface Message {
   id: string;
   content: string;

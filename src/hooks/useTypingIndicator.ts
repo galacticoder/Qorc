@@ -2,7 +2,7 @@ import { useCallback, useRef, useEffect } from 'react';
 
 export function useTypingIndicator(
 	currentUsername: string,
-	sendEncryptedMessage: (messageId: string, content: string, messageSignalType: string, replyTo?: any) => Promise<void>
+	sendEncryptedMessage?: (messageId: string, content: string, messageSignalType: string, replyTo?: any) => Promise<void>
 ) {
 	const typingTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 	const debounceTimeoutRef = useRef<NodeJS.Timeout | null>(null);
@@ -22,11 +22,27 @@ export function useTypingIndicator(
 		if (!isTypingRef.current && now - lastTypingTimeRef.current > MIN_TYPING_INTERVAL) {
 			try {
 				console.debug('[Typing] Sending typing-start signal');
-				await sendEncryptedMessage(
-					crypto.randomUUID(),
-					JSON.stringify({ type: 'typing-start', timestamp: now }),
-					'typing-start'
-				);
+				console.debug('[Typing] edgeApi available:', !!window.edgeApi);
+				console.debug('[Typing] sendTypingIndicator available:', !!window.edgeApi?.sendTypingIndicator);
+				
+				// Use the new direct typing indicator API to bypass Signal Protocol
+				if (window.edgeApi?.sendTypingIndicator) {
+					console.debug('[Typing] Using new direct typing indicator API');
+					await window.edgeApi.sendTypingIndicator({
+						fromUsername: currentUsername,
+						toUsername: 'all', // Send to all users for now
+						type: 'typing-start',
+						timestamp: now
+					});
+				} else if (sendEncryptedMessage) {
+					console.debug('[Typing] Falling back to encrypted message API');
+					// Fallback to encrypted message if new API not available
+					await sendEncryptedMessage(
+						crypto.randomUUID(),
+						JSON.stringify({ type: 'typing-start', timestamp: now }),
+						'typing-start'
+					);
+				}
 				lastTypingTimeRef.current = now;
 				isTypingRef.current = true;
 				pendingTypingRef.current = false;
@@ -38,7 +54,7 @@ export function useTypingIndicator(
 			// Mark that we want to send typing but are throttled
 			pendingTypingRef.current = true;
 		}
-	}, [sendEncryptedMessage]);
+	}, [currentUsername, sendEncryptedMessage]);
 
 	// Send typing stop signal
 	const sendTypingStop = useCallback(async () => {
@@ -46,11 +62,27 @@ export function useTypingIndicator(
 		if (isTypingRef.current) {
 			try {
 				console.debug('[Typing] Sending typing-stop signal');
-				await sendEncryptedMessage(
-					crypto.randomUUID(),
-					JSON.stringify({ type: 'typing-stop', timestamp: Date.now() }),
-					'typing-stop'
-				);
+				console.debug('[Typing] edgeApi available:', !!window.edgeApi);
+				console.debug('[Typing] sendTypingIndicator available:', !!window.edgeApi?.sendTypingIndicator);
+				
+				// Use the new direct typing indicator API to bypass Signal Protocol
+				if (window.edgeApi?.sendTypingIndicator) {
+					console.debug('[Typing] Using new direct typing indicator API for stop');
+					await window.edgeApi.sendTypingIndicator({
+						fromUsername: currentUsername,
+						toUsername: 'all', // Send to all users for now
+						type: 'typing-stop',
+						timestamp: Date.now()
+					});
+				} else if (sendEncryptedMessage) {
+					console.debug('[Typing] Falling back to encrypted message API for stop');
+					// Fallback to encrypted message if new API not available
+					await sendEncryptedMessage(
+						crypto.randomUUID(),
+						JSON.stringify({ type: 'typing-stop', timestamp: Date.now() }),
+						'typing-stop'
+					);
+				}
 				isTypingRef.current = false;
 				pendingTypingRef.current = false;
 			} catch (error) {
@@ -60,7 +92,7 @@ export function useTypingIndicator(
 				pendingTypingRef.current = false;
 			}
 		}
-	}, [sendEncryptedMessage]);
+	}, [currentUsername, sendEncryptedMessage]);
 
 	// Debounced typing handler - much more efficient
 	const handleLocalTyping = useCallback(() => {
