@@ -178,7 +178,7 @@ export function ChatInterface({
                 <ChatMessage
                   message={{
                     ...message,
-                    receipt: getSmartReceiptStatus(message) // Remove redundant find operation
+                    receipt: getSmartReceiptStatus(message) || message.receipt // Use smart status or fall back to original receipt
                   }}
                   previousMessage={index > 0 ? messages[index - 1] : undefined}
                   onReply={() => setReplyTo(message)}

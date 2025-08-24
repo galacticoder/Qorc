@@ -29,6 +29,7 @@ export function MessageReceipt({ receipt, isCurrentUser, className }: MessageRec
 		);
 	}
 
+	// Show sent status for messages that don't have delivery confirmation yet
 	return (
 		<div className={`flex items-center gap-1 text-xs text-gray-400 ${className}`}>
 			<span>Sent</span>

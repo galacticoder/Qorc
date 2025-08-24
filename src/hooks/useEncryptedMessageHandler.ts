@@ -94,7 +94,9 @@ export function useEncryptedMessageHandler(
             from: payload.from,
             content: payload.content,
             isReadReceipt: payload.type === 'read-receipt',
-            contentPreview: payload.content ? payload.content.substring(0, 100) : 'no content'
+            isDeliveryReceipt: payload.type === 'delivery-receipt',
+            contentPreview: payload.content ? payload.content.substring(0, 100) : 'no content',
+            payloadKeys: Object.keys(payload)
           });
           
           // Handle system messages first (these should not appear in chat)
@@ -109,6 +111,7 @@ export function useEncryptedMessageHandler(
               }
             });
             window.dispatchEvent(event);
+            console.log('[EncryptedMessageHandler] Read receipt event dispatched for message:', payload.messageId);
             return; // Don't process as regular message
           }
 
@@ -122,6 +125,7 @@ export function useEncryptedMessageHandler(
               }
             });
             window.dispatchEvent(event);
+            console.log('[EncryptedMessageHandler] Delivery receipt event dispatched for message:', payload.messageId);
             return; // Don't process as regular message
           }
 
@@ -154,17 +158,45 @@ export function useEncryptedMessageHandler(
             return; // Don't process as regular message
           }
 
-          // Check if the content contains typing indicator data (for backward compatibility)
-          // This handles cases where typing indicators might be sent with generic message types
+          // Check if the content contains system message data (typing indicators, receipts, etc.)
+          // This handles cases where system messages might be sent with generic message types
           if (payload.content && typeof payload.content === 'string') {
             try {
               const contentData = JSON.parse(payload.content);
+              
+              // Handle typing indicators
               if (contentData.type === 'typing-start' || contentData.type === 'typing-stop') {
                 console.log('[EncryptedMessageHandler] Processing typing indicator from content (backward compatibility):', contentData);
                 const event = new CustomEvent('typing-indicator', {
                   detail: {
                     from: payload.from,
                     indicatorType: contentData.type
+                  }
+                });
+                window.dispatchEvent(event);
+                return; // Don't process as regular message
+              }
+              
+              // Handle read receipts
+              if (contentData.type === 'read-receipt' && contentData.messageId) {
+                console.log('[EncryptedMessageHandler] Processing read receipt from content:', contentData);
+                const event = new CustomEvent('message-read', {
+                  detail: {
+                    messageId: contentData.messageId,
+                    from: payload.from
+                  }
+                });
+                window.dispatchEvent(event);
+                return; // Don't process as regular message
+              }
+              
+              // Handle delivery receipts
+              if (contentData.type === 'delivery-receipt' && contentData.messageId) {
+                console.log('[EncryptedMessageHandler] Processing delivery receipt from content:', contentData);
+                const event = new CustomEvent('message-delivered', {
+                  detail: {
+                    messageId: contentData.messageId,
+                    from: payload.from
                   }
                 });
                 window.dispatchEvent(event);
@@ -188,11 +220,31 @@ export function useEncryptedMessageHandler(
             } catch (error) {
               // Content is not JSON, continue processing as regular message
             }
-            const messageId = payload.messageId || uuidv4();
+            
+            // Extract message ID from the payload content since it's encrypted along with the content
+            let messageId = payload.messageId;
+            let messageContent = payload.content;
+            
+            // Try to parse the content to get the actual message data
+            try {
+              const contentData = JSON.parse(payload.content);
+              if (contentData.messageId) {
+                messageId = contentData.messageId;
+                messageContent = contentData.content || contentData.message || payload.content;
+                console.log('[EncryptedMessageHandler] Extracted message ID from content:', messageId);
+              } else {
+                console.log('[EncryptedMessageHandler] No messageId found in content:', contentData);
+              }
+            } catch (error) {
+              // Content is not JSON, use fallback
+              messageId = messageId || uuidv4();
+              console.log('[EncryptedMessageHandler] Content not JSON, using fallback message ID:', messageId);
+            }
             
             // Check if message already exists to prevent duplicates
+            let messageExists = false;
             setMessages(prev => {
-              const messageExists = prev.some(msg => msg.id === messageId);
+              messageExists = prev.some(msg => msg.id === messageId);
               if (messageExists) {
                 console.log('[EncryptedMessageHandler] Message already exists, skipping duplicate:', messageId);
                 return prev;
@@ -200,7 +252,7 @@ export function useEncryptedMessageHandler(
               
               const message: Message = {
                 id: messageId,
-                content: payload.content,
+                content: messageContent,
                 sender: payload.from,  // Use 'sender' to match Message interface
                 recipient: loginUsernameRef.current,  // Add recipient field for proper filtering
                 timestamp: new Date(payload.timestamp || Date.now()),  // Convert to Date object
@@ -219,41 +271,93 @@ export function useEncryptedMessageHandler(
 
               return [...prev, message];
             });
-            
-            // Save to database
-            const message: Message = {
-              id: messageId,
-              content: payload.content,
-              sender: payload.from,
-              recipient: loginUsernameRef.current,
-              timestamp: new Date(payload.timestamp || Date.now()),
-              type: 'text',
-              isCurrentUser: false
-            };
-            await saveMessageToLocalDB(message);
 
+            if (!messageExists) {
+              // Save to database (this will also add to state)
+              await saveMessageToLocalDB({
+                id: messageId,
+                content: messageContent,
+                sender: payload.from,
+                recipient: loginUsernameRef.current,
+                timestamp: new Date(payload.timestamp || Date.now()),
+                type: 'text',
+                isCurrentUser: false
+              });
+            }
+            
             // Send delivery receipt to the sender as encrypted message
             try {
+              // First, ensure we have a session with the sender for delivery receipts
+              const currentUser = loginUsernameRef.current;
+              const senderUsername = payload.from;
+              
+              // Check if we have a session with the sender
+              const sessionCheck = await (window as any).edgeApi?.hasSession?.({ 
+                selfUsername: currentUser, 
+                peerUsername: senderUsername, 
+                deviceId: 1 
+              });
+              
+              if (!sessionCheck?.hasSession) {
+                console.log('[EncryptedMessageHandler] No session with sender, requesting bundle for delivery receipt');
+                // Request the sender's bundle so we can send delivery receipts
+                websocketClient.send(JSON.stringify({ 
+                  type: SignalType.LIBSIGNAL_REQUEST_BUNDLE, 
+                  username: senderUsername 
+                }));
+                
+                // Wait a bit for the bundle to be processed
+                await new Promise(resolve => setTimeout(resolve, 500));
+              }
+              
               const deliveryReceiptData = {
-                type: 'delivery-receipt',
-                messageId: message.id,
-                timestamp: Date.now()
+                messageId: `delivery-receipt-${messageId}`,
+                from: loginUsernameRef.current,
+                to: payload.from,
+                content: 'delivery-receipt',
+                timestamp: Date.now(),
+                messageType: 'signal-protocol',
+                signalType: 'signal-protocol',
+                protocolType: 'signal',
+                type: 'delivery-receipt'
               };
+              
+              console.log('[EncryptedMessageHandler] Sending delivery receipt for message:', {
+                messageId: messageId,
+                originalMessageId: payload.messageId,
+                extractedMessageId: messageId,
+                deliveryReceiptData,
+                sender: payload.from,
+                recipient: loginUsernameRef.current
+              });
+              
+              // Use the proper Signal Protocol encryption flow through edgeApi
+              const encryptedMessage = await (window as any).edgeApi?.encrypt?.({
+                fromUsername: loginUsernameRef.current,
+                toUsername: payload.from,
+                plaintext: JSON.stringify(deliveryReceiptData)
+              });
+              
+              if (!encryptedMessage?.ciphertextBase64) {
+                console.error('[EncryptedMessageHandler] Failed to encrypt delivery receipt');
+                return;
+              }
               
               const deliveryReceiptPayload = {
                 type: SignalType.ENCRYPTED_MESSAGE,
                 to: payload.from,
                 encryptedPayload: {
-                  type: 1, // Signal Protocol message type
                   from: loginUsernameRef.current,
                   to: payload.from,
-                  content: JSON.stringify(deliveryReceiptData),
-                  sessionId: crypto.randomUUID() // Generate unique session ID for receipt
+                  content: encryptedMessage.ciphertextBase64,
+                  messageId: `delivery-receipt-${messageId}`,
+                  type: encryptedMessage.type,
+                  sessionId: encryptedMessage.sessionId
                 }
               };
               
               websocketClient.send(JSON.stringify(deliveryReceiptPayload));
-              console.log('[EncryptedMessageHandler] Delivery receipt sent for message:', message.id);
+              console.log('[EncryptedMessageHandler] Delivery receipt sent for message:', messageId);
             } catch (error) {
               console.error('[EncryptedMessageHandler] Failed to send delivery receipt:', error);
             }
@@ -261,11 +365,30 @@ export function useEncryptedMessageHandler(
 
           // Handle file messages
           if (payload.type === 'file-message' && payload.fileData) {
-            const messageId = payload.messageId || uuidv4();
+            // Extract message ID from the payload content since it's encrypted along with the content
+            let messageId = payload.messageId;
+            let fileName = payload.fileName;
+            
+            // Try to parse the content to get the actual message data
+            try {
+              const contentData = JSON.parse(payload.content);
+              if (contentData.messageId) {
+                messageId = contentData.messageId;
+                fileName = contentData.fileName || contentData.fileData || payload.fileName;
+                console.log('[EncryptedMessageHandler] Extracted file message ID from content:', messageId);
+              } else {
+                console.log('[EncryptedMessageHandler] No messageId found in file message content:', contentData);
+              }
+            } catch (error) {
+              // Content is not JSON, use fallback
+              messageId = messageId || uuidv4();
+              console.log('[EncryptedMessageHandler] File message content not JSON, using fallback message ID:', messageId);
+            }
             
             // Check if message already exists to prevent duplicates
+            let messageExists = false;
             setMessages(prev => {
-              const messageExists = prev.some(msg => msg.id === messageId);
+              messageExists = prev.some(msg => msg.id === messageId);
               if (messageExists) {
                 console.log('[EncryptedMessageHandler] File message already exists, skipping duplicate:', messageId);
                 return prev;
@@ -273,14 +396,14 @@ export function useEncryptedMessageHandler(
               
               const message: Message = {
                 id: messageId,
-                content: payload.fileName || 'File',
+                content: fileName || 'File',
                 sender: payload.from,  // Use 'sender' to match Message interface
                 recipient: loginUsernameRef.current,  // Add recipient field for proper filtering
                 timestamp: new Date(payload.timestamp || Date.now()),  // Convert to Date object
                 type: 'file',
                 isCurrentUser: false,  // Received messages are not from current user
                 fileInfo: {
-                  name: payload.fileName || 'File',
+                  name: fileName || 'File',
                   type: payload.fileType || 'application/octet-stream',
                   size: payload.fileSize || 0,
                   data: new ArrayBuffer(0)  // Placeholder - actual file data would be handled separately
@@ -289,47 +412,99 @@ export function useEncryptedMessageHandler(
 
               return [...prev, message];
             });
-            
-            // Save to database
-            const message: Message = {
-              id: messageId,
-              content: payload.fileName || 'File',
-              sender: payload.from,
-              recipient: loginUsernameRef.current,
-              timestamp: new Date(payload.timestamp || Date.now()),
-              type: 'file',
-              isCurrentUser: false,
-              fileInfo: {
-                name: payload.fileName || 'File',
-                type: payload.fileType || 'application/octet-stream',
-                size: payload.fileSize || 0,
-                data: new ArrayBuffer(0)
-              }
-            };
-            await saveMessageToLocalDB(message);
+
+            if (!messageExists) {
+              // Save to database (this will also add to state)
+              await saveMessageToLocalDB({
+                id: messageId,
+                content: fileName || 'File',
+                sender: payload.from,
+                recipient: loginUsernameRef.current,
+                timestamp: new Date(payload.timestamp || Date.now()),
+                type: 'file',
+                isCurrentUser: false,
+                fileInfo: {
+                  name: fileName || 'File',
+                  type: payload.fileType || 'application/octet-stream',
+                  size: payload.fileSize || 0,
+                  data: new ArrayBuffer(0)
+                }
+              });
+            }
 
             // Send delivery receipt to the sender as encrypted message
             try {
+              // First, ensure we have a session with the sender for delivery receipts
+              const currentUser = loginUsernameRef.current;
+              const senderUsername = payload.from;
+              
+              // Check if we have a session with the sender
+              const sessionCheck = await (window as any).edgeApi?.hasSession?.({ 
+                selfUsername: currentUser, 
+                peerUsername: senderUsername, 
+                deviceId: 1 
+              });
+              
+              if (!sessionCheck?.hasSession) {
+                console.log('[EncryptedMessageHandler] No session with sender, requesting bundle for file message delivery receipt');
+                // Request the sender's bundle so we can send delivery receipts
+                websocketClient.send(JSON.stringify({ 
+                  type: SignalType.LIBSIGNAL_REQUEST_BUNDLE, 
+                  username: senderUsername 
+                }));
+                
+                // Wait a bit for the bundle to be processed
+                await new Promise(resolve => setTimeout(resolve, 500));
+              }
+              
               const deliveryReceiptData = {
-                type: 'delivery-receipt',
-                messageId: message.id,
-                timestamp: Date.now()
+                messageId: `delivery-receipt-${messageId}`,
+                from: loginUsernameRef.current,
+                to: payload.from,
+                content: 'delivery-receipt',
+                timestamp: Date.now(),
+                messageType: 'signal-protocol',
+                signalType: 'signal-protocol',
+                protocolType: 'signal',
+                type: 'delivery-receipt'
               };
+              
+              console.log('[EncryptedMessageHandler] Sending delivery receipt for file message:', {
+                messageId: messageId,
+                originalMessageId: payload.messageId,
+                extractedMessageId: messageId,
+                deliveryReceiptData,
+                sender: payload.from,
+                recipient: loginUsernameRef.current
+              });
+              
+              // Use the proper Signal Protocol encryption flow through edgeApi
+              const encryptedMessage = await (window as any).edgeApi?.encrypt?.({
+                fromUsername: loginUsernameRef.current,
+                toUsername: payload.from,
+                plaintext: JSON.stringify(deliveryReceiptData)
+              });
+              
+              if (!encryptedMessage?.ciphertextBase64) {
+                console.error('[EncryptedMessageHandler] Failed to encrypt delivery receipt');
+                return;
+              }
               
               const deliveryReceiptPayload = {
                 type: SignalType.ENCRYPTED_MESSAGE,
                 to: payload.from,
                 encryptedPayload: {
-                  type: 1, // Signal Protocol message type
                   from: loginUsernameRef.current,
                   to: payload.from,
-                  content: JSON.stringify(deliveryReceiptData),
-                  sessionId: crypto.randomUUID() // Generate unique session ID for receipt
+                  content: encryptedMessage.ciphertextBase64,
+                  messageId: `delivery-receipt-${messageId}`,
+                  type: encryptedMessage.type,
+                  sessionId: encryptedMessage.sessionId
                 }
               };
               
               websocketClient.send(JSON.stringify(deliveryReceiptPayload));
-              console.log('[EncryptedMessageHandler] Delivery receipt sent for file message:', message.id);
+              console.log('[EncryptedMessageHandler] Delivery receipt sent for file message:', messageId);
             } catch (error) {
               console.error('[EncryptedMessageHandler] Failed to send delivery receipt for file message:', error);
             }

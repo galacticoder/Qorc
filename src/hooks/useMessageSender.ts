@@ -87,13 +87,24 @@ export function useMessageSender(
     sender: string;
     replyToId?: string;
   }): Promise<string> {
-    const normalized = `${message.sender}:${message.content}:${message.timestamp}${message.replyToId ? `:${message.replyToId}` : ''}`;
+    // Use a more stable timestamp (round to nearest second) to prevent ID changes
+    const stableTimestamp = Math.floor(message.timestamp / 1000) * 1000;
+    const normalized = `${message.sender}:${message.content}:${stableTimestamp}${message.replyToId ? `:${message.replyToId}` : ''}`;
     const encoder = new TextEncoder();
     const data = encoder.encode(normalized);
     const hashBuffer = await crypto.subtle.digest('SHA-256', data);
     const hashArray = Array.from(new Uint8Array(hashBuffer));
     const idHex = hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
-    return idHex.slice(0, 16);
+    const messageId = idHex.slice(0, 16);
+    
+    console.log('[MessageSender] Generated message ID:', {
+      originalTimestamp: message.timestamp,
+      stableTimestamp,
+      normalized,
+      messageId
+    });
+    
+    return messageId;
   }
 
   const handleSendMessage = useCallback(async (user: User, content: string, replyToId?: string, fileData?: string, messageSignalType?: string) => {
