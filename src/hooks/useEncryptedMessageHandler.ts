@@ -12,97 +12,7 @@ export function useEncryptedMessageHandler(
   setMessages: React.Dispatch<React.SetStateAction<Message[]>>,
   saveMessageToLocalDB: (msg: Message) => Promise<void>
 ) {
-  // Helper function to handle read receipts
-  const handleReadReceipt = useCallback((payload: any) => {
-    console.log('[EncryptedMessageHandler] handleReadReceipt called with payload:', {
-      type: payload?.type,
-      messageId: payload?.messageId,
-      content: payload?.content,
-      contentPreview: payload?.content ? payload.content.substring(0, 100) : 'no content'
-    });
-
-    // Check if the payload itself is a read receipt
-    if (payload?.type === 'read-receipt' && payload?.messageId) {
-      try {
-        console.log('[EncryptedMessageHandler] Processing read receipt (direct):', {
-          messageId: payload.messageId,
-          from: payload.from,
-          timestamp: payload.timestamp
-        });
-        
-        const event = new CustomEvent('message-read', {
-          detail: {
-            messageId: payload.messageId,
-            from: payload.from
-          }
-        });
-        window.dispatchEvent(event);
-        return true; // Indicates this was a read receipt that should not be processed as a message
-      } catch (error) {
-        console.error('[EncryptedMessageHandler] Error processing read receipt:', error);
-        return true; // Return true to prevent processing as message even if processing fails
-      }
-    }
-    
-    // Check for read receipts embedded in message content (current issue)
-    if (payload?.type === 'message' && payload?.content) {
-      try {
-        // Try to parse the content to see if it's a read receipt
-        const contentData = JSON.parse(payload.content);
-        console.log('[EncryptedMessageHandler] Parsed message content:', contentData);
-        
-        if (contentData.type === 'read-receipt' && contentData.messageId) {
-          console.log('[EncryptedMessageHandler] Processing read receipt from message content:', {
-            messageId: contentData.messageId,
-            from: payload.from,
-            timestamp: contentData.timestamp
-          });
-          
-          const event = new CustomEvent('message-read', {
-            detail: {
-              messageId: contentData.messageId,
-              from: payload.from
-            }
-          });
-          window.dispatchEvent(event);
-          return true; // Indicates this was a read receipt that should not be processed as a message
-        }
-      } catch (error) {
-        console.log('[EncryptedMessageHandler] Content is not JSON, continuing as regular message');
-        // Content is not JSON, continue processing as regular message
-      }
-    }
-    
-    // Also check for legacy read receipts embedded in content
-    if (payload?.typeInside === 'read-receipt' && payload?.content) {
-      try {
-        // Parse the content to extract the read receipt data
-        const receiptData = JSON.parse(payload.content);
-        if (receiptData.type === 'read-receipt' && receiptData.messageId) {
-          console.log('[EncryptedMessageHandler] Processing legacy read receipt from typeInside:', {
-            messageId: receiptData.messageId,
-            from: payload.from,
-            timestamp: receiptData.timestamp
-          });
-          
-          const event = new CustomEvent('message-read', {
-            detail: {
-              messageId: receiptData.messageId,
-              from: payload.from
-            }
-          });
-          window.dispatchEvent(event);
-          return true; // Indicates this was a read receipt that should not be processed as a message
-        }
-      } catch (error) {
-        console.log('[EncryptedMessageHandler] Legacy read receipt parsing failed, preventing message processing');
-        return true; // Return true to prevent processing as message even if parsing fails
-      }
-    }
-    
-    console.log('[EncryptedMessageHandler] Not a read receipt, can process as normal message');
-    return false; // Not a read receipt, can process as normal message
-  }, []);
+  
 
   return useCallback(
     async (encryptedMessage: any) => {
@@ -187,44 +97,159 @@ export function useEncryptedMessageHandler(
             contentPreview: payload.content ? payload.content.substring(0, 100) : 'no content'
           });
           
+          // Handle system messages first (these should not appear in chat)
+          
           // Handle read receipts
-          if (handleReadReceipt(payload)) {
-            console.log('[EncryptedMessageHandler] Read receipt handled, skipping message processing');
-            return;
-          } else {
-            console.log('[EncryptedMessageHandler] Not a read receipt, processing as regular message');
+          if (payload.type === 'read-receipt' && payload.messageId) {
+            console.log('[EncryptedMessageHandler] Processing read receipt:', payload);
+            const event = new CustomEvent('message-read', {
+              detail: {
+                messageId: payload.messageId,
+                from: payload.from
+              }
+            });
+            window.dispatchEvent(event);
+            return; // Don't process as regular message
           }
 
-          // Handle regular messages
-          if ((payload.type === 'message' || payload.type === 'text') && payload.content) {
-            const message: Message = {
-              id: payload.messageId || uuidv4(),
-              content: payload.content,
-              sender: payload.from,  // Use 'sender' to match Message interface
-              recipient: loginUsernameRef.current,  // Add recipient field for proper filtering
-              timestamp: new Date(payload.timestamp || Date.now()),  // Convert to Date object
-              type: 'text',
-              isCurrentUser: false  // Received messages are not from current user
-            };
-
-            console.log('[EncryptedMessageHandler] Adding message to state:', {
-              id: message.id,
-              sender: message.sender,
-              recipient: message.recipient,
-              contentLength: message.content.length,
-              timestamp: message.timestamp,
-              isCurrentUser: message.isCurrentUser
+          // Handle delivery receipts
+          if (payload.type === 'delivery-receipt' && payload.messageId) {
+            console.log('[EncryptedMessageHandler] Processing delivery receipt:', payload);
+            const event = new CustomEvent('message-delivered', {
+              detail: {
+                messageId: payload.messageId,
+                from: payload.from
+              }
             });
+            window.dispatchEvent(event);
+            return; // Don't process as regular message
+          }
 
-            setMessages(prev => [...prev, message]);
+          // Handle typing indicators (only if not already processed as a system message)
+          if (payload.type === 'typing-start' || payload.type === 'typing-stop' || payload.type === 'typing-indicator') {
+            console.log('[EncryptedMessageHandler] Processing typing indicator:', payload);
+            
+            // For typing-indicator type, we need to parse the content to get the actual indicator type
+            let indicatorType = payload.type;
+            if (payload.type === 'typing-indicator' && payload.content) {
+              try {
+                const contentData = JSON.parse(payload.content);
+                indicatorType = contentData.type;
+                console.log('[EncryptedMessageHandler] Extracted indicator type from content:', indicatorType);
+              } catch (error) {
+                console.warn('[EncryptedMessageHandler] Failed to parse typing indicator content:', error);
+                // Fallback to a default type if parsing fails
+                indicatorType = 'typing-start';
+              }
+            }
+            
+            const event = new CustomEvent('typing-indicator', {
+              detail: {
+                from: payload.from,
+                indicatorType: indicatorType
+              }
+            });
+            window.dispatchEvent(event);
+            console.log('[EncryptedMessageHandler] Dispatched typing indicator event:', { from: payload.from, indicatorType });
+            return; // Don't process as regular message
+          }
+
+          // Check if the content contains typing indicator data (for backward compatibility)
+          // This handles cases where typing indicators might be sent with generic message types
+          if (payload.content && typeof payload.content === 'string') {
+            try {
+              const contentData = JSON.parse(payload.content);
+              if (contentData.type === 'typing-start' || contentData.type === 'typing-stop') {
+                console.log('[EncryptedMessageHandler] Processing typing indicator from content (backward compatibility):', contentData);
+                const event = new CustomEvent('typing-indicator', {
+                  detail: {
+                    from: payload.from,
+                    indicatorType: contentData.type
+                  }
+                });
+                window.dispatchEvent(event);
+                return; // Don't process as regular message
+              }
+            } catch (error) {
+              // Content is not JSON, continue processing as regular message
+            }
+          }
+
+          // Handle regular messages (only if not a system message)
+          // Additional check to ensure typing indicator messages are not processed as regular messages
+          if ((payload.type === 'message' || payload.type === 'text' || !payload.type) && payload.content) {
+            // Double-check that this is not a typing indicator message
+            try {
+              const contentData = JSON.parse(payload.content);
+              if (contentData.type === 'typing-start' || contentData.type === 'typing-stop') {
+                console.log('[EncryptedMessageHandler] Skipping typing indicator message that was already processed:', contentData);
+                return; // Don't process as regular message
+              }
+            } catch (error) {
+              // Content is not JSON, continue processing as regular message
+            }
+            const messageId = payload.messageId || uuidv4();
+            
+            // Check if message already exists to prevent duplicates
+            setMessages(prev => {
+              const messageExists = prev.some(msg => msg.id === messageId);
+              if (messageExists) {
+                console.log('[EncryptedMessageHandler] Message already exists, skipping duplicate:', messageId);
+                return prev;
+              }
+              
+              const message: Message = {
+                id: messageId,
+                content: payload.content,
+                sender: payload.from,  // Use 'sender' to match Message interface
+                recipient: loginUsernameRef.current,  // Add recipient field for proper filtering
+                timestamp: new Date(payload.timestamp || Date.now()),  // Convert to Date object
+                type: 'text',
+                isCurrentUser: false  // Received messages are not from current user
+              };
+
+              console.log('[EncryptedMessageHandler] Adding message to state:', {
+                id: message.id,
+                sender: message.sender,
+                recipient: message.recipient,
+                contentLength: message.content.length,
+                timestamp: message.timestamp,
+                isCurrentUser: message.isCurrentUser
+              });
+
+              return [...prev, message];
+            });
+            
+            // Save to database
+            const message: Message = {
+              id: messageId,
+              content: payload.content,
+              sender: payload.from,
+              recipient: loginUsernameRef.current,
+              timestamp: new Date(payload.timestamp || Date.now()),
+              type: 'text',
+              isCurrentUser: false
+            };
             await saveMessageToLocalDB(message);
 
-            // Send delivery receipt to the sender
+            // Send delivery receipt to the sender as encrypted message
             try {
-              const deliveryReceiptPayload = {
-                type: SignalType.MESSAGE_DELIVERED,
+              const deliveryReceiptData = {
+                type: 'delivery-receipt',
                 messageId: message.id,
-                to: payload.from
+                timestamp: Date.now()
+              };
+              
+              const deliveryReceiptPayload = {
+                type: SignalType.ENCRYPTED_MESSAGE,
+                to: payload.from,
+                encryptedPayload: {
+                  type: 1, // Signal Protocol message type
+                  from: loginUsernameRef.current,
+                  to: payload.from,
+                  content: JSON.stringify(deliveryReceiptData),
+                  sessionId: crypto.randomUUID() // Generate unique session ID for receipt
+                }
               };
               
               websocketClient.send(JSON.stringify(deliveryReceiptPayload));
@@ -236,31 +261,71 @@ export function useEncryptedMessageHandler(
 
           // Handle file messages
           if (payload.type === 'file-message' && payload.fileData) {
+            const messageId = payload.messageId || uuidv4();
+            
+            // Check if message already exists to prevent duplicates
+            setMessages(prev => {
+              const messageExists = prev.some(msg => msg.id === messageId);
+              if (messageExists) {
+                console.log('[EncryptedMessageHandler] File message already exists, skipping duplicate:', messageId);
+                return prev;
+              }
+              
+              const message: Message = {
+                id: messageId,
+                content: payload.fileName || 'File',
+                sender: payload.from,  // Use 'sender' to match Message interface
+                recipient: loginUsernameRef.current,  // Add recipient field for proper filtering
+                timestamp: new Date(payload.timestamp || Date.now()),  // Convert to Date object
+                type: 'file',
+                isCurrentUser: false,  // Received messages are not from current user
+                fileInfo: {
+                  name: payload.fileName || 'File',
+                  type: payload.fileType || 'application/octet-stream',
+                  size: payload.fileSize || 0,
+                  data: new ArrayBuffer(0)  // Placeholder - actual file data would be handled separately
+                }
+              };
+
+              return [...prev, message];
+            });
+            
+            // Save to database
             const message: Message = {
-              id: payload.messageId || uuidv4(),
+              id: messageId,
               content: payload.fileName || 'File',
-              sender: payload.from,  // Use 'sender' to match Message interface
-              recipient: loginUsernameRef.current,  // Add recipient field for proper filtering
-              timestamp: new Date(payload.timestamp || Date.now()),  // Convert to Date object
+              sender: payload.from,
+              recipient: loginUsernameRef.current,
+              timestamp: new Date(payload.timestamp || Date.now()),
               type: 'file',
-              isCurrentUser: false,  // Received messages are not from current user
+              isCurrentUser: false,
               fileInfo: {
                 name: payload.fileName || 'File',
                 type: payload.fileType || 'application/octet-stream',
                 size: payload.fileSize || 0,
-                data: new ArrayBuffer(0)  // Placeholder - actual file data would be handled separately
+                data: new ArrayBuffer(0)
               }
             };
-
-            setMessages(prev => [...prev, message]);
             await saveMessageToLocalDB(message);
 
-            // Send delivery receipt to the sender
+            // Send delivery receipt to the sender as encrypted message
             try {
-              const deliveryReceiptPayload = {
-                type: SignalType.MESSAGE_DELIVERED,
+              const deliveryReceiptData = {
+                type: 'delivery-receipt',
                 messageId: message.id,
-                to: payload.from
+                timestamp: Date.now()
+              };
+              
+              const deliveryReceiptPayload = {
+                type: SignalType.ENCRYPTED_MESSAGE,
+                to: payload.from,
+                encryptedPayload: {
+                  type: 1, // Signal Protocol message type
+                  from: loginUsernameRef.current,
+                  to: payload.from,
+                  content: JSON.stringify(deliveryReceiptData),
+                  sessionId: crypto.randomUUID() // Generate unique session ID for receipt
+                }
               };
               
               websocketClient.send(JSON.stringify(deliveryReceiptPayload));
@@ -270,27 +335,7 @@ export function useEncryptedMessageHandler(
             }
           }
 
-          // Handle delivery receipts
-          if (payload.type === 'delivery-receipt' && payload.messageId) {
-            const event = new CustomEvent('message-delivered', {
-              detail: {
-                messageId: payload.messageId,
-                from: payload.from
-              }
-            });
-            window.dispatchEvent(event);
-          }
-
-          // Handle typing indicators
-          if (payload.type === 'typing-start' || payload.type === 'typing-stop') {
-            const event = new CustomEvent('typing-indicator', {
-              detail: {
-                from: payload.from,
-                isTyping: payload.type === 'typing-start'
-              }
-            });
-            window.dispatchEvent(event);
-          }
+          // Note: System messages (read receipts, delivery receipts, typing indicators) are handled above
         } else {
           console.warn('[EncryptedMessageHandler] No valid payload after decryption');
         }
@@ -298,6 +343,6 @@ export function useEncryptedMessageHandler(
         console.error('[EncryptedMessageHandler] Error processing encrypted message:', error);
       }
     },
-    [handleReadReceipt, setMessages, saveMessageToLocalDB]
+    [setMessages, saveMessageToLocalDB]
   );
 }

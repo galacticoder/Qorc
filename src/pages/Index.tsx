@@ -152,7 +152,7 @@ const ChatApp: React.FC<ChatAppProps> = ({ onNavigate }) => {
             <ChatInterface
               messages={conversationMessages}
               setMessages={setMessages}
-              onSendMessage={(messageId, content, messageSignalType, replyTo) => {
+              onSendMessage={async (messageId, content, messageSignalType, replyTo) => {
                 console.log('[Index] Attempting to send message:', {
                   messageId,
                   content,
@@ -162,6 +162,21 @@ const ChatApp: React.FC<ChatAppProps> = ({ onNavigate }) => {
                   users: Database.users.map(u => u.username)
                 });
                 
+                // Handle typing indicator messages differently
+                if (messageSignalType === 'typing-start' || messageSignalType === 'typing-stop') {
+                  // For typing indicators, we need to send them as encrypted messages
+                  // but they should not appear in the chat history
+                  const targetUser = Database.users.find(user => user.username === selectedConversation);
+                  if (!targetUser) {
+                    console.error('[Index] User not found for conversation:', selectedConversation);
+                    return;
+                  }
+                  
+                  console.log('[Index] Found target user for typing indicator:', targetUser);
+                  // Send typing indicator as encrypted message but don't add to chat history
+                  return messageSender.handleSendMessage(targetUser, content, replyTo?.id, undefined, messageSignalType);
+                }
+                
                 // Find the user object for the selected conversation
                 const targetUser = Database.users.find(user => user.username === selectedConversation);
                 if (!targetUser) {
@@ -170,7 +185,7 @@ const ChatApp: React.FC<ChatAppProps> = ({ onNavigate }) => {
                 }
                 
                 console.log('[Index] Found target user:', targetUser);
-                return messageSender.handleSendMessage(targetUser, content, replyTo?.id);
+                return messageSender.handleSendMessage(targetUser, content, replyTo?.id, undefined, messageSignalType);
               }}
               onSendFile={handleSendFileWrapper}
               isEncrypted={true}

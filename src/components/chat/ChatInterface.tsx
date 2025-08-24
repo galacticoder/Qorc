@@ -50,8 +50,13 @@ export function ChatInterface({
   const lastScrollTimeRef = useRef<number>(0);
   
   // Typing hook
-  const { handleLocalTyping, handleConversationChange } = useTypingIndicator(currentUsername, onSendMessage);
+  const { handleLocalTyping, handleConversationChange } = useTypingIndicator(currentUsername, selectedConversation, onSendMessage);
   const { typingUsers } = useTypingIndicatorContext();
+
+  // Log typing users changes
+  useEffect(() => {
+    console.log('[ChatInterface] typingUsers changed:', typingUsers);
+  }, [typingUsers]);
 
   // Handle conversation changes to stop typing indicators
   useEffect(() => {
@@ -199,21 +204,22 @@ export function ChatInterface({
       )}
       <div className="p-4 bg-gray-50">
         <ChatInput
-                        onSendMessage={async (
-                messageId: string | undefined,
-                content: string,
-                messageSignalType: string,
-                replyToMsg?: Message | null
-              ) => {
-                // For typing indicators, we don't need to send actual messages
-                if (messageSignalType === 'typing-start' || messageSignalType === 'typing-stop') {
-                  // Just handle typing locally, no need to send to server
-                  return;
-                }
-                // For other message types, call the parent handler
-                await onSendMessage(messageId ?? "", content, messageSignalType, replyToMsg);
-                setReplyTo(null);
-              }}
+          onSendMessage={async (
+            messageId: string | undefined,
+            content: string,
+            messageSignalType: string,
+            replyToMsg?: Message | null
+          ) => {
+            // For typing indicators, we need to send them to the server but they should not appear in chat
+            if (messageSignalType === 'typing-start' || messageSignalType === 'typing-stop') {
+              // Send typing indicator to server but don't add to local chat history
+              await onSendMessage(messageId ?? "", content, messageSignalType, replyToMsg);
+              return;
+            }
+            // For other message types, call the parent handler
+            await onSendMessage(messageId ?? "", content, messageSignalType, replyToMsg);
+            setReplyTo(null);
+          }}
           onSendFile={onSendFile}
           isEncrypted={isEncrypted}
           currentUsername={currentUsername}

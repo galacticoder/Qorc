@@ -40,13 +40,9 @@ export const SignalType = {
   RATE_LIMIT_STATUS: "rate-limit-status",
   RATE_LIMIT_RESET: "rate-limit-reset",
 
-  //typing indicators
-  TYPING_START: "typing-start",
-  TYPING_STOP: "typing-stop",
+  // Note: Typing indicators are now handled as encrypted messages
 
-  //receipt signals
-  MESSAGE_DELIVERED: "message-delivered",
-  MESSAGE_READ: "message-read",
+  // Note: Read receipts and delivery receipts are now handled as encrypted messages
 };
 
 export const SignalMessages = {

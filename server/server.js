@@ -381,67 +381,8 @@ async function startServer() {
             break;
           }
 
-          case SignalType.MESSAGE_DELIVERED: {
-            // Handle message delivery receipt
-            {
-              const entry = clientState.username ? clients.get(clientState.username) : null;
-              const isAuthed = entry?.clientState?.hasAuthenticated ?? clientState.hasAuthenticated;
-              if (!isAuthed) {
-                console.error('[SERVER] User not authenticated for delivery receipt');
-                return ws.send(JSON.stringify({ type: SignalType.ERROR, message: 'Not authenticated yet' }));
-              }
-            }
-
-            console.log(`[SERVER] Processing delivery receipt from ${clientState.username} for message ${parsed.messageId}`);
-
-            // Forward delivery receipt to message sender
-            const recipient = clients.get(parsed.to);
-            if (recipient && recipient.ws && recipient.ws.readyState === 1) {
-              try {
-                recipient.ws.send(JSON.stringify({
-                  type: SignalType.MESSAGE_DELIVERED,
-                  messageId: parsed.messageId,
-                  from: clientState.username,
-                  to: parsed.to
-                }));
-                console.log(`[SERVER] Delivery receipt forwarded to ${parsed.to}`);
-              } catch (error) {
-                console.error(`[SERVER] Failed to forward delivery receipt to ${parsed.to}:`, error);
-              }
-            }
-            break;
-          }
-
-          case SignalType.MESSAGE_READ: {
-            // Handle message read receipt
-            {
-              const entry = clientState.username ? clients.get(clientState.username) : null;
-              const isAuthed = entry?.clientState?.hasAuthenticated ?? clientState.hasAuthenticated;
-              if (!isAuthed) {
-                console.error('[SERVER] User not authenticated for read receipt');
-                return ws.send(JSON.stringify({ type: SignalType.ERROR, message: 'Not authenticated yet' }));
-              }
-            }
-
-            console.log(`[SERVER] Processing read receipt from ${clientState.username} for message ${parsed.messageId}`);
-
-            // Forward read receipt to message sender
-            const recipient = clients.get(parsed.to);
-            if (recipient && recipient.ws && recipient.ws.readyState === 1) {
-              try {
-                recipient.ws.send(JSON.stringify({
-                  type: SignalType.MESSAGE_READ,
-                  messageId: parsed.messageId,
-                  from: clientState.username,
-                  to: parsed.to
-                }));
-                console.log(`[SERVER] Read receipt forwarded to ${parsed.to}`);
-              } catch (error) {
-                console.error(`[SERVER] Failed to forward read receipt to ${parsed.to}:`, error);
-              }
-            }
-            break;
-          }
+          // Note: Read receipts, delivery receipts, and typing indicators are now handled as encrypted messages
+          // The server treats them as opaque encrypted data and just forwards them
 
           case SignalType.ENCRYPTED_MESSAGE:
           case SignalType.FILE_MESSAGE_CHUNK:

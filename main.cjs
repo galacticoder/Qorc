@@ -78,8 +78,8 @@ const isDev = !!process.env.VITE_DEV_SERVER_URL;
   let latestServerPublicKey = null;
 
   // Rate limiting for typing indicators to prevent excessive calls
-  const typingRateLimiter = new Map();
-  const TYPING_RATE_LIMIT = 100; // ms between typing indicator calls per user
+  // Note: Typing indicators are now sent as encrypted messages through the normal message system
+  // Note: Typing indicators are now sent as encrypted messages through the normal message system
 
   // Safe console logging to avoid EBADF errors
   function sendCachedStateToRenderer(webContents) {
@@ -99,7 +99,7 @@ const isDev = !!process.env.VITE_DEV_SERVER_URL;
       }
       
       // Clean up rate limiter to prevent memory leaks
-      typingRateLimiter.clear();
+      // Note: Typing indicators are now sent as encrypted messages through the normal message system
     } catch {}
   }
 
@@ -206,6 +206,8 @@ app.whenReady().then(() => {
             debugLog(`Received server-public-key, caching it`);
             latestServerPublicKey = msg;
           }
+          
+          // All messages are now routed through the normal message system
           broadcastToRenderers('edge:server-message', msg);
         } catch {
           broadcastToRenderers('edge:server-message', raw);
@@ -627,50 +629,7 @@ app.whenReady().then(() => {
     }
   });
 
-  // Special handler for typing indicators that bypasses Signal Protocol to prevent EBADF errors
-  ipcMain.handle('edge:typing-indicator', async (_e, args) => {
-    const { fromUsername, toUsername, type, timestamp } = args || {};
-    
-    try {
-      // Validate input
-      if (!fromUsername || !toUsername || !type || !timestamp) {
-        throw new Error('Invalid typing indicator parameters');
-      }
-      
-      // Rate limiting for typing indicators
-      const lastTypingTime = typingRateLimiter.get(`${fromUsername}-${toUsername}`);
-      if (lastTypingTime && Date.now() - lastTypingTime < TYPING_RATE_LIMIT) {
-        debugLog(`[EDGE] Typing indicator rate limited for ${fromUsername} -> ${toUsername}`);
-        return { success: false, message: 'Rate limited' };
-      }
-
-      // Create a simple typing indicator message that doesn't require encryption
-      const typingMessage = {
-        id: `typing-${Date.now()}-${Math.random()}`,
-        type: type, // 'typing-start' or 'typing-stop'
-        fromUsername,
-        toUsername,
-        timestamp,
-        isTypingIndicator: true
-      };
-      
-      // Broadcast to all renderer processes except the sender
-      broadcastToRenderers('edge:typing-indicator', {
-        ...typingMessage,
-        excludeSender: fromUsername // Add flag to exclude sender
-      });
-      
-      // Update rate limiter
-      typingRateLimiter.set(`${fromUsername}-${toUsername}`, Date.now());
-
-      debugLog(`[EDGE] Typing indicator sent: ${fromUsername} -> ${toUsername}, type: ${type}`);
-      
-      return { success: true, messageId: typingMessage.id };
-    } catch (error) {
-      debugError(`[EDGE] Typing indicator failed:`, error);
-      throw error;
-    }
-  });
+  // Note: Typing indicators are now sent as encrypted messages through the normal message system
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });

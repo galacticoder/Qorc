@@ -37,7 +37,7 @@ export function useMessageReceipts(
 		}
 	}, [currentUsername]);
 
-	// Send read receipt when message is viewed (as server signal to avoid appearing as chat message)
+	// Send read receipt when message is viewed (as encrypted message)
 	const sendReadReceipt = useCallback(async (messageId: string, sender: string) => {
 		console.log('[Receipt] sendReadReceipt called:', { messageId, sender, currentUsername });
 		
@@ -55,14 +55,28 @@ export function useMessageReceipts(
 		console.log('[Receipt] Sending read receipt for message:', messageId);
 
 		try {
-			// Send as server signal to avoid appearing as chat message
-			const readReceiptPayload = {
-				type: SignalType.MESSAGE_READ,
+			// Create read receipt payload
+			const readReceiptData = {
+				type: 'read-receipt',
 				messageId: messageId,
-				to: sender
+				timestamp: Date.now()
 			};
 			
-			// Use websocketClient directly to send the read receipt signal
+			// Send as encrypted message through the normal message system
+			// This will be handled by the encrypted message handler on the recipient side
+			const readReceiptPayload = {
+				type: SignalType.ENCRYPTED_MESSAGE,
+				to: sender,
+				encryptedPayload: {
+					type: 1, // Signal Protocol message type
+					from: currentUsername,
+					to: sender,
+					content: JSON.stringify(readReceiptData),
+					sessionId: crypto.randomUUID() // Generate unique session ID for receipt
+				}
+			};
+			
+			// Use websocketClient to send the encrypted read receipt
 			websocketClient.send(JSON.stringify(readReceiptPayload));
 
 			// Mark this message as having a read receipt sent

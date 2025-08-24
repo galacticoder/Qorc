@@ -96,7 +96,7 @@ export function useMessageSender(
     return idHex.slice(0, 16);
   }
 
-  const handleSendMessage = useCallback(async (user: User, content: string, replyToId?: string, fileData?: string) => {
+  const handleSendMessage = useCallback(async (user: User, content: string, replyToId?: string, fileData?: string, messageSignalType?: string) => {
     if (!isLoggedIn || !loginUsernameRef.current) return;
 
     const currentUser = loginUsernameRef.current;
@@ -155,6 +155,10 @@ export function useMessageSender(
         messageId
       });
 
+      const messageType = messageSignalType === 'typing-start' || messageSignalType === 'typing-stop' ? 'typing-indicator' : (fileData ? 'file-message' : 'message');
+      
+      console.log('[MessageSender] Preparing message with type:', { messageType, messageSignalType, content: content.substring(0, 100) });
+      
       const encryptedMessage = await (window as any).edgeApi.encrypt({
         fromUsername: currentUser,
         toUsername: user.username,
@@ -167,7 +171,7 @@ export function useMessageSender(
           messageType: 'signal-protocol',  // Add message type identifier
           signalType: 'signal-protocol',   // Add signal type for server validation
           protocolType: 'signal',          // Add protocol type identifier
-          type: fileData ? 'file-message' : 'message',  // Use 'message' for text, 'file-message' for files
+          type: messageType,  // Use special type for typing indicators
           ...(replyToId && { replyTo: { id: replyToId } }),
           ...(fileData && { fileData })
         })
@@ -218,23 +222,28 @@ export function useMessageSender(
       // Send the encrypted message
       websocketClient.send(JSON.stringify(messagePayload));
 
-      // Create local message for UI
-      const localMessage: Message = {
-        id: messageId,
-        content: content,
-        sender: currentUser,
-        recipient: user.username,  // Add recipient field for proper filtering
-        timestamp: new Date(),
-        type: fileData ? 'file' : 'text',
-        isCurrentUser: true,  // Sent messages are from current user
-        receipt: {
-          delivered: false,
-          read: false
-        },
-        ...(fileData && { fileInfo: { name: fileData, type: 'text/plain', size: 0, data: new ArrayBuffer(0) } })
-      };
+      // Create local message for UI (only for non-typing indicator messages)
+      if (messageSignalType !== 'typing-start' && messageSignalType !== 'typing-stop') {
+        console.log('[MessageSender] Creating local message for UI:', { messageId, content: content.substring(0, 100) });
+        const localMessage: Message = {
+          id: messageId,
+          content: content,
+          sender: currentUser,
+          recipient: user.username,  // Add recipient field for proper filtering
+          timestamp: new Date(),
+          type: fileData ? 'file' : 'text',
+          isCurrentUser: true,  // Sent messages are from current user
+          receipt: {
+            delivered: false,
+            read: false
+          },
+          ...(fileData && { fileInfo: { name: fileData, type: 'text/plain', size: 0, data: new ArrayBuffer(0) } })
+        };
 
-      onNewMessage(localMessage);
+        onNewMessage(localMessage);
+      } else {
+        console.log('[MessageSender] Skipping local message creation for typing indicator:', { messageSignalType, messageId });
+      }
 
       // Note: Delivery receipt should be sent by the recipient when they receive the message
       // Not by the sender immediately after sending

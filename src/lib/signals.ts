@@ -46,11 +46,8 @@ export enum SignalType {
   LIBSIGNAL_PUBLISH_BUNDLE = "libsignal-publish-bundle",
   LIBSIGNAL_REQUEST_BUNDLE = "libsignal-request-bundle",
   LIBSIGNAL_DELIVER_BUNDLE = "libsignal-deliver-bundle",
-  TYPING_START = "typing-start",
-  TYPING_STOP = "typing-stop",
-  // Receipt signals
-  MESSAGE_DELIVERED = "message-delivered",
-  MESSAGE_READ = "message-read",
+  // Note: Typing indicators are now handled as encrypted messages
+  // Note: Read receipts and delivery receipts are now handled as encrypted messages
 }
 
 interface SignalHandlers {
@@ -230,31 +227,7 @@ export async function handleSignalMessages(
         break;
       }
 
-      case SignalType.MESSAGE_DELIVERED: {
-        // Handle message delivery receipt
-        const { messageId, from } = data || {};
-        if (messageId && from) {
-          // Dispatch delivery receipt event
-          const event = new CustomEvent('message-delivered', {
-            detail: { messageId, from }
-          });
-          window.dispatchEvent(event);
-        }
-        break;
-      }
-
-      case SignalType.MESSAGE_READ: {
-        // Handle message read receipt
-        const { messageId, from } = data || {};
-        if (messageId && from) {
-          // Dispatch read receipt event
-          const event = new CustomEvent('message-read', {
-            detail: { messageId, from }
-          });
-          window.dispatchEvent(event);
-        }
-        break;
-      }
+      // Note: Read receipts and delivery receipts are now handled as encrypted messages
 
       case SignalType.ENCRYPTED_MESSAGE:
       case SignalType.DR_SEND:

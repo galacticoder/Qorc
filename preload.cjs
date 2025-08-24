@@ -12,8 +12,7 @@ contextBridge.exposeInMainWorld('edgeApi', {
   encrypt: (args) => ipcRenderer.invoke('edge:encrypt', args),
   decrypt: (args) => ipcRenderer.invoke('edge:decrypt', args),
 
-  // Typing indicators (bypasses Signal Protocol to prevent EBADF errors)
-  sendTypingIndicator: (args) => ipcRenderer.invoke('edge:typing-indicator', args),
+  // Note: Typing indicators are now sent as encrypted messages through the normal message system
 
   // Legacy/unused placeholders (safe to keep for compatibility)
   setupSession: (args) => ipcRenderer.invoke('edge:setupSession', args),
@@ -30,11 +29,6 @@ ipcRenderer.on('edge:server-message', (_event, data) => {
   } catch {}
 });
 
-// Bridge typing indicator messages into the isolated world via a DOM event
-ipcRenderer.on('edge:typing-indicator', (_event, data) => {
-  try {
-    window.dispatchEvent(new CustomEvent('edge:typing-indicator', { detail: data }));
-  } catch {}
-});
+// Note: Typing indicators are now handled as encrypted messages through the normal message system
 
 
