@@ -44,11 +44,11 @@ export function ChatInterface({
   const scrollAreaRef = useRef<HTMLDivElement>(null);
   const [replyTo, setReplyTo] = useState<Message | null>(null);
   const [editingMessage, setEditingMessage] = useState<Message | null>(null);
-  
+
   // Track which messages have been processed in the current scroll event to prevent duplicates
   const processedInScrollRef = useRef<Set<string>>(new Set());
   const lastScrollTimeRef = useRef<number>(0);
-  
+
   // Typing hook
   const { handleLocalTyping, handleConversationChange } = useTypingIndicator(currentUsername, selectedConversation, onSendMessage);
   const { typingUsers } = useTypingIndicatorContext();
@@ -104,7 +104,9 @@ export function ChatInterface({
       const containerRect = scrollContainer.getBoundingClientRect();
       const containerBottom = containerRect.bottom;
 
-      // Check each message to see if it's visible
+      // Find all visible unread messages and send receipts for each
+      const visibleUnread: Message[] = [];
+
       messages.forEach(message => {
         // Only process messages from OTHER users (not current user) and not already read
         if (message.sender === currentUsername || message.receipt?.read) return;
@@ -119,16 +121,20 @@ export function ChatInterface({
 
           // If message is visible in the scroll container
           if (messageBottom <= containerBottom && messageBottom >= containerRect.top) {
-            // Mark as read locally and send read receipt to sender
-            // Only send read receipt if the message isn't already marked as read
-            if (!message.receipt?.read) {
-              markMessageAsRead(message.id);
-              sendReadReceipt(message.id, message.sender);
-              // Mark this message as processed in this scroll event
-              processedInScrollRef.current.add(message.id);
-            }
+            visibleUnread.push(message);
+            // Mark this message as processed in this scroll event
+            processedInScrollRef.current.add(message.id);
           }
         }
+      });
+
+      // Sort by timestamp ascending to send older first
+      visibleUnread.sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
+
+      // Mark and send read receipts for all visible unread messages
+      visibleUnread.forEach((msg) => {
+        markMessageAsRead(msg.id);
+        sendReadReceipt(msg.id, msg.sender);
       });
     };
 
@@ -156,6 +162,64 @@ export function ChatInterface({
     };
   }, [messages, currentUsername, markMessageAsRead, sendReadReceipt, users]);
 
+  // Periodic check to ensure read receipts are sent for visible messages
+  useEffect(() => {
+    const checkForMissedReadReceipts = () => {
+      // Only check if tab is active and we have messages
+      if (document.visibilityState === 'visible' && document.hasFocus() && messages.length > 0) {
+        console.debug('[ChatInterface] Periodic check for missed read receipts');
+
+        // Only check messages that are currently visible in the viewport
+        const scrollContainer = scrollAreaRef.current?.querySelector('[data-radix-scroll-area-viewport]');
+        if (scrollContainer) {
+          const containerRect = scrollContainer.getBoundingClientRect();
+          const containerBottom = containerRect.bottom;
+
+          // Find all visible unread messages
+          const visibleUnread: Message[] = [];
+
+          messages.forEach(message => {
+            // Only process messages from OTHER users (not current user) and not already read
+            if (message.sender === currentUsername || message.receipt?.read) return;
+
+            const messageElement = document.getElementById(`message-${message.id}`);
+            if (messageElement) {
+              const messageRect = messageElement.getBoundingClientRect();
+              const messageBottom = messageRect.bottom;
+
+              // Only consider visible messages
+              if (messageBottom <= containerBottom && messageBottom >= containerRect.top) {
+                visibleUnread.push(message);
+              }
+            }
+          });
+
+          // Send read receipts for all visible unread messages
+          visibleUnread
+            .sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime())
+            .forEach((m) => sendReadReceipt(m.id, m.sender));
+        }
+      }
+    };
+
+    // Check every 30 seconds for missed read receipts
+    const interval = setInterval(checkForMissedReadReceipts, 30000);
+
+    return () => clearInterval(interval);
+  }, [messages, sendReadReceipt]);
+
+  // Compute which messages should show status indicators: only latest read and latest delivered (unread)
+  const lastReadId = [...messages]
+    .reverse()
+    .find((m) => m.isCurrentUser && (getSmartReceiptStatus(m) || m.receipt)?.read)?.id;
+
+  const lastDeliveredId = [...messages]
+    .reverse()
+    .find((m) =>
+      m.isCurrentUser &&
+      (getSmartReceiptStatus(m) || m.receipt)?.delivered &&
+      !(getSmartReceiptStatus(m) || m.receipt)?.read
+    )?.id;
   return (
     <Card className="flex flex-col h-full border border-gray-300 shadow-lg rounded-lg">
       <div className="p-4 border-b bg-gray-100">
@@ -173,22 +237,27 @@ export function ChatInterface({
               {selectedConversation ? "No messages yet. Start the conversation!" : "Select a conversation to view messages"}
             </div>
           ) : (
-            messages.map((message, index) => (
-              <div key={message.id} id={`message-${message.id}`}>
-                <ChatMessage
-                  message={{
-                    ...message,
-                    receipt: getSmartReceiptStatus(message) || message.receipt // Use smart status or fall back to original receipt
-                  }}
-                  previousMessage={index > 0 ? messages[index - 1] : undefined}
-                  onReply={() => setReplyTo(message)}
-                  onDelete={() =>
-                    onSendMessage(message.id, "", SignalType.DELETE_MESSAGE, null) // add reply field later
-                  }
-                  onEdit={() => setEditingMessage(message)}
-                />
-              </div>
-            ))
+            messages.map((message, index) => {
+              const smartReceipt = getSmartReceiptStatus(message) || message.receipt;
+              const shouldShowReceipt =
+                message.isCurrentUser && smartReceipt && (message.id === lastReadId || message.id === lastDeliveredId);
+              return (
+                <div key={message.id} id={`message-${message.id}`}>
+                  <ChatMessage
+                    message={{
+                      ...message,
+                      receipt: shouldShowReceipt ? smartReceipt : undefined,
+                    }}
+                    previousMessage={index > 0 ? messages[index - 1] : undefined}
+                    onReply={() => setReplyTo(message)}
+                    onDelete={() =>
+                      onSendMessage(message.id, "", SignalType.DELETE_MESSAGE, null) // add reply field later
+                    }
+                    onEdit={() => setEditingMessage(message)}
+                  />
+                </div>
+              );
+            })
           )}
         </div>
       </ScrollArea>

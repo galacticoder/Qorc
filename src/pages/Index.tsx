@@ -159,7 +159,10 @@ const ChatApp: React.FC<ChatAppProps> = ({ onNavigate }) => {
                   messageSignalType,
                   selectedConversation,
                   usersCount: Database.users.length,
-                  users: Database.users.map(u => u.username)
+                  users: Database.users.map(u => u.username),
+                  replyTo: replyTo,
+                  replyToType: typeof replyTo,
+                  replyToKeys: replyTo ? Object.keys(replyTo) : null
                 });
                 
                 // Handle typing indicator messages differently
@@ -174,7 +177,7 @@ const ChatApp: React.FC<ChatAppProps> = ({ onNavigate }) => {
                   
                   console.log('[Index] Found target user for typing indicator:', targetUser);
                   // Send typing indicator as encrypted message but don't add to chat history
-                  return messageSender.handleSendMessage(targetUser, content, replyTo?.id, undefined, messageSignalType);
+                  return messageSender.handleSendMessage(targetUser, content, replyTo ? { id: replyTo.id, sender: replyTo.sender, content: replyTo.content } : undefined, undefined, messageSignalType);
                 }
                 
                 // Find the user object for the selected conversation
@@ -185,7 +188,7 @@ const ChatApp: React.FC<ChatAppProps> = ({ onNavigate }) => {
                 }
                 
                 console.log('[Index] Found target user:', targetUser);
-                return messageSender.handleSendMessage(targetUser, content, replyTo?.id, undefined, messageSignalType);
+                return messageSender.handleSendMessage(targetUser, content, replyTo ? { id: replyTo.id, sender: replyTo.sender, content: replyTo.content } : undefined, undefined, messageSignalType);
               }}
               onSendFile={handleSendFileWrapper}
               isEncrypted={true}

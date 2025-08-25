@@ -9,28 +9,41 @@ export function useMessageReceipts(
 	currentUsername: string,
 	saveMessageToLocalDB: (msg: Message) => Promise<void>
 ) {
-	// Track which messages have already had read receipts sent to avoid duplicates
+	// Track which messages have already had read receipts sent in the current session only
 	const sentReadReceiptsRef = useRef<Set<string>>(new Set());
 
-	// Load sent read receipts from localStorage on mount
+	// Load sent read receipts from localStorage on mount, but only for recent messages
 	useEffect(() => {
 		const stored = localStorage.getItem(`sentReadReceipts_${currentUsername}`);
 		if (stored) {
 			try {
 				const receipts = JSON.parse(stored);
-				sentReadReceiptsRef.current = new Set(receipts);
+				// Only load receipts from the last 24 hours to avoid permanent blocking
+				const oneDayAgo = Date.now() - (24 * 60 * 60 * 1000);
+				const recentReceipts = receipts.filter((receipt: any) => {
+					return receipt.timestamp && receipt.timestamp > oneDayAgo;
+				});
+				
+				// Convert to Set of message IDs
+				sentReadReceiptsRef.current = new Set(recentReceipts.map((r: any) => r.messageId));
 			} catch (error) {
 				console.error('Failed to load sent read receipts:', error);
 			}
 		}
 	}, [currentUsername]);
 
-	// Save sent read receipts to localStorage
+	// Save sent read receipts to localStorage with timestamps
 	const saveSentReadReceipts = useCallback(() => {
 		try {
+			// Convert Set to array with timestamps for better tracking
+			const receiptsWithTimestamps = Array.from(sentReadReceiptsRef.current).map(messageId => ({
+				messageId,
+				timestamp: Date.now()
+			}));
+			
 			localStorage.setItem(
 				`sentReadReceipts_${currentUsername}`,
-				JSON.stringify(Array.from(sentReadReceiptsRef.current))
+				JSON.stringify(receiptsWithTimestamps)
 			);
 		} catch (error) {
 			console.error('Failed to save sent read receipts:', error);
@@ -46,9 +59,9 @@ export function useMessageReceipts(
 			return; // Don't send receipt for own messages
 		}
 
-		// Check if we've already sent a read receipt for this message
+		// Check if we've already sent a read receipt for this message in the current session
 		if (sentReadReceiptsRef.current.has(messageId)) {
-			console.debug('[Receipt] Read receipt already sent for message:', messageId);
+			console.debug('[Receipt] Read receipt already sent for message in current session:', messageId);
 			return;
 		}
 
@@ -116,7 +129,7 @@ export function useMessageReceipts(
 			// Use websocketClient to send the encrypted read receipt
 			websocketClient.send(JSON.stringify(readReceiptPayload));
 
-			// Mark this message as having a read receipt sent
+			// Mark this message as having a read receipt sent in this session
 			sentReadReceiptsRef.current.add(messageId);
 			saveSentReadReceipts();
 
@@ -163,41 +176,35 @@ export function useMessageReceipts(
 
 	// Smart status management: show receipt status for all messages that have receipts
 	const getSmartReceiptStatus = useCallback((message: Message) => {
-		console.log('[Receipt] getSmartReceiptStatus called for message:', {
-			id: message.id,
-			sender: message.sender,
-			currentUsername,
-			hasReceipt: !!message.receipt,
-			receiptDetails: message.receipt
-		});
-		
-		// Only process messages sent by the current user (to show receipt status)
-		if (!message.receipt || message.sender !== currentUsername) {
-			console.log('[Receipt] No receipt status - message from other user or no receipt:', {
-				hasReceipt: !!message.receipt,
-				sender: message.sender,
-				currentUsername
-			});
-			return undefined; // No receipt status for other users' messages
+		// We only show status for messages sent by current user that are the latest read or delivered
+		if (!message.receipt || message.sender !== currentUsername) return undefined;
+
+		// Determine last read and last delivered (but not read) message IDs
+		let lastReadId: string | undefined;
+		let lastDeliveredId: string | undefined;
+
+		for (let i = messages.length - 1; i >= 0; i--) {
+			const msg = messages[i];
+			if (msg.sender !== currentUsername) continue;
+			if (!lastReadId && msg.receipt?.read) {
+				lastReadId = msg.id;
+			}
+			if (!lastDeliveredId && msg.receipt?.delivered && !msg.receipt.read) {
+				lastDeliveredId = msg.id;
+			}
+			if (lastReadId && lastDeliveredId) break;
 		}
 
-		// Show receipt status for all messages that have receipts
-		if (message.receipt.read) {
-			console.log('[Receipt] Showing READ status for message:', message.id);
-			return message.receipt;
+		if (message.id === lastReadId) {
+			return { ...message.receipt, read: true };
 		}
 
-		if (message.receipt.delivered) {
-			console.log('[Receipt] Showing DELIVERED status for message:', message.id);
-			return message.receipt;
+		if (message.id === lastDeliveredId) {
+			return { ...message.receipt, delivered: true };
 		}
 
-		// Show sent status for messages that don't have delivery confirmation yet
-		console.log('[Receipt] Showing SENT status for message:', message.id);
-		return {
-			...message.receipt,
-			sent: true
-		};
+		// otherwise, no status
+		return undefined;
 	}, [messages, currentUsername]);
 
 	// Handle delivery receipts from other users
@@ -306,15 +313,15 @@ export function useMessageReceipts(
 		};
 	}, [currentUsername, setMessages, saveMessageToLocalDB]);
 
-	// Clean up old read receipt tracking data (older than 30 days)
+	// Clean up old read receipt tracking data (older than 24 hours)
 	useEffect(() => {
 		const cleanupOldReceipts = () => {
 			try {
-				const thirtyDaysAgo = Date.now() - (30 * 24 * 60 * 60 * 1000);
+				const oneDayAgo = Date.now() - (24 * 60 * 60 * 1000);
 
-				// Get all messages older than 30 days
+				// Get all messages older than 24 hours
 				const oldMessageIds = messages
-					.filter(msg => new Date(msg.timestamp).getTime() < thirtyDaysAgo)
+					.filter(msg => new Date(msg.timestamp).getTime() < oneDayAgo)
 					.map(msg => msg.id);
 
 				// Remove old message IDs from tracking

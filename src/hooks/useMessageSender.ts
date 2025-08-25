@@ -107,10 +107,24 @@ export function useMessageSender(
     return messageId;
   }
 
-  const handleSendMessage = useCallback(async (user: User, content: string, replyToId?: string, fileData?: string, messageSignalType?: string) => {
+  const handleSendMessage = useCallback(async (user: User, content: string, replyTo?: string | { id: string; sender?: string; content?: string }, fileData?: string, messageSignalType?: string) => {
     if (!isLoggedIn || !loginUsernameRef.current) return;
 
     const currentUser = loginUsernameRef.current;
+    const replyToId = typeof replyTo === 'string' ? replyTo : replyTo?.id;
+    const replyToData = replyToId ? {
+      id: replyToId,
+      ...(typeof replyTo === 'object' ? { sender: replyTo.sender, content: replyTo.content } : {})
+    } : undefined;
+
+    console.log('[MessageSender] Reply processing:', {
+      replyToParam: replyTo,
+      replyToType: typeof replyTo,
+      replyToId,
+      replyToData,
+      hasReplyToData: !!replyToData
+    });
+
     const messageId = await getDeterministicMessageId({
       content,
       timestamp: Date.now(),
@@ -183,7 +197,7 @@ export function useMessageSender(
           signalType: 'signal-protocol',   // Add signal type for server validation
           protocolType: 'signal',          // Add protocol type identifier
           type: messageType,  // Use special type for typing indicators
-          ...(replyToId && { replyTo: { id: replyToId } }),
+          ...(replyToData && { replyTo: replyToData }),
           ...(fileData && { fileData })
         })
       });
@@ -248,6 +262,7 @@ export function useMessageSender(
             delivered: false,
             read: false
           },
+          ...(replyToData && { replyTo: replyToData }),
           ...(fileData && { fileInfo: { name: fileData, type: 'text/plain', size: 0, data: new ArrayBuffer(0) } })
         };
 

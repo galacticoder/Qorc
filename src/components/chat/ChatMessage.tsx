@@ -66,6 +66,15 @@ export function ChatMessage({ message, onReply, previousMessage, onDelete, onEdi
           </div>
         )}
 
+        {/* Debug log for reply rendering */}
+        {console.log('[ChatMessage] Rendering message:', {
+          id: message.id,
+          content: message.content.substring(0, 50),
+          hasReplyTo: !!message.replyTo,
+          replyToData: message.replyTo,
+          messageKeys: Object.keys(message)
+        })}
+
         <div className={cn("group flex items-center gap-2", isCurrentUser ? "flex-row-reverse" : "")}>
           <div
             className={cn(

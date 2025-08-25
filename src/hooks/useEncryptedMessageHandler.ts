@@ -96,7 +96,9 @@ export function useEncryptedMessageHandler(
             isReadReceipt: payload.type === 'read-receipt',
             isDeliveryReceipt: payload.type === 'delivery-receipt',
             contentPreview: payload.content ? payload.content.substring(0, 100) : 'no content',
-            payloadKeys: Object.keys(payload)
+            payloadKeys: Object.keys(payload),
+            hasReplyTo: !!payload.replyTo,
+            replyToKeys: payload.replyTo ? Object.keys(payload.replyTo) : null
           });
           
           // Handle system messages first (these should not appear in chat)
@@ -231,6 +233,9 @@ export function useEncryptedMessageHandler(
               if (contentData.messageId) {
                 messageId = contentData.messageId;
                 messageContent = contentData.content || contentData.message || payload.content;
+                if (contentData.replyTo) {
+                  payload.replyTo = contentData.replyTo;
+                }
                 console.log('[EncryptedMessageHandler] Extracted message ID from content:', messageId);
               } else {
                 console.log('[EncryptedMessageHandler] No messageId found in content:', contentData);
@@ -250,6 +255,24 @@ export function useEncryptedMessageHandler(
                 return prev;
               }
               
+              // Fill replyTo from payload, falling back to existing message content if missing
+              let replyToFilled: { id: string; sender: string; content: string } | undefined = undefined;
+              if (payload.replyTo && typeof payload.replyTo === 'object' && payload.replyTo.id) {
+                let replyContent = payload.replyTo.content || '';
+                if (!replyContent) {
+                  const ref = prev.find(m => m.id === payload.replyTo.id);
+                  if (ref?.content) replyContent = ref.content;
+                }
+                replyToFilled = {
+                  id: payload.replyTo.id,
+                  sender: payload.replyTo.sender || payload.from,
+                  content: replyContent
+                };
+                console.log('[EncryptedMessageHandler] Reply data found and filled:', replyToFilled);
+              } else {
+                console.log('[EncryptedMessageHandler] No replyTo in payload or invalid format:', payload.replyTo);
+              }
+
               const message: Message = {
                 id: messageId,
                 content: messageContent,
@@ -257,8 +280,19 @@ export function useEncryptedMessageHandler(
                 recipient: loginUsernameRef.current,  // Add recipient field for proper filtering
                 timestamp: new Date(payload.timestamp || Date.now()),  // Convert to Date object
                 type: 'text',
-                isCurrentUser: false  // Received messages are not from current user
+                isCurrentUser: false,  // Received messages are not from current user
+                ...(replyToFilled && { replyTo: replyToFilled })
               };
+
+              console.log('[EncryptedMessageHandler] Final message object:', {
+                id: message.id,
+                content: message.content,
+                sender: message.sender,
+                hasReplyTo: !!message.replyTo,
+                replyToData: message.replyTo,
+                messageKeys: Object.keys(message),
+                fullMessage: message
+              });
 
               console.log('[EncryptedMessageHandler] Adding message to state:', {
                 id: message.id,
@@ -269,7 +303,14 @@ export function useEncryptedMessageHandler(
                 isCurrentUser: message.isCurrentUser
               });
 
-              return [...prev, message];
+              const newMessages = [...prev, message];
+              console.log('[EncryptedMessageHandler] Updated messages state:', {
+                totalMessages: newMessages.length,
+                lastMessage: newMessages[newMessages.length - 1],
+                lastMessageHasReplyTo: !!newMessages[newMessages.length - 1].replyTo,
+                lastMessageReplyTo: newMessages[newMessages.length - 1].replyTo
+              });
+              return newMessages;
             });
 
             if (!messageExists) {
