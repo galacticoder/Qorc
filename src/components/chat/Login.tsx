@@ -101,7 +101,7 @@ export function Login({
               <div className="mx-auto w-16 h-16 rounded-full bg-primary/10 flex items-center justify-center">
                 <EncryptionIcon className="h-8 w-8 text-primary" />
               </div>
-              <CardTitle className="text-2xl text-center">SecureChat</CardTitle>
+              <CardTitle className="text-2xl text-center">end2end</CardTitle>
               <CardDescription className="text-center">
                 End-to-end encrypted messaging using X25519 + Kyber768 hybrid encryption and AES-GCM
               </CardDescription>

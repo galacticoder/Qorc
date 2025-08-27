@@ -241,7 +241,7 @@ export class TorAutoSetup {
     const controlPort = options.customConfig?.controlPort || 9051;
     
     const config = [
-      '# Auto-generated Tor configuration for SecureChat',
+      '# Auto-generated Tor configuration for end2end',
       '# SOCKS proxy port',
       `SocksPort ${socksPort}`,
       '',

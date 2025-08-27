@@ -115,7 +115,7 @@ if (validCertPath && validKeyPath && fs.existsSync(validCertPath) && fs.existsSy
 }
 
 async function startServer() {
-  console.log('[SERVER] Starting SecureChat server');
+  console.log('[SERVER] Starting end2end server');
   await setServerPasswordOnInput();
   const serverHybridKeyPair = await CryptoUtils.Hybrid.generateHybridKeyPair();
 
@@ -129,7 +129,7 @@ async function startServer() {
   }
 
   server.listen(ServerConfig.PORT, '0.0.0.0', () =>
-    console.log(`[SERVER] SecureChat relay running on wss://0.0.0.0:${ServerConfig.PORT}`)
+    console.log(`[SERVER] end2end relay running on wss://0.0.0.0:${ServerConfig.PORT}`)
   );
 
   const wss = new WebSocketServer({ server });
