@@ -49,11 +49,13 @@ export function TorAutoSetup({ onSetupComplete, autoStart = true }: TorAutoSetup
         enableBridges: false,
         onProgress: (newStatus) => {
           console.log('[TOR-SETUP-UI] Progress update:', newStatus);
-          // Clear error on any progress update
-          setStatus({
+          // If the new status contains an error, it should be preserved.
+          // Otherwise, we can clear any previous error.
+          setStatus(prevStatus => ({
+            ...prevStatus,
             ...newStatus,
-            error: undefined
-          });
+            error: newStatus.error || undefined
+          }));
         }
       });
 

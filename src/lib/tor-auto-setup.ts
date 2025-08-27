@@ -3,7 +3,7 @@
  * Handles Tor installation, configuration, and startup automatically
  */
 
-import { handleCriticalError, handleNetworkError } from './secure-error-handler';
+import { handleCriticalError } from './secure-error-handler';
 
 export interface TorSetupStatus {
   isInstalled: boolean;
@@ -32,7 +32,6 @@ export class TorAutoSetup {
   };
 
   private progressCallback?: (status: TorSetupStatus) => void;
-  private torProcess: any = null;
 
   constructor() {
     this.detectPlatform();
@@ -90,10 +89,11 @@ export class TorAutoSetup {
       // Step 4: Start Tor service
       if (options.autoStart) {
         this.updateStatus(80, 'Starting Tor service...');
-        const startSuccess = await this.startTor();
+        const startResult = await this.startTor();
         
-        if (!startSuccess) {
-          this.updateStatus(0, 'Failed to start Tor', 'Tor service could not be started.');
+        if (!startResult.success) {
+          const errorMessage = startResult.error || 'Tor service could not be started.';
+          this.updateStatus(0, 'Failed to start Tor', errorMessage);
           return false;
         }
 
@@ -118,26 +118,6 @@ export class TorAutoSetup {
     }
   }
 
-  /**
-   * Check if Tor is already installed
-   */
-  private async checkTorInstallation(): Promise<boolean> {
-    try {
-      if (typeof window !== 'undefined' && (window as any).electronAPI) {
-        // Use Electron API to check for Tor
-        const result = await (window as any).electronAPI.checkTorInstallation();
-        this.status.isInstalled = result.isInstalled;
-        this.status.version = result.version;
-        return result.isInstalled;
-      }
-
-      // Fallback: try to detect Tor in common locations
-      return await this.detectTorInstallation();
-    } catch (error) {
-      console.error('[TOR-SETUP] Failed to check Tor installation:', error);
-      return false;
-    }
-  }
 
   /**
    * Download Tor for the current platform
@@ -214,18 +194,19 @@ export class TorAutoSetup {
   /**
    * Start Tor service
    */
-  private async startTor(): Promise<boolean> {
+  private async startTor(): Promise<{ success: boolean; error?: string }> {
     try {
       if (typeof window !== 'undefined' && (window as any).electronAPI) {
         const result = await (window as any).electronAPI.startTor();
         this.status.isRunning = result.success;
-        return result.success;
+        return result;
       }
 
-      return false;
+      return { success: false, error: 'electronAPI not available' };
     } catch (error) {
       console.error('[TOR-SETUP] Failed to start Tor:', error);
-      return false;
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+      return { success: false, error: errorMessage };
     }
   }
 
@@ -319,33 +300,7 @@ export class TorAutoSetup {
     return 'unknown';
   }
 
-  /**
-   * Get Tor download URL for platform
-   */
-  private getTorDownloadUrl(platform: string): string {
-    const baseUrl = 'https://dist.torproject.org/torbrowser';
-    const version = '13.0.8'; // Latest stable version
-    
-    switch (platform) {
-      case 'win32':
-        return `${baseUrl}/${version}/tor-expert-bundle-windows-x86_64-${version}.tar.gz`;
-      case 'darwin':
-        return `${baseUrl}/${version}/tor-expert-bundle-macos-x86_64-${version}.tar.gz`;
-      case 'linux':
-        return `${baseUrl}/${version}/tor-expert-bundle-linux-x86_64-${version}.tar.gz`;
-      default:
-        throw new Error(`Unsupported platform: ${platform}`);
-    }
-  }
 
-  /**
-   * Detect existing Tor installation
-   */
-  private async detectTorInstallation(): Promise<boolean> {
-    // This would need to be implemented in the Electron main process
-    // to check common Tor installation paths
-    return false;
-  }
 
   /**
    * Check if running in Electron environment
