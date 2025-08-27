@@ -1,8 +1,9 @@
 import { webcrypto } from 'crypto';
 import argon2 from 'argon2';
 import { MlKem768 } from 'mlkem';
-import { blake3 } from '@noble/hashes/blake3';
-import { ml_dsa87 } from '@noble/post-quantum/ml-dsa';
+import { blake3 } from '@noble/hashes/blake3.js';
+import { ml_dsa87 } from '@noble/post-quantum/ml-dsa.js';
+import { chacha20poly1305, xchacha20poly1305 } from '@noble/ciphers/chacha.js';
 
 const crypto = webcrypto;
 
@@ -46,6 +47,25 @@ class HashService {
     }
     const hashBuf = await crypto.subtle.digest('SHA-512', joined);
     return new Uint8Array(hashBuf);
+  }
+
+  // BLAKE3-based MAC for additional message authentication
+  static async generateBlake3Mac(message, key) {
+    const keyedHash = blake3.create({ key });
+    keyedHash.update(message);
+    return keyedHash.digest();
+  }
+
+  static async verifyBlake3Mac(message, key, expectedMac) {
+    const computedMac = await this.generateBlake3Mac(message, key);
+    if (computedMac.length !== expectedMac.length) return false;
+
+    // Constant-time comparison to prevent timing attacks
+    let result = 0;
+    for (let i = 0; i < computedMac.length; i++) {
+      result |= computedMac[i] ^ expectedMac[i];
+    }
+    return result === 0;
   }
 }
 
@@ -120,6 +140,88 @@ class KyberService {
   }
 }
 
+class ChaCha20Poly1305Service {
+  /**
+   * Encrypt data using ChaCha20-Poly1305
+   */
+  static encrypt(key, nonce, data, aad) {
+    const cipher = chacha20poly1305(key, nonce, aad);
+    return cipher.encrypt(data);
+  }
+
+  /**
+   * Decrypt data using ChaCha20-Poly1305
+   */
+  static decrypt(key, nonce, ciphertext, aad) {
+    const cipher = chacha20poly1305(key, nonce, aad);
+    return cipher.decrypt(ciphertext);
+  }
+
+  /**
+   * Generate a random 12-byte nonce for ChaCha20-Poly1305
+   */
+  static generateNonce() {
+    return crypto.getRandomValues(new Uint8Array(12));
+  }
+
+  /**
+   * Encrypt with automatic nonce generation and prepending
+   */
+  static encryptWithNonce(key, data, aad) {
+    const nonce = this.generateNonce();
+    const ciphertext = this.encrypt(key, nonce, data, aad);
+    return { nonce, ciphertext };
+  }
+
+  /**
+   * Decrypt with nonce extraction
+   */
+  static decryptWithNonce(key, nonce, ciphertext, aad) {
+    return this.decrypt(key, nonce, ciphertext, aad);
+  }
+}
+
+class XChaCha20Poly1305Service {
+  /**
+   * Encrypt data using XChaCha20-Poly1305 (extended nonce version)
+   */
+  static encrypt(key, nonce, data, aad) {
+    const cipher = xchacha20poly1305(key, nonce, aad);
+    return cipher.encrypt(data);
+  }
+
+  /**
+   * Decrypt data using XChaCha20-Poly1305
+   */
+  static decrypt(key, nonce, ciphertext, aad) {
+    const cipher = xchacha20poly1305(key, nonce, aad);
+    return cipher.decrypt(ciphertext);
+  }
+
+  /**
+   * Generate a random 24-byte nonce for XChaCha20-Poly1305
+   */
+  static generateNonce() {
+    return crypto.getRandomValues(new Uint8Array(24));
+  }
+
+  /**
+   * Encrypt with automatic nonce generation
+   */
+  static encryptWithNonce(key, data, aad) {
+    const nonce = this.generateNonce();
+    const ciphertext = this.encrypt(key, nonce, data, aad);
+    return { nonce, ciphertext };
+  }
+
+  /**
+   * Decrypt with nonce
+   */
+  static decryptWithNonce(key, nonce, ciphertext, aad) {
+    return this.decrypt(key, nonce, ciphertext, aad);
+  }
+}
+
 class DilithiumService {
   static async generateKeyPair() {
     const kp = await ml_dsa87.keygen(undefined);
@@ -140,29 +242,112 @@ class DilithiumService {
 }
 
 class KDFService {
-  static async deriveAesKeyFromIkm(ikmUint8Array, saltUint8Array) {
-    const baseKey = await crypto.subtle.importKey(
-      'raw',
-      ikmUint8Array,
-      { name: 'HKDF' },
-      false,
-      ['deriveKey']
-    );
+  /**
+   * BLAKE3-based HKDF implementation for enhanced security
+   */
+  static async blake3Hkdf(ikm, salt, info, outLen) {
+    // HKDF-Extract: PRK = BLAKE3-MAC(salt, ikm)
+    const prk = await HashService.generateBlake3Mac(ikm, salt);
 
-    const derived = await crypto.subtle.deriveKey(
-      {
-        name: 'HKDF',
-        hash: CryptoConfig.HKDF_HASH,
-        salt: saltUint8Array,
-        info: CryptoConfig.HKDF_INFO,
-      },
-      baseKey,
-      { name: 'AES-GCM', length: CryptoConfig.AES_KEY_SIZE },
-      true,
-      ['encrypt', 'decrypt']
-    );
+    // HKDF-Expand: Generate output key material
+    const output = new Uint8Array(outLen);
+    const hashLen = 32; // BLAKE3 output length
+    const n = Math.ceil(outLen / hashLen);
 
-    return derived;
+    let t = new Uint8Array(0);
+    let outputOffset = 0;
+
+    for (let i = 1; i <= n; i++) {
+      // T(i) = BLAKE3-MAC(PRK, T(i-1) || info || i)
+      const input = new Uint8Array(t.length + info.length + 1);
+      input.set(t, 0);
+      input.set(info, t.length);
+      input[input.length - 1] = i;
+
+      t = await HashService.generateBlake3Mac(input, prk);
+
+      const copyLen = Math.min(hashLen, outLen - outputOffset);
+      output.set(t.slice(0, copyLen), outputOffset);
+      outputOffset += copyLen;
+    }
+
+    return output;
+  }
+
+  /**
+   * AES key derivation using BLAKE3-HKDF compatible with client
+   */
+  static async deriveAesKeyFromIkm(ikmUint8Array, saltUint8Array, context) {
+    try {
+      // Create context-bound info parameter to match client
+      const contextInfo = context ?
+        new TextEncoder().encode(`endtoend-chat hybrid key v2:${context}`) :
+        CryptoConfig.HKDF_INFO;
+
+      // Use BLAKE3-HKDF for key derivation
+      const keyMaterial = await this.blake3Hkdf(ikmUint8Array, saltUint8Array, contextInfo, 32);
+
+      // Validate key material
+      if (!keyMaterial || keyMaterial.length !== 32) {
+        throw new Error(`Invalid key material length: ${keyMaterial?.length}`);
+      }
+
+      // Import as AES key - fix for Node.js webcrypto compatibility
+      const derived = await crypto.subtle.importKey(
+        'raw',
+        keyMaterial,
+        { name: 'AES-GCM' },
+        false, // Set to false to avoid potential issues
+        ['encrypt', 'decrypt']
+      );
+
+      return derived;
+    } catch (error) {
+      console.error('[CRYPTO] AES key derivation failed:', error);
+      throw new Error(`AES key derivation failed: ${error.message}`);
+    }
+  }
+
+  /**
+   * Enhanced session key derivation with BLAKE3 and context binding
+   */
+  static async deriveSessionKey(ikm, salt, sessionContext) {
+    const contextInfo = new TextEncoder().encode(`session-key-v2:${sessionContext}`);
+    return await this.blake3Hkdf(ikm, salt, contextInfo, 32);
+  }
+
+  /**
+   * Legacy AES key derivation using standard HKDF for client compatibility
+   */
+  static async deriveAesKeyFromIkmLegacy(ikmUint8Array, saltUint8Array) {
+    try {
+      // Use standard WebCrypto HKDF like the client
+      const baseKey = await crypto.subtle.importKey(
+        'raw',
+        ikmUint8Array,
+        { name: 'HKDF' },
+        false,
+        ['deriveKey']
+      );
+
+      const derived = await crypto.subtle.deriveKey(
+        {
+          name: 'HKDF',
+          hash: CryptoConfig.HKDF_HASH,
+          salt: saltUint8Array,
+          info: CryptoConfig.HKDF_INFO
+        },
+        baseKey,
+        { name: 'AES-GCM', length: CryptoConfig.AES_KEY_SIZE },
+        false,
+        ['encrypt', 'decrypt']
+      );
+
+      return derived;
+    } catch (error) {
+      console.error('[CRYPTO] Legacy AES key derivation failed:', error);
+      throw new Error(`Legacy AES key derivation failed: ${error.message}`);
+    }
   }
 }
 
@@ -177,7 +362,7 @@ class AESService {
     const iv = RandomGenerator.generateSecureRandom(CryptoConfig.IV_LENGTH);
 
     const cipherBuf = await crypto.subtle.encrypt(
-      { name: 'AES-GCM', iv: iv, tagLength: CryptoConfig.AUTH_TAG_LENGTH * 8 },
+      { name: 'AES-GCM', iv: iv, tagLength: 128 },
       cryptoKey,
       dataBuf
     );
@@ -191,17 +376,42 @@ class AESService {
   }
 
   static async decryptWithAesGcmRaw(iv, authTag, encrypted, cryptoKey) {
-    const combined = new Uint8Array(encrypted.length + authTag.length);
-    combined.set(encrypted, 0);
-    combined.set(authTag, encrypted.length);
+    try {
+      // Validate inputs
+      if (!iv || iv.length !== 16) {
+        throw new Error(`Invalid IV length: ${iv?.length}`);
+      }
+      if (!authTag || authTag.length !== 16) {
+        throw new Error(`Invalid auth tag length: ${authTag?.length}`);
+      }
+      if (!encrypted || encrypted.length === 0) {
+        throw new Error('No encrypted data provided');
+      }
+      if (!cryptoKey) {
+        throw new Error('No crypto key provided');
+      }
 
-    const plainBuf = await crypto.subtle.decrypt(
-      { name: 'AES-GCM', iv: iv, tagLength: CryptoConfig.AUTH_TAG_LENGTH * 8 },
-      cryptoKey,
-      combined
-    );
+      const combined = new Uint8Array(encrypted.length + authTag.length);
+      combined.set(encrypted, 0);
+      combined.set(authTag, encrypted.length);
 
-    return new TextDecoder().decode(plainBuf);
+      const plainBuf = await crypto.subtle.decrypt(
+        { name: 'AES-GCM', iv: iv, tagLength: 128 },
+        cryptoKey,
+        combined
+      );
+
+      return new TextDecoder().decode(plainBuf);
+    } catch (error) {
+      console.error('[CRYPTO] AES decryption failed:', {
+        error: error.message,
+        ivLength: iv?.length,
+        authTagLength: authTag?.length,
+        encryptedLength: encrypted?.length,
+        hasKey: !!cryptoKey
+      });
+      throw new Error(`AES decryption failed: ${error.message}`);
+    }
   }
 
   static serializeEncryptedData(iv, authTag, encrypted) {
@@ -322,7 +532,7 @@ class HybridService {
     // Generate BLAKE3 MAC for additional integrity
     const messageBytes = new TextEncoder().encode(jsonStr);
     const macKey = ikm.slice(0, 32); // BLAKE3 expects 32-byte key
-    const blake3Mac = await HashingService.generateBlake3Mac(messageBytes, macKey);
+    const blake3Mac = await HashService.generateBlake3Mac(messageBytes, macKey);
     const blake3MacBase64 = HashService.arrayBufferToBase64(blake3Mac);
 
     return {
@@ -365,7 +575,7 @@ class HybridService {
     const saltFull = await HashService.digestSHA512Bytes(ephPubRaw, kyberCiphertextBytes);
     const salt = saltFull.slice(0, 32);
 
-    const aesCryptoKey = await KDFService.deriveAesKeyFromIkm(ikm, salt);
+    const aesCryptoKey = await KDFService.deriveAesKeyFromIkm(ikm, salt, "message-encryption");
 
     const decryptedJson = await (async () => {
       const deserialized = AESService.deserializeEncryptedData(encryptedMessage);
@@ -377,7 +587,7 @@ class HybridService {
       const messageBytes = new TextEncoder().encode(decryptedJson);
       const expectedMac = HashService.base64ToUint8Array(encryptedPayload.blake3Mac);
       const macKey = ikm.slice(0, 32); // BLAKE3 expects 32-byte key
-      const isValid = await HashingService.verifyBlake3Mac(messageBytes, macKey, expectedMac);
+      const isValid = await HashService.verifyBlake3Mac(messageBytes, macKey, expectedMac);
       if (!isValid) {
         throw new Error('BLAKE3 MAC verification failed - hybrid payload integrity compromised');
       }
@@ -399,25 +609,6 @@ class HashingService {
 
   static async verifyPassword(hash, inputPassword) {
     return await argon2.verify(hash, inputPassword);
-  }
-
-  // BLAKE3-based MAC for additional message authentication
-  static async generateBlake3Mac(message, key) {
-    const keyedHash = blake3.create({ key });
-    keyedHash.update(message);
-    return keyedHash.digest();
-  }
-
-  static async verifyBlake3Mac(message, key, expectedMac) {
-    const computedMac = await this.generateBlake3Mac(message, key);
-    if (computedMac.length !== expectedMac.length) return false;
-
-    // Constant-time comparison to prevent timing attacks
-    let result = 0;
-    for (let i = 0; i < computedMac.length; i++) {
-      result |= computedMac[i] ^ expectedMac[i];
-    }
-    return result === 0;
   }
 
   static async parseArgon2Hash(encodedHash) {
@@ -450,14 +641,96 @@ class HashingService {
   }
 }
 
+class PostQuantumHybridService {
+  /**
+   * Generate a complete hybrid key pair with X25519, Kyber768, and Dilithium3
+   */
+  static async generateHybridKeyPair() {
+    const x25519Pair = await X25519Service.generateKeyPair();
+    const kyberPair = await KyberService.generateKeyPair();
+    const dilithiumPair = await DilithiumService.generateKeyPair();
+
+    return {
+      x25519: x25519Pair,
+      kyber: kyberPair,
+      dilithium: dilithiumPair
+    };
+  }
+
+  /**
+   * Export public keys for sharing
+   */
+  static async exportPublicKeys(hybridKeyPair) {
+    return {
+      x25519PublicBase64: await HybridService.exportX25519PublicBase64(hybridKeyPair.x25519.publicKey),
+      kyberPublicBase64: HashService.arrayBufferToBase64(hybridKeyPair.kyber.publicKey),
+      dilithiumPublicBase64: HashService.arrayBufferToBase64(hybridKeyPair.dilithium.publicKey)
+    };
+  }
+
+  /**
+   * Sign a message using Dilithium3 (post-quantum signature)
+   */
+  static async signMessage(message, dilithiumSecretKey) {
+    return await DilithiumService.sign(dilithiumSecretKey, message);
+  }
+
+  /**
+   * Verify a Dilithium3 signature
+   */
+  static async verifySignature(signature, message, dilithiumPublicKey) {
+    return await DilithiumService.verify(signature, message, dilithiumPublicKey);
+  }
+
+  /**
+   * Create a hybrid signature that includes both Ed25519 (for compatibility) and Dilithium3
+   */
+  static async createHybridSignature(message, ed25519PrivateKey, dilithiumSecretKey) {
+    // Create Ed25519 signature (for backward compatibility)
+    const ed25519Signature = ed25519PrivateKey.sign(message);
+
+    // Create Dilithium3 signature (post-quantum)
+    const dilithiumSignature = await DilithiumService.sign(dilithiumSecretKey, message);
+
+    return {
+      ed25519: HashService.arrayBufferToBase64(ed25519Signature),
+      dilithium: HashService.arrayBufferToBase64(dilithiumSignature)
+    };
+  }
+
+  /**
+   * Verify a hybrid signature
+   */
+  static async verifyHybridSignature(hybridSignature, message, ed25519PublicKey, dilithiumPublicKey) {
+    try {
+      // Verify Ed25519 signature
+      const ed25519Sig = HashService.base64ToUint8Array(hybridSignature.ed25519);
+      const ed25519Valid = ed25519PublicKey.verify(message, ed25519Sig);
+
+      // Verify Dilithium3 signature
+      const dilithiumSig = HashService.base64ToUint8Array(hybridSignature.dilithium);
+      const dilithiumValid = await DilithiumService.verify(dilithiumSig, message, dilithiumPublicKey);
+
+      // Both signatures must be valid for maximum security
+      return ed25519Valid && dilithiumValid;
+    } catch (error) {
+      console.error('Hybrid signature verification failed:', error);
+      return false;
+    }
+  }
+}
+
 export const CryptoUtils = {
   Random: RandomGenerator,
   Hash: HashService,
   X25519: X25519Service,
   Kyber: KyberService,
   Dilithium: DilithiumService,
+  ChaCha20Poly1305: ChaCha20Poly1305Service,
+  XChaCha20Poly1305: XChaCha20Poly1305Service,
   KDF: KDFService,
   AES: AESService,
   Hybrid: HybridService,
+  PostQuantum: PostQuantumHybridService,
   Password: HashingService,
 };

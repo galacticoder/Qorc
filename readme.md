@@ -96,7 +96,7 @@ The application is designed with a strong focus on security and privacy:
 
 ## Security Features
 
-### Rate Limiting System ✅
+### Rate Limiting System
 A **privacy-first rate limiting system** has been implemented that protects against:
 - **Connection flooding** - Prevents rapid connection attempts
 - **Authentication brute force** - Limits login attempts per connection  

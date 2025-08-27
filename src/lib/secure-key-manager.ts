@@ -4,10 +4,15 @@ import * as argon2 from "argon2-wasm";
 interface EncryptedKeyData {
 	encryptedX25519Private: string;
 	encryptedKyberSecret: string;
+	encryptedDilithiumSecret?: string; // New field for Dilithium3 secret key
+	x25519Nonce: string; // Nonce for XChaCha20-Poly1305
+	kyberNonce: string; // Nonce for XChaCha20-Poly1305
+	dilithiumNonce?: string; // Nonce for Dilithium3 secret key
 	x25519PublicBase64: string;
 	kyberPublicBase64: string;
+	dilithiumPublicBase64?: string; // New field for Dilithium3 public key
 	salt: string;
-	iv: string;
+	iv: string; // Keep for backward compatibility
 	argon2Params?: {
 		version: number;
 		algorithm: string;
@@ -23,6 +28,10 @@ interface DecryptedKeys {
 		publicKeyBase64: string;
 	};
 	kyber: {
+		publicKeyBase64: string;
+		secretKey: Uint8Array;
+	};
+	dilithium?: { // New optional field for Dilithium3 keys
 		publicKeyBase64: string;
 		secretKey: Uint8Array;
 	};
@@ -84,7 +93,8 @@ export class SecureKeyManager {
 				};
 			}
 
-			// derive master key using argon2id
+			// SECURITY: Derive master key using argon2id with timing attack protection
+			const startTime = performance.now();
 			const argon2Result = await argon2.hash({
 				pass: passphrase,
 				salt: keySalt,
@@ -96,12 +106,24 @@ export class SecureKeyManager {
 				hashLen: 32
 			});
 
+			// SECURITY: Add constant-time delay to prevent timing attacks
+			const elapsedTime = performance.now() - startTime;
+			const minTime = 100; // Minimum 100ms for key derivation
+			if (elapsedTime < minTime) {
+				await new Promise(resolve => setTimeout(resolve, minTime - elapsedTime));
+			}
+
+			// SECURITY: Validate Argon2 result
+			if (!argon2Result || !argon2Result.hash || argon2Result.hash.length !== 32) {
+				throw new Error('CRITICAL: Invalid Argon2 key derivation result');
+			}
+
 			// import the derived hash as a crypto key
 			const masterKey = await crypto.subtle.importKey(
 				'raw',
 				argon2Result.hash,
 				{ name: 'AES-GCM' },
-				false,
+				true, // Make extractable for ChaCha20 encryption
 				['encrypt', 'decrypt']
 			);
 
@@ -125,7 +147,7 @@ export class SecureKeyManager {
 				},
 				masterKey,
 				{ name: 'AES-GCM', length: 256 },
-				false,
+				false, // Keep non-extractable for legacy security
 				['encrypt', 'decrypt']
 			);
 
@@ -163,29 +185,47 @@ export class SecureKeyManager {
 
 		const iv = CryptoUtils.Base64.base64ToUint8Array(metadata.iv);
 
-		const x25519PrivateBytes = new TextEncoder().encode(JSON.stringify(Array.from(keys.x25519.private)));
+		// Export master key to raw bytes for ChaCha20
+		let key: Uint8Array;
+		try {
+			const masterKeyBytes = await crypto.subtle.exportKey('raw', this.masterKey);
+			key = new Uint8Array(masterKeyBytes);
+		} catch (error) {
+			// Legacy PBKDF2 keys are not extractable - user needs to re-register with Argon2
+			throw new Error('Legacy key format detected. Please clear your data and re-register for enhanced security.');
+		}
 
-		const encryptedX25519Private = await crypto.subtle.encrypt(
-			{ name: 'AES-GCM', iv },
-			this.masterKey,
-			x25519PrivateBytes
-		);
+		const x25519PrivateBytes = new TextEncoder().encode(JSON.stringify(Array.from(keys.x25519.private)));
+		const { nonce: x25519Nonce, ciphertext: encryptedX25519Private } = CryptoUtils.XChaCha20Poly1305.encryptWithNonce(key, x25519PrivateBytes);
 
 		const kyberSecretBytes = new TextEncoder().encode(JSON.stringify(Array.from(keys.kyber.secretKey)));
+		const { nonce: kyberNonce, ciphertext: encryptedKyberSecret } = CryptoUtils.XChaCha20Poly1305.encryptWithNonce(key, kyberSecretBytes);
 
-		const encryptedKyberSecret = await crypto.subtle.encrypt(
-			{ name: 'AES-GCM', iv },
-			this.masterKey,
-			kyberSecretBytes
-		);
+		// Handle optional Dilithium3 keys
+		let encryptedDilithiumSecret: string | undefined;
+		let dilithiumNonce: string | undefined;
+		let dilithiumPublicBase64: string | undefined;
+
+		if (keys.dilithium) {
+			const dilithiumSecretBytes = new TextEncoder().encode(JSON.stringify(Array.from(keys.dilithium.secretKey)));
+			const { nonce: dilithiumNonceBytes, ciphertext: encryptedDilithiumSecretBytes } = CryptoUtils.XChaCha20Poly1305.encryptWithNonce(key, dilithiumSecretBytes);
+			encryptedDilithiumSecret = CryptoUtils.Base64.arrayBufferToBase64(encryptedDilithiumSecretBytes);
+			dilithiumNonce = CryptoUtils.Base64.arrayBufferToBase64(dilithiumNonceBytes);
+			dilithiumPublicBase64 = keys.dilithium.publicKeyBase64;
+		}
 
 		const encryptedData: EncryptedKeyData = {
 			encryptedX25519Private: CryptoUtils.Base64.arrayBufferToBase64(encryptedX25519Private),
 			encryptedKyberSecret: CryptoUtils.Base64.arrayBufferToBase64(encryptedKyberSecret),
+			encryptedDilithiumSecret,
+			x25519Nonce: CryptoUtils.Base64.arrayBufferToBase64(x25519Nonce),
+			kyberNonce: CryptoUtils.Base64.arrayBufferToBase64(kyberNonce),
+			dilithiumNonce,
 			x25519PublicBase64: keys.x25519.publicKeyBase64,
 			kyberPublicBase64: keys.kyber.publicKeyBase64,
+			dilithiumPublicBase64,
 			salt: metadata.salt,
-			iv: metadata.iv,
+			iv: metadata.iv, // Keep for backward compatibility
 			argon2Params: metadata.argon2Params
 		};
 
@@ -202,17 +242,37 @@ export class SecureKeyManager {
 			return null;
 		}
 
-		const iv = CryptoUtils.Base64.base64ToUint8Array(encryptedData.iv);
+		// Export master key to raw bytes for ChaCha20
+		let key: Uint8Array;
+		try {
+			const masterKeyBytes = await crypto.subtle.exportKey('raw', this.masterKey);
+			key = new Uint8Array(masterKeyBytes);
+		} catch (error) {
+			// Legacy PBKDF2 keys are not extractable - user needs to re-register with Argon2
+			throw new Error('Legacy key format detected. Please clear your data and re-register for enhanced security.');
+		}
 
 		const encryptedX25519Private = CryptoUtils.Base64.base64ToUint8Array(encryptedData.encryptedX25519Private);
 
 		let x25519Private: Uint8Array;
 		try {
-			const decryptedX25519Private = await crypto.subtle.decrypt(
-				{ name: 'AES-GCM', iv },
-				this.masterKey,
-				encryptedX25519Private
-			);
+			let decryptedX25519Private: Uint8Array;
+
+			// Try XChaCha20-Poly1305 first (new format)
+			if (encryptedData.x25519Nonce) {
+				const x25519Nonce = CryptoUtils.Base64.base64ToUint8Array(encryptedData.x25519Nonce);
+				decryptedX25519Private = CryptoUtils.XChaCha20Poly1305.decryptWithNonce(key, x25519Nonce, encryptedX25519Private);
+			} else {
+				// Fallback to AES-GCM (legacy format)
+				const iv = CryptoUtils.Base64.base64ToUint8Array(encryptedData.iv);
+				const decryptedBuffer = await crypto.subtle.decrypt(
+					{ name: 'AES-GCM', iv },
+					this.masterKey,
+					encryptedX25519Private
+				);
+				decryptedX25519Private = new Uint8Array(decryptedBuffer);
+			}
+
 			const decryptedText = new TextDecoder().decode(decryptedX25519Private);
 			const parsedArray = JSON.parse(decryptedText);
 
@@ -230,11 +290,23 @@ export class SecureKeyManager {
 
 		let kyberSecret: Uint8Array;
 		try {
-			const decryptedKyberSecret = await crypto.subtle.decrypt(
-				{ name: 'AES-GCM', iv },
-				this.masterKey,
-				encryptedKyberSecret
-			);
+			let decryptedKyberSecret: Uint8Array;
+
+			// Try XChaCha20-Poly1305 first (new format)
+			if (encryptedData.kyberNonce) {
+				const kyberNonce = CryptoUtils.Base64.base64ToUint8Array(encryptedData.kyberNonce);
+				decryptedKyberSecret = CryptoUtils.XChaCha20Poly1305.decryptWithNonce(key, kyberNonce, encryptedKyberSecret);
+			} else {
+				// Fallback to AES-GCM (legacy format)
+				const iv = CryptoUtils.Base64.base64ToUint8Array(encryptedData.iv);
+				const decryptedBuffer = await crypto.subtle.decrypt(
+					{ name: 'AES-GCM', iv },
+					this.masterKey,
+					encryptedKyberSecret
+				);
+				decryptedKyberSecret = new Uint8Array(decryptedBuffer);
+			}
+
 			const decryptedText = new TextDecoder().decode(decryptedKyberSecret);
 			const parsedArray = JSON.parse(decryptedText);
 
@@ -248,7 +320,47 @@ export class SecureKeyManager {
 			throw error;
 		}
 
-		return {
+		// Handle optional Dilithium3 keys
+		let dilithiumKeys: { publicKeyBase64: string; secretKey: Uint8Array } | undefined;
+
+		if (encryptedData.encryptedDilithiumSecret && encryptedData.dilithiumPublicBase64) {
+			try {
+				const encryptedDilithiumSecret = CryptoUtils.Base64.base64ToUint8Array(encryptedData.encryptedDilithiumSecret);
+				let decryptedDilithiumSecret: Uint8Array;
+
+				// Try XChaCha20-Poly1305 first (new format)
+				if (encryptedData.dilithiumNonce) {
+					const dilithiumNonce = CryptoUtils.Base64.base64ToUint8Array(encryptedData.dilithiumNonce);
+					decryptedDilithiumSecret = CryptoUtils.XChaCha20Poly1305.decryptWithNonce(key, dilithiumNonce, encryptedDilithiumSecret);
+				} else {
+					// Fallback to AES-GCM (legacy format)
+					const iv = CryptoUtils.Base64.base64ToUint8Array(encryptedData.iv);
+					const decryptedBuffer = await crypto.subtle.decrypt(
+						{ name: 'AES-GCM', iv },
+						this.masterKey,
+						encryptedDilithiumSecret
+					);
+					decryptedDilithiumSecret = new Uint8Array(decryptedBuffer);
+				}
+
+				const decryptedText = new TextDecoder().decode(decryptedDilithiumSecret);
+				const parsedArray = JSON.parse(decryptedText);
+
+				if (!Array.isArray(parsedArray)) {
+					throw new Error('Invalid Dilithium secret key format');
+				}
+
+				dilithiumKeys = {
+					publicKeyBase64: encryptedData.dilithiumPublicBase64,
+					secretKey: new Uint8Array(parsedArray)
+				};
+			} catch (error) {
+				console.error('Dilithium decryption failed:', error);
+				// Don't throw - Dilithium keys are optional for backward compatibility
+			}
+		}
+
+		const result: DecryptedKeys = {
 			x25519: {
 				private: x25519Private,
 				publicKeyBase64: encryptedData.x25519PublicBase64
@@ -258,18 +370,30 @@ export class SecureKeyManager {
 				secretKey: kyberSecret
 			}
 		};
+
+		if (dilithiumKeys) {
+			result.dilithium = dilithiumKeys;
+		}
+
+		return result;
 	}
 
-	async getPublicKeys(): Promise<{ x25519PublicBase64: string; kyberPublicBase64: string } | null> {
+	async getPublicKeys(): Promise<{ x25519PublicBase64: string; kyberPublicBase64: string; dilithiumPublicBase64?: string } | null> {
 		const encryptedData = await this.getEncryptedKeys();
 		if (!encryptedData) {
 			return null;
 		}
 
-		return {
+		const result: { x25519PublicBase64: string; kyberPublicBase64: string; dilithiumPublicBase64?: string } = {
 			x25519PublicBase64: encryptedData.x25519PublicBase64,
 			kyberPublicBase64: encryptedData.kyberPublicBase64
 		};
+
+		if (encryptedData.dilithiumPublicBase64) {
+			result.dilithiumPublicBase64 = encryptedData.dilithiumPublicBase64;
+		}
+
+		return result;
 	}
 
 	clearKeys(): void {

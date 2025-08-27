@@ -13,6 +13,7 @@ interface LoginProps {
   isGeneratingKeys: boolean;
   error?: string;
   accountAuthenticated: boolean;
+  isRegistrationMode: boolean;
   serverTrustRequest?: { //trust prompt for new changed server keys
     newKeys: { x25519PublicBase64: string; kyberPublicBase64: string };
     pinned: { x25519PublicBase64: string; kyberPublicBase64: string } | null;
@@ -37,6 +38,7 @@ export function Login({
   error,
   onPassphraseSubmit,
   accountAuthenticated,
+  isRegistrationMode,
   showPassphrasePrompt,
   serverTrustRequest,
   onAcceptServerTrust,

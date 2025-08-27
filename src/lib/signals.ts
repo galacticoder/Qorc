@@ -73,6 +73,7 @@ export async function handleSignalMessages(
   const {
     setServerHybridPublic,
     handleAuthSuccess,
+    handlePassphraseSuccess,
     loginUsernameRef,
     aesKeyRef,
     setAccountAuthenticated,
@@ -224,6 +225,7 @@ export async function handleSignalMessages(
 
         aesKeyRef.current = derivedKey;
         setShowPassphrasePrompt(false);
+        handlePassphraseSuccess();
         break;
       }
 

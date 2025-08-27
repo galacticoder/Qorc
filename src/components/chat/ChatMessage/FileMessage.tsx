@@ -15,8 +15,17 @@ export const VIDEO_EXTENSIONS = ["mp4", "webm", "ogg"];
 export const AUDIO_EXTENSIONS = ["mp3", "wav", "ogg", "m4a"];
 
 export function hasExtension(filename: string, extensions: string[]) {
-  const regex = new RegExp(`\\.(${extensions.join("|")})$`, "i");
-  return regex.test(filename);
+  // SECURITY: Prevent ReDoS attacks by validating filename length and format
+  if (!filename || typeof filename !== 'string' || filename.length > 255) {
+    return false;
+  }
+
+  // SECURITY: Sanitize filename to prevent regex injection
+  const sanitizedFilename = filename.replace(/[^\w.-]/g, '');
+
+  // SECURITY: Use simple string matching instead of complex regex to prevent ReDoS
+  const lowerFilename = sanitizedFilename.toLowerCase();
+  return extensions.some(ext => lowerFilename.endsWith('.' + ext.toLowerCase()));
 }
 
 export function formatFileSize(bytes: number) {

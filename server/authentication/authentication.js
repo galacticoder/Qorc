@@ -209,7 +209,11 @@ export class AccountAuthHandler {
     const existingClient = this.clients.get(username);
     this.clients.set(username, {
       ws,
-      clientState: { username, hasPassedAccountLogin: true, hasAuthenticated: true },
+      clientState: {
+        username,
+        hasPassedAccountLogin: true,
+        hasAuthenticated: false // Both registration and login need server password
+      },
       hybridPublicKeys: existingClient?.hybridPublicKeys || null
     });
 
@@ -219,16 +223,48 @@ export class AccountAuthHandler {
 
   finalizeAuth(ws, username, logMessage) {
     console.log(`[AUTH] Finalizing authentication: ${logMessage} for user: ${username}`);
+
+    // SECURITY: Comprehensive state validation to prevent bypass attacks
     const existingClient = this.clients.get(username);
-    if (existingClient && existingClient.clientState?.hasAuthenticated) {
-      console.error(`[AUTH] User already authenticated: ${username}`);
-      return rejectConnection(ws, SignalType.NAMEEXISTSERROR, SignalMessages.NAMEEXISTSERROR);
+
+    // SECURITY: Validate authentication state transition
+    if (existingClient) {
+      if (existingClient.clientState?.hasAuthenticated) {
+        console.error(`[AUTH] User already authenticated: ${username}`);
+        return rejectConnection(ws, SignalType.NAMEEXISTSERROR, SignalMessages.NAMEEXISTSERROR);
+      }
+
+      // SECURITY: Ensure proper state progression
+      if (!existingClient.clientState?.hasPassedAccountLogin) {
+        console.error(`[AUTH] Invalid state transition - account login not completed: ${username}`);
+        return rejectConnection(ws, SignalType.AUTH_ERROR, "Invalid authentication state");
+      }
+
+      // SECURITY: Validate WebSocket connection consistency
+      if (existingClient.ws !== ws) {
+        console.error(`[AUTH] WebSocket mismatch during finalization: ${username}`);
+        return rejectConnection(ws, SignalType.AUTH_ERROR, "Connection state inconsistency");
+      }
+    } else {
+      console.error(`[AUTH] No existing client state found during finalization: ${username}`);
+      return rejectConnection(ws, SignalType.AUTH_ERROR, "Invalid authentication state");
     }
 
     if (authUtils.isServerFull(this.clients)) {
       console.error(`[AUTH] Server is full, rejecting user: ${username}`);
       return rejectConnection(ws, SignalType.SERVERLIMIT, SignalMessages.SERVERLIMIT, 101);
     }
+
+    // SECURITY: Update state atomically to prevent race conditions
+    this.clients.set(username, {
+      ...existingClient,
+      clientState: {
+        ...existingClient.clientState,
+        hasAuthenticated: true,
+        authenticationTime: Date.now(),
+        finalizedBy: 'AccountAuthHandler'
+      }
+    });
 
     ws.send(JSON.stringify({
       type: SignalType.IN_ACCOUNT,
@@ -278,10 +314,33 @@ export class ServerAuthHandler {
         return rejectConnection(ws, SignalType.AUTH_ERROR, "User not found in client list");
       }
 
+      // SECURITY: Validate state transition for server authentication
+      if (!existingClient.clientState?.hasPassedAccountLogin) {
+        console.error(`[AUTH] Invalid state - account login not completed: ${clientState.username}`);
+        return rejectConnection(ws, SignalType.AUTH_ERROR, "Account authentication required first");
+      }
+
+      if (existingClient.clientState?.hasAuthenticated) {
+        console.error(`[AUTH] User already authenticated: ${clientState.username}`);
+        return rejectConnection(ws, SignalType.AUTH_ERROR, "User already authenticated");
+      }
+
+      // SECURITY: Validate WebSocket consistency
+      if (existingClient.ws !== ws) {
+        console.error(`[AUTH] WebSocket mismatch in server auth: ${clientState.username}`);
+        return rejectConnection(ws, SignalType.AUTH_ERROR, "Connection state inconsistency");
+      }
+
+      // SECURITY: Atomic state update
       this.clients.set(clientState.username, {
         ws,
         hybridPublicKeys: existingClient.hybridPublicKeys,
-        clientState: { ...existingClient.clientState, hasAuthenticated: true }
+        clientState: {
+          ...existingClient.clientState,
+          hasAuthenticated: true,
+          serverAuthTime: Date.now(),
+          finalizedBy: 'ServerAuthHandler'
+        }
       });
 
       ws.send(JSON.stringify({

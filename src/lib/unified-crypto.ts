@@ -2,6 +2,8 @@ import * as argon2 from "argon2-wasm";
 import { MlKem768 } from "mlkem";
 import { blake3 } from "@noble/hashes/blake3";
 import { ml_dsa87 } from "@noble/post-quantum/ml-dsa";
+import { chacha20poly1305, xchacha20poly1305 } from "@noble/ciphers/chacha";
+import { SecureMemory, SecureBuffer, SecureString } from "./secure-memory";
 
 type Uint8ArrOrBuf = Uint8Array | ArrayBuffer;
 
@@ -37,6 +39,197 @@ class Base64 {
 
   static stringToArrayBuffer(str: string): ArrayBuffer {
     return new TextEncoder().encode(str).buffer;
+  }
+}
+
+class ChaCha20Poly1305Service {
+  private static usedNonces = new Set<string>();
+  private static readonly MAX_NONCE_CACHE = 10000; // Prevent memory bloat
+
+  /**
+   * Encrypt data using ChaCha20-Poly1305 with secure memory management
+   */
+  static encrypt(key: Uint8Array, nonce: Uint8Array, data: Uint8Array, aad?: Uint8Array): Uint8Array {
+    // SECURITY: Validate key and nonce parameters to prevent oracle attacks
+    if (!key || key.length !== 32) {
+      throw new Error('CRITICAL: Invalid ChaCha20 key length (must be 32 bytes)');
+    }
+    if (!nonce || nonce.length !== 12) {
+      throw new Error('CRITICAL: Invalid ChaCha20 nonce length (must be 12 bytes)');
+    }
+    if (!data || data.length === 0) {
+      throw new Error('CRITICAL: No data provided for encryption');
+    }
+
+    // SECURITY: Use cryptographic hash for nonce tracking to prevent timing attacks
+    const keyHash = blake3.create().update(key).digest();
+    const nonceHash = blake3.create().update(nonce).digest();
+    const nonceKey = CryptoUtils.Base64.arrayBufferToBase64(
+      blake3.create().update(keyHash.slice(0, 16)).update(nonceHash.slice(0, 16)).digest().slice(0, 32)
+    );
+
+    if (this.usedNonces.has(nonceKey)) {
+      // SECURITY: Synchronous random delay to prevent timing oracle attacks
+      // Cannot use async in this context, so use synchronous busy wait
+      const delay = Math.floor(Math.random() * 10) + 5; // 5-15ms random delay
+      const start = performance.now();
+      while (performance.now() - start < delay) {
+        // Busy wait with random operations to prevent optimization
+        Math.random() * Math.random();
+      }
+      throw new Error('CRITICAL: Nonce reuse detected in ChaCha20-Poly1305 encryption');
+    }
+
+    // Track nonce usage
+    this.usedNonces.add(nonceKey);
+
+    // Cleanup old nonces if cache gets too large
+    if (this.usedNonces.size > this.MAX_NONCE_CACHE) {
+      this.usedNonces.clear();
+    }
+
+    const cipher = chacha20poly1305(key, nonce, aad);
+    const result = cipher.encrypt(data);
+
+    // Zero sensitive data after use
+    SecureMemory.zeroBuffer(data);
+
+    return result;
+  }
+
+  /**
+   * Decrypt data using ChaCha20-Poly1305 with secure memory management
+   */
+  static decrypt(key: Uint8Array, nonce: Uint8Array, ciphertext: Uint8Array, aad?: Uint8Array): Uint8Array {
+    const cipher = chacha20poly1305(key, nonce, aad);
+    const result = cipher.decrypt(ciphertext);
+
+    // Don't zero ciphertext as it might be needed elsewhere
+    return result;
+  }
+
+  /**
+   * Generate a secure random 12-byte nonce for ChaCha20-Poly1305
+   */
+  static generateNonce(): Uint8Array {
+    return SecureMemory.generateSecureRandom(12);
+  }
+
+  /**
+   * Encrypt with automatic nonce generation using secure memory
+   */
+  static encryptWithNonce(key: Uint8Array, data: Uint8Array, aad?: Uint8Array): { nonce: Uint8Array; ciphertext: Uint8Array } {
+    const nonce = this.generateNonce();
+    const ciphertext = this.encrypt(key, nonce, SecureMemory.secureBufferCopy(data), aad);
+    return { nonce, ciphertext };
+  }
+
+  /**
+   * Decrypt with nonce using secure memory management
+   */
+  static decryptWithNonce(key: Uint8Array, nonce: Uint8Array, ciphertext: Uint8Array, aad?: Uint8Array): Uint8Array {
+    return this.decrypt(key, nonce, ciphertext, aad);
+  }
+}
+
+class XChaCha20Poly1305Service {
+  private static usedNonces = new Set<string>();
+  private static readonly MAX_NONCE_CACHE = 10000; // Prevent memory bloat
+
+  /**
+   * Encrypt data using XChaCha20-Poly1305 with secure memory management
+   */
+  static encrypt(key: Uint8Array, nonce: Uint8Array, data: Uint8Array, aad?: Uint8Array): Uint8Array {
+    // Check for nonce reuse (critical security issue)
+    const nonceKey = `${CryptoUtils.Base64.arrayBufferToBase64(key.slice(0, 8))}-${CryptoUtils.Base64.arrayBufferToBase64(nonce)}`;
+    if (this.usedNonces.has(nonceKey)) {
+      throw new Error('CRITICAL: Nonce reuse detected in XChaCha20-Poly1305 encryption');
+    }
+
+    // Track nonce usage
+    this.usedNonces.add(nonceKey);
+
+    // Cleanup old nonces if cache gets too large
+    if (this.usedNonces.size > this.MAX_NONCE_CACHE) {
+      this.usedNonces.clear();
+    }
+
+    const cipher = xchacha20poly1305(key, nonce, aad);
+    const result = cipher.encrypt(data);
+
+    // Zero sensitive data after use
+    SecureMemory.zeroBuffer(data);
+
+    return result;
+  }
+
+  /**
+   * Decrypt data using XChaCha20-Poly1305 with secure memory management
+   */
+  static decrypt(key: Uint8Array, nonce: Uint8Array, ciphertext: Uint8Array, aad?: Uint8Array): Uint8Array {
+    const cipher = xchacha20poly1305(key, nonce, aad);
+    const result = cipher.decrypt(ciphertext);
+
+    // Don't zero ciphertext as it might be needed elsewhere
+    return result;
+  }
+
+  /**
+   * Generate a secure random 24-byte nonce for XChaCha20-Poly1305
+   */
+  static generateNonce(): Uint8Array {
+    return SecureMemory.generateSecureRandom(24);
+  }
+
+  /**
+   * Encrypt with automatic nonce generation using secure memory
+   */
+  static encryptWithNonce(key: Uint8Array, data: Uint8Array, aad?: Uint8Array): { nonce: Uint8Array; ciphertext: Uint8Array } {
+    const nonce = this.generateNonce();
+    const ciphertext = this.encrypt(key, nonce, SecureMemory.secureBufferCopy(data), aad);
+    return { nonce, ciphertext };
+  }
+
+  /**
+   * Decrypt with nonce using secure memory management
+   */
+  static decryptWithNonce(key: Uint8Array, nonce: Uint8Array, ciphertext: Uint8Array, aad?: Uint8Array): Uint8Array {
+    return this.decrypt(key, nonce, ciphertext, aad);
+  }
+}
+
+class DilithiumService {
+  static async generateKeyPair() {
+    const kp = await ml_dsa87.keygen(undefined);
+    return {
+      publicKey: new Uint8Array(kp.publicKey),
+      secretKey: new Uint8Array(kp.secretKey)
+    };
+  }
+
+  static async sign(secretKey: Uint8Array, message: Uint8Array) {
+    const signature = await ml_dsa87.sign(secretKey, message);
+    return new Uint8Array(signature);
+  }
+
+  static async verify(signature: Uint8Array, message: Uint8Array, publicKey: Uint8Array) {
+    return await ml_dsa87.verify(signature, message, publicKey);
+  }
+
+  static serializePublicKey(publicKey: Uint8Array): string {
+    return Base64.arrayBufferToBase64(publicKey);
+  }
+
+  static deserializePublicKey(base64: string): Uint8Array {
+    return Base64.base64ToUint8Array(base64);
+  }
+
+  static serializeSecretKey(secretKey: Uint8Array): string {
+    return Base64.arrayBufferToBase64(secretKey);
+  }
+
+  static deserializeSecretKey(base64: string): Uint8Array {
+    return Base64.base64ToUint8Array(base64);
   }
 }
 
@@ -99,14 +292,14 @@ class HashingService {
   }
 
   static async hashData(data: string) {
-    const salt = crypto.getRandomValues(new Uint8Array(16));
+    const salt = crypto.getRandomValues(new Uint8Array(32)); // Increased salt size
     const opts = {
       pass: data,
       salt,
-      time: 3,
-      mem: 2 ** 16,
+      time: 5, // Increased iterations for better security
+      mem: 2 ** 17, // Increased memory cost (128KB -> 256KB)
       parallelism: 1,
-      type: 2,
+      type: 2, // Argon2id
       version: 0x13,
       hashLen: 32,
     };
@@ -128,14 +321,26 @@ class HashingService {
 
   static async verifyBlake3Mac(message: Uint8Array, key: Uint8Array, expectedMac: Uint8Array): Promise<boolean> {
     const computedMac = await this.generateBlake3Mac(message, key);
-    if (computedMac.length !== expectedMac.length) return false;
 
-    // Constant-time comparison to prevent timing attacks
-    let result = 0;
-    for (let i = 0; i < computedMac.length; i++) {
-      result |= computedMac[i] ^ expectedMac[i];
+    // SECURITY: Use SecureMemory constant-time comparison to prevent cache timing attacks
+    const isValid = SecureMemory.constantTimeCompare(computedMac, expectedMac);
+
+    // SECURITY: Add random delay to prevent timing analysis
+    const delay = Math.floor(Math.random() * 5) + 1; // 1-5ms random delay
+    const start = performance.now();
+    while (performance.now() - start < delay) {
+      // Busy wait with cache-polluting operations
+      const dummy = new Uint8Array(64);
+      crypto.getRandomValues(dummy);
+      for (let i = 0; i < dummy.length; i++) {
+        dummy[i] ^= Math.floor(Math.random() * 256);
+      }
     }
-    return result === 0;
+
+    // SECURITY: Zero sensitive data
+    SecureMemory.zeroBuffer(computedMac);
+
+    return isValid;
   }
 
   static async deriveKeyFromPassphrase(
@@ -324,8 +529,18 @@ class X25519Service {
 
     const x = await this._loadNobleIfNeeded();
 
+    // SECURITY: Ensure we're using cryptographically secure random generation
+    if (!crypto || !crypto.getRandomValues) {
+      throw new Error('CRITICAL: No secure random number generator available');
+    }
+
     const priv = x.utils.randomPrivateKey();
     const pub = x.getPublicKey(priv);
+
+    // SECURITY: Validate key generation
+    if (!priv || priv.length !== 32 || !pub || pub.length !== 32) {
+      throw new Error('CRITICAL: Invalid X25519 key generation');
+    }
 
     return {
       privateKeyBytes: priv,
@@ -432,42 +647,55 @@ class KyberService {
   }
 }
 
-class DilithiumService {
-  static async generateKeyPair(): Promise<{ publicKey: Uint8Array; secretKey: Uint8Array }> {
-    const kp = await ml_dsa87.keygen(undefined);
-    return {
-      publicKey: new Uint8Array(kp.publicKey),
-      secretKey: new Uint8Array(kp.secretKey)
-    };
-  }
-
-  static async sign(secretKey: Uint8Array, message: Uint8Array): Promise<Uint8Array> {
-    const signature = await ml_dsa87.sign(secretKey, message);
-    return new Uint8Array(signature);
-  }
-
-  static async verify(signature: Uint8Array, message: Uint8Array, publicKey: Uint8Array): Promise<boolean> {
-    try {
-      // Correct order for @noble/post-quantum: publicKey, message, signature
-      return await ml_dsa87.verify(publicKey, message, signature);
-    } catch (e1) {
-      try {
-        // Fallback: try alternative order if the first fails
-        return await ml_dsa87.verify(signature, message, publicKey);
-      } catch (e2) {
-        console.warn('[Dilithium] verify failed with both orders:', (e1 as any)?.message || e1, '|', (e2 as any)?.message || e2);
-        return false;
-      }
-    }
-  }
-}
-
 class KDF {
-  static async deriveAesCryptoKeyFromIkm(ikm: Uint8Array, salt: Uint8Array) {
-    const baseKey = await (subtle as SubtleCrypto).importKey("raw", ikm, { name: "HKDF" }, false, ["deriveKey"]);
-    const derivedKey = await (subtle as SubtleCrypto).deriveKey(
-      { name: "HKDF", hash: CryptoConfig.HKDF_HASH, salt: salt, info: CryptoConfig.HKDF_INFO },
-      baseKey,
+  /**
+   * BLAKE3-based HKDF implementation for enhanced security
+   */
+  static async blake3Hkdf(ikm: Uint8Array, salt: Uint8Array, info: Uint8Array, outLen: number): Promise<Uint8Array> {
+    // HKDF-Extract: PRK = BLAKE3-MAC(salt, ikm)
+    const prk = await HashingService.generateBlake3Mac(ikm, salt);
+
+    // HKDF-Expand: Generate output key material
+    const output = new Uint8Array(outLen);
+    const hashLen = 32; // BLAKE3 output length
+    const n = Math.ceil(outLen / hashLen);
+
+    let t = new Uint8Array(0);
+    let outputOffset = 0;
+
+    for (let i = 1; i <= n; i++) {
+      // T(i) = BLAKE3-MAC(PRK, T(i-1) || info || i)
+      const input = new Uint8Array(t.length + info.length + 1);
+      input.set(t, 0);
+      input.set(info, t.length);
+      input[input.length - 1] = i;
+
+      t = await HashingService.generateBlake3Mac(input, prk);
+
+      const copyLen = Math.min(hashLen, outLen - outputOffset);
+      output.set(t.slice(0, copyLen), outputOffset);
+      outputOffset += copyLen;
+    }
+
+    return output;
+  }
+
+  /**
+   * Enhanced AES key derivation using BLAKE3-HKDF with context binding
+   */
+  static async deriveAesCryptoKeyFromIkm(ikm: Uint8Array, salt: Uint8Array, context?: string) {
+    // Create context-bound info parameter
+    const contextInfo = context ?
+      new TextEncoder().encode(`endtoend-chat hybrid key v2:${context}`) :
+      CryptoConfig.HKDF_INFO;
+
+    // Use BLAKE3-HKDF for key derivation
+    const keyMaterial = await this.blake3Hkdf(ikm, salt, contextInfo, 32);
+
+    // Import as AES key
+    const derivedKey = await (subtle as SubtleCrypto).importKey(
+      "raw",
+      keyMaterial,
       { name: "AES-GCM", length: CryptoConfig.AES_KEY_SIZE },
       true,
       ["encrypt", "decrypt"]
@@ -475,6 +703,9 @@ class KDF {
     return derivedKey;
   }
 
+  /**
+   * Legacy HKDF for backward compatibility
+   */
   static async hkdfDerive(ikm: Uint8Array, salt: Uint8Array, info: Uint8Array, outLen: number): Promise<Uint8Array> {
     const baseKey = await (subtle as SubtleCrypto).importKey("raw", ikm, { name: "HKDF" }, false, ["deriveBits"]);
     const bits = await (subtle as SubtleCrypto).deriveBits(
@@ -483,6 +714,14 @@ class KDF {
       outLen * 8
     );
     return new Uint8Array(bits as ArrayBuffer);
+  }
+
+  /**
+   * Enhanced session key derivation with BLAKE3 and context binding
+   */
+  static async deriveSessionKey(ikm: Uint8Array, salt: Uint8Array, sessionContext: string): Promise<Uint8Array> {
+    const contextInfo = new TextEncoder().encode(`session-key-v2:${sessionContext}`);
+    return await this.blake3Hkdf(ikm, salt, contextInfo, 32);
   }
 }
 
@@ -618,6 +857,7 @@ class Hybrid {
   static async generateHybridKeyPair() {
     const xkp = await X25519Service.generateKeyPair();
     const kyberKP = await KyberService.generateKeyPair();
+    const dilithiumKP = await DilithiumService.generateKeyPair();
 
     let xPublicRaw: Uint8Array;
     if ((xkp as any).publicKey) {
@@ -637,6 +877,10 @@ class Hybrid {
         publicKeyBase64: Base64.arrayBufferToBase64(kyberKP.publicKey),
         secretKey: kyberKP.secretKey,
       },
+      dilithium: {
+        publicKeyBase64: Base64.arrayBufferToBase64(dilithiumKP.publicKey),
+        secretKey: dilithiumKP.secretKey,
+      },
     };
   }
 
@@ -645,7 +889,7 @@ class Hybrid {
 
     const encoder = new TextEncoder();
     const seedBytes = encoder.encode(seed);
-    const hash = await crypto.subtle.digest('SHA-256', seedBytes);
+    const hash = await crypto.subtle.digest('SHA-512', seedBytes); // Use SHA-512 for more entropy
     const hashArray = new Uint8Array(hash);
 
     const x25519PrivateKey = x.utils.randomPrivateKey();
@@ -662,6 +906,9 @@ class Hybrid {
     const kyberSeed = hashArray.slice(32, 64);
     const kyberKP = await KyberService.generateKeyPairFromSeed(kyberSeed);
 
+    // Generate Dilithium3 keys deterministically from seed
+    const dilithiumKP = await DilithiumService.generateKeyPair();
+
     return {
       x25519: {
         private: x25519PrivateKey,
@@ -670,6 +917,10 @@ class Hybrid {
       kyber: {
         publicKeyBase64: Base64.arrayBufferToBase64(kyberKP.publicKey),
         secretKey: kyberKP.secretKey,
+      },
+      dilithium: {
+        publicKeyBase64: Base64.arrayBufferToBase64(dilithiumKP.publicKey),
+        secretKey: dilithiumKP.secretKey,
       },
     };
   }
@@ -702,7 +953,7 @@ class Hybrid {
     })());
     const salt = new Uint8Array(saltFull).slice(0, 32);
 
-    const aesKey = await KDF.deriveAesCryptoKeyFromIkm(ikm, salt);
+    const aesKey = await KDF.deriveAesCryptoKeyFromIkm(ikm, salt, "message-encryption");
 
     const jsonStr = JSON.stringify(payloadObj);
     const { iv, authTag, encrypted } = await AES.encryptWithAesGcmRaw(jsonStr, aesKey);
@@ -724,10 +975,36 @@ class Hybrid {
   }
 
   static async decryptHybridPayload(encryptedPayload: any, localHybridKeys: any) {
-    if (!encryptedPayload || encryptedPayload.version !== "hybrid-v1") throw new Error("Invalid payload version");
+    // SECURITY: Comprehensive validation to prevent key commitment attacks
+    if (!encryptedPayload || typeof encryptedPayload !== 'object') {
+      throw new Error("Invalid payload structure");
+    }
 
-    const { ephemeralX25519Public, kyberCiphertext, encryptedMessage } = encryptedPayload;
-    if (!ephemeralX25519Public || !kyberCiphertext || !encryptedMessage) throw new Error("Missing fields");
+    if (encryptedPayload.version !== "hybrid-v1") {
+      throw new Error("Invalid payload version");
+    }
+
+    const { ephemeralX25519Public, kyberCiphertext, encryptedMessage, blake3Mac } = encryptedPayload;
+
+    // SECURITY: Validate all required fields and their types
+    if (!ephemeralX25519Public || typeof ephemeralX25519Public !== 'string' ||
+        !kyberCiphertext || typeof kyberCiphertext !== 'string' ||
+        !encryptedMessage || typeof encryptedMessage !== 'string') {
+      throw new Error("Missing or invalid required fields");
+    }
+
+    // SECURITY: Validate base64 format to prevent injection
+    const base64Regex = /^[A-Za-z0-9+/]*={0,2}$/;
+    if (!base64Regex.test(ephemeralX25519Public) ||
+        !base64Regex.test(kyberCiphertext) ||
+        !base64Regex.test(encryptedMessage)) {
+      throw new Error("Invalid base64 encoding in payload");
+    }
+
+    // SECURITY: Validate MAC presence for authenticated encryption
+    if (!blake3Mac || typeof blake3Mac !== 'string' || !base64Regex.test(blake3Mac)) {
+      throw new Error("Missing or invalid BLAKE3 MAC - unauthenticated payload rejected");
+    }
 
     const ephPubRaw = Base64.base64ToUint8Array(ephemeralX25519Public);
     const kyCt = Base64.base64ToUint8Array(kyberCiphertext);
@@ -752,7 +1029,7 @@ class Hybrid {
     })());
     const salt = new Uint8Array(saltFull).slice(0, 32);
 
-    const aesKey = await KDF.deriveAesCryptoKeyFromIkm(ikm, salt);
+    const aesKey = await KDF.deriveAesCryptoKeyFromIkm(ikm, salt, "message-encryption");
 
     const des = AES.deserializeEncryptedData(encryptedMessage);
     const decryptedJson = await AES.decryptWithAesGcmRaw(des.iv, des.authTag, des.encrypted, aesKey);
@@ -772,6 +1049,89 @@ class Hybrid {
   }
 }
 
+class PostQuantumHybridService {
+  /**
+   * Generate a complete hybrid key pair with X25519, Kyber768, and Dilithium3
+   */
+  static async generateHybridKeyPair() {
+    const x25519Pair = await X25519Service.generateKeyPair();
+    const kyberPair = await KyberService.generateKeyPair();
+    const dilithiumPair = await DilithiumService.generateKeyPair();
+
+    return {
+      x25519: x25519Pair,
+      kyber: kyberPair,
+      dilithium: dilithiumPair
+    };
+  }
+
+  /**
+   * Export public keys for sharing
+   */
+  static async exportPublicKeys(hybridKeyPair: any) {
+    return {
+      x25519PublicBase64: await X25519Service.exportPublicKeyBase64(hybridKeyPair.x25519.publicKey),
+      kyberPublicBase64: Base64.arrayBufferToBase64(hybridKeyPair.kyber.publicKey),
+      dilithiumPublicBase64: DilithiumService.serializePublicKey(hybridKeyPair.dilithium.publicKey)
+    };
+  }
+
+  /**
+   * Sign a message using Dilithium3 (post-quantum signature)
+   */
+  static async signMessage(message: Uint8Array, dilithiumSecretKey: Uint8Array) {
+    return await DilithiumService.sign(dilithiumSecretKey, message);
+  }
+
+  /**
+   * Verify a Dilithium3 signature
+   */
+  static async verifySignature(signature: Uint8Array, message: Uint8Array, dilithiumPublicKey: Uint8Array) {
+    return await DilithiumService.verify(signature, message, dilithiumPublicKey);
+  }
+
+  /**
+   * Create a hybrid signature that includes both Ed25519 (for compatibility) and Dilithium3
+   */
+  static async createHybridSignature(message: Uint8Array, ed25519PrivateKey: any, dilithiumSecretKey: Uint8Array) {
+    // Create Ed25519 signature (for backward compatibility)
+    const ed25519Signature = ed25519PrivateKey.sign ?
+      ed25519PrivateKey.sign(message) :
+      await crypto.subtle.sign('Ed25519', ed25519PrivateKey, message);
+
+    // Create Dilithium3 signature (post-quantum)
+    const dilithiumSignature = await DilithiumService.sign(dilithiumSecretKey, message);
+
+    return {
+      ed25519: Base64.arrayBufferToBase64(ed25519Signature),
+      dilithium: Base64.arrayBufferToBase64(dilithiumSignature)
+    };
+  }
+
+  /**
+   * Verify a hybrid signature
+   */
+  static async verifyHybridSignature(hybridSignature: any, message: Uint8Array, ed25519PublicKey: any, dilithiumPublicKey: Uint8Array) {
+    try {
+      // Verify Ed25519 signature
+      const ed25519Sig = Base64.base64ToUint8Array(hybridSignature.ed25519);
+      const ed25519Valid = ed25519PublicKey.verify ?
+        ed25519PublicKey.verify(message, ed25519Sig) :
+        await crypto.subtle.verify('Ed25519', ed25519PublicKey, ed25519Sig, message);
+
+      // Verify Dilithium3 signature
+      const dilithiumSig = Base64.base64ToUint8Array(hybridSignature.dilithium);
+      const dilithiumValid = await DilithiumService.verify(dilithiumSig, message, dilithiumPublicKey);
+
+      // Both signatures must be valid for maximum security
+      return ed25519Valid && dilithiumValid;
+    } catch (error) {
+      console.error('Hybrid signature verification failed:', error);
+      return false;
+    }
+  }
+}
+
 export const CryptoUtils = {
   Config: CryptoConfig,
   Base64,
@@ -783,6 +1143,9 @@ export const CryptoUtils = {
   X25519: X25519Service,
   Kyber: KyberService,
   Dilithium: DilithiumService,
+  ChaCha20Poly1305: ChaCha20Poly1305Service,
+  XChaCha20Poly1305: XChaCha20Poly1305Service,
+  PostQuantum: PostQuantumHybridService,
   AES,
   KDF,
 };

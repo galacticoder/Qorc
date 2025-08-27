@@ -201,11 +201,39 @@ export const useSecureDB = ({ Authentication, setMessages }: UseSecureDBProps) =
 				clearTimeout(debouncedSaveRef.current);
 			}
 
-			// Debounce the save operation
+			// SECURITY: Debounce with event loop protection to prevent starvation
 			debouncedSaveRef.current = setTimeout(async () => {
 				try {
+					// SECURITY: Yield to event loop to prevent blocking
+					await new Promise(resolve => setTimeout(resolve, 0));
+
 					const msgs = (await secureDBRef.current!.loadMessages().catch(() => [])) || [];
-					const idx = msgs.findIndex((m: Message) => m.id === message.id);
+
+					// SECURITY: Limit processing time to prevent event loop starvation
+					const startTime = performance.now();
+					const maxProcessingTime = 50; // 50ms max processing time
+
+					const idx = msgs.findIndex((m: Message) => {
+						// Check if we've exceeded processing time
+						if (performance.now() - startTime > maxProcessingTime) {
+							console.warn('[useSecureDB] Processing time limit reached, deferring save');
+							// Reschedule for later
+							setTimeout(() => {
+								debouncedSaveRef.current = setTimeout(async () => {
+									// Retry the operation
+									try {
+										await secureDBRef.current!.saveMessages([message]);
+										pendingSavesRef.current.delete(message.id);
+									} catch (retryErr) {
+										saveToPending();
+									}
+								}, 10);
+							}, 10);
+							return false; // Stop processing
+						}
+						return m.id === message.id;
+					});
+
 					if (idx !== -1) {
 						msgs[idx] = message;
 					} else {

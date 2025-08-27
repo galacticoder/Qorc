@@ -44,6 +44,9 @@ export interface Message {
   fileSize?: number;
   type?: string;
   receipt?: MessageReceipt;
+  p2p?: boolean; // Indicates if message was sent via P2P
+  encrypted?: boolean; // Indicates if message is encrypted
+  transport?: 'websocket' | 'p2p' | 'relay'; // Transport method used
 }
 
 export interface ChatMessageProps {

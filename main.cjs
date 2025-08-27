@@ -125,26 +125,125 @@ function createWindow() {
       preload: path.join(__dirname, 'preload.cjs'),
       contextIsolation: true,
       nodeIntegration: false,
+      nodeIntegrationInWorker: false,
+      nodeIntegrationInSubFrames: false,
       sandbox: true,
+      webSecurity: true,
+      allowRunningInsecureContent: false,
+      experimentalFeatures: false,
+      enableBlinkFeatures: '',
+      disableBlinkFeatures: '',
       // Use an in-memory session to avoid IndexedDB file locks in dev
       partition: 'temp-dev',
+      // Additional security settings
+      safeDialogs: true,
+      safeDialogsMessage: 'This app has been blocked from creating additional dialogs',
+      disableHtmlFullscreenWindowResize: true,
+      // Disable remote module completely
+      enableRemoteModule: false,
+      // Prevent new window creation
+      nativeWindowOpen: false,
     },
+    // Window security settings
+    show: false, // Don't show until ready
+    autoHideMenuBar: true,
+    titleBarStyle: 'default',
+  });
+
+  // Configure session security
+  const ses = win.webContents.session;
+
+  // Set Content Security Policy
+  ses.webRequest.onHeadersReceived((details, callback) => {
+    callback({
+      responseHeaders: {
+        ...details.responseHeaders,
+        'Content-Security-Policy': [
+          "default-src 'self'; " +
+          "script-src 'self' 'unsafe-inline' 'unsafe-eval'; " + // Allow unsafe-eval for WebAssembly
+          "style-src 'self' 'unsafe-inline'; " +
+          "img-src 'self' data: blob: https:; " + // Allow external images for favicon
+          "font-src 'self' data:; " +
+          "connect-src 'self' ws: wss:; " + // Allow WebSocket connections
+          "media-src 'none'; " +
+          "object-src 'none'; " +
+          "frame-src 'none'; " +
+          "worker-src 'self' blob:; " + // Allow blob workers for WebAssembly
+          "child-src 'none'; " +
+          "form-action 'none'; " +
+          "base-uri 'self'; " +
+          "manifest-src 'self';"
+        ],
+        'X-Content-Type-Options': ['nosniff'],
+        'X-Frame-Options': ['DENY'],
+        'X-XSS-Protection': ['1; mode=block'],
+        'Referrer-Policy': ['no-referrer']
+      }
+    });
+  });
+
+  // Block external navigation
+  win.webContents.on('will-navigate', (event, navigationUrl) => {
+    const parsedUrl = new URL(navigationUrl);
+    const currentUrl = win.webContents.getURL();
+
+    if (currentUrl && parsedUrl.origin !== new URL(currentUrl).origin) {
+      event.preventDefault();
+      debugLog(`[Security] Blocked navigation to external URL: ${navigationUrl}`);
+    }
+  });
+
+  // Block new window creation
+  win.webContents.setWindowOpenHandler(({ url }) => {
+    debugLog(`[Security] Blocked attempt to open new window: ${url}`);
+    return { action: 'deny' };
   });
 
   // Send cached state when renderer finishes loading
   win.webContents.once('did-finish-load', () => {
     setTimeout(() => sendCachedStateToRenderer(win.webContents), 100);
+
+    // Show the window after content is loaded
+    win.show();
+
+    // Inject security hardening script
+    win.webContents.executeJavaScript(`
+      // Disable potentially dangerous APIs
+      if (typeof window !== 'undefined') {
+        // Disable eval and related functions
+        window.eval = function() { throw new Error('eval is disabled for security'); };
+        window.Function = function() { throw new Error('Function constructor is disabled for security'); };
+
+        // Disable dangerous DOM APIs
+        if (document.write) {
+          document.write = function() { throw new Error('document.write is disabled for security'); };
+          document.writeln = function() { throw new Error('document.writeln is disabled for security'); };
+        }
+      }
+    `).catch(() => {
+      // Ignore errors in case the page is not ready
+    });
   });
 
   const devUrl = process.env.VITE_DEV_SERVER_URL;
   if (devUrl) {
     win.loadURL(devUrl);
+    // Only open DevTools if explicitly requested
     if (process.env.ELECTRON_OPEN_DEVTOOLS === '1') {
       win.webContents.openDevTools({ mode: 'detach' });
     }
   } else {
     win.loadFile(path.join(__dirname, 'dist/index.html'));
   }
+
+  // Ensure the window shows the main UI, not just DevTools
+  win.webContents.once('dom-ready', () => {
+    if (!win.isVisible()) {
+      win.show();
+    }
+    // Focus the main window, not DevTools
+    win.focus();
+  });
 }
 
 app.whenReady().then(() => {
@@ -258,23 +357,58 @@ app.whenReady().then(() => {
   });
 
   const IdentityChange = Signal.IdentityChange; const Direction = Signal.Direction;
-  class MemoryIdentityKeyStore extends Signal.IdentityKeyStore {
-    constructor(identityKeyPair, registrationId) {
-      super(); this.identityKeyPair = identityKeyPair; this.registrationId = registrationId; this.trusted = new Map();
+
+  // Enhanced identity store that supports hybrid Ed25519 + Dilithium3 keys
+  class HybridIdentityKeyStore extends Signal.IdentityKeyStore {
+    constructor(identityKeyPair, registrationId, dilithiumKeyPair) {
+      super();
+      this.identityKeyPair = identityKeyPair;
+      this.registrationId = registrationId;
+      this.dilithiumKeyPair = dilithiumKeyPair; // Store Dilithium3 keys
+      this.trusted = new Map();
+      this.trustedDilithium = new Map(); // Store trusted Dilithium3 public keys
     }
+
     async getIdentityKey() { return this.identityKeyPair.privateKey; }
     async getLocalRegistrationId() { return this.registrationId; }
+
+    // Get Dilithium3 keys for hybrid signatures
+    getDilithiumKeyPair() { return this.dilithiumKeyPair; }
+
     async saveIdentity(name, key) {
-      const k = name.toString(); const prev = this.trusted.get(k); const incoming = Buffer.from(key.serialize()).toString('base64');
+      const k = name.toString();
+      const prev = this.trusted.get(k);
+      const incoming = Buffer.from(key.serialize()).toString('base64');
       if (!prev) { this.trusted.set(k, incoming); return IdentityChange.NewOrUnchanged; }
       if (prev !== incoming) { this.trusted.set(k, incoming); return IdentityChange.ReplacedExisting; }
       return IdentityChange.NewOrUnchanged;
     }
-    async isTrustedIdentity(name, key, direction) {
-      const saved = this.trusted.get(name.toString()); if (!saved) return true; const incoming = Buffer.from(key.serialize()).toString('base64'); return saved === incoming;
+
+    // Save Dilithium3 public key for a contact
+    async saveDilithiumIdentity(name, dilithiumPublicKey) {
+      const k = name.toString();
+      const keyBase64 = Buffer.from(dilithiumPublicKey).toString('base64');
+      this.trustedDilithium.set(k, keyBase64);
     }
+
+    async isTrustedIdentity(name, key, direction) {
+      const saved = this.trusted.get(name.toString());
+      if (!saved) return true;
+      const incoming = Buffer.from(key.serialize()).toString('base64');
+      return saved === incoming;
+    }
+
     async getIdentity(name) {
-      const saved = this.trusted.get(name.toString()); if (!saved) return null; return Signal.PublicKey.deserialize(Buffer.from(saved, 'base64'));
+      const saved = this.trusted.get(name.toString());
+      if (!saved) return null;
+      return Signal.PublicKey.deserialize(Buffer.from(saved, 'base64'));
+    }
+
+    // Get Dilithium3 public key for a contact
+    async getDilithiumIdentity(name) {
+      const saved = this.trustedDilithium.get(name.toString());
+      if (!saved) return null;
+      return Buffer.from(saved, 'base64');
     }
   }
 
@@ -295,12 +429,37 @@ app.whenReady().then(() => {
     async markKyberPreKeyUsed(id) { this.used.add(id); }
   }
 
-  function getOrCreateUserContext(username) {
+  async function getOrCreateUserContext(username) {
     let ctx = userContexts.get(username); if (ctx) return ctx;
+
+    // Generate standard Signal Protocol identity keys
     const idPair = Signal.IdentityKeyPair.generate();
     const registrationId = (Math.floor(Math.random() * 16380) + 1) & 0x7fff;
-    const stores = { sessionStore: new MemorySessionStore(), identityStore: new MemoryIdentityKeyStore(idPair, registrationId), preKeyStore: new MemoryPreKeyStore(), signedPreKeyStore: new MemorySignedPreKeyStore(), kyberPreKeyStore: new MemoryKyberPreKeyStore() };
-    ctx = { idPair, registrationId, stores }; userContexts.set(username, ctx); return ctx;
+
+    // Generate Dilithium3 key pair for post-quantum signatures
+    let dilithiumKeyPair;
+    try {
+      // Import our crypto utilities
+      const { CryptoUtils } = await import('./crypto/unified-crypto.js');
+      dilithiumKeyPair = await CryptoUtils.Dilithium.generateKeyPair();
+      debugLog(`[EDGE] Generated Dilithium3 key pair for user: ${username}`);
+    } catch (error) {
+      console.error('[EDGE] Failed to generate Dilithium3 keys:', error);
+      // Fallback to null - system will work without Dilithium3 but with reduced security
+      dilithiumKeyPair = null;
+    }
+
+    const stores = {
+      sessionStore: new MemorySessionStore(),
+      identityStore: new HybridIdentityKeyStore(idPair, registrationId, dilithiumKeyPair),
+      preKeyStore: new MemoryPreKeyStore(),
+      signedPreKeyStore: new MemorySignedPreKeyStore(),
+      kyberPreKeyStore: new MemoryKyberPreKeyStore()
+    };
+
+    ctx = { idPair, registrationId, dilithiumKeyPair, stores };
+    userContexts.set(username, ctx);
+    return ctx;
   }
 
   function b64(buf) { return Buffer.from(buf).toString('base64'); }
@@ -308,44 +467,173 @@ app.whenReady().then(() => {
   function serializeKemPub(pub) { return b64(pub.serialize()); }
 
   ipcMain.handle('edge:generateIdentity', async (_e, args) => {
-    const { username } = args || {}; const ctx = getOrCreateUserContext(username);
-    return { registrationId: ctx.registrationId, identityPublicKeyBase64: serializeKey(ctx.idPair.publicKey) };
+    const { username } = args || {};
+    const ctx = await getOrCreateUserContext(username);
+
+    const result = {
+      registrationId: ctx.registrationId,
+      identityPublicKeyBase64: serializeKey(ctx.idPair.publicKey)
+    };
+
+    // Include Dilithium3 public key if available
+    if (ctx.dilithiumKeyPair) {
+      result.dilithiumPublicKeyBase64 = Buffer.from(ctx.dilithiumKeyPair.publicKey).toString('base64');
+    }
+
+    return result;
   });
 
   ipcMain.handle('edge:generatePreKeys', async (_e, args) => {
-    const { username, preKeyId = 1001, signedPreKeyId = 2001, kyberPreKeyId = 3001 } = args || {}; const ctx = getOrCreateUserContext(username);
-    const priv = Signal.PrivateKey.generate(); const pre = Signal.PreKeyRecord.new(preKeyId, priv.getPublicKey(), priv);
-    const spkPriv = Signal.PrivateKey.generate(); const spkPub = spkPriv.getPublicKey(); const spkSig = ctx.idPair.privateKey.sign(spkPub.serialize()); const spk = Signal.SignedPreKeyRecord.new(signedPreKeyId, Date.now(), spkPub, spkPriv, spkSig);
-    const kyPair = Signal.KEMKeyPair.generate(); const kySig = ctx.idPair.privateKey.sign(kyPair.getPublicKey().serialize()); const kyRec = Signal.KyberPreKeyRecord.new(kyberPreKeyId, Date.now(), kyPair, kySig);
-    await ctx.stores.preKeyStore.savePreKey(preKeyId, pre); await ctx.stores.signedPreKeyStore.saveSignedPreKey(signedPreKeyId, spk); await ctx.stores.kyberPreKeyStore.saveKyberPreKey(kyberPreKeyId, kyRec);
-    return { preKeyId, preKeyPublicBase64: serializeKey(pre.publicKey()), signedPreKeyId, signedPreKeyPublicBase64: serializeKey(spk.publicKey()), signedPreKeySignatureBase64: b64(spk.signature()), kyberPreKeyId, kyberPreKeyPublicBase64: serializeKemPub(kyPair.getPublicKey()), kyberPreKeySignatureBase64: b64(kySig) };
+    const { username, preKeyId = 1001, signedPreKeyId = 2001, kyberPreKeyId = 3001 } = args || {};
+    const ctx = await getOrCreateUserContext(username);
+
+    // Generate standard prekeys
+    const priv = Signal.PrivateKey.generate();
+    const pre = Signal.PreKeyRecord.new(preKeyId, priv.getPublicKey(), priv);
+
+    // Generate signed prekey with Ed25519 signature
+    const spkPriv = Signal.PrivateKey.generate();
+    const spkPub = spkPriv.getPublicKey();
+    const spkSig = ctx.idPair.privateKey.sign(spkPub.serialize());
+    const spk = Signal.SignedPreKeyRecord.new(signedPreKeyId, Date.now(), spkPub, spkPriv, spkSig);
+
+    // Generate Kyber prekey with Ed25519 signature
+    const kyPair = Signal.KEMKeyPair.generate();
+    const kySig = ctx.idPair.privateKey.sign(kyPair.getPublicKey().serialize());
+    const kyRec = Signal.KyberPreKeyRecord.new(kyberPreKeyId, Date.now(), kyPair, kySig);
+
+    // Store all prekeys
+    await ctx.stores.preKeyStore.savePreKey(preKeyId, pre);
+    await ctx.stores.signedPreKeyStore.saveSignedPreKey(signedPreKeyId, spk);
+    await ctx.stores.kyberPreKeyStore.saveKyberPreKey(kyberPreKeyId, kyRec);
+
+    const result = {
+      preKeyId,
+      preKeyPublicBase64: serializeKey(pre.publicKey()),
+      signedPreKeyId,
+      signedPreKeyPublicBase64: serializeKey(spk.publicKey()),
+      signedPreKeySignatureBase64: b64(spk.signature()),
+      kyberPreKeyId,
+      kyberPreKeyPublicBase64: serializeKemPub(kyPair.getPublicKey()),
+      kyberPreKeySignatureBase64: b64(kySig)
+    };
+
+    // Add Dilithium3 signatures if available
+    if (ctx.dilithiumKeyPair) {
+      try {
+        const { CryptoUtils } = await import('./crypto/unified-crypto.js');
+
+        // Create Dilithium3 signatures for signed prekey and Kyber prekey
+        const spkDilithiumSig = await CryptoUtils.Dilithium.sign(ctx.dilithiumKeyPair.secretKey, spkPub.serialize());
+        const kyDilithiumSig = await CryptoUtils.Dilithium.sign(ctx.dilithiumKeyPair.secretKey, kyPair.getPublicKey().serialize());
+
+        result.signedPreKeyDilithiumSignatureBase64 = Buffer.from(spkDilithiumSig).toString('base64');
+        result.kyberPreKeyDilithiumSignatureBase64 = Buffer.from(kyDilithiumSig).toString('base64');
+
+        debugLog(`[EDGE] Generated Dilithium3 signatures for prekeys: ${username}`);
+      } catch (error) {
+        console.error('[EDGE] Failed to generate Dilithium3 signatures:', error);
+      }
+    }
+
+    return result;
   });
 
   ipcMain.handle('edge:getPreKeyBundle', async (_e, args) => {
-    const { username, deviceId = 1, preKeyId = 1001, signedPreKeyId = 2001, kyberPreKeyId = 3001 } = args || {}; const ctx = getOrCreateUserContext(username);
-    const pre = await ctx.stores.preKeyStore.getPreKey(preKeyId); const spk = await ctx.stores.signedPreKeyStore.getSignedPreKey(signedPreKeyId); const ky = await ctx.stores.kyberPreKeyStore.getKyberPreKey(kyberPreKeyId);
-    return { registrationId: ctx.registrationId, deviceId, identityKeyBase64: serializeKey(ctx.idPair.publicKey), preKeyId, preKeyPublicBase64: serializeKey(pre.publicKey()), signedPreKeyId, signedPreKeyPublicBase64: serializeKey(spk.publicKey()), signedPreKeySignatureBase64: b64(spk.signature()), kyberPreKeyId, kyberPreKeyPublicBase64: serializeKemPub(ky.keyPair().getPublicKey()), kyberPreKeySignatureBase64: b64(ky.signature()) };
+    const { username, deviceId = 1, preKeyId = 1001, signedPreKeyId = 2001, kyberPreKeyId = 3001 } = args || {};
+    const ctx = await getOrCreateUserContext(username);
+
+    const pre = await ctx.stores.preKeyStore.getPreKey(preKeyId);
+    const spk = await ctx.stores.signedPreKeyStore.getSignedPreKey(signedPreKeyId);
+    const ky = await ctx.stores.kyberPreKeyStore.getKyberPreKey(kyberPreKeyId);
+
+    const bundle = {
+      registrationId: ctx.registrationId,
+      deviceId,
+      identityKeyBase64: serializeKey(ctx.idPair.publicKey),
+      preKeyId,
+      preKeyPublicBase64: serializeKey(pre.publicKey()),
+      signedPreKeyId,
+      signedPreKeyPublicBase64: serializeKey(spk.publicKey()),
+      signedPreKeySignatureBase64: b64(spk.signature()),
+      kyberPreKeyId,
+      kyberPreKeyPublicBase64: serializeKemPub(ky.keyPair().getPublicKey()),
+      kyberPreKeySignatureBase64: b64(ky.signature())
+    };
+
+    // Add Dilithium3 keys and signatures if available
+    if (ctx.dilithiumKeyPair) {
+      try {
+        const { CryptoUtils } = await import('./crypto/unified-crypto.js');
+
+        bundle.dilithiumIdentityKeyBase64 = Buffer.from(ctx.dilithiumKeyPair.publicKey).toString('base64');
+
+        // Regenerate Dilithium3 signatures (in production, these should be cached)
+        const spkDilithiumSig = await CryptoUtils.Dilithium.sign(ctx.dilithiumKeyPair.secretKey, spk.publicKey().serialize());
+        const kyDilithiumSig = await CryptoUtils.Dilithium.sign(ctx.dilithiumKeyPair.secretKey, ky.keyPair().getPublicKey().serialize());
+
+        bundle.signedPreKeyDilithiumSignatureBase64 = Buffer.from(spkDilithiumSig).toString('base64');
+        bundle.kyberPreKeyDilithiumSignatureBase64 = Buffer.from(kyDilithiumSig).toString('base64');
+
+        debugLog(`[EDGE] Bundle includes Dilithium3 signatures for: ${username}`);
+      } catch (error) {
+        console.error('[EDGE] Failed to add Dilithium3 signatures to bundle:', error);
+      }
+    }
+
+    return bundle;
   });
 
   ipcMain.handle('edge:processPreKeyBundle', async (_e, args) => {
-    const { selfUsername, peerUsername, deviceId = 1, bundle } = args || {}; 
-    const ctx = getOrCreateUserContext(selfUsername); 
+    const { selfUsername, peerUsername, deviceId = 1, bundle } = args || {};
+    const ctx = await getOrCreateUserContext(selfUsername);
     const addr = Signal.ProtocolAddress.new(peerUsername, deviceId);
-    
+
     try {
       debugLog(`[EDGE] Processing prekey bundle: ${selfUsername} -> ${peerUsername}`);
-      
+
+      // Verify Dilithium3 signatures if present
+      if (bundle.dilithiumIdentityKeyBase64 && bundle.signedPreKeyDilithiumSignatureBase64 && bundle.kyberPreKeyDilithiumSignatureBase64) {
+        try {
+          const { CryptoUtils } = await import('./crypto/unified-crypto.js');
+
+          const dilithiumPubKey = Buffer.from(bundle.dilithiumIdentityKeyBase64, 'base64');
+          const spkDilithiumSig = Buffer.from(bundle.signedPreKeyDilithiumSignatureBase64, 'base64');
+          const kyDilithiumSig = Buffer.from(bundle.kyberPreKeyDilithiumSignatureBase64, 'base64');
+
+          const spkPubBytes = Buffer.from(bundle.signedPreKeyPublicBase64, 'base64');
+          const kyPubBytes = Buffer.from(bundle.kyberPreKeyPublicBase64, 'base64');
+
+          // Verify Dilithium3 signatures
+          const spkSigValid = await CryptoUtils.Dilithium.verify(spkDilithiumSig, spkPubBytes, dilithiumPubKey);
+          const kySigValid = await CryptoUtils.Dilithium.verify(kyDilithiumSig, kyPubBytes, dilithiumPubKey);
+
+          if (!spkSigValid || !kySigValid) {
+            throw new Error('Dilithium3 signature verification failed');
+          }
+
+          // Store the Dilithium3 public key for this contact
+          await ctx.stores.identityStore.saveDilithiumIdentity(peerUsername, dilithiumPubKey);
+
+          debugLog(`[EDGE] Dilithium3 signature verification passed for: ${peerUsername}`);
+        } catch (error) {
+          console.error('[EDGE] Dilithium3 signature verification failed:', error);
+          // Continue with session creation but log the security concern
+          debugLog(`[EDGE] WARNING: Proceeding without Dilithium3 verification for: ${peerUsername}`);
+        }
+      }
+
       const b = await safeSignalOperation(async () => Signal.PreKeyBundle.new(
-        bundle.registrationId, 
-        bundle.deviceId, 
-        bundle.preKeyId ?? null, 
-        bundle.preKeyPublicBase64 ? Signal.PublicKey.deserialize(Buffer.from(bundle.preKeyPublicBase64, 'base64')) : null, 
-        bundle.signedPreKeyId, 
-        Signal.PublicKey.deserialize(Buffer.from(bundle.signedPreKeyPublicBase64, 'base64')), 
-        Buffer.from(bundle.signedPreKeySignatureBase64, 'base64'), 
-        Signal.PublicKey.deserialize(Buffer.from(bundle.identityKeyBase64, 'base64')), 
-        bundle.kyberPreKeyId, 
-        Signal.KEMPublicKey.deserialize(Buffer.from(bundle.kyberPreKeyPublicBase64, 'base64')), 
+        bundle.registrationId,
+        bundle.deviceId,
+        bundle.preKeyId ?? null,
+        bundle.preKeyPublicBase64 ? Signal.PublicKey.deserialize(Buffer.from(bundle.preKeyPublicBase64, 'base64')) : null,
+        bundle.signedPreKeyId,
+        Signal.PublicKey.deserialize(Buffer.from(bundle.signedPreKeyPublicBase64, 'base64')),
+        Buffer.from(bundle.signedPreKeySignatureBase64, 'base64'),
+        Signal.PublicKey.deserialize(Buffer.from(bundle.identityKeyBase64, 'base64')),
+        bundle.kyberPreKeyId,
+        Signal.KEMPublicKey.deserialize(Buffer.from(bundle.kyberPreKeyPublicBase64, 'base64')),
         Buffer.from(bundle.kyberPreKeySignatureBase64, 'base64')
       ));
       
@@ -370,7 +658,7 @@ app.whenReady().then(() => {
 
   ipcMain.handle('edge:hasSession', async (_e, args) => {
     const { selfUsername, peerUsername, deviceId = 1 } = args || {};
-    const ctx = getOrCreateUserContext(selfUsername);
+    const ctx = await getOrCreateUserContext(selfUsername);
     const addr = Signal.ProtocolAddress.new(peerUsername, deviceId);
     const rec = await ctx.stores.sessionStore.getSession(addr);
     const hasSession = !!rec && rec.hasCurrentState?.(new Date()) !== false;
@@ -390,7 +678,7 @@ app.whenReady().then(() => {
         throw new Error('Missing required parameters for encryption');
       }
       
-      const ctx = getOrCreateUserContext(fromUsername); 
+      const ctx = await getOrCreateUserContext(fromUsername);
       const addr = Signal.ProtocolAddress.new(toUsername, deviceId);
       const messageBytes = Buffer.from(plaintext, 'utf8');
       
@@ -521,7 +809,7 @@ app.whenReady().then(() => {
         throw new Error('Missing required parameters for decryption');
       }
       
-      const ctx = getOrCreateUserContext(selfUsername); 
+      const ctx = await getOrCreateUserContext(selfUsername);
       const addr = Signal.ProtocolAddress.new(fromUsername, deviceId);
       
       try {

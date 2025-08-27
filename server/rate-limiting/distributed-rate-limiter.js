@@ -144,10 +144,14 @@ class DistributedRateLimiter {
 		} catch (res) {
 			this.metrics.totalBlockedConnections++;
 			const ms = res.msBeforeNext || 1000;
+			// SECURITY: Prevent division by zero and ensure positive values
+			const safeMs = Math.max(1000, ms || 1000);
+			const remainingSeconds = Math.max(1, Math.ceil(safeMs / 1000));
+
 			return {
 				allowed: false,
-				reason: `Server connection rate limit exceeded. Try again in ${Math.ceil(ms / 1000)} seconds.`,
-				remainingBlockTime: Math.ceil(ms / 1000)
+				reason: `Server connection rate limit exceeded. Try again in ${remainingSeconds} seconds.`,
+				remainingBlockTime: remainingSeconds
 			};
 		}
 	}
@@ -171,11 +175,14 @@ class DistributedRateLimiter {
 			return { allowed: true };
 		} catch (res) {
 			this.metrics.totalBlockedAuths++;
-			const ms = res.msBeforeNext || 1000;
+			// SECURITY: Prevent division by zero and ensure positive values
+			const safeMs = Math.max(1000, res.msBeforeNext || 1000);
+			const remainingSeconds = Math.max(1, Math.ceil(safeMs / 1000));
+
 			return {
 				allowed: false,
-				reason: `Authentication rate limit exceeded on this connection. Try again in ${Math.ceil(ms / 1000)} seconds.`,
-				remainingBlockTime: Math.ceil(ms / 1000)
+				reason: `Authentication rate limit exceeded on this connection. Try again in ${remainingSeconds} seconds.`,
+				remainingBlockTime: remainingSeconds
 			};
 		}
 	}

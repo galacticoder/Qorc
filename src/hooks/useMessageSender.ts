@@ -25,8 +25,21 @@ export function useMessageSender(
     flushTimer = setTimeout(async () => {
       flushTimer = null;
       const tasks = pendingSendsRef.current.splice(0, pendingSendsRef.current.length);
-      for (const task of tasks) {
-        try { await task(); } catch { /* keep quiet */ }
+
+      // SECURITY: Handle all promises properly to prevent unhandled rejections
+      const taskPromises = tasks.map(async (task) => {
+        try {
+          await task();
+        } catch (error) {
+          console.error('[MessageSender] Task execution failed:', error);
+          // Don't rethrow to prevent unhandled rejection
+        }
+      });
+
+      try {
+        await Promise.allSettled(taskPromises);
+      } catch (error) {
+        console.error('[MessageSender] Batch task execution failed:', error);
       }
     }, delayMs);
   }
@@ -34,16 +47,30 @@ export function useMessageSender(
   async function waitForSessionAvailability(currentUser: string, peer: string, totalMs = 5000, intervalMs = 100): Promise<boolean> {
     const start = Date.now();
     let attempt = 0;
-    
-    // First check if session already exists
-    try {
-      const sessionCheck = await (window as any).edgeApi?.hasSession?.({ selfUsername: currentUser, peerUsername: peer, deviceId: 1 });
-      if (sessionCheck?.hasSession) {
-        return true;
-      }
-    } catch (e) {
-      // Session check failed
+
+    // SECURITY: Add mutex to prevent concurrent session checks for same peer
+    const sessionKey = `${currentUser}-${peer}`;
+    if (waitForSessionAvailability._pending?.has?.(sessionKey)) {
+      console.log('[MessageSender] Session check already in progress for', sessionKey);
+      return waitForSessionAvailability._pending.get(sessionKey);
     }
+
+    // Initialize pending map if not exists
+    if (!waitForSessionAvailability._pending) {
+      waitForSessionAvailability._pending = new Map();
+    }
+
+    const sessionPromise = (async () => {
+      try {
+        // First check if session already exists
+        try {
+          const sessionCheck = await (window as any).edgeApi?.hasSession?.({ selfUsername: currentUser, peerUsername: peer, deviceId: 1 });
+          if (sessionCheck?.hasSession) {
+            return true;
+          }
+        } catch (e) {
+          console.error('[MessageSender] Initial session check failed:', e);
+        }
     
     // Listen for session ready event
     return new Promise((resolve) => {
@@ -67,7 +94,7 @@ export function useMessageSender(
               return;
             }
           } catch (e) {
-            // Session check failed
+            console.error('[MessageSender] Session polling failed:', e);
           }
           attempt++;
           await new Promise(res => setTimeout(res, intervalMs));
@@ -77,8 +104,21 @@ export function useMessageSender(
         resolve(false);
       };
       
-      pollForSession();
+      pollForSession().catch(error => {
+        console.error('[MessageSender] Session polling error:', error);
+        window.removeEventListener('libsignal-session-ready', eventListener);
+        resolve(false);
+      });
     });
+      } finally {
+        // SECURITY: Clean up pending session check
+        waitForSessionAvailability._pending?.delete?.(sessionKey);
+      }
+    })();
+
+    // Store the promise to prevent concurrent checks
+    waitForSessionAvailability._pending.set(sessionKey, sessionPromise);
+    return sessionPromise;
   }
 
   async function getDeterministicMessageId(message: {

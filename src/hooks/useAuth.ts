@@ -20,6 +20,7 @@ export const useAuth = () => {
   const [isGeneratingKeys, setIsGeneratingKeys] = useState(false);
   const [loginError, setLoginError] = useState("");
   const [accountAuthenticated, setAccountAuthenticated] = useState(false);
+  const [isRegistrationMode, setIsRegistrationMode] = useState(false);
   const passphraseRef = useRef<string>("");
   const passphrasePlaintextRef = useRef<string>("");
   const aesKeyRef = useRef<CryptoKey | null>(null);
@@ -53,6 +54,7 @@ export const useAuth = () => {
   const hybridKeysRef = useRef<{
     x25519: { private: any; publicKeyBase64: string };
     kyber: { publicKeyBase64: string; secretKey: Uint8Array };
+    dilithium?: { publicKeyBase64: string; secretKey: Uint8Array };
   } | null>(null);
 
   const keyManagerRef = useRef<SecureKeyManager | null>(null);
@@ -108,7 +110,10 @@ export const useAuth = () => {
         x25519PublicLen: keys.x25519.publicKeyBase64?.length,
         kyberPublicLen: keys.kyber.publicKeyBase64?.length,
         x25519PrivateLen: keys.x25519.private?.byteLength,
-        kyberSecretLen: keys.kyber.secretKey?.byteLength
+        kyberSecretLen: keys.kyber.secretKey?.byteLength,
+        hasDilithium: !!keys.dilithium,
+        dilithiumPublicLen: keys.dilithium?.publicKeyBase64?.length,
+        dilithiumSecretLen: keys.dilithium?.secretKey?.byteLength
       });
 
       // Cache the keys for future use
@@ -160,6 +165,9 @@ export const useAuth = () => {
               kyberPublicBase64: existingKeys.kyber.publicKeyBase64?.slice(0, 28) + '...',
               x25519PrivateLen: existingKeys.x25519.private?.length,
               kyberSecretLen: existingKeys.kyber.secretKey?.length,
+              hasDilithium: !!existingKeys.dilithium,
+              dilithiumPublicBase64: existingKeys.dilithium?.publicKeyBase64?.slice(0, 28) + '...',
+              dilithiumSecretLen: existingKeys.dilithium?.secretKey?.length,
             });
           } catch { }
           hybridKeysRef.current = existingKeys;
@@ -179,6 +187,9 @@ export const useAuth = () => {
             kyberPublicBase64: hybridKeyPair.kyber.publicKeyBase64?.slice(0, 28) + '...',
             x25519PrivateLen: hybridKeyPair.x25519.private?.length,
             kyberSecretLen: hybridKeyPair.kyber.secretKey?.length,
+            hasDilithium: !!hybridKeyPair.dilithium,
+            dilithiumPublicBase64: hybridKeyPair.dilithium?.publicKeyBase64?.slice(0, 28) + '...',
+            dilithiumSecretLen: hybridKeyPair.dilithium?.secretKey?.length,
           });
         } catch { }
         hybridKeysRef.current = hybridKeyPair;
@@ -199,6 +210,7 @@ export const useAuth = () => {
   ) => {
     console.log(`[AUTH] Starting ${mode} process for user: ${username}`);
     setLoginError("");
+    setIsRegistrationMode(mode === "register");
 
     // legacy ratchet sessions no longer used
     loginUsernameRef.current = username;
@@ -277,11 +289,13 @@ export const useAuth = () => {
         { content: password },
         serverHybridPublic
       );
+      // SECURITY: Log only non-sensitive metadata
       try {
         console.debug('[AUTH] Password payload encrypted (hybrid-v1)', {
           hasEphemeralX25519Public: !!(encryptedPassword as any).ephemeralX25519Public,
           kyberCiphertextLen: ((encryptedPassword as any).kyberCiphertext || '').length,
           encryptedMessageLen: ((encryptedPassword as any).encryptedMessage || '').length,
+          // SECURITY: No actual key material or content logged
         });
       } catch { }
 
@@ -351,6 +365,7 @@ export const useAuth = () => {
               hybridPublicKeys: {
                 x25519PublicBase64: publicKeys.x25519PublicBase64,
                 kyberPublicBase64: publicKeys.kyberPublicBase64,
+                dilithiumPublicBase64: publicKeys.dilithiumPublicBase64,
               },
             };
 
@@ -385,6 +400,12 @@ export const useAuth = () => {
         console.error("Failed to initialize key manager after auth success:", error);
       });
     }
+  };
+
+  const handlePassphraseSuccess = () => {
+    console.log(`[AUTH] Passphrase success - registration mode: ${isRegistrationMode}`);
+    // Both registration and login should continue to server password prompt
+    // The server password is a security feature required for both flows
   };
 
   const logout = async (secureDBRef?: MutableRefObject<SecureDB | null>, loginErrorMessage: string = "") => {
@@ -444,6 +465,7 @@ export const useAuth = () => {
     setIsLoggedIn(false);
     setLoginError(loginErrorMessage);
     setAccountAuthenticated(false);
+    setIsRegistrationMode(false);
   };
 
   const useLogout = (Database: any) => {
@@ -553,12 +575,14 @@ export const useAuth = () => {
     isGeneratingKeys,
     loginError,
     accountAuthenticated,
+    isRegistrationMode,
     loginUsernameRef,
     initializeKeys,
     handleAccountSubmit,
     handlePassphraseSubmit,
     handleServerPasswordSubmit,
     handleAuthSuccess,
+    handlePassphraseSuccess,
     setAccountAuthenticated,
     passwordRef,
     setLoginError,

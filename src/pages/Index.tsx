@@ -116,6 +116,7 @@ const ChatApp: React.FC<ChatAppProps> = ({ onNavigate }) => {
           onAccountSubmit={Authentication.handleAccountSubmit}
           onServerPasswordSubmit={Authentication.handleServerPasswordSubmit}
           accountAuthenticated={Authentication.accountAuthenticated}
+          isRegistrationMode={Authentication.isRegistrationMode}
           serverTrustRequest={Authentication.serverTrustRequest}
           onAcceptServerTrust={Authentication.acceptServerTrust}
           onRejectServerTrust={Authentication.rejectServerTrust}

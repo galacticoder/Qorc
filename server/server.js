@@ -1,5 +1,6 @@
 import https from 'https';
 import fs from 'fs';
+import path from 'path';
 import { WebSocketServer } from 'ws';
 import selfsigned from 'selfsigned';
 import { SignalType } from './signals.js';
@@ -9,7 +10,7 @@ import * as ServerConfig from './config/config.js';
 import { MessagingUtils } from './messaging/messaging-utils.js';
 import * as authentication from './authentication/authentication.js';
 import { setServerPasswordOnInput } from './authentication/auth-utils.js';
-import { ed25519 } from '@noble/curves/ed25519';
+import { ed25519 } from '@noble/curves/ed25519.js';
 import { rateLimitMiddleware } from './rate-limiting/rate-limit-middleware.js';
 
 const clients = new Map();
@@ -61,12 +62,49 @@ function addToBatch(operation) {
 const CERT_PATH = process.env.TLS_CERT_PATH; //use real later for production and in dev use selfsigned
 const KEY_PATH = process.env.TLS_KEY_PATH;
 
+// SECURITY: Validate and sanitize certificate paths to prevent path traversal
+function validateCertPath(certPath) {
+  if (!certPath || typeof certPath !== 'string') return false;
+
+  // SECURITY: Prevent path traversal attacks
+  const normalizedPath = path.resolve(certPath);
+  const allowedDir = path.resolve('./certs'); // Only allow certs in ./certs directory
+
+  if (!normalizedPath.startsWith(allowedDir)) {
+    console.error('[SERVER] Certificate path outside allowed directory:', certPath);
+    return false;
+  }
+
+  // SECURITY: Only allow .pem, .crt, .key files
+  const allowedExtensions = ['.pem', '.crt', '.key'];
+  const ext = path.extname(normalizedPath).toLowerCase();
+  if (!allowedExtensions.includes(ext)) {
+    console.error('[SERVER] Invalid certificate file extension:', ext);
+    return false;
+  }
+
+  return normalizedPath;
+}
+
 let server;
-if (CERT_PATH && KEY_PATH && fs.existsSync(CERT_PATH) && fs.existsSync(KEY_PATH)) {
+const validCertPath = CERT_PATH ? validateCertPath(CERT_PATH) : null;
+const validKeyPath = KEY_PATH ? validateCertPath(KEY_PATH) : null;
+
+if (validCertPath && validKeyPath && fs.existsSync(validCertPath) && fs.existsSync(validKeyPath)) {
   console.log('[SERVER] Using provided TLS certificate and key');
-  const key = fs.readFileSync(KEY_PATH);
-  const cert = fs.readFileSync(CERT_PATH);
-  server = https.createServer({ key, cert });
+  try {
+    const key = fs.readFileSync(validKeyPath);
+    const cert = fs.readFileSync(validCertPath);
+    server = https.createServer({ key, cert });
+  } catch (error) {
+    console.error('[SERVER] Failed to read TLS certificates:', error.message);
+    console.log('[SERVER] Falling back to self-signed certificate');
+    const { private: key, cert } = selfsigned.generate([{ name: 'commonName', value: 'localhost' }], {
+      days: 365,
+      keySize: 4096,
+    });
+    server = https.createServer({ key, cert });
+  }
 } else {
   console.warn('[SERVER] No TLS_CERT_PATH/TLS_KEY_PATH provided; generating self-signed certificate for development');
   const { private: key, cert } = selfsigned.generate([{ name: 'commonName', value: 'localhost' }], {
@@ -389,17 +427,17 @@ async function startServer() {
           case SignalType.DR_SEND: {
             console.log(`[SERVER] Processing ${parsed.type} from user: ${clientState.username} to user: ${parsed.to}`);
             
-            // Log encrypted message details to verify it's ciphertext
+            // SECURITY: Log only non-sensitive metadata for encrypted messages
             if (parsed.type === SignalType.ENCRYPTED_MESSAGE && parsed.encryptedPayload) {
-              console.log(`[SERVER] Signal Protocol encrypted message details:`, {
+              console.log(`[SERVER] Signal Protocol encrypted message received:`, {
                 from: parsed.encryptedPayload.from,
                 to: parsed.encryptedPayload.to,
                 messageType: parsed.encryptedPayload.type,
                 sessionId: parsed.encryptedPayload.sessionId,
                 contentLength: parsed.encryptedPayload.content?.length || 0,
-                contentPreview: parsed.encryptedPayload.content?.substring(0, 50) + '...',
+                // SECURITY: Remove content preview to prevent data leakage
                 isBase64: /^[A-Za-z0-9+/]*={0,2}$/.test(parsed.encryptedPayload.content || ''),
-                messageStructure: Object.keys(parsed),
+                messageStructure: Object.keys(parsed).filter(key => key !== 'content'), // Exclude content
                 isSignalProtocol: parsed.encryptedPayload.type === 1 || parsed.encryptedPayload.type === 3 // Signal Protocol message types
               });
             }
