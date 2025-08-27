@@ -1,5 +1,34 @@
 const { contextBridge, ipcRenderer } = require('electron');
 
+// Expose Tor and system functionality for the auto-setup
+contextBridge.exposeInMainWorld('electronAPI', {
+  // Platform information
+  platform: process.platform,
+  arch: process.arch,
+
+  // Tor management functions
+  checkTorInstallation: () => ipcRenderer.invoke('tor:check-installation'),
+  downloadTor: () => ipcRenderer.invoke('tor:download'),
+  installTor: () => ipcRenderer.invoke('tor:install'),
+  configureTor: (options) => ipcRenderer.invoke('tor:configure', options),
+  startTor: () => ipcRenderer.invoke('tor:start'),
+  stopTor: () => ipcRenderer.invoke('tor:stop'),
+  getTorStatus: () => ipcRenderer.invoke('tor:status'),
+  uninstallTor: () => ipcRenderer.invoke('tor:uninstall'),
+
+  // System information
+  getPlatformInfo: () => ipcRenderer.invoke('system:platform'),
+
+  // Tor verification
+  verifyTorConnection: () => ipcRenderer.invoke('tor:verify-connection'),
+  getTorInfo: () => ipcRenderer.invoke('tor:get-info'),
+  rotateTorCircuit: () => ipcRenderer.invoke('tor:rotate-circuit'),
+
+  // Utility
+  isElectron: true,
+  isDevelopment: process.env.NODE_ENV === 'development',
+});
+
 contextBridge.exposeInMainWorld('edgeApi', {
   // Libsignal identity and prekeys
   generateIdentity: (args) => ipcRenderer.invoke('edge:generateIdentity', args),

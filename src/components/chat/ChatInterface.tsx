@@ -12,6 +12,7 @@ import { useTypingIndicator } from "@/hooks/useTypingIndicator";
 import { TypingIndicator } from "./TypingIndicator";
 import { useTypingIndicatorContext } from "@/contexts/TypingIndicatorContext";
 import { useMessageReceipts } from "@/hooks/useMessageReceipts";
+import { TorIndicator } from "@/components/ui/TorIndicator";
 
 interface ChatInterfaceProps {
   onSendMessage: (
@@ -222,13 +223,16 @@ export function ChatInterface({
     )?.id;
   return (
     <Card className="flex flex-col h-full border border-gray-300 shadow-lg rounded-lg">
-      <div className="p-4 border-b bg-gray-100">
-        <h2 className="text-lg font-semibold">
-          {selectedConversation ? `Chat with ${selectedConversation}` : "Chat"}
-        </h2>
-        <p className="text-sm text-gray-500">
-          {selectedConversation ? "Secure end-to-end encrypted messaging" : "Select a conversation to start chatting"}
-        </p>
+      <div className="p-4 border-b bg-gray-100 flex items-center justify-between">
+        <div>
+          <h2 className="text-lg font-semibold">
+            {selectedConversation ? `Chat with ${selectedConversation}` : "Chat"}
+          </h2>
+          <p className="text-sm text-gray-500">
+            {selectedConversation ? "Secure end-to-end encrypted messaging" : "Select a conversation to start chatting"}
+          </p>
+        </div>
+        <TorIndicator />
       </div>
       <ScrollArea className="flex-1 p-4 bg-white" ref={scrollAreaRef}>
         <div className="space-y-4">

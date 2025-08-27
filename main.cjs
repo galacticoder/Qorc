@@ -2,6 +2,7 @@ const { app, BrowserWindow, ipcMain, session } = require('electron');
 const WebSocket = require('ws');
 const path = require('path');
 const Signal = require('@signalapp/libsignal-client');
+const torManager = require('./electron/tor-manager.cjs');
 
 const isDev = !!process.env.VITE_DEV_SERVER_URL;
 
@@ -924,6 +925,118 @@ app.whenReady().then(() => {
         message: error.message || 'Decryption failed',
         code: error.code || 'UNKNOWN_ERROR'
       };
+    }
+  });
+
+  // Tor IPC Handlers
+  ipcMain.handle('tor:check-installation', async () => {
+    try {
+      return await torManager.checkTorInstallation();
+    } catch (error) {
+      debugError('[IPC] Error checking Tor installation:', error);
+      return { isInstalled: false, error: error.message };
+    }
+  });
+
+  ipcMain.handle('tor:download', async () => {
+    try {
+      return await torManager.downloadTor();
+    } catch (error) {
+      debugError('[IPC] Error downloading Tor:', error);
+      return { success: false, error: error.message };
+    }
+  });
+
+  ipcMain.handle('tor:install', async () => {
+    try {
+      return await torManager.installTor();
+    } catch (error) {
+      debugError('[IPC] Error installing Tor:', error);
+      return { success: false, error: error.message };
+    }
+  });
+
+  ipcMain.handle('tor:configure', async (event, options) => {
+    try {
+      return await torManager.configureTor(options);
+    } catch (error) {
+      debugError('[IPC] Error configuring Tor:', error);
+      return { success: false, error: error.message };
+    }
+  });
+
+  ipcMain.handle('tor:start', async () => {
+    try {
+      return await torManager.startTor();
+    } catch (error) {
+      debugError('[IPC] Error starting Tor:', error);
+      return { success: false, error: error.message };
+    }
+  });
+
+  ipcMain.handle('tor:stop', async () => {
+    try {
+      return await torManager.stopTor();
+    } catch (error) {
+      debugError('[IPC] Error stopping Tor:', error);
+      return { success: false, error: error.message };
+    }
+  });
+
+  ipcMain.handle('tor:status', () => {
+    try {
+      return torManager.getTorStatus();
+    } catch (error) {
+      debugError('[IPC] Error getting Tor status:', error);
+      return { isRunning: false, error: error.message };
+    }
+  });
+
+  ipcMain.handle('tor:uninstall', async () => {
+    try {
+      return await torManager.uninstallTor();
+    } catch (error) {
+      debugError('[IPC] Error uninstalling Tor:', error);
+      return { success: false, error: error.message };
+    }
+  });
+
+  // System info handlers
+  ipcMain.handle('system:platform', () => {
+    return {
+      platform: process.platform,
+      arch: process.arch,
+      version: process.version
+    };
+  });
+
+  // Tor verification handler
+  ipcMain.handle('tor:verify-connection', async () => {
+    try {
+      return await torManager.verifyTorConnection();
+    } catch (error) {
+      debugError('[IPC] Error verifying Tor connection:', error);
+      return { success: false, error: error.message };
+    }
+  });
+
+  // Tor detailed info handler
+  ipcMain.handle('tor:get-info', async () => {
+    try {
+      return await torManager.getTorInfo();
+    } catch (error) {
+      debugError('[IPC] Error getting Tor info:', error);
+      return { error: error.message };
+    }
+  });
+
+  // Tor circuit rotation handler
+  ipcMain.handle('tor:rotate-circuit', async () => {
+    try {
+      return await torManager.rotateCircuit();
+    } catch (error) {
+      debugError('[IPC] Error rotating Tor circuit:', error);
+      return { success: false, error: error.message };
     }
   });
 

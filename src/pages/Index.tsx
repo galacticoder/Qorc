@@ -1,4 +1,4 @@
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect } from "react";
 import { Login } from "@/components/chat/Login";
 import { Sidebar } from "@/components/chat/UserList";
 import { ConversationList } from "@/components/chat/ConversationList";
@@ -15,6 +15,10 @@ import { useChatSignals } from "@/hooks/useChatSignals";
 import { useWebSocket } from "@/hooks/useWebsocket";
 import { useConversations } from "@/hooks/useConversations";
 import { TypingIndicatorProvider } from "@/contexts/TypingIndicatorContext";
+import { torNetworkManager } from "@/lib/tor-network";
+import { TorIndicator } from "@/components/ui/TorIndicator";
+import { TorAutoSetup } from "@/components/setup/TorAutoSetup";
+import { torAutoSetup } from "@/lib/tor-auto-setup";
 // offline message queue removed
 
 interface ChatAppProps {
@@ -24,8 +28,83 @@ interface ChatAppProps {
 const ChatApp: React.FC<ChatAppProps> = ({ onNavigate }) => {
   const [messages, setMessages] = useState<Message[]>([]);
   const [sidebarActiveTab, setSidebarActiveTab] = useState<string>("messages");
+  const [showTorSetup, setShowTorSetup] = useState(false);
+  const [torSetupComplete, setTorSetupComplete] = useState(false);
 
   const Authentication = useAuth();
+
+  // Check if Tor setup is needed on app start
+  useEffect(() => {
+    const checkTorSetup = async () => {
+      console.log('[TOR-SETUP] Checking Tor setup requirements...');
+      console.log('[TOR-SETUP] Window object keys:', Object.keys(window));
+      console.log('[TOR-SETUP] electronAPI available?', !!(window as any).electronAPI);
+      console.log('[TOR-SETUP] electronAPI object:', (window as any).electronAPI);
+      console.log('[TOR-SETUP] Tor supported?', torNetworkManager.isSupported());
+
+      // Only show Tor setup in Electron environment
+      if (!torNetworkManager.isSupported()) {
+        console.log('[TOR] Browser environment detected - Tor setup not available');
+        return;
+      }
+
+      const torStatus = torAutoSetup.getStatus();
+      const userWantsTor = localStorage.getItem('tor_enabled') !== 'false'; // Default to true
+
+      console.log('[TOR-SETUP] Tor status:', torStatus);
+      console.log('[TOR-SETUP] User wants Tor:', userWantsTor);
+
+      // Force show Tor setup in Electron environment for testing
+      if (torNetworkManager.isSupported()) {
+        console.log('[TOR-SETUP] Showing Tor setup screen (forced for testing)');
+        setShowTorSetup(true);
+      } else if (torStatus.isRunning) {
+        console.log('[TOR-SETUP] Tor already running, initializing network manager');
+        setTorSetupComplete(true);
+        // Initialize the network manager with existing Tor
+        torNetworkManager.updateConfig({ enabled: true });
+        await torNetworkManager.initialize();
+      }
+    };
+
+    checkTorSetup();
+
+    // Cleanup on unmount
+    return () => {
+      if (torNetworkManager.isSupported()) {
+        torNetworkManager.shutdown();
+      }
+    };
+  }, []);
+
+  const handleTorSetupComplete = async (success: boolean) => {
+    if (success) {
+      // Hide Tor setup screen on success
+      setShowTorSetup(false);
+      setTorSetupComplete(true);
+      localStorage.setItem('tor_enabled', 'true');
+      // Initialize the network manager
+      torNetworkManager.updateConfig({ enabled: true });
+      await torNetworkManager.initialize();
+    } else {
+      // On failure, check if user explicitly skipped or if it was an error
+      const userSkipped = localStorage.getItem('tor_setup_skipped') === 'true';
+
+      if (userSkipped) {
+        // User chose to skip - proceed to login
+        console.log('[TOR-SETUP] User skipped Tor setup, proceeding to login');
+        setShowTorSetup(false);
+        setTorSetupComplete(false);
+        localStorage.setItem('tor_enabled', 'false');
+      } else {
+        // Setup failed - stay on Tor setup screen
+        console.log('[TOR-SETUP] Setup failed, staying on Tor setup screen');
+        setTorSetupComplete(false);
+        localStorage.setItem('tor_enabled', 'false');
+        // Don't set setShowTorSetup(false) - keep showing the setup screen
+      }
+    }
+  };
 
   const Database = useSecureDB({
     Authentication,
@@ -103,6 +182,20 @@ const ChatApp: React.FC<ChatAppProps> = ({ onNavigate }) => {
   });
 
   // offline queue effects removed
+
+  // Show Tor setup screen first if needed
+  if (showTorSetup) {
+    return (
+      <div className="flex items-center justify-center min-h-screen p-4 bg-gradient-to-r from-gray-50 to-slate-50">
+        <div className="w-full max-w-2xl">
+          <TorAutoSetup
+            onSetupComplete={handleTorSetupComplete}
+            autoStart={true}
+          />
+        </div>
+      </div>
+    );
+  }
 
   if (!Authentication.isLoggedIn) {
     return (

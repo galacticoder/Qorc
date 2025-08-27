@@ -2,6 +2,8 @@ import React, { useState } from "react";
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "../ui/card";
 import { Alert, AlertDescription } from "../ui/alert";
 import { EncryptionIcon, LockClosedIcon, CheckIcon } from "./icons";
+import { TorIndicator } from "../ui/TorIndicator";
+import { BrowserTorNotice } from "../ui/BrowserTorNotice";
 
 import { SignInForm } from "./Login/SignIn.tsx";
 import { SignUpForm } from "./Login/SignUp.tsx";
@@ -94,13 +96,18 @@ export function Login({
     >
       <Card className="w-full">
         <CardHeader className="space-y-4">
-          <div className="mx-auto w-16 h-16 rounded-full bg-primary/10 flex items-center justify-center">
-            <EncryptionIcon className="h-8 w-8 text-primary" />
+          <div className="flex justify-between items-start">
+            <div className="flex-1 flex flex-col items-center">
+              <div className="mx-auto w-16 h-16 rounded-full bg-primary/10 flex items-center justify-center">
+                <EncryptionIcon className="h-8 w-8 text-primary" />
+              </div>
+              <CardTitle className="text-2xl text-center">SecureChat</CardTitle>
+              <CardDescription className="text-center">
+                End-to-end encrypted messaging using X25519 + Kyber768 hybrid encryption and AES-GCM
+              </CardDescription>
+            </div>
+            <TorIndicator />
           </div>
-          <CardTitle className="text-2xl text-center">SecureChat</CardTitle>
-          <CardDescription className="text-center">
-            End-to-end encrypted messaging using X25519 + Kyber768 hybrid encryption and AES-GCM
-          </CardDescription>
         </CardHeader>
 
         <CardContent className="space-y-6">
@@ -223,6 +230,11 @@ export function Login({
           )}
         </CardFooter>
       </Card>
+
+      {/* Browser Tor Notice */}
+      <div className="mt-4">
+        <BrowserTorNotice />
+      </div>
     </div>
   );
 }
