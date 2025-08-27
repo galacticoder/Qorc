@@ -236,8 +236,10 @@ export class SecureErrorHandler {
    */
   private generateErrorId(): string {
     const timestamp = Date.now().toString(36);
-    const random = Math.random().toString(36).substring(2, 8);
-    return `err_${timestamp}_${random}`;
+    // SECURITY: Use cryptographically secure random for error IDs
+    const randomBytes = crypto.getRandomValues(new Uint8Array(4));
+    const secureRandom = Array.from(randomBytes, byte => byte.toString(36)).join('');
+    return `err_${timestamp}_${secureRandom}`;
   }
 
   /**

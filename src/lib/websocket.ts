@@ -73,10 +73,10 @@ class WebSocketClient {
         })();
         console.debug('[WS] send ->', preview);
       } catch { }
-      // @ts-ignore
-      if (window?.edgeApi?.wsSend) {
-        // @ts-ignore
-        window.edgeApi.wsSend(message);
+      // Type-safe access to edgeApi
+      const edgeApi = (window as any).edgeApi as { wsSend?: (message: string) => void };
+      if (edgeApi?.wsSend) {
+        edgeApi.wsSend(message);
       }
     } catch (error) {
       console.error('Error sending message:', error);

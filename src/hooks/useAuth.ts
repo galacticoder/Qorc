@@ -7,7 +7,11 @@ import { SecureKeyManager } from "@/lib/secure-key-manager";
 // Legacy pinned server removed; use simple in-memory pinning here
 const PinnedServer = {
   get() {
-    try { return JSON.parse(localStorage.getItem('securechat_server_pin_v1') || 'null'); } catch { return null; }
+    try {
+      const stored = localStorage.getItem('securechat_server_pin_v1');
+      if (!stored || stored.length > 10000) return null; // SECURITY: Prevent DoS via large JSON
+      return JSON.parse(stored);
+    } catch { return null; }
   },
   set(val: any) {
     try { localStorage.setItem('securechat_server_pin_v1', JSON.stringify(val)); } catch {}
@@ -18,6 +22,7 @@ export const useAuth = () => {
   const [username, setUsername] = useState("");
   const [isLoggedIn, setIsLoggedIn] = useState(false);
   const [isGeneratingKeys, setIsGeneratingKeys] = useState(false);
+  const [authStatus, setAuthStatus] = useState<string>("");
   const [loginError, setLoginError] = useState("");
   const [accountAuthenticated, setAccountAuthenticated] = useState(false);
   const [isRegistrationMode, setIsRegistrationMode] = useState(false);
@@ -133,6 +138,7 @@ export const useAuth = () => {
   const initializeKeys = useCallback(async () => {
     console.log('[AUTH] Starting key initialization process');
     setIsGeneratingKeys(true);
+    setAuthStatus("Initializing secure key manager...");
     try {
       const passphrase = passphrasePlaintextRef.current;
       if (!passphrase) {
@@ -155,10 +161,12 @@ export const useAuth = () => {
 
       if (hasExistingKeys) {
         console.log('[AUTH] Loading existing keys');
+        setAuthStatus("Loading existing encryption keys...");
         await keyManagerRef.current.initialize(passphrase);
         const existingKeys = await keyManagerRef.current.getKeys();
         if (existingKeys) {
           console.log('[AUTH] Existing keys loaded successfully');
+          setAuthStatus("Verifying key integrity...");
           try {
             console.debug('[AUTH] Existing keys summary', {
               x25519PublicBase64: existingKeys.x25519.publicKeyBase64?.slice(0, 28) + '...',
@@ -174,10 +182,14 @@ export const useAuth = () => {
         }
       } else {
         console.log('[AUTH] Generating new hybrid key pair');
+        setAuthStatus("Generating post-quantum encryption keys...");
         const seed = await CryptoUtils.Hash.hashData(passphrase + currentUsername);
+        setAuthStatus("Creating hybrid cryptographic key pair...");
         const hybridKeyPair = await CryptoUtils.Hybrid.generateHybridKeyPairFromSeed(seed);
 
+        setAuthStatus("Securing keys with passphrase...");
         await keyManagerRef.current.initialize(passphrase);
+        setAuthStatus("Storing encrypted keys securely...");
         await keyManagerRef.current.storeKeys(hybridKeyPair);
 
         console.log('[AUTH] New keys generated and stored successfully');
@@ -199,6 +211,7 @@ export const useAuth = () => {
       setLoginError("Key generation failed");
     } finally {
       setIsGeneratingKeys(false);
+      setAuthStatus("");
     }
   }, []);
 
@@ -211,6 +224,7 @@ export const useAuth = () => {
     console.log(`[AUTH] Starting ${mode} process for user: ${username}`);
     setLoginError("");
     setIsRegistrationMode(mode === "register");
+    setAuthStatus(mode === "register" ? "Creating new account..." : "Authenticating account...");
 
     // legacy ratchet sessions no longer used
     loginUsernameRef.current = username;
@@ -226,6 +240,7 @@ export const useAuth = () => {
 
       if (!websocketClient.isConnectedToServer()) {
         console.log('[AUTH] Connecting to WebSocket server');
+        setAuthStatus("Connecting to secure server...");
         await websocketClient.connect();
       }
 
@@ -243,11 +258,13 @@ export const useAuth = () => {
         }
       };
 
+      setAuthStatus("Encrypting user data with hybrid cryptography...");
       const encryptedPayload = await CryptoUtils.Hybrid.encryptHybridPayload(
         userPayload,
         serverHybridPublic
       );
 
+      setAuthStatus("Encrypting password with post-quantum security...");
       const encryptedPassword = await CryptoUtils.Hybrid.encryptHybridPayload(
         { content: password },
         serverHybridPublic
@@ -260,6 +277,7 @@ export const useAuth = () => {
       };
 
       console.log(`[AUTH] Sending ${mode} request to server`);
+      setAuthStatus(`Sending secure ${mode} request to server...`);
       websocketClient.send(JSON.stringify(payload));
     } catch (error) {
       console.error(`[AUTH] ${mode} submission failed:`, error);
@@ -270,6 +288,7 @@ export const useAuth = () => {
   const handleServerPasswordSubmit = async (password: string) => {
     console.log('[AUTH] Submitting server password');
     setLoginError("");
+    setAuthStatus("Verifying server access credentials...");
     if (!serverHybridPublic) {
       setLoginError("Server keys not available");
       return;
@@ -285,6 +304,7 @@ export const useAuth = () => {
         }
       }
 
+      setAuthStatus("Encrypting server password with hybrid cryptography...");
       const encryptedPassword = await CryptoUtils.Hybrid.encryptHybridPayload(
         { content: password },
         serverHybridPublic
@@ -305,6 +325,7 @@ export const useAuth = () => {
       };
 
       console.log('[AUTH] Sending server password to server');
+      setAuthStatus("Authenticating with server...");
       websocketClient.send(JSON.stringify(loginInfo));
       loginUsernameRef.current = username;
     } catch (error) {
@@ -316,6 +337,7 @@ export const useAuth = () => {
   const handlePassphraseSubmit = async (passphrase: string, mode: "login" | "register") => {
     console.log(`[AUTH] Submitting passphrase for ${mode} mode`);
     passphrasePlaintextRef.current = passphrase;
+    setAuthStatus("Processing secure passphrase...");
 
     try {
       await initializeKeys();
@@ -324,20 +346,24 @@ export const useAuth = () => {
 
       if (mode === "login") {
         if (!passphraseHashParams) {
+          setAuthStatus("Retrieving secure hash parameters...");
           throw new Error("Missing passphrase parameters");
         }
 
+        setAuthStatus("Computing secure passphrase hash with Argon2...");
         passphraseHash = await CryptoUtils.Hash.hashDataUsingInfo(
           passphrase,
           passphraseHashParams
         );
       } else {
+        setAuthStatus("Generating secure passphrase hash...");
         passphraseHash = await CryptoUtils.Hash.hashData(passphrase);
       }
 
       passphraseRef.current = passphraseHash;
 
       console.log(`[AUTH] Sending passphrase hash to server`);
+      setAuthStatus("Sending secure hash to server...");
       websocketClient.send(JSON.stringify({
         type: mode === "register"
           ? SignalType.PASSPHRASE_HASH_NEW
@@ -348,8 +374,11 @@ export const useAuth = () => {
       // publish official libsignal bundle via edge IPC and publish to server; keep legacy hybrid pub for DB
       if (keyManagerRef.current) {
         try {
+          setAuthStatus("Generating Signal Protocol identity...");
           const idOut = await (window as any).edgeApi.generateIdentity({ username: loginUsernameRef.current });
+          setAuthStatus("Creating Signal Protocol prekeys...");
           const prekeys = await (window as any).edgeApi.generatePreKeys({ username: loginUsernameRef.current });
+          setAuthStatus("Publishing Signal Protocol bundle...");
           const bundle = await (window as any).edgeApi.getPreKeyBundle({ username: loginUsernameRef.current });
           websocketClient.send(JSON.stringify({ type: SignalType.LIBSIGNAL_PUBLISH_BUNDLE, bundle: { ...bundle } }));
         } catch (err) {
@@ -391,8 +420,11 @@ export const useAuth = () => {
     console.log(`[AUTH] Authentication success for user: ${username}`);
     if (!accountAuthenticated) return;
 
+    setAuthStatus("Authentication successful! Logging in...");
     setUsername(username);
     setIsLoggedIn(true);
+    // Clear status after a brief delay
+    setTimeout(() => setAuthStatus(""), 1000);
     setLoginError("");
 
     if (keyManagerRef.current && passphrasePlaintextRef.current) {
@@ -485,7 +517,19 @@ export const useAuth = () => {
         const pendingCleanup = localStorage.getItem('securechat_pending_cleanup');
         if (pendingCleanup) {
           try {
-            const { username } = JSON.parse(pendingCleanup);
+            // SECURITY: Validate JSON size and structure before parsing
+            if (pendingCleanup.length > 1000) {
+              console.error('[AUTH] Pending cleanup data too large, ignoring');
+              localStorage.removeItem('securechat_pending_cleanup');
+              return;
+            }
+            const parsed = JSON.parse(pendingCleanup);
+            if (!parsed || typeof parsed !== 'object' || typeof parsed.username !== 'string') {
+              console.error('[AUTH] Invalid pending cleanup data structure');
+              localStorage.removeItem('securechat_pending_cleanup');
+              return;
+            }
+            const { username } = parsed;
             console.log('[AUTH] Found pending cleanup for user:', username);
 
             // Clear SecureKeyManager database
@@ -573,6 +617,7 @@ export const useAuth = () => {
     isLoggedIn,
     setIsLoggedIn,
     isGeneratingKeys,
+    authStatus,
     loginError,
     accountAuthenticated,
     isRegistrationMode,

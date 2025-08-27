@@ -11,6 +11,7 @@ import { ServerPasswordForm } from "./Login/ServerPassword.tsx";
 interface LoginProps {
   onServerPasswordSubmit?: (serverPassword: string) => Promise<void>;
   isGeneratingKeys: boolean;
+  authStatus?: string;
   error?: string;
   accountAuthenticated: boolean;
   isRegistrationMode: boolean;
@@ -35,6 +36,7 @@ export function Login({
   onAccountSubmit,
   onServerPasswordSubmit,
   isGeneratingKeys,
+  authStatus,
   error,
   onPassphraseSubmit,
   accountAuthenticated,
@@ -145,18 +147,21 @@ export function Login({
               mode={mode}
               onSubmit={handlePassphraseSubmit}
               disabled={isSubmitting || isGeneratingKeys}
+              authStatus={authStatus}
             />
           ) : accountAuthenticated ? (
             <ServerPasswordForm
               serverPassword={serverPassword}
               setServerPassword={setServerPassword}
               disabled={isSubmitting || isGeneratingKeys}
+              authStatus={authStatus}
               onSubmit={handleServerPasswordSubmit}
             />
           ) : mode === "register" ? (
             <SignUpForm
               onSubmit={handleAccountSubmit}
               disabled={isSubmitting || isGeneratingKeys || !!serverTrustRequest}
+              authStatus={authStatus}
               error={error}
               hasServerTrustRequest={!!serverTrustRequest}
             />
@@ -164,6 +169,7 @@ export function Login({
             <SignInForm
               onSubmit={handleAccountSubmit}
               disabled={isSubmitting || isGeneratingKeys || !!serverTrustRequest}
+              authStatus={authStatus}
               error={error}
               hasServerTrustRequest={!!serverTrustRequest}
             />

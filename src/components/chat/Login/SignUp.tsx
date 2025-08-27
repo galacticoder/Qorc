@@ -6,11 +6,12 @@ import { Button } from "../../ui/button";
 interface SignUpFormProps {
   onSubmit: (username: string, password: string) => Promise<void>;
   disabled: boolean;
+  authStatus?: string;
   error?: string;
   hasServerTrustRequest?: boolean;
 }
 
-export function SignUpForm({ onSubmit, disabled, error, hasServerTrustRequest }: SignUpFormProps) {
+export function SignUpForm({ onSubmit, disabled, authStatus, error, hasServerTrustRequest }: SignUpFormProps) {
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
@@ -91,7 +92,7 @@ export function SignUpForm({ onSubmit, disabled, error, hasServerTrustRequest }:
         className="w-full"
         disabled={disabled || isSubmitting || !isFormValid}
       >
-        {isSubmitting ? "Registering..." : "Register Account"}
+        {isSubmitting ? (authStatus || "Registering...") : "Register Account"}
       </Button>
     </form>
   );

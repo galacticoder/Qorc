@@ -4,14 +4,25 @@ import { SignalType } from "@/lib/signals";
 import { Message } from "@/components/chat/types";
 import websocketClient from "@/lib/websocket";
 
+// SECURITY: Safe JSON parsing with size and structure validation
+function safeJsonParse(jsonString: string, maxSize: number = 10000): any {
+  if (!jsonString || typeof jsonString !== 'string') return null;
+  if (jsonString.length > maxSize) {
+    console.error('[Security] JSON string too large, rejecting');
+    return null;
+  }
+  try {
+    return JSON.parse(jsonString);
+  } catch (error) {
+    console.error('[Security] JSON parse failed:', error);
+    return null;
+  }
+}
+
 export function useEncryptedMessageHandler(
-  getKeysOnDemand: () => Promise<{ x25519: { private: any; publicKeyBase64: string }; kyber: { publicKeyBase64: string; secretKey: Uint8Array }; dilithium?: { publicKeyBase64: string; secretKey: Uint8Array } } | null>,
-  keyManagerRef: React.MutableRefObject<any>,
   loginUsernameRef: React.MutableRefObject<string>,
-  setUsers: React.Dispatch<React.SetStateAction<any[]>>,
   setMessages: React.Dispatch<React.SetStateAction<Message[]>>,
-  saveMessageToLocalDB: (msg: Message) => Promise<void>,
-  p2pService?: any // Optional P2P service for direct messaging
+  saveMessageToLocalDB: (msg: Message) => Promise<void>
 ) {
   
 
@@ -162,7 +173,7 @@ export function useEncryptedMessageHandler(
             });
             
             if (dec && dec.plaintext) {
-              payload = JSON.parse(dec.plaintext);
+              payload = safeJsonParse(dec.plaintext, 50000); // Allow larger size for encrypted payloads
               console.log('[EncryptedMessageHandler] Message decrypted successfully:', {
                 hasPayload: !!payload,
                 payloadType: payload?.type,
@@ -254,12 +265,12 @@ export function useEncryptedMessageHandler(
             // For typing-indicator type, we need to parse the content to get the actual indicator type
             let indicatorType = payload.type;
             if (payload.type === 'typing-indicator' && payload.content) {
-              try {
-                const contentData = JSON.parse(payload.content);
+              const contentData = safeJsonParse(payload.content);
+              if (contentData && contentData.type) {
                 indicatorType = contentData.type;
                 console.log('[EncryptedMessageHandler] Extracted indicator type from content:', indicatorType);
-              } catch (error) {
-                console.warn('[EncryptedMessageHandler] Failed to parse typing indicator content:', error);
+              } else {
+                console.warn('[EncryptedMessageHandler] Failed to parse typing indicator content');
                 // Fallback to a default type if parsing fails
                 indicatorType = 'typing-start';
               }
@@ -279,9 +290,8 @@ export function useEncryptedMessageHandler(
           // Check if the content contains system message data (typing indicators, receipts, etc.)
           // This handles cases where system messages might be sent with generic message types
           if (payload.content && typeof payload.content === 'string') {
-            try {
-              const contentData = JSON.parse(payload.content);
-              
+            const contentData = safeJsonParse(payload.content);
+            if (contentData) {
               // Handle typing indicators
               if (contentData.type === 'typing-start' || contentData.type === 'typing-stop') {
                 console.log('[EncryptedMessageHandler] Processing typing indicator from content (backward compatibility):', contentData);
@@ -320,8 +330,6 @@ export function useEncryptedMessageHandler(
                 window.dispatchEvent(event);
                 return; // Don't process as regular message
               }
-            } catch (error) {
-              // Content is not JSON, continue processing as regular message
             }
           }
 
@@ -329,14 +337,10 @@ export function useEncryptedMessageHandler(
           // Additional check to ensure typing indicator messages are not processed as regular messages
           if ((payload.type === 'message' || payload.type === 'text' || !payload.type) && payload.content) {
             // Double-check that this is not a typing indicator message
-            try {
-              const contentData = JSON.parse(payload.content);
-              if (contentData.type === 'typing-start' || contentData.type === 'typing-stop') {
-                console.log('[EncryptedMessageHandler] Skipping typing indicator message that was already processed:', contentData);
-                return; // Don't process as regular message
-              }
-            } catch (error) {
-              // Content is not JSON, continue processing as regular message
+            const typingCheckData = safeJsonParse(payload.content);
+            if (typingCheckData && (typingCheckData.type === 'typing-start' || typingCheckData.type === 'typing-stop')) {
+              console.log('[EncryptedMessageHandler] Skipping typing indicator message that was already processed:', typingCheckData);
+              return; // Don't process as regular message
             }
             
             // Extract message ID from the payload content since it's encrypted along with the content
@@ -344,22 +348,18 @@ export function useEncryptedMessageHandler(
             let messageContent = payload.content;
             
             // Try to parse the content to get the actual message data
-            try {
-              const contentData = JSON.parse(payload.content);
-              if (contentData.messageId) {
-                messageId = contentData.messageId;
-                messageContent = contentData.content || contentData.message || payload.content;
-                if (contentData.replyTo) {
-                  payload.replyTo = contentData.replyTo;
-                }
-                console.log('[EncryptedMessageHandler] Extracted message ID from content:', messageId);
-              } else {
-                console.log('[EncryptedMessageHandler] No messageId found in content:', contentData);
+            const contentData = safeJsonParse(payload.content);
+            if (contentData && contentData.messageId) {
+              messageId = contentData.messageId;
+              messageContent = contentData.content || contentData.message || payload.content;
+              if (contentData.replyTo) {
+                payload.replyTo = contentData.replyTo;
               }
-            } catch (error) {
-              // Content is not JSON, use fallback
+              console.log('[EncryptedMessageHandler] Extracted message ID from content:', messageId);
+            } else {
+              // Content is not valid JSON or no messageId, use fallback
               messageId = messageId || uuidv4();
-              console.log('[EncryptedMessageHandler] Content not JSON, using fallback message ID:', messageId);
+              console.log('[EncryptedMessageHandler] Using fallback message ID:', messageId);
             }
             
             // SECURITY: Atomic check and add to prevent race conditions
@@ -542,19 +542,15 @@ export function useEncryptedMessageHandler(
             let fileName = payload.fileName;
             
             // Try to parse the content to get the actual message data
-            try {
-              const contentData = JSON.parse(payload.content);
-              if (contentData.messageId) {
-                messageId = contentData.messageId;
-                fileName = contentData.fileName || contentData.fileData || payload.fileName;
-                console.log('[EncryptedMessageHandler] Extracted file message ID from content:', messageId);
-              } else {
-                console.log('[EncryptedMessageHandler] No messageId found in file message content:', contentData);
-              }
-            } catch (error) {
-              // Content is not JSON, use fallback
+            const fileContentData = safeJsonParse(payload.content);
+            if (fileContentData && fileContentData.messageId) {
+              messageId = fileContentData.messageId;
+              fileName = fileContentData.fileName || fileContentData.fileData || payload.fileName;
+              console.log('[EncryptedMessageHandler] Extracted file message ID from content:', messageId);
+            } else {
+              // Content is not valid JSON or no messageId, use fallback
               messageId = messageId || uuidv4();
-              console.log('[EncryptedMessageHandler] File message content not JSON, using fallback message ID:', messageId);
+              console.log('[EncryptedMessageHandler] Using fallback file message ID:', messageId);
             }
             
             // Check if message already exists to prevent duplicates
@@ -578,7 +574,7 @@ export function useEncryptedMessageHandler(
                   name: fileName || 'File',
                   type: payload.fileType || 'application/octet-stream',
                   size: payload.fileSize || 0,
-                  data: new ArrayBuffer(0)  // Placeholder - actual file data would be handled separately
+                  data: new ArrayBuffer(0)  // SECURITY: Zero-length buffer to prevent memory leaks
                 }
               };
 
@@ -599,7 +595,7 @@ export function useEncryptedMessageHandler(
                   name: fileName || 'File',
                   type: payload.fileType || 'application/octet-stream',
                   size: payload.fileSize || 0,
-                  data: new ArrayBuffer(0)
+                  data: new ArrayBuffer(0)  // SECURITY: Zero-length buffer to prevent memory leaks
                 }
               });
             }

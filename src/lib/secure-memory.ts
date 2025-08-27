@@ -40,8 +40,9 @@ export class SecureMemory {
 
         // SECURITY: Force memory write to prevent compiler optimization
         if (buffer[0] !== undefined) {
-          // Volatile read to ensure write completion
-          const volatile = buffer[Math.floor(Math.random() * buffer.length)];
+          // SECURITY: Use cryptographically secure random for volatile read
+          const randomIndex = crypto.getRandomValues(new Uint32Array(1))[0] % buffer.length;
+          const volatile = buffer[randomIndex];
         }
       }
 
@@ -153,6 +154,18 @@ export class SecureMemory {
       this.stringReferences.clear();
       console.log(`[SecureMemory] Periodic cleanup: cleared ${oldSize} string references`);
     }
+  }
+
+  /**
+   * Stop periodic cleanup and clear all resources
+   */
+  static shutdown(): void {
+    if (this.cleanupTimer) {
+      clearInterval(this.cleanupTimer);
+      this.cleanupTimer = null;
+    }
+    this.stringReferences.clear();
+    console.log('[SecureMemory] Shutdown complete');
   }
 
   /**
@@ -386,9 +399,11 @@ export class SecureString {
 
       // SECURITY: Create memory pressure to force reallocation
       try {
-        const memoryPressure = new Array(1000).fill(0).map(() =>
-          new Array(1000).fill(Math.random().toString(36))
-        );
+        const memoryPressure = new Array(1000).fill(0).map(() => {
+          // SECURITY: Use cryptographically secure random for memory pressure
+          const randomData = crypto.getRandomValues(new Uint8Array(100));
+          return Array.from(randomData, byte => byte.toString(36));
+        });
         // Let it be garbage collected
       } catch (e) {
         // Memory pressure failed, continue

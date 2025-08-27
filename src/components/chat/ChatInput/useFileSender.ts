@@ -28,6 +28,9 @@ export function useFileSender(currentUsername: string, users: User[]) {
       const rawBytes = new Uint8Array(await file.arrayBuffer());
 
       const aesKey = await CryptoUtils.Keys.generateAESKey();
+      if (!window?.crypto?.subtle) {
+        throw new Error('WebCrypto API not available');
+      }
       const rawAes = await window.crypto.subtle.exportKey("raw", aesKey);
       const aesKeyBase64 = CryptoUtils.Base64.arrayBufferToBase64(rawAes);
 

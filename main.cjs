@@ -54,7 +54,17 @@ const isDev = !!process.env.VITE_DEV_SERVER_URL;
                   resolve(retryResult);
                 } catch (retryError) {
                   debugError('Signal Protocol operation failed on retry:', retryError);
-                  resolve(fallback);
+                  // Try one more time with longer delay
+                  setTimeout(async () => {
+                    try {
+                      const finalResult = await operation();
+                      debugLog('Signal Protocol operation succeeded on final retry');
+                      resolve(finalResult);
+                    } catch (finalError) {
+                      debugError('Signal Protocol operation failed on final retry:', finalError);
+                      resolve(fallback);
+                    }
+                  }, 1000);
                 }
               }, 100);
             } else {
@@ -160,11 +170,11 @@ function createWindow() {
         ...details.responseHeaders,
         'Content-Security-Policy': [
           "default-src 'self'; " +
-          "script-src 'self' 'unsafe-inline' 'unsafe-eval'; " + // Allow unsafe-eval for WebAssembly
+          "script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'; " + // Use wasm-unsafe-eval instead of unsafe-eval
           "style-src 'self' 'unsafe-inline'; " +
-          "img-src 'self' data: blob: https:; " + // Allow external images for favicon
+          "img-src 'self' data: blob:; " + // Remove https: for better security
           "font-src 'self' data:; " +
-          "connect-src 'self' ws: wss:; " + // Allow WebSocket connections
+          "connect-src 'self' ws: wss: localhost:*; " + // Allow WebSocket connections
           "media-src 'none'; " +
           "object-src 'none'; " +
           "frame-src 'none'; " +
@@ -924,7 +934,19 @@ app.whenReady().then(() => {
 });
 
 app.on('window-all-closed', () => {
+  // Cleanup all resources before quitting
   cleanupSignalResources();
+
+  // Additional cleanup for memory management
+  try {
+    // Force garbage collection if available
+    if (global.gc) {
+      global.gc();
+    }
+  } catch (error) {
+    console.error('Error during final cleanup:', error);
+  }
+
   if (process.platform !== 'darwin') app.quit();
 });
 

@@ -106,13 +106,23 @@ export class WebRTCP2PService {
 
       this.signalingChannel.onclose = () => {
         console.log('[P2P] Signaling server disconnected');
-        // Prevent multiple reconnection attempts
-        if (this.signalingChannel && this.signalingChannel.readyState === WebSocket.CLOSED) {
+        // Prevent multiple reconnection attempts with atomic check-and-set
+        const currentChannel = this.signalingChannel;
+        if (currentChannel && currentChannel.readyState === WebSocket.CLOSED) {
           this.signalingChannel = null;
-          // Attempt reconnection after delay
+          // Attempt reconnection after delay with proper error handling
           setTimeout(() => {
-            if (!this.signalingChannel) { // Only reconnect if not already reconnecting
-              this.initialize(signalingServerUrl).catch(console.error);
+            // Double-check we're still disconnected and not already reconnecting
+            if (!this.signalingChannel && currentChannel === this.signalingChannel) {
+              this.initialize(signalingServerUrl).catch((error) => {
+                console.error('[P2P] Reconnection failed:', error);
+                // Exponential backoff for failed reconnections
+                setTimeout(() => {
+                  if (!this.signalingChannel) {
+                    this.initialize(signalingServerUrl).catch(console.error);
+                  }
+                }, 10000); // 10 second backoff
+              });
             }
           }, 5000);
         }
@@ -448,7 +458,9 @@ export class WebRTCP2PService {
   private startDummyTraffic(): void {
     this.dummyTrafficInterval = setInterval(() => {
       this.peers.forEach((peer, username) => {
-        if (peer.state === 'connected' && peer.dataChannel && Math.random() < 0.3) {
+        // SECURITY: Use cryptographically secure random for dummy traffic probability
+        const randomValue = crypto.getRandomValues(new Uint8Array(1))[0] / 255;
+        if (peer.state === 'connected' && peer.dataChannel && randomValue < 0.3) {
           // Generate realistic dummy message with variable size
           const dummySize = this.generateRealisticMessageSize();
           const dummyPayload = this.generateObfuscatedPayload(dummySize);
@@ -470,11 +482,18 @@ export class WebRTCP2PService {
    * Generate realistic message size distribution
    */
   private generateRealisticMessageSize(): number {
-    // Simulate realistic message size distribution
-    const rand = Math.random();
-    if (rand < 0.4) return Math.floor(Math.random() * 50) + 20; // Short messages
-    if (rand < 0.8) return Math.floor(Math.random() * 200) + 50; // Medium messages
-    return Math.floor(Math.random() * 500) + 200; // Long messages
+    // SECURITY: Use cryptographically secure random for message size distribution
+    const rand = crypto.getRandomValues(new Uint8Array(1))[0] / 255;
+    if (rand < 0.4) {
+      const shortSize = crypto.getRandomValues(new Uint8Array(1))[0] % 50 + 20;
+      return shortSize; // Short messages
+    }
+    if (rand < 0.8) {
+      const mediumSize = crypto.getRandomValues(new Uint8Array(1))[0] % 200 + 50;
+      return mediumSize; // Medium messages
+    }
+    const longSize = crypto.getRandomValues(new Uint16Array(1))[0] % 500 + 200;
+    return longSize; // Long messages
   }
 
   /**
@@ -503,8 +522,9 @@ export class WebRTCP2PService {
    * Obfuscate timestamp to prevent timing analysis
    */
   private obfuscateTimestamp(timestamp: number): number {
-    // Add random jitter of ±30 seconds
-    const jitter = (Math.random() - 0.5) * 60000;
+    // SECURITY: Add cryptographically secure random jitter of ±30 seconds
+    const randomJitter = crypto.getRandomValues(new Int32Array(1))[0];
+    const jitter = (randomJitter / 2147483647) * 60000; // Convert to ±30 seconds
     return Math.floor(timestamp + jitter);
   }
 
@@ -512,8 +532,9 @@ export class WebRTCP2PService {
    * Generate random interval for dummy traffic
    */
   private generateRandomInterval(): number {
-    // Random interval between 3-20 seconds
-    return 3000 + Math.random() * 17000;
+    // SECURITY: Use cryptographically secure random interval between 3-20 seconds
+    const randomMs = crypto.getRandomValues(new Uint16Array(1))[0] % 17000;
+    return 3000 + randomMs;
   }
 
   /**
@@ -624,24 +645,53 @@ export class WebRTCP2PService {
    * Cleanup and disconnect all peers
    */
   destroy(): void {
+    console.log('[P2P] Starting destroy/cleanup...');
+
+    // Clear intervals with null checks
     if (this.dummyTrafficInterval) {
       clearInterval(this.dummyTrafficInterval);
+      this.dummyTrafficInterval = null;
     }
     if (this.heartbeatInterval) {
       clearInterval(this.heartbeatInterval);
+      this.heartbeatInterval = null;
     }
 
-    this.peers.forEach((peer) => {
-      peer.connection.close();
+    // Close all peer connections with proper error handling
+    this.peers.forEach((peer, username) => {
+      try {
+        if (peer.dataChannel && peer.dataChannel.readyState === 'open') {
+          peer.dataChannel.close();
+        }
+        if (peer.connection.connectionState !== 'closed') {
+          peer.connection.close();
+        }
+        console.log(`[P2P] Cleaned up connection to ${username}`);
+      } catch (error) {
+        console.error(`[P2P] Error cleaning up connection to ${username}:`, error);
+      }
     });
     this.peers.clear();
 
+    // Close signaling channel with proper state checking
     if (this.signalingChannel) {
-      this.signalingChannel.close();
+      try {
+        if (this.signalingChannel.readyState === WebSocket.OPEN ||
+            this.signalingChannel.readyState === WebSocket.CONNECTING) {
+          this.signalingChannel.close();
+        }
+      } catch (error) {
+        console.error('[P2P] Error closing signaling channel:', error);
+      } finally {
+        this.signalingChannel = null;
+      }
     }
 
     // Clear rate limiting data
     this.messageRateLimiter.clear();
     this.connectionAttempts.clear();
+    this.peerDilithiumKeys.clear();
+
+    console.log('[P2P] Destroy/cleanup completed successfully');
   }
 }

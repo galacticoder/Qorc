@@ -57,10 +57,7 @@ const ChatApp: React.FC<ChatAppProps> = ({ onNavigate }) => {
   );
 
   const encryptedHandler = useEncryptedMessageHandler(
-    Authentication.getKeysOnDemand,
-    Authentication.keyManagerRef,
     Authentication.loginUsernameRef,
-    Database.setUsers,
     setMessages,
     Database.saveMessageToLocalDB
   );
@@ -112,6 +109,7 @@ const ChatApp: React.FC<ChatAppProps> = ({ onNavigate }) => {
       <div className="flex items-center justify-center min-h-screen p-4 bg-gradient-to-r from-gray-50 to-slate-50">
         <Login
           isGeneratingKeys={Authentication.isGeneratingKeys}
+          authStatus={Authentication.authStatus}
           error={Authentication.loginError}
           onAccountSubmit={Authentication.handleAccountSubmit}
           onServerPasswordSubmit={Authentication.handleServerPasswordSubmit}

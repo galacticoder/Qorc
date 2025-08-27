@@ -7,6 +7,7 @@ interface ServerPasswordFormProps {
   serverPassword: string;
   setServerPassword: (v: string) => void;
   disabled: boolean;
+  authStatus?: string;
   onSubmit: (e: React.FormEvent) => void;
 }
 
@@ -14,6 +15,7 @@ export function ServerPasswordForm({
   serverPassword,
   setServerPassword,
   disabled,
+  authStatus,
   onSubmit,
 }: ServerPasswordFormProps) {
   return (
@@ -31,7 +33,7 @@ export function ServerPasswordForm({
         />
       </div>
       <Button type="submit" className="w-full" disabled={disabled}>
-        {disabled ? "Submitting..." : "Submit Server Password"}
+        {disabled ? (authStatus || "Submitting...") : "Submit Server Password"}
       </Button>
     </form>
   );

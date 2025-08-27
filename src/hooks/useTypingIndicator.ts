@@ -45,8 +45,10 @@ export function useTypingIndicator(
 				// Send typing indicator as encrypted message with unique ID
 				if (sendEncryptedMessage) {
 					console.debug('[Typing] Sending typing-start as encrypted message');
-					// Use a more unique message ID for typing indicators to prevent duplicates
-					const uniqueId = `typing-start-${now}-${Math.random().toString(36).substr(2, 9)}`;
+					// SECURITY: Use cryptographically secure random ID generation
+					const randomBytes = crypto.getRandomValues(new Uint8Array(6));
+					const secureId = Array.from(randomBytes, byte => byte.toString(36)).join('');
+					const uniqueId = `typing-start-${now}-${secureId}`;
 					await sendEncryptedMessage(
 						uniqueId,
 						JSON.stringify({ type: 'typing-start', timestamp: now }),
@@ -93,7 +95,10 @@ export function useTypingIndicator(
 				if (sendEncryptedMessage) {
 					console.debug('[Typing] Sending typing-stop as encrypted message');
 					// Use a more unique message ID for typing indicators to prevent duplicates
-					const uniqueId = `typing-stop-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+					// SECURITY: Use cryptographically secure random ID generation
+					const randomBytes = crypto.getRandomValues(new Uint8Array(6));
+					const secureId = Array.from(randomBytes, byte => byte.toString(36)).join('');
+					const uniqueId = `typing-stop-${Date.now()}-${secureId}`;
 					await sendEncryptedMessage(
 						uniqueId,
 						JSON.stringify({ type: 'typing-stop', timestamp: Date.now() }),

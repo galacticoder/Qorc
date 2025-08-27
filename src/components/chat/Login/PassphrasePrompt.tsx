@@ -8,9 +8,10 @@ interface PassphrasePromptProps {
   mode: "login" | "register";
   onSubmit: (passphrase: string) => Promise<void>;
   disabled: boolean;
+  authStatus?: string;
 }
 
-export function PassphrasePrompt({ mode, onSubmit, disabled }: PassphrasePromptProps) {
+export function PassphrasePrompt({ mode, onSubmit, disabled, authStatus }: PassphrasePromptProps) {
   const [passphrase, setPassphrase] = useState("");
   const [confirmPassphrase, setConfirmPassphrase] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -79,7 +80,7 @@ export function PassphrasePrompt({ mode, onSubmit, disabled }: PassphrasePromptP
           !isPassphraseValid
         }
       >
-        {isSubmitting ? "Submitting Passphrase..." : "Submit Passphrase"}
+        {isSubmitting ? (authStatus || "Submitting Passphrase...") : "Submit Passphrase"}
       </Button>
     </form>
   );

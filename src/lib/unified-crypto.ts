@@ -69,13 +69,14 @@ class ChaCha20Poly1305Service {
     );
 
     if (this.usedNonces.has(nonceKey)) {
-      // SECURITY: Synchronous random delay to prevent timing oracle attacks
+      // SECURITY: Synchronous cryptographically secure random delay to prevent timing oracle attacks
       // Cannot use async in this context, so use synchronous busy wait
-      const delay = Math.floor(Math.random() * 10) + 5; // 5-15ms random delay
+      const randomDelay = crypto.getRandomValues(new Uint8Array(1))[0] % 10 + 5; // 5-15ms random delay
       const start = performance.now();
-      while (performance.now() - start < delay) {
-        // Busy wait with random operations to prevent optimization
-        Math.random() * Math.random();
+      while (performance.now() - start < randomDelay) {
+        // Busy wait with cryptographically secure random operations to prevent optimization
+        const dummyData = crypto.getRandomValues(new Uint32Array(2));
+        dummyData[0] = dummyData[0] ^ dummyData[1];
       }
       throw new Error('CRITICAL: Nonce reuse detected in ChaCha20-Poly1305 encryption');
     }
@@ -291,20 +292,26 @@ class HashingService {
     return result.encoded;
   }
 
-  static async hashData(data: string) {
+  static async hashData(data: string, timeoutMs: number = 30000) {
     const salt = crypto.getRandomValues(new Uint8Array(32)); // Increased salt size
     const opts = {
       pass: data,
       salt,
       time: 5, // Increased iterations for better security
       mem: 2 ** 17, // Increased memory cost (128KB -> 256KB)
-      parallelism: 1,
+      parallelism: 4, // Increased parallelism for multi-core performance
       type: 2, // Argon2id
       version: 0x13,
       hashLen: 32,
     };
-    const res = await argon2.hash(opts);
-    return res.encoded;
+
+    // Add timeout protection for long-running Argon2 operations
+    return Promise.race([
+      argon2.hash(opts).then(res => res.encoded),
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error('Argon2 hash operation timed out')), timeoutMs)
+      )
+    ]);
   }
 
   static async verifyHash(encoded: string, data: string) {
@@ -325,15 +332,16 @@ class HashingService {
     // SECURITY: Use SecureMemory constant-time comparison to prevent cache timing attacks
     const isValid = SecureMemory.constantTimeCompare(computedMac, expectedMac);
 
-    // SECURITY: Add random delay to prevent timing analysis
-    const delay = Math.floor(Math.random() * 5) + 1; // 1-5ms random delay
+    // SECURITY: Add cryptographically secure random delay to prevent timing analysis
+    const randomDelay = crypto.getRandomValues(new Uint8Array(1))[0] % 5 + 1; // 1-5ms random delay
     const start = performance.now();
-    while (performance.now() - start < delay) {
-      // Busy wait with cache-polluting operations
+    while (performance.now() - start < randomDelay) {
+      // Busy wait with cache-polluting operations using secure random
       const dummy = new Uint8Array(64);
       crypto.getRandomValues(dummy);
+      const randomMask = crypto.getRandomValues(new Uint8Array(64));
       for (let i = 0; i < dummy.length; i++) {
-        dummy[i] ^= Math.floor(Math.random() * 256);
+        dummy[i] ^= randomMask[i];
       }
     }
 
@@ -359,7 +367,7 @@ class HashingService {
       ? Base64.base64ToUint8Array(options.salt)
       : crypto.getRandomValues(new Uint8Array(16));
 
-    let { time = 5, memoryCost = 2 ** 17, parallelism = 2, algorithm = 2, version = 0x13, hashLen = 32 } = options || {};
+    let { time = 5, memoryCost = 2 ** 17, parallelism = 4, algorithm = 2, version = 0x13, hashLen = 32 } = options || {};
 
     if (typeof algorithm === "string") {
       switch (algorithm.toLowerCase()) {
@@ -435,7 +443,7 @@ class KeyService {
       ? Base64.base64ToUint8Array(options.saltBase64)
       : crypto.getRandomValues(new Uint8Array(16));
 
-    let { time = 5, memoryCost = 2 ** 17, parallelism = 2, algorithm = 2, version = 0x13, hashLen = 32 } = options || {};
+    let { time = 5, memoryCost = 2 ** 17, parallelism = 4, algorithm = 2, version = 0x13, hashLen = 32 } = options || {};
 
     if (typeof algorithm === "string") {
       switch (algorithm.toLowerCase()) {
@@ -516,11 +524,23 @@ class X25519Service {
   }
 
   static async generateKeyPair() {
+    // SECURITY: Validate crypto availability first
+    if (!crypto || !crypto.getRandomValues) {
+      throw new Error('CRITICAL: No secure random number generator available');
+    }
+
+    if (!subtle) {
+      throw new Error('CRITICAL: SubtleCrypto API not available');
+    }
+
     if (this.supportsWebCryptoX25519()) {
       try {
         const kp = await (subtle as SubtleCrypto).generateKey({ name: "X25519" } as any, true, [
           "deriveBits",
         ]);
+        if (!kp || !kp.privateKey || !kp.publicKey) {
+          throw new Error('Invalid key pair generated');
+        }
         return kp as CryptoKeyPair;
       } catch (err) {
         console.warn("WebCrypto X25519 failed; falling back to noble", err);
@@ -528,10 +548,8 @@ class X25519Service {
     }
 
     const x = await this._loadNobleIfNeeded();
-
-    // SECURITY: Ensure we're using cryptographically secure random generation
-    if (!crypto || !crypto.getRandomValues) {
-      throw new Error('CRITICAL: No secure random number generator available');
+    if (!x) {
+      throw new Error('CRITICAL: Failed to load X25519 implementation');
     }
 
     const priv = x.utils.randomPrivateKey();

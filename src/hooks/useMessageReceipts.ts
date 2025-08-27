@@ -17,6 +17,12 @@ export function useMessageReceipts(
 		const stored = localStorage.getItem(`sentReadReceipts_${currentUsername}`);
 		if (stored) {
 			try {
+				// SECURITY: Validate JSON size and parse safely
+				if (stored.length > 100000) {
+					console.error('[Receipt] Stored receipts data too large, clearing');
+					localStorage.removeItem(key);
+					return;
+				}
 				const receipts = JSON.parse(stored);
 				// Only load receipts from the last 24 hours to avoid permanent blocking
 				const oneDayAgo = Date.now() - (24 * 60 * 60 * 1000);
