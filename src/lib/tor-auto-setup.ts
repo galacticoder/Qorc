@@ -10,6 +10,8 @@ export interface TorSetupStatus {
   isConfigured: boolean;
   isRunning: boolean;
   version?: string;
+  socksPort?: number;
+  controlPort?: number;
   error?: string;
   setupProgress: number; // 0-100
   currentStep: string;
@@ -234,13 +236,17 @@ export class TorAutoSetup {
    * Generate optimal Tor configuration
    */
   private generateTorConfig(options: TorInstallOptions): string {
+    // Use dynamic ports from options or defaults
+    const socksPort = options.customConfig?.socksPort || 9050;
+    const controlPort = options.customConfig?.controlPort || 9051;
+    
     const config = [
       '# Auto-generated Tor configuration for SecureChat',
       '# SOCKS proxy port',
-      'SocksPort 9050',
+      `SocksPort ${socksPort}`,
       '',
       '# Control port for circuit management',
-      'ControlPort 9051',
+      `ControlPort ${controlPort}`,
       'CookieAuthentication 1',
       '',
       '# Security settings',
@@ -332,13 +338,47 @@ export class TorAutoSetup {
   }
 
   /**
+   * Refresh status from Electron API
+   */
+  async refreshStatus(): Promise<TorSetupStatus> {
+    try {
+      if (typeof window !== 'undefined' && (window as any).electronAPI) {
+        const torStatus = await (window as any).electronAPI.getTorStatus();
+        const torInfo = await (window as any).electronAPI.getTorInfo();
+        
+        this.status.isRunning = torStatus.isRunning || false;
+        this.status.version = torInfo.systemTorVersion || torInfo.version || undefined;
+        this.status.socksPort = torInfo.socksPort;
+        this.status.controlPort = torInfo.controlPort;
+        
+        // If Tor is running and we have version info, assume installed/configured
+        if (this.status.isRunning && this.status.version) {
+          this.status.isInstalled = true;
+          this.status.isConfigured = true;
+          this.status.setupProgress = 100;
+          this.status.currentStep = 'Tor setup complete!';
+        }
+      }
+    } catch (error) {
+      console.error('[TOR-SETUP] Failed to refresh status:', error);
+    }
+    
+    return { ...this.status };
+  }
+
+  /**
    * Stop Tor service
    */
   async stopTor(): Promise<boolean> {
     try {
       if (typeof window !== 'undefined' && (window as any).electronAPI) {
         const result = await (window as any).electronAPI.stopTor();
-        this.status.isRunning = !result.success;
+        if (result.success) {
+          this.status.isRunning = false;
+          this.status.error = undefined; // Clear any previous errors
+          this.status.setupProgress = 0; // Reset progress
+          this.status.currentStep = 'Ready to setup'; // Reset step
+        }
         return result.success;
       }
       return false;
@@ -359,6 +399,9 @@ export class TorAutoSetup {
           this.status.isInstalled = false;
           this.status.isConfigured = false;
           this.status.isRunning = false;
+          this.status.error = undefined; // Clear any previous errors
+          this.status.setupProgress = 0; // Reset progress
+          this.status.currentStep = 'Ready to setup'; // Reset step
         }
         return result.success;
       }

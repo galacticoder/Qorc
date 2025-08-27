@@ -722,13 +722,73 @@ fi
         console.log('[TOR-MANAGER] Config file not found:', this.configPath);
       }
 
-      // Check if Tor binary exists
+      // Check if Tor binary exists (local)
       let binaryExists = false;
       try {
         const stats = await fs.stat(this.torPath);
         binaryExists = stats.isFile();
       } catch (error) {
-        console.log('[TOR-MANAGER] Tor binary not found:', this.torPath);
+        console.log('[TOR-MANAGER] Local Tor binary not found:', this.torPath);
+      }
+
+      // If no local binary, check for system Tor
+      let systemTorRunning = false;
+      let systemTorVersion = null;
+      let systemTorBinaryPath = null;
+      if (!binaryExists || !status.isRunning) {
+        try {
+          const systemCheck = await new Promise((resolve) => {
+            exec('tor --version', (error, stdout) => {
+              if (!error && stdout.includes('Tor version')) {
+                const version = stdout.split('\n')[0].match(/Tor version (\d+\.\d+\.\d+)/)?.[1];
+                resolve({ available: true, version });
+              } else {
+                resolve({ available: false });
+              }
+            });
+          });
+
+          if (systemCheck.available) {
+            systemTorVersion = systemCheck.version;
+            
+            // Get system Tor binary path
+            const binaryPathCheck = await new Promise((resolve) => {
+              const whichCmd = this.platform === 'win32' ? 'where tor' : 'which tor';
+              exec(whichCmd, (error, stdout) => {
+                if (!error && stdout.trim()) {
+                  resolve(stdout.trim().split('\n')[0]);
+                } else {
+                  resolve('tor (in PATH)');
+                }
+              });
+            });
+            
+            systemTorBinaryPath = binaryPathCheck;
+            
+            // Check if system Tor service is actually running (not just any Tor on port 9050)
+            const serviceCheck = await new Promise((resolve) => {
+              const serviceCmd = this.platform === 'win32' 
+                ? 'sc query tor'
+                : 'systemctl is-active tor 2>/dev/null';
+              
+              exec(serviceCmd, (error, stdout) => {
+                if (this.platform === 'win32') {
+                  // Windows: check if service is running
+                  const isRunning = !error && stdout.includes('RUNNING');
+                  resolve(isRunning);
+                } else {
+                  // Linux/macOS: check systemctl status
+                  const isActive = !error && stdout.trim() === 'active';
+                  resolve(isActive);
+                }
+              });
+            });
+            
+            systemTorRunning = serviceCheck;
+          }
+        } catch (error) {
+          console.log('[TOR-MANAGER] Failed to check system Tor:', error);
+        }
       }
 
       // Check if data directory exists
@@ -741,15 +801,93 @@ fi
         console.log('[TOR-MANAGER] Data directory not found:', dataDir);
       }
 
-      return {
+      // Determine which Tor is actually running
+      const finalStatus = {
         ...status,
+        isRunning: status.isRunning || systemTorRunning,
+        processId: status.processId || (systemTorRunning ? 'system' : status.processId)
+      };
+      
+      // If we have our own process running, don't override with system info
+      if (this.torProcess && !this.torProcess.killed) {
+        finalStatus.isRunning = true;
+        finalStatus.processId = this.torProcess.pid;
+        systemTorRunning = false; // Our bundled Tor takes precedence
+      }
+
+      // Extract ports from configuration
+      let socksPort = null;
+      let controlPort = null;
+      
+      if (configExists && configContent) {
+        // Parse SOCKS port from config
+        const socksMatch = configContent.match(/^SocksPort\s+(\d+)/m);
+        if (socksMatch) {
+          socksPort = parseInt(socksMatch[1], 10);
+        }
+        
+        // Parse Control port from config
+        const controlMatch = configContent.match(/^ControlPort\s+(\d+)/m);
+        if (controlMatch) {
+          controlPort = parseInt(controlMatch[1], 10);
+        }
+      }
+      
+      // Detect ports from actual running processes
+      if (!socksPort || !controlPort) {
+        try {
+          const portDetection = await new Promise((resolve) => {
+            const cmd = this.platform === 'win32' 
+              ? 'netstat -ano | findstr LISTEN'
+              : 'ss -tlnp | grep :905 || netstat -tlnp | grep :905';
+            
+            exec(cmd, (error, stdout) => {
+              const ports = { socks: null, control: null };
+              if (!error && stdout) {
+                // Look for ports 9050-9059 range
+                const portMatches = stdout.match(/:(\d+)/g);
+                if (portMatches) {
+                  portMatches.forEach(match => {
+                    const port = parseInt(match.substring(1), 10);
+                    // SOCKS ports (9050-9059)
+                    if (port >= 9050 && port <= 9059 && !ports.socks) {
+                      ports.socks = port;
+                    }
+                    // Control ports (9051-9061)
+                    if (port >= 9051 && port <= 9061 && !ports.control) {
+                      ports.control = port;
+                    }
+                  });
+                }
+              }
+              resolve(ports);
+            });
+          });
+          
+          if (!socksPort && portDetection.socks) socksPort = portDetection.socks;
+          if (!controlPort && portDetection.control) controlPort = portDetection.control;
+        } catch (error) {
+          console.log('[TOR-MANAGER] Failed to detect Tor ports:', error);
+        }
+      }
+
+      return {
+        ...finalStatus,
         configExists,
         configSize: configContent.length,
-        binaryExists,
+        configPath: this.configPath,
+        binaryExists: binaryExists || !!systemTorVersion,
+        binaryPath: systemTorVersion ? (systemTorBinaryPath || 'system') : this.torPath,
         dataDirExists,
+        dataDirectory: path.join(this.torDir, 'data'),
         torDirectory: this.torDir,
         platform: this.platform,
-        arch: this.arch
+        arch: this.arch,
+        systemTorRunning,
+        systemTorVersion,
+        usingSystemTor: systemTorRunning && !this.torProcess, // Only true if system Tor is running AND we don't have our own process
+        socksPort,
+        controlPort
       };
     } catch (error) {
       console.error('[TOR-MANAGER] Failed to get Tor info:', error);

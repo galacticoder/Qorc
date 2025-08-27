@@ -6,17 +6,23 @@ import { CheckCircle, XCircle, Info, RefreshCw } from 'lucide-react';
 
 interface TorInfo {
   isRunning: boolean;
-  processId?: number;
+  processId?: number | string;
   configExists: boolean;
   configSize: number;
+  configPath?: string;
   binaryExists: boolean;
+  binaryPath?: string;
   dataDirExists: boolean;
+  dataDirectory?: string;
   torDirectory: string;
   platform: string;
   arch: string;
   hasProcess: boolean;
   processKilled?: boolean;
   uptime: number;
+  systemTorRunning?: boolean;
+  systemTorVersion?: string;
+  usingSystemTor?: boolean;
   error?: string;
 }
 
@@ -54,7 +60,7 @@ export const TorVerification: React.FC<TorVerificationProps> = ({ onClose }) => 
       }
     } catch (error) {
       console.error('[TOR-VERIFICATION] Failed to test connection:', error);
-      setConnectionTest({ success: false, error: error.message });
+      setConnectionTest({ success: false, error: error instanceof Error ? error.message : 'Unknown error' });
     } finally {
       setIsLoading(false);
     }
@@ -112,28 +118,45 @@ export const TorVerification: React.FC<TorVerificationProps> = ({ onClose }) => 
         {torInfo && (
           <div className="space-y-3 p-4 bg-gray-50 rounded-lg">
             <h3 className="font-semibold">Tor Process Status</h3>
+            
+            {/* Show system Tor info if detected */}
+            {torInfo.usingSystemTor && (
+              <div className="mb-3 p-2 bg-blue-100 rounded text-sm text-blue-800">
+                <strong>System Tor Detected:</strong> Using system-installed Tor service
+                {torInfo.systemTorVersion && ` (v${torInfo.systemTorVersion})`}
+              </div>
+            )}
+            
             <div className="grid grid-cols-1 md:grid-cols-2 gap-2 text-sm">
               <div className="flex items-center">
                 Process Running:
                 <StatusBadge condition={torInfo.isRunning} trueText="Yes" falseText="No" />
               </div>
               <div className="flex items-center">
-                Process ID: <span className="ml-2 font-mono">{torInfo.processId || 'N/A'}</span>
+                Process ID: <span className="ml-2 font-mono">
+                  {torInfo.processId === 'system' ? 'System Service' : (torInfo.processId || 'N/A')}
+                </span>
               </div>
               <div className="flex items-center">
                 Config File:
                 <StatusBadge condition={torInfo.configExists} trueText="Exists" falseText="Missing" />
+                {!torInfo.configExists && torInfo.usingSystemTor && (
+                  <span className="ml-2 text-xs text-gray-500">(Using system config)</span>
+                )}
               </div>
               <div className="flex items-center">
                 Config Size: <span className="ml-2 font-mono">{torInfo.configSize} bytes</span>
               </div>
               <div className="flex items-center">
                 Tor Binary:
-                <StatusBadge condition={torInfo.binaryExists} trueText="Found" falseText="Missing" />
+                <StatusBadge condition={torInfo.binaryExists} trueText="Found" falseText={torInfo.usingSystemTor ? "System" : "Missing"} />
               </div>
               <div className="flex items-center">
                 Data Directory:
                 <StatusBadge condition={torInfo.dataDirExists} trueText="Exists" falseText="Missing" />
+                {!torInfo.dataDirExists && torInfo.usingSystemTor && (
+                  <span className="ml-2 text-xs text-gray-500">(Using system data)</span>
+                )}
               </div>
               <div className="flex items-center">
                 Platform: <span className="ml-2 font-mono">{torInfo.platform}</span>
@@ -147,37 +170,61 @@ export const TorVerification: React.FC<TorVerificationProps> = ({ onClose }) => 
                 </div>
               )}
             </div>
-            <div className="text-xs text-gray-600">
-              <strong>Tor Directory:</strong> {torInfo.torDirectory}
+            <div className="text-xs text-gray-600 space-y-1">
+              <div><strong>Tor Directory:</strong> {torInfo.torDirectory}</div>
+              {torInfo.configPath && (
+                <div><strong>Config File:</strong> {torInfo.configPath}</div>
+              )}
+              {torInfo.binaryPath && (
+                <div><strong>Binary Path:</strong> {torInfo.binaryPath === 'system' ? 'System Tor (via PATH)' : torInfo.binaryPath}</div>
+              )}
+              {torInfo.dataDirectory && (
+                <div><strong>Data Directory:</strong> {torInfo.dataDirectory}</div>
+              )}
             </div>
           </div>
         )}
 
         {connectionTest && (
-          <div className="space-y-3 p-4 bg-blue-50 rounded-lg">
-            <h3 className="font-semibold">Connection Test Results</h3>
-            <div className="text-sm">
+          <div className="space-y-4 p-6 bg-blue-50 rounded-lg border border-blue-200">
+            <h3 className="text-lg font-semibold text-blue-900">Connection Test Results</h3>
+            <div className="space-y-3">
               {connectionTest.success ? (
-                <div className="flex items-center text-green-700">
-                  <CheckCircle className="w-4 h-4 mr-2" />
-                  {connectionTest.isTor ? (
-                    <>
-                      <strong>SUCCESS:</strong> You are connected through Tor!
-                      <br />
-                      <span className="text-xs">Your IP: {connectionTest.ip}</span>
-                    </>
-                  ) : (
-                    <>
-                      <strong>WARNING:</strong> Connected but not through Tor
-                      <br />
-                      <span className="text-xs">Your real IP: {connectionTest.ip}</span>
-                    </>
-                  )}
+                <div className="flex items-start gap-3">
+                  <CheckCircle className="w-5 h-5 mt-0.5 text-green-600 flex-shrink-0" />
+                  <div className="space-y-2">
+                    {connectionTest.isTor ? (
+                      <>
+                        <div className="text-green-800 font-medium text-base">
+                          SUCCESS: You are connected through Tor!
+                        </div>
+                        <div className="text-sm text-green-700 bg-green-100 px-3 py-2 rounded-md font-mono">
+                          Your Tor IP: {connectionTest.ip}
+                        </div>
+                      </>
+                    ) : (
+                      <>
+                        <div className="text-orange-800 font-medium text-base">
+                          WARNING: Connected but not through Tor
+                        </div>
+                        <div className="text-sm text-orange-700 bg-orange-100 px-3 py-2 rounded-md font-mono">
+                          Your real IP: {connectionTest.ip}
+                        </div>
+                      </>
+                    )}
+                  </div>
                 </div>
               ) : (
-                <div className="flex items-center text-red-700">
-                  <XCircle className="w-4 h-4 mr-2" />
-                  <strong>FAILED:</strong> {connectionTest.error}
+                <div className="flex items-start gap-3">
+                  <XCircle className="w-5 h-5 mt-0.5 text-red-600 flex-shrink-0" />
+                  <div className="space-y-2">
+                    <div className="text-red-800 font-medium text-base">
+                      FAILED: Connection test failed
+                    </div>
+                    <div className="text-sm text-red-700 bg-red-100 px-3 py-2 rounded-md">
+                      {connectionTest.error}
+                    </div>
+                  </div>
                 </div>
               )}
             </div>

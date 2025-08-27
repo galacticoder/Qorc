@@ -189,7 +189,7 @@ const ChatApp: React.FC<ChatAppProps> = ({ onNavigate }) => {
       <div className="flex items-center justify-center min-h-screen p-4 bg-gradient-to-r from-gray-50 to-slate-50">
         <div className="w-full max-w-2xl">
           <TorAutoSetup
-            onSetupComplete={handleTorSetupComplete}
+            onComplete={handleTorSetupComplete}
             autoStart={true}
           />
         </div>

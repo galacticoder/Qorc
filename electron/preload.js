@@ -20,6 +20,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   startTor: () => ipcRenderer.invoke('tor:start'),
   stopTor: () => ipcRenderer.invoke('tor:stop'),
   getTorStatus: () => ipcRenderer.invoke('tor:status'),
+  getTorInfo: () => ipcRenderer.invoke('tor:info'),
   uninstallTor: () => ipcRenderer.invoke('tor:uninstall'),
   
   // Utility functions

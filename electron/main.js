@@ -166,6 +166,15 @@ ipcMain.handle('tor:uninstall', async () => {
   }
 });
 
+ipcMain.handle('tor:info', async () => {
+  try {
+    return await torManager.getTorInfo();
+  } catch (error) {
+    console.error('[IPC] Error getting Tor info:', error);
+    return { error: error.message };
+  }
+});
+
 // Get platform info
 ipcMain.handle('system:platform', () => {
   return {

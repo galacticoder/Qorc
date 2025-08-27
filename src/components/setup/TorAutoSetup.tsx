@@ -1,19 +1,19 @@
-import React, { useState, useEffect } from 'react';
+import { useState, useEffect } from 'react';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Progress } from '@/components/ui/progress';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
-import { Shield, Download, Settings, Play, CheckCircle, AlertTriangle, Loader2, Info } from 'lucide-react';
+import { Download, Settings, Play, CheckCircle, AlertTriangle, Loader2, Info } from 'lucide-react';
 import { torAutoSetup, TorSetupStatus } from '@/lib/tor-auto-setup';
 import { TorVerification } from './TorVerification';
 
 interface TorAutoSetupProps {
-  onSetupComplete?: (success: boolean) => void;
+  onComplete?: (success: boolean) => void;
   autoStart?: boolean;
 }
 
-export function TorAutoSetup({ onSetupComplete, autoStart = true }: TorAutoSetupProps) {
+export function TorAutoSetup({ onComplete }: TorAutoSetupProps) {
   const [status, setStatus] = useState<TorSetupStatus>({
     isInstalled: false,
     isConfigured: false,
@@ -26,11 +26,24 @@ export function TorAutoSetup({ onSetupComplete, autoStart = true }: TorAutoSetup
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [showVerification, setShowVerification] = useState(false);
 
-  // Check initial status
+  // Check initial status and refresh from Electron API
   useEffect(() => {
-    const initialStatus = torAutoSetup.getStatus();
-    setStatus(initialStatus);
+    const loadInitialStatus = async () => {
+      const initialStatus = await torAutoSetup.refreshStatus();
+      setStatus(initialStatus);
+    };
+    loadInitialStatus();
   }, []);
+
+  // Prevent body scrolling when verification modal is open
+  useEffect(() => {
+    if (showVerification) {
+      document.body.style.overflow = 'hidden';
+      return () => {
+        document.body.style.overflow = 'unset';
+      };
+    }
+  }, [showVerification]);
 
   const handleAutoSetup = async () => {
     console.log('[TOR-SETUP-UI] Starting auto setup...');
@@ -61,9 +74,7 @@ export function TorAutoSetup({ onSetupComplete, autoStart = true }: TorAutoSetup
 
       console.log('[TOR-SETUP-UI] Setup completed, success:', success);
 
-      if (onSetupComplete) {
-        onSetupComplete(success);
-      }
+      // Don't auto-navigate - let user click Continue button
 
     } catch (error) {
       console.error('[TOR-SETUP-UI] Setup failed:', error);
@@ -77,34 +88,17 @@ export function TorAutoSetup({ onSetupComplete, autoStart = true }: TorAutoSetup
     }
   };
 
-  const getStatusIcon = () => {
-    if (status.error) {
-      return <AlertTriangle className="h-5 w-5 text-red-500" />;
-    }
-    
-    if (status.setupProgress === 100) {
-      return <CheckCircle className="h-5 w-5 text-green-500" />;
-    }
-    
-    if (isSetupRunning) {
-      return <Loader2 className="h-5 w-5 animate-spin text-blue-500" />;
-    }
-    
-    return <Shield className="h-5 w-5 text-gray-500" />;
-  };
 
   const getStatusColor = () => {
-    // Prioritize active setup over error state
-    if (isSetupRunning || status.setupProgress > 0) return 'secondary';
-    if (status.setupProgress === 100) return 'default';
+    if (status.setupProgress === 100 && !isSetupRunning) return 'default';
+    if (isSetupRunning || (status.setupProgress > 0 && status.setupProgress < 100)) return 'secondary';
     if (status.error && !isSetupRunning) return 'destructive';
     return 'outline';
   };
 
   const getStatusText = () => {
-    // Prioritize active setup over error state
-    if (isSetupRunning || status.setupProgress > 0) return 'Setting Up...';
-    if (status.setupProgress === 100) return 'Ready';
+    if (status.setupProgress === 100 && !isSetupRunning) return 'Complete';
+    if (isSetupRunning || (status.setupProgress > 0 && status.setupProgress < 100)) return 'Setting Up...';
     if (status.error && !isSetupRunning) return 'Setup Failed';
     return 'Not Configured';
   };
@@ -115,14 +109,11 @@ export function TorAutoSetup({ onSetupComplete, autoStart = true }: TorAutoSetup
       <Card>
         <CardHeader>
           <div className="flex items-center justify-between">
-            <div className="flex items-center gap-3">
-              {getStatusIcon()}
-              <div>
-                <CardTitle>Tor Network Setup</CardTitle>
-                <CardDescription>
-                  Automatic installation and configuration of Tor for anonymous networking
-                </CardDescription>
-              </div>
+            <div>
+              <CardTitle>Tor Network Setup</CardTitle>
+              <CardDescription>
+                Automatic installation and configuration of Tor for anonymous networking
+              </CardDescription>
             </div>
             <Badge variant={getStatusColor()}>
               {getStatusText()}
@@ -190,25 +181,11 @@ export function TorAutoSetup({ onSetupComplete, autoStart = true }: TorAutoSetup
                 )}
               </Button>
 
-              {/* Skip Button - only show if there's an error or user wants to skip */}
-              {(status.error || !isSetupRunning) && (
-                <Button
-                  onClick={() => {
-                    localStorage.setItem('tor_setup_skipped', 'true');
-                    onSetupComplete && onSetupComplete(false);
-                  }}
-                  variant="outline"
-                  className="w-full"
-                  disabled={isSetupRunning}
-                >
-                  Skip Tor Setup (Continue Without Tor)
-                </Button>
-              )}
             </div>
           )}
 
           {/* Success Message */}
-          {status.setupProgress === 100 && !status.error && (
+          {status.setupProgress === 100 && !isSetupRunning && (
             <div className="space-y-3">
               <Alert>
                 <CheckCircle className="h-4 w-4" />
@@ -217,6 +194,14 @@ export function TorAutoSetup({ onSetupComplete, autoStart = true }: TorAutoSetup
                   Your connections will be automatically routed through the Tor network for enhanced privacy.
                 </AlertDescription>
               </Alert>
+
+              <Button
+                onClick={() => onComplete && onComplete(true)}
+                className="w-full"
+                size="lg"
+              >
+                Continue to Login
+              </Button>
 
               <Button
                 onClick={() => setShowVerification(true)}
@@ -253,12 +238,12 @@ export function TorAutoSetup({ onSetupComplete, autoStart = true }: TorAutoSetup
                 
                 <div className="flex justify-between">
                   <span>SOCKS Port:</span>
-                  <span className="font-mono">9050</span>
+                  <span className="font-mono">{status.socksPort || 'Not detected'}</span>
                 </div>
                 
                 <div className="flex justify-between">
                   <span>Control Port:</span>
-                  <span className="font-mono">9051</span>
+                  <span className="font-mono">{status.controlPort || 'Not detected'}</span>
                 </div>
               </div>
 
@@ -266,7 +251,16 @@ export function TorAutoSetup({ onSetupComplete, autoStart = true }: TorAutoSetup
                 <Button 
                   variant="outline" 
                   size="sm"
-                  onClick={() => torAutoSetup.stopTor()}
+                  onClick={async () => {
+                    await torAutoSetup.stopTor();
+                    // Refresh status after stopping and reset setup progress
+                    const newStatus = await torAutoSetup.refreshStatus();
+                    setStatus({
+                      ...newStatus,
+                      setupProgress: 0,
+                      currentStep: 'Ready to setup'
+                    });
+                  }}
                   disabled={!status.isRunning}
                 >
                   Stop Tor
@@ -275,7 +269,16 @@ export function TorAutoSetup({ onSetupComplete, autoStart = true }: TorAutoSetup
                 <Button 
                   variant="outline" 
                   size="sm"
-                  onClick={() => torAutoSetup.uninstallTor()}
+                  onClick={async () => {
+                    await torAutoSetup.uninstallTor();
+                    // Refresh status after uninstalling and reset setup progress
+                    const newStatus = await torAutoSetup.refreshStatus();
+                    setStatus({
+                      ...newStatus,
+                      setupProgress: 0,
+                      currentStep: 'Ready to setup'
+                    });
+                  }}
                   disabled={isSetupRunning}
                 >
                   Uninstall
@@ -338,8 +341,25 @@ export function TorAutoSetup({ onSetupComplete, autoStart = true }: TorAutoSetup
 
       {/* Tor Verification Modal */}
       {showVerification && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
-          <TorVerification onClose={() => setShowVerification(false)} />
+        <div 
+          className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50 overflow-hidden"
+          onClick={(e) => {
+            if (e.target === e.currentTarget) {
+              setShowVerification(false);
+            }
+          }}
+          style={{ 
+            position: 'fixed',
+            top: 0,
+            left: 0,
+            right: 0,
+            bottom: 0,
+            overflowY: 'hidden'
+          }}
+        >
+          <div className="max-h-[90vh] overflow-y-auto scrollbar-hide">
+            <TorVerification onClose={() => setShowVerification(false)} />
+          </div>
         </div>
       )}
     </div>
