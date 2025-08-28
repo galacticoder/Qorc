@@ -1,16 +1,55 @@
 const { contextBridge, ipcRenderer } = require('electron');
 
+// SECURITY: Validate and sanitize all inputs to prevent injection attacks
+function validateTorOptions(options) {
+  if (!options || typeof options !== 'object') {
+    throw new Error('Invalid options: must be an object');
+  }
+  
+  // SECURITY: Validate config string to prevent command injection
+  if (options.config && typeof options.config === 'string') {
+    // Check for dangerous patterns that could be used for command injection
+    const dangerousPatterns = [
+      /[;&|`$()]/,  // Shell metacharacters
+      /\.\./,       // Path traversal
+      /\/etc\//,    // System directories
+      /\/proc\//,   // Process filesystem
+      /\/dev\//,    // Device files
+    ];
+    
+    for (const pattern of dangerousPatterns) {
+      if (pattern.test(options.config)) {
+        throw new Error('Invalid configuration: contains dangerous patterns');
+      }
+    }
+    
+    // Limit config size to prevent DoS
+    if (options.config.length > 10000) {
+      throw new Error('Configuration too large');
+    }
+  }
+  
+  return options;
+}
+
 // Expose Tor and system functionality for the auto-setup
 contextBridge.exposeInMainWorld('electronAPI', {
-  // Platform information
+  // Platform information - static values only
   platform: process.platform,
   arch: process.arch,
 
-  // Tor management functions
+  // Tor management functions with input validation
   checkTorInstallation: () => ipcRenderer.invoke('tor:check-installation'),
   downloadTor: () => ipcRenderer.invoke('tor:download'),
   installTor: () => ipcRenderer.invoke('tor:install'),
-  configureTor: (options) => ipcRenderer.invoke('tor:configure', options),
+  configureTor: (options) => {
+    try {
+      const validatedOptions = validateTorOptions(options);
+      return ipcRenderer.invoke('tor:configure', validatedOptions);
+    } catch (error) {
+      return Promise.reject(error);
+    }
+  },
   startTor: () => ipcRenderer.invoke('tor:start'),
   stopTor: () => ipcRenderer.invoke('tor:stop'),
   getTorStatus: () => ipcRenderer.invoke('tor:status'),

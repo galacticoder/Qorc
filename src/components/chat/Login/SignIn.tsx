@@ -22,9 +22,30 @@ export function SignInForm({ onSubmit, disabled, authStatus, error, hasServerTru
     e.preventDefault();
     if (disabled || isSubmitting || !isFormValid) return;
 
+    // SECURITY: Sanitize and validate inputs
+    const sanitizedUsername = username.trim();
+    
+    // SECURITY: Validate username format
+    if (!/^[a-zA-Z0-9_-]+$/.test(sanitizedUsername)) {
+      console.error('Invalid username format');
+      return;
+    }
+    
+    // SECURITY: Validate username length
+    if (sanitizedUsername.length < 3 || sanitizedUsername.length > 32) {
+      console.error('Username must be 3-32 characters');
+      return;
+    }
+    
+    // SECURITY: Validate password length
+    if (password.length < 1 || password.length > 1000) {
+      console.error('Invalid password length');
+      return;
+    }
+
     setIsSubmitting(true);
     try {
-      await onSubmit(username.trim(), password);
+      await onSubmit(sanitizedUsername, password);
     } finally {
       setIsSubmitting(false);
     }

@@ -17,13 +17,40 @@ const isDev = !!process.env.VITE_DEV_SERVER_URL;
     // This prevents any file descriptor issues from console operations
   }
 
-  // Override console methods to prevent any console operations
+  // SECURITY: Secure console override to prevent information leakage
   if (typeof console !== 'undefined') {
-    console.log = () => {};
-    console.error = () => {};
-    console.warn = () => {};
-    console.info = () => {};
-    console.debug = () => {};
+    const originalConsole = { ...console };
+    console.log = (...args) => {
+      // SECURITY: Filter sensitive information from logs
+      const filteredArgs = args.map(arg => {
+        if (typeof arg === 'string') {
+          // Remove potential sensitive data patterns
+          return arg.replace(/password[^:]*:[^,}]*/gi, 'password:***')
+                   .replace(/token[^:]*:[^,}]*/gi, 'token:***')
+                   .replace(/key[^:]*:[^,}]*/gi, 'key:***');
+        }
+        return arg;
+      });
+      // Only log in development
+      if (process.env.NODE_ENV === 'development') {
+        originalConsole.log(...filteredArgs);
+      }
+    };
+    console.error = (...args) => {
+      // Always allow error logging but filter sensitive data
+      const filteredArgs = args.map(arg => {
+        if (typeof arg === 'string') {
+          return arg.replace(/password[^:]*:[^,}]*/gi, 'password:***')
+                   .replace(/token[^:]*:[^,}]*/gi, 'token:***')
+                   .replace(/key[^:]*:[^,}]*/gi, 'key:***');
+        }
+        return arg;
+      });
+      originalConsole.error(...filteredArgs);
+    };
+    console.warn = console.error; // Use same filtering for warnings
+    console.info = console.log;   // Use same filtering for info
+    console.debug = () => {}; // Disable debug in production
   }
   
   // Safe Signal Protocol wrapper to prevent native module EBADF errors

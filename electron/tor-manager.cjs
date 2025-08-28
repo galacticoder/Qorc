@@ -460,17 +460,94 @@ fi
       console.log('[TOR-MANAGER] Tor directory:', this.torDir);
       console.log('[TOR-MANAGER] Config path:', this.configPath);
 
+      // SECURITY: Validate configuration input
+      if (!config || typeof config !== 'string') {
+        throw new Error('Invalid configuration: must be a non-empty string');
+      }
+
+      // SECURITY: Limit configuration size to prevent DoS
+      if (config.length > 50000) { // 50KB limit
+        throw new Error('Configuration too large (max 50KB)');
+      }
+
+      // SECURITY: Validate configuration content
+      const dangerousPatterns = [
+        /[;&|`$()]/,           // Shell metacharacters
+        /\.\./,                // Path traversal
+        /\/etc\//,             // System directories
+        /\/proc\//,            // Process filesystem
+        /\/dev\//,             // Device files
+        /\/bin\//,             // Binary directories
+        /\/usr\/bin\//,        // User binaries
+        /\/sbin\//,            // System binaries
+        /exec/i,               // Execution commands
+        /system/i,             // System calls
+        /spawn/i,              // Process spawning
+        /\x00/,                // Null bytes
+      ];
+
+      for (const pattern of dangerousPatterns) {
+        if (pattern.test(config)) {
+          console.error('[TOR-MANAGER] Dangerous pattern detected in config:', pattern);
+          throw new Error('Configuration contains dangerous patterns');
+        }
+      }
+
+      // SECURITY: Validate that config only contains valid Tor configuration directives
+      const lines = config.split('\n');
+      const validTorDirectives = [
+        'SocksPort', 'ControlPort', 'DataDirectory', 'Log', 'RunAsDaemon',
+        'UseBridges', 'Bridge', 'ClientTransportPlugin', 'GeoIPFile',
+        'GeoIPv6File', 'ExitPolicy', 'ExitRelay', 'ORPort', 'DirPort',
+        'Nickname', 'ContactInfo', 'MyFamily', 'BandwidthRate', 'BandwidthBurst',
+        'MaxAdvertisedBandwidth', 'RelayBandwidthRate', 'RelayBandwidthBurst',
+        'PerConnBWRate', 'PerConnBWBurst', 'ClientOnly', 'ExitNodes',
+        'EntryNodes', 'ExcludeNodes', 'ExcludeExitNodes', 'StrictNodes',
+        'FascistFirewall', 'FirewallPorts', 'ReachableAddresses',
+        'ReachableDirAddresses', 'ReachableORAddresses', 'HiddenServiceDir',
+        'HiddenServicePort', 'HiddenServiceVersion', 'RendPostPeriod',
+        'HiddenServiceAuthorizeClient', 'ClientOnionAuthDir', 'CookieAuthentication',
+        'CookieAuthFile', 'CookieAuthFileGroupReadable', 'ControlPortWriteToFile',
+        'ControlPortFileGroupReadable', 'HashedControlPassword', 'DisableNetwork',
+        'PublishServerDescriptor', 'ShutdownWaitLength', 'SafeLogging',
+        'HardwareAccel', 'AccelName', 'AccelDir', 'AvoidDiskWrites',
+        'TunnelDirConns', 'PreferTunneledDirConns', 'CircuitBuildTimeout',
+        'CircuitIdleTimeout', 'CircuitStreamTimeout', 'MaxCircuitDirtiness',
+        'MaxClientCircuitsPending', 'NodeFamily', 'EnforceDistinctSubnets',
+        'SocksTimeout', 'TokenBucketRefillInterval', 'TrackHostExits',
+        'TrackHostExitsExpire', 'UpdateBridgesFromAuthority', 'UseMicrodescriptors',
+        'PathBiasCircThreshold', 'PathBiasNoticeRate', 'PathBiasWarnRate',
+        'PathBiasExtremeRate', 'PathBiasDropGuards', 'PathBiasScaleThreshold'
+      ];
+
+      for (const line of lines) {
+        const trimmedLine = line.trim();
+        if (trimmedLine === '' || trimmedLine.startsWith('#')) {
+          continue; // Skip empty lines and comments
+        }
+
+        const directive = trimmedLine.split(/\s+/)[0];
+        if (!validTorDirectives.includes(directive)) {
+          console.warn('[TOR-MANAGER] Unknown Tor directive:', directive);
+          // Don't throw error for unknown directives, just warn
+          // This allows for future Tor versions with new directives
+        }
+      }
+
       // Ensure Tor directory exists
       await fs.mkdir(this.torDir, { recursive: true });
       console.log('[TOR-MANAGER] Tor directory created/verified');
 
-      // Write configuration file
-      await fs.writeFile(this.configPath, config, 'utf8');
-      console.log('[TOR-MANAGER] Configuration file written');
+      // SECURITY: Write configuration file with restricted permissions
+      await fs.writeFile(this.configPath, config, { 
+        encoding: 'utf8',
+        mode: 0o600 // Read/write for owner only
+      });
+      console.log('[TOR-MANAGER] Configuration file written with secure permissions');
 
-      // Create data directory
+      // Create data directory with secure permissions
       const dataDir = path.join(this.torDir, 'data');
-      await fs.mkdir(dataDir, { recursive: true });
+      await fs.mkdir(dataDir, { recursive: true, mode: 0o700 }); // Owner only
       console.log('[TOR-MANAGER] Data directory created:', dataDir);
 
       console.log('[TOR-MANAGER] Tor configuration completed successfully');
@@ -499,24 +576,39 @@ fi
         return { success: true };
       }
 
-      // First, check if system Tor service is already running
-      const systemTorCheck = await new Promise((resolve) => {
-        exec('ss -tlnp | grep :9050', (error, stdout) => {
-          if (!error && stdout.includes('127.0.0.1:9050')) {
-            console.log('[TOR-MANAGER] System Tor service detected on port 9050');
-            resolve({ running: true, port: 9050 });
-          } else {
-            console.log('[TOR-MANAGER] No system Tor service detected');
-            resolve({ running: false });
-          }
-        });
-      });
+      // Decide whether to prefer our own Tor instance based on config (bridges require our torrc)
+      let preferOwnInstance = false;
+      try {
+        const configContent = await fs.readFile(this.configPath, 'utf8').catch(() => '');
+        if (configContent && /\bUseBridges\s+1\b/i.test(configContent)) {
+          preferOwnInstance = true;
+          console.log('[TOR-MANAGER] Bridge mode detected in config - preferring managed Tor instance');
+        }
+      } catch (e) {
+        // ignore
+      }
 
-      if (systemTorCheck.running) {
-        console.log('[TOR-MANAGER] Using existing system Tor service');
-        // Mark as running but don't create our own process
-        this.usingSystemTor = true;
-        return { success: true, usingSystemTor: true };
+      // Only adopt system Tor if we don't explicitly need our own instance
+      if (!preferOwnInstance) {
+        // First, check if system Tor service is already running
+        const systemTorCheck = await new Promise((resolve) => {
+          exec('ss -tlnp | grep :9050', (error, stdout) => {
+            if (!error && stdout.includes('127.0.0.1:9050')) {
+              console.log('[TOR-MANAGER] System Tor service detected on port 9050');
+              resolve({ running: true, port: 9050 });
+            } else {
+              console.log('[TOR-MANAGER] No system Tor service detected');
+              resolve({ running: false });
+            }
+          });
+        });
+
+        if (systemTorCheck.running) {
+          console.log('[TOR-MANAGER] Using existing system Tor service');
+          // Mark as running but don't create our own process
+          this.usingSystemTor = true;
+          return { success: true, usingSystemTor: true };
+        }
       }
 
       // Verify that Tor binary is available for starting our own instance
@@ -561,10 +653,25 @@ fi
 
       let processError = null;
 
-      this.torProcess = spawn('tor', [
-        '-f', this.configPath,
-        '--DataDirectory', dataDir
-      ], {
+      // Build spawn arguments and handle port conflicts if system Tor is already using defaults
+      let spawnArgs = ['-f', this.configPath, '--DataDirectory', dataDir];
+
+      // If defaults 9050/9051 are busy, use alternates 9150/9151
+      try {
+        const portsInUse = await new Promise((resolve) => {
+          exec('ss -tlnp | grep :905', (error, stdout) => {
+            resolve(!error && stdout ? stdout : '');
+          });
+        });
+        const socksBusy = typeof portsInUse === 'string' && portsInUse.includes(':9050');
+        const controlBusy = typeof portsInUse === 'string' && portsInUse.includes(':9051');
+        if (socksBusy || controlBusy) {
+          console.log('[TOR-MANAGER] Default ports busy, overriding to SocksPort 9150 / ControlPort 9151');
+          spawnArgs = ['-f', this.configPath, '--DataDirectory', dataDir, 'SocksPort', '9150', 'ControlPort', '9151'];
+        }
+      } catch {}
+
+      this.torProcess = spawn('tor', spawnArgs, {
         stdio: ['ignore', 'pipe', 'pipe'],
         detached: false
       });
@@ -603,12 +710,75 @@ fi
       // Check for errors
       if (processError) {
         console.error('[TOR-MANAGER] Tor startup failed:', processError);
+
+        // Automatic fallback: if snowflake bridges are configured, disable bridges and retry
+        try {
+          const cfg = await fs.readFile(this.configPath, 'utf8').catch(() => '');
+          const hasSnowflake = /UseBridges\s+1/i.test(cfg) && /ClientTransportPlugin\s+snowflake/i.test(cfg);
+          if (hasSnowflake) {
+            console.warn('[TOR-MANAGER] Snowflake bridge startup failed. Falling back to direct connection automatically.');
+            // Backup current config
+            try { await fs.writeFile(this.configPath + '.bak', cfg, 'utf8'); } catch {}
+            // Remove bridge-related lines and disable bridges
+            const newCfg = cfg
+              .split('\n')
+              .filter(line => !/^\s*UseBridges\b/i.test(line) && !/^\s*ClientTransportPlugin\b/i.test(line) && !/^\s*Bridge\b/i.test(line))
+              .concat(['', '# Auto-fallback: disable bridges for direct connection', 'UseBridges 0'])
+              .join('\n');
+            await fs.writeFile(this.configPath, newCfg, 'utf8');
+
+            // Retry starting Tor with updated config
+            console.log('[TOR-MANAGER] Retrying Tor start without bridges...');
+            processError = null;
+            this.torProcess = spawn('tor', spawnArgs, { stdio: ['ignore', 'pipe', 'pipe'], detached: false });
+            let retryError = null;
+            this.torProcess.stderr.on('data', (data) => {
+              const err = data.toString().trim();
+              if (err) retryError = err;
+            });
+            await new Promise(resolve => setTimeout(resolve, 3000));
+            if (!retryError && this.torProcess && !this.torProcess.killed) {
+              console.log('[TOR-MANAGER] Tor started successfully after disabling bridges');
+              return { success: true };
+            }
+          }
+        } catch (e) {
+          console.warn('[TOR-MANAGER] Fallback attempt failed:', e?.message || e);
+        }
+
         return { success: false, error: processError };
       }
 
       // Verify the process is still running
       if (!this.torProcess || this.torProcess.killed) {
         console.error('[TOR-MANAGER] Tor process failed to start or died');
+
+        // Attempt same automatic fallback for snowflake config
+        try {
+          const cfg = await fs.readFile(this.configPath, 'utf8').catch(() => '');
+          const hasSnowflake = /UseBridges\s+1/i.test(cfg) && /ClientTransportPlugin\s+snowflake/i.test(cfg);
+          if (hasSnowflake) {
+            console.warn('[TOR-MANAGER] Snowflake bridge process died. Falling back to direct connection automatically.');
+            try { await fs.writeFile(this.configPath + '.bak', cfg, 'utf8'); } catch {}
+            const newCfg = cfg
+              .split('\n')
+              .filter(line => !/^\s*UseBridges\b/i.test(line) && !/^\s*ClientTransportPlugin\b/i.test(line) && !/^\s*Bridge\b/i.test(line))
+              .concat(['', '# Auto-fallback: disable bridges for direct connection', 'UseBridges 0'])
+              .join('\n');
+            await fs.writeFile(this.configPath, newCfg, 'utf8');
+
+            console.log('[TOR-MANAGER] Retrying Tor start without bridges...');
+            this.torProcess = spawn('tor', spawnArgs, { stdio: ['ignore', 'pipe', 'pipe'], detached: false });
+            await new Promise(resolve => setTimeout(resolve, 3000));
+            if (this.torProcess && !this.torProcess.killed) {
+              console.log('[TOR-MANAGER] Tor started successfully after disabling bridges');
+              return { success: true };
+            }
+          }
+        } catch (e) {
+          console.warn('[TOR-MANAGER] Fallback attempt failed:', e?.message || e);
+        }
+
         return { success: false, error: 'Tor process failed to start or died immediately' };
       }
 
@@ -999,34 +1169,62 @@ fi
    * Send NEWNYM signal to Tor control port
    */
   async sendNewNymSignal() {
-    return new Promise((resolve) => {
+    return new Promise(async (resolve) => {
       const net = require('net');
-      const controlPort = 9051; // Default Tor control port
+      let controlPort = 9051; // default
+
+      // Try to read ControlPort from config
+      try {
+        const cfg = await fs.readFile(this.configPath, 'utf8');
+        const m = cfg.match(/^ControlPort\s+(\d+)/m);
+        if (m) controlPort = parseInt(m[1], 10) || controlPort;
+      } catch {}
+
+      // Read cookie for authentication (CookieAuthentication 1)
+      const dataDir = path.join(this.torDir, 'data');
+      const cookiePath = path.join(dataDir, 'control_auth_cookie');
+      let cookieHex = null;
+      try {
+        const cookie = await fs.readFile(cookiePath);
+        cookieHex = cookie.toString('hex');
+      } catch {}
 
       console.log('[TOR-MANAGER] Connecting to Tor control port:', controlPort);
-
       const socket = net.createConnection(controlPort, '127.0.0.1');
-      let responseData = '';
+
+      let stage = cookieHex ? 'auth' : 'signal';
+      let buffer = '';
+
+      const send = (cmd) => socket.write(cmd + '\r\n');
 
       socket.on('connect', () => {
         console.log('[TOR-MANAGER] Connected to Tor control port');
-        // Send NEWNYM command (no authentication needed for local connections by default)
-        socket.write('SIGNAL NEWNYM\r\n');
+        if (stage === 'auth') {
+          send(`AUTHENTICATE ${cookieHex}`);
+        } else {
+          send('SIGNAL NEWNYM');
+        }
       });
 
       socket.on('data', (data) => {
-        responseData += data.toString();
-        console.log('[TOR-MANAGER] Control port response:', data.toString().trim());
-
-        if (responseData.includes('250 OK')) {
-          console.log('[TOR-MANAGER] NEWNYM signal accepted by Tor');
-          socket.end();
-          resolve({ success: true, method: 'control-port' });
-        } else if (responseData.includes('514') || responseData.includes('510')) {
-          console.error('[TOR-MANAGER] Tor control authentication required or command failed');
-          socket.end();
-          resolve({ success: false, error: 'Control port authentication required' });
+        buffer += data.toString();
+        const lines = buffer.split(/\r?\n/).filter(Boolean);
+        for (const line of lines) {
+          console.log('[TOR-MANAGER] Control port response:', line.trim());
+          if (/^250/.test(line)) {
+            if (stage === 'auth') {
+              stage = 'signal';
+              send('SIGNAL NEWNYM');
+            } else {
+              socket.end();
+              return resolve({ success: true, method: 'control-port' });
+            }
+          } else if (/^(514|510)/.test(line)) {
+            socket.end();
+            return resolve({ success: false, error: 'Control port authentication required' });
+          }
         }
+        buffer = '';
       });
 
       socket.on('error', (error) => {
@@ -1038,7 +1236,6 @@ fi
         console.log('[TOR-MANAGER] Control port connection closed');
       });
 
-      // Timeout after 5 seconds
       setTimeout(() => {
         if (!socket.destroyed) {
           console.error('[TOR-MANAGER] Control port connection timeout');
@@ -1147,8 +1344,16 @@ fi
    */
   async getCurrentTorIP() {
     try {
+      // Determine active SOCKS port from config (fallback to 9050)
+      let socksPort = 9050;
+      try {
+        const cfg = await fs.readFile(this.configPath, 'utf8');
+        const m = cfg.match(/^SocksPort\s+(\d+)/m);
+        if (m) socksPort = parseInt(m[1], 10) || socksPort;
+      } catch {}
+
       const { SocksProxyAgent } = require('socks-proxy-agent');
-      const proxyAgent = new SocksProxyAgent('socks5://127.0.0.1:9050');
+      const proxyAgent = new SocksProxyAgent(`socks5://127.0.0.1:${socksPort}`);
 
       return new Promise((resolve) => {
         const options = {
@@ -1220,31 +1425,53 @@ fi
    * Get circuit info from Tor control port
    */
   async getCircuitInfoFromControl() {
-    return new Promise((resolve) => {
+    return new Promise(async (resolve) => {
       const net = require('net');
-      const socket = net.createConnection(9051, '127.0.0.1');
-      let responseData = '';
+      let controlPort = 9051;
+      try {
+        const cfg = await fs.readFile(this.configPath, 'utf8');
+        const m = cfg.match(/^ControlPort\s+(\d+)/m);
+        if (m) controlPort = parseInt(m[1], 10) || controlPort;
+      } catch {}
+
+      const dataDir = path.join(this.torDir, 'data');
+      const cookiePath = path.join(dataDir, 'control_auth_cookie');
+      let cookieHex = null;
+      try {
+        const cookie = await fs.readFile(cookiePath);
+        cookieHex = cookie.toString('hex');
+      } catch {}
+
+      const socket = net.createConnection(controlPort, '127.0.0.1');
+      let stage = cookieHex ? 'auth' : 'getinfo';
+      let buffer = '';
+      const send = (cmd) => socket.write(cmd + '\r\n');
 
       socket.on('connect', () => {
         console.log('[TOR-MANAGER] Connected to control port for circuit info');
-        // Request circuit list
-        socket.write('GETINFO circuit-status\r\n');
+        if (stage === 'auth') send(`AUTHENTICATE ${cookieHex}`); else send('GETINFO circuit-status');
       });
 
       socket.on('data', (data) => {
-        responseData += data.toString();
-        console.log('[TOR-MANAGER] Control response:', data.toString().trim());
-
-        if (responseData.includes('250 OK')) {
-          socket.end();
-          const circuits = this.parseCircuitStatus(responseData);
-          resolve({ success: true, data: circuits });
-        } else if (responseData.includes('250-circuit-status=')) {
-          // Continue reading
-        } else {
-          socket.end();
-          resolve({ success: false, error: 'Control port authentication failed' });
+        buffer += data.toString();
+        const lines = buffer.split(/\r?\n/).filter(Boolean);
+        for (const line of lines) {
+          console.log('[TOR-MANAGER] Control response:', line.trim());
+          if (/^250/.test(line)) {
+            if (stage === 'auth') {
+              stage = 'getinfo';
+              send('GETINFO circuit-status');
+            } else {
+              socket.end();
+              const circuits = this.parseCircuitStatus(buffer);
+              return resolve({ success: true, data: circuits });
+            }
+          } else if (/^(514|510)/.test(line)) {
+            socket.end();
+            return resolve({ success: false, error: 'Control port authentication failed' });
+          }
         }
+        buffer = '';
       });
 
       socket.on('error', (error) => {
@@ -1350,13 +1577,21 @@ fi
    * Make detailed request through Tor with timing info
    */
   async makeDetailedRequestThroughTor(url) {
-    return new Promise((resolve) => {
+    return new Promise(async (resolve) => {
       const startTime = Date.now();
 
       try {
+        // Determine active SOCKS port from config (fallback to 9050)
+        let socksPort = 9050;
+        try {
+          const cfg = await fs.readFile(this.configPath, 'utf8');
+          const m = cfg.match(/^SocksPort\s+(\d+)/m);
+          if (m) socksPort = parseInt(m[1], 10) || socksPort;
+        } catch {}
+
         const { SocksProxyAgent } = require('socks-proxy-agent');
         const https = require('https');
-        const proxyAgent = new SocksProxyAgent('socks5://127.0.0.1:9050');
+        const proxyAgent = new SocksProxyAgent(`socks5://127.0.0.1:${socksPort}`);
 
         const req = https.get(url, { agent: proxyAgent, timeout: 8000 }, (res) => {
           let data = '';
@@ -1433,9 +1668,17 @@ fi
     try {
       console.log('[TOR-MANAGER] Verifying Tor connection...');
 
+      // Determine active SOCKS port from config (fallback to 9050)
+      let socksPort = 9050;
+      try {
+        const cfg = await fs.readFile(this.configPath, 'utf8');
+        const m = cfg.match(/^SocksPort\s+(\d+)/m);
+        if (m) socksPort = parseInt(m[1], 10) || socksPort;
+      } catch {}
+
       return new Promise((resolve) => {
         const { SocksProxyAgent } = require('socks-proxy-agent');
-        const proxyAgent = new SocksProxyAgent('socks5://127.0.0.1:9050');
+        const proxyAgent = new SocksProxyAgent(`socks5://127.0.0.1:${socksPort}`);
 
         const options = {
           hostname: 'check.torproject.org',

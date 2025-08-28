@@ -18,7 +18,17 @@ class CryptoConfig {
 
 class RandomGenerator {
   static generateSecureRandom(length) {
-    return crypto.getRandomValues(new Uint8Array(length));
+    // SECURITY: Validate length parameter to prevent DoS
+    if (!Number.isInteger(length) || length < 0 || length > 1048576) { // Max 1MB
+      throw new Error(`Invalid random length: ${length}`);
+    }
+    
+    try {
+      return crypto.getRandomValues(new Uint8Array(length));
+    } catch (error) {
+      console.error('[CRYPTO] Failed to generate secure random bytes:', error);
+      throw new Error('Failed to generate secure random bytes');
+    }
   }
 }
 
@@ -58,12 +68,19 @@ class HashService {
 
   static async verifyBlake3Mac(message, key, expectedMac) {
     const computedMac = await this.generateBlake3Mac(message, key);
-    if (computedMac.length !== expectedMac.length) return false;
+    
+    // SECURITY: Constant-time comparison to prevent timing attacks
+    return this.constantTimeCompare(computedMac, expectedMac);
+  }
 
-    // Constant-time comparison to prevent timing attacks
+  // SECURITY: Constant-time comparison function to prevent timing attacks
+  static constantTimeCompare(a, b) {
+    if (!a || !b) return false;
+    if (a.length !== b.length) return false;
+
     let result = 0;
-    for (let i = 0; i < computedMac.length; i++) {
-      result |= computedMac[i] ^ expectedMac[i];
+    for (let i = 0; i < a.length; i++) {
+      result |= a[i] ^ b[i];
     }
     return result === 0;
   }

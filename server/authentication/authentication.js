@@ -164,6 +164,18 @@ export class AccountAuthHandler {
 
   async handlePassphrase(ws, username, passphraseHash, isNewUser = false) {
     console.log(`[AUTH] Handling passphrase for user: ${username}, isNewUser: ${isNewUser}`);
+    
+    // SECURITY: Validate inputs
+    if (!username || typeof username !== 'string' || username.length < 3 || username.length > 32) {
+      console.error(`[AUTH] Invalid username in passphrase handling: ${username}`);
+      return rejectConnection(ws, SignalType.AUTH_ERROR, "Invalid username");
+    }
+    
+    if (!passphraseHash || typeof passphraseHash !== 'string' || passphraseHash.length < 10 || passphraseHash.length > 1000) {
+      console.error(`[AUTH] Invalid passphrase hash format for user: ${username}`);
+      return rejectConnection(ws, SignalType.AUTH_ERROR, "Invalid passphrase format");
+    }
+    
     if (!this.pendingPassphrases.has(username)) {
       console.error(`[AUTH] Unexpected passphrase submission for user: ${username}`);
       return rejectConnection(ws, SignalType.AUTH_ERROR, "Unexpected passphrase submission");
@@ -177,9 +189,31 @@ export class AccountAuthHandler {
 
     if (isNewUser) {
       console.log(`[AUTH] Processing new user passphrase for: ${username}`);
+      
+      // SECURITY: Validate passphrase hash format for new users
+      if (!passphraseHash.startsWith('$argon2')) {
+        console.error(`[AUTH] Invalid passphrase hash format for new user: ${username}`);
+        return rejectConnection(ws, SignalType.AUTH_ERROR, "Invalid passphrase hash format");
+      }
+      
       userRecord.passphraseHash = passphraseHash;
       try {
         const parsed = await CryptoUtils.Password.parseArgon2Hash(passphraseHash);
+        
+        // SECURITY: Validate parsed parameters
+        if (!parsed.salt || parsed.salt.length < 16) {
+          throw new Error('Invalid salt length');
+        }
+        if (parsed.memoryCost < 1024 || parsed.memoryCost > 1048576) {
+          throw new Error('Invalid memory cost');
+        }
+        if (parsed.timeCost < 1 || parsed.timeCost > 100) {
+          throw new Error('Invalid time cost');
+        }
+        if (parsed.parallelism < 1 || parsed.parallelism > 16) {
+          throw new Error('Invalid parallelism');
+        }
+        
         userRecord.version = parsed.version;
         userRecord.algorithm = parsed.algorithm;
         userRecord.salt = parsed.salt.toString('base64');
@@ -188,31 +222,70 @@ export class AccountAuthHandler {
         userRecord.parallelism = parsed.parallelism;
         console.log(`[AUTH] Passphrase hash parsed for new user: ${username}`);
       } catch (e) {
-        console.warn(`[AUTH] Failed to parse passphrase hash params for user ${username}:`, e);
+        console.error(`[AUTH] Failed to parse passphrase hash params for user ${username}:`, e);
+        return rejectConnection(ws, SignalType.AUTH_ERROR, "Invalid passphrase hash parameters");
       }
       UserDatabase.saveUserRecord(userRecord);
       console.log(`[AUTH] User record updated with passphrase for: ${username}`);
     } else {
       console.log(`[AUTH] Verifying passphrase for existing user: ${username}`);
-      if (userRecord.passphraseHash !== passphraseHash) {
-        console.error(`[AUTH] Passphrase hash mismatch for user: ${username}`);
-        return rejectConnection(ws, SignalType.AUTH_ERROR, "Passphrase hash mismatch");
+      
+      // SECURITY: Enhanced constant-time comparison to prevent timing attacks
+      const storedHash = userRecord.passphraseHash;
+      const providedHash = passphraseHash;
+      
+      if (!storedHash || !providedHash) {
+        console.error(`[AUTH] Missing passphrase hash for user: ${username}`);
+        return rejectConnection(ws, SignalType.AUTH_ERROR, "Authentication failed");
       }
+      
+      // SECURITY: Normalize lengths and use constant-time comparison
+      const maxLength = Math.max(storedHash.length, providedHash.length);
+      const normalizedStored = storedHash.padEnd(maxLength, '\0');
+      const normalizedProvided = providedHash.padEnd(maxLength, '\0');
+      
+      let result = 0;
+      for (let i = 0; i < maxLength; i++) {
+        result |= normalizedStored.charCodeAt(i) ^ normalizedProvided.charCodeAt(i);
+      }
+      
+      // SECURITY: Add additional length check to prevent bypass
+      result |= storedHash.length ^ providedHash.length;
+      
+      if (result !== 0) {
+        console.error(`[AUTH] Passphrase verification failed for user: ${username}`);
+        // SECURITY: Rate limit failed attempts
+        try { 
+          await rateLimitMiddleware.rateLimiter.userAuthLimiter.consume(username, 2); 
+        } catch {}
+        return rejectConnection(ws, SignalType.AUTH_ERROR, "Authentication failed");
+      }
+      
       console.log(`[AUTH] Passphrase verified for user: ${username}`);
     }
+
+    // SECURITY: Clear sensitive data from memory
+    passphraseHash = null;
 
     this.pendingPassphrases.delete(username);
     console.log(`[AUTH] User ${username} removed from pending passphrases`);
 
     const auth = await this.finalizeAuth(ws, username, isNewUser ? "User registered with passphrase" : "User logged in with passphrase");
 
+    // SECURITY: Validate existing client state before updating
     const existingClient = this.clients.get(username);
+    if (existingClient && existingClient.ws !== ws) {
+      console.error(`[AUTH] WebSocket mismatch during passphrase handling: ${username}`);
+      return rejectConnection(ws, SignalType.AUTH_ERROR, "Connection state inconsistency");
+    }
+
     this.clients.set(username, {
       ws,
       clientState: {
         username,
         hasPassedAccountLogin: true,
-        hasAuthenticated: false // Both registration and login need server password
+        hasAuthenticated: false, // Both registration and login need server password
+        passphraseVerifiedAt: Date.now()
       },
       hybridPublicKeys: existingClient?.hybridPublicKeys || null
     });

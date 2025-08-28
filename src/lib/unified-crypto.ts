@@ -293,6 +293,19 @@ class HashingService {
   }
 
   static async hashData(data: string, timeoutMs: number = 30000) {
+    // SECURITY: Validate input parameters
+    if (!data || typeof data !== 'string') {
+      throw new Error('CRITICAL: Invalid data for hashing - must be non-empty string');
+    }
+    
+    if (data.length > 1000000) { // 1MB limit
+      throw new Error('CRITICAL: Data too large for hashing (max 1MB)');
+    }
+    
+    if (timeoutMs < 1000 || timeoutMs > 300000) { // 1s to 5min range
+      throw new Error('CRITICAL: Invalid timeout value (must be 1-300 seconds)');
+    }
+
     const salt = crypto.getRandomValues(new Uint8Array(32)); // Increased salt size
     const opts = {
       pass: data,
@@ -307,7 +320,12 @@ class HashingService {
 
     // Add timeout protection for long-running Argon2 operations
     return Promise.race([
-      argon2.hash(opts).then(res => res.encoded),
+      argon2.hash(opts).then(res => {
+        if (!res || !res.encoded) {
+          throw new Error('CRITICAL: Argon2 hash operation failed');
+        }
+        return res.encoded;
+      }),
       new Promise<never>((_, reject) =>
         setTimeout(() => reject(new Error('Argon2 hash operation timed out')), timeoutMs)
       )

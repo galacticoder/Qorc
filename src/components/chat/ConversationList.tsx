@@ -1,4 +1,4 @@
-import React, { memo, useMemo } from "react";
+import React, { memo, useMemo, useEffect, useState } from "react";
 import { cn } from "@/lib/utils";
 import { ScrollArea } from "@/components/ui/scroll-area";
 
@@ -23,12 +23,14 @@ const ConversationItem = memo(({
   conversation,
   isSelected,
   onSelect,
-  formatTime
+  formatTime,
+  callStatus
 }: {
   conversation: Conversation;
   isSelected: boolean;
   onSelect: (username: string) => void;
   formatTime: (date?: Date) => string;
+  callStatus?: 'ringing' | 'connecting' | 'connected' | null;
 }) => (
   <div
     onClick={() => onSelect(conversation.username)}
@@ -51,15 +53,30 @@ const ConversationItem = memo(({
 
     {/* Conversation info */}
     <div className="flex-1 min-w-0">
-      <div className="flex items-center justify-between">
+      <div className="flex items-center justify-between gap-2">
         <span className="text-sm font-medium text-gray-900 truncate">
           {conversation.username}
         </span>
-        {conversation.lastMessageTime && (
-          <span className="text-xs text-gray-500">
-            {formatTime(conversation.lastMessageTime)}
-          </span>
-        )}
+        <div className="flex items-center gap-2 shrink-0">
+          {/* In-call badges using daisyUI */}
+          {callStatus === 'connected' && (
+            <div className="badge badge-success">
+              <svg className="size-[1em]" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><g fill="currentColor" strokeLinejoin="miter" strokeLinecap="butt"><circle cx="12" cy="12" r="10" fill="none" stroke="currentColor" strokeLinecap="square" strokeMiterlimit="10" strokeWidth="2"></circle><polyline points="7 13 10 16 17 8" fill="none" stroke="currentColor" strokeLinecap="square" strokeMiterlimit="10" strokeWidth="2"></polyline></g></svg>
+              <span className="ml-1">In Call</span>
+            </div>
+          )}
+          {(callStatus === 'ringing' || callStatus === 'connecting') && (
+            <div className="badge badge-info">
+              <svg className="size-[1em]" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><g fill="currentColor" strokeLinejoin="miter" strokeLinecap="butt"><circle cx="12" cy="12" r="10" fill="none" stroke="currentColor" strokeLinecap="square" strokeMiterlimit="10" strokeWidth="2"></circle><path d="m12,17v-5.5c0-.276-.224-.5-.5-.5h-1.5" fill="none" stroke="currentColor" strokeLinecap="square" strokeMiterlimit="10" strokeWidth="2"></path><circle cx="12" cy="7.25" r="1.25" fill="currentColor" strokeWidth="2"></circle></g></svg>
+              <span className="ml-1">Calling…</span>
+            </div>
+          )}
+          {conversation.lastMessageTime && (
+            <span className="text-xs text-gray-500">
+              {formatTime(conversation.lastMessageTime)}
+            </span>
+          )}
+        </div>
       </div>
       {conversation.lastMessage && (
         <p className="text-xs text-gray-600 truncate">
@@ -83,6 +100,29 @@ export const ConversationList = memo(function ConversationList({
   onSelectConversation,
   currentUsername
 }: ConversationListProps) {
+  // Track active call peer/status via global call-status events
+  const [activePeer, setActivePeer] = useState<string | null>(null);
+  const [activeStatus, setActiveStatus] = useState<'ringing' | 'connecting' | 'connected' | null>(null);
+
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const ce = e as CustomEvent;
+      const { peer, status } = ce.detail || {};
+      if (typeof peer === 'string' && typeof status === 'string') {
+        if (status === 'ringing' || status === 'connecting' || status === 'connected') {
+          setActivePeer(peer);
+          setActiveStatus(status);
+        } else {
+          // Non-active status clears badge if it matches current peer
+          setActivePeer(prev => (prev === peer ? null : prev));
+          setActiveStatus(prev => (prev && prev && prev ? null : prev));
+        }
+      }
+    };
+    window.addEventListener('ui-call-status', handler as EventListener);
+    return () => window.removeEventListener('ui-call-status', handler as EventListener);
+  }, []);
+
   // Memoize the formatTime function to prevent recreation on every render
   const formatTime = useMemo(() => (date?: Date) => {
     if (!date) return "";
@@ -113,6 +153,7 @@ export const ConversationList = memo(function ConversationList({
               isSelected={selectedConversation === conversation.username}
               onSelect={onSelectConversation}
               formatTime={formatTime}
+              callStatus={conversation.username === activePeer ? activeStatus : null}
             />
           ))
         )}

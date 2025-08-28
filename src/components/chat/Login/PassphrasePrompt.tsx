@@ -22,13 +22,43 @@ export function PassphrasePrompt({ mode, onSubmit, disabled, authStatus }: Passp
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (isSubmitting) return;
-    if (!passphrase.trim()) return;
+    
+    // SECURITY: Validate passphrase
+    const trimmedPassphrase = passphrase.trim();
+    if (!trimmedPassphrase) return;
+    
+    // SECURITY: Validate passphrase length
+    if (trimmedPassphrase.length < 12) {
+      console.error('Passphrase must be at least 12 characters');
+      return;
+    }
+    
+    if (trimmedPassphrase.length > 1000) {
+      console.error('Passphrase too long');
+      return;
+    }
+    
+    // SECURITY: Check for common weak passphrases
+    const weakPatterns = [
+      /^(.)\1{11,}$/, // All same character
+      /^(123456789012|password1234|qwertyuiopas)$/i, // Common weak passphrases
+      /^[a-z]{12,}$/i, // Only letters
+      /^\d{12,}$/, // Only numbers
+    ];
+    
+    for (const pattern of weakPatterns) {
+      if (pattern.test(trimmedPassphrase)) {
+        console.error('Passphrase is too weak - please use a mix of characters');
+        return;
+      }
+    }
+    
     if (mode === "register" && !doPassphrasesMatch) return;
     if (!isPassphraseValid) return;
 
     setIsSubmitting(true);
     try {
-      await onSubmit(passphrase);
+      await onSubmit(trimmedPassphrase);
     } finally {
       setIsSubmitting(false);
     }

@@ -4,6 +4,9 @@ import { Button } from '@/components/ui/button';
 import { Progress } from '@/components/ui/progress';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
+import { Input } from '@/components/ui/input';
+import { Label } from '@/components/ui/label';
+import { Textarea } from '@/components/ui/textarea';
 import { Download, Settings, Play, CheckCircle, AlertTriangle, Loader2, Info } from 'lucide-react';
 import { torAutoSetup, TorSetupStatus } from '@/lib/tor-auto-setup';
 import { TorVerification } from './TorVerification';
@@ -25,6 +28,12 @@ export function TorAutoSetup({ onComplete }: TorAutoSetupProps) {
   const [isSetupRunning, setIsSetupRunning] = useState(false);
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [showVerification, setShowVerification] = useState(false);
+
+  // Bridge configuration state
+  const [enableBridges, setEnableBridges] = useState(false);
+  const [transport, setTransport] = useState<'obfs4' | 'snowflake'>('obfs4');
+  const [bridgesText, setBridgesText] = useState('');
+  const [obfs4ProxyPath, setObfs4ProxyPath] = useState('');
 
   // Check initial status and refresh from Electron API
   useEffect(() => {
@@ -57,13 +66,19 @@ export function TorAutoSetup({ onComplete }: TorAutoSetupProps) {
 
     try {
       console.log('[TOR-SETUP-UI] Calling torAutoSetup.autoSetup()...');
+      const bridges = bridgesText
+        .split('\n')
+        .map(l => l.trim())
+        .filter(l => l.length > 0);
+
       const success = await torAutoSetup.autoSetup({
         autoStart: true,
-        enableBridges: false,
+        enableBridges,
+        transport,
+        bridges,
+        obfs4ProxyPath: obfs4ProxyPath || undefined,
         onProgress: (newStatus) => {
           console.log('[TOR-SETUP-UI] Progress update:', newStatus);
-          // If the new status contains an error, it should be preserved.
-          // Otherwise, we can clear any previous error.
           setStatus(prevStatus => ({
             ...prevStatus,
             ...newStatus,
@@ -247,13 +262,72 @@ export function TorAutoSetup({ onComplete }: TorAutoSetupProps) {
                 </div>
               </div>
 
+              {/* Bridges Configuration */}
+              <div className="space-y-3 p-3 bg-white rounded-md border">
+                <div className="flex items-center justify-between">
+                  <Label htmlFor="enableBridges" className="text-sm font-medium">Use Bridges (for censored networks)</Label>
+                  <input
+                    id="enableBridges"
+                    type="checkbox"
+                    className="h-4 w-4"
+                    checked={enableBridges}
+                    onChange={(e) => setEnableBridges(e.target.checked)}
+                  />
+                </div>
+
+                {enableBridges && (
+                  <div className="space-y-3">
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                      <div className="space-y-1">
+                        <Label htmlFor="transport" className="text-sm">Transport</Label>
+                        <select
+                          id="transport"
+                          className="border rounded px-2 py-1 text-sm w-full bg-white"
+                          value={transport}
+                          onChange={(e) => setTransport((e.target.value as 'obfs4' | 'snowflake'))}
+                        >
+                          <option value="obfs4">obfs4 (recommended)</option>
+                          <option value="snowflake">snowflake</option>
+                        </select>
+                      </div>
+
+                      {transport === 'obfs4' && (
+                        <div className="space-y-1">
+                          <Label htmlFor="obfs4path" className="text-sm">obfs4proxy path (optional)</Label>
+                          <Input
+                            id="obfs4path"
+                            placeholder="e.g. /usr/bin/obfs4proxy"
+                            value={obfs4ProxyPath}
+                            onChange={(e) => setObfs4ProxyPath(e.target.value)}
+                          />
+                          <div className="text-xs text-gray-500">Leave empty if obfs4proxy is in PATH</div>
+                        </div>
+                      )}
+                    </div>
+
+                    <div className="space-y-1">
+                      <Label htmlFor="bridges" className="text-sm">Bridge lines</Label>
+                      <Textarea
+                        id="bridges"
+                        placeholder="Paste your Bridge lines here (one per line).\nExample: obfs4 1.2.3.4:9001 0123456789ABCDEF cert=... iat-mode=0"
+                        value={bridgesText}
+                        onChange={(e) => setBridgesText(e.target.value)}
+                        className="min-h-[120px]"
+                      />
+                      <div className="text-xs text-gray-500">
+                        Get bridges at https://bridges.torproject.org/ or via email to bridges@torproject.org from a Riseup or Gmail address.
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </div>
+
               <div className="flex gap-2">
                 <Button 
                   variant="outline" 
                   size="sm"
                   onClick={async () => {
                     await torAutoSetup.stopTor();
-                    // Refresh status after stopping and reset setup progress
                     const newStatus = await torAutoSetup.refreshStatus();
                     setStatus({
                       ...newStatus,
@@ -271,7 +345,6 @@ export function TorAutoSetup({ onComplete }: TorAutoSetupProps) {
                   size="sm"
                   onClick={async () => {
                     await torAutoSetup.uninstallTor();
-                    // Refresh status after uninstalling and reset setup progress
                     const newStatus = await torAutoSetup.refreshStatus();
                     setStatus({
                       ...newStatus,

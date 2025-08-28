@@ -74,43 +74,62 @@ export function useConversations(currentUsername: string, users: User[], message
     });
   }, [userLookup]);
 
-  // Update conversations when messages change
+  // Rebuild conversations when messages change (handles initial load and subsequent updates)
   useEffect(() => {
-    if (messages.length === 0) return;
+    if (!messages || messages.length === 0) {
+      setConversations(prev => prev.length ? [] : prev);
+      return;
+    }
 
-    const latestMessage = messages[messages.length - 1];
-    if (!latestMessage.sender || !latestMessage.recipient) return;
+    // Build conversation map from all messages so existing conversations appear after relogin
+    const convMap = new Map<string, Conversation>();
 
-    const conversationUsername = latestMessage.sender === currentUsername 
-      ? latestMessage.recipient 
-      : latestMessage.sender;
+    for (const msg of messages) {
+      if (!msg.sender || !msg.recipient) continue;
 
-    setConversations(prev => {
-      const existingIndex = prev.findIndex(conv => conv.username === conversationUsername);
-      
-      if (existingIndex >= 0) {
-        const updated = [...prev];
-        updated[existingIndex] = {
-          ...updated[existingIndex],
-          lastMessage: latestMessage.content,
-          lastMessageTime: new Date(latestMessage.timestamp),
-          unreadCount: selectedConversation === conversationUsername ? 0 : (updated[existingIndex].unreadCount || 0) + 1
-        };
-        return updated;
-      } else {
-        // Create new conversation if it doesn't exist
-        const newConversation: Conversation = {
+      const other = msg.sender === currentUsername ? msg.recipient : msg.sender;
+      const isOnline = users.some(user => user.username === other && user.isOnline);
+      const msgTime = new Date(msg.timestamp);
+      const unreadIncrement = (msg.sender !== currentUsername && (!msg.receipt || !msg.receipt.read)) ? 1 : 0;
+
+      const existing = convMap.get(other);
+      if (!existing) {
+        convMap.set(other, {
           id: crypto.randomUUID(),
-          username: conversationUsername,
-          isOnline: users.some(user => user.username === conversationUsername && user.isOnline),
-          lastMessage: latestMessage.content,
-          lastMessageTime: new Date(latestMessage.timestamp),
-          unreadCount: selectedConversation === conversationUsername ? 0 : 1
-        };
-        return [...prev, newConversation];
+          username: other,
+          isOnline,
+          lastMessage: msg.content,
+          lastMessageTime: msgTime,
+          unreadCount: unreadIncrement
+        });
+      } else {
+        // Update last message info if this message is newer
+        if (!existing.lastMessageTime || msgTime > existing.lastMessageTime) {
+          existing.lastMessage = msg.content;
+          existing.lastMessageTime = msgTime;
+        }
+        existing.unreadCount += unreadIncrement;
+        existing.isOnline = isOnline;
       }
-    });
-  }, [messages, selectedConversation, users, currentUsername]);
+    }
+
+    // Convert to array and normalize unread for selected conversation
+    let rebuilt = Array.from(convMap.values()).map(conv => (
+      conv.username === selectedConversation ? { ...conv, unreadCount: 0 } : conv
+    ));
+
+    // Sort by latest activity
+    rebuilt.sort((a, b) => (b.lastMessageTime?.getTime() || 0) - (a.lastMessageTime?.getTime() || 0));
+
+    setConversations(rebuilt);
+  }, [messages, users, currentUsername, selectedConversation]);
+
+  // Auto-select the most recent conversation on initial rebuild if none selected
+  useEffect(() => {
+    if (!selectedConversation && conversations.length > 0) {
+      setSelectedConversation(conversations[0].username);
+    }
+  }, [conversations, selectedConversation]);
 
   return {
     conversations,

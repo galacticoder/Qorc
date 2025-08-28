@@ -135,18 +135,60 @@ console.log('[DB] Database tables initialized');
 
 export class UserDatabase {
   static loadUser(username) {
-    console.log(`[DB] Loading user from database: ${username}`);
-    const row = db.prepare(`SELECT * FROM users WHERE username = ?`).get(username);
-    if (!row) {
-      console.log(`[DB] User not found in database: ${username}`);
+    // SECURITY: Validate username parameter
+    if (!username || typeof username !== 'string' || username.length < 3 || username.length > 32) {
+      console.error(`[DB] Invalid username parameter: ${username}`);
       return null;
     }
-    console.log(`[DB] User loaded successfully: ${username}`);
-    return row;
+    
+    // SECURITY: Validate username format
+    if (!/^[a-zA-Z0-9_-]+$/.test(username)) {
+      console.error(`[DB] Invalid username format: ${username}`);
+      return null;
+    }
+    
+    console.log(`[DB] Loading user from database: ${username}`);
+    try {
+      const row = db.prepare(`SELECT * FROM users WHERE username = ?`).get(username);
+      if (!row) {
+        console.log(`[DB] User not found in database: ${username}`);
+        return null;
+      }
+      console.log(`[DB] User loaded successfully: ${username}`);
+      return row;
+    } catch (error) {
+      console.error(`[DB] Error loading user ${username}:`, error);
+      return null;
+    }
   }
 
   static saveUserRecord(userRecord) {
-    console.log(`[DB] Saving user record to database: ${userRecord.username}`);
+    // SECURITY: Validate user record structure
+    if (!userRecord || typeof userRecord !== 'object') {
+      console.error('[DB] Invalid user record structure');
+      throw new Error('Invalid user record structure');
+    }
+    
+    const { username, passwordHash, passphraseHash } = userRecord;
+    
+    // SECURITY: Validate required fields
+    if (!username || typeof username !== 'string' || username.length < 3 || username.length > 32) {
+      console.error(`[DB] Invalid username in user record: ${username}`);
+      throw new Error('Invalid username in user record');
+    }
+    
+    if (!passwordHash || typeof passwordHash !== 'string' || passwordHash.length < 10) {
+      console.error('[DB] Invalid password hash in user record');
+      throw new Error('Invalid password hash in user record');
+    }
+    
+    // SECURITY: Validate username format
+    if (!/^[a-zA-Z0-9_-]+$/.test(username)) {
+      console.error(`[DB] Invalid username format in user record: ${username}`);
+      throw new Error('Invalid username format in user record');
+    }
+    
+    console.log(`[DB] Saving user record to database: ${username}`);
     try {
       db.prepare(`
         INSERT INTO users (
@@ -165,9 +207,9 @@ export class UserDatabase {
           timeCost = excluded.timeCost,
           parallelism = excluded.parallelism
       `).run(userRecord);
-      console.log(`[DB] User record saved successfully: ${userRecord.username}`);
+      console.log(`[DB] User record saved successfully: ${username}`);
     } catch (error) {
-      console.error(`[DB] Error saving user record for ${userRecord.username}:`, error);
+      console.error(`[DB] Error saving user record for ${username}:`, error);
       throw error;
     }
   }
@@ -176,24 +218,89 @@ export class UserDatabase {
 export class MessageDatabase {
   static async saveMessageInDB(payload, serverHybridKeyPair) {
     console.log('[DB] Starting message save to database');
+    
+    // SECURITY: Validate inputs
+    if (!payload || typeof payload !== 'object') {
+      console.error('[DB] Invalid payload structure');
+      throw new Error('Invalid payload structure');
+    }
+    
+    if (!serverHybridKeyPair) {
+      console.error('[DB] Server hybrid key pair not provided');
+      throw new Error('Server hybrid key pair not provided');
+    }
+    
     try {
       const decryptedPayload = await CryptoUtils.Hybrid.decryptHybridPayload(payload, serverHybridKeyPair);
-      const stringifiedPayload = JSON.stringify(decryptedPayload);
+      
+      // SECURITY: Validate decrypted payload structure
+      if (!decryptedPayload || typeof decryptedPayload !== 'object') {
+        console.error('[DB] Invalid decrypted payload structure');
+        throw new Error('Invalid decrypted payload structure');
+      }
+      
       const messageId = decryptedPayload.messageId;
       const fromUsername = decryptedPayload.fromUsername;
       const toUsername = decryptedPayload.toUsername;
       const timestamp = decryptedPayload.timestamp || Date.now();
 
-      if (!messageId || !fromUsername || !toUsername) {
-        console.error('[DB] Missing required fields in decrypted payload:', { messageId, fromUsername, toUsername });
-        return;
+      // SECURITY: Validate required fields
+      if (!messageId || typeof messageId !== 'string' || messageId.length < 1 || messageId.length > 255) {
+        console.error('[DB] Invalid messageId in decrypted payload:', messageId);
+        throw new Error('Invalid messageId in decrypted payload');
+      }
+      
+      if (!fromUsername || typeof fromUsername !== 'string' || fromUsername.length < 3 || fromUsername.length > 32) {
+        console.error('[DB] Invalid fromUsername in decrypted payload:', fromUsername);
+        throw new Error('Invalid fromUsername in decrypted payload');
+      }
+      
+      if (!toUsername || typeof toUsername !== 'string' || toUsername.length < 3 || toUsername.length > 32) {
+        console.error('[DB] Invalid toUsername in decrypted payload:', toUsername);
+        throw new Error('Invalid toUsername in decrypted payload');
+      }
+      
+      // SECURITY: Validate username formats
+      if (!/^[a-zA-Z0-9_-]+$/.test(fromUsername)) {
+        console.error('[DB] Invalid fromUsername format:', fromUsername);
+        throw new Error('Invalid fromUsername format');
+      }
+      
+      if (!/^[a-zA-Z0-9_-]+$/.test(toUsername)) {
+        console.error('[DB] Invalid toUsername format:', toUsername);
+        throw new Error('Invalid toUsername format');
+      }
+      
+      // SECURITY: Validate timestamp
+      if (!Number.isInteger(timestamp) || timestamp < 0 || timestamp > Date.now() + 86400000) { // Allow 1 day future
+        console.error('[DB] Invalid timestamp in decrypted payload:', timestamp);
+        throw new Error('Invalid timestamp in decrypted payload');
+      }
+
+      // SECURITY: Sanitize payload for storage (remove potentially dangerous content)
+      const sanitizedPayload = {
+        messageId: decryptedPayload.messageId,
+        fromUsername: decryptedPayload.fromUsername,
+        toUsername: decryptedPayload.toUsername,
+        timestamp: timestamp,
+        encryptedContent: decryptedPayload.encryptedContent,
+        messageType: decryptedPayload.messageType,
+        // Only include safe fields, exclude any potentially dangerous ones
+      };
+      
+      const stringifiedPayload = JSON.stringify(sanitizedPayload);
+      
+      // SECURITY: Validate payload size to prevent DoS
+      if (stringifiedPayload.length > 1048576) { // 1MB limit
+        console.error('[DB] Payload too large for storage:', stringifiedPayload.length);
+        throw new Error('Payload too large for storage');
       }
 
       console.log(`[DB] Saving message with ID: ${messageId}`);
       console.log(`[DB] Message from: ${fromUsername}, to: ${toUsername}`);
 
       // Use prepared statement with indexed columns for much faster performance
-      db.prepare(`
+      const stmt = db.prepare(`
         INSERT INTO messages (messageId, payload, fromUsername, toUsername, timestamp)
         VALUES (?, ?, ?, ?, ?)
         ON CONFLICT(messageId) DO UPDATE SET
@@ -201,12 +308,14 @@ export class MessageDatabase {
           fromUsername = excluded.fromUsername,
           toUsername = excluded.toUsername,
           timestamp = excluded.timestamp
-      `).run(messageId, stringifiedPayload, fromUsername, toUsername, timestamp);
+      `);
+      
+      stmt.run(messageId, stringifiedPayload, fromUsername, toUsername, timestamp);
 
       console.log(`[DB] Message saved successfully to database: ${messageId}`);
     } catch (error) {
-      console.error('[DB] Error saving message to database:', error);
-      throw error;
+      console.error('[DB] Error saving message to database:', error.message);
+      throw new Error(`Failed to save message to database: ${error.message}`);
     }
   }
 
@@ -316,60 +425,123 @@ export class PrekeyDatabase {
 
 export class LibsignalBundleDB {
   static publish(username, bundle) {
+    // SECURITY: Validate username parameter
+    if (!username || typeof username !== 'string' || username.length < 3 || username.length > 32) {
+      console.error(`[DB] Invalid username parameter in LibsignalBundleDB.publish: ${username}`);
+      throw new Error('Invalid username parameter');
+    }
+    
+    // SECURITY: Validate username format
+    if (!/^[a-zA-Z0-9_-]+$/.test(username)) {
+      console.error(`[DB] Invalid username format in LibsignalBundleDB.publish: ${username}`);
+      throw new Error('Invalid username format');
+    }
+    
+    // SECURITY: Validate bundle structure
+    if (!bundle || typeof bundle !== 'object') {
+      console.error('[DB] Invalid bundle structure in LibsignalBundleDB.publish');
+      throw new Error('Invalid bundle structure');
+    }
+    
+    // SECURITY: Validate required bundle fields
+    const requiredFields = ['registrationId', 'deviceId', 'identityKeyBase64', 'signedPreKeyId', 
+                           'signedPreKeyPublicBase64', 'signedPreKeySignatureBase64', 
+                           'kyberPreKeyId', 'kyberPreKeyPublicBase64', 'kyberPreKeySignatureBase64'];
+    
+    for (const field of requiredFields) {
+      if (bundle[field] === undefined || bundle[field] === null) {
+        console.error(`[DB] Missing required field in bundle: ${field}`);
+        throw new Error(`Missing required field in bundle: ${field}`);
+      }
+    }
+    
+    // SECURITY: Validate numeric fields
+    if (!Number.isInteger(bundle.registrationId) || bundle.registrationId < 0) {
+      console.error('[DB] Invalid registrationId in bundle');
+      throw new Error('Invalid registrationId in bundle');
+    }
+    
+    if (!Number.isInteger(bundle.deviceId) || bundle.deviceId < 0) {
+      console.error('[DB] Invalid deviceId in bundle');
+      throw new Error('Invalid deviceId in bundle');
+    }
+    
     const now = Date.now();
-    db.prepare(`
-      INSERT INTO libsignal_bundles (
-        username, registrationId, deviceId, identityKeyBase64,
-        preKeyId, preKeyPublicBase64,
-        signedPreKeyId, signedPreKeyPublicBase64, signedPreKeySignatureBase64,
-        kyberPreKeyId, kyberPreKeyPublicBase64, kyberPreKeySignatureBase64,
-        updatedAt
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(username) DO UPDATE SET
-        registrationId=excluded.registrationId,
-        deviceId=excluded.deviceId,
-        identityKeyBase64=excluded.identityKeyBase64,
-        preKeyId=excluded.preKeyId,
-        preKeyPublicBase64=excluded.preKeyPublicBase64,
-        signedPreKeyId=excluded.signedPreKeyId,
-        signedPreKeyPublicBase64=excluded.signedPreKeyPublicBase64,
-        signedPreKeySignatureBase64=excluded.signedPreKeySignatureBase64,
-        kyberPreKeyId=excluded.kyberPreKeyId,
-        kyberPreKeyPublicBase64=excluded.kyberPreKeyPublicBase64,
-        kyberPreKeySignatureBase64=excluded.kyberPreKeySignatureBase64,
-        updatedAt=excluded.updatedAt
-    `).run(
-      username,
-      bundle.registrationId,
-      bundle.deviceId,
-      bundle.identityKeyBase64,
-      bundle.preKeyId ?? null,
-      bundle.preKeyPublicBase64 ?? null,
-      bundle.signedPreKeyId,
-      bundle.signedPreKeyPublicBase64,
-      bundle.signedPreKeySignatureBase64,
-      bundle.kyberPreKeyId,
-      bundle.kyberPreKeyPublicBase64,
-      bundle.kyberPreKeySignatureBase64,
-      now
-    );
+    try {
+      db.prepare(`
+        INSERT INTO libsignal_bundles (
+          username, registrationId, deviceId, identityKeyBase64,
+          preKeyId, preKeyPublicBase64,
+          signedPreKeyId, signedPreKeyPublicBase64, signedPreKeySignatureBase64,
+          kyberPreKeyId, kyberPreKeyPublicBase64, kyberPreKeySignatureBase64,
+          updatedAt
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(username) DO UPDATE SET
+          registrationId=excluded.registrationId,
+          deviceId=excluded.deviceId,
+          identityKeyBase64=excluded.identityKeyBase64,
+          preKeyId=excluded.preKeyId,
+          preKeyPublicBase64=excluded.preKeyPublicBase64,
+          signedPreKeyId=excluded.signedPreKeyId,
+          signedPreKeyPublicBase64=excluded.signedPreKeyPublicBase64,
+          signedPreKeySignatureBase64=excluded.signedPreKeySignatureBase64,
+          kyberPreKeyId=excluded.kyberPreKeyId,
+          kyberPreKeyPublicBase64=excluded.kyberPreKeyPublicBase64,
+          kyberPreKeySignatureBase64=excluded.kyberPreKeySignatureBase64,
+          updatedAt=excluded.updatedAt
+      `).run(
+        username,
+        bundle.registrationId,
+        bundle.deviceId,
+        bundle.identityKeyBase64,
+        bundle.preKeyId ?? null,
+        bundle.preKeyPublicBase64 ?? null,
+        bundle.signedPreKeyId,
+        bundle.signedPreKeyPublicBase64,
+        bundle.signedPreKeySignatureBase64,
+        bundle.kyberPreKeyId,
+        bundle.kyberPreKeyPublicBase64,
+        bundle.kyberPreKeySignatureBase64,
+        now
+      );
+    } catch (error) {
+      console.error(`[DB] Error publishing libsignal bundle for ${username}:`, error);
+      throw error;
+    }
   }
 
   static take(username) {
-    const row = db.prepare(`SELECT * FROM libsignal_bundles WHERE username = ?`).get(username);
-    if (!row) return null;
-    return {
-      registrationId: row.registrationId,
-      deviceId: row.deviceId,
-      identityKeyBase64: row.identityKeyBase64,
-      preKeyId: row.preKeyId,
-      preKeyPublicBase64: row.preKeyPublicBase64,
-      signedPreKeyId: row.signedPreKeyId,
-      signedPreKeyPublicBase64: row.signedPreKeyPublicBase64,
-      signedPreKeySignatureBase64: row.signedPreKeySignatureBase64,
-      kyberPreKeyId: row.kyberPreKeyId,
-      kyberPreKeyPublicBase64: row.kyberPreKeyPublicBase64,
-      kyberPreKeySignatureBase64: row.kyberPreKeySignatureBase64,
-    };
+    // SECURITY: Validate username parameter
+    if (!username || typeof username !== 'string' || username.length < 3 || username.length > 32) {
+      console.error(`[DB] Invalid username parameter in LibsignalBundleDB.take: ${username}`);
+      return null;
+    }
+    
+    // SECURITY: Validate username format
+    if (!/^[a-zA-Z0-9_-]+$/.test(username)) {
+      console.error(`[DB] Invalid username format in LibsignalBundleDB.take: ${username}`);
+      return null;
+    }
+    
+    try {
+      const row = db.prepare(`SELECT * FROM libsignal_bundles WHERE username = ?`).get(username);
+      if (!row) return null;
+      return {
+        registrationId: row.registrationId,
+        deviceId: row.deviceId,
+        identityKeyBase64: row.identityKeyBase64,
+        preKeyId: row.preKeyId,
+        preKeyPublicBase64: row.preKeyPublicBase64,
+        signedPreKeyId: row.signedPreKeyId,
+        signedPreKeyPublicBase64: row.signedPreKeyPublicBase64,
+        signedPreKeySignatureBase64: row.signedPreKeySignatureBase64,
+        kyberPreKeyId: row.kyberPreKeyId,
+        kyberPreKeyPublicBase64: row.kyberPreKeyPublicBase64,
+        kyberPreKeySignatureBase64: row.kyberPreKeySignatureBase64,
+      };
+    } catch (error) {
+      console.error(`[DB] Error taking libsignal bundle for ${username}:`, error);
+      return null;
+    }
   }
 }

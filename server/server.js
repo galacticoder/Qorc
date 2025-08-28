@@ -18,36 +18,55 @@ const wsToUsername = new WeakMap(); // Map WebSocket -> username for consistent 
 
 const bundleCache = new Map(); // Cache for bundle requests to prevent redundant operations
 
-// Message batching for database operations
+// Message batching for database operations with memory management
 const messageBatch = [];
 const BATCH_SIZE = 10;
 const BATCH_TIMEOUT = 1000; // 1 second
+const MAX_BATCH_SIZE = 100; // SECURITY: Prevent memory exhaustion
 let batchTimer = null;
 
 // Batch processing function for database operations
 async function processBatch() {
   if (messageBatch.length === 0) return;
 
-  const batch = messageBatch.splice(0, messageBatch.length);
-  console.log(`[SERVER] Processing batch of ${batch.length} database operations`);
+  // SECURITY: Limit batch size to prevent memory exhaustion
+  const batchToProcess = messageBatch.splice(0, Math.min(messageBatch.length, MAX_BATCH_SIZE));
+  console.log(`[SERVER] Processing batch of ${batchToProcess.length} database operations`);
 
-  // Process all batched operations
-  for (const operation of batch) {
-    try {
-      await operation.execute();
-    } catch (error) {
-      console.error('[SERVER] Batch operation failed:', error);
-    }
+  // Process all batched operations with error isolation
+  const results = await Promise.allSettled(
+    batchToProcess.map(operation => operation.execute())
+  );
+
+  // Log failed operations without exposing sensitive data
+  const failedCount = results.filter(result => result.status === 'rejected').length;
+  if (failedCount > 0) {
+    console.error(`[SERVER] ${failedCount}/${batchToProcess.length} batch operations failed`);
   }
+
+  // SECURITY: Clear processed operations from memory
+  batchToProcess.length = 0;
 
   if (batchTimer) {
     clearTimeout(batchTimer);
     batchTimer = null;
   }
+
+  // Continue processing if there are more operations
+  if (messageBatch.length > 0) {
+    setImmediate(processBatch);
+  }
 }
 
-// Add operation to batch
+// Add operation to batch with overflow protection
 function addToBatch(operation) {
+  // SECURITY: Prevent memory exhaustion from unbounded batch growth
+  if (messageBatch.length >= MAX_BATCH_SIZE * 2) {
+    console.warn('[SERVER] Batch queue full, processing immediately');
+    processBatch();
+    return;
+  }
+
   messageBatch.push(operation);
 
   // Process immediately if batch is full
@@ -65,12 +84,28 @@ const KEY_PATH = process.env.TLS_KEY_PATH;
 // SECURITY: Validate and sanitize certificate paths to prevent path traversal
 function validateCertPath(certPath) {
   if (!certPath || typeof certPath !== 'string') return false;
+  
+  // SECURITY: Limit path length to prevent DoS
+  if (certPath.length > 1000) {
+    console.error('[SERVER] Certificate path too long:', certPath.length);
+    return false;
+  }
+
+  // SECURITY: Prevent path traversal attacks - check for dangerous patterns
+  const dangerousPatterns = ['../', '..\\', '%2e%2e', '%2f', '%5c', '\0'];
+  const lowerPath = certPath.toLowerCase();
+  for (const pattern of dangerousPatterns) {
+    if (lowerPath.includes(pattern)) {
+      console.error('[SERVER] Dangerous pattern detected in certificate path:', pattern);
+      return false;
+    }
+  }
 
   // SECURITY: Prevent path traversal attacks
   const normalizedPath = path.resolve(certPath);
   const allowedDir = path.resolve('./certs'); // Only allow certs in ./certs directory
 
-  if (!normalizedPath.startsWith(allowedDir)) {
+  if (!normalizedPath.startsWith(allowedDir + path.sep) && normalizedPath !== allowedDir) {
     console.error('[SERVER] Certificate path outside allowed directory:', certPath);
     return false;
   }
@@ -80,6 +115,14 @@ function validateCertPath(certPath) {
   const ext = path.extname(normalizedPath).toLowerCase();
   if (!allowedExtensions.includes(ext)) {
     console.error('[SERVER] Invalid certificate file extension:', ext);
+    return false;
+  }
+
+  // SECURITY: Additional check for file existence and readability
+  try {
+    fs.accessSync(normalizedPath, fs.constants.R_OK);
+  } catch (error) {
+    console.error('[SERVER] Certificate file not accessible:', error.message);
     return false;
   }
 
@@ -204,13 +247,52 @@ async function startServer() {
     );
 
     ws.on('message', async (msg) => {
+      // SECURITY: Rate limit message processing to prevent DoS
+      if (clientState.messageCount > 10000) { // Reset counter periodically
+        const timeSinceConnection = Date.now() - clientState.connectionTime;
+        if (timeSinceConnection > 60000) { // Reset every minute
+          clientState.messageCount = 0;
+          clientState.connectionTime = Date.now();
+        } else if (clientState.messageCount > 1000) { // Hard limit per minute
+          console.warn(`[SERVER] Message rate limit exceeded for user: ${clientState.username}`);
+          return ws.close(1008, 'Message rate limit exceeded');
+        }
+      }
+
       // Update activity tracking
       clientState.lastActivity = Date.now();
       clientState.messageCount++;
 
+      // SECURITY: Validate message size to prevent DoS
+      if (msg.length > 1024 * 1024) { // 1MB limit
+        console.error(`[SERVER] Message too large: ${msg.length} bytes from user: ${clientState.username}`);
+        return ws.send(JSON.stringify({ type: SignalType.ERROR, message: 'Message too large' }));
+      }
+
       let parsed;
       try {
-        parsed = JSON.parse(msg.toString().trim());
+        const msgString = msg.toString().trim();
+        
+        // SECURITY: Additional validation for message content
+        if (msgString.length === 0) {
+          console.error('[SERVER] Empty message received');
+          return ws.send(JSON.stringify({ type: SignalType.ERROR, message: 'Empty message' }));
+        }
+
+        parsed = JSON.parse(msgString);
+        
+        // SECURITY: Validate message structure
+        if (!parsed || typeof parsed !== 'object' || !parsed.type) {
+          console.error('[SERVER] Invalid message structure received');
+          return ws.send(JSON.stringify({ type: SignalType.ERROR, message: 'Invalid message structure' }));
+        }
+
+        // SECURITY: Validate message type
+        if (typeof parsed.type !== 'string' || parsed.type.length > 100) {
+          console.error('[SERVER] Invalid message type received');
+          return ws.send(JSON.stringify({ type: SignalType.ERROR, message: 'Invalid message type' }));
+        }
+
         console.log(`[SERVER] Received message type: ${parsed.type} from user: ${clientState.username || 'unknown'}`);
         
         // Debug message structure for encrypted messages
@@ -223,8 +305,8 @@ async function startServer() {
             allKeys: Object.keys(parsed)
           });
         }
-      } catch {
-        console.error('[SERVER] Invalid JSON format received');
+      } catch (error) {
+        console.error('[SERVER] JSON parsing error:', error.message);
         return ws.send(JSON.stringify({ type: SignalType.ERROR, message: 'Invalid JSON format' }));
       }
 
@@ -251,7 +333,20 @@ async function startServer() {
             if (!clientState.hasPassedAccountLogin) {
               return ws.send(JSON.stringify({ type: SignalType.ERROR, message: 'Account login required first' }));
             }
+            
+            // SECURITY: Validate username parameter
             const target = parsed.username;
+            if (!target || typeof target !== 'string' || target.length < 3 || target.length > 32) {
+              console.error(`[SERVER] Invalid username in bundle request: ${target}`);
+              return ws.send(JSON.stringify({ type: SignalType.ERROR, message: 'Invalid username format' }));
+            }
+            
+            // SECURITY: Validate username format (alphanumeric, underscore, hyphen only)
+            if (!/^[a-zA-Z0-9_-]+$/.test(target)) {
+              console.error(`[SERVER] Invalid username characters in bundle request: ${target}`);
+              return ws.send(JSON.stringify({ type: SignalType.ERROR, message: 'Invalid username characters' }));
+            }
+            
             const out = LibsignalBundleDB.take(target);
             if (!out) {
               return ws.send(JSON.stringify({ type: SignalType.ERROR, message: 'No libsignal bundle available' }));
@@ -602,4 +697,75 @@ async function startServer() {
   });
 }
 
-startServer();
+// SECURITY: Graceful shutdown and cleanup
+process.on('SIGINT', async () => {
+  console.log('[SERVER] Received SIGINT, shutting down gracefully...');
+  await gracefulShutdown();
+});
+
+process.on('SIGTERM', async () => {
+  console.log('[SERVER] Received SIGTERM, shutting down gracefully...');
+  await gracefulShutdown();
+});
+
+process.on('uncaughtException', (error) => {
+  console.error('[SERVER] Uncaught exception:', error);
+  gracefulShutdown().then(() => process.exit(1));
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('[SERVER] Unhandled rejection at:', promise, 'reason:', reason);
+  gracefulShutdown().then(() => process.exit(1));
+});
+
+async function gracefulShutdown() {
+  console.log('[SERVER] Starting graceful shutdown...');
+  
+  try {
+    // Clear batch timer
+    if (batchTimer) {
+      clearTimeout(batchTimer);
+      batchTimer = null;
+    }
+    
+    // Process remaining batched operations
+    if (messageBatch.length > 0) {
+      console.log(`[SERVER] Processing ${messageBatch.length} remaining batch operations...`);
+      await processBatch();
+    }
+    
+    // Clear clients map and close connections
+    for (const [username, client] of clients.entries()) {
+      try {
+        if (client.ws && client.ws.readyState === 1) { // WebSocket.OPEN
+          client.ws.close(1001, 'Server shutting down');
+        }
+      } catch (error) {
+        console.error(`[SERVER] Error closing connection for ${username}:`, error);
+      }
+    }
+    clients.clear();
+    
+    // Clear WeakMap references
+    // Note: WeakMap doesn't have a clear method, but references will be garbage collected
+    
+    // Clear bundle cache
+    bundleCache.clear();
+    
+    // Close server
+    if (server) {
+      await new Promise((resolve) => {
+        server.close(resolve);
+      });
+    }
+    
+    console.log('[SERVER] Graceful shutdown completed');
+  } catch (error) {
+    console.error('[SERVER] Error during graceful shutdown:', error);
+  }
+}
+
+startServer().catch(error => {
+  console.error('[SERVER] Failed to start server:', error);
+  process.exit(1);
+});

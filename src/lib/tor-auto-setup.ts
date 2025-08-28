@@ -20,6 +20,12 @@ export interface TorSetupStatus {
 export interface TorInstallOptions {
   autoStart: boolean;
   enableBridges: boolean;
+  // Optional: explicit bridge lines (e.g., obfs4 lines)
+  bridges?: string[];
+  // Pluggable transport selection (default: obfs4)
+  transport?: 'obfs4' | 'snowflake';
+  // Optional path to obfs4proxy binary; if not provided, uses 'obfs4proxy' in PATH
+  obfs4ProxyPath?: string;
   customConfig?: Record<string, any>;
   onProgress?: (status: TorSetupStatus) => void;
 }
@@ -101,11 +107,35 @@ export class TorAutoSetup {
 
         // Step 5: Verify connection
         this.updateStatus(90, 'Verifying Tor connection...');
-        const verifySuccess = await this.verifyTorConnection();
+        let verifySuccess = await this.verifyTorConnection();
         
         if (!verifySuccess) {
-          this.updateStatus(0, 'Tor connection failed', 'Could not establish Tor connection.');
-          return false;
+          // Automatic fallback: enable Snowflake bridges and retry without requiring manual bridge lines
+          try {
+            this.updateStatus(85, 'Connection failed; enabling Snowflake bridges and retrying...');
+            const fallbackOptions = {
+              ...options,
+              enableBridges: true,
+              transport: 'snowflake' as const,
+              bridges: []
+            };
+
+            const reconfigOk = await this.configureTor(fallbackOptions);
+            if (reconfigOk) {
+              const restart = await this.startTor();
+              if (restart.success) {
+                this.updateStatus(90, 'Verifying Tor connection (bridges enabled)...');
+                verifySuccess = await this.verifyTorConnection();
+              }
+            }
+          } catch (e) {
+            // swallow and proceed to failure path
+          }
+
+          if (!verifySuccess) {
+            this.updateStatus(0, 'Tor connection failed', 'Could not establish Tor connection (even with bridges).');
+            return false;
+          }
         }
       }
 
@@ -239,7 +269,7 @@ export class TorAutoSetup {
     // Use dynamic ports from options or defaults
     const socksPort = options.customConfig?.socksPort || 9050;
     const controlPort = options.customConfig?.controlPort || 9051;
-    
+
     const config = [
       '# Auto-generated Tor configuration for end2end',
       '# SOCKS proxy port',
@@ -270,13 +300,29 @@ export class TorAutoSetup {
 
     // Add bridge configuration if requested
     if (options.enableBridges) {
-      config.push(
-        '',
-        '# Bridge configuration for censored networks',
-        'UseBridges 1',
-        'ClientTransportPlugin obfs4 exec obfs4proxy',
-        '# Bridges will be automatically fetched'
-      );
+      const hasBridges = Array.isArray(options.bridges) && options.bridges.length > 0;
+      const transport = hasBridges ? (options.transport || 'obfs4') : 'snowflake';
+      config.push('', '# Bridge configuration for censored networks', 'UseBridges 1');
+
+      if (transport === 'obfs4') {
+        const obfs4Path = options.obfs4ProxyPath?.trim() || 'obfs4proxy';
+        config.push(`ClientTransportPlugin obfs4 exec ${obfs4Path}`);
+      } else if (transport === 'snowflake') {
+        // Note: snowflake-client binary must be available; main process should provision it
+        config.push('ClientTransportPlugin snowflake exec snowflake-client');
+        // For Snowflake, a generic Bridge line can be used
+        config.push('Bridge snowflake');
+      }
+
+      // Add user-provided bridges (if provided)
+      if (hasBridges) {
+        for (const line of options.bridges!) {
+          const trimmed = (line || '').trim();
+          if (!trimmed) continue;
+          // Ensure it starts with 'Bridge '
+          config.push(trimmed.startsWith('Bridge ') ? trimmed : `Bridge ${trimmed}`);
+        }
+      }
     }
 
     // Add custom configuration

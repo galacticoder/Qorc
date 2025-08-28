@@ -444,6 +444,23 @@ export const useAuth = () => {
   const logout = async (secureDBRef?: MutableRefObject<SecureDB | null>, loginErrorMessage: string = "") => {
     console.log('[AUTH] Logging out user');
 
+    // SECURITY: Clear sensitive data from memory first
+    try {
+      // Clear sensitive references immediately
+      passwordRef.current = "";
+      passphraseRef.current = "";
+      passphrasePlaintextRef.current = "";
+      aesKeyRef.current = null;
+      hybridKeysRef.current = null;
+
+      // SECURITY: Force garbage collection of sensitive data if available
+      if (typeof window !== 'undefined' && (window as any).gc) {
+        (window as any).gc();
+      }
+    } catch (error) {
+      console.error('[AUTH] Failed to clear sensitive data from memory:', error);
+    }
+
     // Clear SecureDB database
     if (secureDBRef?.current) {
       try {
@@ -456,19 +473,63 @@ export const useAuth = () => {
       secureDBRef.current = null;
     }
 
-    //drop all ratchet sessions for this user to avoid annoying chain drift on next login
-    try { SessionStore.clearAllForCurrentUser(); } catch { }
+    // SECURITY: Enhanced session data cleanup
+    try { 
+      if (typeof window !== 'undefined' && window.localStorage) {
+        const keysToRemove: string[] = [];
+        const currentUser = loginUsernameRef.current || '';
+        
+        // SECURITY: Safely iterate through localStorage
+        for (let i = 0; i < window.localStorage.length; i++) {
+          const key = window.localStorage.key(i);
+          if (key && currentUser && (
+            key.includes('session') && key.includes(currentUser) ||
+            key.includes('securechat') && key.includes(currentUser) ||
+            key.includes('keystore') && key.includes(currentUser) ||
+            key.includes('identity') && key.includes(currentUser)
+          )) {
+            keysToRemove.push(key);
+          }
+        }
+        
+        // SECURITY: Remove keys in a separate loop to avoid iteration issues
+        keysToRemove.forEach(key => {
+          try {
+            window.localStorage.removeItem(key);
+          } catch (error) {
+            console.error(`[AUTH] Failed to remove localStorage key ${key}:`, error);
+          }
+        });
+        
+        console.log(`[AUTH] Cleared ${keysToRemove.length} localStorage keys`);
+      }
+    } catch (error) {
+      console.error('[AUTH] Failed to clear session data:', error);
+    }
 
     // Clear localStorage data for the current user
     if (loginUsernameRef.current) {
       try {
         console.log('[AUTH] Clearing localStorage data for user');
-        // Clear session store data
-        localStorage.removeItem(`securechat_sessions_${loginUsernameRef.current}`);
-        // Clear pinned identities
-        localStorage.removeItem(`securechat_pins_${loginUsernameRef.current}`);
-        // Clear read receipt tracking data
-        localStorage.removeItem(`sentReadReceipts_${loginUsernameRef.current}`);
+        const userSpecificKeys = [
+          `securechat_sessions_${loginUsernameRef.current}`,
+          `securechat_pins_${loginUsernameRef.current}`,
+          `sentReadReceipts_${loginUsernameRef.current}`,
+          `keystore_${loginUsernameRef.current}`,
+          `identity_${loginUsernameRef.current}`,
+          `prekeys_${loginUsernameRef.current}`,
+          `signedprekey_${loginUsernameRef.current}`,
+          `registrationid_${loginUsernameRef.current}`
+        ];
+        
+        userSpecificKeys.forEach(key => {
+          try {
+            localStorage.removeItem(key);
+          } catch (error) {
+            console.error(`[AUTH] Failed to remove key ${key}:`, error);
+          }
+        });
+        
         console.log('[AUTH] localStorage data cleared successfully');
       } catch (error) {
         console.error('[AUTH] Failed to clear localStorage data:', error);
@@ -482,23 +543,28 @@ export const useAuth = () => {
       console.error('[AUTH] Failed to clear server pin:', error);
     }
 
-    passwordRef.current = "";
-    passphraseRef.current = "";
-    passphrasePlaintextRef.current = "";
-    aesKeyRef.current = null;
-    hybridKeysRef.current = null;
-
+    // SECURITY: Clear key manager with proper cleanup
     if (keyManagerRef.current) {
-      keyManagerRef.current.clearKeys();
-      keyManagerRef.current.deleteDatabase().catch(error => {
-        console.error("Failed to delete user database:", error);
-      });
+      try {
+        keyManagerRef.current.clearKeys();
+        await keyManagerRef.current.deleteDatabase();
+        keyManagerRef.current = null;
+      } catch (error) {
+        console.error("[AUTH] Failed to delete user database:", error);
+      }
     }
+
+    // SECURITY: Clear username reference last to ensure cleanup works
+    const clearedUsername = loginUsernameRef.current;
+    loginUsernameRef.current = "";
 
     setIsLoggedIn(false);
     setLoginError(loginErrorMessage);
     setAccountAuthenticated(false);
     setIsRegistrationMode(false);
+    setUsername("");
+
+    console.log(`[AUTH] Logout completed for user: ${clearedUsername}`);
   };
 
   const useLogout = (Database: any) => {

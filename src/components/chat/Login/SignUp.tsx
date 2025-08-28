@@ -27,9 +27,46 @@ export function SignUpForm({ onSubmit, disabled, authStatus, error, hasServerTru
     e.preventDefault();
     if (disabled || isSubmitting || !isFormValid) return;
 
+    // SECURITY: Sanitize and validate inputs
+    const sanitizedUsername = username.trim();
+    
+    // SECURITY: Validate username format
+    if (!/^[a-zA-Z0-9_-]+$/.test(sanitizedUsername)) {
+      console.error('Username can only contain letters, numbers, underscores, and hyphens');
+      return;
+    }
+    
+    // SECURITY: Validate username length
+    if (sanitizedUsername.length < 3 || sanitizedUsername.length > 32) {
+      console.error('Username must be 3-32 characters');
+      return;
+    }
+    
+    // SECURITY: Validate password strength
+    if (password.length < 8) {
+      console.error('Password must be at least 8 characters');
+      return;
+    }
+    
+    if (password.length > 1000) {
+      console.error('Password too long');
+      return;
+    }
+    
+    // SECURITY: Check password complexity
+    const hasUpperCase = /[A-Z]/.test(password);
+    const hasLowerCase = /[a-z]/.test(password);
+    const hasNumbers = /\d/.test(password);
+    const hasSpecialChar = /[!@#$%^&*(),.?":{}|<>]/.test(password);
+    
+    if (!hasUpperCase || !hasLowerCase || !hasNumbers) {
+      console.error('Password must contain uppercase, lowercase, and numbers');
+      return;
+    }
+
     setIsSubmitting(true);
     try {
-      await onSubmit(username.trim(), password);
+      await onSubmit(sanitizedUsername, password);
     } finally {
       setIsSubmitting(false);
     }

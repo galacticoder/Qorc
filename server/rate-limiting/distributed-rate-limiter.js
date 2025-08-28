@@ -134,7 +134,8 @@ class DistributedRateLimiter {
 		const jitter = Math.floor(ms * 0.1);
 		// SECURITY: Use cryptographically secure random for jitter
 		const crypto = require('crypto');
-		const randomJitter = Math.floor((crypto.randomBytes(1)[0] / 255 - 0.5) * jitter);
+		const randomValue = crypto.randomBytes(1)[0] / 255; // 0-1 range
+		const randomJitter = Math.floor((randomValue - 0.5) * jitter);
 		return Math.max(1, ms + randomJitter);
 	}
 
