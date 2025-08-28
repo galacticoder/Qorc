@@ -16,22 +16,25 @@ import { useWebSocket } from "@/hooks/useWebsocket";
 import { useConversations } from "@/hooks/useConversations";
 import { TypingIndicatorProvider } from "@/contexts/TypingIndicatorContext";
 import { torNetworkManager } from "@/lib/tor-network";
-import { TorIndicator } from "@/components/ui/TorIndicator";
 import { TorAutoSetup } from "@/components/setup/TorAutoSetup";
 import { torAutoSetup } from "@/lib/tor-auto-setup";
+import { useCalling } from "@/hooks/useCalling";
 // offline message queue removed
 
 interface ChatAppProps {
   onNavigate: (page: "home" | "server" | "chat") => void;
 }
 
-const ChatApp: React.FC<ChatAppProps> = ({ onNavigate }) => {
+const ChatApp: React.FC<ChatAppProps> = () => {
   const [messages, setMessages] = useState<Message[]>([]);
   const [sidebarActiveTab, setSidebarActiveTab] = useState<string>("messages");
   const [showTorSetup, setShowTorSetup] = useState(false);
-  const [torSetupComplete, setTorSetupComplete] = useState(false);
+  const [, setTorSetupComplete] = useState(false);
 
   const Authentication = useAuth();
+  
+  // Initialize calling service after complete authentication
+  useCalling(Authentication);
 
   // Check if Tor setup is needed on app start
   useEffect(() => {
@@ -108,7 +111,6 @@ const ChatApp: React.FC<ChatAppProps> = ({ onNavigate }) => {
 
   const Database = useSecureDB({
     Authentication,
-    messages,
     setMessages,
   });
 
@@ -168,10 +170,10 @@ const ChatApp: React.FC<ChatAppProps> = ({ onNavigate }) => {
     addConversation,
     selectConversation,
     getConversationMessages,
-  } = useConversations(Authentication.loginUsernameRef.current, Database.users, messages);
+  } = useConversations(Authentication.loginUsernameRef.current || '', Database.users, messages);
 
   // Get messages for the selected conversation
-  const conversationMessages = getConversationMessages(selectedConversation);
+  const conversationMessages = getConversationMessages(selectedConversation || '');
   
   // Debug conversation state
   console.log('[Index] Conversation state:', {
@@ -220,10 +222,10 @@ const ChatApp: React.FC<ChatAppProps> = ({ onNavigate }) => {
   }
 
   return (
-    <TypingIndicatorProvider currentUsername={Authentication.loginUsernameRef.current}>
+    <TypingIndicatorProvider currentUsername={Authentication.loginUsernameRef.current || ''}>
       <div className="flex h-screen bg-gradient-to-r from-gray-50 to-slate-50 relative">
         <Sidebar
-          currentUsername={Authentication.loginUsernameRef.current}
+          currentUsername={Authentication.loginUsernameRef.current || ''}
           onAddConversation={addConversation}
           onLogout={async () => await Authentication.logout(Database.secureDBRef)}
           onActiveTabChange={setSidebarActiveTab}
@@ -232,7 +234,7 @@ const ChatApp: React.FC<ChatAppProps> = ({ onNavigate }) => {
             conversations={conversations}
             selectedConversation={selectedConversation}
             onSelectConversation={selectConversation}
-            currentUsername={Authentication.loginUsernameRef.current}
+            currentUsername={Authentication.loginUsernameRef.current || ''}
           />
         </Sidebar>
 
@@ -284,7 +286,7 @@ const ChatApp: React.FC<ChatAppProps> = ({ onNavigate }) => {
               }}
               onSendFile={handleSendFileWrapper}
               isEncrypted={true}
-              currentUsername={Authentication.loginUsernameRef.current}
+              currentUsername={Authentication.loginUsernameRef.current || ''}
               users={Database.users}
               selectedConversation={selectedConversation}
               saveMessageToLocalDB={Database.saveMessageToLocalDB}

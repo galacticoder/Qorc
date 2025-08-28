@@ -678,6 +678,18 @@ export function useEncryptedMessageHandler(
             }
           }
 
+          // Handle call signals
+          if (payload.type === 'call-signal') {
+            console.log('[EncryptedMessageHandler] Received call signal:', payload);
+            
+            // Dispatch call signal event for calling service
+            const callSignalEvent = new CustomEvent('call-signal', {
+              detail: JSON.parse(payload.content)
+            });
+            window.dispatchEvent(callSignalEvent);
+            return; // Don't save call signals as regular messages
+          }
+
           // Note: System messages (read receipts, delivery receipts, typing indicators) are handled above
         } else {
           console.warn('[EncryptedMessageHandler] No valid payload after decryption');

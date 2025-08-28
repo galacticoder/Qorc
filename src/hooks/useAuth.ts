@@ -29,7 +29,6 @@ export const useAuth = () => {
   const passphraseRef = useRef<string>("");
   const passphrasePlaintextRef = useRef<string>("");
   const aesKeyRef = useRef<CryptoKey | null>(null);
-  const [initialCleanupDone, setInitialCleanupDone] = useState(false);
 
   const [serverHybridPublic, setServerHybridPublic] = useState<{
     x25519PublicBase64: string;
@@ -418,11 +417,13 @@ export const useAuth = () => {
 
   const handleAuthSuccess = (username: string) => {
     console.log(`[AUTH] Authentication success for user: ${username}`);
-    if (!accountAuthenticated) return;
-
+    console.log(`[AUTH] Setting authentication flags - isLoggedIn: true, accountAuthenticated: ${accountAuthenticated}`);
+    
     setAuthStatus("Authentication successful! Logging in...");
     setUsername(username);
+    console.log(`[AUTH] About to call setIsLoggedIn(true) - current value: ${isLoggedIn}`);
     setIsLoggedIn(true);
+    console.log(`[AUTH] Called setIsLoggedIn(true)`);
     // Clear status after a brief delay
     setTimeout(() => setAuthStatus(""), 1000);
     setLoginError("");
@@ -504,79 +505,8 @@ export const useAuth = () => {
     return async () => await logout(Database.secureDBRef, "Logged out");
   };
 
-  // Add cleanup on page unload/refresh and check for pending cleanup on mount
+  // Add cleanup on page unload/refresh only
   useEffect(() => {
-    // Comprehensive cleanup on app initialization
-    const performInitialCleanup = async () => {
-      if (initialCleanupDone) return;
-
-      try {
-        console.log('[AUTH] Performing initial cleanup check');
-
-        // Check for pending cleanup flag
-        const pendingCleanup = localStorage.getItem('securechat_pending_cleanup');
-        if (pendingCleanup) {
-          try {
-            // SECURITY: Validate JSON size and structure before parsing
-            if (pendingCleanup.length > 1000) {
-              console.error('[AUTH] Pending cleanup data too large, ignoring');
-              localStorage.removeItem('securechat_pending_cleanup');
-              return;
-            }
-            const parsed = JSON.parse(pendingCleanup);
-            if (!parsed || typeof parsed !== 'object' || typeof parsed.username !== 'string') {
-              console.error('[AUTH] Invalid pending cleanup data structure');
-              localStorage.removeItem('securechat_pending_cleanup');
-              return;
-            }
-            const { username } = parsed;
-            console.log('[AUTH] Found pending cleanup for user:', username);
-
-            // Clear SecureKeyManager database
-            const tempKeyManager = new SecureKeyManager(username);
-            await tempKeyManager.deleteDatabase();
-            console.log('[AUTH] Cleared SecureKeyManager database for:', username);
-
-            // Remove the pending cleanup flag
-            localStorage.removeItem('securechat_pending_cleanup');
-            console.log('[AUTH] Pending cleanup completed');
-          } catch (error) {
-            console.error('[AUTH] Failed to complete pending cleanup:', error);
-            // Remove the flag anyway to prevent infinite attempts
-            localStorage.removeItem('securechat_pending_cleanup');
-          }
-        }
-
-        // Also clear any SecureDB databases that might be lingering
-        try {
-          // Get all databases and clear any that look like SecureDB databases
-          if ('indexedDB' in window) {
-            // Clear any databases that start with 'SecureKeyDB_'
-            const databases = await indexedDB.databases?.() || [];
-            for (const db of databases) {
-              if (db.name && (db.name.startsWith('SecureKeyDB_'))) {
-                console.log('[AUTH] Clearing orphaned database:', db.name);
-                const deleteRequest = indexedDB.deleteDatabase(db.name);
-                await new Promise((resolve, reject) => {
-                  deleteRequest.onsuccess = () => resolve(undefined);
-                  deleteRequest.onerror = () => reject(deleteRequest.error);
-                });
-              }
-            }
-          }
-        } catch (error) {
-          console.warn('[AUTH] Could not clear orphaned databases:', error);
-        }
-
-        setInitialCleanupDone(true);
-        console.log('[AUTH] Initial cleanup completed');
-      } catch (error) {
-        console.error('[AUTH] Initial cleanup failed:', error);
-        setInitialCleanupDone(true); // Set anyway to prevent infinite retries
-      }
-    };
-
-    performInitialCleanup();
 
     const handleBeforeUnload = () => {
       // Only clear if user is logged in

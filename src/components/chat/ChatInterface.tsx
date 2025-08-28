@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Card } from "@/components/ui/card";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { Button } from "@/components/ui/button";
 import { ChatMessage } from "./ChatMessage";
 import { Message } from "./types";
 import { ChatInput } from "./ChatInput.tsx";
@@ -13,6 +14,9 @@ import { TypingIndicator } from "./TypingIndicator";
 import { useTypingIndicatorContext } from "@/contexts/TypingIndicatorContext";
 import { useMessageReceipts } from "@/hooks/useMessageReceipts";
 import { TorIndicator } from "@/components/ui/TorIndicator";
+import { Phone, Video } from "lucide-react";
+import { useCalling } from "@/hooks/useCalling";
+import { CallModal } from "./CallModal";
 
 interface ChatInterfaceProps {
   onSendMessage: (
@@ -45,6 +49,21 @@ export function ChatInterface({
   const scrollAreaRef = useRef<HTMLDivElement>(null);
   const [replyTo, setReplyTo] = useState<Message | null>(null);
   const [editingMessage, setEditingMessage] = useState<Message | null>(null);
+
+  // Calling functionality
+  const callingHook = useCalling();
+  const {
+    currentCall,
+    localStream,
+    remoteStream,
+    startCall,
+    answerCall,
+    declineCall,
+    endCall,
+    toggleMute,
+    toggleVideo,
+    switchCamera
+  } = callingHook;
 
   // Track which messages have been processed in the current scroll event to prevent duplicates
   const processedInScrollRef = useRef<Set<string>>(new Set());
@@ -232,7 +251,47 @@ export function ChatInterface({
             {selectedConversation ? "Secure end-to-end encrypted messaging" : "Select a conversation to start chatting"}
           </p>
         </div>
-        <TorIndicator />
+        <div className="flex items-center space-x-2">
+          {selectedConversation && (
+            <>
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={async () => {
+                  try {
+                    await startCall(selectedConversation, 'audio');
+                  } catch (error) {
+                    console.error('[ChatInterface] Failed to start audio call:', error);
+                    alert('Failed to start call: ' + (error as Error).message);
+                  }
+                }}
+                disabled={!!currentCall}
+                className="flex items-center space-x-1"
+              >
+                <Phone className="w-4 h-4" />
+                <span>Call</span>
+              </Button>
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={async () => {
+                  try {
+                    await startCall(selectedConversation, 'video');
+                  } catch (error) {
+                    console.error('[ChatInterface] Failed to start video call:', error);
+                    alert('Failed to start video call: ' + (error as Error).message);
+                  }
+                }}
+                disabled={!!currentCall}
+                className="flex items-center space-x-1"
+              >
+                <Video className="w-4 h-4" />
+                <span>Video</span>
+              </Button>
+            </>
+          )}
+          <TorIndicator />
+        </div>
       </div>
       <ScrollArea className="flex-1 p-4 bg-white" ref={scrollAreaRef}>
         <div className="space-y-4">
@@ -281,7 +340,7 @@ export function ChatInterface({
             messageId: string | undefined,
             content: string,
             messageSignalType: string,
-            replyToMsg?: Message | null
+            replyToMsg?: MessageReply | null
           ) => {
             // For typing indicators, we need to send them to the server but they should not appear in chat
             if (messageSignalType === 'typing-start' || messageSignalType === 'typing-stop') {
@@ -311,6 +370,21 @@ export function ChatInterface({
           selectedConversation={selectedConversation}
         />
       </div>
+
+      {/* Call Modal */}
+      {currentCall && (
+        <CallModal
+          call={currentCall}
+          localStream={localStream}
+          remoteStream={remoteStream}
+          onAnswer={() => currentCall && answerCall(currentCall.id)}
+          onDecline={() => currentCall && declineCall(currentCall.id)}
+          onEndCall={endCall}
+          onToggleMute={toggleMute}
+          onToggleVideo={toggleVideo}
+          onSwitchCamera={switchCamera}
+        />
+      )}
     </Card>
   );
 }

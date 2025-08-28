@@ -42,7 +42,6 @@ export function Login({
   error,
   onPassphraseSubmit,
   accountAuthenticated,
-  isRegistrationMode,
   showPassphrasePrompt,
   serverTrustRequest,
   onAcceptServerTrust,
