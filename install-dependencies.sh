@@ -1,0 +1,418 @@
+#!/bin/bash
+
+# End-to-End Chat Site - System Dependencies Installer
+# This script installs all necessary system dependencies for the secure chat application
+
+set -e  # Exit on any error
+
+# Colors for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m' # No Color
+
+# Logging functions
+log_info() {
+    echo -e "${BLUE}[INFO]${NC} $1"
+}
+
+log_success() {
+    echo -e "${GREEN}[SUCCESS]${NC} $1"
+}
+
+log_warning() {
+    echo -e "${YELLOW}[WARNING]${NC} $1"
+}
+
+log_error() {
+    echo -e "${RED}[ERROR]${NC} $1"
+}
+
+# Check if running as root
+check_root() {
+    if [[ $EUID -eq 0 ]]; then
+        log_error "This script should not be run as root. Please run as a regular user."
+        exit 1
+    fi
+}
+
+# Detect OS
+detect_os() {
+    if [[ -f /etc/os-release ]]; then
+        . /etc/os-release
+        OS=$ID
+        OS_VERSION=$VERSION_ID
+    else
+        log_error "Cannot detect OS. This script supports Ubuntu/Debian, Fedora/RHEL, and Arch Linux."
+        exit 1
+    fi
+    
+    log_info "Detected OS: $OS $OS_VERSION"
+}
+
+# Update package manager
+update_packages() {
+    log_info "Updating package manager..."
+    
+    case $OS in
+        ubuntu|debian)
+            sudo apt update
+            ;;
+        fedora|rhel|centos)
+            sudo dnf update -y
+            ;;
+        arch|manjaro)
+            sudo pacman -Sy
+            ;;
+        *)
+            log_error "Unsupported OS: $OS"
+            exit 1
+            ;;
+    esac
+    
+    log_success "Package manager updated"
+}
+
+# Install system dependencies
+install_system_deps() {
+    log_info "Installing system dependencies..."
+    
+    case $OS in
+        ubuntu|debian)
+            sudo apt install -y \
+                curl \
+                wget \
+                git \
+                build-essential \
+                python3 \
+                python3-pip \
+                tor \
+                torsocks \
+                obfs4proxy \
+                ca-certificates \
+                gnupg \
+                lsb-release \
+                software-properties-common \
+                apt-transport-https
+            ;;
+        fedora|rhel|centos)
+            sudo dnf install -y \
+                curl \
+                wget \
+                git \
+                gcc \
+                gcc-c++ \
+                make \
+                python3 \
+                python3-pip \
+                tor \
+                torsocks \
+                obfs4 \
+                ca-certificates \
+                gnupg2
+            ;;
+        arch|manjaro)
+            sudo pacman -S --noconfirm \
+                curl \
+                wget \
+                git \
+                base-devel \
+                python \
+                python-pip \
+                tor \
+                torsocks \
+                obfs4proxy \
+                ca-certificates \
+                gnupg
+            ;;
+    esac
+    
+    log_success "System dependencies installed"
+}
+
+# Install Node.js and npm
+install_nodejs() {
+    log_info "Installing Node.js and npm..."
+    
+    # Check if Node.js is already installed
+    if command -v node &> /dev/null; then
+        NODE_VERSION=$(node --version)
+        log_info "Node.js is already installed: $NODE_VERSION"
+        
+        # Check if version is >= 18
+        MAJOR_VERSION=$(echo $NODE_VERSION | cut -d'.' -f1 | sed 's/v//')
+        if [[ $MAJOR_VERSION -ge 18 ]]; then
+            log_success "Node.js version is compatible"
+            return
+        else
+            log_warning "Node.js version is too old. Installing newer version..."
+        fi
+    fi
+    
+    # Install Node.js via NodeSource repository
+    curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
+    
+    case $OS in
+        ubuntu|debian)
+            sudo apt install -y nodejs
+            ;;
+        fedora|rhel|centos)
+            sudo dnf install -y nodejs npm
+            ;;
+        arch|manjaro)
+            sudo pacman -S --noconfirm nodejs npm
+            ;;
+    esac
+    
+    log_success "Node.js and npm installed"
+    node --version
+    npm --version
+}
+
+# Install pnpm
+install_pnpm() {
+    log_info "Installing pnpm package manager..."
+    
+    if command -v pnpm &> /dev/null; then
+        log_info "pnpm is already installed: $(pnpm --version)"
+        return
+    fi
+    
+    npm install -g pnpm
+    log_success "pnpm installed: $(pnpm --version)"
+}
+
+# Configure Tor
+configure_tor() {
+    log_info "Configuring Tor..."
+    
+    # Create Tor configuration directory if it doesn't exist
+    sudo mkdir -p /etc/tor
+    
+    # Backup existing torrc if it exists
+    if [[ -f /etc/tor/torrc ]]; then
+        sudo cp /etc/tor/torrc /etc/tor/torrc.backup.$(date +%Y%m%d_%H%M%S)
+        log_info "Backed up existing Tor configuration"
+    fi
+    
+    # Create basic Tor configuration
+    sudo tee /etc/tor/torrc > /dev/null <<EOF
+# Tor configuration for End-to-End Chat Application
+# Generated by install-dependencies.sh
+
+# Basic settings
+DataDirectory /var/lib/tor
+PidFile /var/run/tor/tor.pid
+RunAsDaemon 1
+User debian-tor
+
+# Network settings
+SocksPort 9050
+ControlPort 9051
+HashedControlPassword 16:872860B76453A77D60CA2BB8C1A7042072093276A3D701AD684053EC4C
+
+# Security settings
+CookieAuthentication 1
+CookieAuthFileGroupReadable 1
+
+# Client settings
+ClientOnly 1
+SafeLogging 1
+MaxCircuitDirtiness 600
+
+# Bridge settings (uncomment if needed)
+# UseBridges 1
+# ClientTransportPlugin obfs4 exec /usr/bin/obfs4proxy
+# Bridge obfs4 [bridge-address]:[port] [fingerprint] cert=[certificate] iat-mode=0
+
+# Exit policy (client only)
+ExitPolicy reject *:*
+
+# Logging
+Log notice file /var/log/tor/notices.log
+EOF
+    
+    # Set proper permissions
+    sudo chown root:debian-tor /etc/tor/torrc
+    sudo chmod 644 /etc/tor/torrc
+    
+    # Create log directory
+    sudo mkdir -p /var/log/tor
+    sudo chown debian-tor:debian-tor /var/log/tor
+    
+    log_success "Tor configuration created"
+}
+
+# Start and enable Tor service
+setup_tor_service() {
+    log_info "Setting up Tor service..."
+    
+    # Enable and start Tor service
+    sudo systemctl enable tor
+    sudo systemctl start tor
+    
+    # Wait a moment for Tor to start
+    sleep 3
+    
+    # Check if Tor is running
+    if sudo systemctl is-active --quiet tor; then
+        log_success "Tor service is running"
+    else
+        log_error "Failed to start Tor service"
+        sudo systemctl status tor
+        exit 1
+    fi
+}
+
+# Install Electron dependencies
+install_electron_deps() {
+    log_info "Installing Electron dependencies..."
+    
+    case $OS in
+        ubuntu|debian)
+            sudo apt install -y \
+                libnss3-dev \
+                libatk-bridge2.0-dev \
+                libdrm2 \
+                libxcomposite1 \
+                libxdamage1 \
+                libxrandr2 \
+                libgbm1 \
+                libxss1 \
+                libasound2-dev \
+                libgtk-3-dev \
+                libxshmfence1
+            ;;
+        fedora|rhel|centos)
+            sudo dnf install -y \
+                nss-devel \
+                atk-devel \
+                libdrm \
+                libXcomposite \
+                libXdamage \
+                libXrandr \
+                mesa-libgbm \
+                libXScrnSaver \
+                alsa-lib-devel \
+                gtk3-devel
+            ;;
+        arch|manjaro)
+            sudo pacman -S --noconfirm \
+                nss \
+                atk \
+                libdrm \
+                libxcomposite \
+                libxdamage \
+                libxrandr \
+                mesa \
+                libxss \
+                alsa-lib \
+                gtk3
+            ;;
+    esac
+    
+    log_success "Electron dependencies installed"
+}
+
+# Install project dependencies
+install_project_deps() {
+    log_info "Installing project dependencies..."
+    
+    if [[ ! -f package.json ]]; then
+        log_error "package.json not found. Please run this script from the project root directory."
+        exit 1
+    fi
+    
+    pnpm install
+    log_success "Project dependencies installed"
+}
+
+# Create desktop entry
+create_desktop_entry() {
+    log_info "Creating desktop entry..."
+    
+    DESKTOP_FILE="$HOME/.local/share/applications/end2end-chat.desktop"
+    PROJECT_DIR=$(pwd)
+    
+    mkdir -p "$HOME/.local/share/applications"
+    
+    cat > "$DESKTOP_FILE" <<EOF
+[Desktop Entry]
+Name=End-to-End Chat
+Comment=Secure end-to-end encrypted messaging application
+Exec=$PROJECT_DIR/start.sh
+Icon=$PROJECT_DIR/assets/icon.png
+Terminal=false
+Type=Application
+Categories=Network;Chat;
+StartupWMClass=end2end-chat
+EOF
+    
+    chmod +x "$DESKTOP_FILE"
+    log_success "Desktop entry created"
+}
+
+# Create start script
+create_start_script() {
+    log_info "Creating start script..."
+    
+    cat > start.sh <<'EOF'
+#!/bin/bash
+
+# Start script for End-to-End Chat Application
+cd "$(dirname "$0")"
+
+# Check if Tor is running
+if ! systemctl is-active --quiet tor; then
+    echo "Starting Tor service..."
+    sudo systemctl start tor
+    sleep 3
+fi
+
+# Start the application
+pnpm run dev
+EOF
+    
+    chmod +x start.sh
+    log_success "Start script created"
+}
+
+# Main installation function
+main() {
+    log_info "Starting End-to-End Chat Site dependency installation..."
+    
+    check_root
+    detect_os
+    update_packages
+    install_system_deps
+    install_nodejs
+    install_pnpm
+    configure_tor
+    setup_tor_service
+    install_electron_deps
+    
+    # Only install project deps if we're in the project directory
+    if [[ -f package.json ]]; then
+        install_project_deps
+        create_start_script
+        create_desktop_entry
+    else
+        log_warning "Not in project directory. Skipping project-specific setup."
+        log_info "Navigate to your project directory and run 'pnpm install' to install project dependencies."
+    fi
+    
+    log_success "Installation completed successfully!"
+    echo
+    log_info "Tor is now configured and running on:"
+    echo "  - SOCKS proxy: localhost:9050"
+    echo "  - Control port: localhost:9051"
+    echo
+    log_warning "Important security notes:"
+    echo "- Change the Tor control password in /etc/tor/torrc"
+    echo "- Review Tor configuration for your specific needs"
+    echo "- Consider using bridges if in a restricted network"
+}
+
+# Run main function
+main "$@"
