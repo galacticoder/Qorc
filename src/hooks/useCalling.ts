@@ -119,12 +119,49 @@ export const useCalling = (authContext?: ReturnType<typeof useAuth>) => {
       // Set up callbacks
       service.onIncomingCall((call) => {
         console.log('[useCalling] Incoming call:', call);
-        setCurrentCall(call);
+        // Clone to force React state update on subsequent mutations
+        setCurrentCall({ ...call });
       });
 
       service.onCallStateChange((call) => {
         console.log('[useCalling] Call state changed:', call.status);
-        setCurrentCall(call);
+
+        // Broadcast UI call status for badges/indicators
+        try {
+          const statusDetail = {
+            peer: call.peer,
+            status: call.status,
+            type: call.type,
+            direction: call.direction,
+            startTime: call.startTime,
+            endTime: call.endTime
+          };
+          window.dispatchEvent(new CustomEvent('ui-call-status', { detail: statusDetail }));
+        } catch {}
+
+        if (call.status === 'ended' || call.status === 'declined' || call.status === 'missed') {
+          // For ended specifically, emit a call-ended summary for chat logging
+          if (call.status === 'ended') {
+            try {
+              const durationMs = call.startTime && call.endTime ? (call.endTime - call.startTime) : 0;
+              const endedDetail = {
+                peer: call.peer,
+                type: call.type,
+                startTime: call.startTime,
+                endTime: call.endTime,
+                durationMs
+              };
+              window.dispatchEvent(new CustomEvent('ui-call-ended', { detail: endedDetail }));
+            } catch {}
+          }
+          // Close modal and clear streams when call is finished
+          setCurrentCall(null);
+          setLocalStream(null);
+          setRemoteStream(null);
+        } else {
+          // Clone to force React state update on subsequent mutations
+          setCurrentCall({ ...call });
+        }
       });
 
       service.onLocalStream((stream) => {

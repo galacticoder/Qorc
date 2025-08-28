@@ -50,6 +50,7 @@ export class WebRTCCallingService {
   private peerConnection: RTCPeerConnection | null = null;
   private currentCall: CallState | null = null;
   private localUsername: string = '';
+  private preferredCameraDeviceId: string | null = null;
   
   // Callbacks
   private onIncomingCallCallback: ((call: CallState) => void) | null = null;
@@ -77,6 +78,12 @@ export class WebRTCCallingService {
 
   constructor(username: string) {
     this.localUsername = username;
+    try {
+      const saved = localStorage.getItem('preferred_camera_deviceId_v1');
+      if (saved && typeof saved === 'string' && saved.length < 256) {
+        this.preferredCameraDeviceId = saved;
+      }
+    } catch {}
   }
 
   /**
@@ -173,6 +180,21 @@ export class WebRTCCallingService {
 
     console.log('[Calling] Answering call:', callId);
 
+    // Prevent duplicate/invalid answer attempts
+    if (!this.peerConnection) {
+      console.warn('[Calling] No peer connection present when answering');
+      return;
+    }
+    if (this.currentCall.status !== 'ringing') {
+      console.warn('[Calling] Ignoring answer: call status is', this.currentCall.status);
+      return;
+    }
+    const signalingState = this.peerConnection.signalingState;
+    if (signalingState !== 'have-remote-offer' && signalingState !== 'have-local-pranswer') {
+      console.warn('[Calling] Ignoring answer: invalid signalingState', signalingState);
+      return;
+    }
+
     try {
       // Get user media
       await this.setupLocalMedia(this.currentCall.type);
@@ -204,8 +226,8 @@ export class WebRTCCallingService {
 
     } catch (error) {
       console.error('[Calling] Failed to answer call:', error);
-      this.declineCall(callId);
-      throw error;
+      // Ignore duplicate answer attempts or invalid state; do not auto-decline
+      return;
     }
   }
 
@@ -361,6 +383,19 @@ export class WebRTCCallingService {
    */
   private async setupLocalMedia(callType: 'audio' | 'video'): Promise<void> {
     try {
+      let video: boolean | MediaTrackConstraints = false;
+      if (callType === 'video') {
+        const base: MediaTrackConstraints = {
+          width: { ideal: 1280, max: 1920 },
+          height: { ideal: 720, max: 1080 },
+          frameRate: { ideal: 30, max: 60 },
+          facingMode: 'user'
+        };
+        if (this.preferredCameraDeviceId) {
+          (base as any).deviceId = { exact: this.preferredCameraDeviceId };
+        }
+        video = base;
+      }
       const constraints: MediaStreamConstraints = {
         audio: {
           echoCancellation: true,
@@ -369,12 +404,7 @@ export class WebRTCCallingService {
           sampleRate: 48000,
           channelCount: 1
         },
-        video: callType === 'video' ? {
-          width: { ideal: 1280, max: 1920 },
-          height: { ideal: 720, max: 1080 },
-          frameRate: { ideal: 30, max: 60 },
-          facingMode: 'user'
-        } : false
+        video
       };
 
       this.localStream = await navigator.mediaDevices.getUserMedia(constraints);
@@ -387,8 +417,34 @@ export class WebRTCCallingService {
       // Notify callback
       this.onLocalStreamCallback?.(this.localStream);
 
-    } catch (error) {
+    } catch (error: any) {
       console.error('[Calling] Failed to get user media:', error);
+      // Fallback: if video requested but not available, try audio-only and continue the call
+      if (callType === 'video') {
+        try {
+          console.warn('[Calling] Video device not found or inaccessible. Falling back to audio-only.');
+          const audioOnlyConstraints: MediaStreamConstraints = {
+            audio: {
+              echoCancellation: true,
+              noiseSuppression: true,
+              autoGainControl: true,
+              sampleRate: 48000,
+              channelCount: 1
+            },
+            video: false
+          };
+          this.localStream = await navigator.mediaDevices.getUserMedia(audioOnlyConstraints);
+          console.log('[Calling] Local media stream obtained (audio-only fallback):', {
+            audio: this.localStream.getAudioTracks().length > 0,
+            video: this.localStream.getVideoTracks().length > 0
+          });
+          // Notify callback
+          this.onLocalStreamCallback?.(this.localStream);
+          return; // Continue without throwing
+        } catch (fallbackError) {
+          console.error('[Calling] Audio-only fallback failed:', fallbackError);
+        }
+      }
       throw new Error('Failed to access camera/microphone');
     }
   }
@@ -699,10 +755,8 @@ export class WebRTCCallingService {
     // Clear remote stream
     this.remoteStream = null;
 
-    // Clear current call after a delay to allow UI to show final state
-    setTimeout(() => {
-      this.currentCall = null;
-    }, 3000);
+    // Clear current call immediately to allow prompt re-calling
+    this.currentCall = null;
   }
 
   /**
@@ -731,6 +785,61 @@ export class WebRTCCallingService {
    */
   onLocalStream(callback: (stream: MediaStream) => void): void {
     this.onLocalStreamCallback = callback;
+  }
+
+  /**
+   * List available video input devices
+   */
+  static async getVideoInputDevices(): Promise<MediaDeviceInfo[]> {
+    try {
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      return devices.filter(d => d.kind === 'videoinput');
+    } catch (e) {
+      console.warn('[Calling] enumerateDevices failed:', e);
+      return [];
+    }
+  }
+
+  /**
+   * Get preferred camera device id
+   */
+  getPreferredCameraDeviceId(): string | null {
+    return this.preferredCameraDeviceId;
+  }
+
+  /**
+   * Set preferred camera and apply immediately if possible
+   */
+  async setPreferredCameraDeviceId(deviceId: string): Promise<void> {
+    this.preferredCameraDeviceId = deviceId || null;
+    try { localStorage.setItem('preferred_camera_deviceId_v1', deviceId || ''); } catch {}
+
+    // If there is an active connection, try to replace the video track
+    if (this.peerConnection) {
+      try {
+        const newStream = await navigator.mediaDevices.getUserMedia({
+          video: { deviceId: { exact: deviceId } },
+          audio: false
+        });
+        const newVideo = newStream.getVideoTracks()[0];
+        if (newVideo) {
+          const sender = this.peerConnection.getSenders().find(s => s.track && s.track.kind === 'video');
+          if (sender) {
+            await sender.replaceTrack(newVideo);
+          }
+          if (!this.localStream) {
+            this.localStream = new MediaStream([newVideo]);
+          } else {
+            const old = this.localStream.getVideoTracks()[0];
+            if (old) { old.stop(); this.localStream.removeTrack(old); }
+            this.localStream.addTrack(newVideo);
+          }
+          this.onLocalStreamCallback?.(this.localStream);
+        }
+      } catch (e) {
+        console.error('[Calling] Failed to apply selected camera:', e);
+      }
+    }
   }
 
   /**

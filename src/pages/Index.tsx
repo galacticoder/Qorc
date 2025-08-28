@@ -18,7 +18,6 @@ import { TypingIndicatorProvider } from "@/contexts/TypingIndicatorContext";
 import { torNetworkManager } from "@/lib/tor-network";
 import { TorAutoSetup } from "@/components/setup/TorAutoSetup";
 import { torAutoSetup } from "@/lib/tor-auto-setup";
-import { useCalling } from "@/hooks/useCalling";
 // offline message queue removed
 
 interface ChatAppProps {
@@ -32,9 +31,6 @@ const ChatApp: React.FC<ChatAppProps> = () => {
   const [, setTorSetupComplete] = useState(false);
 
   const Authentication = useAuth();
-  
-  // Initialize calling service after complete authentication
-  useCalling(Authentication);
 
   // Check if Tor setup is needed on app start
   useEffect(() => {
@@ -246,6 +242,7 @@ const ChatApp: React.FC<ChatAppProps> = () => {
             <ChatInterface
               messages={conversationMessages}
               setMessages={setMessages}
+              callingAuthContext={Authentication}
               onSendMessage={async (messageId, content, messageSignalType, replyTo) => {
                 console.log('[Index] Attempting to send message:', {
                   messageId,

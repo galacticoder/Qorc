@@ -17,6 +17,7 @@ import { TorIndicator } from "@/components/ui/TorIndicator";
 import { Phone, Video } from "lucide-react";
 import { useCalling } from "@/hooks/useCalling";
 import { CallModal } from "./CallModal";
+import { useAuth } from "@/hooks/useAuth";
 
 interface ChatInterfaceProps {
   onSendMessage: (
@@ -33,6 +34,7 @@ interface ChatInterfaceProps {
   users: User[];
   selectedConversation?: string;
   saveMessageToLocalDB: (msg: Message) => Promise<void>;
+  callingAuthContext?: ReturnType<typeof useAuth>;
 }
 
 export function ChatInterface({
@@ -45,13 +47,14 @@ export function ChatInterface({
   users,
   selectedConversation,
   saveMessageToLocalDB,
+  callingAuthContext,
 }: ChatInterfaceProps) {
   const scrollAreaRef = useRef<HTMLDivElement>(null);
   const [replyTo, setReplyTo] = useState<Message | null>(null);
   const [editingMessage, setEditingMessage] = useState<Message | null>(null);
 
   // Calling functionality
-  const callingHook = useCalling();
+  const callingHook = useCalling(callingAuthContext);
   const {
     currentCall,
     localStream,
