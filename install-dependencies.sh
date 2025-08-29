@@ -173,14 +173,50 @@ install_nodejs() {
 # Install pnpm
 install_pnpm() {
     log_info "Installing pnpm package manager..."
-    
+
     if command -v pnpm &> /dev/null; then
         log_info "pnpm is already installed: $(pnpm --version)"
         return
     fi
-    
-    npm install -g pnpm
-    log_success "pnpm installed: $(pnpm --version)"
+
+    # Determine desired pnpm version from package.json if specified
+    PNPM_VER=""
+    if [[ -f package.json ]]; then
+        PKG_MGR=$(grep -oE '"packageManager"\s*:\s*"[^"]+"' package.json | sed -E 's/.*"packageManager"\s*:\s*"([^"]+)".*/\1/')
+        if [[ $PKG_MGR == pnpm@* ]]; then
+            PNPM_VER="${PKG_MGR#pnpm@}"
+        fi
+    fi
+    if [[ -z "$PNPM_VER" ]]; then
+        PNPM_VER="8"  # default to pnpm v8 if not specified
+    fi
+
+    # Install pnpm to user directory to avoid requiring sudo
+    NPM_PREFIX="$HOME/.local"
+    mkdir -p "$NPM_PREFIX"
+    log_info "Installing pnpm@$PNPM_VER to $NPM_PREFIX (user scope)"
+    npm install -g "pnpm@${PNPM_VER}" --prefix "$NPM_PREFIX"
+
+    # Ensure user's local bin is on PATH for current script and future shells
+    export PATH="$HOME/.local/bin:$PATH"
+    SHELL_RC=""
+    if [[ -n "$ZSH_VERSION" ]]; then
+        SHELL_RC="$HOME/.zshrc"
+    elif [[ -n "$BASH_VERSION" ]]; then
+        SHELL_RC="$HOME/.bashrc"
+    else
+        SHELL_RC="$HOME/.profile"
+    fi
+    if ! grep -q 'export PATH="$HOME/.local/bin:$PATH"' "$SHELL_RC" 2>/dev/null; then
+        echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$SHELL_RC"
+    fi
+
+    if command -v pnpm &> /dev/null; then
+        log_success "pnpm installed: $(pnpm --version)"
+    else
+        log_error "pnpm did not install correctly. Check npm configuration and PATH."
+        exit 1
+    fi
 }
 
 # Configure Tor
@@ -315,6 +351,43 @@ install_electron_deps() {
     log_success "Electron dependencies installed"
 }
 
+# Install server dependencies
+install_server_deps() {
+    log_info "Installing server dependencies..."
+
+    if [[ -d server ]]; then
+        pushd server > /dev/null
+
+        # Quiet npm output and avoid deprecated transitive audit/fund noise
+        export npm_config_audit=false
+        export npm_config_fund=false
+        export npm_config_progress=false
+
+        # Install if node_modules missing, otherwise ensure ioredis is present
+        if [[ ! -d node_modules ]]; then
+            if [[ -f package-lock.json ]]; then
+                npm ci --omit=dev
+            else
+                npm install --omit=dev
+            fi
+        else
+            # Ensure ioredis is available; install if missing
+            if ! node -e "require.resolve('ioredis')" >/dev/null 2>&1; then
+                log_info "ioredis not found; installing..."
+                npm install ioredis@^5 --omit=dev
+            fi
+        fi
+
+        # Rebuild native modules that may need local toolchain
+        npm rebuild better-sqlite3 || true
+
+        popd > /dev/null
+        log_success "Server dependencies installed"
+    else
+        log_warning "server directory not found; skipping server dependency install."
+    fi
+}
+
 # Install project dependencies
 install_project_deps() {
     log_info "Installing project dependencies..."
@@ -356,12 +429,15 @@ EOF
 # Create start script
 create_start_script() {
     log_info "Creating start script..."
-    
+
     cat > start.sh <<'EOF'
 #!/bin/bash
 
 # Start script for End-to-End Chat Application
 cd "$(dirname "$0")"
+
+# Ensure user-local npm bin is on PATH (for pnpm installed to ~/.local)
+export PATH="$HOME/.local/bin:$PATH"
 
 # Check if Tor is running
 if ! systemctl is-active --quiet tor; then
@@ -373,7 +449,7 @@ fi
 # Start the application
 pnpm run dev
 EOF
-    
+
     chmod +x start.sh
     log_success "Start script created"
 }
@@ -391,6 +467,7 @@ main() {
     configure_tor
     setup_tor_service
     install_electron_deps
+    install_server_deps
     
     # Only install project deps if we're in the project directory
     if [[ -f package.json ]]; then

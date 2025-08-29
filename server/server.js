@@ -760,8 +760,12 @@ async function gracefulShutdown() {
     }
     
     console.log('[SERVER] Graceful shutdown completed');
+    
+    // Exit the process after cleanup
+    process.exit(0);
   } catch (error) {
     console.error('[SERVER] Error during graceful shutdown:', error);
+    process.exit(1);
   }
 }
 

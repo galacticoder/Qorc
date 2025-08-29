@@ -50,10 +50,28 @@ if [ "$SKIP_INSTALL" != "1" ]; then
         fi
     fi
 
-    # Rebuild native modules to ensure compatibility
-    echo -e "${GREEN}Rebuilding native modules...${NC}"
-    npm rebuild better-sqlite3
+    # Rebuild native modules only if necessary (or when forced)
+    SKIP_REBUILD="${SKIP_REBUILD:-1}"
+    if [ "$SKIP_REBUILD" = "0" ]; then
+        echo -e "${GREEN}Rebuilding native modules (forced)...${NC}"
+        npm rebuild better-sqlite3 || true
+    else
+        # Verify better-sqlite3 native binding by opening an in-memory DB
+        if ! node -e "new (require('better-sqlite3'))(':memory:').close();" >/dev/null 2>&1; then
+            echo -e "${GREEN}Rebuilding native modules (auto-detected)...${NC}"
+            npm rebuild better-sqlite3 || true
+            # Re-test after rebuild; bail if still failing
+            if ! node -e "new (require('better-sqlite3'))(':memory:').close();" >/dev/null 2>&1; then
+                echo -e "${YELLOW}better-sqlite3 native binding still missing after rebuild.${NC}"
+                echo -e "${YELLOW}Try: (1) remove server/node_modules and run npm ci, (2) ensure build tools are installed, (3) set SKIP_REBUILD=0 to force.${NC}"
+                exit 1
+            fi
+        else
+            echo -e "${GREEN}Native modules OK; skipping rebuild. Set SKIP_REBUILD=0 to force.${NC}"
+        fi
+    fi
 fi
 
 echo -e "${GREEN}Starting secure WebSocket server...${NC}"
-node server.js
+# Replace shell with node so signals (Ctrl-C) are delivered directly and exit is clean
+exec node server.js
