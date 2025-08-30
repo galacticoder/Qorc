@@ -444,8 +444,7 @@ async function startServer() {
               console.log(`[SERVER] Server authentication successful for user: ${clientState.username}`);
               ws.send(JSON.stringify({ type: SignalType.AUTH_SUCCESS, message: 'Server authentication successful' }));
 
-              console.log(`[SERVER] Broadcasting public keys for: ${clientState.username}`);
-              MessagingUtils.broadcastPublicKeys(clients);
+              // No global public-key broadcast; keys are fetched on-demand per peer
 
               // Offline message delivery removed
             } else {
@@ -470,47 +469,8 @@ async function startServer() {
           }
 
           case SignalType.HYBRID_KEYS_UPDATE: {
-            console.log(`[SERVER] Processing hybrid keys update for user: ${clientState.username}`);
-            if (!clientState.username) {
-              console.error('[SERVER] Username not set for hybrid keys update');
-              return ws.send(JSON.stringify({ type: SignalType.ERROR, message: 'Username not set' }));
-            }
-
-            try {
-              const userPayload = await CryptoUtils.Hybrid.decryptHybridPayload(parsed.userData, serverHybridKeyPair);
-              const username = userPayload.usernameSent;
-              const hybridPublicKeys = userPayload.hybridPublicKeys;
-
-              console.log(`[SERVER] Decrypted hybrid keys update:`, {
-                username,
-                hasHybridKeys: !!hybridPublicKeys,
-                hybridKeysStructure: hybridPublicKeys ? Object.keys(hybridPublicKeys) : null
-              });
-
-              if (username === clientState.username && hybridPublicKeys) {
-                console.log(`[SERVER] Updating hybrid keys for user: ${username}`);
-                const existingClient = clients.get(username);
-                console.log(`[SERVER] Existing client for ${username}:`, {
-                  exists: !!existingClient,
-                  hasHybridKeys: existingClient ? !!existingClient.hybridPublicKeys : false,
-                  clientKeys: existingClient ? Object.keys(existingClient) : null
-                });
-
-                if (existingClient) {
-                  existingClient.hybridPublicKeys = hybridPublicKeys;
-                  console.log(`[SERVER] Hybrid keys updated successfully for user: ${username}`);
-                  console.log(`[SERVER] Client after update:`, {
-                    hasHybridKeys: !!existingClient.hybridPublicKeys,
-                    hybridKeysStructure: existingClient.hybridPublicKeys ? Object.keys(existingClient.hybridPublicKeys) : null
-                  });
-                } else {
-                  console.error(`[SERVER] No existing client found for user: ${username}`);
-                }
-              }
-            } catch (error) {
-              console.error(`[SERVER] Failed to process hybrid keys update for user ${clientState.username}:`, error);
-              ws.send(JSON.stringify({ type: SignalType.ERROR, message: 'Failed to update hybrid keys' }));
-            }
+            // Legacy hybrid key updates are ignored to avoid server memory usage
+            // Clients should use Libsignal bundles and on-demand session setup
             break;
           }
 

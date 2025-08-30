@@ -10,6 +10,11 @@ export const useWebSocket = (
   setLoginError: (error: string) => void
 ) => {
   useEffect(() => {
+    // Ensure Electron main connects to server early
+    try {
+      (window as any).edgeApi?.wsConnect?.();
+    } catch {}
+
     const handler = async (data: any) => {
       try {
         console.log('[useWebSocket] Received message from main process:', {

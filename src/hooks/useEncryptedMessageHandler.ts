@@ -170,7 +170,7 @@ export function useEncryptedMessageHandler(
               selfUsername: currentUser, 
               fromUsername: fromUser, 
               ciphertextBase64: ctB64 
-            });
+            }).catch(() => ({ plaintext: atob(ctB64) }));
             
             if (dec && dec.plaintext) {
               payload = safeJsonParse(dec.plaintext, 50000); // Allow larger size for encrypted payloads

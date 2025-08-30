@@ -119,7 +119,7 @@ const ChatApp: React.FC<ChatAppProps> = () => {
   // offline queue removed
 
   const messageSender = useMessageSender(
-    Database.users,
+    [], // Do not rely on in-memory user list for scalability
     Authentication.loginUsernameRef,
     (message: Message) => {
       // Add the message to the UI state
@@ -256,29 +256,54 @@ const ChatApp: React.FC<ChatAppProps> = () => {
                   replyToKeys: replyTo ? Object.keys(replyTo) : null
                 });
                 
+                if (!selectedConversation) {
+                  console.error('[Index] No conversation selected');
+                  return;
+                }
+                
+                // Ensure conversation exists (auto-create if needed)
+                addConversation(selectedConversation, false);
+                
                 // Handle typing indicator messages differently
                 if (messageSignalType === 'typing-start' || messageSignalType === 'typing-stop') {
                   // For typing indicators, we need to send them as encrypted messages
                   // but they should not appear in the chat history
-                  const targetUser = Database.users.find(user => user.username === selectedConversation);
+                  let targetUser = Database.users.find(user => user.username === selectedConversation);
+                  
+                  // If user not found in Database.users, create a placeholder user for messaging
                   if (!targetUser) {
-                    console.error('[Index] User not found for conversation:', selectedConversation);
-                    return;
+                    console.log('[Index] User not in Database.users, creating placeholder for:', selectedConversation);
+                    targetUser = {
+                      id: crypto.randomUUID(),
+                      username: selectedConversation,
+                      isOnline: false,
+                      hybridPublicKeys: undefined // Will be populated during key exchange
+                    };
                   }
                   
-                  console.log('[Index] Found target user for typing indicator:', targetUser);
+                  console.log('[Index] Found/created target user for typing indicator:', targetUser);
                   // Send typing indicator as encrypted message but don't add to chat history
                   return messageSender.handleSendMessage(targetUser, content, replyTo ? { id: replyTo.id, sender: replyTo.sender, content: replyTo.content } : undefined, undefined, messageSignalType);
                 }
                 
                 // Find the user object for the selected conversation
-                const targetUser = Database.users.find(user => user.username === selectedConversation);
+                let targetUser = Database.users.find(user => user.username === selectedConversation);
+                
+                // If user not found in Database.users, create a placeholder user for messaging
                 if (!targetUser) {
-                  console.error('[Index] User not found for conversation:', selectedConversation);
-                  return;
+                  console.log('[Index] User not in Database.users, creating placeholder for:', selectedConversation);
+                  targetUser = {
+                    id: crypto.randomUUID(),
+                    username: selectedConversation,
+                    isOnline: false,
+                    hybridPublicKeys: undefined // Will be populated during key exchange
+                  };
+                  
+                  // Add to Database.users so future messages can find the user
+                  Database.setUsers(prev => [...prev, targetUser]);
                 }
                 
-                console.log('[Index] Found target user:', targetUser);
+                console.log('[Index] Found/created target user:', targetUser);
                 return messageSender.handleSendMessage(targetUser, content, replyTo ? { id: replyTo.id, sender: replyTo.sender, content: replyTo.content } : undefined, undefined, messageSignalType);
               }}
               onSendFile={handleSendFileWrapper}

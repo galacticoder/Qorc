@@ -30,10 +30,15 @@ export function Sidebar({ className, children, currentUsername, onAddConversatio
   const [newUsername, setNewUsername] = useState("");
 
   const handleAddUser = () => {
-    if (newUsername.trim() && newUsername.trim() !== currentUsername) {
-      onAddConversation?.(newUsername.trim());
+    const username = newUsername.trim();
+    if (username && username !== currentUsername) {
+      // Create conversation and automatically select it
+      onAddConversation?.(username);
       setNewUsername("");
       setShowAddUser(false);
+      // Switch to messages tab after adding conversation
+      setActiveTab("messages");
+      onActiveTabChange?.("messages");
     }
   };
 
@@ -154,23 +159,33 @@ export function Sidebar({ className, children, currentUsername, onAddConversatio
       {showAddUser && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
           <div className="bg-white rounded-lg p-6 w-80 shadow-xl">
-            <h3 className="text-lg font-semibold mb-4">Add New Conversation</h3>
+            <h3 className="text-lg font-semibold mb-4">Start New Conversation</h3>
             <div className="space-y-4">
-              <Input
-                placeholder="Enter username..."
-                value={newUsername}
-                onChange={(e) => setNewUsername(e.target.value)}
-                onKeyDown={handleKeyPress}
-                className="w-full"
-                autoFocus
-              />
+              <div>
+                <label className="text-sm text-gray-600 mb-2 block">
+                  Enter username to chat with:
+                </label>
+                <Input
+                  placeholder="e.g., alice, bob, charlie..."
+                  value={newUsername}
+                  onChange={(e) => setNewUsername(e.target.value)}
+                  onKeyDown={handleKeyPress}
+                  className="w-full"
+                  autoFocus
+                />
+                {newUsername.trim() === currentUsername && (
+                  <p className="text-xs text-red-500 mt-1">
+                    Cannot start conversation with yourself
+                  </p>
+                )}
+              </div>
               <div className="flex gap-2">
                 <Button
                   onClick={handleAddUser}
                   className="flex-1"
-                  disabled={!newUsername.trim()}
+                  disabled={!newUsername.trim() || newUsername.trim() === currentUsername}
                 >
-                  Add Conversation
+                  Start Chat
                 </Button>
                 <Button
                   onClick={() => {
@@ -183,6 +198,9 @@ export function Sidebar({ className, children, currentUsername, onAddConversatio
                 >
                   Cancel
                 </Button>
+              </div>
+              <div className="text-xs text-gray-500">
+                You can message any username. If they're online, they'll receive your message instantly.
               </div>
             </div>
           </div>

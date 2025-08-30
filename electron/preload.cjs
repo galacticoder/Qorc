@@ -56,7 +56,41 @@ contextBridge.exposeInMainWorld('electronAPI', {
   }
 });
 
+// Expose edgeApi for server communication and Signal Protocol
+contextBridge.exposeInMainWorld('edgeApi', {
+  // WebSocket communication
+  wsSend: (message) => ipcRenderer.invoke('edge:ws-send', message),
+  wsConnect: () => ipcRenderer.invoke('edge:ws-connect'),
+  
+  // Server message listener
+  onServerMessage: (callback) => {
+    ipcRenderer.on('edge:server-message', (event, message) => callback(message));
+    return () => ipcRenderer.removeListener('edge:server-message', callback);
+  },
+  
+  // Signal Protocol functions (placeholders for now)
+  generateIdentity: (options) => ipcRenderer.invoke('signal:generate-identity', options),
+  generatePreKeys: (options) => ipcRenderer.invoke('signal:generate-prekeys', options),
+  getPreKeyBundle: (options) => ipcRenderer.invoke('signal:get-prekey-bundle', options),
+  processPreKeyBundle: (options) => ipcRenderer.invoke('signal:process-prekey-bundle', options),
+  hasSession: (options) => ipcRenderer.invoke('signal:has-session', options),
+  encrypt: (options) => ipcRenderer.invoke('signal:encrypt', options),
+  decrypt: (options) => ipcRenderer.invoke('signal:decrypt', options),
+  
+  // Renderer ready notification
+  rendererReady: () => ipcRenderer.invoke('renderer:ready')
+});
+
 // Log that preload script has loaded
 console.log('[PRELOAD] Electron preload script loaded');
 console.log('[PRELOAD] Platform:', process.platform);
 console.log('[PRELOAD] Node version:', process.version);
+
+// Bridge server messages into the isolated world via a DOM event for React hooks
+try {
+  ipcRenderer.on('edge:server-message', (_event, data) => {
+    try {
+      window.dispatchEvent(new CustomEvent('edge:server-message', { detail: data }));
+    } catch {}
+  });
+} catch {}

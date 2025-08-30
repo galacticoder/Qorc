@@ -64,10 +64,9 @@ export class AccountAuthHandler {
         return rejectConnection(ws, SignalType.INVALIDNAMELENGTH, SignalMessages.INVALIDNAMELENGTH);
       }
 
-      // Map consistently by username only; server maintains ws->username mapping
+      // Track only active connection state; do not store user keys or profiles in memory
       this.clients.set(username, {
         ws,
-        hybridPublicKeys,
         clientState: { username, hasPassedAccountLogin: true, hasAuthenticated: false }
       });
 

@@ -8,14 +8,16 @@ export function useConversations(currentUsername: string, users: User[], message
   const [selectedConversation, setSelectedConversation] = useState<string | null>(null);
 
   // Add a new conversation
-  const addConversation = useCallback((username: string) => {
+  const addConversation = useCallback((username: string, autoSelect: boolean = true) => {
     if (!username || username === currentUsername) return;
     
     // Check if conversation already exists
     const existingConversation = conversations.find(conv => conv.username === username);
     if (existingConversation) {
-      setSelectedConversation(username);
-      return;
+      if (autoSelect) {
+        setSelectedConversation(username);
+      }
+      return existingConversation;
     }
 
     // Create new conversation
@@ -29,7 +31,10 @@ export function useConversations(currentUsername: string, users: User[], message
     };
 
     setConversations(prev => [...prev, newConversation]);
-    setSelectedConversation(username);
+    if (autoSelect) {
+      setSelectedConversation(username);
+    }
+    return newConversation;
   }, [conversations, users, currentUsername]);
 
   // Select a conversation
@@ -74,10 +79,11 @@ export function useConversations(currentUsername: string, users: User[], message
     });
   }, [userLookup]);
 
-  // Rebuild conversations when messages change (handles initial load and subsequent updates)
+  // Rebuild/merge conversations when messages change (keep manually added ones)
   useEffect(() => {
     if (!messages || messages.length === 0) {
-      setConversations(prev => prev.length ? [] : prev);
+      // Do not clear manually added conversations when there are no messages yet
+      setConversations(prev => prev);
       return;
     }
 
@@ -113,15 +119,30 @@ export function useConversations(currentUsername: string, users: User[], message
       }
     }
 
-    // Convert to array and normalize unread for selected conversation
-    let rebuilt = Array.from(convMap.values()).map(conv => (
-      conv.username === selectedConversation ? { ...conv, unreadCount: 0 } : conv
-    ));
+    // Merge rebuilt map with existing conversations, preserving manually added ones
+    setConversations(prev => {
+      const merged = new Map<string, Conversation>(prev.map(c => [c.username, c]));
 
-    // Sort by latest activity
-    rebuilt.sort((a, b) => (b.lastMessageTime?.getTime() || 0) - (a.lastMessageTime?.getTime() || 0));
+      for (const [username, conv] of convMap.entries()) {
+        const exists = merged.get(username);
+        if (exists) {
+          merged.set(username, {
+            ...exists,
+            isOnline: conv.isOnline,
+            lastMessage: conv.lastMessage,
+            lastMessageTime: conv.lastMessageTime,
+            unreadCount: username === selectedConversation ? 0 : conv.unreadCount,
+          });
+        } else {
+          merged.set(username, conv);
+        }
+      }
 
-    setConversations(rebuilt);
+      const arr = Array.from(merged.values());
+      // Sort by latest activity; manual conversations without messages come last
+      arr.sort((a, b) => (b.lastMessageTime?.getTime() || 0) - (a.lastMessageTime?.getTime() || 0));
+      return arr;
+    });
   }, [messages, users, currentUsername, selectedConversation]);
 
   // Auto-select the most recent conversation on initial rebuild if none selected
@@ -131,11 +152,29 @@ export function useConversations(currentUsername: string, users: User[], message
     }
   }, [conversations, selectedConversation]);
 
+  // Debug conversation state
+  const debugConversationState = useCallback(() => {
+    console.log('[useConversations] Current state:', {
+      conversationsCount: conversations.length,
+      conversations: conversations.map(c => ({
+        username: c.username,
+        lastMessage: c.lastMessage?.substring(0, 50),
+        unreadCount: c.unreadCount,
+        isOnline: c.isOnline
+      })),
+      selectedConversation,
+      currentUsername,
+      usersCount: users.length,
+      messagesCount: messages.length
+    });
+  }, [conversations, selectedConversation, currentUsername, users.length, messages.length]);
+
   return {
     conversations,
     selectedConversation,
     addConversation,
     selectConversation,
     getConversationMessages,
+    debugConversationState,
   };
 }
