@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "concurrently -k --success first \"pnpm:vite\" \"pnpm:electron\"",
     "vite": "vite --port 5173 --strictPort --open=false",
-    "electron": "wait-on http://localhost:5173 && cross-env VITE_DEV_SERVER_URL=http://localhost:5173 electron .",
+    "electron": "wait-on http://localhost:5173 && cross-env VITE_DEV_SERVER_URL=http://localhost:5173 ELECTRON_DISABLE_SANDBOX=1 electron . --no-sandbox",
     "build": "vite build",
     "build:electron": "electron-builder -c.extraMetadata.name=e2e-chat -c.appId=com.end2end.chat -c.productName=End2EndChat -c.directories.output=dist-electron",
     "lint": "eslint --quiet ./src",

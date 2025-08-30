@@ -5,30 +5,23 @@ function validateTorOptions(options) {
   if (!options || typeof options !== 'object') {
     throw new Error('Invalid options: must be an object');
   }
-  
-  // SECURITY: Validate config string to prevent command injection
-  if (options.config && typeof options.config === 'string') {
-    // Check for dangerous patterns that could be used for command injection
-    const dangerousPatterns = [
-      /[;&|`$()]/,  // Shell metacharacters
-      /\.\./,       // Path traversal
-      /\/etc\//,    // System directories
-      /\/proc\//,   // Process filesystem
-      /\/dev\//,    // Device files
-    ];
-    
-    for (const pattern of dangerousPatterns) {
-      if (pattern.test(options.config)) {
-        throw new Error('Invalid configuration: contains dangerous patterns');
-      }
-    }
-    
-    // Limit config size to prevent DoS
-    if (options.config.length > 10000) {
+
+  // Validate torrc text safely. The config is written to a file and never executed via a shell.
+  if (typeof options.config === 'string') {
+    // Reasonable size limit to avoid abuse
+    if (options.config.length > 50000) {
       throw new Error('Configuration too large');
     }
+
+    // Forbid embedded null bytes and non-printable characters (except tab/newline/CR)
+    if (/\x00/.test(options.config)) {
+      throw new Error('Invalid configuration: contains null bytes');
+    }
+    if (/[^\x09\x0A\x0D\x20-\x7E]/.test(options.config)) {
+      throw new Error('Invalid configuration: contains invalid characters');
+    }
   }
-  
+
   return options;
 }
 
@@ -98,5 +91,3 @@ ipcRenderer.on('edge:server-message', (_event, data) => {
 });
 
 // Note: Typing indicators are now handled as encrypted messages through the normal message system
-
-
