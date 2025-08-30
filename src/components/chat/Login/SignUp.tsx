@@ -42,25 +42,10 @@ export function SignUpForm({ onSubmit, disabled, authStatus, error, hasServerTru
       return;
     }
     
-    // SECURITY: Validate password strength
-    if (password.length < 8) {
-      console.error('Password must be at least 8 characters');
-      return;
-    }
-    
+    // NOTE: Password strength and complexity checks disabled per request.
+    // Only presence and matching confirmation are required.
     if (password.length > 1000) {
       console.error('Password too long');
-      return;
-    }
-    
-    // SECURITY: Check password complexity
-    const hasUpperCase = /[A-Z]/.test(password);
-    const hasLowerCase = /[a-z]/.test(password);
-    const hasNumbers = /\d/.test(password);
-    const hasSpecialChar = /[!@#$%^&*(),.?":{}|<>]/.test(password);
-    
-    if (!hasUpperCase || !hasLowerCase || !hasNumbers) {
-      console.error('Password must contain uppercase, lowercase, and numbers');
       return;
     }
 

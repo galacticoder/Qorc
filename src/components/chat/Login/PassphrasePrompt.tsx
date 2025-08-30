@@ -38,20 +38,8 @@ export function PassphrasePrompt({ mode, onSubmit, disabled, authStatus }: Passp
       return;
     }
     
-    // SECURITY: Check for common weak passphrases
-    const weakPatterns = [
-      /^(.)\1{11,}$/, // All same character
-      /^(123456789012|password1234|qwertyuiopas)$/i, // Common weak passphrases
-      /^[a-z]{12,}$/i, // Only letters
-      /^\d{12,}$/, // Only numbers
-    ];
-    
-    for (const pattern of weakPatterns) {
-      if (pattern.test(trimmedPassphrase)) {
-        console.error('Passphrase is too weak - please use a mix of characters');
-        return;
-      }
-    }
+    // NOTE: Weak passphrase pattern checks disabled per request.
+    // Only the minimum length requirement is enforced for the passphrase.
     
     if (mode === "register" && !doPassphrasesMatch) return;
     if (!isPassphraseValid) return;

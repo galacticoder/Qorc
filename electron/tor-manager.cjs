@@ -488,7 +488,7 @@ fi
       ];
 
       // Check each line individually to allow parentheses in comments
-      lines = config.split('\n');
+      const lines = config.split('\n');
       for (const line of lines) {
         const trimmedLine = line.trim();
         
@@ -1358,7 +1358,7 @@ fi
       try {
         const { SocksProxyAgent } = require('socks-proxy-agent');
         const https = require('https');
-        const proxyAgent = new SocksProxyAgent('socks5://127.0.0.1:9050');
+        const proxyAgent = new SocksProxyAgent('socks5h://127.0.0.1:9050');
 
         const req = https.get(url, { agent: proxyAgent, timeout: 5000 }, (res) => {
           let data = '';
@@ -1388,7 +1388,7 @@ fi
       } catch {}
 
       const { SocksProxyAgent } = require('socks-proxy-agent');
-      const proxyAgent = new SocksProxyAgent(`socks5://127.0.0.1:${socksPort}`);
+      const proxyAgent = new SocksProxyAgent(`socks5h://127.0.0.1:${socksPort}`);
 
       return new Promise((resolve) => {
         const options = {
@@ -1626,7 +1626,7 @@ fi
 
         const { SocksProxyAgent } = require('socks-proxy-agent');
         const https = require('https');
-        const proxyAgent = new SocksProxyAgent(`socks5://127.0.0.1:${socksPort}`);
+        const proxyAgent = new SocksProxyAgent(`socks5h://127.0.0.1:${socksPort}`);
 
         const req = https.get(url, { agent: proxyAgent, timeout: 8000 }, (res) => {
           let data = '';
@@ -1713,7 +1713,7 @@ fi
 
       return new Promise((resolve) => {
         const { SocksProxyAgent } = require('socks-proxy-agent');
-        const proxyAgent = new SocksProxyAgent(`socks5://127.0.0.1:${socksPort}`);
+        const proxyAgent = new SocksProxyAgent(`socks5h://127.0.0.1:${socksPort}`);
 
         const options = {
           hostname: 'check.torproject.org',

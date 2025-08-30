@@ -478,7 +478,7 @@ app.whenReady().then(() => {
     let dilithiumKeyPair;
     try {
       // Import our crypto utilities
-      const { CryptoUtils } = await import('./crypto/unified-crypto.js');
+      const { CryptoUtils } = await import('./server/crypto/unified-crypto.js');
       dilithiumKeyPair = await CryptoUtils.Dilithium.generateKeyPair();
       debugLog(`[EDGE] Generated Dilithium3 key pair for user: ${username}`);
     } catch (error) {
@@ -559,7 +559,7 @@ app.whenReady().then(() => {
     // Add Dilithium3 signatures if available
     if (ctx.dilithiumKeyPair) {
       try {
-        const { CryptoUtils } = await import('./crypto/unified-crypto.js');
+        const { CryptoUtils } = await import('./server/crypto/unified-crypto.js');
 
         // Create Dilithium3 signatures for signed prekey and Kyber prekey
         const spkDilithiumSig = await CryptoUtils.Dilithium.sign(ctx.dilithiumKeyPair.secretKey, spkPub.serialize());
@@ -602,7 +602,7 @@ app.whenReady().then(() => {
     // Add Dilithium3 keys and signatures if available
     if (ctx.dilithiumKeyPair) {
       try {
-        const { CryptoUtils } = await import('./crypto/unified-crypto.js');
+        const { CryptoUtils } = await import('./server/crypto/unified-crypto.js');
 
         bundle.dilithiumIdentityKeyBase64 = Buffer.from(ctx.dilithiumKeyPair.publicKey).toString('base64');
 
@@ -633,7 +633,7 @@ app.whenReady().then(() => {
       // Verify Dilithium3 signatures if present
       if (bundle.dilithiumIdentityKeyBase64 && bundle.signedPreKeyDilithiumSignatureBase64 && bundle.kyberPreKeyDilithiumSignatureBase64) {
         try {
-          const { CryptoUtils } = await import('./crypto/unified-crypto.js');
+          const { CryptoUtils } = await import('./server/crypto/unified-crypto.js');
 
           const dilithiumPubKey = Buffer.from(bundle.dilithiumIdentityKeyBase64, 'base64');
           const spkDilithiumSig = Buffer.from(bundle.signedPreKeyDilithiumSignatureBase64, 'base64');
