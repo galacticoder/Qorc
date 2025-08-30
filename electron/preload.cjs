@@ -22,6 +22,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getTorStatus: () => ipcRenderer.invoke('tor:status'),
   getTorInfo: () => ipcRenderer.invoke('tor:info'),
   uninstallTor: () => ipcRenderer.invoke('tor:uninstall'),
+  verifyTorConnection: () => ipcRenderer.invoke('tor:verify-connection'),
+  rotateTorCircuit: () => ipcRenderer.invoke('tor:rotate-circuit'),
   
   // Utility functions
   isElectron: true,

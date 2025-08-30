@@ -497,9 +497,9 @@ fi
           continue;
         }
         
-        // For non-comment lines, check for dangerous patterns including parentheses
+        // For non-comment lines, check for dangerous patterns
         const strictPatterns = [
-          /[;&|`$()]/,           // Shell metacharacters including parentheses
+          /[;&|`$]/,             // Shell metacharacters (excluding parentheses for Tor bridge configs)
           /\.\./,                // Path traversal
           /\/etc\//,             // System directories
           /\/proc\//,            // Process filesystem
@@ -507,9 +507,6 @@ fi
           /\/bin\//,             // Binary directories
           /\/usr\/bin\//,        // User binaries
           /\/sbin\//,            // System binaries
-          /exec/i,               // Execution commands
-          /system/i,             // System calls
-          /spawn/i,              // Process spawning
           /\x00/,                // Null bytes
         ];
         
@@ -1254,9 +1251,12 @@ fi
               socket.end();
               return resolve({ success: true, method: 'control-port' });
             }
-          } else if (/^(514|510)/.test(line)) {
+          } else if (/^(515|514|510)/.test(line)) {
             socket.end();
-            return resolve({ success: false, error: 'Control port authentication required' });
+            return resolve({ success: false, error: `Control port authentication failed: ${line.trim()}` });
+          } else if (/^[45]\d\d/.test(line)) {
+            socket.end();
+            return resolve({ success: false, error: `Control port error: ${line.trim()}` });
           }
         }
         buffer = '';
@@ -1501,9 +1501,12 @@ fi
               const circuits = this.parseCircuitStatus(buffer);
               return resolve({ success: true, data: circuits });
             }
-          } else if (/^(514|510)/.test(line)) {
+          } else if (/^(515|514|510)/.test(line)) {
             socket.end();
-            return resolve({ success: false, error: 'Control port authentication failed' });
+            return resolve({ success: false, error: `Control port authentication failed: ${line.trim()}` });
+          } else if (/^[45]\d\d/.test(line)) {
+            socket.end();
+            return resolve({ success: false, error: `Control port error: ${line.trim()}` });
           }
         }
         buffer = '';

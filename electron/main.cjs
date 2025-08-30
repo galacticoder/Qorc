@@ -1,7 +1,7 @@
 const { app, BrowserWindow, ipcMain } = require('electron');
 const path = require('path');
 const isDev = process.env.NODE_ENV === 'development';
-const torManager = require('./tor-manager');
+const torManager = require('./tor-manager.cjs');
 
 // Keep a global reference of the window object
 let mainWindow;
@@ -15,7 +15,7 @@ function createWindow() {
       nodeIntegration: false,
       contextIsolation: true,
       enableRemoteModule: false,
-      preload: path.join(__dirname, 'preload.js')
+      preload: path.join(__dirname, 'preload.cjs')
     },
     icon: path.join(__dirname, '../public/icon.png'), // Add your app icon
     titleBarStyle: 'default',
@@ -172,6 +172,24 @@ ipcMain.handle('tor:info', async () => {
   } catch (error) {
     console.error('[IPC] Error getting Tor info:', error);
     return { error: error.message };
+  }
+});
+
+ipcMain.handle('tor:verify-connection', async () => {
+  try {
+    return await torManager.verifyTorConnection();
+  } catch (error) {
+    console.error('[IPC] Error verifying Tor connection:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle('tor:rotate-circuit', async () => {
+  try {
+    return await torManager.rotateCircuit();
+  } catch (error) {
+    console.error('[IPC] Error rotating Tor circuit:', error);
+    return { success: false, error: error.message };
   }
 });
 
