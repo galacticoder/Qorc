@@ -174,16 +174,24 @@ export function useMessageSender(
 
     // Check if we have a session with this user
     try {
-      // Attempt to establish a lightweight session optimistically
+      // Check existing session
       const sessionCheck = await (window as any).edgeApi?.hasSession?.({ 
         selfUsername: currentUser, 
         peerUsername: user.username, 
         deviceId: 1 
       });
       if (!sessionCheck?.hasSession) {
-        try {
-          await (window as any).edgeApi?.processPreKeyBundle?.({ selfUsername: currentUser, peerUsername: user.username });
-        } catch {}
+        // Request prekey bundle from server for this specific peer
+        websocketClient.send(JSON.stringify({ 
+          type: SignalType.LIBSIGNAL_REQUEST_BUNDLE, 
+          username: user.username 
+        }));
+        // Wait for session to become available after bundle is delivered
+        const sessionAvailable = await waitForSessionAvailability(currentUser, user.username);
+        if (!sessionAvailable) {
+          console.error('[MessageSender] Session not available after waiting');
+          return;
+        }
       }
     } catch (error) {
       console.error('[MessageSender] Session check failed:', error);

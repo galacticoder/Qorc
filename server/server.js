@@ -312,6 +312,22 @@ async function startServer() {
 
       try {
         switch (parsed.type) {
+          case SignalType.ADMIN_GENERATE_PREKEYS: {
+            // Admin endpoint: regenerate and store 100 one-time prekeys for a user
+            // In production, restrict this to admin/authenticated requests
+            const target = parsed.username || clientState.username;
+            if (!target) {
+              return ws.send(JSON.stringify({ type: SignalType.ERROR, message: 'Username required' }));
+            }
+            try {
+              const list = Array.from({ length: 100 }, (_, i) => ({ id: i + 1, publicKeyBase64: CryptoUtils.Base64.arrayBufferToBase64(crypto.getRandomValues(new Uint8Array(32))) }));
+              PrekeyDatabase.storeOneTimePreKeys(target, list);
+              ws.send(JSON.stringify({ type: 'ok', message: 'prekeys-generated', username: target, count: list.length }));
+            } catch (e) {
+              ws.send(JSON.stringify({ type: SignalType.ERROR, message: 'Failed to generate prekeys' }));
+            }
+            break;
+          }
 
 
           case SignalType.LIBSIGNAL_PUBLISH_BUNDLE: {
@@ -319,7 +335,16 @@ async function startServer() {
               return ws.send(JSON.stringify({ type: SignalType.ERROR, message: 'Account login required first' }));
             }
             try {
+              // Store main bundle data
               LibsignalBundleDB.publish(clientState.username, parsed.bundle);
+              // Store one-time prekeys for consumption
+              if (Array.isArray(parsed.bundle?.oneTimePreKeys)) {
+                try {
+                  PrekeyDatabase.storeOneTimePreKeys(clientState.username, parsed.bundle.oneTimePreKeys);
+                } catch (e) {
+                  console.error('[SERVER] Failed to store one-time prekeys:', e);
+                }
+              }
               ws.send(JSON.stringify({ type: 'ok', message: 'libsignal-bundle-published' }));
             } catch (e) {
               ws.send(JSON.stringify({ type: SignalType.ERROR, message: 'Failed to publish libsignal bundle' }));
@@ -347,11 +372,26 @@ async function startServer() {
               return ws.send(JSON.stringify({ type: SignalType.ERROR, message: 'Invalid username characters' }));
             }
             
-            const out = LibsignalBundleDB.take(target);
+            // Try to consume a one-time prekey; fallback to base bundle if none
+            let out = PrekeyDatabase.takeBundleForRecipient(target);
+            if (!out) {
+              out = LibsignalBundleDB.take(target);
+            }
             if (!out) {
               return ws.send(JSON.stringify({ type: SignalType.ERROR, message: 'No libsignal bundle available' }));
             }
             ws.send(JSON.stringify({ type: SignalType.LIBSIGNAL_DELIVER_BUNDLE, bundle: out, username: target }));
+            // Auto-replenish if pool is low
+            try {
+              const remaining = PrekeyDatabase.countAvailableOneTimePreKeys(target);
+              if (remaining < 20) {
+                const list = Array.from({ length: 100 }, (_, i) => ({ id: i + 1, publicKeyBase64: CryptoUtils.Base64.arrayBufferToBase64(crypto.getRandomValues(new Uint8Array(32))) }));
+                PrekeyDatabase.storeOneTimePreKeys(target, list);
+                console.log(`[SERVER] Auto-replenished one-time prekeys for ${target}: 100 generated`);
+              }
+            } catch (e) {
+              console.warn('[SERVER] Auto-replenish failed:', e);
+            }
             break;
           }
           case SignalType.ACCOUNT_SIGN_IN:

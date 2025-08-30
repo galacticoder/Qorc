@@ -354,14 +354,17 @@ ipcMain.handle('signal:generate-prekeys', async (_event, { username } = {}) => {
     const kyberPreKeyId = 1;
     const kyberPreKeyPublicBase64 = randomBase64(32);
     const kyberPreKeySignatureBase64 = randomBase64(64);
+    // Generate ~100 one-time prekeys
+    const oneTimePreKeys = Array.from({ length: 100 }, (_, i) => ({ id: i + 1, publicKeyBase64: randomBase64(32) }));
     const existing = signalState.identities.get(username) || {};
     signalState.identities.set(username, {
       ...existing,
       signedPreKey: { id, publicKeyBase64, ed25519SignatureBase64, dilithiumSignatureBase64 },
       kyber: { id: kyberPreKeyId, publicKeyBase64: kyberPreKeyPublicBase64, signatureBase64: kyberPreKeySignatureBase64 },
+      oneTimePreKeys,
       updatedAt: Date.now(),
     });
-    return { success: true };
+    return { success: true, count: oneTimePreKeys.length };
   } catch (error) {
     return { success: false, error: error.message };
   }
@@ -382,6 +385,7 @@ ipcMain.handle('signal:get-prekey-bundle', async (_event, { username } = {}) => 
       kyberPreKeyId: entry.kyber?.id ?? 1,
       kyberPreKeyPublicBase64: entry.kyber?.publicKeyBase64 ?? randomBase64(32),
       kyberPreKeySignatureBase64: entry.kyber?.signatureBase64 ?? randomBase64(64),
+      oneTimePreKeys: Array.isArray(entry.oneTimePreKeys) ? entry.oneTimePreKeys : [],
     };
     return bundle;
   } catch (error) {

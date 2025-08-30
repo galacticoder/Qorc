@@ -36,6 +36,9 @@ export const SignalType = {
   LIBSIGNAL_REQUEST_BUNDLE: "libsignal-request-bundle",
   LIBSIGNAL_DELIVER_BUNDLE: "libsignal-deliver-bundle",
 
+  // admin/maintenance
+  ADMIN_GENERATE_PREKEYS: "admin-generate-prekeys",
+
   //rate limiting and admin
   RATE_LIMIT_STATUS: "rate-limit-status",
   RATE_LIMIT_RESET: "rate-limit-reset",

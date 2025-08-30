@@ -421,6 +421,60 @@ export class PrekeyDatabase {
       oneTimePreKey: ot ? { id: ot.keyId, publicKeyBase64: ot.publicKeyBase64 } : null
     };
   }
+
+  static storeOneTimePreKeys(username, oneTimePreKeys) {
+    if (!username || typeof username !== 'string') return;
+    try {
+      db.prepare(`DELETE FROM one_time_prekeys WHERE username = ?`).run(username);
+      if (Array.isArray(oneTimePreKeys) && oneTimePreKeys.length) {
+        const insertStmt = db.prepare(`INSERT INTO one_time_prekeys (username, keyId, publicKeyBase64, consumed) VALUES (?, ?, ?, 0)`);
+        const insertMany = db.transaction((rows) => {
+          for (const r of rows) insertStmt.run(username, r.id, r.publicKeyBase64);
+        });
+        insertMany(oneTimePreKeys);
+      }
+    } catch (error) {
+      console.error('[DB] Failed to store one-time prekeys:', error);
+      throw error;
+    }
+  }
+
+  static countAvailableOneTimePreKeys(username) {
+    try {
+      const row = db.prepare(`SELECT COUNT(*) as cnt FROM one_time_prekeys WHERE username = ? AND consumed = 0`).get(username);
+      return row?.cnt ?? 0;
+    } catch (error) {
+      console.error('[DB] Failed to count one-time prekeys:', error);
+      return 0;
+    }
+  }
+
+  static getMaxPrekeyId(username) {
+    try {
+      const row = db.prepare(`SELECT MAX(keyId) as maxId FROM one_time_prekeys WHERE username = ?`).get(username);
+      return row?.maxId ?? 0;
+    } catch (error) {
+      console.error('[DB] Failed to get max prekey id:', error);
+      return 0;
+    }
+  }
+
+  static appendOneTimePreKeys(username, count) {
+    if (!username || typeof username !== 'string' || count <= 0) return 0;
+    try {
+      const start = this.getMaxPrekeyId(username) + 1;
+      const insertStmt = db.prepare(`INSERT INTO one_time_prekeys (username, keyId, publicKeyBase64, consumed) VALUES (?, ?, ?, 0)`);
+      const rows = new Array(count).fill(0).map((_, idx) => ({ keyId: start + idx }));
+      const insertMany = db.transaction((xs) => {
+        for (const r of xs) insertStmt.run(username, r.keyId, r.publicKeyBase64);
+      });
+      insertMany(rows);
+      return count;
+    } catch (error) {
+      console.error('[DB] Failed to append one-time prekeys:', error);
+      return 0;
+    }
+  }
 }
 
 export class LibsignalBundleDB {
