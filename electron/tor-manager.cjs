@@ -470,18 +470,68 @@ fi
         throw new Error('Configuration too large (max 50KB)');
       }
 
-      // SECURITY: Basic validation: torrc is written to a file and not executed by a shell.
-      if (/\x00/.test(config)) {
-        throw new Error('Configuration contains invalid null bytes');
+      // SECURITY: Validate configuration content
+      // Note: We need to be careful not to block legitimate Tor config syntax
+      const dangerousPatterns = [
+        /[;&|`$]/,             // Shell metacharacters (excluding parentheses which are safe in comments)
+        /\.\./,                // Path traversal
+        /\/etc\//,             // System directories
+        /\/proc\//,            // Process filesystem
+        /\/dev\//,             // Device files
+        /\/bin\//,             // Binary directories
+        /\/usr\/bin\//,        // User binaries
+        /\/sbin\//,            // System binaries
+        /exec/i,               // Execution commands
+        /system/i,             // System calls
+        /spawn/i,              // Process spawning
+        /\x00/,                // Null bytes
+      ];
+
+      // Check each line individually to allow parentheses in comments
+      lines = config.split('\n');
+      for (const line of lines) {
+        const trimmedLine = line.trim();
+        
+        // Skip comment lines (they can contain parentheses safely)
+        if (trimmedLine.startsWith('#') || trimmedLine === '') {
+          continue;
+        }
+        
+        // For non-comment lines, check for dangerous patterns including parentheses
+        const strictPatterns = [
+          /[;&|`$()]/,           // Shell metacharacters including parentheses
+          /\.\./,                // Path traversal
+          /\/etc\//,             // System directories
+          /\/proc\//,            // Process filesystem
+          /\/dev\//,             // Device files
+          /\/bin\//,             // Binary directories
+          /\/usr\/bin\//,        // User binaries
+          /\/sbin\//,            // System binaries
+          /exec/i,               // Execution commands
+          /system/i,             // System calls
+          /spawn/i,              // Process spawning
+          /\x00/,                // Null bytes
+        ];
+        
+        for (const pattern of strictPatterns) {
+          if (pattern.test(line)) {
+            console.error('[TOR-MANAGER] Dangerous pattern detected in config line:', pattern, 'Line:', line);
+            throw new Error('Configuration contains dangerous patterns');
+          }
+        }
       }
-      if (/[^\x09\x0A\x0D\x20-\x7E]/.test(config)) {
-        throw new Error('Configuration contains invalid characters');
+      
+      // Also check the general patterns on the full config (excluding parentheses)
+      for (const pattern of dangerousPatterns) {
+        if (pattern.test(config)) {
+          console.error('[TOR-MANAGER] Dangerous pattern detected in config:', pattern);
+          throw new Error('Configuration contains dangerous patterns');
+        }
       }
 
       // SECURITY: Validate that config only contains valid Tor configuration directives
-      const lines = config.split('\n');
       const validTorDirectives = [
-        'SocksPort', 'SocksPolicy', 'ControlPort', 'DataDirectory', 'Log', 'RunAsDaemon',
+        'SocksPort', 'ControlPort', 'DataDirectory', 'Log', 'RunAsDaemon',
         'UseBridges', 'Bridge', 'ClientTransportPlugin', 'GeoIPFile',
         'GeoIPv6File', 'ExitPolicy', 'ExitRelay', 'ORPort', 'DirPort',
         'Nickname', 'ContactInfo', 'MyFamily', 'BandwidthRate', 'BandwidthBurst',
@@ -494,7 +544,7 @@ fi
         'HiddenServiceAuthorizeClient', 'ClientOnionAuthDir', 'CookieAuthentication',
         'CookieAuthFile', 'CookieAuthFileGroupReadable', 'ControlPortWriteToFile',
         'ControlPortFileGroupReadable', 'HashedControlPassword', 'DisableNetwork',
-        'PublishServerDescriptor', 'ShutdownWaitLength', 'SafeLogging', 'NewCircuitPeriod', 'LearnCircuitBuildTimeout',
+        'PublishServerDescriptor', 'ShutdownWaitLength', 'SafeLogging',
         'HardwareAccel', 'AccelName', 'AccelDir', 'AvoidDiskWrites',
         'TunnelDirConns', 'PreferTunneledDirConns', 'CircuitBuildTimeout',
         'CircuitIdleTimeout', 'CircuitStreamTimeout', 'MaxCircuitDirtiness',
@@ -644,7 +694,7 @@ fi
       // If defaults 9050/9051 are busy, use alternates 9150/9151
       try {
         const portsInUse = await new Promise((resolve) => {
-          exec('ss -tlnp | grep :905 || netstat -tlnp | grep :905', (error, stdout) => {
+          exec('ss -tlnp | grep :905', (error, stdout) => {
             resolve(!error && stdout ? stdout : '');
           });
         });
@@ -690,7 +740,7 @@ fi
 
       // Wait a moment for Tor to start
       console.log('[TOR-MANAGER] Waiting for Tor to initialize...');
-      await new Promise(resolve => setTimeout(resolve, 7000));
+      await new Promise(resolve => setTimeout(resolve, 3000));
 
       // Check for errors
       if (processError) {
@@ -1108,9 +1158,9 @@ fi
 
       // Make a few more requests to encourage different exit node selection
       console.log('[TOR-MANAGER] Making additional requests to encourage exit node change...');
-      for (let i = 0; i < 1; i++) {
+      for (let i = 0; i < 3; i++) {
         await this.makeRequestThroughTor('https://httpbin.org/ip');
-        await new Promise(resolve => setTimeout(resolve, 500));
+        await new Promise(resolve => setTimeout(resolve, 1000));
       }
 
       // Get new IP and circuit info after rotation
@@ -1304,20 +1354,13 @@ fi
    * Make a request through Tor
    */
   async makeRequestThroughTor(url) {
-    return new Promise(async (resolve) => {
+    return new Promise((resolve) => {
       try {
-        // Determine active SOCKS port from config (fallback to 9050)
-        let socksPort = 9050;
-        try {
-          const cfg = await fs.readFile(this.configPath, 'utf8');
-          const m = cfg.match(/^SocksPort\s+(\d+)/m);
-          if (m) socksPort = parseInt(m[1], 10) || socksPort;
-        } catch {}
         const { SocksProxyAgent } = require('socks-proxy-agent');
         const https = require('https');
-        const proxyAgent = new SocksProxyAgent(`socks5h://127.0.0.1:${socksPort}`);
+        const proxyAgent = new SocksProxyAgent('socks5://127.0.0.1:9050');
 
-        const req = https.get(url, { agent: proxyAgent, timeout: 3000 }, (res) => {
+        const req = https.get(url, { agent: proxyAgent, timeout: 5000 }, (res) => {
           let data = '';
           res.on('data', chunk => data += chunk);
           res.on('end', () => resolve(data));
@@ -1345,7 +1388,7 @@ fi
       } catch {}
 
       const { SocksProxyAgent } = require('socks-proxy-agent');
-      const proxyAgent = new SocksProxyAgent(`socks5h://127.0.0.1:${socksPort}`);
+      const proxyAgent = new SocksProxyAgent(`socks5://127.0.0.1:${socksPort}`);
 
       return new Promise((resolve) => {
         const options = {
@@ -1353,7 +1396,7 @@ fi
           path: '/ip',
           method: 'GET',
           agent: proxyAgent,
-          timeout: 5000
+          timeout: 10000
         };
 
         const req = https.request(options, (res) => {
@@ -1527,6 +1570,8 @@ fi
       const requests = [];
       const endpoints = [
         'https://httpbin.org/headers',
+        'https://httpbin.org/user-agent',
+        'https://icanhazip.com',
         'https://ipinfo.io/json'
       ];
 
@@ -1581,9 +1626,9 @@ fi
 
         const { SocksProxyAgent } = require('socks-proxy-agent');
         const https = require('https');
-        const proxyAgent = new SocksProxyAgent(`socks5h://127.0.0.1:${socksPort}`);
+        const proxyAgent = new SocksProxyAgent(`socks5://127.0.0.1:${socksPort}`);
 
-        const req = https.get(url, { agent: proxyAgent, timeout: 5000 }, (res) => {
+        const req = https.get(url, { agent: proxyAgent, timeout: 8000 }, (res) => {
           let data = '';
           const headers = res.headers;
 
@@ -1668,14 +1713,14 @@ fi
 
       return new Promise((resolve) => {
         const { SocksProxyAgent } = require('socks-proxy-agent');
-        const proxyAgent = new SocksProxyAgent(`socks5h://127.0.0.1:${socksPort}`);
+        const proxyAgent = new SocksProxyAgent(`socks5://127.0.0.1:${socksPort}`);
 
         const options = {
           hostname: 'check.torproject.org',
           path: '/api/ip',
           method: 'GET',
           agent: proxyAgent,
-          timeout: 7000
+          timeout: 10000
         };
 
         const req = https.request(options, (res) => {
