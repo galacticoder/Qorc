@@ -73,7 +73,7 @@ export function ChatInterface({
   const lastScrollTimeRef = useRef<number>(0);
 
   // Typing hook
-  const { handleLocalTyping, handleConversationChange } = useTypingIndicator(currentUsername, selectedConversation, onSendMessage);
+  const { handleLocalTyping, handleConversationChange, resetTypingAfterSend } = useTypingIndicator(currentUsername, selectedConversation, onSendMessage);
   const { typingUsers } = useTypingIndicatorContext();
 
   // Log typing users changes
@@ -353,6 +353,8 @@ export function ChatInterface({
             }
             // For other message types, call the parent handler
             await onSendMessage(messageId ?? "", content, messageSignalType, replyToMsg);
+            // Reset typing debounce/throttle so next keystroke can emit typing-start immediately
+            resetTypingAfterSend();
             setReplyTo(null);
           }}
           onSendFile={onSendFile}

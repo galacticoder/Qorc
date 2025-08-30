@@ -333,6 +333,14 @@ export function useEncryptedMessageHandler(
             }
           }
 
+          // Before showing a regular message, ensure typing indicator for this sender is cleared
+          try {
+            const typingClearEvent = new CustomEvent('typing-indicator', {
+              detail: { from: payload.from, indicatorType: 'typing-stop' }
+            });
+            window.dispatchEvent(typingClearEvent);
+          } catch {}
+
           // Handle regular messages (only if not a system message)
           // Additional check to ensure typing indicator messages are not processed as regular messages
           if ((payload.type === 'message' || payload.type === 'text' || !payload.type) && payload.content) {

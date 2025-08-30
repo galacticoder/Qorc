@@ -227,6 +227,27 @@ export function useTypingIndicator(
 		};
 	}, [sendTypingStop]);
 
+	// Public helper: reset typing throttles after sending a message
+	const resetTypingAfterSend = useCallback(() => {
+		try {
+			if (debounceTimeoutRef.current) {
+				clearTimeout(debounceTimeoutRef.current);
+				debounceTimeoutRef.current = null;
+			}
+			if (typingTimeoutRef.current) {
+				clearTimeout(typingTimeoutRef.current);
+				typingTimeoutRef.current = null;
+			}
+			// Reset throttle and state so next keystroke can emit typing-start immediately
+			lastTypingStartSentRef.current = 0;
+			lastTypingTimeRef.current = 0;
+			pendingTypingRef.current = false;
+			isProcessingTypingRef.current = false;
+			isTypingRef.current = false;
+			console.log('[Typing] Reset typing throttle after message send');
+		} catch {}
+	}, []);
+
 	// Auto-retry pending typing signals when throttle period expires
 	useEffect(() => {
 		if (pendingTypingRef.current && !isTypingRef.current) {
@@ -248,6 +269,7 @@ export function useTypingIndicator(
 	return {
 		handleLocalTyping,
 		handleConversationChange,
+		resetTypingAfterSend,
 		isTyping: isTypingRef.current
 	};
 }
