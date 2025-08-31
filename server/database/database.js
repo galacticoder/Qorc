@@ -76,6 +76,16 @@ db.exec(`
   );
 `);
 
+// Offline message queue (encrypted payloads per recipient)
+db.exec(`
+  CREATE TABLE IF NOT EXISTS offline_messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    toUsername TEXT NOT NULL,
+    payload TEXT NOT NULL,
+    queuedAt INTEGER NOT NULL
+  );
+`);
+
 // Run migration check
 checkMigration();
 
@@ -349,6 +359,35 @@ export class MessageDatabase {
       });
     } catch (error) {
       console.error(`[DB] Error loading messages for user ${username}:`, error);
+      return [];
+    }
+  }
+
+  static queueOfflineMessage(toUsername, payloadObj) {
+    try {
+      const payload = JSON.stringify(payloadObj);
+      const queuedAt = Date.now();
+      db.prepare(`INSERT INTO offline_messages (toUsername, payload, queuedAt) VALUES (?, ?, ?)`).run(toUsername, payload, queuedAt);
+      return true;
+    } catch (error) {
+      console.error('[DB] Error queueing offline message:', error);
+      return false;
+    }
+  }
+
+  static takeOfflineMessages(toUsername, max = 100) {
+    try {
+      const rows = db.prepare(`SELECT id, payload FROM offline_messages WHERE toUsername = ? ORDER BY queuedAt ASC LIMIT ?`).all(toUsername, max);
+      if (!rows || rows.length === 0) return [];
+      const ids = rows.map(r => r.id);
+      const messages = rows.map(r => {
+        try { return JSON.parse(r.payload); } catch { return null; }
+      }).filter(Boolean);
+      const del = db.prepare(`DELETE FROM offline_messages WHERE id IN (${ids.map(() => '?').join(',')})`);
+      del.run(...ids);
+      return messages;
+    } catch (error) {
+      console.error('[DB] Error taking offline messages:', error);
       return [];
     }
   }

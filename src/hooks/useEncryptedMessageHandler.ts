@@ -406,7 +406,7 @@ export function useEncryptedMessageHandler(
                 id: messageId,
                 content: messageContent,
                 sender: payload.from,  // Use 'sender' to match Message interface
-                recipient: loginUsernameRef.current,  // Add recipient field for proper filtering
+                recipient: (payload as any)?.to || loginUsernameRef.current,  // Prefer decrypted recipient if present
                 timestamp: new Date(payload.timestamp || Date.now()),  // Convert to Date object
                 type: 'text',
                 isCurrentUser: false,  // Received messages are not from current user
@@ -451,7 +451,7 @@ export function useEncryptedMessageHandler(
                   id: messageId,
                   content: messageContent,
                   sender: payload.from,
-                  recipient: loginUsernameRef.current,
+                  recipient: (payload as any)?.to || loginUsernameRef.current,
                   p2p: payload.p2p || false,
                   encrypted: true,
                   transport: payload.p2p ? 'p2p' : 'websocket',
@@ -574,7 +574,7 @@ export function useEncryptedMessageHandler(
                 id: messageId,
                 content: fileName || 'File',
                 sender: payload.from,  // Use 'sender' to match Message interface
-                recipient: loginUsernameRef.current,  // Add recipient field for proper filtering
+                recipient: (payload as any)?.to || loginUsernameRef.current,  // Prefer decrypted recipient if present
                 timestamp: new Date(payload.timestamp || Date.now()),  // Convert to Date object
                 type: 'file',
                 isCurrentUser: false,  // Received messages are not from current user
@@ -595,7 +595,7 @@ export function useEncryptedMessageHandler(
                 id: messageId,
                 content: fileName || 'File',
                 sender: payload.from,
-                recipient: loginUsernameRef.current,
+                recipient: (payload as any)?.to || loginUsernameRef.current,
                 timestamp: new Date(payload.timestamp || Date.now()),
                 type: 'file',
                 isCurrentUser: false,

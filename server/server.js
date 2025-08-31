@@ -546,8 +546,21 @@ async function startServer() {
               }
             }
             if (!parsed.to || !clients.has(parsed.to)) {
-              console.warn(`[SERVER] Target user offline or not found: ${parsed.to}, not delivering`);
-              return ws.send(JSON.stringify({ type: SignalType.ERROR, message: 'Recipient offline; message not delivered' }));
+              console.warn(`[SERVER] Target user offline or not found: ${parsed.to}, queueing`);
+              try {
+                // Queue encrypted payload for delivery when user comes online
+                MessageDatabase.queueOfflineMessage(parsed.to, {
+                  type: parsed.type,
+                  to: parsed.to,
+                  encryptedPayload: parsed.encryptedPayload
+                });
+                // Inform sender that message has been queued
+                try { ws.send(JSON.stringify({ type: 'ok', message: 'queued' })); } catch {}
+              } catch (e) {
+                console.error('[SERVER] Failed to queue offline message:', e);
+                try { ws.send(JSON.stringify({ type: SignalType.ERROR, message: 'Failed to queue message' })); } catch {}
+              }
+              break;
             }
 
             // Apply message rate limiting

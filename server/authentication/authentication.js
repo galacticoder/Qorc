@@ -303,7 +303,7 @@ export class AccountAuthHandler {
     return auth;
   }
 
-  finalizeAuth(ws, username, logMessage) {
+  async finalizeAuth(ws, username, logMessage) {
     console.log(`[AUTH] Finalizing authentication: ${logMessage} for user: ${username}`);
 
     // SECURITY: Comprehensive state validation to prevent bypass attacks
@@ -352,6 +352,25 @@ export class AccountAuthHandler {
       type: SignalType.IN_ACCOUNT,
       message: "Account authentication successful"
     }));
+
+    // Deliver any queued offline messages for this user
+    try {
+      const { MessageDatabase } = await import('../database/database.js');
+      const queued = MessageDatabase.takeOfflineMessages(username, 200);
+      if (queued.length) {
+        for (const msg of queued) {
+          try {
+            ws.send(JSON.stringify(msg));
+          } catch (e) {
+            // If sending fails, re-queue
+            try { MessageDatabase.queueOfflineMessage(username, msg); } catch {}
+            break;
+          }
+        }
+      }
+    } catch (e) {
+      console.error('[AUTH] Failed to deliver offline messages:', e);
+    }
 
     console.log(`[AUTH] Authentication successful for user: ${username}`);
     return { username, authenticated: true };
