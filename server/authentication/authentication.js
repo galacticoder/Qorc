@@ -41,6 +41,16 @@ export class AccountAuthHandler {
 
       console.log(`[AUTH] Processing auth for user: ${username}`);
 
+      // Prevent multiple logins for the same account (already authenticated elsewhere)
+      if (type === SignalType.ACCOUNT_SIGN_IN) {
+        const existing = this.clients.get(username);
+        const isAlreadyLoggedIn = !!(existing && existing.clientState && existing.clientState.hasAuthenticated);
+        if (isAlreadyLoggedIn) {
+          console.warn(`[AUTH] User already logged in: ${username}`);
+          return rejectConnection(ws, SignalType.AUTH_ERROR, "Account already logged in");
+        }
+      }
+
       if (!username || !password) {
         console.error('[AUTH] Invalid authentication data format');
         return rejectConnection(ws, SignalType.AUTH_ERROR, "Invalid authentication data format");

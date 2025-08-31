@@ -157,6 +157,13 @@ const ChatApp: React.FC<ChatAppProps> = () => {
     [fileHandler, Authentication.loginUsernameRef, Database.saveMessageToLocalDB]
   );
 
+  // Initialize WebSocket only after Tor setup has completed or been skipped
+  useEffect(() => {
+    if (!showTorSetup) {
+      try { (window as any).edgeApi?.wsConnect?.(); } catch {}
+    }
+  }, [showTorSetup]);
+
   useWebSocket(signalHandler, encryptedHandler, Authentication.setLoginError);
 
   // Conversation management
