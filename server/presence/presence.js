@@ -5,7 +5,7 @@ const REDIS_URL = process.env.REDIS_URL || 'redis://127.0.0.1:6379';
 
 // Redis connection pool configuration
 const POOL_CONFIG = {
-  min: 2, // Minimum number of connections
+  min: 1, // Minimum number of connections (reduced to avoid duplicate startup logs)
   max: 10, // Maximum number of connections
   acquireTimeoutMillis: 10000, // Max time to wait for a connection
   idleTimeoutMillis: 30000, // Time before an idle connection is released
@@ -38,11 +38,11 @@ const factory = {
     });
     
     client.on('connect', () => {
-      console.log('[PRESENCE] Redis client connected');
+      console.log('[PRESENCE] Redis pool client connected');
     });
     
     client.on('ready', () => {
-      console.log('[PRESENCE] Redis client ready');
+      console.log('[PRESENCE] Redis pool client ready');
     });
     
     client.on('close', () => {
@@ -147,12 +147,8 @@ export async function createSubscriber() {
     console.error('[PRESENCE] Redis subscriber error:', error);
   });
   
-  sub.on('connect', () => {
-    console.log('[PRESENCE] Redis subscriber connected');
-  });
-  
   sub.on('ready', () => {
-    console.log('[PRESENCE] Redis subscriber ready');
+    console.log('[PRESENCE] Redis subscriber ready for user notifications');
   });
   
   sub.on('close', () => {

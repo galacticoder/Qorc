@@ -229,7 +229,7 @@ export function useMessageSender(
         })
       });
 
-      console.log('[MessageSender] Raw encryption result from edgeApi:', encryptedMessage);
+      // SECURITY: Log only non-sensitive metadata
       console.log('[MessageSender] Encryption result details:', {
         hasResult: !!encryptedMessage,
         resultType: typeof encryptedMessage,
@@ -238,8 +238,8 @@ export function useMessageSender(
         ciphertextLength: encryptedMessage?.ciphertextBase64?.length || 0,
         hasType: !!encryptedMessage?.type,
         typeValue: encryptedMessage?.type,
-        hasSessionId: !!encryptedMessage?.sessionId,
-        sessionIdValue: encryptedMessage?.sessionId
+        hasSessionId: !!encryptedMessage?.sessionId
+        // SECURITY: No actual ciphertext or session ID values logged
       });
 
       // Check for encryption errors

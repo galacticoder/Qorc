@@ -43,6 +43,10 @@ export const SignalType = {
   RATE_LIMIT_STATUS: "rate-limit-status",
   RATE_LIMIT_RESET: "rate-limit-reset",
 
+  // Message synchronization
+  REQUEST_MESSAGE_HISTORY: "request-message-history",
+  MESSAGE_HISTORY_RESPONSE: "message-history-response",
+
   // Note: Typing indicators are now handled as encrypted messages
 
   // Note: Read receipts and delivery receipts are now handled as encrypted messages

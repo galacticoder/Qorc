@@ -340,7 +340,7 @@ export class MessageDatabase {
       console.log(`[DB] Message saved successfully to database: ${messageId}`);
     } catch (error) {
       console.error('[DB] Error saving message to database:', error.message);
-      throw new Error(`Failed to save message to database: ${error.message}`);
+      throw new Error('Failed to save message to database: Database error');
     }
   }
 
@@ -861,13 +861,13 @@ export class PrekeyDatabase {
     
     // Validate decoded data lengths
     if (iv.length !== 12) {
-      throw new Error(`IV must be exactly 12 bytes (96 bits), got ${iv.length} bytes`);
+      throw new Error('Invalid IV length provided');
     }
     if (salt.length < 16) {
-      throw new Error(`Salt must be at least 16 bytes, got ${salt.length} bytes`);
+      throw new Error('Invalid salt length provided');
     }
     if (encryptedPrivateKey.length < 16) {
-      throw new Error(`Encrypted private key must be at least 16 bytes, got ${encryptedPrivateKey.length} bytes`);
+      throw new Error('Invalid encrypted private key length provided');
     }
     
     // Require a non-empty PREKEY_ENCRYPTION_SECRET from environment
@@ -1030,7 +1030,7 @@ export class LibsignalBundleDB {
     for (const field of requiredFields) {
       if (bundle[field] === undefined || bundle[field] === null) {
         console.error(`[DB] Missing required field in bundle: ${field}`);
-        throw new Error(`Missing required field in bundle: ${field}`);
+        throw new Error('Missing required field in bundle: [REDACTED]');
       }
     }
     

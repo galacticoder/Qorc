@@ -7,6 +7,8 @@ const torManager = require('./tor-manager.cjs');
 let mainWindow;
 
 function createWindow() {
+  // Use a unique session partition per Electron process to avoid IndexedDB lock conflicts
+  const partitionName = isDev ? `persist:securechat-${process.pid}` : 'persist:securechat';
   // Create the browser window
   mainWindow = new BrowserWindow({
     width: 1200,
@@ -15,7 +17,8 @@ function createWindow() {
       nodeIntegration: false,
       contextIsolation: true,
       enableRemoteModule: false,
-      preload: path.join(__dirname, 'preload.cjs')
+      preload: path.join(__dirname, 'preload.cjs'),
+      partition: partitionName
     },
     icon: path.join(__dirname, '../public/icon.png'), // Add your app icon
     titleBarStyle: 'default',

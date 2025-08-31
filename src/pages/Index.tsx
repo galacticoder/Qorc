@@ -14,6 +14,7 @@ import { useEncryptedMessageHandler } from "@/hooks/useEncryptedMessageHandler";
 import { useChatSignals } from "@/hooks/useChatSignals";
 import { useWebSocket } from "@/hooks/useWebsocket";
 import { useConversations } from "@/hooks/useConversations";
+import { useMessageHistory } from "@/hooks/useMessageHistory";
 import { TypingIndicatorProvider } from "@/contexts/TypingIndicatorContext";
 import { torNetworkManager } from "@/lib/tor-network";
 import { TorAutoSetup } from "@/components/setup/TorAutoSetup";
@@ -139,11 +140,20 @@ const ChatApp: React.FC<ChatAppProps> = () => {
     Database.saveMessageToLocalDB
   );
 
+  // Message history synchronization
+  const messageHistory = useMessageHistory(
+    Authentication.loginUsernameRef.current || '',
+    Authentication.isLoggedIn,
+    setMessages,
+    Database.saveMessageToLocalDB
+  );
+
   const signalHandler = useChatSignals({
     Authentication,
     Database,
     fileHandler,
-    encryptedHandler
+    encryptedHandler,
+    handleMessageHistory: messageHistory.handleMessageHistory
   });
 
   const handleSendFileWrapper = useCallback(

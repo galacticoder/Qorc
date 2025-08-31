@@ -46,6 +46,11 @@ export enum SignalType {
   LIBSIGNAL_PUBLISH_BUNDLE = "libsignal-publish-bundle",
   LIBSIGNAL_REQUEST_BUNDLE = "libsignal-request-bundle",
   LIBSIGNAL_DELIVER_BUNDLE = "libsignal-deliver-bundle",
+  
+  // Message synchronization
+  REQUEST_MESSAGE_HISTORY = "request-message-history",
+  MESSAGE_HISTORY_RESPONSE = "message-history-response",
+  
   // Note: Typing indicators are now handled as encrypted messages
   // Note: Read receipts and delivery receipts are now handled as encrypted messages
 }
@@ -55,6 +60,7 @@ interface SignalHandlers {
   Database: any;
   handleFileMessageChunk: (data: any, meta: any) => Promise<void>;
   handleEncryptedMessagePayload: (message: any) => Promise<void>;
+  handleMessageHistory?: (data: any) => Promise<void>;
 }
 
 
@@ -275,6 +281,19 @@ export async function handleSignalMessages(
 
       case SignalType.FILE_MESSAGE_CHUNK: {
         await handleFileMessageChunk(data, { from: data.from });
+        break;
+      }
+
+      case SignalType.MESSAGE_HISTORY_RESPONSE: {
+        console.log('[Signals] Processing MESSAGE_HISTORY_RESPONSE:', data);
+        
+        if (handlers.handleMessageHistory) {
+          try {
+            await handlers.handleMessageHistory(data);
+          } catch (error) {
+            console.error('[Signals] Error processing message history:', error);
+          }
+        }
         break;
       }
 

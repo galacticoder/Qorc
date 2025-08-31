@@ -765,6 +765,70 @@ async function startServer() {
             break;
           }
 
+          case SignalType.REQUEST_MESSAGE_HISTORY: {
+            if (!clientState.hasAuthenticated) {
+              return ws.send(JSON.stringify({ type: SignalType.ERROR, message: 'Authentication required' }));
+            }
+
+            // Rate limiting: Track last history request time
+            const now = Date.now();
+            const HISTORY_REQUEST_COOLDOWN = 1000; // 1 second between requests
+            if (clientState.lastHistoryRequest && (now - clientState.lastHistoryRequest) < HISTORY_REQUEST_COOLDOWN) {
+              return ws.send(JSON.stringify({ 
+                type: SignalType.ERROR, 
+                message: 'Rate limited: too many history requests',
+                error: 'RATE_LIMITED'
+              }));
+            }
+            clientState.lastHistoryRequest = now;
+
+            try {
+              const { limit = 50, since } = parsed;
+              const requestLimit = Math.min(Math.max(1, parseInt(limit) || 50), 100); // Cap at 100 messages
+              
+              // Validate and parse 'since' parameter
+              let sinceTimestamp = null;
+              if (since !== undefined) {
+                const parsedSince = parseInt(since);
+                if (isNaN(parsedSince) || !isFinite(parsedSince) || parsedSince < 0) {
+                  return ws.send(JSON.stringify({ 
+                    type: SignalType.ERROR, 
+                    message: 'Invalid since parameter: must be a finite positive integer timestamp',
+                    error: 'INVALID_SINCE_PARAMETER'
+                  }));
+                }
+                sinceTimestamp = parsedSince;
+              }
+              
+              console.log(`[SERVER] Fetching message history for user: ${clientState.username}, limit: ${requestLimit}, since: ${sinceTimestamp}`);
+              
+              // Get messages from database using top-level import
+              const messages = await MessageDatabase.getMessagesForUser(clientState.username, requestLimit);
+              
+              // Filter by timestamp if 'since' parameter provided
+              const filteredMessages = sinceTimestamp ? 
+                messages.filter(msg => msg.timestamp > sinceTimestamp) : 
+                messages;
+              
+              ws.send(JSON.stringify({
+                type: SignalType.MESSAGE_HISTORY_RESPONSE,
+                messages: filteredMessages,
+                hasMore: messages.length === requestLimit, // Indicate if there might be more messages
+                timestamp: Date.now()
+              }));
+              
+              console.log(`[SERVER] Sent ${filteredMessages.length} historical messages to user: ${clientState.username}`);
+            } catch (error) {
+              console.error(`[SERVER] Error fetching message history for user ${clientState.username}:`, error);
+              ws.send(JSON.stringify({ 
+                type: SignalType.ERROR, 
+                message: 'Failed to fetch message history',
+                error: 'HISTORY_FETCH_FAILED'
+              }));
+            }
+            break;
+          }
+
           default:
             console.error(`[SERVER] Unknown message type: ${parsed.type}`);
             ws.send(JSON.stringify({ type: SignalType.ERROR, message: `Unknown message type: ${msg}` }));

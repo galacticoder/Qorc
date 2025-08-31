@@ -294,7 +294,8 @@ export const useAuth = () => {
       websocketClient.send(JSON.stringify(payload));
     } catch (error) {
       console.error(`[AUTH] ${mode} submission failed:`, error);
-      setLoginError(`Submission error: ${error instanceof Error ? error.message : "Unknown error"}`);
+      setAuthStatus('');
+      setLoginError('Submission error: Authentication request failed');
     }
   };
 
@@ -312,7 +313,8 @@ export const useAuth = () => {
         try {
           await websocketClient.connect();
         } catch (error) {
-          setLoginError(`Failed to connect to server: ${error}`);
+          setAuthStatus("");
+          setLoginError('Failed to connect to server: Connection error');
           return;
         }
       }
