@@ -13,9 +13,10 @@ import { setServerPasswordOnInput } from './authentication/auth-utils.js';
 import { ed25519 } from '@noble/curves/ed25519.js';
 import { rateLimitMiddleware } from './rate-limiting/rate-limit-middleware.js';
 import { setOnline, setOffline, refreshOnline, createSubscriber, subscribeUserChannel } from './presence/presence.js';
+import { ConnectionStateManager } from './presence/connection-state.js';
 
 // COMPLETELY REMOVED: No in-memory client tracking for millions of users
-// All user data stored on WebSocket.clientState and Redis presence only
+// All user data stored in Redis-based connection state for scalability
 
 // Message batching for database operations with memory management
 const messageBatch = [];
@@ -179,32 +180,16 @@ async function startServer() {
   const authHandler = new authentication.AccountAuthHandler(serverHybridKeyPair);
   const serverAuthHandler = new authentication.ServerAuthHandler(serverHybridKeyPair, null, ServerConfig);
 
-  // PREKEY-MAINTENANCE: Set up periodic pre-key maintenance
-  console.log('[PREKEY] Setting up periodic pre-key maintenance...');
-  
-  // Run initial maintenance after server startup
-  setTimeout(async () => {
-    await PrekeyDatabase.performPreKeyMaintenance(10, 100);
-  }, 30000); // 30 seconds after startup
-  
-  // Schedule periodic maintenance every 6 hours
-  setInterval(async () => {
-    try {
-      console.log('[PREKEY] Running scheduled pre-key maintenance...');
-      const stats = PrekeyDatabase.getPreKeyStats();
-      if (stats) {
-        console.log('[PREKEY] Current stats:', {
-          totalUsers: stats.total_users,
-          usersWithPrekeys: stats.users_with_prekeys,
-          avgPrekeysPerUser: Math.round(stats.avg_prekeys_per_user),
-          lowPrekeyUsers: stats.low_prekey_users
-        });
-      }
-      await PrekeyDatabase.performPreKeyMaintenance(10, 100);
-    } catch (error) {
-      console.error('[PREKEY] Scheduled maintenance failed:', error);
-    }
-  }, 6 * 60 * 60 * 1000); // 6 hours in milliseconds
+  // Cleanup stale Redis data from previous server runs
+  try {
+    console.log('[SERVER] Cleaning up stale session data...');
+    await ConnectionStateManager.cleanupStaleUsernameMappings();
+    await ConnectionStateManager.cleanupExpiredSessions();
+  } catch (error) {
+    console.error('[SERVER] Warning: Failed to cleanup stale session data:', error);
+  }
+
+  // SECURITY: Removed periodic pre-key maintenance - clients manage their own prekeys
 
   // Optimized periodic rate limiting status logging - only when needed
   let statusLogInterval = null;
@@ -247,19 +232,23 @@ async function startServer() {
       return;
     }
 
-    let clientState = {
-      username: null,
-      hasPassedAccountLogin: false,
-      hasAuthenticated: false,
-      connectionTime: Date.now(),
-      messageCount: 0,
-      lastActivity: Date.now()
-    };
+    // Create Redis-based session for scalable connection state management
+    let sessionId = null;
+    let messageCount = 0; // Keep message count in memory for rate limiting
+    const connectionTime = Date.now();
 
     // Start status logging on first active connection (guarded internally)
     startStatusLogging();
 
-    // No global clients map; use ws.clientState and Redis presence only
+    // Create Redis-based session for connection state
+    try {
+      sessionId = await ConnectionStateManager.createSession();
+      console.log(`[SERVER] Created session: ${sessionId}`);
+    } catch (error) {
+      console.error('[SERVER] Failed to create session:', error);
+      ws.close(1011, 'Internal server error');
+      return;
+    }
 
     ws.send(
       JSON.stringify({
@@ -277,24 +266,25 @@ async function startServer() {
 
     ws.on('message', async (msg) => {
       // SECURITY: Rate limit message processing to prevent DoS
-      if (clientState.messageCount > 10000) { // Reset counter periodically
-        const timeSinceConnection = Date.now() - clientState.connectionTime;
+      if (messageCount > 10000) { // Reset counter periodically
+        const timeSinceConnection = Date.now() - connectionTime;
         if (timeSinceConnection > 60000) { // Reset every minute
-          clientState.messageCount = 0;
-          clientState.connectionTime = Date.now();
-        } else if (clientState.messageCount > 1000) { // Hard limit per minute
-          console.warn(`[SERVER] Message rate limit exceeded for user: ${clientState.username}`);
+          messageCount = 0;
+        } else if (messageCount > 1000) { // Hard limit per minute
+          const state = await ConnectionStateManager.getState(sessionId);
+          console.warn(`[SERVER] Message rate limit exceeded for user: ${state?.username || 'unknown'}`);
           return ws.close(1008, 'Message rate limit exceeded');
         }
       }
 
-      // Update activity tracking
-      clientState.lastActivity = Date.now();
-      clientState.messageCount++;
+      // Update activity tracking and increment message count
+      await ConnectionStateManager.refreshSession(sessionId);
+      messageCount++;
 
       // SECURITY: Validate message size to prevent DoS
       if (msg.length > 1024 * 1024) { // 1MB limit
-        console.error(`[SERVER] Message too large: ${msg.length} bytes from user: ${clientState.username}`);
+        const state = await ConnectionStateManager.getState(sessionId);
+        console.error(`[SERVER] Message too large: ${msg.length} bytes from user: ${state?.username || 'unknown'}`);
         return ws.send(JSON.stringify({ type: SignalType.ERROR, message: 'Message too large' }));
       }
 
@@ -322,7 +312,9 @@ async function startServer() {
           return ws.send(JSON.stringify({ type: SignalType.ERROR, message: 'Invalid message type' }));
         }
 
-        console.log(`[SERVER] Received message type: ${parsed.type} from user: ${clientState.username || 'unknown'}`);
+        // Get current session state for logging
+        const currentState = await ConnectionStateManager.getState(sessionId);
+        console.log(`[SERVER] Received message type: ${parsed.type} from user: ${currentState?.username || 'unknown'}`);
         
         // Debug message structure for encrypted messages
         if (parsed.type === SignalType.ENCRYPTED_MESSAGE) {
@@ -341,78 +333,156 @@ async function startServer() {
 
       try {
         switch (parsed.type) {
-          case SignalType.ADMIN_GENERATE_PREKEYS: {
-            // SECURITY: Admin endpoint - requires full authentication and admin privileges
-            if (!clientState.hasAuthenticated || !clientState.username) {
-              console.error('[SERVER] Unauthorized admin access attempt');
-              return ws.send(JSON.stringify({ type: SignalType.AUTH_ERROR, message: 'Full authentication required for admin functions' }));
+          case SignalType.REQUEST_PREKEY_GENERATION: {
+            // SECURITY: Requires authentication
+            const state = await ConnectionStateManager.getState(sessionId);
+            if (!state?.hasAuthenticated || !state?.username) {
+              console.error('[SERVER] Unauthorized prekey generation request');
+              return ws.send(JSON.stringify({ type: SignalType.AUTH_ERROR, message: 'Authentication required' }));
             }
-            
-            // SECURITY: In production, this should check admin role/permissions
-            // For now, only allow users to generate prekeys for themselves
-            const target = clientState.username; // SECURITY: Remove ability to target other users
-            
-            // SECURITY: Rate limit admin operations per user
-            const now = Date.now();
-            if (!clientState.lastAdminOp) clientState.lastAdminOp = 0;
-            if (now - clientState.lastAdminOp < 60000) { // 1 minute cooldown
-              console.error(`[SERVER] Admin operation rate limited for user: ${clientState.username}`);
-              return ws.send(JSON.stringify({ type: SignalType.ERROR, message: 'Admin operation rate limited - try again in 1 minute' }));
-            }
-            clientState.lastAdminOp = now;
             
             try {
-              // SECURITY: Gate server-side prekey generation behind dev-only flag
-              const isDevMode = process.env.NODE_ENV !== 'production';
-              const allowPrekeyGen = process.env.DEV_ALLOW_PREKEY_GEN === 'true';
+              // Check current prekey count
+              const currentCount = PrekeyDatabase.countAvailableOneTimePreKeys(state.username);
+              const needsGeneration = currentCount < 10;
               
-              if (!isDevMode || !allowPrekeyGen) {
-                console.warn(`[SERVER] SECURITY: Admin prekey generation denied - server-side private key generation breaks E2E guarantees`);
-                console.warn(`[SERVER] isDevMode: ${isDevMode}, allowPrekeyGen: ${allowPrekeyGen}`);
+              if (!needsGeneration) {
                 return ws.send(JSON.stringify({ 
                   type: SignalType.ERROR, 
-                  message: 'Server-side prekey generation is disabled for security reasons. Private keys should be generated client-side to maintain E2E encryption guarantees.' 
+                  message: `Sufficient prekeys available (${currentCount}). Generation not needed.` 
                 }));
               }
               
-              // Log audit trail for dev-only usage
-              console.warn(`[SERVER] AUDIT: Admin ${username} is using dev-only server-side prekey generation for user ${target}`);
-              console.warn(`[SERVER] AUDIT: This breaks E2E guarantees as server generates private keys`);
+              // Request client to generate prekeys (no server-side private key generation)
+              console.log(`[SERVER] Requesting client-side prekey generation for user: ${state.username}`);
+              ws.send(JSON.stringify({ 
+                type: SignalType.CLIENT_GENERATE_PREKEYS,
+                message: 'Please generate 100 one-time prekeys client-side',
+                requestedCount: 100,
+                currentCount: currentCount
+              }));
               
-              // SECURITY: Limit number of prekeys that can be generated
-              const currentCount = PrekeyDatabase.countAvailableOneTimePreKeys(target);
-              if (currentCount > 500) { // Don't allow more than 500 prekeys
-                return ws.send(JSON.stringify({ type: SignalType.ERROR, message: 'Too many existing prekeys' }));
-              }
-              
-              const generated = await PrekeyDatabase.appendOneTimePreKeys(target, 100);
-              ws.send(JSON.stringify({ type: 'ok', message: 'prekeys-generated', username: target, count: generated }));
-              console.log(`[SERVER] Admin generated prekeys for user: ${target}`);
             } catch (e) {
-              console.error('[SERVER] Admin prekey generation failed:', e);
-              ws.send(JSON.stringify({ type: SignalType.ERROR, message: 'Failed to generate prekeys' }));
+              console.error('[SERVER] Prekey generation request failed:', e);
+              ws.send(JSON.stringify({ type: SignalType.ERROR, message: 'Failed to process prekey request' }));
             }
             break;
           }
 
-
-          case SignalType.LIBSIGNAL_PUBLISH_BUNDLE: {
-            if (!clientState.hasPassedAccountLogin || !clientState.username) {
-              return ws.send(JSON.stringify({ type: SignalType.ERROR, message: 'Account login required first' }));
+          case SignalType.CLIENT_SUBMIT_PREKEYS: {
+            // Handle client-generated prekeys (public keys only)
+            const state = await ConnectionStateManager.getState(sessionId);
+            if (!state?.hasAuthenticated || !state?.username) {
+              console.error('[SERVER] Unauthorized prekey submission');
+              return ws.send(JSON.stringify({ type: SignalType.AUTH_ERROR, message: 'Authentication required' }));
             }
+
             try {
-              // Store main bundle data
-              LibsignalBundleDB.publish(clientState.username, parsed.bundle);
-              // Store one-time prekeys for consumption
-              if (Array.isArray(parsed.bundle?.oneTimePreKeys)) {
-                try {
-                  PrekeyDatabase.storeOneTimePreKeys(clientState.username, parsed.bundle.oneTimePreKeys);
-                } catch (e) {
-                  console.error('[SERVER] Failed to store one-time prekeys:', e);
+              // Validate and store client-generated public keys
+              if (!Array.isArray(parsed.prekeys) || parsed.prekeys.length === 0) {
+                return ws.send(JSON.stringify({ 
+                  type: SignalType.ERROR, 
+                  message: 'Invalid prekeys format - must be array of public keys' 
+                }));
+              }
+
+              // Validate each prekey has required public key fields only
+              for (const prekey of parsed.prekeys) {
+                if (!prekey.id || !prekey.publicKeyBase64) {
+                  throw new Error('Invalid prekey format - missing id or publicKeyBase64');
+                }
+                if (typeof prekey.id !== 'string' && typeof prekey.id !== 'number') {
+                  throw new Error('Invalid prekey id format');
+                }
+                if (typeof prekey.publicKeyBase64 !== 'string' || prekey.publicKeyBase64.length < 10) {
+                  throw new Error('Invalid public key format');
                 }
               }
+
+              // Store the public keys
+              PrekeyDatabase.storeOneTimePreKeys(state.username, parsed.prekeys);
+              
+              console.log(`[SERVER] Stored ${parsed.prekeys.length} client-generated prekeys for user: ${state.username}`);
+              ws.send(JSON.stringify({ 
+                type: 'ok', 
+                message: 'prekeys-stored',
+                count: parsed.prekeys.length
+              }));
+
+            } catch (e) {
+              console.error('[SERVER] Failed to store client prekeys:', e);
+              ws.send(JSON.stringify({ 
+                type: SignalType.ERROR, 
+                message: 'Failed to store prekeys: ' + e.message 
+              }));
+            }
+            break;
+          }
+
+          case SignalType.PREKEY_STATUS: {
+            // Check current prekey status for the authenticated user
+            const state = await ConnectionStateManager.getState(sessionId);
+            if (!state?.hasAuthenticated || !state?.username) {
+              console.error('[SERVER] Unauthorized prekey status request');
+              return ws.send(JSON.stringify({ type: SignalType.AUTH_ERROR, message: 'Authentication required' }));
+            }
+
+            try {
+              const currentCount = PrekeyDatabase.countAvailableOneTimePreKeys(state.username);
+              const needsGeneration = currentCount < 10;
+              
+              ws.send(JSON.stringify({
+                type: SignalType.PREKEY_STATUS,
+                currentCount: currentCount,
+                needsGeneration: needsGeneration,
+                threshold: 10
+              }));
+
+              // If low, automatically request generation
+              if (needsGeneration) {
+                console.log(`[SERVER] Auto-requesting prekey generation for user: ${state.username} (${currentCount} remaining)`);
+                ws.send(JSON.stringify({ 
+                  type: SignalType.CLIENT_GENERATE_PREKEYS,
+                  message: 'Low prekey count detected. Please generate 100 one-time prekeys client-side',
+                  requestedCount: 100,
+                  currentCount: currentCount,
+                  reason: 'auto-low-count'
+                }));
+              }
+
+            } catch (e) {
+              console.error('[SERVER] Failed to check prekey status:', e);
+              ws.send(JSON.stringify({ 
+                type: SignalType.ERROR, 
+                message: 'Failed to check prekey status' 
+              }));
+            }
+            break;
+          }
+
+          case SignalType.LIBSIGNAL_PUBLISH_BUNDLE: {
+            const state = await ConnectionStateManager.getState(sessionId);
+            if (!state?.hasPassedAccountLogin || !state?.username) {
+              return ws.send(JSON.stringify({ type: SignalType.ERROR, message: 'Account login required first' }));
+            }
+            
+            try {
+              // Store main bundle data (public keys only - client never sends private keys)
+              LibsignalBundleDB.publish(state.username, parsed.bundle);
+              
+              // Store one-time prekeys for consumption (public keys only)
+              if (Array.isArray(parsed.bundle?.oneTimePreKeys)) {
+                try {
+                  PrekeyDatabase.storeOneTimePreKeys(state.username, parsed.bundle.oneTimePreKeys);
+                } catch (e) {
+                  console.error('[SERVER] Failed to store one-time prekeys:', e);
+                  return ws.send(JSON.stringify({ type: SignalType.ERROR, message: 'Invalid one-time prekeys' }));
+                }
+              }
+              
               ws.send(JSON.stringify({ type: 'ok', message: 'libsignal-bundle-published' }));
             } catch (e) {
+              console.error('[SERVER] Bundle publication failed:', e);
               ws.send(JSON.stringify({ type: SignalType.ERROR, message: 'Failed to publish libsignal bundle' }));
             }
             break;
@@ -421,7 +491,8 @@ async function startServer() {
 
 
           case SignalType.LIBSIGNAL_REQUEST_BUNDLE: {
-            if (!clientState.hasPassedAccountLogin) {
+            const state = await ConnectionStateManager.getState(sessionId);
+            if (!state?.hasPassedAccountLogin) {
               return ws.send(JSON.stringify({ type: SignalType.ERROR, message: 'Account login required first' }));
             }
             
@@ -447,15 +518,17 @@ async function startServer() {
               return ws.send(JSON.stringify({ type: SignalType.ERROR, message: 'No libsignal bundle available' }));
             }
             ws.send(JSON.stringify({ type: SignalType.LIBSIGNAL_DELIVER_BUNDLE, bundle: out, username: target }));
-            // Auto-replenish if pool is low
+            
+            // Check if target user needs more prekeys and notify them
             try {
               const remaining = PrekeyDatabase.countAvailableOneTimePreKeys(target);
-              if (remaining < 20) {
-                const generated = await PrekeyDatabase.appendOneTimePreKeys(target, 100);
-                console.log(`[SERVER] Auto-replenished one-time prekeys for ${target}: ${generated} generated`);
+              if (remaining < 10) {
+                console.log(`[SERVER] User ${target} has low prekey count (${remaining}), will be notified on next connection`);
+                // Note: We can't directly notify the target user here unless they're online
+                // The client should periodically check their prekey count or check after bundle delivery
               }
             } catch (e) {
-              console.warn('[SERVER] Auto-replenish failed:', e);
+              console.warn('[SERVER] Failed to check prekey count:', e);
             }
             break;
           }
@@ -475,9 +548,11 @@ async function startServer() {
             console.log(`[SERVER] Processing ${parsed.type} request`);
             const result = await authHandler.processAuthRequest(ws, msg.toString());
             if (result?.authenticated || result?.pending) {
-              clientState.hasPassedAccountLogin = true;
-              clientState.username = result.username;
-              // Username stored in clientState only - no global memory structures
+              await ConnectionStateManager.updateState(sessionId, {
+                hasPassedAccountLogin: true,
+                username: result.username
+              });
+              // Username stored in Redis-based session state for scalability
 
               // Mark presence and subscribe to delivery channel
               try {
@@ -497,10 +572,12 @@ async function startServer() {
               ws.send(JSON.stringify({ type: SignalType.IN_ACCOUNT, message: 'Logged in successfully' }));
 
               if (!result.pending) {
-                console.log(`[SERVER] User '${clientState.username}' completed account authentication`);
+                const currentState = await ConnectionStateManager.getState(sessionId);
+                console.log(`[SERVER] User '${currentState?.username || 'unknown'}' completed account authentication`);
               }
             } else {
-              console.error(`[SERVER] Login failed for user: ${clientState.username || 'unknown'}`);
+              const currentState = await ConnectionStateManager.getState(sessionId);
+              console.error(`[SERVER] Login failed for user: ${currentState?.username || 'unknown'}`);
               ws.send(JSON.stringify({ type: SignalType.ERROR, message: 'Login failed' }));
             }
             break;
@@ -508,8 +585,9 @@ async function startServer() {
 
           case SignalType.PASSPHRASE_HASH:
           case SignalType.PASSPHRASE_HASH_NEW: {
-            console.log(`[SERVER] Processing passphrase hash for user: ${clientState.username}`);
-            if (!clientState.username) {
+            const state = await ConnectionStateManager.getState(sessionId);
+            console.log(`[SERVER] Processing passphrase hash for user: ${state?.username || 'unknown'}`);
+            if (!state?.username) {
               console.error('[SERVER] Username not set for passphrase submission');
               return ws.send(JSON.stringify({ type: SignalType.ERROR, message: 'Username not set' }));
             }
@@ -520,7 +598,7 @@ async function startServer() {
 
             await authHandler.handlePassphrase(
               ws,
-              clientState.username,
+              state.username,
               parsed.passphraseHash,
               parsed.type === SignalType.PASSPHRASE_HASH_NEW
             );
@@ -528,7 +606,7 @@ async function startServer() {
             const successMessage = parsed.type === SignalType.PASSPHRASE_HASH_NEW
               ? 'Passphrase saved successfully'
               : 'Passphrase verified successfully';
-            console.log(`[SERVER] Sending passphrase success to user: ${clientState.username}`);
+            console.log(`[SERVER] Sending passphrase success to user: ${state.username}`);
             ws.send(
               JSON.stringify({
                 type: SignalType.PASSPHRASE_SUCCESS,
@@ -539,37 +617,56 @@ async function startServer() {
           }
 
           case SignalType.SERVER_LOGIN: {
-            console.log(`[SERVER] Processing server login for user: ${clientState.username}`);
-            if (!clientState.hasPassedAccountLogin) {
+            const state = await ConnectionStateManager.getState(sessionId);
+            console.log(`[SERVER] Processing server login for user: ${state?.username || 'unknown'}`);
+            if (!state?.hasPassedAccountLogin) {
               console.error('[SERVER] Account login required first');
               return ws.send(JSON.stringify({ type: SignalType.ERROR, message: 'Account login required first' }));
             }
 
-            if (clientState.hasAuthenticated) {
+            if (state?.hasAuthenticated) {
               console.error('[SERVER] User already authenticated');
               return ws.send(JSON.stringify({ type: SignalType.ERROR, message: 'Already authenticated' }));
             }
 
-            const success = await serverAuthHandler.handleServerAuthentication(ws, msg.toString(), clientState);
+            const success = await serverAuthHandler.handleServerAuthentication(ws, msg.toString(), state);
             if (success) {
-              clientState.hasAuthenticated = true;
+              await ConnectionStateManager.updateState(sessionId, { hasAuthenticated: true });
               // AUTH_SUCCESS is already sent by ServerAuthHandler.handleServerAuthentication()
-              console.log(`[SERVER] Server authentication successful for user: ${clientState.username}`);
+              console.log(`[SERVER] Server authentication successful for user: ${state.username}`);
 
               // No global public-key broadcast; keys are fetched on-demand per peer
 
               // Offline message delivery removed
               // Refresh online TTL after full auth
-              try { await setOnline(clientState.username, 120); } catch {}
+              try { await setOnline(state.username, 120); } catch {}
+
+              // Auto-check prekey status after successful authentication
+              try {
+                const currentCount = PrekeyDatabase.countAvailableOneTimePreKeys(state.username);
+                if (currentCount < 10) {
+                  console.log(`[SERVER] User ${state.username} has low prekey count (${currentCount}), requesting generation`);
+                  ws.send(JSON.stringify({ 
+                    type: SignalType.CLIENT_GENERATE_PREKEYS,
+                    message: 'Low prekey count detected. Please generate 100 one-time prekeys client-side',
+                    requestedCount: 100,
+                    currentCount: currentCount,
+                    reason: 'post-auth-check'
+                  }));
+                }
+              } catch (e) {
+                console.warn('[SERVER] Failed to check prekey status after auth:', e);
+              }
             } else {
-              console.error(`[SERVER] Server authentication failed for user: ${clientState.username}`);
+              console.error(`[SERVER] Server authentication failed for user: ${state.username}`);
               ws.send(JSON.stringify({ type: SignalType.AUTH_ERROR, message: 'Server authentication failed' }));
             }
             break;
           }
 
           case SignalType.UPDATE_DB: {
-            console.log(`[SERVER] Queuing message for batch database save from user: ${clientState.username}`);
+            const state = await ConnectionStateManager.getState(sessionId);
+            console.log(`[SERVER] Queuing message for batch database save from user: ${state?.username || 'unknown'}`);
 
             // Add to batch instead of immediate processing
             addToBatch({
@@ -594,7 +691,8 @@ async function startServer() {
           case SignalType.ENCRYPTED_MESSAGE:
           case SignalType.FILE_MESSAGE_CHUNK:
           case SignalType.DR_SEND: {
-            console.log(`[SERVER] Processing ${parsed.type} from user: ${clientState.username} to user: ${parsed.to}`);
+            const state = await ConnectionStateManager.getState(sessionId);
+            console.log(`[SERVER] Processing ${parsed.type} from user: ${state?.username || 'unknown'} to user: ${parsed.to}`);
             
             // SECURITY: Log only non-sensitive metadata for encrypted messages
             if (parsed.type === SignalType.ENCRYPTED_MESSAGE && parsed.encryptedPayload) {
@@ -611,12 +709,9 @@ async function startServer() {
               });
             }
             
-            {
-              const isAuthed = clientState.hasAuthenticated;
-              if (!isAuthed) {
-                console.error('[SERVER] User not authenticated for message sending');
-                return ws.send(JSON.stringify({ type: SignalType.ERROR, message: 'Not authenticated yet' }));
-              }
+            if (!state?.hasAuthenticated) {
+              console.error('[SERVER] User not authenticated for message sending');
+              return ws.send(JSON.stringify({ type: SignalType.ERROR, message: 'Not authenticated yet' }));
             }
             if (!parsed.to) {
               console.warn(`[SERVER] Target user offline or not found: ${parsed.to}, queueing`);
@@ -638,19 +733,19 @@ async function startServer() {
 
             // Apply message rate limiting
             try {
-              if (!(await rateLimitMiddleware.checkMessageLimit(ws, clientState.username))) {
-                console.log(`[SERVER] Message blocked due to rate limiting for user: ${clientState.username}`);
+              if (!(await rateLimitMiddleware.checkMessageLimit(ws, state.username))) {
+                console.log(`[SERVER] Message blocked due to rate limiting for user: ${state.username}`);
                 break;
               }
             } catch (error) {
-              console.error(`[SERVER] Rate limiting error during message for user ${clientState.username}:`, error);
+              console.error(`[SERVER] Rate limiting error during message for user ${state.username}:`, error);
               break;
             }
 
             const toUser = parsed.to || parsed.encryptedPayload?.to;
             let messageToSend;
               if (parsed.type === SignalType.DR_SEND) {
-                messageToSend = { type: SignalType.DR_SEND, from: clientState.username, to: toUser, payload: parsed.payload };
+                messageToSend = { type: SignalType.DR_SEND, from: state.username, to: toUser, payload: parsed.payload };
               } else if (parsed.type === SignalType.ENCRYPTED_MESSAGE) {
                 // Verify Signal Protocol message integrity before relaying
                 const encryptedPayload = parsed.encryptedPayload;
@@ -689,13 +784,21 @@ async function startServer() {
             } catch (e) {
               console.warn('[SERVER] Pub-sub delivery failed, queueing offline:', e?.message || e);
               try {
-                MessageDatabase.queueOfflineMessage(parsed.to, {
+                const queueSuccess = MessageDatabase.queueOfflineMessage(parsed.to, {
                   type: parsed.type,
                   to: parsed.to,
                   encryptedPayload: parsed.encryptedPayload
                 });
+                if (queueSuccess) {
+                  console.log(`[SERVER] Message successfully queued for offline user: ${parsed.to}`);
+                  try { ws.send(JSON.stringify({ type: 'ok', message: 'queued' })); } catch {}
+                } else {
+                  console.error(`[SERVER] Failed to queue message for user: ${parsed.to}`);
+                  try { ws.send(JSON.stringify({ type: SignalType.ERROR, message: 'Failed to queue message' })); } catch {}
+                }
               } catch (qe) {
                 console.error('[SERVER] Failed to queue offline message:', qe);
+                try { ws.send(JSON.stringify({ type: SignalType.ERROR, message: 'Failed to queue message' })); } catch {}
               }
             }
             console.log(`[SERVER] Message handling complete for ${toUser}:`, {
@@ -711,10 +814,11 @@ async function startServer() {
           case SignalType.RATE_LIMIT_STATUS: {
             // Admin function: Get rate limiting statistics
             // This could be restricted to admin users in production
-            console.log(`[SERVER] Rate limit status request from user: ${clientState.username || 'unknown'}`);
+            const state = await ConnectionStateManager.getState(sessionId);
+            console.log(`[SERVER] Rate limit status request from user: ${state?.username || 'unknown'}`);
             const stats = rateLimitMiddleware.getStats();
             const globalStatus = await rateLimitMiddleware.getGlobalConnectionStatus();
-            const userStatus = clientState.username ? await rateLimitMiddleware.getUserStatus(clientState.username) : null;
+            const userStatus = state?.username ? await rateLimitMiddleware.getUserStatus(state.username) : null;
 
             ws.send(JSON.stringify({
               type: SignalType.RATE_LIMIT_STATUS,
@@ -728,7 +832,8 @@ async function startServer() {
           case SignalType.RATE_LIMIT_RESET: {
             // Admin function: Reset rate limits
             // This could be restricted to admin users in production
-            console.log(`[SERVER] Rate limit reset request from user: ${clientState.username || 'unknown'}`);
+            const state = await ConnectionStateManager.getState(sessionId);
+            console.log(`[SERVER] Rate limit reset request from user: ${state?.username || 'unknown'}`);
 
             if (parsed.resetType === 'global') {
               await rateLimitMiddleware.resetGlobalConnectionLimits();
@@ -766,21 +871,22 @@ async function startServer() {
           }
 
           case SignalType.REQUEST_MESSAGE_HISTORY: {
-            if (!clientState.hasAuthenticated) {
+            const state = await ConnectionStateManager.getState(sessionId);
+            if (!state?.hasAuthenticated) {
               return ws.send(JSON.stringify({ type: SignalType.ERROR, message: 'Authentication required' }));
             }
 
-            // Rate limiting: Track last history request time
+            // Rate limiting: Track last history request time in session state
             const now = Date.now();
             const HISTORY_REQUEST_COOLDOWN = 1000; // 1 second between requests
-            if (clientState.lastHistoryRequest && (now - clientState.lastHistoryRequest) < HISTORY_REQUEST_COOLDOWN) {
+            if (state.lastHistoryRequest && (now - state.lastHistoryRequest) < HISTORY_REQUEST_COOLDOWN) {
               return ws.send(JSON.stringify({ 
                 type: SignalType.ERROR, 
                 message: 'Rate limited: too many history requests',
                 error: 'RATE_LIMITED'
               }));
             }
-            clientState.lastHistoryRequest = now;
+            await ConnectionStateManager.updateState(sessionId, { lastHistoryRequest: now });
 
             try {
               const { limit = 50, since } = parsed;
@@ -800,10 +906,10 @@ async function startServer() {
                 sinceTimestamp = parsedSince;
               }
               
-              console.log(`[SERVER] Fetching message history for user: ${clientState.username}, limit: ${requestLimit}, since: ${sinceTimestamp}`);
+              console.log(`[SERVER] Fetching message history for user: ${state.username}, limit: ${requestLimit}, since: ${sinceTimestamp}`);
               
               // Get messages from database using top-level import
-              const messages = await MessageDatabase.getMessagesForUser(clientState.username, requestLimit);
+              const messages = await MessageDatabase.getMessagesForUser(state.username, requestLimit);
               
               // Filter by timestamp if 'since' parameter provided
               const filteredMessages = sinceTimestamp ? 
@@ -817,9 +923,9 @@ async function startServer() {
                 timestamp: Date.now()
               }));
               
-              console.log(`[SERVER] Sent ${filteredMessages.length} historical messages to user: ${clientState.username}`);
+              console.log(`[SERVER] Sent ${filteredMessages.length} historical messages to user: ${state.username}`);
             } catch (error) {
-              console.error(`[SERVER] Error fetching message history for user ${clientState.username}:`, error);
+              console.error(`[SERVER] Error fetching message history for user ${state.username}:`, error);
               ws.send(JSON.stringify({ 
                 type: SignalType.ERROR, 
                 message: 'Failed to fetch message history',
@@ -834,16 +940,24 @@ async function startServer() {
             ws.send(JSON.stringify({ type: SignalType.ERROR, message: `Unknown message type: ${msg}` }));
         }
       } catch (err) {
-        console.error(`[SERVER] Message handler error for user ${clientState.username}:`, err);
+        const state = await ConnectionStateManager.getState(sessionId);
+        console.error(`[SERVER] Message handler error for user ${state?.username || 'unknown'}:`, err);
       }
     });
 
     ws.on('close', async () => {
-      // Clean up client state - username stored in clientState only
-      const username = clientState.username;
+      // Clean up Redis-based session state
+      const state = await ConnectionStateManager.getState(sessionId);
+      const username = state?.username;
+      
       if (username) {
         try { await setOffline(username); } catch {}
         console.log(`[SERVER] User '${username}' disconnected`);
+      }
+
+      // Clean up session from Redis
+      if (sessionId) {
+        try { await ConnectionStateManager.deleteSession(sessionId); } catch {}
       }
 
       // Unsubscribe presence channel
@@ -857,9 +971,9 @@ async function startServer() {
         console.log('[SERVER] No active connections, stopped status logging');
       }
 
-      // Log connection stats
-      const connectionDuration = Date.now() - clientState.connectionTime;
-      console.log(`[SERVER] Connection closed - Duration: ${connectionDuration}ms, Messages: ${clientState.messageCount}`);
+      // Log connection stats (minimal tracking)
+      const connectionDuration = Date.now() - connectionTime;
+      console.log(`[SERVER] Connection closed - Duration: ${connectionDuration}ms, Messages: ${messageCount}`);
     });
   });
 }

@@ -303,9 +303,25 @@ export async function isOnline(username) {
 
 export async function publishToUser(username, payloadObj) {
   try {
+    // First check if user is actually online before attempting delivery
+    const userIsOnline = await isOnline(username);
+    if (!userIsOnline) {
+      console.log(`[PRESENCE] User ${username} is offline, skipping pub-sub delivery`);
+      return false; // User is offline, should queue message instead
+    }
+
     const msg = typeof payloadObj === 'string' ? payloadObj : JSON.stringify(payloadObj);
-    await redis.publish(DELIVER_CH(username), msg);
-    return true;
+    const subscriberCount = await redis.publish(DELIVER_CH(username), msg);
+    
+    // Return true only if at least one subscriber received the message
+    const delivered = subscriberCount > 0;
+    if (!delivered) {
+      console.log(`[PRESENCE] No active subscribers for user ${username}, treating as offline`);
+    } else {
+      console.log(`[PRESENCE] Message delivered to ${subscriberCount} subscriber(s) for user ${username}`);
+    }
+    
+    return delivered;
   } catch (error) {
     console.error(`[PRESENCE] Error publishing message to user ${username}:`, error);
     return false; // Safe fallback: indicate failure

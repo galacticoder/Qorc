@@ -36,7 +36,13 @@ export const SignalType = {
   LIBSIGNAL_REQUEST_BUNDLE: "libsignal-request-bundle",
   LIBSIGNAL_DELIVER_BUNDLE: "libsignal-deliver-bundle",
 
-  // admin/maintenance
+  // Client-side prekey generation (secure)
+  REQUEST_PREKEY_GENERATION: "request-prekey-generation",
+  CLIENT_GENERATE_PREKEYS: "client-generate-prekeys",
+  CLIENT_SUBMIT_PREKEYS: "client-submit-prekeys",
+  PREKEY_STATUS: "prekey-status",
+  
+  // Legacy admin endpoint (deprecated for security)
   ADMIN_GENERATE_PREKEYS: "admin-generate-prekeys",
 
   //rate limiting and admin

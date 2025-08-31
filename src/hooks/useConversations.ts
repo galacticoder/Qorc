@@ -117,7 +117,7 @@ export function useConversations(currentUsername: string, users: User[], message
           existing.lastMessage = msg.content;
           existing.lastMessageTime = msgTime;
         }
-        existing.unreadCount += unreadIncrement;
+        existing.unreadCount = (existing.unreadCount || 0) + unreadIncrement;
         existing.isOnline = isOnline;
       }
     }

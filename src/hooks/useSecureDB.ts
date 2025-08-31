@@ -119,7 +119,33 @@ export const useSecureDB = ({ Authentication, setMessages }: UseSecureDBProps) =
 					} : undefined,
 				}));
 
-				setMessages(processedMessages);
+				// Merge with existing messages instead of replacing them
+				setMessages(prevMessages => {
+					console.debug('[useSecureDB] Merging loaded messages with existing messages', {
+						loadedCount: processedMessages.length,
+						existingCount: prevMessages.length
+					});
+					
+					if (processedMessages.length === 0) {
+						// No stored messages, keep existing ones (including any received during login)
+						return prevMessages;
+					}
+					
+					// Create a map of existing message IDs for deduplication
+					const existingIds = new Set(prevMessages.map(msg => msg.id));
+					
+					// Add loaded messages that don't already exist
+					const newMessages = processedMessages.filter(msg => !existingIds.has(msg.id));
+					
+					const merged = [...prevMessages, ...newMessages];
+					console.debug('[useSecureDB] Message merge complete', {
+						finalCount: merged.length,
+						addedFromDB: newMessages.length,
+						keptExisting: prevMessages.length
+					});
+					
+					return merged;
+				});
 
 				if (savedUsers.length) setUsers(savedUsers);
 			} catch (err) {

@@ -156,14 +156,7 @@ export class AccountAuthHandler {
     UserDatabase.saveUserRecord(userRecord);
     console.log(`[AUTH] User record saved for: ${username}`);
 
-    // AUTO-GENERATE: Generate initial pre-keys for offline messaging
-    try {
-      const prekeyCount = await PrekeyDatabase.generateInitialPreKeys(username, 100);
-      console.log(`[AUTH] Generated ${prekeyCount} initial pre-keys for new user: ${username}`);
-    } catch (error) {
-      console.error(`[AUTH] Failed to generate initial pre-keys for user ${username}:`, error);
-      // Don't fail registration if pre-key generation fails
-    }
+    // SECURITY: Removed server-side prekey generation - client will generate prekeys
 
     ws.send(JSON.stringify({
       type: SignalType.PASSPHRASE_HASH,
@@ -366,32 +359,32 @@ export class AccountAuthHandler {
       message: "Account authentication successful"
     }));
 
-    // AUTO-REPLENISH: Check and replenish pre-keys if needed
-    try {
-      const needsReplenishment = PrekeyDatabase.needsPreKeyReplenishment(username, 10);
-      if (needsReplenishment) {
-        console.log(`[AUTH] User ${username} needs pre-key replenishment`);
-        await PrekeyDatabase.ensurePreKeyAvailability(username, 10, 100);
-      }
-    } catch (error) {
-      console.error(`[AUTH] Failed to check/replenish pre-keys for user ${username}:`, error);
-      // Don't fail authentication if pre-key replenishment fails
-    }
+    // SECURITY: Removed server-side prekey replenishment - client manages prekeys
 
     // Deliver any queued offline messages for this user
     try {
       const { MessageDatabase } = await import('../database/database.js');
+      console.log(`[AUTH] Checking for offline messages for user: ${username}`);
       const queued = MessageDatabase.takeOfflineMessages(username, 200);
+      console.log(`[AUTH] Found ${queued.length} offline messages for user: ${username}`);
+      
       if (queued.length) {
+        let deliveredCount = 0;
         for (const msg of queued) {
           try {
             ws.send(JSON.stringify(msg));
+            deliveredCount++;
+            console.log(`[AUTH] Delivered offline message ${deliveredCount}/${queued.length} to user: ${username}`);
           } catch (e) {
+            console.error(`[AUTH] Failed to send offline message to user ${username}:`, e);
             // If sending fails, re-queue
             try { MessageDatabase.queueOfflineMessage(username, msg); } catch {}
             break;
           }
         }
+        console.log(`[AUTH] Successfully delivered ${deliveredCount}/${queued.length} offline messages to user: ${username}`);
+      } else {
+        console.log(`[AUTH] No offline messages found for user: ${username}`);
       }
     } catch (e) {
       console.error('[AUTH] Failed to deliver offline messages:', e);

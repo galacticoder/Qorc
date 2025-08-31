@@ -245,7 +245,7 @@ const ChatApp: React.FC<ChatAppProps> = () => {
         >
           <ConversationList
             conversations={conversations}
-            selectedConversation={selectedConversation}
+            selectedConversation={selectedConversation || undefined}
             onSelectConversation={selectConversation}
             currentUsername={Authentication.loginUsernameRef.current || ''}
           />
@@ -317,7 +317,7 @@ const ChatApp: React.FC<ChatAppProps> = () => {
                   };
                   
                   // Add to Database.users so future messages can find the user
-                  Database.setUsers(prev => [...prev, targetUser]);
+                  Database.setUsers(prev => [...prev, targetUser!]);
                 }
                 
                 console.log('[Index] Found/created target user:', targetUser);
