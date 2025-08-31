@@ -1,7 +1,7 @@
 import * as authUtils from './auth-utils.js';
 import { SignalType, SignalMessages } from '../signals.js';
 import { CryptoUtils } from '../crypto/unified-crypto.js';
-import { UserDatabase } from '../database/database.js';
+import { UserDatabase, PrekeyDatabase } from '../database/database.js';
 import { rateLimitMiddleware } from '../rate-limiting/rate-limit-middleware.js';
 import { isOnline as presenceIsOnline } from '../presence/presence.js';
 
@@ -155,6 +155,15 @@ export class AccountAuthHandler {
 
     UserDatabase.saveUserRecord(userRecord);
     console.log(`[AUTH] User record saved for: ${username}`);
+
+    // AUTO-GENERATE: Generate initial pre-keys for offline messaging
+    try {
+      const prekeyCount = await PrekeyDatabase.generateInitialPreKeys(username, 100);
+      console.log(`[AUTH] Generated ${prekeyCount} initial pre-keys for new user: ${username}`);
+    } catch (error) {
+      console.error(`[AUTH] Failed to generate initial pre-keys for user ${username}:`, error);
+      // Don't fail registration if pre-key generation fails
+    }
 
     ws.send(JSON.stringify({
       type: SignalType.PASSPHRASE_HASH,
@@ -356,6 +365,18 @@ export class AccountAuthHandler {
       type: SignalType.IN_ACCOUNT,
       message: "Account authentication successful"
     }));
+
+    // AUTO-REPLENISH: Check and replenish pre-keys if needed
+    try {
+      const needsReplenishment = PrekeyDatabase.needsPreKeyReplenishment(username, 10);
+      if (needsReplenishment) {
+        console.log(`[AUTH] User ${username} needs pre-key replenishment`);
+        await PrekeyDatabase.ensurePreKeyAvailability(username, 10, 100);
+      }
+    } catch (error) {
+      console.error(`[AUTH] Failed to check/replenish pre-keys for user ${username}:`, error);
+      // Don't fail authentication if pre-key replenishment fails
+    }
 
     // Deliver any queued offline messages for this user
     try {

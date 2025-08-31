@@ -2,6 +2,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import DatabaseDriver from 'better-sqlite3';
 import { CryptoUtils } from '../crypto/unified-crypto.js';
+import { randomBytes } from 'crypto';
 
 const DB_PATH = path.join(path.dirname(fileURLToPath(import.meta.url)), 'user_database.sqlite');
 const db = new DatabaseDriver(DB_PATH);
@@ -138,6 +139,20 @@ db.exec(`
     consumed INTEGER NOT NULL DEFAULT 0,
     consumedAt INTEGER,
     PRIMARY KEY (username, keyId)
+  );
+`);
+
+// Table for securely storing one-time prekey private keys
+db.exec(`
+  CREATE TABLE IF NOT EXISTS one_time_prekey_private_keys (
+    username TEXT NOT NULL,
+    keyId TEXT NOT NULL,
+    encryptedPrivateKeyBase64 TEXT NOT NULL,
+    salt TEXT NOT NULL,
+    iv TEXT NOT NULL,
+    createdAt INTEGER NOT NULL,
+    PRIMARY KEY (username, keyId),
+    FOREIGN KEY (username, keyId) REFERENCES one_time_prekeys(username, keyId) ON DELETE CASCADE
   );
 `);
 
@@ -530,12 +545,31 @@ export class PrekeyDatabase {
     }
   }
 
-  static takeBundleForRecipient(username) {
+  static async takeBundleForRecipient(username) {
     const bundle = db.prepare(`SELECT * FROM prekey_bundles WHERE username = ?`).get(username);
     if (!bundle) return null;
     const ot = db.prepare(`SELECT keyId, publicKeyBase64 FROM one_time_prekeys WHERE username = ? AND consumed = 0 ORDER BY keyId LIMIT 1`).get(username);
     if (ot) {
       db.prepare(`UPDATE one_time_prekeys SET consumed = 1, consumedAt = ? WHERE username = ? AND keyId = ?`).run(Date.now(), username, ot.keyId);
+      
+      // Clean up consumed private key immediately after marking as consumed
+      try {
+        this.cleanupConsumedPrivateKeys(username, ot.keyId);
+      } catch (error) {
+        console.error(`[DB] Failed to cleanup consumed private key for ${username}:${ot.keyId}:`, error);
+      }
+      
+      // AUTO-REPLENISH: Check if we need to generate more pre-keys after consumption
+      try {
+        const remainingCount = this.countAvailableOneTimePreKeys(username);
+        if (remainingCount < 10) {
+          console.log(`[PREKEY] Auto-replenishing pre-keys for ${username} (${remainingCount} remaining)`);
+          await this.appendOneTimePreKeys(username, 100);
+          console.log(`[PREKEY] Added 100 more pre-keys for ${username}`);
+        }
+      } catch (error) {
+        console.error(`[PREKEY] Failed to auto-replenish pre-keys for ${username}:`, error);
+      }
     }
     return {
       username,
@@ -590,20 +624,380 @@ export class PrekeyDatabase {
     }
   }
 
-  static appendOneTimePreKeys(username, count) {
+  static async appendOneTimePreKeys(username, count) {
     if (!username || typeof username !== 'string' || count <= 0) return 0;
     try {
       const start = this.getMaxPrekeyId(username) + 1;
-      const insertStmt = db.prepare(`INSERT INTO one_time_prekeys (username, keyId, publicKeyBase64, consumed) VALUES (?, ?, ?, 0)`);
-      const rows = new Array(count).fill(0).map((_, idx) => ({ keyId: start + idx }));
-      const insertMany = db.transaction((xs) => {
-        for (const r of xs) insertStmt.run(username, r.keyId, r.publicKeyBase64);
+      const insertPublicStmt = db.prepare(`INSERT INTO one_time_prekeys (username, keyId, publicKeyBase64, consumed) VALUES (?, ?, ?, 0)`);
+      const insertPrivateStmt = db.prepare(`INSERT INTO one_time_prekey_private_keys (username, keyId, encryptedPrivateKeyBase64, salt, iv, createdAt) VALUES (?, ?, ?, ?, ?, ?)`);
+      
+      const keyPairs = [];
+      for (let i = 0; i < count; i++) {
+        // Generate proper X25519 key pair
+        const keyPair = await CryptoUtils.X25519.generateKeyPair();
+        const publicKeyRaw = await CryptoUtils.X25519.exportPublicKeyRaw(keyPair.publicKey);
+        const publicKeyBase64 = CryptoUtils.Hash.arrayBufferToBase64(publicKeyRaw);
+        
+        // Export private key for secure storage
+        const privateKeyRaw = await crypto.subtle.exportKey('pkcs8', keyPair.privateKey);
+        const privateKeyBytes = new Uint8Array(privateKeyRaw);
+        
+        // Encrypt private key for storage
+        const { encryptedPrivateKey, salt, iv } = await this.encryptPrivateKey(privateKeyBytes, `${username}:${start + i}`);
+        
+        keyPairs.push({
+          keyId: start + i,
+          publicKeyBase64,
+          encryptedPrivateKeyBase64: CryptoUtils.Hash.arrayBufferToBase64(encryptedPrivateKey),
+          salt: CryptoUtils.Hash.arrayBufferToBase64(salt),
+          iv: CryptoUtils.Hash.arrayBufferToBase64(iv)
+        });
+      }
+      
+      const insertMany = db.transaction((keyPairs) => {
+        for (const kp of keyPairs) {
+          insertPublicStmt.run(username, kp.keyId, kp.publicKeyBase64);
+          insertPrivateStmt.run(username, kp.keyId, kp.encryptedPrivateKeyBase64, kp.salt, kp.iv, Date.now());
+        }
       });
-      insertMany(rows);
+      insertMany(keyPairs);
       return count;
     } catch (error) {
       console.error('[DB] Failed to append one-time prekeys:', error);
       return 0;
+    }
+  }
+
+  // Auto-generate initial pre-keys for new users
+  static async generateInitialPreKeys(username, count = 100) {
+    if (!username || typeof username !== 'string') return 0;
+    try {
+      console.log(`[PREKEY] Generating ${count} initial pre-keys for user: ${username}`);
+      
+      const prekeys = [];
+      const privateKeys = [];
+      
+      for (let i = 0; i < count; i++) {
+        // Generate proper X25519 key pair
+        const keyPair = await CryptoUtils.X25519.generateKeyPair();
+        const publicKeyRaw = await CryptoUtils.X25519.exportPublicKeyRaw(keyPair.publicKey);
+        const publicKeyBase64 = CryptoUtils.Hash.arrayBufferToBase64(publicKeyRaw);
+        
+        // Export private key for secure storage
+        const privateKeyRaw = await crypto.subtle.exportKey('pkcs8', keyPair.privateKey);
+        const privateKeyBytes = new Uint8Array(privateKeyRaw);
+        
+        // Encrypt private key for storage
+        const { encryptedPrivateKey, salt, iv } = await this.encryptPrivateKey(privateKeyBytes, `${username}:${i + 1}`);
+        
+        prekeys.push({
+          id: i + 1,
+          publicKeyBase64
+        });
+        
+        privateKeys.push({
+          keyId: i + 1,
+          encryptedPrivateKeyBase64: CryptoUtils.Hash.arrayBufferToBase64(encryptedPrivateKey),
+          salt: CryptoUtils.Hash.arrayBufferToBase64(salt),
+          iv: CryptoUtils.Hash.arrayBufferToBase64(iv)
+        });
+      }
+      
+      this.storeOneTimePreKeys(username, prekeys);
+      this.storeOneTimePreKeyPrivateKeys(username, privateKeys);
+      
+      console.log(`[PREKEY] Successfully generated ${count} pre-keys for user: ${username}`);
+      return count;
+    } catch (error) {
+      console.error(`[PREKEY] Failed to generate initial pre-keys for user ${username}:`, error);
+      return 0;
+    }
+  }
+
+  // Check and replenish pre-keys if below threshold
+  static async ensurePreKeyAvailability(username, minThreshold = 10, replenishCount = 100) {
+    if (!username || typeof username !== 'string') return false;
+    try {
+      const currentCount = this.countAvailableOneTimePreKeys(username);
+      console.log(`[PREKEY] User ${username} has ${currentCount} available pre-keys`);
+      
+      if (currentCount < minThreshold) {
+        console.log(`[PREKEY] Replenishing pre-keys for user ${username} (${currentCount} < ${minThreshold})`);
+        const generated = await this.appendOneTimePreKeys(username, replenishCount);
+        console.log(`[PREKEY] Generated ${generated} additional pre-keys for user: ${username}`);
+        return generated > 0;
+      }
+      return true;
+    } catch (error) {
+      console.error(`[PREKEY] Failed to ensure pre-key availability for user ${username}:`, error);
+      return false;
+    }
+  }
+
+  // Check if user needs pre-key replenishment
+  static needsPreKeyReplenishment(username, threshold = 10) {
+    try {
+      const count = this.countAvailableOneTimePreKeys(username);
+      return count < threshold;
+    } catch (error) {
+      console.error(`[PREKEY] Failed to check pre-key count for user ${username}:`, error);
+      return true; // Err on the side of generating more keys
+    }
+  }
+
+  // Periodic maintenance: Check all users and replenish low pre-key counts
+  static async performPreKeyMaintenance(threshold = 10, replenishCount = 100) {
+    try {
+      console.log('[PREKEY] Starting periodic pre-key maintenance...');
+      
+      // Get all users who have low pre-key counts
+      const lowCountUsers = db.prepare(`
+        SELECT DISTINCT u.username, COALESCE(p.available_count, 0) as available_count
+        FROM users u
+        LEFT JOIN (
+          SELECT username, COUNT(*) as available_count 
+          FROM one_time_prekeys 
+          WHERE consumed = 0 
+          GROUP BY username
+        ) p ON u.username = p.username
+        WHERE COALESCE(p.available_count, 0) < ?
+      `).all(threshold);
+
+      let replenishedCount = 0;
+      for (const user of lowCountUsers) {
+        try {
+          console.log(`[PREKEY] Maintenance: Replenishing pre-keys for ${user.username} (${user.available_count} available)`);
+          const generated = await this.appendOneTimePreKeys(user.username, replenishCount);
+          if (generated > 0) {
+            replenishedCount++;
+            console.log(`[PREKEY] Maintenance: Added ${generated} pre-keys for ${user.username}`);
+          }
+        } catch (error) {
+          console.error(`[PREKEY] Maintenance: Failed to replenish pre-keys for ${user.username}:`, error);
+        }
+      }
+      
+      console.log(`[PREKEY] Maintenance complete: Replenished pre-keys for ${replenishedCount} users`);
+      return replenishedCount;
+    } catch (error) {
+      console.error('[PREKEY] Maintenance: Failed to perform pre-key maintenance:', error);
+      return 0;
+    }
+  }
+
+  // Encrypt private key for secure storage
+  static async encryptPrivateKey(privateKeyBytes, aad) {
+    // Require a non-empty PREKEY_ENCRYPTION_SECRET from environment
+    const serverSecret = process.env.PREKEY_ENCRYPTION_SECRET;
+    if (!serverSecret || serverSecret.trim().length === 0) {
+      throw new Error('PREKEY_ENCRYPTION_SECRET environment variable is required and must not be empty');
+    }
+    
+    // Generate a random salt and IV for this private key
+    const salt = randomBytes(32);
+    const iv = randomBytes(12); // Use 12-byte IV (96 bits) for AES-GCM standard
+    
+    const serverSecretBytes = new TextEncoder().encode(serverSecret);
+    
+    // Use HKDF to derive encryption key
+    const encryptionKey = await CryptoUtils.KDF.blake3Hkdf(
+      serverSecretBytes,
+      salt,
+      new TextEncoder().encode('prekey-private-key-encryption-v1'),
+      32
+    );
+    
+    // Import as AES key
+    const aesKey = await crypto.subtle.importKey(
+      'raw',
+      encryptionKey,
+      { name: 'AES-GCM' },
+      false,
+      ['encrypt']
+    );
+    
+    // Prepare encryption options with optional AAD
+    const encryptOptions = { name: 'AES-GCM', iv: iv };
+    if (aad) {
+      encryptOptions.additionalData = new TextEncoder().encode(aad);
+    }
+    
+    // Encrypt the private key
+    const encryptedBuffer = await crypto.subtle.encrypt(
+      encryptOptions,
+      aesKey,
+      privateKeyBytes
+    );
+    
+    return {
+      encryptedPrivateKey: new Uint8Array(encryptedBuffer),
+      salt,
+      iv
+    };
+  }
+  
+  // Decrypt private key for use
+  static async decryptPrivateKey(encryptedPrivateKeyBase64, saltBase64, ivBase64, aad) {
+    // Input validation
+    if (!encryptedPrivateKeyBase64 || typeof encryptedPrivateKeyBase64 !== 'string' || encryptedPrivateKeyBase64.trim().length === 0) {
+      throw new Error('encryptedPrivateKeyBase64 must be a non-empty string');
+    }
+    if (!saltBase64 || typeof saltBase64 !== 'string' || saltBase64.trim().length === 0) {
+      throw new Error('saltBase64 must be a non-empty string');
+    }
+    if (!ivBase64 || typeof ivBase64 !== 'string' || ivBase64.trim().length === 0) {
+      throw new Error('ivBase64 must be a non-empty string');
+    }
+    
+    // Decode and validate binary data
+    let encryptedPrivateKey, salt, iv;
+    try {
+      encryptedPrivateKey = CryptoUtils.Hash.base64ToUint8Array(encryptedPrivateKeyBase64);
+      salt = CryptoUtils.Hash.base64ToUint8Array(saltBase64);
+      iv = CryptoUtils.Hash.base64ToUint8Array(ivBase64);
+    } catch (error) {
+      throw new Error('Failed to decode base64 input parameters: ' + error.message);
+    }
+    
+    // Validate decoded data lengths
+    if (iv.length !== 12) {
+      throw new Error(`IV must be exactly 12 bytes (96 bits), got ${iv.length} bytes`);
+    }
+    if (salt.length < 16) {
+      throw new Error(`Salt must be at least 16 bytes, got ${salt.length} bytes`);
+    }
+    if (encryptedPrivateKey.length < 16) {
+      throw new Error(`Encrypted private key must be at least 16 bytes, got ${encryptedPrivateKey.length} bytes`);
+    }
+    
+    // Require a non-empty PREKEY_ENCRYPTION_SECRET from environment
+    const serverSecret = process.env.PREKEY_ENCRYPTION_SECRET;
+    if (!serverSecret || serverSecret.trim().length === 0) {
+      throw new Error('PREKEY_ENCRYPTION_SECRET environment variable is required and must not be empty');
+    }
+    
+    const serverSecretBytes = new TextEncoder().encode(serverSecret);
+    
+    let encryptionKey;
+    try {
+      encryptionKey = await CryptoUtils.KDF.blake3Hkdf(
+        serverSecretBytes,
+        salt,
+        new TextEncoder().encode('prekey-private-key-encryption-v1'),
+        32
+      );
+    } catch (error) {
+      throw new Error('Failed to derive encryption key: ' + error.message);
+    }
+    
+    let aesKey;
+    try {
+      aesKey = await crypto.subtle.importKey(
+        'raw',
+        encryptionKey,
+        { name: 'AES-GCM' },
+        false,
+        ['decrypt']
+      );
+    } catch (error) {
+      throw new Error('Failed to import AES key: ' + error.message);
+    }
+    
+    // Prepare decryption options with optional AAD
+    const decryptOptions = { name: 'AES-GCM', iv: iv };
+    if (aad) {
+      decryptOptions.additionalData = new TextEncoder().encode(aad);
+    }
+    
+    // Decrypt the private key
+    let decryptedBuffer;
+    try {
+      decryptedBuffer = await crypto.subtle.decrypt(
+        decryptOptions,
+        aesKey,
+        encryptedPrivateKey
+      );
+    } catch (error) {
+      throw new Error('Failed to decrypt private key: ' + error.message);
+    }
+    
+    return new Uint8Array(decryptedBuffer);
+  }
+  
+  // Store private keys securely
+  static storeOneTimePreKeyPrivateKeys(username, privateKeys) {
+    if (!username || typeof username !== 'string' || !Array.isArray(privateKeys)) return;
+    try {
+      const insertStmt = db.prepare(`INSERT INTO one_time_prekey_private_keys (username, keyId, encryptedPrivateKeyBase64, salt, iv, createdAt) VALUES (?, ?, ?, ?, ?, ?)`);
+      const insertMany = db.transaction((keys) => {
+        for (const key of keys) {
+          insertStmt.run(username, key.keyId, key.encryptedPrivateKeyBase64, key.salt, key.iv, Date.now());
+        }
+      });
+      insertMany(privateKeys);
+    } catch (error) {
+      console.error('[DB] Failed to store one-time prekey private keys:', error);
+      throw error;
+    }
+  }
+  
+  // Retrieve private key for a specific pre-key
+  static async getOneTimePreKeyPrivateKey(username, keyId) {
+    try {
+      const row = db.prepare(`SELECT encryptedPrivateKeyBase64, salt, iv FROM one_time_prekey_private_keys WHERE username = ? AND keyId = ?`).get(username, keyId);
+      if (!row) return null;
+      
+      const privateKeyBytes = await this.decryptPrivateKey(row.encryptedPrivateKeyBase64, row.salt, row.iv, `${username}:${keyId}`);
+      
+      // Import the private key back to CryptoKey format
+      const privateKey = await crypto.subtle.importKey(
+        'pkcs8',
+        privateKeyBytes,
+        { name: 'X25519' },
+        false,
+        ['deriveBits']
+      );
+      
+      return privateKey;
+    } catch (error) {
+      console.error('[DB] Failed to get one-time prekey private key:', error);
+      return null;
+    }
+  }
+  
+  // Clean up consumed private keys
+  static cleanupConsumedPrivateKeys(username, keyId) {
+    try {
+      db.prepare(`DELETE FROM one_time_prekey_private_keys WHERE username = ? AND keyId = ?`).run(username, keyId);
+    } catch (error) {
+      console.error('[DB] Failed to cleanup consumed private key:', error);
+    }
+  }
+
+  // Get stats for monitoring
+  static getPreKeyStats() {
+    try {
+      const stats = db.prepare(`
+        SELECT 
+          COUNT(DISTINCT u.username) as total_users,
+          COUNT(DISTINCT p.username) as users_with_prekeys,
+          COALESCE(AVG(p.available_count), 0) as avg_prekeys_per_user,
+          COALESCE(MIN(p.available_count), 0) as min_prekeys,
+          COALESCE(MAX(p.available_count), 0) as max_prekeys,
+          COUNT(CASE WHEN p.available_count < 10 THEN 1 END) as low_prekey_users
+        FROM users u
+        LEFT JOIN (
+          SELECT username, COUNT(*) as available_count 
+          FROM one_time_prekeys 
+          WHERE consumed = 0 
+          GROUP BY username
+        ) p ON u.username = p.username
+      `).get();
+      
+      return stats;
+    } catch (error) {
+      console.error('[PREKEY] Failed to get pre-key stats:', error);
+      return null;
     }
   }
 }

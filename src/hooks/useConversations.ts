@@ -14,7 +14,7 @@ export function useConversations(currentUsername: string, users: User[], message
     // Check if conversation already exists
     const existingConversation = conversations.find(conv => conv.username === username);
     if (existingConversation) {
-      if (autoSelect) {
+      if (autoSelect && selectedConversation !== username) {
         setSelectedConversation(username);
       }
       return existingConversation;
@@ -31,20 +31,23 @@ export function useConversations(currentUsername: string, users: User[], message
     };
 
     setConversations(prev => [...prev, newConversation]);
-    if (autoSelect) {
+    if (autoSelect && selectedConversation !== username) {
       setSelectedConversation(username);
     }
     return newConversation;
-  }, [conversations, users, currentUsername]);
+  }, [conversations, users, currentUsername, selectedConversation]);
 
   // Select a conversation
   const selectConversation = useCallback((username: string) => {
-    setSelectedConversation(username);
-    // Mark messages as read for this conversation
-    setConversations(prev => prev.map(conv => 
-      conv.username === username ? { ...conv, unreadCount: 0 } : conv
-    ));
-  }, []);
+    // Only update state if the conversation is actually changing
+    if (selectedConversation !== username) {
+      setSelectedConversation(username);
+      // Mark messages as read for this conversation
+      setConversations(prev => prev.map(conv => 
+        conv.username === username ? { ...conv, unreadCount: 0 } : conv
+      ));
+    }
+  }, [selectedConversation]);
 
   // Get messages for the selected conversation
   const getConversationMessages = useCallback((conversationUsername?: string) => {
@@ -148,7 +151,10 @@ export function useConversations(currentUsername: string, users: User[], message
   // Auto-select the most recent conversation on initial rebuild if none selected
   useEffect(() => {
     if (!selectedConversation && conversations.length > 0) {
-      setSelectedConversation(conversations[0].username);
+      const firstConversationUsername = conversations[0].username;
+      if (selectedConversation !== firstConversationUsername) {
+        setSelectedConversation(firstConversationUsername);
+      }
     }
   }, [conversations, selectedConversation]);
 

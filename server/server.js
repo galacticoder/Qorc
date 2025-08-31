@@ -179,6 +179,33 @@ async function startServer() {
   const authHandler = new authentication.AccountAuthHandler(serverHybridKeyPair);
   const serverAuthHandler = new authentication.ServerAuthHandler(serverHybridKeyPair, null, ServerConfig);
 
+  // PREKEY-MAINTENANCE: Set up periodic pre-key maintenance
+  console.log('[PREKEY] Setting up periodic pre-key maintenance...');
+  
+  // Run initial maintenance after server startup
+  setTimeout(async () => {
+    await PrekeyDatabase.performPreKeyMaintenance(10, 100);
+  }, 30000); // 30 seconds after startup
+  
+  // Schedule periodic maintenance every 6 hours
+  setInterval(async () => {
+    try {
+      console.log('[PREKEY] Running scheduled pre-key maintenance...');
+      const stats = PrekeyDatabase.getPreKeyStats();
+      if (stats) {
+        console.log('[PREKEY] Current stats:', {
+          totalUsers: stats.total_users,
+          usersWithPrekeys: stats.users_with_prekeys,
+          avgPrekeysPerUser: Math.round(stats.avg_prekeys_per_user),
+          lowPrekeyUsers: stats.low_prekey_users
+        });
+      }
+      await PrekeyDatabase.performPreKeyMaintenance(10, 100);
+    } catch (error) {
+      console.error('[PREKEY] Scheduled maintenance failed:', error);
+    }
+  }, 6 * 60 * 60 * 1000); // 6 hours in milliseconds
+
   // Optimized periodic rate limiting status logging - only when needed
   let statusLogInterval = null;
   const startStatusLogging = () => {
@@ -335,15 +362,31 @@ async function startServer() {
             clientState.lastAdminOp = now;
             
             try {
+              // SECURITY: Gate server-side prekey generation behind dev-only flag
+              const isDevMode = process.env.NODE_ENV !== 'production';
+              const allowPrekeyGen = process.env.DEV_ALLOW_PREKEY_GEN === 'true';
+              
+              if (!isDevMode || !allowPrekeyGen) {
+                console.warn(`[SERVER] SECURITY: Admin prekey generation denied - server-side private key generation breaks E2E guarantees`);
+                console.warn(`[SERVER] isDevMode: ${isDevMode}, allowPrekeyGen: ${allowPrekeyGen}`);
+                return ws.send(JSON.stringify({ 
+                  type: SignalType.ERROR, 
+                  message: 'Server-side prekey generation is disabled for security reasons. Private keys should be generated client-side to maintain E2E encryption guarantees.' 
+                }));
+              }
+              
+              // Log audit trail for dev-only usage
+              console.warn(`[SERVER] AUDIT: Admin ${username} is using dev-only server-side prekey generation for user ${target}`);
+              console.warn(`[SERVER] AUDIT: This breaks E2E guarantees as server generates private keys`);
+              
               // SECURITY: Limit number of prekeys that can be generated
               const currentCount = PrekeyDatabase.countAvailableOneTimePreKeys(target);
               if (currentCount > 500) { // Don't allow more than 500 prekeys
                 return ws.send(JSON.stringify({ type: SignalType.ERROR, message: 'Too many existing prekeys' }));
               }
               
-              const list = Array.from({ length: 100 }, (_, i) => ({ id: i + 1, publicKeyBase64: CryptoUtils.Hash.arrayBufferToBase64(crypto.getRandomValues(new Uint8Array(32))) }));
-              PrekeyDatabase.storeOneTimePreKeys(target, list);
-              ws.send(JSON.stringify({ type: 'ok', message: 'prekeys-generated', username: target, count: list.length }));
+              const generated = await PrekeyDatabase.appendOneTimePreKeys(target, 100);
+              ws.send(JSON.stringify({ type: 'ok', message: 'prekeys-generated', username: target, count: generated }));
               console.log(`[SERVER] Admin generated prekeys for user: ${target}`);
             } catch (e) {
               console.error('[SERVER] Admin prekey generation failed:', e);
@@ -396,7 +439,7 @@ async function startServer() {
             }
             
             // Try to consume a one-time prekey; fallback to base bundle if none
-            let out = PrekeyDatabase.takeBundleForRecipient(target);
+            let out = await PrekeyDatabase.takeBundleForRecipient(target);
             if (!out) {
               out = LibsignalBundleDB.take(target);
             }
@@ -408,9 +451,8 @@ async function startServer() {
             try {
               const remaining = PrekeyDatabase.countAvailableOneTimePreKeys(target);
               if (remaining < 20) {
-                const list = Array.from({ length: 100 }, (_, i) => ({ id: i + 1, publicKeyBase64: CryptoUtils.Base64.arrayBufferToBase64(crypto.getRandomValues(new Uint8Array(32))) }));
-                PrekeyDatabase.storeOneTimePreKeys(target, list);
-                console.log(`[SERVER] Auto-replenished one-time prekeys for ${target}: 100 generated`);
+                const generated = await PrekeyDatabase.appendOneTimePreKeys(target, 100);
+                console.log(`[SERVER] Auto-replenished one-time prekeys for ${target}: ${generated} generated`);
               }
             } catch (e) {
               console.warn('[SERVER] Auto-replenish failed:', e);
@@ -511,8 +553,8 @@ async function startServer() {
             const success = await serverAuthHandler.handleServerAuthentication(ws, msg.toString(), clientState);
             if (success) {
               clientState.hasAuthenticated = true;
+              // AUTH_SUCCESS is already sent by ServerAuthHandler.handleServerAuthentication()
               console.log(`[SERVER] Server authentication successful for user: ${clientState.username}`);
-              ws.send(JSON.stringify({ type: SignalType.AUTH_SUCCESS, message: 'Server authentication successful' }));
 
               // No global public-key broadcast; keys are fetched on-demand per peer
 
