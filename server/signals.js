@@ -55,7 +55,7 @@ export const SignalMessages = {
   //username validation
   NAMEEXISTSERROR: "Username already exists",
   INVALIDNAME: "Username must only contain letters, numbers, underscores, or hyphens",
-  INVALIDNAMELENGTH: "Username must be between 3 and 16 characters",
+  INVALIDNAMELENGTH: "Username must be between 3 and 32 characters",
 
   //server status
   SERVERLIMIT: "Server has reached maximum capacity",

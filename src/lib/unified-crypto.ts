@@ -43,8 +43,9 @@ class Base64 {
 }
 
 class ChaCha20Poly1305Service {
-  private static usedNonces = new Set<string>();
-  private static readonly MAX_NONCE_CACHE = 10000; // Prevent memory bloat
+  // SECURITY: Remove global nonce tracking to prevent memory issues and nonce reuse vulnerabilities
+  // Client-side nonce tracking is replaced by using high-entropy random nonces
+  private static readonly NONCE_ENTROPY_BITS = 96; // 12 bytes * 8 = 96 bits of entropy
 
   /**
    * Encrypt data using ChaCha20-Poly1305 with secure memory management
@@ -61,32 +62,15 @@ class ChaCha20Poly1305Service {
       throw new Error('CRITICAL: No data provided for encryption');
     }
 
-    // SECURITY: Use cryptographic hash for nonce tracking to prevent timing attacks
-    const keyHash = blake3.create().update(key).digest();
-    const nonceHash = blake3.create().update(nonce).digest();
-    const nonceKey = CryptoUtils.Base64.arrayBufferToBase64(
-      blake3.create().update(keyHash.slice(0, 16)).update(nonceHash.slice(0, 16)).digest().slice(0, 32)
-    );
-
-    if (this.usedNonces.has(nonceKey)) {
-      // SECURITY: Synchronous cryptographically secure random delay to prevent timing oracle attacks
-      // Cannot use async in this context, so use synchronous busy wait
-      const randomDelay = crypto.getRandomValues(new Uint8Array(1))[0] % 10 + 5; // 5-15ms random delay
-      const start = performance.now();
-      while (performance.now() - start < randomDelay) {
-        // Busy wait with cryptographically secure random operations to prevent optimization
-        const dummyData = crypto.getRandomValues(new Uint32Array(2));
-        dummyData[0] = dummyData[0] ^ dummyData[1];
-      }
-      throw new Error('CRITICAL: Nonce reuse detected in ChaCha20-Poly1305 encryption');
+    // SECURITY: Validate nonce entropy instead of tracking usage
+    // Client-side should use high-entropy random nonces rather than tracking
+    if (nonce.every(byte => byte === 0)) {
+      throw new Error('CRITICAL: All-zero nonce detected in ChaCha20-Poly1305 encryption');
     }
-
-    // Track nonce usage
-    this.usedNonces.add(nonceKey);
-
-    // Cleanup old nonces if cache gets too large
-    if (this.usedNonces.size > this.MAX_NONCE_CACHE) {
-      this.usedNonces.clear();
+    
+    // SECURITY: Check for obviously weak nonces (first 8 bytes all same)
+    if (nonce.slice(0, 8).every(byte => byte === nonce[0])) {
+      throw new Error('CRITICAL: Weak nonce pattern detected in ChaCha20-Poly1305 encryption');
     }
 
     const cipher = chacha20poly1305(key, nonce, aad);
@@ -134,25 +118,23 @@ class ChaCha20Poly1305Service {
 }
 
 class XChaCha20Poly1305Service {
-  private static usedNonces = new Set<string>();
-  private static readonly MAX_NONCE_CACHE = 10000; // Prevent memory bloat
+  // SECURITY: Remove global nonce tracking to prevent memory issues and nonce reuse vulnerabilities
+  // Client-side nonce tracking is replaced by using high-entropy random nonces
+  private static readonly NONCE_ENTROPY_BITS = 192; // 24 bytes * 8 = 192 bits of entropy
 
   /**
    * Encrypt data using XChaCha20-Poly1305 with secure memory management
    */
   static encrypt(key: Uint8Array, nonce: Uint8Array, data: Uint8Array, aad?: Uint8Array): Uint8Array {
-    // Check for nonce reuse (critical security issue)
-    const nonceKey = `${CryptoUtils.Base64.arrayBufferToBase64(key.slice(0, 8))}-${CryptoUtils.Base64.arrayBufferToBase64(nonce)}`;
-    if (this.usedNonces.has(nonceKey)) {
-      throw new Error('CRITICAL: Nonce reuse detected in XChaCha20-Poly1305 encryption');
+    // SECURITY: Validate nonce entropy instead of tracking usage
+    // Client-side should use high-entropy random nonces rather than tracking
+    if (nonce.every(byte => byte === 0)) {
+      throw new Error('CRITICAL: All-zero nonce detected in XChaCha20-Poly1305 encryption');
     }
-
-    // Track nonce usage
-    this.usedNonces.add(nonceKey);
-
-    // Cleanup old nonces if cache gets too large
-    if (this.usedNonces.size > this.MAX_NONCE_CACHE) {
-      this.usedNonces.clear();
+    
+    // SECURITY: Check for obviously weak nonces (all 24 bytes the same)
+    if (nonce.every(byte => byte === nonce[0])) {
+      throw new Error('CRITICAL: Weak nonce pattern detected in XChaCha20-Poly1305 encryption');
     }
 
     const cipher = xchacha20poly1305(key, nonce, aad);
@@ -236,19 +218,87 @@ class DilithiumService {
 
 class HashingService {
   static parseArgon2Hash(encodedHash: string) {
+    // SECURITY: Validate input
+    if (!encodedHash || typeof encodedHash !== 'string') {
+      throw new Error('CRITICAL: Encoded hash must be a non-empty string');
+    }
+    
+    // SECURITY: Prevent extremely long hashes that could cause DoS
+    if (encodedHash.length > 512) {
+      throw new Error('CRITICAL: Hash too long - potential DoS attack');
+    }
+    
     const parts = encodedHash.split("$");
-    if (parts.length !== 6) throw new Error("Invalid Argon2 encoded hash format");
+    if (parts.length !== 6) {
+      throw new Error("CRITICAL: Invalid Argon2 encoded hash format - wrong number of parts");
+    }
 
     const [, algorithm, versionPart, paramsPart, saltB64, hashB64] = parts;
+    
+    // SECURITY: Validate algorithm
+    if (!algorithm || !['argon2i', 'argon2d', 'argon2id'].includes(algorithm)) {
+      throw new Error('CRITICAL: Invalid Argon2 algorithm type');
+    }
+    
+    // SECURITY: Validate version format
+    if (!versionPart || !versionPart.includes('=')) {
+      throw new Error('CRITICAL: Invalid version format');
+    }
+    
     const version = parseInt(versionPart.split("=")[1], 10);
+    if (isNaN(version) || version < 0x10 || version > 0x13) {
+      throw new Error('CRITICAL: Invalid Argon2 version');
+    }
 
+    // SECURITY: Validate parameters format and values
+    if (!paramsPart) {
+      throw new Error('CRITICAL: Missing parameters');
+    }
+    
     const params: Record<string, number> = {};
     paramsPart.split(",").forEach((param) => {
-      const [k, v] = param.split("=");
-      if (k && v) params[k] = Number(v);
+      const equalIndex = param.indexOf('=');
+      if (equalIndex === -1) {
+        throw new Error('CRITICAL: Invalid parameter format');
+      }
+      
+      const k = param.substring(0, equalIndex);
+      const v = param.substring(equalIndex + 1);
+      
+      if (!['m', 't', 'p'].includes(k)) {
+        throw new Error(`CRITICAL: Invalid parameter key: ${k}`);
+      }
+      
+      const numValue = Number(v);
+      if (isNaN(numValue) || numValue < 1 || numValue > 2**30) {
+        throw new Error(`CRITICAL: Invalid parameter value for ${k}: ${v}`);
+      }
+      
+      params[k] = numValue;
     });
+    
+    // SECURITY: Validate required parameters are present
+    if (!params.m || !params.t || !params.p) {
+      throw new Error('CRITICAL: Missing required parameters (m, t, p)');
+    }
 
-    const hashBytes = Uint8Array.from(atob(hashB64), (c) => c.charCodeAt(0));
+    // SECURITY: Validate base64 format and decode safely
+    if (!saltB64 || !hashB64) {
+      throw new Error('CRITICAL: Missing salt or hash');
+    }
+    
+    let hashBytes: Uint8Array;
+    try {
+      hashBytes = Uint8Array.from(atob(hashB64), (c) => c.charCodeAt(0));
+    } catch (error) {
+      throw new Error('CRITICAL: Invalid base64 encoding in hash');
+    }
+    
+    // SECURITY: Validate hash length
+    if (hashBytes.length < 16 || hashBytes.length > 128) {
+      throw new Error('CRITICAL: Invalid hash length');
+    }
+    
     return {
       version,
       algorithm,

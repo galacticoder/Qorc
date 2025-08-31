@@ -5,14 +5,24 @@
 
 export class SecureMemory {
   private static allocatedBuffers = new WeakSet<Uint8Array>();
-  private static stringReferences = new Set<string>();
-  private static readonly MAX_STRING_REFERENCES = 10000; // Prevent memory bloat
+  // SECURITY: Remove global string tracking to prevent memory issues with millions of operations
+  // Client-side secure memory should focus on zeroing rather than tracking references
+  private static readonly MAX_BUFFER_SIZE = 1048576; // 1MB limit for secure buffers
   private static cleanupTimer: NodeJS.Timeout | null = null;
 
   /**
    * Create a secure buffer that will be automatically zeroed
    */
   static createSecureBuffer(size: number): Uint8Array {
+    // SECURITY: Validate buffer size to prevent DoS attacks
+    if (!Number.isInteger(size) || size < 0) {
+      throw new Error('CRITICAL: Invalid buffer size - must be non-negative integer');
+    }
+    
+    if (size > this.MAX_BUFFER_SIZE) {
+      throw new Error(`CRITICAL: Buffer size too large - maximum ${this.MAX_BUFFER_SIZE} bytes`);
+    }
+    
     const buffer = new Uint8Array(size);
     this.allocatedBuffers.add(buffer);
     return buffer;
@@ -60,24 +70,20 @@ export class SecureMemory {
   }
 
   /**
-   * Create a secure string that tracks references for cleanup
+   * Create a secure string with validation (no global tracking for scalability)
    */
   static createSecureString(data: string): string {
-    // SECURITY: Prevent memory bloat from string references
-    if (this.stringReferences.size >= this.MAX_STRING_REFERENCES) {
-      this.stringReferences.clear();
-      console.warn('[SecureMemory] String reference limit reached, clearing cache');
+    // SECURITY: Validate input to prevent DoS attacks
+    if (!data || typeof data !== 'string') {
+      throw new Error('CRITICAL: Invalid string data for secure storage');
+    }
+    
+    if (data.length > 1048576) { // 1MB limit
+      throw new Error('CRITICAL: String too large for secure storage');
     }
 
-    this.stringReferences.add(data);
-
-    // SECURITY: Start periodic cleanup if not already running
-    if (!this.cleanupTimer) {
-      this.cleanupTimer = setInterval(() => {
-        this.periodicCleanup();
-      }, 60000); // Every minute
-    }
-
+    // SECURITY: No global tracking to prevent memory issues with millions of operations
+    // Individual string clearing should be done by the caller when appropriate
     return data;
   }
 

@@ -5,12 +5,8 @@ import { RATE_LIMIT_CONFIG } from '../config/config.js';
 // Distributed rate limiter using Redis with memory fallback
 class DistributedRateLimiter {
 	constructor() {
-		this.metrics = {
-			totalBlockedConnections: 0,
-			totalBlockedAuths: 0,
-			totalBlockedMessages: 0,
-			totalBlockedBundles: 0,
-		};
+		// REMOVED: metrics object to prevent memory issues with millions of users
+		// All rate limiting handled by Redis-based limiters
 
 		// Redis client (optional)
 		this.redis = null;
@@ -145,7 +141,7 @@ class DistributedRateLimiter {
 			await this.globalConnectionLimiter.consume('global-conn', 1);
 			return { allowed: true };
 		} catch (res) {
-			this.metrics.totalBlockedConnections++;
+			// Blocked connection logged (metrics removed for memory efficiency)
 			const ms = res.msBeforeNext || 1000;
 			// SECURITY: Prevent division by zero and ensure positive values
 			const safeMs = Math.max(1000, ms || 1000);
@@ -177,7 +173,7 @@ class DistributedRateLimiter {
 			await limiter.consume('auth', 1);
 			return { allowed: true };
 		} catch (res) {
-			this.metrics.totalBlockedAuths++;
+			// Blocked auth logged (metrics removed for memory efficiency)
 			// SECURITY: Prevent division by zero and ensure positive values
 			const safeMs = Math.max(1000, res.msBeforeNext || 1000);
 			const remainingSeconds = Math.max(1, Math.ceil(safeMs / 1000));
@@ -209,7 +205,7 @@ class DistributedRateLimiter {
 			await this.userMessageLimiter.consume(username, 1);
 			return { allowed: true };
 		} catch (res) {
-			this.metrics.totalBlockedMessages++;
+			// Blocked message logged (metrics removed for memory efficiency)
 			const ms = res.msBeforeNext || 1000;
 			return {
 				allowed: false,
@@ -224,7 +220,7 @@ class DistributedRateLimiter {
 			await this.userBundleLimiter.consume(username, 1);
 			return { allowed: true };
 		} catch (res) {
-			this.metrics.totalBlockedBundles++;
+			// Blocked bundle logged (metrics removed for memory efficiency)
 			const ms = res.msBeforeNext || 1000;
 			return {
 				allowed: false,
@@ -260,9 +256,9 @@ class DistributedRateLimiter {
 
 	getStats() {
 		return {
-			securityMetrics: { ...this.metrics },
 			timestamp: Date.now(),
-			backend: this.usingRedis ? 'redis' : 'memory'
+			backend: this.usingRedis ? 'redis' : 'memory',
+			note: "Individual metrics removed for memory efficiency with millions of users"
 		};
 	}
 }

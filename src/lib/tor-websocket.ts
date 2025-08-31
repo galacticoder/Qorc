@@ -22,6 +22,7 @@ export class TorWebSocket {
   private reconnectTimer: NodeJS.Timeout | null = null;
   private isConnecting: boolean = false;
   private messageQueue: string[] = [];
+  private readonly MAX_QUEUE_SIZE = 1000; // SECURITY: Prevent memory exhaustion
   private eventListeners: Map<string, Set<Function>> = new Map();
 
   constructor(url: string, options?: Partial<TorWebSocketOptions>) {

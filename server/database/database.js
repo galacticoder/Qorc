@@ -330,6 +330,23 @@ export class MessageDatabase {
   }
 
   static getMessagesForUser(username, limit = 50) {
+    // SECURITY: Validate inputs
+    if (!username || typeof username !== 'string' || username.length < 3 || username.length > 32) {
+      console.error('[DB] Invalid username parameter for getMessagesForUser');
+      return [];
+    }
+    
+    if (!Number.isInteger(limit) || limit < 1 || limit > 1000) {
+      console.error('[DB] Invalid limit parameter - must be integer between 1 and 1000');
+      return [];
+    }
+    
+    // SECURITY: Validate username format
+    if (!/^[a-zA-Z0-9_-]+$/.test(username)) {
+      console.error('[DB] Invalid username format for getMessagesForUser');
+      return [];
+    }
+    
     console.log(`[DB] Loading messages for user: ${username}, limit: ${limit}`);
     try {
       // Use indexed columns instead of JSON extraction for 100x faster queries
@@ -345,18 +362,29 @@ export class MessageDatabase {
       console.log(`[DB] Loaded ${rows.length} messages for user: ${username}`);
 
       return rows.map(row => {
-        const payload = JSON.parse(row.payload);
-        return {
-          dbId: row.id,
-          messageId: row.messageId,
-          ...payload,
-          encryptedContent: payload.encryptedContent,
-          replyTo: payload.replyTo ? {
-            ...payload.replyTo,
-            encryptedContent: payload.replyTo.encryptedContent
-          } : undefined
-        };
-      });
+        try {
+          const payload = JSON.parse(row.payload);
+          // SECURITY: Validate parsed payload structure
+          if (!payload || typeof payload !== 'object') {
+            console.warn('[DB] Invalid message payload structure, skipping');
+            return null;
+          }
+          
+          return {
+            dbId: row.id,
+            messageId: row.messageId,
+            ...payload,
+            encryptedContent: payload.encryptedContent,
+            replyTo: payload.replyTo ? {
+              ...payload.replyTo,
+              encryptedContent: payload.replyTo.encryptedContent
+            } : undefined
+          };
+        } catch (parseError) {
+          console.warn('[DB] Failed to parse message payload, skipping:', parseError);
+          return null;
+        }
+      }).filter(Boolean); // Remove null entries
     } catch (error) {
       console.error(`[DB] Error loading messages for user ${username}:`, error);
       return [];
@@ -364,8 +392,32 @@ export class MessageDatabase {
   }
 
   static queueOfflineMessage(toUsername, payloadObj) {
+    // SECURITY: Validate inputs
+    if (!toUsername || typeof toUsername !== 'string' || toUsername.length < 3 || toUsername.length > 32) {
+      console.error('[DB] Invalid toUsername for offline message');
+      return false;
+    }
+    
+    if (!payloadObj || typeof payloadObj !== 'object') {
+      console.error('[DB] Invalid payload for offline message');
+      return false;
+    }
+    
+    // SECURITY: Validate username format
+    if (!/^[a-zA-Z0-9_-]+$/.test(toUsername)) {
+      console.error('[DB] Invalid toUsername format for offline message');
+      return false;
+    }
+    
     try {
       const payload = JSON.stringify(payloadObj);
+      
+      // SECURITY: Prevent extremely large payloads that could cause DoS
+      if (payload.length > 1048576) { // 1MB limit
+        console.error('[DB] Offline message payload too large');
+        return false;
+      }
+      
       const queuedAt = Date.now();
       db.prepare(`INSERT INTO offline_messages (toUsername, payload, queuedAt) VALUES (?, ?, ?)`).run(toUsername, payload, queuedAt);
       return true;
@@ -376,15 +428,55 @@ export class MessageDatabase {
   }
 
   static takeOfflineMessages(toUsername, max = 100) {
+    // SECURITY: Validate inputs to prevent SQL injection and DoS
+    if (!toUsername || typeof toUsername !== 'string' || toUsername.length < 3 || toUsername.length > 32) {
+      console.error('[DB] Invalid toUsername parameter');
+      return [];
+    }
+    
+    if (!Number.isInteger(max) || max < 1 || max > 1000) {
+      console.error('[DB] Invalid max parameter - must be integer between 1 and 1000');
+      return [];
+    }
+    
+    // SECURITY: Validate username format
+    if (!/^[a-zA-Z0-9_-]+$/.test(toUsername)) {
+      console.error('[DB] Invalid toUsername format');
+      return [];
+    }
+    
     try {
       const rows = db.prepare(`SELECT id, payload FROM offline_messages WHERE toUsername = ? ORDER BY queuedAt ASC LIMIT ?`).all(toUsername, max);
       if (!rows || rows.length === 0) return [];
+      
+      // SECURITY: Validate that all IDs are integers to prevent injection
       const ids = rows.map(r => r.id);
+      if (!ids.every(id => Number.isInteger(id) && id > 0)) {
+        console.error('[DB] Invalid message IDs detected');
+        return [];
+      }
+      
       const messages = rows.map(r => {
-        try { return JSON.parse(r.payload); } catch { return null; }
+        try { 
+          const parsed = JSON.parse(r.payload);
+          // SECURITY: Validate parsed message structure
+          if (!parsed || typeof parsed !== 'object') return null;
+          return parsed;
+        } catch { 
+          return null; 
+        }
       }).filter(Boolean);
-      const del = db.prepare(`DELETE FROM offline_messages WHERE id IN (${ids.map(() => '?').join(',')})`);
-      del.run(...ids);
+      
+      // SECURITY: Use transaction and prepare statement with safe parameterization
+      if (ids.length > 0) {
+        const placeholders = ids.map(() => '?').join(',');
+        const deleteStmt = db.prepare(`DELETE FROM offline_messages WHERE id IN (${placeholders})`);
+        const deleteTransaction = db.transaction(() => {
+          deleteStmt.run(...ids);
+        });
+        deleteTransaction();
+      }
+      
       return messages;
     } catch (error) {
       console.error('[DB] Error taking offline messages:', error);

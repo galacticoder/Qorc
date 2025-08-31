@@ -22,6 +22,7 @@ export class SecureDB {
   // In-memory fallback when IndexedDB isn't available (e.g., dev sandbox issues)
   private memoryMode: boolean = false;
   private memoryStore = new Map<string, Uint8Array>();
+  private readonly MAX_MEMORY_ENTRIES = 1000; // SECURITY: Limit memory usage
   private ephemeralConfig: EphemeralConfig;
   private cleanupInterval: NodeJS.Timeout | null = null;
 

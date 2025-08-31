@@ -10,11 +10,25 @@ const PinnedServer = {
     try {
       const stored = localStorage.getItem('securechat_server_pin_v1');
       if (!stored || stored.length > 10000) return null; // SECURITY: Prevent DoS via large JSON
-      return JSON.parse(stored);
+      
+      const parsed = JSON.parse(stored);
+      // SECURITY: Validate parsed object structure
+      if (!parsed || typeof parsed !== 'object') return null;
+      if (!parsed.x25519PublicBase64 || !parsed.kyberPublicBase64) return null;
+      if (typeof parsed.x25519PublicBase64 !== 'string' || typeof parsed.kyberPublicBase64 !== 'string') return null;
+      
+      return parsed;
     } catch { return null; }
   },
   set(val: any) {
-    try { localStorage.setItem('securechat_server_pin_v1', JSON.stringify(val)); } catch {}
+    try { 
+      // SECURITY: Validate input before storing
+      if (!val || typeof val !== 'object') return;
+      if (!val.x25519PublicBase64 || !val.kyberPublicBase64) return;
+      if (typeof val.x25519PublicBase64 !== 'string' || typeof val.kyberPublicBase64 !== 'string') return;
+      
+      localStorage.setItem('securechat_server_pin_v1', JSON.stringify(val)); 
+    } catch {}
   }
 };
 

@@ -19,8 +19,13 @@ class CryptoConfig {
 class RandomGenerator {
   static generateSecureRandom(length) {
     // SECURITY: Validate length parameter to prevent DoS
-    if (!Number.isInteger(length) || length < 0 || length > 1048576) { // Max 1MB
-      throw new Error(`Invalid random length: ${length}`);
+    if (!Number.isInteger(length) || length < 0) {
+      throw new Error(`Invalid random length: ${length} - must be non-negative integer`);
+    }
+    
+    // SECURITY: Stricter limit for memory protection with millions of users
+    if (length > 65536) { // Max 64KB to prevent memory exhaustion
+      throw new Error(`Random length too large: ${length} - maximum 65536 bytes`);
     }
     
     try {
@@ -616,35 +621,143 @@ class HybridService {
 
 class HashingService {
   static async hashPassword(password) {
+    // SECURITY: Validate password input
+    if (!password || typeof password !== 'string') {
+      throw new Error('Password must be a non-empty string');
+    }
+    
+    // SECURITY: Prevent extremely long passwords that could cause DoS
+    if (password.length > 512) {
+      throw new Error('Password too long - maximum 512 characters');
+    }
+    
+    // SECURITY: Warn about very short passwords
+    if (password.length < 8) {
+      console.warn('[CRYPTO] Warning: Password is shorter than 8 characters');
+    }
+    
     return await argon2.hash(password, {
       type: argon2.argon2id,
-      memoryCost: 2 ** 16,
-      timeCost: 3,
-      parallelism: 1,
+      memoryCost: 2 ** 16,  // 64MB
+      timeCost: 3,          // 3 iterations
+      parallelism: 1,       // 1 thread
     });
   }
 
   static async verifyPassword(hash, inputPassword) {
-    return await argon2.verify(hash, inputPassword);
+    // SECURITY: Validate inputs
+    if (!hash || typeof hash !== 'string') {
+      throw new Error('Hash must be a non-empty string');
+    }
+    
+    if (!inputPassword || typeof inputPassword !== 'string') {
+      throw new Error('Input password must be a non-empty string');
+    }
+    
+    // SECURITY: Validate hash format before passing to argon2
+    if (!hash.startsWith('$argon2')) {
+      throw new Error('Invalid hash format - not an Argon2 hash');
+    }
+    
+    // SECURITY: Prevent extremely long inputs that could cause DoS
+    if (inputPassword.length > 512 || hash.length > 512) {
+      throw new Error('Input too long');
+    }
+    
+    try {
+      return await argon2.verify(hash, inputPassword);
+    } catch (error) {
+      console.error('[CRYPTO] Password verification error:', error.message);
+      return false; // Don't expose internal errors
+    }
   }
 
   static async parseArgon2Hash(encodedHash) {
+    // SECURITY: Validate input
+    if (!encodedHash || typeof encodedHash !== 'string') {
+      throw new Error('Encoded hash must be a non-empty string');
+    }
+    
+    // SECURITY: Prevent extremely long hashes that could cause DoS
+    if (encodedHash.length > 512) {
+      throw new Error('Hash too long');
+    }
+    
     const parts = encodedHash.split('$');
     if (parts.length !== 6) {
-      throw new Error('Invalid Argon2 encoded hash format');
+      throw new Error('Invalid Argon2 encoded hash format - wrong number of parts');
     }
 
     const [, algorithm, versionPart, paramsPart, saltB64, hashB64] = parts;
+    
+    // SECURITY: Validate algorithm
+    if (!algorithm || !['argon2i', 'argon2d', 'argon2id'].includes(algorithm)) {
+      throw new Error('Invalid Argon2 algorithm type');
+    }
+    
+    // SECURITY: Validate version format
+    if (!versionPart || !versionPart.includes('=')) {
+      throw new Error('Invalid version format');
+    }
+    
     const version = parseInt(versionPart.split('=')[1], 10);
+    if (isNaN(version) || version < 0x10 || version > 0x13) {
+      throw new Error('Invalid Argon2 version');
+    }
 
+    // SECURITY: Validate parameters format and values
+    if (!paramsPart) {
+      throw new Error('Missing parameters');
+    }
+    
     const params = {};
     paramsPart.split(',').forEach(param => {
-      const [key, value] = param.split('=');
-      params[key] = Number(value);
+      const equalIndex = param.indexOf('=');
+      if (equalIndex === -1) {
+        throw new Error('Invalid parameter format');
+      }
+      
+      const key = param.substring(0, equalIndex);
+      const value = param.substring(equalIndex + 1);
+      
+      if (!['m', 't', 'p'].includes(key)) {
+        throw new Error(`Invalid parameter key: ${key}`);
+      }
+      
+      const numValue = Number(value);
+      if (isNaN(numValue) || numValue < 1 || numValue > 2**30) {
+        throw new Error(`Invalid parameter value for ${key}: ${value}`);
+      }
+      
+      params[key] = numValue;
     });
+    
+    // SECURITY: Validate required parameters are present
+    if (!params.m || !params.t || !params.p) {
+      throw new Error('Missing required parameters (m, t, p)');
+    }
 
-    const salt = Buffer.from(saltB64, 'base64');
-    const hash = Buffer.from(hashB64, 'base64');
+    // SECURITY: Validate base64 format and decode safely
+    if (!saltB64 || !hashB64) {
+      throw new Error('Missing salt or hash');
+    }
+    
+    let salt, hash;
+    try {
+      salt = Buffer.from(saltB64, 'base64');
+      hash = Buffer.from(hashB64, 'base64');
+    } catch (error) {
+      throw new Error('Invalid base64 encoding in salt or hash');
+    }
+    
+    // SECURITY: Validate salt and hash lengths
+    if (salt.length < 8 || salt.length > 64) {
+      throw new Error('Invalid salt length');
+    }
+    
+    if (hash.length < 16 || hash.length > 128) {
+      throw new Error('Invalid hash length');
+    }
 
     return {
       algorithm,

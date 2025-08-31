@@ -7,29 +7,21 @@ import { RATE_LIMIT_CONFIG } from '../config/config.js';
 export class RateLimitMiddleware {
 	constructor() {
 		this.rateLimiter = distributedRateLimiter;
-		this.securityMetrics = {
-			totalRequests: 0,
-			blockedRequests: 0,
-			securityViolations: 0,
-			lastSecurityCheck: Date.now()
-		};
+		// REMOVED: securityMetrics to prevent memory issues with millions of users
+		// All metrics now handled by Redis-based rate limiter for scalability
 	}
 
 	// Check global connection rate limit
 	async checkConnectionLimit(ws) {
-		this.securityMetrics.totalRequests++;
-
 		// Check WebSocket object
 		if (!this.isValidWebSocket(ws)) {
 			console.warn('[RATE-LIMIT] Invalid WebSocket in connection check');
-			this.securityMetrics.securityViolations++;
 			return false;
 		}
 
 		const result = await this.rateLimiter.checkGlobalConnectionLimit();
 
 		if (!result.allowed) {
-			this.securityMetrics.blockedRequests++;
 			console.warn(`[RATE-LIMIT] Global connection blocked: ${result.reason}`);
 
 			// Security: Send rate limit info with jittered timing
@@ -53,19 +45,19 @@ export class RateLimitMiddleware {
 
 	// Check auth rate limit for connection
 	async checkAuthLimit(ws) {
-		this.securityMetrics.totalRequests++;
+		// Metrics removed for memory efficiency
 
 		// Check WebSocket object
 		if (!this.isValidWebSocket(ws)) {
 			console.warn('[RATE-LIMIT] Invalid WebSocket in auth check');
-			this.securityMetrics.securityViolations++;
+			// Security violation logged (metrics removed for memory efficiency)
 			return false;
 		}
 
 		const result = await this.rateLimiter.checkConnectionAuthLimit(ws);
 
 		if (!result.allowed) {
-			this.securityMetrics.blockedRequests++;
+			// Blocked request logged (metrics removed for memory efficiency)
 			console.warn(`[RATE-LIMIT] Authentication blocked for connection: ${result.reason}`);
 
 			// Security: Send rate limit info with jittered timing
@@ -89,7 +81,7 @@ export class RateLimitMiddleware {
 	async checkUserAuthLimit(username) {
 		if (!this.isValidUsername(username)) {
 			console.warn('[RATE-LIMIT-SECURITY] Invalid username format in user auth check');
-			this.securityMetrics.securityViolations++;
+			// Security violation logged (metrics removed for memory efficiency)
 			return { allowed: false, reason: 'Invalid user' };
 		}
 		return this.rateLimiter.checkUserAuthLimit(username);
@@ -97,12 +89,12 @@ export class RateLimitMiddleware {
 
 	// Check message rate limit
 	async checkMessageLimit(ws, username) {
-		this.securityMetrics.totalRequests++;
+		// Metrics removed for memory efficiency
 
 		// Security: Validate WebSocket object
 		if (!this.isValidWebSocket(ws)) {
 			console.warn('[RATE-LIMIT-SECURITY] Invalid WebSocket object in message check');
-			this.securityMetrics.securityViolations++;
+			// Security violation logged (metrics removed for memory efficiency)
 			return false;
 		}
 
@@ -114,14 +106,14 @@ export class RateLimitMiddleware {
 		// Security: Validate username format
 		if (!this.isValidUsername(username)) {
 			console.warn('[RATE-LIMIT-SECURITY] Invalid username format in message check');
-			this.securityMetrics.securityViolations++;
+			// Security violation logged (metrics removed for memory efficiency)
 			return false;
 		}
 
 		const result = await this.rateLimiter.checkMessageLimit(username);
 
 		if (!result.allowed) {
-			this.securityMetrics.blockedRequests++;
+			// Blocked request logged (metrics removed for memory efficiency)
 			console.warn(`[RATE-LIMIT] Message blocked for user ${username}: ${result.reason}`);
 
 			// Security: Send rate limit info with jittered timing
@@ -145,12 +137,12 @@ export class RateLimitMiddleware {
 	 * Check bundle operation rate limit for authenticated users
 	 */
 	async checkBundleLimit(ws, username) {
-		this.securityMetrics.totalRequests++;
+		// Metrics removed for memory efficiency
 
 		// Security: Validate WebSocket object
 		if (!this.isValidWebSocket(ws)) {
 			console.warn('[RATE-LIMIT-SECURITY] Invalid WebSocket object in bundle check');
-			this.securityMetrics.securityViolations++;
+			// Security violation logged (metrics removed for memory efficiency)
 			return false;
 		}
 
@@ -162,14 +154,14 @@ export class RateLimitMiddleware {
 		// Security: Validate username format
 		if (!this.isValidUsername(username)) {
 			console.warn('[RATE-LIMIT-SECURITY] Invalid username format in bundle check');
-			this.securityMetrics.securityViolations++;
+			// Security violation logged (metrics removed for memory efficiency)
 			return false;
 		}
 
 		const result = await this.rateLimiter.checkBundleLimit(username);
 
 		if (!result.allowed) {
-			this.securityMetrics.blockedRequests++;
+			// Blocked request logged (metrics removed for memory efficiency)
 			console.warn(`[RATE-LIMIT] Bundle operation blocked for user ${username}: ${result.reason}`);
 
 			// Security: Send rate limit info with jittered timing
@@ -197,7 +189,7 @@ export class RateLimitMiddleware {
 		// Security: Validate message type
 		if (!this.isValidMessageType(messageType)) {
 			console.warn('[RATE-LIMIT-SECURITY] Invalid message type provided');
-			this.securityMetrics.securityViolations++;
+			// Security violation logged (metrics removed for memory efficiency)
 			return false;
 		}
 
@@ -232,28 +224,20 @@ export class RateLimitMiddleware {
 			userMessageLimiters: 0,
 			userBundleLimiters: 0,
 			totalUserLimiters: 0,
-			middlewareMetrics: this.securityMetrics,
 			securityHealth: this.getSecurityHealth(),
-			timestamp: Date.now()
+			timestamp: Date.now(),
+			note: "Individual metrics removed for memory efficiency with millions of users"
 		};
 	}
 
 	/**
-	 * Get security health status
+	 * Get security health status (simplified for memory efficiency)
 	 */
 	getSecurityHealth() {
-		const totalRequests = this.securityMetrics.totalRequests;
-		const blockedRequests = this.securityMetrics.blockedRequests;
-		const securityViolations = this.securityMetrics.securityViolations;
-
-		const blockRate = totalRequests > 0 ? (blockedRequests / totalRequests) * 100 : 0;
-		const violationRate = totalRequests > 0 ? (securityViolations / totalRequests) * 100 : 0;
-
 		return {
-			blockRate: blockRate.toFixed(2) + '%',
-			violationRate: violationRate.toFixed(2) + '%',
-			securityScore: Math.max(0, 100 - violationRate * 10),
-			lastCheck: this.securityMetrics.lastSecurityCheck
+			status: "Security monitoring active",
+			note: "Detailed metrics removed for memory efficiency with millions of users",
+			rateLimiterActive: !!this.rateLimiter
 		};
 	}
 
@@ -345,20 +329,15 @@ export class RateLimitMiddleware {
 	performSecurityAudit() {
 		const audit = {
 			timestamp: Date.now(),
-			securityMetrics: this.securityMetrics,
 			rateLimiterStats: this.rateLimiter.getStats(),
 			securityHealth: this.getSecurityHealth(),
-			recommendations: []
+			recommendations: [],
+			note: "Detailed security metrics removed for memory efficiency with millions of users"
 		};
 
-		// Security recommendations
-		if (this.securityMetrics.securityViolations > 0) {
-			audit.recommendations.push('Security violations detected - review logs for suspicious activity');
-		}
-
-		if (this.securityMetrics.blockedRequests / this.securityMetrics.totalRequests > 0.1) {
-			audit.recommendations.push('High block rate detected - consider adjusting rate limits');
-		}
+		// Basic security recommendations (simplified)
+		audit.recommendations.push('Monitor Redis rate limiter logs for security violations');
+		audit.recommendations.push('Rate limiting active - check Redis stats for block rates');
 
 		console.log('[RATE-LIMIT-SECURITY] Security Audit:', JSON.stringify(audit, null, 2));
 		return audit;

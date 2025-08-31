@@ -12,11 +12,10 @@ import * as authentication from './authentication/authentication.js';
 import { setServerPasswordOnInput } from './authentication/auth-utils.js';
 import { ed25519 } from '@noble/curves/ed25519.js';
 import { rateLimitMiddleware } from './rate-limiting/rate-limit-middleware.js';
+import { setOnline, setOffline, refreshOnline, createSubscriber, subscribeUserChannel } from './presence/presence.js';
 
-const clients = new Map();
-const wsToUsername = new WeakMap(); // Map WebSocket -> username for consistent client tracking
-
-const bundleCache = new Map(); // Cache for bundle requests to prevent redundant operations
+// COMPLETELY REMOVED: No in-memory client tracking for millions of users
+// All user data stored on WebSocket.clientState and Redis presence only
 
 // Message batching for database operations with memory management
 const messageBatch = [];
@@ -177,8 +176,8 @@ async function startServer() {
 
   const wss = new WebSocketServer({ server });
 
-  const authHandler = new authentication.AccountAuthHandler(serverHybridKeyPair, clients);
-  const serverAuthHandler = new authentication.ServerAuthHandler(serverHybridKeyPair, clients, ServerConfig);
+  const authHandler = new authentication.AccountAuthHandler(serverHybridKeyPair);
+  const serverAuthHandler = new authentication.ServerAuthHandler(serverHybridKeyPair, null, ServerConfig);
 
   // Optimized periodic rate limiting status logging - only when needed
   let statusLogInterval = null;
@@ -233,8 +232,7 @@ async function startServer() {
     // Start status logging on first active connection (guarded internally)
     startStatusLogging();
 
-    // Note: Do not add WebSocket to `clients` map.
-    // `clients` is keyed by username only (set during/after authentication).
+    // No global clients map; use ws.clientState and Redis presence only
 
     ws.send(
       JSON.stringify({
@@ -245,6 +243,10 @@ async function startServer() {
         }
       })
     );
+
+    // Presence: per-connection subscriber for delivery
+    let presenceUnsub = null;
+    let presenceSub = null;
 
     ws.on('message', async (msg) => {
       // SECURITY: Rate limit message processing to prevent DoS
@@ -313,17 +315,38 @@ async function startServer() {
       try {
         switch (parsed.type) {
           case SignalType.ADMIN_GENERATE_PREKEYS: {
-            // Admin endpoint: regenerate and store 100 one-time prekeys for a user
-            // In production, restrict this to admin/authenticated requests
-            const target = parsed.username || clientState.username;
-            if (!target) {
-              return ws.send(JSON.stringify({ type: SignalType.ERROR, message: 'Username required' }));
+            // SECURITY: Admin endpoint - requires full authentication and admin privileges
+            if (!clientState.hasAuthenticated || !clientState.username) {
+              console.error('[SERVER] Unauthorized admin access attempt');
+              return ws.send(JSON.stringify({ type: SignalType.AUTH_ERROR, message: 'Full authentication required for admin functions' }));
             }
+            
+            // SECURITY: In production, this should check admin role/permissions
+            // For now, only allow users to generate prekeys for themselves
+            const target = clientState.username; // SECURITY: Remove ability to target other users
+            
+            // SECURITY: Rate limit admin operations per user
+            const now = Date.now();
+            if (!clientState.lastAdminOp) clientState.lastAdminOp = 0;
+            if (now - clientState.lastAdminOp < 60000) { // 1 minute cooldown
+              console.error(`[SERVER] Admin operation rate limited for user: ${clientState.username}`);
+              return ws.send(JSON.stringify({ type: SignalType.ERROR, message: 'Admin operation rate limited - try again in 1 minute' }));
+            }
+            clientState.lastAdminOp = now;
+            
             try {
-              const list = Array.from({ length: 100 }, (_, i) => ({ id: i + 1, publicKeyBase64: CryptoUtils.Base64.arrayBufferToBase64(crypto.getRandomValues(new Uint8Array(32))) }));
+              // SECURITY: Limit number of prekeys that can be generated
+              const currentCount = PrekeyDatabase.countAvailableOneTimePreKeys(target);
+              if (currentCount > 500) { // Don't allow more than 500 prekeys
+                return ws.send(JSON.stringify({ type: SignalType.ERROR, message: 'Too many existing prekeys' }));
+              }
+              
+              const list = Array.from({ length: 100 }, (_, i) => ({ id: i + 1, publicKeyBase64: CryptoUtils.Hash.arrayBufferToBase64(crypto.getRandomValues(new Uint8Array(32))) }));
               PrekeyDatabase.storeOneTimePreKeys(target, list);
               ws.send(JSON.stringify({ type: 'ok', message: 'prekeys-generated', username: target, count: list.length }));
+              console.log(`[SERVER] Admin generated prekeys for user: ${target}`);
             } catch (e) {
+              console.error('[SERVER] Admin prekey generation failed:', e);
               ws.send(JSON.stringify({ type: SignalType.ERROR, message: 'Failed to generate prekeys' }));
             }
             break;
@@ -412,8 +435,18 @@ async function startServer() {
             if (result?.authenticated || result?.pending) {
               clientState.hasPassedAccountLogin = true;
               clientState.username = result.username;
-              // Maintain ws->username mapping for cleanup and quick lookup
-              wsToUsername.set(ws, result.username);
+              // Username stored in clientState only - no global memory structures
+
+              // Mark presence and subscribe to delivery channel
+              try {
+                await setOnline(result.username, 120);
+                presenceSub = presenceSub || await createSubscriber();
+                presenceUnsub = await subscribeUserChannel(presenceSub, result.username, (raw) => {
+                  try { ws.send(raw); } catch {}
+                });
+              } catch (e) {
+                console.warn('[SERVER] Presence registration failed:', e?.message || e);
+              }
 
               if (result.pending) {
                 console.log(`[SERVER] User '${result.username}' pending passphrase`);
@@ -423,9 +456,6 @@ async function startServer() {
 
               if (!result.pending) {
                 console.log(`[SERVER] User '${clientState.username}' completed account authentication`);
-                // Ensure username entry exists in clients with ws attached (set by AccountAuthHandler)
-                const existing = clients.get(clientState.username);
-                if (existing && !existing.ws) existing.ws = ws;
               }
             } else {
               console.error(`[SERVER] Login failed for user: ${clientState.username || 'unknown'}`);
@@ -487,6 +517,8 @@ async function startServer() {
               // No global public-key broadcast; keys are fetched on-demand per peer
 
               // Offline message delivery removed
+              // Refresh online TTL after full auth
+              try { await setOnline(clientState.username, 120); } catch {}
             } else {
               console.error(`[SERVER] Server authentication failed for user: ${clientState.username}`);
               ws.send(JSON.stringify({ type: SignalType.AUTH_ERROR, message: 'Server authentication failed' }));
@@ -538,14 +570,13 @@ async function startServer() {
             }
             
             {
-              const entry = clientState.username ? clients.get(clientState.username) : null;
-              const isAuthed = entry?.clientState?.hasAuthenticated ?? clientState.hasAuthenticated;
+              const isAuthed = clientState.hasAuthenticated;
               if (!isAuthed) {
                 console.error('[SERVER] User not authenticated for message sending');
                 return ws.send(JSON.stringify({ type: SignalType.ERROR, message: 'Not authenticated yet' }));
               }
             }
-            if (!parsed.to || !clients.has(parsed.to)) {
+            if (!parsed.to) {
               console.warn(`[SERVER] Target user offline or not found: ${parsed.to}, queueing`);
               try {
                 // Queue encrypted payload for delivery when user comes online
@@ -575,11 +606,7 @@ async function startServer() {
             }
 
             const toUser = parsed.to || parsed.encryptedPayload?.to;
-            const recipient = clients.get(toUser);
-            if (recipient && recipient.ws) {
-              console.log(`[SERVER] Forwarding message from ${clientState.username} to ${parsed.to}`);
-              
-              let messageToSend;
+            let messageToSend;
               if (parsed.type === SignalType.DR_SEND) {
                 messageToSend = { type: SignalType.DR_SEND, from: clientState.username, to: toUser, payload: parsed.payload };
               } else if (parsed.type === SignalType.ENCRYPTED_MESSAGE) {
@@ -606,17 +633,36 @@ async function startServer() {
                 messageToSend = parsed;
               }
               
-              recipient.ws.send(JSON.stringify(messageToSend));
-              console.log(`[SERVER] Message relayed to ${toUser}:`, {
+            // Try pub-sub delivery first; fallback to offline queue
+            try {
+              const payload = JSON.stringify(messageToSend);
+              const { publishToUser } = await import('./presence/presence.js');
+              const published = await publishToUser(toUser, payload);
+              if (published) {
+                try { ws.send(JSON.stringify({ type: 'ok', message: 'relayed' })); } catch {}
+                console.log(`[SERVER] Message published to user channel for ${toUser}`);
+              } else {
+                throw new Error('publish-failed');
+              }
+            } catch (e) {
+              console.warn('[SERVER] Pub-sub delivery failed, queueing offline:', e?.message || e);
+              try {
+                MessageDatabase.queueOfflineMessage(parsed.to, {
+                  type: parsed.type,
+                  to: parsed.to,
+                  encryptedPayload: parsed.encryptedPayload
+                });
+              } catch (qe) {
+                console.error('[SERVER] Failed to queue offline message:', qe);
+              }
+            }
+            console.log(`[SERVER] Message handling complete for ${toUser}:`, {
                 type: messageToSend.type,
                 hasEncryptedPayload: !!messageToSend.encryptedPayload,
                 encryptedPayloadKeys: messageToSend.encryptedPayload ? Object.keys(messageToSend.encryptedPayload) : [],
                 messageStructure: Object.keys(messageToSend),
                 isSignalProtocol: messageToSend.type === SignalType.ENCRYPTED_MESSAGE
               });
-            } else {
-              console.error(`[SERVER] Recipient WebSocket not available for user: ${parsed.to}`);
-            }
             break;
           }
 
@@ -687,14 +733,16 @@ async function startServer() {
     });
 
     ws.on('close', async () => {
-      // Clean up client state
-      const mappedUsername = wsToUsername.get(ws) || clientState.username;
-      if (mappedUsername && clients.has(mappedUsername)) {
-        clients.delete(mappedUsername);
-        console.log(`[SERVER] User '${mappedUsername}' disconnected`);
+      // Clean up client state - username stored in clientState only
+      const username = clientState.username;
+      if (username) {
+        try { await setOffline(username); } catch {}
+        console.log(`[SERVER] User '${username}' disconnected`);
       }
-      // Remove mapping
-      if (wsToUsername.has(ws)) wsToUsername.delete(ws);
+
+      // Unsubscribe presence channel
+      try { if (presenceUnsub) await presenceUnsub(); } catch {}
+      try { if (presenceSub) await presenceSub.quit?.(); } catch {}
 
       // Stop status logging if no more active connections
       if (wss.clients.size === 0 && statusLogInterval) {
@@ -747,23 +795,8 @@ async function gracefulShutdown() {
       await processBatch();
     }
     
-    // Clear clients map and close connections
-    for (const [username, client] of clients.entries()) {
-      try {
-        if (client.ws && client.ws.readyState === 1) { // WebSocket.OPEN
-          client.ws.close(1001, 'Server shutting down');
-        }
-      } catch (error) {
-        console.error(`[SERVER] Error closing connection for ${username}:`, error);
-      }
-    }
-    clients.clear();
-    
-    // Clear WeakMap references
-    // Note: WeakMap doesn't have a clear method, but references will be garbage collected
-    
-    // Clear bundle cache
-    bundleCache.clear();
+    // No global data structures to clear - all user data in Redis and per-connection state
+    // Designed for millions of users without memory issues
     
     // Close server
     if (server) {

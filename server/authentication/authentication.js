@@ -3,6 +3,7 @@ import { SignalType, SignalMessages } from '../signals.js';
 import { CryptoUtils } from '../crypto/unified-crypto.js';
 import { UserDatabase } from '../database/database.js';
 import { rateLimitMiddleware } from '../rate-limiting/rate-limit-middleware.js';
+import { isOnline as presenceIsOnline } from '../presence/presence.js';
 
 function rejectConnection(ws, type, reason, code = 1008) {
   console.log(`[AUTH] Rejecting connection: ${type} - ${reason}`);
@@ -12,17 +13,36 @@ function rejectConnection(ws, type, reason, code = 1008) {
 }
 
 export class AccountAuthHandler {
-  constructor(serverHybridKeyPair, clients) {
+  constructor(serverHybridKeyPair) {
     this.serverHybridKeyPair = serverHybridKeyPair;
-    this.clients = clients;
-    this.pendingPassphrases = new Map();
     console.log('[AUTH] AccountAuthHandler initialized');
   }
 
   async processAuthRequest(ws, str) {
     console.log('[AUTH] Processing authentication request');
+    
+    // SECURITY: Validate input size to prevent DoS attacks
+    if (!str || typeof str !== 'string') {
+      console.error('[AUTH] Invalid authentication request format');
+      return rejectConnection(ws, SignalType.AUTH_ERROR, "Invalid request format");
+    }
+    
+    // SECURITY: Prevent extremely large payloads that could cause DoS
+    if (str.length > 1048576) { // 1MB limit
+      console.error('[AUTH] Authentication request too large');
+      return rejectConnection(ws, SignalType.AUTH_ERROR, "Request too large");
+    }
+    
     try {
-      const { type, passwordData, userData } = JSON.parse(str);
+      const parsed = JSON.parse(str);
+      const { type, passwordData, userData } = parsed;
+      
+      // SECURITY: Validate parsed object structure
+      if (!parsed || typeof parsed !== 'object') {
+        console.error('[AUTH] Invalid authentication data structure');
+        return rejectConnection(ws, SignalType.AUTH_ERROR, "Invalid request structure");
+      }
+      
       console.log(`[AUTH] Auth type: ${type}`);
 
       const [passwordPayload, userPayload] = await Promise.all([
@@ -32,29 +52,45 @@ export class AccountAuthHandler {
 
       if (!userPayload || !passwordPayload) {
         console.error('[AUTH] Failed to decrypt authentication data');
-        return rejectConnection(ws, SignalType.AUTH_ERROR, "Failed to decrypt authentication data");
+        return rejectConnection(ws, SignalType.AUTH_ERROR, "Authentication failed");
+      }
+
+      // SECURITY: Validate decrypted payload structure
+      if (typeof userPayload !== 'object' || typeof passwordPayload !== 'object') {
+        console.error('[AUTH] Invalid decrypted payload structure');
+        return rejectConnection(ws, SignalType.AUTH_ERROR, "Authentication failed");
       }
 
       const username = userPayload.usernameSent;
       const password = passwordPayload.content;
       const hybridPublicKeys = userPayload.hybridPublicKeys;
+      
+      // SECURITY: Validate extracted fields
+      if (!username || typeof username !== 'string' || username.length > 32) {
+        console.error('[AUTH] Invalid username in authentication data');
+        return rejectConnection(ws, SignalType.AUTH_ERROR, "Authentication failed");
+      }
+      
+      if (!password || typeof password !== 'string' || password.length > 512) {
+        console.error('[AUTH] Invalid password in authentication data');
+        return rejectConnection(ws, SignalType.AUTH_ERROR, "Authentication failed");
+      }
 
       console.log(`[AUTH] Processing auth for user: ${username}`);
 
-      // Prevent multiple logins for the same account (already authenticated elsewhere)
+      // Prevent multiple logins for the same account (already authenticated elsewhere) using presence
       if (type === SignalType.ACCOUNT_SIGN_IN) {
-        const existing = this.clients.get(username);
-        const isAlreadyLoggedIn = !!(existing && existing.clientState && existing.clientState.hasAuthenticated);
-        if (isAlreadyLoggedIn) {
-          console.warn(`[AUTH] User already logged in: ${username}`);
-          return rejectConnection(ws, SignalType.AUTH_ERROR, "Account already logged in");
-        }
+        try {
+          const alreadyOnline = await presenceIsOnline(username);
+          if (alreadyOnline) {
+            console.warn(`[AUTH] User already online: ${username}`);
+            return rejectConnection(ws, SignalType.AUTH_ERROR, "Account already logged in");
+          }
+        } catch {}
       }
 
-      if (!username || !password) {
-        console.error('[AUTH] Invalid authentication data format');
-        return rejectConnection(ws, SignalType.AUTH_ERROR, "Invalid authentication data format");
-      }
+      // SECURITY: Additional validation already performed above
+      // This check is now redundant but kept for defensive programming
 
       // Per-user auth limiter before processing (across connections)
       try {
@@ -74,11 +110,8 @@ export class AccountAuthHandler {
         return rejectConnection(ws, SignalType.INVALIDNAMELENGTH, SignalMessages.INVALIDNAMELENGTH);
       }
 
-      // Track only active connection state; do not store user keys or profiles in memory
-      this.clients.set(username, {
-        ws,
-        clientState: { username, hasPassedAccountLogin: true, hasAuthenticated: false }
-      });
+      // Track only active connection state on the WebSocket itself; avoid global maps
+      ws.clientState = { username, hasPassedAccountLogin: true, hasAuthenticated: false };
 
       if (type === SignalType.ACCOUNT_SIGN_UP) {
         console.log(`[AUTH] Handling sign up for user: ${username}`);
@@ -128,8 +161,8 @@ export class AccountAuthHandler {
       message: "Please hash your passphrase and send it back"
     }));
 
-    this.pendingPassphrases.set(username, ws);
-    console.log(`[AUTH] User ${username} added to pending passphrases`);
+    ws.clientState.pendingPassphrase = true;
+    console.log(`[AUTH] User ${username} pending passphrase set on connection`);
     return { username, pending: true };
   }
 
@@ -162,8 +195,8 @@ export class AccountAuthHandler {
         message: "Please hash your passphrase with this info and send back"
       }));
 
-      this.pendingPassphrases.set(username, ws);
-      console.log(`[AUTH] User ${username} added to pending passphrases for sign in`);
+      ws.clientState.pendingPassphrase = true;
+      console.log(`[AUTH] User ${username} pending passphrase set for sign in`);
       return { username, pending: true };
     }
 
@@ -185,7 +218,7 @@ export class AccountAuthHandler {
       return rejectConnection(ws, SignalType.AUTH_ERROR, "Invalid passphrase format");
     }
     
-    if (!this.pendingPassphrases.has(username)) {
+    if (!ws.clientState || ws.clientState.username !== username || !ws.clientState.pendingPassphrase) {
       console.error(`[AUTH] Unexpected passphrase submission for user: ${username}`);
       return rejectConnection(ws, SignalType.AUTH_ERROR, "Unexpected passphrase submission");
     }
@@ -276,28 +309,19 @@ export class AccountAuthHandler {
     // SECURITY: Clear sensitive data from memory
     passphraseHash = null;
 
-    this.pendingPassphrases.delete(username);
-    console.log(`[AUTH] User ${username} removed from pending passphrases`);
+    ws.clientState.pendingPassphrase = false;
+    console.log(`[AUTH] User ${username} cleared pending passphrase on connection`);
 
     const auth = await this.finalizeAuth(ws, username, isNewUser ? "User registered with passphrase" : "User logged in with passphrase");
 
-    // SECURITY: Validate existing client state before updating
-    const existingClient = this.clients.get(username);
-    if (existingClient && existingClient.ws !== ws) {
-      console.error(`[AUTH] WebSocket mismatch during passphrase handling: ${username}`);
-      return rejectConnection(ws, SignalType.AUTH_ERROR, "Connection state inconsistency");
-    }
-
-    this.clients.set(username, {
-      ws,
-      clientState: {
-        username,
-        hasPassedAccountLogin: true,
-        hasAuthenticated: false, // Both registration and login need server password
-        passphraseVerifiedAt: Date.now()
-      },
-      hybridPublicKeys: existingClient?.hybridPublicKeys || null
-    });
+    // Attach verification time to this connection only
+    ws.clientState = {
+      ...(ws.clientState || {}),
+      username,
+      hasPassedAccountLogin: true,
+      hasAuthenticated: ws.clientState?.hasAuthenticated || false,
+      passphraseVerifiedAt: Date.now()
+    };
 
     console.log(`[AUTH] Authentication completed for user: ${username}`);
     return auth;
@@ -306,47 +330,27 @@ export class AccountAuthHandler {
   async finalizeAuth(ws, username, logMessage) {
     console.log(`[AUTH] Finalizing authentication: ${logMessage} for user: ${username}`);
 
-    // SECURITY: Comprehensive state validation to prevent bypass attacks
-    const existingClient = this.clients.get(username);
-
-    // SECURITY: Validate authentication state transition
-    if (existingClient) {
-      if (existingClient.clientState?.hasAuthenticated) {
-        console.error(`[AUTH] User already authenticated: ${username}`);
-        return rejectConnection(ws, SignalType.NAMEEXISTSERROR, SignalMessages.NAMEEXISTSERROR);
-      }
-
-      // SECURITY: Ensure proper state progression
-      if (!existingClient.clientState?.hasPassedAccountLogin) {
-        console.error(`[AUTH] Invalid state transition - account login not completed: ${username}`);
-        return rejectConnection(ws, SignalType.AUTH_ERROR, "Invalid authentication state");
-      }
-
-      // SECURITY: Validate WebSocket connection consistency
-      if (existingClient.ws !== ws) {
-        console.error(`[AUTH] WebSocket mismatch during finalization: ${username}`);
-        return rejectConnection(ws, SignalType.AUTH_ERROR, "Connection state inconsistency");
-      }
-    } else {
-      console.error(`[AUTH] No existing client state found during finalization: ${username}`);
+    // SECURITY: Validate authentication state transition using ws state only
+    if (!ws.clientState || ws.clientState.username !== username) {
+      console.error(`[AUTH] Invalid or missing client state during finalization: ${username}`);
+      return rejectConnection(ws, SignalType.AUTH_ERROR, "Invalid authentication state");
+    }
+    if (ws.clientState.hasAuthenticated) {
+      console.error(`[AUTH] User already authenticated: ${username}`);
+      return rejectConnection(ws, SignalType.NAMEEXISTSERROR, SignalMessages.NAMEEXISTSERROR);
+    }
+    if (!ws.clientState.hasPassedAccountLogin) {
+      console.error(`[AUTH] Invalid state transition - account login not completed: ${username}`);
       return rejectConnection(ws, SignalType.AUTH_ERROR, "Invalid authentication state");
     }
 
-    if (authUtils.isServerFull(this.clients)) {
-      console.error(`[AUTH] Server is full, rejecting user: ${username}`);
-      return rejectConnection(ws, SignalType.SERVERLIMIT, SignalMessages.SERVERLIMIT, 101);
-    }
-
-    // SECURITY: Update state atomically to prevent race conditions
-    this.clients.set(username, {
-      ...existingClient,
-      clientState: {
-        ...existingClient.clientState,
-        hasAuthenticated: true,
-        authenticationTime: Date.now(),
-        finalizedBy: 'AccountAuthHandler'
-      }
-    });
+    // SECURITY: Update state atomically on this connection only
+    // Note: hasAuthenticated should only be set by ServerAuthHandler after server login
+    ws.clientState = {
+      ...ws.clientState,
+      authenticationTime: Date.now(),
+      finalizedBy: 'AccountAuthHandler'
+    };
 
     ws.send(JSON.stringify({
       type: SignalType.IN_ACCOUNT,
@@ -378,9 +382,8 @@ export class AccountAuthHandler {
 }
 
 export class ServerAuthHandler {
-  constructor(serverHybridKeyPair, clients, serverConfig) {
+  constructor(serverHybridKeyPair, _unusedClients, serverConfig) {
     this.serverHybridKeyPair = serverHybridKeyPair;
-    this.clients = clients;
     this.ServerConfig = serverConfig;
     console.log('[AUTH] ServerAuthHandler initialized');
   }
@@ -402,47 +405,37 @@ export class ServerAuthHandler {
         return rejectConnection(ws, SignalType.AUTH_ERROR, "Invalid password format");
       }
 
-      const passwordValid = await CryptoUtils.Password.verifyPassword(this.ServerConfig.SERVER_PASSWORD, passwordPayload.content);
+      const serverPasswordHash = this.ServerConfig.getServerPasswordHash();
+      if (!serverPasswordHash) {
+        console.error('[AUTH] Server password not configured');
+        return rejectConnection(ws, SignalType.AUTH_ERROR, "Server not properly configured");
+      }
+      
+      const passwordValid = await CryptoUtils.Password.verifyPassword(serverPasswordHash, passwordPayload.content);
 
       if (!passwordValid) {
         console.error(`[AUTH] Incorrect server password for user: ${clientState.username}`);
         return rejectConnection(ws, SignalType.AUTH_ERROR, "Incorrect password");
       }
 
-      const existingClient = this.clients.get(clientState.username);
-      if (!existingClient) {
-        console.error(`[AUTH] User not found in client list: ${clientState.username}`);
-        return rejectConnection(ws, SignalType.AUTH_ERROR, "User not found in client list");
-      }
-
-      // SECURITY: Validate state transition for server authentication
-      if (!existingClient.clientState?.hasPassedAccountLogin) {
+      // SECURITY: Validate state transition for server authentication using ws state
+      if (!ws.clientState?.hasPassedAccountLogin) {
         console.error(`[AUTH] Invalid state - account login not completed: ${clientState.username}`);
         return rejectConnection(ws, SignalType.AUTH_ERROR, "Account authentication required first");
       }
 
-      if (existingClient.clientState?.hasAuthenticated) {
+      if (ws.clientState?.hasAuthenticated) {
         console.error(`[AUTH] User already authenticated: ${clientState.username}`);
         return rejectConnection(ws, SignalType.AUTH_ERROR, "User already authenticated");
       }
 
-      // SECURITY: Validate WebSocket consistency
-      if (existingClient.ws !== ws) {
-        console.error(`[AUTH] WebSocket mismatch in server auth: ${clientState.username}`);
-        return rejectConnection(ws, SignalType.AUTH_ERROR, "Connection state inconsistency");
-      }
-
       // SECURITY: Atomic state update
-      this.clients.set(clientState.username, {
-        ws,
-        hybridPublicKeys: existingClient.hybridPublicKeys,
-        clientState: {
-          ...existingClient.clientState,
-          hasAuthenticated: true,
-          serverAuthTime: Date.now(),
-          finalizedBy: 'ServerAuthHandler'
-        }
-      });
+      ws.clientState = {
+        ...(ws.clientState || {}),
+        hasAuthenticated: true,
+        serverAuthTime: Date.now(),
+        finalizedBy: 'ServerAuthHandler'
+      };
 
       ws.send(JSON.stringify({
         type: SignalType.AUTH_SUCCESS,
