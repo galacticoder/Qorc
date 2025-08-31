@@ -290,6 +290,42 @@ export class ConnectionStateManager {
   }
 
   /**
+   * Force cleanup all sessions for a specific user (for login conflicts)
+   */
+  static async forceCleanupUserSessions(username) {
+    if (!username) return;
+
+    try {
+      return await withRedisClient(async (client) => {
+        console.log(`[CONNECTION-STATE] Force cleaning up sessions for user: ${username}`);
+
+        // Get the current session ID for this username
+        const currentSessionId = await client.get(USER_SESSION_KEY(username));
+
+        if (currentSessionId) {
+          // Check if the session still exists
+          const sessionExists = await client.exists(CONNECTION_STATE_KEY(currentSessionId));
+
+          if (sessionExists) {
+            // Session exists, delete it
+            console.log(`[CONNECTION-STATE] Deleting existing session ${currentSessionId} for user ${username}`);
+            await client.del(CONNECTION_STATE_KEY(currentSessionId));
+          }
+
+          // Always remove the username mapping
+          await client.del(USER_SESSION_KEY(username));
+          console.log(`[CONNECTION-STATE] Removed username mapping for ${username}`);
+        }
+
+        return true;
+      });
+    } catch (error) {
+      console.error(`[CONNECTION-STATE] Error during force cleanup for user ${username}:`, error);
+      return false;
+    }
+  }
+
+  /**
    * Cleanup stale username mappings (for server startup)
    */
   static async cleanupStaleUsernameMappings() {

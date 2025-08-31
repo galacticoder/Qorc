@@ -5,7 +5,7 @@ import { WebSocketServer } from 'ws';
 import selfsigned from 'selfsigned';
 import { SignalType } from './signals.js';
 import { CryptoUtils } from './crypto/unified-crypto.js';
-import { MessageDatabase, PrekeyDatabase, LibsignalBundleDB } from './database/database.js';
+import { MessageDatabase, PrekeyDatabase, LibsignalBundleDB, UserDatabase } from './database/database.js';
 import * as ServerConfig from './config/config.js';
 import { MessagingUtils } from './messaging/messaging-utils.js';
 import * as authentication from './authentication/authentication.js';
@@ -490,25 +490,82 @@ async function startServer() {
 
 
 
+          case SignalType.CHECK_USER_EXISTS: {
+            const state = await ConnectionStateManager.getState(sessionId);
+            if (!state?.hasPassedAccountLogin) {
+              return ws.send(JSON.stringify({ type: SignalType.ERROR, message: 'Account login required first' }));
+            }
+
+            // SECURITY: Validate username parameter
+            const target = parsed.username;
+            if (!target || typeof target !== 'string' || target.length < 3 || target.length > 32) {
+              console.error(`[SERVER] Invalid username in user existence check: ${target}`);
+              return ws.send(JSON.stringify({
+                type: SignalType.USER_EXISTS_RESPONSE,
+                username: target,
+                exists: false,
+                error: 'Invalid username format'
+              }));
+            }
+
+            // SECURITY: Validate username format (alphanumeric, underscore, hyphen only)
+            if (!/^[a-zA-Z0-9_-]+$/.test(target)) {
+              console.error(`[SERVER] Invalid username characters in user existence check: ${target}`);
+              return ws.send(JSON.stringify({
+                type: SignalType.USER_EXISTS_RESPONSE,
+                username: target,
+                exists: false,
+                error: 'Invalid username characters'
+              }));
+            }
+
+            // Check if user exists in database
+            try {
+              const userExists = UserDatabase.loadUser(target) !== null;
+              console.log(`[SERVER] User existence check for ${target}: ${userExists}`);
+              ws.send(JSON.stringify({
+                type: SignalType.USER_EXISTS_RESPONSE,
+                username: target,
+                exists: userExists
+              }));
+            } catch (error) {
+              console.error(`[SERVER] Error checking user existence for ${target}:`, error);
+              ws.send(JSON.stringify({
+                type: SignalType.USER_EXISTS_RESPONSE,
+                username: target,
+                exists: false,
+                error: 'Database error'
+              }));
+            }
+            break;
+          }
+
           case SignalType.LIBSIGNAL_REQUEST_BUNDLE: {
             const state = await ConnectionStateManager.getState(sessionId);
             if (!state?.hasPassedAccountLogin) {
               return ws.send(JSON.stringify({ type: SignalType.ERROR, message: 'Account login required first' }));
             }
-            
+
             // SECURITY: Validate username parameter
             const target = parsed.username;
             if (!target || typeof target !== 'string' || target.length < 3 || target.length > 32) {
               console.error(`[SERVER] Invalid username in bundle request: ${target}`);
               return ws.send(JSON.stringify({ type: SignalType.ERROR, message: 'Invalid username format' }));
             }
-            
+
             // SECURITY: Validate username format (alphanumeric, underscore, hyphen only)
             if (!/^[a-zA-Z0-9_-]+$/.test(target)) {
               console.error(`[SERVER] Invalid username characters in bundle request: ${target}`);
               return ws.send(JSON.stringify({ type: SignalType.ERROR, message: 'Invalid username characters' }));
             }
-            
+
+            // Check if user exists before trying to get bundle
+            const userExists = UserDatabase.loadUser(target) !== null;
+            if (!userExists) {
+              console.error(`[SERVER] Bundle requested for non-existent user: ${target}`);
+              return ws.send(JSON.stringify({ type: SignalType.ERROR, message: 'User account does not exist' }));
+            }
+
             // Try to consume a one-time prekey; fallback to base bundle if none
             let out = await PrekeyDatabase.takeBundleForRecipient(target);
             if (!out) {
@@ -518,7 +575,7 @@ async function startServer() {
               return ws.send(JSON.stringify({ type: SignalType.ERROR, message: 'No libsignal bundle available' }));
             }
             ws.send(JSON.stringify({ type: SignalType.LIBSIGNAL_DELIVER_BUNDLE, bundle: out, username: target }));
-            
+
             // Check if target user needs more prekeys and notify them
             try {
               const remaining = PrekeyDatabase.countAvailableOneTimePreKeys(target);
@@ -548,6 +605,13 @@ async function startServer() {
             console.log(`[SERVER] Processing ${parsed.type} request`);
             const result = await authHandler.processAuthRequest(ws, msg.toString());
             if (result?.authenticated || result?.pending) {
+              // Force cleanup any stale sessions for this user before claiming the username
+              try {
+                await ConnectionStateManager.forceCleanupUserSessions(result.username);
+              } catch (error) {
+                console.warn(`[SERVER] Warning: Failed to cleanup stale sessions for ${result.username}:`, error);
+              }
+
               await ConnectionStateManager.updateState(sessionId, {
                 hasPassedAccountLogin: true,
                 username: result.username

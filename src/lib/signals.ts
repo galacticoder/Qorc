@@ -50,7 +50,11 @@ export enum SignalType {
   // Message synchronization
   REQUEST_MESSAGE_HISTORY = "request-message-history",
   MESSAGE_HISTORY_RESPONSE = "message-history-response",
-  
+
+  // User existence validation
+  CHECK_USER_EXISTS = "check-user-exists",
+  USER_EXISTS_RESPONSE = "user-exists-response",
+
   // Note: Typing indicators are now handled as encrypted messages
   // Note: Read receipts and delivery receipts are now handled as encrypted messages
 }
@@ -286,13 +290,32 @@ export async function handleSignalMessages(
 
       case SignalType.MESSAGE_HISTORY_RESPONSE: {
         console.log('[Signals] Processing MESSAGE_HISTORY_RESPONSE:', data);
-        
+
         if (handlers.handleMessageHistory) {
           try {
             await handlers.handleMessageHistory(data);
           } catch (error) {
             console.error('[Signals] Error processing message history:', error);
           }
+        }
+        break;
+      }
+
+      case SignalType.USER_EXISTS_RESPONSE: {
+        console.log('[Signals] Processing USER_EXISTS_RESPONSE:', data);
+
+        // Dispatch a custom event that the UI can listen to
+        try {
+          const event = new CustomEvent('user-exists-response', {
+            detail: {
+              username: data.username,
+              exists: data.exists,
+              error: data.error
+            }
+          });
+          window.dispatchEvent(event);
+        } catch (error) {
+          console.error('[Signals] Error dispatching user exists event:', error);
         }
         break;
       }

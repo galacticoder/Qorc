@@ -19,7 +19,7 @@ interface SidebarProps {
   className?: string;
   children?: React.ReactNode;
   currentUsername?: string;
-  onAddConversation?: (username: string) => void;
+  onAddConversation?: (username: string) => Promise<any>;
   onLogout?: () => void;
   onActiveTabChange?: (tab: string) => void;
 }
@@ -28,26 +28,39 @@ export function Sidebar({ className, children, currentUsername, onAddConversatio
   const [activeTab, setActiveTab] = useState("messages");
   const [showAddUser, setShowAddUser] = useState(false);
   const [newUsername, setNewUsername] = useState("");
+  const [isValidating, setIsValidating] = useState(false);
+  const [validationError, setValidationError] = useState("");
 
-  const handleAddUser = () => {
+  const handleAddUser = async () => {
     const username = newUsername.trim();
-    if (username && username !== currentUsername) {
+    if (!username || username === currentUsername) return;
+
+    setIsValidating(true);
+    setValidationError("");
+
+    try {
       // Create conversation and automatically select it
-      onAddConversation?.(username);
+      await onAddConversation?.(username);
       setNewUsername("");
       setShowAddUser(false);
       // Switch to messages tab after adding conversation
       setActiveTab("messages");
       onActiveTabChange?.("messages");
+    } catch (error) {
+      console.error('[UserList] Failed to add conversation:', error);
+      setValidationError(error instanceof Error ? error.message : 'Failed to add user');
+    } finally {
+      setIsValidating(false);
     }
   };
 
   const handleKeyPress = (e: React.KeyboardEvent) => {
-    if (e.key === 'Enter') {
+    if (e.key === 'Enter' && !isValidating) {
       handleAddUser();
     } else if (e.key === 'Escape') {
       setShowAddUser(false);
       setNewUsername("");
+      setValidationError("");
     }
   };
 
@@ -168,14 +181,28 @@ export function Sidebar({ className, children, currentUsername, onAddConversatio
                 <Input
                   placeholder="e.g., alice, bob, charlie..."
                   value={newUsername}
-                  onChange={(e) => setNewUsername(e.target.value)}
+                  onChange={(e) => {
+                    setNewUsername(e.target.value);
+                    setValidationError(""); // Clear error when user types
+                  }}
                   onKeyDown={handleKeyPress}
                   className="w-full"
                   autoFocus
+                  disabled={isValidating}
                 />
                 {newUsername.trim() === currentUsername && (
                   <p className="text-xs text-red-500 mt-1">
                     Cannot start conversation with yourself
+                  </p>
+                )}
+                {validationError && (
+                  <p className="text-xs text-red-500 mt-1">
+                    {validationError}
+                  </p>
+                )}
+                {isValidating && (
+                  <p className="text-xs text-blue-500 mt-1">
+                    Validating user...
                   </p>
                 )}
               </div>
@@ -183,18 +210,20 @@ export function Sidebar({ className, children, currentUsername, onAddConversatio
                 <Button
                   onClick={handleAddUser}
                   className="flex-1"
-                  disabled={!newUsername.trim() || newUsername.trim() === currentUsername}
+                  disabled={!newUsername.trim() || newUsername.trim() === currentUsername || isValidating}
                 >
-                  Start Chat
+                  {isValidating ? "Validating..." : "Start Chat"}
                 </Button>
                 <Button
                   onClick={() => {
                     setShowAddUser(false);
                     setNewUsername("");
+                    setValidationError("");
                     setActiveTab("messages");
                   }}
                   variant="outline"
                   className="flex-1"
+                  disabled={isValidating}
                 >
                   Cancel
                 </Button>

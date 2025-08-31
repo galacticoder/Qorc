@@ -53,6 +53,10 @@ export const SignalType = {
   REQUEST_MESSAGE_HISTORY: "request-message-history",
   MESSAGE_HISTORY_RESPONSE: "message-history-response",
 
+  // User existence validation
+  CHECK_USER_EXISTS: "check-user-exists",
+  USER_EXISTS_RESPONSE: "user-exists-response",
+
   // Note: Typing indicators are now handled as encrypted messages
 
   // Note: Read receipts and delivery receipts are now handled as encrypted messages
