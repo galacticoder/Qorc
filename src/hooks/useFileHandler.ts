@@ -72,7 +72,16 @@ export function useFileHandler(
         fileEntry.receivedCount++;
 
         if (fileEntry.receivedCount === totalChunks) {
-          const fileBlob = new Blob(fileEntry.decryptedChunks, { type: "application/octet-stream" });
+          // Infer MIME type for better handling on the UI (especially voice notes)
+          const lowerName = String(filename || '').toLowerCase();
+          let detectedMime = 'application/octet-stream';
+          if (lowerName.endsWith('.webm')) detectedMime = 'audio/webm';
+          else if (lowerName.endsWith('.mp3')) detectedMime = 'audio/mpeg';
+          else if (lowerName.endsWith('.wav')) detectedMime = 'audio/wav';
+          else if (lowerName.endsWith('.ogg')) detectedMime = 'audio/ogg';
+          else if (lowerName.endsWith('.m4a')) detectedMime = 'audio/mp4';
+
+          const fileBlob = new Blob(fileEntry.decryptedChunks, { type: detectedMime });
           const fileUrl = URL.createObjectURL(fileBlob);
 
           onNewMessage({
@@ -84,7 +93,8 @@ export function useFileHandler(
             isSystemMessage: false,
             type: SignalType.FILE_MESSAGE,
             filename,
-            fileSize: fileBlob.size
+            fileSize: fileBlob.size,
+            mimeType: detectedMime
           });
 
           delete incomingFileChunksRef.current[fileKey];

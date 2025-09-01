@@ -60,6 +60,8 @@ export function ChatInterface({
     currentCall,
     localStream,
     remoteStream,
+    remoteScreenStream,
+    peerConnection,
     startCall,
     answerCall,
     declineCall,
@@ -85,6 +87,35 @@ export function ChatInterface({
   useEffect(() => {
     console.log('[ChatInterface] typingUsers changed:', typingUsers);
   }, [typingUsers]);
+
+  // Listen for call logs and inject system messages into conversation
+  useEffect(() => {
+    const handler = (e: any) => {
+      try {
+        const d = e.detail || {};
+        if (!selectedConversation || d.peer !== selectedConversation) return;
+        const label = d.type === 'incoming' ? `Incoming call from ${d.peer}`
+          : d.type === 'connected' ? `Call connected with ${d.peer}`
+          : d.type === 'started' ? `Calling ${d.peer}...`
+          : d.type === 'ended' ? `Call with ${d.peer} ended (${Math.round((d.durationMs||0)/1000)}s)`
+          : d.type === 'declined' ? `${d.peer} declined the call`
+          : d.type === 'missed' ? `Missed call from ${d.peer}`
+          : d.type === 'not-answered' ? `${d.peer} did not answer`
+          : `Call event: ${d.type}`;
+        setMessages((prev) => [...prev, {
+          id: `call-log-${d.callId || crypto.randomUUID()}-${d.type}-${d.at || Date.now()}`,
+          content: label,
+          sender: 'System',
+          timestamp: new Date(),
+          isCurrentUser: false,
+          isSystemMessage: true,
+          type: 'system'
+        } as Message]);
+      } catch {}
+    };
+    window.addEventListener('ui-call-log', handler as EventListener);
+    return () => window.removeEventListener('ui-call-log', handler as EventListener);
+  }, [setMessages, selectedConversation]);
 
   // Handle conversation changes to stop typing indicators
   useEffect(() => {
@@ -387,6 +418,8 @@ export function ChatInterface({
           call={currentCall}
           localStream={localStream}
           remoteStream={remoteStream}
+          remoteScreenStream={remoteScreenStream}
+          peerConnection={peerConnection}
           onAnswer={() => currentCall && answerCall(currentCall.id)}
           onDecline={() => currentCall && declineCall(currentCall.id)}
           onEndCall={endCall}

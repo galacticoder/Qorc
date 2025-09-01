@@ -30,6 +30,9 @@ export function VoiceMessage({
   const [error, setError] = useState<string | null>(null);
 
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const peaksRef = useRef<number[] | null>(null);
+  const drawRafRef = useRef<number | null>(null);
 
   useEffect(() => {
     return () => {
@@ -45,10 +48,27 @@ export function VoiceMessage({
   }, []);
 
   const handleLoadedMetadata = () => {
-    if (audioRef.current) {
-      setDuration(audioRef.current.duration);
-      setIsLoading(false);
+    if (!audioRef.current) return;
+    const dur = audioRef.current.duration;
+    if (isFinite(dur) && dur > 0) {
+      setDuration(dur);
+    } else {
+      // Safari/Blob quirk: try a small play-pause to force metadata
+      try {
+        const el = audioRef.current;
+        const onTimeUpdate = () => {
+          if (isFinite(el.duration) && el.duration > 0) {
+            setDuration(el.duration);
+            el.removeEventListener('timeupdate', onTimeUpdate);
+          }
+        };
+        el.addEventListener('timeupdate', onTimeUpdate);
+        el.play().then(() => {
+          setTimeout(() => el.pause(), 50);
+        }).catch(() => {});
+      } catch {}
     }
+    setIsLoading(false);
   };
 
   const handleTimeUpdate = () => {
@@ -92,6 +112,7 @@ export function VoiceMessage({
 
       if (!audioRef.current) {
         const audio = new Audio(audioUrl);
+        // HTMLAudioElement has no 'type' property; rely on Blob URL MIME for playback
         audio.preload = 'metadata';
         audioRef.current = audio;
 
@@ -110,6 +131,115 @@ export function VoiceMessage({
       setError('Failed to play audio');
       setIsLoading(false);
       setIsPlaying(false);
+    }
+  };
+
+  // Generate waveform peaks once per source
+  useEffect(() => {
+    let cancelled = false;
+    peaksRef.current = null;
+
+    const decodeAndComputePeaks = async () => {
+      try {
+        const arrayBuffer = originalBase64Data
+          ? (() => {
+              const clean = originalBase64Data.trim().replace(/[^A-Za-z0-9+/=]/g, '');
+              const binaryString = atob(clean);
+              const bytes = new Uint8Array(binaryString.length);
+              for (let i = 0; i < binaryString.length; i++) bytes[i] = binaryString.charCodeAt(i);
+              return bytes.buffer;
+            })()
+          : await (await fetch(audioUrl)).arrayBuffer();
+
+        const AudioCtx: typeof AudioContext = (window as any).AudioContext || (window as any).webkitAudioContext;
+        const audioCtx = new AudioCtx();
+        const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer.slice(0));
+
+        // Compute peaks per pixel
+        const canvas = canvasRef.current;
+        const width = canvas?.width || 240;
+        const height = canvas?.height || 40;
+        const channelData = audioBuffer.getChannelData(0);
+        const samplesPerPixel = Math.max(1, Math.floor(channelData.length / width));
+        const peaks: number[] = new Array(width);
+        for (let i = 0; i < width; i++) {
+          const start = i * samplesPerPixel;
+          const end = Math.min(start + samplesPerPixel, channelData.length);
+          let min = 1.0;
+          let max = -1.0;
+          for (let j = start; j < end; j++) {
+            const v = channelData[j];
+            if (v < min) min = v;
+            if (v > max) max = v;
+          }
+          const amp = Math.max(-min, max); // peak amplitude
+          peaks[i] = Math.min(1, amp);
+        }
+
+        peaksRef.current = peaks;
+        drawWaveform();
+        try { audioCtx.close(); } catch {}
+      } catch (e) {
+        // Non-fatal; waveform will be hidden
+        peaksRef.current = null;
+        drawWaveform();
+      }
+    };
+
+    // Defer to next tick to allow canvas to mount
+    setTimeout(() => { if (!cancelled) decodeAndComputePeaks(); }, 0);
+
+    return () => { cancelled = true; if (drawRafRef.current) cancelAnimationFrame(drawRafRef.current); };
+  }, [audioUrl, originalBase64Data]);
+
+  // Redraw on progress
+  useEffect(() => {
+    drawWaveform();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentTime, duration, isCurrentUser]);
+
+  const drawWaveform = () => {
+    const canvas = canvasRef.current;
+    const peaks = peaksRef.current;
+    if (!canvas || !peaks) {
+      // Clear canvas if no peaks
+      if (canvas) {
+        const ctx = canvas.getContext('2d');
+        if (ctx) { ctx.clearRect(0, 0, canvas.width, canvas.height); }
+      }
+      return;
+    }
+
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+
+    const width = canvas.width;
+    const height = canvas.height;
+    const centerY = Math.floor(height / 2);
+
+    // Colors depending on bubble theme
+    const baseColor = isCurrentUser ? 'rgba(255,255,255,0.45)' : 'rgba(59,130,246,0.35)';
+    const progressColor = isCurrentUser ? 'rgba(255,255,255,0.95)' : 'rgba(59,130,246,0.9)';
+
+    // Background
+    ctx.clearRect(0, 0, width, height);
+
+    // Draw full waveform (base)
+    ctx.fillStyle = baseColor;
+    for (let x = 0; x < width; x++) {
+      const amp = peaks[x];
+      const y = Math.max(1, Math.round(amp * (height / 2)));
+      ctx.fillRect(x, centerY - y, 1, y * 2);
+    }
+
+    // Overlay progress
+    const progress = duration > 0 ? Math.min(1, currentTime / duration) : 0;
+    const progressX = Math.round(progress * width);
+    ctx.fillStyle = progressColor;
+    for (let x = 0; x < progressX; x++) {
+      const amp = peaks[x];
+      const y = Math.max(1, Math.round(amp * (height / 2)));
+      ctx.fillRect(x, centerY - y, 1, y * 2);
     }
   };
 
@@ -268,18 +398,9 @@ export function VoiceMessage({
                     / {formatTime(duration)}
                   </span>
                 </div>
-                
-                <div className={cn(
-                  "h-1 rounded-full overflow-hidden",
-                  isCurrentUser ? "bg-primary-foreground/30" : "bg-muted-foreground/30"
-                )}>
-                  <div 
-                    className={cn(
-                      "h-full transition-all duration-100",
-                      isCurrentUser ? "bg-primary-foreground" : "bg-primary"
-                    )}
-                    style={{ width: `${progress}%` }}
-                  />
+                {/* Waveform */}
+                <div className="mt-1">
+                  <canvas ref={canvasRef} width={240} height={40} className="w-full h-10" />
                 </div>
               </div>
 

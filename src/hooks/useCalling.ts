@@ -37,12 +37,14 @@ export const useCalling = (authContext?: ReturnType<typeof useAuth>) => {
   const [currentCall, setCurrentCall] = useState<CallState | null>(null);
   const [localStream, setLocalStream] = useState<MediaStream | null>(null);
   const [remoteStream, setRemoteStream] = useState<MediaStream | null>(null);
+  const [remoteScreenStream, setRemoteScreenStream] = useState<MediaStream | null>(null);
   const [isInitialized, setIsInitialized] = useState(false);
   
   const serviceRef = useRef<WebRTCCallingService | null>(null);
   const stableUsernameRef = useRef<string>('');
   const stableIsLoggedInRef = useRef<boolean>(false);
   const stableAccountAuthenticatedRef = useRef<boolean>(false);
+  const everConnectedRef = useRef<Set<string>>(new Set());
 
   // Store stable values that never reset once set
   if (username && username.trim() !== '' && !stableUsernameRef.current) {
@@ -121,6 +123,9 @@ export const useCalling = (authContext?: ReturnType<typeof useAuth>) => {
         console.log('[useCalling] Incoming call:', call);
         // Clone to force React state update on subsequent mutations
         setCurrentCall({ ...call });
+        try {
+          window.dispatchEvent(new CustomEvent('ui-call-log', { detail: { type: 'incoming', peer: call.peer, at: Date.now(), callId: call.id } }));
+        } catch {}
       });
 
       service.onCallStateChange((call) => {
@@ -139,25 +144,46 @@ export const useCalling = (authContext?: ReturnType<typeof useAuth>) => {
           window.dispatchEvent(new CustomEvent('ui-call-status', { detail: statusDetail }));
         } catch {}
 
+        if (call.status === 'connecting') {
+          try { window.dispatchEvent(new CustomEvent('ui-call-log', { detail: { type: 'started', peer: call.peer, at: Date.now(), callId: call.id } })); } catch {}
+        } else if (call.status === 'connected') {
+          try { everConnectedRef.current.add(call.id); } catch {}
+          try { window.dispatchEvent(new CustomEvent('ui-call-log', { detail: { type: 'connected', peer: call.peer, at: Date.now(), callId: call.id } })); } catch {}
+        }
         if (call.status === 'ended' || call.status === 'declined' || call.status === 'missed') {
           // For ended specifically, emit a call-ended summary for chat logging
           if (call.status === 'ended') {
-            try {
-              const durationMs = call.startTime && call.endTime ? (call.endTime - call.startTime) : 0;
-              const endedDetail = {
-                peer: call.peer,
-                type: call.type,
-                startTime: call.startTime,
-                endTime: call.endTime,
-                durationMs
-              };
-              window.dispatchEvent(new CustomEvent('ui-call-ended', { detail: endedDetail }));
-            } catch {}
+            const wasConnected = everConnectedRef.current.has(call.id);
+            if (!wasConnected && call.direction === 'outgoing') {
+              // Outgoing call ended without connection -> not answered
+              try { window.dispatchEvent(new CustomEvent('ui-call-log', { detail: { type: 'not-answered', peer: call.peer, at: Date.now(), callId: call.id } })); } catch {}
+            } else {
+              try {
+                const durationMs = call.startTime && call.endTime ? (call.endTime - call.startTime) : 0;
+                const endedDetail = {
+                  peer: call.peer,
+                  type: call.type,
+                  startTime: call.startTime,
+                  endTime: call.endTime,
+                  durationMs
+                };
+                window.dispatchEvent(new CustomEvent('ui-call-ended', { detail: endedDetail }));
+                window.dispatchEvent(new CustomEvent('ui-call-log', { detail: { type: 'ended', peer: call.peer, at: Date.now(), callId: call.id, durationMs } }));
+              } catch {}
+            }
+          }
+          if (call.status === 'declined') {
+            try { window.dispatchEvent(new CustomEvent('ui-call-log', { detail: { type: 'declined', peer: call.peer, at: Date.now(), callId: call.id } })); } catch {}
+          }
+          if (call.status === 'missed') {
+            try { window.dispatchEvent(new CustomEvent('ui-call-log', { detail: { type: 'missed', peer: call.peer, at: Date.now(), callId: call.id } })); } catch {}
           }
           // Close modal and clear streams when call is finished
           setCurrentCall(null);
           setLocalStream(null);
           setRemoteStream(null);
+          setRemoteScreenStream(null);
+          try { everConnectedRef.current.delete(call.id); } catch {}
         } else {
           // Clone to force React state update on subsequent mutations
           setCurrentCall({ ...call });
@@ -172,6 +198,11 @@ export const useCalling = (authContext?: ReturnType<typeof useAuth>) => {
       service.onRemoteStream((stream) => {
         console.log('[useCalling] Remote stream received');
         setRemoteStream(stream);
+      });
+
+      service.onRemoteScreenStream((stream) => {
+        console.log('[useCalling] Remote screen stream received:', !!stream);
+        setRemoteScreenStream(stream);
       });
 
       // Initialize service immediately (it's synchronous)
@@ -372,6 +403,8 @@ export const useCalling = (authContext?: ReturnType<typeof useAuth>) => {
     currentCall,
     localStream,
     remoteStream,
+    remoteScreenStream,
+    peerConnection: callingService?.getPeerConnection() || null,
     isInitialized,
     isScreenSharing,
 

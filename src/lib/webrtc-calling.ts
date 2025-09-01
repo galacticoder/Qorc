@@ -6,6 +6,37 @@
 // Crypto utilities are handled by Signal Protocol encryption
 import { SignalType } from './signals';
 import websocketClient from './websocket';
+import { screenSharingSettings } from './screen-sharing-settings';
+
+// Screen sharing settings types
+export interface ScreenSharingResolution {
+  id: string;
+  name: string;
+  width: number;
+  height: number;
+  isNative?: boolean;
+}
+
+export interface ScreenSharingSettings {
+  resolution: ScreenSharingResolution;
+  frameRate: number;
+  quality: 'low' | 'medium' | 'high';
+}
+
+// Predefined resolution presets
+export const SCREEN_SHARING_RESOLUTIONS: ScreenSharingResolution[] = [
+  { id: 'native', name: 'Native Resolution', width: 0, height: 0, isNative: true },
+  { id: '720p', name: '720p (1280×720)', width: 1280, height: 720 },
+  { id: '1080p', name: '1080p (1920×1080)', width: 1920, height: 1080 },
+  { id: '1440p', name: '1440p (2560×1440)', width: 2560, height: 1440 },
+  { id: '4k', name: '4K (3840×2160)', width: 3840, height: 2160 },
+];
+
+// Framerate options
+export const SCREEN_SHARING_FRAMERATES = [15, 30, 60] as const;
+export type ScreenSharingFrameRate = typeof SCREEN_SHARING_FRAMERATES[number];
+
+// Default settings are now defined in screen-sharing-settings.ts to avoid circular dependency
 
 export interface CallState {
   id: string;
@@ -16,6 +47,7 @@ export interface CallState {
   startTime?: number;
   endTime?: number;
   duration?: number;
+  endReason?: 'user' | 'timeout' | 'missed' | 'failed' | 'connection-lost' | 'shutdown' | string;
 }
 
 export interface CallOffer {
@@ -48,12 +80,15 @@ export interface CallSignal {
 export class WebRTCCallingService {
   private localStream: MediaStream | null = null;
   private remoteStream: MediaStream | null = null;
+  private remoteScreenStream: MediaStream | null = null; // Separate stream for remote screen sharing
   private screenStream: MediaStream | null = null;
+  private screenShareSender: RTCRtpSender | null = null; // Keep a dedicated sender for screen share
   private peerConnection: RTCPeerConnection | null = null;
   private currentCall: CallState | null = null;
   private isScreenSharing: boolean = false;
   private isTogglingScreenShare: boolean = false;
   private isRenegotiating: boolean = false;
+  private renegotiationTimeoutId: ReturnType<typeof setTimeout> | null = null;
   private iceConnectionFailureTimeoutId: ReturnType<typeof setTimeout> | null = null;
   private localUsername: string = '';
   private preferredCameraDeviceId: string | null = null;
@@ -61,7 +96,8 @@ export class WebRTCCallingService {
   // Callbacks
   private onIncomingCallCallback: ((call: CallState) => void) | null = null;
   private onCallStateChangeCallback: ((call: CallState) => void) | null = null;
-  private onRemoteStreamCallback: ((stream: MediaStream) => void) | null = null;
+  private onRemoteStreamCallback: ((stream: MediaStream | null) => void) | null = null;
+  private onRemoteScreenStreamCallback: ((stream: MediaStream | null) => void) | null = null;
   private onLocalStreamCallback: ((stream: MediaStream) => void) | null = null;
 
   // Security: Enhanced WebRTC configuration for maximum security
@@ -78,9 +114,9 @@ export class WebRTCCallingService {
   };
 
   // Call timeout settings
-  private readonly CALL_TIMEOUT = 60000; // 60 seconds
+  private readonly CALL_TIMEOUT = 30000; // 30 seconds (aligned with ring timeout)
   private readonly RING_TIMEOUT = 30000; // 30 seconds
-  private callTimeoutId: NodeJS.Timeout | null = null;
+  private callTimeoutId: ReturnType<typeof setTimeout> | null = null;
 
   constructor(username: string) {
     this.localUsername = username;
@@ -123,6 +159,9 @@ export class WebRTCCallingService {
       peer: targetUser,
       startTime: Date.now()
     };
+
+    // Notify initial state so UI can show "started"
+    this.onCallStateChangeCallback?.(this.currentCall);
 
     try {
       // Get user media
@@ -293,6 +332,7 @@ export class WebRTCCallingService {
     if (this.currentCall.startTime) {
       this.currentCall.duration = this.currentCall.endTime - this.currentCall.startTime;
     }
+    (this.currentCall as any).endReason = reason;
     this.onCallStateChangeCallback?.(this.currentCall);
 
     // Cleanup
@@ -485,30 +525,53 @@ export class WebRTCCallingService {
           }
           console.log('[Calling] Selected screen source:', screenSource.name);
 
+          // Get user settings for video constraints
+          const electronConstraints = screenSharingSettings.getElectronVideoConstraints();
+          // Ensure mandatory object exists before assigning properties
+          if (!electronConstraints.mandatory) {
+            electronConstraints.mandatory = {};
+          }
+          electronConstraints.mandatory.chromeMediaSource = 'desktop';
+          electronConstraints.mandatory.chromeMediaSourceId = screenSource.id;
+
+          console.log('[Calling] Using Electron constraints:', JSON.stringify(electronConstraints, null, 2));
+
           this.screenStream = await navigator.mediaDevices.getUserMedia({
             audio: false,
-            video: {
-              mandatory: {
-                chromeMediaSource: 'desktop',
-                chromeMediaSourceId: screenSource.id,
-                minWidth: 1280,
-                maxWidth: 1920,
-                minHeight: 720,
-                maxHeight: 1080
-              }
-            } as any
+            video: electronConstraints as any
           });
+
+          // Log actual stream properties for verification
+          const videoTrack = this.screenStream.getVideoTracks()[0];
+          if (videoTrack) {
+            const actualSettings = videoTrack.getSettings();
+            console.log('[Calling] Actual Electron stream settings:', actualSettings);
+            console.log('[Calling] Resolution verification: requested vs actual:', {
+              requested: electronConstraints.mandatory,
+              actual: { width: actualSettings.width, height: actualSettings.height, frameRate: actualSettings.frameRate }
+            });
+          }
         } catch (electronError) {
           console.warn('[Calling] Electron screen capture failed, falling back to browser API:', electronError);
           // Fall through to browser API
+          const videoConstraints = screenSharingSettings.getVideoConstraints();
+          console.log('[Calling] Using browser constraints (fallback):', JSON.stringify(videoConstraints, null, 2));
+
           this.screenStream = await navigator.mediaDevices.getDisplayMedia({
-            video: {
-              width: { ideal: 1920, max: 1920 },
-              height: { ideal: 1080, max: 1080 },
-              frameRate: { ideal: 30, max: 60 }
-            },
+            video: videoConstraints,
             audio: true
           });
+
+          // Log actual stream properties for verification
+          const videoTrack = this.screenStream.getVideoTracks()[0];
+          if (videoTrack) {
+            const actualSettings = videoTrack.getSettings();
+            console.log('[Calling] Actual browser stream settings (fallback):', actualSettings);
+            console.log('[Calling] Resolution verification (fallback): requested vs actual:', {
+              requested: videoConstraints,
+              actual: { width: actualSettings.width, height: actualSettings.height, frameRate: actualSettings.frameRate }
+            });
+          }
         }
       } else {
         // Fallback to standard getDisplayMedia for browsers
@@ -521,14 +584,25 @@ export class WebRTCCallingService {
 
         console.log('[Calling] Attempting browser screen capture...');
 
+        // Get user settings for video constraints
+        const videoConstraints = screenSharingSettings.getVideoConstraints();
+        console.log('[Calling] Using browser constraints:', JSON.stringify(videoConstraints, null, 2));
+
         this.screenStream = await navigator.mediaDevices.getDisplayMedia({
-          video: {
-            width: { ideal: 1920, max: 1920 },
-            height: { ideal: 1080, max: 1080 },
-            frameRate: { ideal: 30, max: 60 }
-          },
+          video: videoConstraints,
           audio: true // Include system audio if available
         });
+
+        // Log actual stream properties for verification
+        const videoTrack = this.screenStream.getVideoTracks()[0];
+        if (videoTrack) {
+          const actualSettings = videoTrack.getSettings();
+          console.log('[Calling] Actual browser stream settings:', actualSettings);
+          console.log('[Calling] Resolution verification: requested vs actual:', {
+            requested: videoConstraints,
+            actual: { width: actualSettings.width, height: actualSettings.height, frameRate: actualSettings.frameRate }
+          });
+        }
       }
 
       const videoTrack = this.screenStream.getVideoTracks()[0];
@@ -539,27 +613,14 @@ export class WebRTCCallingService {
         this.stopScreenShare();
       };
 
-      // Replace video track in peer connection
-      const sender = this.peerConnection.getSenders().find(s =>
-        s.track && s.track.kind === 'video'
-      );
+      // Always add screen share as a separate track so both camera and screen can be sent
+      // This ensures simultaneous screen shares are visible on both sides
+      console.log('[Calling] Adding screen share track as additional sender');
+      this.screenShareSender = this.peerConnection.addTrack(videoTrack, this.screenStream);
 
-      if (sender) {
-        console.log('[Calling] Replacing existing video track with screen share');
-        await sender.replaceTrack(videoTrack);
-
-        // Force renegotiation to ensure the remote peer gets the new track
-        console.log('[Calling] Triggering renegotiation for screen share');
-        await this.renegotiateConnection();
-      } else {
-        // Add track if no video sender exists
-        console.log('[Calling] Adding screen share track to peer connection');
-        this.peerConnection.addTrack(videoTrack, this.screenStream);
-
-        // Renegotiate since we added a new track
-        console.log('[Calling] Triggering renegotiation for new screen share track');
-        await this.renegotiateConnection();
-      }
+      // Renegotiate so the remote peer receives the additional m=video line
+      console.log('[Calling] Triggering renegotiation for new screen share track');
+      await this.renegotiateConnection();
 
       this.isScreenSharing = true;
       console.log('[Calling] Screen sharing started successfully');
@@ -617,41 +678,41 @@ export class WebRTCCallingService {
     const localStream = this.localStream;
 
     try {
-      // Stop screen stream
+      // Stop local capture
       if (screenStream) {
         screenStream.getTracks().forEach(track => track.stop());
       }
 
-      // Return to camera if we have a local stream and peer connection
-      if (localStream && peerConnection) {
-        const videoTrack = localStream.getVideoTracks()[0];
-
-        if (videoTrack) {
-          const sender = peerConnection.getSenders().find(s =>
-            s.track && s.track.kind === 'video'
-          );
-
+      // If we added a dedicated sender for screen share, remove it from the connection
+      if (peerConnection && this.screenShareSender) {
+        try {
+          console.log('[Calling] Removing screen share sender from peer connection');
+          peerConnection.removeTrack(this.screenShareSender);
+        } catch (removeErr) {
+          console.warn('[Calling] Failed to remove screen share sender:', removeErr);
+        }
+      } else if (localStream && peerConnection) {
+        // Fallback path for legacy replaceTrack mode: restore camera to the single video sender
+        const cameraTrack = localStream.getVideoTracks()[0];
+        if (cameraTrack) {
+          const sender = peerConnection.getSenders().find(s => s.track && s.track.kind === 'video');
           if (sender) {
             try {
-              console.log('[Calling] Replacing screen share track with camera');
-              await sender.replaceTrack(videoTrack);
-
-              // Trigger renegotiation to ensure remote peer gets the camera track
-              console.log('[Calling] Triggering renegotiation to restore camera');
-              await this.renegotiateConnection();
-            } catch (replaceError) {
-              console.warn('[Calling] Failed to replace track during screen share stop:', replaceError);
-              // Continue with cleanup even if replaceTrack fails
+              console.log('[Calling] Restoring camera track after screen share');
+              await sender.replaceTrack(cameraTrack);
+            } catch (replaceErr) {
+              console.warn('[Calling] Failed to restore camera track:', replaceErr);
             }
           }
-        } else {
-          console.log('[Calling] No camera video track available to restore');
         }
       }
 
+      // Renegotiate so the remote peer stops receiving the screen share track
+      await this.renegotiateConnection();
+
       console.log('[Calling] Screen sharing stopped successfully');
 
-      // Notify callback about local stream restoration
+      // Restore local camera preview
       if (localStream) {
         this.onLocalStreamCallback?.(localStream);
       }
@@ -674,6 +735,7 @@ export class WebRTCCallingService {
         this.screenStream = null;
       }
       this.isScreenSharing = false;
+      this.screenShareSender = null;
       this.isTogglingScreenShare = false;
 
       console.log('[Calling] Screen sharing cleanup completed');
@@ -697,29 +759,45 @@ export class WebRTCCallingService {
 
     try {
       this.isRenegotiating = true;
-
-      // Only the caller should create a new offer
-      if (this.currentCall.direction === 'outgoing') {
-        console.log('[Calling] Creating new offer for renegotiation');
-        const offer = await this.peerConnection.createOffer();
-        await this.peerConnection.setLocalDescription(offer);
-
-        // Send the new offer
-        await this.sendCallSignal({
-          type: 'offer',
-          callId: this.currentCall.id,
-          from: this.localUsername,
-          to: this.currentCall.peer,
-          data: offer,
-          timestamp: Date.now(),
-          isRenegotiation: true
-        });
-
-        // Clear renegotiation flag after a delay to allow for ICE reconnection
-        setTimeout(() => {
-          this.isRenegotiating = false;
-        }, 5000); // 5 second grace period
+      // Avoid glare and invalid states
+      if (this.peerConnection.signalingState !== 'stable') {
+        console.log('[Calling] Skipping renegotiation: signalingState=', this.peerConnection.signalingState);
+        this.isRenegotiating = false;
+        return;
       }
+
+      console.log('[Calling] Creating new offer for renegotiation');
+      const offer = await this.peerConnection.createOffer();
+      await this.peerConnection.setLocalDescription(offer);
+
+      // Send the new offer from either side (supports simultaneous screen shares)
+      await this.sendCallSignal({
+        type: 'offer',
+        callId: this.currentCall.id,
+        from: this.localUsername,
+        to: this.currentCall.peer,
+        data: offer,
+        timestamp: Date.now(),
+        isRenegotiation: true
+      });
+
+      // Start timeout waiting for renegotiation answer to avoid indefinite wait
+      if (this.renegotiationTimeoutId) {
+        clearTimeout(this.renegotiationTimeoutId);
+        this.renegotiationTimeoutId = null;
+      }
+      this.renegotiationTimeoutId = setTimeout(async () => {
+        if (!this.peerConnection) return;
+        if (this.peerConnection.signalingState === 'have-local-offer') {
+          try {
+            console.warn('[Calling] Renegotiation timed out; rolling back local offer');
+            await (this.peerConnection as any).setLocalDescription({ type: 'rollback' });
+          } catch (rbErr) {
+            console.warn('[Calling] Rollback after renegotiation timeout failed (non-fatal):', rbErr);
+          }
+        }
+        this.isRenegotiating = false;
+      }, 10000);
     } catch (error) {
       console.error('[Calling] Failed to renegotiate connection:', error);
       this.isRenegotiating = false;
@@ -761,6 +839,20 @@ export class WebRTCCallingService {
    */
   getCurrentCall(): CallState | null {
     return this.currentCall;
+  }
+
+  /**
+   * Get remote screen stream
+   */
+  getRemoteScreenStream(): MediaStream | null {
+    return this.remoteScreenStream;
+  }
+
+  /**
+   * Get peer connection for quality monitoring
+   */
+  getPeerConnection(): RTCPeerConnection | null {
+    return this.peerConnection;
   }
 
   /**
@@ -879,6 +971,61 @@ export class WebRTCCallingService {
   }
 
   /**
+   * Clear remote screen stream and notify callback
+   */
+  private clearRemoteScreenStream(): void {
+    if (this.remoteScreenStream) {
+      console.log('[Calling] Clearing remote screen stream');
+      this.remoteScreenStream = null;
+      this.onRemoteScreenStreamCallback?.(null);
+    }
+  }
+
+  /**
+   * Clear remote camera stream and notify callback
+   */
+  private clearRemoteStream(): void {
+    if (this.remoteStream) {
+      console.log('[Calling] Clearing remote camera stream');
+      this.remoteStream = null;
+      this.onRemoteStreamCallback?.(null);
+    }
+  }
+
+  /**
+   * Detect if a video track is from screen sharing based on its characteristics
+   */
+  private isScreenShareTrack(settings: MediaTrackSettings): boolean {
+    // Screen shares typically have:
+    // 1. No facingMode (cameras have 'user' or 'environment')
+    // 2. Larger resolutions (usually > 1280x720)
+    // 3. Different aspect ratios than typical cameras
+
+    const hasNoFacingMode = !settings.facingMode;
+    const isLargeResolution = (settings.width || 0) >= 1280 || (settings.height || 0) >= 720;
+    const isWideAspectRatio = settings.width && settings.height ?
+      (settings.width / settings.height) > 1.5 : false;
+    // Type-safe device ID check
+    const deviceId = (settings as MediaTrackSettings & { deviceId?: string }).deviceId;
+    const isDesktopDeviceId =
+      typeof deviceId === 'string' &&
+      (deviceId.startsWith('screen:') || deviceId.startsWith('window:'));
+
+    // Screen shares usually don't have facingMode and tend to be larger
+    const isLikelyScreenShare = (hasNoFacingMode && (isLargeResolution || isWideAspectRatio)) || isDesktopDeviceId;
+
+    console.log('[Calling] Screen share detection:', {
+      hasNoFacingMode,
+      isLargeResolution,
+      isWideAspectRatio,
+      isLikelyScreenShare,
+      settings
+    });
+
+    return isLikelyScreenShare;
+  }
+
+  /**
    * Create WebRTC peer connection
    */
   private async createPeerConnection(): Promise<void> {
@@ -886,10 +1033,97 @@ export class WebRTCCallingService {
 
     // Handle remote stream
     this.peerConnection.ontrack = (event) => {
-      console.log('[Calling] Received remote track:', event.track.kind);
-      
+      console.log('[Calling] Received remote track:', event.track.kind, 'from stream:', event.streams[0]?.id);
+
+      // Handle empty event.streams by creating a new MediaStream
+      let stream: MediaStream;
       if (event.streams && event.streams[0]) {
-        this.remoteStream = event.streams[0];
+        stream = event.streams[0];
+      } else {
+        // Create new MediaStream from the track
+        stream = new MediaStream([event.track]);
+        console.log('[Calling] Created new MediaStream from track:', event.track.kind);
+      }
+
+      const videoTrack = stream.getVideoTracks()[0];
+
+      // Detect if this is a screen share based on track settings
+      if (videoTrack) {
+        const settings = videoTrack.getSettings();
+        const isScreenShare = this.isScreenShareTrack(settings);
+
+        console.log('[Calling] Track analysis:', {
+          isScreenShare,
+          width: settings.width,
+          height: settings.height,
+          frameRate: settings.frameRate,
+          facingMode: settings.facingMode
+        });
+
+        if (isScreenShare) {
+          console.log('[Calling] Detected remote screen share stream');
+
+          // Clear previous screen stream if exists
+          if (this.remoteScreenStream) {
+            this.clearRemoteScreenStream();
+          }
+
+          this.remoteScreenStream = stream;
+
+          // Attach ended handlers to clear screen stream
+          videoTrack.onended = () => {
+            console.log('[Calling] Remote screen share track ended');
+            this.clearRemoteScreenStream();
+          };
+          const handleRemove = () => {
+            console.log('[Calling] Remote screen share track removed');
+            this.clearRemoteScreenStream();
+          };
+          try { (stream as any).onremovetrack = handleRemove; } catch {}
+
+          this.onRemoteScreenStreamCallback?.(this.remoteScreenStream);
+        } else {
+          console.log('[Calling] Detected remote camera stream');
+
+          // Clear previous camera stream if exists
+          if (this.remoteStream) {
+            this.clearRemoteStream();
+          }
+
+          this.remoteStream = stream;
+
+          // Attach ended handlers to clear camera stream
+          videoTrack.onended = () => {
+            console.log('[Calling] Remote camera track ended');
+            this.clearRemoteStream();
+          };
+          const handleRemoveCam = () => {
+            console.log('[Calling] Remote camera track removed');
+            this.clearRemoteStream();
+          };
+          try { (stream as any).onremovetrack = handleRemoveCam; } catch {}
+
+          this.onRemoteStreamCallback?.(this.remoteStream);
+        }
+      } else {
+        // Audio-only or fallback
+        console.log('[Calling] Audio-only or fallback stream');
+
+        if (this.remoteStream) {
+          this.clearRemoteStream();
+        }
+
+        this.remoteStream = stream;
+
+        // Attach ended handlers for audio tracks
+        const audioTrack = stream.getAudioTracks()[0];
+        if (audioTrack) {
+          audioTrack.onended = () => {
+            console.log('[Calling] Remote audio track ended');
+            this.clearRemoteStream();
+          };
+        }
+
         this.onRemoteStreamCallback?.(this.remoteStream);
       }
     };
@@ -911,6 +1145,10 @@ export class WebRTCCallingService {
             if (this.iceConnectionFailureTimeoutId) {
               clearTimeout(this.iceConnectionFailureTimeoutId);
               this.iceConnectionFailureTimeoutId = null;
+            }
+            if (this.renegotiationTimeoutId) {
+              clearTimeout(this.renegotiationTimeoutId);
+              this.renegotiationTimeoutId = null;
             }
             // Clear renegotiation flag if connection is restored
             if (this.isRenegotiating) {
@@ -966,6 +1204,19 @@ export class WebRTCCallingService {
     this.peerConnection.oniceconnectionstatechange = () => {
       const state = this.peerConnection?.iceConnectionState;
       console.log('[Calling] ICE connection state:', state);
+      if (this.currentCall) {
+        if (state === 'connected' || state === 'completed') {
+          // Some platforms only update iceConnectionState; mirror to overall call status
+          if (this.currentCall.status !== 'connected') {
+            this.currentCall.status = 'connected';
+            this.onCallStateChangeCallback?.(this.currentCall);
+          }
+        } else if (state === 'checking' && this.currentCall.status === 'ringing') {
+          // Move from ringing to connecting once ICE starts
+          this.currentCall.status = 'connecting';
+          this.onCallStateChangeCallback?.(this.currentCall);
+        }
+      }
     };
   }
 
@@ -1077,22 +1328,32 @@ export class WebRTCCallingService {
 
         // Process the renegotiation offer only for answered calls
         try {
-          await this.peerConnection?.setRemoteDescription(signal.data);
+          if (!this.peerConnection) return;
+
+          // Handle glare by rolling back local offer if present
+          if (this.peerConnection.signalingState === 'have-local-offer') {
+            try {
+              console.log('[Calling] Rolling back local offer to resolve glare');
+              await (this.peerConnection as any).setLocalDescription({ type: 'rollback' });
+            } catch (rbErr) {
+              console.warn('[Calling] Rollback failed (non-fatal):', rbErr);
+            }
+          }
+
+          await this.peerConnection.setRemoteDescription(signal.data);
 
           // Create and send answer for renegotiation
-          const answer = await this.peerConnection?.createAnswer();
-          if (answer) {
-            await this.peerConnection?.setLocalDescription(answer);
-            await this.sendCallSignal({
-              type: 'answer',
-              callId: signal.callId,
-              from: this.localUsername,
-              to: signal.from,
-              data: answer,
-              timestamp: Date.now(),
-              isRenegotiation: true
-            });
-          }
+          const answer = await this.peerConnection.createAnswer();
+          await this.peerConnection.setLocalDescription(answer);
+          await this.sendCallSignal({
+            type: 'answer',
+            callId: signal.callId,
+            from: this.localUsername,
+            to: signal.from,
+            data: answer,
+            timestamp: Date.now(),
+            isRenegotiation: true
+          });
         } catch (error) {
           console.error('[Calling] Failed to handle renegotiation offer:', error);
         }
@@ -1141,6 +1402,15 @@ export class WebRTCCallingService {
       if (this.currentCall?.status === 'ringing') {
         this.currentCall.status = 'missed';
         this.onCallStateChangeCallback?.(this.currentCall);
+        // Notify caller so their UI ends promptly
+        this.sendCallSignal({
+          type: 'end-call',
+          callId: this.currentCall.id,
+          from: this.localUsername,
+          to: this.currentCall.peer,
+          data: { reason: 'missed' },
+          timestamp: Date.now()
+        }).catch((e) => console.warn('[Calling] Failed to notify caller of missed call:', e));
         this.cleanup();
       }
     }, this.RING_TIMEOUT);
@@ -1166,6 +1436,10 @@ export class WebRTCCallingService {
 
           // Clear renegotiation flag since we successfully processed the answer
           this.isRenegotiating = false;
+          if (this.renegotiationTimeoutId) {
+            clearTimeout(this.renegotiationTimeoutId);
+            this.renegotiationTimeoutId = null;
+          }
         } catch (error) {
           console.error('[Calling] Failed to process renegotiation answer:', error);
         }
@@ -1255,6 +1529,10 @@ export class WebRTCCallingService {
       clearTimeout(this.iceConnectionFailureTimeoutId);
       this.iceConnectionFailureTimeoutId = null;
     }
+    if (this.renegotiationTimeoutId) {
+      clearTimeout(this.renegotiationTimeoutId);
+      this.renegotiationTimeoutId = null;
+    }
 
     // Stop local stream
     if (this.localStream) {
@@ -1268,14 +1546,18 @@ export class WebRTCCallingService {
       this.screenStream = null;
     }
 
+    // Reset screen share sender
+    this.screenShareSender = null;
+
     // Close peer connection
     if (this.peerConnection) {
       this.peerConnection.close();
       this.peerConnection = null;
     }
 
-    // Clear remote stream
+    // Clear remote streams
     this.remoteStream = null;
+    this.remoteScreenStream = null;
 
     // Reset screen sharing state
     this.isScreenSharing = false;
@@ -1302,8 +1584,15 @@ export class WebRTCCallingService {
   /**
    * Set callback for remote stream
    */
-  onRemoteStream(callback: (stream: MediaStream) => void): void {
+  onRemoteStream(callback: (stream: MediaStream | null) => void): void {
     this.onRemoteStreamCallback = callback;
+  }
+
+  /**
+   * Set callback for remote screen stream
+   */
+  onRemoteScreenStream(callback: (stream: MediaStream | null) => void): void {
+    this.onRemoteScreenStreamCallback = callback;
   }
 
   /**

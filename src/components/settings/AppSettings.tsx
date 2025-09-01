@@ -1,4 +1,4 @@
-import React from 'react';
+
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Label } from '@/components/ui/label';
 import { Switch } from '@/components/ui/switch';
@@ -6,6 +6,8 @@ import { Button } from '@/components/ui/button';
 import { Separator } from '@/components/ui/separator';
 import { useTheme } from 'next-themes';
 import { Moon, Sun, Monitor, Palette, Shield, Bell, Volume2, Trash2 } from 'lucide-react';
+import { ScreenSharingSettings } from './ScreenSharingSettings';
+import { ScreenSharingDebug } from '../debug/ScreenSharingDebug';
 
 export function AppSettings() {
   const { theme, setTheme } = useTheme();
@@ -183,6 +185,12 @@ export function AppSettings() {
           </div>
         </CardContent>
       </Card>
+
+      {/* Screen Sharing Settings */}
+      <ScreenSharingSettings />
+
+      {/* Screen Sharing Debug Tool */}
+      <ScreenSharingDebug />
 
       {/* Data Management */}
       <Card>

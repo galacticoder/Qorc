@@ -3,14 +3,18 @@
  */
 
 import React, { useState, useEffect, useRef } from 'react';
-import { Phone, PhoneOff, Video, VideoOff, Mic, MicOff, RotateCcw, Monitor, MonitorOff } from 'lucide-react';
+import { Phone, PhoneOff, Video, VideoOff, Mic, MicOff, RotateCcw, Monitor, MonitorOff, Settings } from 'lucide-react';
 import { CallState, WebRTCCallingService } from '../../lib/webrtc-calling';
 import { ScreenSourceSelector } from './ScreenSourceSelector';
+import { ScreenSharingSettings } from '../settings/ScreenSharingSettings';
+import { VideoQualityMonitor } from '../debug/VideoQualityMonitor';
 
 interface CallModalProps {
   call: CallState | null;
   localStream: MediaStream | null;
   remoteStream: MediaStream | null;
+  remoteScreenStream?: MediaStream | null;
+  peerConnection?: RTCPeerConnection | null;
   onAnswer: () => void;
   onDecline: () => void;
   onEndCall: () => void;
@@ -27,6 +31,8 @@ export const CallModal: React.FC<CallModalProps> = ({
   call,
   localStream,
   remoteStream,
+  remoteScreenStream,
+  peerConnection,
   onAnswer,
   onDecline,
   onEndCall,
@@ -44,9 +50,16 @@ export const CallModal: React.FC<CallModalProps> = ({
   const [isProcessing, setIsProcessing] = useState(false);
   const [micLevel, setMicLevel] = useState(0);
   const [showScreenSourceSelector, setShowScreenSourceSelector] = useState(false);
+  const [showScreenSharingSettings, setShowScreenSharingSettings] = useState(false);
   const audioCtxRef = useRef<AudioContext | null>(null);
   const analyserRef = useRef<AnalyserNode | null>(null);
   const rafRef = useRef<number | null>(null);
+  const wrapperRef = useRef<HTMLDivElement | null>(null);
+  const [dragging, setDragging] = useState(false);
+  const dragStartRef = useRef<{ x: number; y: number; left: number; top: number; width: number; height: number } | null>(null);
+  const [freePos, setFreePos] = useState<{ left: number; top: number } | null>(null);
+  const [anchorCorner, setAnchorCorner] = useState<'tl' | 'tr' | 'bl' | 'br'>('br');
+  const [anchorOffset, setAnchorOffset] = useState<{ x: number; y: number }>({ x: 16, y: 16 });
 
   // Camera devices & dropdown state
   const [cameraDevices, setCameraDevices] = useState<MediaDeviceInfo[]>([]);
@@ -103,6 +116,73 @@ export const CallModal: React.FC<CallModalProps> = ({
     setCameraMenuOpen(false);
     // Note: live switching mid-call requires access to callingService.
     // This selection will be applied automatically on the next video call.
+  };
+
+  // Drag handling
+  useEffect(() => {
+    const onMouseMove = (e: MouseEvent) => {
+      if (!dragging || !dragStartRef.current) return;
+      const dx = e.clientX - dragStartRef.current.x;
+      const dy = e.clientY - dragStartRef.current.y;
+      let left = dragStartRef.current.left + dx;
+      let top = dragStartRef.current.top + dy;
+      // Constrain to viewport with 8px margin
+      const margin = 8;
+      const vw = window.innerWidth;
+      const vh = window.innerHeight;
+      const w = dragStartRef.current.width;
+      const h = dragStartRef.current.height;
+      left = Math.max(margin, Math.min(left, vw - w - margin));
+      top = Math.max(margin, Math.min(top, vh - h - margin));
+      setFreePos({ left, top });
+    };
+    const onMouseUp = () => {
+      if (!dragging || !dragStartRef.current || !wrapperRef.current || !freePos) {
+        setDragging(false);
+        document.body.style.userSelect = '';
+        return;
+      }
+      // Snap to nearest corner
+      const rect = { left: freePos.left, top: freePos.top, width: dragStartRef.current.width, height: dragStartRef.current.height };
+      const vw = window.innerWidth;
+      const vh = window.innerHeight;
+      const distances = [
+        { corner: 'tl' as const, d: rect.left + rect.top },
+        { corner: 'tr' as const, d: (vw - (rect.left + rect.width)) + rect.top },
+        { corner: 'bl' as const, d: rect.left + (vh - (rect.top + rect.height)) },
+        { corner: 'br' as const, d: (vw - (rect.left + rect.width)) + (vh - (rect.top + rect.height)) }
+      ];
+      distances.sort((a, b) => a.d - b.d);
+      const nearest = distances[0].corner;
+      setAnchorCorner(nearest);
+      // Compute offset from that corner (8px min)
+      let offX = 16, offY = 16;
+      if (nearest === 'tl') { offX = rect.left; offY = rect.top; }
+      if (nearest === 'tr') { offX = vw - (rect.left + rect.width); offY = rect.top; }
+      if (nearest === 'bl') { offX = rect.left; offY = vh - (rect.top + rect.height); }
+      if (nearest === 'br') { offX = vw - (rect.left + rect.width); offY = vh - (rect.top + rect.height); }
+      setAnchorOffset({ x: Math.max(8, Math.round(offX)), y: Math.max(8, Math.round(offY)) });
+      setFreePos(null);
+      setDragging(false);
+      document.body.style.userSelect = '';
+    };
+    if (dragging) {
+      window.addEventListener('mousemove', onMouseMove);
+      window.addEventListener('mouseup', onMouseUp);
+    }
+    return () => {
+      window.removeEventListener('mousemove', onMouseMove);
+      window.removeEventListener('mouseup', onMouseUp);
+    };
+  }, [dragging, freePos]);
+
+  const beginDrag = (e: React.MouseEvent) => {
+    if (!wrapperRef.current) return;
+    const rect = wrapperRef.current.getBoundingClientRect();
+    dragStartRef.current = { x: e.clientX, y: e.clientY, left: rect.left, top: rect.top, width: rect.width, height: rect.height };
+    setDragging(true);
+    setFreePos({ left: rect.left, top: rect.top });
+    document.body.style.userSelect = 'none';
   };
 
   // Mic level analyser from local stream
@@ -196,6 +276,7 @@ export const CallModal: React.FC<CallModalProps> = ({
   
   const localVideoRef = useRef<HTMLVideoElement>(null);
   const remoteVideoRef = useRef<HTMLVideoElement>(null);
+  const remoteScreenVideoRef = useRef<HTMLVideoElement>(null);
   const durationIntervalRef = useRef<NodeJS.Timeout | null>(null);
 
   // Update video streams
@@ -206,10 +287,41 @@ export const CallModal: React.FC<CallModalProps> = ({
   }, [localStream]);
 
   useEffect(() => {
-    if (remoteVideoRef.current && remoteStream) {
-      remoteVideoRef.current.srcObject = remoteStream;
+    if (remoteVideoRef.current) {
+      if (remoteStream) {
+        remoteVideoRef.current.srcObject = remoteStream;
+      } else {
+        // Clear the last frame when stream ends
+        try { remoteVideoRef.current.pause?.(); } catch {}
+        remoteVideoRef.current.srcObject = null as any;
+        try { 
+          remoteVideoRef.current.removeAttribute('src'); 
+          // Force clear by setting to empty video
+          (remoteVideoRef.current as any).src = '';
+          remoteVideoRef.current.load(); 
+        } catch {}
+      }
     }
   }, [remoteStream]);
+
+  useEffect(() => {
+    if (remoteScreenVideoRef.current) {
+      if (remoteScreenStream) {
+        remoteScreenVideoRef.current.srcObject = remoteScreenStream;
+        console.log('[CallModal] Remote screen stream connected to video element');
+      } else {
+        // Clear the last frame when screen share ends
+        try { remoteScreenVideoRef.current.pause?.(); } catch {}
+        remoteScreenVideoRef.current.srcObject = null as any;
+        try { 
+          remoteScreenVideoRef.current.removeAttribute('src'); 
+          // Force clear by setting to empty video
+          (remoteScreenVideoRef.current as any).src = '';
+          remoteScreenVideoRef.current.load(); 
+        } catch {}
+      }
+    }
+  }, [remoteScreenStream]);
 
   // Track call duration
   useEffect(() => {
@@ -309,12 +421,23 @@ export const CallModal: React.FC<CallModalProps> = ({
   const isRinging = call.status === 'ringing';
   const isConnecting = call.status === 'connecting';
 
+  // Compute wrapper style based on drag/free or anchored corner
+  const wrapperStyle: React.CSSProperties = freePos
+    ? { position: 'fixed', left: Math.round(freePos.left), top: Math.round(freePos.top), zIndex: 50, width: '380px' }
+    : anchorCorner === 'tl'
+      ? { position: 'fixed', left: anchorOffset.x, top: anchorOffset.y, zIndex: 50, width: '380px' }
+      : anchorCorner === 'tr'
+        ? { position: 'fixed', right: anchorOffset.x, top: anchorOffset.y, zIndex: 50, width: '380px' }
+        : anchorCorner === 'bl'
+          ? { position: 'fixed', left: anchorOffset.x, bottom: anchorOffset.y, zIndex: 50, width: '380px' }
+          : { position: 'fixed', right: anchorOffset.x, bottom: anchorOffset.y, zIndex: 50, width: '380px' };
+
   return (
-    <div className="fixed bottom-4 right-4 z-50 w-[380px] sm:w-[420px]">
-      <div className="bg-gray-900 rounded-xl shadow-2xl border border-gray-700 overflow-hidden flex flex-col">
+    <div ref={wrapperRef} style={wrapperStyle} className="sm:w-[420px]">
+      <div className="bg-gray-900/95 backdrop-blur rounded-xl shadow-[0_20px_60px_-15px_rgba(0,0,0,0.6)] border border-gray-700 overflow-hidden flex flex-col">
         
         {/* Header */}
-        <div className="p-5 border-b border-gray-700 bg-gradient-to-r from-gray-900 to-gray-800">
+        <div className="p-5 border-b border-gray-700 bg-gradient-to-r from-gray-900 to-gray-800 cursor-move select-none" onMouseDown={beginDrag}>
           <div className="flex items-center justify-between">
             <div>
               <h2 className="text-xl font-semibold text-white">
@@ -370,38 +493,80 @@ export const CallModal: React.FC<CallModalProps> = ({
 
         {/* Video Area */}
         {isVideoCall && (
-          <div className="relative bg-black h-56">
-            {/* Remote Video */}
-            <video
-              ref={remoteVideoRef}
-              autoPlay
-              playsInline
-              className="w-full h-full object-cover"
-            />
-            
-            {/* Local Video (Picture-in-Picture) */}
-            <div className="absolute top-3 right-3 w-28 h-20 bg-gray-800 rounded-md overflow-hidden border border-gray-600 shadow-md">
+          <div className="space-y-3">
+            {/* Main Video Display */}
+            <div className="relative bg-black h-56">
+              {/* Dedicated remote screen share video (shown only when available) */}
               <video
-                ref={localVideoRef}
+                ref={remoteScreenVideoRef}
                 autoPlay
                 playsInline
-                muted
-                className="w-full h-full object-cover"
+                className={`w-full h-full object-cover ${remoteScreenStream ? '' : 'hidden'}`}
               />
+
+              {/* Dedicated remote camera video (hidden when screen share is active) */}
+              <video
+                ref={remoteVideoRef}
+                autoPlay
+                playsInline
+                className={`w-full h-full object-cover ${remoteScreenStream ? 'hidden' : ''}`}
+              />
+
+              {/* Local Video (Picture-in-Picture) */}
+              <div className="absolute top-3 right-3 w-28 h-20 bg-gray-800 rounded-md overflow-hidden border border-gray-600 shadow-md">
+                <video
+                  ref={localVideoRef}
+                  autoPlay
+                  playsInline
+                  muted
+                  className="w-full h-full object-cover"
+                />
+              </div>
+
+              {/* Stream Type Indicator */}
+              {remoteScreenStream && (
+                <div className="absolute top-3 left-3 bg-blue-600 text-white px-2 py-1 rounded text-xs font-medium">
+                  Screen Share
+                </div>
+              )}
+
+              {/* No video placeholder */}
+              {!remoteStream && !remoteScreenStream && (
+                <div className="absolute inset-0 flex items-center justify-center">
+                  <div className="text-center text-gray-400">
+                    <div className="w-24 h-24 bg-gray-700 rounded-full flex items-center justify-center mx-auto mb-4">
+                      <span className="text-2xl font-bold">
+                        {call.peer.charAt(0).toUpperCase()}
+                      </span>
+                    </div>
+                    <p>Waiting for video...</p>
+                  </div>
+                </div>
+              )}
             </div>
 
-            {/* No video placeholder */}
-            {!remoteStream && (
-              <div className="absolute inset-0 flex items-center justify-center">
-                <div className="text-center text-gray-400">
-                  <div className="w-24 h-24 bg-gray-700 rounded-full flex items-center justify-center mx-auto mb-4">
-                    <span className="text-2xl font-bold">
-                      {call.peer.charAt(0).toUpperCase()}
-                    </span>
-                  </div>
-                  <p>Waiting for video...</p>
+            {/* Secondary Video (Camera when screen sharing) */}
+            {remoteScreenStream && remoteStream && (
+              <div className="relative bg-black h-32 rounded-md overflow-hidden">
+                <video
+                  ref={remoteVideoRef}
+                  autoPlay
+                  playsInline
+                  className="w-full h-full object-cover"
+                />
+                <div className="absolute top-2 left-2 bg-gray-800 text-white px-2 py-1 rounded text-xs">
+                  Camera
                 </div>
               </div>
+            )}
+
+            {/* Quality Monitor */}
+            {(remoteStream || remoteScreenStream) && (
+              <VideoQualityMonitor
+                peerConnection={peerConnection || null}
+                remoteStream={remoteScreenStream || remoteStream}
+                isVisible={true}
+              />
             )}
           </div>
         )}
@@ -549,20 +714,29 @@ export const CallModal: React.FC<CallModalProps> = ({
 
               {/* Screen Share Button (only for video calls) */}
               {isVideoCall && onStartScreenShare && onStopScreenShare && (
-                <button
-                  onClick={handleScreenShare}
-                  disabled={isProcessing}
-                  className={`w-12 h-12 rounded-full flex items-center justify-center transition-colors ${
-                    isScreenSharing ? 'bg-blue-600 hover:bg-blue-700' : 'bg-gray-600 hover:bg-gray-700'
-                  }`}
-                  title={isScreenSharing ? 'Stop screen sharing' : 'Start screen sharing'}
-                >
-                  {isScreenSharing ? (
-                    <MonitorOff className="w-6 h-6 text-white" />
-                  ) : (
-                    <Monitor className="w-6 h-6 text-white" />
-                  )}
-                </button>
+                <div className="flex items-center gap-1">
+                  <button
+                    onClick={handleScreenShare}
+                    disabled={isProcessing}
+                    className={`w-12 h-12 rounded-full flex items-center justify-center transition-colors ${
+                      isScreenSharing ? 'bg-blue-600 hover:bg-blue-700' : 'bg-gray-600 hover:bg-gray-700'
+                    }`}
+                    title={isScreenSharing ? 'Stop screen sharing' : 'Start screen sharing'}
+                  >
+                    {isScreenSharing ? (
+                      <MonitorOff className="w-6 h-6 text-white" />
+                    ) : (
+                      <Monitor className="w-6 h-6 text-white" />
+                    )}
+                  </button>
+                  <button
+                    onClick={() => setShowScreenSharingSettings(true)}
+                    className="w-8 h-8 rounded-full bg-gray-700 hover:bg-gray-600 flex items-center justify-center transition-colors"
+                    title="Screen sharing settings"
+                  >
+                    <Settings className="w-4 h-4 text-white" />
+                  </button>
+                </div>
               )}
 
               {/* End Call Button */}
@@ -586,6 +760,32 @@ export const CallModal: React.FC<CallModalProps> = ({
         onCancel={handleScreenSourceCancel}
         onGetAvailableScreenSources={onGetAvailableScreenSources}
       />
+
+      {/* Screen Sharing Settings Modal */}
+      {showScreenSharingSettings && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+          <div className="bg-white dark:bg-gray-800 rounded-lg p-6 max-w-md w-full mx-4 max-h-[80vh] overflow-y-auto">
+            <div className="flex justify-between items-center mb-4">
+              <h3 className="text-lg font-semibold">Screen Sharing Settings</h3>
+              <button
+                onClick={() => setShowScreenSharingSettings(false)}
+                className="text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200"
+              >
+                ✕
+              </button>
+            </div>
+            <ScreenSharingSettings />
+            <div className="mt-4 flex justify-end">
+              <button
+                onClick={() => setShowScreenSharingSettings(false)}
+                className="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700 transition-colors"
+              >
+                Done
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

@@ -28,7 +28,7 @@ export function ChatMessage({ message, onReply, previousMessage, onDelete, onEdi
     return <DeletedMessage sender={sender} timestamp={timestamp} isCurrentUser={isCurrentUser} />;
   }
 
-  if (type === "FILE_MESSAGE" || type === "file") {
+  if (type === "FILE_MESSAGE" || type === "file" || type === "file-message") {
     // Check if it's a voice note (audio file)
     const isVoiceNote = message.filename?.includes('voice-note') ||
                        (message.mimeType && message.mimeType.startsWith('audio/')) ||

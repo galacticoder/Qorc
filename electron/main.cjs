@@ -119,6 +119,31 @@ app.whenReady().then(() => {
       return false;
     });
 
+    // Prevent navigation away from our app (e.g., when clicking blob: links for download)
+    contents.on('will-navigate', (e, url) => {
+      e.preventDefault();
+      console.log('[SECURITY] Blocked navigation to:', url);
+    });
+
+    // Intercept downloads to avoid renderer navigation/logouts
+    contents.session.on('will-download', (event, item) => {
+      // Keep default behavior but ensure it does not navigate the page
+      console.log('[ELECTRON] Download started:', item.getFilename());
+      // Explicitly prevent any navigation side-effects
+      try {
+        if (typeof contents.isLoading === 'function' && contents.isLoading()) {
+          if (typeof contents.stopLoading === 'function') {
+            contents.stopLoading();
+          }
+        }
+      } catch (err) {
+        console.error('[ELECTRON] Failed to stop loading during download:', err);
+      }
+      item.on('done', (_e, state) => {
+        console.log('[ELECTRON] Download finished:', state);
+      });
+    });
+
     // Security: Prevent new window creation
     contents.on('new-window', (event, navigationUrl) => {
       event.preventDefault();

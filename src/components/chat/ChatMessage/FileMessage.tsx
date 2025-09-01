@@ -4,6 +4,7 @@ import { Avatar, AvatarFallback } from "../../ui/avatar";
 import { format } from "date-fns";
 import * as icons from "../icons";
 import { Message } from "../types";
+import { VoiceMessage } from "../VoiceMessage";
 
 interface FileMessageProps {
   message: Message;
@@ -12,7 +13,7 @@ interface FileMessageProps {
 
 export const IMAGE_EXTENSIONS = ["jpg", "jpeg", "png", "gif", "webp"];
 export const VIDEO_EXTENSIONS = ["mp4", "webm", "ogg"];
-export const AUDIO_EXTENSIONS = ["mp3", "wav", "ogg", "m4a"];
+export const AUDIO_EXTENSIONS = ["mp3", "wav", "ogg", "m4a", "webm"];
 
 export function hasExtension(filename: string, extensions: string[]) {
   // SECURITY: Prevent ReDoS attacks by validating filename length and format
@@ -36,12 +37,32 @@ export function formatFileSize(bytes: number) {
   return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + " " + sizes[i];
 }
 
-
 export function FileMessage({ message, isCurrentUser }: FileMessageProps) {
-  const { content, sender, timestamp, filename, fileSize } = message;
+  const { content, sender, timestamp, filename, fileSize, mimeType, originalBase64Data } = message;
+
+  // Voice note detection: filename contains voice-note or MIME is audio/*
+  const isVoiceNote = Boolean(
+    (filename && filename.toLowerCase().includes('voice-note')) ||
+    (mimeType && mimeType.startsWith('audio/')) ||
+    (filename && hasExtension(filename, AUDIO_EXTENSIONS))
+  );
+
+  if (isVoiceNote) {
+    return (
+      <VoiceMessage
+        audioUrl={content}
+        sender={sender}
+        timestamp={timestamp}
+        isCurrentUser={Boolean(isCurrentUser)}
+        filename={filename}
+        originalBase64Data={originalBase64Data}
+        mimeType={mimeType}
+      />
+    );
+  }
 
   return (
-    <div className={cn("flex items-start gap-2 mb-4", isCurrentUser ? "flex-row-reverse" : "")}>
+    <div className={cn("flex items-start gap-2 mb-4", isCurrentUser ? "flex-row-reverse" : "")}> 
       <Avatar className="w-8 h-8">
         <AvatarFallback className={cn(isCurrentUser ? "bg-blue-500 text-white" : "bg-muted")}>
           {sender.charAt(0).toUpperCase()}
@@ -63,6 +84,7 @@ export function FileMessage({ message, isCurrentUser }: FileMessageProps) {
                 download={filename}
                 className="absolute top-2 right-2 bg-white p-1 rounded-full shadow hidden group-hover:block"
                 aria-label={`Download ${filename}`}
+                rel="noopener"
               >
                 <icons.DownloadIcon />
               </a>
@@ -91,6 +113,7 @@ export function FileMessage({ message, isCurrentUser }: FileMessageProps) {
                   download={filename}
                   className="text-blue-500 hover:text-blue-700"
                   title="Download"
+                  rel="noopener"
                 >
                   <icons.DownloadIcon className="w-5 h-5 hover:scale-110 transition-transform duration-100 ease-in-out" />
                 </a>
@@ -116,7 +139,7 @@ export function FileMessage({ message, isCurrentUser }: FileMessageProps) {
                 <span className="truncate max-w-[250px] ml-1" title={filename}>
                   {filename}
                 </span>
-                <a href={content} download={filename} title="Download" aria-label={`Download ${filename}`}>
+                <a href={content} download={filename} title="Download" aria-label={`Download ${filename}`} rel="noopener">
                   <icons.DownloadIcon className="w-5 h-5 hover:scale-110 transition-transform duration-100 ease-in-out" />
                 </a>
               </div>
@@ -140,7 +163,7 @@ export function FileMessage({ message, isCurrentUser }: FileMessageProps) {
                   <span className="text-sm truncate max-w-[250px] w-full" title={filename}>
                     {filename}
                   </span>
-                  <a href={content} download={filename} title="Download" aria-label={`Download ${filename}`}>
+                  <a href={content} download={filename} title="Download" aria-label={`Download ${filename}`} rel="noopener">
                     <icons.DownloadIcon className="w-5 h-5 hover:scale-110 transition-transform duration-100 ease-in-out" />
                   </a>
                 </div>

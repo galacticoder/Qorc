@@ -46,7 +46,10 @@ function createBlobUrlFromBase64(dataBase64: string, fileType?: string): string 
       cleanBase64 = cleanBase64.split(',')[1];
     }
 
-    // Remove any whitespace and invalid characters
+    // Convert base64url to standard base64 if necessary (-_ -> +/)
+    cleanBase64 = cleanBase64.replace(/-/g, '+').replace(/_/g, '/');
+
+    // Remove any whitespace and invalid characters (after base64url fix)
     cleanBase64 = cleanBase64.replace(/[^A-Za-z0-9+/=]/g, '');
 
     // Ensure proper padding
@@ -318,17 +321,17 @@ export function useEncryptedMessageHandler(
             }).catch(() => ({ plaintext: atob(ctB64) }));
             
             if (dec && dec.plaintext) {
-              // First, try to parse with file message limit to check message type (file messages can be very large)
-              let tempPayload = safeJsonParse(dec.plaintext, MAX_FILE_MESSAGE_SIZE);
+              // First, try to parse with call signal size; SDPs can be very large
+              let tempPayload = safeJsonParse(dec.plaintext, MAX_CALL_SIGNAL_SIZE);
 
               // Use appropriate limit based on message type
-              if (tempPayload?.type === 'file-message') {
-                payload = tempPayload; // Already parsed with correct limit
-              } else if (tempPayload?.type === 'call-signal') {
-                // For call signals, use the call signal limit (reparse if needed)
-                payload = safeJsonParse(dec.plaintext, MAX_CALL_SIGNAL_SIZE);
+              if (tempPayload?.type === 'call-signal') {
+                payload = tempPayload;
+              } else if (tempPayload?.type === 'file-message') {
+                // Reparse with file-message limit if needed
+                payload = safeJsonParse(dec.plaintext, MAX_FILE_MESSAGE_SIZE);
               } else {
-                // For other message types, use the standard limit (reparse if needed)
+                // For other message types, use a generous standard limit
                 payload = safeJsonParse(dec.plaintext, 50000);
               }
 

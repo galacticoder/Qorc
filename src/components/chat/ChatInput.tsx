@@ -255,6 +255,28 @@ export function ChatInput({
     }
   };
 
+  // Efficiently convert a Blob/File to base64 using FileReader
+  const blobToBase64 = (blob: Blob): Promise<string> => {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onloadend = () => {
+        try {
+          const result = reader.result as string;
+          const commaIndex = result.indexOf(',');
+          resolve(commaIndex >= 0 ? result.substring(commaIndex + 1) : result);
+        } catch (err) {
+          reject(err);
+        }
+      };
+      reader.onerror = () => reject(reader.error);
+      try {
+        reader.readAsDataURL(blob);
+      } catch (err) {
+        reject(err);
+      }
+    });
+  };
+
   const handleSendVoiceNote = async (audioBlob: Blob) => {
     if (!selectedConversation) {
       console.error('[ChatInput] No conversation selected for voice note');
@@ -302,17 +324,26 @@ export function ChatInput({
       const fileUrl = URL.createObjectURL(file);
       console.log('[ChatInput] Created blob URL for voice note:', fileUrl);
 
+      let originalBase64Data: string = '';
+      try {
+        originalBase64Data = await blobToBase64(file);
+      } catch (err) {
+        console.error('[ChatInput] Failed to convert voice note to base64:', err);
+        originalBase64Data = '';
+      }
+
       onSendFile({
         id: crypto.randomUUID(),
         content: fileUrl,
         timestamp: new Date(),
         isCurrentUser: true,
         isSystemMessage: false,
-        type: 'file', // Use 'file' type for proper message handling
+        type: 'file-message', // Normalize to file-message for consistent handling
         filename: filename,
         fileSize: file.size,
-        mimeType: file.type,
+        mimeType: file.type || 'audio/webm',
         sender: currentUsername,
+        originalBase64Data,
       });
 
       console.log('[ChatInput] Voice note added to UI');
