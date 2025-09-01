@@ -5,6 +5,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Phone, PhoneOff, Video, VideoOff, Mic, MicOff, RotateCcw, Monitor, MonitorOff } from 'lucide-react';
 import { CallState, WebRTCCallingService } from '../../lib/webrtc-calling';
+import { ScreenSourceSelector } from './ScreenSourceSelector';
 
 interface CallModalProps {
   call: CallState | null;
@@ -16,8 +17,9 @@ interface CallModalProps {
   onToggleMute: () => boolean;
   onToggleVideo: () => boolean;
   onSwitchCamera: () => void;
-  onStartScreenShare?: () => Promise<void>;
+  onStartScreenShare?: (selectedSource?: { id: string; name: string }) => Promise<void>;
   onStopScreenShare?: () => Promise<void>;
+  onGetAvailableScreenSources?: () => Promise<Array<{ id: string; name: string; type: 'screen' | 'window' }>>;
   isScreenSharing?: boolean;
 }
 
@@ -33,6 +35,7 @@ export const CallModal: React.FC<CallModalProps> = ({
   onSwitchCamera,
   onStartScreenShare,
   onStopScreenShare,
+  onGetAvailableScreenSources,
   isScreenSharing = false
 }) => {
   const [isMuted, setIsMuted] = useState(false);
@@ -40,6 +43,7 @@ export const CallModal: React.FC<CallModalProps> = ({
   const [callDuration, setCallDuration] = useState(0);
   const [isProcessing, setIsProcessing] = useState(false);
   const [micLevel, setMicLevel] = useState(0);
+  const [showScreenSourceSelector, setShowScreenSourceSelector] = useState(false);
   const audioCtxRef = useRef<AudioContext | null>(null);
   const analyserRef = useRef<AnalyserNode | null>(null);
   const rafRef = useRef<number | null>(null);
@@ -110,6 +114,14 @@ export const CallModal: React.FC<CallModalProps> = ({
       }
       audioCtxRef.current = null;
       analyserRef.current = null;
+      setMicLevel(0);
+      return;
+    }
+
+    // Check if the stream has audio tracks before creating analyser
+    const audioTracks = localStream.getAudioTracks();
+    if (audioTracks.length === 0) {
+      console.log('[CallModal] No audio tracks in stream, skipping mic analyser setup');
       setMicLevel(0);
       return;
     }
@@ -235,19 +247,52 @@ export const CallModal: React.FC<CallModalProps> = ({
   const handleScreenShare = async () => {
     if (isProcessing) return;
 
+    if (isScreenSharing) {
+      // Stop screen sharing
+      setIsProcessing(true);
+      try {
+        await onStopScreenShare?.();
+      } catch (error) {
+        console.error('Screen sharing error:', error);
+        alert('Failed to stop screen sharing: ' + (error as Error).message);
+      } finally {
+        setIsProcessing(false);
+      }
+    } else {
+      // Start screen sharing - show source selector if available
+      if (onGetAvailableScreenSources) {
+        setShowScreenSourceSelector(true);
+      } else {
+        // Fallback to direct screen sharing without selection
+        setIsProcessing(true);
+        try {
+          await onStartScreenShare?.();
+        } catch (error) {
+          console.error('Screen sharing error:', error);
+          alert('Failed to start screen sharing: ' + (error as Error).message);
+        } finally {
+          setIsProcessing(false);
+        }
+      }
+    }
+  };
+
+  const handleScreenSourceSelect = async (source: { id: string; name: string; type: 'screen' | 'window' }) => {
     setIsProcessing(true);
     try {
-      if (isScreenSharing) {
-        await onStopScreenShare?.();
-      } else {
-        await onStartScreenShare?.();
-      }
+      await onStartScreenShare?.(source);
     } catch (error) {
       console.error('Screen sharing error:', error);
-      alert('Failed to ' + (isScreenSharing ? 'stop' : 'start') + ' screen sharing: ' + (error as Error).message);
+      alert('Failed to start screen sharing: ' + (error as Error).message);
     } finally {
       setIsProcessing(false);
+      setShowScreenSourceSelector(false);
     }
+  };
+
+  const handleScreenSourceCancel = () => {
+    // Close the screen source selector
+    setShowScreenSourceSelector(false);
   };
 
   const formatDuration = (seconds: number): string => {
@@ -532,6 +577,15 @@ export const CallModal: React.FC<CallModalProps> = ({
           )}
         </div>
       </div>
+
+      {/* Screen Source Selector */}
+      <ScreenSourceSelector
+        isOpen={showScreenSourceSelector}
+        onClose={() => setShowScreenSourceSelector(false)}
+        onSelect={handleScreenSourceSelect}
+        onCancel={handleScreenSourceCancel}
+        onGetAvailableScreenSources={onGetAvailableScreenSources}
+      />
     </div>
   );
 };

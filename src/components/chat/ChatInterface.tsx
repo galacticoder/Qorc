@@ -69,6 +69,7 @@ export function ChatInterface({
     switchCamera,
     startScreenShare,
     stopScreenShare,
+    getAvailableScreenSources,
     isScreenSharing
   } = callingHook;
 
@@ -394,6 +395,7 @@ export function ChatInterface({
           onSwitchCamera={switchCamera}
           onStartScreenShare={startScreenShare}
           onStopScreenShare={stopScreenShare}
+          onGetAvailableScreenSources={getAvailableScreenSources}
           isScreenSharing={isScreenSharing}
         />
       )}

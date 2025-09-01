@@ -8,14 +8,114 @@ import websocketClient from "@/lib/websocket";
 function safeJsonParse(jsonString: string, maxSize: number = 10000): any {
   if (!jsonString || typeof jsonString !== 'string') return null;
   if (jsonString.length > maxSize) {
-    console.error('[Security] JSON string too large, rejecting');
+    console.error('[Security] JSON string too large, rejecting:', {
+      actualSize: jsonString.length,
+      maxSize,
+      preview: jsonString.substring(0, 100) + '...'
+    });
     return null;
   }
+
+  // Quick check if string looks like JSON (starts with { or [)
+  const trimmed = jsonString.trim();
+  if (!trimmed.startsWith('{') && !trimmed.startsWith('[')) {
+    return null; // Not JSON, don't log error for plain text
+  }
+
   try {
     return JSON.parse(jsonString);
   } catch (error) {
     console.error('[Security] JSON parse failed:', error);
     return null;
+  }
+}
+
+// SECURITY: Context-aware JSON parsing with appropriate size limits
+const MAX_CALL_SIGNAL_SIZE = 100000; // 100KB limit for call signals
+const MAX_MESSAGE_SIZE = 10000; // 10KB limit for regular messages
+const MAX_FILE_MESSAGE_SIZE = 1000000; // 1MB limit for file messages with base64 data
+
+function safeJsonParseForCallSignals(jsonString: string): any {
+  // Call signals (WebRTC offers/answers) can be quite large due to SDP data
+  return safeJsonParse(jsonString, MAX_CALL_SIGNAL_SIZE);
+}
+
+function safeJsonParseForMessages(jsonString: string): any {
+  // Regular messages should be smaller
+  return safeJsonParse(jsonString, MAX_MESSAGE_SIZE);
+}
+
+function safeJsonParseForFileMessages(jsonString: string): any {
+  // File messages can contain large base64 encoded data
+  const parsed = safeJsonParse(jsonString, MAX_FILE_MESSAGE_SIZE);
+
+  if (!parsed) {
+    return null;
+  }
+
+  // Validate base64-encoded file payloads if present
+  if (parsed.dataBase64 && typeof parsed.dataBase64 === 'string') {
+    if (!isValidBase64(parsed.dataBase64)) {
+      console.error('[Security] Invalid base64 data in file message, rejecting payload');
+      return null;
+    }
+  }
+
+  // Check other potential base64 fields that might be present in file messages
+  const base64Fields = ['fileData', 'data', 'content'];
+  for (const field of base64Fields) {
+    if (parsed[field] && typeof parsed[field] === 'string' && parsed[field].length > 100) {
+      // Only validate if it looks like it could be base64 (long string)
+      if (looksLikeBase64(parsed[field]) && !isValidBase64(parsed[field])) {
+        console.error(`[Security] Invalid base64 data in field '${field}' of file message, rejecting payload`);
+        return null;
+      }
+    }
+  }
+
+  return parsed;
+}
+
+// Helper function to check if a string looks like base64
+function looksLikeBase64(str: string): boolean {
+  // Base64 strings are typically long and contain only valid base64 characters
+  return str.length > 100 && /^[A-Za-z0-9+/]*={0,2}$/.test(str);
+}
+
+// Helper function to validate base64 strings
+function isValidBase64(str: string): boolean {
+  if (!str || typeof str !== 'string') {
+    return false;
+  }
+
+  // Check basic base64 pattern
+  const base64Pattern = /^[A-Za-z0-9+/]*={0,2}$/;
+  if (!base64Pattern.test(str)) {
+    return false;
+  }
+
+  // Check length is multiple of 4 (base64 requirement)
+  if (str.length % 4 !== 0) {
+    return false;
+  }
+
+  // Attempt safe decode+re-encode roundtrip to validate
+  try {
+    // Use different methods based on environment
+    if (typeof window !== 'undefined' && typeof Buffer === 'undefined') {
+      // Browser environment
+      const decoded = atob(str);
+      const reencoded = btoa(decoded);
+      return reencoded === str;
+    } else {
+      // Node.js/Electron environment
+      const decoded = Buffer.from(str, 'base64');
+      const reencoded = decoded.toString('base64');
+      return reencoded === str;
+    }
+  } catch (error) {
+    console.error('[Security] Base64 decode/encode roundtrip failed:', error);
+    return false;
   }
 }
 
@@ -289,83 +389,104 @@ export function useEncryptedMessageHandler(
 
           // Check if the content contains system message data (typing indicators, receipts, etc.)
           // This handles cases where system messages might be sent with generic message types
+          // Only try to parse as JSON if it looks like structured data
           if (payload.content && typeof payload.content === 'string') {
-            const contentData = safeJsonParse(payload.content);
-            if (contentData) {
-              // Handle typing indicators
-              if (contentData.type === 'typing-start' || contentData.type === 'typing-stop') {
-                console.log('[EncryptedMessageHandler] Processing typing indicator from content (backward compatibility):', contentData);
-                const event = new CustomEvent('typing-indicator', {
-                  detail: {
-                    from: payload.from,
-                    indicatorType: contentData.type
-                  }
-                });
-                window.dispatchEvent(event);
-                return; // Don't process as regular message
-              }
-              
-              // Handle read receipts
-              if (contentData.type === 'read-receipt' && contentData.messageId) {
-                console.log('[EncryptedMessageHandler] Processing read receipt from content:', contentData);
-                const event = new CustomEvent('message-read', {
-                  detail: {
-                    messageId: contentData.messageId,
-                    from: payload.from
-                  }
-                });
-                window.dispatchEvent(event);
-                return; // Don't process as regular message
-              }
-              
-              // Handle delivery receipts
-              if (contentData.type === 'delivery-receipt' && contentData.messageId) {
-                console.log('[EncryptedMessageHandler] Processing delivery receipt from content:', contentData);
-                const event = new CustomEvent('message-delivered', {
-                  detail: {
-                    messageId: contentData.messageId,
-                    from: payload.from
-                  }
-                });
-                window.dispatchEvent(event);
-                return; // Don't process as regular message
+            const trimmed = payload.content.trim();
+            if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
+              const contentData = safeJsonParseForMessages(payload.content);
+              if (contentData) {
+                // Handle typing indicators
+                if (contentData.type === 'typing-start' || contentData.type === 'typing-stop') {
+                  console.log('[EncryptedMessageHandler] Processing typing indicator from content (backward compatibility):', contentData);
+                  const event = new CustomEvent('typing-indicator', {
+                    detail: {
+                      from: payload.from,
+                      indicatorType: contentData.type
+                    }
+                  });
+                  window.dispatchEvent(event);
+                  return; // Don't process as regular message
+                }
+
+                // Handle read receipts
+                if (contentData.type === 'read-receipt' && contentData.messageId) {
+                  console.log('[EncryptedMessageHandler] Processing read receipt from content:', contentData);
+                  const event = new CustomEvent('message-read', {
+                    detail: {
+                      messageId: contentData.messageId,
+                      from: payload.from
+                    }
+                  });
+                  window.dispatchEvent(event);
+                  return; // Don't process as regular message
+                }
+
+                // Handle delivery receipts
+                if (contentData.type === 'delivery-receipt' && contentData.messageId) {
+                  console.log('[EncryptedMessageHandler] Processing delivery receipt from content:', contentData);
+                  const event = new CustomEvent('message-delivered', {
+                    detail: {
+                      messageId: contentData.messageId,
+                      from: payload.from
+                    }
+                  });
+                  window.dispatchEvent(event);
+                  return; // Don't process as regular message
+                }
               }
             }
           }
 
           // Before showing a regular message, ensure typing indicator for this sender is cleared
-          try {
-            const typingClearEvent = new CustomEvent('typing-indicator', {
-              detail: { from: payload.from, indicatorType: 'typing-stop' }
-            });
-            window.dispatchEvent(typingClearEvent);
-          } catch {}
+          // Only clear typing indicators for actual text messages, not system messages like call signals
+          const isActualMessage = (payload.type === 'message' || payload.type === 'text' || !payload.type) &&
+                                  payload.content &&
+                                  typeof payload.content === 'string' &&
+                                  payload.content.trim().length > 0;
+
+          if (isActualMessage) {
+            try {
+              const typingClearEvent = new CustomEvent('typing-indicator', {
+                detail: { from: payload.from, indicatorType: 'typing-stop' }
+              });
+              window.dispatchEvent(typingClearEvent);
+            } catch {}
+          }
 
           // Handle regular messages (only if not a system message)
           // Additional check to ensure typing indicator messages are not processed as regular messages
           if ((payload.type === 'message' || payload.type === 'text' || !payload.type) && payload.content) {
-            // Double-check that this is not a typing indicator message
-            const typingCheckData = safeJsonParse(payload.content);
-            if (typingCheckData && (typingCheckData.type === 'typing-start' || typingCheckData.type === 'typing-stop')) {
-              console.log('[EncryptedMessageHandler] Skipping typing indicator message that was already processed:', typingCheckData);
-              return; // Don't process as regular message
+            // Double-check that this is not a typing indicator message (only if content looks like JSON)
+            const trimmedContent = payload.content.trim();
+            if (trimmedContent.startsWith('{') || trimmedContent.startsWith('[')) {
+              const typingCheckData = safeJsonParseForMessages(payload.content);
+              if (typingCheckData && (typingCheckData.type === 'typing-start' || typingCheckData.type === 'typing-stop')) {
+                console.log('[EncryptedMessageHandler] Skipping typing indicator message that was already processed:', typingCheckData);
+                return; // Don't process as regular message
+              }
             }
-            
+
             // Extract message ID from the payload content since it's encrypted along with the content
             let messageId = payload.messageId;
             let messageContent = payload.content;
-            
-            // Try to parse the content to get the actual message data
-            const contentData = safeJsonParse(payload.content);
-            if (contentData && contentData.messageId) {
-              messageId = contentData.messageId;
-              messageContent = contentData.content || contentData.message || payload.content;
-              if (contentData.replyTo) {
-                payload.replyTo = contentData.replyTo;
+
+            // Try to parse the content to get the actual message data (only if it looks like JSON)
+            if (trimmedContent.startsWith('{') || trimmedContent.startsWith('[')) {
+              const contentData = safeJsonParseForMessages(payload.content);
+              if (contentData && contentData.messageId) {
+                messageId = contentData.messageId;
+                messageContent = contentData.content || contentData.message || payload.content;
+                if (contentData.replyTo) {
+                  payload.replyTo = contentData.replyTo;
+                }
+                console.log('[EncryptedMessageHandler] Extracted message ID from content:', messageId);
+              } else {
+                // Content is JSON but no messageId, use fallback
+                messageId = messageId || uuidv4();
+                console.log('[EncryptedMessageHandler] Using fallback message ID for JSON content:', messageId);
               }
-              console.log('[EncryptedMessageHandler] Extracted message ID from content:', messageId);
             } else {
-              // Content is not valid JSON or no messageId, use fallback
+              // Content is plain text, use fallback message ID
               messageId = messageId || uuidv4();
               console.log('[EncryptedMessageHandler] Using fallback message ID:', messageId);
             }
@@ -544,16 +665,22 @@ export function useEncryptedMessageHandler(
           }
 
           // Handle file messages
-          if (payload.type === 'file-message' && payload.fileData) {
+          if (payload.type === 'file-message') {
             // Extract message ID from the payload content since it's encrypted along with the content
             let messageId = payload.messageId;
             let fileName = payload.fileName;
+            let fileType = payload.fileType || 'application/octet-stream';
+            let fileSize = payload.fileSize || 0;
+            let dataBase64: string | null = null;
             
             // Try to parse the content to get the actual message data
-            const fileContentData = safeJsonParse(payload.content);
+            const fileContentData = safeJsonParseForFileMessages(payload.content);
             if (fileContentData && fileContentData.messageId) {
               messageId = fileContentData.messageId;
               fileName = fileContentData.fileName || fileContentData.fileData || payload.fileName;
+              fileType = fileContentData.fileType || fileType;
+              fileSize = fileContentData.fileSize || fileSize;
+              dataBase64 = fileContentData.dataBase64 || null;
               console.log('[EncryptedMessageHandler] Extracted file message ID from content:', messageId);
             } else {
               // Content is not valid JSON or no messageId, use fallback
@@ -561,6 +688,22 @@ export function useEncryptedMessageHandler(
               console.log('[EncryptedMessageHandler] Using fallback file message ID:', messageId);
             }
             
+            // If inline base64 is present, construct a Blob URL for immediate playback/download
+            let contentValue: string = payload.content;
+            if (dataBase64 && typeof dataBase64 === 'string') {
+              try {
+                const binary = atob(dataBase64);
+                const bytes = new Uint8Array(binary.length);
+                for (let i = 0; i < binary.length; i++) {
+                  bytes[i] = binary.charCodeAt(i);
+                }
+                const blob = new Blob([bytes], { type: fileType });
+                contentValue = URL.createObjectURL(blob);
+              } catch (e) {
+                console.warn('[EncryptedMessageHandler] Failed to decode inline base64 file data:', e);
+              }
+            }
+
             // Check if message already exists to prevent duplicates
             let messageExists = false;
             setMessages(prev => {
@@ -572,7 +715,7 @@ export function useEncryptedMessageHandler(
               
               const message: Message = {
                 id: messageId,
-                content: fileName || 'File',
+                content: contentValue || fileName || 'File',
                 sender: payload.from,  // Use 'sender' to match Message interface
                 recipient: (payload as any)?.to || loginUsernameRef.current,  // Prefer decrypted recipient if present
                 timestamp: new Date(payload.timestamp || Date.now()),  // Convert to Date object
@@ -580,8 +723,8 @@ export function useEncryptedMessageHandler(
                 isCurrentUser: false,  // Received messages are not from current user
                 fileInfo: {
                   name: fileName || 'File',
-                  type: payload.fileType || 'application/octet-stream',
-                  size: payload.fileSize || 0,
+                  type: fileType,
+                  size: fileSize,
                   data: new ArrayBuffer(0)  // SECURITY: Zero-length buffer to prevent memory leaks
                 }
               };
@@ -593,7 +736,7 @@ export function useEncryptedMessageHandler(
               // Save to database (this will also add to state)
               await saveMessageToLocalDB({
                 id: messageId,
-                content: fileName || 'File',
+                content: contentValue || fileName || 'File',
                 sender: payload.from,
                 recipient: (payload as any)?.to || loginUsernameRef.current,
                 timestamp: new Date(payload.timestamp || Date.now()),
@@ -601,8 +744,8 @@ export function useEncryptedMessageHandler(
                 isCurrentUser: false,
                 fileInfo: {
                   name: fileName || 'File',
-                  type: payload.fileType || 'application/octet-stream',
-                  size: payload.fileSize || 0,
+                  type: fileType,
+                  size: fileSize,
                   data: new ArrayBuffer(0)  // SECURITY: Zero-length buffer to prevent memory leaks
                 }
               });
@@ -689,12 +832,18 @@ export function useEncryptedMessageHandler(
           // Handle call signals
           if (payload.type === 'call-signal') {
             console.log('[EncryptedMessageHandler] Received call signal:', payload);
-            
-            // Dispatch call signal event for calling service
-            const callSignalEvent = new CustomEvent('call-signal', {
-              detail: JSON.parse(payload.content)
-            });
-            window.dispatchEvent(callSignalEvent);
+
+            // Parse call signal content with larger size limit
+            const callSignalData = safeJsonParseForCallSignals(payload.content);
+            if (callSignalData) {
+              // Dispatch call signal event for calling service
+              const callSignalEvent = new CustomEvent('call-signal', {
+                detail: callSignalData
+              });
+              window.dispatchEvent(callSignalEvent);
+            } else {
+              console.error('[EncryptedMessageHandler] Failed to parse call signal content');
+            }
             return; // Don't save call signals as regular messages
           }
 

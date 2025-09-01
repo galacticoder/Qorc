@@ -23,6 +23,19 @@ declare global {
       requestBundle: (args: any) => Promise<any>;
       wsSend: (payload: any) => Promise<any>;
       rendererReady: () => Promise<any>;
+      // Screen sharing bridge (preload can expose this)
+      getScreenSources?: () => Promise<Array<{ id: string; name: string; type: 'screen' | 'window' }>>;
+      debugElectronAPI?: () => any;
+      testFunction?: () => any;
+    };
+    electronAPI?: {
+      platform?: string;
+      arch?: string;
+      isElectron?: boolean;
+      isDevelopment?: boolean;
+      getScreenSources?: () => Promise<Array<{ id: string; name: string }>>;
+      send?: (channel: string, data?: any) => void;
+      receive?: (channel: string, func: (...args: any[]) => void) => void;
     };
   }
 }

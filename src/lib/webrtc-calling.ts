@@ -42,6 +42,7 @@ export interface CallSignal {
   to: string;
   data?: any;
   timestamp: number;
+  isRenegotiation?: boolean; // Flag to indicate this is a renegotiation offer
 }
 
 export class WebRTCCallingService {
@@ -52,6 +53,8 @@ export class WebRTCCallingService {
   private currentCall: CallState | null = null;
   private isScreenSharing: boolean = false;
   private isTogglingScreenShare: boolean = false;
+  private isRenegotiating: boolean = false;
+  private iceConnectionFailureTimeoutId: ReturnType<typeof setTimeout> | null = null;
   private localUsername: string = '';
   private preferredCameraDeviceId: string | null = null;
   
@@ -375,9 +378,9 @@ export class WebRTCCallingService {
   }
 
   /**
-   * Start screen sharing
+   * Start screen sharing with optional source selection
    */
-  async startScreenShare(): Promise<void> {
+  async startScreenShare(selectedSource?: { id: string; name: string }): Promise<void> {
     if (!this.peerConnection) {
       throw new Error('No active call to share screen');
     }
@@ -390,31 +393,38 @@ export class WebRTCCallingService {
       throw new Error('Screen sharing operation already in progress');
     }
 
+    this.isTogglingScreenShare = true;
+
     try {
-      // Check if we're in Electron
-      const isElectron = !!(window as any).electronAPI;
+      // Check if we're in Electron and what APIs are exposed
+      const electronApi = (window as any).electronAPI || null;
+      const edgeApi = (window as any).edgeApi || null;
+      const isElectron = !!electronApi || !!edgeApi;
+      const getScreenSourcesFn = electronApi?.getScreenSources || edgeApi?.getScreenSources || null;
+
       console.log('[Calling] Screen share - isElectron:', isElectron);
-      console.log('[Calling] electronAPI available:', !!(window as any).electronAPI);
-      console.log('[Calling] getScreenSources available:', !!(window as any).electronAPI?.getScreenSources);
-      console.log('[Calling] electronAPI keys:', (window as any).electronAPI ? Object.keys((window as any).electronAPI) : 'none');
+      console.log('[Calling] electronAPI available:', !!electronApi);
+      console.log('[Calling] edgeApi available:', !!edgeApi);
+      console.log('[Calling] getScreenSources available:', !!getScreenSourcesFn);
+      console.log('[Calling] electronAPI keys:', electronApi ? Object.keys(electronApi) : 'none');
 
       // Try to use Electron API if available, with fallback
       if (isElectron) {
         // Check if getScreenSources is available
-        if (!(window as any).electronAPI?.getScreenSources) {
+        if (!getScreenSourcesFn) {
           console.warn('[Calling] getScreenSources not found in electronAPI');
-          console.warn('[Calling] Available electronAPI functions:', Object.keys((window as any).electronAPI || {}));
+          console.warn('[Calling] Available electronAPI functions:', Object.keys(electronApi || {}));
 
           // Test debug function and check actual API availability
-          if ((window as any).electronAPI?.debugElectronAPI) {
-            const debugInfo = (window as any).electronAPI.debugElectronAPI();
+          if (edgeApi?.debugElectronAPI) {
+            const debugInfo = edgeApi.debugElectronAPI();
             console.log('[Calling] Debug info:', debugInfo);
           }
 
           // Check actual API availability in renderer context
-          const hasGetScreenSources = typeof (window as any).electronAPI?.getScreenSources === 'function';
-          const hasTestFunction = typeof (window as any).electronAPI?.testFunction === 'function';
-          const electronAPIKeys = (window as any).electronAPI ? Object.keys((window as any).electronAPI) : [];
+          const hasGetScreenSources = typeof getScreenSourcesFn === 'function';
+          const hasTestFunction = typeof edgeApi?.testFunction === 'function' || typeof electronApi?.testFunction === 'function';
+          const electronAPIKeys = electronApi ? Object.keys(electronApi) : [];
 
           console.log('[Calling] Renderer context API check:', {
             hasGetScreenSources,
@@ -423,10 +433,10 @@ export class WebRTCCallingService {
           });
 
           // Try to manually test the IPC call
-          if ((window as any).electronAPI?.send) {
+          if (electronApi?.send) {
             console.log('[Calling] Attempting manual IPC test...');
             try {
-              (window as any).electronAPI.send('test-screen-sources', {});
+              electronApi.send('test-screen-sources', {});
             } catch (e) {
               console.log('[Calling] Manual IPC test failed:', e);
             }
@@ -437,7 +447,7 @@ export class WebRTCCallingService {
 
           // Try to manually invoke the IPC call as a last resort
           try {
-            if ((window as any).electronAPI?.send) {
+            if (electronApi?.send) {
               console.log('[Calling] Attempting manual IPC call for screen sources');
               // This won't work but will help us debug
             }
@@ -447,19 +457,27 @@ export class WebRTCCallingService {
         }
       }
 
-      if (isElectron && (window as any).electronAPI?.getScreenSources) {
+      if (isElectron && getScreenSourcesFn) {
         try {
           // Use Electron's desktopCapturer API
           console.log('[Calling] Using Electron desktopCapturer API');
-          const sources = await (window as any).electronAPI.getScreenSources();
+          const sources = await getScreenSourcesFn();
           console.log('[Calling] Got screen sources:', sources?.length || 0);
 
           if (!sources || sources.length === 0) {
             throw new Error('No screen sources available');
           }
 
-          // Use the first screen source (you could show a picker here)
-          const screenSource = sources.find((source: any) => source.id.startsWith('screen:')) || sources[0];
+          // Use the selected source or default to first screen source
+          let screenSource;
+          if (selectedSource) {
+            screenSource = sources.find((source: any) => source.id === selectedSource.id);
+            if (!screenSource) {
+              throw new Error(`Selected screen source "${selectedSource.name}" not found`);
+            }
+          } else {
+            screenSource = sources.find((source: any) => source.id.startsWith('screen:')) || sources[0];
+          }
           console.log('[Calling] Selected screen source:', screenSource.name);
 
           this.screenStream = await navigator.mediaDevices.getUserMedia({
@@ -512,6 +530,7 @@ export class WebRTCCallingService {
 
       // Handle screen share end (user clicks "Stop sharing" in browser)
       videoTrack.onended = () => {
+        console.log('[Calling] Screen share track ended by user or system');
         this.stopScreenShare();
       };
 
@@ -521,21 +540,48 @@ export class WebRTCCallingService {
       );
 
       if (sender) {
+        console.log('[Calling] Replacing existing video track with screen share');
         await sender.replaceTrack(videoTrack);
+
+        // Force renegotiation to ensure the remote peer gets the new track
+        console.log('[Calling] Triggering renegotiation for screen share');
+        await this.renegotiateConnection();
       } else {
         // Add track if no video sender exists
+        console.log('[Calling] Adding screen share track to peer connection');
         this.peerConnection.addTrack(videoTrack, this.screenStream);
+
+        // Renegotiate since we added a new track
+        console.log('[Calling] Triggering renegotiation for new screen share track');
+        await this.renegotiateConnection();
       }
 
       this.isScreenSharing = true;
-      console.log('[Calling] Screen sharing started');
+      console.log('[Calling] Screen sharing started successfully');
 
-      // Notify callback about screen stream
-      this.onLocalStreamCallback?.(this.screenStream);
+      // Notify callback about screen stream - but don't replace the original local stream
+      // Instead, create a new stream that includes the screen video track
+      if (this.localStream) {
+        const audioTracks = this.localStream.getAudioTracks();
+        const combinedStream = new MediaStream([videoTrack, ...audioTracks]);
+        this.onLocalStreamCallback?.(combinedStream);
+      } else {
+        this.onLocalStreamCallback?.(this.screenStream);
+      }
 
     } catch (error) {
       console.error('[Calling] Failed to start screen sharing:', error);
+
+      // Clean up any partial state
+      if (this.screenStream) {
+        this.screenStream.getTracks().forEach(track => track.stop());
+        this.screenStream = null;
+      }
+      this.isScreenSharing = false;
+
       throw error;
+    } finally {
+      this.isTogglingScreenShare = false;
     }
   }
 
@@ -543,12 +589,19 @@ export class WebRTCCallingService {
    * Stop screen sharing and return to camera
    */
   async stopScreenShare(): Promise<void> {
-    if (!this.isScreenSharing || !this.screenStream) {
-      return;
+    if (!this.isScreenSharing && !this.screenStream) {
+      return; // Nothing to stop
     }
 
     if (this.isTogglingScreenShare) {
-      return; // Already in progress
+      console.log('[Calling] Screen share stop already in progress, waiting...');
+      // Wait for the current operation to complete
+      let attempts = 0;
+      while (this.isTogglingScreenShare && attempts < 50) { // Max 5 seconds
+        await new Promise(resolve => setTimeout(resolve, 100));
+        attempts++;
+      }
+      return;
     }
 
     this.isTogglingScreenShare = true;
@@ -575,30 +628,50 @@ export class WebRTCCallingService {
 
           if (sender) {
             try {
+              console.log('[Calling] Replacing screen share track with camera');
               await sender.replaceTrack(videoTrack);
+
+              // Trigger renegotiation to ensure remote peer gets the camera track
+              console.log('[Calling] Triggering renegotiation to restore camera');
+              await this.renegotiateConnection();
             } catch (replaceError) {
               console.warn('[Calling] Failed to replace track during screen share stop:', replaceError);
               // Continue with cleanup even if replaceTrack fails
             }
           }
+        } else {
+          console.log('[Calling] No camera video track available to restore');
         }
       }
 
-      console.log('[Calling] Screen sharing stopped');
+      console.log('[Calling] Screen sharing stopped successfully');
 
-      // Notify callback about local stream
+      // Notify callback about local stream restoration
       if (localStream) {
         this.onLocalStreamCallback?.(localStream);
       }
 
     } catch (error) {
       console.error('[Calling] Failed to stop screen sharing:', error);
-      throw error;
+      // Don't throw - we still want to clean up state
     } finally {
       // Always perform cleanup and release the toggle flag
-      this.screenStream = null;
+      if (this.screenStream) {
+        try {
+          this.screenStream.getTracks().forEach(track => {
+            if (track.readyState !== 'ended') {
+              track.stop();
+            }
+          });
+        } catch (e) {
+          console.warn('[Calling] Error stopping screen stream tracks:', e);
+        }
+        this.screenStream = null;
+      }
       this.isScreenSharing = false;
       this.isTogglingScreenShare = false;
+
+      console.log('[Calling] Screen sharing cleanup completed');
     }
   }
 
@@ -607,6 +680,75 @@ export class WebRTCCallingService {
    */
   getScreenSharingStatus(): boolean {
     return this.isScreenSharing;
+  }
+
+  /**
+   * Renegotiate the peer connection (for track changes)
+   */
+  private async renegotiateConnection(): Promise<void> {
+    if (!this.peerConnection || !this.currentCall) {
+      return;
+    }
+
+    try {
+      this.isRenegotiating = true;
+
+      // Only the caller should create a new offer
+      if (this.currentCall.direction === 'outgoing') {
+        console.log('[Calling] Creating new offer for renegotiation');
+        const offer = await this.peerConnection.createOffer();
+        await this.peerConnection.setLocalDescription(offer);
+
+        // Send the new offer
+        await this.sendCallSignal({
+          type: 'offer',
+          callId: this.currentCall.id,
+          from: this.localUsername,
+          to: this.currentCall.peer,
+          data: offer,
+          timestamp: Date.now(),
+          isRenegotiation: true
+        });
+
+        // Clear renegotiation flag after a delay to allow for ICE reconnection
+        setTimeout(() => {
+          this.isRenegotiating = false;
+        }, 5000); // 5 second grace period
+      }
+    } catch (error) {
+      console.error('[Calling] Failed to renegotiate connection:', error);
+      this.isRenegotiating = false;
+      // Don't throw - screen sharing might still work without renegotiation
+    }
+  }
+
+  /**
+   * Get available screen sources for selection
+   */
+  async getAvailableScreenSources(): Promise<Array<{ id: string; name: string; type: 'screen' | 'window' }>> {
+    try {
+      const electronApi = (window as any).electronAPI || null;
+      const edgeApi = (window as any).edgeApi || null;
+      const getScreenSourcesFn = electronApi?.getScreenSources || edgeApi?.getScreenSources || null;
+
+      if (!getScreenSourcesFn) {
+        throw new Error('Screen source selection not available in this environment');
+      }
+
+      const sources = await getScreenSourcesFn();
+      if (!sources || sources.length === 0) {
+        throw new Error('No screen sources available');
+      }
+
+      return sources.map((source: any) => ({
+        id: source.id,
+        name: source.name,
+        type: source.id.startsWith('screen:') ? 'screen' as const : 'window' as const
+      }));
+    } catch (error) {
+      console.error('[Calling] Failed to get screen sources:', error);
+      throw error;
+    }
   }
 
   /**
@@ -621,6 +763,27 @@ export class WebRTCCallingService {
    */
   private async setupLocalMedia(callType: 'audio' | 'video'): Promise<void> {
     try {
+      // First, check if devices are available
+      if (callType === 'video') {
+        try {
+          const devices = await navigator.mediaDevices.enumerateDevices();
+          const videoDevices = devices.filter(device => device.kind === 'videoinput');
+          const audioDevices = devices.filter(device => device.kind === 'audioinput');
+
+          console.log('[Calling] Available devices:', {
+            video: videoDevices.length,
+            audio: audioDevices.length
+          });
+
+          if (videoDevices.length === 0) {
+            console.warn('[Calling] No video devices found, falling back to audio-only');
+            callType = 'audio';
+          }
+        } catch (enumError) {
+          console.warn('[Calling] Failed to enumerate devices, proceeding with original call type:', enumError);
+        }
+      }
+
       let video: boolean | MediaTrackConstraints = false;
       if (callType === 'video') {
         const base: MediaTrackConstraints = {
@@ -657,6 +820,23 @@ export class WebRTCCallingService {
 
     } catch (error: any) {
       console.error('[Calling] Failed to get user media:', error);
+
+      // Provide more specific error messages based on error type
+      let errorMessage = 'Failed to access camera/microphone';
+      if (error.name === 'NotFoundError') {
+        errorMessage = callType === 'video' ?
+          'No camera found. Please connect a camera or try audio-only mode.' :
+          'No microphone found. Please connect a microphone to make calls.';
+      } else if (error.name === 'NotAllowedError') {
+        errorMessage = 'Camera/microphone access denied. Please click the camera/microphone icon in your browser\'s address bar and allow access.';
+      } else if (error.name === 'NotReadableError') {
+        errorMessage = 'Camera/microphone is already in use. Please close other applications using your camera/microphone and try again.';
+      } else if (error.name === 'OverconstrainedError') {
+        errorMessage = 'Camera/microphone settings are not supported. Trying with default settings...';
+      } else if (error.name === 'AbortError') {
+        errorMessage = 'Camera/microphone access was interrupted. Please try again.';
+      }
+
       // Fallback: if video requested but not available, try audio-only and continue the call
       if (callType === 'video') {
         try {
@@ -679,11 +859,17 @@ export class WebRTCCallingService {
           // Notify callback
           this.onLocalStreamCallback?.(this.localStream);
           return; // Continue without throwing
-        } catch (fallbackError) {
+        } catch (fallbackError: any) {
           console.error('[Calling] Audio-only fallback failed:', fallbackError);
+          // Update error message for audio fallback failure
+          if (fallbackError.name === 'NotFoundError') {
+            errorMessage = 'No camera or microphone found. Please check your device connections.';
+          } else if (fallbackError.name === 'NotAllowedError') {
+            errorMessage = 'Microphone access denied. Please allow permissions to make calls.';
+          }
         }
       }
-      throw new Error('Failed to access camera/microphone');
+      throw new Error(errorMessage);
     }
   }
 
@@ -716,8 +902,36 @@ export class WebRTCCallingService {
               clearTimeout(this.callTimeoutId);
               this.callTimeoutId = null;
             }
+            // Clear any pending ICE failure timeout since we're connected
+            if (this.iceConnectionFailureTimeoutId) {
+              clearTimeout(this.iceConnectionFailureTimeoutId);
+              this.iceConnectionFailureTimeoutId = null;
+            }
+            // Clear renegotiation flag if connection is restored
+            if (this.isRenegotiating) {
+              console.log('[Calling] ICE connection restored after renegotiation');
+              this.isRenegotiating = false;
+            }
             break;
           case 'disconnected':
+            // During renegotiation, temporary disconnections are normal
+            if (this.isRenegotiating) {
+              console.log('[Calling] ICE disconnected during renegotiation, waiting for reconnection...');
+              // Set a timeout to end the call if it doesn't reconnect within a reasonable time
+              if (this.iceConnectionFailureTimeoutId) {
+                clearTimeout(this.iceConnectionFailureTimeoutId);
+              }
+              this.iceConnectionFailureTimeoutId = setTimeout(() => {
+                if (this.currentCall?.status !== 'ended' && this.peerConnection?.iceConnectionState === 'disconnected') {
+                  console.log('[Calling] ICE connection failed to recover after renegotiation');
+                  this.endCall('connection-lost');
+                }
+              }, 10000); // 10 second timeout
+            } else if (this.currentCall.status !== 'ended') {
+              // Not during renegotiation, end call immediately
+              this.endCall('connection-lost');
+            }
+            break;
           case 'failed':
           case 'closed':
             if (this.currentCall.status !== 'ended') {
@@ -845,7 +1059,34 @@ export class WebRTCCallingService {
    */
   private async handleCallOffer(signal: CallSignal): Promise<void> {
     if (this.currentCall) {
-      // Already in a call, decline automatically
+      // Check if this is a renegotiation offer for the current call
+      if (signal.isRenegotiation && signal.callId === this.currentCall.id) {
+        console.log('[Calling] Handling renegotiation offer');
+        // Process the renegotiation offer
+        try {
+          await this.peerConnection?.setRemoteDescription(signal.data);
+
+          // Create and send answer for renegotiation
+          const answer = await this.peerConnection?.createAnswer();
+          if (answer) {
+            await this.peerConnection?.setLocalDescription(answer);
+            await this.sendCallSignal({
+              type: 'answer',
+              callId: signal.callId,
+              from: this.localUsername,
+              to: signal.from,
+              data: answer,
+              timestamp: Date.now(),
+              isRenegotiation: true
+            });
+          }
+        } catch (error) {
+          console.error('[Calling] Failed to handle renegotiation offer:', error);
+        }
+        return;
+      }
+
+      // Already in a call with different ID, decline automatically
       await this.sendCallSignal({
         type: 'decline-call',
         callId: signal.callId,
@@ -900,11 +1141,31 @@ export class WebRTCCallingService {
       return;
     }
 
+    // Check if this is a renegotiation answer
+    if (signal.isRenegotiation) {
+      console.log('[Calling] Handling renegotiation answer');
+      if (this.peerConnection) {
+        try {
+          // For renegotiation, the data is directly the SDP
+          const sdp = signal.data as RTCSessionDescriptionInit;
+          await this.peerConnection.setRemoteDescription(sdp);
+          console.log('[Calling] Renegotiation answer processed successfully');
+
+          // Clear renegotiation flag since we successfully processed the answer
+          this.isRenegotiating = false;
+        } catch (error) {
+          console.error('[Calling] Failed to process renegotiation answer:', error);
+        }
+      }
+      return;
+    }
+
+    // Handle normal call answer
     const answerData = signal.data as { sdp: RTCSessionDescriptionInit; accepted: boolean };
-    
+
     if (answerData.accepted && this.peerConnection) {
       await this.peerConnection.setRemoteDescription(answerData.sdp);
-      
+
       this.currentCall.status = 'connecting';
       this.onCallStateChangeCallback?.(this.currentCall);
     } else {
@@ -972,10 +1233,14 @@ export class WebRTCCallingService {
   private cleanup(): void {
     console.log('[Calling] Cleaning up call resources');
 
-    // Clear timeout
+    // Clear timeouts
     if (this.callTimeoutId) {
       clearTimeout(this.callTimeoutId);
       this.callTimeoutId = null;
+    }
+    if (this.iceConnectionFailureTimeoutId) {
+      clearTimeout(this.iceConnectionFailureTimeoutId);
+      this.iceConnectionFailureTimeoutId = null;
     }
 
     // Stop local stream
