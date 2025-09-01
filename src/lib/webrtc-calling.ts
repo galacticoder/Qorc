@@ -385,6 +385,11 @@ export class WebRTCCallingService {
       throw new Error('No active call to share screen');
     }
 
+    // SECURITY: Prevent screen sharing during ringing to avoid auto-answering
+    if (this.currentCall?.status === 'ringing') {
+      throw new Error('Cannot start screen sharing during ringing call. Please answer the call first.');
+    }
+
     if (this.isScreenSharing) {
       throw new Error('Screen sharing is already active');
     }
@@ -1062,7 +1067,15 @@ export class WebRTCCallingService {
       // Check if this is a renegotiation offer for the current call
       if (signal.isRenegotiation && signal.callId === this.currentCall.id) {
         console.log('[Calling] Handling renegotiation offer');
-        // Process the renegotiation offer
+
+        // SECURITY: Only process renegotiation if call has been manually answered
+        // Prevent automatic answering during renegotiation (e.g., when screen sharing starts)
+        if (this.currentCall.status === 'ringing') {
+          console.log('[Calling] Ignoring renegotiation offer - call not yet answered by user');
+          return;
+        }
+
+        // Process the renegotiation offer only for answered calls
         try {
           await this.peerConnection?.setRemoteDescription(signal.data);
 

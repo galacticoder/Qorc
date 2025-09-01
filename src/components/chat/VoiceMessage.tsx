@@ -10,6 +10,8 @@ interface VoiceMessageProps {
   timestamp: Date;
   isCurrentUser: boolean;
   filename?: string;
+  originalBase64Data?: string;
+  mimeType?: string;
 }
 
 export function VoiceMessage({
@@ -17,7 +19,9 @@ export function VoiceMessage({
   sender,
   timestamp,
   isCurrentUser,
-  filename
+  filename,
+  originalBase64Data,
+  mimeType
 }: VoiceMessageProps) {
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
@@ -109,13 +113,100 @@ export function VoiceMessage({
     }
   };
 
-  const handleDownload = () => {
-    const link = document.createElement('a');
-    link.href = audioUrl;
-    link.download = filename || `voice-note-${format(timestamp, 'yyyy-MM-dd-HH-mm-ss')}.webm`;
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
+  const handleDownload = async () => {
+    try {
+      console.log('[VoiceMessage] Starting download for:', filename, {
+        hasOriginalBase64: !!originalBase64Data,
+        audioUrl: audioUrl.substring(0, 50) + '...'
+      });
+
+      // Prefer original base64 data for reliable downloads
+      if (originalBase64Data) {
+        try {
+          // Create blob from original base64 data
+          const cleanBase64 = originalBase64Data.trim().replace(/[^A-Za-z0-9+/=]/g, '');
+          const binaryString = atob(cleanBase64);
+          const bytes = new Uint8Array(binaryString.length);
+          for (let i = 0; i < binaryString.length; i++) {
+            bytes[i] = binaryString.charCodeAt(i);
+          }
+
+          const blob = new Blob([bytes], { type: mimeType || 'audio/webm' });
+          const downloadUrl = URL.createObjectURL(blob);
+
+          // Perform the download
+          const link = document.createElement('a');
+          link.href = downloadUrl;
+          link.download = filename || `voice-note-${format(timestamp, 'yyyy-MM-dd-HH-mm-ss')}.webm`;
+          link.style.display = 'none';
+          document.body.appendChild(link);
+          link.click();
+          document.body.removeChild(link);
+
+          // Clean up the temporary URL
+          setTimeout(() => URL.revokeObjectURL(downloadUrl), 1000);
+
+          console.log('[VoiceMessage] Download from base64 completed successfully');
+          return;
+        } catch (base64Error) {
+          console.error('[VoiceMessage] Base64 download failed, falling back to blob URL:', base64Error);
+        }
+      }
+
+      // Fallback to blob URL method
+      if (!audioUrl || audioUrl === 'File' || audioUrl === 'voice-note') {
+        console.error('[VoiceMessage] Invalid audio URL for download:', audioUrl);
+        alert('Cannot download voice note: Invalid audio data');
+        return;
+      }
+
+      // For blob URLs, we need to fetch the data and create a new download
+      if (audioUrl.startsWith('blob:')) {
+        try {
+          // Fetch the blob data
+          const response = await fetch(audioUrl);
+          if (!response.ok) {
+            throw new Error(`Failed to fetch blob data: ${response.status}`);
+          }
+
+          const blob = await response.blob();
+
+          // Create a new blob URL for download
+          const downloadUrl = URL.createObjectURL(blob);
+
+          // Perform the download
+          const link = document.createElement('a');
+          link.href = downloadUrl;
+          link.download = filename || `voice-note-${format(timestamp, 'yyyy-MM-dd-HH-mm-ss')}.webm`;
+          link.style.display = 'none';
+          document.body.appendChild(link);
+          link.click();
+          document.body.removeChild(link);
+
+          // Clean up the temporary URL
+          setTimeout(() => URL.revokeObjectURL(downloadUrl), 1000);
+
+          console.log('[VoiceMessage] Download from blob URL completed successfully');
+        } catch (blobError) {
+          console.error('[VoiceMessage] Blob download failed:', blobError);
+          alert('Cannot download voice note: Audio data is no longer available');
+        }
+      } else {
+        // Regular URL, proceed with direct download
+        const link = document.createElement('a');
+        link.href = audioUrl;
+        link.download = filename || `voice-note-${format(timestamp, 'yyyy-MM-dd-HH-mm-ss')}.webm`;
+        link.style.display = 'none';
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+
+        console.log('[VoiceMessage] Direct download completed');
+      }
+    } catch (error) {
+      console.error('[VoiceMessage] Download failed:', error);
+      alert('Failed to download voice note: ' + (error instanceof Error ? error.message : 'Unknown error'));
+    }
   };
 
   const progress = duration > 0 ? (currentTime / duration) * 100 : 0;

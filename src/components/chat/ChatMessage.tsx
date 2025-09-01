@@ -42,6 +42,8 @@ export function ChatMessage({ message, onReply, previousMessage, onDelete, onEdi
           timestamp={message.timestamp}
           isCurrentUser={isCurrentUser}
           filename={message.filename}
+          originalBase64Data={message.originalBase64Data}
+          mimeType={message.mimeType}
         />
       );
     }

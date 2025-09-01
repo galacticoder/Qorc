@@ -44,6 +44,7 @@ export interface Message {
   fileSize?: number;
   type?: string;
   mimeType?: string; // MIME type for file messages
+  originalBase64Data?: string; // Original base64 data for reliable downloads
   receipt?: MessageReceipt;
   p2p?: boolean; // Indicates if message was sent via P2P
   encrypted?: boolean; // Indicates if message is encrypted

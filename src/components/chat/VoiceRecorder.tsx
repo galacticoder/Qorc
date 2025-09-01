@@ -106,13 +106,14 @@ export function VoiceRecorder({ onSendVoiceNote, onCancel, disabled }: VoiceReco
       }
 
       console.log('[VoiceRecorder] Requesting microphone access...');
-      // Request microphone access
+      // Request microphone access with optimized settings for voice notes
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: {
           echoCancellation: true,
           noiseSuppression: true,
           autoGainControl: true,
-          sampleRate: 44100,
+          sampleRate: 16000,  // 16kHz is sufficient for voice (much smaller files)
+          channelCount: 1,    // Mono recording for voice notes
         }
       });
 
@@ -156,9 +157,14 @@ export function VoiceRecorder({ onSendVoiceNote, onCancel, disabled }: VoiceReco
 
       console.log('[VoiceRecorder] Using MIME type:', mimeType);
 
-      // Set up MediaRecorder
+      // Set up MediaRecorder with optimized settings for voice notes
       console.log('[VoiceRecorder] Creating MediaRecorder...');
-      const mediaRecorder = new MediaRecorder(stream, { mimeType });
+      const mediaRecorderOptions: MediaRecorderOptions = {
+        mimeType,
+        audioBitsPerSecond: 32000  // 32kbps is good quality for voice, much smaller than default
+      };
+
+      const mediaRecorder = new MediaRecorder(stream, mediaRecorderOptions);
 
       mediaRecorderRef.current = mediaRecorder;
       chunksRef.current = [];

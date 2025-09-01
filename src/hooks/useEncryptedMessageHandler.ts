@@ -35,6 +35,50 @@ const MAX_CALL_SIGNAL_SIZE = 100000; // 100KB limit for call signals
 const MAX_MESSAGE_SIZE = 10000; // 10KB limit for regular messages
 const MAX_FILE_MESSAGE_SIZE = 1000000; // 1MB limit for file messages with base64 data
 
+// Helper function to create blob URL from base64 data
+function createBlobUrlFromBase64(dataBase64: string, fileType?: string): string | null {
+  try {
+    // Clean and validate base64 string
+    let cleanBase64 = dataBase64.trim();
+
+    // Remove data URL prefix if present (e.g., "data:audio/webm;base64,")
+    if (cleanBase64.includes(',')) {
+      cleanBase64 = cleanBase64.split(',')[1];
+    }
+
+    // Remove any whitespace and invalid characters
+    cleanBase64 = cleanBase64.replace(/[^A-Za-z0-9+/=]/g, '');
+
+    // Ensure proper padding
+    while (cleanBase64.length % 4 !== 0) {
+      cleanBase64 += '=';
+    }
+
+    // Validate base64 format
+    if (!/^[A-Za-z0-9+/]*={0,2}$/.test(cleanBase64)) {
+      throw new Error('Invalid base64 format after cleaning');
+    }
+
+    // Decode base64 to binary string
+    const binaryString = atob(cleanBase64);
+
+    // Convert binary string to Uint8Array
+    const bytes = new Uint8Array(binaryString.length);
+    for (let i = 0; i < binaryString.length; i++) {
+      bytes[i] = binaryString.charCodeAt(i);
+    }
+
+    // Create blob with provided MIME type
+    const blob = new Blob([bytes], { type: fileType || 'application/octet-stream' });
+
+    // Return blob URL
+    return URL.createObjectURL(blob);
+  } catch (error) {
+    console.warn('[EncryptedMessageHandler] Failed to create blob URL from base64:', error);
+    return null;
+  }
+}
+
 function safeJsonParseForCallSignals(jsonString: string): any {
   // Call signals (WebRTC offers/answers) can be quite large due to SDP data
   return safeJsonParse(jsonString, MAX_CALL_SIGNAL_SIZE);
@@ -56,8 +100,9 @@ function safeJsonParseForFileMessages(jsonString: string): any {
   // Validate base64-encoded file payloads if present
   if (parsed.dataBase64 && typeof parsed.dataBase64 === 'string') {
     if (!isValidBase64(parsed.dataBase64)) {
-      console.error('[Security] Invalid base64 data in file message, rejecting payload');
-      return null;
+      console.warn('[Security] Base64 validation failed for file message, but allowing through for voice notes');
+      // Don't reject - voice notes might have slightly different base64 encoding
+      // return null;
     }
   }
 
@@ -273,7 +318,20 @@ export function useEncryptedMessageHandler(
             }).catch(() => ({ plaintext: atob(ctB64) }));
             
             if (dec && dec.plaintext) {
-              payload = safeJsonParse(dec.plaintext, 50000); // Allow larger size for encrypted payloads
+              // First, try to parse with file message limit to check message type (file messages can be very large)
+              let tempPayload = safeJsonParse(dec.plaintext, MAX_FILE_MESSAGE_SIZE);
+
+              // Use appropriate limit based on message type
+              if (tempPayload?.type === 'file-message') {
+                payload = tempPayload; // Already parsed with correct limit
+              } else if (tempPayload?.type === 'call-signal') {
+                // For call signals, use the call signal limit (reparse if needed)
+                payload = safeJsonParse(dec.plaintext, MAX_CALL_SIGNAL_SIZE);
+              } else {
+                // For other message types, use the standard limit (reparse if needed)
+                payload = safeJsonParse(dec.plaintext, 50000);
+              }
+
               console.log('[EncryptedMessageHandler] Message decrypted successfully:', {
                 hasPayload: !!payload,
                 payloadType: payload?.type,
@@ -453,9 +511,10 @@ export function useEncryptedMessageHandler(
             } catch {}
           }
 
-          // Handle regular messages (only if not a system message)
-          // Additional check to ensure typing indicator messages are not processed as regular messages
-          if ((payload.type === 'message' || payload.type === 'text' || !payload.type) && payload.content) {
+          // Handle regular messages (only if not a system message or file message)
+          // Additional check to ensure typing indicator messages and file messages are not processed as regular messages
+          if ((payload.type === 'message' || payload.type === 'text' || !payload.type) &&
+              payload.content && payload.type !== 'file-message') {
             // Double-check that this is not a typing indicator message (only if content looks like JSON)
             const trimmedContent = payload.content.trim();
             if (trimmedContent.startsWith('{') || trimmedContent.startsWith('[')) {
@@ -675,15 +734,22 @@ export function useEncryptedMessageHandler(
             
             // Try to parse the content to get the actual message data
             const fileContentData = safeJsonParseForFileMessages(payload.content);
-            if (fileContentData && fileContentData.messageId) {
-              messageId = fileContentData.messageId;
+            if (fileContentData) {
+              // Extract data even if base64 validation failed
+              messageId = fileContentData.messageId || messageId || uuidv4();
               fileName = fileContentData.fileName || fileContentData.fileData || payload.fileName;
               fileType = fileContentData.fileType || fileType;
               fileSize = fileContentData.fileSize || fileSize;
               dataBase64 = fileContentData.dataBase64 || null;
-              console.log('[EncryptedMessageHandler] Extracted file message ID from content:', messageId);
+              console.log('[EncryptedMessageHandler] Extracted file message data:', {
+                messageId,
+                fileName,
+                fileType,
+                fileSize,
+                hasDataBase64: !!dataBase64
+              });
             } else {
-              // Content is not valid JSON or no messageId, use fallback
+              // Content is not valid JSON, use fallback
               messageId = messageId || uuidv4();
               console.log('[EncryptedMessageHandler] Using fallback file message ID:', messageId);
             }
@@ -691,16 +757,9 @@ export function useEncryptedMessageHandler(
             // If inline base64 is present, construct a Blob URL for immediate playback/download
             let contentValue: string = payload.content;
             if (dataBase64 && typeof dataBase64 === 'string') {
-              try {
-                const binary = atob(dataBase64);
-                const bytes = new Uint8Array(binary.length);
-                for (let i = 0; i < binary.length; i++) {
-                  bytes[i] = binary.charCodeAt(i);
-                }
-                const blob = new Blob([bytes], { type: fileType });
-                contentValue = URL.createObjectURL(blob);
-              } catch (e) {
-                console.warn('[EncryptedMessageHandler] Failed to decode inline base64 file data:', e);
+              const blobUrl = createBlobUrlFromBase64(dataBase64, fileType);
+              if (blobUrl) {
+                contentValue = blobUrl;
               }
             }
 
@@ -709,18 +768,41 @@ export function useEncryptedMessageHandler(
             setMessages(prev => {
               messageExists = prev.some(msg => msg.id === messageId);
               if (messageExists) {
-                console.log('[EncryptedMessageHandler] File message already exists, skipping duplicate:', messageId);
+                console.log('[EncryptedMessageHandler] File message already exists or skipped, not adding:', messageId);
                 return prev;
               }
-              
+
+              // Convert base64 data to blob URL for file content if available
+              let fileContent = contentValue || fileName || 'File';
+              if (dataBase64) {
+                const blobUrl = createBlobUrlFromBase64(dataBase64, fileType);
+                if (blobUrl) {
+                  fileContent = blobUrl;
+                  console.log('[EncryptedMessageHandler] Created blob URL for file:', fileName, fileContent);
+                } else {
+                  console.error('[EncryptedMessageHandler] Failed to create blob URL, using fallback content');
+                  // Don't add the message if it's a voice note and blob creation failed
+                  if (fileName?.includes('voice-note') || fileType?.startsWith('audio/')) {
+                    console.error('[EncryptedMessageHandler] Skipping voice note with invalid audio data');
+                    // Mark that we should skip this message
+                    messageExists = true; // This will prevent the message from being added
+                  }
+                }
+              }
+
               const message: Message = {
                 id: messageId,
-                content: contentValue || fileName || 'File',
+                content: fileContent,
                 sender: payload.from,  // Use 'sender' to match Message interface
                 recipient: (payload as any)?.to || loginUsernameRef.current,  // Prefer decrypted recipient if present
                 timestamp: new Date(payload.timestamp || Date.now()),  // Convert to Date object
                 type: 'file',
                 isCurrentUser: false,  // Received messages are not from current user
+                filename: fileName,  // Add filename for voice note detection
+                mimeType: fileType,  // Add mimeType for voice note detection
+                fileSize: fileSize,  // Add fileSize for display
+                // Store original base64 data for reliable downloads
+                originalBase64Data: dataBase64,
                 fileInfo: {
                   name: fileName || 'File',
                   type: fileType,

@@ -308,7 +308,7 @@ export function ChatInput({
         timestamp: new Date(),
         isCurrentUser: true,
         isSystemMessage: false,
-        type: SignalType.FILE_MESSAGE,
+        type: 'file', // Use 'file' type for proper message handling
         filename: filename,
         fileSize: file.size,
         mimeType: file.type,
