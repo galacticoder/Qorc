@@ -3,7 +3,7 @@
  */
 
 import React, { useState, useEffect, useRef } from 'react';
-import { Phone, PhoneOff, Video, VideoOff, Mic, MicOff, RotateCcw } from 'lucide-react';
+import { Phone, PhoneOff, Video, VideoOff, Mic, MicOff, RotateCcw, Monitor, MonitorOff } from 'lucide-react';
 import { CallState, WebRTCCallingService } from '../../lib/webrtc-calling';
 
 interface CallModalProps {
@@ -16,6 +16,9 @@ interface CallModalProps {
   onToggleMute: () => boolean;
   onToggleVideo: () => boolean;
   onSwitchCamera: () => void;
+  onStartScreenShare?: () => Promise<void>;
+  onStopScreenShare?: () => Promise<void>;
+  isScreenSharing?: boolean;
 }
 
 export const CallModal: React.FC<CallModalProps> = ({
@@ -27,7 +30,10 @@ export const CallModal: React.FC<CallModalProps> = ({
   onEndCall,
   onToggleMute,
   onToggleVideo,
-  onSwitchCamera
+  onSwitchCamera,
+  onStartScreenShare,
+  onStopScreenShare,
+  isScreenSharing = false
 }) => {
   const [isMuted, setIsMuted] = useState(false);
   const [isVideoEnabled, setIsVideoEnabled] = useState(true);
@@ -45,16 +51,46 @@ export const CallModal: React.FC<CallModalProps> = ({
 
   useEffect(() => {
     let mounted = true;
-    (async () => {
+
+    const loadCameraDevices = async () => {
       const devs = await WebRTCCallingService.getVideoInputDevices();
       if (!mounted) return;
+
       setCameraDevices(devs);
+
+      // Load preferred camera and validate it still exists
       try {
         const saved = localStorage.getItem('preferred_camera_deviceId_v1');
-        if (saved && saved.length < 256) setPreferredCameraId(saved || null);
+        if (saved && saved.length < 256) {
+          // Check if the saved camera still exists
+          const deviceExists = devs.some(dev => dev.deviceId === saved);
+          if (deviceExists) {
+            setPreferredCameraId(saved);
+          } else {
+            // Reset to null if saved device no longer exists
+            setPreferredCameraId(null);
+            localStorage.removeItem('preferred_camera_deviceId_v1');
+          }
+        }
       } catch {}
-    })();
-    return () => { mounted = false; };
+    };
+
+    // Initial load
+    loadCameraDevices();
+
+    // Listen for device changes (cameras plugged/unplugged)
+    const handleDeviceChange = () => {
+      if (mounted) {
+        loadCameraDevices();
+      }
+    };
+
+    navigator.mediaDevices.addEventListener('devicechange', handleDeviceChange);
+
+    return () => {
+      mounted = false;
+      navigator.mediaDevices.removeEventListener('devicechange', handleDeviceChange);
+    };
   }, []);
 
   const handleSelectCamera = async (deviceId: string) => {
@@ -194,6 +230,24 @@ export const CallModal: React.FC<CallModalProps> = ({
   const handleToggleVideo = () => {
     const enabled = onToggleVideo();
     setIsVideoEnabled(enabled);
+  };
+
+  const handleScreenShare = async () => {
+    if (isProcessing) return;
+
+    setIsProcessing(true);
+    try {
+      if (isScreenSharing) {
+        await onStopScreenShare?.();
+      } else {
+        await onStartScreenShare?.();
+      }
+    } catch (error) {
+      console.error('Screen sharing error:', error);
+      alert('Failed to ' + (isScreenSharing ? 'stop' : 'start') + ' screen sharing: ' + (error as Error).message);
+    } finally {
+      setIsProcessing(false);
+    }
   };
 
   const formatDuration = (seconds: number): string => {
@@ -392,6 +446,22 @@ export const CallModal: React.FC<CallModalProps> = ({
                         <VideoOff className="w-6 h-6 text-white" />
                       )}
                     </button>
+                    {/* Camera switch button */}
+                    <button
+                      type="button"
+                      onClick={onSwitchCamera}
+                      disabled={cameraDevices.length <= 1}
+                      aria-label={cameraDevices.length <= 1 ? 'No other cameras available' : 'Switch camera'}
+                      aria-disabled={cameraDevices.length <= 1}
+                      title={cameraDevices.length <= 1 ? 'No other cameras available' : 'Switch camera'}
+                      data-testid="switch-camera-button"
+                      className={`ml-1 w-8 h-8 rounded-full flex items-center justify-center transition-colors ${
+                        cameraDevices.length <= 1 ? 'bg-gray-500 opacity-60 cursor-not-allowed' : 'bg-gray-600 hover:bg-gray-700'
+                      }`}
+                    >
+                      <RotateCcw className="w-4 h-4 text-white" />
+                    </button>
+
                     {/* Dropdown trigger */}
                     <button
                       onClick={() => setCameraMenuOpen(v => !v)}
@@ -430,6 +500,24 @@ export const CallModal: React.FC<CallModalProps> = ({
                     )}
                   </div>
                 </>
+              )}
+
+              {/* Screen Share Button (only for video calls) */}
+              {isVideoCall && onStartScreenShare && onStopScreenShare && (
+                <button
+                  onClick={handleScreenShare}
+                  disabled={isProcessing}
+                  className={`w-12 h-12 rounded-full flex items-center justify-center transition-colors ${
+                    isScreenSharing ? 'bg-blue-600 hover:bg-blue-700' : 'bg-gray-600 hover:bg-gray-700'
+                  }`}
+                  title={isScreenSharing ? 'Stop screen sharing' : 'Start screen sharing'}
+                >
+                  {isScreenSharing ? (
+                    <MonitorOff className="w-6 h-6 text-white" />
+                  ) : (
+                    <Monitor className="w-6 h-6 text-white" />
+                  )}
+                </button>
               )}
 
               {/* End Call Button */}

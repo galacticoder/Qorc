@@ -1,8 +1,9 @@
-import { useState, useCallback, useEffect } from "react";
+import React, { useState, useCallback, useEffect } from "react";
 import { Login } from "@/components/chat/Login";
 import { Sidebar } from "@/components/chat/UserList";
 import { ConversationList } from "@/components/chat/ConversationList";
 import { ChatInterface } from "@/components/chat/ChatInterface";
+import { AppSettings } from "@/components/settings/AppSettings";
 import { Message } from "@/components/chat/types";
 import { cn } from "@/lib/utils";
 
@@ -201,7 +202,7 @@ const ChatApp: React.FC<ChatAppProps> = () => {
   // Show Tor setup screen first if needed
   if (showTorSetup) {
     return (
-      <div className="flex items-center justify-center min-h-screen p-4 bg-gradient-to-r from-gray-50 to-slate-50">
+      <div className="flex items-center justify-center min-h-screen p-4 bg-gradient-to-r from-gray-50 to-slate-50 dark:from-gray-900 dark:to-slate-900">
         <div className="w-full max-w-2xl">
           <TorAutoSetup
             onComplete={handleTorSetupComplete}
@@ -214,7 +215,7 @@ const ChatApp: React.FC<ChatAppProps> = () => {
 
   if (!Authentication.isLoggedIn) {
     return (
-      <div className="flex items-center justify-center min-h-screen p-4 bg-gradient-to-r from-gray-50 to-slate-50">
+      <div className="flex items-center justify-center min-h-screen p-4 bg-gradient-to-r from-gray-50 to-slate-50 dark:from-gray-900 dark:to-slate-900">
         <Login
           isGeneratingKeys={Authentication.isGeneratingKeys}
           authStatus={Authentication.authStatus}
@@ -236,12 +237,13 @@ const ChatApp: React.FC<ChatAppProps> = () => {
 
   return (
     <TypingIndicatorProvider currentUsername={Authentication.loginUsernameRef.current || ''}>
-      <div className="flex h-screen bg-gradient-to-r from-gray-50 to-slate-50 relative">
+      <div className="flex h-screen bg-gradient-to-r from-gray-50 to-slate-50 dark:from-gray-900 dark:to-slate-900 relative">
         <Sidebar
           currentUsername={Authentication.loginUsernameRef.current || ''}
           onAddConversation={addConversation}
           onLogout={async () => await Authentication.logout(Database.secureDBRef)}
           onActiveTabChange={setSidebarActiveTab}
+          settingsContent={<AppSettings />}
         >
           <ConversationList
             conversations={conversations}
@@ -253,7 +255,8 @@ const ChatApp: React.FC<ChatAppProps> = () => {
 
         <div className={cn(
           "flex-1 flex flex-col transition-all duration-300",
-          sidebarActiveTab === "messages" ? "ml-80" : "ml-16"
+          sidebarActiveTab === "messages" ? "ml-80" :
+          sidebarActiveTab === "settings" ? "ml-[400px]" : "ml-16"
         )}>
           {selectedConversation ? (
             <ChatInterface

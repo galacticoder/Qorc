@@ -43,6 +43,7 @@ export interface Message {
   filename?: string;
   fileSize?: number;
   type?: string;
+  mimeType?: string; // MIME type for file messages
   receipt?: MessageReceipt;
   p2p?: boolean; // Indicates if message was sent via P2P
   encrypted?: boolean; // Indicates if message is encrypted

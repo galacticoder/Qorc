@@ -12,7 +12,7 @@ import * as authentication from './authentication/authentication.js';
 import { setServerPasswordOnInput } from './authentication/auth-utils.js';
 import { ed25519 } from '@noble/curves/ed25519.js';
 import { rateLimitMiddleware } from './rate-limiting/rate-limit-middleware.js';
-import { setOnline, setOffline, refreshOnline, createSubscriber, subscribeUserChannel } from './presence/presence.js';
+import { setOnline, setOffline, bumpOnline, createSubscriber, subscribeUserChannel, publishToUser } from './presence/presence.js';
 import { ConnectionStateManager } from './presence/connection-state.js';
 
 // COMPLETELY REMOVED: No in-memory client tracking for millions of users
@@ -249,6 +249,8 @@ async function startServer() {
       ws.close(1011, 'Internal server error');
       return;
     }
+
+
 
     ws.send(
       JSON.stringify({
@@ -591,6 +593,7 @@ async function startServer() {
           }
           case SignalType.ACCOUNT_SIGN_IN:
           case SignalType.ACCOUNT_SIGN_UP: {
+            console.log(`[SERVER] 🔐 Received ${parsed.type} from user: ${parsed.username || 'unknown'}`);
             // Apply authentication rate limiting
             try {
               if (!(await rateLimitMiddleware.checkAuthLimit(ws))) {
@@ -620,13 +623,15 @@ async function startServer() {
 
               // Mark presence and subscribe to delivery channel
               try {
-                await setOnline(result.username, 120);
+                await setOnline(result.username, 180); // 3 minutes TTL
+                console.log(`[SERVER] ✅ User ${result.username} marked as ONLINE in Redis with TTL`);
                 presenceSub = presenceSub || await createSubscriber();
                 presenceUnsub = await subscribeUserChannel(presenceSub, result.username, (raw) => {
                   try { ws.send(raw); } catch {}
                 });
+                console.log(`[SERVER] ✅ User ${result.username} subscribed to delivery channel`);
               } catch (e) {
-                console.warn('[SERVER] Presence registration failed:', e?.message || e);
+                console.error(`[SERVER] ❌ Presence registration FAILED for ${result.username}:`, e);
               }
 
               if (result.pending) {
@@ -703,7 +708,12 @@ async function startServer() {
 
               // Offline message delivery removed
               // Refresh online TTL after full auth
-              try { await setOnline(state.username, 120); } catch {}
+              try {
+                await setOnline(state.username, 180); // 3 minutes TTL
+                console.log(`[SERVER] ✅ User ${state.username} marked as ONLINE after server auth with TTL`);
+              } catch (e) {
+                console.error(`[SERVER] ❌ Failed to mark ${state.username} online after server auth:`, e);
+              }
 
               // Auto-check prekey status after successful authentication
               try {
@@ -837,7 +847,6 @@ async function startServer() {
             // Try pub-sub delivery first; fallback to offline queue
             try {
               const payload = JSON.stringify(messageToSend);
-              const { publishToUser } = await import('./presence/presence.js');
               const published = await publishToUser(toUser, payload);
               if (published) {
                 try { ws.send(JSON.stringify({ type: 'ok', message: 'relayed' })); } catch {}
@@ -999,6 +1008,29 @@ async function startServer() {
             break;
           }
 
+          case 'debug-status': {
+            // Debug command to check user status
+            const state = await ConnectionStateManager.getState(sessionId);
+            const response = {
+              type: 'debug-status-response',
+              sessionId: sessionId,
+              state: state,
+              timestamp: new Date().toISOString()
+            };
+
+            if (state?.username) {
+              try {
+                const { isOnline } = await import('./presence/presence.js');
+                response.isOnlineInRedis = await isOnline(state.username);
+              } catch (e) {
+                response.presenceError = e.message;
+              }
+            }
+
+            ws.send(JSON.stringify(response));
+            break;
+          }
+
           default:
             console.error(`[SERVER] Unknown message type: ${parsed.type}`);
             ws.send(JSON.stringify({ type: SignalType.ERROR, message: `Unknown message type: ${msg}` }));
@@ -1015,7 +1047,12 @@ async function startServer() {
       const username = state?.username;
       
       if (username) {
-        try { await setOffline(username); } catch {}
+        try {
+          await setOffline(username);
+          console.log(`[SERVER] ✅ User '${username}' marked offline due to WebSocket disconnect`);
+        } catch (e) {
+          console.error(`[SERVER] ❌ Failed to mark user '${username}' offline:`, e);
+        }
         console.log(`[SERVER] User '${username}' disconnected`);
       }
 

@@ -14,12 +14,24 @@ interface User {
   };
 }
 
-export function useFileSender(currentUsername: string, users: User[]) {
+export function useFileSender(currentUsername: string, targetUsername: string, users: User[]) {
   const [progress, setProgress] = useState(0);
   const [isSendingFile, setIsSendingFile] = useState(false);
 
   async function sendFile(file: File) {
-    if (!users || users.length === 0) return;
+    console.log('[useFileSender] Starting file send:', {
+      filename: file.name,
+      size: file.size,
+      targetUsername,
+      currentUsername,
+      usersCount: users.length,
+      users: users.map(u => u.username)
+    });
+
+    if (users.length === 0) {
+      console.error('[useFileSender] No users provided for file sending');
+      throw new Error('No users available for file sending');
+    }
 
     setIsSendingFile(true);
     setProgress(0);
@@ -34,10 +46,27 @@ export function useFileSender(currentUsername: string, users: User[]) {
       const rawAes = await window.crypto.subtle.exportKey("raw", aesKey);
       const aesKeyBase64 = CryptoUtils.Base64.arrayBufferToBase64(rawAes);
 
+      // Filter users to only include the target user for one-on-one conversation
+      const filteredUsers = users.filter((user) =>
+        user.username === targetUsername &&
+        user.username !== currentUsername &&
+        user.hybridPublicKeys
+      );
+
+      console.log('[useFileSender] Filtered users for encryption:', {
+        targetUsername,
+        totalUsers: users.length,
+        filteredCount: filteredUsers.length,
+        filteredUsers: filteredUsers.map(u => ({ username: u.username, hasKeys: !!u.hybridPublicKeys }))
+      });
+
+      if (filteredUsers.length === 0) {
+        console.error('[useFileSender] No valid target user with hybrid keys found for:', targetUsername);
+        throw new Error(`No valid recipient found for user: ${targetUsername}`);
+      }
+
       const userKeys = await Promise.all(
-        users
-          .filter((user) => user.username !== currentUsername && user.hybridPublicKeys)
-          .map(async (user) => {
+        filteredUsers.map(async (user) => {
 
             const aesKeyPayload = { aesKey: aesKeyBase64 };
 
@@ -97,9 +126,11 @@ export function useFileSender(currentUsername: string, users: User[]) {
       }
 
       setProgress(1);
+      console.log('[useFileSender] File sending completed successfully');
     } catch (error) {
-      console.error("Failed to process and send file:", error);
-      throw error;
+      console.error("[useFileSender] Failed to process and send file:", error);
+      setProgress(0);
+      throw error; // Re-throw so the caller can handle it
     } finally {
       setIsSendingFile(false);
     }

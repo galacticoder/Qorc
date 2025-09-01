@@ -321,13 +321,46 @@ export const useCalling = (authContext?: ReturnType<typeof useAuth>) => {
     }
   }, [callingService]);
 
+  // Start screen sharing
+  const startScreenShare = useCallback(async () => {
+    if (!callingService) {
+      throw new Error('Calling service not available');
+    }
+
+    try {
+      await callingService.startScreenShare();
+      console.log('[useCalling] Screen sharing started');
+    } catch (error) {
+      console.error('[useCalling] Failed to start screen sharing:', error);
+      throw error;
+    }
+  }, [callingService]);
+
+  // Stop screen sharing
+  const stopScreenShare = useCallback(async () => {
+    if (!callingService) {
+      return;
+    }
+
+    try {
+      await callingService.stopScreenShare();
+      console.log('[useCalling] Screen sharing stopped');
+    } catch (error) {
+      console.error('[useCalling] Failed to stop screen sharing:', error);
+    }
+  }, [callingService]);
+
+  // Get screen sharing status
+  const isScreenSharing = callingService?.getScreenSharingStatus() || false;
+
   return {
     // State
     currentCall,
     localStream,
     remoteStream,
     isInitialized,
-    
+    isScreenSharing,
+
     // Actions
     startCall,
     answerCall,
@@ -336,7 +369,9 @@ export const useCalling = (authContext?: ReturnType<typeof useAuth>) => {
     toggleMute,
     toggleVideo,
     switchCamera,
-    
+    startScreenShare,
+    stopScreenShare,
+
     // Service instance (for advanced usage)
     callingService
   };

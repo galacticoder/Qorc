@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { Card } from "@/components/ui/card";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Button } from "@/components/ui/button";
@@ -18,6 +18,7 @@ import { Phone, Video } from "lucide-react";
 import { useCalling } from "@/hooks/useCalling";
 import { CallModal } from "./CallModal";
 import { useAuth } from "@/hooks/useAuth";
+
 
 interface ChatInterfaceProps {
   onSendMessage: (
@@ -65,7 +66,10 @@ export function ChatInterface({
     endCall,
     toggleMute,
     toggleVideo,
-    switchCamera
+    switchCamera,
+    startScreenShare,
+    stopScreenShare,
+    isScreenSharing
   } = callingHook;
 
   // Track which messages have been processed in the current scroll event to prevent duplicates
@@ -388,6 +392,9 @@ export function ChatInterface({
           onToggleMute={toggleMute}
           onToggleVideo={toggleVideo}
           onSwitchCamera={switchCamera}
+          onStartScreenShare={startScreenShare}
+          onStopScreenShare={stopScreenShare}
+          isScreenSharing={isScreenSharing}
         />
       )}
     </Card>

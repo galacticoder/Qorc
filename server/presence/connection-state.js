@@ -154,10 +154,18 @@ export class ConnectionStateManager {
         state.lastActivity = Date.now();
 
         await client.setex(CONNECTION_STATE_KEY(sessionId), SESSION_TTL, JSON.stringify(state));
-        
+
         // Also refresh user session mapping if exists
         if (state.username) {
           await client.setex(USER_SESSION_KEY(state.username), SESSION_TTL, sessionId);
+
+          // Opportunistically bump presence TTL on activity
+          try {
+            const { bumpOnline } = await import('./presence.js');
+            await bumpOnline(state.username, 180); // 3 minutes
+          } catch (e) {
+            // Silently ignore presence bump errors
+          }
         }
 
         return true;

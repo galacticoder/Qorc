@@ -1,10 +1,11 @@
-import { useState, useRef, useEffect } from "react";
+import React, { useState, useRef, useEffect } from "react";
 import { cn } from "@/lib/utils";
 import { User } from "./UserList";
 import { SignalType } from "../../lib/signals";
 import { Message } from "./types";
 import { EditingBanner } from "./ChatInput/EditingBanner";
 import { ReplyBanner } from "./ChatInput/ReplyBanner";
+import { VoiceRecorder } from "./VoiceRecorder";
 
 import { useFileSender } from "./ChatInput/useFileSender";
 import { ProgressBar } from "./ChatInput/ProgressBar.tsx";
@@ -12,6 +13,7 @@ import { ProgressBar } from "./ChatInput/ProgressBar.tsx";
 import { FileUploader } from "./ChatInput/FileUploader.tsx";
 import { MessageTextarea } from "./ChatInput/MessageTextarea.tsx";
 import { SendButton } from "./ChatInput/SendButton.tsx";
+import { VoiceRecorderButton } from "./ChatInput/VoiceRecorderButton.tsx";
 import { MessageReply } from "./types";
 
 interface ChatInputProps {
@@ -32,7 +34,7 @@ interface ChatInputProps {
 export function ChatInput({
   onSendMessage,
   onSendFile,
-  isEncrypted,
+
   currentUsername,
   users,
   replyTo,
@@ -45,9 +47,10 @@ export function ChatInput({
 }: ChatInputProps) {
   const [message, setMessage] = useState("");
   const [isSending, setIsSending] = useState(false);
+  const [showVoiceRecorder, setShowVoiceRecorder] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
-  const { sendFile, progress, isSendingFile } = useFileSender(currentUsername, users);
+  const { sendFile, progress, isSendingFile } = useFileSender(currentUsername, selectedConversation, users);
 
   useEffect(() => {
     if (editingMessage) {
@@ -150,7 +153,7 @@ export function ChatInput({
       'image/jpeg', 'image/png', 'image/gif', 'image/webp',
       'text/plain', 'application/pdf',
       'application/zip', 'application/x-zip-compressed',
-      'audio/mpeg', 'audio/wav', 'audio/ogg',
+      'audio/mpeg', 'audio/wav', 'audio/ogg', 'audio/webm', // Added audio/webm for voice notes
       'video/mp4', 'video/webm', 'video/ogg'
     ];
 
@@ -181,6 +184,7 @@ export function ChatInput({
       'audio/mpeg': ['mp3'],
       'audio/wav': ['wav'],
       'audio/ogg': ['ogg'],
+      'audio/webm': ['webm'], // Added for voice notes
       'video/mp4': ['mp4'],
       'video/webm': ['webm'],
       'video/ogg': ['ogv']
@@ -243,10 +247,83 @@ export function ChatInput({
         type: SignalType.FILE_MESSAGE,
         filename: sanitizedFilename,
         fileSize: file.size,
+        mimeType: file.type,
         sender: currentUsername,
       });
     } catch {
       // error handled in hook
+    }
+  };
+
+  const handleSendVoiceNote = async (audioBlob: Blob) => {
+    if (!selectedConversation) {
+      console.error('[ChatInput] No conversation selected for voice note');
+      return;
+    }
+
+    try {
+      setIsSending(true);
+
+      // Create a file from the audio blob
+      const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+      const filename = `voice-note-${timestamp}.webm`;
+      const file = new File([audioBlob], filename, { type: 'audio/webm' });
+
+      // Validate file size using the same validation as regular file uploads
+      const validation = validateFile(file);
+      if (!validation.valid) {
+        console.error('[ChatInput] Voice note validation failed:', validation.error);
+        alert('Voice note too large: ' + validation.error);
+        setIsSending(false);
+        return;
+      }
+
+      console.log('[ChatInput] Sending voice note file:', {
+        filename: filename,
+        size: file.size,
+        type: file.type,
+        selectedConversation,
+        usersCount: users.length,
+        users: users.map(u => u.username)
+      });
+
+      try {
+        await sendFile(file);
+        console.log('[ChatInput] Voice note file sent successfully');
+      } catch (error) {
+        console.error('[ChatInput] Failed to send voice note:', error);
+        alert('Failed to send voice note: ' + (error instanceof Error ? error.message : 'Unknown error'));
+        setIsSending(false);
+        setShowVoiceRecorder(false);
+        return;
+      }
+
+      // Add voice note to sender's UI immediately (like regular files)
+      const fileUrl = URL.createObjectURL(file);
+      console.log('[ChatInput] Created blob URL for voice note:', fileUrl);
+
+      onSendFile({
+        id: crypto.randomUUID(),
+        content: fileUrl,
+        timestamp: new Date(),
+        isCurrentUser: true,
+        isSystemMessage: false,
+        type: SignalType.FILE_MESSAGE,
+        filename: filename,
+        fileSize: file.size,
+        mimeType: file.type,
+        sender: currentUsername,
+      });
+
+      console.log('[ChatInput] Voice note added to UI');
+
+      setShowVoiceRecorder(false);
+      console.log('[ChatInput] Voice note sent successfully');
+    } catch (error) {
+      console.error('[ChatInput] Failed to send voice note:', error);
+      alert('Failed to send voice note: ' + (error as Error).message);
+    } finally {
+      setIsSending(false);
     }
   };
 
@@ -261,6 +338,16 @@ export function ChatInput({
         </div>
       )}
 
+      {showVoiceRecorder && (
+        <div className="px-4 pt-2">
+          <VoiceRecorder
+            onSendVoiceNote={handleSendVoiceNote}
+            onCancel={() => setShowVoiceRecorder(false)}
+            disabled={isSending || isSendingFile}
+          />
+        </div>
+      )}
+
       <div className="p-4">
         <div
           className={cn(
@@ -269,6 +356,11 @@ export function ChatInput({
           )}
         >
           <FileUploader onFileSelected={handleFileChange} disabled={isSendingFile} />
+
+          <VoiceRecorderButton
+            onClick={() => setShowVoiceRecorder(true)}
+            disabled={isSendingFile || showVoiceRecorder}
+          />
 
           <MessageTextarea
             value={message}

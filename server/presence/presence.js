@@ -264,27 +264,30 @@ process.once('exit', () => {
 const ONLINE_KEY = (u) => `online:${u}`;
 const DELIVER_CH = (u) => `deliver:${u}`;
 
-export async function setOnline(username, ttlSeconds = 60) {
+export async function setOnline(username, ttlSeconds = 120) {
   try {
+    // Set online with TTL to auto-expire after crashes
     await redis.set(ONLINE_KEY(username), '1', 'EX', Math.max(10, ttlSeconds));
+    console.log(`[PRESENCE] User ${username} set online with ${ttlSeconds}s TTL`);
   } catch (error) {
     console.error(`[PRESENCE] Error setting user ${username} online:`, error);
     throw error; // Re-throw to let caller handle appropriately
   }
 }
 
-export async function refreshOnline(username, ttlSeconds = 60) {
+export async function bumpOnline(username, ttlSeconds = 120) {
   try {
+    // Lightweight TTL refresh - silently ignore errors
     await redis.expire(ONLINE_KEY(username), Math.max(10, ttlSeconds));
   } catch (error) {
-    console.error(`[PRESENCE] Error refreshing online status for user ${username}:`, error);
-    throw error; // Re-throw to let caller handle appropriately
+    // Silently ignore errors as this is opportunistic
   }
 }
 
 export async function setOffline(username) {
   try {
     await redis.del(ONLINE_KEY(username));
+    console.log(`[PRESENCE] User ${username} set offline`);
   } catch (error) {
     console.error(`[PRESENCE] Error setting user ${username} offline:`, error);
     throw error; // Re-throw to let caller handle appropriately

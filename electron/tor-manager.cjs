@@ -481,9 +481,9 @@ fi
         /\/bin\//,             // Binary directories
         /\/usr\/bin\//,        // User binaries
         /\/sbin\//,            // System binaries
-        /exec/i,               // Execution commands
-        /system/i,             // System calls
-        /spawn/i,              // Process spawning
+        /\bexec\s*\(/i,        // Execution function calls (but not words containing "exec")
+        /\bsystem\s*\(/i,      // System function calls (but not words containing "system")
+        /\bspawn\s*\(/i,       // Process spawning function calls
         /\x00/,                // Null bytes
       ];
 
@@ -549,7 +549,9 @@ fi
         'SocksTimeout', 'TokenBucketRefillInterval', 'TrackHostExits',
         'TrackHostExitsExpire', 'UpdateBridgesFromAuthority', 'UseMicrodescriptors',
         'PathBiasCircThreshold', 'PathBiasNoticeRate', 'PathBiasWarnRate',
-        'PathBiasExtremeRate', 'PathBiasDropGuards', 'PathBiasScaleThreshold'
+        'PathBiasExtremeRate', 'PathBiasDropGuards', 'PathBiasScaleThreshold',
+        // Additional directives that may appear in configurations
+        'SocksPolicy', 'NewCircuitPeriod', 'LearnCircuitBuildTimeout'
       ];
 
       for (const line of lines) {
@@ -636,10 +638,23 @@ fi
         });
 
         if (systemTorCheck.running) {
-          console.log('[TOR-MANAGER] Using existing system Tor service');
-          // Mark as running but don't create our own process
-          this.usingSystemTor = true;
-          return { success: true, usingSystemTor: true };
+          console.log('[TOR-MANAGER] System Tor detected, testing connectivity...');
+
+          // Test if system Tor is actually working before using it
+          try {
+            const torTest = await this.verifyTorConnection();
+            if (torTest.success) {
+              console.log('[TOR-MANAGER] System Tor is working properly, using existing service');
+              this.usingSystemTor = true;
+              return { success: true, usingSystemTor: true };
+            } else {
+              console.log('[TOR-MANAGER] System Tor detected but not responding properly:', torTest.error);
+              console.log('[TOR-MANAGER] Will start our own Tor instance instead');
+            }
+          } catch (testError) {
+            console.log('[TOR-MANAGER] Failed to test system Tor:', testError.message);
+            console.log('[TOR-MANAGER] Will start our own Tor instance instead');
+          }
         }
       }
 
@@ -1723,7 +1738,7 @@ fi
           path: '/api/ip',
           method: 'GET',
           agent: proxyAgent,
-          timeout: 10000
+          timeout: 20000  // Increase timeout to 20 seconds for better reliability
         };
 
         const req = https.request(options, (res) => {

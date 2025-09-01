@@ -6,3 +6,4 @@ pnpm-lock.yaml
 /server/database/user_database.sqlite
 /.qodo
 /.vscode
+/ref

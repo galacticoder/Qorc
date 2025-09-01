@@ -1,5 +1,9 @@
 const { contextBridge, ipcRenderer } = require('electron');
 
+console.log('[PRELOAD] Starting preload script...');
+console.log('[PRELOAD] contextBridge available:', !!contextBridge);
+console.log('[PRELOAD] ipcRenderer available:', !!ipcRenderer);
+
 // Expose protected methods that allow the renderer process to use
 // the ipcRenderer without exposing the entire object
 contextBridge.exposeInMainWorld('electronAPI', {
@@ -62,10 +66,12 @@ contextBridge.exposeInMainWorld('edgeApi', {
   wsSend: (message) => ipcRenderer.invoke('edge:ws-send', message),
   wsConnect: () => ipcRenderer.invoke('edge:ws-connect'),
   
-  // Server message listener
+  // Server message listener - centralized dispatcher
   onServerMessage: (callback) => {
-    ipcRenderer.on('edge:server-message', (event, message) => callback(message));
-    return () => ipcRenderer.removeListener('edge:server-message', callback);
+    // Use the centralized dispatcher instead of direct IPC listener
+    const handler = (event) => callback(event.detail);
+    window.addEventListener('edge:server-message', handler);
+    return () => window.removeEventListener('edge:server-message', handler);
   },
   
   // Signal Protocol functions (placeholders for now)
@@ -78,15 +84,46 @@ contextBridge.exposeInMainWorld('edgeApi', {
   decrypt: (options) => ipcRenderer.invoke('signal:decrypt', options),
   
   // Renderer ready notification
-  rendererReady: () => ipcRenderer.invoke('renderer:ready')
+  rendererReady: () => ipcRenderer.invoke('renderer:ready'),
+
+  // Screen sharing support
+  getScreenSources: () => {
+    console.log('[PRELOAD] getScreenSources called');
+    return ipcRenderer.invoke('screen:getSources');
+  },
+
+  // Test function to verify preload script is working
+  testFunction: () => {
+    console.log('[PRELOAD] Test function called - preload script is working');
+    return 'preload-working';
+  },
+
+  // Debug function to check what's available
+  debugElectronAPI: () => {
+    console.log('[PRELOAD] Debug function called');
+    // Note: This function runs in the renderer context, not preload context
+    // The actual checks will be performed when called from the renderer
+    return {
+      preloadScriptLoaded: true,
+      timestamp: new Date().toISOString(),
+      platform: process.platform
+    };
+  }
 });
 
+console.log('[PRELOAD] contextBridge.exposeInMainWorld completed');
+
 // Log that preload script has loaded
-console.log('[PRELOAD] Electron preload script loaded');
+console.log('[PRELOAD] ===== ELECTRON PRELOAD SCRIPT LOADED =====');
 console.log('[PRELOAD] Platform:', process.platform);
 console.log('[PRELOAD] Node version:', process.version);
+console.log('[PRELOAD] Screen sharing function defined in contextBridge');
+console.log('[PRELOAD] Current timestamp:', new Date().toISOString());
 
-// Bridge server messages into the isolated world via a DOM event for React hooks
+
+
+// Centralized server message dispatcher - single IPC listener that dispatches DOM events
+// All consumers should use electronAPI.onServerMessage() which subscribes to these DOM events
 try {
   ipcRenderer.on('edge:server-message', (_event, data) => {
     try {

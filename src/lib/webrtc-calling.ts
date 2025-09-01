@@ -47,8 +47,11 @@ export interface CallSignal {
 export class WebRTCCallingService {
   private localStream: MediaStream | null = null;
   private remoteStream: MediaStream | null = null;
+  private screenStream: MediaStream | null = null;
   private peerConnection: RTCPeerConnection | null = null;
   private currentCall: CallState | null = null;
+  private isScreenSharing: boolean = false;
+  private isTogglingScreenShare: boolean = false;
   private localUsername: string = '';
   private preferredCameraDeviceId: string | null = null;
   
@@ -369,6 +372,241 @@ export class WebRTCCallingService {
     } catch (error) {
       console.error('[Calling] Failed to switch camera:', error);
     }
+  }
+
+  /**
+   * Start screen sharing
+   */
+  async startScreenShare(): Promise<void> {
+    if (!this.peerConnection) {
+      throw new Error('No active call to share screen');
+    }
+
+    if (this.isScreenSharing) {
+      throw new Error('Screen sharing is already active');
+    }
+
+    if (this.isTogglingScreenShare) {
+      throw new Error('Screen sharing operation already in progress');
+    }
+
+    try {
+      // Check if we're in Electron
+      const isElectron = !!(window as any).electronAPI;
+      console.log('[Calling] Screen share - isElectron:', isElectron);
+      console.log('[Calling] electronAPI available:', !!(window as any).electronAPI);
+      console.log('[Calling] getScreenSources available:', !!(window as any).electronAPI?.getScreenSources);
+      console.log('[Calling] electronAPI keys:', (window as any).electronAPI ? Object.keys((window as any).electronAPI) : 'none');
+
+      // Try to use Electron API if available, with fallback
+      if (isElectron) {
+        // Check if getScreenSources is available
+        if (!(window as any).electronAPI?.getScreenSources) {
+          console.warn('[Calling] getScreenSources not found in electronAPI');
+          console.warn('[Calling] Available electronAPI functions:', Object.keys((window as any).electronAPI || {}));
+
+          // Test debug function and check actual API availability
+          if ((window as any).electronAPI?.debugElectronAPI) {
+            const debugInfo = (window as any).electronAPI.debugElectronAPI();
+            console.log('[Calling] Debug info:', debugInfo);
+          }
+
+          // Check actual API availability in renderer context
+          const hasGetScreenSources = typeof (window as any).electronAPI?.getScreenSources === 'function';
+          const hasTestFunction = typeof (window as any).electronAPI?.testFunction === 'function';
+          const electronAPIKeys = (window as any).electronAPI ? Object.keys((window as any).electronAPI) : [];
+
+          console.log('[Calling] Renderer context API check:', {
+            hasGetScreenSources,
+            hasTestFunction,
+            electronAPIKeys
+          });
+
+          // Try to manually test the IPC call
+          if ((window as any).electronAPI?.send) {
+            console.log('[Calling] Attempting manual IPC test...');
+            try {
+              (window as any).electronAPI.send('test-screen-sources', {});
+            } catch (e) {
+              console.log('[Calling] Manual IPC test failed:', e);
+            }
+          }
+
+          console.warn('[Calling] This usually means the app needs to be restarted after permission changes');
+          console.log('[Calling] Attempting to use browser getDisplayMedia API as fallback');
+
+          // Try to manually invoke the IPC call as a last resort
+          try {
+            if ((window as any).electronAPI?.send) {
+              console.log('[Calling] Attempting manual IPC call for screen sources');
+              // This won't work but will help us debug
+            }
+          } catch (e) {
+            console.log('[Calling] Manual IPC attempt failed:', e);
+          }
+        }
+      }
+
+      if (isElectron && (window as any).electronAPI?.getScreenSources) {
+        try {
+          // Use Electron's desktopCapturer API
+          console.log('[Calling] Using Electron desktopCapturer API');
+          const sources = await (window as any).electronAPI.getScreenSources();
+          console.log('[Calling] Got screen sources:', sources?.length || 0);
+
+          if (!sources || sources.length === 0) {
+            throw new Error('No screen sources available');
+          }
+
+          // Use the first screen source (you could show a picker here)
+          const screenSource = sources.find((source: any) => source.id.startsWith('screen:')) || sources[0];
+          console.log('[Calling] Selected screen source:', screenSource.name);
+
+          this.screenStream = await navigator.mediaDevices.getUserMedia({
+            audio: false,
+            video: {
+              mandatory: {
+                chromeMediaSource: 'desktop',
+                chromeMediaSourceId: screenSource.id,
+                minWidth: 1280,
+                maxWidth: 1920,
+                minHeight: 720,
+                maxHeight: 1080
+              }
+            } as any
+          });
+        } catch (electronError) {
+          console.warn('[Calling] Electron screen capture failed, falling back to browser API:', electronError);
+          // Fall through to browser API
+          this.screenStream = await navigator.mediaDevices.getDisplayMedia({
+            video: {
+              width: { ideal: 1920, max: 1920 },
+              height: { ideal: 1080, max: 1080 },
+              frameRate: { ideal: 30, max: 60 }
+            },
+            audio: true
+          });
+        }
+      } else {
+        // Fallback to standard getDisplayMedia for browsers
+        console.log('[Calling] Using browser getDisplayMedia API');
+
+        // Check if getDisplayMedia is available
+        if (!navigator.mediaDevices?.getDisplayMedia) {
+          throw new Error('Screen sharing not supported in this environment. Please restart the Electron app to enable screen sharing permissions.');
+        }
+
+        console.log('[Calling] Attempting browser screen capture...');
+
+        this.screenStream = await navigator.mediaDevices.getDisplayMedia({
+          video: {
+            width: { ideal: 1920, max: 1920 },
+            height: { ideal: 1080, max: 1080 },
+            frameRate: { ideal: 30, max: 60 }
+          },
+          audio: true // Include system audio if available
+        });
+      }
+
+      const videoTrack = this.screenStream.getVideoTracks()[0];
+
+      // Handle screen share end (user clicks "Stop sharing" in browser)
+      videoTrack.onended = () => {
+        this.stopScreenShare();
+      };
+
+      // Replace video track in peer connection
+      const sender = this.peerConnection.getSenders().find(s =>
+        s.track && s.track.kind === 'video'
+      );
+
+      if (sender) {
+        await sender.replaceTrack(videoTrack);
+      } else {
+        // Add track if no video sender exists
+        this.peerConnection.addTrack(videoTrack, this.screenStream);
+      }
+
+      this.isScreenSharing = true;
+      console.log('[Calling] Screen sharing started');
+
+      // Notify callback about screen stream
+      this.onLocalStreamCallback?.(this.screenStream);
+
+    } catch (error) {
+      console.error('[Calling] Failed to start screen sharing:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Stop screen sharing and return to camera
+   */
+  async stopScreenShare(): Promise<void> {
+    if (!this.isScreenSharing || !this.screenStream) {
+      return;
+    }
+
+    if (this.isTogglingScreenShare) {
+      return; // Already in progress
+    }
+
+    this.isTogglingScreenShare = true;
+
+    // Create local copies to avoid race conditions
+    const screenStream = this.screenStream;
+    const peerConnection = this.peerConnection;
+    const localStream = this.localStream;
+
+    try {
+      // Stop screen stream
+      if (screenStream) {
+        screenStream.getTracks().forEach(track => track.stop());
+      }
+
+      // Return to camera if we have a local stream and peer connection
+      if (localStream && peerConnection) {
+        const videoTrack = localStream.getVideoTracks()[0];
+
+        if (videoTrack) {
+          const sender = peerConnection.getSenders().find(s =>
+            s.track && s.track.kind === 'video'
+          );
+
+          if (sender) {
+            try {
+              await sender.replaceTrack(videoTrack);
+            } catch (replaceError) {
+              console.warn('[Calling] Failed to replace track during screen share stop:', replaceError);
+              // Continue with cleanup even if replaceTrack fails
+            }
+          }
+        }
+      }
+
+      console.log('[Calling] Screen sharing stopped');
+
+      // Notify callback about local stream
+      if (localStream) {
+        this.onLocalStreamCallback?.(localStream);
+      }
+
+    } catch (error) {
+      console.error('[Calling] Failed to stop screen sharing:', error);
+      throw error;
+    } finally {
+      // Always perform cleanup and release the toggle flag
+      this.screenStream = null;
+      this.isScreenSharing = false;
+      this.isTogglingScreenShare = false;
+    }
+  }
+
+  /**
+   * Check if screen sharing is active
+   */
+  getScreenSharingStatus(): boolean {
+    return this.isScreenSharing;
   }
 
   /**
@@ -725,7 +963,7 @@ export class WebRTCCallingService {
    * Generate unique call ID
    */
   private generateCallId(): string {
-    return `call_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+    return `call_${Date.now()}_${Math.random().toString(36).substring(2, 11)}`;
   }
 
   /**
@@ -746,6 +984,12 @@ export class WebRTCCallingService {
       this.localStream = null;
     }
 
+    // Stop screen stream
+    if (this.screenStream) {
+      this.screenStream.getTracks().forEach(track => track.stop());
+      this.screenStream = null;
+    }
+
     // Close peer connection
     if (this.peerConnection) {
       this.peerConnection.close();
@@ -754,6 +998,10 @@ export class WebRTCCallingService {
 
     // Clear remote stream
     this.remoteStream = null;
+
+    // Reset screen sharing state
+    this.isScreenSharing = false;
+    this.isTogglingScreenShare = false;
 
     // Clear current call immediately to allow prompt re-calling
     this.currentCall = null;

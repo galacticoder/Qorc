@@ -9,6 +9,7 @@ import { ChatMessageProps } from "./types.ts";
 import { SystemMessage } from "./ChatMessage/SystemMessage.tsx";
 import { DeletedMessage } from "./ChatMessage/DeletedMessage.tsx";
 import { FileMessage } from "./ChatMessage/FileMessage.tsx";
+import { VoiceMessage } from "./VoiceMessage.tsx";
 import { MessageReceipt } from "./MessageReceipt.tsx";
 
 export function ChatMessage({ message, onReply, previousMessage, onDelete, onEdit }: ChatMessageProps) {
@@ -27,7 +28,24 @@ export function ChatMessage({ message, onReply, previousMessage, onDelete, onEdi
     return <DeletedMessage sender={sender} timestamp={timestamp} isCurrentUser={isCurrentUser} />;
   }
 
-  if (type === "FILE_MESSAGE") {
+  if (type === "FILE_MESSAGE" || type === "file") {
+    // Check if it's a voice note (audio file)
+    const isVoiceNote = message.filename?.includes('voice-note') ||
+                       (message.mimeType && message.mimeType.startsWith('audio/')) ||
+                       (message.filename && /\.(webm|mp3|wav|ogg|m4a)$/i.test(message.filename));
+
+    if (isVoiceNote) {
+      return (
+        <VoiceMessage
+          audioUrl={message.content}
+          sender={message.sender}
+          timestamp={message.timestamp}
+          isCurrentUser={isCurrentUser}
+          filename={message.filename}
+        />
+      );
+    }
+
     return <FileMessage message={message} isCurrentUser={isCurrentUser} />;
   }
 

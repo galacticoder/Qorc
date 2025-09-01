@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain } = require('electron');
+const { app, BrowserWindow, ipcMain, desktopCapturer } = require('electron');
 const path = require('path');
 const isDev = process.env.NODE_ENV === 'development';
 const torManager = require('./tor-manager.cjs');
@@ -7,19 +7,32 @@ const torManager = require('./tor-manager.cjs');
 let mainWindow;
 
 function createWindow() {
-  // Use a unique session partition per Electron process to avoid IndexedDB lock conflicts
-  const partitionName = isDev ? `persist:securechat-${process.pid}` : 'persist:securechat';
+  // Use in-memory partition in dev to avoid orphaned profiles, persistent in production
+  const partitionName = isDev ? 'securechat-dev' : 'persist:securechat';
+
+  // Base web preferences with secure defaults
+  const webPreferences = {
+    nodeIntegration: false,
+    contextIsolation: true,
+    enableRemoteModule: false,
+    preload: path.join(__dirname, 'preload.cjs'),
+    partition: partitionName,
+    // Enable media access for voice notes and video calls
+    allowRunningInsecureContent: false,
+    experimentalFeatures: true
+  };
+
+  // Only weaken security in development for WebRTC/screen sharing testing
+  if (isDev) {
+    webPreferences.webSecurity = false;
+    webPreferences.allowRunningInsecureContent = true;
+  }
+
   // Create the browser window
   mainWindow = new BrowserWindow({
     width: 1200,
     height: 800,
-    webPreferences: {
-      nodeIntegration: false,
-      contextIsolation: true,
-      enableRemoteModule: false,
-      preload: path.join(__dirname, 'preload.cjs'),
-      partition: partitionName
-    },
+    webPreferences,
     icon: path.join(__dirname, '../public/icon.png'), // Add your app icon
     titleBarStyle: 'default',
     show: false // Don't show until ready
@@ -67,6 +80,52 @@ function createWindow() {
 app.whenReady().then(() => {
   createWindow();
 
+  // Handle permission requests for media devices and security
+  app.on('web-contents-created', (event, contents) => {
+    // Set up permission handlers for media access
+    contents.session.setPermissionRequestHandler((_webContents, permission, callback) => {
+      console.log('[ELECTRON] Permission request:', permission);
+
+      // Allow media permissions (microphone, camera, screen capture)
+      if (permission === 'media' || permission === 'microphone' || permission === 'camera') {
+        console.log('[ELECTRON] Granting media permission:', permission);
+        callback(true);
+        return;
+      }
+
+      // Allow display capture for screen sharing
+      if (permission === 'display-capture') {
+        console.log('[ELECTRON] Granting display-capture permission');
+        callback(true);
+        return;
+      }
+
+      // Deny other permissions by default
+      console.log('[ELECTRON] Denying permission:', permission);
+      callback(false);
+    });
+
+    // Handle permission check requests
+    contents.session.setPermissionCheckHandler((_webContents, permission, requestingOrigin) => {
+      console.log('[ELECTRON] Permission check:', permission, 'from:', requestingOrigin);
+
+      // Allow media permissions
+      if (permission === 'media' || permission === 'microphone' || permission === 'camera' || permission === 'display-capture') {
+        console.log('[ELECTRON] Permission check granted for:', permission);
+        return true;
+      }
+
+      console.log('[ELECTRON] Permission check denied for:', permission);
+      return false;
+    });
+
+    // Security: Prevent new window creation
+    contents.on('new-window', (event, navigationUrl) => {
+      event.preventDefault();
+      console.log('[SECURITY] Blocked new window creation to:', navigationUrl);
+    });
+  });
+
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {
       createWindow();
@@ -88,13 +147,7 @@ app.on('before-quit', async () => {
   }
 });
 
-// Security: Prevent new window creation
-app.on('web-contents-created', (event, contents) => {
-  contents.on('new-window', (event, navigationUrl) => {
-    event.preventDefault();
-    console.log('[SECURITY] Blocked new window creation to:', navigationUrl);
-  });
-});
+
 
 // IPC Handlers for Tor functionality
 ipcMain.handle('tor:check-installation', async () => {
@@ -453,6 +506,31 @@ ipcMain.handle('app:version', () => {
 
 ipcMain.handle('app:name', () => {
   return app.getName();
+});
+
+// Handle screen sharing
+ipcMain.handle('screen:getSources', async () => {
+  try {
+    console.log('[ELECTRON] ===== SCREEN SOURCES REQUEST RECEIVED =====');
+    console.log('[ELECTRON] Getting screen sources...');
+    const sources = await desktopCapturer.getSources({
+      types: ['window', 'screen'],
+      thumbnailSize: { width: 150, height: 150 }
+    });
+    console.log('[ELECTRON] Found', sources.length, 'screen sources');
+    console.log('[ELECTRON] Sources:', sources.map(s => ({ id: s.id, name: s.name })));
+    return sources;
+  } catch (error) {
+    console.error('[ELECTRON] Error getting screen sources:', error);
+    throw error;
+  }
+});
+
+// Test handler for debugging
+ipcMain.on('test-screen-sources', (event, data) => {
+  console.log('[ELECTRON] ===== TEST SCREEN SOURCES RECEIVED =====');
+  console.log('[ELECTRON] Test data:', data);
+  event.reply('test-screen-sources-reply', { success: true, message: 'IPC is working!' });
 });
 
 console.log('[ELECTRON] Main process started');

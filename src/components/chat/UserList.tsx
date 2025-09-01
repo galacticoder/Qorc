@@ -22,9 +22,10 @@ interface SidebarProps {
   onAddConversation?: (username: string) => Promise<any>;
   onLogout?: () => void;
   onActiveTabChange?: (tab: string) => void;
+  settingsContent?: React.ReactNode;
 }
 
-export function Sidebar({ className, children, currentUsername, onAddConversation, onLogout, onActiveTabChange }: SidebarProps) {
+export function Sidebar({ className, children, currentUsername, onAddConversation, onLogout, onActiveTabChange, settingsContent }: SidebarProps) {
   const [activeTab, setActiveTab] = useState("messages");
   const [showAddUser, setShowAddUser] = useState(false);
   const [newUsername, setNewUsername] = useState("");
@@ -66,7 +67,7 @@ export function Sidebar({ className, children, currentUsername, onAddConversatio
 
   return (
     <div className={cn("flex flex-col justify-start items-center relative transition-all duration-500 ease-in-out w-16", className)}>
-      <article className="border border-solid border-gray-300 w-full ease-in-out duration-500 left-0 rounded-2xl inline-block shadow-lg shadow-black/15 bg-white h-full flex flex-col">
+      <article className="border border-solid border-gray-300 dark:border-gray-700 w-full ease-in-out duration-500 left-0 rounded-2xl inline-block shadow-lg shadow-black/15 bg-white dark:bg-gray-900 h-full flex flex-col">
         {/* Top navigation buttons */}
         <div className="flex flex-col">
           <label
@@ -238,13 +239,24 @@ export function Sidebar({ className, children, currentUsername, onAddConversatio
 
       {/* Conversations panel - only show when messages tab is active */}
       {activeTab === "messages" && (
-        <div className="fixed left-16 top-0 h-full w-64 bg-white border border-gray-300 rounded-r-2xl shadow-lg shadow-black/15 z-30">
+        <div className="fixed left-16 top-0 h-full w-64 bg-white dark:bg-gray-900 border border-gray-300 dark:border-gray-700 rounded-r-2xl shadow-lg shadow-black/15 z-30">
           <div className="h-full flex flex-col">
-            <div className="p-4 border-b border-gray-200">
-              <h2 className="text-lg font-semibold text-gray-900">Conversations</h2>
+            <div className="p-4 border-b border-gray-200 dark:border-gray-700">
+              <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">Conversations</h2>
             </div>
             <div className="flex-1 overflow-hidden">
               {children}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Settings panel - only show when settings tab is active */}
+      {activeTab === "settings" && (
+        <div className="fixed left-16 top-0 h-full w-96 bg-white dark:bg-gray-900 border border-gray-300 dark:border-gray-700 rounded-r-2xl shadow-lg shadow-black/15 z-30 overflow-y-auto">
+          <div className="h-full flex flex-col">
+            <div className="flex-1">
+              {settingsContent}
             </div>
           </div>
         </div>
