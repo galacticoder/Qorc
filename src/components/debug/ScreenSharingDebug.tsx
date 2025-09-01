@@ -3,7 +3,7 @@
  * Shows actual video constraints and stream properties to verify settings are working
  */
 
-import React, { useState, useEffect } from 'react';
+import { useState, useEffect } from 'react';
 import { Monitor, Info, Play, Square } from 'lucide-react';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -68,11 +68,18 @@ export function ScreenSharingDebug() {
       
       console.log('[ScreenSharingDebug] Using constraints:', videoConstraints);
       
-      // Start screen capture with our constraints
-      const capturedStream = await navigator.mediaDevices.getDisplayMedia({
-        video: videoConstraints,
-        audio: false
-      });
+      // Feature detection for screen capture APIs
+      const hasModernAPI = typeof navigator !== 'undefined' && !!navigator.mediaDevices && typeof navigator.mediaDevices.getDisplayMedia === 'function';
+      const hasLegacyAPI = typeof navigator !== 'undefined' && typeof (navigator as any).getDisplayMedia === 'function';
+
+      if (!hasModernAPI && !hasLegacyAPI) {
+        throw new Error('Screen sharing is not supported in this browser.');
+      }
+
+      // Start screen capture with our constraints using modern or legacy API
+      const capturedStream = hasModernAPI
+        ? await navigator.mediaDevices.getDisplayMedia({ video: videoConstraints, audio: false })
+        : await (navigator as any).getDisplayMedia({ video: true });
       
       setStream(capturedStream);
       

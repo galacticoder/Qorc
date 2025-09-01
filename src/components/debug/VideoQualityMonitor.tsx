@@ -3,7 +3,7 @@
  * Shows real-time quality stats for received video streams (viewer side)
  */
 
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { Activity, Eye } from 'lucide-react';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 
@@ -30,8 +30,22 @@ export function VideoQualityMonitor({ peerConnection, remoteStream, isVisible = 
   const [isMonitoring, setIsMonitoring] = useState(false);
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const lastInboundRef = useRef<{ id: string; bytesReceived: number; framesReceived?: number; timestamp: number } | null>(null);
+  const failureCountRef = useRef(0);
+  const MAX_FAILURES = 5;
 
-  const startMonitoring = () => {
+  const stopMonitoring = useCallback(() => {
+    console.log('[VideoQualityMonitor] Stopping quality monitoring...');
+    setIsMonitoring(false);
+    
+    if (intervalRef.current) {
+      clearInterval(intervalRef.current);
+      intervalRef.current = null;
+    }
+    
+    setStats(null);
+  }, []);
+
+  const startMonitoring = useCallback(() => {
     if (!peerConnection || isMonitoring) return;
     
     console.log('[VideoQualityMonitor] Starting quality monitoring...');
@@ -44,29 +58,23 @@ export function VideoQualityMonitor({ peerConnection, remoteStream, isVisible = 
         
         if (videoStats) {
           setStats(videoStats);
+          failureCountRef.current = 0; // Reset on success
           console.log('[VideoQualityMonitor] Current video quality:', videoStats);
         }
       } catch (error) {
         console.error('[VideoQualityMonitor] Failed to get stats:', error);
+        failureCountRef.current++;
+        if (failureCountRef.current >= MAX_FAILURES) {
+          console.error('[VideoQualityMonitor] Too many failures, stopping monitoring');
+          stopMonitoring();
+        }
       }
     };
-
+    
     // Update stats every second
     intervalRef.current = setInterval(updateStats, 1000);
     updateStats(); // Initial update
-  };
-
-  const stopMonitoring = () => {
-    console.log('[VideoQualityMonitor] Stopping quality monitoring...');
-    setIsMonitoring(false);
-    
-    if (intervalRef.current) {
-      clearInterval(intervalRef.current);
-      intervalRef.current = null;
-    }
-    
-    setStats(null);
-  };
+  }, [peerConnection, isMonitoring, stopMonitoring]);
 
   const extractVideoStats = (statsReport: RTCStatsReport): VideoStats | null => {
     let inboundVideoStats: any = null;
@@ -94,10 +102,16 @@ export function VideoQualityMonitor({ peerConnection, remoteStream, isVisible = 
     const prevInboundSnapshot = lastInboundRef.current ? { ...lastInboundRef.current } : null;
 
     if (prevInboundSnapshot && prevInboundSnapshot.id === currentId) {
-      const timeDiff = (currentTime - prevInboundSnapshot.timestamp) / 1000;
-      const bytesDiff = currentBytes - prevInboundSnapshot.bytesReceived;
-      if (timeDiff > 0 && bytesDiff >= 0) {
-        bitrate = Math.round((bytesDiff * 8) / timeDiff);
+      const prevTimestamp = prevInboundSnapshot.timestamp;
+      const timesAreValid = Number.isFinite(currentTime) && Number.isFinite(prevTimestamp) && currentTime > prevTimestamp;
+      if (timesAreValid) {
+        const timeDiff = (currentTime - prevTimestamp) / 1000;
+        const bytesDiff = currentBytes - prevInboundSnapshot.bytesReceived;
+        if (timeDiff > 0 && bytesDiff >= 0) {
+          bitrate = Math.round((bytesDiff * 8) / timeDiff);
+        }
+      } else {
+        // Leave bitrate at 0 on invalid timestamps
       }
     }
 
@@ -108,10 +122,14 @@ export function VideoQualityMonitor({ peerConnection, remoteStream, isVisible = 
     // Compute frameRate using delta frames if needed
     if (!trackStats?.framesPerSecond && !inboundVideoStats.framesPerSecond && prevInboundSnapshot && prevInboundSnapshot.id === currentId) {
       if (typeof inboundVideoStats.framesReceived === 'number' && typeof prevInboundSnapshot.framesReceived === 'number') {
-        const tDiff = (inboundVideoStats.timestamp - prevInboundSnapshot.timestamp) / 1000;
-        const fDiff = inboundVideoStats.framesReceived - prevInboundSnapshot.framesReceived;
-        if (tDiff >= 0.2 && fDiff >= 0) {
-          frameRate = fDiff / tDiff;
+        const tDiffRaw = inboundVideoStats.timestamp - prevInboundSnapshot.timestamp;
+        const timesAreValid = Number.isFinite(inboundVideoStats.timestamp) && Number.isFinite(prevInboundSnapshot.timestamp) && tDiffRaw > 0;
+        if (timesAreValid) {
+          const tDiff = tDiffRaw / 1000;
+          const fDiff = inboundVideoStats.framesReceived - prevInboundSnapshot.framesReceived;
+          if (tDiff >= 0.2 && fDiff >= 0) {
+            frameRate = fDiff / tDiff;
+          }
         }
       }
     }
@@ -150,7 +168,7 @@ export function VideoQualityMonitor({ peerConnection, remoteStream, isVisible = 
     return () => {
       stopMonitoring();
     };
-  }, [peerConnection]);
+  }, [peerConnection, isMonitoring, startMonitoring, stopMonitoring]);
 
   // Reset baseline when remote stream changes (e.g., start/stop/restart share)
   useEffect(() => {

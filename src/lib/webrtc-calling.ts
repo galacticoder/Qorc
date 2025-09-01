@@ -332,7 +332,9 @@ export class WebRTCCallingService {
     if (this.currentCall.startTime) {
       this.currentCall.duration = this.currentCall.endTime - this.currentCall.startTime;
     }
-    (this.currentCall as any).endReason = reason;
+    if (this.currentCall) {
+      this.currentCall.endReason = reason as CallState['endReason'];
+    }
     this.onCallStateChangeCallback?.(this.currentCall);
 
     // Cleanup
@@ -538,7 +540,7 @@ export class WebRTCCallingService {
 
           this.screenStream = await navigator.mediaDevices.getUserMedia({
             audio: false,
-            video: electronConstraints as any
+            video: electronConstraints as MediaTrackConstraints
           });
 
           // Log actual stream properties for verification
@@ -791,7 +793,8 @@ export class WebRTCCallingService {
         if (this.peerConnection.signalingState === 'have-local-offer') {
           try {
             console.warn('[Calling] Renegotiation timed out; rolling back local offer');
-            await (this.peerConnection as any).setLocalDescription({ type: 'rollback' });
+            // 'rollback' is a valid type per WebRTC spec for rolling back offers
+            await this.peerConnection.setLocalDescription({ type: 'rollback' } as RTCSessionDescriptionInit);
           } catch (rbErr) {
             console.warn('[Calling] Rollback after renegotiation timeout failed (non-fatal):', rbErr);
           }
@@ -1334,7 +1337,8 @@ export class WebRTCCallingService {
           if (this.peerConnection.signalingState === 'have-local-offer') {
             try {
               console.log('[Calling] Rolling back local offer to resolve glare');
-              await (this.peerConnection as any).setLocalDescription({ type: 'rollback' });
+              // 'rollback' is a valid type per WebRTC spec for rolling back offers
+              await this.peerConnection.setLocalDescription({ type: 'rollback' } as RTCSessionDescriptionInit);
             } catch (rbErr) {
               console.warn('[Calling] Rollback failed (non-fatal):', rbErr);
             }

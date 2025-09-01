@@ -30,6 +30,25 @@ class ElectronTorManager {
   }
 
   /**
+   * Parse ports from Tor config file
+   */
+  async parsePortsFromConfig(configPath) {
+    const defaults = { socks: 9050, control: 9051 };
+    try {
+      const cfg = await fs.readFile(configPath, 'utf8').catch(() => '');
+      const socksMatch = cfg.match(/^SocksPort\s+(\d+)/m);
+      const controlMatch = cfg.match(/^ControlPort\s+(\d+)/m);
+      return {
+        socks: socksMatch ? (parseInt(socksMatch[1], 10) || defaults.socks) : defaults.socks,
+        control: controlMatch ? (parseInt(controlMatch[1], 10) || defaults.control) : defaults.control,
+      };
+    } catch (e) {
+      console.warn('[TOR-MANAGER] Failed to parse ports from config:', e?.message || e);
+      return defaults;
+    }
+  }
+
+  /**
    * Setup Tor installation paths
    */
   setupPaths() {
@@ -592,11 +611,12 @@ fi
       console.log('[TOR-MANAGER] Tor configuration completed successfully');
       // Record configured ports (effective ports may be overridden at runtime)
       try {
-        const socksMatch = config.match(/^SocksPort\s+(\d+)/m);
-        const controlMatch = config.match(/^ControlPort\s+(\d+)/m);
-        if (socksMatch) this.configuredSocksPort = parseInt(socksMatch[1], 10) || this.configuredSocksPort;
-        if (controlMatch) this.configuredControlPort = parseInt(controlMatch[1], 10) || this.configuredControlPort;
-      } catch {}
+        const ports = await this.parsePortsFromConfig(this.configPath);
+        this.configuredSocksPort = ports.socks;
+        this.configuredControlPort = ports.control;
+      } catch (e) {
+        console.warn('[TOR-MANAGER] Failed to update configured ports from config:', e?.message || e);
+      }
       return { success: true };
 
     } catch (error) {
@@ -708,15 +728,9 @@ fi
       }
 
       // Derive configured ports from config as baseline
-      let configuredSocksPort = 9050;
-      let configuredControlPort = 9051;
-      try {
-        const cfg = await fs.readFile(this.configPath, 'utf8').catch(() => '');
-        const mS = cfg.match(/^SocksPort\s+(\d+)/m);
-        const mC = cfg.match(/^ControlPort\s+(\d+)/m);
-        if (mS) configuredSocksPort = parseInt(mS[1], 10) || configuredSocksPort;
-        if (mC) configuredControlPort = parseInt(mC[1], 10) || configuredControlPort;
-      } catch {}
+      const portsFromCfg = await this.parsePortsFromConfig(this.configPath);
+      let configuredSocksPort = portsFromCfg.socks;
+      let configuredControlPort = portsFromCfg.control;
 
       // Start Tor process
       console.log('[TOR-MANAGER] Spawning Tor process with args:', ['-f', this.configPath, '--DataDirectory', dataDir]);
@@ -760,12 +774,22 @@ fi
           if (/Bootstrapped\s+100%/i.test(line)) {
             this.bootstrapped = true;
           }
-          // Detect port announcements if present (handle various formats)
-          const mSock = line.match(/Opened (?:Socks|SOCKS) listener(?: connection)? \(ready\) on (?:127\.0\.0\.1|localhost):(\d+)/i);
-          if (mSock) this.effectiveSocksPort = parseInt(mSock[1], 10) || this.effectiveSocksPort;
-          const mCtl = line.match(/Opened Control listener(?: connection)? \(ready\) on (?:127\.0\.0\.1|localhost):(\d+)/i);
-          if (mCtl) this.effectiveControlPort = parseInt(mCtl[1], 10) || this.effectiveControlPort;
-        } catch {}
+          // Detect port announcements with broad matching (SOCKS/SOCKS5, IPv4/IPv6/hostnames)
+          const socksMatch = line.match(/Opened\s+(?:Socks(?:5)?|SOCKS(?:5)?)\s+listener(?:\s+connection)?\s*(?:\(ready\))?\s+on\s+(?:\[[^\]]+\]|[^\s]+?)(?::(\d+)|\]:(\d+))/i);
+          if (socksMatch) {
+            const portStr = socksMatch[1] || socksMatch[2];
+            const p = parseInt(portStr, 10);
+            if (Number.isFinite(p)) this.effectiveSocksPort = p;
+          }
+          const controlMatch = line.match(/Opened\s+Control\s+listener(?:\s+connection)?\s*(?:\(ready\))?\s+on\s+(?:\[[^\]]+\]|[^\s]+?)(?::(\d+)|\]:(\d+))/i);
+          if (controlMatch) {
+            const portStr = controlMatch[1] || controlMatch[2];
+            const p = parseInt(portStr, 10);
+            if (Number.isFinite(p)) this.effectiveControlPort = p;
+          }
+        } catch (e) {
+          console.warn('[TOR-MANAGER] Failed to parse Tor stdout for ports:', e?.message || e);
+        }
       });
 
       this.torProcess.stderr.on('data', (data) => {

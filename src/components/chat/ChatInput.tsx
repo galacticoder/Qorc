@@ -327,9 +327,15 @@ export function ChatInput({
       let originalBase64Data: string = '';
       try {
         originalBase64Data = await blobToBase64(file);
+        if (!originalBase64Data) {
+          throw new Error('Empty base64 data produced');
+        }
       } catch (err) {
         console.error('[ChatInput] Failed to convert voice note to base64:', err);
-        originalBase64Data = '';
+        alert('Failed to process voice note for sending. Please try again.');
+        setIsSending(false);
+        setShowVoiceRecorder(false);
+        return; // Abort sending on failed conversion
       }
 
       onSendFile({

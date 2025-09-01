@@ -119,26 +119,37 @@ app.whenReady().then(() => {
       return false;
     });
 
-    // Prevent navigation away from our app (e.g., when clicking blob: links for download)
-    contents.on('will-navigate', (e, url) => {
-      e.preventDefault();
-      console.log('[SECURITY] Blocked navigation to:', url);
-    });
-
-    // Intercept downloads to avoid renderer navigation/logouts
-    contents.session.on('will-download', (event, item) => {
-      // Keep default behavior but ensure it does not navigate the page
-      console.log('[ELECTRON] Download started:', item.getFilename());
-      // Explicitly prevent any navigation side-effects
+    // Prevent external navigation while allowing same-origin/app-served URLs
+    contents.on('will-navigate', (e, targetUrl) => {
       try {
-        if (typeof contents.isLoading === 'function' && contents.isLoading()) {
-          if (typeof contents.stopLoading === 'function') {
-            contents.stopLoading();
+        const currentUrlStr = contents.getURL();
+        const target = new URL(targetUrl);
+
+        // Always allow internal schemes served by the app
+        if (target.protocol === 'file:' || target.protocol === 'blob:') {
+          return; // allow navigation
+        }
+
+        if (currentUrlStr) {
+          const current = new URL(currentUrlStr);
+          if (current.origin === target.origin) {
+            return; // allow same-origin navigation (e.g., internal routes, OAuth redirects)
           }
         }
+
+        // Different origin: block navigation
+        e.preventDefault();
+        console.log('[SECURITY] Blocked external navigation to:', targetUrl);
       } catch (err) {
-        console.error('[ELECTRON] Failed to stop loading during download:', err);
+        // On parsing error, be conservative and block
+        e.preventDefault();
+        console.warn('[SECURITY] Error evaluating navigation target; blocking:', targetUrl, err?.message || err);
       }
+    });
+
+    // Intercept downloads and log progress; default behavior should not navigate the page
+    contents.session.on('will-download', (event, item) => {
+      console.log('[ELECTRON] Download started:', item.getFilename());
       item.on('done', (_e, state) => {
         console.log('[ELECTRON] Download finished:', state);
       });

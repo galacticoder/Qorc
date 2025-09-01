@@ -36,8 +36,7 @@ export class ScreenSharingSettingsManager {
     try {
       const stored = localStorage.getItem(STORAGE_KEY);
       if (!stored) {
-        // Find the 1080p resolution from the current presets as default
-        const defaultResolution = SCREEN_SHARING_RESOLUTIONS.find(r => r.id === '1080p') || SCREEN_SHARING_RESOLUTIONS[0];
+        const defaultResolution = this.getDefaultResolution();
         return {
           resolution: defaultResolution,
           frameRate: 30,
@@ -50,8 +49,7 @@ export class ScreenSharingSettingsManager {
       // Validate the loaded settings
       if (!this.isValidSettings(parsed)) {
         console.warn('[ScreenSharingSettings] Invalid stored settings, using defaults');
-        // Find the 1080p resolution from the current presets as fallback
-        const defaultResolution = SCREEN_SHARING_RESOLUTIONS.find(r => r.id === '1080p') || SCREEN_SHARING_RESOLUTIONS[0];
+        const defaultResolution = this.getDefaultResolution();
         return {
           resolution: defaultResolution,
           frameRate: 30,
@@ -63,8 +61,7 @@ export class ScreenSharingSettingsManager {
       const resolution = SCREEN_SHARING_RESOLUTIONS.find(r => r.id === parsed.resolution?.id);
       if (!resolution) {
         console.warn('[ScreenSharingSettings] Stored resolution not found, using default');
-        // Find the 1080p resolution from the current presets
-        const defaultResolution = SCREEN_SHARING_RESOLUTIONS.find(r => r.id === '1080p') || SCREEN_SHARING_RESOLUTIONS[0];
+        const defaultResolution = this.getDefaultResolution();
         return {
           resolution: defaultResolution,
           frameRate: 30,
@@ -79,14 +76,20 @@ export class ScreenSharingSettingsManager {
       };
     } catch (error) {
       console.error('[ScreenSharingSettings] Failed to load settings:', error);
-      // Find the 1080p resolution from the current presets as fallback
-      const defaultResolution = SCREEN_SHARING_RESOLUTIONS.find(r => r.id === '1080p') || SCREEN_SHARING_RESOLUTIONS[0];
+      const defaultResolution = this.getDefaultResolution();
       return {
         resolution: defaultResolution,
         frameRate: 30,
         quality: 'medium'
       };
     }
+  }
+
+  /**
+   * Return the default resolution preset (prefer 1080p, else first preset)
+   */
+  private getDefaultResolution(): ScreenSharingResolution {
+    return SCREEN_SHARING_RESOLUTIONS.find(r => r.id === '1080p') || SCREEN_SHARING_RESOLUTIONS[0];
   }
 
   /**
@@ -222,8 +225,7 @@ export class ScreenSharingSettingsManager {
    * Reset to default settings
    */
   public resetToDefaults(): void {
-    // Find the 1080p resolution from the current presets as default
-    const defaultResolution = SCREEN_SHARING_RESOLUTIONS.find(r => r.id === '1080p') || SCREEN_SHARING_RESOLUTIONS[0];
+    const defaultResolution = this.getDefaultResolution();
     this.settings = {
       resolution: defaultResolution,
       frameRate: 30,
@@ -265,7 +267,7 @@ export class ScreenSharingSettingsManager {
 
     // Base constraints with frame rate
     const constraints: MediaTrackConstraints = {
-      frameRate: { ideal: frameRate, max: frameRate, min: Math.max(1, frameRate - 5) }
+      frameRate: { ideal: frameRate, max: frameRate, min: Math.max(1, Math.floor(frameRate * 0.8)) }
     };
 
     // Apply resolution constraints
@@ -290,22 +292,17 @@ export class ScreenSharingSettingsManager {
    * Get quality-specific constraints
    */
   private getQualityConstraints(quality: 'low' | 'medium' | 'high'): Partial<MediaTrackConstraints> {
+    // Extended typing for advanced constraints
+    interface ExtendedMediaTrackConstraints extends MediaTrackConstraints {
+      advanced?: Array<{ width?: { max: number }, height?: { max: number } }>;
+    }
     switch (quality) {
       case 'low':
-        return {
-          // Lower quality settings
-          advanced: [{ width: { max: 1280 }, height: { max: 720 } }] as any
-        };
+        return { advanced: [{ width: { max: 1280 }, height: { max: 720 } }] } as ExtendedMediaTrackConstraints;
       case 'medium':
-        return {
-          // Medium quality settings
-          advanced: [{ width: { max: 1920 }, height: { max: 1080 } }] as any
-        };
+        return { advanced: [{ width: { max: 1920 }, height: { max: 1080 } }] } as ExtendedMediaTrackConstraints;
       case 'high':
-        return {
-          // High quality settings - no additional restrictions
-          advanced: [{ width: { max: 3840 }, height: { max: 2160 } }] as any
-        };
+        return { advanced: [{ width: { max: 3840 }, height: { max: 2160 } }] } as ExtendedMediaTrackConstraints;
       default:
         return {};
     }
