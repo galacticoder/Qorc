@@ -1111,18 +1111,15 @@ fi
       // Extract ports from configuration
       let socksPort = null;
       let controlPort = null;
-      
-      if (configExists && configContent) {
-        // Parse SOCKS port from config
-        const socksMatch = configContent.match(/^SocksPort\s+(\d+)/m);
-        if (socksMatch) {
-          socksPort = parseInt(socksMatch[1], 10);
-        }
-        
-        // Parse Control port from config
-        const controlMatch = configContent.match(/^ControlPort\s+(\d+)/m);
-        if (controlMatch) {
-          controlPort = parseInt(controlMatch[1], 10);
+      if (configExists) {
+        try {
+          const hasSocks = /^SocksPort\s+/m.test(configContent);
+          const hasControl = /^ControlPort\s+/m.test(configContent);
+          const ports = await this.parsePortsFromConfig(this.configPath);
+          if (hasSocks) socksPort = ports.socks;
+          if (hasControl) controlPort = ports.control;
+        } catch (e) {
+          console.warn('[TOR-MANAGER] Failed to parse ports from config in getTorInfo:', e?.message || e);
         }
       }
       
