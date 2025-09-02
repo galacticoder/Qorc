@@ -296,9 +296,16 @@ ipcMain.handle('system:platform', () => {
 
 // Handle websocket connection
 let wsConnection = null;
+let torSetupComplete = false;
 
 ipcMain.handle('edge:ws-send', async (event, payload) => {
   try {
+    // Check if Tor setup is complete before attempting connection
+    if (!torSetupComplete) {
+      console.log('[ELECTRON] WebSocket connection blocked - Tor setup not complete');
+      return { success: false, error: 'Tor setup not complete' };
+    }
+
     if (!wsConnection || wsConnection.readyState !== 1) {
       // Connect to server if not connected
       const WebSocket = require('ws');
@@ -359,6 +366,12 @@ ipcMain.handle('edge:ws-send', async (event, payload) => {
 // Explicitly connect the WebSocket without sending any payload
 ipcMain.handle('edge:ws-connect', async () => {
   try {
+    // Check if Tor setup is complete before attempting connection
+    if (!torSetupComplete) {
+      console.log('[ELECTRON] WebSocket connection blocked - Tor setup not complete');
+      return { success: false, error: 'Tor setup not complete' };
+    }
+
     if (wsConnection && wsConnection.readyState === 1) {
       return { success: true };
     }
@@ -532,6 +545,13 @@ ipcMain.handle('signal:decrypt', async (_event, { ciphertextBase64 } = {}) => {
 
 ipcMain.handle('renderer:ready', async () => {
   console.log('[ELECTRON] Renderer process ready');
+  return { success: true };
+});
+
+// Handle Tor setup completion notification
+ipcMain.handle('tor:setup-complete', async () => {
+  console.log('[ELECTRON] Tor setup marked as complete');
+  torSetupComplete = true;
   return { success: true };
 });
 

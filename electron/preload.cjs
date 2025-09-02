@@ -87,6 +87,9 @@ contextBridge.exposeInMainWorld('edgeApi', {
   // Renderer ready notification
   rendererReady: () => ipcRenderer.invoke('renderer:ready'),
 
+  // Tor setup completion notification
+  torSetupComplete: () => ipcRenderer.invoke('tor:setup-complete'),
+
   // Screen sharing support
   getScreenSources: () => {
     console.log('[PRELOAD] getScreenSources called');

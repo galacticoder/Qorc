@@ -46,6 +46,13 @@ const ChatApp: React.FC<ChatAppProps> = () => {
       // Only show Tor setup in Electron environment
       if (!torNetworkManager.isSupported()) {
         console.log('[TOR] Browser environment detected - Tor setup not available');
+        // In browser environment, mark Tor setup as complete immediately
+        try {
+          await (window as any).edgeApi?.torSetupComplete?.();
+        } catch (error) {
+          // edgeApi not available in browser, which is expected
+          console.log('[TOR-SETUP] edgeApi not available (browser environment)');
+        }
         return;
       }
 
@@ -62,6 +69,14 @@ const ChatApp: React.FC<ChatAppProps> = () => {
       } else if (torStatus.isRunning) {
         console.log('[TOR-SETUP] Tor already running, initializing network manager');
         setTorSetupComplete(true);
+
+        // Notify Electron main process that Tor setup is complete
+        try {
+          await (window as any).edgeApi?.torSetupComplete?.();
+        } catch (error) {
+          console.error('[TOR-SETUP] Failed to notify main process:', error);
+        }
+
         // Initialize the network manager with existing Tor
         torNetworkManager.updateConfig({ enabled: true });
         await torNetworkManager.initialize();
@@ -84,6 +99,14 @@ const ChatApp: React.FC<ChatAppProps> = () => {
       setShowTorSetup(false);
       setTorSetupComplete(true);
       localStorage.setItem('tor_enabled', 'true');
+
+      // Notify Electron main process that Tor setup is complete
+      try {
+        await (window as any).edgeApi?.torSetupComplete?.();
+      } catch (error) {
+        console.error('[TOR-SETUP] Failed to notify main process:', error);
+      }
+
       // Initialize the network manager
       torNetworkManager.updateConfig({ enabled: true });
       await torNetworkManager.initialize();
@@ -97,6 +120,13 @@ const ChatApp: React.FC<ChatAppProps> = () => {
         setShowTorSetup(false);
         setTorSetupComplete(false);
         localStorage.setItem('tor_enabled', 'false');
+
+        // Notify Electron main process that Tor setup is complete (even if skipped)
+        try {
+          await (window as any).edgeApi?.torSetupComplete?.();
+        } catch (error) {
+          console.error('[TOR-SETUP] Failed to notify main process:', error);
+        }
       } else {
         // Setup failed - stay on Tor setup screen
         console.log('[TOR-SETUP] Setup failed, staying on Tor setup screen');

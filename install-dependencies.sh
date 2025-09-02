@@ -222,16 +222,26 @@ install_pnpm() {
 # Configure Tor
 configure_tor() {
     log_info "Configuring Tor..."
-    
+
     # Create Tor configuration directory if it doesn't exist
     sudo mkdir -p /etc/tor
-    
+
     # Backup existing torrc if it exists
     if [[ -f /etc/tor/torrc ]]; then
         sudo cp /etc/tor/torrc /etc/tor/torrc.backup.$(date +%Y%m%d_%H%M%S)
         log_info "Backed up existing Tor configuration"
     fi
-    
+
+    # Generate a random control password
+    log_info "Generating secure Tor control password..."
+    CONTROL_PASSWORD=$(openssl rand -base64 32)
+    HASHED_PASSWORD=$(tor --hash-password "$CONTROL_PASSWORD" | tail -n1)
+
+    # Save the password for user reference (they may need it for advanced configuration)
+    echo "Tor Control Password: $CONTROL_PASSWORD" | sudo tee /etc/tor/control_password.txt > /dev/null
+    sudo chmod 600 /etc/tor/control_password.txt
+    sudo chown root:root /etc/tor/control_password.txt
+
     # Create basic Tor configuration
     sudo tee /etc/tor/torrc > /dev/null <<EOF
 # Tor configuration for End-to-End Chat Application
@@ -246,7 +256,7 @@ User debian-tor
 # Network settings
 SocksPort 9050
 ControlPort 9051
-HashedControlPassword 16:872860B76453A77D60CA2BB8C1A7042072093276A3D701AD684053EC4C
+HashedControlPassword $HASHED_PASSWORD
 
 # Security settings
 CookieAuthentication 1
@@ -404,60 +414,51 @@ install_project_deps() {
 # Create desktop entry
 create_desktop_entry() {
     log_info "Creating desktop entry..."
-    
+
     DESKTOP_FILE="$HOME/.local/share/applications/end2end-chat.desktop"
     PROJECT_DIR=$(pwd)
-    
+
     mkdir -p "$HOME/.local/share/applications"
-    
+
     cat > "$DESKTOP_FILE" <<EOF
 [Desktop Entry]
 Name=End-to-End Chat
 Comment=Secure end-to-end encrypted messaging application
-Exec=$PROJECT_DIR/start.sh
+Exec=$PROJECT_DIR/install-dependencies.sh --start
 Icon=$PROJECT_DIR/assets/icon.png
 Terminal=false
 Type=Application
 Categories=Network;Chat;
 StartupWMClass=end2end-chat
 EOF
-    
+
     chmod +x "$DESKTOP_FILE"
     log_success "Desktop entry created"
 }
 
-# Create start script
-create_start_script() {
-    log_info "Creating start script..."
-
-    cat > start.sh <<'EOF'
-#!/bin/bash
-
-# Start script for End-to-End Chat Application
-cd "$(dirname "$0")"
-
-# Ensure user-local npm bin is on PATH (for pnpm installed to ~/.local)
-export PATH="$HOME/.local/bin:$PATH"
-
-# Check if Tor is running
-if ! systemctl is-active --quiet tor; then
-    echo "Starting Tor service..."
-    sudo systemctl start tor
-    sleep 3
-fi
-
 # Start the application
-pnpm run dev
-EOF
+start_application() {
+    log_info "Starting End-to-End Chat Application..."
 
-    chmod +x start.sh
-    log_success "Start script created"
+    # Ensure user-local npm bin is on PATH (for pnpm installed to ~/.local)
+    export PATH="$HOME/.local/bin:$PATH"
+
+    # Check if Tor is running
+    if ! systemctl is-active --quiet tor; then
+        log_info "Starting Tor service..."
+        sudo systemctl start tor
+        sleep 3
+    fi
+
+    # Start the application
+    log_info "Launching application with pnpm run dev..."
+    pnpm run dev
 }
 
 # Main installation function
 main() {
     log_info "Starting End-to-End Chat Site dependency installation..."
-    
+
     check_root
     detect_os
     update_packages
@@ -468,17 +469,16 @@ main() {
     setup_tor_service
     install_electron_deps
     install_server_deps
-    
+
     # Only install project deps if we're in the project directory
     if [[ -f package.json ]]; then
         install_project_deps
-        create_start_script
         create_desktop_entry
     else
         log_warning "Not in project directory. Skipping project-specific setup."
         log_info "Navigate to your project directory and run 'pnpm install' to install project dependencies."
     fi
-    
+
     log_success "Installation completed successfully!"
     echo
     log_info "Tor is now configured and running on:"
@@ -489,7 +489,16 @@ main() {
     echo "- Change the Tor control password in /etc/tor/torrc"
     echo "- Review Tor configuration for your specific needs"
     echo "- Consider using bridges if in a restricted network"
+    echo
+    log_info "To start the application, run: $0 --start"
 }
 
-# Run main function
-main "$@"
+# Handle command line arguments
+if [[ "$1" == "--start" ]]; then
+    # Change to script directory
+    cd "$(dirname "$0")"
+    start_application
+else
+    # Run main installation function
+    main "$@"
+fi
