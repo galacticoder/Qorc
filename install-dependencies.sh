@@ -39,22 +39,39 @@ check_root() {
 
 # Detect OS
 detect_os() {
-    if [[ -f /etc/os-release ]]; then
-        . /etc/os-release
-        OS=$ID
-        OS_VERSION=$VERSION_ID
-    else
-        log_error "Cannot detect OS. This script supports Ubuntu/Debian, Fedora/RHEL, and Arch Linux."
-        exit 1
-    fi
-    
+    case "$(uname -s)" in
+        Linux*)
+            if [[ -f /etc/os-release ]]; then
+                . /etc/os-release
+                OS=$ID
+                OS_VERSION=$VERSION_ID
+            else
+                log_error "Cannot detect Linux distribution. This script supports Ubuntu/Debian, Fedora/RHEL, Arch Linux, and macOS."
+                exit 1
+            fi
+            ;;
+        Darwin*)
+            OS="macos"
+            OS_VERSION=$(sw_vers -productVersion)
+            ;;
+        CYGWIN*|MINGW*|MSYS*)
+            OS="windows"
+            OS_VERSION=$(cmd.exe /c ver 2>/dev/null | grep -o '[0-9]*\.[0-9]*\.[0-9]*' | head -1)
+            ;;
+        *)
+            log_error "Unsupported operating system: $(uname -s)"
+            log_error "This script supports Linux (Ubuntu/Debian, Fedora/RHEL, Arch), macOS, and Windows (WSL/Git Bash)."
+            exit 1
+            ;;
+    esac
+
     log_info "Detected OS: $OS $OS_VERSION"
 }
 
 # Update package manager
 update_packages() {
     log_info "Updating package manager..."
-    
+
     case $OS in
         ubuntu|debian)
             sudo apt update
@@ -65,81 +82,110 @@ update_packages() {
         arch|manjaro)
             sudo pacman -Sy
             ;;
+        macos)
+            # Check if Homebrew is installed
+            if ! command -v brew &> /dev/null; then
+                log_info "Installing Homebrew..."
+                /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+                # Add Homebrew to PATH for current session
+                eval "$(/opt/homebrew/bin/brew shellenv)" 2>/dev/null || eval "$(/usr/local/bin/brew shellenv)" 2>/dev/null
+            fi
+            brew update
+            ;;
+        windows)
+            log_info "Windows detected. Please ensure you have Git Bash, WSL, or similar Unix-like environment."
+            log_info "Package management will be handled through Node.js/npm."
+            ;;
         *)
             log_error "Unsupported OS: $OS"
             exit 1
             ;;
     esac
-    
+
     log_success "Package manager updated"
 }
 
 # Install system dependencies
 install_system_deps() {
     log_info "Installing system dependencies..."
-    
+
+    # Define package lists based on mode
+    if [[ "${SERVER_ONLY:-false}" == "true" ]]; then
+        log_info "Installing server-only dependencies..."
+        COMMON_PACKAGES="curl wget git build-essential python3 python3-pip ca-certificates gnupg"
+        TOR_PACKAGES=""  # Skip Tor in server-only mode
+        ELECTRON_PACKAGES=""  # Skip Electron deps in server-only mode
+    else
+        log_info "Installing full dependencies (client + server)..."
+        COMMON_PACKAGES="curl wget git build-essential python3 python3-pip ca-certificates gnupg"
+        TOR_PACKAGES="tor torsocks obfs4proxy"
+        ELECTRON_PACKAGES="software-properties-common apt-transport-https lsb-release"
+    fi
+
     case $OS in
         ubuntu|debian)
-            sudo apt install -y \
-                curl \
-                wget \
-                git \
-                build-essential \
-                python3 \
-                python3-pip \
-                tor \
-                torsocks \
-                obfs4proxy \
-                ca-certificates \
-                gnupg \
-                lsb-release \
-                software-properties-common \
-                apt-transport-https
+            sudo apt install -y $COMMON_PACKAGES $TOR_PACKAGES $ELECTRON_PACKAGES
             ;;
         fedora|rhel|centos)
-            sudo dnf install -y \
-                curl \
-                wget \
-                git \
-                gcc \
-                gcc-c++ \
-                make \
-                python3 \
-                python3-pip \
-                tor \
-                torsocks \
-                obfs4 \
-                ca-certificates \
-                gnupg2
+            if [[ "${SERVER_ONLY:-false}" == "true" ]]; then
+                sudo dnf install -y \
+                    curl wget git gcc gcc-c++ make python3 python3-pip ca-certificates gnupg2
+            else
+                sudo dnf install -y \
+                    curl wget git gcc gcc-c++ make python3 python3-pip \
+                    tor torsocks obfs4 ca-certificates gnupg2
+            fi
             ;;
         arch|manjaro)
-            sudo pacman -S --noconfirm \
-                curl \
-                wget \
-                git \
-                base-devel \
-                python \
-                python-pip \
-                tor \
-                torsocks \
-                obfs4proxy \
-                ca-certificates \
-                gnupg
+            if [[ "${SERVER_ONLY:-false}" == "true" ]]; then
+                sudo pacman -S --noconfirm \
+                    curl wget git base-devel python python-pip ca-certificates gnupg
+            else
+                sudo pacman -S --noconfirm \
+                    curl wget git base-devel python python-pip \
+                    tor torsocks obfs4proxy ca-certificates gnupg
+            fi
+            ;;
+        macos)
+            if [[ "${SERVER_ONLY:-false}" == "true" ]]; then
+                brew install curl wget git python@3.11 gnupg
+            else
+                brew install curl wget git python@3.11 tor torsocks gnupg
+            fi
+
+            # Install Xcode command line tools if not present
+            if ! xcode-select -p &> /dev/null; then
+                log_info "Installing Xcode command line tools..."
+                xcode-select --install
+                log_warning "Please complete the Xcode command line tools installation and re-run this script."
+                exit 1
+            fi
+            ;;
+        windows)
+            log_info "Windows detected. Please ensure you have the following installed:"
+            echo "  - Git for Windows (includes Git Bash)"
+            echo "  - Node.js (will be installed next)"
+            echo "  - Python 3.x"
+            echo "  - Visual Studio Build Tools or Visual Studio Community"
+            if [[ "${SERVER_ONLY:-false}" != "true" ]]; then
+                log_warning "Tor installation on Windows requires manual setup."
+                log_info "Please download Tor Browser or install Tor as a service manually."
+            fi
             ;;
     esac
-    
+
     log_success "System dependencies installed"
 }
 
 # Install Node.js and npm
 install_nodejs() {
     log_info "Installing Node.js and npm..."
-    
+
     # Check if Node.js is already installed
     if command -v node &> /dev/null; then
         NODE_VERSION=$(node --version)
         log_info "Node.js is already installed: $NODE_VERSION"
-        
+
         # Check if version is >= 18
         MAJOR_VERSION=$(echo $NODE_VERSION | cut -d'.' -f1 | sed 's/v//')
         if [[ $MAJOR_VERSION -ge 18 ]]; then
@@ -149,22 +195,41 @@ install_nodejs() {
             log_warning "Node.js version is too old. Installing newer version..."
         fi
     fi
-    
-    # Install Node.js via NodeSource repository
-    curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
-    
+
     case $OS in
         ubuntu|debian)
+            # Install Node.js via NodeSource repository
+            curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
             sudo apt install -y nodejs
             ;;
         fedora|rhel|centos)
+            # Install Node.js via NodeSource repository
+            curl -fsSL https://rpm.nodesource.com/setup_20.x | sudo bash -
             sudo dnf install -y nodejs npm
             ;;
         arch|manjaro)
             sudo pacman -S --noconfirm nodejs npm
             ;;
+        macos)
+            # Install Node.js via Homebrew
+            brew install node@20
+            # Link the specific version
+            brew link node@20 --force
+            ;;
+        windows)
+            log_info "Please download and install Node.js from: https://nodejs.org/"
+            log_info "Choose the LTS version (20.x or later)"
+            log_warning "After installing Node.js, restart your terminal and re-run this script."
+            read -p "Press Enter after installing Node.js to continue..."
+
+            # Verify installation
+            if ! command -v node &> /dev/null; then
+                log_error "Node.js not found. Please install it and restart your terminal."
+                exit 1
+            fi
+            ;;
     esac
-    
+
     log_success "Node.js and npm installed"
     node --version
     npm --version
@@ -221,26 +286,34 @@ install_pnpm() {
 
 # Configure Tor
 configure_tor() {
-    log_info "Configuring Tor..."
-
-    # Create Tor configuration directory if it doesn't exist
-    sudo mkdir -p /etc/tor
-
-    # Backup existing torrc if it exists
-    if [[ -f /etc/tor/torrc ]]; then
-        sudo cp /etc/tor/torrc /etc/tor/torrc.backup.$(date +%Y%m%d_%H%M%S)
-        log_info "Backed up existing Tor configuration"
+    if [[ "${SERVER_ONLY:-false}" == "true" ]]; then
+        log_info "Skipping Tor configuration in server-only mode..."
+        return
     fi
 
-    # Generate a random control password
-    log_info "Generating secure Tor control password..."
-    CONTROL_PASSWORD=$(openssl rand -base64 32)
-    HASHED_PASSWORD=$(tor --hash-password "$CONTROL_PASSWORD" | tail -n1)
+    log_info "Configuring Tor..."
 
-    # Save the password for user reference (they may need it for advanced configuration)
-    echo "Tor Control Password: $CONTROL_PASSWORD" | sudo tee /etc/tor/control_password.txt > /dev/null
-    sudo chmod 600 /etc/tor/control_password.txt
-    sudo chown root:root /etc/tor/control_password.txt
+    case $OS in
+        ubuntu|debian|fedora|rhel|centos|arch|manjaro)
+            # Linux configuration
+            # Create Tor configuration directory if it doesn't exist
+            sudo mkdir -p /etc/tor
+
+            # Backup existing torrc if it exists
+            if [[ -f /etc/tor/torrc ]]; then
+                sudo cp /etc/tor/torrc /etc/tor/torrc.backup.$(date +%Y%m%d_%H%M%S)
+                log_info "Backed up existing Tor configuration"
+            fi
+
+            # Generate a random control password
+            log_info "Generating secure Tor control password..."
+            CONTROL_PASSWORD=$(openssl rand -base64 32)
+            HASHED_PASSWORD=$(tor --hash-password "$CONTROL_PASSWORD" | tail -n1)
+
+            # Save the password for user reference (they may need it for advanced configuration)
+            echo "Tor Control Password: $CONTROL_PASSWORD" | sudo tee /etc/tor/control_password.txt > /dev/null
+            sudo chmod 600 /etc/tor/control_password.txt
+            sudo chown root:root /etc/tor/control_password.txt
 
     # Create basic Tor configuration
     sudo tee /etc/tor/torrc > /dev/null <<EOF
@@ -279,42 +352,140 @@ ExitPolicy reject *:*
 Log notice file /var/log/tor/notices.log
 EOF
     
-    # Set proper permissions
-    sudo chown root:debian-tor /etc/tor/torrc
-    sudo chmod 644 /etc/tor/torrc
-    
-    # Create log directory
-    sudo mkdir -p /var/log/tor
-    sudo chown debian-tor:debian-tor /var/log/tor
-    
+            # Set proper permissions
+            sudo chown root:debian-tor /etc/tor/torrc
+            sudo chmod 644 /etc/tor/torrc
+
+            # Create log directory
+            sudo mkdir -p /var/log/tor
+            sudo chown debian-tor:debian-tor /var/log/tor
+            ;;
+        macos)
+            # macOS configuration
+            TOR_CONFIG_DIR="/usr/local/etc/tor"
+            sudo mkdir -p "$TOR_CONFIG_DIR"
+
+            # Backup existing torrc if it exists
+            if [[ -f "$TOR_CONFIG_DIR/torrc" ]]; then
+                sudo cp "$TOR_CONFIG_DIR/torrc" "$TOR_CONFIG_DIR/torrc.backup.$(date +%Y%m%d_%H%M%S)"
+                log_info "Backed up existing Tor configuration"
+            fi
+
+            # Generate a random control password
+            log_info "Generating secure Tor control password..."
+            CONTROL_PASSWORD=$(openssl rand -base64 32)
+            HASHED_PASSWORD=$(tor --hash-password "$CONTROL_PASSWORD" | tail -n1)
+
+            # Save the password for user reference
+            echo "Tor Control Password: $CONTROL_PASSWORD" | sudo tee "$TOR_CONFIG_DIR/control_password.txt" > /dev/null
+            sudo chmod 600 "$TOR_CONFIG_DIR/control_password.txt"
+
+            # Create basic Tor configuration for macOS
+            sudo tee "$TOR_CONFIG_DIR/torrc" > /dev/null <<EOF
+# Tor configuration for End-to-End Chat Application (macOS)
+# Generated by install-dependencies.sh
+
+# Basic settings
+DataDirectory /usr/local/var/lib/tor
+PidFile /usr/local/var/run/tor.pid
+RunAsDaemon 1
+
+# Network settings
+SocksPort 9050
+ControlPort 9051
+HashedControlPassword $HASHED_PASSWORD
+
+# Security settings
+CookieAuthentication 1
+
+# Client settings
+ClientOnly 1
+SafeLogging 1
+MaxCircuitDirtiness 600
+
+# Exit policy (client only)
+ExitPolicy reject *:*
+
+# Logging
+Log notice file /usr/local/var/log/tor/notices.log
+EOF
+
+            # Create log directory
+            sudo mkdir -p /usr/local/var/log/tor
+            sudo mkdir -p /usr/local/var/lib/tor
+            sudo mkdir -p /usr/local/var/run
+            ;;
+        windows)
+            log_warning "Tor configuration on Windows requires manual setup."
+            log_info "Please configure Tor manually or use Tor Browser."
+            log_info "Default SOCKS proxy should be available at localhost:9050"
+            return
+            ;;
+    esac
+
     log_success "Tor configuration created"
 }
 
 # Start and enable Tor service
 setup_tor_service() {
-    log_info "Setting up Tor service..."
-    
-    # Enable and start Tor service
-    sudo systemctl enable tor
-    sudo systemctl start tor
-    
-    # Wait a moment for Tor to start
-    sleep 3
-    
-    # Check if Tor is running
-    if sudo systemctl is-active --quiet tor; then
-        log_success "Tor service is running"
-    else
-        log_error "Failed to start Tor service"
-        sudo systemctl status tor
-        exit 1
+    if [[ "${SERVER_ONLY:-false}" == "true" ]]; then
+        log_info "Skipping Tor service setup in server-only mode..."
+        return
     fi
+
+    log_info "Setting up Tor service..."
+
+    case $OS in
+        ubuntu|debian|fedora|rhel|centos|arch|manjaro)
+            # Linux systemd service
+            sudo systemctl enable tor
+            sudo systemctl start tor
+
+            # Wait a moment for Tor to start
+            sleep 3
+
+            # Check if Tor is running
+            if sudo systemctl is-active --quiet tor; then
+                log_success "Tor service is running"
+            else
+                log_error "Failed to start Tor service"
+                sudo systemctl status tor
+                exit 1
+            fi
+            ;;
+        macos)
+            # macOS service via Homebrew
+            log_info "Starting Tor service on macOS..."
+
+            # Start Tor service
+            brew services start tor
+
+            # Wait a moment for Tor to start
+            sleep 3
+
+            # Check if Tor is running
+            if pgrep -f "tor" > /dev/null; then
+                log_success "Tor service is running"
+            else
+                log_warning "Tor may not be running. You can start it manually with: brew services start tor"
+            fi
+            ;;
+        windows)
+            log_warning "Tor service setup on Windows requires manual configuration."
+            log_info "Please start Tor Browser or configure Tor as a Windows service manually."
+            ;;
+    esac
 }
 
 # Install Electron dependencies
 install_electron_deps() {
+    if [[ "${SERVER_ONLY:-false}" == "true" ]]; then
+        log_info "Skipping Electron dependencies in server-only mode..."
+        return
+    fi
+
     log_info "Installing Electron dependencies..."
-    
+
     case $OS in
         ubuntu|debian)
             sudo apt install -y \
@@ -356,8 +527,16 @@ install_electron_deps() {
                 alsa-lib \
                 gtk3
             ;;
+        macos)
+            log_info "Electron dependencies are handled automatically on macOS"
+            # No additional system dependencies needed for Electron on macOS
+            ;;
+        windows)
+            log_info "Electron dependencies are handled automatically on Windows"
+            # No additional system dependencies needed for Electron on Windows
+            ;;
     esac
-    
+
     log_success "Electron dependencies installed"
 }
 
@@ -398,21 +577,64 @@ install_server_deps() {
     fi
 }
 
+# Create symbolic links for configuration files
+create_config_symlinks() {
+    log_info "Creating symbolic links for configuration files..."
+
+    # Define the configuration files that should be symlinked from config/ to root
+    declare -A CONFIG_FILES=(
+        ["components.json"]="config/components.json"
+        ["eslint.config.js"]="config/eslint.config.js"
+        ["postcss.config.js"]="config/postcss.config.js"
+        ["tailwind.config.ts"]="config/tailwind.config.ts"
+        ["tsconfig.app.json"]="config/tsconfig.app.json"
+        ["tsconfig.json"]="config/tsconfig.json"
+        ["tsconfig.node.json"]="config/tsconfig.node.json"
+        ["vite.config.ts"]="config/vite.config.ts"
+    )
+
+    for symlink_name in "${!CONFIG_FILES[@]}"; do
+        target_file="${CONFIG_FILES[$symlink_name]}"
+
+        # Check if target file exists in config directory
+        if [[ -f "$target_file" ]]; then
+            # Remove existing symlink or file if it exists
+            if [[ -L "$symlink_name" ]] || [[ -f "$symlink_name" ]]; then
+                rm -f "$symlink_name"
+                log_info "Removed existing $symlink_name"
+            fi
+
+            # Create the symbolic link
+            ln -s "$target_file" "$symlink_name"
+            log_info "Created symlink: $symlink_name -> $target_file"
+        else
+            log_warning "Target file $target_file not found, skipping symlink creation for $symlink_name"
+        fi
+    done
+
+    log_success "Configuration symbolic links created"
+}
+
 # Install project dependencies
 install_project_deps() {
     log_info "Installing project dependencies..."
-    
+
     if [[ ! -f package.json ]]; then
         log_error "package.json not found. Please run this script from the project root directory."
         exit 1
     fi
-    
+
     pnpm install
     log_success "Project dependencies installed"
 }
 
 # Create desktop entry
 create_desktop_entry() {
+    if [[ "${SERVER_ONLY:-false}" == "true" ]]; then
+        log_info "Skipping desktop entry in server-only mode..."
+        return
+    fi
+
     log_info "Creating desktop entry..."
 
     DESKTOP_FILE="$HOME/.local/share/applications/end2end-chat.desktop"
@@ -473,6 +695,7 @@ main() {
     # Only install project deps if we're in the project directory
     if [[ -f package.json ]]; then
         install_project_deps
+        create_config_symlinks
         create_desktop_entry
     else
         log_warning "Not in project directory. Skipping project-specific setup."
@@ -481,16 +704,22 @@ main() {
 
     log_success "Installation completed successfully!"
     echo
-    log_info "Tor is now configured and running on:"
-    echo "  - SOCKS proxy: localhost:9050"
-    echo "  - Control port: localhost:9051"
-    echo
-    log_warning "Important security notes:"
-    echo "- Change the Tor control password in /etc/tor/torrc"
-    echo "- Review Tor configuration for your specific needs"
-    echo "- Consider using bridges if in a restricted network"
-    echo
-    log_info "To start the application, run: $0 --start"
+
+    if [[ "${SERVER_ONLY:-false}" == "true" ]]; then
+        log_info "Server-only installation complete!"
+        log_info "Server is starting..."
+    else
+        log_info "Tor is now configured and running on:"
+        echo "  - SOCKS proxy: localhost:9050"
+        echo "  - Control port: localhost:9051"
+        echo
+        log_warning "Important security notes:"
+        echo "- Change the Tor control password in /etc/tor/torrc"
+        echo "- Review Tor configuration for your specific needs"
+        echo "- Consider using bridges if in a restricted network"
+        echo
+        log_info "To start the application, run: $0 --start"
+    fi
 }
 
 # Handle command line arguments

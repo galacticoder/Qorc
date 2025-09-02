@@ -1,10 +1,131 @@
+# Dependencies
 /node_modules
 /server/node_modules
+/config/node_modules
+
+# Lock files (keep only the one in config/)
 pnpm-lock.yaml
 /server/pnpm-lock.yaml
 /server/package-lock.yaml
+package-lock.json
+
+# Symbolic links created by startClient.sh
+package.json
+postcss.config.js
+tailwind.config.ts
+vite.config.ts
+tsconfig.json
+
+# Build outputs
+/dist
+/build
+/.next
+/.nuxt
+/.output
+/.vercel
+/.netlify
+
+# Database files
 /server/database/user_database.sqlite
+/server/database/*.db
+/server/database/*.sqlite*
+
+# Environment files
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# Runtime data
+pids
+*.pid
+*.seed
+*.pid.lock
+
+# Coverage directory used by tools like istanbul
+coverage
+*.lcov
+
+# nyc test coverage
+.nyc_output
+
+# Dependency directories
+jspm_packages/
+
+# TypeScript cache
+*.tsbuildinfo
+
+# Optional npm cache directory
+.npm
+
+# Optional eslint cache
+.eslintcache
+
+# Optional stylelint cache
+.stylelintcache
+
+# Microbundle cache
+.rpt2_cache/
+.rts2_cache_cjs/
+.rts2_cache_es/
+.rts2_cache_umd/
+
+# Optional REPL history
+.node_repl_history
+
+# Output of 'npm pack'
+*.tgz
+
+# Yarn Integrity file
+.yarn-integrity
+
+# parcel-bundler cache (https://parceljs.org/)
+.cache
+.parcel-cache
+
+# Vite cache
+.vite
+
+# Rollup cache
+.rollup.cache
+
+# Temporary folders
+tmp/
+temp/
+
+# Editor directories and files
 /.qodo
 /.vscode
-problem.txt
 /.cursor
+.idea
+*.swp
+*.swo
+*~
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Electron build outputs
+/electron-dist
+/release
+
+# Docker
+.dockerignore
+
+# Misc
+problem.txt

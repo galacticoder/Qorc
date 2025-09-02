@@ -16,7 +16,7 @@ export function useTypingIndicator(
 
 	// Optimized timing for better UX and performance
 	const TYPING_STOP_DELAY = 1500; // Reduced from 3000ms - more responsive
-	const MIN_TYPING_INTERVAL = 3000; // Increased from 2000ms - less network traffic
+	const MIN_TYPING_INTERVAL = 4000; // Send typing-start every 4 seconds to keep indicator alive
 	const DEBOUNCE_DELAY = 300; // Debounce keystrokes to prevent spam
 	const CONVERSATION_CHANGE_DEBOUNCE = 100; // Debounce conversation changes
 
@@ -36,15 +36,16 @@ export function useTypingIndicator(
 		}
 
 		const now = Date.now();
-		// Only send if not already typing and enough time has passed since last typing start
-		if (!isTypingRef.current && now - lastTypingStartSentRef.current > MIN_TYPING_INTERVAL) {
+		// Send if not already typing OR if enough time has passed since last typing start (keep-alive)
+		if ((!isTypingRef.current || now - lastTypingStartSentRef.current > MIN_TYPING_INTERVAL) && now - lastTypingStartSentRef.current > MIN_TYPING_INTERVAL) {
 			try {
 				isProcessingTypingRef.current = true;
-				console.debug('[Typing] Sending typing-start signal');
-				
+				const isKeepAlive = isTypingRef.current;
+				console.debug(`[Typing] Sending typing-start signal (${isKeepAlive ? 'keep-alive' : 'initial'})`);
+
 				// Send typing indicator as encrypted message with unique ID
 				if (sendEncryptedMessage) {
-					console.debug('[Typing] Sending typing-start as encrypted message');
+					console.debug(`[Typing] Sending typing-start as encrypted message (${isKeepAlive ? 'keep-alive' : 'initial'})`);
 					// SECURITY: Use cryptographically secure random ID generation
 					const randomBytes = crypto.getRandomValues(new Uint8Array(6));
 					const secureId = Array.from(randomBytes, byte => byte.toString(36)).join('');
@@ -59,7 +60,7 @@ export function useTypingIndicator(
 				lastTypingStartSentRef.current = now;
 				isTypingRef.current = true;
 				pendingTypingRef.current = false;
-				console.log('[Typing] Typing started successfully');
+				console.log(`[Typing] Typing ${isKeepAlive ? 'keep-alive' : 'started'} successfully`);
 			} catch (error) {
 				console.error('[Typing] Failed to send typing start:', error);
 				isTypingRef.current = false;
@@ -129,16 +130,19 @@ export function useTypingIndicator(
 			minInterval: MIN_TYPING_INTERVAL,
 			isProcessingTyping: isProcessingTypingRef.current
 		});
-		
+
 		// Clear existing debounce timeout
 		if (debounceTimeoutRef.current) {
 			clearTimeout(debounceTimeoutRef.current);
 		}
 
-		// Only send typing start if not already typing, not processing, and enough time has passed
 		const now = Date.now();
-		if (!isTypingRef.current && !isProcessingTypingRef.current && now - lastTypingStartSentRef.current > MIN_TYPING_INTERVAL) {
-			console.log('[Typing] Sending typing start - conditions met');
+
+		// Send typing start if not processing and enough time has passed since last signal
+		// This handles both initial typing and keep-alive signals for long typing sessions
+		if (!isProcessingTypingRef.current && now - lastTypingStartSentRef.current > MIN_TYPING_INTERVAL) {
+			const isKeepAlive = isTypingRef.current;
+			console.log(`[Typing] Sending ${isKeepAlive ? 'keep-alive' : 'initial'} typing start - conditions met`);
 			sendTypingStart();
 		} else {
 			console.log('[Typing] Skipping typing start - conditions not met', {

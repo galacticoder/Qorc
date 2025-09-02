@@ -104,7 +104,7 @@ export function TypingIndicatorProvider({ children, currentUsername }: TypingInd
 					// Set auto-clear timeout (fallback in case typing-stop is missed)
 					const timeout = setTimeout(() => {
 						clearTypingUser(username);
-					}, 5000); // 5 second fallback timeout
+					}, 6000); // 6 second fallback timeout - longer than MIN_TYPING_INTERVAL
 
 					typingTimeoutsRef.current.set(username, timeout);
 
@@ -145,7 +145,7 @@ export function TypingIndicatorProvider({ children, currentUsername }: TypingInd
 				// Set auto-clear timeout (fallback in case typing-stop is missed)
 				const timeout = setTimeout(() => {
 					clearTypingUser(actualUsername);
-				}, 5000); // 5 second fallback timeout
+				}, 6000); // 6 second fallback timeout - longer than MIN_TYPING_INTERVAL
 
 				typingTimeoutsRef.current.set(actualUsername, timeout);
 

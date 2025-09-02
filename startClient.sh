@@ -13,8 +13,20 @@ echo -e "${BLUE}║${GREEN}        end2end chat client        ${BLUE}║${NC}"
 echo -e "${BLUE}╚════════════════════════════════════════════╝${NC}"
 cd "$(dirname "$0")"
 
+# Create symlinks to package and config files (always ensure they exist)
+echo -e "${GREEN}Setting up package and config file symlinks...${NC}"
+# Remove existing files/symlinks first
+rm -f package.json pnpm-lock.yaml postcss.config.js tailwind.config.ts vite.config.ts tsconfig.json
+# Create symlinks to config directory
+ln -sf config/package.json package.json
+ln -sf config/pnpm-lock.yaml pnpm-lock.yaml
+ln -sf config/postcss.config.js postcss.config.js
+ln -sf config/tailwind.config.ts tailwind.config.ts
+ln -sf config/vite.config.ts vite.config.ts
+ln -sf config/tsconfig.json tsconfig.json
+
 # Install deps when needed (first run or lockfile newer than installed modules)
-if [ ! -d node_modules ] || [ pnpm-lock.yaml -nt node_modules/.modules.yaml ]; then
+if [ ! -d node_modules ] || [ config/pnpm-lock.yaml -nt node_modules/.modules.yaml ]; then
     if ! command -v pnpm >/dev/null 2>&1; then
         echo -e "${YELLOW}pnpm not found. See https://pnpm.io/installation${NC}"
         exit 1
