@@ -186,6 +186,18 @@ export function VideoQualityMonitor({ peerConnection, remoteStream, isVisible = 
     let packetsLostDelta = 0;
     if (prevInboundSnapshot && prevInboundSnapshot.id === currentId) {
       const lostDiff = currentPacketsLostTotal - prevInboundSnapshot.packetsLostTotal;
+
+      // Log when packet loss total decreases (indicates stat reset or connection change)
+      if (lostDiff < 0) {
+        console.warn('[VideoQualityMonitor] Packet loss total decreased - possible stat reset or connection change', {
+          currentId,
+          prevId: prevInboundSnapshot.id,
+          prevPacketsLost: prevInboundSnapshot.packetsLostTotal,
+          currentPacketsLost: currentPacketsLostTotal,
+          timestamp: currentTime
+        });
+      }
+
       packetsLostDelta = lostDiff >= 0 ? lostDiff : 0;
     }
     
@@ -227,7 +239,7 @@ export function VideoQualityMonitor({ peerConnection, remoteStream, isVisible = 
     // Keep monitoring running; next tick will repopulate baselines
   }, [remoteStream]);
 
-  // Note: cleanup on unmount is handled by the peerConnection effect above
+
 
   if (!isVisible || !stats) {
     return null;

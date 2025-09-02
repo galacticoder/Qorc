@@ -87,7 +87,7 @@ if [ -n "${REDIS_CLUSTER_NODES:-}" ]; then
     echo -e "${GREEN}Using Redis Cluster nodes: ${REDIS_CLUSTER_NODES}${NC}"
 fi
 
-# Default to clustered workers for higher density; override with CLUSTER_WORKERS
+# Default to single worker; override with CLUSTER_WORKERS for clustering
 export CLUSTER_WORKERS="${CLUSTER_WORKERS:-1}"
 echo -e "${GREEN}Cluster workers: ${CLUSTER_WORKERS}${NC}"
 

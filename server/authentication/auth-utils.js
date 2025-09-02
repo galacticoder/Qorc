@@ -107,7 +107,7 @@ export async function setServerPasswordOnInput() {
     }
     // Interactive fallback only if TTY is available
     if (!process.stdin.isTTY) {
-      throw new Error('No TTY available for interactive password prompt. Run with CLUSTER_WORKERS=1 in a terminal or set SERVER_PASSWORD/SERVER_PASSWORD_HASH.');
+      throw new Error('No TTY available for interactive password prompt. Run in an interactive terminal or set SERVER_PASSWORD/SERVER_PASSWORD_HASH environment variable.');
     }
     const password = prompt.hide('Set server password (Input will not be visible): ').trim();
     const confirm = prompt.hide('Confirm password: ').trim();

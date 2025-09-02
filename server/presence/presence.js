@@ -30,13 +30,23 @@ const REDIS_OPTIONS = {
   commandTimeout: 5000,
 };
 
+// Helper function to parse Redis cluster nodes from environment variable
+function parseRedisClusterNodes(redisClusterNodes) {
+  if (!redisClusterNodes) return [];
+  return redisClusterNodes.split(',').map(s => {
+    const [host, portStr] = s.trim().split(':');
+    return { host, port: Number.parseInt(portStr || '6379', 10) };
+  }).filter(n => n.host);
+}
+
 let clusterClient = null;
+// Connection pool for duplicate() calls to avoid exhausting connections
+let duplicateConnectionPool = [];
+const MAX_DUPLICATE_CONNECTIONS = 5;
+
 if (USING_CLUSTER) {
   try {
-    const nodes = REDIS_CLUSTER_NODES.split(',').map(s => {
-      const [host, portStr] = s.trim().split(':');
-      return { host, port: Number.parseInt(portStr || '6379', 10) };
-    }).filter(n => n.host);
+    const nodes = parseRedisClusterNodes(REDIS_CLUSTER_NODES);
     clusterClient = new Redis.Cluster(nodes, {
       redisOptions: REDIS_OPTIONS
     });
@@ -154,15 +164,93 @@ export const redis = {
   decr: (...args) => withRedisClient(client => client.decr(...args)),
   publish: (...args) => withRedisClient(client => client.publish(...args)),
   eval: (...args) => withRedisClient(client => client.eval(...args)),
-  duplicate: () => {
-    // For subscribers, create a new dedicated connection
+  duplicate: async () => {
+    // For subscribers, reuse cached connections to avoid exhausting connections
     if (USING_CLUSTER && clusterClient) {
-      const nodes = REDIS_CLUSTER_NODES.split(',').map(s => {
-        const [host, portStr] = s.trim().split(':');
-        return { host, port: Number.parseInt(portStr || '6379', 10) };
-      }).filter(n => n.host);
-      return new Redis.Cluster(nodes, { redisOptions: REDIS_OPTIONS });
+      // Try to reuse an existing connection from the pool with health check
+      while (duplicateConnectionPool.length > 0) {
+        const cachedClient = duplicateConnectionPool.pop();
+
+        // Perform lightweight health check
+        if (cachedClient && cachedClient.status === 'ready') {
+          try {
+            // Quick ping to verify connection is alive
+            await cachedClient.ping();
+            return cachedClient;
+          } catch (error) {
+            // Client failed health check, properly dispose of it
+            try {
+              if (cachedClient._originalQuit) {
+                await cachedClient._originalQuit();
+              } else {
+                await cachedClient.quit();
+              }
+            } catch (quitError) {
+              console.debug('[PRESENCE] Error disposing unhealthy cached client:', quitError.message);
+            }
+            // Continue to next client in pool or create new one
+          }
+        } else {
+          // Client is not ready, dispose of it
+          try {
+            if (cachedClient && cachedClient._originalQuit) {
+              await cachedClient._originalQuit();
+            } else if (cachedClient) {
+              await cachedClient.quit();
+            }
+          } catch (quitError) {
+            console.debug('[PRESENCE] Error disposing invalid cached client:', quitError.message);
+          }
+        }
+      }
+
+      // Create new connection if pool is empty or all connections are invalid
+      const nodes = parseRedisClusterNodes(REDIS_CLUSTER_NODES);
+      const newClient = new Redis.Cluster(nodes, { redisOptions: REDIS_OPTIONS });
+
+      // Store original quit method
+      const originalQuit = newClient.quit.bind(newClient);
+      newClient._originalQuit = originalQuit;
+
+      // Add error handlers to remove client from pool on failure
+      const removeFromPool = () => {
+        const index = duplicateConnectionPool.indexOf(newClient);
+        if (index > -1) {
+          duplicateConnectionPool.splice(index, 1);
+        }
+      };
+
+      newClient.on('error', removeFromPool);
+      newClient.on('close', removeFromPool);
+      newClient.on('end', removeFromPool);
+
+      // Override quit to return connection to pool when done
+      newClient.quit = async () => {
+        // Remove event listeners before returning to pool
+        newClient.removeListener('error', removeFromPool);
+        newClient.removeListener('close', removeFromPool);
+        newClient.removeListener('end', removeFromPool);
+
+        // Validate client is still connected before pooling
+        if (newClient.status === 'ready' && duplicateConnectionPool.length < MAX_DUPLICATE_CONNECTIONS) {
+          try {
+            await newClient.ping();
+            duplicateConnectionPool.push(newClient);
+            return Promise.resolve();
+          } catch (error) {
+            // Client failed validation, properly close it
+            return originalQuit();
+          }
+        } else {
+          // Pool is full or client is not ready, properly close it
+          return originalQuit();
+        }
+      };
+
+      return newClient;
     }
+
+    // For standalone Redis, create new connection (lightweight)
     return new Redis(REDIS_URL, REDIS_OPTIONS);
   }
 };
@@ -247,7 +335,7 @@ export async function closeSubscriber(subscriber) {
 // Global cleanup on process termination
 const cleanup = async () => {
   console.log('[PRESENCE] Cleaning up Redis connection pool...');
-  
+
   // Drain the connection pool (standalone)
   if (redisPool) {
     try {
@@ -258,9 +346,32 @@ const cleanup = async () => {
       console.error('[PRESENCE] Error cleaning up Redis pool:', error);
     }
   }
+
+  // Clean up duplicate connection pool
+  if (duplicateConnectionPool.length > 0) {
+    console.log(`[PRESENCE] Cleaning up ${duplicateConnectionPool.length} duplicate connections...`);
+    const cleanupPromises = duplicateConnectionPool.map(async (client) => {
+      try {
+        if (client && client._originalQuit && typeof client._originalQuit === 'function') {
+          await client._originalQuit();
+        } else if (client && typeof client.quit === 'function') {
+          await client.quit();
+        }
+      } catch (err) {
+        console.error('[PRESENCE] Error quitting duplicate connection:', err);
+      }
+    });
+    await Promise.all(cleanupPromises);
+    duplicateConnectionPool = [];
+  }
+
   // Quit cluster client
   if (clusterClient) {
-    try { await clusterClient.quit(); } catch {}
+    try {
+      await clusterClient.quit();
+    } catch (err) {
+      console.error('[PRESENCE] Error quitting clusterClient in presence cleanup:', err);
+    }
   }
 };
 
@@ -288,14 +399,6 @@ const gracefulShutdown = async (signal) => {
 process.once('SIGTERM', () => gracefulShutdown('SIGTERM'));
 process.once('SIGINT', () => gracefulShutdown('SIGINT'));
 
-// Handle process exit - but don't await here as it's synchronous
-process.once('exit', () => {
-  console.log('[PRESENCE] Process exiting, attempting final cleanup...');
-  // Note: exit event is synchronous, so we can't await here
-  // Just attempt cleanup without waiting
-  cleanup().catch(err => console.error('[PRESENCE] Final cleanup error:', err));
-});
-
 const ONLINE_KEY = (u) => `online:${u}`;
 const DELIVER_CH = (u) => `deliver:${u}`;
 
@@ -317,7 +420,10 @@ export async function bumpOnline(username, ttlSeconds = TTL_CONFIG.PRESENCE_TTL)
     const safeTtl = Math.max(10, ttlSeconds);
     await redis.expire(ONLINE_KEY(username), safeTtl);
   } catch (error) {
-    // Silently ignore errors as this is opportunistic
+    // Log in debug mode but don't throw as this is opportunistic
+    if (process.env.DEBUG_SERVER_LOGS === 'true') {
+      console.debug(`[PRESENCE] Failed to bump online status for ${username}:`, error.message);
+    }
   }
 }
 

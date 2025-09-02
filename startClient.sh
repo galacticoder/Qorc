@@ -1,5 +1,8 @@
 #!/bin/bash
 
+set -euo pipefail
+IFS=$'\n\t'
+
 GREEN='\033[0;32m'
 BLUE='\033[0;34m'
 YELLOW='\033[1;33m'
@@ -10,10 +13,14 @@ echo -e "${BLUE}║${GREEN}        end2end chat client        ${BLUE}║${NC}"
 echo -e "${BLUE}╚════════════════════════════════════════════╝${NC}"
 cd "$(dirname "$0")"
 
-# Install deps only when needed
-if [ ! -d node_modules ]; then
+# Install deps when needed (first run or lockfile newer than installed modules)
+if [ ! -d node_modules ] || [ pnpm-lock.yaml -nt node_modules/.modules.yaml ]; then
+    if ! command -v pnpm >/dev/null 2>&1; then
+        echo -e "${YELLOW}pnpm not found. See https://pnpm.io/installation${NC}"
+        exit 1
+    fi
     echo -e "${GREEN}Installing client dependencies...${NC}"
-    pnpm install
+    pnpm install --frozen-lockfile --prefer-offline
 fi
 
 # Prevent auto-opening external browser and enable Electron DevTools
@@ -36,7 +43,11 @@ fi
 CLIENT_PID=$!
 
 cleanup() {
-    kill $CLIENT_PID 2>/dev/null || true
+    if [ -n "${CLIENT_PID:-}" ] && kill -0 "$CLIENT_PID" 2>/dev/null; then
+        pkill -P "$CLIENT_PID" 2>/dev/null || true
+        kill "$CLIENT_PID" 2>/dev/null || true
+        wait "$CLIENT_PID" 2>/dev/null || true
+    fi
     exit
 }
 

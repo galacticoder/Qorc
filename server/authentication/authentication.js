@@ -321,7 +321,9 @@ export class AccountAuthHandler {
         // SECURITY: Rate limit failed attempts
         try {
           await rateLimitMiddleware.rateLimiter.userAuthLimiter.consume(username, 2);
-        } catch {}
+        } catch (err) {
+          console.warn(`[AUTH] Rate limit consume failed for user ${username}:`, err.message);
+        }
         return rejectConnection(ws, SignalType.AUTH_ERROR, "Authentication failed");
       }
       

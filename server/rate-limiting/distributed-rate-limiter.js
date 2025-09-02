@@ -53,85 +53,55 @@ class DistributedRateLimiter {
 
 		this.disableGlobal = (process.env.DISABLE_CONNECTION_LIMIT || '').toLowerCase() === 'true' || process.env.DISABLE_CONNECTION_LIMIT === '1';
 
+		// Shared configuration objects for rate limiters
+		const authCfg = RATE_LIMIT_CONFIG.AUTHENTICATION;
+		const configs = {
+			globalConnection: {
+				points: Math.max(1, effectiveConnPoints),
+				duration: Math.ceil(effectiveConnWindowMs / 1000),
+				blockDuration: Math.ceil(effectiveConnBlockMs / 1000),
+				keyPrefix: 'rl:global:conn'
+			},
+			userMessage: {
+				points: Math.max(1, msgCfg.MAX_MESSAGES),
+				duration: Math.ceil(msgCfg.WINDOW_MS / 1000),
+				blockDuration: Math.ceil(msgCfg.BLOCK_DURATION_MS / 1000),
+				keyPrefix: 'rl:user:msg'
+			},
+			userBundle: {
+				points: Math.max(1, bunCfg.MAX_OPERATIONS),
+				duration: Math.ceil(bunCfg.WINDOW_MS / 1000),
+				blockDuration: Math.ceil(bunCfg.BLOCK_DURATION_MS / 1000),
+				keyPrefix: 'rl:user:bundle'
+			},
+			userAuth: {
+				points: Math.max(1, authUserCfg.MAX_ATTEMPTS),
+				duration: Math.ceil(authUserCfg.WINDOW_MS / 1000),
+				blockDuration: Math.ceil(authUserCfg.BLOCK_DURATION_MS / 1000),
+				keyPrefix: 'rl:user:auth'
+			},
+			connectionAuth: {
+				points: Math.max(1, authCfg.MAX_ATTEMPTS_PER_CONNECTION),
+				duration: Math.ceil(authCfg.WINDOW_MS / 1000),
+				blockDuration: Math.ceil(authCfg.BLOCK_DURATION_MS / 1000),
+				keyPrefix: 'rl:conn:auth'
+			}
+		};
+
 		if (this.usingRedis) {
-			this.globalConnectionLimiter = new RateLimiterRedis({
-				storeClient: this.redis,
-				points: Math.max(1, effectiveConnPoints),
-				duration: Math.ceil(effectiveConnWindowMs / 1000),
-				blockDuration: Math.ceil(effectiveConnBlockMs / 1000),
-				keyPrefix: 'rl:global:conn'
-			});
-
-			this.userMessageLimiter = new RateLimiterRedis({
-				storeClient: this.redis,
-				points: Math.max(1, msgCfg.MAX_MESSAGES),
-				duration: Math.ceil(msgCfg.WINDOW_MS / 1000),
-				blockDuration: Math.ceil(msgCfg.BLOCK_DURATION_MS / 1000),
-				keyPrefix: 'rl:user:msg'
-			});
-
-			this.userBundleLimiter = new RateLimiterRedis({
-				storeClient: this.redis,
-				points: Math.max(1, bunCfg.MAX_OPERATIONS),
-				duration: Math.ceil(bunCfg.WINDOW_MS / 1000),
-				blockDuration: Math.ceil(bunCfg.BLOCK_DURATION_MS / 1000),
-				keyPrefix: 'rl:user:bundle'
-			});
-
-			this.userAuthLimiter = new RateLimiterRedis({
-				storeClient: this.redis,
-				points: Math.max(1, authUserCfg.MAX_ATTEMPTS),
-				duration: Math.ceil(authUserCfg.WINDOW_MS / 1000),
-				blockDuration: Math.ceil(authUserCfg.BLOCK_DURATION_MS / 1000),
-				keyPrefix: 'rl:user:auth'
-			});
-
-			// Connection-based auth limiter using Redis
-			const authCfg = RATE_LIMIT_CONFIG.AUTHENTICATION;
-			this.connectionAuthLimiter = new RateLimiterRedis({
-				storeClient: this.redis,
-				points: Math.max(1, authCfg.MAX_ATTEMPTS_PER_CONNECTION),
-				duration: Math.ceil(authCfg.WINDOW_MS / 1000),
-				blockDuration: Math.ceil(authCfg.BLOCK_DURATION_MS / 1000),
-				keyPrefix: 'rl:conn:auth'
-			});
+			// Add storeClient to each config for Redis
+			this.globalConnectionLimiter = new RateLimiterRedis({ ...configs.globalConnection, storeClient: this.redis });
+			this.userMessageLimiter = new RateLimiterRedis({ ...configs.userMessage, storeClient: this.redis });
+			this.userBundleLimiter = new RateLimiterRedis({ ...configs.userBundle, storeClient: this.redis });
+			this.userAuthLimiter = new RateLimiterRedis({ ...configs.userAuth, storeClient: this.redis });
+			this.connectionAuthLimiter = new RateLimiterRedis({ ...configs.connectionAuth, storeClient: this.redis });
 		} else {
-			this.globalConnectionLimiter = new RateLimiterMemory({
-				points: Math.max(1, effectiveConnPoints),
-				duration: Math.ceil(effectiveConnWindowMs / 1000),
-				blockDuration: Math.ceil(effectiveConnBlockMs / 1000),
-				keyPrefix: 'rl:global:conn'
-			});
-
-			this.userMessageLimiter = new RateLimiterMemory({
-				points: Math.max(1, msgCfg.MAX_MESSAGES),
-				duration: Math.ceil(msgCfg.WINDOW_MS / 1000),
-				blockDuration: Math.ceil(msgCfg.BLOCK_DURATION_MS / 1000),
-				keyPrefix: 'rl:user:msg'
-			});
-
-			this.userBundleLimiter = new RateLimiterMemory({
-				points: Math.max(1, bunCfg.MAX_OPERATIONS),
-				duration: Math.ceil(bunCfg.WINDOW_MS / 1000),
-				blockDuration: Math.ceil(bunCfg.BLOCK_DURATION_MS / 1000),
-				keyPrefix: 'rl:user:bundle'
-			});
-
-			this.userAuthLimiter = new RateLimiterMemory({
-				points: Math.max(1, authUserCfg.MAX_ATTEMPTS),
-				duration: Math.ceil(authUserCfg.WINDOW_MS / 1000),
-				blockDuration: Math.ceil(authUserCfg.BLOCK_DURATION_MS / 1000),
-				keyPrefix: 'rl:user:auth'
-			});
-
-			// Connection-based auth limiter using memory (fallback)
-			const authCfg = RATE_LIMIT_CONFIG.AUTHENTICATION;
-			this.connectionAuthLimiter = new RateLimiterMemory({
-				points: Math.max(1, authCfg.MAX_ATTEMPTS_PER_CONNECTION),
-				duration: Math.ceil(authCfg.WINDOW_MS / 1000),
-				blockDuration: Math.ceil(authCfg.BLOCK_DURATION_MS / 1000),
-				keyPrefix: 'rl:conn:auth'
-			});
+			// Use memory-based limiters
+			this.globalConnectionLimiter = new RateLimiterMemory(configs.globalConnection);
+			this.userMessageLimiter = new RateLimiterMemory(configs.userMessage);
+			this.userBundleLimiter = new RateLimiterMemory(configs.userBundle);
+			this.userAuthLimiter = new RateLimiterMemory(configs.userAuth);
+			this.connectionAuthLimiter = new RateLimiterMemory(configs.connectionAuth);
 		}
 
 		console.log('[RATE-LIMIT] Backend:', this.usingRedis ? 'redis' : 'memory');
@@ -275,6 +245,19 @@ class DistributedRateLimiter {
 			backend: this.usingRedis ? 'redis' : 'memory',
 			note: "Individual metrics removed for memory efficiency with millions of users"
 		};
+	}
+
+	// Clean up connection-specific rate limiting data
+	async cleanupConnectionLimit(ws) {
+		if (ws._connectionId && this.connectionAuthLimiter) {
+			try {
+				// Reset the limiter for this connection if needed
+				await this.connectionAuthLimiter.delete(ws._connectionId);
+			} catch (error) {
+				console.debug('[RATE-LIMIT] Error cleaning up connection limit:', error.message);
+			}
+			delete ws._connectionId;
+		}
 	}
 }
 

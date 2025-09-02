@@ -163,12 +163,30 @@ function validateCertPath(certPath) {
 
 let server, key, cert, serverHybridKeyPair;
 
+function shouldPromptForServerPassword() {
+  // Check if server password hash is missing
+  if (ServerConfig.getServerPasswordHash()) {
+    return false;
+  }
+
+  // Check if CLUSTER_WORKERS is unset or equal to '1'
+  if (!process.env.CLUSTER_WORKERS || process.env.CLUSTER_WORKERS === '1') {
+    return true;
+  }
+
+  // Check if cluster is defined and cluster.isPrimary
+  if (typeof cluster !== 'undefined' && cluster.isPrimary) {
+    return true;
+  }
+
+  return false;
+}
+
 async function startServer() {
   console.log('[SERVER] Starting end2end server');
   try {
     // Only the primary process (or single-worker mode) should prompt. Workers rely on hash set by primary.
-    const shouldPrompt = (!ServerConfig.getServerPasswordHash()) && (!process.env.CLUSTER_WORKERS || process.env.CLUSTER_WORKERS === '1' || (typeof cluster !== 'undefined' && cluster.isPrimary));
-    if (shouldPrompt) await setServerPasswordOnInput();
+    if (shouldPromptForServerPassword()) await setServerPasswordOnInput();
   } catch (e) {
     console.error('[SERVER] Failed to set server password:', {
       message: e?.message || e,
@@ -232,7 +250,15 @@ async function startServer() {
         const set = localDeliveryMap.get(username);
         if (set && set.size) {
           for (const client of set) {
-            try { client.send(message); } catch {}
+            try {
+              client.send(message);
+            } catch (err) {
+              console.error('[SERVER] Failed to send pattern delivery message to client:', {
+                username: username,
+                error: err.message,
+                clientReadyState: client.readyState
+              });
+            }
           }
         }
       } catch (e) {
@@ -598,7 +624,7 @@ async function startServer() {
 
             // Check if user exists in database
             try {
-              const userExists = UserDatabase.loadUser(target) !== null;
+              const userExists = (await UserDatabase.loadUser(target)) !== null;
               console.log(`[SERVER] User existence check for ${target}: ${userExists}`);
               ws.send(JSON.stringify({
                 type: SignalType.USER_EXISTS_RESPONSE,
@@ -684,7 +710,11 @@ async function startServer() {
             const result = await authHandler.processAuthRequest(ws, msg.toString());
             if (result?.authenticated || result?.pending) {
               // Force cleanup any stale sessions for this user before claiming the username
-              try { await ConnectionStateManager.forceCleanupUserSessions(result.username); } catch {}
+              try {
+                await ConnectionStateManager.forceCleanupUserSessions(result.username);
+              } catch (err) {
+                console.error(`[SERVER] Error cleaning up user sessions for ${result.username}:`, err);
+              }
 
               await ConnectionStateManager.updateState(sessionId, {
                 hasPassedAccountLogin: true,
@@ -796,7 +826,9 @@ async function startServer() {
                     reason: 'post-auth-check'
                   }));
                 }
-              } catch {}
+              } catch (error) {
+                if (DEBUG_SERVER_LOGS) console.warn(`[SERVER] Failed to check prekey count:`, error);
+              }
             } else {
               console.error(`[SERVER] Server authentication failed for user: ${state.username}`);
               ws.send(JSON.stringify({ type: SignalType.AUTH_ERROR, message: 'Server authentication failed' }));
@@ -938,9 +970,17 @@ async function startServer() {
             if (localSet && localSet.size) {
               const payload = JSON.stringify(messageToSend);
               for (const client of localSet) {
-                try { client.send(payload); } catch {}
+                try {
+                  client.send(payload);
+                } catch (err) {
+                  console.error('[SERVER] Failed to send message to client:', err);
+                }
               }
-              try { ws.send(JSON.stringify({ type: 'ok', message: 'relayed' })); } catch {}
+              try {
+                ws.send(JSON.stringify({ type: 'ok', message: 'relayed' }));
+              } catch (err) {
+                console.error('[SERVER] Failed to send relay confirmation to client:', err);
+              }
               if (DEBUG_SERVER_LOGS) console.log(`[SERVER] Message delivered locally to ${toUser}`);
             } else {
               // Cross-instance delivery via Redis pub-sub
@@ -951,7 +991,11 @@ async function startServer() {
                 const online = await isOnline(toUser);
                 if (online) {
                   await publishToUser(toUser, payload);
-                  try { ws.send(JSON.stringify({ type: 'ok', message: 'relayed' })); } catch {}
+                  try {
+                    ws.send(JSON.stringify({ type: 'ok', message: 'relayed' }));
+                  } catch (err) {
+                    console.error('[SERVER] Failed to send relay confirmation to client:', err);
+                  }
                   if (DEBUG_SERVER_LOGS) console.log(`[SERVER] Message published for ${toUser}`);
                 } else {
                   const queueSuccess = MessageDatabase.queueOfflineMessage(toUser, {
@@ -961,15 +1005,27 @@ async function startServer() {
                   });
                   if (queueSuccess) {
                     if (DEBUG_SERVER_LOGS) console.log(`[SERVER] Message queued for offline user: ${toUser}`);
-                    try { ws.send(JSON.stringify({ type: 'ok', message: 'queued' })); } catch {}
+                    try {
+                      ws.send(JSON.stringify({ type: 'ok', message: 'queued' }));
+                    } catch (err) {
+                      console.error('[SERVER] Failed to send queue confirmation to client:', err);
+                    }
                   } else {
                     console.error(`[SERVER] Failed to queue message for user: ${toUser}`);
-                    try { ws.send(JSON.stringify({ type: SignalType.ERROR, message: 'Failed to queue message' })); } catch {}
+                    try {
+                      ws.send(JSON.stringify({ type: SignalType.ERROR, message: 'Failed to queue message' }));
+                    } catch (err) {
+                      console.error('[SERVER] Failed to send queue error to client:', err);
+                    }
                   }
                 }
               } catch (e) {
                 console.error('[SERVER] Delivery error:', e);
-                try { ws.send(JSON.stringify({ type: SignalType.ERROR, message: 'Delivery failed' })); } catch {}
+                try {
+                  ws.send(JSON.stringify({ type: SignalType.ERROR, message: 'Delivery failed' }));
+                } catch (err) {
+                  console.error('[SERVER] Failed to send delivery error to client:', err);
+                }
               }
             }
             if (DEBUG_SERVER_LOGS) console.log(`[SERVER] Message handling complete for ${toUser}`);
@@ -1149,11 +1205,28 @@ async function startServer() {
       }
 
       // Remove from local delivery map
-      try { removeLocalConnection(ws._username, ws); } catch {}
+      try {
+        removeLocalConnection(ws._username, ws);
+      } catch (err) {
+        console.error('[SERVER] Failed to remove local connection:', err);
+      }
 
       // Clean up session from Redis
       if (sessionId) {
-        try { await ConnectionStateManager.deleteSession(sessionId); } catch {}
+        try {
+          await ConnectionStateManager.deleteSession(sessionId);
+        } catch (err) {
+          console.error('[SERVER] Failed to delete session:', err);
+        }
+      }
+
+      // Clean up rate limiting data for this connection
+      if (rateLimitMiddleware && rateLimitMiddleware.rateLimiter && typeof rateLimitMiddleware.rateLimiter.cleanupConnectionLimit === 'function') {
+        try {
+          await rateLimitMiddleware.rateLimiter.cleanupConnectionLimit(ws);
+        } catch (err) {
+          console.error('[SERVER] Failed to cleanup rate limiting data:', err);
+        }
       }
 
       // No per-connection Redis subscribers anymore
@@ -1173,7 +1246,33 @@ async function startServer() {
 }
 
 // Optional multi-process clustering for higher connection density
-const WORKERS = Math.max(1, Number.parseInt(process.env.CLUSTER_WORKERS || '1', 10));
+function parseClusterWorkers() {
+  const envValue = (process.env.CLUSTER_WORKERS || '').trim();
+
+  // If empty or missing, default to 1
+  if (!envValue) {
+    return 1;
+  }
+
+  // Parse with base 10
+  const parsed = Number.parseInt(envValue, 10);
+
+  // Validate: must be a finite positive integer
+  if (!Number.isFinite(parsed) || parsed < 1) {
+    console.warn(`[SERVER] Invalid CLUSTER_WORKERS value '${envValue}', using default: 1`);
+    return 1;
+  }
+
+  // Optional: enforce a reasonable maximum (e.g., 32)
+  if (parsed > 32) {
+    console.warn(`[SERVER] CLUSTER_WORKERS value ${parsed} exceeds maximum 32, using 32`);
+    return 32;
+  }
+
+  return parsed;
+}
+
+const WORKERS = parseClusterWorkers();
 
 if (WORKERS > 1 && cluster.isPrimary) {
   console.log(`[SERVER] Primary starting ${WORKERS} workers (cpus=${os.cpus().length})`);

@@ -9,13 +9,43 @@ let pgPool = null;
 async function getPgPool() {
   if (!USE_PG) return null;
   if (pgPool) return pgPool;
+
+  // Validate connection string when USE_PG is true
+  if (!process.env.DATABASE_URL) {
+    const error = new Error('DATABASE_URL is required when USE_PG is true');
+    console.error('[DB] Missing DATABASE_URL:', error.message);
+    throw error;
+  }
+
   try {
     const { Pool } = await import('pg');
+
+    // Parse and validate pool configuration with safe defaults
+    const dbPoolMax = Number.parseInt(process.env.DB_POOL_MAX || '20', 10);
+    const dbIdleTimeout = Number.parseInt(process.env.DB_IDLE_TIMEOUT || '30000', 10);
+    const dbConnectTimeout = Number.parseInt(process.env.DB_CONNECT_TIMEOUT || '2000', 10);
+
+    // Apply safe defaults for NaN values and enforce sensible ranges
+    const maxConnections = Number.isNaN(dbPoolMax) ? 20 : Math.max(1, Math.min(dbPoolMax, 100));
+    const idleTimeoutMs = Number.isNaN(dbIdleTimeout) ? 30000 : Math.max(1000, Math.min(dbIdleTimeout, 300000));
+    const connectTimeoutMs = Number.isNaN(dbConnectTimeout) ? 2000 : Math.max(500, Math.min(dbConnectTimeout, 30000));
+
+    // Log invalid values for debugging
+    if (Number.isNaN(dbPoolMax)) {
+      console.warn(`[DB] Invalid DB_POOL_MAX value '${process.env.DB_POOL_MAX}', using default: ${maxConnections}`);
+    }
+    if (Number.isNaN(dbIdleTimeout)) {
+      console.warn(`[DB] Invalid DB_IDLE_TIMEOUT value '${process.env.DB_IDLE_TIMEOUT}', using default: ${idleTimeoutMs}`);
+    }
+    if (Number.isNaN(dbConnectTimeout)) {
+      console.warn(`[DB] Invalid DB_CONNECT_TIMEOUT value '${process.env.DB_CONNECT_TIMEOUT}', using default: ${connectTimeoutMs}`);
+    }
+
     pgPool = new Pool({
       connectionString: process.env.DATABASE_URL,
-      max: parseInt(process.env.DB_POOL_MAX || '20'),
-      idleTimeoutMillis: parseInt(process.env.DB_IDLE_TIMEOUT || '30000'),
-      connectionTimeoutMillis: parseInt(process.env.DB_CONNECT_TIMEOUT || '2000')
+      max: maxConnections,
+      idleTimeoutMillis: idleTimeoutMs,
+      connectionTimeoutMillis: connectTimeoutMs
     });
     return pgPool;
   } catch (e) {
@@ -531,42 +561,49 @@ export class MessageDatabase {
     }
   }
 
-  static queueOfflineMessage(toUsername, payloadObj) {
+  static async queueOfflineMessage(toUsername, payloadObj) {
     // SECURITY: Validate inputs
     if (!toUsername || typeof toUsername !== 'string' || toUsername.length < 3 || toUsername.length > 32) {
       console.error('[DB] Invalid toUsername for offline message');
       return false;
     }
-    
+
     if (!payloadObj || typeof payloadObj !== 'object') {
       console.error('[DB] Invalid payload for offline message');
       return false;
     }
-    
+
     // SECURITY: Validate username format
     if (!/^[a-zA-Z0-9_-]+$/.test(toUsername)) {
       console.error('[DB] Invalid toUsername format for offline message');
       return false;
     }
-    
+
     try {
       const payload = JSON.stringify(payloadObj);
-      
+
       if (payload.length > 1048576) {
         console.error('[DB] Offline message payload too large');
         return false;
       }
-      
+
       const queuedAt = Date.now();
       if (USE_PG) {
-        return getPgPool().then(pool => pool.query('INSERT INTO offline_messages (toUsername, payload, queuedAt) VALUES ($1,$2,$3)', [toUsername, payload, queuedAt]).then(() => true).catch(() => false));
+        try {
+          const pool = await getPgPool();
+          await pool.query('INSERT INTO offline_messages (toUsername, payload, queuedAt) VALUES ($1,$2,$3)', [toUsername, payload, queuedAt]);
+          return true;
+        } catch (error) {
+          console.error('[DB] Error inserting offline message (PG):', error);
+          return false;
+        }
       } else {
         try {
           db.prepare(`INSERT INTO offline_messages (toUsername, payload, queuedAt) VALUES (?, ?, ?)`).run(toUsername, payload, queuedAt);
-          return Promise.resolve(true);
+          return true;
         } catch (error) {
           console.error('[DB] Error inserting offline message:', error);
-          return Promise.resolve(false);
+          return false;
         }
       }
     } catch (error) {
