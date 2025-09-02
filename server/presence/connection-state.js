@@ -1,10 +1,11 @@
 import { withRedisClient } from './presence.js';
+import { TTL_CONFIG } from '../config/config.js';
 import crypto from 'crypto';
 
 // Redis key patterns for connection state
 const CONNECTION_STATE_KEY = (sessionId) => `connection_state:${sessionId}`;
 const USER_SESSION_KEY = (username) => `user_session:${username}`;
-const SESSION_TTL = 300; // 5 minutes TTL for connection state
+const SESSION_TTL = TTL_CONFIG.SESSION_TTL; // Use standardized TTL
 
 /**
  * Redis-based connection state manager for millions of concurrent users
@@ -73,50 +74,84 @@ export class ConnectionStateManager {
           lastActivity: Date.now()
         };
 
-        // Handle username changes with race condition protection
+        // Handle username changes with atomic race condition protection
         if ('username' in updates && updates.username !== currentState.username) {
           const oldUsername = currentState.username;
           const newUsername = updates.username;
 
           // Case 1: Clearing username (setting to null/empty)
           if (!newUsername && oldUsername) {
-            // Only remove old mapping if it belongs to this session
-            const currentOwner = await client.get(USER_SESSION_KEY(oldUsername));
-            if (currentOwner === sessionId) {
-              await client.del(USER_SESSION_KEY(oldUsername));
-            }
+            // Use Lua script for atomic check-and-delete
+            const luaScript = `
+              local userKey = KEYS[1]
+              local sessionId = ARGV[1]
+              local currentOwner = redis.call('GET', userKey)
+              if currentOwner == sessionId then
+                redis.call('DEL', userKey)
+                return 1
+              end
+              return 0
+            `;
+            await client.eval(luaScript, 1, USER_SESSION_KEY(oldUsername), sessionId);
           }
           // Case 2: Setting/changing to a new username
           else if (newUsername) {
-            // Check if new username is available or owned by this session
-            const currentOwner = await client.get(USER_SESSION_KEY(newUsername));
-            let canClaimUsername = false;
-            
-            if (!currentOwner || currentOwner === sessionId) {
-              canClaimUsername = true;
-            } else {
-              // Check if the owning session still exists (cleanup stale mappings)
-              const ownerSessionExists = await client.exists(CONNECTION_STATE_KEY(currentOwner));
-              if (!ownerSessionExists) {
-                console.log(`[CONNECTION-STATE] Cleaning up stale username mapping for ${newUsername} (owner session ${currentOwner} no longer exists)`);
-                await client.del(USER_SESSION_KEY(newUsername));
-                canClaimUsername = true;
-              }
-            }
-            
-            if (canClaimUsername) {
-              // Safe to claim the new username
-              await client.setex(USER_SESSION_KEY(newUsername), SESSION_TTL, sessionId);
-              
-              // Remove old username mapping if it belongs to this session
-              if (oldUsername && oldUsername !== newUsername) {
-                const oldOwner = await client.get(USER_SESSION_KEY(oldUsername));
-                if (oldOwner === sessionId) {
-                  await client.del(USER_SESSION_KEY(oldUsername));
-                }
-              }
-            } else {
-              // Username is taken by another active session - reject the change
+            // Use Lua script for atomic username claiming
+            const luaScript = `
+              local userKey = KEYS[1]
+              local sessionKey = KEYS[2]
+              local oldUserKey = KEYS[3]
+              local sessionId = ARGV[1]
+              local ttl = tonumber(ARGV[2])
+              local oldUsername = ARGV[3]
+
+              -- Check if new username is available or owned by this session
+              local currentOwner = redis.call('GET', userKey)
+              local canClaim = false
+
+              if not currentOwner or currentOwner == sessionId then
+                canClaim = true
+              else
+                -- Check if the owning session still exists
+                local ownerSessionExists = redis.call('EXISTS', 'connection_state:' .. currentOwner)
+                if ownerSessionExists == 0 then
+                  -- Cleanup stale mapping
+                  redis.call('DEL', userKey)
+                  canClaim = true
+                end
+              end
+
+              if canClaim then
+                -- Claim the new username
+                redis.call('SETEX', userKey, ttl, sessionId)
+
+                -- Remove old username mapping if it belongs to this session and is different
+                if oldUsername and oldUsername ~= '' and oldUserKey ~= userKey then
+                  local oldOwner = redis.call('GET', oldUserKey)
+                  if oldOwner == sessionId then
+                    redis.call('DEL', oldUserKey)
+                  end
+                end
+
+                return 1  -- Success
+              else
+                return 0  -- Username taken
+              end
+            `;
+
+            const oldUserKey = oldUsername ? USER_SESSION_KEY(oldUsername) : '';
+            const result = await client.eval(
+              luaScript,
+              3,
+              USER_SESSION_KEY(newUsername),
+              CONNECTION_STATE_KEY(sessionId),
+              oldUserKey,
+              sessionId,
+              SESSION_TTL,
+              oldUsername || ''
+            );
+
+            if (result === 0) {
               throw new Error(`Username '${newUsername}' is already taken by another active session`);
             }
           }
@@ -162,7 +197,7 @@ export class ConnectionStateManager {
           // Opportunistically bump presence TTL on activity
           try {
             const { bumpOnline } = await import('./presence.js');
-            await bumpOnline(state.username, 180); // 3 minutes
+            await bumpOnline(state.username, TTL_CONFIG.PRESENCE_TTL); // Use standardized TTL
           } catch (e) {
             // Silently ignore presence bump errors
           }
@@ -277,16 +312,24 @@ export class ConnectionStateManager {
   static async cleanupExpiredSessions() {
     try {
       return await withRedisClient(async (client) => {
-        const sessionKeys = await client.keys('connection_state:*');
         let cleanedCount = 0;
+        let cursor = '0';
+        const batchSize = 100;
 
-        for (const key of sessionKeys) {
-          const ttl = await client.ttl(key);
-          if (ttl === -1 || ttl === -2) { // No TTL or expired
-            await client.del(key);
-            cleanedCount++;
+        // Use SCAN instead of KEYS to avoid blocking Redis
+        do {
+          const result = await client.scan(cursor, 'MATCH', 'connection_state:*', 'COUNT', batchSize);
+          cursor = result[0];
+          const keys = result[1];
+
+          for (const key of keys) {
+            const ttl = await client.ttl(key);
+            if (ttl === -1 || ttl === -2) { // No TTL or expired
+              await client.del(key);
+              cleanedCount++;
+            }
           }
-        }
+        } while (cursor !== '0');
 
         console.log(`[CONNECTION-STATE] Cleaned up ${cleanedCount} expired sessions`);
         return cleanedCount;
@@ -339,27 +382,35 @@ export class ConnectionStateManager {
   static async cleanupStaleUsernameMappings() {
     try {
       return await withRedisClient(async (client) => {
-        const userSessionKeys = await client.keys('user_session:*');
         let cleanedCount = 0;
+        let cursor = '0';
+        const batchSize = 100;
 
-        for (const key of userSessionKeys) {
-          const sessionId = await client.get(key);
-          if (sessionId) {
-            // Check if the session still exists
-            const sessionExists = await client.exists(CONNECTION_STATE_KEY(sessionId));
-            if (!sessionExists) {
-              // Session doesn't exist, remove the stale username mapping
+        // Use SCAN instead of KEYS to avoid blocking Redis
+        do {
+          const result = await client.scan(cursor, 'MATCH', 'user_session:*', 'COUNT', batchSize);
+          cursor = result[0];
+          const keys = result[1];
+
+          for (const key of keys) {
+            const sessionId = await client.get(key);
+            if (sessionId) {
+              // Check if the session still exists
+              const sessionExists = await client.exists(CONNECTION_STATE_KEY(sessionId));
+              if (!sessionExists) {
+                // Session doesn't exist, remove the stale username mapping
+                await client.del(key);
+                cleanedCount++;
+                const username = key.replace('user_session:', '');
+                console.log(`[CONNECTION-STATE] Cleaned up stale username mapping for ${username} (session ${sessionId} no longer exists)`);
+              }
+            } else {
+              // Empty mapping, remove it
               await client.del(key);
               cleanedCount++;
-              const username = key.replace('user_session:', '');
-              console.log(`[CONNECTION-STATE] Cleaned up stale username mapping for ${username} (session ${sessionId} no longer exists)`);
             }
-          } else {
-            // Empty mapping, remove it
-            await client.del(key);
-            cleanedCount++;
           }
-        }
+        } while (cursor !== '0');
 
         console.log(`[CONNECTION-STATE] Cleaned up ${cleanedCount} stale username mappings`);
         return cleanedCount;

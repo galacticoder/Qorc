@@ -2,6 +2,7 @@ import promptSync from 'prompt-sync';
 import * as db from '../database/database.js';
 import { CryptoUtils } from '../crypto/unified-crypto.js';
 import * as ServerConfig from '../config/config.js';
+import { TTL_CONFIG } from '../config/config.js';
 import { UserDatabase } from '../database/database.js';
 import { redis } from '../presence/presence.js';
 
@@ -16,13 +17,13 @@ export const validateUsernameLength = (username) => {
   if (!username || typeof username !== 'string') return false;
   return username.length >= 3 && username.length <= 32; // Increased to match database validation
 };
-export const isUsernameAvailable = (username) => {
+export const isUsernameAvailable = async (username) => {
   try {
     if (!username || typeof username !== 'string') {
       throw new Error('Invalid username parameter');
     }
     
-    const existingUser = UserDatabase.loadUser(username);
+    const existingUser = await UserDatabase.loadUser(username);
     return existingUser === null; // Available if no user found
   } catch (error) {
     console.error(`[AUTH] Error checking username availability for ${username}:`, error);
@@ -33,7 +34,7 @@ export const isUsernameAvailable = (username) => {
 // Configuration for server capacity
 const MAX_CONNECTIONS = parseInt(process.env.MAX_CONNECTIONS || '1000', 10);
 const CONNECTION_COUNTER_KEY = 'server:active_connections';
-const CONNECTION_COUNTER_TTL = 3600; // 1 hour TTL to avoid stale keys
+const CONNECTION_COUNTER_TTL = TTL_CONFIG.CONNECTION_COUNTER_TTL; // Use standardized TTL
 
 export const isServerFull = async () => {
   try {
@@ -87,28 +88,46 @@ export const decrementConnectionCount = async () => {
 };
 
 export async function setServerPasswordOnInput() {
-  const password = prompt.hide('Set server password (Input will not be visible): ').trim();
-  const confirm = prompt.hide('Confirm password: ').trim();
-
-  // SECURITY: Validate password (minimum length requirement removed)
-  
-  if (password.length > 512) {
-    console.error('Password too long (max 512 characters). Exiting.');
-    process.exit(1);
-  }
-
-  if (password !== confirm) {
-    console.error('Passwords do not match. Exiting.');
-    process.exit(1);
-  }
-  
-  // SECURITY: Clear password variables from memory
   try {
+    // Non-interactive paths first
+    if (process.env.SERVER_PASSWORD_HASH && process.env.SERVER_PASSWORD_HASH.length > 0) {
+      ServerConfig.setServerPassword(process.env.SERVER_PASSWORD_HASH);
+      console.log('[SERVER] Server password hash set from environment');
+      return;
+    }
+    if (process.env.SERVER_PASSWORD && process.env.SERVER_PASSWORD.length > 0) {
+      if (process.env.SERVER_PASSWORD.length > 512) {
+        console.error('SERVER_PASSWORD too long (max 512 characters). Exiting.');
+        process.exit(1);
+      }
+      const hash = await CryptoUtils.Password.hashPassword(process.env.SERVER_PASSWORD);
+      ServerConfig.setServerPassword(hash);
+      console.log('[SERVER] Server password set from environment');
+      return;
+    }
+    // Interactive fallback only if TTY is available
+    if (!process.stdin.isTTY) {
+      throw new Error('No TTY available for interactive password prompt. Run with CLUSTER_WORKERS=1 in a terminal or set SERVER_PASSWORD/SERVER_PASSWORD_HASH.');
+    }
+    const password = prompt.hide('Set server password (Input will not be visible): ').trim();
+    const confirm = prompt.hide('Confirm password: ').trim();
+    if (password.length > 512) {
+      console.error('Password too long (max 512 characters). Exiting.');
+      process.exit(1);
+    }
+    if (password !== confirm) {
+      console.error('Passwords do not match. Exiting.');
+      process.exit(1);
+    }
     const serverPasswordHash = await CryptoUtils.Password.hashPassword(password);
     ServerConfig.setServerPassword(serverPasswordHash);
     console.log('Password set successfully.');
   } catch (error) {
-    console.error('Failed to hash password:', error.message);
+    console.error('[SERVER] Failed to set server password:', {
+      message: error?.message || error,
+      stack: error?.stack,
+      type: error?.constructor?.name
+    });
     process.exit(1);
   }
 }

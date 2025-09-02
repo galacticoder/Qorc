@@ -13,12 +13,12 @@ export function MediaDebug() {
     addLog('Testing microphone access...');
     try {
       if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-        addLog('❌ MediaDevices not supported');
+        addLog('MediaDevices not supported');
         return;
       }
       
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      addLog('✅ Microphone access granted');
+      addLog('Microphone access granted');
       addLog(`Stream tracks: ${stream.getAudioTracks().length}`);
       
       // Test MediaRecorder
@@ -31,12 +31,12 @@ export function MediaDebug() {
       
       for (const type of supportedTypes) {
         const supported = MediaRecorder.isTypeSupported(type);
-        addLog(`${supported ? '✅' : '❌'} ${type}`);
+        addLog(`${supported ? 'SUPPORTED' : 'NOT SUPPORTED'} ${type}`);
       }
       
       stream.getTracks().forEach(track => track.stop());
     } catch (error) {
-      addLog(`❌ Microphone error: ${error}`);
+      addLog(`Microphone error: ${error}`);
     }
   };
 
@@ -46,36 +46,36 @@ export function MediaDebug() {
     // Test Electron API
     const electronAPI = (window as any).electronAPI;
     if (electronAPI) {
-      addLog('✅ ElectronAPI available');
+      addLog('ElectronAPI available');
       addLog(`Available functions: ${Object.keys(electronAPI).join(', ')}`);
       
       if (electronAPI.getScreenSources) {
-        addLog('✅ getScreenSources available');
+        addLog('getScreenSources available');
         try {
           const sources = await electronAPI.getScreenSources();
-          addLog(`✅ Got ${sources?.length || 0} screen sources`);
+          addLog(`Got ${sources?.length || 0} screen sources`);
         } catch (error) {
-          addLog(`❌ getScreenSources error: ${error}`);
+          addLog(`getScreenSources error: ${error}`);
         }
       } else {
-        addLog('❌ getScreenSources NOT available');
+        addLog('getScreenSources NOT available');
       }
     } else {
-      addLog('❌ ElectronAPI not available');
+      addLog('ElectronAPI not available');
     }
     
     // Test browser API
     if (navigator.mediaDevices?.getDisplayMedia) {
-      addLog('✅ getDisplayMedia available');
+      addLog('getDisplayMedia available');
       try {
         const stream = await navigator.mediaDevices.getDisplayMedia({ video: true });
-        addLog('✅ Screen sharing works via browser API');
+        addLog('Screen sharing works via browser API');
         stream.getTracks().forEach(track => track.stop());
       } catch (error) {
-        addLog(`❌ getDisplayMedia error: ${error}`);
+        addLog(`getDisplayMedia error: ${error}`);
       }
     } else {
-      addLog('❌ getDisplayMedia not available');
+      addLog('getDisplayMedia not available');
     }
   };
 

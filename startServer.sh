@@ -73,5 +73,23 @@ if [ "$SKIP_INSTALL" != "1" ]; then
 fi
 
 echo -e "${GREEN}Starting secure WebSocket server...${NC}"
+
+# Auto-detect Postgres and enable backend if DATABASE_URL provided
+if [ -n "${DATABASE_URL:-}" ]; then
+    export DB_BACKEND=postgres
+    echo -e "${GREEN}Database backend: Postgres${NC}"
+else
+    echo -e "${GREEN}Database backend: SQLite (default)${NC}"
+fi
+
+# Optional Redis Cluster
+if [ -n "${REDIS_CLUSTER_NODES:-}" ]; then
+    echo -e "${GREEN}Using Redis Cluster nodes: ${REDIS_CLUSTER_NODES}${NC}"
+fi
+
+# Default to clustered workers for higher density; override with CLUSTER_WORKERS
+export CLUSTER_WORKERS="${CLUSTER_WORKERS:-1}"
+echo -e "${GREEN}Cluster workers: ${CLUSTER_WORKERS}${NC}"
+
 # Replace shell with node so signals (Ctrl-C) are delivered directly and exit is clean
 exec node server.js

@@ -1,6 +1,7 @@
 import Redis from 'ioredis';
 import { RateLimiterRedis, RateLimiterMemory } from 'rate-limiter-flexible';
 import { RATE_LIMIT_CONFIG } from '../config/config.js';
+import crypto from 'crypto';
 
 // Distributed rate limiter using Redis with memory fallback
 class DistributedRateLimiter {
@@ -14,9 +15,10 @@ class DistributedRateLimiter {
 		this.globalConnectionLimiter = null;
 		this.userMessageLimiter = null;
 		this.userBundleLimiter = null;
+		this.connectionAuthLimiter = null;
 
-		// Per-connection auth limiters (lifetime of ws)
-		this.connectionAuthLimiters = new WeakMap();
+		// REMOVED: Per-connection auth limiters WeakMap to prevent memory leaks
+		// Now using Redis-based connection auth limiter with connection IDs
 
 		this._initStores();
 	}
@@ -83,6 +85,16 @@ class DistributedRateLimiter {
 				blockDuration: Math.ceil(authUserCfg.BLOCK_DURATION_MS / 1000),
 				keyPrefix: 'rl:user:auth'
 			});
+
+			// Connection-based auth limiter using Redis
+			const authCfg = RATE_LIMIT_CONFIG.AUTHENTICATION;
+			this.connectionAuthLimiter = new RateLimiterRedis({
+				storeClient: this.redis,
+				points: Math.max(1, authCfg.MAX_ATTEMPTS_PER_CONNECTION),
+				duration: Math.ceil(authCfg.WINDOW_MS / 1000),
+				blockDuration: Math.ceil(authCfg.BLOCK_DURATION_MS / 1000),
+				keyPrefix: 'rl:conn:auth'
+			});
 		} else {
 			this.globalConnectionLimiter = new RateLimiterMemory({
 				points: Math.max(1, effectiveConnPoints),
@@ -111,6 +123,15 @@ class DistributedRateLimiter {
 				blockDuration: Math.ceil(authUserCfg.BLOCK_DURATION_MS / 1000),
 				keyPrefix: 'rl:user:auth'
 			});
+
+			// Connection-based auth limiter using memory (fallback)
+			const authCfg = RATE_LIMIT_CONFIG.AUTHENTICATION;
+			this.connectionAuthLimiter = new RateLimiterMemory({
+				points: Math.max(1, authCfg.MAX_ATTEMPTS_PER_CONNECTION),
+				duration: Math.ceil(authCfg.WINDOW_MS / 1000),
+				blockDuration: Math.ceil(authCfg.BLOCK_DURATION_MS / 1000),
+				keyPrefix: 'rl:conn:auth'
+			});
 		}
 
 		console.log('[RATE-LIMIT] Backend:', this.usingRedis ? 'redis' : 'memory');
@@ -129,7 +150,6 @@ class DistributedRateLimiter {
 	_addSecurityJitter(ms) {
 		const jitter = Math.floor(ms * 0.1);
 		// SECURITY: Use cryptographically secure random for jitter
-		const crypto = require('crypto');
 		const randomValue = crypto.randomBytes(1)[0] / 255; // 0-1 range
 		const randomJitter = Math.floor((randomValue - 0.5) * jitter);
 		return Math.max(1, ms + randomJitter);
@@ -156,21 +176,16 @@ class DistributedRateLimiter {
 	}
 
 	async checkConnectionAuthLimit(ws) {
-		const cfg = RATE_LIMIT_CONFIG.AUTHENTICATION;
-		if (!this.connectionAuthLimiters.has(ws)) {
-			this.connectionAuthLimiters.set(
-				ws,
-				new RateLimiterMemory({
-					points: Math.max(1, cfg.MAX_ATTEMPTS_PER_CONNECTION),
-					duration: Math.ceil(cfg.WINDOW_MS / 1000),
-					blockDuration: Math.ceil(cfg.BLOCK_DURATION_MS / 1000),
-					keyPrefix: 'rl:conn:auth'
-				})
-			);
+		// SECURITY: Generate a unique connection ID for rate limiting
+		// Use a combination of connection time and random data to avoid collisions
+		if (!ws._connectionId) {
+			const timestamp = Date.now();
+			const randomBytes = crypto.randomBytes(8).toString('hex');
+			ws._connectionId = `conn_${timestamp}_${randomBytes}`;
 		}
-		const limiter = this.connectionAuthLimiters.get(ws);
+
 		try {
-			await limiter.consume('auth', 1);
+			await this.connectionAuthLimiter.consume(ws._connectionId, 1);
 			return { allowed: true };
 		} catch (res) {
 			// Blocked auth logged (metrics removed for memory efficiency)

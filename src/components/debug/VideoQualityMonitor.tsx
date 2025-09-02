@@ -11,8 +11,8 @@ interface VideoStats {
   resolution: { width: number; height: number };
   frameRate: number;
   bitrate: number;
-  packetsLost: number;
-  packetsReceived: number;
+  packetsLost: number; // delta since last sample
+  packetsReceived: number; // cumulative
   bytesReceived: number;
   timestamp: number;
   codecName?: string;
@@ -27,70 +27,106 @@ interface VideoQualityMonitorProps {
 
 export function VideoQualityMonitor({ peerConnection, remoteStream, isVisible = true }: VideoQualityMonitorProps) {
   const [stats, setStats] = useState<VideoStats | null>(null);
-  const [isMonitoring, setIsMonitoring] = useState(false);
+  // Internal monitoring state is derived from intervalRef; avoid extra state churn
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const lastInboundRef = useRef<{ id: string; bytesReceived: number; framesReceived?: number; timestamp: number } | null>(null);
+  const lastInboundRef = useRef<{
+    id: string;
+    bytesReceived: number;
+    framesReceived?: number;
+    packetsReceived: number;
+    packetsLostTotal: number;
+    timestamp: number;
+  } | null>(null);
   const failureCountRef = useRef(0);
   const MAX_FAILURES = 5;
 
   const stopMonitoring = useCallback(() => {
     console.log('[VideoQualityMonitor] Stopping quality monitoring...');
-    setIsMonitoring(false);
-    
+    // intervalRef presence determines monitoring state; no state flip needed
     if (intervalRef.current) {
       clearInterval(intervalRef.current);
       intervalRef.current = null;
     }
-    
     setStats(null);
   }, []);
 
   const startMonitoring = useCallback(() => {
-    if (!peerConnection || isMonitoring) return;
-    
+    if (!peerConnection) return;
+    if (intervalRef.current) return; // already monitoring
+
     console.log('[VideoQualityMonitor] Starting quality monitoring...');
-    setIsMonitoring(true);
-    
+    // intervalRef presence determines monitoring state; no state flip needed
+
     const updateStats = async () => {
       try {
         const statsReport = await peerConnection.getStats();
         const videoStats = extractVideoStats(statsReport);
-        
         if (videoStats) {
           setStats(videoStats);
           failureCountRef.current = 0; // Reset on success
-          console.log('[VideoQualityMonitor] Current video quality:', videoStats);
         }
       } catch (error) {
-        console.error('[VideoQualityMonitor] Failed to get stats:', error);
+        console.warn('[VideoQualityMonitor] Failed to get stats:', error);
         failureCountRef.current++;
         if (failureCountRef.current >= MAX_FAILURES) {
-          console.error('[VideoQualityMonitor] Too many failures, stopping monitoring');
+          console.warn('[VideoQualityMonitor] Too many failures, stopping monitoring');
           stopMonitoring();
         }
       }
     };
-    
+
     // Update stats every second
     intervalRef.current = setInterval(updateStats, 1000);
     updateStats(); // Initial update
-  }, [peerConnection, isMonitoring, stopMonitoring]);
+  }, [peerConnection, stopMonitoring]);
 
   const extractVideoStats = (statsReport: RTCStatsReport): VideoStats | null => {
-    let inboundVideoStats: any = null;
-    let trackStats: any = null;
+    // Prefer mapping inbound-rtp to the actual remote video track from props.remoteStream
+    const preferredTrackId = remoteStream?.getVideoTracks()?.[0]?.id;
 
-    // Find inbound video stream stats
-    statsReport.forEach((report) => {
-      if (report.type === 'inbound-rtp' && report.kind === 'video') {
-        inboundVideoStats = report;
-      } else if (report.type === 'track' && report.kind === 'video' && report.remoteSource) {
-        // For received remote video, remoteSource should be true
-        trackStats = report;
+    const inboundCandidates: any[] = [];
+    const trackById: Record<string, any> = {};
+    const videoTracks: any[] = [];
+
+    statsReport.forEach((report: any) => {
+      // Collect inbound-rtp for video (support kind or mediaType)
+      if (
+        report.type === 'inbound-rtp' &&
+        (report.kind === 'video' || report.mediaType === 'video')
+      ) {
+        inboundCandidates.push(report);
+      }
+      // Collect track reports for video
+      if (
+        report.type === 'track' &&
+        (report.kind === 'video' || report.mediaType === 'video')
+      ) {
+        trackById[report.id] = report;
+        videoTracks.push(report);
       }
     });
 
-    if (!inboundVideoStats) return null;
+    if (inboundCandidates.length === 0) return null;
+
+    // Try to find inbound tied to our visible remote track
+    let inboundVideoStats: any = null;
+    let trackStats: any = null;
+    if (preferredTrackId) {
+      inboundVideoStats = inboundCandidates.find((inb: any) => {
+        const t = trackById[inb.trackId];
+        return t && t.trackIdentifier === preferredTrackId;
+      }) || null;
+      if (inboundVideoStats) {
+        trackStats = trackById[inboundVideoStats.trackId] || null;
+      }
+    }
+    // Fallbacks: pick an active inbound with bytes/packets flowing, else the first
+    if (!inboundVideoStats) {
+      inboundVideoStats =
+        inboundCandidates.find((r) => (r.bytesReceived || 0) > 0 || (r.packetsReceived || 0) > 0) ||
+        inboundCandidates[0];
+      trackStats = trackById[inboundVideoStats.trackId] || videoTracks[0] || null;
+    }
 
     // Calculate bitrate using last inbound snapshot, reset when SSRC/ID changes
     let bitrate = 0;
@@ -98,6 +134,8 @@ export function VideoQualityMonitor({ peerConnection, remoteStream, isVisible = 
     const currentTime: number = inboundVideoStats.timestamp;
     const currentBytes: number = inboundVideoStats.bytesReceived || 0;
     const currentFrames: number | undefined = inboundVideoStats.framesReceived;
+    const currentPacketsReceived: number = inboundVideoStats.packetsReceived || 0;
+    const currentPacketsLostTotal: number = inboundVideoStats.packetsLost || 0;
 
     const prevInboundSnapshot = lastInboundRef.current ? { ...lastInboundRef.current } : null;
 
@@ -135,7 +173,21 @@ export function VideoQualityMonitor({ peerConnection, remoteStream, isVisible = 
     }
 
     // Now update snapshots after calculations
-    lastInboundRef.current = { id: currentId, bytesReceived: currentBytes, framesReceived: currentFrames, timestamp: currentTime };
+    lastInboundRef.current = {
+      id: currentId,
+      bytesReceived: currentBytes,
+      framesReceived: currentFrames,
+      packetsReceived: currentPacketsReceived,
+      packetsLostTotal: currentPacketsLostTotal,
+      timestamp: currentTime
+    };
+
+    // Compute packet loss delta for the interval (more actionable than cumulative)
+    let packetsLostDelta = 0;
+    if (prevInboundSnapshot && prevInboundSnapshot.id === currentId) {
+      const lostDiff = currentPacketsLostTotal - prevInboundSnapshot.packetsLostTotal;
+      packetsLostDelta = lostDiff >= 0 ? lostDiff : 0;
+    }
     
     // Resolve codec from codecId if present
     const codecStats = inboundVideoStats.codecId ? statsReport.get(inboundVideoStats.codecId) : undefined;
@@ -148,7 +200,7 @@ export function VideoQualityMonitor({ peerConnection, remoteStream, isVisible = 
       },
       frameRate: frameRate || 0,
       bitrate,
-      packetsLost: inboundVideoStats.packetsLost || 0,
+      packetsLost: packetsLostDelta,
       packetsReceived: inboundVideoStats.packetsReceived || 0,
       bytesReceived: inboundVideoStats.bytesReceived || 0,
       timestamp: inboundVideoStats.timestamp || Date.now(),
@@ -159,16 +211,15 @@ export function VideoQualityMonitor({ peerConnection, remoteStream, isVisible = 
 
   // Auto-start monitoring when peer connection and stream are available
   useEffect(() => {
-    if (peerConnection && !isMonitoring) {
-      startMonitoring();
-    } else if (!peerConnection && isMonitoring) {
+    if (!peerConnection) {
       stopMonitoring();
+      return;
     }
-
+    startMonitoring();
     return () => {
       stopMonitoring();
     };
-  }, [peerConnection, isMonitoring, startMonitoring, stopMonitoring]);
+  }, [peerConnection, startMonitoring, stopMonitoring]);
 
   // Reset baseline when remote stream changes (e.g., start/stop/restart share)
   useEffect(() => {
@@ -176,10 +227,7 @@ export function VideoQualityMonitor({ peerConnection, remoteStream, isVisible = 
     // Keep monitoring running; next tick will repopulate baselines
   }, [remoteStream]);
 
-  // Cleanup on unmount
-  useEffect(() => {
-    return () => stopMonitoring();
-  }, []);
+  // Note: cleanup on unmount is handled by the peerConnection effect above
 
   if (!isVisible || !stats) {
     return null;

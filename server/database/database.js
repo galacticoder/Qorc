@@ -3,151 +3,235 @@ import { fileURLToPath } from 'url';
 import DatabaseDriver from 'better-sqlite3';
 import { CryptoUtils } from '../crypto/unified-crypto.js';
 
-const DB_PATH = path.join(path.dirname(fileURLToPath(import.meta.url)), 'user_database.sqlite');
-const db = new DatabaseDriver(DB_PATH);
+// Optional Postgres backend for horizontal scalability
+const USE_PG = (process.env.DB_BACKEND || '').toLowerCase() === 'postgres' || !!process.env.DATABASE_URL;
+let pgPool = null;
+async function getPgPool() {
+  if (!USE_PG) return null;
+  if (pgPool) return pgPool;
+  try {
+    const { Pool } = await import('pg');
+    pgPool = new Pool({
+      connectionString: process.env.DATABASE_URL,
+      max: parseInt(process.env.DB_POOL_MAX || '20'),
+      idleTimeoutMillis: parseInt(process.env.DB_IDLE_TIMEOUT || '30000'),
+      connectionTimeoutMillis: parseInt(process.env.DB_CONNECT_TIMEOUT || '2000')
+    });
+    return pgPool;
+  } catch (e) {
+    console.error('[DB] Failed to initialize Postgres pool:', e);
+    throw e;
+  }
+}
 
-console.log('[DB] Initializing database at:', DB_PATH);
+const DB_PATH = path.join(path.dirname(fileURLToPath(import.meta.url)), 'user_database.sqlite');
+let db;
+let initialized = false;
+
+export async function initDatabase() {
+  if (initialized) return;
+  initialized = true;
+
+  if (!USE_PG) {
+    console.log('[DB] Initializing database at:', DB_PATH);
+    db = new DatabaseDriver(DB_PATH);
+
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS users (
+        username TEXT PRIMARY KEY,
+        passwordHash TEXT,
+        passphraseHash TEXT,
+        version INTEGER,
+        algorithm TEXT,
+        salt TEXT,
+        memoryCost INTEGER,
+        timeCost INTEGER,
+        parallelism INTEGER
+      )
+    `);
+
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS messages (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        messageId TEXT NOT NULL UNIQUE,
+        payload TEXT NOT NULL,
+        fromUsername TEXT NOT NULL,
+        toUsername TEXT NOT NULL,
+        timestamp INTEGER NOT NULL
+      );
+    `);
+
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS offline_messages (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        toUsername TEXT NOT NULL,
+        payload TEXT NOT NULL,
+        queuedAt INTEGER NOT NULL
+      );
+    `);
+
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS prekey_bundles (
+        username TEXT PRIMARY KEY,
+        identityEd25519PublicBase64 TEXT NOT NULL,
+	identityDilithiumPublicBase64 TEXT,
+	identityX25519PublicBase64 TEXT NOT NULL,
+        signedPreKeyId TEXT NOT NULL,
+        signedPreKeyPublicBase64 TEXT NOT NULL,
+        signedPreKeyEd25519SignatureBase64 TEXT NOT NULL,
+	signedPreKeyDilithiumSignatureBase64 TEXT,
+        ratchetPublicBase64 TEXT NOT NULL,
+        updatedAt INTEGER NOT NULL
+      );
+    `);
+
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS libsignal_bundles (
+        username TEXT PRIMARY KEY,
+        registrationId INTEGER NOT NULL,
+        deviceId INTEGER NOT NULL,
+        identityKeyBase64 TEXT NOT NULL,
+        preKeyId INTEGER,
+        preKeyPublicBase64 TEXT,
+        signedPreKeyId INTEGER NOT NULL,
+        signedPreKeyPublicBase64 TEXT NOT NULL,
+        signedPreKeySignatureBase64 TEXT NOT NULL,
+        kyberPreKeyId INTEGER NOT NULL,
+        kyberPreKeyPublicBase64 TEXT NOT NULL,
+        kyberPreKeySignatureBase64 TEXT NOT NULL,
+        updatedAt INTEGER NOT NULL
+      );
+    `);
+
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS one_time_prekeys (
+        username TEXT NOT NULL,
+        keyId TEXT NOT NULL,
+        publicKeyBase64 TEXT NOT NULL,
+        consumed INTEGER NOT NULL DEFAULT 0,
+        consumedAt INTEGER,
+        PRIMARY KEY (username, keyId)
+      );
+    `);
+
+    checkMigration();
+
+    db.exec(`CREATE INDEX IF NOT EXISTS idx_messages_from ON messages(fromUsername);`);
+    db.exec(`CREATE INDEX IF NOT EXISTS idx_messages_to ON messages(toUsername);`);
+    db.exec(`CREATE INDEX IF NOT EXISTS idx_messages_timestamp ON messages(timestamp);`);
+    db.exec(`CREATE INDEX IF NOT EXISTS idx_messages_participants ON messages(fromUsername, toUsername);`);
+  } else {
+    // For Postgres, assume tables exist or handle migrations externally
+    console.log('[DB] Using Postgres backend - assuming tables exist');
+  }
+
+  console.log(`[DB] Database tables initialized (backend=${USE_PG ? 'postgres' : 'sqlite'})`);
+}
 
 // Check if we need to migrate the messages table
 const checkMigration = () => {
   try {
+    if (USE_PG) return; // handled by external migrations
     const tableInfo = db.prepare("PRAGMA table_info(messages)").all();
     const hasNewColumns = tableInfo.some(col => col.name === 'fromUsername');
 
     if (!hasNewColumns) {
       console.log('[DB] Migrating messages table to add performance columns...');
 
-      // Add new columns
-      db.exec(`ALTER TABLE messages ADD COLUMN fromUsername TEXT`);
-      db.exec(`ALTER TABLE messages ADD COLUMN toUsername TEXT`);
-      db.exec(`ALTER TABLE messages ADD COLUMN timestamp INTEGER`);
+      // Create pre-migration backup
+      let backupTableCreated = false;
+      try {
+        // Create backup table
+        db.exec(`CREATE TABLE messages_backup AS SELECT * FROM messages`);
+        backupTableCreated = true;
+        console.log('[DB] Pre-migration backup created');
 
-      // Populate new columns from existing data
-      const messages = db.prepare("SELECT id, messageId, payload FROM messages").all();
-      const updateStmt = db.prepare(`
-        UPDATE messages
-        SET fromUsername = ?, toUsername = ?, timestamp = ?
-        WHERE id = ?
-      `);
+        // Use transaction for atomic migration
+        const migration = db.transaction(() => {
+          // Add new columns
+          db.exec(`ALTER TABLE messages ADD COLUMN fromUsername TEXT`);
+          db.exec(`ALTER TABLE messages ADD COLUMN toUsername TEXT`);
+          db.exec(`ALTER TABLE messages ADD COLUMN timestamp INTEGER`);
 
-      messages.forEach(row => {
-        try {
-          const payload = JSON.parse(row.payload);
-          updateStmt.run(
-            payload.fromUsername || '',
-            payload.toUsername || '',
-            payload.timestamp || Date.now(),
-            row.id
-          );
-        } catch (e) {
-          console.warn(`[DB] Failed to migrate message ${row.id}:`, e);
+          // Populate new columns from existing data
+          const messages = db.prepare("SELECT id, messageId, payload FROM messages").all();
+          const updateStmt = db.prepare(`
+            UPDATE messages
+            SET fromUsername = ?, toUsername = ?, timestamp = ?
+            WHERE id = ?
+          `);
+
+          let migratedCount = 0;
+          let failedCount = 0;
+
+          messages.forEach(row => {
+            try {
+              const payload = JSON.parse(row.payload);
+              updateStmt.run(
+                payload.fromUsername || '',
+                payload.toUsername || '',
+                payload.timestamp || Date.now(),
+                row.id
+              );
+              migratedCount++;
+            } catch (e) {
+              console.warn(`[DB] Failed to migrate message ${row.id}:`, e);
+              failedCount++;
+              // Don't throw here - continue with other messages
+            }
+          });
+
+          console.log(`[DB] Migration completed: ${migratedCount} migrated, ${failedCount} failed`);
+
+          if (failedCount > migratedCount / 2) {
+            throw new Error(`Too many migration failures: ${failedCount}/${messages.length}`);
+          }
+        });
+
+        // Execute the migration transaction
+        migration();
+
+        // Clean up backup on success
+        db.exec(`DROP TABLE messages_backup`);
+        console.log('[DB] Migration successful, backup cleaned up');
+
+      } catch (migrationError) {
+        console.error('[DB] Migration failed:', migrationError);
+
+        // Attempt to restore from backup
+        if (backupTableCreated) {
+          try {
+            // Rollback: restore from backup
+            db.exec(`DROP TABLE IF EXISTS messages`);
+            db.exec(`ALTER TABLE messages_backup RENAME TO messages`);
+            console.log('[DB] Successfully restored messages table from backup');
+          } catch (restoreError) {
+            console.error('[DB] CRITICAL: Failed to restore from backup:', restoreError);
+            // Clean up backup table if it exists
+            try {
+              db.exec(`DROP TABLE IF EXISTS messages_backup`);
+            } catch {}
+          }
         }
-      });
 
-      console.log(`[DB] Migrated ${messages.length} messages`);
+        throw new Error(`Database migration failed: ${migrationError.message}`);
+      } finally {
+        // Ensure backup is cleaned up in all cases
+        try {
+          db.exec(`DROP TABLE IF EXISTS messages_backup`);
+        } catch {}
+      }
     }
   } catch (error) {
-    console.warn('[DB] Migration check failed:', error);
+    console.error('[DB] Migration failed:', error);
+    throw new Error(`Database migration failed: ${error.message}`);
   }
 };
 
-db.exec(`
-  CREATE TABLE IF NOT EXISTS users (
-    username TEXT PRIMARY KEY,
-    passwordHash TEXT,
-    passphraseHash TEXT,
-    version INTEGER,
-    algorithm TEXT,
-    salt TEXT,
-    memoryCost INTEGER,
-    timeCost INTEGER,
-    parallelism INTEGER
-  )
-`);
-
-db.exec(`
-  CREATE TABLE IF NOT EXISTS messages (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    messageId TEXT NOT NULL UNIQUE,
-    payload TEXT NOT NULL,
-    fromUsername TEXT NOT NULL,
-    toUsername TEXT NOT NULL,
-    timestamp INTEGER NOT NULL
-  );
-`);
-
-// Offline message queue (encrypted payloads per recipient)
-db.exec(`
-  CREATE TABLE IF NOT EXISTS offline_messages (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    toUsername TEXT NOT NULL,
-    payload TEXT NOT NULL,
-    queuedAt INTEGER NOT NULL
-  );
-`);
-
-// Run migration check
-checkMigration();
-
-// Create indexes for much faster queries
-db.exec(`CREATE INDEX IF NOT EXISTS idx_messages_from ON messages(fromUsername);`);
-db.exec(`CREATE INDEX IF NOT EXISTS idx_messages_to ON messages(toUsername);`);
-db.exec(`CREATE INDEX IF NOT EXISTS idx_messages_timestamp ON messages(timestamp);`);
-db.exec(`CREATE INDEX IF NOT EXISTS idx_messages_participants ON messages(fromUsername, toUsername);`);
-
-// offline_messages table removed
-
-db.exec(`
-  CREATE TABLE IF NOT EXISTS prekey_bundles (
-    username TEXT PRIMARY KEY,
-    		identityEd25519PublicBase64 TEXT NOT NULL,
-		identityDilithiumPublicBase64 TEXT,
-		identityX25519PublicBase64 TEXT NOT NULL,
-    signedPreKeyId TEXT NOT NULL,
-    signedPreKeyPublicBase64 TEXT NOT NULL,
-    		signedPreKeyEd25519SignatureBase64 TEXT NOT NULL,
-		signedPreKeyDilithiumSignatureBase64 TEXT,
-    ratchetPublicBase64 TEXT NOT NULL,
-    updatedAt INTEGER NOT NULL
-  );
-`);
-
-db.exec(`
-  CREATE TABLE IF NOT EXISTS libsignal_bundles (
-    username TEXT PRIMARY KEY,
-    registrationId INTEGER NOT NULL,
-    deviceId INTEGER NOT NULL,
-    identityKeyBase64 TEXT NOT NULL,
-    preKeyId INTEGER,
-    preKeyPublicBase64 TEXT,
-    signedPreKeyId INTEGER NOT NULL,
-    signedPreKeyPublicBase64 TEXT NOT NULL,
-    signedPreKeySignatureBase64 TEXT NOT NULL,
-    kyberPreKeyId INTEGER NOT NULL,
-    kyberPreKeyPublicBase64 TEXT NOT NULL,
-    kyberPreKeySignatureBase64 TEXT NOT NULL,
-    updatedAt INTEGER NOT NULL
-  );
-`);
-
-db.exec(`
-  CREATE TABLE IF NOT EXISTS one_time_prekeys (
-    username TEXT NOT NULL,
-    keyId TEXT NOT NULL,
-    publicKeyBase64 TEXT NOT NULL,
-    consumed INTEGER NOT NULL DEFAULT 0,
-    consumedAt INTEGER,
-    PRIMARY KEY (username, keyId)
-  );
-`);
-
-// SECURITY: Removed private key storage table to maintain E2E encryption guarantees
-// Private keys are now generated and managed entirely client-side
-
-console.log('[DB] Database tables initialized');
+// All database initialization moved to initDatabase() function
 
 export class UserDatabase {
-  static loadUser(username) {
+  static async loadUser(username) {
     // SECURITY: Validate username parameter
     if (!username || typeof username !== 'string' || username.length < 3 || username.length > 32) {
       console.error(`[DB] Invalid username parameter: ${username}`);
@@ -162,27 +246,29 @@ export class UserDatabase {
     
     console.log(`[DB] Loading user from database: ${username}`);
     try {
-      const row = db.prepare(`SELECT * FROM users WHERE username = ?`).get(username);
-      if (!row) {
-        console.log(`[DB] User not found in database: ${username}`);
-        return null;
+      if (USE_PG) {
+        const pool = await getPgPool();
+        const { rows } = await pool.query('SELECT * FROM users WHERE username = $1', [username]);
+        return rows[0] || null;
+      } else {
+        const row = db.prepare(`SELECT * FROM users WHERE username = ?`).get(username);
+        if (!row) return null;
+        return row;
       }
-      console.log(`[DB] User loaded successfully: ${username}`);
-      return row;
     } catch (error) {
       console.error(`[DB] Error loading user ${username}:`, error);
       return null;
     }
   }
 
-  static saveUserRecord(userRecord) {
+  static async saveUserRecord(userRecord) {
     // SECURITY: Validate user record structure
     if (!userRecord || typeof userRecord !== 'object') {
       console.error('[DB] Invalid user record structure');
       throw new Error('Invalid user record structure');
     }
     
-    const { username, passwordHash, passphraseHash } = userRecord;
+    const { username, passwordHash } = userRecord;
     
     // SECURITY: Validate required fields
     if (!username || typeof username !== 'string' || username.length < 3 || username.length > 32) {
@@ -203,23 +289,52 @@ export class UserDatabase {
     
     console.log(`[DB] Saving user record to database: ${username}`);
     try {
-      db.prepare(`
-        INSERT INTO users (
-          username, passwordHash, passphraseHash,
-          version, algorithm, salt, memoryCost, timeCost, parallelism
-        )
-        VALUES (@username, @passwordHash, @passphraseHash,
-          @version, @algorithm, @salt, @memoryCost, @timeCost, @parallelism)
-        ON CONFLICT(username) DO UPDATE SET
-          passwordHash = excluded.passwordHash,
-          passphraseHash = excluded.passphraseHash,
-          version = excluded.version,
-          algorithm = excluded.algorithm,
-          salt = excluded.salt,
-          memoryCost = excluded.memoryCost,
-          timeCost = excluded.timeCost,
-          parallelism = excluded.parallelism
-      `).run(userRecord);
+      if (USE_PG) {
+        const pool = await getPgPool();
+        await pool.query(`
+          INSERT INTO users (
+            username, passwordHash, passphraseHash,
+            version, algorithm, salt, memoryCost, timeCost, parallelism
+          ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+          ON CONFLICT (username) DO UPDATE SET
+            passwordHash = EXCLUDED.passwordHash,
+            passphraseHash = EXCLUDED.passphraseHash,
+            version = EXCLUDED.version,
+            algorithm = EXCLUDED.algorithm,
+            salt = EXCLUDED.salt,
+            memoryCost = EXCLUDED.memoryCost,
+            timeCost = EXCLUDED.timeCost,
+            parallelism = EXCLUDED.parallelism
+        `, [
+          userRecord.username,
+          userRecord.passwordHash,
+          userRecord.passphraseHash,
+          userRecord.version,
+          userRecord.algorithm,
+          userRecord.salt,
+          userRecord.memoryCost,
+          userRecord.timeCost,
+          userRecord.parallelism
+        ]);
+      } else {
+        db.prepare(`
+          INSERT INTO users (
+            username, passwordHash, passphraseHash,
+            version, algorithm, salt, memoryCost, timeCost, parallelism
+          )
+          VALUES (@username, @passwordHash, @passphraseHash,
+            @version, @algorithm, @salt, @memoryCost, @timeCost, @parallelism)
+          ON CONFLICT(username) DO UPDATE SET
+            passwordHash = excluded.passwordHash,
+            passphraseHash = excluded.passphraseHash,
+            version = excluded.version,
+            algorithm = excluded.algorithm,
+            salt = excluded.salt,
+            memoryCost = excluded.memoryCost,
+            timeCost = excluded.timeCost,
+            parallelism = excluded.parallelism
+        `).run(userRecord);
+      }
       console.log(`[DB] User record saved successfully: ${username}`);
     } catch (error) {
       console.error(`[DB] Error saving user record for ${username}:`, error);
@@ -312,18 +427,29 @@ export class MessageDatabase {
       console.log(`[DB] Saving message with ID: ${messageId}`);
       console.log(`[DB] Message from: ${fromUsername}, to: ${toUsername}`);
 
-      // Use prepared statement with indexed columns for much faster performance
-      const stmt = db.prepare(`
-        INSERT INTO messages (messageId, payload, fromUsername, toUsername, timestamp)
-        VALUES (?, ?, ?, ?, ?)
-        ON CONFLICT(messageId) DO UPDATE SET
-          payload = excluded.payload,
-          fromUsername = excluded.fromUsername,
-          toUsername = excluded.toUsername,
-          timestamp = excluded.timestamp
-      `);
-      
-      stmt.run(messageId, stringifiedPayload, fromUsername, toUsername, timestamp);
+      if (USE_PG) {
+        const pool = await getPgPool();
+        await pool.query(`
+          INSERT INTO messages (messageId, payload, fromUsername, toUsername, timestamp)
+          VALUES ($1,$2,$3,$4,$5)
+          ON CONFLICT (messageId) DO UPDATE SET
+            payload = EXCLUDED.payload,
+            fromUsername = EXCLUDED.fromUsername,
+            toUsername = EXCLUDED.toUsername,
+            timestamp = EXCLUDED.timestamp
+        `, [messageId, stringifiedPayload, fromUsername, toUsername, timestamp]);
+      } else {
+        const stmt = db.prepare(`
+          INSERT INTO messages (messageId, payload, fromUsername, toUsername, timestamp)
+          VALUES (?, ?, ?, ?, ?)
+          ON CONFLICT(messageId) DO UPDATE SET
+            payload = excluded.payload,
+            fromUsername = excluded.fromUsername,
+            toUsername = excluded.toUsername,
+            timestamp = excluded.timestamp
+        `);
+        stmt.run(messageId, stringifiedPayload, fromUsername, toUsername, timestamp);
+      }
 
       console.log(`[DB] Message saved successfully to database: ${messageId}`);
     } catch (error) {
@@ -332,36 +458,47 @@ export class MessageDatabase {
     }
   }
 
-  static getMessagesForUser(username, limit = 50) {
+  static async getMessagesForUser(username, limit = 50) {
     // SECURITY: Validate inputs
     if (!username || typeof username !== 'string' || username.length < 3 || username.length > 32) {
       console.error('[DB] Invalid username parameter for getMessagesForUser');
       return [];
     }
-    
+
     if (!Number.isInteger(limit) || limit < 1 || limit > 1000) {
       console.error('[DB] Invalid limit parameter - must be integer between 1 and 1000');
       return [];
     }
-    
+
     // SECURITY: Validate username format
     if (!/^[a-zA-Z0-9_-]+$/.test(username)) {
       console.error('[DB] Invalid username format for getMessagesForUser');
       return [];
     }
-    
+
     console.log(`[DB] Loading messages for user: ${username}, limit: ${limit}`);
     try {
-      // Use indexed columns instead of JSON extraction for 100x faster queries
-      const stmt = db.prepare(`
-        SELECT id, messageId, payload, fromUsername, toUsername, timestamp
-        FROM messages
-        WHERE fromUsername = ? OR toUsername = ?
-        ORDER BY timestamp DESC
-        LIMIT ?
-      `);
-
-      const rows = stmt.all(username, username, limit);
+      let rows;
+      if (USE_PG) {
+        const pool = await getPgPool();
+        const res = await pool.query(`
+          SELECT id, messageId, payload, fromUsername, toUsername, timestamp
+          FROM messages
+          WHERE fromUsername = $1 OR toUsername = $1
+          ORDER BY timestamp DESC
+          LIMIT $2
+        `, [username, limit]);
+        rows = res.rows;
+      } else {
+        const stmt = db.prepare(`
+          SELECT id, messageId, payload, fromUsername, toUsername, timestamp
+          FROM messages
+          WHERE fromUsername = ? OR toUsername = ?
+          ORDER BY timestamp DESC
+          LIMIT ?
+        `);
+        rows = stmt.all(username, username, limit);
+      }
       console.log(`[DB] Loaded ${rows.length} messages for user: ${username}`);
 
       return rows.map(row => {
@@ -372,7 +509,7 @@ export class MessageDatabase {
             console.warn('[DB] Invalid message payload structure, skipping');
             return null;
           }
-          
+
           return {
             dbId: row.id,
             messageId: row.messageId,
@@ -415,22 +552,30 @@ export class MessageDatabase {
     try {
       const payload = JSON.stringify(payloadObj);
       
-      // SECURITY: Prevent extremely large payloads that could cause DoS
-      if (payload.length > 1048576) { // 1MB limit
+      if (payload.length > 1048576) {
         console.error('[DB] Offline message payload too large');
         return false;
       }
       
       const queuedAt = Date.now();
-      db.prepare(`INSERT INTO offline_messages (toUsername, payload, queuedAt) VALUES (?, ?, ?)`).run(toUsername, payload, queuedAt);
-      return true;
+      if (USE_PG) {
+        return getPgPool().then(pool => pool.query('INSERT INTO offline_messages (toUsername, payload, queuedAt) VALUES ($1,$2,$3)', [toUsername, payload, queuedAt]).then(() => true).catch(() => false));
+      } else {
+        try {
+          db.prepare(`INSERT INTO offline_messages (toUsername, payload, queuedAt) VALUES (?, ?, ?)`).run(toUsername, payload, queuedAt);
+          return Promise.resolve(true);
+        } catch (error) {
+          console.error('[DB] Error inserting offline message:', error);
+          return Promise.resolve(false);
+        }
+      }
     } catch (error) {
       console.error('[DB] Error queueing offline message:', error);
       return false;
     }
   }
 
-  static takeOfflineMessages(toUsername, max = 100) {
+  static async takeOfflineMessages(toUsername, max = 100) {
     // SECURITY: Validate inputs to prevent SQL injection and DoS
     if (!toUsername || typeof toUsername !== 'string' || toUsername.length < 3 || toUsername.length > 32) {
       console.error('[DB] Invalid toUsername parameter');
@@ -449,38 +594,31 @@ export class MessageDatabase {
     }
     
     try {
-      const rows = db.prepare(`SELECT id, payload FROM offline_messages WHERE toUsername = ? ORDER BY queuedAt ASC LIMIT ?`).all(toUsername, max);
-      if (!rows || rows.length === 0) return [];
-      
-      // SECURITY: Validate that all IDs are integers to prevent injection
-      const ids = rows.map(r => r.id);
-      if (!ids.every(id => Number.isInteger(id) && id > 0)) {
-        console.error('[DB] Invalid message IDs detected');
-        return [];
-      }
-      
-      const messages = rows.map(r => {
-        try { 
-          const parsed = JSON.parse(r.payload);
-          // SECURITY: Validate parsed message structure
-          if (!parsed || typeof parsed !== 'object') return null;
-          return parsed;
-        } catch { 
-          return null; 
+      if (USE_PG) {
+        const pool = await getPgPool();
+        const res = await pool.query('SELECT id, payload FROM offline_messages WHERE toUsername = $1 ORDER BY queuedAt ASC LIMIT $2', [toUsername, max]);
+        const rows = res.rows || [];
+        if (rows.length === 0) return [];
+        const ids = rows.map(r => Number(r.id)).filter(n => Number.isInteger(n) && n > 0);
+        const messages = rows.map(r => { try { const p = JSON.parse(r.payload); return (p && typeof p === 'object') ? p : null; } catch { return null; } }).filter(Boolean);
+        if (ids.length > 0) {
+          await pool.query('DELETE FROM offline_messages WHERE id = ANY($1::int[])', [ids]);
         }
-      }).filter(Boolean);
-      
-      // SECURITY: Use transaction and prepare statement with safe parameterization
-      if (ids.length > 0) {
-        const placeholders = ids.map(() => '?').join(',');
-        const deleteStmt = db.prepare(`DELETE FROM offline_messages WHERE id IN (${placeholders})`);
-        const deleteTransaction = db.transaction(() => {
-          deleteStmt.run(...ids);
-        });
-        deleteTransaction();
+        return messages;
+      } else {
+        const rows = db.prepare(`SELECT id, payload FROM offline_messages WHERE toUsername = ? ORDER BY queuedAt ASC LIMIT ?`).all(toUsername, max);
+        if (!rows || rows.length === 0) return [];
+        const ids = rows.map(r => r.id);
+        if (!ids.every(id => Number.isInteger(id) && id > 0)) return [];
+        const messages = rows.map(r => { try { const p = JSON.parse(r.payload); return (p && typeof p === 'object') ? p : null; } catch { return null; } }).filter(Boolean);
+        if (ids.length > 0) {
+          const placeholders = ids.map(() => '?').join(',');
+          const deleteStmt = db.prepare(`DELETE FROM offline_messages WHERE id IN (${placeholders})`);
+          const deleteTransaction = db.transaction(() => { deleteStmt.run(...ids); });
+          deleteTransaction();
+        }
+        return messages;
       }
-      
-      return messages;
     } catch (error) {
       console.error('[DB] Error taking offline messages:', error);
       return [];
@@ -560,16 +698,35 @@ export class PrekeyDatabase {
     };
   }
 
-  static storeOneTimePreKeys(username, oneTimePreKeys) {
+  static async storeOneTimePreKeys(username, oneTimePreKeys) {
     if (!username || typeof username !== 'string') return;
     try {
-      db.prepare(`DELETE FROM one_time_prekeys WHERE username = ?`).run(username);
-      if (Array.isArray(oneTimePreKeys) && oneTimePreKeys.length) {
-        const insertStmt = db.prepare(`INSERT INTO one_time_prekeys (username, keyId, publicKeyBase64, consumed) VALUES (?, ?, ?, 0)`);
-        const insertMany = db.transaction((rows) => {
-          for (const r of rows) insertStmt.run(username, r.id, r.publicKeyBase64);
-        });
-        insertMany(oneTimePreKeys);
+      if (USE_PG) {
+        const pool = await getPgPool();
+        await pool.query('DELETE FROM one_time_prekeys WHERE username=$1', [username]);
+        if (Array.isArray(oneTimePreKeys) && oneTimePreKeys.length) {
+          // Use parameterized bulk INSERT to prevent SQL injection
+          const placeholders = oneTimePreKeys.map((_, index) => {
+            const base = index * 4;
+            return `($${base + 1},$${base + 2},$${base + 3},$${base + 4})`;
+          }).join(',');
+
+          const params = [];
+          oneTimePreKeys.forEach((r) => {
+            params.push(username, r.id, r.publicKeyBase64, 0);
+          });
+
+          await pool.query(`INSERT INTO one_time_prekeys (username, keyId, publicKeyBase64, consumed) VALUES ${placeholders}`, params);
+        }
+      } else {
+        db.prepare(`DELETE FROM one_time_prekeys WHERE username = ?`).run(username);
+        if (Array.isArray(oneTimePreKeys) && oneTimePreKeys.length) {
+          const insertStmt = db.prepare(`INSERT INTO one_time_prekeys (username, keyId, publicKeyBase64, consumed) VALUES (?, ?, ?, 0)`);
+          const insertMany = db.transaction((rows) => {
+            for (const r of rows) insertStmt.run(username, r.id, r.publicKeyBase64);
+          });
+          insertMany(oneTimePreKeys);
+        }
       }
     } catch (error) {
       console.error('[DB] Failed to store one-time prekeys:', error);
@@ -598,22 +755,22 @@ export class PrekeyDatabase {
   }
 
   // SECURITY: REMOVED - Server-side private key generation violates E2E encryption guarantees
-  // This method has been removed to ensure private keys are only generated client-side
-  static async appendOneTimePreKeys(username, count) {
+  // These methods have been removed to ensure private keys are only generated client-side
+  static async appendOneTimePreKeys() {
     console.error('[DB] SECURITY: appendOneTimePreKeys deprecated - server should not generate private keys');
     console.error('[DB] Use client-side prekey generation instead to maintain E2E security');
     return 0;
   }
 
   // SECURITY: REMOVED - Server-side private key generation violates E2E encryption guarantees
-  static async generateInitialPreKeys(username, count = 100) {
+  static async generateInitialPreKeys() {
     console.error('[DB] SECURITY: generateInitialPreKeys deprecated - server should not generate private keys');
     console.error('[DB] Client should generate prekeys during registration to maintain E2E security');
     return 0;
   }
 
   // SECURITY: REMOVED - Server should not generate prekeys
-  static async ensurePreKeyAvailability(username, minThreshold = 10, replenishCount = 100) {
+  static async ensurePreKeyAvailability() {
     console.warn('[DB] SECURITY: ensurePreKeyAvailability deprecated - client should manage prekeys');
     console.warn('[DB] Server will not generate prekeys to maintain E2E security');
     return false;
@@ -631,7 +788,7 @@ export class PrekeyDatabase {
   }
 
   // SECURITY: REMOVED - Server should not generate prekeys
-  static async performPreKeyMaintenance(threshold = 10, replenishCount = 100) {
+  static async performPreKeyMaintenance() {
     console.warn('[DB] SECURITY: performPreKeyMaintenance deprecated - client should manage prekeys');
     console.warn('[DB] Server will not generate prekeys to maintain E2E security');
     return 0;
@@ -668,7 +825,7 @@ export class PrekeyDatabase {
 }
 
 export class LibsignalBundleDB {
-  static publish(username, bundle) {
+  static async publish(username, bundle) {
     // SECURITY: Validate username parameter
     if (!username || typeof username !== 'string' || username.length < 3 || username.length > 32) {
       console.error(`[DB] Invalid username parameter in LibsignalBundleDB.publish: ${username}`);
@@ -712,49 +869,89 @@ export class LibsignalBundleDB {
     
     const now = Date.now();
     try {
-      db.prepare(`
-        INSERT INTO libsignal_bundles (
-          username, registrationId, deviceId, identityKeyBase64,
-          preKeyId, preKeyPublicBase64,
-          signedPreKeyId, signedPreKeyPublicBase64, signedPreKeySignatureBase64,
-          kyberPreKeyId, kyberPreKeyPublicBase64, kyberPreKeySignatureBase64,
-          updatedAt
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(username) DO UPDATE SET
-          registrationId=excluded.registrationId,
-          deviceId=excluded.deviceId,
-          identityKeyBase64=excluded.identityKeyBase64,
-          preKeyId=excluded.preKeyId,
-          preKeyPublicBase64=excluded.preKeyPublicBase64,
-          signedPreKeyId=excluded.signedPreKeyId,
-          signedPreKeyPublicBase64=excluded.signedPreKeyPublicBase64,
-          signedPreKeySignatureBase64=excluded.signedPreKeySignatureBase64,
-          kyberPreKeyId=excluded.kyberPreKeyId,
-          kyberPreKeyPublicBase64=excluded.kyberPreKeyPublicBase64,
-          kyberPreKeySignatureBase64=excluded.kyberPreKeySignatureBase64,
-          updatedAt=excluded.updatedAt
-      `).run(
-        username,
-        bundle.registrationId,
-        bundle.deviceId,
-        bundle.identityKeyBase64,
-        bundle.preKeyId ?? null,
-        bundle.preKeyPublicBase64 ?? null,
-        bundle.signedPreKeyId,
-        bundle.signedPreKeyPublicBase64,
-        bundle.signedPreKeySignatureBase64,
-        bundle.kyberPreKeyId,
-        bundle.kyberPreKeyPublicBase64,
-        bundle.kyberPreKeySignatureBase64,
-        now
-      );
+      if (USE_PG) {
+        const pool = await getPgPool();
+        await pool.query(`
+          INSERT INTO libsignal_bundles (
+            username, registrationId, deviceId, identityKeyBase64,
+            preKeyId, preKeyPublicBase64,
+            signedPreKeyId, signedPreKeyPublicBase64, signedPreKeySignatureBase64,
+            kyberPreKeyId, kyberPreKeyPublicBase64, kyberPreKeySignatureBase64,
+            updatedAt
+          ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+          ON CONFLICT(username) DO UPDATE SET
+            registrationId=EXCLUDED.registrationId,
+            deviceId=EXCLUDED.deviceId,
+            identityKeyBase64=EXCLUDED.identityKeyBase64,
+            preKeyId=EXCLUDED.preKeyId,
+            preKeyPublicBase64=EXCLUDED.preKeyPublicBase64,
+            signedPreKeyId=EXCLUDED.signedPreKeyId,
+            signedPreKeyPublicBase64=EXCLUDED.signedPreKeyPublicBase64,
+            signedPreKeySignatureBase64=EXCLUDED.signedPreKeySignatureBase64,
+            kyberPreKeyId=EXCLUDED.kyberPreKeyId,
+            kyberPreKeyPublicBase64=EXCLUDED.kyberPreKeyPublicBase64,
+            kyberPreKeySignatureBase64=EXCLUDED.kyberPreKeySignatureBase64,
+            updatedAt=EXCLUDED.updatedAt
+        `, [
+          username,
+          bundle.registrationId,
+          bundle.deviceId,
+          bundle.identityKeyBase64,
+          bundle.preKeyId ?? null,
+          bundle.preKeyPublicBase64 ?? null,
+          bundle.signedPreKeyId,
+          bundle.signedPreKeyPublicBase64,
+          bundle.signedPreKeySignatureBase64,
+          bundle.kyberPreKeyId,
+          bundle.kyberPreKeyPublicBase64,
+          bundle.kyberPreKeySignatureBase64,
+          now
+        ]);
+      } else {
+        db.prepare(`
+          INSERT INTO libsignal_bundles (
+            username, registrationId, deviceId, identityKeyBase64,
+            preKeyId, preKeyPublicBase64,
+            signedPreKeyId, signedPreKeyPublicBase64, signedPreKeySignatureBase64,
+            kyberPreKeyId, kyberPreKeyPublicBase64, kyberPreKeySignatureBase64,
+            updatedAt
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          ON CONFLICT(username) DO UPDATE SET
+            registrationId=excluded.registrationId,
+            deviceId=excluded.deviceId,
+            identityKeyBase64=excluded.identityKeyBase64,
+            preKeyId=excluded.preKeyId,
+            preKeyPublicBase64=excluded.preKeyPublicBase64,
+            signedPreKeyId=excluded.signedPreKeyId,
+            signedPreKeyPublicBase64=excluded.signedPreKeyPublicBase64,
+            signedPreKeySignatureBase64=excluded.signedPreKeySignatureBase64,
+            kyberPreKeyId=excluded.kyberPreKeyId,
+            kyberPreKeyPublicBase64=excluded.kyberPreKeyPublicBase64,
+            kyberPreKeySignatureBase64=excluded.kyberPreKeySignatureBase64,
+            updatedAt=excluded.updatedAt
+        `).run(
+          username,
+          bundle.registrationId,
+          bundle.deviceId,
+          bundle.identityKeyBase64,
+          bundle.preKeyId ?? null,
+          bundle.preKeyPublicBase64 ?? null,
+          bundle.signedPreKeyId,
+          bundle.signedPreKeyPublicBase64,
+          bundle.signedPreKeySignatureBase64,
+          bundle.kyberPreKeyId,
+          bundle.kyberPreKeyPublicBase64,
+          bundle.kyberPreKeySignatureBase64,
+          now
+        );
+      }
     } catch (error) {
       console.error(`[DB] Error publishing libsignal bundle for ${username}:`, error);
       throw error;
     }
   }
 
-  static take(username) {
+  static async take(username) {
     // SECURITY: Validate username parameter
     if (!username || typeof username !== 'string' || username.length < 3 || username.length > 32) {
       console.error(`[DB] Invalid username parameter in LibsignalBundleDB.take: ${username}`);
@@ -768,21 +965,41 @@ export class LibsignalBundleDB {
     }
     
     try {
-      const row = db.prepare(`SELECT * FROM libsignal_bundles WHERE username = ?`).get(username);
-      if (!row) return null;
-      return {
-        registrationId: row.registrationId,
-        deviceId: row.deviceId,
-        identityKeyBase64: row.identityKeyBase64,
-        preKeyId: row.preKeyId,
-        preKeyPublicBase64: row.preKeyPublicBase64,
-        signedPreKeyId: row.signedPreKeyId,
-        signedPreKeyPublicBase64: row.signedPreKeyPublicBase64,
-        signedPreKeySignatureBase64: row.signedPreKeySignatureBase64,
-        kyberPreKeyId: row.kyberPreKeyId,
-        kyberPreKeyPublicBase64: row.kyberPreKeyPublicBase64,
-        kyberPreKeySignatureBase64: row.kyberPreKeySignatureBase64,
-      };
+      if (USE_PG) {
+        const pool = await getPgPool();
+        const { rows } = await pool.query('SELECT * FROM libsignal_bundles WHERE username = $1', [username]);
+        const row = rows[0];
+        if (!row) return null;
+        return {
+          registrationId: row.registrationId,
+          deviceId: row.deviceId,
+          identityKeyBase64: row.identityKeyBase64,
+          preKeyId: row.preKeyId,
+          preKeyPublicBase64: row.preKeyPublicBase64,
+          signedPreKeyId: row.signedPreKeyId,
+          signedPreKeyPublicBase64: row.signedPreKeyPublicBase64,
+          signedPreKeySignatureBase64: row.signedPreKeySignatureBase64,
+          kyberPreKeyId: row.kyberPreKeyId,
+          kyberPreKeyPublicBase64: row.kyberPreKeyPublicBase64,
+          kyberPreKeySignatureBase64: row.kyberPreKeySignatureBase64,
+        };
+      } else {
+        const row = db.prepare(`SELECT * FROM libsignal_bundles WHERE username = ?`).get(username);
+        if (!row) return null;
+        return {
+          registrationId: row.registrationId,
+          deviceId: row.deviceId,
+          identityKeyBase64: row.identityKeyBase64,
+          preKeyId: row.preKeyId,
+          preKeyPublicBase64: row.preKeyPublicBase64,
+          signedPreKeyId: row.signedPreKeyId,
+          signedPreKeyPublicBase64: row.signedPreKeyPublicBase64,
+          signedPreKeySignatureBase64: row.signedPreKeySignatureBase64,
+          kyberPreKeyId: row.kyberPreKeyId,
+          kyberPreKeyPublicBase64: row.kyberPreKeyPublicBase64,
+          kyberPreKeySignatureBase64: row.kyberPreKeySignatureBase64,
+        };
+      }
     } catch (error) {
       console.error(`[DB] Error taking libsignal bundle for ${username}:`, error);
       return null;

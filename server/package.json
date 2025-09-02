@@ -6,6 +6,8 @@
   "type": "module",
   "scripts": {
     "start": "node server.js",
+    "start:cluster": "cross-env CLUSTER_WORKERS=4 node server.js",
+    "start:prod": "cross-env NODE_ENV=production CLUSTER_WORKERS=4 node server.js",
     "audit": "npm audit",
     "audit:fix": "npm audit fix"
   },
@@ -23,7 +25,8 @@
     "ws": "^8.18.3"
   },
   "devDependencies": {
-    "@types/ws": "^8.18.1"
+    "@types/ws": "^8.18.1",
+    "cross-env": "^7.0.3"
   },
   "engines": {
     "node": ">=18.0.0"

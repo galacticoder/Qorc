@@ -1,22 +1,54 @@
 import https from 'https';
+import os from 'os';
+import cluster from 'cluster';
 import fs from 'fs';
 import path from 'path';
 import { WebSocketServer } from 'ws';
 import selfsigned from 'selfsigned';
 import { SignalType } from './signals.js';
 import { CryptoUtils } from './crypto/unified-crypto.js';
-import { MessageDatabase, PrekeyDatabase, LibsignalBundleDB, UserDatabase } from './database/database.js';
+import { MessageDatabase, PrekeyDatabase, LibsignalBundleDB, UserDatabase, initDatabase } from './database/database.js';
 import * as ServerConfig from './config/config.js';
-import { MessagingUtils } from './messaging/messaging-utils.js';
+import { TTL_CONFIG } from './config/config.js';
 import * as authentication from './authentication/authentication.js';
 import { setServerPasswordOnInput } from './authentication/auth-utils.js';
-import { ed25519 } from '@noble/curves/ed25519.js';
 import { rateLimitMiddleware } from './rate-limiting/rate-limit-middleware.js';
-import { setOnline, setOffline, bumpOnline, createSubscriber, subscribeUserChannel, publishToUser } from './presence/presence.js';
+import { setOnline, setOffline, createSubscriber, publishToUser } from './presence/presence.js';
 import { ConnectionStateManager } from './presence/connection-state.js';
 
 // COMPLETELY REMOVED: No in-memory client tracking for millions of users
 // All user data stored in Redis-based connection state for scalability
+
+// SECURITY: Input validation utilities
+class InputValidator {
+  static validateUsername(username) {
+    if (!username || typeof username !== 'string') return false;
+    if (username.length < 3 || username.length > 32) return false;
+    return /^[a-zA-Z0-9_-]+$/.test(username);
+  }
+
+  static validateMessageType(messageType) {
+    if (!messageType || typeof messageType !== 'string') return false;
+    if (messageType.length === 0 || messageType.length > 100) return false;
+    return /^[a-zA-Z0-9_-]+$/.test(messageType);
+  }
+
+  static validateMessageSize(message) {
+    if (!message) return false;
+    return message.length <= 1024 * 1024; // 1MB limit
+  }
+
+  static validateJsonStructure(obj) {
+    if (!obj || typeof obj !== 'object') return false;
+    if (Array.isArray(obj)) return false;
+    return true;
+  }
+
+  static sanitizeString(str, maxLength = 1000) {
+    if (!str || typeof str !== 'string') return '';
+    return str.slice(0, maxLength).replace(/[\x00-\x1F\x7F]/g, ''); // Remove control characters
+  }
+}
 
 // Message batching for database operations with memory management
 const messageBatch = [];
@@ -129,38 +161,23 @@ function validateCertPath(certPath) {
   return normalizedPath;
 }
 
-let server;
-const validCertPath = CERT_PATH ? validateCertPath(CERT_PATH) : null;
-const validKeyPath = KEY_PATH ? validateCertPath(KEY_PATH) : null;
-
-if (validCertPath && validKeyPath && fs.existsSync(validCertPath) && fs.existsSync(validKeyPath)) {
-  console.log('[SERVER] Using provided TLS certificate and key');
-  try {
-    const key = fs.readFileSync(validKeyPath);
-    const cert = fs.readFileSync(validCertPath);
-    server = https.createServer({ key, cert });
-  } catch (error) {
-    console.error('[SERVER] Failed to read TLS certificates:', error.message);
-    console.log('[SERVER] Falling back to self-signed certificate');
-    const { private: key, cert } = selfsigned.generate([{ name: 'commonName', value: 'localhost' }], {
-      days: 365,
-      keySize: 4096,
-    });
-    server = https.createServer({ key, cert });
-  }
-} else {
-  console.warn('[SERVER] No TLS_CERT_PATH/TLS_KEY_PATH provided; generating self-signed certificate for development');
-  const { private: key, cert } = selfsigned.generate([{ name: 'commonName', value: 'localhost' }], {
-    days: 365,
-    keySize: 4096,
-  });
-  server = https.createServer({ key, cert });
-}
+let server, key, cert, serverHybridKeyPair;
 
 async function startServer() {
   console.log('[SERVER] Starting end2end server');
-  await setServerPasswordOnInput();
-  const serverHybridKeyPair = await CryptoUtils.Hybrid.generateHybridKeyPair();
+  try {
+    // Only the primary process (or single-worker mode) should prompt. Workers rely on hash set by primary.
+    const shouldPrompt = (!ServerConfig.getServerPasswordHash()) && (!process.env.CLUSTER_WORKERS || process.env.CLUSTER_WORKERS === '1' || (typeof cluster !== 'undefined' && cluster.isPrimary));
+    if (shouldPrompt) await setServerPasswordOnInput();
+  } catch (e) {
+    console.error('[SERVER] Failed to set server password:', {
+      message: e?.message || e,
+      stack: e?.stack,
+      type: e?.constructor?.name
+    });
+    throw e;
+  }
+  await initDatabase();
 
   console.log('[SERVER] Server hybrid key pair generated (X25519 + Kyber768)');
   console.log(`[SERVER] Allow self-signed cert: https://localhost:${ServerConfig.PORT}`);
@@ -177,14 +194,71 @@ async function startServer() {
 
   const wss = new WebSocketServer({ server });
 
+  // Minimal debug toggle to reduce hot-path logging in production
+  const DEBUG_SERVER_LOGS = (process.env.DEBUG_SERVER_LOGS || '').toString() === '1';
+
+  // Maintain local mapping of online users to their WebSocket(s) on THIS instance only
+  // This avoids per-connection Redis subscribers and enables O(1) local delivery
+  const localDeliveryMap = new Map(); // username -> Set<ws>
+
+  function addLocalConnection(username, ws) {
+    if (!username || !ws) return;
+    let set = localDeliveryMap.get(username);
+    if (!set) {
+      set = new Set();
+      localDeliveryMap.set(username, set);
+    }
+    set.add(ws);
+  }
+
+  function removeLocalConnection(username, ws) {
+    if (!username || !ws) return;
+    const set = localDeliveryMap.get(username);
+    if (set) {
+      set.delete(ws);
+      if (set.size === 0) localDeliveryMap.delete(username);
+    }
+  }
+
+  // Single pattern-subscriber for this server instance to receive cross-instance deliveries
+  let patternSub = null;
+  try {
+    patternSub = await createSubscriber();
+    await patternSub.psubscribe('deliver:*');
+    patternSub.on('pmessage', (_pattern, channel, message) => {
+      try {
+        if (!channel || !channel.startsWith('deliver:')) return;
+        const username = channel.slice('deliver:'.length);
+        const set = localDeliveryMap.get(username);
+        if (set && set.size) {
+          for (const client of set) {
+            try { client.send(message); } catch {}
+          }
+        }
+      } catch (e) {
+        if (DEBUG_SERVER_LOGS) console.warn('[SERVER] Pattern delivery error:', e);
+      }
+    });
+    console.log('[SERVER] Pattern subscriber initialized for deliver:*');
+  } catch (e) {
+    console.error('[SERVER] Failed to initialize pattern subscriber:', e);
+  }
+
   const authHandler = new authentication.AccountAuthHandler(serverHybridKeyPair);
   const serverAuthHandler = new authentication.ServerAuthHandler(serverHybridKeyPair, null, ServerConfig);
 
-  // Cleanup stale Redis data from previous server runs
+  // Cleanup stale Redis data from previous server runs (run once per cluster via Redis lock)
   try {
-    console.log('[SERVER] Cleaning up stale session data...');
-    await ConnectionStateManager.cleanupStaleUsernameMappings();
-    await ConnectionStateManager.cleanupExpiredSessions();
+    const { redis } = await import('./presence/presence.js');
+    const lockKey = 'startup_cleanup_lock';
+    const lock = await redis.set(lockKey, '1', 'EX', 60, 'NX');
+    if (lock) {
+      console.log('[SERVER] Cleaning up stale session data...');
+      await ConnectionStateManager.cleanupStaleUsernameMappings();
+      await ConnectionStateManager.cleanupExpiredSessions();
+    } else if (DEBUG_SERVER_LOGS) {
+      console.log('[SERVER] Skipping startup cleanup; another worker handled it');
+    }
   } catch (error) {
     console.error('[SERVER] Warning: Failed to cleanup stale session data:', error);
   }
@@ -262,9 +336,8 @@ async function startServer() {
       })
     );
 
-    // Presence: per-connection subscriber for delivery
-    let presenceUnsub = null;
-    let presenceSub = null;
+    // Local username cache for this connection to avoid repeated Redis reads in hot paths
+    ws._username = null;
 
     ws.on('message', async (msg) => {
       // SECURITY: Rate limit message processing to prevent DoS
@@ -315,11 +388,13 @@ async function startServer() {
         }
 
         // Get current session state for logging
-        const currentState = await ConnectionStateManager.getState(sessionId);
-        console.log(`[SERVER] Received message type: ${parsed.type} from user: ${currentState?.username || 'unknown'}`);
+        if (DEBUG_SERVER_LOGS) {
+          const currentState = await ConnectionStateManager.getState(sessionId);
+          console.log(`[SERVER] Received message type: ${parsed.type} from user: ${currentState?.username || 'unknown'}`);
+        }
         
         // Debug message structure for encrypted messages
-        if (parsed.type === SignalType.ENCRYPTED_MESSAGE) {
+        if (DEBUG_SERVER_LOGS && parsed.type === SignalType.ENCRYPTED_MESSAGE) {
           console.log(`[SERVER] Message structure:`, {
             hasTo: 'to' in parsed,
             hasEncryptedPayload: 'encryptedPayload' in parsed,
@@ -470,12 +545,12 @@ async function startServer() {
             
             try {
               // Store main bundle data (public keys only - client never sends private keys)
-              LibsignalBundleDB.publish(state.username, parsed.bundle);
+              await LibsignalBundleDB.publish(state.username, parsed.bundle);
               
               // Store one-time prekeys for consumption (public keys only)
               if (Array.isArray(parsed.bundle?.oneTimePreKeys)) {
                 try {
-                  PrekeyDatabase.storeOneTimePreKeys(state.username, parsed.bundle.oneTimePreKeys);
+                  await PrekeyDatabase.storeOneTimePreKeys(state.username, parsed.bundle.oneTimePreKeys);
                 } catch (e) {
                   console.error('[SERVER] Failed to store one-time prekeys:', e);
                   return ws.send(JSON.stringify({ type: SignalType.ERROR, message: 'Invalid one-time prekeys' }));
@@ -562,7 +637,7 @@ async function startServer() {
             }
 
             // Check if user exists before trying to get bundle
-            const userExists = UserDatabase.loadUser(target) !== null;
+            const userExists = (await UserDatabase.loadUser(target)) !== null;
             if (!userExists) {
               console.error(`[SERVER] Bundle requested for non-existent user: ${target}`);
               return ws.send(JSON.stringify({ type: SignalType.ERROR, message: 'User account does not exist' }));
@@ -571,7 +646,7 @@ async function startServer() {
             // Try to consume a one-time prekey; fallback to base bundle if none
             let out = await PrekeyDatabase.takeBundleForRecipient(target);
             if (!out) {
-              out = LibsignalBundleDB.take(target);
+              out = await LibsignalBundleDB.take(target);
             }
             if (!out) {
               return ws.send(JSON.stringify({ type: SignalType.ERROR, message: 'No libsignal bundle available' }));
@@ -593,7 +668,7 @@ async function startServer() {
           }
           case SignalType.ACCOUNT_SIGN_IN:
           case SignalType.ACCOUNT_SIGN_UP: {
-            console.log(`[SERVER] 🔐 Received ${parsed.type} from user: ${parsed.username || 'unknown'}`);
+            if (DEBUG_SERVER_LOGS) console.log(`[SERVER] Received ${parsed.type} from user: ${parsed.username || 'unknown'}`);
             // Apply authentication rate limiting
             try {
               if (!(await rateLimitMiddleware.checkAuthLimit(ws))) {
@@ -609,11 +684,7 @@ async function startServer() {
             const result = await authHandler.processAuthRequest(ws, msg.toString());
             if (result?.authenticated || result?.pending) {
               // Force cleanup any stale sessions for this user before claiming the username
-              try {
-                await ConnectionStateManager.forceCleanupUserSessions(result.username);
-              } catch (error) {
-                console.warn(`[SERVER] Warning: Failed to cleanup stale sessions for ${result.username}:`, error);
-              }
+              try { await ConnectionStateManager.forceCleanupUserSessions(result.username); } catch {}
 
               await ConnectionStateManager.updateState(sessionId, {
                 hasPassedAccountLogin: true,
@@ -623,15 +694,12 @@ async function startServer() {
 
               // Mark presence and subscribe to delivery channel
               try {
-                await setOnline(result.username, 180); // 3 minutes TTL
-                console.log(`[SERVER] ✅ User ${result.username} marked as ONLINE in Redis with TTL`);
-                presenceSub = presenceSub || await createSubscriber();
-                presenceUnsub = await subscribeUserChannel(presenceSub, result.username, (raw) => {
-                  try { ws.send(raw); } catch {}
-                });
-                console.log(`[SERVER] ✅ User ${result.username} subscribed to delivery channel`);
+                await setOnline(result.username, TTL_CONFIG.PRESENCE_TTL);
+                ws._username = result.username;
+                addLocalConnection(result.username, ws);
+                if (DEBUG_SERVER_LOGS) console.log(`[SERVER] User ${result.username} online and registered for local delivery`);
               } catch (e) {
-                console.error(`[SERVER] ❌ Presence registration FAILED for ${result.username}:`, e);
+                console.error(`[SERVER] Presence registration FAILED for ${result.username}:`, e);
               }
 
               if (result.pending) {
@@ -655,7 +723,7 @@ async function startServer() {
           case SignalType.PASSPHRASE_HASH:
           case SignalType.PASSPHRASE_HASH_NEW: {
             const state = await ConnectionStateManager.getState(sessionId);
-            console.log(`[SERVER] Processing passphrase hash for user: ${state?.username || 'unknown'}`);
+            if (DEBUG_SERVER_LOGS) console.log(`[SERVER] Processing passphrase hash for user: ${state?.username || 'unknown'}`);
             if (!state?.username) {
               console.error('[SERVER] Username not set for passphrase submission');
               return ws.send(JSON.stringify({ type: SignalType.ERROR, message: 'Username not set' }));
@@ -675,7 +743,7 @@ async function startServer() {
             const successMessage = parsed.type === SignalType.PASSPHRASE_HASH_NEW
               ? 'Passphrase saved successfully'
               : 'Passphrase verified successfully';
-            console.log(`[SERVER] Sending passphrase success to user: ${state.username}`);
+            if (DEBUG_SERVER_LOGS) console.log(`[SERVER] Sending passphrase success to user: ${state.username}`);
             ws.send(
               JSON.stringify({
                 type: SignalType.PASSPHRASE_SUCCESS,
@@ -687,7 +755,7 @@ async function startServer() {
 
           case SignalType.SERVER_LOGIN: {
             const state = await ConnectionStateManager.getState(sessionId);
-            console.log(`[SERVER] Processing server login for user: ${state?.username || 'unknown'}`);
+            if (DEBUG_SERVER_LOGS) console.log(`[SERVER] Processing server login for user: ${state?.username || 'unknown'}`);
             if (!state?.hasPassedAccountLogin) {
               console.error('[SERVER] Account login required first');
               return ws.send(JSON.stringify({ type: SignalType.ERROR, message: 'Account login required first' }));
@@ -709,17 +777,17 @@ async function startServer() {
               // Offline message delivery removed
               // Refresh online TTL after full auth
               try {
-                await setOnline(state.username, 180); // 3 minutes TTL
-                console.log(`[SERVER] ✅ User ${state.username} marked as ONLINE after server auth with TTL`);
+                await setOnline(state.username, TTL_CONFIG.PRESENCE_TTL); // Use standardized TTL
+                console.log(`[SERVER] User ${state.username} marked as ONLINE after server auth with TTL`);
               } catch (e) {
-                console.error(`[SERVER] ❌ Failed to mark ${state.username} online after server auth:`, e);
+                console.error(`[SERVER] Failed to mark ${state.username} online after server auth:`, e);
               }
 
               // Auto-check prekey status after successful authentication
               try {
                 const currentCount = PrekeyDatabase.countAvailableOneTimePreKeys(state.username);
                 if (currentCount < 10) {
-                  console.log(`[SERVER] User ${state.username} has low prekey count (${currentCount}), requesting generation`);
+                  if (DEBUG_SERVER_LOGS) console.log(`[SERVER] User ${state.username} has low prekey count (${currentCount}), requesting generation`);
                   ws.send(JSON.stringify({ 
                     type: SignalType.CLIENT_GENERATE_PREKEYS,
                     message: 'Low prekey count detected. Please generate 100 one-time prekeys client-side',
@@ -728,9 +796,7 @@ async function startServer() {
                     reason: 'post-auth-check'
                   }));
                 }
-              } catch (e) {
-                console.warn('[SERVER] Failed to check prekey status after auth:', e);
-              }
+              } catch {}
             } else {
               console.error(`[SERVER] Server authentication failed for user: ${state.username}`);
               ws.send(JSON.stringify({ type: SignalType.AUTH_ERROR, message: 'Server authentication failed' }));
@@ -765,9 +831,11 @@ async function startServer() {
           case SignalType.ENCRYPTED_MESSAGE:
           case SignalType.FILE_MESSAGE_CHUNK:
           case SignalType.DR_SEND: {
-            const state = await ConnectionStateManager.getState(sessionId);
-            console.log(`[SERVER] Processing ${parsed.type} from user: ${state?.username || 'unknown'} to user: ${parsed.to}`);
-            
+            const state = DEBUG_SERVER_LOGS ? await ConnectionStateManager.getState(sessionId) : null;
+            const senderUser = ws._username || state?.username;
+            const recipientUser = parsed.to || parsed.encryptedPayload?.to;
+            if (DEBUG_SERVER_LOGS) console.log(`[SERVER] Processing ${parsed.type} from user: ${senderUser || 'unknown'} to user: ${recipientUser || 'unknown'}`);
+
             // SECURITY: Log only non-sensitive metadata for encrypted messages
             if (parsed.type === SignalType.ENCRYPTED_MESSAGE && parsed.encryptedPayload) {
               console.log(`[SERVER] Signal Protocol encrypted message received:`, {
@@ -782,32 +850,45 @@ async function startServer() {
                 isSignalProtocol: parsed.encryptedPayload.type === 1 || parsed.encryptedPayload.type === 3 // Signal Protocol message types
               });
             }
-            
-            if (!state?.hasAuthenticated) {
+
+            if (!ws._username) {
               console.error('[SERVER] User not authenticated for message sending');
               return ws.send(JSON.stringify({ type: SignalType.ERROR, message: 'Not authenticated yet' }));
             }
-            if (!parsed.to) {
-              console.warn(`[SERVER] Target user offline or not found: ${parsed.to}, queueing`);
-              try {
-                // Queue encrypted payload for delivery when user comes online
-                MessageDatabase.queueOfflineMessage(parsed.to, {
-                  type: parsed.type,
-                  to: parsed.to,
-                  encryptedPayload: parsed.encryptedPayload
-                });
-                // Inform sender that message has been queued
-                try { ws.send(JSON.stringify({ type: 'ok', message: 'queued' })); } catch {}
-              } catch (e) {
-                console.error('[SERVER] Failed to queue offline message:', e);
-                try { ws.send(JSON.stringify({ type: SignalType.ERROR, message: 'Failed to queue message' })); } catch {}
+
+            // SECURITY: Validate recipient exists before processing
+            if (!recipientUser || typeof recipientUser !== 'string' || recipientUser.length < 3) {
+              console.error(`[SERVER] Invalid or missing recipient: ${recipientUser}`);
+              return ws.send(JSON.stringify({ type: SignalType.ERROR, message: 'Invalid recipient' }));
+            }
+
+            // SECURITY: Validate recipient format
+            if (!/^[a-zA-Z0-9_-]+$/.test(recipientUser)) {
+              console.error(`[SERVER] Invalid recipient format: ${recipientUser}`);
+              return ws.send(JSON.stringify({ type: SignalType.ERROR, message: 'Invalid recipient format' }));
+            }
+
+            // Check if recipient user exists in database
+            try {
+              const recipientExists = (await UserDatabase.loadUser(recipientUser)) !== null;
+              if (!recipientExists) {
+                console.error(`[SERVER] Recipient user does not exist: ${recipientUser}`);
+                return ws.send(JSON.stringify({ type: SignalType.ERROR, message: 'Recipient user does not exist' }));
               }
-              break;
+            } catch (error) {
+              console.error(`[SERVER] Error checking recipient existence: ${error}`);
+              return ws.send(JSON.stringify({ type: SignalType.ERROR, message: 'Failed to validate recipient' }));
+            }
+
+            // If no recipient found, queue for offline delivery
+            if (!recipientUser) {
+              console.warn(`[SERVER] No recipient specified, cannot queue message`);
+              return ws.send(JSON.stringify({ type: SignalType.ERROR, message: 'No recipient specified' }));
             }
 
             // Apply message rate limiting
             try {
-              if (!(await rateLimitMiddleware.checkMessageLimit(ws, state.username))) {
+              if (!(await rateLimitMiddleware.checkMessageLimit(ws, ws._username))) {
                 console.log(`[SERVER] Message blocked due to rate limiting for user: ${state.username}`);
                 break;
               }
@@ -816,71 +897,82 @@ async function startServer() {
               break;
             }
 
-            const toUser = parsed.to || parsed.encryptedPayload?.to;
+            // Use the already validated recipient
+            const toUser = recipientUser;
             let messageToSend;
-              if (parsed.type === SignalType.DR_SEND) {
-                messageToSend = { type: SignalType.DR_SEND, from: state.username, to: toUser, payload: parsed.payload };
-              } else if (parsed.type === SignalType.ENCRYPTED_MESSAGE) {
-                // Verify Signal Protocol message integrity before relaying
-                const encryptedPayload = parsed.encryptedPayload;
-                if (!encryptedPayload || !encryptedPayload.content || !encryptedPayload.type) {
-                  console.error(`[SERVER] Invalid Signal Protocol message structure:`, {
-                    hasEncryptedPayload: !!encryptedPayload,
-                    hasContent: !!encryptedPayload?.content,
-                    hasType: !!encryptedPayload?.type,
-                    structure: encryptedPayload ? Object.keys(encryptedPayload) : []
-                  });
-                  return ws.send(JSON.stringify({ type: SignalType.ERROR, message: 'Invalid message structure' }));
-                }
-                
-                // Preserve the full message structure for Signal Protocol decryption
-                messageToSend = { 
-                  type: SignalType.ENCRYPTED_MESSAGE, 
-                  encryptedPayload: encryptedPayload 
-                };
-                
-                console.log(`[SERVER] Signal Protocol message validated and ready for relay`);
-              } else {
-                messageToSend = parsed;
-              }
-              
-            // Try pub-sub delivery first; fallback to offline queue
-            try {
-              const payload = JSON.stringify(messageToSend);
-              const published = await publishToUser(toUser, payload);
-              if (published) {
-                try { ws.send(JSON.stringify({ type: 'ok', message: 'relayed' })); } catch {}
-                console.log(`[SERVER] Message published to user channel for ${toUser}`);
-              } else {
-                throw new Error('publish-failed');
-              }
-            } catch (e) {
-              console.warn('[SERVER] Pub-sub delivery failed, queueing offline:', e?.message || e);
-              try {
-                const queueSuccess = MessageDatabase.queueOfflineMessage(parsed.to, {
-                  type: parsed.type,
-                  to: parsed.to,
-                  encryptedPayload: parsed.encryptedPayload
+
+            if (parsed.type === SignalType.DR_SEND) {
+              messageToSend = { type: SignalType.DR_SEND, from: ws._username, to: toUser, payload: parsed.payload };
+            } else if (parsed.type === SignalType.ENCRYPTED_MESSAGE) {
+              // Verify Signal Protocol message integrity before relaying
+              const encryptedPayload = parsed.encryptedPayload;
+              if (!encryptedPayload || !encryptedPayload.content || !encryptedPayload.type) {
+                console.error(`[SERVER] Invalid Signal Protocol message structure:`, {
+                  hasEncryptedPayload: !!encryptedPayload,
+                  hasContent: !!encryptedPayload?.content,
+                  hasType: !!encryptedPayload?.type,
+                  structure: encryptedPayload ? Object.keys(encryptedPayload) : []
                 });
-                if (queueSuccess) {
-                  console.log(`[SERVER] Message successfully queued for offline user: ${parsed.to}`);
-                  try { ws.send(JSON.stringify({ type: 'ok', message: 'queued' })); } catch {}
+                return ws.send(JSON.stringify({ type: SignalType.ERROR, message: 'Invalid message structure' }));
+              }
+
+              // SECURITY: Validate that the encryptedPayload.to matches our recipient
+              if (encryptedPayload.to && encryptedPayload.to !== toUser) {
+                console.error(`[SERVER] Recipient mismatch: parsed.to=${toUser}, encryptedPayload.to=${encryptedPayload.to}`);
+                return ws.send(JSON.stringify({ type: SignalType.ERROR, message: 'Recipient mismatch in message' }));
+              }
+
+              // Preserve the full message structure for Signal Protocol decryption
+              messageToSend = {
+                type: SignalType.ENCRYPTED_MESSAGE,
+                encryptedPayload: encryptedPayload
+              };
+
+              if (DEBUG_SERVER_LOGS) console.log(`[SERVER] Signal Protocol message validated and ready for relay`);
+            } else {
+              messageToSend = parsed;
+            }
+            
+            // Local delivery (same-instance) first
+            const localSet = localDeliveryMap.get(toUser);
+            if (localSet && localSet.size) {
+              const payload = JSON.stringify(messageToSend);
+              for (const client of localSet) {
+                try { client.send(payload); } catch {}
+              }
+              try { ws.send(JSON.stringify({ type: 'ok', message: 'relayed' })); } catch {}
+              if (DEBUG_SERVER_LOGS) console.log(`[SERVER] Message delivered locally to ${toUser}`);
+            } else {
+              // Cross-instance delivery via Redis pub-sub
+              try {
+                const payload = JSON.stringify(messageToSend);
+                // Use presence to decide whether to queue offline
+                const { isOnline } = await import('./presence/presence.js');
+                const online = await isOnline(toUser);
+                if (online) {
+                  await publishToUser(toUser, payload);
+                  try { ws.send(JSON.stringify({ type: 'ok', message: 'relayed' })); } catch {}
+                  if (DEBUG_SERVER_LOGS) console.log(`[SERVER] Message published for ${toUser}`);
                 } else {
-                  console.error(`[SERVER] Failed to queue message for user: ${parsed.to}`);
-                  try { ws.send(JSON.stringify({ type: SignalType.ERROR, message: 'Failed to queue message' })); } catch {}
+                  const queueSuccess = MessageDatabase.queueOfflineMessage(toUser, {
+                    type: parsed.type,
+                    to: toUser,
+                    encryptedPayload: parsed.encryptedPayload
+                  });
+                  if (queueSuccess) {
+                    if (DEBUG_SERVER_LOGS) console.log(`[SERVER] Message queued for offline user: ${toUser}`);
+                    try { ws.send(JSON.stringify({ type: 'ok', message: 'queued' })); } catch {}
+                  } else {
+                    console.error(`[SERVER] Failed to queue message for user: ${toUser}`);
+                    try { ws.send(JSON.stringify({ type: SignalType.ERROR, message: 'Failed to queue message' })); } catch {}
+                  }
                 }
-              } catch (qe) {
-                console.error('[SERVER] Failed to queue offline message:', qe);
-                try { ws.send(JSON.stringify({ type: SignalType.ERROR, message: 'Failed to queue message' })); } catch {}
+              } catch (e) {
+                console.error('[SERVER] Delivery error:', e);
+                try { ws.send(JSON.stringify({ type: SignalType.ERROR, message: 'Delivery failed' })); } catch {}
               }
             }
-            console.log(`[SERVER] Message handling complete for ${toUser}:`, {
-                type: messageToSend.type,
-                hasEncryptedPayload: !!messageToSend.encryptedPayload,
-                encryptedPayloadKeys: messageToSend.encryptedPayload ? Object.keys(messageToSend.encryptedPayload) : [],
-                messageStructure: Object.keys(messageToSend),
-                isSignalProtocol: messageToSend.type === SignalType.ENCRYPTED_MESSAGE
-              });
+            if (DEBUG_SERVER_LOGS) console.log(`[SERVER] Message handling complete for ${toUser}`);
             break;
           }
 
@@ -1049,21 +1141,22 @@ async function startServer() {
       if (username) {
         try {
           await setOffline(username);
-          console.log(`[SERVER] ✅ User '${username}' marked offline due to WebSocket disconnect`);
+          console.log(`[SERVER] User '${username}' marked offline due to WebSocket disconnect`);
         } catch (e) {
-          console.error(`[SERVER] ❌ Failed to mark user '${username}' offline:`, e);
+          console.error(`[SERVER] Failed to mark user '${username}' offline:`, e);
         }
         console.log(`[SERVER] User '${username}' disconnected`);
       }
+
+      // Remove from local delivery map
+      try { removeLocalConnection(ws._username, ws); } catch {}
 
       // Clean up session from Redis
       if (sessionId) {
         try { await ConnectionStateManager.deleteSession(sessionId); } catch {}
       }
 
-      // Unsubscribe presence channel
-      try { if (presenceUnsub) await presenceUnsub(); } catch {}
-      try { if (presenceSub) await presenceSub.quit?.(); } catch {}
+      // No per-connection Redis subscribers anymore
 
       // Stop status logging if no more active connections
       if (wss.clients.size === 0 && statusLogInterval) {
@@ -1077,6 +1170,163 @@ async function startServer() {
       console.log(`[SERVER] Connection closed - Duration: ${connectionDuration}ms, Messages: ${messageCount}`);
     });
   });
+}
+
+// Optional multi-process clustering for higher connection density
+const WORKERS = Math.max(1, Number.parseInt(process.env.CLUSTER_WORKERS || '1', 10));
+
+if (WORKERS > 1 && cluster.isPrimary) {
+  console.log(`[SERVER] Primary starting ${WORKERS} workers (cpus=${os.cpus().length})`);
+
+  // Generate TLS cert
+  const validCertPath = CERT_PATH ? validateCertPath(CERT_PATH) : null;
+  const validKeyPath = KEY_PATH ? validateCertPath(KEY_PATH) : null;
+
+  if (validCertPath && validKeyPath && fs.existsSync(validCertPath) && fs.existsSync(validKeyPath)) {
+    console.log('[SERVER] Using provided TLS certificate and key');
+    try {
+      key = fs.readFileSync(validKeyPath);
+      cert = fs.readFileSync(validCertPath);
+    } catch (error) {
+      console.error('[SERVER] Failed to read TLS certificates:', error.message);
+      console.log('[SERVER] Falling back to self-signed certificate');
+      const { private: fallbackKey, cert: fallbackCert } = selfsigned.generate([{ name: 'commonName', value: 'localhost' }], {
+        days: 365,
+        keySize: 4096,
+      });
+      key = fallbackKey;
+      cert = fallbackCert;
+    }
+  } else {
+    console.warn('[SERVER] No TLS_CERT_PATH/TLS_KEY_PATH provided; generating self-signed certificate for development');
+    const { private: generatedKey, cert: generatedCert } = selfsigned.generate([{ name: 'commonName', value: 'localhost' }], {
+      days: 365,
+      keySize: 4096,
+    });
+    key = generatedKey;
+    cert = generatedCert;
+  }
+
+  console.log(`[SERVER] Allow self-signed cert: https://localhost:${ServerConfig.PORT}`);
+
+  // Generate hybrid key pair
+  serverHybridKeyPair = await CryptoUtils.Hybrid.generateHybridKeyPair();
+  console.log('[SERVER] Server hybrid key pair generated (X25519 + Kyber768)');
+
+  // Serialize hybrid key pair
+  const serializedHybrid = {
+    x25519: {
+      public: await CryptoUtils.Hybrid.exportX25519PublicBase64(serverHybridKeyPair.x25519.publicKey),
+      private: CryptoUtils.Hash.arrayBufferToBase64(new Uint8Array(await crypto.subtle.exportKey('raw', serverHybridKeyPair.x25519.privateKey))),
+    },
+    kyber: {
+      public: await CryptoUtils.Hybrid.exportKyberPublicBase64(serverHybridKeyPair.kyber.publicKey),
+      private: CryptoUtils.Hash.arrayBufferToBase64(serverHybridKeyPair.kyber.secretKey),
+    }
+  };
+
+  for (let i = 0; i < WORKERS; i++) {
+    const worker = cluster.fork();
+    worker.on('online', () => {
+      worker.send({
+        type: 'init',
+        key,
+        cert,
+        hybrid: serializedHybrid
+      });
+    });
+  }
+
+  cluster.on('exit', (worker, code, signal) => {
+    console.warn(`[SERVER] Worker ${worker.process.pid} exited (code=${code}, signal=${signal}). Respawning...`);
+    cluster.fork();
+  });
+} else {
+  if (cluster.isWorker) {
+    process.once('message', async (msg) => {
+      if (msg.type === 'init') {
+        key = msg.key;
+        cert = msg.cert;
+
+        // Deserialize hybrid key pair
+        const x25519PublicRaw = CryptoUtils.Hash.base64ToUint8Array(msg.hybrid.x25519.public);
+        const x25519PrivateRaw = CryptoUtils.Hash.base64ToUint8Array(msg.hybrid.x25519.private);
+
+        const x25519PublicKey = await CryptoUtils.X25519.importPublicKeyRaw(x25519PublicRaw);
+        const x25519PrivateKey = await crypto.subtle.importKey(
+          'raw',
+          x25519PrivateRaw,
+          { name: 'X25519' },
+          true,
+          ['deriveBits']
+        );
+
+        const kyberPublic = CryptoUtils.Hash.base64ToUint8Array(msg.hybrid.kyber.public);
+        const kyberSecret = CryptoUtils.Hash.base64ToUint8Array(msg.hybrid.kyber.private);
+
+        serverHybridKeyPair = {
+          x25519: {
+            publicKey: x25519PublicKey,
+            privateKey: x25519PrivateKey
+          },
+          kyber: {
+            publicKey: kyberPublic,
+            secretKey: kyberSecret
+          }
+        };
+
+        // Create HTTPS server
+        server = https.createServer({ key, cert });
+
+        // Start server
+        startServer().catch(error => {
+          console.error('[SERVER] Failed to start server:', error);
+          process.exit(1);
+        });
+      }
+    });
+  } else {
+    // Single worker mode
+    const validCertPath = CERT_PATH ? validateCertPath(CERT_PATH) : null;
+    const validKeyPath = KEY_PATH ? validateCertPath(KEY_PATH) : null;
+
+    if (validCertPath && validKeyPath && fs.existsSync(validCertPath) && fs.existsSync(validKeyPath)) {
+      console.log('[SERVER] Using provided TLS certificate and key');
+      try {
+        key = fs.readFileSync(validKeyPath);
+        cert = fs.readFileSync(validCertPath);
+      } catch (error) {
+        console.error('[SERVER] Failed to read TLS certificates:', error.message);
+        console.log('[SERVER] Falling back to self-signed certificate');
+        const { private: fallbackKey, cert: fallbackCert } = selfsigned.generate([{ name: 'commonName', value: 'localhost' }], {
+          days: 365,
+          keySize: 4096,
+        });
+        key = fallbackKey;
+        cert = fallbackCert;
+      }
+    } else {
+      console.warn('[SERVER] No TLS_CERT_PATH/TLS_KEY_PATH provided; generating self-signed certificate for development');
+      const { private: generatedKey, cert: generatedCert } = selfsigned.generate([{ name: 'commonName', value: 'localhost' }], {
+        days: 365,
+        keySize: 4096,
+      });
+      key = generatedKey;
+      cert = generatedCert;
+    }
+
+    console.log(`[SERVER] Allow self-signed cert: https://localhost:${ServerConfig.PORT}`);
+
+    serverHybridKeyPair = await CryptoUtils.Hybrid.generateHybridKeyPair();
+    console.log('[SERVER] Server hybrid key pair generated (X25519 + Kyber768)');
+
+    server = https.createServer({ key, cert });
+
+    startServer().catch(error => {
+      console.error('[SERVER] Failed to start server:', error);
+      process.exit(1);
+    });
+  }
 }
 
 // SECURITY: Graceful shutdown and cleanup
@@ -1135,8 +1385,3 @@ async function gracefulShutdown() {
     process.exit(1);
   }
 }
-
-startServer().catch(error => {
-  console.error('[SERVER] Failed to start server:', error);
-  process.exit(1);
-});

@@ -1,15 +1,18 @@
 import Redis from 'ioredis';
 import { createPool } from 'generic-pool';
+import { TTL_CONFIG } from '../config/config.js';
 
 const REDIS_URL = process.env.REDIS_URL || 'redis://127.0.0.1:6379';
+const REDIS_CLUSTER_NODES = (process.env.REDIS_CLUSTER_NODES || '').trim();
+const USING_CLUSTER = REDIS_CLUSTER_NODES.length > 0;
 
 // Redis connection pool configuration
 const POOL_CONFIG = {
-  min: 1, // Minimum number of connections (reduced to avoid duplicate startup logs)
-  max: 10, // Maximum number of connections
-  acquireTimeoutMillis: 10000, // Max time to wait for a connection
-  idleTimeoutMillis: 30000, // Time before an idle connection is released
-  evictionRunIntervalMillis: 60000, // How often to check for idle connections
+  min: 4,
+  max: Math.max(20, Number.parseInt(process.env.REDIS_POOL_MAX || '50', 10)),
+  acquireTimeoutMillis: 15000,
+  idleTimeoutMillis: 30000,
+  evictionRunIntervalMillis: 60000,
 };
 
 // Redis client options with robust error handling
@@ -27,7 +30,25 @@ const REDIS_OPTIONS = {
   commandTimeout: 5000,
 };
 
-// Factory for creating Redis clients
+let clusterClient = null;
+if (USING_CLUSTER) {
+  try {
+    const nodes = REDIS_CLUSTER_NODES.split(',').map(s => {
+      const [host, portStr] = s.trim().split(':');
+      return { host, port: Number.parseInt(portStr || '6379', 10) };
+    }).filter(n => n.host);
+    clusterClient = new Redis.Cluster(nodes, {
+      redisOptions: REDIS_OPTIONS
+    });
+    clusterClient.on('connect', () => console.log('[PRESENCE] Redis Cluster client connected'));
+    clusterClient.on('ready', () => console.log('[PRESENCE] Redis Cluster client ready'));
+    clusterClient.on('error', (e) => console.error('[PRESENCE] Redis Cluster error:', e));
+  } catch (e) {
+    console.error('[PRESENCE] Failed to initialize Redis Cluster client:', e);
+  }
+}
+
+// Factory for creating Redis clients (standalone mode)
 const factory = {
   create: async () => {
     const client = new Redis(REDIS_URL, REDIS_OPTIONS);
@@ -106,11 +127,14 @@ const factory = {
   }
 };
 
-// Create the connection pool
-export const redisPool = createPool(factory, POOL_CONFIG);
+// Create the connection pool (standalone only)
+export const redisPool = USING_CLUSTER ? null : createPool(factory, POOL_CONFIG);
 
 // Helper function to execute Redis commands with automatic pool management
 export async function withRedisClient(operation) {
+  if (USING_CLUSTER && clusterClient) {
+    return operation(clusterClient);
+  }
   const client = await redisPool.acquire();
   try {
     return await operation(client);
@@ -131,7 +155,14 @@ export const redis = {
   publish: (...args) => withRedisClient(client => client.publish(...args)),
   eval: (...args) => withRedisClient(client => client.eval(...args)),
   duplicate: () => {
-    // For subscribers, create a new direct connection (not from pool)
+    // For subscribers, create a new dedicated connection
+    if (USING_CLUSTER && clusterClient) {
+      const nodes = REDIS_CLUSTER_NODES.split(',').map(s => {
+        const [host, portStr] = s.trim().split(':');
+        return { host, port: Number.parseInt(portStr || '6379', 10) };
+      }).filter(n => n.host);
+      return new Redis.Cluster(nodes, { redisOptions: REDIS_OPTIONS });
+    }
     return new Redis(REDIS_URL, REDIS_OPTIONS);
   }
 };
@@ -140,7 +171,8 @@ export const redis = {
 // Subscribers are now cleaned up per-connection when WebSocket closes
 
 export async function createSubscriber() {
-  const sub = redis.duplicate();
+  // Dedicated subscriber connection (not pooled)
+  const sub = new Redis(REDIS_URL, REDIS_OPTIONS);
   
   // Add basic error logging
   sub.on('error', (error) => {
@@ -155,7 +187,7 @@ export async function createSubscriber() {
     console.log('[PRESENCE] Redis subscriber closed');
   });
   
-  // Wait for the subscriber to be ready (duplicate() auto-connects)
+  // Wait for the subscriber to be ready
   await new Promise((resolve, reject) => {
     if (sub.status === 'ready') {
       resolve();
@@ -216,16 +248,19 @@ export async function closeSubscriber(subscriber) {
 const cleanup = async () => {
   console.log('[PRESENCE] Cleaning up Redis connection pool...');
   
-  // NOTE: Individual subscribers are now cleaned up per-connection when WebSocket closes
-  // This prevents memory issues with millions of concurrent users
-  
-  // Drain the connection pool
-  try {
-    await redisPool.drain();
-    await redisPool.clear();
-    console.log('[PRESENCE] Redis connection pool cleaned up');
-  } catch (error) {
-    console.error('[PRESENCE] Error cleaning up Redis pool:', error);
+  // Drain the connection pool (standalone)
+  if (redisPool) {
+    try {
+      await redisPool.drain();
+      await redisPool.clear();
+      console.log('[PRESENCE] Redis connection pool cleaned up');
+    } catch (error) {
+      console.error('[PRESENCE] Error cleaning up Redis pool:', error);
+    }
+  }
+  // Quit cluster client
+  if (clusterClient) {
+    try { await clusterClient.quit(); } catch {}
   }
 };
 
@@ -264,21 +299,23 @@ process.once('exit', () => {
 const ONLINE_KEY = (u) => `online:${u}`;
 const DELIVER_CH = (u) => `deliver:${u}`;
 
-export async function setOnline(username, ttlSeconds = 120) {
+export async function setOnline(username, ttlSeconds = TTL_CONFIG.PRESENCE_TTL) {
   try {
     // Set online with TTL to auto-expire after crashes
-    await redis.set(ONLINE_KEY(username), '1', 'EX', Math.max(10, ttlSeconds));
-    console.log(`[PRESENCE] User ${username} set online with ${ttlSeconds}s TTL`);
+    const safeTtl = Math.max(10, ttlSeconds);
+    await redis.set(ONLINE_KEY(username), '1', 'EX', safeTtl);
+    console.log(`[PRESENCE] User ${username} set online with ${safeTtl}s TTL`);
   } catch (error) {
     console.error(`[PRESENCE] Error setting user ${username} online:`, error);
     throw error; // Re-throw to let caller handle appropriately
   }
 }
 
-export async function bumpOnline(username, ttlSeconds = 120) {
+export async function bumpOnline(username, ttlSeconds = TTL_CONFIG.PRESENCE_TTL) {
   try {
     // Lightweight TTL refresh - silently ignore errors
-    await redis.expire(ONLINE_KEY(username), Math.max(10, ttlSeconds));
+    const safeTtl = Math.max(10, ttlSeconds);
+    await redis.expire(ONLINE_KEY(username), safeTtl);
   } catch (error) {
     // Silently ignore errors as this is opportunistic
   }
@@ -306,28 +343,12 @@ export async function isOnline(username) {
 
 export async function publishToUser(username, payloadObj) {
   try {
-    // First check if user is actually online before attempting delivery
-    const userIsOnline = await isOnline(username);
-    if (!userIsOnline) {
-      console.log(`[PRESENCE] User ${username} is offline, skipping pub-sub delivery`);
-      return false; // User is offline, should queue message instead
-    }
-
     const msg = typeof payloadObj === 'string' ? payloadObj : JSON.stringify(payloadObj);
-    const subscriberCount = await redis.publish(DELIVER_CH(username), msg);
-    
-    // Return true only if at least one subscriber received the message
-    const delivered = subscriberCount > 0;
-    if (!delivered) {
-      console.log(`[PRESENCE] No active subscribers for user ${username}, treating as offline`);
-    } else {
-      console.log(`[PRESENCE] Message delivered to ${subscriberCount} subscriber(s) for user ${username}`);
-    }
-    
-    return delivered;
+    await redis.publish(DELIVER_CH(username), msg);
+    return true; // Delivery will be handled by pattern subscribers on instances
   } catch (error) {
     console.error(`[PRESENCE] Error publishing message to user ${username}:`, error);
-    return false; // Safe fallback: indicate failure
+    return false;
   }
 }
 

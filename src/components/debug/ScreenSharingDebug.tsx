@@ -197,7 +197,7 @@ export function ScreenSharingDebug() {
         {/* Actual Stream Properties */}
         {trackInfo && (
           <div className="space-y-3">
-            <h3 className="font-semibold text-green-600">✅ Actual Stream Properties (PROOF)</h3>
+            <h3 className="font-semibold text-green-600">Actual Stream Properties (PROOF)</h3>
             <div className="bg-green-50 border border-green-200 p-4 rounded">
               <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
                 <div>
@@ -225,18 +225,18 @@ export function ScreenSharingDebug() {
                     (trackInfo.width === constraintsInfo?.settings.resolution.width && 
                      trackInfo.height === constraintsInfo?.settings.resolution.height) 
                     ? 'text-green-600' : 'text-red-600'}`}>
-                    Resolution: {constraintsInfo?.settings.resolution.isNative 
-                      ? '✅ Native resolution (as expected)' 
-                      : trackInfo.width === constraintsInfo?.settings.resolution.width && 
+                    Resolution: {constraintsInfo?.settings.resolution.isNative
+                      ? `Native resolution (as expected)`
+                      : trackInfo.width === constraintsInfo?.settings.resolution.width &&
                         trackInfo.height === constraintsInfo?.settings.resolution.height
-                        ? '✅ Matches configured resolution'
-                        : '❌ Does not match configured resolution'}
+                        ? `Matches configured resolution (${trackInfo.width}x${trackInfo.height} vs ${constraintsInfo?.settings.resolution.width}x${constraintsInfo?.settings.resolution.height})`
+                        : `Does not match configured resolution (got ${trackInfo.width}x${trackInfo.height}, expected ${constraintsInfo?.settings.resolution.width}x${constraintsInfo?.settings.resolution.height})`}
                   </div>
-                  <div className={`${Math.abs(trackInfo.frameRate - (constraintsInfo?.settings.frameRate || 0)) < 1 
+                  <div className={`${Math.abs(trackInfo.frameRate - (constraintsInfo?.settings.frameRate || 0)) <= 1
                     ? 'text-green-600' : 'text-red-600'}`}>
-                    Frame Rate: {Math.abs(trackInfo.frameRate - (constraintsInfo?.settings.frameRate || 0)) < 1
-                      ? '✅ Matches configured frame rate'
-                      : '❌ Does not match configured frame rate'}
+                    Frame Rate: {Math.abs(trackInfo.frameRate - (constraintsInfo?.settings.frameRate || 0)) <= 1
+                      ? `Matches configured frame rate (${trackInfo.frameRate} vs ${(constraintsInfo?.settings.frameRate ?? 0)})`
+                      : `Does not match configured frame rate (${trackInfo.frameRate} vs ${(constraintsInfo?.settings.frameRate ?? 0)})`}
                   </div>
                 </div>
               </div>

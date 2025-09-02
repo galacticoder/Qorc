@@ -80,13 +80,24 @@ export class AccountAuthHandler {
 
       // Prevent multiple logins for the same account (already authenticated elsewhere) using presence
       if (type === SignalType.ACCOUNT_SIGN_IN) {
-        try {
-          const alreadyOnline = await presenceIsOnline(username);
-          if (alreadyOnline) {
-            console.warn(`[AUTH] User already online: ${username}`);
-            return rejectConnection(ws, SignalType.AUTH_ERROR, "Account already logged in");
+        let retries = 2;
+        while (retries > 0) {
+          try {
+            const alreadyOnline = await presenceIsOnline(username);
+            if (alreadyOnline) {
+              console.warn(`[AUTH] User already online: ${username}`);
+              return rejectConnection(ws, SignalType.AUTH_ERROR, "Account already logged in");
+            }
+            break;
+          } catch (error) {
+            retries--;
+            if (retries === 0) {
+              console.error(`[AUTH] Failed to check presence after retries for ${username}:`, error);
+            } else {
+              await new Promise(resolve => setTimeout(resolve, 100));
+            }
           }
-        } catch {}
+        }
       }
 
       // SECURITY: Additional validation already performed above
@@ -132,7 +143,7 @@ export class AccountAuthHandler {
 
   async handleSignUp(ws, username, password) {
     console.log(`[AUTH] Starting sign up for user: ${username}`);
-    const existingUser = UserDatabase.loadUser(username);
+    const existingUser = await UserDatabase.loadUser(username);
     if (existingUser) {
       console.error(`[AUTH] Username already exists: ${username}`);
       return rejectConnection(ws, SignalType.NAMEEXISTSERROR, SignalMessages.NAMEEXISTSERROR);
@@ -153,7 +164,7 @@ export class AccountAuthHandler {
       parallelism: null
     };
 
-    UserDatabase.saveUserRecord(userRecord);
+    await UserDatabase.saveUserRecord(userRecord);
     console.log(`[AUTH] User record saved for: ${username}`);
 
     // SECURITY: Removed server-side prekey generation - client will generate prekeys
@@ -170,7 +181,7 @@ export class AccountAuthHandler {
 
   async handleSignIn(ws, username, password) {
     console.log(`[AUTH] Starting sign in for user: ${username}`);
-    const userData = UserDatabase.loadUser(username);
+    const userData = await UserDatabase.loadUser(username);
     if (!userData) {
       console.error(`[AUTH] Account does not exist: ${username}`);
       return rejectConnection(ws, SignalType.AUTH_ERROR, "Account does not exist, Register instead.");
@@ -178,7 +189,11 @@ export class AccountAuthHandler {
 
     if (!await CryptoUtils.Password.verifyPassword(userData.passwordHash, password)) {
       console.error(`[AUTH] Incorrect password for user: ${username}`);
-      try { await rateLimitMiddleware.rateLimiter.userAuthLimiter.consume(username, 1); } catch {}
+      try {
+        await rateLimitMiddleware.rateLimiter.userAuthLimiter.consume(username, 2);
+      } catch (error) {
+        console.warn(`[AUTH] Rate limit consume failed for user ${username}:`, error.message);
+      }
       return rejectConnection(ws, SignalType.AUTH_ERROR, "Incorrect password");
     }
 
@@ -225,7 +240,7 @@ export class AccountAuthHandler {
       return rejectConnection(ws, SignalType.AUTH_ERROR, "Unexpected passphrase submission");
     }
 
-    const userRecord = UserDatabase.loadUser(username);
+    const userRecord = await UserDatabase.loadUser(username);
     if (!userRecord) {
       console.error(`[AUTH] User does not exist: ${username}`);
       return rejectConnection(ws, SignalType.AUTH_ERROR, "User does not exist");
@@ -269,7 +284,7 @@ export class AccountAuthHandler {
         console.error(`[AUTH] Failed to parse passphrase hash params for user ${username}:`, e);
         return rejectConnection(ws, SignalType.AUTH_ERROR, "Invalid passphrase hash parameters");
       }
-      UserDatabase.saveUserRecord(userRecord);
+      await UserDatabase.saveUserRecord(userRecord);
       console.log(`[AUTH] User record updated with passphrase for: ${username}`);
     } else {
       console.log(`[AUTH] Verifying passphrase for existing user: ${username}`);
@@ -277,30 +292,35 @@ export class AccountAuthHandler {
       // SECURITY: Enhanced constant-time comparison to prevent timing attacks
       const storedHash = userRecord.passphraseHash;
       const providedHash = passphraseHash;
-      
+
       if (!storedHash || !providedHash) {
         console.error(`[AUTH] Missing passphrase hash for user: ${username}`);
         return rejectConnection(ws, SignalType.AUTH_ERROR, "Authentication failed");
       }
-      
-      // SECURITY: Normalize lengths and use constant-time comparison
-      const maxLength = Math.max(storedHash.length, providedHash.length);
-      const normalizedStored = storedHash.padEnd(maxLength, '\0');
-      const normalizedProvided = providedHash.padEnd(maxLength, '\0');
-      
-      let result = 0;
-      for (let i = 0; i < maxLength; i++) {
-        result |= normalizedStored.charCodeAt(i) ^ normalizedProvided.charCodeAt(i);
+
+      // SECURITY: Use crypto.timingSafeEqual for proper constant-time comparison
+      const crypto = await import('crypto');
+      let isValid = false;
+
+      try {
+        // Ensure both strings are the same length by padding with null bytes
+        const maxLength = Math.max(storedHash.length, providedHash.length);
+        const normalizedStored = Buffer.from(storedHash.padEnd(maxLength, '\0'), 'utf8');
+        const normalizedProvided = Buffer.from(providedHash.padEnd(maxLength, '\0'), 'utf8');
+
+        // Use Node.js built-in constant-time comparison
+        isValid = crypto.timingSafeEqual(normalizedStored, normalizedProvided) &&
+                  storedHash.length === providedHash.length;
+      } catch (error) {
+        console.error(`[AUTH] Error during constant-time comparison: ${error.message}`);
+        isValid = false;
       }
-      
-      // SECURITY: Add additional length check to prevent bypass
-      result |= storedHash.length ^ providedHash.length;
-      
-      if (result !== 0) {
+
+      if (!isValid) {
         console.error(`[AUTH] Passphrase verification failed for user: ${username}`);
         // SECURITY: Rate limit failed attempts
-        try { 
-          await rateLimitMiddleware.rateLimiter.userAuthLimiter.consume(username, 2); 
+        try {
+          await rateLimitMiddleware.rateLimiter.userAuthLimiter.consume(username, 2);
         } catch {}
         return rejectConnection(ws, SignalType.AUTH_ERROR, "Authentication failed");
       }
@@ -365,7 +385,7 @@ export class AccountAuthHandler {
     try {
       const { MessageDatabase } = await import('../database/database.js');
       console.log(`[AUTH] Checking for offline messages for user: ${username}`);
-      const queued = MessageDatabase.takeOfflineMessages(username, 200);
+      const queued = await MessageDatabase.takeOfflineMessages(username, 200);
       console.log(`[AUTH] Found ${queued.length} offline messages for user: ${username}`);
       
       if (queued.length) {

@@ -10,8 +10,11 @@ echo -e "${BLUE}║${GREEN}        end2end chat client        ${BLUE}║${NC}"
 echo -e "${BLUE}╚════════════════════════════════════════════╝${NC}"
 cd "$(dirname "$0")"
 
-echo -e "${GREEN}Installing client dependencies...${NC}"
-pnpm install
+# Install deps only when needed
+if [ ! -d node_modules ]; then
+    echo -e "${GREEN}Installing client dependencies...${NC}"
+    pnpm install
+fi
 
 # Prevent auto-opening external browser and enable Electron DevTools
 export BROWSER=none
@@ -33,8 +36,7 @@ fi
 CLIENT_PID=$!
 
 cleanup() {
-    kill $CLIENT_PID 2>/dev/null
-    reset
+    kill $CLIENT_PID 2>/dev/null || true
     exit
 }
 

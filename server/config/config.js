@@ -1,6 +1,14 @@
 export const PORT = 8443;
 export const MAX_CLIENTS = 100;
 export const SERVER_ID = 'end2end-Server';
+
+// SECURITY: Standardized TTL values to prevent inconsistencies
+export const TTL_CONFIG = {
+  SESSION_TTL: 300,        // 5 minutes - Redis session state
+  PRESENCE_TTL: 180,       // 3 minutes - User online status
+  CONNECTION_COUNTER_TTL: 3600, // 1 hour - Connection counting
+  RATE_LIMIT_TTL: 3600     // 1 hour - Rate limiting data
+};
 // SECURITY: Private password storage with validation
 let _serverPasswordHash = null;
 
