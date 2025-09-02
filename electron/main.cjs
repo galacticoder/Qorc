@@ -267,6 +267,17 @@ ipcMain.handle('tor:info', async () => {
   }
 });
 
+// Handle tor:get-info for compatibility (alias to tor:info)
+ipcMain.handle('tor:get-info', async () => {
+  // Delegate to the canonical tor:info handler
+  try {
+    return await torManager.getTorInfo();
+  } catch (error) {
+    console.error('[IPC] Error getting Tor info (via tor:get-info alias):', error);
+    return { error: error.message };
+  }
+});
+
 ipcMain.handle('tor:verify-connection', async () => {
   try {
     return await torManager.verifyTorConnection();
@@ -548,6 +559,8 @@ ipcMain.handle('renderer:ready', async () => {
   return { success: true };
 });
 
+
+
 // Handle Tor setup completion notification
 ipcMain.handle('tor:setup-complete', async () => {
   console.log('[ELECTRON] Tor setup marked as complete');
@@ -562,6 +575,59 @@ ipcMain.handle('app:version', () => {
 
 ipcMain.handle('app:name', () => {
   return app.getName();
+});
+
+// Handle edge: IPC methods for compatibility with preload.js
+ipcMain.handle('edge:encrypt', async (_event, args) => {
+  try {
+    // Use the same logic as signal:encrypt
+    const plaintext = Buffer.from(String(args?.plaintext || ''), 'utf8').toString('base64');
+    return { ciphertextBase64: plaintext };
+  } catch (error) {
+    console.error('[IPC] Error in edge:encrypt:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle('edge:decrypt', async (_event, args) => {
+  try {
+    // Use the same logic as signal:decrypt
+    const plaintext = Buffer.from(String(args?.ciphertextBase64 || ''), 'base64').toString('utf8');
+    return { plaintext };
+  } catch (error) {
+    console.error('[IPC] Error in edge:decrypt:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle('edge:setupSession', async (_event, args) => {
+  try {
+    console.log('[IPC] edge:setupSession called with args:', args);
+    return { success: true, message: 'Session setup placeholder' };
+  } catch (error) {
+    console.error('[IPC] Error in edge:setupSession:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle('edge:publishBundle', async (_event, args) => {
+  try {
+    console.log('[IPC] edge:publishBundle called with args:', args);
+    return { success: true, message: 'Bundle publish placeholder' };
+  } catch (error) {
+    console.error('[IPC] Error in edge:publishBundle:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle('edge:requestBundle', async (_event, args) => {
+  try {
+    console.log('[IPC] edge:requestBundle called with args:', args);
+    return { success: true, message: 'Bundle request placeholder' };
+  } catch (error) {
+    console.error('[IPC] Error in edge:requestBundle:', error);
+    return { success: false, error: error.message };
+  }
 });
 
 // Handle screen sharing

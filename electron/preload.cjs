@@ -1,137 +1,97 @@
 const { contextBridge, ipcRenderer } = require('electron');
 
-console.log('[PRELOAD] Starting preload script...');
-console.log('[PRELOAD] contextBridge available:', !!contextBridge);
-console.log('[PRELOAD] ipcRenderer available:', !!ipcRenderer);
+// SECURITY: Validate and sanitize all inputs to prevent injection attacks
+function validateTorOptions(options) {
+  if (!options || typeof options !== 'object') {
+    throw new Error('Invalid options: must be an object');
+  }
 
-// Expose protected methods that allow the renderer process to use
-// the ipcRenderer without exposing the entire object
+  // Validate torrc text safely. The config is written to a file and never executed via a shell.
+  if (typeof options.config === 'string') {
+    // Reasonable size limit to avoid abuse
+    if (options.config.length > 50000) {
+      throw new Error('Configuration too large');
+    }
+
+    // Forbid embedded null bytes and non-printable characters (except tab/newline/CR)
+    if (/\x00/.test(options.config)) {
+      throw new Error('Invalid configuration: contains null bytes');
+    }
+    if (/[^\x09\x0A\x0D\x20-\x7E]/.test(options.config)) {
+      throw new Error('Invalid configuration: contains invalid characters');
+    }
+  }
+
+  return options;
+}
+
+// Expose Tor and system functionality for the auto-setup
 contextBridge.exposeInMainWorld('electronAPI', {
-  // Platform information
+  // Platform information - static values only
   platform: process.platform,
   arch: process.arch,
-  
-  // App information
-  getAppVersion: () => ipcRenderer.invoke('app:version'),
-  getAppName: () => ipcRenderer.invoke('app:name'),
-  getPlatformInfo: () => ipcRenderer.invoke('system:platform'),
-  
-  // Tor management functions
+
+  // Tor management functions with input validation
   checkTorInstallation: () => ipcRenderer.invoke('tor:check-installation'),
   downloadTor: (options) => ipcRenderer.invoke('tor:download', options),
   installTor: () => ipcRenderer.invoke('tor:install'),
-  configureTor: (options) => ipcRenderer.invoke('tor:configure', options),
+  configureTor: (options) => {
+    try {
+      const validatedOptions = validateTorOptions(options);
+      return ipcRenderer.invoke('tor:configure', validatedOptions);
+    } catch (error) {
+      return Promise.reject(error);
+    }
+  },
   startTor: () => ipcRenderer.invoke('tor:start'),
   stopTor: () => ipcRenderer.invoke('tor:stop'),
   getTorStatus: () => ipcRenderer.invoke('tor:status'),
-  getTorInfo: () => ipcRenderer.invoke('tor:info'),
-  verifyTorConnection: () => ipcRenderer.invoke('tor:verify-connection'),
-  rotateTorCircuit: () => ipcRenderer.invoke('tor:rotate-circuit'),
   uninstallTor: () => ipcRenderer.invoke('tor:uninstall'),
-  
-  
-  // Utility functions
+
+  // System information
+  getPlatformInfo: () => ipcRenderer.invoke('system:platform'),
+
+  // Tor verification
+  verifyTorConnection: () => ipcRenderer.invoke('tor:verify-connection'),
+  getTorInfo: () => ipcRenderer.invoke('tor:info'),
+  rotateTorCircuit: () => ipcRenderer.invoke('tor:rotate-circuit'),
+
+  // Utility
   isElectron: true,
   isDevelopment: process.env.NODE_ENV === 'development',
-  
-  // Event listeners for Tor status updates
-  onTorStatusChange: (callback) => {
-    ipcRenderer.on('tor:status-change', callback);
-    return () => ipcRenderer.removeListener('tor:status-change', callback);
-  },
-  
-  onTorProgress: (callback) => {
-    ipcRenderer.on('tor:progress', callback);
-    return () => ipcRenderer.removeListener('tor:progress', callback);
-  },
-  
-  // Security: Only allow specific channels
-  send: (channel, data) => {
-    const validChannels = ['tor:rotate-circuit', 'tor:new-session'];
-    if (validChannels.includes(channel)) {
-      ipcRenderer.send(channel, data);
-    }
-  },
-  
-  receive: (channel, func) => {
-    const validChannels = ['tor:status-update', 'tor:error', 'tor:connected', 'tor:disconnected'];
-    if (validChannels.includes(channel)) {
-      ipcRenderer.on(channel, (event, ...args) => func(...args));
-    }
-  }
 });
 
-// Expose edgeApi for server communication and Signal Protocol
 contextBridge.exposeInMainWorld('edgeApi', {
-  // WebSocket communication
-  wsSend: (message) => ipcRenderer.invoke('edge:ws-send', message),
+  // Libsignal identity and prekeys
+  generateIdentity: (args) => ipcRenderer.invoke('signal:generate-identity', args),
+  generatePreKeys: (args) => ipcRenderer.invoke('signal:generate-prekeys', args),
+  getPreKeyBundle: (args) => ipcRenderer.invoke('signal:get-prekey-bundle', args),
+  processPreKeyBundle: (args) => ipcRenderer.invoke('signal:process-prekey-bundle', args),
+
+  // Encryption helpers
+  hasSession: (args) => ipcRenderer.invoke('signal:has-session', args),
+  encrypt: (args) => ipcRenderer.invoke('signal:encrypt', args),
+  decrypt: (args) => ipcRenderer.invoke('signal:decrypt', args),
+
+  // Note: Typing indicators are now sent as encrypted messages through the normal message system
+
+  // Legacy/unused placeholders (safe to keep for compatibility)
+  setupSession: (args) => ipcRenderer.invoke('signal:setup-session', args),
+  publishBundle: (args) => ipcRenderer.invoke('signal:publish-bundle', args),
+  requestBundle: (args) => ipcRenderer.invoke('signal:request-bundle', args),
+  wsSend: (payload) => ipcRenderer.invoke('edge:ws-send', payload),
   wsConnect: () => ipcRenderer.invoke('edge:ws-connect'),
-  
-  // Server message listener - centralized dispatcher
-  onServerMessage: (callback) => {
-    // Use the centralized dispatcher instead of direct IPC listener
-    const handler = (event) => callback(event.detail);
-    window.addEventListener('edge:server-message', handler);
-    return () => window.removeEventListener('edge:server-message', handler);
-  },
-  
-  // Signal Protocol functions (placeholders for now)
-  generateIdentity: (options) => ipcRenderer.invoke('signal:generate-identity', options),
-  generatePreKeys: (options) => ipcRenderer.invoke('signal:generate-prekeys', options),
-  getPreKeyBundle: (options) => ipcRenderer.invoke('signal:get-prekey-bundle', options),
-  processPreKeyBundle: (options) => ipcRenderer.invoke('signal:process-prekey-bundle', options),
-  hasSession: (options) => ipcRenderer.invoke('signal:has-session', options),
-  encrypt: (options) => ipcRenderer.invoke('signal:encrypt', options),
-  decrypt: (options) => ipcRenderer.invoke('signal:decrypt', options),
-  
-  // Renderer ready notification
   rendererReady: () => ipcRenderer.invoke('renderer:ready'),
-
-  // Tor setup completion notification
   torSetupComplete: () => ipcRenderer.invoke('tor:setup-complete'),
+});
 
-  // Screen sharing support
-  getScreenSources: () => {
-    console.log('[PRELOAD] getScreenSources called');
-    return ipcRenderer.invoke('screen:getSources');
-  },
-
-  // Test function to verify preload script is working
-  testFunction: () => {
-    console.log('[PRELOAD] Test function called - preload script is working');
-    return 'preload-working';
-  },
-
-  // Debug function to check what's available
-  debugElectronAPI: () => {
-    console.log('[PRELOAD] Debug function called');
-    // Note: This function runs in the renderer context, not preload context
-    // The actual checks will be performed when called from the renderer
-    return {
-      preloadScriptLoaded: true,
-      timestamp: new Date().toISOString(),
-      platform: process.platform
-    };
+// Bridge server messages into the isolated world via a DOM event
+ipcRenderer.on('edge:server-message', (_event, data) => {
+  try {
+    window.dispatchEvent(new CustomEvent('edge:server-message', { detail: data }));
+  } catch (error) {
+    console.error('[PRELOAD] Failed to dispatch server message:', error);
   }
 });
 
-console.log('[PRELOAD] contextBridge.exposeInMainWorld completed');
-
-// Log that preload script has loaded
-console.log('[PRELOAD] ===== ELECTRON PRELOAD SCRIPT LOADED =====');
-console.log('[PRELOAD] Platform:', process.platform);
-console.log('[PRELOAD] Node version:', process.version);
-console.log('[PRELOAD] Screen sharing function defined in contextBridge');
-console.log('[PRELOAD] Current timestamp:', new Date().toISOString());
-
-
-
-// Centralized server message dispatcher - single IPC listener that dispatches DOM events
-// All consumers should use electronAPI.onServerMessage() which subscribes to these DOM events
-try {
-  ipcRenderer.on('edge:server-message', (_event, data) => {
-    try {
-      window.dispatchEvent(new CustomEvent('edge:server-message', { detail: data }));
-    } catch {}
-  });
-} catch {}
+// Note: Typing indicators are now handled as encrypted messages through the normal message system

@@ -1,5 +1,5 @@
 {
-  "description": "this is a e2e encrypted chat app i made in a site instead of cpp",
+  "description": "End-to-end encrypted web chat application.",
   "required_fields": [],
   "required_files": [
     "README.md",

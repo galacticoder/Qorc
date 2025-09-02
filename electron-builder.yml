@@ -2,8 +2,8 @@ appId: com.end2end.chat
 productName: End2EndChat
 files:
   - dist/**
-  - main.js
-  - preload.js
+  - electron/main.cjs
+  - electron/preload.cjs
 asar: true
 directories:
   output: dist-electron
