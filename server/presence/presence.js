@@ -479,5 +479,3 @@ export async function subscribeUserChannel(subscriber, username, onMessage) {
     }
   };
 }
-
-

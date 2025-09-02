@@ -17,4 +17,3 @@ linux:
   target:
     - AppImage
 publish: null
-

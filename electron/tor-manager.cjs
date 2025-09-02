@@ -1207,21 +1207,15 @@ fi
 
       // Try different methods based on Tor setup
       if (this.usingSystemTor) {
-        console.log('[TOR-MANAGER] Using system Tor - trying multiple rotation methods...');
+        console.log('[TOR-MANAGER] Using system Tor - trying control port method...');
 
-        // Method 1: Try control port
+        // Method 1: Try control port (primary method)
         console.log('[TOR-MANAGER] Method 1: Attempting control port connection...');
         rotationResult = await this.sendNewNymSignal();
 
         if (!rotationResult.success) {
-          console.log('[TOR-MANAGER] Control port failed, trying Method 2: System signal...');
-          // Method 2: Try sending system signal to Tor process
-          rotationResult = await this.sendSystemSignal();
-        }
-
-        if (!rotationResult.success) {
-          console.log('[TOR-MANAGER] System signal failed, trying Method 3: Force circuit change...');
-          // Method 3: Force circuit change by making multiple requests
+          console.log('[TOR-MANAGER] Control port failed, trying Method 2: Force circuit change...');
+          // Method 2: Force circuit change by making multiple requests (last resort)
           rotationResult = await this.forceCircuitChange();
         }
       } else {
@@ -1370,42 +1364,12 @@ fi
   }
 
   /**
-   * Send system signal to Tor process (Method 2)
+   * Send system signal to Tor process (DISABLED - no-op wrapper)
+   * Note: Tor does not support NEWNYM via SIGUSR2, so this is disabled
    */
   async sendSystemSignal() {
-    try {
-      console.log('[TOR-MANAGER] Attempting to send SIGUSR2 to system Tor process...');
-
-      // Find Tor process PID
-      const { exec } = require('child_process');
-
-      return new Promise((resolve) => {
-        exec('pgrep -f "tor.*--defaults-torrc"', (error, stdout) => {
-          if (error || !stdout.trim()) {
-            console.log('[TOR-MANAGER] Could not find system Tor process');
-            resolve({ success: false, error: 'System Tor process not found' });
-            return;
-          }
-
-          const torPid = stdout.trim().split('\n')[0];
-          console.log('[TOR-MANAGER] Found system Tor PID:', torPid);
-
-          // Send SIGUSR2 signal (equivalent to NEWNYM)
-          exec(`kill -USR2 ${torPid}`, (signalError) => {
-            if (signalError) {
-              console.error('[TOR-MANAGER] Failed to send signal to Tor:', signalError.message);
-              resolve({ success: false, error: `Signal error: ${signalError.message}` });
-            } else {
-              console.log('[TOR-MANAGER] SIGUSR2 signal sent to Tor process');
-              resolve({ success: true, method: 'system-signal' });
-            }
-          });
-        });
-      });
-    } catch (error) {
-      console.error('[TOR-MANAGER] System signal method failed:', error);
-      return { success: false, error: error.message };
-    }
+    console.log('[TOR-MANAGER] System signal method is disabled (Tor does not support NEWNYM via SIGUSR2)');
+    return { success: false, error: 'System signal method is disabled' };
   }
 
   /**

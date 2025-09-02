@@ -19,7 +19,7 @@ import { useMessageHistory } from "@/hooks/useMessageHistory";
 import { TypingIndicatorProvider } from "@/contexts/TypingIndicatorContext";
 import { torNetworkManager } from "@/lib/tor-network";
 import { TorAutoSetup } from "@/components/setup/TorAutoSetup";
-import { torAutoSetup } from "@/lib/tor-auto-setup";
+import { getTorAutoSetup } from "@/lib/tor-auto-setup";
 // offline message queue removed
 
 interface ChatAppProps {
@@ -49,7 +49,7 @@ const ChatApp: React.FC<ChatAppProps> = () => {
         return;
       }
 
-      const torStatus = torAutoSetup.getStatus();
+      const torStatus = getTorAutoSetup().getStatus();
       const userWantsTor = localStorage.getItem('tor_enabled') !== 'false'; // Default to true
 
       console.log('[TOR-SETUP] Tor status:', torStatus);

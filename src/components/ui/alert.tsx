@@ -33,4 +33,3 @@ interface AlertDescriptionProps {
 export function AlertDescription({ children, className = '' }: AlertDescriptionProps) {
   return <p className={cn('text-sm', className)}>{children}</p>;
 }
-

@@ -8,7 +8,7 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
 import { Download, Settings, Play, CheckCircle, AlertTriangle, Loader2, Info } from 'lucide-react';
-import { torAutoSetup, TorSetupStatus } from '@/lib/tor-auto-setup';
+import { getTorAutoSetup, TorSetupStatus } from '@/lib/tor-auto-setup';
 import { TorVerification } from './TorVerification';
 
 interface TorAutoSetupProps {
@@ -38,7 +38,7 @@ export function TorAutoSetup({ onComplete }: TorAutoSetupProps) {
   // Check initial status and refresh from Electron API
   useEffect(() => {
     const loadInitialStatus = async () => {
-      const initialStatus = await torAutoSetup.refreshStatus();
+      const initialStatus = await getTorAutoSetup().refreshStatus();
       setStatus(initialStatus);
     };
     loadInitialStatus();
@@ -71,7 +71,7 @@ export function TorAutoSetup({ onComplete }: TorAutoSetupProps) {
         .map(l => l.trim())
         .filter(l => l.length > 0);
 
-      const success = await torAutoSetup.autoSetup({
+      const success = await getTorAutoSetup().autoSetup({
         autoStart: true,
         enableBridges,
         transport,
@@ -327,8 +327,8 @@ export function TorAutoSetup({ onComplete }: TorAutoSetupProps) {
                   variant="outline" 
                   size="sm"
                   onClick={async () => {
-                    await torAutoSetup.stopTor();
-                    const newStatus = await torAutoSetup.refreshStatus();
+                    await getTorAutoSetup().stopTor();
+                    const newStatus = await getTorAutoSetup().refreshStatus();
                     setStatus({
                       ...newStatus,
                       setupProgress: 0,
@@ -344,8 +344,8 @@ export function TorAutoSetup({ onComplete }: TorAutoSetupProps) {
                   variant="outline" 
                   size="sm"
                   onClick={async () => {
-                    await torAutoSetup.uninstallTor();
-                    const newStatus = await torAutoSetup.refreshStatus();
+                    await getTorAutoSetup().uninstallTor();
+                    const newStatus = await getTorAutoSetup().refreshStatus();
                     setStatus({
                       ...newStatus,
                       setupProgress: 0,

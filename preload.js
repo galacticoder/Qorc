@@ -7,5 +7,3 @@ contextBridge.exposeInMainWorld('edgeApi', {
   publishBundle: (args) => ipcRenderer.invoke('edge:publishBundle', args),
   requestBundle: (args) => ipcRenderer.invoke('edge:requestBundle', args),
 });
-
-

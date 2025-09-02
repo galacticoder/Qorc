@@ -344,12 +344,22 @@ export class TorAutoSetup {
       return (window as any).electronAPI.platform || 'unknown';
     }
 
-    // Fallback platform detection
-    const userAgent = navigator.userAgent.toLowerCase();
-    if (userAgent.includes('win')) return 'win32';
-    if (userAgent.includes('mac')) return 'darwin';
-    if (userAgent.includes('linux')) return 'linux';
-    return 'unknown';
+    // Guard access to navigator for SSR/Node environments
+    if (typeof window === 'undefined' || typeof navigator === 'undefined') {
+      return 'unknown';
+    }
+
+    // Fallback platform detection using user agent
+    try {
+      const userAgent = navigator.userAgent.toLowerCase();
+      if (userAgent.includes('win')) return 'win32';
+      if (userAgent.includes('mac')) return 'darwin';
+      if (userAgent.includes('linux')) return 'linux';
+      return 'unknown';
+    } catch (error) {
+      console.warn('[TOR-AUTO-SETUP] Failed to detect platform:', error);
+      return 'unknown';
+    }
   }
 
 
@@ -459,5 +469,12 @@ export class TorAutoSetup {
   }
 }
 
-// Global instance
-export const torAutoSetup = new TorAutoSetup();
+// Lazy singleton instance
+let _torAutoSetupInstance: TorAutoSetup | null = null;
+
+export function getTorAutoSetup(): TorAutoSetup {
+  if (!_torAutoSetupInstance) {
+    _torAutoSetupInstance = new TorAutoSetup();
+  }
+  return _torAutoSetupInstance;
+}

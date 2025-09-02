@@ -24,6 +24,7 @@ export class TorWebSocket {
   private messageQueue: string[] = [];
   private readonly MAX_QUEUE_SIZE = 1000; // SECURITY: Prevent memory exhaustion
   private eventListeners: Map<string, Set<Function>> = new Map();
+  private _isUsingTor: boolean = false; // Track actual Tor usage
 
   constructor(url: string, options?: Partial<TorWebSocketOptions>) {
     this.url = url;
@@ -58,8 +59,11 @@ export class TorWebSocket {
         console.log('[TOR-WS] Attempting connection through Tor network...');
         const success = await this.connectThroughTor();
         if (success) {
+          this._isUsingTor = true; // Successfully connected through Tor
           this.isConnecting = false;
           return true;
+        } else {
+          this._isUsingTor = false; // Tor connection failed
         }
       }
 
@@ -67,6 +71,7 @@ export class TorWebSocket {
       if (this.options.fallbackToDirect) {
         console.log('[TOR-WS] Connecting directly (not through Tor)...');
         const success = await this.connectDirect();
+        this._isUsingTor = false; // Using direct connection
         this.isConnecting = false;
         return success;
       }
@@ -129,6 +134,7 @@ export class TorWebSocket {
         this.ws.onerror = (error) => {
           clearTimeout(timeout);
           console.error('[TOR-WS] Tor connection error:', error);
+          this._isUsingTor = false; // Reset flag on Tor connection error
           this.emit('error', error);
           resolve(false);
         };
@@ -215,11 +221,12 @@ export class TorWebSocket {
    */
   private handleDisconnection(): void {
     this.ws = null;
+    this._isUsingTor = false; // Reset Tor usage flag on disconnection
 
     if (this.reconnectAttempts < this.options.maxReconnectAttempts) {
       this.reconnectAttempts++;
       console.log(`[TOR-WS] Attempting reconnection ${this.reconnectAttempts}/${this.options.maxReconnectAttempts}...`);
-      
+
       this.reconnectTimer = setTimeout(() => {
         this.connect();
       }, this.options.reconnectDelay);
@@ -305,6 +312,7 @@ export class TorWebSocket {
       this.ws = null;
     }
 
+    this._isUsingTor = false; // Reset flag on manual close
     this.messageQueue = [];
     this.reconnectAttempts = 0;
   }
@@ -324,9 +332,9 @@ export class TorWebSocket {
   }
 
   /**
-   * Check if using Tor
+   * Check if using Tor (reflects actual active connection path)
    */
   get isUsingTor(): boolean {
-    return this.options.useTor && torNetworkManager.isConnected();
+    return this._isUsingTor;
   }
 }
