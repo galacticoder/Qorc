@@ -1,126 +1,141 @@
-# End-to-End Encrypted Chat Site
+# End-to-End Encrypted Chat Application
 
-# ATTENTION: THIS READ ME FILE IS CURRENTLY OUTDATED I WILL UPDATE THIS LATER TO REFLECT CHANGES BUT FOR NOW IS OUTDATED INFORMATION
+Secure messaging with post-quantum cryptography and Signal Protocol integration.
 
-This is my end2end encrypted chat app. I originally made 2 different versions in c++ but was very limited, So i decided to make it into a site and not use c++.
-
+## Quick Start
 
 ### Prerequisites
 
-*   Node.js (LTS version recommended)
-*   pnpm (or npm/yarn)
+- Node.js (latest stable version)
+- pnpm package manager (or npm/yarn)
 
-## Installation and Setup
+### Installation
 
-To quickly get the application running, you can use the provided bash script:
+1. **Clone and setup:**
+   ```bash
+   git clone https://github.com/galacticoder/end2end-chat-site.git
+   cd end2end-chat-site
+   ```
 
-1.  **Navigate to the project root directory:**
-    ```bash
-    cd end2end-chat-site
-    ```
-2.  **Run the start server script:**
-    ```bash
-    ./startServer.sh
-    ```
-3.  **Run the start client script in another terminal:**
-    ```bash
-     ./startClient.sh
-    ```
-    
-5.  **Access the application:**
-    Once the script has finished, open your web browser and navigate to `http://localhost:5173` (or the address indicated by the script if different).
+2. **Start the server:**
+   ```bash
+   ./startServer.sh
+   ```
 
-## Usage
+3. **Start the client:**
+   ```bash
+   ./startClient.sh
+   ```
 
-1.  **Register/Login:** After opening the application in your browser, register a new account or log in with existing credentials.
-2.  **Start Chatting:** Once logged in, you can start sending end-to-end encrypted messages and files to other users.
-3.  **File Sharing:** Use the integrated file sharing feature to securely exchange files.
+   Desktop app launches automatically in electron when running client
+## Features
 
-### Key Features
+### Communication
+- Real-time messaging with typing indicators
+- Secure file sharing with chunked encryption
+- Voice and video calls with WebRTC
+- Screen sharing with quality controls
+- Message replies and threading
+- Offline message delivery
 
-*   **End-to-End Encryption:** All messages and files are encrypted on the sender's device and can only be decrypted by the intended recipient, ensuring privacy and confidentiality.
-*   **Real-time Communication:** Utilizes WebSockets for instant message delivery and real-time chat experience.
-*   **User Authentication:** Secure user registration and login system.
-*   **File Sharing:** Securely share files within the chat.
-*   **Responsive Design:** A user-friendly interface that adapts to various screen sizes.
+### Privacy & Security
+- End-to-end encryption with Signal Protocol
+- Post-quantum cryptography (Kyber768, Dilithium3)
+- Tor network integration for anonymity
+- Zero-knowledge server architecture
+- Rate limiting and spam protection
+- Multi-layer authentication
 
+### Platform Support
+- Cross-platform desktop apps (Electron)
 
+## Security Implementation
 
-### Encryption Details
+### Encryption
+- **Signal Protocol:** Double Ratchet algorithm with X3DH key agreement
+- **Post-Quantum:** Kyber768 key encapsulation, Dilithium3 signatures
+- **Symmetric:** XChaCha20-Poly1305, ChaCha20-Poly1305, AES-256-GCM
+- **Hashing:** BLAKE3, Argon2id for passwords, HKDF-SHA512
 
-This application employs a hybrid encryption scheme to ensure robust end-to-end security:
+### Privacy Features
+- Zero-knowledge server design
+- Local encrypted storage (IndexedDB)
+- Optional Tor routing
+- Minimal metadata collection
+- Perfect forward secrecy
 
-*   **RSA-OAEP (4096-bit):** Used for asymmetric encryption, primarily for securely exchanging AES keys between users. This ensures that the symmetric key used for message encryption is transmitted confidentially.
-*   **AES-GCM (256-bit):** Used for symmetric encryption of the actual chat messages. AES-GCM provides both confidentiality and authenticity (integrity) of the data.
-*   **Key Derivation (Argon2):** Passwords are not stored directly. Instead, Argon2 is used to derive strong cryptographic keys from user passwords, adding a significant layer of protection against brute-force attacks.
-*   **Secure Key Exchange:** A unique AES key is generated for each message or session and is encrypted using the recipient's RSA public key before transmission. This ensures forward secrecy to some extent, as compromising one AES key does not compromise past or future communications.
+## Technology Stack
 
-### Security Measures
+### Frontend
+- React 18 with TypeScript
+- Vite build system
+- Tailwind CSS + shadcn/ui
+- Electron for desktop apps
 
-*   **End-to-End Encryption:** Messages are encrypted on the sender's device and decrypted only on the recipient's device. The server never has access to the plaintext messages.
-*   **Strong Cryptographic Algorithms:** Utilizes industry-standard and robust cryptographic algorithms (RSA-4096, AES-256 GCM, SHA-512) to protect data confidentiality and integrity.
-*   **Salted Key Derivation:** Argon2 with a unique salt for each user makes it computationally infeasible to reverse engineer passwords from derived keys.
-*   **Secure WebSocket Communication:** All communication between the client and server, including metadata, is handled over secure WebSockets.
-*   **No Plaintext Storage:** User messages are never stored in plaintext on the server.
-*   **Servers Require Passwords:** Users need to enter the correct server password to enter.
+### Backend
+- Node.js with WebSocket server
+- SQLite/PostgreSQL database
+- Self-signed TLS certificates
+- Redis support for scaling
 
-### How Safe Is It?
+### Cryptography Libraries
+- @noble/post-quantum (Kyber, Dilithium)
+- @noble/ciphers (ChaCha20, XChaCha20)
+- @noble/hashes (BLAKE3)
+- argon2-wasm
+- Signal Protocol implementation
 
-The application is designed with a strong focus on security and privacy:
+## Configuration
 
-*   **Confidentiality:** Messages are unreadable by anyone other than the intended recipient, including the server administrators.
-*   **Integrity:** AES-GCM ensures that messages have not been tampered with during transit.
-*   **Authentication:** Users are authenticated, and cryptographic keys are managed to ensure that only authorized users can participate in conversations.
+### Server Setup (No need to do this as is already handled by server script unless you want to do it manually)
+```bash
+# Environment Variables
+DB_BACKEND=sqlite|postgres
+DATABASE_URL=<connection_string>
+SERVER_PASSWORD=<password>
+RATE_LIMIT_ENABLED=true
+TOR_ENABLED=false
+```
 
+### Development
+```bash
+# Install dependencies
+pnpm install
 
-### Technologies Used
+# Development mode
+pnpm run dev
 
-**Frontend:**
-*   **React:** A JavaScript library for building user interfaces.
-*   **TypeScript:** A typed superset of JavaScript that compiles to plain JavaScript.
-*   **Vite:** A fast build tool that provides a lightning-fast development experience.
-*   **Tailwind CSS:** A utility-first CSS framework for rapidly building custom designs.
-*   **Radix UI:** A collection of unstyled, accessible UI components for building high-quality design systems.
-*   **Zod:** A TypeScript-first schema declaration and validation library.
-*   **React Router DOM:** Declarative routing for React.
+# Production build
+pnpm run build
 
-**Backend:**
-*   **Node.js:** A JavaScript runtime built on Chrome's V8 JavaScript engine.
-*   **WebSocket (ws library):** For real-time, bidirectional communication between client and server.
-*   **Argon2:** For secure password hashing.
+# Electron build
+pnpm run build:electron
+```
 
-**Cryptography:**
-*   **Web Cryptography API:** Browser-native cryptographic operations.
-*   **pako:** Zlib port to javascript for compression/decompression.
+## Security Highlights
 
+### Network Security
+- TLS 1.3 with certificate pinning
+- Encrypted WebSocket connections
+- Optional Tor routing with circuit rotation
+- Rate limiting and DDoS protection
 
-## Security Features
+### Data Protection
+- No plaintext storage on server
+- Encrypted local database (IndexedDB)
+- Automatic secure deletion
+- Minimal metadata collection
 
-### Rate Limiting System
-A **privacy-first rate limiting system** has been implemented that protects against:
-- **Connection flooding** - Prevents rapid connection attempts
-- **Authentication brute force** - Limits login attempts per connection  
-- **Message spam** - Prevents message flooding by authenticated users
-- **Resource exhaustion** - Protects server resources from abuse
-
-**Key Privacy Features:**
-- **No IP tracking** - The server doesn't collect or store client IP addresses
-- **Connection-based limits** - Rate limits are applied per WebSocket connection
-- **User-based limits** - After authentication, limits are applied per username
-- **Minimal data collection** - Only essential rate limiting data is stored
-
-### Future Security Plans
-I'm fully focused on security and will continue to add:
-- Enhanced authentication mechanisms
-- Advanced threat detection
-- Improved encryption protocols
-- Security monitoring and alerting 
-
-
-## Contributing
-
-Contributions or ideas are welcome. Please feel free to submit a pull request or open an issue if you find bugs or have suggestions for improvements.
+### Open Source & Auditable
+- Full source code available for review
+- Regular security audits
+- TypeScript for type safety
+- Automated testing and static analysis
 
 ## License
 
-This project is licensed under the MIT License - see the `LICENSE` file for details.
+MIT License - see LICENSE file for details.
+
+## Have an idea or request?
+
+Found a bug or have a feature request? Open an issue [here](https://github.com/galacticoder/end2end-chat-site/issues).
