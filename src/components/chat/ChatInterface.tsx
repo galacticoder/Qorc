@@ -343,8 +343,10 @@ export function ChatInterface({
               const smartReceipt = getSmartReceiptStatus(message) || message.receipt;
               const shouldShowReceipt =
                 message.isCurrentUser && smartReceipt && (message.id === lastReadId || message.id === lastDeliveredId);
+              // Ensure unique key by combining message ID with index as fallback
+              const uniqueKey = message.id ? `${message.id}-${index}` : `message-${index}-${Date.now()}`;
               return (
-                <div key={message.id} id={`message-${message.id}`}>
+                <div key={uniqueKey} id={`message-${message.id}`}>
                   <ChatMessage
                     message={{
                       ...message,
