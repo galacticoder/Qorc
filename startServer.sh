@@ -91,5 +91,78 @@ fi
 export CLUSTER_WORKERS="${CLUSTER_WORKERS:-1}"
 echo -e "${GREEN}Cluster workers: ${CLUSTER_WORKERS}${NC}"
 
-# Replace shell with node so signals (Ctrl-C) are delivered directly and exit is clean
-exec node server.js
+# Function to cleanup and retry on module errors
+cleanup_and_retry() {
+    echo -e "${YELLOW}Module not found error detected. Cleaning up dependencies...${NC}"
+    
+    # Remove node_modules and lock files
+    if [ -d node_modules ]; then
+        echo -e "${YELLOW}Removing server/node_modules...${NC}"
+        rm -rf node_modules
+    fi
+    
+    if [ -f package-lock.json ]; then
+        echo -e "${YELLOW}Removing server/package-lock.json...${NC}"
+        rm -f package-lock.json
+    fi
+    
+    if [ -f pnpm-lock.yaml ]; then
+        echo -e "${YELLOW}Removing server/pnpm-lock.yaml...${NC}"
+        rm -f pnpm-lock.yaml
+    fi
+    
+    echo -e "${GREEN}Reinstalling server dependencies using install script...${NC}"
+    # Navigate to project root where install-dependencies.sh is located
+    cd ..
+    
+    echo -e "${GREEN}Working directory: $(pwd)${NC}"
+    echo -e "${GREEN}Looking for install-dependencies.sh...${NC}"
+    
+    # Use the install-dependencies.sh script to reinstall server deps
+    if [[ -f install-dependencies.sh ]]; then
+        echo -e "${GREEN}Found install-dependencies.sh, sourcing and calling install_server_deps...${NC}"
+        # Temporarily disable strict mode to avoid unbound variable errors when sourcing
+        set +u
+        # Set SERVER_ONLY mode to skip client-side setup (Tor, Electron, etc.)
+        export SERVER_ONLY=true
+        source install-dependencies.sh
+        set -u
+        install_server_deps
+    else
+        # Fallback to manual npm install
+        echo -e "${YELLOW}install-dependencies.sh not found at $(pwd), using fallback...${NC}"
+        if [[ -d server ]]; then
+            echo -e "${GREEN}Found server directory, installing dependencies...${NC}"
+            cd server
+            npm install --omit=dev
+            npm rebuild better-sqlite3 || true
+            cd ..
+        else
+            echo -e "${YELLOW}Server directory not found for fallback install${NC}"
+        fi
+    fi
+    
+    echo -e "${GREEN}Retrying server startup (final attempt)...${NC}"
+    if [[ -d server ]]; then
+        cd server
+        exec node server.js
+    else
+        echo -e "${YELLOW}Server directory not found after cleanup. Cannot restart server.${NC}"
+        exit 1
+    fi
+}
+
+# Start server with error handling
+echo -e "${GREEN}Starting secure WebSocket server...${NC}"
+if ! node server.js 2>&1 | tee /tmp/server_output.log; then
+    # Check if the error was module not found and we haven't retried yet
+    if grep -q "ERR_MODULE_NOT_FOUND" /tmp/server_output.log && [ ! -f /tmp/server_retry_attempted ]; then
+        # Mark that we've attempted a retry
+        touch /tmp/server_retry_attempted
+        cleanup_and_retry
+    else
+        # For other errors or if we already retried once, just exit
+        rm -f /tmp/server_retry_attempted 2>/dev/null
+        exit 1
+    fi
+fi
