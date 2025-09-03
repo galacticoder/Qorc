@@ -620,14 +620,18 @@ export function useEncryptedMessageHandler(
             }
 
             // Also check if replyTo exists directly in the payload (not just in content)
-            if (!payload.replyTo && (payload as any).replyTo) {
-              payload.replyTo = (payload as any).replyTo;
+            // Check for replyTo in the decrypted payload that wasn't extracted from content
+            const directReplyTo = (payload as any).replyTo;
+            if (!payload.replyTo && directReplyTo) {
+              payload.replyTo = directReplyTo;
               console.log('[EncryptedMessageHandler] Found reply data in payload root:', payload.replyTo);
             }
             
             // SECURITY: Atomic check and add to prevent race conditions
             let messageExists = false;
             let messageAdded = false;
+            // Keep a copy of replyTo to persist to DB after state update
+            let replyToForSave: { id: string; sender: string; content: string } | undefined = undefined;
 
             setMessages(prev => {
               messageExists = prev.some(msg => msg.id === messageId);
@@ -645,13 +649,23 @@ export function useEncryptedMessageHandler(
                 let replyContent = payload.replyTo.content || '';
                 if (!replyContent) {
                   const ref = prev.find(m => m.id === payload.replyTo.id);
-                  if (ref?.content) replyContent = ref.content;
+                  if (ref?.isDeleted) {
+                    replyContent = 'Message deleted';
+                  } else if (ref?.content) {
+                    replyContent = ref.content;
+                  }
+                }
+                // Guard: if still no content after lookup, indicate the message doesn't exist
+                if (!replyContent || replyContent.trim().length === 0) {
+                  replyContent = "Message doesn't exist";
                 }
                 replyToFilled = {
                   id: payload.replyTo.id,
-                  sender: payload.replyTo.sender || payload.from,
+                  sender: payload.replyTo.sender || (ref?.sender ?? payload.from),
                   content: replyContent
                 };
+                // Store for DB persistence outside of state updater
+                replyToForSave = replyToFilled;
                 console.log('[EncryptedMessageHandler] Reply data found and filled:', replyToFilled);
               } else {
                 console.log('[EncryptedMessageHandler] No replyTo in payload or invalid format:', payload.replyTo);
@@ -712,7 +726,8 @@ export function useEncryptedMessageHandler(
                   transport: payload.p2p ? 'p2p' : 'websocket',
                   timestamp: new Date(payload.timestamp || Date.now()),
                   type: 'text',
-                  isCurrentUser: false
+                  isCurrentUser: false,
+                  ...(replyToForSave && { replyTo: replyToForSave })
                 });
               } catch (dbError) {
                 console.error('[EncryptedMessageHandler] Failed to save message to database:', dbError);

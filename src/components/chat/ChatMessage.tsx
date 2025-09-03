@@ -75,14 +75,19 @@ export function ChatMessage({ message, onReply, previousMessage, onDelete, onEdi
         )}
 
         {message.replyTo && (
-          <div className="mb-1 p-2 border-l-2 border-blue-500 bg-blue-50 text-xs text-gray-500 rounded max-w-full truncate">
-            <span className="font-medium">{message.replyTo.sender}</span>:{" "}
-            <span className="italic">
+          <div className="mb-2 p-3 border-l-4 border-blue-500 bg-blue-50 text-sm text-gray-700 rounded-r-lg shadow-sm">
+            <div className="flex items-center gap-2 mb-1">
+              <svg className="w-4 h-4 text-blue-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 10h10a8 8 0 018 8v2M3 10l6 6m-6-6l6-6" />
+              </svg>
+              <span className="font-semibold text-blue-700">{message.replyTo.sender}</span>
+            </div>
+            <p className="text-gray-600 line-clamp-2">
               {message.replyTo.content === "Message deleted"
                 ? "Message deleted"
                 : message.replyTo.content.slice(0, 100) +
                 (message.replyTo.content.length > 100 ? "..." : "")}
-            </span>
+            </p>
           </div>
         )}
 
