@@ -423,7 +423,11 @@ export function ChatInterface({
         >
           <div className="flex flex-col gap-1">
             {typingUsers.map((username) => (
-              <TypingIndicator key={username} username={username} />
+              <TypingIndicator 
+                key={username} 
+                username={username} 
+                getDisplayUsername={getDisplayUsername}
+              />
             ))}
           </div>
         </div>
