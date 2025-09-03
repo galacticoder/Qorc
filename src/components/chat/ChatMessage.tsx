@@ -52,37 +52,78 @@ export function ChatMessage({ message, onReply, previousMessage, onDelete, onEdi
   }
 
   return (
-    <div className={cn("flex items-start gap-2 mb-4", isCurrentUser ? "flex-row-reverse" : "")}>
-      <div className={cn("w-9 h-9", isGrouped ? "invisible" : "mb-5")}>
+    <div 
+      className={cn(
+        "flex gap-3 mb-4 group",
+        isCurrentUser ? "flex-row-reverse" : "flex-row"
+      )}
+      style={{ 
+        marginBottom: isGrouped ? 'var(--spacing-xs)' : 'var(--spacing-md)'
+      }}
+    >
+      {/* Avatar - only show for non-grouped messages */}
+      <div className={cn("flex-shrink-0", isGrouped ? "w-10" : "w-10")}>
         {!isGrouped && (
-          <Avatar className="w-9 h-9">
-            <AvatarFallback className={cn(isCurrentUser ? "bg-blue-500 text-white" : "bg-muted")}>
-              {sender.charAt(0).toUpperCase()}
-            </AvatarFallback>
-          </Avatar>
+          <div 
+            className="w-10 h-10 rounded-full flex items-center justify-center font-medium text-sm"
+            style={{
+              backgroundColor: isCurrentUser ? 'var(--color-accent-primary)' : 'var(--color-accent-secondary)',
+              color: 'white'
+            }}
+          >
+            {sender.charAt(0).toUpperCase()}
+          </div>
         )}
       </div>
 
+      {/* Message Content */}
       <div
-        className={cn("flex flex-col min-w-0", isCurrentUser ? "items-end" : "items-start")}
-        style={{ maxWidth: "75%" }}
+        className={cn(
+          "flex flex-col min-w-0",
+          isCurrentUser ? "items-end" : "items-start"
+        )}
+        style={{ maxWidth: 'var(--message-bubble-max-width)' }}
       >
+        {/* Sender name and timestamp - only for non-grouped messages */}
         {!isGrouped && (
-          <div className="flex items-center gap-2 mt-1">
-            <span className="text-sm font-medium">{sender}</span>
-            <span className="text-xs text-muted-foreground">{format(timestamp, "h:mm a")}</span>
+          <div 
+            className={cn(
+              "flex items-center gap-2 mb-1",
+              isCurrentUser ? "flex-row-reverse" : "flex-row"
+            )}
+          >
+            <span 
+              className="text-sm font-medium"
+              style={{ color: 'var(--color-text-primary)' }}
+            >
+              {sender}
+            </span>
+            <span 
+              className="text-xs"
+              style={{ color: 'var(--color-text-secondary)' }}
+            >
+              {format(timestamp, "h:mm a")}
+            </span>
           </div>
         )}
 
+        {/* Reply indicator */}
         {message.replyTo && (
-          <div className="mb-2 p-3 border-l-4 border-blue-500 bg-blue-50 text-sm text-gray-700 rounded-r-lg shadow-sm">
+          <div 
+            className="mb-2 p-3 rounded-lg text-sm max-w-full"
+            style={{
+              backgroundColor: 'var(--color-muted-panel)',
+              borderLeft: '3px solid var(--color-accent-primary)',
+              color: 'var(--color-text-secondary)'
+            }}
+          >
             <div className="flex items-center gap-2 mb-1">
-              <svg className="w-4 h-4 text-blue-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 10h10a8 8 0 018 8v2M3 10l6 6m-6-6l6-6" />
               </svg>
-              <span className="font-semibold text-blue-700">{message.replyTo.sender}</span>
+              <span className="font-semibold">{message.replyTo.sender}</span>
             </div>
-            <p className="text-gray-600 line-clamp-2">
+            <p className="line-clamp-2">
               {message.replyTo.content === "Message deleted"
                 ? "Message deleted"
                 : message.replyTo.content.slice(0, 100) +
@@ -91,15 +132,19 @@ export function ChatMessage({ message, onReply, previousMessage, onDelete, onEdi
           </div>
         )}
 
-
-
-        <div className={cn("group flex items-center gap-2", isCurrentUser ? "flex-row-reverse" : "")}>
+        {/* Message bubble */}
+        <div className={cn("flex items-end gap-2", isCurrentUser ? "flex-row-reverse" : "flex-row")}>
           <div
-            className={cn(
-              "rounded-lg px-3 py-2 text-sm min-w-[5rem] whitespace-pre-wrap break-words",
-              isCurrentUser ? "bg-primary text-primary-foreground" : "bg-muted"
-            )}
-            style={{ wordBreak: "break-word", whiteSpace: "pre-wrap" }}
+            className="px-4 py-3 text-sm whitespace-pre-wrap break-words"
+            style={{
+              backgroundColor: isCurrentUser ? 'var(--color-accent-primary)' : 'var(--color-surface)',
+              color: isCurrentUser ? 'white' : 'var(--color-text-primary)',
+              borderRadius: 'var(--message-bubble-radius)',
+              wordBreak: "break-word",
+              whiteSpace: "pre-wrap",
+              minWidth: '3rem',
+              maxWidth: '100%'
+            }}
           >
             <Linkify options={{ target: "_blank", rel: "noopener noreferrer" }}>{content}</Linkify>
           </div>
@@ -108,13 +153,26 @@ export function ChatMessage({ message, onReply, previousMessage, onDelete, onEdi
           <div
             className={cn(
               "flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity duration-200",
-              isCurrentUser ? "mr-1 flex-row-reverse" : "ml-1"
+              "p-1 rounded"
             )}
+            style={{
+              backgroundColor: 'var(--color-surface)',
+              boxShadow: 'var(--shadow-elevation-low)'
+            }}
           >
             <button
               onClick={() => navigator.clipboard.writeText(content)}
               aria-label="Copy message"
-              className="hover:text-primary"
+              className="p-1 rounded hover:bg-opacity-80 transition-colors"
+              style={{ color: 'var(--color-text-secondary)' }}
+              onMouseEnter={(e) => {
+                e.currentTarget.style.backgroundColor = 'var(--color-accent-primary)';
+                e.currentTarget.style.color = 'white';
+              }}
+              onMouseLeave={(e) => {
+                e.currentTarget.style.backgroundColor = 'transparent';
+                e.currentTarget.style.color = 'var(--color-text-secondary)';
+              }}
             >
               <svg
                 width="15"
@@ -135,7 +193,16 @@ export function ChatMessage({ message, onReply, previousMessage, onDelete, onEdi
             <button
               onClick={() => onReply?.(message)}
               aria-label="Reply to message"
-              className="hover:text-primary"
+              className="p-1 rounded hover:bg-opacity-80 transition-colors"
+              style={{ color: 'var(--color-text-secondary)' }}
+              onMouseEnter={(e) => {
+                e.currentTarget.style.backgroundColor = 'var(--color-accent-primary)';
+                e.currentTarget.style.color = 'white';
+              }}
+              onMouseLeave={(e) => {
+                e.currentTarget.style.backgroundColor = 'transparent';
+                e.currentTarget.style.color = 'var(--color-text-secondary)';
+              }}
             >
               <svg
                 xmlns="http://www.w3.org/2000/svg"
@@ -150,19 +217,66 @@ export function ChatMessage({ message, onReply, previousMessage, onDelete, onEdi
             </button>
 
             {isCurrentUser && !isSystemMessage && (
-              <button onClick={() => onDelete?.(message)} aria-label="Delete message" className="hover:text-destructive">
+              <button 
+                onClick={() => onDelete?.(message)} 
+                aria-label="Delete message" 
+                className="p-1 rounded hover:bg-opacity-80 transition-colors"
+                style={{ color: 'var(--color-text-secondary)' }}
+                onMouseEnter={(e) => {
+                  e.currentTarget.style.backgroundColor = '#ef4444';
+                  e.currentTarget.style.color = 'white';
+                }}
+                onMouseLeave={(e) => {
+                  e.currentTarget.style.backgroundColor = 'transparent';
+                  e.currentTarget.style.color = 'var(--color-text-secondary)';
+                }}
+              >
                 <TrashIcon className="w-4 h-4" />
               </button>
             )}
 
-            {message.isEdited && <span className="text-xs text-muted-foreground italic">(edited)</span>}
-
             {isCurrentUser && !message.isDeleted && (
-              <button onClick={() => onEdit?.(message.content)} aria-label="Edit message" className="hover:text-primary">
+              <button 
+                onClick={() => onEdit?.(message.content)} 
+                aria-label="Edit message" 
+                className="p-1 rounded hover:bg-opacity-80 transition-colors"
+                style={{ color: 'var(--color-text-secondary)' }}
+                onMouseEnter={(e) => {
+                  e.currentTarget.style.backgroundColor = 'var(--color-accent-primary)';
+                  e.currentTarget.style.color = 'white';
+                }}
+                onMouseLeave={(e) => {
+                  e.currentTarget.style.backgroundColor = 'transparent';
+                  e.currentTarget.style.color = 'var(--color-text-secondary)';
+                }}
+              >
                 <Pencil1Icon className="w-4 h-4" />
               </button>
             )}
           </div>
+        </div>
+
+        {/* Message metadata */}
+        <div className={cn(
+          "flex items-center gap-2 mt-1 text-xs",
+          isCurrentUser ? "flex-row-reverse" : "flex-row"
+        )}>
+          {/* Timestamp for grouped messages */}
+          {isGrouped && (
+            <span style={{ color: 'var(--color-text-secondary)' }}>
+              {format(timestamp, "h:mm a")}
+            </span>
+          )}
+          
+          {/* Edited indicator */}
+          {message.isEdited && (
+            <span 
+              className="italic"
+              style={{ color: 'var(--color-text-secondary)' }}
+            >
+              (edited)
+            </span>
+          )}
         </div>
 
         {/* Message Receipt */}

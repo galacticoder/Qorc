@@ -417,7 +417,13 @@ export function ChatInput({
   };
 
   return (
-    <div className={cn("relative border-t", "bg-white border-slate-200")}>
+    <div 
+      className="relative border-t"
+      style={{
+        backgroundColor: 'var(--color-background)',
+        borderColor: 'var(--color-border)'
+      }}
+    >
       {editingMessage && <EditingBanner onCancelEdit={onCancelEdit} />}
       {replyTo && <ReplyBanner replyTo={replyTo} onCancelReply={onCancelReply} />}
 
@@ -437,12 +443,25 @@ export function ChatInput({
         </div>
       )}
 
-      <div className="p-4">
+      <div 
+        className="px-4 py-3"
+        style={{ 
+          paddingLeft: 'var(--spacing-md)', 
+          paddingRight: 'var(--spacing-md)',
+          paddingTop: 'var(--spacing-sm)',
+          paddingBottom: 'var(--spacing-sm)'
+        }}
+      >
         <div
-          className={cn(
-            "flex items-end gap-3 rounded-2xl border shadow-sm transition-all duration-200",
-            "bg-slate-50 border-slate-200 focus-within:border-slate-400"
-          )}
+          className="flex items-center gap-2 transition-all duration-200"
+          style={{
+            backgroundColor: 'var(--composer-input-bg)',
+            borderRadius: 'var(--radius-pill)',
+            border: '1px solid var(--color-border)',
+            minHeight: 'var(--composer-height)',
+            boxShadow: 'var(--shadow-elevation-low)',
+            padding: '8px 12px'
+          }}
         >
           <FileUploader onFileSelected={handleFileChange} disabled={isSendingFile} />
 

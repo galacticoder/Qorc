@@ -17,10 +17,14 @@ export function SendButton({ disabled, isSending, editingMessage, onClick }: Sen
       size="sm"
       disabled={disabled}
       className={cn(
-        "h-10 w-10 rounded-full text-white shadow-md transition-all duration-200",
-        disabled ? "opacity-50 cursor-not-allowed bg-gray-400" :
-          editingMessage ? "bg-yellow-500 hover:bg-yellow-600" : "bg-slate-600 hover:bg-slate-700"
+        "h-8 w-8 rounded-full text-white shadow-md transition-all duration-200 flex items-center justify-center flex-shrink-0",
+        disabled ? "opacity-50 cursor-not-allowed" : ""
       )}
+      style={{
+        backgroundColor: disabled ? 'var(--color-disabled)' : 
+          editingMessage ? 'var(--color-warning)' : 'var(--color-accent-primary)',
+        color: 'white'
+      }}
     >
       {isSending ? (
         <svg className="h-5 w-5 animate-spin" fill="none" viewBox="0 0 24 24">

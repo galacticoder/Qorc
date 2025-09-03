@@ -3,7 +3,7 @@ import { cn } from "@/lib/utils";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from "@/components/ui/dialog";
-import { X } from "lucide-react";
+import { Trash2 } from "lucide-react";
 
 export interface Conversation {
   id: string;
@@ -40,59 +40,80 @@ const ConversationItem = memo(({
 }) => (
   <div
     className={cn(
-      "flex items-center gap-2 p-2 rounded cursor-pointer transition-colors group",
-      isSelected
-        ? "bg-blue-100 border border-blue-200"
-        : "hover:bg-gray-100"
+      "flex items-center gap-3 p-3 cursor-pointer transition-all duration-200 group relative",
+      "hover:bg-opacity-80"
     )}
+    style={{
+      backgroundColor: isSelected ? 'var(--color-accent-primary)' : 'transparent',
+      borderRadius: 'var(--radius-medium)'
+    }}
+    onMouseEnter={(e) => {
+      if (!isSelected) {
+        e.currentTarget.style.backgroundColor = 'rgba(59, 130, 246, 0.05)';
+      }
+    }}
+    onMouseLeave={(e) => {
+      if (!isSelected) {
+        e.currentTarget.style.backgroundColor = 'transparent';
+      }
+    }}
+    onClick={() => onSelect(conversation.username)}
   >
+    {/* Avatar */}
     <div 
-      onClick={() => onSelect(conversation.username)}
-      className="flex items-center gap-2 flex-1 min-w-0"
+      className="w-10 h-10 rounded-full flex items-center justify-center font-medium text-sm flex-shrink-0"
+      style={{
+        backgroundColor: isSelected ? 'rgba(255, 255, 255, 0.2)' : 'var(--color-accent-secondary)',
+        color: isSelected ? 'white' : 'white'
+      }}
     >
-      {/* Status indicator */}
-      <div
-        className={cn(
-          "w-2 h-2 rounded-full",
-          conversation.isOnline ? "bg-green-500" : "bg-gray-400"
-        )}
-      />
-      
-      {/* User info */}
-      <div className="flex-1 min-w-0">
-        <div className="flex items-center justify-between">
-          <span className="font-medium text-sm truncate">
-            {conversation.username}
-          </span>
-        </div>
-        
-        {conversation.lastMessage && (
-          <div className="text-xs text-gray-500 truncate mt-0.5">
-            {conversation.lastMessage}
-          </div>
-        )}
-        
+      {conversation.username.charAt(0).toUpperCase()}
+    </div>
+    
+    {/* Content */}
+    <div className="flex-1 min-w-0">
+      {/* Primary line (name) */}
+      <div className="flex items-center justify-between mb-1">
+        <span 
+          className="font-medium text-sm truncate"
+          style={{ color: isSelected ? 'white' : 'var(--color-text-primary)' }}
+        >
+          {conversation.username}
+        </span>
         {conversation.lastMessageTime && (
-          <div className="text-xs text-gray-400 mt-0.5">
+          <span 
+            className="text-xs flex-shrink-0 ml-2"
+            style={{ color: isSelected ? 'rgba(255, 255, 255, 0.7)' : 'var(--color-text-secondary)' }}
+          >
             {formatTime(conversation.lastMessageTime)}
-          </div>
+          </span>
         )}
       </div>
-
-      {/* Call status badge */}
-      {callStatus && (
-        <div className={cn(
-          "text-xs px-2 py-1 rounded-full font-medium",
-          callStatus === 'ringing' && "bg-yellow-100 text-yellow-800",
-          callStatus === 'connecting' && "bg-blue-100 text-blue-800",
-          callStatus === 'connected' && "bg-green-100 text-green-800"
-        )}>
-          {callStatus === 'ringing' && "📞 Ringing"}
-          {callStatus === 'connecting' && "🔄 Connecting"}
-          {callStatus === 'connected' && "📞 Connected"}
+      
+      {/* Secondary line (preview) */}
+      {conversation.lastMessage && (
+        <div 
+          className="text-xs truncate"
+          style={{ color: isSelected ? 'rgba(255, 255, 255, 0.8)' : 'var(--color-text-secondary)' }}
+        >
+          {conversation.lastMessage}
         </div>
       )}
     </div>
+
+    {/* Call status badge only */}
+    {callStatus && (
+      <div className={cn(
+        "text-xs px-2 py-1 rounded-full font-medium flex-shrink-0",
+        callStatus === 'ringing' && "bg-yellow-100 text-yellow-800",
+        callStatus === 'connecting' && "bg-blue-100 text-blue-800",
+        callStatus === 'connected' && "bg-green-100 text-green-800"
+      )}>
+        {callStatus === 'ringing' && "📞"}
+        {callStatus === 'connecting' && "🔄"}
+        {callStatus === 'connected' && "📞"}
+      </div>
+    )}
 
     {/* Remove button - only show on hover */}
     {onRemove && (
@@ -103,9 +124,19 @@ const ConversationItem = memo(({
           e.stopPropagation();
           onRemove(conversation.username);
         }}
-        className="opacity-0 group-hover:opacity-100 transition-opacity p-1 h-6 w-6 hover:bg-red-100 hover:text-red-600"
+        className="absolute bottom-1 right-1 opacity-0 group-hover:opacity-100 transition-opacity p-1 h-6 w-6"
+        style={{
+          backgroundColor: 'transparent',
+          color: 'var(--color-error)'
+        }}
+        onMouseEnter={(e) => {
+          e.currentTarget.style.backgroundColor = 'rgba(239, 68, 68, 0.1)';
+        }}
+        onMouseLeave={(e) => {
+          e.currentTarget.style.backgroundColor = 'transparent';
+        }}
       >
-        <X className="h-3 w-3" />
+        <Trash2 className="h-3 w-3" />
       </Button>
     )}
   </div>
@@ -181,33 +212,38 @@ export const ConversationList = memo(function ConversationList({
   return (
     <>
       <ScrollArea className="h-full">
-        <div className="p-1">
+        <div className="p-2">
           {conversations.length === 0 ? (
-            <div className="text-center text-gray-500 text-xs py-4">
+            <div 
+              className="text-center text-xs py-8"
+              style={{ color: 'var(--color-text-secondary)' }}
+            >
               No conversations yet
             </div>
           ) : (
-            conversations.map((conversation) => (
-              <ConversationItem
-                key={conversation.id}
-                conversation={conversation}
-                isSelected={selectedConversation === conversation.username}
-                onSelect={onSelectConversation}
-                onRemove={handleRemoveClick}
-                formatTime={formatTime}
-                callStatus={conversation.username === activePeer ? activeStatus : null}
-              />
-            ))
+            <div className="space-y-1">
+              {conversations.map((conversation) => (
+                <ConversationItem
+                  key={conversation.id}
+                  conversation={conversation}
+                  isSelected={selectedConversation === conversation.username}
+                  onSelect={onSelectConversation}
+                  onRemove={handleRemoveClick}
+                  formatTime={formatTime}
+                  callStatus={conversation.username === activePeer ? activeStatus : null}
+                />
+              ))}
+            </div>
           )}
         </div>
       </ScrollArea>
 
       {/* Confirmation Dialog */}
       <Dialog open={showConfirmDialog} onOpenChange={setShowConfirmDialog}>
-        <DialogContent>
+        <DialogContent style={{ backgroundColor: 'var(--color-surface)', borderColor: 'var(--color-border)' }}>
           <DialogHeader>
-            <DialogTitle>Remove Conversation</DialogTitle>
-            <DialogDescription>
+            <DialogTitle style={{ color: 'var(--color-text-primary)' }}>Remove Conversation</DialogTitle>
+            <DialogDescription style={{ color: 'var(--color-text-secondary)' }}>
               Are you sure you want to remove the conversation with {conversationToRemove}? 
               This action cannot be undone and will delete all message history.
             </DialogDescription>

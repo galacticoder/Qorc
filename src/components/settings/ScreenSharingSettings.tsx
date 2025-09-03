@@ -97,7 +97,6 @@ export function ScreenSharingSettings() {
             {SCREEN_SHARING_RESOLUTIONS.map((resolution) => (
               <option key={resolution.id} value={resolution.id}>
                 {resolution.name}
-                {!resolution.isNative && ` (${resolution.width} × ${resolution.height})`}
               </option>
             ))}
           </select>

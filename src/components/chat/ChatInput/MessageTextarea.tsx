@@ -26,9 +26,12 @@ export function MessageTextarea({ value, onChange, onKeyDown, textareaRef }: Mes
       placeholder="Type a message..."
       className={cn(
         "min-h-[39px] max-h-[100px] resize-none border-0 bg-transparent px-0 py-2 text-sm",
-        "focus-visible:ring-0 focus-visible:ring-offset-0",
-        "text-slate-900 placeholder:text-slate-500"
+        "focus-visible:ring-0 focus-visible:ring-offset-0"
       )}
+      style={{
+        color: 'var(--composer-text-color)',
+        backgroundColor: 'transparent'
+      }}
       rows={1}
     />
   );

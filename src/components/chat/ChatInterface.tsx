@@ -280,17 +280,26 @@ export function ChatInterface({
       !(getSmartReceiptStatus(m) || m.receipt)?.read
     )?.id;
   return (
-    <Card className="flex flex-col h-full border border-gray-300 shadow-lg rounded-lg">
-      <div className="p-4 border-b bg-gray-100 flex items-center justify-between">
+    <div 
+      className="flex flex-col h-full"
+      style={{ backgroundColor: 'var(--color-background)' }}
+    >
+      <div 
+        className="p-4 border-b flex items-center justify-between"
+        style={{
+          backgroundColor: 'var(--color-surface)',
+          borderColor: 'var(--color-border)'
+        }}
+      >
         <div>
-          <h2 className="text-lg font-semibold">
-            {selectedConversation ? `Chat with ${selectedConversation}` : "Chat"}
+          <h2 
+            className="text-lg font-semibold"
+            style={{ color: 'var(--color-text-primary)' }}
+          >
+            {selectedConversation || "Chat"}
           </h2>
-          <p className="text-sm text-gray-500">
-            {selectedConversation ? "Secure end-to-end encrypted messaging" : "Select a conversation to start chatting"}
-          </p>
         </div>
-        <div className="flex items-center space-x-2">
+        <div className="flex items-center gap-2">
           {selectedConversation && (
             <>
               <Button
@@ -305,7 +314,12 @@ export function ChatInterface({
                   }
                 }}
                 disabled={!!currentCall}
-                className="flex items-center space-x-1"
+                className="flex items-center gap-2"
+                style={{
+                  backgroundColor: 'transparent',
+                  borderColor: 'var(--color-border)',
+                  color: 'var(--color-text-primary)'
+                }}
               >
                 <Phone className="w-4 h-4" />
                 <span>Call</span>
@@ -322,7 +336,12 @@ export function ChatInterface({
                   }
                 }}
                 disabled={!!currentCall}
-                className="flex items-center space-x-1"
+                className="flex items-center gap-2"
+                style={{
+                  backgroundColor: 'transparent',
+                  borderColor: 'var(--color-border)',
+                  color: 'var(--color-text-primary)'
+                }}
               >
                 <Video className="w-4 h-4" />
                 <span>Video</span>
@@ -332,10 +351,17 @@ export function ChatInterface({
           <TorIndicator />
         </div>
       </div>
-      <ScrollArea className="flex-1 p-4 bg-white" ref={scrollAreaRef}>
+      <ScrollArea 
+        className="flex-1 p-4" 
+        ref={scrollAreaRef}
+        style={{ backgroundColor: 'var(--color-background)' }}
+      >
         <div className="space-y-4">
           {messages.length === 0 ? (
-            <div className="flex items-center justify-center h-full min-h-[200px] text-gray-400 text-sm">
+            <div 
+              className="flex items-center justify-center h-full min-h-[200px] text-sm"
+              style={{ color: 'var(--color-text-secondary)' }}
+            >
               {selectedConversation ? "No messages yet. Start the conversation!" : "Select a conversation to view messages"}
             </div>
           ) : (
@@ -365,9 +391,18 @@ export function ChatInterface({
           )}
         </div>
       </ScrollArea>
-      <Separator />
+      <div 
+        className="border-t"
+        style={{ borderColor: 'var(--color-border)' }}
+      />
       {typingUsers.length > 0 && (
-        <div className="px-4 py-3 bg-muted/30 border-t border-border/50 animate-in slide-in-from-bottom duration-200">
+        <div 
+          className="px-4 py-3 border-t animate-in slide-in-from-bottom duration-200"
+          style={{
+            backgroundColor: 'var(--color-muted-panel)',
+            borderColor: 'var(--color-border)'
+          }}
+        >
           <div className="flex flex-col gap-1">
             {typingUsers.map((username) => (
               <TypingIndicator key={username} username={username} />
@@ -375,7 +410,10 @@ export function ChatInterface({
           </div>
         </div>
       )}
-      <div className="p-4 bg-gray-50">
+      <div 
+        className="p-4"
+        style={{ backgroundColor: 'var(--color-surface)' }}
+      >
         <ChatInput
           onSendMessage={async (
             messageId: string | undefined,
@@ -435,6 +473,6 @@ export function ChatInterface({
           isScreenSharing={isScreenSharing}
         />
       )}
-    </Card>
+    </div>
   );
 }

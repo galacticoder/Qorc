@@ -5,7 +5,7 @@ import { Switch } from '@/components/ui/switch';
 import { Button } from '@/components/ui/button';
 import { Separator } from '@/components/ui/separator';
 import { useTheme } from 'next-themes';
-import { Moon, Sun, Monitor, Palette, Shield, Bell, Volume2, Trash2, Download, FolderOpen } from 'lucide-react';
+import { Moon, Sun, Monitor, Palette, Shield, Bell, Volume2, Trash2, Download, FolderOpen, X } from 'lucide-react';
 import { ScreenSharingSettings } from './ScreenSharingSettings';
 
 export function AppSettings() {
@@ -81,14 +81,50 @@ export function AppSettings() {
     }
   };
 
+  const handleClose = () => {
+    window.dispatchEvent(new CustomEvent('closeSettings'));
+  };
+
   return (
-    <div className="space-y-6 p-6 max-w-2xl">
-      <div>
-        <h2 className="text-2xl font-bold tracking-tight">Settings</h2>
-        <p className="text-muted-foreground">
-          Manage your application preferences and privacy settings.
-        </p>
+    <div 
+      className="flex flex-col h-full"
+      style={{ backgroundColor: 'var(--color-background)' }}
+    >
+      {/* Header with close button */}
+      <div 
+        className="p-4 border-b flex items-center justify-between"
+        style={{
+          backgroundColor: 'var(--color-surface)',
+          borderColor: 'var(--color-border)'
+        }}
+      >
+        <div>
+          <h2 
+            className="text-lg font-semibold"
+            style={{ color: 'var(--color-text-primary)' }}
+          >
+            Settings
+          </h2>
+        </div>
+        <Button
+          variant="ghost"
+          size="sm"
+          onClick={handleClose}
+          className="h-8 w-8 p-0"
+          style={{
+            color: 'var(--color-text-secondary)'
+          }}
+        >
+          <X className="h-4 w-4" />
+        </Button>
       </div>
+
+      {/* Content */}
+      <div className="flex-1 overflow-auto p-6">
+        <div className="space-y-6 max-w-2xl">
+          <p style={{ color: 'var(--color-text-secondary)' }}>
+            Manage your application preferences and privacy settings.
+          </p>
 
       {/* Appearance Settings */}
       <Card>
@@ -311,24 +347,19 @@ export function AppSettings() {
             Manage your local data and storage
           </CardDescription>
         </CardHeader>
-        <CardContent className="space-y-4">
-          <div className="space-y-2">
-            <Label>Clear All Data</Label>
-            <p className="text-sm text-muted-foreground">
-              This will remove all stored messages, settings, and log you out. This action cannot be undone.
-            </p>
-            <Button 
-              variant="destructive" 
-              size="sm"
-              onClick={handleClearData}
-              className="flex items-center gap-2"
-            >
-              <Trash2 className="h-4 w-4" />
-              Clear All Data
-            </Button>
-          </div>
+        <CardContent>
+          <Button 
+            variant="destructive" 
+            onClick={handleClearData}
+            className="w-full"
+          >
+            <Trash2 className="mr-2 h-4 w-4" />
+            Clear All Data
+          </Button>
         </CardContent>
       </Card>
+        </div>
+      </div>
     </div>
   );
 }

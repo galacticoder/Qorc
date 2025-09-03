@@ -1,6 +1,6 @@
 import React, { useState } from "react";
 import { cn } from "@/lib/utils";
-import { Plus, MessageSquare, Settings, LogOut } from "lucide-react";
+import { Plus, MessageSquare, Settings, LogOut, Home, Users, Phone } from "lucide-react";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 
@@ -22,15 +22,15 @@ interface SidebarProps {
   onAddConversation?: (username: string) => Promise<any>;
   onLogout?: () => void;
   onActiveTabChange?: (tab: string) => void;
-  settingsContent?: React.ReactNode;
 }
 
-export function Sidebar({ className, children, currentUsername, onAddConversation, onLogout, onActiveTabChange, settingsContent }: SidebarProps) {
+export function Sidebar({ className, children, currentUsername, onAddConversation, onLogout, onActiveTabChange }: SidebarProps) {
   const [activeTab, setActiveTab] = useState("messages");
   const [showAddUser, setShowAddUser] = useState(false);
   const [newUsername, setNewUsername] = useState("");
   const [isValidating, setIsValidating] = useState(false);
   const [validationError, setValidationError] = useState("");
+  const [isCollapsed, setIsCollapsed] = useState(false);
 
   const handleAddUser = async () => {
     const username = newUsername.trim();
@@ -65,109 +65,184 @@ export function Sidebar({ className, children, currentUsername, onAddConversatio
     }
   };
 
-  return (
-    <div className={cn("flex flex-col justify-start items-center relative transition-all duration-500 ease-in-out w-16", className)}>
-      <article className="border border-solid border-gray-300 dark:border-gray-700 w-full ease-in-out duration-500 left-0 rounded-2xl inline-block shadow-lg shadow-black/15 bg-white dark:bg-gray-900 h-full flex flex-col">
-        {/* Top navigation buttons */}
-        <div className="flex flex-col">
-          <label
-            className={cn(
-              "has-[:checked]:shadow-lg relative w-full h-16 p-4 ease-in-out duration-300 border-solid border-black/10 has-[:checked]:border group flex flex-row gap-3 items-center justify-center text-black rounded-xl cursor-pointer",
-              activeTab === "newchat" && "shadow-lg border border-black/10"
-            )}
-            onClick={() => {
-              setActiveTab("newchat");
-              setShowAddUser(true);
-              onActiveTabChange?.("newchat");
-            }}
-          >
-            <input
-              className="hidden peer/expand"
-              type="radio"
-              name="path"
-              id="newchat"
-              checked={activeTab === "newchat"}
-              onChange={() => {}}
-            />
-            <Plus className="peer-hover/expand:scale-125 peer-hover/expand:text-blue-400 peer-checked/expand:text-blue-400 text-2xl peer-checked/expand:scale-125 ease-in-out duration-300 w-6 h-6" />
-          </label>
+  const navigationItems = [
+    { id: 'home', icon: Home, label: 'Home', action: () => {} },
+    { id: 'messages', icon: MessageSquare, label: 'Messages', action: () => { setActiveTab('messages'); onActiveTabChange?.('messages'); } },
+    { id: 'newchat', icon: Plus, label: 'New Chat', action: () => { setActiveTab('newchat'); setShowAddUser(true); onActiveTabChange?.('newchat'); } },
+  ];
 
-          <label
-            className={cn(
-              "has-[:checked]:shadow-lg relative w-full h-16 p-4 ease-in-out duration-300 border-solid border-black/10 has-[:checked]:border group flex flex-row gap-3 items-center justify-center text-black rounded-xl cursor-pointer",
-              activeTab === "messages" && "shadow-lg border border-black/10"
+  const secondaryItems = [
+    { id: 'settings', icon: Settings, label: 'Settings', action: () => { 
+      // Set active tab for visual highlighting
+      setActiveTab('settings');
+      onActiveTabChange?.('settings');
+      // Open settings in main screen instead of sidebar tab
+      window.dispatchEvent(new CustomEvent('openSettings'));
+    } },
+  ];
+
+  return (
+    <div className={cn(
+      "fixed left-0 top-0 h-full transition-all duration-300 ease-in-out z-40",
+      isCollapsed ? "w-16" : "w-60",
+      className
+    )}>
+      {/* Main Sidebar */}
+      <div 
+        className="h-full flex flex-col"
+        style={{
+          backgroundColor: 'var(--color-panel)',
+          borderRight: '1px solid var(--color-border)'
+        }}
+      >
+        {/* App Logo / Header */}
+        <div className="p-4 border-b" style={{ borderColor: 'var(--color-border)' }}>
+          <div className="flex items-center gap-3">
+            <div 
+              className="w-8 h-8 rounded-lg flex items-center justify-center"
+              style={{ backgroundColor: 'var(--color-accent-primary)' }}
+            >
+              <MessageSquare className="w-5 h-5 text-white" />
+            </div>
+            {!isCollapsed && (
+              <span 
+                className="font-semibold text-lg"
+                style={{ color: 'var(--color-text-primary)' }}
+              >
+                endtoend
+              </span>
             )}
-            onClick={() => {
-              setActiveTab("messages");
-              onActiveTabChange?.("messages");
-            }}
-          >
-            <input
-              className="hidden peer/expand"
-              type="radio"
-              name="path"
-              id="messages"
-              checked={activeTab === "messages"}
-              onChange={() => {}}
-            />
-            <MessageSquare className="peer-hover/expand:scale-125 peer-hover/expand:text-blue-400 peer-checked/expand:text-blue-400 text-2xl peer-checked/expand:scale-125 ease-in-out duration-300 w-6 h-6" />
-          </label>
+          </div>
         </div>
 
-        {/* Spacer to push bottom buttons down */}
-        <div className="flex-1"></div>
+        {/* Primary Navigation */}
+        <div className="flex-1 py-4">
+          <nav className="space-y-1 px-3">
+            {navigationItems.map((item) => {
+              const Icon = item.icon;
+              const isActive = activeTab === item.id;
+              
+              return (
+                <button
+                  key={item.id}
+                  onClick={item.action}
+                  className={cn(
+                    "w-full flex items-center gap-3 px-3 py-3 rounded-lg transition-all duration-200",
+                    "hover:bg-opacity-80",
+                    isActive ? "bg-opacity-100" : "bg-opacity-0 hover:bg-opacity-10"
+                  )}
+                  style={{
+                    backgroundColor: isActive ? 'var(--color-accent-primary)' : 'transparent',
+                    color: isActive ? 'white' : 'var(--color-text-primary)',
+                    height: 'var(--sidebar-item-height)'
+                  }}
+                  onMouseEnter={(e) => {
+                    if (!isActive) {
+                      e.currentTarget.style.backgroundColor = 'rgba(59, 130, 246, 0.1)';
+                    }
+                  }}
+                  onMouseLeave={(e) => {
+                    if (!isActive) {
+                      e.currentTarget.style.backgroundColor = 'transparent';
+                    }
+                  }}
+                >
+                  <Icon size={20} />
+                  {!isCollapsed && (
+                    <span className="font-medium">{item.label}</span>
+                  )}
+                  {isActive && (
+                    <div 
+                      className="absolute left-0 w-1 h-6 rounded-r"
+                      style={{ backgroundColor: 'var(--color-accent-secondary)' }}
+                    />
+                  )}
+                </button>
+              );
+            })}
+          </nav>
+        </div>
 
-        {/* Bottom navigation buttons */}
-        <div className="flex flex-col">
-          <label
-            className={cn(
-              "has-[:checked]:shadow-lg relative w-full h-16 p-4 ease-in-out duration-300 border-solid border-black/10 has-[:checked]:border group flex flex-row gap-3 items-center justify-center text-black rounded-xl cursor-pointer",
-              activeTab === "settings" && "shadow-lg border border-black/10"
-            )}
-            onClick={() => {
-              setActiveTab("settings");
-              onActiveTabChange?.("settings");
-            }}
-          >
-            <input
-              className="hidden peer/expand"
-              type="radio"
-              name="path"
-              id="settings"
-              checked={activeTab === "settings"}
-              onChange={() => {}}
-            />
-            <Settings className="peer-hover/expand:scale-125 peer-hover/expand:text-blue-400 peer-checked/expand:text-blue-400 text-2xl peer-checked/expand:scale-125 ease-in-out duration-300 w-6 h-6" />
-          </label>
+        {/* Secondary Links */}
+        <div className="border-t px-3 py-4" style={{ borderColor: 'var(--color-border)' }}>
+          {secondaryItems.map((item) => {
+            const Icon = item.icon;
+            const isActive = activeTab === item.id;
+            
+            return (
+              <button
+                key={item.id}
+                onClick={item.action}
+                className={cn(
+                  "w-full flex items-center gap-3 px-3 py-3 rounded-lg transition-all duration-200",
+                  "hover:bg-opacity-80",
+                  isActive ? "bg-opacity-100" : "bg-opacity-0 hover:bg-opacity-10"
+                )}
+                style={{
+                  backgroundColor: isActive ? 'var(--color-accent-primary)' : 'transparent',
+                  color: isActive ? 'white' : 'var(--color-text-primary)',
+                  height: 'var(--sidebar-item-height)'
+                }}
+                onMouseEnter={(e) => {
+                  if (!isActive) {
+                    e.currentTarget.style.backgroundColor = 'rgba(59, 130, 246, 0.1)';
+                  }
+                }}
+                onMouseLeave={(e) => {
+                  if (!isActive) {
+                    e.currentTarget.style.backgroundColor = 'transparent';
+                  }
+                }}
+              >
+                <Icon size={20} />
+                {!isCollapsed && (
+                  <span className="font-medium">{item.label}</span>
+                )}
+              </button>
+            );
+          })}
+        </div>
 
-          <label
-            className={cn(
-              "has-[:checked]:shadow-lg relative w-full h-16 p-4 ease-in-out duration-300 border-solid border-black/10 has-[:checked]:border group flex flex-row gap-3 items-center justify-center text-black rounded-xl cursor-pointer",
-              activeTab === "logout" && "shadow-lg border border-black/10"
-            )}
+        {/* User Profile Area */}
+        <div className="border-t px-3 py-4" style={{ borderColor: 'var(--color-border)' }}>
+          <button
             onClick={() => {
-              setActiveTab("logout");
-              onActiveTabChange?.("logout");
+              setActiveTab('logout');
+              onActiveTabChange?.('logout');
               onLogout?.();
             }}
+            className="w-full flex items-center gap-3 px-3 py-3 rounded-lg transition-all duration-200 hover:bg-opacity-10"
+            style={{
+              color: 'var(--color-text-primary)',
+              height: 'var(--sidebar-item-height)'
+            }}
+            onMouseEnter={(e) => {
+              e.currentTarget.style.backgroundColor = 'rgba(239, 68, 68, 0.1)';
+            }}
+            onMouseLeave={(e) => {
+              e.currentTarget.style.backgroundColor = 'transparent';
+            }}
           >
-            <input
-              className="hidden peer/expand"
-              type="radio"
-              name="path"
-              id="logout"
-              checked={activeTab === "logout"}
-              onChange={() => {}}
-            />
-            <div className="peer-hover/expand:scale-125 peer-checked/expand:scale-125 ease-in-out duration-300 w-6 h-6 bg-orange-500 rounded-full flex items-center justify-center">
-              <span className="text-white text-xs font-medium">
-                {currentUsername?.charAt(0).toUpperCase() || "U"}
-              </span>
+            <div 
+              className="w-8 h-8 rounded-full flex items-center justify-center text-white font-medium text-sm"
+              style={{ backgroundColor: 'var(--color-accent-secondary)' }}
+            >
+              {currentUsername?.charAt(0).toUpperCase() || "U"}
             </div>
-          </label>
+            {!isCollapsed && (
+              <div className="flex-1 text-left">
+                <div className="font-medium text-sm" style={{ color: 'var(--color-text-primary)' }}>
+                  {currentUsername || 'User'}
+                </div>
+                <div className="text-xs" style={{ color: 'var(--color-text-secondary)' }}>
+                  Click to logout
+                </div>
+              </div>
+            )}
+            <LogOut size={16} className="opacity-60" />
+          </button>
         </div>
-
-      </article>
+      </div>
 
       {/* Add user modal/overlay */}
       {showAddUser && (
@@ -239,10 +314,25 @@ export function Sidebar({ className, children, currentUsername, onAddConversatio
 
       {/* Conversations panel - only show when messages tab is active */}
       {activeTab === "messages" && (
-        <div className="fixed left-16 top-0 h-full w-64 bg-white dark:bg-gray-900 border border-gray-300 dark:border-gray-700 rounded-r-2xl shadow-lg shadow-black/15 z-30">
+        <div 
+          className={cn(
+            "fixed top-0 h-full transition-all duration-300 z-30",
+            isCollapsed ? "left-16 w-80" : "left-60 w-80"
+          )}
+          style={{
+            backgroundColor: 'var(--color-surface)',
+            borderRight: '1px solid var(--color-border)',
+            boxShadow: 'var(--shadow-elevation-low)'
+          }}
+        >
           <div className="h-full flex flex-col">
-            <div className="p-4 border-b border-gray-200 dark:border-gray-700">
-              <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">Conversations</h2>
+            <div className="p-4 border-b" style={{ borderColor: 'var(--color-border)' }}>
+              <h2 
+                className="text-lg font-semibold"
+                style={{ color: 'var(--color-text-primary)' }}
+              >
+                Conversations
+              </h2>
             </div>
             <div className="flex-1 overflow-hidden">
               {children}
@@ -251,16 +341,6 @@ export function Sidebar({ className, children, currentUsername, onAddConversatio
         </div>
       )}
 
-      {/* Settings panel - only show when settings tab is active */}
-      {activeTab === "settings" && (
-        <div className="fixed left-16 top-0 h-full w-96 bg-white dark:bg-gray-900 border border-gray-300 dark:border-gray-700 rounded-r-2xl shadow-lg shadow-black/15 z-30 overflow-y-auto">
-          <div className="h-full flex flex-col">
-            <div className="flex-1">
-              {settingsContent}
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   );
 }

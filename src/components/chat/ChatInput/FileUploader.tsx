@@ -25,10 +25,25 @@ export function FileUploader({ onFileSelected, disabled }: FileUploaderProps) {
         variant="ghost"
         size="sm"
         className={cn(
-          "h-10 w-10 rounded-full transition-all duration-200",
-          disabled && "opacity-50 cursor-not-allowed",
-          "hover:bg-slate-200 text-slate-500 hover:text-slate-700"
+          "h-8 w-8 rounded-full transition-all duration-200 flex items-center justify-center flex-shrink-0",
+          disabled && "opacity-50 cursor-not-allowed"
         )}
+        style={{
+          color: 'var(--color-text-secondary)',
+          backgroundColor: 'transparent'
+        }}
+        onMouseEnter={(e) => {
+          if (!disabled) {
+            e.currentTarget.style.backgroundColor = 'var(--color-surface)';
+            e.currentTarget.style.color = 'var(--color-text-primary)';
+          }
+        }}
+        onMouseLeave={(e) => {
+          if (!disabled) {
+            e.currentTarget.style.backgroundColor = 'transparent';
+            e.currentTarget.style.color = 'var(--color-text-secondary)';
+          }
+        }}
         onClick={() => !disabled && fileInputRef.current?.click()}
         disabled={disabled}
         type="button"

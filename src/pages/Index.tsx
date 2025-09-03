@@ -31,6 +31,8 @@ const ChatApp: React.FC<ChatAppProps> = () => {
   const [sidebarActiveTab, setSidebarActiveTab] = useState<string>("messages");
   const [showTorSetup, setShowTorSetup] = useState(false);
   const [, setTorSetupComplete] = useState(false);
+  const [showSettings, setShowSettings] = useState(false);
+
 
   const Authentication = useAuth();
 
@@ -46,6 +48,25 @@ const ChatApp: React.FC<ChatAppProps> = () => {
     window.addEventListener('clear-conversation-messages', handleClearConversationMessages as EventListener);
     return () => {
       window.removeEventListener('clear-conversation-messages', handleClearConversationMessages as EventListener);
+    };
+  }, []);
+
+  // Handle settings open/close events
+  useEffect(() => {
+    const handleOpenSettings = () => {
+      setShowSettings(true);
+    };
+
+    const handleCloseSettings = () => {
+      setShowSettings(false);
+    };
+
+    window.addEventListener('openSettings', handleOpenSettings);
+    window.addEventListener('closeSettings', handleCloseSettings);
+
+    return () => {
+      window.removeEventListener('openSettings', handleOpenSettings);
+      window.removeEventListener('closeSettings', handleCloseSettings);
     };
   }, []);
 
@@ -396,13 +417,15 @@ const ChatApp: React.FC<ChatAppProps> = () => {
 
   return (
     <TypingIndicatorProvider currentUsername={Authentication.loginUsernameRef.current || ''}>
-      <div className="flex h-screen bg-gradient-to-r from-gray-50 to-slate-50 dark:from-gray-900 dark:to-slate-900 relative">
+      <div 
+        className="flex h-screen relative"
+        style={{ backgroundColor: 'var(--color-background)' }}
+      >
         <Sidebar
           currentUsername={Authentication.loginUsernameRef.current || ''}
           onAddConversation={addConversation}
           onLogout={async () => await Authentication.logout(Database.secureDBRef)}
           onActiveTabChange={setSidebarActiveTab}
-          settingsContent={<AppSettings />}
         >
           <ConversationList
             conversations={conversations}
@@ -413,12 +436,18 @@ const ChatApp: React.FC<ChatAppProps> = () => {
           />
         </Sidebar>
 
-        <div className={cn(
-          "flex-1 flex flex-col transition-all duration-300",
-          sidebarActiveTab === "messages" ? "ml-80" :
-          sidebarActiveTab === "settings" ? "ml-[400px]" : "ml-16"
-        )}>
-          {selectedConversation ? (
+        <div 
+          className="flex-1 flex flex-col transition-all duration-300"
+          style={{
+            marginLeft: sidebarActiveTab === "messages" ? 'calc(var(--sidebar-width) + var(--list-column-width))' : // sidebar + conversation list
+                      'var(--sidebar-width)', // just sidebar
+            maxWidth: 'var(--main-content-max-width)',
+            padding: 'var(--main-content-padding)'
+          }}
+        >
+          {showSettings ? (
+            <AppSettings />
+          ) : selectedConversation ? (
             <ChatInterface
               messages={conversationMessages}
               setMessages={setMessages}
@@ -505,10 +534,20 @@ const ChatApp: React.FC<ChatAppProps> = () => {
               saveMessageToLocalDB={Database.saveMessageToLocalDB}
             />
           ) : (
-            <div className="flex-1 flex items-center justify-center">
-              <div className="text-center text-gray-500">
-                <h2 className="text-xl font-semibold mb-2">Welcome to endtoend</h2>
-                <p>Click the messages button to view conversations or add a new chat to begin</p>
+            <div 
+              className="flex-1 flex items-center justify-center"
+              style={{ backgroundColor: 'var(--color-background)' }}
+            >
+              <div className="text-center">
+                <h2 
+                  className="text-xl font-semibold mb-2"
+                  style={{ color: 'var(--color-text-primary)' }}
+                >
+                  Welcome to endtoend
+                </h2>
+                <p style={{ color: 'var(--color-text-secondary)' }}>
+                  Click the messages button to view conversations or add a new chat to begin
+                </p>
               </div>
             </div>
           )}
