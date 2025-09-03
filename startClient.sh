@@ -42,14 +42,81 @@ export ELECTRON_OPEN_DEVTOOLS=1
 # Ensure Vite uses fixed port and won't open
 export VITE_PORT=5173
 
+# Function to cleanup and retry on module errors
+cleanup_and_retry() {
+    echo -e "${YELLOW}Module not found error detected. Cleaning up dependencies...${NC}"
+    
+    # Remove node_modules and lock files
+    if [ -d node_modules ]; then
+        echo -e "${YELLOW}Removing client node_modules...${NC}"
+        rm -rf node_modules
+    fi
+    
+    if [ -f pnpm-lock.yaml ]; then
+        echo -e "${YELLOW}Removing client pnpm-lock.yaml...${NC}"
+        rm -f pnpm-lock.yaml
+    fi
+    
+    if [ -f package-lock.json ]; then
+        echo -e "${YELLOW}Removing client package-lock.json...${NC}"
+        rm -f package-lock.json
+    fi
+    
+    echo -e "${GREEN}Reinstalling client dependencies using install script...${NC}"
+    
+    # Use the install-dependencies.sh script to reinstall client deps
+    if [[ -f install-dependencies.sh ]]; then
+        echo -e "${GREEN}Found install-dependencies.sh, sourcing and calling main...${NC}"
+        # Temporarily disable strict mode to avoid unbound variable errors when sourcing
+        set +u
+        source install-dependencies.sh
+        set -u
+        # Call main function to reinstall everything
+        main
+    else
+        # Fallback to manual pnpm install
+        echo -e "${YELLOW}install-dependencies.sh not found, using fallback...${NC}"
+        # Recreate symlinks
+        ln -sf config/pnpm-lock.yaml pnpm-lock.yaml
+        pnpm install --frozen-lockfile --prefer-offline
+    fi
+    
+    echo -e "${GREEN}Retrying client startup (final attempt)...${NC}"
+    # Restart the client application
+    exec "$0" "$@"
+}
+
 START_ELECTRON="${START_ELECTRON:-1}"
 
+# Start client with error handling
 if [ "$START_ELECTRON" = "1" ]; then
     echo -e "${GREEN}Starting client application (Vite + Electron)...${NC}"
-    pnpm run dev &
+    if ! pnpm run dev 2>&1 | tee /tmp/client_output.log; then
+        # Check if the error was module not found and we haven't retried yet
+        if grep -q "ERR_MODULE_NOT_FOUND" /tmp/client_output.log && [ ! -f /tmp/client_retry_attempted ]; then
+            # Mark that we've attempted a retry
+            touch /tmp/client_retry_attempted
+            cleanup_and_retry
+        else
+            # For other errors or if we already retried once, just exit
+            rm -f /tmp/client_retry_attempted 2>/dev/null
+            exit 1
+        fi
+    fi &
 else
     echo -e "${GREEN}Starting client application (Vite only; no window). Set START_ELECTRON=1 to launch Electron.${NC}"
-    pnpm run vite &
+    if ! pnpm run vite 2>&1 | tee /tmp/client_output.log; then
+        # Check if the error was module not found and we haven't retried yet
+        if grep -q "ERR_MODULE_NOT_FOUND" /tmp/client_output.log && [ ! -f /tmp/client_retry_attempted ]; then
+            # Mark that we've attempted a retry
+            touch /tmp/client_retry_attempted
+            cleanup_and_retry
+        else
+            # For other errors or if we already retried once, just exit
+            rm -f /tmp/client_retry_attempted 2>/dev/null
+            exit 1
+        fi
+    fi &
 fi
 
 CLIENT_PID=$!
