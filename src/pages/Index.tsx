@@ -34,6 +34,21 @@ const ChatApp: React.FC<ChatAppProps> = () => {
 
   const Authentication = useAuth();
 
+  // Handle conversation message clearing
+  useEffect(() => {
+    const handleClearConversationMessages = (event: CustomEvent) => {
+      const { username } = event.detail;
+      setMessages(prev => prev.filter(msg => 
+        !(msg.sender === username || msg.recipient === username)
+      ));
+    };
+
+    window.addEventListener('clear-conversation-messages', handleClearConversationMessages as EventListener);
+    return () => {
+      window.removeEventListener('clear-conversation-messages', handleClearConversationMessages as EventListener);
+    };
+  }, []);
+
   // Check if Tor setup is needed on app start
   useEffect(() => {
     const checkTorSetup = async () => {
@@ -213,6 +228,7 @@ const ChatApp: React.FC<ChatAppProps> = () => {
     selectedConversation,
     addConversation,
     selectConversation,
+    removeConversation,
     getConversationMessages,
   } = useConversations(Authentication.loginUsernameRef.current || '', Database.users, messages);
 
@@ -279,6 +295,7 @@ const ChatApp: React.FC<ChatAppProps> = () => {
             conversations={conversations}
             selectedConversation={selectedConversation || undefined}
             onSelectConversation={selectConversation}
+            onRemoveConversation={removeConversation}
             currentUsername={Authentication.loginUsernameRef.current || ''}
           />
         </Sidebar>

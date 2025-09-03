@@ -1,6 +1,9 @@
 import React, { memo, useMemo, useEffect, useState } from "react";
 import { cn } from "@/lib/utils";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { Button } from "@/components/ui/button";
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from "@/components/ui/dialog";
+import { X } from "lucide-react";
 
 export interface Conversation {
   id: string;
@@ -15,6 +18,7 @@ interface ConversationListProps {
   conversations: Conversation[];
   selectedConversation?: string;
   onSelectConversation: (username: string) => void;
+  onRemoveConversation?: (username: string) => void;
   currentUsername?: string;
 }
 
@@ -23,73 +27,86 @@ const ConversationItem = memo(({
   conversation,
   isSelected,
   onSelect,
+  onRemove,
   formatTime,
   callStatus
 }: {
   conversation: Conversation;
   isSelected: boolean;
   onSelect: (username: string) => void;
+  onRemove?: (username: string) => void;
   formatTime: (date?: Date) => string;
   callStatus?: 'ringing' | 'connecting' | 'connected' | null;
 }) => (
   <div
-    onClick={() => onSelect(conversation.username)}
     className={cn(
-      "flex items-center gap-2 p-2 rounded cursor-pointer transition-colors",
+      "flex items-center gap-2 p-2 rounded cursor-pointer transition-colors group",
       isSelected
         ? "bg-blue-100 border border-blue-200"
         : "hover:bg-gray-100"
     )}
   >
-    {/* Avatar */}
-    <div className="relative">
-      <div className="w-8 h-8 bg-gradient-to-br from-blue-500 to-purple-600 rounded-full flex items-center justify-center text-white text-xs font-medium">
-        {conversation.username.charAt(0).toUpperCase()}
-      </div>
-      {conversation.isOnline && (
-        <div className="absolute -bottom-0.5 -right-0.5 w-3 h-3 bg-green-500 border-2 border-white rounded-full"></div>
-      )}
-    </div>
-
-    {/* Conversation info */}
-    <div className="flex-1 min-w-0">
-      <div className="flex items-center justify-between gap-2">
-        <span className="text-sm font-medium text-gray-900 truncate">
-          {conversation.username}
-        </span>
-        <div className="flex items-center gap-2 shrink-0">
-          {/* In-call badges using daisyUI */}
-          {callStatus === 'connected' && (
-            <div className="badge badge-success">
-              <svg className="size-[1em]" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><g fill="currentColor" strokeLinejoin="miter" strokeLinecap="butt"><circle cx="12" cy="12" r="10" fill="none" stroke="currentColor" strokeLinecap="square" strokeMiterlimit="10" strokeWidth="2"></circle><polyline points="7 13 10 16 17 8" fill="none" stroke="currentColor" strokeLinecap="square" strokeMiterlimit="10" strokeWidth="2"></polyline></g></svg>
-              <span className="ml-1">In Call</span>
-            </div>
-          )}
-          {(callStatus === 'ringing' || callStatus === 'connecting') && (
-            <div className="badge badge-info">
-              <svg className="size-[1em]" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><g fill="currentColor" strokeLinejoin="miter" strokeLinecap="butt"><circle cx="12" cy="12" r="10" fill="none" stroke="currentColor" strokeLinecap="square" strokeMiterlimit="10" strokeWidth="2"></circle><path d="m12,17v-5.5c0-.276-.224-.5-.5-.5h-1.5" fill="none" stroke="currentColor" strokeLinecap="square" strokeMiterlimit="10" strokeWidth="2"></path><circle cx="12" cy="7.25" r="1.25" fill="currentColor" strokeWidth="2"></circle></g></svg>
-              <span className="ml-1">Calling…</span>
-            </div>
-          )}
-          {conversation.lastMessageTime && (
-            <span className="text-xs text-gray-500">
-              {formatTime(conversation.lastMessageTime)}
-            </span>
-          )}
+    <div 
+      onClick={() => onSelect(conversation.username)}
+      className="flex items-center gap-2 flex-1 min-w-0"
+    >
+      {/* Status indicator */}
+      <div
+        className={cn(
+          "w-2 h-2 rounded-full",
+          conversation.isOnline ? "bg-green-500" : "bg-gray-400"
+        )}
+      />
+      
+      {/* User info */}
+      <div className="flex-1 min-w-0">
+        <div className="flex items-center justify-between">
+          <span className="font-medium text-sm truncate">
+            {conversation.username}
+          </span>
         </div>
+        
+        {conversation.lastMessage && (
+          <div className="text-xs text-gray-500 truncate mt-0.5">
+            {conversation.lastMessage}
+          </div>
+        )}
+        
+        {conversation.lastMessageTime && (
+          <div className="text-xs text-gray-400 mt-0.5">
+            {formatTime(conversation.lastMessageTime)}
+          </div>
+        )}
       </div>
-      {conversation.lastMessage && (
-        <p className="text-xs text-gray-600 truncate">
-          {conversation.lastMessage}
-        </p>
+
+      {/* Call status badge */}
+      {callStatus && (
+        <div className={cn(
+          "text-xs px-2 py-1 rounded-full font-medium",
+          callStatus === 'ringing' && "bg-yellow-100 text-yellow-800",
+          callStatus === 'connecting' && "bg-blue-100 text-blue-800",
+          callStatus === 'connected' && "bg-green-100 text-green-800"
+        )}>
+          {callStatus === 'ringing' && "📞 Ringing"}
+          {callStatus === 'connecting' && "🔄 Connecting"}
+          {callStatus === 'connected' && "📞 Connected"}
+        </div>
       )}
     </div>
 
-    {/* Unread count */}
-    {conversation.unreadCount && conversation.unreadCount > 0 && (
-      <div className="bg-red-500 text-white text-xs rounded-full w-5 h-5 flex items-center justify-center">
-        {conversation.unreadCount > 99 ? "99+" : conversation.unreadCount}
-      </div>
+    {/* Remove button - only show on hover */}
+    {onRemove && (
+      <Button
+        variant="ghost"
+        size="sm"
+        onClick={(e) => {
+          e.stopPropagation();
+          onRemove(conversation.username);
+        }}
+        className="opacity-0 group-hover:opacity-100 transition-opacity p-1 h-6 w-6 hover:bg-red-100 hover:text-red-600"
+      >
+        <X className="h-3 w-3" />
+      </Button>
     )}
   </div>
 ));
@@ -98,11 +115,34 @@ export const ConversationList = memo(function ConversationList({
   conversations,
   selectedConversation,
   onSelectConversation,
+  onRemoveConversation,
   currentUsername
 }: ConversationListProps) {
   // Track active call peer/status via global call-status events
   const [activePeer, setActivePeer] = useState<string | null>(null);
   const [activeStatus, setActiveStatus] = useState<'ringing' | 'connecting' | 'connected' | null>(null);
+  
+  // Confirmation dialog state
+  const [showConfirmDialog, setShowConfirmDialog] = useState(false);
+  const [conversationToRemove, setConversationToRemove] = useState<string | null>(null);
+
+  const handleRemoveClick = (username: string) => {
+    setConversationToRemove(username);
+    setShowConfirmDialog(true);
+  };
+
+  const handleConfirmRemove = () => {
+    if (conversationToRemove && onRemoveConversation) {
+      onRemoveConversation(conversationToRemove);
+    }
+    setShowConfirmDialog(false);
+    setConversationToRemove(null);
+  };
+
+  const handleCancelRemove = () => {
+    setShowConfirmDialog(false);
+    setConversationToRemove(null);
+  };
 
   useEffect(() => {
     const handler = (e: Event) => {
@@ -139,25 +179,49 @@ export const ConversationList = memo(function ConversationList({
   }, []);
 
   return (
-    <ScrollArea className="h-full">
-      <div className="p-1">
-        {conversations.length === 0 ? (
-          <div className="text-center text-gray-500 text-xs py-4">
-            No conversations yet
-          </div>
-        ) : (
-          conversations.map((conversation) => (
-            <ConversationItem
-              key={conversation.id}
-              conversation={conversation}
-              isSelected={selectedConversation === conversation.username}
-              onSelect={onSelectConversation}
-              formatTime={formatTime}
-              callStatus={conversation.username === activePeer ? activeStatus : null}
-            />
-          ))
-        )}
-      </div>
-    </ScrollArea>
+    <>
+      <ScrollArea className="h-full">
+        <div className="p-1">
+          {conversations.length === 0 ? (
+            <div className="text-center text-gray-500 text-xs py-4">
+              No conversations yet
+            </div>
+          ) : (
+            conversations.map((conversation) => (
+              <ConversationItem
+                key={conversation.id}
+                conversation={conversation}
+                isSelected={selectedConversation === conversation.username}
+                onSelect={onSelectConversation}
+                onRemove={handleRemoveClick}
+                formatTime={formatTime}
+                callStatus={conversation.username === activePeer ? activeStatus : null}
+              />
+            ))
+          )}
+        </div>
+      </ScrollArea>
+
+      {/* Confirmation Dialog */}
+      <Dialog open={showConfirmDialog} onOpenChange={setShowConfirmDialog}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Remove Conversation</DialogTitle>
+            <DialogDescription>
+              Are you sure you want to remove the conversation with {conversationToRemove}? 
+              This action cannot be undone and will delete all message history.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={handleCancelRemove}>
+              Cancel
+            </Button>
+            <Button variant="destructive" onClick={handleConfirmRemove}>
+              Remove
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </>
   );
 });

@@ -5,9 +5,10 @@ import { User } from "@/components/chat/UserList";
 import { SignalType } from "@/lib/signals";
 import websocketClient from "@/lib/websocket";
 
-export function useConversations(currentUsername: string, users: User[], messages: Message[]) {
+export const useConversations = (currentUsername: string, users: User[], messages: Message[]) => {
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [selectedConversation, setSelectedConversation] = useState<string | null>(null);
+  const [removedConversations, setRemovedConversations] = useState<Set<string>>(new Set());
 
   // Add a new conversation with user validation
   const addConversation = useCallback((username: string, autoSelect: boolean = true): Promise<Conversation | null> => {
@@ -17,10 +18,20 @@ export function useConversations(currentUsername: string, users: User[], message
         return;
       }
 
+      // If this conversation was previously removed, remove it from the removed set
+      // to allow re-adding it
+      if (removedConversations.has(username)) {
+        setRemovedConversations(prev => {
+          const newSet = new Set(prev);
+          newSet.delete(username);
+          return newSet;
+        });
+      }
+
       // Check if conversation already exists
       const existingConversation = conversations.find(conv => conv.username === username);
       if (existingConversation) {
-        if (autoSelect && selectedConversation !== username) {
+        if (autoSelect) {
           setSelectedConversation(username);
         }
         resolve(existingConversation);
@@ -98,7 +109,7 @@ export function useConversations(currentUsername: string, users: User[], message
         reject(new Error('User validation timed out. Please try again.'));
       }, 10000); // 10 second timeout
     });
-  }, [conversations, users, currentUsername, selectedConversation]);
+  }, [conversations, users, currentUsername, selectedConversation, removedConversations]);
 
   // Select a conversation
   const selectConversation = useCallback((username: string) => {
@@ -158,6 +169,13 @@ export function useConversations(currentUsername: string, users: User[], message
 
     for (const msg of messages) {
       if (!msg.sender || !msg.recipient) continue;
+      
+      // Skip typing indicators and receipts for conversation creation
+      if (msg.content?.includes('"type":"typing-') || 
+          msg.content?.includes('delivery-receipt') || 
+          msg.content?.includes('read-receipt')) {
+        continue;
+      }
 
       const other = msg.sender === currentUsername ? msg.recipient : msg.sender;
       const isOnline = users.some(user => user.username === other && user.isOnline);
@@ -190,6 +208,18 @@ export function useConversations(currentUsername: string, users: User[], message
       const merged = new Map<string, Conversation>(prev.map(c => [c.username, c]));
 
       for (const [username, conv] of convMap.entries()) {
+        // For conversations that were manually removed, restore them when receiving new messages
+        if (removedConversations.has(username)) {
+          // Always restore if there's any message activity (like modern chat apps)
+          setRemovedConversations(prevRemoved => {
+            const newSet = new Set(prevRemoved);
+            newSet.delete(username);
+            return newSet;
+          });
+          merged.set(username, conv);
+          continue;
+        }
+        
         const exists = merged.get(username);
         if (exists) {
           merged.set(username, {
@@ -209,7 +239,7 @@ export function useConversations(currentUsername: string, users: User[], message
       arr.sort((a, b) => (b.lastMessageTime?.getTime() || 0) - (a.lastMessageTime?.getTime() || 0));
       return arr;
     });
-  }, [messages, users, currentUsername, selectedConversation]);
+  }, [messages, users, currentUsername, selectedConversation, removedConversations]);
 
   // Auto-select the most recent conversation on initial rebuild if none selected
   useEffect(() => {
@@ -238,11 +268,40 @@ export function useConversations(currentUsername: string, users: User[], message
     });
   }, [conversations, selectedConversation, currentUsername, users.length, messages.length]);
 
+  // Remove a conversation (like hiding/archiving in modern chat apps)
+  const removeConversation = useCallback((username: string, clearMessages: boolean = true) => {
+    setConversations(prev => prev.filter(conv => conv.username !== username));
+    // Track that this conversation was manually removed (soft delete)
+    setRemovedConversations(prev => new Set(prev).add(username));
+    // If we're removing the currently selected conversation, clear selection
+    if (selectedConversation === username) {
+      setSelectedConversation(null);
+    }
+    
+    // Clear messages for this conversation if requested
+    if (clearMessages) {
+      // Dispatch event to clear messages for this conversation
+      window.dispatchEvent(new CustomEvent('clear-conversation-messages', { 
+        detail: { username } 
+      }));
+    }
+  }, [selectedConversation]);
+
+  // Clear conversation removal status (for when user wants to unarchive)
+  const clearConversationRemoval = useCallback((username: string) => {
+    setRemovedConversations(prev => {
+      const newSet = new Set(prev);
+      newSet.delete(username);
+      return newSet;
+    });
+  }, []);
+
   return {
     conversations,
     selectedConversation,
     addConversation,
     selectConversation,
+    removeConversation,
     getConversationMessages,
     debugConversationState,
   };
