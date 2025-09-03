@@ -24,7 +24,6 @@ The installer will:
 - Configure Tor for secure networking
 - Set up Electron dependencies
 - Install project dependencies
-- Create desktop shortcuts
 
 ### Manual Setup
 
@@ -49,7 +48,7 @@ The installer will:
 
 #### Option 2: Server in Docker + Local Client
 
-**Best for development - isolated server, native Electron client:**
+**Isolated server, native Electron client:**
 
 1. **Start server in Docker:**
    ```bash
@@ -70,6 +69,7 @@ The installer will:
 - Screen sharing with quality controls
 - Message replies and threading
 - Offline message delivery
+- Lots of other features
 
 ### Privacy & Security
 - End-to-end encryption with Signal Protocol
@@ -122,7 +122,7 @@ The installer will:
 
 ### Docker Configuration
 
-**Environment Variables for Docker:**
+**Environment Variables for Docker (Already handled by setup_chat_docker.sh automatically):**
 ```bash
 # Create a .env file for custom configuration
 DB_BACKEND=sqlite|postgres
@@ -171,7 +171,7 @@ docker logs chat-server
 - **Server**: Benefits from containerization (isolation, consistent environment, easy deployment)
 - **Client**: Electron apps work best natively (GUI access, system integration, performance)
 
-### Server Setup (No need to do this as is already handled by server script unless you want to do it manually)
+### Local Server Setup (No need to do this as is already handled by server script unless you want to do it manually)
 ```bash
 # Environment Variables
 DB_BACKEND=sqlite|postgres
@@ -203,12 +203,14 @@ pnpm run build:electron
 - Encrypted WebSocket connections
 - Optional Tor routing with circuit rotation
 - Rate limiting and DDoS protection
+- Lots of other security measures
 
 ### Data Protection
 - No plaintext storage on server
 - Encrypted local database (IndexedDB)
 - Automatic secure deletion
 - Minimal metadata collection
+- Server never knows original usernames
 
 ### Open Source & Auditable
 - Full source code available for review

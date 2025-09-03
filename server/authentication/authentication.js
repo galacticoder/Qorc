@@ -61,13 +61,15 @@ export class AccountAuthHandler {
         return rejectConnection(ws, SignalType.AUTH_ERROR, "Authentication failed");
       }
 
+      console.log('[AUTH] Decryption succeeded');
+      
       const username = userPayload.usernameSent;
       const password = passwordPayload.content;
       const hybridPublicKeys = userPayload.hybridPublicKeys;
       
       // SECURITY: Validate extracted fields
       if (!username || typeof username !== 'string' || username.length > 32) {
-        console.error('[AUTH] Invalid username in authentication data');
+        console.error(`[AUTH] Invalid username in authentication data (type: ${typeof username}, length: ${username?.length || 0})`);
         return rejectConnection(ws, SignalType.AUTH_ERROR, "Authentication failed");
       }
       
@@ -113,11 +115,11 @@ export class AccountAuthHandler {
       } catch {}
 
       if (!authUtils.validateUsernameFormat(username)) {
-        console.error(`[AUTH] Invalid username format: ${username}`);
+        console.error(`[AUTH] Invalid username format: "${username}" (length: ${username.length}, regex test: ${/^[a-zA-Z0-9_-]+$/.test(username)})`);
         return rejectConnection(ws, SignalType.INVALIDNAME, SignalMessages.INVALIDNAME);
       }
       if (!authUtils.validateUsernameLength(username)) {
-        console.error(`[AUTH] Invalid username length: ${username}`);
+        console.error(`[AUTH] Invalid username length: "${username}" (length: ${username.length}, expected: 3-32)`);
         return rejectConnection(ws, SignalType.INVALIDNAMELENGTH, SignalMessages.INVALIDNAMELENGTH);
       }
 

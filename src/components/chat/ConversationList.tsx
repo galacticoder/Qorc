@@ -19,7 +19,7 @@ interface ConversationListProps {
   selectedConversation?: string;
   onSelectConversation: (username: string) => void;
   onRemoveConversation?: (username: string) => void;
-  currentUsername?: string;
+  getDisplayUsername?: (username: string) => Promise<string>;
 }
 
 // Memoized conversation item to prevent unnecessary re-renders
@@ -29,7 +29,8 @@ const ConversationItem = memo(({
   onSelect,
   onRemove,
   formatTime,
-  callStatus
+  callStatus,
+  getDisplayUsername
 }: {
   conversation: Conversation;
   isSelected: boolean;
@@ -37,7 +38,32 @@ const ConversationItem = memo(({
   onRemove?: (username: string) => void;
   formatTime: (date?: Date) => string;
   callStatus?: 'ringing' | 'connecting' | 'connected' | null;
-}) => (
+  getDisplayUsername?: (username: string) => Promise<string>;
+}) => {
+  const [displayName, setDisplayName] = useState(conversation.username);
+
+  useEffect(() => {
+    let mounted = true;
+    
+    if (getDisplayUsername) {
+      getDisplayUsername(conversation.username)
+        .then((displayName) => {
+          if (mounted) {
+            setDisplayName(displayName);
+          }
+        })
+        .catch((error) => {
+          console.error('Failed to get display username:', error);
+          // Ignore error, keep original username
+        });
+    }
+    
+    return () => {
+      mounted = false;
+    };
+  }, [conversation.username, getDisplayUsername]);
+
+  return (
   <div
     className={cn(
       "flex items-center gap-3 p-3 cursor-pointer transition-all duration-200 group relative",
@@ -63,11 +89,11 @@ const ConversationItem = memo(({
     <div 
       className="w-10 h-10 rounded-full flex items-center justify-center font-medium text-sm flex-shrink-0"
       style={{
-        backgroundColor: isSelected ? 'rgba(255, 255, 255, 0.2)' : 'var(--color-accent-secondary)',
+        backgroundColor: isSelected ? 'rgba(255, 255, 255, 0.2)' : `hsl(${Math.abs(conversation.username.split('').reduce((a, b) => a + b.charCodeAt(0), 0)) % 360}, 65%, 55%)`,
         color: isSelected ? 'white' : 'white'
       }}
     >
-      {conversation.username.charAt(0).toUpperCase()}
+      {(displayName || conversation.username).trim().charAt(0).toUpperCase()}
     </div>
     
     {/* Content */}
@@ -78,7 +104,7 @@ const ConversationItem = memo(({
           className="font-medium text-sm truncate"
           style={{ color: isSelected ? 'white' : 'var(--color-text-primary)' }}
         >
-          {conversation.username}
+          {displayName}
         </span>
         {conversation.lastMessageTime && (
           <span 
@@ -140,14 +166,15 @@ const ConversationItem = memo(({
       </Button>
     )}
   </div>
-));
+  );
+});
 
 export const ConversationList = memo(function ConversationList({
   conversations,
   selectedConversation,
   onSelectConversation,
   onRemoveConversation,
-  currentUsername
+  getDisplayUsername
 }: ConversationListProps) {
   // Track active call peer/status via global call-status events
   const [activePeer, setActivePeer] = useState<string | null>(null);
@@ -231,6 +258,7 @@ export const ConversationList = memo(function ConversationList({
                   onRemove={handleRemoveClick}
                   formatTime={formatTime}
                   callStatus={conversation.username === activePeer ? activeStatus : null}
+                  getDisplayUsername={getDisplayUsername}
                 />
               ))}
             </div>

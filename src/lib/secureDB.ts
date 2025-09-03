@@ -902,4 +902,40 @@ export class SecureDB {
       throw error;
     }
   }
+
+  /**
+   * Cache a username hash to avoid repeated expensive hashing operations
+   */
+  async cacheUsernameHash(originalUsername: string, hashedUsername: string): Promise<void> {
+    await this.store('username_hashes', originalUsername, hashedUsername);
+  }
+
+  /**
+   * Retrieve a cached username hash
+   */
+  async getCachedUsernameHash(originalUsername: string): Promise<string | null> {
+    return await this.retrieve('username_hashes', originalUsername);
+  }
+
+  /**
+   * Check if a username hash is cached
+   */
+  async hasUsernameHash(originalUsername: string): Promise<boolean> {
+    const cached = await this.getCachedUsernameHash(originalUsername);
+    return cached !== null;
+  }
+
+  /**
+   * Store a reverse mapping from hash to original username for display purposes
+   */
+  async storeUsernameMapping(hashedUsername: string, originalUsername: string): Promise<void> {
+    await this.store('username_mappings', hashedUsername, originalUsername);
+  }
+
+  /**
+   * Get the original username from a hash for display purposes
+   */
+  async getOriginalUsername(hashedUsername: string): Promise<string | null> {
+    return await this.retrieve('username_mappings', hashedUsername);
+  }
 }

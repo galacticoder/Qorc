@@ -1,113 +1,137 @@
 import { useState, useCallback, useEffect, useMemo } from "react";
-import { Conversation } from "@/components/chat/ConversationList";
-import { Message } from "@/components/chat/types";
-import { User } from "@/components/chat/UserList";
-import { SignalType } from "@/lib/signals";
-import websocketClient from "@/lib/websocket";
+import { Conversation } from "../components/chat/ConversationList";
+import { Message } from "../components/chat/types";
+import { User } from "../components/chat/UserList";
+import { SignalType } from "../lib/signals";
+import websocketClient from "../lib/websocket";
+import { pseudonymizeUsernameWithCache } from "../lib/username-hash";
+import { SecureDB } from "../lib/secureDB";
 
-export const useConversations = (currentUsername: string, users: User[], messages: Message[]) => {
+export const useConversations = (currentUsername: string, users: User[], messages: Message[], secureDB?: SecureDB) => {
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [selectedConversation, setSelectedConversation] = useState<string | null>(null);
   const [removedConversations, setRemovedConversations] = useState<Set<string>>(new Set());
 
-  // Add a new conversation with user validation
+  // Add a new conversation with user validation (use pseudonymized username for server)
   const addConversation = useCallback((username: string, autoSelect: boolean = true): Promise<Conversation | null> => {
-    return new Promise((resolve, reject) => {
-      if (!username || username === currentUsername) {
-        resolve(null);
-        return;
-      }
-
-      // If this conversation was previously removed, remove it from the removed set
-      // to allow re-adding it
-      if (removedConversations.has(username)) {
-        setRemovedConversations(prev => {
-          const newSet = new Set(prev);
-          newSet.delete(username);
-          return newSet;
-        });
-      }
-
-      // Check if conversation already exists
-      const existingConversation = conversations.find(conv => conv.username === username);
-      if (existingConversation) {
-        if (autoSelect) {
-          setSelectedConversation(username);
-        }
-        resolve(existingConversation);
-        return;
-      }
-
-      let timeoutId: number | null = null;
-
-      // Validate user exists before creating conversation
-      const handleUserExistsResponse = (event: CustomEvent) => {
-        const { username: responseUsername, exists, error } = event.detail;
-
-        if (responseUsername !== username) return; // Not for this request
-
-        // Remove event listener and clear timeout
-        window.removeEventListener('user-exists-response', handleUserExistsResponse as EventListener);
-        if (timeoutId !== null) {
-          clearTimeout(timeoutId);
-          timeoutId = null;
-        }
-
-        if (error) {
-          console.error('[useConversations] Error checking user existence:', error);
-          reject(new Error(`Failed to validate user: ${error}`));
+    return new Promise(async (resolve, reject) => {
+      try {
+        if (!username) {
+          resolve(null);
           return;
         }
 
-        if (!exists) {
-          console.warn('[useConversations] User does not exist:', username);
-          reject(new Error(`User "${username}" does not exist. Please check the username and try again.`));
+        // Compute pseudonym for this username; server must never see original
+        const pseudonym = await pseudonymizeUsernameWithCache(username);
+
+        if (pseudonym === currentUsername) {
+          resolve(null);
           return;
         }
 
-        // User exists, create conversation
-        const newConversation: Conversation = {
-          id: crypto.randomUUID(),
-          username,
-          isOnline: users.some(user => user.username === username && user.isOnline),
-          lastMessage: undefined,
-          lastMessageTime: undefined,
-          unreadCount: 0
+        // Store username mapping for display purposes if we have secureDB
+        if (secureDB && username !== pseudonym) {
+          try {
+            console.log(`[useConversations] Storing username mapping: ${pseudonym} -> ${username}`);
+            await secureDB.storeUsernameMapping(pseudonym, username);
+          } catch (error) {
+            console.error('[useConversations] Failed to store username mapping:', error);
+          }
+        }
+
+        // If this conversation was previously removed, allow re-adding it
+        if (removedConversations.has(pseudonym)) {
+          setRemovedConversations(prev => {
+            const newSet = new Set(prev);
+            newSet.delete(pseudonym);
+            return newSet;
+          });
+        }
+
+        // Check if conversation already exists by pseudonym
+        const existingConversation = conversations.find(conv => conv.username === pseudonym);
+        if (existingConversation) {
+          if (autoSelect) {
+            setSelectedConversation(pseudonym);
+          }
+          resolve(existingConversation);
+          return;
+        }
+
+        let timeoutId: number | null = null;
+
+        // Validate user exists before creating conversation
+        const handleUserExistsResponse = (event: CustomEvent) => {
+          const { username: responseUsername, exists, error } = event.detail;
+
+          if (responseUsername !== pseudonym) return; // Not for this request
+
+          // Remove event listener and clear timeout
+          window.removeEventListener('user-exists-response', handleUserExistsResponse as EventListener);
+          if (timeoutId !== null) {
+            clearTimeout(timeoutId);
+            timeoutId = null;
+          }
+
+          if (error) {
+            console.error('[useConversations] Error checking user existence:', error);
+            reject(new Error(`Failed to validate user: ${error}`));
+            return;
+          }
+
+          if (!exists) {
+            console.warn('[useConversations] User does not exist (pseudonym):', pseudonym);
+            reject(new Error(`User does not exist. Please check the username and try again.`));
+            return;
+          }
+
+          // User exists, create conversation (store pseudonym as the key)
+          const newConversation: Conversation = {
+            id: crypto.randomUUID(),
+            username: pseudonym,
+            isOnline: users.some(user => user.username === pseudonym && user.isOnline),
+            lastMessage: undefined,
+            lastMessageTime: undefined,
+            unreadCount: 0
+          };
+
+          setConversations(prev => [...prev, newConversation]);
+          if (autoSelect && selectedConversation !== pseudonym) {
+            setSelectedConversation(pseudonym);
+          }
+          resolve(newConversation);
         };
 
-        setConversations(prev => [...prev, newConversation]);
-        if (autoSelect && selectedConversation !== username) {
-          setSelectedConversation(username);
+        // Listen for response
+        window.addEventListener('user-exists-response', handleUserExistsResponse as EventListener);
+
+        // Send request to check if user exists (send only pseudonym)
+        try {
+          websocketClient.send(JSON.stringify({
+            type: SignalType.CHECK_USER_EXISTS,
+            username: pseudonym
+          }));
+        } catch (error) {
+          window.removeEventListener('user-exists-response', handleUserExistsResponse as EventListener);
+          if (timeoutId !== null) {
+            clearTimeout(timeoutId);
+            timeoutId = null;
+          }
+          console.error('[useConversations] Failed to send user existence check:', error);
+          reject(new Error('Failed to validate user existence. Please try again.'));
+          return;
         }
-        resolve(newConversation);
-      };
 
-      // Listen for response
-      window.addEventListener('user-exists-response', handleUserExistsResponse as EventListener);
-
-      // Send request to check if user exists
-      try {
-        websocketClient.send(JSON.stringify({
-          type: SignalType.CHECK_USER_EXISTS,
-          username: username
-        }));
-      } catch (error) {
-        window.removeEventListener('user-exists-response', handleUserExistsResponse as EventListener);
-        if (timeoutId !== null) {
-          clearTimeout(timeoutId);
+        // Set timeout to prevent hanging
+        timeoutId = window.setTimeout(() => {
+          window.removeEventListener('user-exists-response', handleUserExistsResponse as EventListener);
           timeoutId = null;
-        }
-        console.error('[useConversations] Failed to send user existence check:', error);
-        reject(new Error('Failed to validate user existence. Please try again.'));
-        return;
+          reject(new Error('User validation timed out. Please try again.'));
+        }, 10000); // 10 second timeout
+      } catch (err) {
+        console.error('[useConversations] Failed to pseudonymize username:', err);
+        reject(new Error('Failed to prepare conversation. Please try again.'));
       }
-
-      // Set timeout to prevent hanging
-      timeoutId = window.setTimeout(() => {
-        window.removeEventListener('user-exists-response', handleUserExistsResponse as EventListener);
-        timeoutId = null;
-        reject(new Error('User validation timed out. Please try again.'));
-      }, 10000); // 10 second timeout
     });
   }, [conversations, users, currentUsername, selectedConversation, removedConversations]);
 

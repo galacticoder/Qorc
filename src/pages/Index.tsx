@@ -1,25 +1,27 @@
 import React, { useState, useCallback, useEffect } from "react";
-import { Login } from "@/components/chat/Login";
-import { Sidebar } from "@/components/chat/UserList";
-import { ConversationList } from "@/components/chat/ConversationList";
-import { ChatInterface } from "@/components/chat/ChatInterface";
-import { AppSettings } from "@/components/settings/AppSettings";
-import { Message } from "@/components/chat/types";
-import { cn } from "@/lib/utils";
+import { Login } from "../components/chat/Login";
+import { Sidebar } from "../components/chat/UserList";
+import { ConversationList } from "../components/chat/ConversationList";
+import { ChatInterface } from "../components/chat/ChatInterface";
+import { AppSettings } from "../components/settings/AppSettings";
+import { Message } from "../components/chat/types";
+import { cn } from "../lib/utils";
 
-import { useAuth } from "@/hooks/useAuth";
-import { useSecureDB } from "@/hooks/useSecureDB";
-import { useFileHandler } from "@/hooks/useFileHandler";
-import { useMessageSender } from "@/hooks/useMessageSender";
-import { useEncryptedMessageHandler } from "@/hooks/useEncryptedMessageHandler";
-import { useChatSignals } from "@/hooks/useChatSignals";
-import { useWebSocket } from "@/hooks/useWebsocket";
-import { useConversations } from "@/hooks/useConversations";
-import { useMessageHistory } from "@/hooks/useMessageHistory";
-import { TypingIndicatorProvider } from "@/contexts/TypingIndicatorContext";
-import { torNetworkManager } from "@/lib/tor-network";
-import { TorAutoSetup } from "@/components/setup/TorAutoSetup";
-import { getTorAutoSetup } from "@/lib/tor-auto-setup";
+import { useAuth } from "../hooks/useAuth";
+import { useSecureDB } from "../hooks/useSecureDB";
+import { useFileHandler } from "../hooks/useFileHandler";
+import { useMessageSender } from "../hooks/useMessageSender";
+import { useEncryptedMessageHandler } from "../hooks/useEncryptedMessageHandler";
+import { useChatSignals } from "../hooks/useChatSignals";
+import { useWebSocket } from "../hooks/useWebsocket";
+import { useConversations } from "../hooks/useConversations";
+import { useMessageHistory } from "../hooks/useMessageHistory";
+import { useUsernameDisplay } from "../hooks/useUsernameDisplay";
+import { storeUsernameMapping } from "../lib/username-display";
+import { TypingIndicatorProvider } from "../contexts/TypingIndicatorContext";
+import { torNetworkManager } from "../lib/tor-network";
+import { TorAutoSetup } from "../components/setup/TorAutoSetup";
+import { getTorAutoSetup } from "../lib/tor-auto-setup";
 // offline message queue removed
 
 interface ChatAppProps {
@@ -33,8 +35,122 @@ const ChatApp: React.FC<ChatAppProps> = () => {
   const [, setTorSetupComplete] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
 
-
+  // Initialize Authentication first (without SecureDB dependency)
   const Authentication = useAuth();
+  
+  const Database = useSecureDB({
+    Authentication,
+    setMessages,
+  });
+
+  // Initialize all hooks before any conditional returns
+  const fileHandler = useFileHandler(
+    Authentication.getKeysOnDemand,
+    Database.saveMessageToLocalDB,
+    Authentication.setLoginError
+  );
+
+  const messageSender = useMessageSender(
+    [], // Do not rely on in-memory user list for scalability
+    Authentication.loginUsernameRef,
+    (message: Message) => {
+      // Add the message to the UI state
+      setMessages(prev => [...prev, message]);
+    },
+    Authentication.serverHybridPublic,
+    Authentication.getKeysOnDemand,
+    Authentication.aesKeyRef,
+    Authentication.keyManagerRef,
+    Authentication.passphrasePlaintextRef,
+    Authentication.isLoggedIn
+  );
+
+  const encryptedHandler = useEncryptedMessageHandler(
+    Authentication.loginUsernameRef,
+    setMessages,
+    Database.saveMessageToLocalDB,
+    Authentication.isLoggedIn && Authentication.accountAuthenticated
+  );
+
+  // Message history synchronization
+  const messageHistory = useMessageHistory(
+    Authentication.loginUsernameRef.current || '',
+    Authentication.isLoggedIn,
+    setMessages,
+    Database.saveMessageToLocalDB,
+    Authentication.isLoggedIn && Authentication.accountAuthenticated
+  );
+
+  const signalHandler = useChatSignals({
+    Authentication,
+    Database,
+    fileHandler,
+    encryptedHandler,
+    handleMessageHistory: messageHistory.handleMessageHistory
+  });
+
+  // Conversation management
+  const {
+    conversations,
+    selectedConversation,
+    addConversation,
+    selectConversation,
+    removeConversation,
+    getConversationMessages,
+  } = useConversations(Authentication.loginUsernameRef.current || '', Database.users, messages, Database.secureDBRef.current || undefined);
+
+  // Username display system
+  const usernameDisplay = useUsernameDisplay(
+    Database.secureDBRef.current,
+    Authentication.originalUsernameRef.current
+  );
+  
+
+  // Store username mappings for known usernames when SecureDB is available
+  useEffect(() => {
+    if (Database.secureDBRef.current) {
+      const storeKnownMappings = async () => {
+        try {
+          // Store mapping for current user if available
+          if (Authentication.originalUsernameRef.current) {
+            if (Database.secureDBRef.current) {
+              await Authentication.storeUsernameMapping(Database.secureDBRef.current);
+            }
+            console.log('[Index] Stored current user mapping');
+          }
+          
+          // Store mappings for test users to ensure they work
+          const testUsers = ['user1', 'user2'];
+          for (const user of testUsers) {
+            try {
+              await storeUsernameMapping(user, Database.secureDBRef.current);
+              console.log(`[Index] Stored test mapping for: ${user}`);
+            } catch (error) {
+              console.error(`[Index] Failed to store mapping for ${user}:`, error);
+            }
+          }
+          
+        } catch (error) {
+          console.error('[Index] Failed to store username mappings:', error);
+        }
+      };
+      storeKnownMappings();
+    }
+  }, [Database.secureDBRef.current, Authentication.originalUsernameRef.current]);
+
+  // Get messages for the selected conversation
+  const conversationMessages = getConversationMessages(selectedConversation || '');
+
+  const handleSendFileWrapper = useCallback(
+    (fileMessage: Message) => {
+      return fileHandler.handleSendFile(
+        fileMessage,
+        Authentication.loginUsernameRef.current,
+        Database.saveMessageToLocalDB
+      );
+    },
+    [fileHandler, Authentication.loginUsernameRef, Database.saveMessageToLocalDB]
+  );
 
   // Handle conversation message clearing
   useEffect(() => {
@@ -129,84 +245,21 @@ const ChatApp: React.FC<ChatAppProps> = () => {
     };
   }, []);
 
-  const handleTorSetupComplete = async (success: boolean) => {
-    if (success) {
-      // Hide Tor setup screen on success
-      setShowTorSetup(false);
-      setTorSetupComplete(true);
-      localStorage.setItem('tor_enabled', 'true');
-
-      // Notify Electron main process that Tor setup is complete
-      try {
-        await (window as any).edgeApi?.torSetupComplete?.();
-      } catch (error) {
-        console.error('[TOR-SETUP] Failed to notify main process:', error);
-      }
-
-      // Initialize the network manager
-      torNetworkManager.updateConfig({ enabled: true });
-      await torNetworkManager.initialize();
-    } else {
-      // On failure, check if user explicitly skipped or if it was an error
-      const userSkipped = localStorage.getItem('tor_setup_skipped') === 'true';
-
-      if (userSkipped) {
-        // User chose to skip - proceed to login
-        console.log('[TOR-SETUP] User skipped Tor setup, proceeding to login');
-        setShowTorSetup(false);
-        setTorSetupComplete(false);
-        localStorage.setItem('tor_enabled', 'false');
-
-        // Notify Electron main process that Tor setup is complete (even if skipped)
-        try {
-          await (window as any).edgeApi?.torSetupComplete?.();
-        } catch (error) {
-          console.error('[TOR-SETUP] Failed to notify main process:', error);
-        }
-      } else {
-        // Setup failed - stay on Tor setup screen
-        console.log('[TOR-SETUP] Setup failed, staying on Tor setup screen');
-        setTorSetupComplete(false);
-        localStorage.setItem('tor_enabled', 'false');
-        // Don't set setShowTorSetup(false) - keep showing the setup screen
-      }
+  // Initialize WebSocket only after Tor setup has completed or been skipped
+  useEffect(() => {
+    if (!showTorSetup) {
+      try { (window as any).edgeApi?.wsConnect?.(); } catch {}
     }
-  };
+  }, [showTorSetup]);
 
-  const Database = useSecureDB({
-    Authentication,
-    setMessages,
-  });
+  useWebSocket(signalHandler, encryptedHandler, Authentication.setLoginError);
 
-  const fileHandler = useFileHandler(
-    Authentication.getKeysOnDemand,
-    Database.saveMessageToLocalDB,
-    Authentication.setLoginError
-  );
-
-  // offline queue removed
-
-  const messageSender = useMessageSender(
-    [], // Do not rely on in-memory user list for scalability
-    Authentication.loginUsernameRef,
-    (message: Message) => {
-      // Add the message to the UI state
-      setMessages(prev => [...prev, message]);
-    },
-    Authentication.serverHybridPublic,
-    Authentication.getKeysOnDemand,
-    Authentication.aesKeyRef,
-    Authentication.keyManagerRef,
-    Authentication.passphrasePlaintextRef,
-    Authentication.isLoggedIn
-  );
-
-  const encryptedHandler = useEncryptedMessageHandler(
-    Authentication.loginUsernameRef,
-    setMessages,
-    Database.saveMessageToLocalDB,
-    Authentication.isLoggedIn && Authentication.accountAuthenticated
-  );
+  // Store username mapping when user is logged in and SecureDB is ready
+  useEffect(() => {
+    if (Authentication.isLoggedIn && Database.secureDBRef.current && Authentication.originalUsernameRef.current) {
+      Authentication.storeUsernameMapping(Database.secureDBRef.current);
+    }
+  }, [Authentication.isLoggedIn, Database.secureDBRef.current, Authentication.originalUsernameRef.current]);
 
   // Handle local message deletion events (for sender side)
   useEffect(() => {
@@ -319,55 +372,49 @@ const ChatApp: React.FC<ChatAppProps> = () => {
     };
   }, [setMessages]);
 
-  // Message history synchronization
-  const messageHistory = useMessageHistory(
-    Authentication.loginUsernameRef.current || '',
-    Authentication.isLoggedIn,
-    setMessages,
-    Database.saveMessageToLocalDB,
-    Authentication.isLoggedIn && Authentication.accountAuthenticated
-  );
+  const handleTorSetupComplete = async (success: boolean) => {
+    if (success) {
+      // Hide Tor setup screen on success
+      setShowTorSetup(false);
+      setTorSetupComplete(true);
+      localStorage.setItem('tor_enabled', 'true');
 
-  const signalHandler = useChatSignals({
-    Authentication,
-    Database,
-    fileHandler,
-    encryptedHandler,
-    handleMessageHistory: messageHistory.handleMessageHistory
-  });
+      // Notify Electron main process that Tor setup is complete
+      try {
+        await (window as any).edgeApi?.torSetupComplete?.();
+      } catch (error) {
+        console.error('[TOR-SETUP] Failed to notify main process:', error);
+      }
 
-  const handleSendFileWrapper = useCallback(
-    (fileMessage: Message) => {
-      return fileHandler.handleSendFile(
-        fileMessage,
-        Authentication.loginUsernameRef.current,
-        Database.saveMessageToLocalDB
-      );
-    },
-    [fileHandler, Authentication.loginUsernameRef, Database.saveMessageToLocalDB]
-  );
+      // Initialize the network manager
+      torNetworkManager.updateConfig({ enabled: true });
+      await torNetworkManager.initialize();
+    } else {
+      // On failure, check if user explicitly skipped or if it was an error
+      const userSkipped = localStorage.getItem('tor_setup_skipped') === 'true';
 
-  // Initialize WebSocket only after Tor setup has completed or been skipped
-  useEffect(() => {
-    if (!showTorSetup) {
-      try { (window as any).edgeApi?.wsConnect?.(); } catch {}
+      if (userSkipped) {
+        // User chose to skip - proceed to login
+        console.log('[TOR-SETUP] User skipped Tor setup, proceeding to login');
+        setShowTorSetup(false);
+        setTorSetupComplete(false);
+        localStorage.setItem('tor_enabled', 'false');
+
+        // Notify Electron main process that Tor setup is complete (even if skipped)
+        try {
+          await (window as any).edgeApi?.torSetupComplete?.();
+        } catch (error) {
+          console.error('[TOR-SETUP] Failed to notify main process:', error);
+        }
+      } else {
+        // Setup failed - stay on Tor setup screen
+        console.log('[TOR-SETUP] Setup failed, staying on Tor setup screen');
+        setTorSetupComplete(false);
+        localStorage.setItem('tor_enabled', 'false');
+        // Don't set setShowTorSetup(false) - keep showing the setup screen
+      }
     }
-  }, [showTorSetup]);
-
-  useWebSocket(signalHandler, encryptedHandler, Authentication.setLoginError);
-
-  // Conversation management
-  const {
-    conversations,
-    selectedConversation,
-    addConversation,
-    selectConversation,
-    removeConversation,
-    getConversationMessages,
-  } = useConversations(Authentication.loginUsernameRef.current || '', Database.users, messages);
-
-  // Get messages for the selected conversation
-  const conversationMessages = getConversationMessages(selectedConversation || '');
+  };
   
   // Debug conversation state
   console.log('[Index] Conversation state:', {
@@ -376,8 +423,6 @@ const ChatApp: React.FC<ChatAppProps> = () => {
     usersCount: Database.users.length,
     hasSelectedConversation: !!selectedConversation
   });
-
-  // offline queue effects removed
 
   // Show Tor setup screen first if needed
   if (showTorSetup) {
@@ -422,7 +467,7 @@ const ChatApp: React.FC<ChatAppProps> = () => {
         style={{ backgroundColor: 'var(--color-background)' }}
       >
         <Sidebar
-          currentUsername={Authentication.loginUsernameRef.current || ''}
+          currentUsername={Authentication.originalUsernameRef.current || Authentication.loginUsernameRef.current || ''}
           onAddConversation={addConversation}
           onLogout={async () => await Authentication.logout(Database.secureDBRef)}
           onActiveTabChange={setSidebarActiveTab}
@@ -432,7 +477,7 @@ const ChatApp: React.FC<ChatAppProps> = () => {
             selectedConversation={selectedConversation || undefined}
             onSelectConversation={selectConversation}
             onRemoveConversation={removeConversation}
-            currentUsername={Authentication.loginUsernameRef.current || ''}
+            getDisplayUsername={usernameDisplay.getDisplayUsername}
           />
         </Sidebar>
 
@@ -452,6 +497,7 @@ const ChatApp: React.FC<ChatAppProps> = () => {
               messages={conversationMessages}
               setMessages={setMessages}
               callingAuthContext={Authentication}
+              getDisplayUsername={usernameDisplay.isReady ? usernameDisplay.getDisplayUsername : undefined}
               onSendMessage={async (messageId, content, messageSignalType, replyTo) => {
                 console.log('[Index] Attempting to send message:', {
                   messageId,

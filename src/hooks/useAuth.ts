@@ -1,9 +1,10 @@
 import { useState, useRef, useCallback, useEffect, MutableRefObject } from "react";
-import { SignalType } from "@/lib/signals";
-import websocketClient from "@/lib/websocket";
-import { CryptoUtils } from "@/lib/unified-crypto";
-import { SecureDB } from "@/lib/secureDB";
-import { SecureKeyManager } from "@/lib/secure-key-manager";
+import { SignalType } from "../lib/signals";
+import websocketClient from "../lib/websocket";
+import { CryptoUtils } from "../lib/unified-crypto";
+import { SecureDB } from "../lib/secureDB";
+import { SecureKeyManager } from "../lib/secure-key-manager";
+import { pseudonymizeUsername, pseudonymizeUsernameWithCache } from "../lib/username-hash";
 // Legacy pinned server removed; use simple in-memory pinning here
 const PinnedServer = {
   get() {
@@ -32,7 +33,7 @@ const PinnedServer = {
   }
 };
 
-export const useAuth = () => {
+export const useAuth = (secureDB?: SecureDB) => {
   const [username, setUsername] = useState("");
   const [isLoggedIn, setIsLoggedIn] = useState(false);
   const [isGeneratingKeys, setIsGeneratingKeys] = useState(false);
@@ -77,6 +78,8 @@ export const useAuth = () => {
 
   const keyManagerRef = useRef<SecureKeyManager | null>(null);
   const loginUsernameRef = useRef("");
+  // Keep original username only on client; never send to server
+  const originalUsernameRef = useRef<string>("");
 
   const getKeysOnDemand = useCallback(async () => {
     console.log('[AUTH] Getting keys on demand');
@@ -230,18 +233,27 @@ export const useAuth = () => {
 
   const handleAccountSubmit = async (
     mode: "login" | "register",
-    username: string,
+    userInput: string,
     password: string,
     passphrase?: string
   ) => {
-    console.log(`[AUTH] Starting ${mode} process for user: ${username}`);
+    console.log(`[AUTH] Starting ${mode} process for user (client-only original): ${userInput}`);
     setLoginError("");
     setIsRegistrationMode(mode === "register");
     setAuthStatus(mode === "register" ? "Creating new account..." : "Authenticating account...");
 
-    // legacy ratchet sessions no longer used
-    loginUsernameRef.current = username;
-    setUsername(username);
+    // Store original username locally only; never send to server
+    originalUsernameRef.current = userInput;
+
+    // Compute pseudonym for all server-facing operations
+    // Use non-cached version during login since SecureDB isn't initialized yet
+    console.log(`[AUTH] Computing pseudonym for username: "${userInput}"`);
+    const pseudonym = await pseudonymizeUsername(userInput);
+    console.log(`[AUTH] Generated pseudonym: "${pseudonym}" (length: ${pseudonym.length})`);
+
+    // Use pseudonym as canonical identity
+    loginUsernameRef.current = pseudonym;
+    setUsername(pseudonym);
     passwordRef.current = password;
     passphraseRef.current = passphrase || "";
 
@@ -264,12 +276,15 @@ export const useAuth = () => {
       }
 
       const userPayload = {
-        usernameSent: username,
+        // Only send pseudonym to server
+        usernameSent: pseudonym,
         hybridPublicKeys: {
           x25519PublicBase64: "",
           kyberPublicBase64: ""
         }
       };
+
+      console.log(`[AUTH] Client userPayload before encryption:`, JSON.stringify(userPayload, null, 2));
 
       setAuthStatus("Encrypting user data with hybrid cryptography...");
       const encryptedPayload = await CryptoUtils.Hybrid.encryptHybridPayload(
@@ -342,7 +357,7 @@ export const useAuth = () => {
       console.log('[AUTH] Sending server password to server');
       setAuthStatus("Authenticating with server...");
       websocketClient.send(JSON.stringify(loginInfo));
-      loginUsernameRef.current = username;
+      // Do not overwrite loginUsernameRef with any original string here
     } catch (error) {
       console.error("Login failed: ", error);
       setLoginError("Password encryption failed");
@@ -390,9 +405,9 @@ export const useAuth = () => {
       if (keyManagerRef.current) {
         try {
           setAuthStatus("Generating Signal Protocol identity...");
-          const idOut = await (window as any).edgeApi.generateIdentity({ username: loginUsernameRef.current });
+          await (window as any).edgeApi.generateIdentity({ username: loginUsernameRef.current });
           setAuthStatus("Creating Signal Protocol prekeys...");
-          const prekeys = await (window as any).edgeApi.generatePreKeys({ username: loginUsernameRef.current });
+          await (window as any).edgeApi.generatePreKeys({ username: loginUsernameRef.current });
           setAuthStatus("Publishing Signal Protocol bundle...");
           const bundle = await (window as any).edgeApi.getPreKeyBundle({ username: loginUsernameRef.current });
           websocketClient.send(JSON.stringify({ type: SignalType.LIBSIGNAL_PUBLISH_BUNDLE, bundle: { ...bundle } }));
@@ -431,7 +446,7 @@ export const useAuth = () => {
     }
   };
 
-  const handleAuthSuccess = (username: string) => {
+  const handleAuthSuccess = async (username: string) => {
     console.log(`[AUTH] Authentication success for user: ${username}`);
     console.log(`[AUTH] Setting authentication flags - isLoggedIn: true, accountAuthenticated: true`);
     
@@ -441,6 +456,7 @@ export const useAuth = () => {
     setIsLoggedIn(true);
     setAccountAuthenticated(true);
     console.log(`[AUTH] Called setIsLoggedIn(true) and setAccountAuthenticated(true)`);
+    
     // Clear status after a brief delay
     setTimeout(() => setAuthStatus(""), 1000);
     setLoginError("");
@@ -451,6 +467,19 @@ export const useAuth = () => {
       });
     }
   };
+
+  // Function to store username mapping (called from outside when SecureDB is ready)
+  const storeUsernameMapping = useCallback(async (secureDBInstance: SecureDB) => {
+    if (originalUsernameRef.current && loginUsernameRef.current) {
+      try {
+        console.log(`[AUTH] Storing username mapping: ${loginUsernameRef.current} -> ${originalUsernameRef.current}`);
+        await secureDBInstance.storeUsernameMapping(loginUsernameRef.current, originalUsernameRef.current);
+        console.log(`[AUTH] Username mapping stored successfully`);
+      } catch (error) {
+        console.error('[AUTH] Failed to store username mapping:', error);
+      }
+    }
+  }, []);
 
   const handlePassphraseSuccess = () => {
     console.log(`[AUTH] Passphrase success - registration mode: ${isRegistrationMode}`);
@@ -635,6 +664,8 @@ export const useAuth = () => {
     accountAuthenticated,
     isRegistrationMode,
     loginUsernameRef,
+    originalUsernameRef,
+    storeUsernameMapping,
     initializeKeys,
     handleAccountSubmit,
     handlePassphraseSubmit,

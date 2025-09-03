@@ -36,6 +36,7 @@ interface ChatInterfaceProps {
   selectedConversation?: string;
   saveMessageToLocalDB: (msg: Message) => Promise<void>;
   callingAuthContext?: ReturnType<typeof useAuth>;
+  getDisplayUsername?: (username: string) => Promise<string>;
 }
 
 export function ChatInterface({
@@ -49,10 +50,12 @@ export function ChatInterface({
   selectedConversation,
   saveMessageToLocalDB,
   callingAuthContext,
+  getDisplayUsername,
 }: ChatInterfaceProps) {
   const scrollAreaRef = useRef<HTMLDivElement>(null);
   const [replyTo, setReplyTo] = useState<Message | null>(null);
   const [editingMessage, setEditingMessage] = useState<Message | null>(null);
+  const [displayConversationName, setDisplayConversationName] = useState<string>("");
 
   // Calling functionality
   const callingHook = useCalling(callingAuthContext);
@@ -124,6 +127,20 @@ export function ChatInterface({
     processedInScrollRef.current.clear();
     lastScrollTimeRef.current = 0;
   }, [selectedConversation, handleConversationChange]);
+
+  // Resolve display name for selected conversation
+  useEffect(() => {
+    if (selectedConversation && getDisplayUsername) {
+      getDisplayUsername(selectedConversation)
+        .then(setDisplayConversationName)
+        .catch((error) => {
+          console.error('Failed to resolve conversation display name:', error);
+          setDisplayConversationName(selectedConversation);
+        });
+    } else {
+      setDisplayConversationName(selectedConversation || "");
+    }
+  }, [selectedConversation, getDisplayUsername]);
 
   // Message receipts hook
   const { sendReadReceipt, markMessageAsRead, getSmartReceiptStatus } = useMessageReceipts(messages, setMessages, currentUsername, saveMessageToLocalDB);
@@ -296,7 +313,7 @@ export function ChatInterface({
             className="text-lg font-semibold"
             style={{ color: 'var(--color-text-primary)' }}
           >
-            {selectedConversation || "Chat"}
+            {displayConversationName || "Chat"}
           </h2>
         </div>
         <div className="flex items-center gap-2">
@@ -384,6 +401,7 @@ export function ChatInterface({
                       onSendMessage(message.id, "", SignalType.DELETE_MESSAGE, null) // add reply field later
                     }
                     onEdit={() => setEditingMessage(message)}
+                    getDisplayUsername={getDisplayUsername}
                   />
                 </div>
               );

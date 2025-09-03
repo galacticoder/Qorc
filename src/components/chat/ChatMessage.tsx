@@ -1,5 +1,5 @@
-import React from "react";
-import { cn } from "@/lib/utils";
+import React, { useState, useEffect } from "react";
+import { cn } from "../../lib/utils";
 import { Avatar, AvatarFallback } from "../ui/avatar";
 import { format, isSameMinute } from "date-fns";
 import Linkify from "linkify-react";
@@ -12,20 +12,49 @@ import { FileMessage } from "./ChatMessage/FileMessage.tsx";
 import { VoiceMessage } from "./VoiceMessage.tsx";
 import { MessageReceipt } from "./MessageReceipt.tsx";
 
-export function ChatMessage({ message, onReply, previousMessage, onDelete, onEdit }: ChatMessageProps) {
+interface ExtendedChatMessageProps extends ChatMessageProps {
+  getDisplayUsername?: (username: string) => Promise<string>;
+}
+
+export function ChatMessage({ message, onReply, previousMessage, onDelete, onEdit, getDisplayUsername }: ExtendedChatMessageProps) {
   const { content, sender, timestamp, isCurrentUser, isSystemMessage, isDeleted, type } = message;
+  const [displaySender, setDisplaySender] = useState(sender);
+  const [displayReplyToSender, setDisplayReplyToSender] = useState(message.replyTo?.sender || "");
+
+  // Load display usernames
+  useEffect(() => {
+    if (getDisplayUsername) {
+      getDisplayUsername(sender)
+        .then(setDisplaySender)
+        .catch((error) => {
+          console.error('Failed to get display username for sender:', error);
+          setDisplaySender(sender);
+        });
+      if (message.replyTo?.sender) {
+        getDisplayUsername(message.replyTo.sender)
+          .then(setDisplayReplyToSender)
+          .catch((error) => {
+            console.error('Failed to get display username for reply sender:', error);
+            setDisplayReplyToSender(message.replyTo?.sender || "");
+          });
+      }
+    }
+  }, [sender, message.replyTo?.sender, getDisplayUsername]);
 
   const isGrouped =
     previousMessage &&
     previousMessage.sender === sender &&
     isSameMinute(previousMessage.timestamp, timestamp);
 
+  // Ensure isCurrentUser is always boolean
+  const safeIsCurrentUser = isCurrentUser || false;
+
   if (isSystemMessage) {
     return <SystemMessage content={content} />;
   }
 
   if (isDeleted) {
-    return <DeletedMessage sender={sender} timestamp={timestamp} isCurrentUser={isCurrentUser} />;
+    return <DeletedMessage sender={displaySender} timestamp={timestamp} isCurrentUser={isCurrentUser || false} />;
   }
 
   if (type === "FILE_MESSAGE" || type === "file" || type === "file-message") {
@@ -38,9 +67,9 @@ export function ChatMessage({ message, onReply, previousMessage, onDelete, onEdi
       return (
         <VoiceMessage
           audioUrl={message.content}
-          sender={message.sender}
+          sender={displaySender}
           timestamp={message.timestamp}
-          isCurrentUser={isCurrentUser}
+          isCurrentUser={isCurrentUser || false}
           filename={message.filename}
           originalBase64Data={message.originalBase64Data}
           mimeType={message.mimeType}
@@ -48,14 +77,14 @@ export function ChatMessage({ message, onReply, previousMessage, onDelete, onEdi
       );
     }
 
-    return <FileMessage message={message} isCurrentUser={isCurrentUser} />;
+    return <FileMessage message={message} isCurrentUser={isCurrentUser || false} />;
   }
 
   return (
     <div 
       className={cn(
         "flex gap-3 mb-4 group",
-        isCurrentUser ? "flex-row-reverse" : "flex-row"
+        safeIsCurrentUser ? "flex-row-reverse" : "flex-row"
       )}
       style={{ 
         marginBottom: isGrouped ? 'var(--spacing-xs)' : 'var(--spacing-md)'
@@ -67,11 +96,11 @@ export function ChatMessage({ message, onReply, previousMessage, onDelete, onEdi
           <div 
             className="w-10 h-10 rounded-full flex items-center justify-center font-medium text-sm"
             style={{
-              backgroundColor: isCurrentUser ? 'var(--color-accent-primary)' : 'var(--color-accent-secondary)',
+              backgroundColor: safeIsCurrentUser ? 'var(--color-accent-primary)' : 'var(--color-accent-secondary)',
               color: 'white'
             }}
           >
-            {sender.charAt(0).toUpperCase()}
+            {displaySender.charAt(0).toUpperCase()}
           </div>
         )}
       </div>
@@ -80,7 +109,7 @@ export function ChatMessage({ message, onReply, previousMessage, onDelete, onEdi
       <div
         className={cn(
           "flex flex-col min-w-0",
-          isCurrentUser ? "items-end" : "items-start"
+          safeIsCurrentUser ? "items-end" : "items-start"
         )}
         style={{ maxWidth: 'var(--message-bubble-max-width)' }}
       >
@@ -89,14 +118,14 @@ export function ChatMessage({ message, onReply, previousMessage, onDelete, onEdi
           <div 
             className={cn(
               "flex items-center gap-2 mb-1",
-              isCurrentUser ? "flex-row-reverse" : "flex-row"
+              safeIsCurrentUser ? "flex-row-reverse" : "flex-row"
             )}
           >
             <span 
               className="text-sm font-medium"
               style={{ color: 'var(--color-text-primary)' }}
             >
-              {sender}
+              {displaySender}
             </span>
             <span 
               className="text-xs"
@@ -121,7 +150,7 @@ export function ChatMessage({ message, onReply, previousMessage, onDelete, onEdi
               <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 10h10a8 8 0 018 8v2M3 10l6 6m-6-6l6-6" />
               </svg>
-              <span className="font-semibold">{message.replyTo.sender}</span>
+              <span className="font-semibold">{displayReplyToSender}</span>
             </div>
             <p className="line-clamp-2">
               {message.replyTo.content === "Message deleted"
@@ -133,12 +162,12 @@ export function ChatMessage({ message, onReply, previousMessage, onDelete, onEdi
         )}
 
         {/* Message bubble */}
-        <div className={cn("flex items-end gap-2", isCurrentUser ? "flex-row-reverse" : "flex-row")}>
+        <div className={cn("flex items-end gap-2", safeIsCurrentUser ? "flex-row-reverse" : "flex-row")}>
           <div
             className="px-4 py-3 text-sm whitespace-pre-wrap break-words"
             style={{
-              backgroundColor: isCurrentUser ? 'var(--color-accent-primary)' : 'var(--color-surface)',
-              color: isCurrentUser ? 'white' : 'var(--color-text-primary)',
+              backgroundColor: safeIsCurrentUser ? 'var(--color-accent-primary)' : 'var(--color-surface)',
+              color: safeIsCurrentUser ? 'white' : 'var(--color-text-primary)',
               borderRadius: 'var(--message-bubble-radius)',
               wordBreak: "break-word",
               whiteSpace: "pre-wrap",
@@ -216,7 +245,7 @@ export function ChatMessage({ message, onReply, previousMessage, onDelete, onEdi
               </svg>
             </button>
 
-            {isCurrentUser && !isSystemMessage && (
+            {safeIsCurrentUser && !isSystemMessage && (
               <button 
                 onClick={() => onDelete?.(message)} 
                 aria-label="Delete message" 
@@ -235,7 +264,7 @@ export function ChatMessage({ message, onReply, previousMessage, onDelete, onEdi
               </button>
             )}
 
-            {isCurrentUser && !message.isDeleted && (
+            {safeIsCurrentUser && !message.isDeleted && (
               <button 
                 onClick={() => onEdit?.(message.content)} 
                 aria-label="Edit message" 
@@ -257,10 +286,11 @@ export function ChatMessage({ message, onReply, previousMessage, onDelete, onEdi
         </div>
 
         {/* Message metadata */}
-        <div className={cn(
-          "flex items-center gap-2 mt-1 text-xs",
-          isCurrentUser ? "flex-row-reverse" : "flex-row"
-        )}>
+        <div 
+          className={cn(
+            "flex items-center gap-2 mt-1 text-xs",
+            safeIsCurrentUser ? "flex-row-reverse" : "flex-row"
+          )}>
           {/* Timestamp for grouped messages */}
           {isGrouped && (
             <span style={{ color: 'var(--color-text-secondary)' }}>
@@ -282,7 +312,7 @@ export function ChatMessage({ message, onReply, previousMessage, onDelete, onEdi
         {/* Message Receipt */}
         <MessageReceipt
           receipt={message.receipt}
-          isCurrentUser={isCurrentUser}
+          isCurrentUser={isCurrentUser || false}
           className="mt-1"
         />
       </div>
