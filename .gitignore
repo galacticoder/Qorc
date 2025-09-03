@@ -17,6 +17,8 @@ vite.config.ts
 tsconfig.node.json
 tsconfig.app.json
 tsconfig.json
+eslint.config.js
+components.json
 
 # Build outputs
 /dist
