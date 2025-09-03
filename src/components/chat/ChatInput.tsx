@@ -147,15 +147,8 @@ export function ChatInput({
     }
   };
 
-  const validateFile = (file: File): { valid: boolean; error?: string } => {
+  const validateFile = async (file: File): Promise<{ valid: boolean; error?: string }> => {
     const maxSize = 100 * 1024 * 1024; // 100MB max file size
-    const allowedTypes = [
-      'image/jpeg', 'image/png', 'image/gif', 'image/webp',
-      'text/plain', 'application/pdf',
-      'application/zip', 'application/x-zip-compressed',
-      'audio/mpeg', 'audio/wav', 'audio/ogg', 'audio/webm', // Added audio/webm for voice notes
-      'video/mp4', 'video/webm', 'video/ogg'
-    ];
 
     // SECURITY: Comprehensive file validation to prevent spoofing attacks
     if (file.size > maxSize) {
@@ -166,44 +159,103 @@ export function ChatInput({
       return { valid: false, error: 'Empty files are not allowed' };
     }
 
-    if (!allowedTypes.includes(file.type)) {
-      return { valid: false, error: 'File type not allowed' };
-    }
+    // Get file extension early for use throughout validation
+    const fileExtension = (file.name.toLowerCase().split('.').pop() || '').toLowerCase();
 
-    // SECURITY: Validate file extension matches MIME type
-    const fileExtension = file.name.toLowerCase().split('.').pop() || '';
-    const mimeToExtension: Record<string, string[]> = {
-      'image/jpeg': ['jpg', 'jpeg'],
-      'image/png': ['png'],
-      'image/gif': ['gif'],
-      'image/webp': ['webp'],
-      'text/plain': ['txt'],
-      'application/pdf': ['pdf'],
-      'application/zip': ['zip'],
-      'application/x-zip-compressed': ['zip'],
-      'audio/mpeg': ['mp3'],
-      'audio/wav': ['wav'],
-      'audio/ogg': ['ogg'],
-      'audio/webm': ['webm'], // Added for voice notes
-      'video/mp4': ['mp4'],
-      'video/webm': ['webm'],
-      'video/ogg': ['ogv']
-    };
-
-    const expectedExtensions = mimeToExtension[file.type];
-    if (expectedExtensions && !expectedExtensions.includes(fileExtension)) {
-      return { valid: false, error: `File extension '${fileExtension}' does not match MIME type '${file.type}'` };
-    }
-
-    // SECURITY: Check for dangerous file extensions
-    const dangerousExtensions = [
-      'exe', 'bat', 'cmd', 'com', 'pif', 'scr', 'vbs', 'js', 'jar', 'app', 'deb', 'pkg', 'dmg',
-      'msi', 'msp', 'dll', 'sys', 'drv', 'bin', 'run', 'action', 'workflow', 'sh', 'bash', 'zsh',
-      'ps1', 'psm1', 'psd1', 'ps1xml', 'psc1', 'psc2', 'msh', 'msh1', 'msh2', 'mshxml', 'msh1xml', 'msh2xml'
+    // SECURITY: Enhanced MIME type validation with magic byte verification
+    const allowedMimeTypes = [
+      // Images
+      'image/jpeg', 'image/jpg', 'image/png', 'image/gif', 'image/webp', 'image/bmp', 'image/svg+xml',
+      // Documents
+      'application/pdf', 'text/plain', 'application/msword', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      'application/vnd.ms-excel', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      'application/vnd.ms-powerpoint', 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+      // Archives
+      'application/zip', 'application/x-rar-compressed', 'application/x-7z-compressed',
+      // Audio
+      'audio/mpeg', 'audio/wav', 'audio/ogg', 'audio/m4a', 'audio/webm',
+      // Video
+      'video/mp4', 'video/webm', 'video/ogg', 'video/quicktime',
+      // Other safe types
+      'application/json', 'text/csv'
     ];
 
-    if (dangerousExtensions.includes(fileExtension)) {
-      return { valid: false, error: `Dangerous file extension '${fileExtension}' not allowed` };
+    // Helper function to check magic bytes
+    const checkMagicBytes = async (file: File, extension: string): Promise<boolean> => {
+      return new Promise((resolve) => {
+        const reader = new FileReader();
+        reader.onload = (e) => {
+          const arrayBuffer = e.target?.result as ArrayBuffer;
+          if (!arrayBuffer) {
+            resolve(false);
+            return;
+          }
+          
+          const bytes = new Uint8Array(arrayBuffer.slice(0, 16)); // Read first 16 bytes
+          const hex = Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('');
+          
+          // Magic byte signatures for common file types
+          const signatures: Record<string, string[]> = {
+            'jpg': ['ffd8ff'], 'jpeg': ['ffd8ff'],
+            'png': ['89504e47'],
+            'gif': ['474946383761', '474946383961'],
+            'pdf': ['255044462d'],
+            'zip': ['504b0304', '504b0506', '504b0708'],
+            'mp4': ['66747970'],
+            'webp': ['52494646']
+          };
+          
+          const extensionSigs = signatures[extension] || [];
+          const matches = extensionSigs.some(sig => hex.startsWith(sig));
+          resolve(matches);
+        };
+        reader.onerror = () => resolve(false);
+        reader.readAsArrayBuffer(file.slice(0, 16));
+      });
+    };
+
+    // Check MIME type - if empty/suspicious, fall back to extension + magic byte check
+    let mimeTypeValid = file.type && allowedMimeTypes.includes(file.type);
+    let needsMagicByteCheck = false;
+
+    if (!file.type || !mimeTypeValid) {
+      // MIME type is missing or not in allowlist - will validate via extension + magic bytes
+      needsMagicByteCheck = true;
+    }
+
+    // For high-risk file types, always perform magic byte verification
+    const highRiskExtensions = ['jpg', 'jpeg', 'png', 'gif', 'pdf', 'zip', 'mp4', 'webp'];
+    if (highRiskExtensions.includes(fileExtension)) {
+      needsMagicByteCheck = true;
+    }
+
+    if (needsMagicByteCheck) {
+      const magicByteValid = await checkMagicBytes(file, fileExtension);
+      if (!magicByteValid && !mimeTypeValid) {
+        return { valid: false, error: `File validation failed. The file does not match expected format for .${fileExtension} files.` };
+      }
+    } else if (!mimeTypeValid) {
+      return { valid: false, error: `File type "${file.type}" is not allowed. Please choose a different file.` };
+    }
+
+    // SECURITY: File extension allowlist - only permit safe file types
+    const allowedExtensions = [
+      // Images
+      'jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'svg',
+      // Documents
+      'pdf', 'txt', 'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx',
+      // Archives (common safe formats)
+      'zip', 'rar', '7z',
+      // Audio
+      'mp3', 'wav', 'ogg', 'm4a', 'webm',
+      // Video
+      'mp4', 'webm', 'ogg', 'mov',
+      // Data
+      'json', 'csv'
+    ];
+
+    if (!allowedExtensions.includes(fileExtension)) {
+      return { valid: false, error: `File extension ".${fileExtension}" is not allowed. Permitted types: ${allowedExtensions.join(', ')}` };
     }
 
     // SECURITY: Advanced filename sanitization
@@ -226,7 +278,7 @@ export function ChatInput({
   };
 
   const handleFileChange = async (file: File) => {
-    const validation = validateFile(file);
+    const validation = await validateFile(file);
     if (!validation.valid) {
       console.error('[ChatInput] File validation failed:', validation.error);
       // TODO: Show error to user
@@ -292,7 +344,7 @@ export function ChatInput({
       const file = new File([audioBlob], filename, { type: 'audio/webm' });
 
       // Validate file size using the same validation as regular file uploads
-      const validation = validateFile(file);
+      const validation = await validateFile(file);
       if (!validation.valid) {
         console.error('[ChatInput] Voice note validation failed:', validation.error);
         alert('Voice note too large: ' + validation.error);

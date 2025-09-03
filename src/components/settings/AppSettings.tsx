@@ -1,16 +1,74 @@
-
+import React, { useState, useEffect } from 'react';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Label } from '@/components/ui/label';
 import { Switch } from '@/components/ui/switch';
 import { Button } from '@/components/ui/button';
 import { Separator } from '@/components/ui/separator';
 import { useTheme } from 'next-themes';
-import { Moon, Sun, Monitor, Palette, Shield, Bell, Volume2, Trash2 } from 'lucide-react';
+import { Moon, Sun, Monitor, Palette, Shield, Bell, Volume2, Trash2, Download, FolderOpen } from 'lucide-react';
 import { ScreenSharingSettings } from './ScreenSharingSettings';
-import { ScreenSharingDebug } from '../debug/ScreenSharingDebug';
 
 export function AppSettings() {
   const { theme, setTheme } = useTheme();
+  const [downloadSettings, setDownloadSettings] = useState<{ downloadPath: string; autoSave: boolean } | null>(null);
+  const [isElectron, setIsElectron] = useState(false);
+
+  useEffect(() => {
+    const checkElectron = async () => {
+      if (window.electronAPI?.isElectron) {
+        setIsElectron(true);
+        try {
+          const settings = await window.electronAPI.getDownloadSettings();
+          setDownloadSettings(settings);
+        } catch (error) {
+          console.error('Failed to get download settings:', error);
+        }
+      }
+    };
+    checkElectron();
+  }, []);
+
+  const handleChooseDownloadPath = async () => {
+    if (!window.electronAPI) return;
+    
+    try {
+      const result = await window.electronAPI.chooseDownloadPath();
+      if (result.success && result.path) {
+        const updateResult = await window.electronAPI.setDownloadPath(result.path);
+        if (updateResult.success) {
+          setDownloadSettings(prev => prev ? { ...prev, downloadPath: result.path! } : null);
+        } else {
+          // Show user-facing error for failed path update
+          alert(`Failed to set download path: ${updateResult.error || 'Unknown error'}`);
+        }
+      } else {
+        // Show user-facing error for failed path selection
+        if (!result.canceled) {
+          alert(`Failed to choose download path: ${result.error || 'Unknown error'}`);
+        }
+      }
+    } catch (error) {
+      console.error('Failed to choose download path:', error);
+      alert('Failed to choose download path. Please try again.');
+    }
+  };
+
+  const handleAutoSaveToggle = async (autoSave: boolean) => {
+    if (!window.electronAPI) return;
+    
+    try {
+      const result = await window.electronAPI.setAutoSave(autoSave);
+      if (result.success) {
+        setDownloadSettings(prev => prev ? { ...prev, autoSave } : null);
+      } else {
+        // Show user-facing error for failed auto-save update
+        alert(`Failed to update auto-save setting: ${result.error || 'Unknown error'}`);
+      }
+    } catch (error) {
+      console.error('Failed to update auto-save setting:', error);
+      alert('Failed to update auto-save setting. Please try again.');
+    }
+  };
 
   const handleClearData = () => {
     if (confirm('Are you sure you want to clear all local data? This will log you out and remove all stored messages.')) {
@@ -186,11 +244,61 @@ export function AppSettings() {
         </CardContent>
       </Card>
 
+      {/* Download Settings - Only show in Electron */}
+      {isElectron && downloadSettings && (
+        <Card>
+          <CardHeader>
+            <div className="flex items-center gap-2">
+              <Download className="h-5 w-5" />
+              <CardTitle>File Downloads</CardTitle>
+            </div>
+            <CardDescription>
+              Configure how files are saved when downloaded
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="space-y-3">
+              <Label className="text-sm font-medium">Download Location</Label>
+              <div className="flex items-center gap-2">
+                <div className="flex-1 p-2 bg-muted rounded-md text-sm font-mono truncate" title={downloadSettings.downloadPath}>
+                  {downloadSettings.downloadPath}
+                </div>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={handleChooseDownloadPath}
+                  className="flex items-center gap-2"
+                >
+                  <FolderOpen className="h-4 w-4" />
+                  Browse
+                </Button>
+              </div>
+              <p className="text-xs text-muted-foreground">
+                Choose where downloaded files will be saved
+              </p>
+            </div>
+            
+            <Separator />
+            
+            <div className="flex items-center justify-between">
+              <div className="space-y-0.5">
+                <Label>Auto-save Files</Label>
+                <div className="text-sm text-muted-foreground">
+                  Automatically save files to download folder without asking
+                </div>
+              </div>
+              <Switch 
+                checked={downloadSettings.autoSave} 
+                onCheckedChange={handleAutoSaveToggle}
+              />
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
       {/* Screen Sharing Settings */}
       <ScreenSharingSettings />
 
-      {/* Screen Sharing Debug Tool */}
-      <ScreenSharingDebug />
 
       {/* Data Management */}
       <Card>

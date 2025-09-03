@@ -56,6 +56,67 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getTorInfo: () => ipcRenderer.invoke('tor:info'),
   rotateTorCircuit: () => ipcRenderer.invoke('tor:rotate-circuit'),
 
+  // Screen sharing
+  getScreenSources: () => {
+    // No input validation needed - takes no parameters
+    return ipcRenderer.invoke('screen:getSources');
+  },
+
+  // File operations
+  saveFile: (data) => {
+    // Validate saveFile input
+    if (!data || typeof data !== 'object') {
+      return Promise.reject(new Error('saveFile requires an object parameter'));
+    }
+    if (!data.filename || typeof data.filename !== 'string' || data.filename.length > 255) {
+      return Promise.reject(new Error('Invalid filename'));
+    }
+    if (!data.data || typeof data.data !== 'string') {
+      return Promise.reject(new Error('Invalid file data'));
+    }
+    if (!data.mimeType || typeof data.mimeType !== 'string') {
+      return Promise.reject(new Error('Invalid MIME type'));
+    }
+    // Check for path traversal in filename
+    if (data.filename.includes('..') || data.filename.includes('/') || data.filename.includes('\\')) {
+      return Promise.reject(new Error('Filename contains invalid characters'));
+    }
+    return ipcRenderer.invoke('file:save', data);
+  },
+  
+  getDownloadSettings: () => {
+    // No input validation needed - takes no parameters
+    return ipcRenderer.invoke('file:get-download-settings');
+  },
+  
+  setDownloadPath: (path) => {
+    // Validate path input
+    if (!path || typeof path !== 'string') {
+      return Promise.reject(new Error('Path must be a non-empty string'));
+    }
+    if (path.length > 1000) {
+      return Promise.reject(new Error('Path too long'));
+    }
+    // Check for null bytes
+    if (path.includes('\0')) {
+      return Promise.reject(new Error('Path contains null bytes'));
+    }
+    return ipcRenderer.invoke('file:set-download-path', path);
+  },
+  
+  setAutoSave: (autoSave) => {
+    // Validate boolean input
+    if (typeof autoSave !== 'boolean') {
+      return Promise.reject(new Error('autoSave must be a boolean'));
+    }
+    return ipcRenderer.invoke('file:set-auto-save', autoSave);
+  },
+  
+  chooseDownloadPath: () => {
+    // No input validation needed - takes no parameters
+    return ipcRenderer.invoke('file:choose-download-path');
+  },
+
   // Utility
   isElectron: true,
   isDevelopment: process.env.NODE_ENV === 'development',

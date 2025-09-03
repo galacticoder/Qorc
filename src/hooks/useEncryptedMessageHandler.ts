@@ -914,6 +914,10 @@ export function useEncryptedMessageHandler(
                 timestamp: new Date(payload.timestamp || Date.now()),
                 type: 'file',
                 isCurrentUser: false,
+                filename: fileName,  // Include filename for downloads
+                mimeType: fileType,  // Include mimeType for downloads
+                fileSize: fileSize,  // Include fileSize for downloads
+                originalBase64Data: dataBase64,  // Include original base64 data for downloads
                 fileInfo: {
                   name: fileName || 'File',
                   type: fileType,

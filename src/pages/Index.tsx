@@ -190,7 +190,18 @@ const ChatApp: React.FC<ChatAppProps> = () => {
   // Handle local message deletion events (for sender side)
   useEffect(() => {
     const handleLocalMessageDelete = (event: CustomEvent) => {
+      // Defensive validation
+      if (!event.detail || typeof event.detail !== 'object') {
+        console.warn('[Index] Invalid delete event - missing or invalid detail');
+        return;
+      }
+      
       const { messageId } = event.detail;
+      if (!messageId || typeof messageId !== 'string') {
+        console.warn('[Index] Invalid delete event - missing or invalid messageId');
+        return;
+      }
+      
       console.log('[Index] Processing local message deletion:', messageId);
       
       setMessages(prev => {
@@ -205,7 +216,24 @@ const ChatApp: React.FC<ChatAppProps> = () => {
     };
 
     const handleLocalMessageEdit = (event: CustomEvent) => {
+      // Defensive validation
+      if (!event.detail || typeof event.detail !== 'object') {
+        console.warn('[Index] Invalid edit event - missing or invalid detail');
+        return;
+      }
+      
       const { messageId, newContent } = event.detail;
+      
+      if (!messageId || typeof messageId !== 'string') {
+        console.warn('[Index] Invalid edit event - missing or invalid messageId');
+        return;
+      }
+      
+      if (!newContent || typeof newContent !== 'string') {
+        console.warn('[Index] Invalid edit event - missing or invalid newContent');
+        return;
+      }
+      
       console.log('[Index] Processing local message edit:', messageId, newContent);
       
       setMessages(prev => {
@@ -219,12 +247,54 @@ const ChatApp: React.FC<ChatAppProps> = () => {
       });
     };
 
+    const handleLocalFileMessage = (event: CustomEvent) => {
+      // Defensive validation
+      if (!event.detail || typeof event.detail !== 'object') {
+        console.warn('[Index] Invalid file message event - missing or invalid detail');
+        return;
+      }
+      
+      const fileMessage = event.detail;
+      
+      if (!fileMessage.id || typeof fileMessage.id !== 'string') {
+        console.warn('[Index] Invalid file message event - missing or invalid id');
+        return;
+      }
+      
+      console.log('[Index] Processing local file message:', fileMessage);
+      
+      setMessages(prev => {
+        // Safe timestamp handling
+        let timestamp;
+        try {
+          timestamp = fileMessage.timestamp ? new Date(fileMessage.timestamp) : new Date();
+          if (isNaN(timestamp.getTime())) {
+            throw new Error('Invalid timestamp');
+          }
+        } catch (err) {
+          console.warn('[Index] Invalid timestamp, using current time:', err);
+          timestamp = new Date();
+        }
+        
+        const newMessage = {
+          ...fileMessage,
+          isCurrentUser: true,
+          recipient: fileMessage.recipient || '', // Safe fallback for recipient
+          timestamp
+        };
+        console.log('[Index] Local file message added:', newMessage.id);
+        return [...prev, newMessage];
+      });
+    };
+
     window.addEventListener('local-message-delete', handleLocalMessageDelete as EventListener);
     window.addEventListener('local-message-edit', handleLocalMessageEdit as EventListener);
+    window.addEventListener('local-file-message', handleLocalFileMessage as EventListener);
     
     return () => {
       window.removeEventListener('local-message-delete', handleLocalMessageDelete as EventListener);
       window.removeEventListener('local-message-edit', handleLocalMessageEdit as EventListener);
+      window.removeEventListener('local-file-message', handleLocalFileMessage as EventListener);
     };
   }, [setMessages]);
 

@@ -1,5 +1,7 @@
-const { app, BrowserWindow, ipcMain, desktopCapturer } = require('electron');
+const { app, BrowserWindow, ipcMain, desktopCapturer, dialog } = require('electron');
 const path = require('path');
+const fs = require('fs');
+const os = require('os');
 const isDev = process.env.NODE_ENV === 'development';
 const torManager = require('./tor-manager.cjs');
 
@@ -655,7 +657,183 @@ ipcMain.on('test-screen-sources', (event, data) => {
   event.reply('test-screen-sources-reply', { success: true, message: 'IPC is working!' });
 });
 
+// File download settings
+let downloadSettings = {
+  downloadPath: getDefaultDownloadPath(),
+  autoSave: true
+};
+
+function getDefaultDownloadPath() {
+  switch (process.platform) {
+    case 'win32':
+      return path.join(os.homedir(), 'Downloads');
+    case 'darwin':
+      return path.join(os.homedir(), 'Downloads');
+    case 'linux':
+      return path.join(os.homedir(), 'Downloads');
+    default:
+      return path.join(os.homedir(), 'Downloads');
+  }
+}
+
+// File download handlers
+ipcMain.handle('file:save', async (event, { filename, data, mimeType }) => {
+  try {
+    console.log('[ELECTRON] Saving file:', { 
+      filename, 
+      dataLength: data?.length, 
+      mimeType,
+      downloadPath: downloadSettings.downloadPath,
+      autoSave: downloadSettings.autoSave
+    });
+    
+    if (!filename || !data) {
+      throw new Error('Missing filename or data');
+    }
+    
+    let savePath;
+    if (downloadSettings.autoSave) {
+      // Auto-save to configured download directory
+      savePath = path.join(downloadSettings.downloadPath, filename);
+      
+      // Ensure directory exists
+      if (!fs.existsSync(downloadSettings.downloadPath)) {
+        console.log('[ELECTRON] Creating download directory:', downloadSettings.downloadPath);
+        fs.mkdirSync(downloadSettings.downloadPath, { recursive: true });
+      }
+      
+      // Handle duplicate filenames
+      let counter = 1;
+      let originalPath = savePath;
+      while (fs.existsSync(savePath)) {
+        const ext = path.extname(filename);
+        const name = path.basename(filename, ext);
+        savePath = path.join(downloadSettings.downloadPath, `${name} (${counter})${ext}`);
+        counter++;
+      }
+      console.log('[ELECTRON] Final save path:', savePath);
+    } else {
+      // Show save dialog
+      const result = await dialog.showSaveDialog(mainWindow, {
+        defaultPath: path.join(downloadSettings.downloadPath, filename),
+        filters: [
+          { name: 'All Files', extensions: ['*'] }
+        ]
+      });
+      
+      if (result.canceled) {
+        console.log('[ELECTRON] Save dialog canceled');
+        return { success: false, canceled: true };
+      }
+      
+      savePath = result.filePath;
+      console.log('[ELECTRON] User selected save path:', savePath);
+    }
+    
+    // Convert base64 data to buffer and save
+    console.log('[ELECTRON] Converting base64 to buffer...');
+    const buffer = Buffer.from(data, 'base64');
+    console.log('[ELECTRON] Buffer created, size:', buffer.length);
+    
+    fs.writeFileSync(savePath, buffer);
+    
+    console.log('[ELECTRON] File saved successfully to:', savePath);
+    return { success: true, path: savePath };
+  } catch (error) {
+    console.error('[ELECTRON] Error saving file:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle('file:get-download-settings', () => {
+  return downloadSettings;
+});
+
+ipcMain.handle('file:set-download-path', async (event, newPath) => {
+  try {
+    // Input validation
+    if (!newPath || typeof newPath !== 'string') {
+      return { success: false, error: 'Path must be a non-empty string' };
+    }
+
+    // Require absolute path
+    if (!path.isAbsolute(newPath)) {
+      return { success: false, error: 'Path must be absolute' };
+    }
+
+    // Check for null bytes in raw input
+    if (newPath.includes('\0')) {
+      return { success: false, error: 'Path contains null bytes' };
+    }
+
+    // Validate raw path segments before normalization to catch traversal attempts
+    const pathSegments = newPath.split(path.sep);
+    for (const segment of pathSegments) {
+      if (segment === '..') {
+        return { success: false, error: 'Path contains directory traversal sequences' };
+      }
+    }
+
+    // Normalize and resolve path
+    const resolved = path.resolve(newPath);
+
+    // Additional safety check: ensure resolved path is within reasonable bounds
+    // This catches any remaining traversal attempts after resolution
+    const userHomeDir = require('os').homedir();
+    const commonBaseDirs = [userHomeDir, '/tmp', '/var/tmp'];
+    let isWithinAllowedBase = false;
+    
+    for (const baseDir of commonBaseDirs) {
+      const resolvedBase = path.resolve(baseDir);
+      if (resolved.startsWith(resolvedBase)) {
+        isWithinAllowedBase = true;
+        break;
+      }
+    }
+    
+    // Allow paths in common system locations or user directories
+    if (!isWithinAllowedBase && !resolved.startsWith('/home/') && !resolved.startsWith('/Users/')) {
+      return { success: false, error: 'Path is outside allowed directories' };
+    }
+
+    // Validate path exists or can be created
+    if (!fs.existsSync(resolved)) {
+      fs.mkdirSync(resolved, { recursive: true });
+    }
+    
+    downloadSettings.downloadPath = resolved;
+    return { success: true };
+  } catch (error) {
+    console.error('[ELECTRON] Error setting download path:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle('file:set-auto-save', (event, autoSave) => {
+  downloadSettings.autoSave = autoSave;
+  return { success: true };
+});
+
+ipcMain.handle('file:choose-download-path', async () => {
+  try {
+    const result = await dialog.showOpenDialog(mainWindow, {
+      properties: ['openDirectory'],
+      defaultPath: downloadSettings.downloadPath
+    });
+    
+    if (result.canceled) {
+      return { success: false, canceled: true };
+    }
+    
+    return { success: true, path: result.filePaths[0] };
+  } catch (error) {
+    console.error('[ELECTRON] Error choosing download path:', error);
+    return { success: false, error: error.message };
+  }
+});
+
 console.log('[ELECTRON] Main process started');
 console.log('[ELECTRON] Platform:', process.platform);
 console.log('[ELECTRON] Architecture:', process.arch);
 console.log('[ELECTRON] Development mode:', isDev);
+console.log('[ELECTRON] Default download path:', downloadSettings.downloadPath);

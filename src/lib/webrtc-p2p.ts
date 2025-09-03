@@ -35,6 +35,7 @@ export class WebRTCP2PService {
   private peers: Map<string, PeerConnection> = new Map();
   private localUsername: string = '';
   private signalingChannel: WebSocket | null = null;
+   private bufferedLowHandlers: Map<string, Set<() => void>> = new Map();
   private onMessageCallback: ((message: P2PMessage) => void) | null = null;
   private onPeerConnectedCallback: ((username: string) => void) | null = null;
   private onPeerDisconnectedCallback: ((username: string) => void) | null = null;
@@ -179,6 +180,15 @@ export class WebRTCP2PService {
 
     peer.dataChannel = dataChannel;
 
+    // Configure backpressure low-watermark
+    try { dataChannel.bufferedAmountLowThreshold = 262144; } catch {}
+    dataChannel.onbufferedamountlow = () => {
+      const handlers = this.bufferedLowHandlers.get(username);
+      if (handlers) {
+        handlers.forEach(h => { try { h(); } catch (e) { console.error('[P2P] bufferedamountlow handler error:', e); } });
+      }
+    };
+
     // Set up data channel handlers
     dataChannel.onopen = () => {
       console.log(`[P2P] Data channel opened with ${username}`);
@@ -216,6 +226,15 @@ export class WebRTCP2PService {
     connection.ondatachannel = (event) => {
       const channel = event.channel;
       peer.dataChannel = channel;
+
+      // Configure backpressure low-watermark for incoming channel too
+      try { channel.bufferedAmountLowThreshold = 262144; } catch {}
+      channel.onbufferedamountlow = () => {
+        const handlers = this.bufferedLowHandlers.get(username);
+        if (handlers) {
+          handlers.forEach(h => { try { h(); } catch (e) { console.error('[P2P] bufferedamountlow handler error:', e); } });
+        }
+      };
       
       channel.onmessage = (event) => {
         try {
@@ -325,9 +344,23 @@ export class WebRTCP2PService {
 
     // Handle different message types
     switch (message.type) {
-      case 'chat':
+      case 'chat': {
+        // Dispatch file transfer events for app-level handlers
+        try {
+          const kind = message?.payload?.kind;
+          if (kind === 'file-chunk') {
+            const evt = new CustomEvent('p2p-file-chunk', { detail: { from: message.from, to: message.to, payload: message.payload } });
+            window.dispatchEvent(evt);
+          } else if (kind === 'file-ack') {
+            const evt = new CustomEvent('p2p-file-ack', { detail: { from: message.from, to: message.to, payload: message.payload } });
+            window.dispatchEvent(evt);
+          }
+        } catch (e) {
+          console.warn('[P2P] Failed to dispatch file transfer event:', e);
+        }
         this.onMessageCallback?.(message);
         break;
+      }
       case 'heartbeat':
         // Respond to heartbeat
         if (peer && peer.dataChannel) {
@@ -585,6 +618,38 @@ export class WebRTCP2PService {
     return Array.from(this.peers.entries())
       .filter(([_, peer]) => peer.state === 'connected')
       .map(([username, _]) => username);
+  }
+
+  /**
+   * Backpressure APIs for DataChannel flow control
+   */
+  getBufferedAmount(username: string): number {
+    const peer = this.peers.get(username);
+    return peer?.dataChannel?.bufferedAmount ?? 0;
+    }
+
+  setBufferedAmountLowThreshold(username: string, threshold: number): void {
+    const peer = this.peers.get(username);
+    if (peer?.dataChannel) {
+      try { peer.dataChannel.bufferedAmountLowThreshold = threshold; } catch {}
+    }
+  }
+
+  onBufferedAmountLow(username: string, handler: () => void): void {
+    let set = this.bufferedLowHandlers.get(username);
+    if (!set) {
+      set = new Set();
+      this.bufferedLowHandlers.set(username, set);
+    }
+    set.add(handler);
+  }
+
+  offBufferedAmountLow(username: string, handler: () => void): void {
+    const set = this.bufferedLowHandlers.get(username);
+    if (set) {
+      set.delete(handler);
+      if (set.size === 0) this.bufferedLowHandlers.delete(username);
+    }
   }
 
   /**

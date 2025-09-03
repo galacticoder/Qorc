@@ -52,6 +52,13 @@ interface ElectronAPI {
   // Screen sharing
   getScreenSources: () => Promise<ScreenSource[]>;
   
+  // File operations
+  saveFile: (data: { filename: string; data: string; mimeType: string }) => Promise<{ success: boolean; path?: string; error?: string; canceled?: boolean }>;
+  getDownloadSettings: () => Promise<{ downloadPath: string; autoSave: boolean }>;
+  setDownloadPath: (path: string) => Promise<{ success: boolean; error?: string }>;
+  setAutoSave: (autoSave: boolean) => Promise<{ success: boolean }>;
+  chooseDownloadPath: () => Promise<{ success: boolean; path?: string; canceled?: boolean }>;
+  
   // Renderer
   rendererReady: () => Promise<void>;
 }
