@@ -1,9 +1,10 @@
+import { v4 as uuidv4 } from "uuid";
 import { useCallback } from "react";
-import { Message } from "@/components/chat/types";
 import { SignalType } from "@/lib/signals";
-import { User } from "@/components/chat/UserList";
-import { CryptoUtils } from "@/lib/unified-crypto";
+import { Message } from "@/components/chat/types";
 import websocketClient from "@/lib/websocket";
+import { User } from "@/components/chat/types";
+import { CryptoUtils } from "@/lib/unified-crypto";
 import { ServerDatabase } from "./useSecureDB";
 
 export function useMessageSender(

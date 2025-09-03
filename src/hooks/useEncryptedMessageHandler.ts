@@ -170,12 +170,27 @@ function isValidBase64(str: string): boolean {
 export function useEncryptedMessageHandler(
   loginUsernameRef: React.MutableRefObject<string>,
   setMessages: React.Dispatch<React.SetStateAction<Message[]>>,
-  saveMessageToLocalDB: (msg: Message) => Promise<void>
+  saveMessageToLocalDB: (msg: Message) => Promise<void>,
+  isAuthenticated?: boolean
 ) {
   
 
   return useCallback(
     async (encryptedMessage: any) => {
+      // Allow P2P messages and offline messages to be processed regardless of authentication state
+      // since they have their own validation mechanisms
+      const isP2PMessage = encryptedMessage?.p2p === true && encryptedMessage?.encrypted === true;
+      const isOfflineMessage = encryptedMessage?.offline === true;
+      const isSignalProtocolMessage = encryptedMessage?.type === SignalType.ENCRYPTED_MESSAGE;
+      const isBundleMessage = encryptedMessage?.type === SignalType.LIBSIGNAL_DELIVER_BUNDLE;
+      
+      // Block only new server-routed messages if not authenticated
+      // Allow P2P, offline, and Signal Protocol messages through as they have their own security
+      if (!isAuthenticated && !isP2PMessage && !isOfflineMessage && !isSignalProtocolMessage && !isBundleMessage) {
+        console.log('[EncryptedMessageHandler] Blocking server message processing - user not authenticated');
+        return;
+      }
+
       try {
         // SECURITY: Comprehensive type validation to prevent type confusion attacks
         if (typeof encryptedMessage !== "object" ||
@@ -940,6 +955,6 @@ export function useEncryptedMessageHandler(
         console.error('[EncryptedMessageHandler] Error processing encrypted message:', error);
       }
     },
-    [setMessages, saveMessageToLocalDB]
+    [setMessages, saveMessageToLocalDB, isAuthenticated]
   );
 }

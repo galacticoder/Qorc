@@ -183,7 +183,8 @@ const ChatApp: React.FC<ChatAppProps> = () => {
   const encryptedHandler = useEncryptedMessageHandler(
     Authentication.loginUsernameRef,
     setMessages,
-    Database.saveMessageToLocalDB
+    Database.saveMessageToLocalDB,
+    Authentication.isLoggedIn && Authentication.accountAuthenticated
   );
 
   // Message history synchronization
@@ -191,7 +192,8 @@ const ChatApp: React.FC<ChatAppProps> = () => {
     Authentication.loginUsernameRef.current || '',
     Authentication.isLoggedIn,
     setMessages,
-    Database.saveMessageToLocalDB
+    Database.saveMessageToLocalDB,
+    Authentication.isLoggedIn && Authentication.accountAuthenticated
   );
 
   const signalHandler = useChatSignals({

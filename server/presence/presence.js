@@ -479,3 +479,35 @@ export async function subscribeUserChannel(subscriber, username, onMessage) {
     }
   };
 }
+
+/**
+ * Clear all presence data on server startup to prevent hanging sessions
+ */
+export async function clearAllPresenceData() {
+  try {
+    return await withRedisClient(async (client) => {
+      let cleanedCount = 0;
+      let cursor = '0';
+      const batchSize = 100;
+
+      // Clear all online:* keys
+      do {
+        const result = await client.scan(cursor, 'MATCH', 'online:*', 'COUNT', batchSize);
+        cursor = result[0];
+        const keys = result[1];
+
+        if (keys.length > 0) {
+          await client.del(...keys);
+          cleanedCount += keys.length;
+          console.log(`[PRESENCE] Cleared ${keys.length} presence keys`);
+        }
+      } while (cursor !== '0');
+
+      console.log(`[PRESENCE] Cleared ${cleanedCount} total presence entries on startup`);
+      return cleanedCount;
+    });
+  } catch (error) {
+    console.error('[PRESENCE] Error during presence cleanup:', error);
+    return 0;
+  }
+}

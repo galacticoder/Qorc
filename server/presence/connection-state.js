@@ -368,6 +368,10 @@ export class ConnectionStateManager {
           console.log(`[CONNECTION-STATE] Removed username mapping for ${username}`);
         }
 
+        // Also clear presence data to ensure user is offline
+        const { setOffline } = await import('./presence.js');
+        await setOffline(username);
+
         return true;
       });
     } catch (error) {

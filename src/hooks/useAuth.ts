@@ -433,13 +433,14 @@ export const useAuth = () => {
 
   const handleAuthSuccess = (username: string) => {
     console.log(`[AUTH] Authentication success for user: ${username}`);
-    console.log(`[AUTH] Setting authentication flags - isLoggedIn: true, accountAuthenticated: ${accountAuthenticated}`);
+    console.log(`[AUTH] Setting authentication flags - isLoggedIn: true, accountAuthenticated: true`);
     
     setAuthStatus("Authentication successful! Logging in...");
     setUsername(username);
     console.log(`[AUTH] About to call setIsLoggedIn(true) - current value: ${isLoggedIn}`);
     setIsLoggedIn(true);
-    console.log(`[AUTH] Called setIsLoggedIn(true)`);
+    setAccountAuthenticated(true);
+    console.log(`[AUTH] Called setIsLoggedIn(true) and setAccountAuthenticated(true)`);
     // Clear status after a brief delay
     setTimeout(() => setAuthStatus(""), 1000);
     setLoginError("");

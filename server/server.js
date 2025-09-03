@@ -16,9 +16,6 @@ import { rateLimitMiddleware } from './rate-limiting/rate-limit-middleware.js';
 import { setOnline, setOffline, createSubscriber, publishToUser } from './presence/presence.js';
 import { ConnectionStateManager } from './presence/connection-state.js';
 
-// COMPLETELY REMOVED: No in-memory client tracking for millions of users
-// All user data stored in Redis-based connection state for scalability
-
 // SECURITY: Input validation utilities
 class InputValidator {
   static validateUsername(username) {
@@ -243,7 +240,7 @@ async function startServer() {
   try {
     patternSub = await createSubscriber();
     await patternSub.psubscribe('deliver:*');
-    patternSub.on('pmessage', (_pattern, channel, message) => {
+    patternSub.on('pmessage', async (_pattern, channel, message) => {
       try {
         if (!channel || !channel.startsWith('deliver:')) return;
         const username = channel.slice('deliver:'.length);
@@ -251,7 +248,17 @@ async function startServer() {
         if (set && set.size) {
           for (const client of set) {
             try {
-              client.send(message);
+              // Check if recipient client is authenticated with server password
+              const recipientSessionId = client._sessionId;
+              if (recipientSessionId) {
+                const recipientState = await ConnectionStateManager.getState(recipientSessionId);
+                if (recipientState?.hasAuthenticated) {
+                  client.send(message);
+                  if (DEBUG_SERVER_LOGS) console.log(`[SERVER] Cross-instance message delivered to authenticated recipient: ${username}`);
+                } else {
+                  if (DEBUG_SERVER_LOGS) console.log(`[SERVER] Blocking cross-instance message delivery to unauthenticated recipient: ${username}`);
+                }
+              }
             } catch (err) {
               console.error('[SERVER] Failed to send pattern delivery message to client:', {
                 username: username,
@@ -282,6 +289,10 @@ async function startServer() {
       console.log('[SERVER] Cleaning up stale session data...');
       await ConnectionStateManager.cleanupStaleUsernameMappings();
       await ConnectionStateManager.cleanupExpiredSessions();
+      
+      // Clear all presence data to prevent "already online" issues
+      const { clearAllPresenceData } = await import('./presence/presence.js');
+      await clearAllPresenceData();
     } else if (DEBUG_SERVER_LOGS) {
       console.log('[SERVER] Skipping startup cleanup; another worker handled it');
     }
@@ -343,6 +354,7 @@ async function startServer() {
     // Create Redis-based session for connection state
     try {
       sessionId = await ConnectionStateManager.createSession();
+      ws._sessionId = sessionId; // Store session ID on WebSocket for authentication checks
       console.log(`[SERVER] Created session: ${sessionId}`);
     } catch (error) {
       console.error('[SERVER] Failed to create session:', error);
@@ -722,14 +734,13 @@ async function startServer() {
               });
               // Username stored in Redis-based session state for scalability
 
-              // Mark presence and subscribe to delivery channel
+              // Register connection but keep user offline until server auth
               try {
-                await setOnline(result.username, TTL_CONFIG.PRESENCE_TTL);
                 ws._username = result.username;
                 addLocalConnection(result.username, ws);
-                if (DEBUG_SERVER_LOGS) console.log(`[SERVER] User ${result.username} online and registered for local delivery`);
+                if (DEBUG_SERVER_LOGS) console.log(`[SERVER] User ${result.username} registered for local delivery (offline until server auth)`);
               } catch (e) {
-                console.error(`[SERVER] Presence registration FAILED for ${result.username}:`, e);
+                console.error(`[SERVER] Connection registration FAILED for ${result.username}:`, e);
               }
 
               if (result.pending) {
@@ -888,6 +899,13 @@ async function startServer() {
               return ws.send(JSON.stringify({ type: SignalType.ERROR, message: 'Not authenticated yet' }));
             }
 
+            // SECURITY: Check if sender has completed full server authentication
+            const senderState = await ConnectionStateManager.getState(sessionId);
+            if (!senderState?.hasAuthenticated) {
+              console.error(`[SERVER] User ${ws._username} not fully authenticated for message sending`);
+              return ws.send(JSON.stringify({ type: SignalType.ERROR, message: 'Server authentication required' }));
+            }
+
             // SECURITY: Validate recipient exists before processing
             if (!recipientUser || typeof recipientUser !== 'string' || recipientUser.length < 3) {
               console.error(`[SERVER] Invalid or missing recipient: ${recipientUser}`);
@@ -965,23 +983,65 @@ async function startServer() {
               messageToSend = parsed;
             }
             
-            // Local delivery (same-instance) first
+            // Local delivery (same-instance) first - but only to authenticated recipients
             const localSet = localDeliveryMap.get(toUser);
             if (localSet && localSet.size) {
               const payload = JSON.stringify(messageToSend);
+              let deliveredCount = 0;
+              
               for (const client of localSet) {
                 try {
-                  client.send(payload);
+                  // Check if recipient client is authenticated with server password
+                  const recipientSessionId = client._sessionId;
+                  if (recipientSessionId) {
+                    const recipientState = await ConnectionStateManager.getState(recipientSessionId);
+                    if (recipientState?.hasAuthenticated) {
+                      client.send(payload);
+                      deliveredCount++;
+                      if (DEBUG_SERVER_LOGS) console.log(`[SERVER] Message delivered to authenticated recipient: ${toUser}`);
+                    } else {
+                      if (DEBUG_SERVER_LOGS) console.log(`[SERVER] Blocking message delivery to unauthenticated recipient: ${toUser}`);
+                    }
+                  }
                 } catch (err) {
                   console.error('[SERVER] Failed to send message to client:', err);
                 }
               }
-              try {
-                ws.send(JSON.stringify({ type: 'ok', message: 'relayed' }));
-              } catch (err) {
-                console.error('[SERVER] Failed to send relay confirmation to client:', err);
+              
+              if (deliveredCount > 0) {
+                try {
+                  ws.send(JSON.stringify({ type: 'ok', message: 'relayed' }));
+                } catch (err) {
+                  console.error('[SERVER] Failed to send relay confirmation to client:', err);
+                }
+                if (DEBUG_SERVER_LOGS) console.log(`[SERVER] Message delivered locally to ${deliveredCount} authenticated clients for ${toUser}`);
+              } else {
+                // No authenticated clients found, treat as offline
+                if (DEBUG_SERVER_LOGS) console.log(`[SERVER] No authenticated clients found for ${toUser}, treating as offline`);
+                try {
+                  const queueSuccess = await MessageDatabase.queueOfflineMessage(toUser, {
+                    type: parsed.type,
+                    to: toUser,
+                    encryptedPayload: parsed.encryptedPayload
+                  });
+                  if (queueSuccess) {
+                    try {
+                      ws.send(JSON.stringify({ type: 'ok', message: 'queued' }));
+                    } catch (err) {
+                      console.error('[SERVER] Failed to send queue confirmation to client:', err);
+                    }
+                  } else {
+                    console.error(`[SERVER] Failed to queue message for offline user: ${toUser}`);
+                  }
+                } catch (queueError) {
+                  console.error(`[SERVER] Error queueing message for offline user ${toUser}:`, queueError);
+                  try {
+                    ws.send(JSON.stringify({ type: SignalType.ERROR, message: 'Failed to queue message' }));
+                  } catch (err) {
+                    console.error('[SERVER] Failed to send queue error to client:', err);
+                  }
+                }
               }
-              if (DEBUG_SERVER_LOGS) console.log(`[SERVER] Message delivered locally to ${toUser}`);
             } else {
               // Cross-instance delivery via Redis pub-sub
               try {
@@ -998,25 +1058,26 @@ async function startServer() {
                   }
                   if (DEBUG_SERVER_LOGS) console.log(`[SERVER] Message published for ${toUser}`);
                 } else {
-                  const queueSuccess = MessageDatabase.queueOfflineMessage(toUser, {
-                    type: parsed.type,
-                    to: toUser,
-                    encryptedPayload: parsed.encryptedPayload
-                  });
-                  if (queueSuccess) {
-                    if (DEBUG_SERVER_LOGS) console.log(`[SERVER] Message queued for offline user: ${toUser}`);
-                    try {
-                      ws.send(JSON.stringify({ type: 'ok', message: 'queued' }));
-                    } catch (err) {
-                      console.error('[SERVER] Failed to send queue confirmation to client:', err);
-                    }
-                  } else {
-                    console.error(`[SERVER] Failed to queue message for user: ${toUser}`);
-                    try {
+                  try {
+                    const queueSuccess = await MessageDatabase.queueOfflineMessage(toUser, {
+                      type: parsed.type,
+                      to: toUser,
+                      encryptedPayload: parsed.encryptedPayload
+                    });
+                    if (queueSuccess) {
+                      if (DEBUG_SERVER_LOGS) console.log(`[SERVER] Message queued for offline user: ${toUser}`);
+                      try {
+                        ws.send(JSON.stringify({ type: 'ok', message: 'queued' }));
+                      } catch (err) {
+                        console.error('[SERVER] Failed to send queue confirmation to client:', err);
+                      }
+                    } else {
+                      console.error(`[SERVER] Failed to queue message for user: ${toUser}`);
                       ws.send(JSON.stringify({ type: SignalType.ERROR, message: 'Failed to queue message' }));
-                    } catch (err) {
-                      console.error('[SERVER] Failed to send queue error to client:', err);
                     }
+                  } catch (queueError) {
+                    console.error(`[SERVER] Error queueing message for offline user ${toUser}:`, queueError);
+                    ws.send(JSON.stringify({ type: SignalType.ERROR, message: 'Failed to queue message' }));
                   }
                 }
               } catch (e) {

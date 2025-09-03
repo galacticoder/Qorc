@@ -7,15 +7,16 @@ export function useMessageHistory(
   currentUsername: string,
   isLoggedIn: boolean,
   setMessages: React.Dispatch<React.SetStateAction<Message[]>>,
-  saveMessageToLocalDB: (msg: Message) => Promise<void>
+  saveMessageToLocalDB: (msg: Message) => Promise<void>,
+  isFullyAuthenticated?: boolean
 ) {
   const hasRequestedHistory = useRef(false);
   const isProcessingHistory = useRef(false);
 
   // Request message history from server after successful authentication
   const requestMessageHistory = useCallback((limit: number = 50, since?: number) => {
-    if (!isLoggedIn || !currentUsername) {
-      console.log('[MessageHistory] Cannot request history - not logged in');
+    if (!isLoggedIn || !currentUsername || !isFullyAuthenticated) {
+      console.log('[MessageHistory] Cannot request history - not fully authenticated');
       return;
     }
 
@@ -43,10 +44,15 @@ export function useMessageHistory(
     } catch (error) {
       console.error('[MessageHistory] Failed to request message history:', error);
     }
-  }, [isLoggedIn, currentUsername]);
+  }, [isLoggedIn, currentUsername, isFullyAuthenticated]);
 
   // Handle message history response from server
   const handleMessageHistory = useCallback(async (data: any) => {
+    if (!isFullyAuthenticated) {
+      console.log('[MessageHistory] Blocking history processing - not fully authenticated');
+      return;
+    }
+    
     if (isProcessingHistory.current) {
       console.log('[MessageHistory] Already processing history, skipping duplicate');
       return;
@@ -170,11 +176,11 @@ export function useMessageHistory(
     } finally {
       isProcessingHistory.current = false;
     }
-  }, [currentUsername, setMessages, saveMessageToLocalDB]);
+  }, [currentUsername, setMessages, saveMessageToLocalDB, isFullyAuthenticated]);
 
   // Auto-request message history on login
   useEffect(() => {
-    if (isLoggedIn && currentUsername && !hasRequestedHistory.current) {
+    if (isLoggedIn && currentUsername && isFullyAuthenticated && !hasRequestedHistory.current) {
       // Small delay to ensure authentication is fully complete
       const timer = setTimeout(() => {
         requestMessageHistory(50); // Request last 50 messages
@@ -182,7 +188,7 @@ export function useMessageHistory(
 
       return () => clearTimeout(timer);
     }
-  }, [isLoggedIn, currentUsername, requestMessageHistory]);
+  }, [isLoggedIn, currentUsername, isFullyAuthenticated, requestMessageHistory]);
 
   // Reset flag when user logs out
   useEffect(() => {
