@@ -187,6 +187,47 @@ const ChatApp: React.FC<ChatAppProps> = () => {
     Authentication.isLoggedIn && Authentication.accountAuthenticated
   );
 
+  // Handle local message deletion events (for sender side)
+  useEffect(() => {
+    const handleLocalMessageDelete = (event: CustomEvent) => {
+      const { messageId } = event.detail;
+      console.log('[Index] Processing local message deletion:', messageId);
+      
+      setMessages(prev => {
+        const updatedMessages = prev.map(msg => 
+          msg.id === messageId 
+            ? { ...msg, isDeleted: true, content: 'This message was deleted' }
+            : msg
+        );
+        console.log('[Index] Local message marked as deleted:', messageId);
+        return updatedMessages;
+      });
+    };
+
+    const handleLocalMessageEdit = (event: CustomEvent) => {
+      const { messageId, newContent } = event.detail;
+      console.log('[Index] Processing local message edit:', messageId, newContent);
+      
+      setMessages(prev => {
+        const updatedMessages = prev.map(msg => 
+          msg.id === messageId 
+            ? { ...msg, content: newContent, isEdited: true }
+            : msg
+        );
+        console.log('[Index] Local message edited:', messageId);
+        return updatedMessages;
+      });
+    };
+
+    window.addEventListener('local-message-delete', handleLocalMessageDelete as EventListener);
+    window.addEventListener('local-message-edit', handleLocalMessageEdit as EventListener);
+    
+    return () => {
+      window.removeEventListener('local-message-delete', handleLocalMessageDelete as EventListener);
+      window.removeEventListener('local-message-edit', handleLocalMessageEdit as EventListener);
+    };
+  }, [setMessages]);
+
   // Message history synchronization
   const messageHistory = useMessageHistory(
     Authentication.loginUsernameRef.current || '',
@@ -373,6 +414,17 @@ const ChatApp: React.FC<ChatAppProps> = () => {
                 }
                 
                 console.log('[Index] Found/created target user:', targetUser);
+                
+                // For delete messages, pass the messageId as originalMessageId
+                if (messageSignalType === 'delete-message') {
+                  return messageSender.handleSendMessage(targetUser, content, replyTo ? { id: replyTo.id, sender: replyTo.sender, content: replyTo.content } : undefined, undefined, messageSignalType, messageId);
+                }
+                
+                // For edit messages, pass the messageId as editMessageId
+                if (messageSignalType === 'edit-message') {
+                  return messageSender.handleSendMessage(targetUser, content, replyTo ? { id: replyTo.id, sender: replyTo.sender, content: replyTo.content } : undefined, undefined, messageSignalType, undefined, messageId);
+                }
+                
                 return messageSender.handleSendMessage(targetUser, content, replyTo ? { id: replyTo.id, sender: replyTo.sender, content: replyTo.content } : undefined, undefined, messageSignalType);
               }}
               onSendFile={handleSendFileWrapper}

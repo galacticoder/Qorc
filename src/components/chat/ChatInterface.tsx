@@ -383,17 +383,18 @@ export function ChatInterface({
             messageSignalType: string,
             replyToMsg?: MessageReply | null
           ) => {
-            // For typing indicators, we need to send them to the server but they should not appear in chat
-            if (messageSignalType === 'typing-start' || messageSignalType === 'typing-stop') {
-              // Send typing indicator to server but don't add to local chat history
-              await onSendMessage(messageId ?? "", content, messageSignalType, replyToMsg);
-              return;
-            }
-            // For other message types, call the parent handler
+            // Send all message types to the parent handler
             await onSendMessage(messageId ?? "", content, messageSignalType, replyToMsg);
-            // Reset typing debounce/throttle so next keystroke can emit typing-start immediately
-            resetTypingAfterSend();
-            setReplyTo(null);
+            
+            // Reset typing indicator for ALL message types except typing indicators themselves
+            console.log('[ChatInterface] Message sent, checking typing reset:', { messageSignalType });
+            if (messageSignalType !== 'typing-start' && messageSignalType !== 'typing-stop') {
+              console.log('[ChatInterface] Resetting typing indicator for message type:', messageSignalType);
+              resetTypingAfterSend();
+              setReplyTo(null);
+            } else {
+              console.log('[ChatInterface] Skipping typing reset for typing indicator:', messageSignalType);
+            }
           }}
           onSendFile={onSendFile}
           isEncrypted={isEncrypted}

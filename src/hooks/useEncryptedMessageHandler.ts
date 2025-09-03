@@ -529,6 +529,55 @@ export function useEncryptedMessageHandler(
             } catch {}
           }
 
+          // Handle message deletion first
+          if (payload.type === 'delete-message' || payload.type === 'DELETE_MESSAGE') {
+            console.log('[EncryptedMessageHandler] Processing message deletion:', payload);
+            const messageIdToDelete = payload.deleteMessageId || payload.messageId || payload.content;
+            if (messageIdToDelete) {
+              setMessages(prev => {
+                const updatedMessages = prev.map(msg => 
+                  msg.id === messageIdToDelete 
+                    ? { ...msg, isDeleted: true, content: 'This message was deleted' }
+                    : msg
+                );
+                console.log('[EncryptedMessageHandler] Message marked as deleted:', messageIdToDelete);
+                return updatedMessages;
+              });
+            }
+            return; // Don't process as regular message
+          }
+
+          // Handle message editing
+          if (payload.type === 'edit-message' || payload.type === 'EDIT_MESSAGE') {
+            console.log('[EncryptedMessageHandler] Processing message edit:', payload);
+            const messageIdToEdit = payload.messageId;
+            const newContent = payload.content;
+            if (messageIdToEdit && newContent) {
+              setMessages(prev => {
+                const updatedMessages = prev.map(msg => 
+                  msg.id === messageIdToEdit 
+                    ? { ...msg, content: newContent, isEdited: true }
+                    : msg
+                );
+                console.log('[EncryptedMessageHandler] Message edited:', messageIdToEdit);
+                return updatedMessages;
+              });
+            }
+            
+            // Dispatch typing stop event for edit messages (same as normal messages)
+            try {
+              const typingStopEvent = new CustomEvent('typing-indicator', {
+                detail: { from: payload.from, indicatorType: 'typing-stop' }
+              });
+              window.dispatchEvent(typingStopEvent);
+              console.log('[EncryptedMessageHandler] Dispatched typing stop for edit message from:', payload.from);
+            } catch (error) {
+              console.error('[EncryptedMessageHandler] Failed to dispatch typing stop for edit:', error);
+            }
+            
+            return; // Don't process as regular message
+          }
+
           // Handle regular messages (only if not a system message or file message)
           // Additional check to ensure typing indicator messages and file messages are not processed as regular messages
           if ((payload.type === 'message' || payload.type === 'text' || !payload.type) &&
@@ -553,8 +602,10 @@ export function useEncryptedMessageHandler(
               if (contentData && contentData.messageId) {
                 messageId = contentData.messageId;
                 messageContent = contentData.content || contentData.message || payload.content;
+                // Extract reply data from content
                 if (contentData.replyTo) {
                   payload.replyTo = contentData.replyTo;
+                  console.log('[EncryptedMessageHandler] Found reply data in content:', contentData.replyTo);
                 }
                 console.log('[EncryptedMessageHandler] Extracted message ID from content:', messageId);
               } else {
@@ -566,6 +617,12 @@ export function useEncryptedMessageHandler(
               // Content is plain text, use fallback message ID
               messageId = messageId || uuidv4();
               console.log('[EncryptedMessageHandler] Using fallback message ID:', messageId);
+            }
+
+            // Also check if replyTo exists directly in the payload (not just in content)
+            if (!payload.replyTo && (payload as any).replyTo) {
+              payload.replyTo = (payload as any).replyTo;
+              console.log('[EncryptedMessageHandler] Found reply data in payload root:', payload.replyTo);
             }
             
             // SECURITY: Atomic check and add to prevent race conditions

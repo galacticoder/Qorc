@@ -148,7 +148,7 @@ export function useMessageSender(
     return messageId;
   }
 
-  const handleSendMessage = useCallback(async (user: User, content: string, replyTo?: string | { id: string; sender?: string; content?: string }, fileData?: string, messageSignalType?: string) => {
+  const handleSendMessage = useCallback(async (user: User, content: string, replyTo?: string | { id: string; sender?: string; content?: string }, fileData?: string, messageSignalType?: string, originalMessageId?: string, editMessageId?: string) => {
     if (!isLoggedIn || !loginUsernameRef.current) return;
 
     const currentUser = loginUsernameRef.current;
@@ -166,12 +166,20 @@ export function useMessageSender(
       hasReplyToData: !!replyToData
     });
 
-    const messageId = await getDeterministicMessageId({
-      content,
-      timestamp: Date.now(),
-      sender: currentUser,
-      replyToId
-    });
+    // For edit messages, use the editMessageId parameter (original message ID)
+    // For other messages, generate a new deterministic ID
+    let actualMessageId;
+    if (messageSignalType === 'edit-message' && editMessageId) {
+      actualMessageId = editMessageId;
+      console.log('[MessageSender] Using original message ID for edit:', actualMessageId);
+    } else {
+      actualMessageId = await getDeterministicMessageId({
+        content,
+        timestamp: Date.now(),
+        sender: currentUser,
+        replyToId
+      });
+    }
 
     // Check if we have a session with this user
     try {
@@ -205,10 +213,13 @@ export function useMessageSender(
         fromUsername: currentUser,
         toUsername: user.username,
         contentLength: content.length,
-        messageId
+        messageId: actualMessageId
       });
 
-      const messageType = messageSignalType === 'typing-start' || messageSignalType === 'typing-stop' ? 'typing-indicator' : (fileData ? 'file-message' : 'message');
+      const messageType = messageSignalType === 'typing-start' || messageSignalType === 'typing-stop' ? 'typing-indicator' : 
+                          messageSignalType === 'delete-message' ? 'delete-message' :
+                          messageSignalType === 'edit-message' ? 'edit-message' :
+                          (fileData ? 'file-message' : 'message');
       
       console.log('[MessageSender] Preparing message with type:', { messageType, messageSignalType, content: content.substring(0, 100) });
       
@@ -216,7 +227,7 @@ export function useMessageSender(
         fromUsername: currentUser,
         toUsername: user.username,
         plaintext: JSON.stringify({
-          messageId: messageId,  // Use 'messageId' to match receiver expectations
+          messageId: actualMessageId,  // Use 'messageId' to match receiver expectations
           from: currentUser,
           to: user.username,
           content: content,
@@ -225,6 +236,7 @@ export function useMessageSender(
           signalType: 'signal-protocol',   // Add signal type for server validation
           protocolType: 'signal',          // Add protocol type identifier
           type: messageType,  // Use special type for typing indicators
+          ...(messageSignalType === 'delete-message' && originalMessageId && { deleteMessageId: originalMessageId }),
           ...(replyToData && { replyTo: replyToData }),
           ...(fileData && { fileData })
         })
@@ -266,7 +278,7 @@ export function useMessageSender(
           from: currentUser,
           to: user.username,
           content: encryptedMessage.ciphertextBase64,
-          messageId: messageId,
+          messageId: actualMessageId,
           type: encryptedMessage.type,  // Use the actual Signal Protocol message type (1 or 3)
           sessionId: encryptedMessage.sessionId  // Add session ID for server validation
         }
@@ -275,11 +287,34 @@ export function useMessageSender(
       // Send the encrypted message
       websocketClient.send(JSON.stringify(messagePayload));
 
-      // Create local message for UI (only for non-typing indicator messages)
-      if (messageSignalType !== 'typing-start' && messageSignalType !== 'typing-stop') {
-        console.log('[MessageSender] Creating local message for UI:', { messageId, content: content.substring(0, 100) });
+      // Handle delete messages locally for sender
+      if (messageSignalType === 'delete-message' && originalMessageId) {
+        console.log('[MessageSender] Processing local delete for sender:', { originalMessageId });
+        // Create a custom event to trigger local message deletion
+        const deleteEvent = new CustomEvent('local-message-delete', {
+          detail: { messageId: originalMessageId }
+        });
+        window.dispatchEvent(deleteEvent);
+        return; // Don't create a new message for delete signals
+      }
+
+      // Handle edit messages locally for sender
+      if (messageSignalType === 'edit-message') {
+        console.log('[MessageSender] Processing local edit for sender:', { messageId: actualMessageId, content: content.substring(0, 100) });
+        // For edit messages, use the messageId passed from the UI (which is the original message ID)
+        // Don't generate a new ID for edits
+        const editEvent = new CustomEvent('local-message-edit', {
+          detail: { messageId: actualMessageId, newContent: content }
+        });
+        window.dispatchEvent(editEvent);
+        return; // Don't create a new message for edit signals
+      }
+
+      // Create local message for UI (only for non-typing indicator messages, non-delete messages, and non-edit messages)
+      if (messageSignalType !== 'typing-start' && messageSignalType !== 'typing-stop' && messageSignalType !== 'delete-message' && messageSignalType !== 'edit-message') {
+        console.log('[MessageSender] Creating local message for UI:', { messageId: actualMessageId, content: content.substring(0, 100) });
         const localMessage: Message = {
-          id: messageId,
+          id: actualMessageId,
           content: content,
           sender: currentUser,
           recipient: user.username,  // Add recipient field for proper filtering
@@ -296,7 +331,7 @@ export function useMessageSender(
 
         onNewMessage(localMessage);
       } else {
-        console.log('[MessageSender] Skipping local message creation for typing indicator:', { messageSignalType, messageId });
+        console.log('[MessageSender] Skipping local message creation for:', { messageSignalType, messageId: actualMessageId });
       }
 
       // Note: Delivery receipt should be sent by the recipient when they receive the message
