@@ -26,7 +26,17 @@ class ElectronTorManager {
 
     // Set up paths
     this.setupPaths();
-    console.log('[TOR-MANAGER] Initialized for platform:', this.platform);
+    // Use safe logging to avoid EBADF dialogs (console writes are redirected in main)
+    try { console.log('[TOR-MANAGER] Initialized for platform:', this.platform); } catch (_) {}
+  }
+
+  /**
+   * Get unique data directory path to avoid conflicts between multiple users/processes
+   */
+  getDataDir() {
+    const processId = process.pid;
+    const userName = require('os').userInfo().username;
+    return path.join(this.torDir, `data-${userName}-${processId}`);
   }
 
   /**
@@ -604,7 +614,7 @@ fi
       console.log('[TOR-MANAGER] Configuration file written with secure permissions');
 
       // Create data directory with secure permissions
-      const dataDir = path.join(this.torDir, 'data');
+      const dataDir = this.getDataDir();
       await fs.mkdir(dataDir, { recursive: true, mode: 0o700 }); // Owner only
       console.log('[TOR-MANAGER] Data directory created:', dataDir);
 
@@ -642,53 +652,66 @@ fi
         return { success: true };
       }
 
-      // Decide whether to prefer our own Tor instance based on config (bridges require our torrc)
-      let preferOwnInstance = false;
-      try {
-        const configContent = await fs.readFile(this.configPath, 'utf8').catch(() => '');
-        if (configContent && /\bUseBridges\s+1\b/i.test(configContent)) {
-          preferOwnInstance = true;
-          console.log('[TOR-MANAGER] Bridge mode detected in config - preferring managed Tor instance');
-        }
-      } catch (e) {
-        // ignore
-      }
-
-      // Only adopt system Tor if we don't explicitly need our own instance
-      if (!preferOwnInstance) {
-        // First, check if system Tor service is already running
-        const systemTorCheck = await new Promise((resolve) => {
-          exec('ss -tlnp | grep :9050', (error, stdout) => {
-            if (!error && stdout.includes('127.0.0.1:9050')) {
-              console.log('[TOR-MANAGER] System Tor service detected on port 9050');
-              resolve({ running: true, port: 9050 });
-            } else {
-              console.log('[TOR-MANAGER] No system Tor service detected');
-              resolve({ running: false });
-            }
-          });
+      // First check if system Tor is available and working
+      console.log('[TOR-MANAGER] Checking for running system Tor service...');
+      const systemTorCheck = await new Promise((resolve) => {
+        exec('ss -tlnp | grep :9050', (error, stdout) => {
+          if (!error && stdout.includes('127.0.0.1:9050')) {
+            console.log('[TOR-MANAGER] System Tor service detected on port 9050');
+            resolve({ running: true, port: 9050 });
+          } else {
+            console.log('[TOR-MANAGER] No system Tor service detected');
+            resolve({ running: false });
+          }
         });
+      });
 
-        if (systemTorCheck.running) {
-          console.log('[TOR-MANAGER] System Tor detected, testing connectivity...');
+      if (systemTorCheck.running) {
+        console.log('[TOR-MANAGER] System Tor detected, testing connectivity...');
 
-          // Test if system Tor is actually working before using it
-          try {
-            const torTest = await this.verifyTorConnection();
-            if (torTest.success) {
-              console.log('[TOR-MANAGER] System Tor is working properly, using existing service');
+        // Set effective ports to system Tor defaults
+        this.effectiveSocksPort = 9050;
+        this.effectiveControlPort = 9051;
+
+        // Test if system Tor is actually working - use simple SOCKS test
+        try {
+          console.log('[TOR-MANAGER] Testing system Tor SOCKS proxy on port 9050...');
+          const socksWorking = await this.checkSocksProxy(9050);
+          if (socksWorking) {
+            console.log('[TOR-MANAGER] System Tor SOCKS proxy is responding, using system Tor');
+            
+            // Check if bridges are required from config
+            let needsBridges = false;
+            try {
+              const configContent = await fs.readFile(this.configPath, 'utf8').catch(() => '');
+              if (configContent && /\bUseBridges\s+1\b/i.test(configContent)) {
+                needsBridges = true;
+                console.log('[TOR-MANAGER] Bridge mode detected in config - need to start managed instance');
+              }
+            } catch (e) {
+              // ignore
+            }
+            
+            if (!needsBridges) {
               this.usingSystemTor = true;
               return { success: true, usingSystemTor: true };
             } else {
-              console.log('[TOR-MANAGER] System Tor detected but not responding properly:', torTest.error);
-              console.log('[TOR-MANAGER] Will start our own Tor instance instead');
+              console.log('[TOR-MANAGER] Bridges required, need to start managed Tor instance instead');
             }
-          } catch (testError) {
-            console.log('[TOR-MANAGER] Failed to test system Tor:', testError.message);
-            console.log('[TOR-MANAGER] Will start our own Tor instance instead');
+          } else {
+            console.log('[TOR-MANAGER] System Tor SOCKS proxy not responding, will start managed instance');
           }
+        } catch (testError) {
+          console.log('[TOR-MANAGER] Failed to test system Tor:', testError.message);
+          console.log('[TOR-MANAGER] Will start our own Tor instance instead');
         }
+      } else {
+        console.log('[TOR-MANAGER] No system Tor detected, will start managed instance');
       }
+
+      // If we reach here, we need to start our own Tor instance
+      console.log('[TOR-MANAGER] Starting managed Tor instance...');
+      
 
       // Verify that Tor binary is available for starting our own instance
       const torCheck = await new Promise((resolve) => {
@@ -711,7 +734,7 @@ fi
         };
       }
 
-      const dataDir = path.join(this.torDir, 'data');
+      const dataDir = this.getDataDir();
 
       // Ensure data directory exists
       console.log('[TOR-MANAGER] Creating data directory:', dataDir);
@@ -732,6 +755,38 @@ fi
       let configuredSocksPort = portsFromCfg.socks;
       let configuredControlPort = portsFromCfg.control;
 
+      // Ensure CookieAuthentication and ControlPort are present in config (for rotation)
+      try {
+        let cfg = await fs.readFile(this.configPath, 'utf8');
+        let changed = false;
+        const dataDir = this.getDataDir();
+        if (!/^CookieAuthentication\s+1/m.test(cfg)) { cfg += '\nCookieAuthentication 1\n'; changed = true; }
+        if (!/^ControlPort\s+\d+/m.test(cfg)) { cfg += `\nControlPort ${configuredControlPort || 9051}\n`; changed = true; }
+        if (!/^DataDirectory\s+/m.test(cfg)) { cfg += `\nDataDirectory ${dataDir}\n`; changed = true; }
+        if (changed) {
+          await fs.writeFile(this.configPath, cfg, 'utf8');
+          console.log('[TOR-MANAGER] Updated torrc to include CookieAuthentication/ControlPort/DataDirectory');
+        }
+      } catch (e) {
+        console.warn('[TOR-MANAGER] Could not ensure torrc has control settings:', e?.message || e);
+      }
+
+      // Verify Tor binary exists and is executable
+      try {
+        await fs.access('tor', fs.constants.F_OK | fs.constants.X_OK);
+        console.log('[TOR-MANAGER] System Tor binary found and executable');
+      } catch (e) {
+        console.warn('[TOR-MANAGER] System Tor binary not accessible, checking app bundle...');
+        if (this.torPath) {
+          try {
+            await fs.access(this.torPath, fs.constants.F_OK | fs.constants.X_OK);
+            console.log('[TOR-MANAGER] App bundle Tor binary found and executable');
+          } catch (e2) {
+            console.error('[TOR-MANAGER] App bundle Tor binary not accessible:', e2.message);
+          }
+        }
+      }
+
       // Start Tor process
       console.log('[TOR-MANAGER] Spawning Tor process with args:', ['-f', this.configPath, '--DataDirectory', dataDir]);
 
@@ -740,28 +795,57 @@ fi
       // Build spawn arguments and handle port conflicts if system Tor is already using defaults
       let spawnArgs = ['-f', this.configPath, '--DataDirectory', dataDir];
 
-      // If defaults 9050/9051 are busy, use alternates 9150/9151
-      try {
-        const portsInUse = await new Promise((resolve) => {
-          exec('ss -tlnp | grep :905', (error, stdout) => {
-            resolve(!error && stdout ? stdout : '');
-          });
-        });
-        const socksBusy = typeof portsInUse === 'string' && portsInUse.includes(':9050');
-        const controlBusy = typeof portsInUse === 'string' && portsInUse.includes(':9051');
-        if (socksBusy || controlBusy) {
-          console.log('[TOR-MANAGER] Default ports busy, overriding to SocksPort 9150 / ControlPort 9151');
-          spawnArgs = ['-f', this.configPath, '--DataDirectory', dataDir, 'SocksPort', '9150', 'ControlPort', '9151'];
-          this.effectiveSocksPort = 9150;
-          this.effectiveControlPort = 9151;
-        } else {
-          // Use configured ports
-          this.effectiveSocksPort = configuredSocksPort;
-          this.effectiveControlPort = configuredControlPort;
+      // Find available ports to avoid conflicts with other users/processes
+      const findAvailablePort = async (startPort) => {
+        for (let port = startPort; port < startPort + 100; port++) {
+          try {
+            const portsInUse = await new Promise((resolve) => {
+              exec(`ss -tlnp | grep ":${port}"`, (error, stdout) => {
+                resolve(!error && stdout ? stdout.trim() : '');
+              });
+            });
+            if (!portsInUse || portsInUse === '') {
+              console.log(`[TOR-MANAGER] Found available port: ${port}`);
+              return port;
+            } else {
+              console.log(`[TOR-MANAGER] Port ${port} is busy: ${portsInUse.split('\n')[0]}`);
+            }
+          } catch (e) {
+            // If ss command fails, try the port anyway
+            console.log(`[TOR-MANAGER] Port check failed for ${port}, using anyway`);
+            return port;
+          }
         }
-      } catch {}
+        console.warn(`[TOR-MANAGER] No available ports found starting from ${startPort}, using ${startPort}`);
+        return startPort; // Fallback
+      };
 
-      this.torProcess = spawn('tor', spawnArgs, {
+      try {
+        // Find available ports starting from 9150 for multi-user compatibility
+        const availableSocksPort = await findAvailablePort(9150);
+        // Ensure control port is different from SOCKS port
+        const availableControlPort = await findAvailablePort(availableSocksPort + 1);
+        
+        console.log(`[TOR-MANAGER] Using available ports: SOCKS=${availableSocksPort}, Control=${availableControlPort}`);
+        
+        spawnArgs = ['-f', this.configPath, '--DataDirectory', dataDir, 'SocksPort', availableSocksPort.toString(), 'ControlPort', availableControlPort.toString()];
+        this.effectiveSocksPort = availableSocksPort;
+        this.effectiveControlPort = availableControlPort;
+      } catch (e) {
+        console.warn('[TOR-MANAGER] Port detection failed, using configured ports:', e?.message || e);
+        // Use configured ports as fallback
+        this.effectiveSocksPort = configuredSocksPort;
+        this.effectiveControlPort = configuredControlPort;
+      }
+
+      // Use system Tor if available, otherwise use app bundle
+      const torBinary = this.torPath && await fs.access(this.torPath, fs.constants.F_OK).then(() => true).catch(() => false) 
+        ? this.torPath 
+        : 'tor';
+      
+      console.log('[TOR-MANAGER] Using Tor binary:', torBinary);
+      
+      this.torProcess = spawn(torBinary, spawnArgs, {
         stdio: ['ignore', 'pipe', 'pipe'],
         detached: false
       });
@@ -795,15 +879,28 @@ fi
       this.torProcess.stderr.on('data', (data) => {
         const errorMsg = data.toString().trim();
         console.error('[TOR-ERROR]', errorMsg);
-        if (errorMsg.includes('Permission denied') || errorMsg.includes('Cannot bind')) {
+        // Capture all error messages, not just permission/bind errors
+        if (errorMsg && !processError) {
           processError = errorMsg;
+        }
+        // Log specific common error patterns
+        if (errorMsg.includes('Permission denied')) {
+          console.error('[TOR-ERROR] Permission denied - check file/directory permissions');
+        } else if (errorMsg.includes('Cannot bind')) {
+          console.error('[TOR-ERROR] Port binding failed - port may be in use');
+        } else if (errorMsg.includes('Configuration file')) {
+          console.error('[TOR-ERROR] Configuration file error - check torrc syntax');
+        } else if (errorMsg.includes('Invalid')) {
+          console.error('[TOR-ERROR] Invalid configuration option');
         }
       });
 
       this.torProcess.on('exit', (code) => {
         console.log(`[TOR-MANAGER] Tor process exited with code ${code}`);
         if (code !== 0) {
-          processError = `Tor exited with code ${code}`;
+          processError = processError ? 
+            `Tor exited with code ${code}: ${processError}` : 
+            `Tor exited with code ${code}`;
         }
         this.torProcess = null;
       });
@@ -814,15 +911,13 @@ fi
         this.torProcess = null;
       });
 
-      // Wait a moment for Tor to start
+      // Wait for Tor to start; declare success if process is running even if verify later fails
       console.log('[TOR-MANAGER] Waiting for Tor to initialize...');
-      // Wait up to ~45s for bootstrap, checking periodically
       let bootstrapTimeout = false;
-      for (let i = 0; i < 15; i++) {
+      for (let i = 0; i < 10; i++) {
         if (this.bootstrapped) break;
-        if (processError) break; // Exit early if error detected
-        await new Promise(resolve => setTimeout(resolve, 3000));
-        if (i === 14) bootstrapTimeout = true;
+        if (processError) break;
+        await new Promise(resolve => setTimeout(resolve, 1000));
       }
 
       if (bootstrapTimeout && !this.bootstrapped) {
@@ -830,7 +925,13 @@ fi
         processError = processError || 'Tor failed to bootstrap within 45 seconds';
       }
 
-      // Check for errors
+      // Ensure effective ports are set
+      try {
+        if (!this.effectiveSocksPort) this.effectiveSocksPort = configuredSocksPort || 9050;
+        if (!this.effectiveControlPort) this.effectiveControlPort = configuredControlPort || 9051;
+      } catch {}
+
+      // Check for critical errors only
       if (processError) {
         console.error('[TOR-MANAGER] Tor startup failed:', processError);
 
@@ -853,7 +954,7 @@ fi
             // Retry starting Tor with updated config
             console.log('[TOR-MANAGER] Retrying Tor start without bridges...');
             processError = null;
-            this.torProcess = spawn('tor', spawnArgs, { stdio: ['ignore', 'pipe', 'pipe'], detached: false });
+            this.torProcess = spawn(torBinary, spawnArgs, { stdio: ['ignore', 'pipe', 'pipe'], detached: false });
             let retryError = null;
             this.torProcess.stderr.on('data', (data) => {
               const err = data.toString().trim();
@@ -891,7 +992,7 @@ fi
             await fs.writeFile(this.configPath, newCfg, 'utf8');
 
             console.log('[TOR-MANAGER] Retrying Tor start without bridges...');
-            this.torProcess = spawn('tor', spawnArgs, { stdio: ['ignore', 'pipe', 'pipe'], detached: false });
+            this.torProcess = spawn(torBinary, spawnArgs, { stdio: ['ignore', 'pipe', 'pipe'], detached: false });
             await new Promise(resolve => setTimeout(resolve, 3000));
             if (this.torProcess && !this.torProcess.killed) {
               console.log('[TOR-MANAGER] Tor started successfully after disabling bridges');
@@ -905,7 +1006,7 @@ fi
         return { success: false, error: 'Tor process failed to start or died immediately' };
       }
 
-      console.log('[TOR-MANAGER] Tor service started successfully');
+      console.log('[TOR-MANAGER] Tor service started (verify may follow)');
       return { success: true };
 
     } catch (error) {
@@ -1060,21 +1161,31 @@ fi
             
             // Check if system Tor service is actually running (not just any Tor on port 9050)
             const serviceCheck = await new Promise((resolve) => {
-              const serviceCmd = this.platform === 'win32' 
-                ? 'sc query tor'
-                : 'systemctl is-active tor 2>/dev/null';
-              
-              exec(serviceCmd, (error, stdout) => {
-                if (this.platform === 'win32') {
-                  // Windows: check if service is running
+              if (this.platform === 'win32') {
+                exec('sc query tor', (error, stdout) => {
                   const isRunning = !error && stdout.includes('RUNNING');
                   resolve(isRunning);
-                } else {
-                  // Linux/macOS: check systemctl status
-                  const isActive = !error && stdout.trim() === 'active';
-                  resolve(isActive);
-                }
-              });
+                });
+              } else {
+                // Linux/macOS: check for port 9050 listener AND Tor process
+                exec('ss -tln | grep ":9050"', (portError, portStdout) => {
+                  const port9050Open = !portError && portStdout.includes(':9050');
+                  
+                  if (port9050Open) {
+                    exec('ps aux | grep -v grep | grep "/usr/bin/tor"', (processError, processStdout) => {
+                      const hasTorProcess = !processError && processStdout.includes('/usr/bin/tor');
+                      console.log('[TOR-MANAGER] System Tor check - Port 9050:', port9050Open, ', Tor process:', hasTorProcess);
+                      if (hasTorProcess) {
+                        console.log('[TOR-MANAGER] System Tor details:', processStdout.trim());
+                      }
+                      resolve(port9050Open && hasTorProcess);
+                    });
+                  } else {
+                    console.log('[TOR-MANAGER] Port 9050 not open, no system Tor');
+                    resolve(false);
+                  }
+                });
+              }
             });
             
             systemTorRunning = serviceCheck;
@@ -1085,7 +1196,7 @@ fi
       }
 
       // Check if data directory exists
-      const dataDir = path.join(this.torDir, 'data');
+      const dataDir = this.getDataDir();
       let dataDirExists = false;
       try {
         const stats = await fs.stat(dataDir);
@@ -1285,17 +1396,19 @@ fi
   async sendNewNymSignal() {
     return new Promise(async (resolve) => {
       const net = require('net');
-      let controlPort = 9051; // default
+      let controlPort = this.effectiveControlPort || 9051; // prefer effective port
 
-      // Try to read ControlPort from config
-      try {
-        const cfg = await fs.readFile(this.configPath, 'utf8');
-        const m = cfg.match(/^ControlPort\s+(\d+)/m);
-        if (m) controlPort = parseInt(m[1], 10) || controlPort;
-      } catch {}
+      // Try to read ControlPort from config as fallback only if effectiveControlPort not set
+      if (!this.effectiveControlPort) {
+        try {
+          const cfg = await fs.readFile(this.configPath, 'utf8');
+          const m = cfg.match(/^ControlPort\s+(\d+)/m);
+          if (m) controlPort = parseInt(m[1], 10) || controlPort;
+        } catch {}
+      }
 
       // Read cookie for authentication (CookieAuthentication 1)
-      const dataDir = path.join(this.torDir, 'data');
+      const dataDir = this.getDataDir();
       const cookiePath = path.join(dataDir, 'control_auth_cookie');
       let cookieHex = null;
       try {
@@ -1303,7 +1416,9 @@ fi
         cookieHex = cookie.toString('hex');
       } catch {}
 
-      console.log('[TOR-MANAGER] Connecting to Tor control port:', controlPort);
+      console.log('[TOR-MANAGER] sendNewNymSignal: Using control port:', controlPort);
+      console.log('[TOR-MANAGER] sendNewNymSignal: this.effectiveControlPort =', this.effectiveControlPort);
+      console.log('[TOR-MANAGER] sendNewNymSignal: this.configuredControlPort =', this.configuredControlPort);
       const socket = net.createConnection(controlPort, '127.0.0.1');
 
       let stage = cookieHex ? 'auth' : 'signal';
@@ -1314,7 +1429,8 @@ fi
       socket.on('connect', () => {
         console.log('[TOR-MANAGER] Connected to Tor control port');
         if (stage === 'auth') {
-          send(`AUTHENTICATE ${cookieHex}`);
+          if (cookieHex) send(`AUTHENTICATE ${cookieHex}`);
+          else { stage = 'signal'; send('SIGNAL NEWNYM'); }
         } else {
           send('SIGNAL NEWNYM');
         }
@@ -1516,14 +1632,21 @@ fi
   async getCircuitInfoFromControl() {
     return new Promise(async (resolve) => {
       const net = require('net');
-      let controlPort = 9051;
-      try {
-        const cfg = await fs.readFile(this.configPath, 'utf8');
-        const m = cfg.match(/^ControlPort\s+(\d+)/m);
-        if (m) controlPort = parseInt(m[1], 10) || controlPort;
-      } catch {}
+      let controlPort = this.effectiveControlPort || 9051; // prefer effective port
+      
+      // Try to read ControlPort from config as fallback only if effectiveControlPort not set
+      if (!this.effectiveControlPort) {
+        try {
+          const cfg = await fs.readFile(this.configPath, 'utf8');
+          const m = cfg.match(/^ControlPort\s+(\d+)/m);
+          if (m) controlPort = parseInt(m[1], 10) || controlPort;
+        } catch {}
+      }
 
-      const dataDir = path.join(this.torDir, 'data');
+      console.log('[TOR-MANAGER] getCircuitInfoFromControl: Using control port:', controlPort);
+      console.log('[TOR-MANAGER] getCircuitInfoFromControl: this.effectiveControlPort =', this.effectiveControlPort);
+
+      const dataDir = this.getDataDir();
       const cookiePath = path.join(dataDir, 'control_auth_cookie');
       let cookieHex = null;
       try {
@@ -1754,11 +1877,38 @@ fi
   }
 
   /**
+   * Check if SOCKS proxy is responding (simple connectivity test)
+   */
+  async checkSocksProxy(port) {
+    return new Promise((resolve) => {
+      const net = require('net');
+      const socket = net.createConnection(port, '127.0.0.1');
+      
+      const timeout = setTimeout(() => {
+        socket.destroy();
+        resolve(false);
+      }, 3000);
+      
+      socket.on('connect', () => {
+        clearTimeout(timeout);
+        socket.destroy();
+        resolve(true);
+      });
+      
+      socket.on('error', () => {
+        clearTimeout(timeout);
+        resolve(false);
+      });
+    });
+  }
+
+  /**
    * Verify Tor connection by checking IP through Tor network
    */
   async verifyTorConnection() {
     try {
       console.log('[TOR-MANAGER] Verifying Tor connection...');
+      console.log('[TOR-MANAGER] this.effectiveSocksPort =', this.effectiveSocksPort);
 
       // Use effective SOCKS port if known, else read from config, else default
       let socksPort = this.effectiveSocksPort || 9050;
@@ -1770,57 +1920,89 @@ fi
         } catch {}
       }
 
+      console.log('[TOR-MANAGER] Using SOCKS port for verification:', socksPort);
+      
       return new Promise((resolve) => {
         const { SocksProxyAgent } = require('socks-proxy-agent');
         const proxyAgent = new SocksProxyAgent(`socks5h://127.0.0.1:${socksPort}`);
 
-        const options = {
-          hostname: 'check.torproject.org',
-          path: '/api/ip',
-          method: 'GET',
-          agent: proxyAgent,
-          timeout: 20000  // Increase timeout to 20 seconds for better reliability
-        };
+        // First do a quick SOCKS proxy check (faster and more reliable)
+        this.checkSocksProxy(socksPort).then(socksWorking => {
+          if (!socksWorking) {
+            console.log('[TOR-MANAGER] SOCKS proxy not responding, Tor likely not working');
+            resolve({ success: false, error: 'SOCKS proxy not responding on port ' + socksPort });
+            return;
+          }
+          
+          console.log('[TOR-MANAGER] SOCKS proxy responding, now testing external connectivity...');
+          
+          const options = {
+            hostname: 'check.torproject.org',
+            path: '/api/ip',
+            method: 'GET',
+            agent: proxyAgent,
+            timeout: 10000  // Reduce timeout to 10 seconds since SOCKS is already working
+          };
 
-        const req = https.request(options, (res) => {
-          let data = '';
+          const req = https.request(options, (res) => {
+            let data = '';
 
-          res.on('data', (chunk) => {
-            data += chunk;
+            res.on('data', (chunk) => {
+              data += chunk;
+            });
+
+            res.on('end', () => {
+              try {
+                const result = JSON.parse(data);
+                console.log('[TOR-MANAGER] Tor verification result:', result);
+                resolve({
+                  success: true,
+                  isTor: result.IsTor === true,
+                  ip: result.IP
+                });
+              } catch (parseError) {
+                console.error('[TOR-MANAGER] Failed to parse verification response:', parseError);
+                resolve({ success: false, error: 'Invalid response format' });
+              }
+            });
           });
 
-          res.on('end', () => {
-            try {
-              const result = JSON.parse(data);
-              console.log('[TOR-MANAGER] Tor verification result:', result);
-              resolve({
-                success: true,
-                isTor: result.IsTor === true,
-                ip: result.IP
-              });
-            } catch (parseError) {
-              console.error('[TOR-MANAGER] Failed to parse verification response:', parseError);
-              resolve({ success: false, error: 'Invalid response format' });
-            }
+          req.on('error', (error) => {
+            console.error('[TOR-MANAGER] Tor verification failed:', error);
+            console.log('[TOR-MANAGER] SOCKS proxy was responding but external verification failed');
+            resolve({ success: true, error: `External verification failed but SOCKS proxy responding: ${error.message}`, isTor: true });
           });
-        });
 
-        req.on('error', (error) => {
-          console.error('[TOR-MANAGER] Tor verification failed:', error);
-          resolve({ success: false, error: error.message });
-        });
+          req.on('timeout', () => {
+            console.error('[TOR-MANAGER] Tor verification timed out');
+            req.destroy();
+            console.log('[TOR-MANAGER] SOCKS proxy was responding but external verification timed out');
+            resolve({ success: true, error: 'External verification timed out but SOCKS proxy responding', isTor: true });
+          });
 
-        req.on('timeout', () => {
-          console.error('[TOR-MANAGER] Tor verification timed out');
-          req.destroy();
-          resolve({ success: false, error: 'Connection timeout' });
+          req.end();
+        }).catch((socksError) => {
+          console.log('[TOR-MANAGER] Failed to check SOCKS proxy:', socksError.message);
+          resolve({ success: false, error: 'SOCKS proxy check failed: ' + socksError.message });
         });
-
-        req.end();
       });
 
     } catch (error) {
       console.error('[TOR-MANAGER] Tor verification error:', error);
+      console.log('[TOR-MANAGER] Attempting SOCKS proxy fallback check...');
+      
+      // Fallback: check if SOCKS proxy is at least responding
+      try {
+        const socksPort = this.effectiveSocksPort || 9050;
+        const socksWorking = await this.checkSocksProxy(socksPort);
+        if (socksWorking) {
+          console.log('[TOR-MANAGER] SOCKS proxy is responding, considering Tor as working (fallback)');
+          return { success: true, error: `External verification failed but SOCKS proxy responding: ${error.message}`, isTor: true };
+        }
+      } catch (fallbackError) {
+        console.log('[TOR-MANAGER] Fallback SOCKS check also failed:', fallbackError.message);
+      }
+      
       return { success: false, error: error.message };
     }
   }

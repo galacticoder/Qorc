@@ -3,6 +3,45 @@ const path = require('path');
 const fs = require('fs');
 const os = require('os');
 const isDev = process.env.NODE_ENV === 'development';
+
+// Disable GPU acceleration to avoid Vulkan/graphics driver issues
+app.disableHardwareAcceleration();
+
+// Add additional command line switches for better compatibility
+app.commandLine.appendSwitch('--disable-gpu');
+app.commandLine.appendSwitch('--disable-gpu-sandbox');
+app.commandLine.appendSwitch('--disable-software-rasterizer');
+
+// Route all console output to a file to avoid EBADF when parent stdio closes
+try {
+  const logFilePath = path.join(os.tmpdir(), 'end2end-chat-electron-main.log');
+  const formatArg = (a) => {
+    try {
+      if (typeof a === 'string') return a;
+      if (a instanceof Error) return a.stack || a.message;
+      return JSON.stringify(a);
+    } catch (_e) {
+      return String(a);
+    }
+  };
+  const writeLine = (level, args) => {
+    const line = `[${new Date().toISOString()}] [${level}] ` + Array.from(args).map(formatArg).join(' ') + '\n';
+    try { fs.appendFileSync(logFilePath, line); } catch (_e) { /* ignore */ }
+  };
+  const make = (level) => function() { writeLine(level, arguments); };
+  console.log = make('LOG');
+  console.info = make('INFO');
+  console.warn = make('WARN');
+  console.error = make('ERROR');
+  console.debug = make('DEBUG');
+  process.on('uncaughtException', (err) => {
+    try { writeLine('UNCAUGHT', [err && (err.stack || err.message || String(err))]); } catch (_) {}
+  });
+} catch (_e) {
+  // no-op
+}
+
+// Require Tor manager after console/stdio safety is applied
 const torManager = require('./tor-manager.cjs');
 
 // Keep a global reference of the window object
@@ -21,13 +60,15 @@ function createWindow() {
     partition: partitionName,
     // Enable media access for voice notes and video calls
     allowRunningInsecureContent: false,
-    experimentalFeatures: true
+    experimentalFeatures: false
   };
 
   // Only weaken security in development for WebRTC/screen sharing testing
   if (isDev) {
-    webPreferences.webSecurity = false;
-    webPreferences.allowRunningInsecureContent = true;
+    // Enable experimental features only in dev for WebRTC/screen sharing
+    webPreferences.experimentalFeatures = true;
+    // webPreferences.webSecurity = false;
+    // webPreferences.allowRunningInsecureContent = true;
   }
 
   // Create the browser window
@@ -40,14 +81,67 @@ function createWindow() {
     show: false // Don't show until ready
   });
 
-  // Load the app
-  if (isDev) {
-    mainWindow.loadURL('http://localhost:5173');
-    // Open DevTools in development
-    mainWindow.webContents.openDevTools();
-  } else {
-    mainWindow.loadFile(path.join(__dirname, '../dist/index.html'));
-  }
+  // Load the app - try dev server first, then dist build, then show error
+  const tryLoadDevServer = () => {
+    return new Promise((resolve) => {
+      const http = require('http');
+      const req = http.request({
+        hostname: 'localhost',
+        port: 5173,
+        path: '/',
+        method: 'HEAD',
+        timeout: 2000
+      }, (res) => {
+        resolve(true);
+      });
+      req.on('error', () => resolve(false));
+      req.on('timeout', () => {
+        req.destroy();
+        resolve(false);
+      });
+      req.end();
+    });
+  };
+
+  const loadApp = async () => {
+    // First try dev server (regardless of NODE_ENV since user might run electron directly)
+    const devServerAvailable = await tryLoadDevServer();
+    
+    if (devServerAvailable) {
+      console.log('Loading from Vite dev server...');
+      mainWindow.loadURL('http://localhost:5173');
+      // Open DevTools when loading from dev server
+      mainWindow.webContents.openDevTools();
+    } else {
+      // Try dist build
+      const distPath = path.join(__dirname, '../dist/index.html');
+      if (fs.existsSync(distPath)) {
+        console.log('Loading from dist build...');
+        mainWindow.loadFile(distPath);
+      } else {
+        console.error('Neither dev server nor dist build available.');
+        // Show helpful error page
+        const errorHtml = `
+          <html>
+            <head><title>End2End Chat - Setup Required</title></head>
+            <body style="font-family: Arial, sans-serif; padding: 40px; text-align: center;">
+              <h1>🔧 Setup Required</h1>
+              <p>To run the application, you need either:</p>
+              <ol style="text-align: left; display: inline-block;">
+                <li><strong>Development mode:</strong> Run <code>bash startClient.sh</code></li>
+                <li><strong>Production build:</strong> Run <code>pnpm run build</code> first</li>
+              </ol>
+              <p><small>This window will close in 10 seconds...</small></p>
+              <script>setTimeout(() => window.close(), 10000);</script>
+            </body>
+          </html>
+        `;
+        mainWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(errorHtml)}`);
+      }
+    }
+  };
+  
+  loadApp();
 
   // Show window when ready to prevent visual flash
   mainWindow.once('ready-to-show', () => {
@@ -56,6 +150,13 @@ function createWindow() {
     // Focus on window
     if (isDev) {
       mainWindow.focus();
+    }
+  });
+
+  // Ensure app quits when last window is closed in dev to avoid relaunch loops
+  mainWindow.on('closed', () => {
+    if (process.platform !== 'darwin') {
+      try { app.quit(); } catch (_) {}
     }
   });
 
@@ -72,8 +173,10 @@ function createWindow() {
 
   mainWindow.on('close', async (event) => {
     if (torManager.isTorRunning()) {
-      console.log('[ELECTRON] Shutting down Tor before closing...');
-      await torManager.stopTor();
+      try {
+        console.log('[ELECTRON] Shutting down Tor before closing...');
+        await torManager.stopTor();
+      } catch (_) {}
     }
   });
 }

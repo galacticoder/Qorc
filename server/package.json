@@ -14,6 +14,7 @@
   "dependencies": {
     "@noble/ciphers": "^2.0.0",
     "@noble/curves": "^1.9.7",
+    "@noble/post-quantum": "^0.4.1",
     "argon2": "^0.44.0",
     "better-sqlite3": "^12.2.0",
     "cross-env": "^7.0.3",
@@ -23,7 +24,8 @@
     "rate-limiter-flexible": "^7.2.0",
     "selfsigned": "^3.0.1",
     "socks-proxy-agent": "^8.0.5",
-    "ws": "^8.18.3"
+    "ws": "^8.18.3",
+    "generic-pool": "^3.9.0"
   },
   "devDependencies": {
     "@types/ws": "^8.18.1"

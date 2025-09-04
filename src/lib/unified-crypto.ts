@@ -561,14 +561,18 @@ class X25519Service {
   static async _loadNobleIfNeeded() {
     if (this.nobleX) return this.nobleX;
     try {
+      // Import X25519 from the ed25519 module (where it's actually exported)
       const mod = await import("@noble/curves/ed25519");
-      const x =
-        (mod as any).x25519 ||
-        (mod as any).x25519
+      const x = (mod as any).x25519;
+      if (!x) {
+        throw new Error('x25519 not found in ed25519 module');
+      }
       this.nobleX = x;
+      console.log('[CRYPTO] Successfully loaded noble X25519 from ed25519 module');
       return x;
     } catch (e) {
       try {
+        // Fallback: try importing from root (though this likely won't work)
         const root = await import("@noble/curves");
         const x = (root as any).x25519;
         if (!x) throw e;
@@ -576,6 +580,7 @@ class X25519Service {
         return x;
       } catch (err) {
         console.warn("Noble x25519 dynamic import failed:", err);
+        console.error('Failed to load X25519:', e);
         throw new Error("No X25519 implementation available in this environment");
       }
     }
@@ -584,6 +589,13 @@ class X25519Service {
   static supportsWebCryptoX25519(): boolean {
     try {
       if (!subtle || typeof subtle.generateKey !== "function") return false;
+      
+      // Check if we're in Electron environment
+      if (typeof window !== 'undefined' && (window as any).electronAPI) {
+        // Electron's WebCrypto may not support X25519, so prefer noble fallback
+        console.log('[CRYPTO] Electron environment detected, using noble-curves for X25519');
+        return false;
+      }
 
       return true;
     } catch {
@@ -625,8 +637,14 @@ class X25519Service {
 
     // SECURITY: Validate key generation
     if (!priv || priv.length !== 32 || !pub || pub.length !== 32) {
+      console.error('[CRYPTO] Invalid key generation:', {
+        priv: priv ? `${priv.length} bytes` : 'null',
+        pub: pub ? `${pub.length} bytes` : 'null'
+      });
       throw new Error('CRITICAL: Invalid X25519 key generation');
     }
+    
+    console.log('[CRYPTO] Successfully generated X25519 key pair with noble-curves');
 
     return {
       privateKeyBytes: priv,

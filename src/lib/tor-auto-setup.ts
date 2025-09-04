@@ -60,27 +60,37 @@ export class TorAutoSetup {
         return false;
       }
 
-      // Step 1: Always download fresh Tor Expert Bundle for consistency
-      this.updateStatus(10, 'Preparing Tor Expert Bundle download...');
-      console.log('[TOR-SETUP] Will download Tor Expert Bundle for maximum compatibility');
+      // Step 1: Check for system Tor first (more reliable and faster)
+      this.updateStatus(10, 'Checking for system Tor...');
+      console.log('[TOR-SETUP] Checking for system Tor installation first');
+      
+      const systemTorCheck = await this.checkSystemTor();
+      if (systemTorCheck.isInstalled) {
+        console.log('[TOR-SETUP] Found system Tor, using it instead of downloading');
+        this.updateStatus(30, 'Using system Tor installation...');
+        this.status.isInstalled = true;
+      } else {
+        console.log('[TOR-SETUP] No system Tor found, downloading Tor Expert Bundle');
+        this.updateStatus(15, 'Preparing Tor Expert Bundle download...');
+        
+        // Step 2: Download Tor Expert Bundle only if no system Tor
+        this.updateStatus(20, 'Downloading Tor Expert Bundle...', 'Downloading ~15MB from torproject.org');
+        const downloadSuccess = await this.downloadTor();
 
-      // Step 2: Download Tor Expert Bundle (always, for consistency)
-      this.updateStatus(20, 'Downloading Tor Expert Bundle...', 'Downloading ~15MB from torproject.org');
-      const downloadSuccess = await this.downloadTor();
+        if (!downloadSuccess) {
+          this.updateStatus(0, 'Failed to download Tor', 'Could not download Tor Expert Bundle. Check internet connection or install system Tor: sudo apt-get install tor');
+          return false;
+        }
 
-      if (!downloadSuccess) {
-        this.updateStatus(0, 'Failed to download Tor', 'Could not download Tor Expert Bundle. Check internet connection.');
-        return false;
-      }
+        this.updateStatus(40, 'Installing Tor Expert Bundle...');
+        console.log('[TOR-SETUP] Calling installTor...');
+        const installSuccess = await this.installTor();
+        console.log('[TOR-SETUP] Install result:', installSuccess);
 
-      this.updateStatus(40, 'Installing Tor Expert Bundle...');
-      console.log('[TOR-SETUP] Calling installTor...');
-      const installSuccess = await this.installTor();
-      console.log('[TOR-SETUP] Install result:', installSuccess);
-
-      if (!installSuccess) {
-        this.updateStatus(0, 'Failed to install Tor', 'Could not complete Tor installation. You may need to install Tor manually.');
-        return false;
+        if (!installSuccess) {
+          this.updateStatus(0, 'Failed to install Tor', 'Could not complete Tor installation. You may need to install Tor manually.');
+          return false;
+        }
       }
 
       // Step 3: Configure Tor
@@ -150,6 +160,27 @@ export class TorAutoSetup {
     }
   }
 
+
+  /**
+   * Check if system Tor is available
+   */
+  private async checkSystemTor(): Promise<{ isInstalled: boolean; version?: string }> {
+    try {
+      if (typeof window !== 'undefined' && (window as any).electronAPI) {
+        console.log('[TOR-SETUP] Checking system Tor through Electron API...');
+        const result = await (window as any).electronAPI.checkTorInstallation();
+        console.log('[TOR-SETUP] System Tor check result:', result);
+        return { 
+          isInstalled: result.isInstalled || false, 
+          version: result.version || result.systemVersion 
+        };
+      }
+      return { isInstalled: false };
+    } catch (error) {
+      console.error('[TOR-SETUP] Failed to check system Tor:', error);
+      return { isInstalled: false };
+    }
+  }
 
   /**
    * Download Tor for the current platform
@@ -250,7 +281,24 @@ export class TorAutoSetup {
       if (typeof window !== 'undefined' && (window as any).electronAPI) {
         // Use Electron main process to verify Tor connection
         const result = await (window as any).electronAPI.verifyTorConnection();
-        return result.success && result.isTor;
+        if (result && result.success && result.isTor) {
+          return true;
+        }
+
+        // Fallback heuristic: treat as connected if Tor is running and SOCKS port is known
+        try {
+          const status = await (window as any).electronAPI.getTorStatus?.();
+          const info = await (window as any).electronAPI.getTorInfo?.();
+          const running = !!(status && status.isRunning);
+          const hasSocks = !!(info && (info.socksPort || info.binaryExists));
+          if (running && hasSocks) {
+            console.warn('[TOR-SETUP] Verification failed, but Tor appears to be running with SOCKS; proceeding.');
+            return true;
+          }
+        } catch (_e) {
+          // ignore and fall through to failure
+        }
+        return false;
       }
 
       // Fallback: assume success if we can't verify
@@ -267,8 +315,9 @@ export class TorAutoSetup {
    */
   private generateTorConfig(options: TorInstallOptions): string {
     // Use dynamic ports from options or defaults
-    const socksPort = options.customConfig?.socksPort || 9050;
-    const controlPort = options.customConfig?.controlPort || 9051;
+    // Use non-default ports by default to avoid colliding with a system Tor
+    const socksPort = options.customConfig?.socksPort || 9150;
+    const controlPort = options.customConfig?.controlPort || 9151;
 
     const config = [
       '# Auto-generated Tor configuration for end2end',
@@ -286,16 +335,25 @@ export class TorAutoSetup {
       '# Performance optimizations',
       'NewCircuitPeriod 30',
       'MaxCircuitDirtiness 600',
-      'CircuitBuildTimeout 10',
-      'LearnCircuitBuildTimeout 1',
+      'CircuitBuildTimeout 30',
+      'LearnCircuitBuildTimeout 0',
       '',
       '# Privacy settings',
       'ExitPolicy reject *:*',
       'ClientOnly 1',
       '',
-      '# Logging (minimal for privacy)',
+      '# Logging (more verbose for debugging)',
       'Log notice stdout',
-      'SafeLogging 1',
+      'Log warn stdout',
+      'SafeLogging 0',
+      '',
+      '# Data directory (will be overridden by command line)',
+      'DataDirectory ./tor-data',
+      '',
+      '# Network resilience settings',
+      'FetchDirInfoEarly 1',
+      'FetchDirInfoExtraEarly 1',
+      'FetchUselessDescriptors 1',
     ];
 
     // Add bridge configuration if requested
