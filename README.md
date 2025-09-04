@@ -1,52 +1,29 @@
 # End-to-End Encrypted Chat Application
 
-Secure messaging with post-quantum cryptography and Signal Protocol integration.
+Secure chat app with post-quantum cryptography and Signal Protocol integration along with lots of other security.
 
-## Quick Start
+## Setup and run
 
-### Automated Installation (Recommended)
+**Prerequisites:**
+  - Node.js 18+ and pnpm
 
-**Cross-platform installer that handles all dependencies:**
+**Clone the repository:**
 
 ```bash
 git clone https://github.com/galacticoder/end2end-chat-site.git
+
 cd end2end-chat-site
-./install-dependencies.sh
 ```
-
-**Supported platforms:**
-- **Linux**: Ubuntu/Debian, Fedora/RHEL, Arch Linux
-- **macOS**: Intel and Apple Silicon
-- **Windows**: Git Bash, WSL, or similar Unix-like environment
-
-The installer will:
-- Install Node.js, pnpm, and system dependencies
-- Configure Tor for secure networking
-- Set up Electron dependencies
-- Install project dependencies
-
-### Manual Setup
-
-#### Option 1: Electron Desktop App (Recommended)
-
-**Prerequisites:**
-- Node.js 18+ and pnpm
-- System dependencies (see install-dependencies.sh)
-
-**Installation:**
-1. **Clone and setup:**
-   ```bash
-   git clone https://github.com/galacticoder/end2end-chat-site.git
-   cd end2end-chat-site
-   ```
+### Setup option 1: Electron Desktop App (Recommended)
 
 2. **Start the application:**
    ```bash
    ./startClient.sh  # Launches Electron app + dev server
-   ./startServer.sh  # In another terminal for backend
+
+   ./startServer.sh  # In another terminal for starting the server
    ```
 
-#### Option 2: Server in Docker + Local Client
+### Setup option 2: Server in Docker + Local Client
 
 **Isolated server, native Electron client:**
 
@@ -60,63 +37,16 @@ The installer will:
    ./startClient.sh  # Native Electron app
    ```
 
-## Features
+**Supported platforms:**
+- **Linux**: Ubuntu/Debian, Fedora/RHEL, Arch Linux
+- **macOS**: Intel and Apple Silicon
+- **Windows**: Git Bash, WSL, or similar Unix-like environment
 
-### Communication
-- Real-time messaging with typing indicators
-- Secure file sharing with chunked encryption
-- Voice and video calls with WebRTC
-- Screen sharing with quality controls
-- Message replies and threading
-- Offline message delivery
-- Lots of other features
-
-### Privacy & Security
-- End-to-end encryption with Signal Protocol
-- Post-quantum cryptography (Kyber768, Dilithium3)
-- Tor network integration for anonymity
-- Zero-knowledge server architecture
-- Rate limiting and spam protection
-- Multi-layer authentication
-
-### Platform Support
-- Cross-platform desktop apps (Electron)
-
-## Security Implementation
-
-### Encryption
-- **Signal Protocol:** Double Ratchet algorithm with X3DH key agreement
-- **Post-Quantum:** Kyber768 key encapsulation, Dilithium3 signatures
-- **Symmetric:** XChaCha20-Poly1305, ChaCha20-Poly1305, AES-256-GCM
-- **Hashing:** BLAKE3, Argon2id for passwords, HKDF-SHA512
-
-### Privacy Features
-- Zero-knowledge server design
-- Local encrypted storage (IndexedDB)
-- Optional Tor routing
-- Minimal metadata collection
-- Perfect forward secrecy
-
-## Technology Stack
-
-### Frontend
-- React 18 with TypeScript
-- Vite build system
-- Tailwind CSS + shadcn/ui
-- Electron for desktop apps
-
-### Backend
-- Node.js with WebSocket server
-- SQLite/PostgreSQL database
-- Self-signed TLS certificates
-- Redis support for scaling
-
-### Cryptography Libraries
-- @noble/post-quantum (Kyber, Dilithium)
-- @noble/ciphers (ChaCha20, XChaCha20)
-- @noble/hashes (BLAKE3)
-- argon2-wasm
-- Signal Protocol implementation
+Everything is handled automatically in the scripts and will do:
+- Install Node.js, pnpm, and system dependencies
+- Configure Tor for secure networking
+- Set up Electron dependencies
+- Install project dependencies
 
 ## Configuration
 
@@ -181,20 +111,63 @@ RATE_LIMIT_ENABLED=true
 TOR_ENABLED=false
 ```
 
-### Development
-```bash
-# Install dependencies
-pnpm install
+## Features
 
-# Development mode
-pnpm run dev
+### Communication
+- Real-time messaging with typing indicators
+- Secure file sharing with chunked encryption
+- Voice and video calls with WebRTC
+- Screen sharing with quality controls
+- Message replies and threading
+- Offline message delivery
+- Lots of other features
 
-# Production build
-pnpm run build
+### Privacy & Security
+- End-to-end encryption with Signal Protocol
+- Post-quantum cryptography (Kyber768, Dilithium3)
+- Tor network integration for anonymity
+- Zero-knowledge server architecture
+- Rate limiting and spam protection
+- Multi-layer authentication
 
-# Electron build
-pnpm run build:electron
-```
+### Platform Support
+- Cross-platform desktop apps (Electron)
+
+## Security Implementation
+
+### Encryption
+- **Signal Protocol:** Double Ratchet algorithm with X3DH key agreement
+- **Post-Quantum:** Kyber768 key encapsulation, Dilithium3 signatures
+- **Symmetric:** XChaCha20-Poly1305, ChaCha20-Poly1305, AES-256-GCM
+- **Hashing:** BLAKE3, Argon2id for passwords, HKDF-SHA512
+
+### Privacy Features
+- Zero-knowledge server design
+- Local encrypted storage (IndexedDB)
+- Optional Tor routing
+- Minimal metadata collection
+- Perfect forward secrecy
+
+## Technology Stack
+
+### Frontend
+- React 18 with TypeScript
+- Vite build system
+- Tailwind CSS + shadcn/ui
+- Electron for desktop apps
+
+### Backend
+- Node.js with WebSocket server
+- SQLite/PostgreSQL database
+- Self-signed TLS certificates
+- Redis support for scaling
+
+### Cryptography Libraries
+- @noble/post-quantum (Kyber, Dilithium)
+- @noble/ciphers (ChaCha20, XChaCha20)
+- @noble/hashes (BLAKE3)
+- argon2-wasm
+- Signal Protocol implementation
 
 ## Security Highlights
 
