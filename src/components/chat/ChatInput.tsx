@@ -417,13 +417,7 @@ export function ChatInput({
   };
 
   return (
-    <div 
-      className="relative border-t"
-      style={{
-        backgroundColor: 'var(--color-background)',
-        borderColor: 'var(--color-border)'
-      }}
-    >
+    <>
       {editingMessage && <EditingBanner onCancelEdit={onCancelEdit} />}
       {replyTo && <ReplyBanner replyTo={replyTo} onCancelReply={onCancelReply} />}
 
@@ -443,51 +437,31 @@ export function ChatInput({
         </div>
       )}
 
-      <div 
-        className="px-4 py-3"
-        style={{ 
-          paddingLeft: 'var(--spacing-md)', 
-          paddingRight: 'var(--spacing-md)',
-          paddingTop: 'var(--spacing-sm)',
-          paddingBottom: 'var(--spacing-sm)'
-        }}
-      >
-        <div
-          className="flex items-center gap-2 transition-all duration-200"
-          style={{
-            backgroundColor: 'var(--composer-input-bg)',
-            borderRadius: 'var(--radius-pill)',
-            border: '1px solid var(--color-border)',
-            minHeight: 'var(--composer-height)',
-            boxShadow: 'var(--shadow-elevation-low)',
-            padding: '8px 12px'
+      <div className="flex items-center gap-2 px-4 py-3 transition-all duration-200">
+        <FileUploader onFileSelected={handleFileChange} disabled={isSendingFile} />
+
+        <VoiceRecorderButton
+          onClick={() => setShowVoiceRecorder(true)}
+          disabled={isSendingFile || showVoiceRecorder}
+        />
+
+        <MessageTextarea
+          value={message}
+          onChange={(e) => {
+            setMessage(e.target.value);
+            onTyping();
           }}
-        >
-          <FileUploader onFileSelected={handleFileChange} disabled={isSendingFile} />
+          onKeyDown={handleKeyDown}
+          textareaRef={textareaRef}
+        />
 
-          <VoiceRecorderButton
-            onClick={() => setShowVoiceRecorder(true)}
-            disabled={isSendingFile || showVoiceRecorder}
-          />
-
-          <MessageTextarea
-            value={message}
-            onChange={(e) => {
-              setMessage(e.target.value);
-              onTyping();
-            }}
-            onKeyDown={handleKeyDown}
-            textareaRef={textareaRef}
-          />
-
-          <SendButton
-            disabled={!message.trim() || isSending || !selectedConversation}
-            isSending={isSending}
-            editingMessage={editingMessage}
-            onClick={handleSend}
-          />
-        </div>
+        <SendButton
+          disabled={!message.trim() || isSending || !selectedConversation}
+          isSending={isSending}
+          editingMessage={editingMessage}
+          onClick={handleSend}
+        />
       </div>
-    </div>
+    </>
   );
 }

@@ -409,10 +409,6 @@ export function ChatInterface({
           )}
         </div>
       </ScrollArea>
-      <div 
-        className="border-t"
-        style={{ borderColor: 'var(--color-border)' }}
-      />
       {typingUsers.length > 0 && (
         <div 
           className="px-4 py-3 border-t animate-in slide-in-from-bottom duration-200"
@@ -433,8 +429,8 @@ export function ChatInterface({
         </div>
       )}
       <div 
-        className="p-4"
-        style={{ backgroundColor: 'var(--color-surface)' }}
+        className="px-4 pb-4"
+        style={{ backgroundColor: 'var(--color-background)' }}
       >
         <ChatInput
           onSendMessage={async (

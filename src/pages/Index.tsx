@@ -22,7 +22,6 @@ import { TypingIndicatorProvider } from "../contexts/TypingIndicatorContext";
 import { torNetworkManager } from "../lib/tor-network";
 import { TorAutoSetup } from "../components/setup/TorAutoSetup";
 import { getTorAutoSetup } from "../lib/tor-auto-setup";
-// offline message queue removed
 
 interface ChatAppProps {
   onNavigate: (page: "home" | "server" | "chat") => void;

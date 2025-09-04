@@ -18,6 +18,7 @@ export function SendButton({ disabled, isSending, editingMessage, onClick }: Sen
       disabled={disabled}
       className={cn(
         "h-8 w-8 rounded-full text-white shadow-md transition-all duration-200 flex items-center justify-center flex-shrink-0",
+        "focus:outline-none focus:ring-0 focus-visible:ring-0 focus-visible:ring-offset-0",
         disabled ? "opacity-50 cursor-not-allowed" : ""
       )}
       style={{
