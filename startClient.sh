@@ -106,6 +106,19 @@ ensure_server_deps() {
     fi
 }
 ensure_electron_installed
+
+# Ensure Electron sandboxing works correctly (Linux fix)
+fix_electron_sandbox() {
+    local electron_bin
+    electron_bin=$(pnpm root)/electron/dist/chrome-sandbox
+    if [ -f "$electron_bin" ]; then
+        echo -e "${GREEN}Fixing Electron sandbox permissions...${NC}"
+        sudo chown root:root "$electron_bin" || true
+        sudo chmod 4755 "$electron_bin" || true
+    fi
+}
+fix_electron_sandbox
+
 ensure_server_deps
 
 # Prevent auto-opening external browser and enable Electron DevTools
