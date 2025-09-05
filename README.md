@@ -15,18 +15,19 @@ git clone https://github.com/galacticoder/end2end-chat-site.git
 cd end2end-chat-site
 ```
 
-1. **Start the client:**
-   ```bash
-   ./startClient.sh  # Launches Electron app + dev server
-   ```
-2. **Start the server:**
-   ```bash
-   # Run server on your machine
-   ./startServer.sh  # In another terminal for starting the server
+**Start the client:**
+```bash
+./startClient.sh  # Launches Electron app + dev server
+```
 
-   # Or run server in docker
-   ./setup_chat_docker.sh
-   ```
+**Start the server:**
+```bash
+# Run server on your machine
+./startServer.sh  # In another terminal for starting the server
+
+# Or run server in docker
+./setup_chat_docker.sh
+```
 
 **Supported platforms:**
 - **Linux**: Ubuntu/Debian (apt), Fedora (dnf), Arch (pacman), and most major distributions with supported package managers
