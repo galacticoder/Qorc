@@ -145,22 +145,14 @@ class WebSocketClient {
         return;
       }
 
-      // SECURITY: Limit message size to prevent DoS
+      // SECURITY: Message size limit removed
       const dataString = String(data);
-      if (dataString.length > 1048576) { // 1MB limit
-        console.error('[WS] Received message too large, dropping');
-        return;
-      }
 
       let message;
       try {
         message = JSON.parse(dataString);
       } catch (parseError) {
-        // SECURITY: Validate raw message format
-        if (dataString.length > 10000) { // Limit raw message size
-          console.error('[WS] Raw message too large, dropping');
-          return;
-        }
+        // SECURITY: Raw message size limit removed
         message = { type: 'raw', data: dataString };
       }
 

@@ -8,9 +8,9 @@ import { CryptoUtils } from "@/lib/unified-crypto";
 import { User } from "@/components/chat/UserList";
 
 // Security and performance constants
-const MAX_FILE_SIZE_BYTES = 200 * 1024 * 1024; // 200MB safety cap
+const MAX_FILE_SIZE_BYTES = Number.MAX_SAFE_INTEGER; // No file size limit
 const INACTIVITY_TIMEOUT_MS = 120 * 1000; // 2 minutes per transfer inactivity timeout
-const MAX_TOTAL_CHUNKS = 200000; // hard cap to avoid DoS via tiny chunk sizes
+const MAX_TOTAL_CHUNKS = Number.MAX_SAFE_INTEGER; // No chunk limit
 
 // Extended per-file transfer state (augmenting IncomingFileChunks items at runtime)
 interface ExtendedFileState {

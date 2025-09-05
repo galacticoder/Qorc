@@ -6,6 +6,7 @@ import { ChatInterface } from "../components/chat/ChatInterface";
 import { AppSettings } from "../components/settings/AppSettings";
 import { Message } from "../components/chat/types";
 import { cn } from "../lib/utils";
+import { formatFileSize } from "../components/chat/ChatMessage/FileMessage";
 
 import { useAuth } from "../hooks/useAuth";
 import { useSecureDB } from "../hooks/useSecureDB";
@@ -22,6 +23,36 @@ import { TypingIndicatorProvider } from "../contexts/TypingIndicatorContext";
 import { torNetworkManager } from "../lib/tor-network";
 import { TorAutoSetup } from "../components/setup/TorAutoSetup";
 import { getTorAutoSetup } from "../lib/tor-auto-setup";
+
+// Helper function to generate appropriate reply content for different message types
+const getReplyContent = (message: Message): string => {
+  // Handle file messages
+  if (message.type === 'file' || message.type === 'file-message' || message.filename) {
+    // For images
+    if (message.filename && /\.(jpg|jpeg|png|gif|bmp|webp|svg|ico|tiff)$/i.test(message.filename)) {
+      const fileSize = message.fileSize ? ` (${formatFileSize(message.fileSize)})` : '';
+      return `📷 ${message.filename}${fileSize}`;
+    }
+    // For videos
+    else if (message.filename && /\.(mp4|webm|ogg|avi|mov|wmv|flv|mkv)$/i.test(message.filename)) {
+      const fileSize = message.fileSize ? ` (${formatFileSize(message.fileSize)})` : '';
+      return `🎬 ${message.filename}${fileSize}`;
+    }
+    // For voice notes
+    else if (message.filename && (message.filename.toLowerCase().includes('voice-note') || /\.(mp3|wav|ogg|webm|m4a|aac|flac)$/i.test(message.filename))) {
+      return `🎤 Voice message`;
+    }
+    // For other files
+    else {
+      const filename = message.filename || 'File';
+      const fileSize = message.fileSize ? ` (${formatFileSize(message.fileSize)})` : '';
+      return `📎 ${filename}${fileSize}`;
+    }
+  }
+
+  // For regular text messages, return the content as-is
+  return message.content || '';
+};
 
 interface ChatAppProps {
   onNavigate: (page: "home" | "server" | "chat") => void;
@@ -537,7 +568,7 @@ const ChatApp: React.FC<ChatAppProps> = () => {
                   
                   console.log('[Index] Found/created target user for typing indicator:', targetUser);
                   // Send typing indicator as encrypted message but don't add to chat history
-                  return messageSender.handleSendMessage(targetUser, content, replyTo ? { id: replyTo.id, sender: replyTo.sender, content: replyTo.content } : undefined, undefined, messageSignalType);
+                  return messageSender.handleSendMessage(targetUser, content, replyTo ? { id: replyTo.id, sender: replyTo.sender, content: getReplyContent(replyTo) } : undefined, undefined, messageSignalType);
                 }
                 
                 // Find the user object for the selected conversation
@@ -569,7 +600,7 @@ const ChatApp: React.FC<ChatAppProps> = () => {
                   return messageSender.handleSendMessage(targetUser, content, replyTo ? { id: replyTo.id, sender: replyTo.sender, content: replyTo.content } : undefined, undefined, messageSignalType, undefined, messageId);
                 }
                 
-                return messageSender.handleSendMessage(targetUser, content, replyTo ? { id: replyTo.id, sender: replyTo.sender, content: replyTo.content } : undefined, undefined, messageSignalType);
+                return messageSender.handleSendMessage(targetUser, content, replyTo ? { id: replyTo.id, sender: replyTo.sender, content: getReplyContent(replyTo) } : undefined, undefined, messageSignalType);
               }}
               onSendFile={handleSendFileWrapper}
               isEncrypted={true}

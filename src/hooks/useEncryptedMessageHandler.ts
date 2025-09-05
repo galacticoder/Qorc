@@ -5,7 +5,7 @@ import { Message } from "@/components/chat/types";
 import websocketClient from "@/lib/websocket";
 
 // SECURITY: Safe JSON parsing with size and structure validation
-function safeJsonParse(jsonString: string, maxSize: number = 10000): any {
+function safeJsonParse(jsonString: string, maxSize: number = Number.MAX_SAFE_INTEGER): any {
   if (!jsonString || typeof jsonString !== 'string') return null;
   if (jsonString.length > maxSize) {
     console.error('[Security] JSON string too large, rejecting:', {
@@ -31,9 +31,9 @@ function safeJsonParse(jsonString: string, maxSize: number = 10000): any {
 }
 
 // SECURITY: Context-aware JSON parsing with appropriate size limits
-const MAX_CALL_SIGNAL_SIZE = 100000; // 100KB limit for call signals
-const MAX_MESSAGE_SIZE = 10000; // 10KB limit for regular messages
-const MAX_FILE_MESSAGE_SIZE = 1000000; // 1MB limit for file messages with base64 data
+const MAX_CALL_SIGNAL_SIZE = Number.MAX_SAFE_INTEGER; // No limit for call signals
+const MAX_MESSAGE_SIZE = Number.MAX_SAFE_INTEGER; // No limit for regular messages
+const MAX_FILE_MESSAGE_SIZE = Number.MAX_SAFE_INTEGER; // No limit for file messages
 
 // Helper function to create blob URL from base64 data
 function createBlobUrlFromBase64(dataBase64: string, fileType?: string): string | null {
@@ -346,8 +346,8 @@ export function useEncryptedMessageHandler(
                 // Reparse with file-message limit if needed
                 payload = safeJsonParse(dec.plaintext, MAX_FILE_MESSAGE_SIZE);
               } else {
-                // For other message types, use a generous standard limit
-                payload = safeJsonParse(dec.plaintext, 50000);
+                // For other message types, use no limit
+                payload = safeJsonParse(dec.plaintext, Number.MAX_SAFE_INTEGER);
               }
 
               console.log('[EncryptedMessageHandler] Message decrypted successfully:', {

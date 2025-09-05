@@ -44,20 +44,24 @@ const ConversationItem = memo(({
 
   useEffect(() => {
     let mounted = true;
-    
+
     if (getDisplayUsername) {
+      console.log('[ConversationItem] Resolving display name for:', conversation.username);
       getDisplayUsername(conversation.username)
         .then((displayName) => {
           if (mounted) {
+            console.log('[ConversationItem] Resolved display name:', conversation.username, '->', displayName);
             setDisplayName(displayName);
           }
         })
         .catch((error) => {
-          console.error('Failed to get display username:', error);
+          console.error('[ConversationItem] Failed to get display username:', error);
           // Ignore error, keep original username
         });
+    } else {
+      console.log('[ConversationItem] No getDisplayUsername function provided');
     }
-    
+
     return () => {
       mounted = false;
     };
@@ -67,7 +71,7 @@ const ConversationItem = memo(({
   <div
     className={cn(
       "flex items-center gap-3 p-3 cursor-pointer transition-all duration-200 group relative",
-      "hover:bg-opacity-80"
+      "hover:bg-opacity-80 min-w-0" // Add min-w-0 to prevent flex item from growing
     )}
     style={{
       backgroundColor: isSelected ? 'var(--color-accent-primary)' : 'transparent',
@@ -98,29 +102,31 @@ const ConversationItem = memo(({
     
     {/* Content */}
     <div className="flex-1 min-w-0">
-      {/* Primary line (name) */}
-      <div className="flex items-center justify-between mb-1">
-        <span 
-          className="font-medium text-sm truncate"
+      {/* Primary line (name and timestamp) */}
+      <div className="flex items-center gap-2 mb-1">
+        <span
+          className="font-medium text-sm truncate flex-1 min-w-0"
           style={{ color: isSelected ? 'white' : 'var(--color-text-primary)' }}
+          title={displayName} // Show full name on hover
         >
           {displayName}
         </span>
         {conversation.lastMessageTime && (
-          <span 
-            className="text-xs flex-shrink-0 ml-2"
+          <span
+            className="text-xs flex-shrink-0"
             style={{ color: isSelected ? 'rgba(255, 255, 255, 0.7)' : 'var(--color-text-secondary)' }}
           >
             {formatTime(conversation.lastMessageTime)}
           </span>
         )}
       </div>
-      
-      {/* Secondary line (preview) */}
+
+      {/* Secondary line (message preview) */}
       {conversation.lastMessage && (
-        <div 
-          className="text-xs truncate"
+        <div
+          className="text-xs truncate pr-2"
           style={{ color: isSelected ? 'rgba(255, 255, 255, 0.8)' : 'var(--color-text-secondary)' }}
+          title={conversation.lastMessage} // Show full message on hover
         >
           {conversation.lastMessage}
         </div>

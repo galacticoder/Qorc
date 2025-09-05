@@ -8,7 +8,7 @@ import { TrashIcon, Pencil1Icon } from "./icons.tsx";
 import { ChatMessageProps } from "./types.ts";
 import { SystemMessage } from "./ChatMessage/SystemMessage.tsx";
 import { DeletedMessage } from "./ChatMessage/DeletedMessage.tsx";
-import { FileMessage } from "./ChatMessage/FileMessage.tsx";
+import { FileMessage, FileContent } from "./ChatMessage/FileMessage.tsx";
 import { VoiceMessage } from "./VoiceMessage.tsx";
 import { MessageReceipt } from "./MessageReceipt.tsx";
 
@@ -57,28 +57,30 @@ export function ChatMessage({ message, onReply, previousMessage, onDelete, onEdi
     return <DeletedMessage sender={displaySender} timestamp={timestamp} isCurrentUser={isCurrentUser || false} />;
   }
 
-  if (type === "FILE_MESSAGE" || type === "file" || type === "file-message") {
-    // Check if it's a voice note (audio file)
-    const isVoiceNote = message.filename?.includes('voice-note') ||
+  // Check if it's a voice note (special handling - keeps its own layout)
+  const isVoiceNote = (type === "FILE_MESSAGE" || type === "file" || type === "file-message") &&
+                      (message.filename?.includes('voice-note') ||
                        (message.mimeType && message.mimeType.startsWith('audio/')) ||
-                       (message.filename && /\.(webm|mp3|wav|ogg|m4a)$/i.test(message.filename));
+                       (message.filename && /\.(webm|mp3|wav|ogg|m4a)$/i.test(message.filename)));
 
-    if (isVoiceNote) {
-      return (
-        <VoiceMessage
-          audioUrl={message.content}
-          sender={displaySender}
-          timestamp={message.timestamp}
-          isCurrentUser={isCurrentUser || false}
-          filename={message.filename}
-          originalBase64Data={message.originalBase64Data}
-          mimeType={message.mimeType}
-        />
-      );
-    }
-
-    return <FileMessage message={message} isCurrentUser={isCurrentUser || false} />;
+  if (isVoiceNote) {
+    return (
+      <VoiceMessage
+        audioUrl={message.content}
+        sender={displaySender}
+        timestamp={message.timestamp}
+        isCurrentUser={isCurrentUser || false}
+        filename={message.filename}
+        originalBase64Data={message.originalBase64Data}
+        mimeType={message.mimeType}
+        onReply={onReply}
+        onDelete={onDelete}
+        onEdit={onEdit}
+      />
+    );
   }
+
+  // For file messages, we'll render them within the standard message layout below
 
   return (
     <div 
@@ -163,20 +165,30 @@ export function ChatMessage({ message, onReply, previousMessage, onDelete, onEdi
 
         {/* Message bubble */}
         <div className={cn("flex items-end gap-2", safeIsCurrentUser ? "flex-row-reverse" : "flex-row")}>
-          <div
-            className="px-4 py-3 text-sm whitespace-pre-wrap break-words"
-            style={{
-              backgroundColor: safeIsCurrentUser ? 'var(--color-accent-primary)' : 'var(--color-surface)',
-              color: safeIsCurrentUser ? 'white' : 'var(--color-text-primary)',
-              borderRadius: 'var(--message-bubble-radius)',
-              wordBreak: "break-word",
-              whiteSpace: "pre-wrap",
-              minWidth: '3rem',
-              maxWidth: '100%'
-            }}
-          >
-            <Linkify options={{ target: "_blank", rel: "noopener noreferrer" }}>{content}</Linkify>
-          </div>
+          {/* Render file content or text content */}
+          {(type === "FILE_MESSAGE" || type === "file" || type === "file-message") ? (
+            <div className="max-w-[60%]">
+              <FileContent
+                message={message}
+                isCurrentUser={isCurrentUser || false}
+              />
+            </div>
+          ) : (
+            <div
+              className="px-4 py-3 text-sm whitespace-pre-wrap break-words"
+              style={{
+                backgroundColor: safeIsCurrentUser ? 'var(--color-accent-primary)' : 'var(--color-surface)',
+                color: safeIsCurrentUser ? 'white' : 'var(--color-text-primary)',
+                borderRadius: 'var(--message-bubble-radius)',
+                wordBreak: "break-word",
+                whiteSpace: "pre-wrap",
+                minWidth: '3rem',
+                maxWidth: '100%'
+              }}
+            >
+              <Linkify options={{ target: "_blank", rel: "noopener noreferrer" }}>{content}</Linkify>
+            </div>
+          )}
 
           {/* Action Buttons */}
           <div

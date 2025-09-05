@@ -12,6 +12,9 @@ interface VoiceMessageProps {
   filename?: string;
   originalBase64Data?: string;
   mimeType?: string;
+  onReply?: (message: any) => void;
+  onDelete?: (message: any) => void;
+  onEdit?: (message: any) => void;
 }
 
 export function VoiceMessage({
@@ -21,7 +24,10 @@ export function VoiceMessage({
   isCurrentUser,
   filename,
   originalBase64Data,
-  mimeType
+  mimeType,
+  onReply,
+  onDelete,
+  onEdit
 }: VoiceMessageProps) {
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
@@ -342,7 +348,7 @@ export function VoiceMessage({
   const progress = duration > 0 ? (currentTime / duration) * 100 : 0;
 
   return (
-    <div className={cn("flex items-start gap-2 mb-4", isCurrentUser ? "flex-row-reverse" : "")}>
+    <div className={cn("flex items-start gap-2 mb-4 group", isCurrentUser ? "flex-row-reverse" : "")}>
       <div className="w-9 h-9">
         <div className={cn(
           "w-9 h-9 rounded-full flex items-center justify-center text-white text-sm font-medium",
@@ -419,6 +425,116 @@ export function VoiceMessage({
                 <Download className="w-3 h-3" />
               </Button>
             </div>
+          )}
+        </div>
+
+        {/* Action buttons */}
+        <div
+          className={cn(
+            "flex items-center gap-1 mt-2 opacity-0 group-hover:opacity-100 transition-opacity duration-200",
+            isCurrentUser ? "justify-end" : "justify-start"
+          )}
+        >
+          <button
+            onClick={() => navigator.clipboard.writeText(filename || 'Voice note')}
+            aria-label="Copy filename"
+            className="p-1 rounded hover:bg-opacity-80 transition-colors"
+            style={{ color: 'var(--color-text-secondary)' }}
+            onMouseEnter={(e) => {
+              e.currentTarget.style.backgroundColor = 'var(--color-accent-primary)';
+              e.currentTarget.style.color = 'white';
+            }}
+            onMouseLeave={(e) => {
+              e.currentTarget.style.backgroundColor = 'transparent';
+              e.currentTarget.style.color = 'var(--color-text-secondary)';
+            }}
+          >
+            <svg
+              width="15"
+              height="15"
+              viewBox="0 0 15 15"
+              fill="none"
+              xmlns="http://www.w3.org/2000/svg"
+            >
+              <path
+                d="M1 9.50006C1 10.3285 1.67157 11.0001 2.5 11.0001H4L4 10.0001H2.5C2.22386 10.0001 2 9.7762 2 9.50006L2 2.50006C2 2.22392 2.22386 2.00006 2.5 2.00006L9.5 2.00006C9.77614 2.00006 10 2.22392 10 2.50006V4.00002H5.5C4.67158 4.00002 4 4.67159 4 5.50002V12.5C4 13.3284 4.67158 14 5.5 14H12.5C13.3284 14 14 13.3284 14 12.5V5.50002C14 4.67159 13.3284 4.00002 12.5 4.00002H11V2.50006C11 1.67163 10.3284 1.00006 9.5 1.00006H2.5C1.67157 1.00006 1 1.67163 1 2.50006V9.50006ZM5 5.50002C5 5.22388 5.22386 5.00002 5.5 5.00002H12.5C12.7761 5.00002 13 5.22388 13 5.50002V12.5C13 12.7762 12.7761 13 12.5 13H5.5C5.22386 13 5 12.7762 5 12.5V5.50002Z"
+                fill="currentColor"
+                fillRule="evenodd"
+                clipRule="evenodd"
+              />
+            </svg>
+          </button>
+
+          <button
+            onClick={() => onReply?.({
+              id: '',
+              content: filename || 'Voice note',
+              sender,
+              timestamp,
+              type: 'voice',
+              filename,
+              mimeType,
+              originalBase64Data
+            })}
+            aria-label="Reply to voice note"
+            className="p-1 rounded hover:bg-opacity-80 transition-colors"
+            style={{ color: 'var(--color-text-secondary)' }}
+            onMouseEnter={(e) => {
+              e.currentTarget.style.backgroundColor = 'var(--color-accent-primary)';
+              e.currentTarget.style.color = 'white';
+            }}
+            onMouseLeave={(e) => {
+              e.currentTarget.style.backgroundColor = 'transparent';
+              e.currentTarget.style.color = 'var(--color-text-secondary)';
+            }}
+          >
+            <svg
+              xmlns="http://www.w3.org/2000/svg"
+              fill="none"
+              viewBox="0 0 24 24"
+              strokeWidth={1.5}
+              stroke="currentColor"
+              className="w-4 h-4"
+            >
+              <path strokeLinecap="round" strokeLinejoin="round" d="M9 15 3 9m0 0 6-6M3 9h12a6 6 0 0 1 0 12h-3" />
+            </svg>
+          </button>
+
+          {isCurrentUser && (
+            <button
+              onClick={() => onDelete?.({
+                id: '',
+                content: filename || 'Voice note',
+                sender,
+                timestamp,
+                type: 'voice',
+                filename,
+                mimeType,
+                originalBase64Data
+              })}
+              aria-label="Delete voice note"
+              className="p-1 rounded hover:bg-opacity-80 transition-colors"
+              style={{ color: 'var(--color-text-secondary)' }}
+              onMouseEnter={(e) => {
+                e.currentTarget.style.backgroundColor = '#ef4444';
+                e.currentTarget.style.color = 'white';
+              }}
+              onMouseLeave={(e) => {
+                e.currentTarget.style.backgroundColor = 'transparent';
+                e.currentTarget.style.color = 'var(--color-text-secondary)';
+              }}
+            >
+              <svg
+                xmlns="http://www.w3.org/2000/svg"
+                fill="none"
+                viewBox="0 0 24 24"
+                strokeWidth={1.5}
+                stroke="currentColor"
+                className="w-4 h-4"
+              >
+                <path strokeLinecap="round" strokeLinejoin="round" d="m14.74 9-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 0 1-2.244 2.077H8.084a2.25 2.25 0 0 1-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 0 0-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 0 1 3.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 0 0-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 0 0-7.5 0" />
+              </svg>
+            </button>
           )}
         </div>
       </div>

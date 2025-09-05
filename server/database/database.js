@@ -448,11 +448,7 @@ export class MessageDatabase {
       
       const stringifiedPayload = JSON.stringify(sanitizedPayload);
       
-      // SECURITY: Validate payload size to prevent DoS
-      if (stringifiedPayload.length > 1048576) { // 1MB limit
-        console.error('[DB] Payload too large for storage:', stringifiedPayload.length);
-        throw new Error('Payload too large for storage');
-      }
+      // SECURITY: Payload size limit removed
 
       console.log(`[DB] Saving message with ID: ${messageId}`);
       console.log(`[DB] Message from: ${fromUsername}, to: ${toUsername}`);

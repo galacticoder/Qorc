@@ -6,6 +6,46 @@ import { SignalType } from "../lib/signals";
 import websocketClient from "../lib/websocket";
 import { pseudonymizeUsernameWithCache } from "../lib/username-hash";
 import { SecureDB } from "../lib/secureDB";
+import { formatFileSize } from "../components/chat/ChatMessage/FileMessage";
+
+// Helper function to generate appropriate conversation preview for different message types
+const getConversationPreview = (message: Message): string => {
+  const MAX_PREVIEW_LENGTH = 40; // Maximum characters for preview
+
+  // Handle file messages
+  if (message.type === 'file' || message.type === 'file-message' || message.filename) {
+    let preview = '';
+
+    // For images
+    if (message.filename && /\.(jpg|jpeg|png|gif|bmp|webp|svg|ico|tiff)$/i.test(message.filename)) {
+      preview = `📷 ${message.filename}`;
+    }
+    // For videos
+    else if (message.filename && /\.(mp4|webm|ogg|avi|mov|wmv|flv|mkv)$/i.test(message.filename)) {
+      preview = `🎬 ${message.filename}`;
+    }
+    // For voice notes
+    else if (message.filename && (message.filename.toLowerCase().includes('voice-note') || /\.(mp3|wav|ogg|webm|m4a|aac|flac)$/i.test(message.filename))) {
+      preview = `🎤 Voice message`;
+    }
+    // For other files
+    else {
+      const filename = message.filename || 'File';
+      preview = `📎 ${filename}`;
+    }
+
+    // Truncate if too long
+    return preview.length > MAX_PREVIEW_LENGTH
+      ? preview.substring(0, MAX_PREVIEW_LENGTH - 3) + '...'
+      : preview;
+  }
+
+  // For regular text messages, truncate if needed
+  const content = message.content || '';
+  return content.length > MAX_PREVIEW_LENGTH
+    ? content.substring(0, MAX_PREVIEW_LENGTH - 3) + '...'
+    : content;
+};
 
 export const useConversations = (currentUsername: string, users: User[], messages: Message[], secureDB?: SecureDB) => {
   const [conversations, setConversations] = useState<Conversation[]>([]);
@@ -212,14 +252,14 @@ export const useConversations = (currentUsername: string, users: User[], message
           id: crypto.randomUUID(),
           username: other,
           isOnline,
-          lastMessage: msg.content,
+          lastMessage: getConversationPreview(msg),
           lastMessageTime: msgTime,
           unreadCount: unreadIncrement
         });
       } else {
         // Update last message info if this message is newer
         if (!existing.lastMessageTime || msgTime > existing.lastMessageTime) {
-          existing.lastMessage = msg.content;
+          existing.lastMessage = getConversationPreview(msg);
           existing.lastMessageTime = msgTime;
         }
         existing.unreadCount = (existing.unreadCount || 0) + unreadIncrement;

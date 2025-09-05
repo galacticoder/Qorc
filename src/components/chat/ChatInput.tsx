@@ -150,130 +150,37 @@ export function ChatInput({
   };
 
   const validateFile = async (file: File): Promise<{ valid: boolean; error?: string }> => {
-    const maxSize = 100 * 1024 * 1024; // 100MB max file size
-
-    // SECURITY: Comprehensive file validation to prevent spoofing attacks
-    if (file.size > maxSize) {
-      return { valid: false, error: 'File size exceeds 100MB limit' };
-    }
+    // Basic validation - allow any file type
 
     if (file.size === 0) {
       return { valid: false, error: 'Empty files are not allowed' };
     }
 
-    // Get file extension early for use throughout validation
-    const fileExtension = (file.name.toLowerCase().split('.').pop() || '').toLowerCase();
+    // Optional: Set a reasonable file size limit (e.g., 100MB)
+    const MAX_FILE_SIZE = 100 * 1024 * 1024; // 100MB
+    if (file.size > MAX_FILE_SIZE) {
+      return { valid: false, error: `File too large. Maximum size is ${Math.round(MAX_FILE_SIZE / (1024 * 1024))}MB` };
+    }
 
-    // SECURITY: Enhanced MIME type validation with magic byte verification
-    const allowedMimeTypes = [
-      // Images
-      'image/jpeg', 'image/jpg', 'image/png', 'image/gif', 'image/webp', 'image/bmp', 'image/svg+xml',
-      // Documents
-      'application/pdf', 'text/plain', 'application/msword', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-      'application/vnd.ms-excel', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-      'application/vnd.ms-powerpoint', 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
-      // Archives
-      'application/zip', 'application/x-rar-compressed', 'application/x-7z-compressed',
-      // Audio
-      'audio/mpeg', 'audio/wav', 'audio/ogg', 'audio/m4a', 'audio/webm',
-      // Video
-      'video/mp4', 'video/webm', 'video/ogg', 'video/quicktime',
-      // Other safe types
-      'application/json', 'text/csv'
+    // Basic filename sanitization - only reject truly dangerous patterns
+    const dangerousPatterns = [
+      /\x00/, // Null bytes
+      /[\x01-\x1f\x7f-\x9f]/, // Control characters
     ];
 
-    // Helper function to check magic bytes
-    const checkMagicBytes = async (file: File, extension: string): Promise<boolean> => {
-      return new Promise((resolve) => {
-        const reader = new FileReader();
-        reader.onload = (e) => {
-          const arrayBuffer = e.target?.result as ArrayBuffer;
-          if (!arrayBuffer) {
-            resolve(false);
-            return;
-          }
-          
-          const bytes = new Uint8Array(arrayBuffer.slice(0, 16)); // Read first 16 bytes
-          const hex = Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('');
-          
-          // Magic byte signatures for common file types
-          const signatures: Record<string, string[]> = {
-            'jpg': ['ffd8ff'], 'jpeg': ['ffd8ff'],
-            'png': ['89504e47'],
-            'gif': ['474946383761', '474946383961'],
-            'pdf': ['255044462d'],
-            'zip': ['504b0304', '504b0506', '504b0708'],
-            'mp4': ['66747970'],
-            'webp': ['52494646']
-          };
-          
-          const extensionSigs = signatures[extension] || [];
-          const matches = extensionSigs.some(sig => hex.startsWith(sig));
-          resolve(matches);
-        };
-        reader.onerror = () => resolve(false);
-        reader.readAsArrayBuffer(file.slice(0, 16));
-      });
-    };
-
-    // Check MIME type - if empty/suspicious, fall back to extension + magic byte check
-    let mimeTypeValid = file.type && allowedMimeTypes.includes(file.type);
-    let needsMagicByteCheck = false;
-
-    if (!file.type || !mimeTypeValid) {
-      // MIME type is missing or not in allowlist - will validate via extension + magic bytes
-      needsMagicByteCheck = true;
+    const hasDangerousChars = dangerousPatterns.some(pattern => pattern.test(file.name));
+    if (hasDangerousChars) {
+      return { valid: false, error: 'Filename contains invalid characters' };
     }
 
-    // For high-risk file types, always perform magic byte verification
-    const highRiskExtensions = ['jpg', 'jpeg', 'png', 'gif', 'pdf', 'zip', 'mp4', 'webp'];
-    if (highRiskExtensions.includes(fileExtension)) {
-      needsMagicByteCheck = true;
+    // Reject files with no name or extension
+    if (!file.name || file.name.trim().length === 0) {
+      return { valid: false, error: 'File must have a valid name' };
     }
 
-    if (needsMagicByteCheck) {
-      const magicByteValid = await checkMagicBytes(file, fileExtension);
-      if (!magicByteValid && !mimeTypeValid) {
-        return { valid: false, error: `File validation failed. The file does not match expected format for .${fileExtension} files.` };
-      }
-    } else if (!mimeTypeValid) {
-      return { valid: false, error: `File type "${file.type}" is not allowed. Please choose a different file.` };
-    }
-
-    // SECURITY: File extension allowlist - only permit safe file types
-    const allowedExtensions = [
-      // Images
-      'jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'svg',
-      // Documents
-      'pdf', 'txt', 'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx',
-      // Archives (common safe formats)
-      'zip', 'rar', '7z',
-      // Audio
-      'mp3', 'wav', 'ogg', 'm4a', 'webm',
-      // Video
-      'mp4', 'webm', 'ogg', 'mov',
-      // Data
-      'json', 'csv'
-    ];
-
-    if (!allowedExtensions.includes(fileExtension)) {
-      return { valid: false, error: `File extension ".${fileExtension}" is not allowed. Permitted types: ${allowedExtensions.join(', ')}` };
-    }
-
-    // SECURITY: Advanced filename sanitization
-    const sanitizedName = file.name
-      .normalize('NFC') // Unicode normalization
-      .replace(/[<>:"/\\|?*\x00-\x1f\x7f-\x9f]/g, '_') // Remove dangerous characters
-      .replace(/\.{2,}/g, '.') // Remove multiple dots
-      .replace(/^\.+|\.+$/g, '') // Remove leading/trailing dots
-      .slice(0, 255); // Limit length
-
-    if (sanitizedName !== file.name) {
-      console.warn('[ChatInput] Filename sanitized:', file.name, '->', sanitizedName);
-    }
-
-    if (sanitizedName.length === 0) {
-      return { valid: false, error: 'Invalid filename after sanitization' };
+    // Reject files with extremely long names
+    if (file.name.length > 255) {
+      return { valid: false, error: 'Filename too long (maximum 255 characters)' };
     }
 
     return { valid: true };
@@ -283,7 +190,7 @@ export function ChatInput({
     const validation = await validateFile(file);
     if (!validation.valid) {
       console.error('[ChatInput] File validation failed:', validation.error);
-      // TODO: Show error to user
+      alert(`File upload failed: ${validation.error}`);
       return;
     }
 

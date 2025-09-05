@@ -32,7 +32,7 @@ class InputValidator {
 
   static validateMessageSize(message) {
     if (!message) return false;
-    return message.length <= 1024 * 1024; // 1MB limit
+    return true; // No size limit
   }
 
   static validateJsonStructure(obj) {
@@ -394,12 +394,7 @@ async function startServer() {
       await ConnectionStateManager.refreshSession(sessionId);
       messageCount++;
 
-      // SECURITY: Validate message size to prevent DoS
-      if (msg.length > 1024 * 1024) { // 1MB limit
-        const state = await ConnectionStateManager.getState(sessionId);
-        console.error(`[SERVER] Message too large: ${msg.length} bytes from user: ${state?.username || 'unknown'}`);
-        return ws.send(JSON.stringify({ type: SignalType.ERROR, message: 'Message too large' }));
-      }
+      // SECURITY: Message size validation removed - no limits
 
       let parsed;
       try {

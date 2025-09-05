@@ -230,11 +230,15 @@ export function Sidebar({ className, children, currentUsername, onAddConversatio
               {currentUsername?.charAt(0).toUpperCase() || "U"}
             </div>
             {!isCollapsed && (
-              <div className="flex-1 text-left">
-                <div className="font-medium text-sm" style={{ color: 'var(--color-text-primary)' }}>
+              <div className="flex-1 text-left min-w-0 mr-2">
+                <div
+                  className="font-medium text-sm truncate"
+                  style={{ color: 'var(--color-text-primary)' }}
+                  title={currentUsername || 'User'} // Show full username on hover
+                >
                   {currentUsername || 'User'}
                 </div>
-                <div className="text-xs" style={{ color: 'var(--color-text-secondary)' }}>
+                <div className="text-xs truncate" style={{ color: 'var(--color-text-secondary)' }}>
                   Click to logout
                 </div>
               </div>

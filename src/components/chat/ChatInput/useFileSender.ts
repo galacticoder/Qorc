@@ -265,11 +265,8 @@ export function useFileSender(currentUsername: string, targetUsername: string, u
       );
 
       if (filteredUsers.length === 0) {
-        // Fallback to inline for small files if no hybrid keys
-        const maxInlineBytes = 5 * 1024 * 1024;
-        if (rawBytes.length > maxInlineBytes) {
-          throw new Error(`No valid recipient keys for ${targetUsername} and file too large for inline fallback`);
-        }
+        // Fallback to inline for files if no hybrid keys (no size limit)
+        // No size limit for inline fallback
 
         // Ensure Signal session exists
         const sessionCheck = await (window as any).edgeApi?.hasSession?.({
@@ -397,7 +394,12 @@ export function useFileSender(currentUsername: string, targetUsername: string, u
         fileSize: file.size,
         mimeType: file.type || 'application/octet-stream',
         originalBase64Data: fileBase64,
-        type: 'file'
+        type: 'file',
+        isCurrentUser: true,  // Sent files are from current user
+        receipt: {
+          delivered: false,
+          read: false
+        }
       };
 
       // Dispatch event to add message to chat
