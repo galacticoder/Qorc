@@ -29,6 +29,7 @@ interface ChatInputProps {
   onEditMessage?: (newContent: string) => void;
   onTyping: () => void;
   selectedConversation?: string;
+  getDisplayUsername?: (username: string) => Promise<string>;
 }
 
 export function ChatInput({
@@ -44,6 +45,7 @@ export function ChatInput({
   onEditMessage,
   onTyping,
   selectedConversation,
+  getDisplayUsername,
 }: ChatInputProps) {
   const [message, setMessage] = useState("");
   const [isSending, setIsSending] = useState(false);
@@ -419,7 +421,7 @@ export function ChatInput({
   return (
     <>
       {editingMessage && <EditingBanner onCancelEdit={onCancelEdit} />}
-      {replyTo && <ReplyBanner replyTo={replyTo} onCancelReply={onCancelReply} />}
+      {replyTo && <ReplyBanner replyTo={replyTo} onCancelReply={onCancelReply} getDisplayUsername={getDisplayUsername} />}
 
       {progress > 0 && progress < 1 && (
         <div className="px-4 pt-2">

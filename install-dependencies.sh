@@ -29,6 +29,32 @@ log_error() {
     echo -e "${RED}[ERROR]${NC} $1"
 }
 
+# Function to normalize boolean values (supports both old 0/1 and new true/false formats)
+normalize_bool() {
+    local value="$1"
+    local default="$2"
+
+    # Handle empty/unset values
+    if [ -z "${value:-}" ]; then
+        echo "$default"
+        return
+    fi
+
+    # Convert to lowercase for comparison
+    value=$(echo "$value" | tr '[:upper:]' '[:lower:]')
+
+    # Handle various true values
+    if [[ "$value" == "true" ]] || [[ "$value" == "1" ]] || [[ "$value" == "yes" ]] || [[ "$value" == "on" ]]; then
+        echo "true"
+    # Handle various false values
+    elif [[ "$value" == "false" ]] || [[ "$value" == "0" ]] || [[ "$value" == "no" ]] || [[ "$value" == "off" ]]; then
+        echo "false"
+    else
+        # Invalid value, use default
+        echo "$default"
+    fi
+}
+
 # Check if running as root
 check_root() {
     if [[ $EUID -eq 0 ]]; then
@@ -109,72 +135,285 @@ update_packages() {
 install_system_deps() {
     log_info "Installing system dependencies..."
 
-    # Define package lists based on mode
-    if [[ "${SERVER_ONLY:-false}" == "true" ]]; then
-        log_info "Installing server-only dependencies..."
-        COMMON_PACKAGES="curl wget git build-essential python3 python3-pip ca-certificates gnupg"
-        TOR_PACKAGES=""  # Skip Tor in server-only mode
-        ELECTRON_PACKAGES=""  # Skip Electron deps in server-only mode
+    # Install packages directly without variables to avoid quoting issues
+
+    # Detect package manager and install accordingly
+    if command -v apt-get &> /dev/null; then
+        # Ubuntu/Debian/Mint/Pop!_OS/Elementary
+        sudo apt-get update
+        if [[ "${SERVER_ONLY:-false}" == "true" ]]; then
+            log_info "Installing server-only dependencies..."
+            sudo apt-get install -y \
+                curl wget git build-essential python3 python3-pip python3-dev \
+                ca-certificates gnupg2 software-properties-common apt-transport-https \
+                lsb-release make gcc g++ libc6-dev which
+        else
+            log_info "Installing full dependencies (client + server)..."
+            sudo apt-get install -y \
+                curl wget git build-essential python3 python3-pip python3-dev \
+                ca-certificates gnupg2 software-properties-common apt-transport-https \
+                lsb-release make gcc g++ libc6-dev which tor torsocks obfs4proxy
+        fi
+    elif command -v dnf &> /dev/null; then
+        # Fedora/RHEL 8+/CentOS 8+/Rocky Linux/AlmaLinux/Amazon Linux 2022+
+        if [[ "${SERVER_ONLY:-false}" == "true" ]]; then
+            sudo dnf install -y \
+                curl wget git gcc gcc-c++ make python3 python3-pip python3-devel \
+                ca-certificates gnupg2 which glibc-devel
+        else
+            sudo dnf install -y \
+                curl wget git gcc gcc-c++ make python3 python3-pip python3-devel \
+                tor torsocks obfs4 ca-certificates gnupg2 which glibc-devel
+        fi
+    elif command -v yum &> /dev/null; then
+        # CentOS 7/RHEL 7/Amazon Linux 2/Oracle Linux
+        if [[ "${SERVER_ONLY:-false}" == "true" ]]; then
+            sudo yum install -y epel-release
+            sudo yum install -y \
+                curl wget git gcc gcc-c++ make python3 python3-pip python3-devel \
+                ca-certificates gnupg2 which glibc-devel
+        else
+            sudo yum install -y epel-release
+            sudo yum install -y \
+                curl wget git gcc gcc-c++ make python3 python3-pip python3-devel \
+                tor torsocks obfs4proxy ca-certificates gnupg2 which glibc-devel
+        fi
+    elif command -v pacman &> /dev/null; then
+        # Arch Linux/Manjaro/EndeavourOS/Garuda/ArcoLinux/Artix
+        # Update package database first
+        sudo pacman -Sy --noconfirm
+        if [[ "${SERVER_ONLY:-false}" == "true" ]]; then
+            sudo pacman -S --noconfirm \
+                curl wget git base-devel python python-pip ca-certificates gnupg which
+        else
+            sudo pacman -S --noconfirm \
+                curl wget git base-devel python python-pip \
+                tor torsocks obfs4proxy ca-certificates gnupg which
+        fi
+    elif command -v zypper &> /dev/null; then
+        # openSUSE Leap/Tumbleweed/SLES/openSUSE MicroOS
+        # Refresh repositories first
+        sudo zypper refresh
+        if [[ "${SERVER_ONLY:-false}" == "true" ]]; then
+            # Try to install development pattern first, fallback to individual packages
+            sudo zypper install -y -t pattern devel_basis devel_C_C++ || \
+            sudo zypper install -y \
+                curl wget git gcc gcc-c++ make python3 python3-pip python3-devel \
+                ca-certificates gpg2 which glibc-devel
+        else
+            sudo zypper install -y -t pattern devel_basis devel_C_C++ || \
+            sudo zypper install -y \
+                curl wget git gcc gcc-c++ make python3 python3-pip python3-devel \
+                tor ca-certificates gpg2 which glibc-devel
+        fi
+    elif command -v apk &> /dev/null; then
+        # Alpine Linux
+        if [[ "${SERVER_ONLY:-false}" == "true" ]]; then
+            sudo apk add --no-cache \
+                curl wget git build-base python3 python3-dev py3-pip \
+                ca-certificates gnupg which bash make gcc g++ libc-dev
+        else
+            sudo apk add --no-cache \
+                curl wget git build-base python3 python3-dev py3-pip \
+                tor ca-certificates gnupg which bash make gcc g++ libc-dev
+        fi
+    elif command -v xbps-install &> /dev/null; then
+        # Void Linux
+        if [[ "${SERVER_ONLY:-false}" == "true" ]]; then
+            sudo xbps-install -S \
+                curl wget git base-devel python3 python3-devel python3-pip \
+                ca-certificates gnupg2 which make gcc
+        else
+            sudo xbps-install -S \
+                curl wget git base-devel python3 python3-devel python3-pip \
+                tor ca-certificates gnupg2 which make gcc
+        fi
+    elif command -v emerge &> /dev/null; then
+        # Gentoo/Funtoo/Calculate Linux
+        # Check if we need to sync first (only if portage tree is very old)
+        if [ ! -d /var/db/repos/gentoo ] || [ $(find /var/db/repos/gentoo -name "*.ebuild" -mtime +7 | wc -l) -eq 0 ]; then
+            log_info "Syncing Portage tree..."
+            sudo emerge --sync --quiet || true
+        fi
+        if [[ "${SERVER_ONLY:-false}" == "true" ]]; then
+            sudo emerge --ask=n --quiet \
+                net-misc/curl net-misc/wget dev-vcs/git sys-devel/gcc sys-devel/make \
+                dev-lang/python dev-python/pip app-crypt/gnupg sys-apps/which sys-libs/glibc
+        else
+            sudo emerge --ask=n --quiet \
+                net-misc/curl net-misc/wget dev-vcs/git sys-devel/gcc sys-devel/make \
+                dev-lang/python dev-python/pip net-vpn/tor app-crypt/gnupg sys-apps/which sys-libs/glibc
+        fi
+    elif command -v eopkg &> /dev/null; then
+        # Solus
+        if [[ "${SERVER_ONLY:-false}" == "true" ]]; then
+            sudo eopkg install -y \
+                curl wget git gcc make python3 python3-devel pip \
+                ca-certificates gnupg which
+        else
+            sudo eopkg install -y \
+                curl wget git gcc make python3 python3-devel pip \
+                tor ca-certificates gnupg which
+        fi
+    elif command -v swupd &> /dev/null; then
+        # Clear Linux
+        if [[ "${SERVER_ONLY:-false}" == "true" ]]; then
+            sudo swupd bundle-add \
+                curl wget git c-basic python3-basic devpkg-glibc \
+                ca-certificates gnupg which
+        else
+            sudo swupd bundle-add \
+                curl wget git c-basic python3-basic devpkg-glibc \
+                network-basic ca-certificates gnupg which
+        fi
+    elif command -v nix-env &> /dev/null; then
+        # NixOS
+        if [[ "${SERVER_ONLY:-false}" == "true" ]]; then
+            nix-env -iA \
+                nixpkgs.curl nixpkgs.wget nixpkgs.git nixpkgs.gcc nixpkgs.gnumake \
+                nixpkgs.python3 nixpkgs.python3Packages.pip nixpkgs.gnupg nixpkgs.which
+        else
+            nix-env -iA \
+                nixpkgs.curl nixpkgs.wget nixpkgs.git nixpkgs.gcc nixpkgs.gnumake \
+                nixpkgs.python3 nixpkgs.python3Packages.pip nixpkgs.tor nixpkgs.gnupg nixpkgs.which
+        fi
+    elif [[ "$OS" == "macos" ]]; then
+        # macOS
+        if [[ "${SERVER_ONLY:-false}" == "true" ]]; then
+            brew install curl wget git python@3.11 gnupg
+        else
+            brew install curl wget git python@3.11 tor torsocks gnupg
+        fi
+
+        # Install Xcode command line tools if not present
+        if ! xcode-select -p &> /dev/null; then
+            log_info "Installing Xcode command line tools..."
+            xcode-select --install
+            log_warning "Please complete the Xcode command line tools installation and re-run this script."
+            exit 1
+        fi
+    elif [[ "$OS" == "windows" ]]; then
+        # Windows
+        log_info "Windows detected. Please ensure you have the following installed:"
+        echo "  - Git for Windows (includes Git Bash)"
+        echo "  - Node.js (will be installed next)"
+        echo "  - Python 3.x"
+        echo "  - Visual Studio Build Tools or Visual Studio Community"
+        if [[ "${SERVER_ONLY:-false}" != "true" ]]; then
+            log_warning "Tor installation on Windows requires manual setup."
+            log_info "Please download Tor Browser or install Tor as a service manually."
+        fi
     else
-        log_info "Installing full dependencies (client + server)..."
-        COMMON_PACKAGES="curl wget git build-essential python3 python3-pip ca-certificates gnupg"
-        TOR_PACKAGES="tor torsocks obfs4proxy"
-        ELECTRON_PACKAGES="software-properties-common apt-transport-https lsb-release"
+        log_error "Unsupported operating system or package manager not detected."
+        log_info "Supported package managers: apt-get, dnf, yum, pacman, zypper, apk, xbps-install, emerge, eopkg, swupd, nix-env, brew"
+        exit 1
     fi
 
-    case $OS in
-        ubuntu|debian)
-            sudo apt install -y $COMMON_PACKAGES $TOR_PACKAGES $ELECTRON_PACKAGES
-            ;;
-        fedora|rhel|centos)
-            if [[ "${SERVER_ONLY:-false}" == "true" ]]; then
-                sudo dnf install -y \
-                    curl wget git gcc gcc-c++ make python3 python3-pip ca-certificates gnupg2
-            else
-                sudo dnf install -y \
-                    curl wget git gcc gcc-c++ make python3 python3-pip \
-                    tor torsocks obfs4 ca-certificates gnupg2
-            fi
-            ;;
-        arch|manjaro)
-            if [[ "${SERVER_ONLY:-false}" == "true" ]]; then
-                sudo pacman -S --noconfirm \
-                    curl wget git base-devel python python-pip ca-certificates gnupg
-            else
-                sudo pacman -S --noconfirm \
-                    curl wget git base-devel python python-pip \
-                    tor torsocks obfs4proxy ca-certificates gnupg
-            fi
-            ;;
-        macos)
-            if [[ "${SERVER_ONLY:-false}" == "true" ]]; then
-                brew install curl wget git python@3.11 gnupg
-            else
-                brew install curl wget git python@3.11 tor torsocks gnupg
-            fi
-
-            # Install Xcode command line tools if not present
-            if ! xcode-select -p &> /dev/null; then
-                log_info "Installing Xcode command line tools..."
-                xcode-select --install
-                log_warning "Please complete the Xcode command line tools installation and re-run this script."
-                exit 1
-            fi
-            ;;
-        windows)
-            log_info "Windows detected. Please ensure you have the following installed:"
-            echo "  - Git for Windows (includes Git Bash)"
-            echo "  - Node.js (will be installed next)"
-            echo "  - Python 3.x"
-            echo "  - Visual Studio Build Tools or Visual Studio Community"
-            if [[ "${SERVER_ONLY:-false}" != "true" ]]; then
-                log_warning "Tor installation on Windows requires manual setup."
-                log_info "Please download Tor Browser or install Tor as a service manually."
-            fi
-            ;;
-    esac
-
     log_success "System dependencies installed"
+}
+
+# Install Redis server
+install_redis() {
+    log_info "Installing Redis server..."
+
+    # Check if Redis is already installed and running
+    if command -v redis-server &> /dev/null; then
+        log_info "Redis is already installed: $(redis-server --version | head -n1)"
+
+        # Check if Redis is running
+        if redis-cli ping &> /dev/null; then
+            log_success "Redis is already running"
+            return 0
+        else
+            log_info "Redis is installed but not running. Will start it after installation check."
+        fi
+    fi
+
+    # Detect package manager and install accordingly
+    if command -v apt-get &> /dev/null; then
+        # Ubuntu/Debian/Mint/Pop!_OS/Elementary
+        sudo apt install -y redis-server
+        sudo systemctl enable redis-server 2>/dev/null || true
+        sudo systemctl start redis-server 2>/dev/null || true
+    elif command -v dnf &> /dev/null; then
+        # Fedora/RHEL 8+/CentOS 8+/Rocky Linux/AlmaLinux/Amazon Linux 2022+
+        sudo dnf install -y redis
+        sudo systemctl enable redis 2>/dev/null || true
+        sudo systemctl start redis 2>/dev/null || true
+    elif command -v yum &> /dev/null; then
+        # CentOS 7/RHEL 7/Amazon Linux 2/Oracle Linux
+        sudo yum install -y epel-release 2>/dev/null || true
+        sudo yum install -y redis
+        sudo systemctl enable redis 2>/dev/null || sudo chkconfig redis on 2>/dev/null || true
+        sudo systemctl start redis 2>/dev/null || sudo service redis start 2>/dev/null || true
+    elif command -v pacman &> /dev/null; then
+        # Arch Linux/Manjaro/EndeavourOS/Garuda
+        sudo pacman -S --noconfirm redis
+        sudo systemctl enable redis 2>/dev/null || true
+        sudo systemctl start redis 2>/dev/null || true
+    elif command -v zypper &> /dev/null; then
+        # openSUSE Leap/Tumbleweed/SLES
+        sudo zypper install -y redis
+        sudo systemctl enable redis 2>/dev/null || true
+        sudo systemctl start redis 2>/dev/null || true
+    elif command -v apk &> /dev/null; then
+        # Alpine Linux
+        sudo apk add --no-cache redis
+        sudo rc-update add redis default 2>/dev/null || true
+        sudo rc-service redis start 2>/dev/null || true
+    elif command -v xbps-install &> /dev/null; then
+        # Void Linux
+        sudo xbps-install -S redis
+        sudo ln -sf /etc/sv/redis /var/service/ 2>/dev/null || true
+    elif command -v emerge &> /dev/null; then
+        # Gentoo
+        sudo emerge --ask=n dev-db/redis
+        sudo rc-update add redis default 2>/dev/null || true
+        sudo rc-service redis start 2>/dev/null || true
+    elif command -v eopkg &> /dev/null; then
+        # Solus
+        sudo eopkg install -y redis
+        sudo systemctl enable redis 2>/dev/null || true
+        sudo systemctl start redis 2>/dev/null || true
+    elif command -v swupd &> /dev/null; then
+        # Clear Linux
+        sudo swupd bundle-add redis
+        sudo systemctl enable redis 2>/dev/null || true
+        sudo systemctl start redis 2>/dev/null || true
+    elif command -v nix-env &> /dev/null; then
+        # NixOS
+        nix-env -iA nixpkgs.redis
+        log_warning "NixOS: Please configure Redis service in your configuration.nix"
+    elif [[ "$OS" == "macos" ]]; then
+        # macOS
+        brew install redis
+        brew services start redis
+    elif [[ "$OS" == "windows" ]]; then
+        # Windows
+        log_warning "Redis installation on Windows requires manual setup."
+        log_info "Please download Redis for Windows from: https://github.com/microsoftarchive/redis/releases"
+        log_info "Or use Windows Subsystem for Linux (WSL) for easier Redis installation."
+        return 0
+    else
+        log_error "Unsupported OS for Redis installation"
+        log_info "Supported package managers: apt-get, dnf, yum, pacman, zypper, apk, xbps-install, emerge, eopkg, swupd, nix-env, brew"
+        return 1
+    fi
+
+    # Verify Redis installation
+    if command -v redis-server &> /dev/null; then
+        log_success "Redis server installed successfully"
+
+        # Test Redis connection
+        if redis-cli ping &> /dev/null; then
+            log_success "Redis is running and responding to ping"
+        else
+            log_warning "Redis is installed but not responding. You may need to start it manually."
+        fi
+    else
+        log_error "Redis installation failed"
+        return 1
+    fi
 }
 
 # Install Node.js and npm
@@ -196,39 +435,76 @@ install_nodejs() {
         fi
     fi
 
-    case $OS in
-        ubuntu|debian)
-            # Install Node.js via NodeSource repository
-            curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
-            sudo apt install -y nodejs
-            ;;
-        fedora|rhel|centos)
-            # Install Node.js via NodeSource repository
-            curl -fsSL https://rpm.nodesource.com/setup_20.x | sudo bash -
-            sudo dnf install -y nodejs npm
-            ;;
-        arch|manjaro)
-            sudo pacman -S --noconfirm nodejs npm
-            ;;
-        macos)
-            # Install Node.js via Homebrew
-            brew install node@20
-            # Link the specific version
-            brew link node@20 --force
-            ;;
-        windows)
-            log_info "Please download and install Node.js from: https://nodejs.org/"
-            log_info "Choose the LTS version (20.x or later)"
-            log_warning "After installing Node.js, restart your terminal and re-run this script."
-            read -p "Press Enter after installing Node.js to continue..."
+    # Detect package manager and install accordingly
+    if command -v apt-get &> /dev/null; then
+        # Ubuntu/Debian/Mint/Pop!_OS/Elementary
+        curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
+        sudo apt install -y nodejs
+    elif command -v dnf &> /dev/null; then
+        # Fedora/RHEL 8+/CentOS 8+/Rocky Linux/AlmaLinux/Amazon Linux 2022+
+        curl -fsSL https://rpm.nodesource.com/setup_20.x | sudo bash -
+        sudo dnf install -y nodejs npm
+    elif command -v yum &> /dev/null; then
+        # CentOS 7/RHEL 7/Amazon Linux 2/Oracle Linux
+        curl -fsSL https://rpm.nodesource.com/setup_20.x | sudo bash -
+        sudo yum install -y nodejs npm
+    elif command -v pacman &> /dev/null; then
+        # Arch Linux/Manjaro/EndeavourOS/Garuda/ArcoLinux/Artix
+        sudo pacman -Sy --noconfirm
+        sudo pacman -S --noconfirm nodejs npm
+    elif command -v zypper &> /dev/null; then
+        # openSUSE Leap/Tumbleweed/SLES/openSUSE MicroOS
+        sudo zypper refresh
+        # Try different Node.js versions - prefer newer versions
+        sudo zypper install -y nodejs20 npm20 || \
+        sudo zypper install -y nodejs18 npm18 || \
+        sudo zypper install -y nodejs npm
+    elif command -v apk &> /dev/null; then
+        # Alpine Linux
+        sudo apk add --no-cache nodejs npm
+    elif command -v xbps-install &> /dev/null; then
+        # Void Linux
+        sudo xbps-install -S nodejs npm
+    elif command -v emerge &> /dev/null; then
+        # Gentoo/Funtoo/Calculate Linux
+        # Check if we need to sync first
+        if [ ! -d /var/db/repos/gentoo ] || [ $(find /var/db/repos/gentoo -name "*.ebuild" -mtime +7 | wc -l) -eq 0 ]; then
+            sudo emerge --sync --quiet || true
+        fi
+        # Install Node.js with npm support
+        sudo emerge --ask=n --quiet net-libs/nodejs
+    elif command -v eopkg &> /dev/null; then
+        # Solus
+        sudo eopkg install -y nodejs npm
+    elif command -v swupd &> /dev/null; then
+        # Clear Linux
+        sudo swupd bundle-add nodejs-basic
+    elif command -v nix-env &> /dev/null; then
+        # NixOS
+        nix-env -iA nixpkgs.nodejs nixpkgs.nodePackages.npm
+    elif [[ "$OS" == "macos" ]]; then
+        # macOS
+        brew install node@20 || brew install node
+        # Try to link the specific version if available
+        brew link node@20 --force 2>/dev/null || true
+    elif [[ "$OS" == "windows" ]]; then
+        # Windows
+        log_info "Please download and install Node.js from: https://nodejs.org/"
+        log_info "Choose the LTS version (20.x or later)"
+        log_warning "After installing Node.js, restart your terminal and re-run this script."
+        read -p "Press Enter after installing Node.js to continue..."
 
-            # Verify installation
-            if ! command -v node &> /dev/null; then
-                log_error "Node.js not found. Please install it and restart your terminal."
-                exit 1
-            fi
-            ;;
-    esac
+        # Verify installation
+        if ! command -v node &> /dev/null; then
+            log_error "Node.js not found. Please install it and restart your terminal."
+            exit 1
+        fi
+    else
+        log_error "Unsupported operating system or package manager for Node.js installation"
+        log_info "Supported package managers: apt-get, dnf, yum, pacman, zypper, apk, xbps-install, emerge, eopkg, swupd, nix-env, brew"
+        log_info "Please install Node.js 20+ manually from: https://nodejs.org/"
+        exit 1
+    fi
 
     log_success "Node.js and npm installed"
     node --version
@@ -256,25 +532,40 @@ install_pnpm() {
         PNPM_VER="8"  # default to pnpm v8 if not specified
     fi
 
-    # Install pnpm to user directory to avoid requiring sudo
-    NPM_PREFIX="$HOME/.local"
-    mkdir -p "$NPM_PREFIX"
-    log_info "Installing pnpm@$PNPM_VER to $NPM_PREFIX (user scope)"
-    npm install -g "pnpm@${PNPM_VER}" --prefix "$NPM_PREFIX"
+    # Install pnpm globally
+    log_info "Installing pnpm@$PNPM_VER globally"
 
-    # Ensure user's local bin is on PATH for current script and future shells
-    export PATH="$HOME/.local/bin:$PATH"
-    SHELL_RC=""
-    if [[ -n "$ZSH_VERSION" ]]; then
-        SHELL_RC="$HOME/.zshrc"
-    elif [[ -n "$BASH_VERSION" ]]; then
-        SHELL_RC="$HOME/.bashrc"
+    # Try corepack first (preferred method)
+    if command -v corepack &> /dev/null; then
+        log_info "Using corepack to enable pnpm globally..."
+        sudo corepack enable pnpm || {
+            log_warning "Corepack failed, trying npm global installation..."
+            timeout 120 sudo npm install -g "pnpm@${PNPM_VER}" --no-audit --no-fund --silent || {
+                log_warning "npm install timed out or failed, trying manual installation..."
+                # Try manual binary download as last resort
+                log_info "Downloading pnpm binary globally..."
+                sudo mkdir -p /usr/local/bin
+                curl -fsSL https://github.com/pnpm/pnpm/releases/latest/download/pnpm-linuxstatic-x64 -o /tmp/pnpm || true
+                sudo mv /tmp/pnpm /usr/local/bin/pnpm 2>/dev/null || true
+                sudo chmod +x /usr/local/bin/pnpm 2>/dev/null || true
+            }
+        }
     else
-        SHELL_RC="$HOME/.profile"
+        # Fallback to npm if corepack not available
+        log_info "Using npm to install pnpm globally..."
+        timeout 120 sudo npm install -g "pnpm@${PNPM_VER}" --no-audit --no-fund --silent || {
+            log_warning "npm install timed out or failed, trying manual installation..."
+            # Try manual binary download as last resort
+            log_info "Downloading pnpm binary globally..."
+            sudo mkdir -p /usr/local/bin
+            curl -fsSL https://github.com/pnpm/pnpm/releases/latest/download/pnpm-linuxstatic-x64 -o /tmp/pnpm || true
+            sudo mv /tmp/pnpm /usr/local/bin/pnpm 2>/dev/null || true
+            sudo chmod +x /usr/local/bin/pnpm 2>/dev/null || true
+        }
     fi
-    if ! grep -q 'export PATH="$HOME/.local/bin:$PATH"' "$SHELL_RC" 2>/dev/null; then
-        echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$SHELL_RC"
-    fi
+
+    # Ensure global bin directories are on PATH for current script
+    export PATH="/usr/local/bin:$PATH"
 
     if command -v pnpm &> /dev/null; then
         log_success "pnpm installed: $(pnpm --version)"
@@ -681,10 +972,15 @@ start_application() {
 main() {
     log_info "Starting End-to-End Chat Site dependency installation..."
 
+    # Normalize SERVER_ONLY environment variable
+    SERVER_ONLY=$(normalize_bool "${SERVER_ONLY:-}" "false")
+    export SERVER_ONLY
+
     check_root
     detect_os
     update_packages
     install_system_deps
+    install_redis
     install_nodejs
     install_pnpm
     configure_tor

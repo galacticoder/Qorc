@@ -1,3 +1,4 @@
+import React, { useState, useEffect } from "react";
 import { Button } from "../../ui/button";
 import { Cross2Icon } from "../icons";
 import { cn } from "@/lib/utils";
@@ -7,9 +8,23 @@ import { Message } from "../types"
 interface ReplyBannerProps {
   replyTo: Message;
   onCancelReply: () => void;
+  getDisplayUsername?: (username: string) => Promise<string>;
 }
 
-export function ReplyBanner({ replyTo, onCancelReply }: ReplyBannerProps) {
+export function ReplyBanner({ replyTo, onCancelReply, getDisplayUsername }: ReplyBannerProps) {
+  const [displaySender, setDisplaySender] = useState(replyTo.sender);
+
+  // Load display username
+  useEffect(() => {
+    if (getDisplayUsername) {
+      getDisplayUsername(replyTo.sender)
+        .then(setDisplaySender)
+        .catch((error) => {
+          console.error('Failed to get display username for reply banner:', error);
+          setDisplaySender(replyTo.sender);
+        });
+    }
+  }, [replyTo.sender, getDisplayUsername]);
   return (
     <div className="px-4 pt-3 pb-0">
       <div
@@ -34,7 +49,7 @@ export function ReplyBanner({ replyTo, onCancelReply }: ReplyBannerProps) {
               />
             </svg>
             <span className="text-sm font-semibold text-slate-700">
-              {replyTo.sender}
+              {displaySender}
             </span>
           </div>
           <p className="text-sm line-clamp-2 text-slate-600">

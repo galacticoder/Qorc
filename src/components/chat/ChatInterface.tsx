@@ -468,6 +468,7 @@ export function ChatInterface({
           }}
           onTyping={handleLocalTyping}
           selectedConversation={selectedConversation}
+          getDisplayUsername={getDisplayUsername}
         />
       </div>
 

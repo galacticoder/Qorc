@@ -5,40 +5,33 @@ Secure chat app with post-quantum cryptography and Signal Protocol integration a
 ## Setup and run
 
 **Prerequisites:**
-  - Node.js 18+ and pnpm
+  - No need to worry about anything. The scripts will install everything you need automatically.
 
 **Clone the repository:**
 
 ```bash
-git clone https://github.com/galacticoder/end2end-chat-site.git
+   git clone https://github.com/galacticoder/end2end-chat-site.git
 
-cd end2end-chat-site
+   cd end2end-chat-site
 ```
-### Setup option 1: Electron Desktop App (Recommended)
 
-2. **Start the application:**
+### Setup
+
+1. **Start the client:**
    ```bash
    ./startClient.sh  # Launches Electron app + dev server
-
+   ```
+2. **Start the server:**
+   ```bash
+   # Run server on your machine
    ./startServer.sh  # In another terminal for starting the server
-   ```
 
-### Setup option 2: Server in Docker + Local Client
-
-**Isolated server, native Electron client:**
-
-1. **Start server in Docker:**
-   ```bash
-   ./setup_chat_docker.sh  # Choose option 1 (Server only)
-   ```
-
-2. **Start client locally:**
-   ```bash
-   ./startClient.sh  # Native Electron app
+   # Or run server in docker
+   ./setup_chat_docker.sh
    ```
 
 **Supported platforms:**
-- **Linux**: Ubuntu/Debian, Fedora/RHEL, Arch Linux
+- **Linux**: Ubuntu/Debian (apt), Fedora (dnf), Arch (pacman), and most major distributions with supported package managers
 - **macOS**: Intel and Apple Silicon
 - **Windows**: Git Bash, WSL, or similar Unix-like environment
 
@@ -130,8 +123,6 @@ TOR_ENABLED=false
 - Rate limiting and spam protection
 - Multi-layer authentication
 
-### Platform Support
-- Cross-platform desktop apps (Electron)
 
 ## Security Implementation
 
@@ -184,12 +175,6 @@ TOR_ENABLED=false
 - Automatic secure deletion
 - Minimal metadata collection
 - Server never knows original usernames
-
-### Open Source & Auditable
-- Full source code available for review
-- Regular security audits
-- TypeScript for type safety
-- Automated testing and static analysis
 
 ## License
 
