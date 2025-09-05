@@ -10,12 +10,10 @@ Secure chat app with post-quantum cryptography and Signal Protocol integration a
 **Clone the repository:**
 
 ```bash
-   git clone https://github.com/galacticoder/end2end-chat-site.git
+git clone https://github.com/galacticoder/end2end-chat-site.git
 
-   cd end2end-chat-site
+cd end2end-chat-site
 ```
-
-### Setup
 
 1. **Start the client:**
    ```bash
