@@ -19,6 +19,7 @@
     "dist": "npm run build && electron-builder --publish=never"
   },
   "dependencies": {
+    "@dhaiwat10/react-link-preview": "^1.15.0",
     "@noble/ciphers": "^2.0.0",
     "@noble/curves": "^1.9.7",
     "@noble/hashes": "^1.6.0",

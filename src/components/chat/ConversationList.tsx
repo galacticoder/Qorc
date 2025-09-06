@@ -4,6 +4,7 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from "@/components/ui/dialog";
 import { Trash2 } from "lucide-react";
+import { useUnifiedUsernameDisplay } from "../../hooks/useUnifiedUsernameDisplay";
 
 export interface Conversation {
   id: string;
@@ -40,32 +41,12 @@ const ConversationItem = memo(({
   callStatus?: 'ringing' | 'connecting' | 'connected' | null;
   getDisplayUsername?: (username: string) => Promise<string>;
 }) => {
-  const [displayName, setDisplayName] = useState(conversation.username);
-
-  useEffect(() => {
-    let mounted = true;
-
-    if (getDisplayUsername) {
-      console.log('[ConversationItem] Resolving display name for:', conversation.username);
-      getDisplayUsername(conversation.username)
-        .then((displayName) => {
-          if (mounted) {
-            console.log('[ConversationItem] Resolved display name:', conversation.username, '->', displayName);
-            setDisplayName(displayName);
-          }
-        })
-        .catch((error) => {
-          console.error('[ConversationItem] Failed to get display username:', error);
-          // Ignore error, keep original username
-        });
-    } else {
-      console.log('[ConversationItem] No getDisplayUsername function provided');
-    }
-
-    return () => {
-      mounted = false;
-    };
-  }, [conversation.username, getDisplayUsername]);
+  // Use unified username display
+  const { displayName } = useUnifiedUsernameDisplay({
+    username: conversation.username,
+    getDisplayUsername,
+    fallbackToOriginal: true
+  });
 
   return (
   <div
@@ -278,7 +259,8 @@ export const ConversationList = memo(function ConversationList({
           <DialogHeader>
             <DialogTitle style={{ color: 'var(--color-text-primary)' }}>Remove Conversation</DialogTitle>
             <DialogDescription style={{ color: 'var(--color-text-secondary)' }}>
-              Are you sure you want to remove the conversation with {conversationToRemove}? 
+              Are you sure you want to remove the conversation with {/* Mask hashed in confirm dialog */}
+              {conversationToRemove && /^[a-f0-9]{32,}$/i.test(conversationToRemove) ? 'User' : conversationToRemove}? 
               This action cannot be undone and will delete all message history.
             </DialogDescription>
           </DialogHeader>

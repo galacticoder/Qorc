@@ -3,16 +3,19 @@
  * Shows recent calls with status indicators
  */
 
-import React from 'react';
+import React, { useMemo } from 'react';
 import { Phone, PhoneIncoming, PhoneOutgoing, PhoneMissed, Video } from 'lucide-react';
 import { CallState } from '../../lib/webrtc-calling';
+import { isHashedUsername } from '@/lib/unified-username-display';
+import { useUnifiedUsernameDisplay } from '@/hooks/useUnifiedUsernameDisplay';
 
 interface CallHistoryProps {
   calls: CallState[];
   onCallUser?: (username: string, type: 'audio' | 'video') => void;
+  getDisplayUsername?: (username: string) => Promise<string>;
 }
 
-export const CallHistory: React.FC<CallHistoryProps> = ({ calls, onCallUser }) => {
+export const CallHistory: React.FC<CallHistoryProps> = ({ calls, onCallUser, getDisplayUsername }) => {
   const formatDuration = (duration?: number): string => {
     if (!duration) return '';
     const mins = Math.floor(duration / 60000);
@@ -74,7 +77,13 @@ export const CallHistory: React.FC<CallHistoryProps> = ({ calls, onCallUser }) =
   return (
     <div className="space-y-2">
       <h3 className="text-sm font-medium text-gray-700 px-4 py-2 border-b">Recent Calls</h3>
-      {calls.map((call) => (
+      {calls.map((call) => {
+        const { displayName } = useUnifiedUsernameDisplay({
+          username: call.peer,
+          getDisplayUsername,
+          fallbackToOriginal: true
+        });
+        return (
         <div
           key={call.id}
           className="flex items-center justify-between p-3 hover:bg-gray-50 cursor-pointer group"
@@ -88,7 +97,7 @@ export const CallHistory: React.FC<CallHistoryProps> = ({ calls, onCallUser }) =
               )}
             </div>
             <div>
-              <p className="font-medium text-sm">{call.peer}</p>
+              <p className="font-medium text-sm">{displayName}</p>
               <p className="text-xs text-gray-500">
                 {getStatusText(call)} • {formatTime(call.startTime)}
               </p>
@@ -118,7 +127,8 @@ export const CallHistory: React.FC<CallHistoryProps> = ({ calls, onCallUser }) =
             </button>
           </div>
         </div>
-      ))}
+        );
+      })}
     </div>
   );
 };

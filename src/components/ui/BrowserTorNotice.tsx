@@ -25,7 +25,20 @@ export function BrowserTorNotice() {
           <Button
             variant="outline"
             size="sm"
-            onClick={() => window.open('https://www.torproject.org/', '_blank')}
+            onClick={async () => {
+              // Always open in external browser
+              if (typeof window !== 'undefined' && (window as any).electronAPI?.openExternal) {
+                try {
+                  await (window as any).electronAPI.openExternal('https://www.torproject.org/');
+                } catch {
+                  // Fallback to system default browser
+                  window.open('https://www.torproject.org/', '_blank');
+                }
+              } else {
+                // Fallback to system default browser
+                window.open('https://www.torproject.org/', '_blank');
+              }
+            }}
             className="border-blue-300 text-blue-700 hover:bg-blue-100"
           >
             <ExternalLink className="h-3 w-3 mr-1" />

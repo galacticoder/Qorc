@@ -4,6 +4,53 @@
 @tailwind components;
 @tailwind utilities;
 
+/* Link Preview Styles */
+.link-preview-container {
+  /* Ensure images load properly */
+}
+
+.link-preview-container img {
+  max-width: 100%;
+  height: auto;
+  object-fit: cover;
+  border-radius: 8px;
+}
+
+/* Fix for react-link-preview image loading */
+.rlp-container img {
+  max-width: 100% !important;
+  height: auto !important;
+  object-fit: cover !important;
+  border-radius: 8px !important;
+}
+
+.rlp-container {
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.1) !important;
+  transition: transform 0.2s ease !important;
+}
+
+.rlp-container:hover {
+  transform: scale(1.02) !important;
+}
+
+@layer utilities {
+  .line-clamp-2 {
+    overflow: hidden;
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+  }
+  
+  .line-clamp-3 {
+    overflow: hidden;
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 3;
+    line-clamp: 3;
+  }
+}
+
 @layer base {
   :root { /* light mode colors */
     /* Backgrounds */

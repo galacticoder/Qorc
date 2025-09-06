@@ -115,7 +115,20 @@ export const TorInstallPrompt: React.FC<TorInstallPromptProps> = ({ onContinue, 
               <Button
                 size="sm"
                 variant="ghost"
-                onClick={() => window.open('https://www.torproject.org/download/', '_blank')}
+                onClick={async () => {
+                  // Always open in external browser
+                  if (typeof window !== 'undefined' && (window as any).electronAPI?.openExternal) {
+                    try {
+                      await (window as any).electronAPI.openExternal('https://www.torproject.org/download/');
+                    } catch {
+                      // Fallback to system default browser
+                      window.open('https://www.torproject.org/download/', '_blank');
+                    }
+                  } else {
+                    // Fallback to system default browser
+                    window.open('https://www.torproject.org/download/', '_blank');
+                  }
+                }}
               >
                 <ExternalLink className="w-3 h-3" />
               </Button>

@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect, useMemo } from "react";
+import { useState, useCallback, useEffect, useMemo, useRef } from "react";
 import { Conversation } from "../components/chat/ConversationList";
 import { Message } from "../components/chat/types";
 import { User } from "../components/chat/UserList";
@@ -51,6 +51,7 @@ export const useConversations = (currentUsername: string, users: User[], message
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [selectedConversation, setSelectedConversation] = useState<string | null>(null);
   const [removedConversations, setRemovedConversations] = useState<Set<string>>(new Set());
+  const pendingMappingsRef = useRef<Array<{ pseudo: string; original: string }>>([]);
 
   // Add a new conversation with user validation (use pseudonymized username for server)
   const addConversation = useCallback((username: string, autoSelect: boolean = true): Promise<Conversation | null> => {
@@ -61,22 +62,32 @@ export const useConversations = (currentUsername: string, users: User[], message
           return;
         }
 
+        // Detect if input is already a pseudonym (32+ hex)
+        const looksLikePseudonym = /^[a-f0-9]{32,}$/i.test(username.trim());
+
         // Compute pseudonym for this username; server must never see original
-        const pseudonym = await pseudonymizeUsernameWithCache(username);
+        const pseudonym = looksLikePseudonym
+          ? username.trim().toLowerCase()
+          : await pseudonymizeUsernameWithCache(username);
 
         if (pseudonym === currentUsername) {
           resolve(null);
           return;
         }
 
-        // Store username mapping for display purposes if we have secureDB
-        if (secureDB && username !== pseudonym) {
+        // Store username mapping for display purposes ONLY when original username was provided
+        if (secureDB && !looksLikePseudonym && username !== pseudonym) {
           try {
             console.log(`[useConversations] Storing username mapping: ${pseudonym} -> ${username}`);
             await secureDB.storeUsernameMapping(pseudonym, username);
+            try { window.dispatchEvent(new CustomEvent('username-mapping-updated', { detail: { username: pseudonym } })); } catch {}
           } catch (error) {
             console.error('[useConversations] Failed to store username mapping:', error);
           }
+        } else if (!secureDB && !looksLikePseudonym && username !== pseudonym) {
+          // SecureDB not ready yet; queue mapping for later flush
+          pendingMappingsRef.current.push({ pseudo: pseudonym, original: username });
+          console.log('[useConversations] Queued username mapping (SecureDB not ready):', { pseudonym, original: username });
         }
 
         // If this conversation was previously removed, allow re-adding it
@@ -173,7 +184,7 @@ export const useConversations = (currentUsername: string, users: User[], message
         reject(new Error('Failed to prepare conversation. Please try again.'));
       }
     });
-  }, [conversations, users, currentUsername, selectedConversation, removedConversations]);
+  }, [conversations, users, currentUsername, selectedConversation, removedConversations, secureDB]);
 
   // Select a conversation
   const selectConversation = useCallback((username: string) => {
@@ -186,6 +197,26 @@ export const useConversations = (currentUsername: string, users: User[], message
       ));
     }
   }, [selectedConversation]);
+
+  // Flush any queued mappings once SecureDB becomes available
+  useEffect(() => {
+    const flushQueuedMappings = async () => {
+      if (!secureDB) return;
+      const pending = pendingMappingsRef.current;
+      if (pending.length === 0) return;
+      const toFlush = [...pending];
+      pendingMappingsRef.current = [];
+      for (const item of toFlush) {
+        try {
+          await secureDB.storeUsernameMapping(item.pseudo, item.original);
+          try { window.dispatchEvent(new CustomEvent('username-mapping-updated', { detail: { username: item.pseudo } })); } catch {}
+        } catch (err) {
+          console.error('[useConversations] Failed to flush queued username mapping:', err);
+        }
+      }
+    };
+    flushQueuedMappings();
+  }, [secureDB]);
 
   // Get messages for the selected conversation
   const getConversationMessages = useCallback((conversationUsername?: string) => {

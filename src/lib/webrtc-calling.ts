@@ -422,7 +422,7 @@ export class WebRTCCallingService {
   /**
    * Start screen sharing with optional source selection
    */
-  async startScreenShare(selectedSource?: { id: string; name: string }): Promise<void> {
+  async startScreenShare(selectedSource?: { id: string; name: string; type?: 'screen' | 'window' }): Promise<void> {
     if (!this.peerConnection) {
       throw new Error('No active call to share screen');
     }
@@ -517,10 +517,19 @@ export class WebRTCCallingService {
 
           // Use the selected source or default to first screen source
           let screenSource;
-          if (selectedSource) {
+          if (selectedSource && selectedSource.id) {
+            console.log('[Calling] Looking for source with ID:', selectedSource.id);
+            console.log('[Calling] Available sources:', sources.map((s: any) => ({ id: s.id, name: s.name })));
+
             screenSource = sources.find((source: any) => source.id === selectedSource.id);
             if (!screenSource) {
-              throw new Error(`Selected screen source "${selectedSource.name}" not found`);
+              console.warn('[Calling] Exact ID match failed, trying fallback selection');
+              // Fallback: try to find any screen source if the exact ID doesn't match
+              screenSource = sources.find((source: any) => source.id.startsWith('screen:')) || sources[0];
+              if (!screenSource) {
+                throw new Error(`No screen sources available. Selected: "${selectedSource.name || selectedSource.id}"`);
+              }
+              console.log('[Calling] Using fallback source:', screenSource.name);
             }
           } else {
             screenSource = sources.find((source: any) => source.id.startsWith('screen:')) || sources[0];
@@ -554,8 +563,15 @@ export class WebRTCCallingService {
             });
           }
         } catch (electronError) {
-          console.warn('[Calling] Electron screen capture failed, falling back to browser API:', electronError);
-          // Fall through to browser API
+          console.error('[Calling] Electron screen capture failed:', electronError);
+          // If user selected a specific source and Electron failed, don't fall back to browser API
+          // as it would show another screen selection dialog which is confusing
+          if (selectedSource) {
+            throw new Error(`Failed to capture selected screen source: ${electronError.message}`);
+          }
+
+          // Only fall back to browser API if no specific source was selected
+          console.log('[Calling] No specific source selected, falling back to browser API');
           const videoConstraints = screenSharingSettings.getVideoConstraints();
           console.log('[Calling] Using browser constraints (fallback):', JSON.stringify(videoConstraints, null, 2));
 
@@ -1232,6 +1248,8 @@ export class WebRTCCallingService {
       const signalData = {
         messageId: this.generateCallId(),
         from: this.localUsername,
+        // Optional: include sender's original name in encrypted content when available
+        fromOriginal: (window as any)?.currentUserOriginal || undefined,
         to: signal.to,
         content: JSON.stringify(signal),
         timestamp: Date.now(),

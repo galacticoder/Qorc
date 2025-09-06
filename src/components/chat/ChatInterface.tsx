@@ -12,6 +12,7 @@ import { MessageReply } from "./types";
 import { useTypingIndicator } from "@/hooks/useTypingIndicator";
 import { TypingIndicator } from "./TypingIndicator";
 import { useTypingIndicatorContext } from "@/contexts/TypingIndicatorContext";
+import { resolveDisplayUsername } from "@/lib/unified-username-display";
 import { useMessageReceipts } from "@/hooks/useMessageReceipts";
 import { TorIndicator } from "@/components/ui/TorIndicator";
 import { Phone, Video } from "lucide-react";
@@ -93,21 +94,28 @@ export function ChatInterface({
 
   // Listen for call logs and inject system messages into conversation
   useEffect(() => {
-    const handler = (e: any) => {
+    const handler = async (e: any) => {
       try {
         const d = e.detail || {};
         if (!selectedConversation || d.peer !== selectedConversation) return;
-        const label = d.type === 'incoming' ? `Incoming call from ${d.peer}`
-          : d.type === 'connected' ? `Call connected with ${d.peer}`
-          : d.type === 'started' ? `Calling ${d.peer}...`
-          : d.type === 'ended' ? `Call with ${d.peer} ended (${Math.round((d.durationMs||0)/1000)}s)`
-          : d.type === 'declined' ? `${d.peer} declined the call`
-          : d.type === 'missed' ? `Missed call from ${d.peer}`
-          : d.type === 'not-answered' ? `${d.peer} did not answer`
+
+        // Resolve the peer name for display
+        const displayPeerName = await resolveDisplayUsername(d.peer, getDisplayUsername);
+
+        const label = d.type === 'incoming' ? `Incoming call from ${displayPeerName}`
+          : d.type === 'connected' ? `Call connected with ${displayPeerName}`
+          : d.type === 'started' ? `Calling ${displayPeerName}...`
+          : d.type === 'ended' ? `Call with ${displayPeerName} ended (${Math.round((d.durationMs||0)/1000)}s)`
+          : d.type === 'declined' ? `${displayPeerName} declined the call`
+          : d.type === 'missed' ? `Missed call from ${displayPeerName}`
+          : d.type === 'not-answered' ? `${displayPeerName} did not answer`
           : `Call event: ${d.type}`;
+        const actions = (d.type === 'missed' || d.type === 'not-answered' || d.type === 'ended' || d.type === 'declined')
+          ? [{ label: 'Call back', onClick: () => startCall(d.peer, 'audio').catch(() => {}) }]
+          : undefined;
         setMessages((prev) => [...prev, {
           id: `call-log-${d.callId || crypto.randomUUID()}-${d.type}-${d.at || Date.now()}`,
-          content: label,
+          content: JSON.stringify({ label, actionsType: actions ? 'callback' : undefined }),
           sender: 'System',
           timestamp: new Date(),
           isCurrentUser: false,
@@ -118,7 +126,20 @@ export function ChatInterface({
     };
     window.addEventListener('ui-call-log', handler as EventListener);
     return () => window.removeEventListener('ui-call-log', handler as EventListener);
-  }, [setMessages, selectedConversation]);
+  }, [setMessages, selectedConversation, getDisplayUsername]);
+
+  // Handle global call-back requests from system messages
+  useEffect(() => {
+    const cb = (e: any) => {
+      try {
+        const d = e.detail || {};
+        if (!d.peer) return;
+        startCall(d.peer, d.type === 'video' ? 'video' : 'audio').catch(() => {});
+      } catch {}
+    };
+    window.addEventListener('ui-call-request', cb as EventListener);
+    return () => window.removeEventListener('ui-call-request', cb as EventListener);
+  }, [startCall]);
 
   // Handle conversation changes to stop typing indicators
   useEffect(() => {
@@ -132,30 +153,104 @@ export function ChatInterface({
   useEffect(() => {
     if (selectedConversation && getDisplayUsername) {
       getDisplayUsername(selectedConversation)
-        .then(setDisplayConversationName)
+        .then((resolved) => {
+          try {
+            const hexPattern = /^[a-f0-9]{32,}$/i;
+            setDisplayConversationName(hexPattern.test(resolved) ? `${resolved.slice(0, 8)}...` : resolved);
+          } catch {
+            setDisplayConversationName(resolved);
+          }
+        })
         .catch((error) => {
           console.error('Failed to resolve conversation display name:', error);
-          setDisplayConversationName(selectedConversation);
+          try {
+            const hexPattern = /^[a-f0-9]{32,}$/i;
+            setDisplayConversationName(hexPattern.test(selectedConversation) ? `${selectedConversation.slice(0, 8)}...` : selectedConversation);
+          } catch {
+            setDisplayConversationName(selectedConversation);
+          }
         });
     } else {
-      setDisplayConversationName(selectedConversation || "");
+      if (!selectedConversation) {
+        setDisplayConversationName("");
+      } else {
+        try {
+          const hexPattern = /^[a-f0-9]{32,}$/i;
+          setDisplayConversationName(hexPattern.test(selectedConversation) ? `${selectedConversation.slice(0, 8)}...` : selectedConversation);
+        } catch {
+          setDisplayConversationName(selectedConversation);
+        }
+      }
     }
+  }, [selectedConversation, getDisplayUsername]);
+
+  // Re-resolve header name when a mapping is updated/received
+  useEffect(() => {
+    const handler = () => {
+      if (!selectedConversation || !getDisplayUsername) return;
+      getDisplayUsername(selectedConversation)
+        .then((resolved) => {
+          try {
+            const hexPattern = /^[a-f0-9]{32,}$/i;
+            setDisplayConversationName(hexPattern.test(resolved) ? `${resolved.slice(0, 8)}...` : resolved);
+          } catch {
+            setDisplayConversationName(resolved);
+          }
+        })
+        .catch(() => {});
+    };
+    window.addEventListener('username-mapping-updated', handler as EventListener);
+    window.addEventListener('username-mapping-received', handler as EventListener);
+    return () => {
+      window.removeEventListener('username-mapping-updated', handler as EventListener);
+      window.removeEventListener('username-mapping-received', handler as EventListener);
+    };
   }, [selectedConversation, getDisplayUsername]);
 
   // Message receipts hook
   const { sendReadReceipt, markMessageAsRead, getSmartReceiptStatus } = useMessageReceipts(messages, setMessages, currentUsername, saveMessageToLocalDB);
 
+  // Smart auto-scroll: only scroll to bottom when appropriate
+  const prevMessagesLengthRef = useRef(messages.length);
+  const lastMessageIdRef = useRef<string | null>(null);
+
   useEffect(() => {
-    if (scrollAreaRef.current) {
-      const scrollContainer =
-        scrollAreaRef.current.querySelector(
-          '[data-radix-scroll-area-viewport]'
-        );
-      if (scrollContainer) {
-        scrollContainer.scrollTop = scrollContainer.scrollHeight;
+    if (!scrollAreaRef.current) return;
+
+    const scrollContainer = scrollAreaRef.current.querySelector('[data-radix-scroll-area-viewport]');
+    if (!scrollContainer) return;
+
+    const currentMessagesLength = messages.length;
+    const prevMessagesLength = prevMessagesLengthRef.current;
+
+    // Check if this is a new message (length increased)
+    const isNewMessage = currentMessagesLength > prevMessagesLength;
+
+    // Get the latest message
+    const latestMessage = messages[messages.length - 1];
+    const isNewMessageId = latestMessage && latestMessage.id !== lastMessageIdRef.current;
+
+    // Only auto-scroll if:
+    // 1. It's a new message (not just an update to existing messages)
+    // 2. User is near the bottom (within 100px) OR the new message is from current user
+    if (isNewMessage && isNewMessageId && latestMessage) {
+      const isNearBottom = scrollContainer.scrollTop >= scrollContainer.scrollHeight - scrollContainer.clientHeight - 100;
+      const isCurrentUserMessage = latestMessage.sender === currentUsername;
+
+      if (isNearBottom || isCurrentUserMessage) {
+        // Smooth scroll to bottom
+        scrollContainer.scrollTo({
+          top: scrollContainer.scrollHeight,
+          behavior: 'smooth'
+        });
       }
+
+      lastMessageIdRef.current = latestMessage.id;
     }
-  }, [messages]);
+
+    // Update the previous length
+    prevMessagesLengthRef.current = currentMessagesLength;
+  }, [messages, currentUsername]);
 
   // Mark messages as read when they come into view
   useEffect(() => {
@@ -490,6 +585,7 @@ export function ChatInterface({
           onStopScreenShare={stopScreenShare}
           onGetAvailableScreenSources={getAvailableScreenSources}
           isScreenSharing={isScreenSharing}
+          getDisplayUsername={getDisplayUsername}
         />
       )}
     </div>

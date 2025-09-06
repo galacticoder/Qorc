@@ -128,7 +128,13 @@ export const ScreenSourceSelector: React.FC<ScreenSourceSelectorProps> = ({
   };
 
   const handleSelect = (source: ScreenSource) => {
-    console.log('[ScreenSourceSelector] Selected source:', source.name);
+    console.log('[ScreenSourceSelector] Selected source:', {
+      id: source.id,
+      name: source.name,
+      type: source.type,
+      hasName: !!source.name,
+      nameLength: source.name?.length || 0
+    });
     onSelect(source);
     onClose();
   };

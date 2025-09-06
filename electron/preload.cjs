@@ -117,6 +117,64 @@ contextBridge.exposeInMainWorld('electronAPI', {
     return ipcRenderer.invoke('file:choose-download-path');
   },
 
+  // Link Preview - secure fetching through Tor
+  fetchLinkPreview: (url, options = {}) => {
+    // Validate URL input
+    if (!url || typeof url !== 'string') {
+      return Promise.reject(new Error('URL must be a non-empty string'));
+    }
+    if (url.length > 2048) {
+      return Promise.reject(new Error('URL too long'));
+    }
+    // Basic URL format validation
+    try {
+      new URL(url.startsWith('http') ? url : 'https://' + url);
+    } catch {
+      return Promise.reject(new Error('Invalid URL format'));
+    }
+    
+    // Validate options if provided
+    if (options && typeof options !== 'object') {
+      return Promise.reject(new Error('Options must be an object'));
+    }
+    
+    // Sanitize options
+    const sanitizedOptions = {};
+    if (options.timeout && typeof options.timeout === 'number' && options.timeout > 0 && options.timeout <= 60000) {
+      sanitizedOptions.timeout = options.timeout;
+    }
+    if (options.userAgent && typeof options.userAgent === 'string' && options.userAgent.length <= 500) {
+      sanitizedOptions.userAgent = options.userAgent;
+    }
+    if (options.maxRedirects && typeof options.maxRedirects === 'number' && options.maxRedirects >= 0 && options.maxRedirects <= 10) {
+      sanitizedOptions.maxRedirects = options.maxRedirects;
+    }
+    
+    return ipcRenderer.invoke('link:fetch-preview', url, sanitizedOptions);
+  },
+
+  // External URL opening - secure shell.openExternal
+  openExternal: (url) => {
+    // Validate URL input
+    if (!url || typeof url !== 'string') {
+      return Promise.reject(new Error('URL must be a non-empty string'));
+    }
+    if (url.length > 2048) {
+      return Promise.reject(new Error('URL too long'));
+    }
+    // Basic URL format validation
+    try {
+      new URL(url);
+      if (!url.startsWith('http://') && !url.startsWith('https://')) {
+        return Promise.reject(new Error('Only HTTP/HTTPS URLs are allowed'));
+      }
+    } catch {
+      return Promise.reject(new Error('Invalid URL format'));
+    }
+    
+    return ipcRenderer.invoke('shell:open-external', url);
+  },
+
   // Utility
   isElectron: true,
   isDevelopment: process.env.NODE_ENV === 'development',
@@ -144,6 +202,9 @@ contextBridge.exposeInMainWorld('edgeApi', {
   wsConnect: () => ipcRenderer.invoke('edge:ws-connect'),
   rendererReady: () => ipcRenderer.invoke('renderer:ready'),
   torSetupComplete: () => ipcRenderer.invoke('tor:setup-complete'),
+  // Power save blocker for calls
+  powerSaveBlockerStart: () => ipcRenderer.invoke('power:psb-start'),
+  powerSaveBlockerStop: () => ipcRenderer.invoke('power:psb-stop'),
 });
 
 // Bridge server messages into the isolated world via a DOM event

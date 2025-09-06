@@ -259,32 +259,29 @@ export class ScreenSharingSettingsManager {
   }
 
   /**
-   * Get video constraints based on current settings
+   * Get video constraints based on current settings (browser-compatible)
    */
   public getVideoConstraints(): MediaTrackConstraints {
     this.ensureSettingsLoaded();
     const { resolution, frameRate, quality } = this.settings!;
 
-    // Base constraints with frame rate
+    // Base constraints with frame rate (no min constraints for browser compatibility)
     const constraints: MediaTrackConstraints = {
-      frameRate: { ideal: frameRate, max: frameRate, min: Math.max(1, Math.floor(frameRate * 0.8)) }
+      frameRate: { ideal: frameRate, max: frameRate }
     };
 
-    // Apply resolution constraints
+    // Apply resolution constraints (no min constraints for browser compatibility)
     if (resolution.isNative) {
       // For native resolution, let the browser choose the best available
       constraints.width = { ideal: 1920 };
       constraints.height = { ideal: 1080 };
     } else {
-      constraints.width = { ideal: resolution.width, max: resolution.width, min: Math.max(640, resolution.width - 100) };
-      constraints.height = { ideal: resolution.height, max: resolution.height, min: Math.max(480, resolution.height - 100) };
+      constraints.width = { ideal: resolution.width, max: resolution.width };
+      constraints.height = { ideal: resolution.height, max: resolution.height };
     }
 
-    // Apply quality settings through bitrate constraints
-    const qualitySettings = this.getQualityConstraints(quality);
-    Object.assign(constraints, qualitySettings);
-
-    console.log('[ScreenSharingSettings] Generated video constraints:', constraints);
+    // Don't apply quality settings as they may include unsupported constraints
+    console.log('[ScreenSharingSettings] Generated browser-compatible video constraints:', constraints);
     return constraints;
   }
 
@@ -292,17 +289,15 @@ export class ScreenSharingSettingsManager {
    * Get quality-specific constraints
    */
   private getQualityConstraints(quality: 'low' | 'medium' | 'high'): Partial<MediaTrackConstraints> {
-    // Extended typing for advanced constraints
-    interface ExtendedMediaTrackConstraints extends MediaTrackConstraints {
-      advanced?: Array<{ width?: { max: number }, height?: { max: number } }>;
-    }
+    // Remove advanced constraints as they are not supported by browser getDisplayMedia API
+    // Instead, use basic constraints that are widely supported
     switch (quality) {
       case 'low':
-        return { advanced: [{ width: { max: 1280 }, height: { max: 720 } }] } as ExtendedMediaTrackConstraints;
+        return {}; // Let basic constraints handle quality
       case 'medium':
-        return { advanced: [{ width: { max: 1920 }, height: { max: 1080 } }] } as ExtendedMediaTrackConstraints;
+        return {}; // Let basic constraints handle quality
       case 'high':
-        return { advanced: [{ width: { max: 3840 }, height: { max: 2160 } }] } as ExtendedMediaTrackConstraints;
+        return {}; // Let basic constraints handle quality
       default:
         return {};
     }

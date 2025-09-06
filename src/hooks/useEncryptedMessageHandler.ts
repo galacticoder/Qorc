@@ -389,6 +389,18 @@ export function useEncryptedMessageHandler(
           return;
         }
 
+        // If sender's original name was provided inside the encrypted payload, store mapping locally
+        try {
+          const originalFrom = (payload as any)?.fromOriginal;
+          const hashedFrom = (payload as any)?.from;
+          if (typeof originalFrom === 'string' && typeof hashedFrom === 'string') {
+            // Emit event so whoever holds SecureDB can store mapping
+            window.dispatchEvent(new CustomEvent('username-mapping-received', {
+              detail: { hashed: hashedFrom, original: originalFrom }
+            }));
+          }
+        } catch {}
+
         // Process the decrypted payload
         if (payload && typeof payload === 'object') {
           console.log('[EncryptedMessageHandler] Processing decrypted payload:', {
@@ -1012,6 +1024,18 @@ export function useEncryptedMessageHandler(
             // Parse call signal content with larger size limit
             const callSignalData = safeJsonParseForCallSignals(payload.content);
             if (callSignalData) {
+              // If encrypted wrapper provided original sender name, attach it to the call signal
+              try {
+                const originalFrom = (payload as any)?.fromOriginal;
+                if (typeof originalFrom === 'string') {
+                  // Emit mapping event for immediate storage
+                  window.dispatchEvent(new CustomEvent('username-mapping-received', {
+                    detail: { hashed: payload.from, original: originalFrom }
+                  }));
+                  // Also annotate signal for UI if helpful
+                  (callSignalData as any).fromOriginal = originalFrom;
+                }
+              } catch {}
               // Dispatch call signal event for calling service
               const callSignalEvent = new CustomEvent('call-signal', {
                 detail: callSignalData

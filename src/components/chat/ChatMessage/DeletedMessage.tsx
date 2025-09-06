@@ -13,23 +13,39 @@ export function DeletedMessage({ sender, timestamp, isCurrentUser }: DeletedMess
   return (
     <div className={cn("flex items-start gap-2 mb-4", isCurrentUser ? "flex-row-reverse" : "")}>
       <Avatar className="w-8 h-8">
-        <AvatarFallback className={cn(isCurrentUser ? "bg-blue-500 text-white" : "bg-muted")}>
+        <AvatarFallback
+          style={{
+            backgroundColor: isCurrentUser ? 'var(--color-accent-primary)' : 'var(--color-avatar-bg)',
+            color: isCurrentUser ? 'white' : 'var(--color-text-primary)'
+          }}
+        >
           {sender.charAt(0).toUpperCase()}
         </AvatarFallback>
       </Avatar>
 
       <div className={cn("flex flex-col min-w-0", isCurrentUser ? "items-end" : "items-start")} style={{ maxWidth: "75%" }}>
         <div className="flex items-center gap-2 mb-1">
-          <span className="text-sm font-medium">{sender}</span>
-          <span className="text-xs text-muted-foreground">{format(timestamp, "h:mm a")}</span>
+          <span
+            className="text-sm font-medium"
+            style={{ color: 'var(--color-text-primary)' }}
+          >
+            {sender}
+          </span>
+          <span
+            className="text-xs"
+            style={{ color: 'var(--color-text-secondary)' }}
+          >
+            {format(timestamp, "h:mm a")}
+          </span>
         </div>
 
         <div
-          className={cn(
-            "rounded-lg px-3 py-2 text-sm min-w-[5rem] whitespace-pre-wrap break-words",
-            isCurrentUser ? "bg-primary text-primary-foreground" : "bg-muted",
-            "italic text-gray-500"
-          )}
+          className="rounded-lg px-3 py-2 text-sm min-w-[5rem] whitespace-pre-wrap break-words italic"
+          style={{
+            backgroundColor: isCurrentUser ? 'var(--color-accent-primary)' : 'var(--color-message-bg)',
+            color: isCurrentUser ? 'white' : 'var(--color-text-secondary)',
+            opacity: 0.7
+          }}
         >
           Message deleted
         </div>

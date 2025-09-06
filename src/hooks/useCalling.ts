@@ -145,12 +145,15 @@ export const useCalling = (authContext?: ReturnType<typeof useAuth>) => {
         } catch {}
 
         if (call.status === 'connecting') {
+          try { (window as any).edgeApi?.powerSaveBlockerStart?.(); } catch {}
           try { window.dispatchEvent(new CustomEvent('ui-call-log', { detail: { type: 'started', peer: call.peer, at: Date.now(), callId: call.id } })); } catch {}
         } else if (call.status === 'connected') {
           try { everConnectedRef.current.add(call.id); } catch {}
+          try { (window as any).edgeApi?.powerSaveBlockerStart?.(); } catch {}
           try { window.dispatchEvent(new CustomEvent('ui-call-log', { detail: { type: 'connected', peer: call.peer, at: Date.now(), callId: call.id } })); } catch {}
         }
         if (call.status === 'ended' || call.status === 'declined' || call.status === 'missed') {
+          try { (window as any).edgeApi?.powerSaveBlockerStop?.(); } catch {}
           // For ended specifically, emit a call-ended summary for chat logging
           if (call.status === 'ended') {
             const wasConnected = everConnectedRef.current.has(call.id);

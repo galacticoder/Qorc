@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, desktopCapturer, dialog } = require('electron');
+const { app, BrowserWindow, ipcMain, desktopCapturer, dialog, shell, powerSaveBlocker } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
@@ -260,10 +260,20 @@ app.whenReady().then(() => {
       });
     });
 
-    // Security: Prevent new window creation
+    // Security: Prevent new window creation (legacy)
     contents.on('new-window', (event, navigationUrl) => {
       event.preventDefault();
       console.log('[SECURITY] Blocked new window creation to:', navigationUrl);
+    });
+
+    // Security: Modern window open handler - redirect to external browser
+    contents.setWindowOpenHandler(({ url }) => {
+      console.log('[SECURITY] Redirecting window.open to external browser:', url);
+      // Use shell.openExternal to open in system browser
+      shell.openExternal(url).catch(err => {
+        console.error('[SECURITY] Failed to open URL externally:', err);
+      });
+      return { action: 'deny' }; // Deny opening in Electron
     });
   });
 
@@ -682,6 +692,36 @@ ipcMain.handle('app:name', () => {
   return app.getName();
 });
 
+// Power save blocker controls for calls
+let psbId = null;
+ipcMain.handle('power:psb-start', () => {
+  try {
+    if (psbId !== null && powerSaveBlocker.isStarted(psbId)) {
+      return { success: true, id: psbId };
+    }
+    psbId = powerSaveBlocker.start('prevent-app-suspension');
+    console.log('[POWER] Power save blocker started:', psbId);
+    return { success: true, id: psbId };
+  } catch (e) {
+    console.error('[POWER] Failed to start power save blocker:', e);
+    return { success: false, error: e.message };
+  }
+});
+
+ipcMain.handle('power:psb-stop', () => {
+  try {
+    if (psbId !== null && powerSaveBlocker.isStarted(psbId)) {
+      powerSaveBlocker.stop(psbId);
+      console.log('[POWER] Power save blocker stopped:', psbId);
+    }
+    psbId = null;
+    return { success: true };
+  } catch (e) {
+    console.error('[POWER] Failed to stop power save blocker:', e);
+    return { success: false, error: e.message };
+  }
+});
+
 // Handle edge: IPC methods for compatibility with preload.js
 ipcMain.handle('edge:encrypt', async (_event, args) => {
   try {
@@ -931,6 +971,331 @@ ipcMain.handle('file:choose-download-path', async () => {
     return { success: true, path: result.filePaths[0] };
   } catch (error) {
     console.error('[ELECTRON] Error choosing download path:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+// Link Preview Handler - Uses Tor proxy for secure fetching
+ipcMain.handle('link:fetch-preview', async (event, url, options = {}) => {
+  try {
+    const { timeout = 10000, userAgent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36', maxRedirects = 5 } = options;
+
+    console.log('[LINK-PREVIEW] Fetching preview for:', url);
+
+    // Use Tor proxy for the request
+    const { SocksProxyAgent } = require('socks-proxy-agent');
+    const https = require('https');
+    const http = require('http');
+    const { URL } = require('url');
+    const zlib = require('zlib');
+    
+    const proxyAgent = new SocksProxyAgent(`socks5h://127.0.0.1:${torManager.effectiveSocksPort || 9050}`);
+    
+    return new Promise((resolve) => {
+      try {
+        const parsedUrl = new URL(url);
+        const isHttps = parsedUrl.protocol === 'https:';
+        const client = isHttps ? https : http;
+        
+        const requestOptions = {
+          agent: proxyAgent,
+          timeout: timeout,
+          headers: {
+            'User-Agent': userAgent,
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.5',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'DNT': '1',
+            'Connection': 'close',
+            'Sec-Fetch-Dest': 'document',
+            'Sec-Fetch-Mode': 'navigate',
+            'Sec-Fetch-Site': 'none'
+          }
+        };
+        
+        const req = client.get(url, requestOptions, (res) => {
+          let data = Buffer.alloc(0);
+          let redirectCount = 0;
+
+          console.log(`[LINK-PREVIEW] Response status: ${res.statusCode}`);
+          console.log(`[LINK-PREVIEW] Response headers:`, res.headers);
+
+          // Handle redirects
+          if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+            if (redirectCount >= maxRedirects) {
+              resolve({ error: 'Too many redirects' });
+              return;
+            }
+
+            redirectCount++;
+            const redirectUrl = new URL(res.headers.location, url).href;
+            console.log(`[LINK-PREVIEW] Redirecting to: ${redirectUrl}`);
+
+            // Recursively handle redirect (simplified - in production you'd want proper redirect handling)
+            resolve({ error: 'Redirect handling not implemented in this version' });
+            return;
+          }
+
+          if (res.statusCode !== 200) {
+            console.log(`[LINK-PREVIEW] Non-200 status code: ${res.statusCode}`);
+            resolve({ error: `HTTP ${res.statusCode}` });
+            return;
+          }
+
+          // Check content type
+          const contentType = res.headers['content-type'] || '';
+          console.log(`[LINK-PREVIEW] Content type: ${contentType}`);
+          if (!contentType.includes('text/html') && !contentType.includes('application/xhtml')) {
+            console.log(`[LINK-PREVIEW] Not HTML content: ${contentType}`);
+            resolve({ error: 'Not HTML content' });
+            return;
+          }
+
+          // Handle compressed responses
+          const encoding = res.headers['content-encoding'];
+          console.log(`[LINK-PREVIEW] Content encoding: ${encoding}`);
+
+          res.on('data', chunk => {
+            data = Buffer.concat([data, chunk]);
+            // Limit response size to prevent memory issues
+            if (data.length > 1024 * 1024) { // 1MB limit
+              res.destroy();
+              resolve({ error: 'Response too large' });
+            }
+          });
+          
+          res.on('end', () => {
+            try {
+              let htmlContent = '';
+
+              // Decompress the response based on encoding
+              if (encoding === 'gzip') {
+                console.log('[LINK-PREVIEW] Decompressing gzip content...');
+                htmlContent = zlib.gunzipSync(data).toString('utf8');
+              } else if (encoding === 'deflate') {
+                console.log('[LINK-PREVIEW] Decompressing deflate content...');
+                htmlContent = zlib.inflateSync(data).toString('utf8');
+              } else if (encoding === 'br') {
+                console.log('[LINK-PREVIEW] Decompressing brotli content...');
+                htmlContent = zlib.brotliDecompressSync(data).toString('utf8');
+              } else {
+                console.log('[LINK-PREVIEW] No compression, using raw content...');
+                htmlContent = data.toString('utf8');
+              }
+
+              console.log(`[LINK-PREVIEW] Decompressed HTML length: ${htmlContent.length}`);
+              console.log(`[LINK-PREVIEW] HTML preview (first 500 chars): ${htmlContent.substring(0, 500)}`);
+
+              const preview = parseHtmlForPreview(htmlContent, url);
+              console.log('[LINK-PREVIEW] Successfully parsed preview:', preview);
+              resolve(preview);
+            } catch (parseError) {
+              console.error('[LINK-PREVIEW] Parse error:', parseError);
+              resolve({ error: 'Failed to parse HTML' });
+            }
+          });
+        });
+        
+        req.on('error', (error) => {
+          console.error('[LINK-PREVIEW] Request error:', error);
+          resolve({ error: error.message || 'Request failed' });
+        });
+        
+        req.on('timeout', () => {
+          req.destroy();
+          resolve({ error: 'Request timeout' });
+        });
+        
+      } catch (error) {
+        console.error('[LINK-PREVIEW] Setup error:', error);
+        resolve({ error: error.message || 'Failed to setup request' });
+      }
+    });
+    
+  } catch (error) {
+    console.error('[LINK-PREVIEW] Handler error:', error);
+    return { error: error.message || 'Unknown error' };
+  }
+});
+
+// HTML parsing function for link previews
+function parseHtmlForPreview(html, url) {
+  const preview = { url };
+
+  try {
+    console.log('[LINK-PREVIEW] Parsing HTML for URL:', url);
+    console.log('[LINK-PREVIEW] HTML length:', html.length);
+    console.log('[LINK-PREVIEW] HTML preview (first 500 chars):', html.substring(0, 500));
+
+    // Simple regex-based HTML parsing (for production, consider using a proper HTML parser)
+
+    // Extract title
+    const titleMatch = html.match(/<title[^>]*>(.*?)<\/title>/is);
+    if (titleMatch) {
+      preview.title = decodeHtmlEntities(titleMatch[1].trim());
+      console.log('[LINK-PREVIEW] Found title:', preview.title);
+    } else {
+      console.log('[LINK-PREVIEW] No title found');
+    }
+
+    // Extract Open Graph tags - improved regex patterns
+    // Try both property-first and content-first patterns
+    let ogTitleMatch = html.match(/<meta[^>]*property=["']og:title["'][^>]*content=["']([^"']*?)["']/i);
+    if (!ogTitleMatch) {
+      ogTitleMatch = html.match(/<meta[^>]*content=["']([^"']*?)["'][^>]*property=["']og:title["']/i);
+    }
+    if (ogTitleMatch) {
+      preview.title = decodeHtmlEntities(ogTitleMatch[1]);
+      console.log('[LINK-PREVIEW] Found OG title:', preview.title);
+    }
+
+    let ogDescMatch = html.match(/<meta[^>]*property=["']og:description["'][^>]*content=["']([^"']*?)["']/i);
+    if (!ogDescMatch) {
+      ogDescMatch = html.match(/<meta[^>]*content=["']([^"']*?)["'][^>]*property=["']og:description["']/i);
+    }
+    if (ogDescMatch) {
+      preview.description = decodeHtmlEntities(ogDescMatch[1]);
+      console.log('[LINK-PREVIEW] Found OG description:', preview.description);
+    }
+
+    let ogImageMatch = html.match(/<meta[^>]*property=["']og:image["'][^>]*content=["']([^"']*?)["']/i);
+    if (!ogImageMatch) {
+      ogImageMatch = html.match(/<meta[^>]*content=["']([^"']*?)["'][^>]*property=["']og:image["']/i);
+    }
+    if (ogImageMatch) {
+      preview.image = resolveUrl(ogImageMatch[1], url);
+      console.log('[LINK-PREVIEW] Found OG image:', preview.image);
+    }
+
+    let ogSiteMatch = html.match(/<meta[^>]*property=["']og:site_name["'][^>]*content=["']([^"']*?)["']/i);
+    if (!ogSiteMatch) {
+      ogSiteMatch = html.match(/<meta[^>]*content=["']([^"']*?)["'][^>]*property=["']og:site_name["']/i);
+    }
+    if (ogSiteMatch) {
+      preview.siteName = decodeHtmlEntities(ogSiteMatch[1]);
+      console.log('[LINK-PREVIEW] Found OG site name:', preview.siteName);
+    }
+
+    // Fallback to standard meta tags
+    if (!preview.description) {
+      let descMatch = html.match(/<meta[^>]*name=["']description["'][^>]*content=["']([^"']*?)["']/i);
+      if (!descMatch) {
+        descMatch = html.match(/<meta[^>]*content=["']([^"']*?)["'][^>]*name=["']description["']/i);
+      }
+      if (descMatch) {
+        preview.description = decodeHtmlEntities(descMatch[1]);
+        console.log('[LINK-PREVIEW] Found meta description:', preview.description);
+      } else {
+        console.log('[LINK-PREVIEW] No description found');
+      }
+    }
+    
+    // Additional fallbacks for Twitter Card meta tags
+    if (!preview.title) {
+      const twitterTitleMatch = html.match(/<meta[^>]*name=["']twitter:title["'][^>]*content=["']([^"']*?)["']/i);
+      if (twitterTitleMatch) {
+        preview.title = decodeHtmlEntities(twitterTitleMatch[1]);
+        console.log('[LINK-PREVIEW] Found Twitter title:', preview.title);
+      }
+    }
+
+    if (!preview.description) {
+      const twitterDescMatch = html.match(/<meta[^>]*name=["']twitter:description["'][^>]*content=["']([^"']*?)["']/i);
+      if (twitterDescMatch) {
+        preview.description = decodeHtmlEntities(twitterDescMatch[1]);
+        console.log('[LINK-PREVIEW] Found Twitter description:', preview.description);
+      }
+    }
+
+    if (!preview.image) {
+      const twitterImageMatch = html.match(/<meta[^>]*name=["']twitter:image["'][^>]*content=["']([^"']*?)["']/i);
+      if (twitterImageMatch) {
+        preview.image = resolveUrl(twitterImageMatch[1], url);
+        console.log('[LINK-PREVIEW] Found Twitter image:', preview.image);
+      }
+    }
+
+    // Extract favicon
+    const faviconMatch = html.match(/<link[^>]*rel=["'](?:shortcut icon|icon)["'][^>]*href=["']([^"']*?)["']/i);
+    if (faviconMatch) {
+      preview.faviconUrl = resolveUrl(faviconMatch[1], url);
+    } else {
+      // Fallback to default favicon location
+      try {
+        const { URL } = require('url');
+        const parsedUrl = new URL(url);
+        preview.faviconUrl = `${parsedUrl.protocol}//${parsedUrl.host}/favicon.ico`;
+      } catch (e) {
+        // Ignore favicon errors
+      }
+    }
+    
+    // Limit text lengths
+    if (preview.title && preview.title.length > 100) {
+      preview.title = preview.title.substring(0, 97) + '...';
+    }
+    if (preview.description && preview.description.length > 200) {
+      preview.description = preview.description.substring(0, 197) + '...';
+    }
+
+    console.log('[LINK-PREVIEW] Final preview object:', preview);
+    return preview;
+  } catch (error) {
+    console.error('[LINK-PREVIEW] HTML parsing error:', error);
+    return { url, error: 'Failed to parse HTML content' };
+  }
+}
+
+// Helper function to decode HTML entities
+function decodeHtmlEntities(text) {
+  const entities = {
+    '&amp;': '&',
+    '&lt;': '<',
+    '&gt;': '>',
+    '&quot;': '"',
+    '&#39;': "'",
+    '&apos;': "'",
+    '&nbsp;': ' '
+  };
+  
+  return text.replace(/&[#\w]+;/g, (entity) => {
+    return entities[entity] || entity;
+  });
+}
+
+// Helper function to resolve relative URLs
+function resolveUrl(relativeUrl, baseUrl) {
+  try {
+    const { URL } = require('url');
+    return new URL(relativeUrl, baseUrl).href;
+  } catch (error) {
+    return relativeUrl;
+  }
+}
+
+// External URL handler - secure opening of links
+ipcMain.handle('shell:open-external', async (event, url) => {
+  try {
+    // Validate URL for security
+    if (!url || typeof url !== 'string') {
+      throw new Error('Invalid URL');
+    }
+    
+    // Only allow HTTP/HTTPS URLs
+    if (!url.startsWith('http://') && !url.startsWith('https://')) {
+      throw new Error('Only HTTP/HTTPS URLs are allowed');
+    }
+    
+    // Limit URL length
+    if (url.length > 2048) {
+      throw new Error('URL too long');
+    }
+    
+    console.log('[ELECTRON] Opening external URL:', url);
+    await shell.openExternal(url);
+    return { success: true };
+  } catch (error) {
+    console.error('[ELECTRON] Error opening external URL:', error);
     return { success: false, error: error.message };
   }
 });

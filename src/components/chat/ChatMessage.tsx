@@ -2,7 +2,6 @@ import React, { useState, useEffect } from "react";
 import { cn } from "../../lib/utils";
 import { Avatar, AvatarFallback } from "../ui/avatar";
 import { format, isSameMinute } from "date-fns";
-import Linkify from "linkify-react";
 import { TrashIcon, Pencil1Icon } from "./icons.tsx";
 
 import { ChatMessageProps } from "./types.ts";
@@ -11,6 +10,9 @@ import { DeletedMessage } from "./ChatMessage/DeletedMessage.tsx";
 import { FileMessage, FileContent } from "./ChatMessage/FileMessage.tsx";
 import { VoiceMessage } from "./VoiceMessage.tsx";
 import { MessageReceipt } from "./MessageReceipt.tsx";
+import { useUnifiedUsernameDisplay } from "../../hooks/useUnifiedUsernameDisplay";
+import { LinkifyWithPreviews } from "./LinkifyWithPreviews.tsx";
+import { LinkExtractor } from "../../lib/link-extraction.ts";
 
 interface ExtendedChatMessageProps extends ChatMessageProps {
   getDisplayUsername?: (username: string) => Promise<string>;
@@ -18,28 +20,20 @@ interface ExtendedChatMessageProps extends ChatMessageProps {
 
 export function ChatMessage({ message, onReply, previousMessage, onDelete, onEdit, getDisplayUsername }: ExtendedChatMessageProps) {
   const { content, sender, timestamp, isCurrentUser, isSystemMessage, isDeleted, type } = message;
-  const [displaySender, setDisplaySender] = useState(sender);
-  const [displayReplyToSender, setDisplayReplyToSender] = useState(message.replyTo?.sender || "");
 
-  // Load display usernames
-  useEffect(() => {
-    if (getDisplayUsername) {
-      getDisplayUsername(sender)
-        .then(setDisplaySender)
-        .catch((error) => {
-          console.error('Failed to get display username for sender:', error);
-          setDisplaySender(sender);
-        });
-      if (message.replyTo?.sender) {
-        getDisplayUsername(message.replyTo.sender)
-          .then(setDisplayReplyToSender)
-          .catch((error) => {
-            console.error('Failed to get display username for reply sender:', error);
-            setDisplayReplyToSender(message.replyTo?.sender || "");
-          });
-      }
-    }
-  }, [sender, message.replyTo?.sender, getDisplayUsername]);
+  // Use unified username display for sender
+  const { displayName: displaySender } = useUnifiedUsernameDisplay({
+    username: sender,
+    getDisplayUsername,
+    fallbackToOriginal: true
+  });
+
+  // Use unified username display for reply-to sender
+  const { displayName: displayReplyToSender } = useUnifiedUsernameDisplay({
+    username: message.replyTo?.sender || '',
+    getDisplayUsername,
+    fallbackToOriginal: true
+  });
 
   const isGrouped =
     previousMessage &&
@@ -50,7 +44,25 @@ export function ChatMessage({ message, onReply, previousMessage, onDelete, onEdi
   const safeIsCurrentUser = isCurrentUser || false;
 
   if (isSystemMessage) {
-    return <SystemMessage content={content} />;
+    // Allow simple structured content to carry actions, but keep plaintext fallback
+    let label = content;
+    let actions: Array<{ label: string; onClick: () => void }> | undefined = undefined;
+    try {
+      if (typeof content === 'string' && (content.trim().startsWith('{') || content.trim().startsWith('['))) {
+        const parsed = JSON.parse(content);
+        if (parsed && typeof parsed === 'object' && parsed.label) {
+          label = parsed.label;
+          if (parsed.actionsType === 'callback' && message) {
+            // Dispatch a global event; ChatInterface wires startCall logic from there
+            const peer = message.sender === 'System' ? (message.recipient || '') : message.sender;
+            actions = [{ label: 'Call back', onClick: () => {
+              try { window.dispatchEvent(new CustomEvent('ui-call-request', { detail: { peer, type: 'audio' } })); } catch {}
+            }}];
+          }
+        }
+      }
+    } catch {}
+    return <SystemMessage content={label} actions={actions} />;
   }
 
   if (isDeleted) {
@@ -163,6 +175,30 @@ export function ChatMessage({ message, onReply, previousMessage, onDelete, onEdi
           </div>
         )}
 
+        {/* Link previews above message bubble (for messages with text + links) */}
+        {(() => {
+          const isUrlOnly = LinkExtractor.isUrlOnlyMessage(content);
+          const showPreviews = !isSystemMessage && !isDeleted;
+          const urls = LinkExtractor.extractUrlStrings(content);
+
+          // Show link previews above the message for non-URL-only messages that have links
+          if (!isUrlOnly && showPreviews && urls.length > 0 && type !== "FILE_MESSAGE" && type !== "file" && type !== "file-message") {
+            return (
+              <div className="mb-3">
+                <LinkifyWithPreviews
+                  options={{ rel: "noopener noreferrer" }}
+                  showPreviews={true}
+                  isCurrentUser={safeIsCurrentUser}
+                  previewsOnly={true}
+                >
+                  {content}
+                </LinkifyWithPreviews>
+              </div>
+            );
+          }
+          return null;
+        })()}
+
         {/* Message bubble */}
         <div className={cn("flex items-end gap-2", safeIsCurrentUser ? "flex-row-reverse" : "flex-row")}>
           {/* Render file content or text content */}
@@ -173,22 +209,50 @@ export function ChatMessage({ message, onReply, previousMessage, onDelete, onEdi
                 isCurrentUser={isCurrentUser || false}
               />
             </div>
-          ) : (
-            <div
-              className="px-4 py-3 text-sm whitespace-pre-wrap break-words"
-              style={{
-                backgroundColor: safeIsCurrentUser ? 'var(--color-accent-primary)' : 'var(--color-surface)',
-                color: safeIsCurrentUser ? 'white' : 'var(--color-text-primary)',
-                borderRadius: 'var(--message-bubble-radius)',
-                wordBreak: "break-word",
-                whiteSpace: "pre-wrap",
-                minWidth: '3rem',
-                maxWidth: '100%'
-              }}
-            >
-              <Linkify options={{ target: "_blank", rel: "noopener noreferrer" }}>{content}</Linkify>
-            </div>
-          )}
+          ) : (() => {
+            // Check if this is a URL-only message for special handling
+            const isUrlOnly = LinkExtractor.isUrlOnlyMessage(content);
+            const showPreviews = !isSystemMessage && !isDeleted;
+
+            if (isUrlOnly && showPreviews) {
+              // For URL-only messages, render LinkifyWithPreviews without bubble styling
+              return (
+                <div className="max-w-[80%]">
+                  <LinkifyWithPreviews
+                    options={{ rel: "noopener noreferrer" }}
+                    showPreviews={true}
+                    isCurrentUser={safeIsCurrentUser}
+                  >
+                    {content}
+                  </LinkifyWithPreviews>
+                </div>
+              );
+            } else {
+              // For regular messages, use the bubble styling WITHOUT link previews (they're shown above)
+              return (
+                <div
+                  className="px-4 py-3 text-sm whitespace-pre-wrap break-words"
+                  style={{
+                    backgroundColor: safeIsCurrentUser ? 'var(--color-accent-primary)' : 'var(--color-surface)',
+                    color: safeIsCurrentUser ? 'white' : 'var(--color-text-primary)',
+                    borderRadius: 'var(--message-bubble-radius)',
+                    wordBreak: "break-word",
+                    whiteSpace: "pre-wrap",
+                    minWidth: '3rem',
+                    maxWidth: '100%'
+                  }}
+                >
+                  <LinkifyWithPreviews
+                    options={{ rel: "noopener noreferrer" }}
+                    showPreviews={false}
+                    isCurrentUser={safeIsCurrentUser}
+                  >
+                    {content}
+                  </LinkifyWithPreviews>
+                </div>
+              );
+            }
+          })()}
 
           {/* Action Buttons */}
           <div

@@ -760,6 +760,76 @@ export class SecureDB {
     }
   }
 
+  /**
+   * Clear all stored data except username mappings and cached username hashes.
+   * This preserves display-name resolution across sessions while removing
+   * potentially sensitive message/user content.
+   */
+  async clearAllDataExceptMappings(): Promise<void> {
+    const keepStores = new Set<string>(['username_mappings', 'username_hashes']);
+
+    // Memory mode handling
+    if (this.memoryMode) {
+      const keysToDelete: string[] = [];
+      for (const key of this.memoryStore.keys()) {
+        try {
+          const [storeName] = this.parseCompositeKey(key);
+          if (!keepStores.has(storeName)) {
+            keysToDelete.push(key);
+          }
+        } catch {
+          // Legacy keys without JSON encoding: delete for safety
+          keysToDelete.push(key);
+        }
+      }
+      keysToDelete.forEach(k => this.memoryStore.delete(k));
+      console.log('[SecureDB] Cleared all data except mappings (memory mode)');
+      return;
+    }
+
+    try {
+      const db = await this.openDB();
+      await new Promise<void>((resolve, reject) => {
+        const tx = db.transaction('data', 'readwrite');
+        const store = tx.objectStore('data');
+        const cursorRequest = store.openCursor();
+
+        cursorRequest.onsuccess = (event) => {
+          const cursor = (event.target as IDBRequest).result as IDBCursorWithValue | null;
+          if (!cursor) return; // Done
+          try {
+            const compositeKey = cursor.key as string;
+            let storeName = '';
+            try {
+              [storeName] = this.parseCompositeKey(compositeKey);
+            } catch {
+              // Legacy/unexpected key: delete for safety
+              store.delete(compositeKey);
+              cursor.continue();
+              return;
+            }
+
+            if (!keepStores.has(storeName)) {
+              store.delete(compositeKey);
+            }
+          } catch (err) {
+            console.warn('[SecureDB] Failed to process key during selective clear: [REDACTED]', err);
+          }
+          cursor.continue();
+        };
+
+        tx.oncomplete = () => {
+          console.log('[SecureDB] Cleared all data except mappings');
+          resolve();
+        };
+        tx.onerror = () => reject(tx.error);
+      });
+    } catch (error) {
+      console.error('[SecureDB] Error during selective clear:', error);
+      throw error;
+    }
+  }
+
   async clearDatabase(): Promise<void> {
     if (this.cleanupInterval) {
       clearInterval(this.cleanupInterval);
@@ -929,13 +999,31 @@ export class SecureDB {
    * Store a reverse mapping from hash to original username for display purposes
    */
   async storeUsernameMapping(hashedUsername: string, originalUsername: string): Promise<void> {
-    await this.store('username_mappings', hashedUsername, originalUsername);
+    try {
+      if (!hashedUsername || !originalUsername) {
+        console.error('[SecureDB] Invalid parameters for storeUsernameMapping:', { hashedUsername, originalUsername });
+        return;
+      }
+      await this.store('username_mappings', hashedUsername, originalUsername);
+    } catch (error) {
+      console.error('[SecureDB] Failed to store username mapping:', error);
+      throw error;
+    }
   }
 
   /**
    * Get the original username from a hash for display purposes
    */
   async getOriginalUsername(hashedUsername: string): Promise<string | null> {
-    return await this.retrieve('username_mappings', hashedUsername);
+    try {
+      if (!hashedUsername || typeof hashedUsername !== 'string') {
+        return null;
+      }
+      const result = await this.retrieve('username_mappings', hashedUsername);
+      return result && typeof result === 'string' ? result : null;
+    } catch (error) {
+      console.error('[SecureDB] Failed to get original username:', error);
+      return null;
+    }
   }
 }

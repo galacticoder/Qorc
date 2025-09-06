@@ -26,6 +26,17 @@ export const useUsernameDisplay = (secureDB: SecureDB | undefined, currentUserOr
     }
   }, [displayContext]);
 
+  // Invalidate cache when mappings are updated/received so re-resolutions reflect immediately
+  useEffect(() => {
+    const handler = () => clearCache();
+    window.addEventListener('username-mapping-updated', handler as EventListener);
+    window.addEventListener('username-mapping-received', handler as EventListener);
+    return () => {
+      window.removeEventListener('username-mapping-updated', handler as EventListener);
+      window.removeEventListener('username-mapping-received', handler as EventListener);
+    };
+  }, [clearCache]);
+
   return {
     getDisplayUsername,
     clearCache,

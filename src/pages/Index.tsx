@@ -83,6 +83,7 @@ const ChatApp: React.FC<ChatAppProps> = () => {
   const messageSender = useMessageSender(
     [], // Do not rely on in-memory user list for scalability
     Authentication.loginUsernameRef,
+    Authentication.originalUsernameRef,
     (message: Message) => {
       // Add the message to the UI state
       setMessages(prev => [...prev, message]);
@@ -136,35 +137,18 @@ const ChatApp: React.FC<ChatAppProps> = () => {
   );
   
 
-  // Store username mappings for known usernames when SecureDB is available
+  // Store username mapping for current user only when SecureDB is available
   useEffect(() => {
-    if (Database.secureDBRef.current) {
-      const storeKnownMappings = async () => {
+    if (Database.secureDBRef.current && Authentication.originalUsernameRef.current) {
+      const storeCurrentUserMapping = async () => {
         try {
-          // Store mapping for current user if available
-          if (Authentication.originalUsernameRef.current) {
-            if (Database.secureDBRef.current) {
-              await Authentication.storeUsernameMapping(Database.secureDBRef.current);
-            }
-            console.log('[Index] Stored current user mapping');
-          }
-          
-          // Store mappings for test users to ensure they work
-          const testUsers = ['user1', 'user2'];
-          for (const user of testUsers) {
-            try {
-              await storeUsernameMapping(user, Database.secureDBRef.current);
-              console.log(`[Index] Stored test mapping for: ${user}`);
-            } catch (error) {
-              console.error(`[Index] Failed to store mapping for ${user}:`, error);
-            }
-          }
-          
+          await Authentication.storeUsernameMapping(Database.secureDBRef.current!);
+          console.log('[Index] Stored current user mapping');
         } catch (error) {
-          console.error('[Index] Failed to store username mappings:', error);
+          console.error('[Index] Failed to store current user mapping:', error);
         }
       };
-      storeKnownMappings();
+      storeCurrentUserMapping();
     }
   }, [Database.secureDBRef.current, Authentication.originalUsernameRef.current]);
 
@@ -283,6 +267,13 @@ const ChatApp: React.FC<ChatAppProps> = () => {
   }, [showTorSetup]);
 
   useWebSocket(signalHandler, encryptedHandler, Authentication.setLoginError);
+
+  // Expose current user's original name for call signal encryption (renderer-only, safe variable)
+  useEffect(() => {
+    try {
+      (window as any).currentUserOriginal = Authentication.originalUsernameRef.current || undefined;
+    } catch {}
+  }, [Authentication.originalUsernameRef.current]);
 
   // Store username mapping when user is logged in and SecureDB is ready
   useEffect(() => {
@@ -527,7 +518,7 @@ const ChatApp: React.FC<ChatAppProps> = () => {
               messages={conversationMessages}
               setMessages={setMessages}
               callingAuthContext={Authentication}
-              getDisplayUsername={usernameDisplay.isReady ? usernameDisplay.getDisplayUsername : undefined}
+              getDisplayUsername={usernameDisplay.getDisplayUsername}
               onSendMessage={async (messageId, content, messageSignalType, replyTo) => {
                 console.log('[Index] Attempting to send message:', {
                   messageId,

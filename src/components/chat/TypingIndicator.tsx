@@ -1,5 +1,6 @@
 import React, { memo, useState, useEffect } from "react";
 import { cn } from "@/lib/utils";
+import { useUnifiedUsernameDisplay } from "../../hooks/useUnifiedUsernameDisplay";
 
 interface TypingIndicatorProps {
   username: string;
@@ -9,18 +10,12 @@ interface TypingIndicatorProps {
 
 // Memoized component to prevent unnecessary re-renders
 export const TypingIndicator = memo(function TypingIndicator({ username, className, getDisplayUsername }: TypingIndicatorProps) {
-  const [displayName, setDisplayName] = useState(username);
-
-  useEffect(() => {
-    if (getDisplayUsername) {
-      getDisplayUsername(username)
-        .then(setDisplayName)
-        .catch((error) => {
-          console.error('Failed to resolve typing indicator username:', error);
-          setDisplayName(username);
-        });
-    }
-  }, [username, getDisplayUsername]);
+  // Use unified username display
+  const { displayName } = useUnifiedUsernameDisplay({
+    username,
+    getDisplayUsername,
+    fallbackToOriginal: true
+  });
 
   return (
     <div className={cn("flex items-center gap-2 text-sm text-muted-foreground animate-in fade-in duration-200", className)}>

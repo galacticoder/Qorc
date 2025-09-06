@@ -8,6 +8,7 @@ import { CallState, WebRTCCallingService } from '../../lib/webrtc-calling';
 import { ScreenSourceSelector } from './ScreenSourceSelector';
 import { ScreenSharingSettings } from '../settings/ScreenSharingSettings';
 import { VideoQualityMonitor } from '../debug/VideoQualityMonitor';
+import { useUnifiedUsernameDisplay } from '../../hooks/useUnifiedUsernameDisplay';
 
 interface CallModalProps {
   call: CallState | null;
@@ -25,6 +26,7 @@ interface CallModalProps {
   onStopScreenShare?: () => Promise<void>;
   onGetAvailableScreenSources?: () => Promise<Array<{ id: string; name: string; type: 'screen' | 'window' }>>;
   isScreenSharing?: boolean;
+  getDisplayUsername?: (username: string) => Promise<string>;
 }
 
 export const CallModal: React.FC<CallModalProps> = ({
@@ -42,15 +44,73 @@ export const CallModal: React.FC<CallModalProps> = ({
   onStartScreenShare,
   onStopScreenShare,
   onGetAvailableScreenSources,
-  isScreenSharing = false
+  isScreenSharing = false,
+  getDisplayUsername
 }) => {
+  // Use unified username display for the call peer
+  const { displayName: displayPeerName } = useUnifiedUsernameDisplay({
+    username: call?.peer || '',
+    getDisplayUsername,
+    fallbackToOriginal: true
+  });
+
   const [isMuted, setIsMuted] = useState(false);
   const [isVideoEnabled, setIsVideoEnabled] = useState(true);
   const [callDuration, setCallDuration] = useState(0);
   const [isProcessing, setIsProcessing] = useState(false);
+
+
+
+  // State declarations
   const [micLevel, setMicLevel] = useState(0);
   const [showScreenSourceSelector, setShowScreenSourceSelector] = useState(false);
   const [showScreenSharingSettings, setShowScreenSharingSettings] = useState(false);
+  const [micMenuOpen, setMicMenuOpen] = useState(false);
+  const [videoMenuOpen, setVideoMenuOpen] = useState(false);
+  const [micDevices, setMicDevices] = useState<MediaDeviceInfo[]>([]);
+  const [videoDevices, setVideoDevices] = useState<MediaDeviceInfo[]>([]);
+
+  // Load available devices
+  useEffect(() => {
+    const loadDevices = async () => {
+      try {
+        const devices = await navigator.mediaDevices.enumerateDevices();
+        setMicDevices(devices.filter(device => device.kind === 'audioinput'));
+        setVideoDevices(devices.filter(device => device.kind === 'videoinput'));
+      } catch (error) {
+        console.error('[CallModal] Failed to enumerate devices:', error);
+      }
+    };
+
+    loadDevices();
+
+    // Listen for device changes
+    navigator.mediaDevices.addEventListener('devicechange', loadDevices);
+    return () => {
+      navigator.mediaDevices.removeEventListener('devicechange', loadDevices);
+    };
+  }, []);
+
+  // Close dropdowns when clicking outside
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      const target = event.target as Element;
+
+      // Check if click is inside any dropdown menu or dropdown trigger
+      const isInsideDropdown = target.closest('[data-dropdown-menu]') ||
+                              target.closest('[data-dropdown-trigger]');
+
+      if (!isInsideDropdown) {
+        setMicMenuOpen(false);
+        setVideoMenuOpen(false);
+      }
+    };
+
+    if (micMenuOpen || videoMenuOpen) {
+      document.addEventListener('mousedown', handleClickOutside);
+      return () => document.removeEventListener('mousedown', handleClickOutside);
+    }
+  }, [micMenuOpen, videoMenuOpen]);
   const audioCtxRef = useRef<AudioContext | null>(null);
   const analyserRef = useRef<AnalyserNode | null>(null);
   const rafRef = useRef<number | null>(null);
@@ -441,9 +501,11 @@ export const CallModal: React.FC<CallModalProps> = ({
           <div className="flex items-center justify-between">
             <div>
               <h2 className="text-xl font-semibold text-white">
-                {isIncoming ? 'Incoming Call' : 'Calling'}
+                {isConnected ? 'In Call' :
+                 isConnecting ? 'Connecting' :
+                 isIncoming ? 'Incoming Call' : 'Calling'}
               </h2>
-              <p className="text-gray-300">{call.peer}</p>
+              <p className="text-gray-300">{displayPeerName}</p>
               {isConnected && (
                 <p className="text-sm text-green-400">{formatDuration(callDuration)}</p>
               )}
@@ -536,7 +598,7 @@ export const CallModal: React.FC<CallModalProps> = ({
                   <div className="text-center text-gray-400">
                     <div className="w-24 h-24 bg-gray-700 rounded-full flex items-center justify-center mx-auto mb-4">
                       <span className="text-2xl font-bold">
-                        {call.peer.charAt(0).toUpperCase()}
+                        {displayPeerName.charAt(0).toUpperCase()}
                       </span>
                     </div>
                     <p>Waiting for video...</p>
@@ -577,10 +639,10 @@ export const CallModal: React.FC<CallModalProps> = ({
             <div className="text-center text-white">
               <div className="w-32 h-32 bg-gray-700 rounded-full flex items-center justify-center mx-auto mb-6">
                 <span className="text-4xl font-bold">
-                  {call.peer.charAt(0).toUpperCase()}
+                  {displayPeerName.charAt(0).toUpperCase()}
                 </span>
               </div>
-              <h3 className="text-2xl font-semibold mb-2">{call.peer}</h3>
+              <h3 className="text-2xl font-semibold mb-2">{displayPeerName}</h3>
               {isConnected && (
                 <p className="text-lg text-green-400">{formatDuration(callDuration)}</p>
               )}
@@ -621,95 +683,155 @@ export const CallModal: React.FC<CallModalProps> = ({
           {/* In-Call Controls */}
           {(isConnected || isConnecting || (!isIncoming && isRinging)) && (
             <div className="flex justify-center items-center space-x-6">
-              {/* Mute Button */}
-              <button
-                onClick={handleToggleMute}
-                className={`w-12 h-12 rounded-full flex items-center justify-center transition-colors ${
-                  isMuted ? 'bg-red-600 hover:bg-red-700' : 'bg-gray-600 hover:bg-gray-700'
-                }`}
-              >
-                {isMuted ? (
-                  <MicOff className="w-6 h-6 text-white" />
-                ) : (
-                  <Mic className="w-6 h-6 text-white" />
-                )}
-              </button>
+              {/* Mute Button with Integrated Dropdown */}
+              <div className="relative">
+                <button
+                  onClick={handleToggleMute}
+                  className={`w-16 h-16 rounded-full flex items-center justify-center transition-colors relative ${
+                    isMuted ? 'bg-red-600 hover:bg-red-700' : 'bg-gray-600 hover:bg-gray-700'
+                  }`}
+                  title={isMuted ? 'Unmute' : 'Mute'}
+                  data-dropdown-trigger
+                >
+                  {isMuted ? (
+                    <MicOff className="w-7 h-7 text-white" />
+                  ) : (
+                    <Mic className="w-7 h-7 text-white" />
+                  )}
+                  {/* Integrated dropdown arrow */}
+                  <div
+                    className="absolute bottom-1 right-1 w-4 h-4 bg-black bg-opacity-30 rounded-full flex items-center justify-center cursor-pointer hover:bg-opacity-50 transition-colors"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setMicMenuOpen(v => !v);
+                    }}
+                    title="Select microphone"
+                    data-dropdown-trigger
+                  >
+                    <span className="text-white text-xs">▾</span>
+                  </div>
+                </button>
 
-              {/* Video Toggle (for video calls) */}
-              {isVideoCall && (
-                <>
-                  {/* Video toggle */}
-                  <div className="relative inline-flex items-center">
-                    <button
-                      onClick={handleToggleVideo}
-                      disabled={cameraDevices.length === 0}
-                      title={cameraDevices.length === 0 ? 'No camera detected' : ''}
-                      className={`w-12 h-12 rounded-full flex items-center justify-center transition-colors ${
-                        cameraDevices.length === 0
-                          ? 'bg-gray-500 opacity-60 cursor-not-allowed'
-                          : (!isVideoEnabled ? 'bg-red-600 hover:bg-red-700' : 'bg-gray-600 hover:bg-gray-700')
-                      }`}
-                    >
-                      {isVideoEnabled ? (
-                        <Video className="w-6 h-6 text-white" />
-                      ) : (
-                        <VideoOff className="w-6 h-6 text-white" />
-                      )}
-                    </button>
-                    {/* Camera switch button */}
-                    <button
-                      type="button"
-                      onClick={onSwitchCamera}
-                      disabled={cameraDevices.length <= 1}
-                      aria-label={cameraDevices.length <= 1 ? 'No other cameras available' : 'Switch camera'}
-                      aria-disabled={cameraDevices.length <= 1}
-                      title={cameraDevices.length <= 1 ? 'No other cameras available' : 'Switch camera'}
-                      data-testid="switch-camera-button"
-                      className={`ml-1 w-8 h-8 rounded-full flex items-center justify-center transition-colors ${
-                        cameraDevices.length <= 1 ? 'bg-gray-500 opacity-60 cursor-not-allowed' : 'bg-gray-600 hover:bg-gray-700'
-                      }`}
-                    >
-                      <RotateCcw className="w-4 h-4 text-white" />
-                    </button>
-
-                    {/* Dropdown trigger */}
-                    <button
-                      onClick={() => setCameraMenuOpen(v => !v)}
-                      disabled={cameraDevices.length === 0}
-                      title={cameraDevices.length === 0 ? 'No camera detected' : 'Select camera'}
-                      className={`ml-1 w-8 h-8 rounded-full flex items-center justify-center transition-colors ${
-                        cameraDevices.length === 0 ? 'bg-gray-500 opacity-60 cursor-not-allowed' : 'bg-gray-600 hover:bg-gray-700'
-                      }`}
-                    >
-                      <span className="text-white text-xs">▾</span>
-                    </button>
-
-                    {/* Dropdown menu */}
-                    {cameraMenuOpen && cameraDevices.length > 0 && (
-                      <div className="absolute top-12 left-0 bg-gray-800 text-white text-sm rounded-md shadow-lg border border-gray-700 min-w-[220px] z-50">
-                        <div className="px-3 py-2 border-b border-gray-700 text-gray-300">Select camera</div>
-                        <ul className="max-h-60 overflow-auto">
-                          {cameraDevices.map((d) => (
-                            <li key={d.deviceId}>
-                              <button
-                                onClick={() => handleSelectCamera(d.deviceId)}
-                                className={`w-full text-left px-3 py-2 hover:bg-gray-700 ${preferredCameraId === d.deviceId ? 'bg-gray-700' : ''}`}
-                              >
-                                {d.label || `Camera (${d.deviceId.slice(0,6)}…)`}
-                              </button>
-                            </li>
-                          ))}
-                          {cameraDevices.length === 0 && (
-                            <li className="px-3 py-2 text-gray-400">No cameras found</li>
-                          )}
-                        </ul>
-                        <div className="px-3 py-2 border-t border-gray-700 text-xs text-gray-400">
-                          Selection applies to the next video call.
-                        </div>
+                {/* Microphone dropdown menu */}
+                {micMenuOpen && (
+                  <div
+                    className="fixed bg-gray-800 border border-gray-600 rounded-lg shadow-xl py-2 min-w-[200px]"
+                    style={{
+                      zIndex: 9999,
+                      bottom: '100px',
+                      left: '50%',
+                      transform: 'translateX(-50%)',
+                      maxHeight: '200px',
+                      overflowY: 'auto'
+                    }}
+                    data-dropdown-menu
+                  >
+                    <div className="px-3 py-1 text-xs text-gray-400 border-b border-gray-600 mb-1">
+                      Select Microphone
+                    </div>
+                    {micDevices.map((device) => (
+                      <button
+                        key={device.deviceId}
+                        onClick={() => {
+                          // Handle microphone selection
+                          setMicMenuOpen(false);
+                        }}
+                        className="w-full text-left px-3 py-2 text-sm text-white hover:bg-gray-700 transition-colors"
+                      >
+                        {device.label || `Microphone ${device.deviceId.slice(0, 8)}...`}
+                      </button>
+                    ))}
+                    {micDevices.length === 0 && (
+                      <div className="px-3 py-2 text-sm text-gray-400">
+                        No microphones detected
                       </div>
                     )}
                   </div>
-                </>
+                )}
+              </div>
+
+              {/* Video Toggle with Integrated Dropdown (for video calls) */}
+              {isVideoCall && (
+                <div className="relative">
+                  <button
+                    onClick={handleToggleVideo}
+                    disabled={videoDevices.length === 0}
+                    title={videoDevices.length === 0 ? 'No camera detected' : (isVideoEnabled ? 'Turn off video' : 'Turn on video')}
+                    className={`w-16 h-16 rounded-full flex items-center justify-center transition-colors relative ${
+                      videoDevices.length === 0
+                        ? 'bg-gray-500 opacity-60 cursor-not-allowed'
+                        : (!isVideoEnabled ? 'bg-red-600 hover:bg-red-700' : 'bg-gray-600 hover:bg-gray-700')
+                    }`}
+                    data-dropdown-trigger
+                  >
+                    {isVideoEnabled ? (
+                      <Video className="w-7 h-7 text-white" />
+                    ) : (
+                      <VideoOff className="w-7 h-7 text-white" />
+                    )}
+                    {/* Integrated dropdown arrow */}
+                    <div
+                      className="absolute bottom-1 right-1 w-4 h-4 bg-black bg-opacity-30 rounded-full flex items-center justify-center cursor-pointer hover:bg-opacity-50 transition-colors"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setVideoMenuOpen(v => !v);
+                      }}
+                      title="Select camera"
+                      data-dropdown-trigger
+                    >
+                      <span className="text-white text-xs">▾</span>
+                    </div>
+                  </button>
+
+                  {/* Video dropdown menu */}
+                  {videoMenuOpen && (
+                    <div
+                      className="fixed bg-gray-800 border border-gray-600 rounded-lg shadow-xl py-2 min-w-[200px]"
+                      style={{
+                        zIndex: 9999,
+                        bottom: '100px',
+                        left: '50%',
+                        transform: 'translateX(-50%)',
+                        maxHeight: '250px',
+                        overflowY: 'auto'
+                      }}
+                      data-dropdown-menu
+                    >
+                      <div className="px-3 py-1 text-xs text-gray-400 border-b border-gray-600 mb-1">
+                        Select Camera
+                      </div>
+                      {videoDevices.map((device) => (
+                        <button
+                          key={device.deviceId}
+                          onClick={() => {
+                            // Handle camera selection
+                            setVideoMenuOpen(false);
+                          }}
+                          className="w-full text-left px-3 py-2 text-sm text-white hover:bg-gray-700 transition-colors"
+                        >
+                          {device.label || `Camera ${device.deviceId.slice(0, 8)}...`}
+                        </button>
+                      ))}
+                      {videoDevices.length === 0 && (
+                        <div className="px-3 py-2 text-sm text-gray-400">
+                          No cameras detected
+                        </div>
+                      )}
+                      <div className="border-t border-gray-600 mt-1 pt-1">
+                        <button
+                          onClick={() => {
+                            onSwitchCamera();
+                            setVideoMenuOpen(false);
+                          }}
+                          disabled={videoDevices.length <= 1}
+                          className="w-full text-left px-3 py-2 text-sm text-white hover:bg-gray-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                        >
+                          Switch Camera
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </div>
               )}
 
               {/* Screen Share Button (only for video calls) */}
@@ -718,7 +840,7 @@ export const CallModal: React.FC<CallModalProps> = ({
                   <button
                     onClick={handleScreenShare}
                     disabled={isProcessing}
-                    className={`w-12 h-12 rounded-full flex items-center justify-center transition-colors ${
+                    className={`w-14 h-14 rounded-full flex items-center justify-center transition-colors ${
                       isScreenSharing ? 'bg-blue-600 hover:bg-blue-700' : 'bg-gray-600 hover:bg-gray-700'
                     }`}
                     title={isScreenSharing ? 'Stop screen sharing' : 'Start screen sharing'}
@@ -731,7 +853,7 @@ export const CallModal: React.FC<CallModalProps> = ({
                   </button>
                   <button
                     onClick={() => setShowScreenSharingSettings(true)}
-                    className="w-8 h-8 rounded-full bg-gray-700 hover:bg-gray-600 flex items-center justify-center transition-colors"
+                    className="ml-2 w-10 h-10 rounded-full bg-gray-700 hover:bg-gray-600 flex items-center justify-center transition-colors"
                     title="Screen sharing settings"
                   >
                     <Settings className="w-4 h-4 text-white" />
@@ -743,9 +865,10 @@ export const CallModal: React.FC<CallModalProps> = ({
               <button
                 onClick={handleEndClick}
                 disabled={isProcessing}
-                className="w-16 h-16 bg-red-600 hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed rounded-full flex items-center justify-center transition-colors"
+                className="w-18 h-18 min-w-[72px] min-h-[72px] bg-red-600 hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed rounded-full flex items-center justify-center transition-colors shrink-0"
+                title="End call"
               >
-                <PhoneOff className="w-8 h-8 text-white" />
+                <PhoneOff className="w-9 h-9 text-white" />
               </button>
             </div>
           )}

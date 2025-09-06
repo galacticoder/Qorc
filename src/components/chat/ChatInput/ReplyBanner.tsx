@@ -43,14 +43,26 @@ const isVideo = (message: Message): boolean => {
 export function ReplyBanner({ replyTo, onCancelReply, getDisplayUsername }: ReplyBannerProps) {
   const [displaySender, setDisplaySender] = useState(replyTo.sender);
 
-  // Load display username
+  // Load display username (mask hashed fallback)
   useEffect(() => {
     if (getDisplayUsername) {
       getDisplayUsername(replyTo.sender)
-        .then(setDisplaySender)
+        .then((resolved) => {
+          try {
+            const hexPattern = /^[a-f0-9]{32,}$/i;
+            setDisplaySender(hexPattern.test(resolved) ? 'User' : resolved);
+          } catch {
+            setDisplaySender(resolved);
+          }
+        })
         .catch((error) => {
           console.error('Failed to get display username for reply banner:', error);
-          setDisplaySender(replyTo.sender);
+          try {
+            const hexPattern = /^[a-f0-9]{32,}$/i;
+            setDisplaySender(hexPattern.test(replyTo.sender) ? 'User' : replyTo.sender);
+          } catch {
+            setDisplaySender(replyTo.sender);
+          }
         });
     }
   }, [replyTo.sender, getDisplayUsername]);

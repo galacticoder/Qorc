@@ -17,6 +17,7 @@ export const useSecureDB = ({ Authentication, setMessages }: UseSecureDBProps) =
 	const [dbInitialized, setDbInitialized] = useState(false);
 	const [users, setUsers] = useState<User[]>([]);
 	const pendingMessagesRef = useRef<Message[]>([]);
+	const pendingMappingsRef = useRef<Array<{ hashed: string; original: string }>>([]);
 
 	// Debounced save optimization
 	const debouncedSaveRef = useRef<NodeJS.Timeout | null>(null);
@@ -155,6 +156,63 @@ export const useSecureDB = ({ Authentication, setMessages }: UseSecureDBProps) =
 		};
 
 		loadData();
+
+		// Listen for incoming username mappings attached to encrypted messages
+		const mappingListener = (e: any) => {
+			try {
+				const { hashed, original } = e.detail || {};
+				if (!hashed || !original) return;
+				secureDBRef.current!.storeUsernameMapping(hashed, original)
+					.then(() => {
+						console.log('[useSecureDB] Stored username mapping from received message');
+						try { window.dispatchEvent(new CustomEvent('username-mapping-updated', { detail: { username: hashed } })); } catch {}
+					})
+					.catch((err) => console.error('[useSecureDB] Failed to store username mapping from received message', err));
+			} catch {}
+		};
+		window.addEventListener('username-mapping-received', mappingListener as EventListener);
+		return () => window.removeEventListener('username-mapping-received', mappingListener as EventListener);
+	}, [Authentication?.isLoggedIn, dbInitialized]);
+
+	// Capture mapping events that arrive before DB is ready
+	useEffect(() => {
+		if (dbInitialized) return; // This pre-init listener is only active before DB is ready
+		const preInitListener = (e: any) => {
+			try {
+				const { hashed, original } = e.detail || {};
+				if (!hashed || !original) return;
+				pendingMappingsRef.current.push({ hashed, original });
+				console.debug('[useSecureDB] Queued username mapping (DB not ready):', { hashed });
+			} catch {}
+		};
+		window.addEventListener('username-mapping-received', preInitListener as EventListener);
+		return () => window.removeEventListener('username-mapping-received', preInitListener as EventListener);
+	}, [dbInitialized]);
+
+	// Flush queued mappings once DB becomes available
+	useEffect(() => {
+		if (!dbInitialized || !secureDBRef.current) return;
+		if (pendingMappingsRef.current.length === 0) return;
+		const toFlush = [...pendingMappingsRef.current];
+		pendingMappingsRef.current = [];
+		(async () => {
+			for (const m of toFlush) {
+				try {
+					await secureDBRef.current!.storeUsernameMapping(m.hashed, m.original);
+					try { window.dispatchEvent(new CustomEvent('username-mapping-updated', { detail: { username: m.hashed } })); } catch {}
+				} catch (err) {
+					console.error('[useSecureDB] Failed to flush queued username mapping:', err);
+				}
+			}
+			// Also trigger a broad refresh for components that don't scope by username
+			try { window.dispatchEvent(new CustomEvent('username-mapping-updated', { detail: { username: '__all__' } })); } catch {}
+		})();
+	}, [dbInitialized]);
+
+	// After DB initializes, proactively re-resolve any UI showing hashed names
+	useEffect(() => {
+		if (!Authentication?.isLoggedIn || !dbInitialized || !secureDBRef.current) return;
+		try { window.dispatchEvent(new CustomEvent('username-mapping-updated', { detail: { username: '__all__' } })); } catch {}
 	}, [Authentication?.isLoggedIn, dbInitialized]);
 
 	useEffect(() => {

@@ -10,6 +10,7 @@ import { ServerDatabase } from "./useSecureDB";
 export function useMessageSender(
   users: User[],
   loginUsernameRef: React.MutableRefObject<string>,
+  originalUsernameRef: React.MutableRefObject<string>,
   onNewMessage: (message: Message) => void,
   serverHybridPublic: { x25519PublicBase64: string; kyberPublicBase64: string } | null,
   getKeysOnDemand: () => Promise<{ x25519: { private: any; publicKeyBase64: string }; kyber: { publicKeyBase64: string; secretKey: Uint8Array } } | null>,
@@ -229,6 +230,7 @@ export function useMessageSender(
         plaintext: JSON.stringify({
           messageId: actualMessageId,  // Use 'messageId' to match receiver expectations
           from: currentUser,
+          fromOriginal: originalUsernameRef?.current || undefined,
           to: user.username,
           content: content,
           timestamp: Date.now(),
