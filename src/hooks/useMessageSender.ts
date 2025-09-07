@@ -220,6 +220,8 @@ export function useMessageSender(
       const messageType = messageSignalType === 'typing-start' || messageSignalType === 'typing-stop' ? 'typing-indicator' : 
                           messageSignalType === 'delete-message' ? 'delete-message' :
                           messageSignalType === 'edit-message' ? 'edit-message' :
+                          messageSignalType === SignalType.REACTION_ADD ? 'reaction-add' :
+                          messageSignalType === SignalType.REACTION_REMOVE ? 'reaction-remove' :
                           (fileData ? 'file-message' : 'message');
       
       console.log('[MessageSender] Preparing message with type:', { messageType, messageSignalType, content: content.substring(0, 100) });
@@ -240,7 +242,9 @@ export function useMessageSender(
           type: messageType,  // Use special type for typing indicators
           ...(messageSignalType === 'delete-message' && originalMessageId && { deleteMessageId: originalMessageId }),
           ...(replyToData && { replyTo: replyToData }),
-          ...(fileData && { fileData })
+          ...(fileData && { fileData }),
+          ...(messageSignalType === SignalType.REACTION_ADD && originalMessageId ? { reactTo: originalMessageId, emoji: content } : {}),
+          ...(messageSignalType === SignalType.REACTION_REMOVE && originalMessageId ? { reactTo: originalMessageId, emoji: content } : {})
         })
       });
 
@@ -312,7 +316,15 @@ export function useMessageSender(
         return; // Don't create a new message for edit signals
       }
 
-      // Create local message for UI (only for non-typing indicator messages, non-delete messages, and non-edit messages)
+      // Handle reactions locally
+      if ((messageSignalType === SignalType.REACTION_ADD || messageSignalType === SignalType.REACTION_REMOVE) && originalMessageId) {
+        window.dispatchEvent(new CustomEvent('local-message-reaction', {
+          detail: { messageId: originalMessageId, emoji: content, action: messageSignalType }
+        }));
+        return;
+      }
+
+      // Create local message for UI (only for standard/text/file messages)
       if (messageSignalType !== 'typing-start' && messageSignalType !== 'typing-stop' && messageSignalType !== 'delete-message' && messageSignalType !== 'edit-message') {
         console.log('[MessageSender] Creating local message for UI:', { messageId: actualMessageId, content: content.substring(0, 100) });
         const localMessage: Message = {

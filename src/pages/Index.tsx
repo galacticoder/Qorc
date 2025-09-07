@@ -23,6 +23,7 @@ import { TypingIndicatorProvider } from "../contexts/TypingIndicatorContext";
 import { torNetworkManager } from "../lib/tor-network";
 import { TorAutoSetup } from "../components/setup/TorAutoSetup";
 import { getTorAutoSetup } from "../lib/tor-auto-setup";
+import { SignalType } from "../lib/signals";
 
 // Helper function to generate appropriate reply content for different message types
 const getReplyContent = (message: Message): string => {
@@ -384,12 +385,39 @@ const ChatApp: React.FC<ChatAppProps> = () => {
 
     window.addEventListener('local-message-delete', handleLocalMessageDelete as EventListener);
     window.addEventListener('local-message-edit', handleLocalMessageEdit as EventListener);
+    const handleLocalMessageReaction = (e: any) => {
+      try {
+        const { messageId, emoji, action } = e.detail || {};
+        if (!messageId || !emoji) return;
+        setMessages(prev => prev.map(msg => {
+          if (msg.id !== messageId) return msg;
+          const reactions = { ...(msg.reactions || {}) } as Record<string, string[]>;
+          const arr = Array.isArray(reactions[emoji]) ? [...reactions[emoji]] : [];
+          const actor = Authentication.loginUsernameRef.current;
+          const has = arr.includes(actor);
+          // Enforce one reaction per user: remove actor from any other emoji first
+          for (const key of Object.keys(reactions)) {
+            if (key !== emoji) {
+              reactions[key] = (reactions[key] || []).filter(u => u !== actor);
+              if (reactions[key].length === 0) delete reactions[key];
+            }
+          }
+          if (action === 'reaction-add' && !has) arr.push(actor);
+          if (action === 'reaction-remove' && has) reactions[emoji] = arr.filter(u => u !== actor);
+          else reactions[emoji] = arr;
+          if (reactions[emoji].length === 0) delete reactions[emoji];
+          return { ...msg, reactions };
+        }));
+      } catch {}
+    };
+    window.addEventListener('local-message-reaction', handleLocalMessageReaction as EventListener);
     window.addEventListener('local-file-message', handleLocalFileMessage as EventListener);
     
     return () => {
       window.removeEventListener('local-message-delete', handleLocalMessageDelete as EventListener);
       window.removeEventListener('local-message-edit', handleLocalMessageEdit as EventListener);
       window.removeEventListener('local-file-message', handleLocalFileMessage as EventListener);
+      window.removeEventListener('local-message-reaction', handleLocalMessageReaction as EventListener);
     };
   }, [setMessages]);
 
@@ -537,6 +565,22 @@ const ChatApp: React.FC<ChatAppProps> = () => {
                   return;
                 }
                 
+                // Handle reactions (no message bubble should be created)
+                if (messageSignalType === SignalType.REACTION_ADD || messageSignalType === SignalType.REACTION_REMOVE) {
+                  let targetUser = Database.users.find(user => user.username === selectedConversation);
+                  if (!targetUser) {
+                    targetUser = {
+                      id: crypto.randomUUID(),
+                      username: selectedConversation,
+                      isOnline: false,
+                      hybridPublicKeys: undefined
+                    };
+                    Database.setUsers(prev => [...prev, targetUser!]);
+                  }
+                  // Pass target message id via messageId -> originalMessageId param
+                  return messageSender.handleSendMessage(targetUser, content, undefined, undefined, messageSignalType, messageId);
+                }
+
                 // Ensure conversation exists (auto-create if needed)
                 addConversation(selectedConversation, false);
                 

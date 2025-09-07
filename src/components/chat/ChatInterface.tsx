@@ -496,6 +496,13 @@ export function ChatInterface({
                       onSendMessage(message.id, "", SignalType.DELETE_MESSAGE, null) // add reply field later
                     }
                     onEdit={() => setEditingMessage(message)}
+                    onReact={(targetMessage, emoji) => {
+                      const isRemove = !!(targetMessage.reactions && targetMessage.reactions[emoji] && targetMessage.reactions[emoji].includes(currentUsername));
+                      const action = isRemove ? SignalType.REACTION_REMOVE : SignalType.REACTION_ADD;
+                      // Send reaction signal (no UI bubble). We pass target message id via messageId param.
+                      onSendMessage(targetMessage.id, emoji, action, null);
+                    }}
+                    currentUsername={currentUsername}
                     getDisplayUsername={getDisplayUsername}
                   />
                 </div>

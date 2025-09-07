@@ -590,6 +590,36 @@ export function useEncryptedMessageHandler(
             return; // Don't process as regular message
           }
 
+          // Handle reactions (add/remove)
+          if (payload.type === 'reaction-add' || payload.type === 'REACTION_ADD' || payload.type === 'reaction-remove' || payload.type === 'REACTION_REMOVE') {
+            const reactTo = (payload as any).reactTo || (contentData && contentData.reactTo);
+            const emoji = (payload as any).emoji || (contentData && contentData.emoji);
+            if (reactTo && typeof emoji === 'string' && emoji.length > 0) {
+              setMessages(prev => prev.map(msg => {
+                if (msg.id !== reactTo) return msg;
+                const reactions = { ...(msg.reactions || {}) } as Record<string, string[]>;
+                const arr = Array.isArray(reactions[emoji]) ? [...reactions[emoji]] : [];
+                const actor = payload.from;
+                const has = arr.includes(actor);
+                const isAdd = (payload.type === 'reaction-add' || payload.type === 'REACTION_ADD');
+                // Enforce one reaction per user: remove actor from any other emoji
+                for (const key of Object.keys(reactions)) {
+                  if (key !== emoji) {
+                    reactions[key] = (reactions[key] || []).filter(u => u !== actor);
+                    if (reactions[key].length === 0) delete reactions[key];
+                  }
+                }
+                if (isAdd && !has) arr.push(actor);
+                if (!isAdd && has) reactions[emoji] = arr.filter(u => u !== actor);
+                else reactions[emoji] = arr;
+                // Clean empty arrays
+                if (reactions[emoji].length === 0) delete reactions[emoji];
+                return { ...msg, reactions };
+              }));
+            }
+            return; // Do not create a new message for reaction signals
+          }
+
           // Handle regular messages (only if not a system message or file message)
           // Additional check to ensure typing indicator messages and file messages are not processed as regular messages
           if ((payload.type === 'message' || payload.type === 'text' || !payload.type) &&

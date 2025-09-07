@@ -49,6 +49,8 @@ export interface Message {
   p2p?: boolean; // Indicates if message was sent via P2P
   encrypted?: boolean; // Indicates if message is encrypted
   transport?: 'websocket' | 'p2p' | 'relay'; // Transport method used
+  // Map of emoji -> array of usernames (pseudonyms) who reacted
+  reactions?: Record<string, string[]>;
 }
 
 export interface ChatMessageProps {
@@ -57,4 +59,6 @@ export interface ChatMessageProps {
   previousMessage?: Message;
   onDelete?: (message: Message) => void;
   onEdit?: (newContent: string) => void;
+  onReact?: (message: Message, emoji: string) => void;
+  currentUsername?: string;
 }

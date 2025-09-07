@@ -1,13 +1,13 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useRef } from "react";
 import { cn } from "../../lib/utils";
-import { Avatar, AvatarFallback } from "../ui/avatar";
 import { format, isSameMinute } from "date-fns";
 import { TrashIcon, Pencil1Icon } from "./icons.tsx";
+import { EmojiPicker } from "../ui/EmojiPicker";
 
 import { ChatMessageProps } from "./types.ts";
 import { SystemMessage } from "./ChatMessage/SystemMessage.tsx";
 import { DeletedMessage } from "./ChatMessage/DeletedMessage.tsx";
-import { FileMessage, FileContent } from "./ChatMessage/FileMessage.tsx";
+import { FileContent } from "./ChatMessage/FileMessage.tsx";
 import { VoiceMessage } from "./VoiceMessage.tsx";
 import { MessageReceipt } from "./MessageReceipt.tsx";
 import { useUnifiedUsernameDisplay } from "../../hooks/useUnifiedUsernameDisplay";
@@ -18,7 +18,7 @@ interface ExtendedChatMessageProps extends ChatMessageProps {
   getDisplayUsername?: (username: string) => Promise<string>;
 }
 
-export function ChatMessage({ message, onReply, previousMessage, onDelete, onEdit, getDisplayUsername }: ExtendedChatMessageProps) {
+export function ChatMessage({ message, onReply, previousMessage, onDelete, onEdit, onReact, getDisplayUsername, currentUsername }: ExtendedChatMessageProps) {
   const { content, sender, timestamp, isCurrentUser, isSystemMessage, isDeleted, type } = message;
 
   // Use unified username display for sender
@@ -93,6 +93,22 @@ export function ChatMessage({ message, onReply, previousMessage, onDelete, onEdi
   }
 
   // For file messages, we'll render them within the standard message layout below
+
+  // Emoji picker state and helpers
+  const [pickerOpen, setPickerOpen] = useState<string | null>(null);
+  const bubbleRef = useRef<HTMLDivElement | null>(null);
+
+  const handlePickEmoji = (emoji: string) => {
+    // Enforce one reaction per user (client-side): toggle off other emoji first
+    if (currentUsername && message.reactions) {
+      for (const [e, users] of Object.entries(message.reactions)) {
+        if (users.includes(currentUsername) && e !== emoji) {
+          onReact?.(message, e);
+        }
+      }
+    }
+    onReact?.(message, emoji);
+  };
 
   return (
     <div 
@@ -203,11 +219,11 @@ export function ChatMessage({ message, onReply, previousMessage, onDelete, onEdi
         <div className={cn("flex items-end gap-2", safeIsCurrentUser ? "flex-row-reverse" : "flex-row")}>
           {/* Render file content or text content */}
           {(type === "FILE_MESSAGE" || type === "file" || type === "file-message") ? (
-            <div className="max-w-[60%]">
-              <FileContent
-                message={message}
-                isCurrentUser={isCurrentUser || false}
-              />
+            <div className="max-w-[60%] relative" ref={bubbleRef}>
+              <FileContent message={message} isCurrentUser={isCurrentUser || false} />
+              {/* Reactions overlay bottom-left */}
+
+
             </div>
           ) : (() => {
             // Check if this is a URL-only message for special handling
@@ -217,7 +233,7 @@ export function ChatMessage({ message, onReply, previousMessage, onDelete, onEdi
             if (isUrlOnly && showPreviews) {
               // For URL-only messages, render LinkifyWithPreviews without bubble styling
               return (
-                <div className="max-w-[80%]">
+                <div className="max-w-[80%] relative" ref={bubbleRef}>
                   <LinkifyWithPreviews
                     options={{ rel: "noopener noreferrer" }}
                     showPreviews={true}
@@ -225,34 +241,65 @@ export function ChatMessage({ message, onReply, previousMessage, onDelete, onEdi
                   >
                     {content}
                   </LinkifyWithPreviews>
+                  {/* Overlays - removed plus button, will be handled by single button outside */}
                 </div>
               );
             } else {
               // For regular messages, use the bubble styling WITHOUT link previews (they're shown above)
               return (
-                <div
-                  className="px-4 py-3 text-sm whitespace-pre-wrap break-words"
-                  style={{
-                    backgroundColor: safeIsCurrentUser ? 'var(--color-accent-primary)' : 'var(--color-surface)',
-                    color: safeIsCurrentUser ? 'white' : 'var(--color-text-primary)',
-                    borderRadius: 'var(--message-bubble-radius)',
-                    wordBreak: "break-word",
-                    whiteSpace: "pre-wrap",
-                    minWidth: '3rem',
-                    maxWidth: '100%'
-                  }}
-                >
-                  <LinkifyWithPreviews
-                    options={{ rel: "noopener noreferrer" }}
-                    showPreviews={false}
-                    isCurrentUser={safeIsCurrentUser}
+                <div className="relative max-w-full" ref={bubbleRef}>
+                  <div
+                    className="px-4 py-3 text-sm whitespace-pre-wrap break-words"
+                    style={{
+                      backgroundColor: safeIsCurrentUser ? 'var(--color-accent-primary)' : 'var(--color-surface)',
+                      color: safeIsCurrentUser ? 'white' : 'var(--color-text-primary)',
+                      borderRadius: 'var(--message-bubble-radius)',
+                      wordBreak: "break-word",
+                      whiteSpace: "pre-wrap",
+                      minWidth: '3rem',
+                      maxWidth: '100%'
+                    }}
                   >
-                    {content}
-                  </LinkifyWithPreviews>
+                    <LinkifyWithPreviews
+                      options={{ rel: "noopener noreferrer" }}
+                      showPreviews={false}
+                      isCurrentUser={safeIsCurrentUser}
+                    >
+                      {content}
+                    </LinkifyWithPreviews>
+                  </div>
                 </div>
               );
             }
           })()}
+
+          {/* Single consolidated plus button for reactions - positioned outside message bubble */}
+          <div className="flex items-end">
+            <button
+              data-emoji-add-button
+              data-emoji-trigger="main"
+              className="w-5 h-5 rounded-full text-[11px] flex items-center justify-center border opacity-0 group-hover:opacity-100 transition-opacity duration-200"
+              style={{
+                backgroundColor: 'var(--color-surface)',
+                borderColor: 'var(--color-border)',
+                color: 'var(--color-text-secondary)',
+                boxShadow: 'var(--shadow-elevation-low)'
+              }}
+              onClick={() => setPickerOpen(pickerOpen === 'main' ? null : 'main')}
+              aria-label="Add reaction"
+              title="Add reaction"
+              onMouseEnter={(e) => {
+                e.currentTarget.style.backgroundColor = 'var(--color-accent-primary)';
+                e.currentTarget.style.color = 'white';
+              }}
+              onMouseLeave={(e) => {
+                e.currentTarget.style.backgroundColor = 'var(--color-surface)';
+                e.currentTarget.style.color = 'var(--color-text-secondary)';
+              }}
+            >
+              +
+            </button>
+          </div>
 
           {/* Action Buttons */}
           <div
@@ -385,6 +432,32 @@ export function ChatMessage({ message, onReply, previousMessage, onDelete, onEdi
           )}
         </div>
 
+        {/* Reactions bar */}
+        {message.reactions && Object.keys(message.reactions).length > 0 && (
+          <div
+            className="flex flex-wrap gap-1 mt-1"
+            style={{ color: safeIsCurrentUser ? 'white' : 'var(--color-text-primary)' }}
+          >
+            {Object.entries(message.reactions).map(([emoji, users]) => (
+              <button
+                key={emoji}
+                className="px-2 py-0.5 rounded-full text-xs border"
+                style={{
+                  backgroundColor: safeIsCurrentUser ? 'rgba(255,255,255,0.15)' : 'var(--color-muted-panel)',
+                  borderColor: 'var(--color-border)'
+                }}
+                onClick={() => onReact?.(message, emoji)}
+                title={`${emoji} · ${users.length}`}
+              >
+                <span className="mr-1">{emoji}</span>
+                <span>{users.length}</span>
+              </button>
+            ))}
+          </div>
+        )}
+
+
+
         {/* Message Receipt */}
         <MessageReceipt
           receipt={message.receipt}
@@ -392,6 +465,15 @@ export function ChatMessage({ message, onReply, previousMessage, onDelete, onEdi
           className="mt-1"
         />
       </div>
+
+      {/* Single Emoji Picker positioned outside message bubble */}
+      {pickerOpen === 'main' && (
+        <EmojiPicker
+          onEmojiSelect={handlePickEmoji}
+          onClose={() => setPickerOpen(null)}
+          triggerId="main"
+        />
+      )}
     </div>
   );
 }
