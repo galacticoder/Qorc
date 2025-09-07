@@ -4,6 +4,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../ui
 import { Alert, AlertDescription } from '../ui/alert';
 import { Badge } from '../ui/badge';
 import { Terminal, Download, Shield, ExternalLink, Copy } from 'lucide-react';
+import { copyTextToClipboard } from '@/lib/clipboard';
 
 interface TorInstallPromptProps {
   onContinue?: () => void;
@@ -21,10 +22,12 @@ export const TorInstallPrompt: React.FC<TorInstallPromptProps> = ({ onContinue, 
     windows: 'Download from https://www.torproject.org/download/'
   };
 
-  const copyCommand = (command: string) => {
-    navigator.clipboard.writeText(command);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
+  const copyCommand = async (command: string) => {
+    const ok = await copyTextToClipboard(command);
+    if (ok) {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    }
   };
 
   return (

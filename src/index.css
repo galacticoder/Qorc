@@ -1,4 +1,5 @@
 @import './styles/design-tokens.css';
+@import 'highlight.js/styles/github-dark.min.css';
 
 @tailwind base;
 @tailwind components;
@@ -162,4 +163,259 @@
 
 .scrollbar-hide::-webkit-scrollbar {
   display: none;             /* Chrome, Safari and Opera */
+}
+
+/* Markdown Content Styles */
+.markdown-content {
+  font-family: inherit;
+  line-height: 1.6;
+  max-width: none; /* Allow full width for README content */
+  width: 100%;
+}
+
+.markdown-content h1,
+.markdown-content h2,
+.markdown-content h3,
+.markdown-content h4,
+.markdown-content h5,
+.markdown-content h6 {
+  margin: 1.2em 0 0.6em 0;
+  font-weight: 600;
+  line-height: 1.25;
+  border-bottom: 1px solid rgba(128, 128, 128, 0.2);
+  padding-bottom: 0.3em;
+}
+
+/* Better header sizing for README content */
+.markdown-content h1 { 
+  font-size: 2em; 
+  margin-top: 0;
+  border-bottom: 2px solid rgba(128, 128, 128, 0.3);
+}
+.markdown-content h2 { 
+  font-size: 1.5em; 
+  border-bottom: 1px solid rgba(128, 128, 128, 0.2);
+}
+.markdown-content h3 { 
+  font-size: 1.25em; 
+  border-bottom: none;
+}
+.markdown-content h4 { font-size: 1.1em; border-bottom: none; }
+.markdown-content h5 { font-size: 1em; border-bottom: none; }
+.markdown-content h6 { font-size: 0.9em; border-bottom: none; }
+
+.markdown-content p {
+  margin: 0.5em 0;
+}
+
+.markdown-content p:first-child {
+  margin-top: 0;
+}
+
+.markdown-content p:last-child {
+  margin-bottom: 0;
+}
+
+.markdown-content code {
+  background-color: var(--markdown-inline-code-bg);
+  color: var(--markdown-code-text);
+  padding: 0.2em 0.4em;
+  border-radius: 6px;
+  font-size: 0.85em;
+  font-family: var(--markdown-code-font);
+}
+
+.markdown-content pre {
+  background-color: var(--markdown-code-bg);
+  border: 1px solid var(--markdown-code-border);
+  border-radius: 6px;
+  padding: 16px;
+  overflow-x: auto;
+  margin: 1em 0;
+  font-size: 0.85em;
+  color: var(--markdown-code-text);
+}
+
+.markdown-content pre code {
+  background: none;
+  padding: 0;
+  border-radius: 0;
+  font-size: inherit;
+  color: var(--markdown-code-text);
+}
+
+.markdown-content ul,
+.markdown-content ol {
+  margin: 1em 0;
+  padding-left: 2em;
+}
+
+.markdown-content ul {
+  list-style-type: disc;
+}
+
+.markdown-content ol {
+  list-style-type: decimal;
+}
+
+.markdown-content li {
+  margin: 0.5em 0;
+  line-height: 1.6;
+}
+
+.markdown-content li > ul,
+.markdown-content li > ol {
+  margin: 0.3em 0;
+}
+
+.markdown-content a {
+  color: #0969da;
+  text-decoration: none;
+}
+
+.markdown-content a:hover {
+  text-decoration: underline;
+}
+
+/* Dark theme links */
+.dark .markdown-content a {
+  color: #58a6ff;
+}
+
+/* README-style blockquotes */
+.markdown-content blockquote {
+  padding: 0 1em;
+  color: #656d76;
+  border-left: 0.25em solid #d0d7de;
+  margin: 1em 0;
+}
+
+.dark .markdown-content blockquote {
+  color: #8b949e;
+  border-left-color: #30363d;
+}
+
+.markdown-content strong {
+  font-weight: 600;
+}
+
+.markdown-content em {
+  font-style: italic;
+}
+
+.markdown-content br {
+  line-height: 1.8;
+}
+
+/* Compact spacing for chat bubbles */
+.markdown-content.compact {
+  font-size: 0.95em;
+}
+
+.markdown-content.compact h1,
+.markdown-content.compact h2,
+.markdown-content.compact h3,
+.markdown-content.compact h4,
+.markdown-content.compact h5,
+.markdown-content.compact h6 {
+  margin: 0.6em 0 0.3em 0;
+}
+
+.markdown-content.compact p {
+  margin: 0.4em 0;
+}
+
+.markdown-content.compact pre {
+  margin: 0.6em 0;
+  padding: 0.8em;
+}
+
+.markdown-content.compact ul,
+.markdown-content.compact ol {
+  margin: 0.4em 0;
+  padding-left: 1.2em;
+}
+
+/* Styling for large README-style content */
+.markdown-readme {
+  background-color: var(--color-surface) !important;
+  color: var(--color-text-primary) !important;
+  max-width: none !important;
+  width: 100% !important;
+  padding: 2em !important;
+  margin: 1em 0 !important;
+  border-radius: 12px !important;
+  border: 1px solid var(--color-border) !important;
+  box-shadow: var(--shadow-elevation-low) !important;
+}
+
+/* Styling for small markdown messages (compact chat bubbles) */
+.markdown-message {
+  background-color: var(--color-surface) !important;
+  color: var(--color-text-primary) !important;
+  max-width: none !important;
+  width: 100% !important;
+  padding: 1em !important;
+  margin: 0.5em 0 !important;
+  border-radius: 8px !important;
+  border: 1px solid var(--color-border) !important;
+  box-shadow: var(--shadow-elevation-low) !important;
+}
+
+/* Styles for README content - generous spacing */
+.markdown-readme .markdown-content {
+  font-size: 1em !important;
+}
+
+.markdown-readme .markdown-content h1,
+.markdown-readme .markdown-content h2,
+.markdown-readme .markdown-content h3 {
+  color: var(--color-text-primary) !important;
+  margin: 1.5em 0 0.8em 0 !important;
+}
+
+.markdown-readme .markdown-content h1 {
+  margin-top: 0 !important;
+}
+
+.markdown-readme .markdown-content p {
+  margin: 1em 0 !important;
+}
+
+.markdown-readme .markdown-content pre {
+  margin: 1.5em 0 !important;
+  padding: 1.5em !important;
+}
+
+.markdown-readme .markdown-content ul,
+.markdown-readme .markdown-content ol {
+  margin: 1.5em 0 !important;
+  padding-left: 2em !important;
+}
+
+.markdown-readme .markdown-content li {
+  margin: 0.5em 0 !important;
+}
+
+/* Override compact styles for small markdown message content */
+.markdown-message .markdown-content {
+  font-size: 0.95em !important;
+}
+
+.markdown-message .markdown-content h1,
+.markdown-message .markdown-content h2,
+.markdown-message .markdown-content h3 {
+  color: var(--color-text-primary) !important;
+  margin: 0.8em 0 0.4em 0 !important;
+}
+
+.markdown-message .markdown-content pre {
+  margin: 0.8em 0 !important;
+  padding: 1em !important;
+}
+
+.markdown-message .markdown-content ul,
+.markdown-message .markdown-content ol {
+  margin: 0.8em 0 !important;
+  padding-left: 1.5em !important;
 }

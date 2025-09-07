@@ -70,7 +70,8 @@ export function ChatInput({
 
     // SECURITY: Remove dangerous Unicode categories
     // Remove control characters, format characters, and private use characters
-    sanitized = sanitized.replace(/[\u0000-\u001F\u007F-\u009F\u2000-\u200F\u2028-\u202F\u205F-\u206F\uFEFF\uFFF0-\uFFFF]/g, '');
+    // BUT preserve newlines (\n = \u000A) and tabs (\t = \u0009) for markdown formatting
+    sanitized = sanitized.replace(/[\u0000-\u0008\u000B-\u001F\u007F-\u009F\u2000-\u200F\u2028-\u202F\u205F-\u206F\uFEFF\uFFF0-\uFFFF]/g, '');
 
     // SECURITY: Remove zero-width characters that can be used for steganography
     sanitized = sanitized.replace(/[\u200B-\u200D\u2060\uFEFF]/g, '');

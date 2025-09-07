@@ -13,6 +13,16 @@
   --color-success: #10b981;
   --color-disabled: #475569;
 
+  /* Markdown Content Colors */
+  --markdown-header-color: var(--color-text-primary);
+  --markdown-link-color: #58a6ff;
+  --markdown-code-bg: #161b22;
+  --markdown-code-border: #30363d;
+  --markdown-code-text: #e6edf3;
+  --markdown-inline-code-bg: rgba(110, 118, 129, 0.4);
+  --markdown-border-color: var(--color-border);
+  --markdown-code-font: 'SFMono-Regular', 'Monaco', 'Inconsolata', 'Fira Code', 'Fira Mono', 'Droid Sans Mono', 'Courier New', monospace;
+
   /* Typography */
   --font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', sans-serif;
   --font-weight-regular: 400;

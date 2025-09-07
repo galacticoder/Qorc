@@ -13,6 +13,9 @@ import { MessageReceipt } from "./MessageReceipt.tsx";
 import { useUnifiedUsernameDisplay } from "../../hooks/useUnifiedUsernameDisplay";
 import { LinkifyWithPreviews } from "./LinkifyWithPreviews.tsx";
 import { LinkExtractor } from "../../lib/link-extraction.ts";
+import { MarkdownRenderer } from "../ui/MarkdownRenderer";
+import { isMarkdownMessage } from "../../lib/markdown-parser";
+import { copyTextToClipboard } from "../../lib/clipboard";
 
 interface ExtendedChatMessageProps extends ChatMessageProps {
   getDisplayUsername?: (username: string) => Promise<string>;
@@ -42,6 +45,10 @@ export function ChatMessage({ message, onReply, previousMessage, onDelete, onEdi
 
   // Ensure isCurrentUser is always boolean
   const safeIsCurrentUser = isCurrentUser || false;
+
+  // Hooks must be declared unconditionally to avoid hook-order mismatches on conditional returns
+  const [pickerOpen, setPickerOpen] = useState<string | null>(null);
+  const bubbleRef = useRef<HTMLDivElement | null>(null);
 
   if (isSystemMessage) {
     // Allow simple structured content to carry actions, but keep plaintext fallback
@@ -94,10 +101,6 @@ export function ChatMessage({ message, onReply, previousMessage, onDelete, onEdi
 
   // For file messages, we'll render them within the standard message layout below
 
-  // Emoji picker state and helpers
-  const [pickerOpen, setPickerOpen] = useState<string | null>(null);
-  const bubbleRef = useRef<HTMLDivElement | null>(null);
-
   const handlePickEmoji = (emoji: string) => {
     // Enforce one reaction per user (client-side): toggle off other emoji first
     if (currentUsername && message.reactions) {
@@ -141,7 +144,9 @@ export function ChatMessage({ message, onReply, previousMessage, onDelete, onEdi
           "flex flex-col min-w-0",
           safeIsCurrentUser ? "items-end" : "items-start"
         )}
-        style={{ maxWidth: 'var(--message-bubble-max-width)' }}
+        style={{ 
+          maxWidth: 'var(--message-bubble-max-width)'
+        }}
       >
         {/* Sender name and timestamp - only for non-grouped messages */}
         {!isGrouped && (
@@ -249,24 +254,36 @@ export function ChatMessage({ message, onReply, previousMessage, onDelete, onEdi
               return (
                 <div className="relative max-w-full" ref={bubbleRef}>
                   <div
-                    className="px-4 py-3 text-sm whitespace-pre-wrap break-words"
+                    className={`px-4 py-3 ${
+                      isMarkdownMessage(content) ? 'text-base' : 'text-sm'
+                    } ${
+                      isMarkdownMessage(content) ? '' : 'whitespace-pre-wrap'
+                    } break-words`}
                     style={{
                       backgroundColor: safeIsCurrentUser ? 'var(--color-accent-primary)' : 'var(--color-surface)',
                       color: safeIsCurrentUser ? 'white' : 'var(--color-text-primary)',
                       borderRadius: 'var(--message-bubble-radius)',
                       wordBreak: "break-word",
-                      whiteSpace: "pre-wrap",
+                      whiteSpace: isMarkdownMessage(content) ? "normal" : "pre-wrap",
                       minWidth: '3rem',
                       maxWidth: '100%'
                     }}
                   >
-                    <LinkifyWithPreviews
-                      options={{ rel: "noopener noreferrer" }}
-                      showPreviews={false}
-                      isCurrentUser={safeIsCurrentUser}
-                    >
-                      {content}
-                    </LinkifyWithPreviews>
+                    {isMarkdownMessage(content) ? (
+                      <MarkdownRenderer 
+                        content={content}
+                        isCurrentUser={safeIsCurrentUser}
+                        className="compact"
+                      />
+                    ) : (
+                      <LinkifyWithPreviews
+                        options={{ rel: "noopener noreferrer" }}
+                        showPreviews={false}
+                        isCurrentUser={safeIsCurrentUser}
+                      >
+                        {content}
+                      </LinkifyWithPreviews>
+                    )}
                   </div>
                 </div>
               );
@@ -313,7 +330,7 @@ export function ChatMessage({ message, onReply, previousMessage, onDelete, onEdi
             }}
           >
             <button
-              onClick={() => navigator.clipboard.writeText(content)}
+              onClick={() => { void copyTextToClipboard(content); }}
               aria-label="Copy message"
               className="p-1 rounded hover:bg-opacity-80 transition-colors"
               style={{ color: 'var(--color-text-secondary)' }}

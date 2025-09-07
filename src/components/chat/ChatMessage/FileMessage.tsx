@@ -6,6 +6,7 @@ import { DownloadIcon, PaperclipIcon } from "../icons.tsx";
 import { Message } from "../types.ts";
 import { MessageReceipt } from "../MessageReceipt.tsx";
 import { VoiceMessage } from "../VoiceMessage";
+import { copyTextToClipboard } from "@/lib/clipboard";
 
 
 // Type declaration for electronAPI
@@ -432,7 +433,7 @@ export function FileMessage({ message, isCurrentUser, onReply, onDelete, onEdit 
           )}
         >
           <button
-            onClick={() => navigator.clipboard.writeText(filename || 'File')}
+            onClick={() => { void copyTextToClipboard(filename || 'File'); }}
             aria-label="Copy filename"
             className="p-1 rounded hover:bg-opacity-80 transition-colors"
             style={{ color: 'var(--color-text-secondary)' }}

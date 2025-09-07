@@ -3,6 +3,7 @@ import { Button } from '@/components/ui/button';
 import { Play, Pause, Download } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { format } from 'date-fns';
+import { copyTextToClipboard } from '@/lib/clipboard';
 
 interface VoiceMessageProps {
   audioUrl: string;
@@ -436,7 +437,7 @@ export function VoiceMessage({
           )}
         >
           <button
-            onClick={() => navigator.clipboard.writeText(filename || 'Voice note')}
+            onClick={() => { void copyTextToClipboard(filename || 'Voice note'); }}
             aria-label="Copy filename"
             className="p-1 rounded hover:bg-opacity-80 transition-colors"
             style={{ color: 'var(--color-text-secondary)' }}
