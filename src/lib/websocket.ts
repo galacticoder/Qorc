@@ -108,10 +108,20 @@ class WebSocketClient {
 
       // Type-safe access to edgeApi
       const edgeApi = (window as any).edgeApi as { wsSend?: (message: string) => void };
+      
       if (edgeApi?.wsSend) {
+        // Ensure torSetupComplete is called before sending (in case it wasn't called properly)
+        try {
+          if (edgeApi.torSetupComplete) {
+            edgeApi.torSetupComplete();
+          }
+        } catch (torError) {
+          console.warn('[WS] Could not call torSetupComplete:', torError);
+        }
+        
         edgeApi.wsSend(message);
       } else {
-        console.error('[WS] edgeApi.wsSend not available');
+        console.error('[WS] edgeApi.wsSend not available. edgeApi exists:', !!edgeApi);
       }
     } catch (error) {
       console.error('Error sending message:', error);

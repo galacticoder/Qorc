@@ -56,8 +56,8 @@ export function TorIndicator() {
     return `${hours}h ago`;
   };
 
-  // Don't show indicator if Tor is not supported or not connected
-  if (!torNetworkManager.isSupported() || !torNetworkManager.isConnected()) {
+  // Only show indicator if Tor is supported in this environment
+  if (!torNetworkManager.isSupported()) {
     return null;
   }
 

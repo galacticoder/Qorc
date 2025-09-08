@@ -49,6 +49,10 @@ interface ElectronAPI {
   onWsError: (callback: (event: any, error: any) => void) => () => void;
   onWsClose: (callback: (event: any) => void) => () => void;
   
+  // Server URL management
+  setServerUrl: (url: string) => Promise<{ success: boolean; error?: string; serverUrl?: string }>;
+  getServerUrl: () => Promise<{ success: boolean; serverUrl: string }>;
+  
   // Screen sharing
   getScreenSources: () => Promise<ScreenSource[]>;
   

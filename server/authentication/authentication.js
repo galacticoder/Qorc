@@ -88,6 +88,8 @@ export class AccountAuthHandler {
             const alreadyOnline = await presenceIsOnline(username);
             if (alreadyOnline) {
               console.warn(`[AUTH] User already online: ${username}`);
+              // SECURITY: Add delay to prevent rapid retry attacks
+              await new Promise(resolve => setTimeout(resolve, 1000));
               return rejectConnection(ws, SignalType.AUTH_ERROR, "Account already logged in");
             }
             break;
@@ -183,19 +185,38 @@ export class AccountAuthHandler {
 
   async handleSignIn(ws, username, password) {
     console.log(`[AUTH] Starting sign in for user: ${username}`);
+    
+    // SECURITY: Additional timing attack protection
+    const startTime = Date.now();
+    
     const userData = await UserDatabase.loadUser(username);
     if (!userData) {
       console.error(`[AUTH] Account does not exist: ${username}`);
+      // SECURITY: Consistent timing to prevent user enumeration
+      const elapsedTime = Date.now() - startTime;
+      const minTime = 200; // Minimum 200ms response time
+      if (elapsedTime < minTime) {
+        await new Promise(resolve => setTimeout(resolve, minTime - elapsedTime));
+      }
       return rejectConnection(ws, SignalType.AUTH_ERROR, "Account does not exist, Register instead.");
     }
 
     if (!await CryptoUtils.Password.verifyPassword(userData.passwordHash, password)) {
       console.error(`[AUTH] Incorrect password for user: ${username}`);
+      // SECURITY: Enhanced rate limiting for failed password attempts
       try {
-        await rateLimitMiddleware.rateLimiter.userAuthLimiter.consume(username, 2);
+        await rateLimitMiddleware.rateLimiter.userAuthLimiter.consume(username, 3); // Increased penalty
       } catch (error) {
         console.warn(`[AUTH] Rate limit consume failed for user ${username}:`, error.message);
       }
+      
+      // SECURITY: Consistent timing to prevent timing attacks
+      const elapsedTime = Date.now() - startTime;
+      const minTime = 300; // Minimum 300ms for failed attempts
+      if (elapsedTime < minTime) {
+        await new Promise(resolve => setTimeout(resolve, minTime - elapsedTime));
+      }
+      
       return rejectConnection(ws, SignalType.AUTH_ERROR, "Incorrect password");
     }
 
@@ -378,6 +399,15 @@ export class AccountAuthHandler {
       finalizedBy: 'AccountAuthHandler'
     };
 
+    // Store account authentication state for reconnection recovery
+    const { ConnectionStateManager } = await import('../presence/connection-state.js');
+    await ConnectionStateManager.storeUserAuthState(username, {
+      hasPassedAccountLogin: true,
+      hasAuthenticated: false, // Server auth still required
+      accountAuthTime: Date.now(),
+      finalizedBy: 'AccountAuthHandler'
+    });
+
     ws.send(JSON.stringify({
       type: SignalType.IN_ACCOUNT,
       message: "Account authentication successful"
@@ -448,6 +478,17 @@ export class ServerAuthHandler {
         serverAuthTime: Date.now(),
         finalizedBy: 'ServerAuthHandler'
       };
+
+      // Store full authentication state for reconnection recovery
+      const { ConnectionStateManager } = await import('../presence/connection-state.js');
+      await ConnectionStateManager.storeUserAuthState(clientState.username, {
+        hasPassedAccountLogin: true,
+        hasAuthenticated: true,
+        accountAuthTime: ws.clientState.accountAuthTime || ws.clientState.authenticationTime,
+        serverAuthTime: Date.now(),
+        finalizedBy: 'ServerAuthHandler',
+        fullAuthComplete: true
+      });
 
       ws.send(JSON.stringify({
         type: SignalType.AUTH_SUCCESS,

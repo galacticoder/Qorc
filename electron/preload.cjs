@@ -200,6 +200,8 @@ contextBridge.exposeInMainWorld('edgeApi', {
   requestBundle: (args) => ipcRenderer.invoke('signal:request-bundle', args),
   wsSend: (payload) => ipcRenderer.invoke('edge:ws-send', payload),
   wsConnect: () => ipcRenderer.invoke('edge:ws-connect'),
+  setServerUrl: (url) => ipcRenderer.invoke('edge:set-server-url', url),
+  getServerUrl: () => ipcRenderer.invoke('edge:get-server-url'),
   rendererReady: () => ipcRenderer.invoke('renderer:ready'),
   torSetupComplete: () => ipcRenderer.invoke('tor:setup-complete'),
   // Power save blocker for calls

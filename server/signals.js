@@ -6,6 +6,7 @@ export const SignalType = {
   ACCOUNT_SIGN_UP: "account-sign-up",
   IN_ACCOUNT: "in-account",
   AUTH_SUCCESS: "AUTH_SUCCESS",
+  AUTH_RECOVERY: "auth-recovery",
 
   //messaging
   ENCRYPTED_MESSAGE: "encrypted-message",

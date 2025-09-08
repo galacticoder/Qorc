@@ -446,16 +446,19 @@ export const useAuth = (secureDB?: SecureDB) => {
     }
   };
 
-  const handleAuthSuccess = async (username: string) => {
-    console.log(`[AUTH] Authentication success for user: ${username}`);
+  const handleAuthSuccess = async (username: string, isRecovered = false) => {
+    console.log(`[AUTH] Authentication success for user: ${username} (recovered: ${isRecovered})`);
     console.log(`[AUTH] Setting authentication flags - isLoggedIn: true, accountAuthenticated: true`);
     
-    setAuthStatus("Authentication successful! Logging in...");
+    setAuthStatus(isRecovered ? "Authentication recovered successfully!" : "Authentication successful! Logging in...");
     setUsername(username);
     console.log(`[AUTH] About to call setIsLoggedIn(true) - current value: ${isLoggedIn}`);
     setIsLoggedIn(true);
     setAccountAuthenticated(true);
     console.log(`[AUTH] Called setIsLoggedIn(true) and setAccountAuthenticated(true)`);
+    
+    // Store authentication state for future recovery
+    storeAuthenticationState(username);
     
     // Clear status after a brief delay
     setTimeout(() => setAuthStatus(""), 1000);
@@ -467,6 +470,58 @@ export const useAuth = (secureDB?: SecureDB) => {
       });
     }
   };
+
+  // Authentication recovery function
+  const attemptAuthRecovery = useCallback(async () => {
+    const storedUsername = loginUsernameRef.current || localStorage.getItem('last_authenticated_username');
+    
+    if (!storedUsername) {
+      console.log('[AUTH] No stored username found for auth recovery');
+      return false;
+    }
+
+    console.log(`[AUTH] Attempting authentication recovery for user: ${storedUsername}`);
+    setAuthStatus("Recovering authentication state...");
+    
+    try {
+      if (!websocketClient.isConnectedToServer()) {
+        console.log('[AUTH] Connecting to WebSocket server for auth recovery');
+        await websocketClient.connect();
+      }
+
+      // Send auth recovery request
+      websocketClient.send(JSON.stringify({
+        type: SignalType.AUTH_RECOVERY,
+        username: storedUsername
+      }));
+
+      return true;
+    } catch (error) {
+      console.error('[AUTH] Auth recovery attempt failed:', error);
+      setAuthStatus('');
+      return false;
+    }
+  }, []);
+
+  // Store username for recovery on successful authentication
+  const storeAuthenticationState = useCallback((username: string) => {
+    try {
+      localStorage.setItem('last_authenticated_username', username);
+      console.log(`[AUTH] Stored authentication state for recovery: ${username}`);
+    } catch (error) {
+      console.error('[AUTH] Failed to store authentication state:', error);
+    }
+  }, []);
+
+  // Clear stored authentication state
+  const clearAuthenticationState = useCallback(() => {
+    try {
+      localStorage.removeItem('last_authenticated_username');
+      console.log('[AUTH] Cleared stored authentication state');
+    } catch (error) {
+      console.error('[AUTH] Failed to clear authentication state:', error);
+    }
+  }, []);
 
   // Function to store username mapping (called from outside when SecureDB is ready)
   const storeUsernameMapping = useCallback(async (secureDBInstance: SecureDB) => {
@@ -489,6 +544,9 @@ export const useAuth = (secureDB?: SecureDB) => {
 
   const logout = async (secureDBRef?: MutableRefObject<SecureDB | null>, loginErrorMessage: string = "") => {
     console.log('[AUTH] Logging out user');
+
+    // Clear stored authentication state for recovery
+    clearAuthenticationState();
 
     // SECURITY: Clear sensitive data from memory first
     try {
@@ -686,6 +744,9 @@ export const useAuth = (secureDB?: SecureDB) => {
     useLogout,
     hybridKeysRef,
     keyManagerRef,
-    getKeysOnDemand
+    getKeysOnDemand,
+    attemptAuthRecovery,
+    storeAuthenticationState,
+    clearAuthenticationState
   };
 };

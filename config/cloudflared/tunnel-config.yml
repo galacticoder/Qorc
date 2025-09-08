@@ -1,0 +1,47 @@
+tunnel: YOUR_TUNNEL_ID
+credentials-file: config/cloudflared/YOUR_TUNNEL_ID.json
+
+# Ingress rules - using Cloudflare's free subdomain (no domain purchase required)
+ingress:
+  # Main chat application (HTTPS) - uses free *.cfargotunnel.com subdomain
+  - service: https://localhost:8443
+    originRequest:
+      # DDoS protection settings
+      connectTimeout: 30s
+      tlsTimeout: 10s
+      tcpKeepAlive: 30s
+      keepAliveConnections: 100
+      keepAliveTimeout: 90s
+      httpHostHeader: YOUR_DOMAIN.com
+      # Security headers
+      originServerName: localhost
+      noTLSVerify: true
+      # WebSocket support for real-time chat
+      upgradeConnectionHeaders:
+        - "Upgrade"
+        - "Connection"
+        - "Sec-WebSocket-Key"
+        - "Sec-WebSocket-Version"
+        - "Sec-WebSocket-Protocol"
+        - "Sec-WebSocket-Extensions"
+
+  # Fallback for all other traffic
+  - service: http_status:404
+
+# Logging and metrics  
+log:
+  level: info
+  file: config/cloudflared/cloudflared.log
+
+# Security and performance settings
+transport-logs: false
+retries: 5
+retry-interval: 1s
+grace-period: 30s
+
+# Additional DDoS protection settings
+warp-routing:
+  enabled: false
+
+# Edge locations (will connect to closest Cloudflare edge)
+region: auto

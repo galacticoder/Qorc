@@ -22,6 +22,7 @@ import { storeUsernameMapping } from "../lib/username-display";
 import { TypingIndicatorProvider } from "../contexts/TypingIndicatorContext";
 import { torNetworkManager } from "../lib/tor-network";
 import { TorAutoSetup } from "../components/setup/TorAutoSetup";
+import { ServerSelection } from "../components/setup/ServerSelection";
 import { getTorAutoSetup } from "../lib/tor-auto-setup";
 import { SignalType } from "../lib/signals";
 
@@ -63,8 +64,11 @@ const ChatApp: React.FC<ChatAppProps> = () => {
   const [messages, setMessages] = useState<Message[]>([]);
   const [sidebarActiveTab, setSidebarActiveTab] = useState<string>("messages");
   const [showTorSetup, setShowTorSetup] = useState(false);
+  const [showServerSelection, setShowServerSelection] = useState(false);
+  const [selectedServerUrl, setSelectedServerUrl] = useState<string>('');
   const [, setTorSetupComplete] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
+
 
   // Initialize Authentication first (without SecureDB dependency)
   const Authentication = useAuth();
@@ -260,12 +264,91 @@ const ChatApp: React.FC<ChatAppProps> = () => {
     };
   }, []);
 
-  // Initialize WebSocket only after Tor setup has completed or been skipped
-  useEffect(() => {
-    if (!showTorSetup) {
-      try { (window as any).edgeApi?.wsConnect?.(); } catch {}
+  // Handle Tor setup completion
+  const handleTorSetupComplete = async (success: boolean) => {
+    if (success) {
+      console.log('[TOR-SETUP] Tor setup completed successfully');
+      setTorSetupComplete(true);
+      
+      // Notify Electron main process that Tor setup is complete
+      try {
+        await (window as any).edgeApi?.torSetupComplete?.();
+      } catch (error) {
+        console.error('[TOR-SETUP] Failed to notify main process:', error);
+      }
+      
+      // No automatic tunnel URL fetching - clients will enter their preferred server URLs
+      
+      // Initialize Tor network manager after successful setup
+      torNetworkManager.updateConfig({ enabled: true });
+      await torNetworkManager.initialize();
+      
+      // Move to server selection
+      setShowTorSetup(false);
+      setShowServerSelection(true);
+    } else {
+      console.error('[TOR-SETUP] Tor setup failed');
     }
-  }, [showTorSetup]);
+  };
+
+  // Handle server selection
+  const handleServerSelected = async (serverUrl: string) => {
+    console.log('[SERVER-SELECTION] Server selected:', serverUrl);
+    setSelectedServerUrl(serverUrl);
+    
+    // Update Electron with the selected server URL
+    try {
+      const electronAPI = (window as any).electronAPI;
+      if (electronAPI && electronAPI.setServerUrl) {
+        await electronAPI.setServerUrl(serverUrl);
+      } else {
+        // Fallback to edgeApi
+        const edgeApi = (window as any).edgeApi;
+        if (edgeApi && edgeApi.setServerUrl) {
+          await edgeApi.setServerUrl(serverUrl);
+        }
+      }
+    } catch (error) {
+      console.error('[SERVER-SELECTION] Failed to set server URL:', error);
+    }
+    
+    setShowServerSelection(false);
+    
+    // Initialize WebSocket connection
+    try {
+      await (window as any).edgeApi?.wsConnect?.();
+    } catch (error) {
+      console.error('[SERVER-SELECTION] Failed to connect WebSocket:', error);
+    }
+  };
+
+  // Initialize WebSocket only after server selection is complete
+  useEffect(() => {
+    if (!showTorSetup && !showServerSelection && selectedServerUrl) {
+      const initializeConnection = async () => {
+        try {
+          // Connect WebSocket first
+          await (window as any).edgeApi?.wsConnect?.();
+          
+          // Then attempt authentication recovery if there's a stored username
+          const hasStoredAuth = localStorage.getItem('last_authenticated_username');
+          if (hasStoredAuth && !Authentication.isLoggedIn) {
+            console.log('[Index] Attempting automatic authentication recovery...');
+            setTimeout(() => {
+              Authentication.attemptAuthRecovery().catch(error => {
+                console.log('[Index] Authentication recovery failed:', error);
+                // Not a critical error, user can login manually
+              });
+            }, 1000); // Wait 1 second for connection to stabilize
+          }
+        } catch (error) {
+          console.error('[Index] Connection initialization failed:', error);
+        }
+      };
+      
+      initializeConnection();
+    }
+  }, [showTorSetup, showServerSelection, selectedServerUrl, Authentication.isLoggedIn, Authentication.attemptAuthRecovery]);
 
   useWebSocket(signalHandler, encryptedHandler, Authentication.setLoginError);
 
@@ -421,57 +504,6 @@ const ChatApp: React.FC<ChatAppProps> = () => {
     };
   }, [setMessages]);
 
-  const handleTorSetupComplete = async (success: boolean) => {
-    if (success) {
-      // Hide Tor setup screen on success
-      setShowTorSetup(false);
-      setTorSetupComplete(true);
-      localStorage.setItem('tor_enabled', 'true');
-
-      // Notify Electron main process that Tor setup is complete
-      try {
-        await (window as any).edgeApi?.torSetupComplete?.();
-      } catch (error) {
-        console.error('[TOR-SETUP] Failed to notify main process:', error);
-      }
-
-      // Initialize the network manager
-      torNetworkManager.updateConfig({ enabled: true });
-      await torNetworkManager.initialize();
-    } else {
-      // On failure, check if user explicitly skipped or if it was an error
-      const userSkipped = localStorage.getItem('tor_setup_skipped') === 'true';
-
-      if (userSkipped) {
-        // User chose to skip - proceed to login
-        console.log('[TOR-SETUP] User skipped Tor setup, proceeding to login');
-        setShowTorSetup(false);
-        setTorSetupComplete(false);
-        localStorage.setItem('tor_enabled', 'false');
-
-        // Notify Electron main process that Tor setup is complete (even if skipped)
-        try {
-          await (window as any).edgeApi?.torSetupComplete?.();
-        } catch (error) {
-          console.error('[TOR-SETUP] Failed to notify main process:', error);
-        }
-      } else {
-        // Setup failed - stay on Tor setup screen
-        console.log('[TOR-SETUP] Setup failed, staying on Tor setup screen');
-        setTorSetupComplete(false);
-        localStorage.setItem('tor_enabled', 'false');
-        // Don't set setShowTorSetup(false) - keep showing the setup screen
-      }
-    }
-  };
-  
-  // Debug conversation state
-  console.log('[Index] Conversation state:', {
-    conversationsCount: conversations.length,
-    selectedConversation,
-    usersCount: Database.users.length,
-    hasSelectedConversation: !!selectedConversation
-  });
 
   // Show Tor setup screen first if needed
   if (showTorSetup) {
@@ -481,6 +513,19 @@ const ChatApp: React.FC<ChatAppProps> = () => {
           <TorAutoSetup
             onComplete={handleTorSetupComplete}
             autoStart={true}
+          />
+        </div>
+      </div>
+    );
+  }
+
+  // Show server selection screen after Tor setup
+  if (showServerSelection) {
+    return (
+      <div className="flex items-center justify-center min-h-screen p-4 bg-gradient-to-r from-gray-50 to-slate-50 dark:from-gray-900 dark:to-slate-900">
+        <div className="w-full max-w-3xl">
+          <ServerSelection
+            onServerSelected={handleServerSelected}
           />
         </div>
       </div>

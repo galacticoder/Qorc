@@ -17,14 +17,18 @@ if [[ "${1:-}" == "--help" ]] || [[ "${1:-}" == "-h" ]]; then
     echo ""
     echo "Usage: $0 [options]"
     echo "Options:"
-    echo "  -h, --help     Show this help message"
-    echo "  --no-build     Skip build tools installation prompt"
+    echo "  -h, --help        Show this help message"
+    echo "  --no-build        Skip build tools installation prompt"
+    echo "  --no-ddos         Skip DDoS protection setup (Cloudflare tunnel)"
+    echo "  --ddos-only       Setup DDoS protection and exit"
     echo ""
     echo "Environment variables:"
     echo "  REDIS_URL                Override Redis connection URL"
+    echo "  PUBLIC_URL               Set public URL for tunnel (optional)"
     echo "  SKIP_INSTALL             Skip npm dependency installation (true/false)"
     echo "  SKIP_REBUILD             Skip native module rebuild (true/false)"
     echo "  DISABLE_CONNECTION_LIMIT Disable connection limiting (true/false)"
+    echo "  ENABLE_DDOS_PROTECTION   Enable DDoS protection (true/false, default: true)"
     echo ""
     exit 0
 fi
@@ -36,10 +40,118 @@ RED='\033[0;31m'
 NC='\033[0m'
 
 echo -e "${BLUE}╔════════════════════════════════════════════╗${NC}"
-echo -e "${BLUE}║${GREEN}        end2end chat server        ${BLUE}║${NC}"
+echo -e "${BLUE}║${GREEN}   End2End Chat Server + DDoS Protection   ${BLUE}║${NC}"
 echo -e "${BLUE}╚════════════════════════════════════════════╝${NC}"
 
 cd "$(dirname "$0")"
+
+# Parse command line arguments
+ENABLE_DDOS_PROTECTION="${ENABLE_DDOS_PROTECTION:-true}"
+NO_DDOS=false
+DDOS_ONLY=false
+
+for arg in "$@"; do
+    case $arg in
+        --no-ddos)
+            ENABLE_DDOS_PROTECTION="false"
+            NO_DDOS=true
+            ;;
+        --ddos-only)
+            DDOS_ONLY=true
+            ;;
+        --no-build)
+            # This is handled elsewhere
+            ;;
+        --help|-h)
+            # This is handled elsewhere
+            ;;
+    esac
+done
+
+# Handle --ddos-only option
+if [[ "$DDOS_ONLY" == "true" ]]; then
+    echo -e "${BLUE}Setting up DDoS protection only...${NC}"
+    setup_ddos_protection() {
+        echo -e "${BLUE}Setting up DDoS protection with Cloudflare tunnel...${NC}"
+        
+        if [[ ! -f "scripts/setup-cloudflared-internal.sh" ]]; then
+            echo -e "${RED}DDoS protection script not found!${NC}"
+            exit 1
+        fi
+        
+        # Setup cloudflared
+        echo -e "${YELLOW}Setting up Cloudflare tunnel...${NC}"
+        echo -e "${BLUE}This will open a browser for Cloudflare authentication.${NC}"
+        
+        if ./scripts/setup-cloudflared-internal.sh setup; then
+            echo -e "${GREEN}✓ DDoS protection setup completed!${NC}"
+            
+            # Start the tunnel
+            if ./scripts/setup-cloudflared-internal.sh start; then
+                echo -e "${GREEN}✓ DDoS protection tunnel started!${NC}"
+                
+                if [[ -n "${PUBLIC_URL:-}" ]]; then
+                    echo -e "${GREEN}✓ Public URL: ${PUBLIC_URL}${NC}"
+                elif [[ -f "config/cloudflared/public-url" ]]; then
+                    PUBLIC_URL=$(cat config/cloudflared/public-url)
+                    echo -e "${GREEN}✓ Public URL: ${PUBLIC_URL}${NC}"
+                fi
+                
+                echo -e "${BLUE}DDoS protection is now active. Start your server with ./startServer.sh${NC}"
+            else
+                echo -e "${YELLOW}Setup completed but failed to start tunnel${NC}"
+                exit 1
+            fi
+        else
+            echo -e "${RED}Failed to setup DDoS protection${NC}"
+            exit 1
+        fi
+    }
+    
+    setup_ddos_protection
+    exit 0
+fi
+
+# Function to setup DDoS protection
+setup_ddos_protection() {
+    if [[ "$ENABLE_DDOS_PROTECTION" != "true" ]]; then
+        echo -e "${YELLOW}DDoS protection disabled (use --no-ddos to skip this message)${NC}"
+        return 0
+    fi
+
+    echo -e "${BLUE}Setting up DDoS protection with Cloudflare tunnel...${NC}"
+    
+    if [[ ! -f "../scripts/simple-tunnel.sh" ]]; then
+        echo -e "${YELLOW}DDoS protection script not found. Skipping...${NC}"
+        return 0
+    fi
+    
+    # Start the simple tunnel (no complex authentication required)
+    echo -e "${GREEN}Starting DDoS protection tunnel (no authentication needed)...${NC}"
+    if ../scripts/simple-tunnel.sh start; then
+        echo -e "${GREEN}✓ DDoS protection active!${NC}"
+        
+        # Show public URL if available
+        if [[ -n "${PUBLIC_URL:-}" ]]; then
+            echo -e "${GREEN}✓ Public URL: ${PUBLIC_URL}${NC}"
+        elif [[ -f "../config/cloudflared/public-url" ]]; then
+            PUBLIC_URL=$(cat ../config/cloudflared/public-url)
+            echo -e "${GREEN}✓ Public URL: ${PUBLIC_URL}${NC}"
+        fi
+        
+        return 0
+    else
+        echo -e "${YELLOW}Failed to start DDoS protection. Server will start without it.${NC}"
+        return 0
+    fi
+}
+
+# Function to check DDoS protection status
+check_ddos_status() {
+    if [[ -f "../scripts/simple-tunnel.sh" ]]; then
+        ../scripts/simple-tunnel.sh status
+    fi
+}
 
 # Function to install essential system tools
 install_essential_tools() {
@@ -707,6 +819,18 @@ cleanup_and_retry() {
         exit 1
     fi
 }
+
+# Setup DDoS protection before starting server
+setup_ddos_protection
+
+# Show final status
+echo
+echo -e "${BLUE}=== Server Status ===${NC}"
+echo -e "${GREEN}✓ Redis: Running${NC}"
+if [[ "$ENABLE_DDOS_PROTECTION" == "true" ]]; then
+    check_ddos_status
+fi
+echo
 
 # Start server with error handling
 echo -e "${GREEN}Starting secure WebSocket server...${NC}"

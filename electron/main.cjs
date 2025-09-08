@@ -420,9 +420,188 @@ ipcMain.handle('system:platform', () => {
   };
 });
 
-// Handle websocket connection
+// Handle server URL management
+ipcMain.handle('edge:set-server-url', async (event, newServerUrl) => {
+  try {
+    console.log('[ELECTRON] Setting server URL to:', newServerUrl);
+    
+    // Close existing connection if any
+    if (wsConnection) {
+      wsConnection.close();
+      wsConnection = null;
+    }
+    
+    // Update server URL
+    serverUrl = newServerUrl;
+    console.log('[ELECTRON] Server URL updated successfully');
+    
+    return { success: true, serverUrl };
+  } catch (error) {
+    console.error('[ELECTRON] Error setting server URL:', error);
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle('edge:get-server-url', () => {
+  return { success: true, serverUrl };
+});
+
+// Enhanced WebSocket connection management with persistence and auto-reconnection
+// Import WebSocket once at module scope so handlers can reference WebSocket.OPEN/CONNECTING safely
+const WebSocket = require('ws');
 let wsConnection = null;
 let torSetupComplete = false;
+let serverUrl = 'wss://localhost:8443'; // Default server URL
+let isConnecting = false;
+let reconnectAttempts = 0;
+const MAX_RECONNECT_ATTEMPTS = 5;
+const RECONNECT_DELAY = 2000; // 2 seconds
+let reconnectTimer = null;
+let messageQueue = [];
+const MAX_QUEUE_SIZE = 100;
+let connectionEstablishedAt = null;
+
+// Create stable WebSocket connection with proper error handling and reconnection
+async function createWebSocketConnection() {
+  if (isConnecting || (wsConnection && wsConnection.readyState === WebSocket.CONNECTING)) {
+    console.log('[ELECTRON] Connection already in progress');
+    return wsConnection;
+  }
+
+  if (wsConnection && wsConnection.readyState === WebSocket.OPEN) {
+    console.log('[ELECTRON] WebSocket already connected');
+    return wsConnection;
+  }
+
+  isConnecting = true;
+  console.log(`[ELECTRON] Creating new WebSocket connection to: ${serverUrl}`);
+  
+  try {
+    wsConnection = new WebSocket(serverUrl, {
+      rejectUnauthorized: false, // Accept self-signed certificates in development
+      handshakeTimeout: 10000,
+      perMessageDeflate: false
+    });
+
+    // Connection opened successfully
+    wsConnection.on('open', () => {
+      console.log('[ELECTRON] WebSocket connection established successfully');
+      isConnecting = false;
+      reconnectAttempts = 0;
+      connectionEstablishedAt = Date.now();
+      
+      // Clear any pending reconnection timer
+      if (reconnectTimer) {
+        clearTimeout(reconnectTimer);
+        reconnectTimer = null;
+      }
+      
+      // Process any queued messages
+      if (messageQueue.length > 0) {
+        console.log(`[ELECTRON] Processing ${messageQueue.length} queued messages`);
+        const queuedMessages = [...messageQueue];
+        messageQueue.length = 0; // Clear queue
+        
+        for (const queuedMessage of queuedMessages) {
+          try {
+            if (wsConnection && wsConnection.readyState === WebSocket.OPEN) {
+              wsConnection.send(queuedMessage);
+              console.log('[ELECTRON] Sent queued message:', queuedMessage.substring(0, 100));
+            }
+          } catch (error) {
+            console.error('[ELECTRON] Error sending queued message:', error);
+            // Re-queue the message if send failed
+            if (messageQueue.length < MAX_QUEUE_SIZE) {
+              messageQueue.push(queuedMessage);
+            }
+          }
+        }
+      }
+    });
+
+    // Handle incoming messages
+    wsConnection.on('message', (data) => {
+      try {
+        const parsed = JSON.parse(data.toString());
+        console.log('[ELECTRON] Received from server:', parsed.type || 'unknown');
+        
+        // Forward to renderer process
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.send('edge:server-message', parsed);
+        }
+      } catch (error) {
+        console.error('[ELECTRON] Error parsing server message:', error);
+      }
+    });
+
+    // Handle connection errors
+    wsConnection.on('error', (error) => {
+      console.error('[ELECTRON] WebSocket error:', error);
+      isConnecting = false;
+    });
+
+    // Handle connection close
+    wsConnection.on('close', (code, reason) => {
+      const wasConnected = connectionEstablishedAt !== null;
+      const connectionDuration = wasConnected ? Date.now() - connectionEstablishedAt : 0;
+      
+      console.log(`[ELECTRON] WebSocket connection closed - Code: ${code}, Reason: ${reason || 'none'}, Duration: ${connectionDuration}ms`);
+      
+      wsConnection = null;
+      isConnecting = false;
+      connectionEstablishedAt = null;
+      
+      // Only attempt reconnection if Tor setup is complete and we haven't exceeded max attempts
+      if (torSetupComplete && reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
+        reconnectAttempts++;
+        console.log(`[ELECTRON] Scheduling reconnection attempt ${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS} in ${RECONNECT_DELAY}ms`);
+        
+        reconnectTimer = setTimeout(() => {
+          console.log('[ELECTRON] Attempting to reconnect...');
+          createWebSocketConnection().catch(error => {
+            console.error('[ELECTRON] Reconnection failed:', error);
+          });
+        }, RECONNECT_DELAY * reconnectAttempts); // Exponential backoff
+      } else if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
+        console.error('[ELECTRON] Max reconnection attempts reached, giving up');
+        // Notify renderer of persistent connection failure
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.send('edge:server-message', {
+            type: 'connection-failed',
+            error: 'Max reconnection attempts reached',
+            attempts: reconnectAttempts
+          });
+        }
+      }
+    });
+
+    // Wait for connection to be established or fail
+    await new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        isConnecting = false;
+        reject(new Error('Connection timeout'));
+      }, 10000);
+      
+      wsConnection.once('open', () => {
+        clearTimeout(timeout);
+        resolve(wsConnection);
+      });
+      
+      wsConnection.once('error', (error) => {
+        clearTimeout(timeout);
+        isConnecting = false;
+        reject(error);
+      });
+    });
+
+    return wsConnection;
+    
+  } catch (error) {
+    isConnecting = false;
+    console.error('[ELECTRON] Failed to create WebSocket connection:', error);
+    throw error;
+  }
+}
 
 ipcMain.handle('edge:ws-send', async (event, payload) => {
   try {
@@ -432,56 +611,30 @@ ipcMain.handle('edge:ws-send', async (event, payload) => {
       return { success: false, error: 'Tor setup not complete' };
     }
 
-    if (!wsConnection || wsConnection.readyState !== 1) {
-      // Connect to server if not connected
-      const WebSocket = require('ws');
-      wsConnection = new WebSocket('wss://localhost:8443', {
-        rejectUnauthorized: false // Accept self-signed certificates in development
-      });
-
-      wsConnection.on('open', () => {
-        console.log('[ELECTRON] Connected to websocket server');
-      });
-
-      wsConnection.on('message', (data) => {
-        try {
-          const parsed = JSON.parse(data.toString());
-          console.log('[ELECTRON] Received from server:', parsed.type);
-          
-          // Forward to renderer process
-          if (mainWindow && !mainWindow.isDestroyed()) {
-            mainWindow.webContents.send('edge:server-message', parsed);
-          }
-        } catch (error) {
-          console.error('[ELECTRON] Error parsing server message:', error);
-        }
-      });
-
-      wsConnection.on('error', (error) => {
-        console.error('[ELECTRON] WebSocket error:', error);
-      });
-
-      wsConnection.on('close', () => {
-        console.log('[ELECTRON] WebSocket connection closed');
-        wsConnection = null;
-      });
-
-      // Wait for connection to be established
-      await new Promise((resolve, reject) => {
-        wsConnection.on('open', resolve);
-        wsConnection.on('error', reject);
-        setTimeout(() => reject(new Error('Connection timeout')), 10000);
-      });
+    // Ensure we have a stable connection before sending
+    if (!wsConnection || wsConnection.readyState !== WebSocket.OPEN) {
+      console.log('[ELECTRON] WebSocket not connected, establishing connection...');
+      await createWebSocketConnection();
     }
 
-    // Send message to server
-    if (wsConnection && wsConnection.readyState === 1) {
-      const message = typeof payload === 'string' ? payload : JSON.stringify(payload);
+    // Prepare message for sending
+    const message = typeof payload === 'string' ? payload : JSON.stringify(payload);
+    
+    // Send message if connection is ready
+    if (wsConnection && wsConnection.readyState === WebSocket.OPEN) {
       wsConnection.send(message);
       console.log('[ELECTRON] Sent to server:', message.substring(0, 100));
       return { success: true };
     } else {
-      throw new Error('WebSocket not connected');
+      // Queue message if connection is not ready but Tor is set up
+      if (messageQueue.length < MAX_QUEUE_SIZE) {
+        messageQueue.push(message);
+        console.log('[ELECTRON] Message queued for later delivery');
+        return { success: true, queued: true };
+      } else {
+        console.error('[ELECTRON] Message queue full, dropping message');
+        return { success: false, error: 'Message queue full' };
+      }
     }
   } catch (error) {
     console.error('[ELECTRON] Error sending websocket message:', error);
@@ -498,47 +651,16 @@ ipcMain.handle('edge:ws-connect', async () => {
       return { success: false, error: 'Tor setup not complete' };
     }
 
-    if (wsConnection && wsConnection.readyState === 1) {
-      return { success: true };
+    // Use the new stable connection management
+    if (wsConnection && wsConnection.readyState === WebSocket.OPEN) {
+      console.log('[ELECTRON] WebSocket already connected');
+      return { success: true, alreadyConnected: true };
     }
 
-    const WebSocket = require('ws');
-    wsConnection = new WebSocket('wss://localhost:8443', {
-      rejectUnauthorized: false
-    });
-
-    wsConnection.on('open', () => {
-      console.log('[ELECTRON] Connected to websocket server');
-    });
-
-    wsConnection.on('message', (data) => {
-      try {
-        const parsed = JSON.parse(data.toString());
-        console.log('[ELECTRON] Received from server:', parsed.type);
-        if (mainWindow && !mainWindow.isDestroyed()) {
-          mainWindow.webContents.send('edge:server-message', parsed);
-        }
-      } catch (error) {
-        console.error('[ELECTRON] Error parsing server message:', error);
-      }
-    });
-
-    wsConnection.on('error', (error) => {
-      console.error('[ELECTRON] WebSocket error:', error);
-    });
-
-    wsConnection.on('close', () => {
-      console.log('[ELECTRON] WebSocket connection closed');
-      wsConnection = null;
-    });
-
-    await new Promise((resolve, reject) => {
-      wsConnection.on('open', resolve);
-      wsConnection.on('error', reject);
-      setTimeout(() => reject(new Error('Connection timeout')), 10000);
-    });
-
-    return { success: true };
+    console.log('[ELECTRON] Establishing WebSocket connection...');
+    await createWebSocketConnection();
+    
+    return { success: true, newConnection: true };
   } catch (error) {
     console.error('[ELECTRON] Error connecting websocket:', error);
     return { success: false, error: error.message };

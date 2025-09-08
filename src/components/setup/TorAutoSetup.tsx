@@ -215,7 +215,7 @@ export function TorAutoSetup({ onComplete }: TorAutoSetupProps) {
                 className="w-full"
                 size="lg"
               >
-                Continue to Login
+                Continue to Server Selection
               </Button>
 
               <Button

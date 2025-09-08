@@ -57,6 +57,87 @@ export class ConnectionStateManager {
   }
 
   /**
+   * Get authentication state for a user (for reconnection recovery)
+   */
+  static async getUserAuthState(username) {
+    if (!username) return null;
+
+    try {
+      return await withRedisClient(async (client) => {
+        const authStateJson = await client.get(`auth_state:${username}`);
+        return authStateJson ? JSON.parse(authStateJson) : null;
+      });
+    } catch (error) {
+      console.error(`[CONNECTION-STATE] Error getting auth state for user ${username}:`, error);
+      return null;
+    }
+  }
+
+  /**
+   * Store authentication state for a user (persist across reconnections)
+   */
+  static async storeUserAuthState(username, authState) {
+    if (!username) return false;
+
+    try {
+      const stateToStore = {
+        ...authState,
+        storedAt: Date.now(),
+        lastActivity: Date.now()
+      };
+
+      return await withRedisClient(async (client) => {
+        // Store auth state with longer TTL (30 minutes) to handle reconnections
+        const AUTH_STATE_TTL = 1800; // 30 minutes
+        await client.setex(`auth_state:${username}`, AUTH_STATE_TTL, JSON.stringify(stateToStore));
+        return true;
+      });
+    } catch (error) {
+      console.error(`[CONNECTION-STATE] Error storing auth state for user ${username}:`, error);
+      return false;
+    }
+  }
+
+  /**
+   * Clear authentication state for a user (on explicit logout)
+   */
+  static async clearUserAuthState(username) {
+    if (!username) return;
+
+    try {
+      await withRedisClient(async (client) => {
+        await client.del(`auth_state:${username}`);
+      });
+    } catch (error) {
+      console.error(`[CONNECTION-STATE] Error clearing auth state for user ${username}:`, error);
+    }
+  }
+
+  /**
+   * Refresh user auth state TTL (call on activity)
+   */
+  static async refreshUserAuthState(username) {
+    if (!username) return false;
+
+    try {
+      return await withRedisClient(async (client) => {
+        const authStateJson = await client.get(`auth_state:${username}`);
+        if (!authStateJson) return false;
+
+        const authState = JSON.parse(authStateJson);
+        authState.lastActivity = Date.now();
+        
+        const AUTH_STATE_TTL = 1800; // 30 minutes
+        await client.setex(`auth_state:${username}`, AUTH_STATE_TTL, JSON.stringify(authState));
+        return true;
+      });
+    } catch (error) {
+      console.error(`[CONNECTION-STATE] Error refreshing auth state for user ${username}:`, error);
+      return false;
+    }
+  }
+
+  /**
    * Update connection state
    */
   static async updateState(sessionId, updates) {

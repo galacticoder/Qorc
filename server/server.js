@@ -394,19 +394,30 @@ async function startServer() {
       await ConnectionStateManager.refreshSession(sessionId);
       messageCount++;
 
-      // SECURITY: Message size validation removed - no limits
-
-      let parsed;
-      try {
-        const msgString = msg.toString().trim();
-        
-        // SECURITY: Additional validation for message content
-        if (msgString.length === 0) {
-          console.error('[SERVER] Empty message received');
-          return ws.send(JSON.stringify({ type: SignalType.ERROR, message: 'Empty message' }));
+        // SECURITY: Message size validation - reasonable limits to prevent DoS
+        const MAX_MESSAGE_SIZE = 10 * 1024 * 1024; // 10MB for large file transfers
+        if (msg.length > MAX_MESSAGE_SIZE) {
+          console.error(`[SERVER] Message too large: ${msg.length} bytes`);
+          return ws.close(1009, 'Message too large');
         }
 
-        parsed = JSON.parse(msgString);
+        let parsed;
+        try {
+          const msgString = msg.toString().trim();
+          
+          // SECURITY: Additional validation for message content
+          if (msgString.length === 0) {
+            console.error('[SERVER] Empty message received');
+            return ws.send(JSON.stringify({ type: SignalType.ERROR, message: 'Empty message' }));
+          }
+          
+          // SECURITY: Validate JSON structure before parsing
+          if (!msgString.startsWith('{') || !msgString.endsWith('}')) {
+            console.error('[SERVER] Invalid JSON format - not an object');
+            return ws.send(JSON.stringify({ type: SignalType.ERROR, message: 'Invalid message format' }));
+          }
+
+          parsed = JSON.parse(msgString);
         
         // SECURITY: Validate message structure
         if (!parsed || typeof parsed !== 'object' || !parsed.type) {
@@ -699,6 +710,107 @@ async function startServer() {
             }
             break;
           }
+          case SignalType.AUTH_RECOVERY: {
+            // Handle authentication state recovery for reconnected clients
+            console.log('[SERVER] Processing AUTH_RECOVERY request');
+            
+            if (!parsed.username || typeof parsed.username !== 'string') {
+              return ws.send(JSON.stringify({ 
+                type: SignalType.ERROR, 
+                message: 'Username required for auth recovery' 
+              }));
+            }
+            
+            const recoveryUsername = parsed.username;
+            console.log(`[SERVER] Auth recovery requested for user: ${recoveryUsername}`);
+            
+            try {
+              // Get stored authentication state for this user
+              const authState = await ConnectionStateManager.getUserAuthState(recoveryUsername);
+              
+              if (!authState) {
+                console.log(`[SERVER] No stored auth state found for user: ${recoveryUsername}`);
+                return ws.send(JSON.stringify({
+                  type: SignalType.ERROR,
+                  message: 'No authentication state found - please login again'
+                }));
+              }
+              
+              console.log(`[SERVER] Found stored auth state for user: ${recoveryUsername}`, {
+                hasPassedAccountLogin: authState.hasPassedAccountLogin,
+                hasAuthenticated: authState.hasAuthenticated,
+                fullAuthComplete: authState.fullAuthComplete,
+                storedAt: new Date(authState.storedAt).toISOString()
+              });
+              
+              // Restore authentication state to current session
+              await ConnectionStateManager.updateState(sessionId, {
+                username: recoveryUsername,
+                hasPassedAccountLogin: authState.hasPassedAccountLogin || false,
+                hasAuthenticated: authState.hasAuthenticated || false
+              });
+              
+              // Restore local state
+              ws._username = recoveryUsername;
+              addLocalConnection(recoveryUsername, ws);
+              
+              // Update WebSocket client state to match recovered auth
+              ws.clientState = {
+                username: recoveryUsername,
+                hasPassedAccountLogin: authState.hasPassedAccountLogin || false,
+                hasAuthenticated: authState.hasAuthenticated || false,
+                authenticationTime: authState.accountAuthTime,
+                serverAuthTime: authState.serverAuthTime,
+                finalizedBy: authState.finalizedBy,
+                recoveredAt: Date.now()
+              };
+              
+              // Refresh auth state TTL
+              await ConnectionStateManager.refreshUserAuthState(recoveryUsername);
+              
+              // Set user online if fully authenticated
+              if (authState.hasAuthenticated) {
+                try {
+                  await setOnline(recoveryUsername, TTL_CONFIG.PRESENCE_TTL);
+                  console.log(`[SERVER] User ${recoveryUsername} marked as ONLINE after auth recovery`);
+                } catch (e) {
+                  console.error(`[SERVER] Failed to mark ${recoveryUsername} online after auth recovery:`, e);
+                }
+              }
+              
+              // Send appropriate response based on auth state
+              if (authState.hasAuthenticated && authState.fullAuthComplete) {
+                ws.send(JSON.stringify({
+                  type: SignalType.AUTH_SUCCESS,
+                  message: 'Authentication recovered successfully - you are fully authenticated',
+                  recovered: true
+                }));
+                console.log(`[SERVER] Full authentication recovered for user: ${recoveryUsername}`);
+              } else if (authState.hasPassedAccountLogin) {
+                ws.send(JSON.stringify({
+                  type: SignalType.IN_ACCOUNT,
+                  message: 'Account authentication recovered - server login required',
+                  recovered: true
+                }));
+                console.log(`[SERVER] Account authentication recovered for user: ${recoveryUsername} - server login still required`);
+              } else {
+                ws.send(JSON.stringify({
+                  type: SignalType.ERROR,
+                  message: 'Invalid authentication state - please login again'
+                }));
+                console.error(`[SERVER] Invalid stored auth state for user: ${recoveryUsername}`);
+              }
+              
+            } catch (error) {
+              console.error(`[SERVER] Error during auth recovery for user ${recoveryUsername}:`, error);
+              ws.send(JSON.stringify({
+                type: SignalType.ERROR,
+                message: 'Authentication recovery failed'
+              }));
+            }
+            break;
+          }
+          
           case SignalType.ACCOUNT_SIGN_IN:
           case SignalType.ACCOUNT_SIGN_UP: {
             if (DEBUG_SERVER_LOGS) console.log(`[SERVER] Received ${parsed.type} from user: ${parsed.username || 'unknown'}`);
@@ -736,6 +848,12 @@ async function startServer() {
                 if (DEBUG_SERVER_LOGS) console.log(`[SERVER] User ${result.username} registered for local delivery (offline until server auth)`);
               } catch (e) {
                 console.error(`[SERVER] Connection registration FAILED for ${result.username}:`, e);
+              }
+              
+              // Also ensure the username is properly restored for cloudflared compatibility
+              if (!ws._username && result.username) {
+                ws._username = result.username;
+                console.log(`[SERVER] Set ws._username for cloudflared compatibility: ${ws._username}`);
               }
 
               if (result.pending) {
@@ -889,15 +1007,24 @@ async function startServer() {
               });
             }
 
-            if (!ws._username) {
+            // SECURITY: Check authentication using both ws._username and Redis session state
+            // This is more robust when using proxies like cloudflared that might affect WebSocket properties
+            const senderState = await ConnectionStateManager.getState(sessionId);
+            
+            if (!ws._username && !senderState?.username) {
               console.error('[SERVER] User not authenticated for message sending');
               return ws.send(JSON.stringify({ type: SignalType.ERROR, message: 'Not authenticated yet' }));
             }
+            
+            // If ws._username is missing but we have it in Redis, restore it (for cloudflared compatibility)
+            if (!ws._username && senderState?.username) {
+              ws._username = senderState.username;
+              console.log(`[SERVER] Restored ws._username from session state: ${ws._username}`);
+            }
 
             // SECURITY: Check if sender has completed full server authentication
-            const senderState = await ConnectionStateManager.getState(sessionId);
             if (!senderState?.hasAuthenticated) {
-              console.error(`[SERVER] User ${ws._username} not fully authenticated for message sending`);
+              console.error(`[SERVER] User ${ws._username || senderState?.username || 'unknown'} not fully authenticated for message sending`);
               return ws.send(JSON.stringify({ type: SignalType.ERROR, message: 'Server authentication required' }));
             }
 
@@ -1239,25 +1366,47 @@ async function startServer() {
             console.error(`[SERVER] Unknown message type: ${parsed.type}`);
             ws.send(JSON.stringify({ type: SignalType.ERROR, message: `Unknown message type: ${msg}` }));
         }
-      } catch (err) {
-        const state = await ConnectionStateManager.getState(sessionId);
-        console.error(`[SERVER] Message handler error for user ${state?.username || 'unknown'}:`, err);
-      }
+        } catch (err) {
+          try {
+            const state = await ConnectionStateManager.getState(sessionId);
+            console.error(`[SERVER] Message handler error for user ${state?.username || 'unknown'}:`, {
+              message: err?.message || 'Unknown error',
+              type: err?.constructor?.name || 'Error',
+              stack: process.env.NODE_ENV === 'development' ? err?.stack : undefined
+            });
+            
+            // Send error response to client if connection is still open
+            if (ws.readyState === 1) {
+              ws.send(JSON.stringify({ 
+                type: SignalType.ERROR, 
+                message: 'Server error processing message' 
+              }));
+            }
+          } catch (errorHandlingError) {
+            console.error('[SERVER] Error in error handler:', errorHandlingError);
+          }
+        }
     });
 
-    ws.on('close', async () => {
+    ws.on('close', async (code, reason) => {
       // Clean up Redis-based session state
-      const state = await ConnectionStateManager.getState(sessionId);
-      const username = state?.username;
-      
-      if (username) {
-        try {
-          await setOffline(username);
-          console.log(`[SERVER] User '${username}' marked offline due to WebSocket disconnect`);
-        } catch (e) {
-          console.error(`[SERVER] Failed to mark user '${username}' offline:`, e);
+      try {
+        const state = await ConnectionStateManager.getState(sessionId);
+        const username = state?.username;
+        
+        console.log(`[SERVER] Connection closing - Code: ${code}, Reason: ${reason || 'none'}, User: ${username || 'unknown'}`);
+        
+        if (username) {
+          try {
+            await setOffline(username);
+            console.log(`[SERVER] User '${username}' marked offline due to WebSocket disconnect`);
+          } catch (e) {
+            console.error(`[SERVER] Failed to mark user '${username}' offline:`, e);
+          }
+          console.log(`[SERVER] User '${username}' disconnected`);
         }
-        console.log(`[SERVER] User '${username}' disconnected`);
+      } catch (stateError) {
+        console.error('[SERVER] Error getting connection state during close:', stateError);
       }
 
       // Remove from local delivery map
@@ -1430,8 +1579,40 @@ if (WORKERS > 1 && cluster.isPrimary) {
           }
         };
 
-        // Create HTTPS server
-        server = https.createServer({ key, cert });
+        // Create HTTPS server with basic HTTP handler
+        server = https.createServer({ key, cert }, (req, res) => {
+          // Enable CORS for client requests
+          res.setHeader('Access-Control-Allow-Origin', '*');
+          res.setHeader('Access-Control-Allow-Methods', 'GET');
+          res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+          
+          if (req.method === 'OPTIONS') {
+            res.writeHead(200);
+            res.end();
+            return;
+          }
+          
+          if (req.method === 'GET' && req.url === '/api/tunnel-url') {
+            try {
+              const tunnelUrlPath = path.join(process.cwd(), 'config/cloudflared/public-url');
+              if (fs.existsSync(tunnelUrlPath)) {
+                const tunnelUrl = fs.readFileSync(tunnelUrlPath, 'utf8').trim();
+                res.writeHead(200, { 'Content-Type': 'text/plain' });
+                res.end(tunnelUrl);
+              } else {
+                res.writeHead(404, { 'Content-Type': 'text/plain' });
+                res.end('Tunnel URL not found');
+              }
+            } catch (error) {
+              console.error('[SERVER] Error reading tunnel URL:', error);
+              res.writeHead(500, { 'Content-Type': 'text/plain' });
+              res.end('Server error');
+            }
+          } else {
+            res.writeHead(404, { 'Content-Type': 'text/plain' });
+            res.end('Not found');
+          }
+        });
 
         // Start server
         startServer().catch(error => {
@@ -1475,7 +1656,39 @@ if (WORKERS > 1 && cluster.isPrimary) {
     serverHybridKeyPair = await CryptoUtils.Hybrid.generateHybridKeyPair();
     console.log('[SERVER] Server hybrid key pair generated (X25519 + Kyber768)');
 
-    server = https.createServer({ key, cert });
+    server = https.createServer({ key, cert }, (req, res) => {
+      // Enable CORS for client requests
+      res.setHeader('Access-Control-Allow-Origin', '*');
+      res.setHeader('Access-Control-Allow-Methods', 'GET');
+      res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+      
+      if (req.method === 'OPTIONS') {
+        res.writeHead(200);
+        res.end();
+        return;
+      }
+      
+      if (req.method === 'GET' && req.url === '/api/tunnel-url') {
+        try {
+          const tunnelUrlPath = path.join(process.cwd(), 'config/cloudflared/public-url');
+          if (fs.existsSync(tunnelUrlPath)) {
+            const tunnelUrl = fs.readFileSync(tunnelUrlPath, 'utf8').trim();
+            res.writeHead(200, { 'Content-Type': 'text/plain' });
+            res.end(tunnelUrl);
+          } else {
+            res.writeHead(404, { 'Content-Type': 'text/plain' });
+            res.end('Tunnel URL not found');
+          }
+        } catch (error) {
+          console.error('[SERVER] Error reading tunnel URL:', error);
+          res.writeHead(500, { 'Content-Type': 'text/plain' });
+          res.end('Server error');
+        }
+      } else {
+        res.writeHead(404, { 'Content-Type': 'text/plain' });
+        res.end('Not found');
+      }
+    });
 
     startServer().catch(error => {
       console.error('[SERVER] Failed to start server:', error);

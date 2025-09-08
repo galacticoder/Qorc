@@ -36,6 +36,7 @@ export enum SignalType {
   REACTION_REMOVE = "reaction-remove",
   AUTH_ERROR = "AUTH_ERROR",
   AUTH_SUCCESS = "AUTH_SUCCESS",
+  AUTH_RECOVERY = "auth-recovery",
   PASSPHRASE_HASH = "passphrase-hash",
   PASSPHRASE_HASH_NEW = "passphrase-hash-new",
   PASSPHRASE_SUCCESS = "passphrase-success",
@@ -183,7 +184,8 @@ export async function handleSignalMessages(
       }
 
       case SignalType.AUTH_SUCCESS: {
-        handleAuthSuccess(loginUsernameRef.current);
+        const isRecovered = data.recovered || false;
+        handleAuthSuccess(loginUsernameRef.current, isRecovered);
         break;
       }
 
@@ -282,6 +284,11 @@ export async function handleSignalMessages(
       case SignalType.IN_ACCOUNT: {
         setAccountAuthenticated(true);
         passwordRef.current = "";
+        
+        // If this is a recovered account auth, indicate it
+        if (data.recovered) {
+          console.log('[Signals] Account authentication recovered - server login still required');
+        }
         break;
       }
 

@@ -1,7 +1,7 @@
 #!/bin/bash
 
-# Script: setup_chat_docker.sh
-# Purpose: Build and run end2end-chat-site server in Docker
+# Script: docker-server.sh  
+# Purpose: Build and run end2end-chat-site server in Docker with optional DDoS protection
 
 set -e  # Exit on error
 
@@ -159,18 +159,59 @@ cleanup() {
     log_success "Cleanup complete!"
 }
 
+# Run server with DDoS protection  
+run_server_with_ddos() {
+    log_header "Running Server with DDoS Protection"
+    
+    # Check if DDoS protection files exist
+    if [[ ! -f "scripts/Dockerfile.cloudflared" ]]; then
+        log_error "DDoS protection Docker files not found!"
+        log_info "Please ensure all files are present in the scripts directory"
+        exit 1
+    fi
+    
+    # Build the DDoS-protected image
+    log_step "Building Docker image with DDoS protection..."
+    if docker build -f scripts/Dockerfile.cloudflared -t "${SERVER_IMAGE_NAME}-ddos" . > /dev/null 2>&1; then
+        log_success "DDoS-protected image built successfully"
+    else
+        log_error "Failed to build DDoS-protected image"
+        exit 1
+    fi
+    
+    # Stop any existing containers
+    log_step "Stopping existing containers..."
+    docker stop "${SERVER_CONTAINER_NAME}-ddos" > /dev/null 2>&1 || true
+    docker rm "${SERVER_CONTAINER_NAME}-ddos" > /dev/null 2>&1 || true
+    
+    # Start the DDoS-protected container
+    log_step "Starting DDoS-protected server container..."
+    log_info "This will open a browser for Cloudflare authentication..."
+    
+    docker run -it --rm \
+        --name "${SERVER_CONTAINER_NAME}-ddos" \
+        -p 8080:8080 \
+        -p 8443:8443 \
+        -v "$(pwd)/config/cloudflared:/etc/cloudflared" \
+        -e CLOUDFLARE_ENABLED=true \
+        -e ENABLE_DDOS_PROTECTION=true \
+        "${SERVER_IMAGE_NAME}-ddos"
+}
+
 # Show menu and get user choice
 show_menu() {
     log_header "End-to-End Chat Site Server Docker Setup"
     echo ""
     log_info "What would you like to do?"
-    echo "1) Run Server (Backend - Node.js) in Docker"
-    echo "2) Clean up Docker images and containers"
-    echo "3) Exit"
+    echo "1) Run Server (Standard - Node.js) in Docker"
+    echo "2) Run Server with DDoS Protection (Cloudflare Tunnel)"
+    echo "3) Clean up Docker images and containers"
+    echo "4) Exit"
     echo ""
+    log_info "DDoS Protection: Uses Cloudflare's free tunnel for enterprise-grade protection"
     log_info "Note: For the client (Electron app), run './startClient.sh' directly"
     echo ""
-    read -p "Enter your choice (1-3): " choice
+    read -p "Enter your choice (1-4): " choice
 }
 
 # Main execution
@@ -188,9 +229,14 @@ main() {
             log_info "To run the client: ./startClient.sh"
             ;;
         2)
-            cleanup
+            run_server_with_ddos
+            log_success "DDoS-protected server session ended."
+            log_info "To run the client: ./startClient.sh"
             ;;
         3)
+            cleanup
+            ;;
+        4)
             log_info "Exiting..."
             exit 0
             ;;
