@@ -149,7 +149,9 @@ export const useAuth = (secureDB?: SecureDB) => {
 
   const passwordRef = useRef<string>("");
   const [passphraseHashParams, setPassphraseHashParams] = useState(null);
+  const [passwordHashParams, setPasswordHashParams] = useState(null);
   const [showPassphrasePrompt, setShowPassphrasePrompt] = useState(false);
+  const [showPasswordPrompt, setShowPasswordPrompt] = useState(false);
 
   const initializeKeys = useCallback(async () => {
     console.log('[AUTH] Starting key initialization process');
@@ -292,9 +294,23 @@ export const useAuth = (secureDB?: SecureDB) => {
         serverHybridPublic
       );
 
+      // For new registrations, hash password client-side with Argon2
+      // For existing users, send plaintext to get proper Argon2 parameters from server
+      let passwordToSend: string;
+      if (mode === "register") {
+        setAuthStatus("Hashing password with Argon2...");
+        console.log('[AUTH] Hashing password client-side using Argon2 for new registration');
+        passwordToSend = await CryptoUtils.Hash.hashData(password);
+        console.log(`[AUTH] Password hashed client-side for registration, hash length: ${passwordToSend.length}`);
+      } else {
+        // For login, request Argon2 parameters without sending plaintext password
+        console.log('[AUTH] Requesting password hash parameters (no plaintext password sent)');
+        passwordToSend = 'REQUEST_PASSWORD_PARAMS';
+      }
+      
       setAuthStatus("Encrypting password with post-quantum security...");
       const encryptedPassword = await CryptoUtils.Hybrid.encryptHybridPayload(
-        { content: password },
+        { content: passwordToSend },
         serverHybridPublic
       );
 
@@ -372,6 +388,19 @@ export const useAuth = (secureDB?: SecureDB) => {
     try {
       await initializeKeys();
 
+      // Check if this is a recovery mode (already authenticated but need passphrase for functionality)
+      const isRecoveryMode = isLoggedIn && accountAuthenticated && !passphraseHashParams;
+      
+      if (isRecoveryMode) {
+        console.log('[AUTH] Passphrase provided for recovery mode - enabling full functionality');
+        setShowPassphrasePrompt(false);
+        setAuthStatus("Passphrase verified - full functionality enabled!");
+        
+        // Clear status after a brief delay
+        setTimeout(() => setAuthStatus(""), 2000);
+        return;
+      }
+
       let passphraseHash: string;
 
       if (mode === "login") {
@@ -446,9 +475,65 @@ export const useAuth = (secureDB?: SecureDB) => {
     }
   };
 
+  const handlePasswordHashSubmit = async (password: string) => {
+    console.log(`[AUTH] Submitting password hash response`);
+    setAuthStatus("Processing password hash...");
+
+    try {
+      if (!passwordHashParams) {
+        setAuthStatus("Retrieving password hash parameters...");
+        throw new Error("Missing password hash parameters");
+      }
+
+      setAuthStatus("Computing secure password hash with Argon2...");
+      const passwordHash = await CryptoUtils.Hash.hashDataUsingInfo(
+        password,
+        passwordHashParams
+      );
+
+      console.log(`[AUTH] Sending password hash to server`);
+      setAuthStatus("Sending secure password hash to server...");
+      websocketClient.send(JSON.stringify({
+        type: SignalType.PASSWORD_HASH_RESPONSE,
+        passwordHash
+      }));
+      
+      // Clear the password prompt after sending the response
+      setShowPasswordPrompt(false);
+      setAuthStatus("Password verification in progress...");
+    } catch (error) {
+      console.error("Password hashing failed:", error);
+      setLoginError("Password processing failed");
+      setAuthStatus("");
+    }
+  };
+
   const handleAuthSuccess = async (username: string, isRecovered = false) => {
     console.log(`[AUTH] Authentication success for user: ${username} (recovered: ${isRecovered})`);
     console.log(`[AUTH] Setting authentication flags - isLoggedIn: true, accountAuthenticated: true`);
+    
+    // For recovered authentication without passphrase, prompt for passphrase
+    if (isRecovered && !passphrasePlaintextRef.current) {
+      console.log('[AUTH] Authentication recovered but passphrase needed for full functionality');
+      setAuthStatus("Authentication recovered - passphrase required for full functionality");
+      setUsername(username);
+      
+      // CRITICAL: Set loginUsernameRef for recovered authentication
+      loginUsernameRef.current = username;
+      console.log(`[AUTH] Set loginUsernameRef.current to recovered username: ${username}`);
+      
+      setIsLoggedIn(true);
+      setAccountAuthenticated(true);
+      
+      // Store authentication state for future recovery
+      storeAuthenticationState(username);
+      
+      // Prompt for passphrase to enable full functionality
+      setShowPassphrasePrompt(true);
+      setIsRegistrationMode(false); // This is a login scenario
+      setLoginError("");
+      return;
+    }
     
     setAuthStatus(isRecovered ? "Authentication recovered successfully!" : "Authentication successful! Logging in...");
     setUsername(username);
@@ -675,6 +760,59 @@ export const useAuth = (secureDB?: SecureDB) => {
     return async () => await logout(Database.secureDBRef, "Logged out");
   };
 
+  // Listen for password hash parameters from server
+  useEffect(() => {
+    const handlePasswordHashParams = (event: CustomEvent) => {
+      console.log('[AUTH] Received password hash parameters event:', event.detail);
+      
+      // Validate that required parameters are present
+      const params = event.detail;
+      if (!params || !params.salt || !params.memoryCost || !params.timeCost || !params.parallelism) {
+        console.error('[AUTH] Invalid password hash parameters received:', params);
+        setLoginError("Server sent invalid password hash parameters");
+        return;
+      }
+      
+      // Persist for potential fallback prompt
+      setPasswordHashParams(params);
+
+      // If we still have the user's plaintext password in memory from the account form,
+      // hash it immediately and respond without showing a second prompt
+      const existingPassword = passwordRef.current || "";
+      if (existingPassword) {
+        (async () => {
+          try {
+            setAuthStatus("Computing secure password hash with Argon2...");
+            const passwordHash = await CryptoUtils.Hash.hashDataUsingInfo(existingPassword, params);
+            console.log('[AUTH] Auto-submitting password hash to server');
+            websocketClient.send(JSON.stringify({
+              type: SignalType.PASSWORD_HASH_RESPONSE,
+              passwordHash
+            }));
+            // Do not show the prompt since we auto-submitted
+            setShowPasswordPrompt(false);
+            setAuthStatus("Password verification in progress...");
+          } catch (error) {
+            console.error('[AUTH] Auto password hashing failed:', error);
+            // Fallback to manual prompt
+            setShowPasswordPrompt(true);
+            setAuthStatus("Server requires password for secure authentication...");
+          }
+        })();
+      } else {
+        // No password cached (e.g., recovery or resumed session) — prompt the user
+        setShowPasswordPrompt(true);
+        setAuthStatus("Server requires password for secure authentication...");
+      }
+    };
+
+    window.addEventListener('password-hash-params', handlePasswordHashParams as EventListener);
+
+    return () => {
+      window.removeEventListener('password-hash-params', handlePasswordHashParams as EventListener);
+    };
+  }, []);
+
   // Add cleanup on page unload/refresh only
   useEffect(() => {
 
@@ -735,11 +873,16 @@ export const useAuth = (secureDB?: SecureDB) => {
     setLoginError,
     passphraseHashParams,
     setPassphraseHashParams,
+    passwordHashParams,
+    setPasswordHashParams,
     passphrasePlaintextRef,
     passphraseRef,
     aesKeyRef,
     setShowPassphrasePrompt,
     showPassphrasePrompt,
+    setShowPasswordPrompt,
+    showPasswordPrompt,
+    handlePasswordHashSubmit,
     logout,
     useLogout,
     hybridKeysRef,

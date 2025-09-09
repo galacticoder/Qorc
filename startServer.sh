@@ -2,6 +2,37 @@
 
 set -euo pipefail
 
+# Cleanup function for proper shutdown
+cleanup_on_exit() {
+    echo -e "\n[STARTUP] Received shutdown signal, cleaning up..."
+    
+    # Stop tunnel monitoring if it was started
+    if [[ -f "/tmp/tunnel_monitor.pid" ]]; then
+        MONITOR_PID=$(cat /tmp/tunnel_monitor.pid 2>/dev/null)
+        if [[ -n "$MONITOR_PID" ]]; then
+            echo "[STARTUP] Stopping tunnel monitor..."
+            kill "$MONITOR_PID" 2>/dev/null || true
+        fi
+        rm -f /tmp/tunnel_monitor.pid
+    fi
+    
+    # Stop tunnel if running
+    if [[ -f "scripts/config/cloudflared/tunnel.pid" ]]; then
+        echo "[STARTUP] Stopping Cloudflare tunnel..."
+        bash scripts/simple-tunnel.sh stop 2>/dev/null || true
+    fi
+    
+    # Kill any remaining processes
+    pkill -f cloudflared 2>/dev/null || true
+    pkill -f "node server.js" 2>/dev/null || true
+    
+    echo "[STARTUP] Cleanup completed"
+    exit 0
+}
+
+# Set up signal handlers
+trap cleanup_on_exit SIGINT SIGTERM SIGQUIT
+
 # Show help if requested
 if [[ "${1:-}" == "--help" ]] || [[ "${1:-}" == "-h" ]]; then
     echo "End-to-End Chat Server Startup Script"
@@ -112,7 +143,7 @@ if [[ "$DDOS_ONLY" == "true" ]]; then
     exit 0
 fi
 
-# Function to setup DDoS protection
+# Function to setup DDoS protection with monitoring
 setup_ddos_protection() {
     if [[ "$ENABLE_DDOS_PROTECTION" != "true" ]]; then
         echo -e "${YELLOW}DDoS protection disabled (use --no-ddos to skip this message)${NC}"
@@ -126,24 +157,67 @@ setup_ddos_protection() {
         return 0
     fi
     
-    # Start the simple tunnel (no complex authentication required)
-    echo -e "${GREEN}Starting DDoS protection tunnel (no authentication needed)...${NC}"
-    if ../scripts/simple-tunnel.sh start; then
-        echo -e "${GREEN}✓ DDoS protection active!${NC}"
+    # Start the tunnel with robust retry
+    echo -e "${GREEN}Starting DDoS protection tunnel (with auto-retry)...${NC}"
+    
+    local tunnel_attempts=3
+    local tunnel_success=false
+    
+    for attempt in $(seq 1 $tunnel_attempts); do
+        echo -e "${BLUE}Tunnel attempt $attempt/$tunnel_attempts...${NC}"
         
-        # Show public URL if available
-        if [[ -n "${PUBLIC_URL:-}" ]]; then
-            echo -e "${GREEN}✓ Public URL: ${PUBLIC_URL}${NC}"
-        elif [[ -f "../config/cloudflared/public-url" ]]; then
-            PUBLIC_URL=$(cat ../config/cloudflared/public-url)
-            echo -e "${GREEN}✓ Public URL: ${PUBLIC_URL}${NC}"
+        if timeout 60 ../scripts/simple-tunnel.sh start; then
+            echo -e "${GREEN}✓ DDoS protection active!${NC}"
+            tunnel_success=true
+            
+            # Show public URL if available
+            if [[ -n "${PUBLIC_URL:-}" ]]; then
+                echo -e "${GREEN}✓ Public URL: ${PUBLIC_URL}${NC}"
+            elif [[ -f "../config/cloudflared/public-url" ]]; then
+                PUBLIC_URL=$(cat ../config/cloudflared/public-url)
+                echo -e "${GREEN}✓ Public URL: ${PUBLIC_URL}${NC}"
+            fi
+            break
+        else
+            echo -e "${YELLOW}Tunnel attempt $attempt failed${NC}"
+            if [[ $attempt -lt $tunnel_attempts ]]; then
+                echo -e "${BLUE}Cleaning up and retrying in 5 seconds...${NC}"
+                pkill -f cloudflared 2>/dev/null || true
+                sleep 5
+            fi
         fi
-        
-        return 0
-    else
-        echo -e "${YELLOW}Failed to start DDoS protection. Server will start without it.${NC}"
-        return 0
+    done
+    
+    if [[ "$tunnel_success" != "true" ]]; then
+        echo -e "${YELLOW}Failed to start DDoS protection after $tunnel_attempts attempts.${NC}"
+        echo -e "${YELLOW}Server will start without tunnel protection.${NC}"
+        # Final cleanup
+        pkill -f cloudflared 2>/dev/null || true
+        rm -f scripts/config/cloudflared/tunnel.pid 2>/dev/null || true
     fi
+    
+    return 0
+}
+
+# Function to monitor and restart tunnel if needed
+monitor_tunnel() {
+    while true; do
+        sleep 30 # Check every 30 seconds
+        
+        if [[ "$ENABLE_DDOS_PROTECTION" == "true" ]] && [[ -f "../scripts/simple-tunnel.sh" ]]; then
+            # Check if tunnel should be running but isn't
+            if ! ../scripts/simple-tunnel.sh status >/dev/null 2>&1; then
+                echo -e "${YELLOW}[$(date)] Tunnel down, attempting restart...${NC}"
+                
+                # Try to restart the tunnel
+                if timeout 60 ../scripts/simple-tunnel.sh restart >/dev/null 2>&1; then
+                    echo -e "${GREEN}[$(date)] Tunnel restarted successfully${NC}"
+                else
+                    echo -e "${RED}[$(date)] Failed to restart tunnel${NC}"
+                fi
+            fi
+        fi
+    done
 }
 
 # Function to check DDoS protection status
@@ -832,8 +906,21 @@ if [[ "$ENABLE_DDOS_PROTECTION" == "true" ]]; then
 fi
 echo
 
+# Start tunnel monitoring in background if tunnel is enabled
+if [[ "$ENABLE_DDOS_PROTECTION" == "true" ]] && [[ -f "../scripts/simple-tunnel.sh" ]]; then
+    echo -e "${BLUE}Starting tunnel monitoring service...${NC}"
+    monitor_tunnel &
+    MONITOR_PID=$!
+    echo "$MONITOR_PID" > /tmp/tunnel_monitor.pid
+fi
+
 # Start server with error handling
 echo -e "${GREEN}Starting secure WebSocket server...${NC}"
+
+# Ensure cleanup happens on script exit
+trap 'cleanup_on_exit' EXIT
+
+# Start the server
 if ! node server.js 2>&1 | tee /tmp/server_output.log; then
     # Check if the error was module not found and we haven't retried yet
     if grep -q "ERR_MODULE_NOT_FOUND" /tmp/server_output.log && [ ! -f /tmp/server_retry_attempted ]; then
@@ -843,6 +930,10 @@ if ! node server.js 2>&1 | tee /tmp/server_output.log; then
     else
         # For other errors or if we already retried once, just exit
         rm -f /tmp/server_retry_attempted 2>/dev/null
+        cleanup_on_exit
         exit 1
     fi
 fi
+
+# If we get here, server exited normally
+cleanup_on_exit

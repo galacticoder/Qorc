@@ -25,6 +25,7 @@ import { TorAutoSetup } from "../components/setup/TorAutoSetup";
 import { ServerSelection } from "../components/setup/ServerSelection";
 import { getTorAutoSetup } from "../lib/tor-auto-setup";
 import { SignalType } from "../lib/signals";
+import { blockingSystem } from "../lib/blocking-system";
 
 // Helper function to generate appropriate reply content for different message types
 const getReplyContent = (message: Message): string => {
@@ -141,6 +142,14 @@ const ChatApp: React.FC<ChatAppProps> = () => {
     Authentication.originalUsernameRef.current
   );
   
+
+  // Make auth context globally available for blocking system
+  useEffect(() => {
+    (window as any).authContext = Authentication;
+    return () => {
+      delete (window as any).authContext;
+    };
+  }, [Authentication]);
 
   // Store username mapping for current user only when SecureDB is available
   useEffect(() => {
@@ -330,16 +339,13 @@ const ChatApp: React.FC<ChatAppProps> = () => {
           // Connect WebSocket first
           await (window as any).edgeApi?.wsConnect?.();
           
-          // Then attempt authentication recovery if there's a stored username
+          // Authentication recovery disabled - user must login manually
+          // This prevents automatic passphrase prompts on app startup
           const hasStoredAuth = localStorage.getItem('last_authenticated_username');
           if (hasStoredAuth && !Authentication.isLoggedIn) {
-            console.log('[Index] Attempting automatic authentication recovery...');
-            setTimeout(() => {
-              Authentication.attemptAuthRecovery().catch(error => {
-                console.log('[Index] Authentication recovery failed:', error);
-                // Not a critical error, user can login manually
-              });
-            }, 1000); // Wait 1 second for connection to stabilize
+            console.log('[Index] Found stored authentication but auto-recovery is disabled - user must login manually');
+            // Show a subtle hint that the user can login with their previous account
+            // but don't automatically attempt recovery
           }
         } catch (error) {
           console.error('[Index] Connection initialization failed:', error);
@@ -413,7 +419,7 @@ const ChatApp: React.FC<ChatAppProps> = () => {
         return;
       }
       
-      console.log('[Index] Processing local message edit:', messageId, newContent);
+      console.log('[Index] Processing local message edit:', messageId);
       
       setMessages(prev => {
         const updatedMessages = prev.map(msg => 
@@ -532,7 +538,8 @@ const ChatApp: React.FC<ChatAppProps> = () => {
     );
   }
 
-  if (!Authentication.isLoggedIn) {
+  // Show login screen if not logged in OR if passphrase/password is needed for recovery
+  if (!Authentication.isLoggedIn || Authentication.showPassphrasePrompt || Authentication.showPasswordPrompt) {
     return (
       <div className="flex items-center justify-center min-h-screen p-4 bg-gradient-to-r from-gray-50 to-slate-50 dark:from-gray-900 dark:to-slate-900">
         <Login
@@ -541,6 +548,7 @@ const ChatApp: React.FC<ChatAppProps> = () => {
           error={Authentication.loginError}
           onAccountSubmit={Authentication.handleAccountSubmit}
           onServerPasswordSubmit={Authentication.handleServerPasswordSubmit}
+          onPasswordHashSubmit={Authentication.handlePasswordHashSubmit}
           accountAuthenticated={Authentication.accountAuthenticated}
           isRegistrationMode={Authentication.isRegistrationMode}
           serverTrustRequest={Authentication.serverTrustRequest}
@@ -548,6 +556,8 @@ const ChatApp: React.FC<ChatAppProps> = () => {
           onRejectServerTrust={Authentication.rejectServerTrust}
           showPassphrasePrompt={Authentication.showPassphrasePrompt}
           setShowPassphrasePrompt={Authentication.setShowPassphrasePrompt}
+          showPasswordPrompt={Authentication.showPasswordPrompt}
+          setShowPasswordPrompt={Authentication.setShowPasswordPrompt}
           onPassphraseSubmit={Authentication.handlePassphraseSubmit}
         />
       </div>
@@ -608,6 +618,23 @@ const ChatApp: React.FC<ChatAppProps> = () => {
                 if (!selectedConversation) {
                   console.error('[Index] No conversation selected');
                   return;
+                }
+                
+                // Check if the recipient is blocked before sending (except for typing indicators)
+                if (messageSignalType !== 'typing-start' && messageSignalType !== 'typing-stop') {
+                  try {
+                    const passphrase = Authentication.passphrasePlaintextRef.current;
+                    if (passphrase && selectedConversation) {
+                      const canSend = await blockingSystem.canSendMessage(selectedConversation, passphrase);
+                      if (!canSend) {
+                        console.log('[Index] Message blocked - user is blocked');
+                        return; // blockingSystem.canSendMessage already shows notification
+                      }
+                    }
+                  } catch (error) {
+                    console.error('[Index] Error checking blocking status:', error);
+                    // Continue with sending on error to avoid breaking functionality
+                  }
                 }
                 
                 // Handle reactions (no message bubble should be created)

@@ -26,6 +26,8 @@ export const SignalType = {
   PASSPHRASE_HASH: "passphrase-hash",
   PASSPHRASE_HASH_NEW: "passphrase-hash-new",
   PASSPHRASE_SUCCESS: "passphrase-success",
+  PASSWORD_HASH_PARAMS: "password-hash-params",
+  PASSWORD_HASH_RESPONSE: "password-hash-response",
 
   UPDATE_DB: "update-db",
   HYBRID_KEYS_UPDATE: "hybrid-keys-update",
@@ -57,6 +59,13 @@ export const SignalType = {
   // User existence validation
   CHECK_USER_EXISTS: "check-user-exists",
   USER_EXISTS_RESPONSE: "user-exists-response",
+
+  // Blocking system - secure and privacy-preserving
+  BLOCK_LIST_SYNC: "block-list-sync",
+  BLOCK_LIST_UPDATE: "block-list-update",
+  BLOCK_TOKENS_UPDATE: "block-tokens-update",
+  BLOCK_USER: "block-user",
+  UNBLOCK_USER: "unblock-user",
 
   // Note: Typing indicators are now handled as encrypted messages
 

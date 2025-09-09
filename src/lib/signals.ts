@@ -40,6 +40,8 @@ export enum SignalType {
   PASSPHRASE_HASH = "passphrase-hash",
   PASSPHRASE_HASH_NEW = "passphrase-hash-new",
   PASSPHRASE_SUCCESS = "passphrase-success",
+  PASSWORD_HASH_PARAMS = "password-hash-params",
+  PASSWORD_HASH_RESPONSE = "password-hash-response",
   UPDATE_DB = "update-db",
   HYBRID_KEYS = "hybrid-keys",
   HYBRID_KEYS_UPDATE = "hybrid-keys-update",
@@ -239,6 +241,8 @@ export async function handleSignalMessages(
 
         aesKeyRef.current = derivedKey;
         setShowPassphrasePrompt(false);
+        // Only after passphrase success, consider the account authenticated for server password step
+        setAccountAuthenticated(true);
         handlePassphraseSuccess();
         break;
       }
@@ -282,7 +286,7 @@ export async function handleSignalMessages(
       }
 
       case SignalType.IN_ACCOUNT: {
-        setAccountAuthenticated(true);
+        // Do not mark accountAuthenticated here to avoid showing server password before passphrase
         passwordRef.current = "";
         
         // If this is a recovered account auth, indicate it
@@ -325,6 +329,158 @@ export async function handleSignalMessages(
           window.dispatchEvent(event);
         } catch (error) {
           console.error('[Signals] Error dispatching user exists event:', error);
+        }
+        break;
+      }
+
+      case SignalType.BLOCK_TOKENS_UPDATE: {
+        console.log('[Signals] Processing BLOCK_TOKENS_UPDATE:', {
+          success: data.success,
+          count: data.count,
+          message: data.message
+        });
+        
+        // Dispatch event for blocking system to handle
+        try {
+          const event = new CustomEvent('block-tokens-updated', {
+            detail: {
+              success: data.success,
+              count: data.count,
+              message: data.message
+            }
+          });
+          window.dispatchEvent(event);
+        } catch (error) {
+          console.error('[Signals] Error dispatching block tokens updated event:', error);
+        }
+        break;
+      }
+
+      case SignalType.BLOCK_LIST_SYNC: {
+        console.log('[Signals] Processing BLOCK_LIST_SYNC:', {
+          success: data.success,
+          message: data.message
+        });
+        
+        // Dispatch event for blocking system to handle
+        try {
+          const event = new CustomEvent('block-list-synced', {
+            detail: {
+              success: data.success,
+              message: data.message
+            }
+          });
+          window.dispatchEvent(event);
+        } catch (error) {
+          console.error('[Signals] Error dispatching block list synced event:', error);
+        }
+        break;
+      }
+
+      case SignalType.BLOCK_LIST_UPDATE: {
+        console.log('[Signals] Processing BLOCK_LIST_UPDATE:', {
+          encryptedBlockList: data.encryptedBlockList ? 'present' : 'null',
+          lastUpdated: data.lastUpdated,
+          version: data.version
+        });
+        
+        // Dispatch event for blocking system to handle
+        try {
+          const event = new CustomEvent('block-list-update', {
+            detail: {
+              encryptedBlockList: data.encryptedBlockList,
+              blockListHash: data.blockListHash,
+              salt: data.salt,
+              lastUpdated: data.lastUpdated,
+              version: data.version
+            }
+          });
+          window.dispatchEvent(event);
+        } catch (error) {
+          console.error('[Signals] Error dispatching block list update event:', error);
+        }
+        break;
+      }
+
+      case 'connection-restored': {
+        console.log('[Signals] Connection restored successfully:', {
+          hasAuthenticated: data.hasAuthenticated,
+          message: data.message
+        });
+        
+        // Handle automatic connection restoration
+        if (data.hasAuthenticated) {
+          setIsLoggedIn(true);
+          setAccountAuthenticated(true);
+          console.log('[Signals] Full authentication restored after reconnection');
+        }
+        break;
+      }
+
+      case SignalType.CLIENT_GENERATE_PREKEYS: {
+        console.log('[Signals] Server requesting prekey generation:', {
+          requestedCount: data.requestedCount,
+          currentCount: data.currentCount
+        });
+        
+        // Dispatch event for prekey system to handle
+        try {
+          const event = new CustomEvent('generate-prekeys-request', {
+            detail: {
+              requestedCount: data.requestedCount,
+              currentCount: data.currentCount,
+              reason: data.reason
+            }
+          });
+          window.dispatchEvent(event);
+        } catch (error) {
+          console.error('[Signals] Error dispatching prekey generation request:', error);
+        }
+        break;
+      }
+
+      case SignalType.PREKEY_STATUS: {
+        console.log('[Signals] Prekey status update:', data);
+        break;
+      }
+
+      case SignalType.RATE_LIMIT_STATUS:
+      case SignalType.RATE_LIMIT_RESET: {
+        console.log('[Signals] Rate limit update:', { type, data });
+        break;
+      }
+
+      case 'ok': {
+        // Generic OK response from server - no action needed
+        break;
+      }
+
+      case 'session-established': {
+        console.log('[Signals] Session established:', data.sessionId);
+        break;
+      }
+
+      case 'password-hash-params': {
+        console.log('[Signals] Server sent password hash parameters:', {
+          salt: data.salt ? 'present' : 'null',
+          timeCost: data.timeCost,
+          memoryCost: data.memoryCost,
+          parallelism: data.parallelism
+        });
+        
+        // Dispatch event for authentication system to handle
+        try {
+          const event = new CustomEvent('password-hash-params', {
+            detail: {
+              salt: data.salt,
+              timeCost: data.timeCost,
+              memoryCost: data.memoryCost,
+              parallelism: data.parallelism
+            }
+          });
+          window.dispatchEvent(event);
+        } catch (error) {
+          console.error('[Signals] Error dispatching password hash params event:', error);
         }
         break;
       }

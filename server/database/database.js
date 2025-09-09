@@ -76,7 +76,14 @@ export async function initDatabase() {
         salt TEXT,
         memoryCost INTEGER,
         timeCost INTEGER,
-        parallelism INTEGER
+        parallelism INTEGER,
+        -- Optional password parameter columns (may be added via migration)
+        passwordVersion INTEGER,
+        passwordAlgorithm TEXT,
+        passwordSalt TEXT,
+        passwordMemoryCost INTEGER,
+        passwordTimeCost INTEGER,
+        passwordParallelism INTEGER
       )
     `);
 
@@ -144,12 +151,77 @@ export async function initDatabase() {
       );
     `);
 
+    // Blocking system tables - maintain privacy with encrypted block tokens
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS user_block_lists (
+        username TEXT PRIMARY KEY,
+        encryptedBlockList TEXT NOT NULL,
+        blockListHash TEXT NOT NULL,
+        salt TEXT,
+        lastUpdated INTEGER NOT NULL,
+        version INTEGER NOT NULL DEFAULT 1
+      );
+    `);
+    
+    // Add salt column if it doesn't exist (migration)
+    try {
+      const tableInfo = db.prepare("PRAGMA table_info(user_block_lists)").all();
+      const hasSaltColumn = tableInfo.some(col => col.name === 'salt');
+      if (!hasSaltColumn) {
+        console.log('[DB] Adding salt column to user_block_lists table...');
+        db.exec(`ALTER TABLE user_block_lists ADD COLUMN salt TEXT;`);
+      }
+    } catch (error) {
+      console.warn('[DB] Warning: Could not check/add salt column:', error.message);
+    }
+
+    // Migrate users table to add password parameter columns if missing
+    try {
+      const usersInfo = db.prepare("PRAGMA table_info(users)").all();
+      const missingCols = [
+        'passwordVersion',
+        'passwordAlgorithm',
+        'passwordSalt',
+        'passwordMemoryCost',
+        'passwordTimeCost',
+        'passwordParallelism'
+      ].filter(col => !usersInfo.some(info => info.name === col));
+      if (missingCols.length > 0) {
+        console.log('[DB] Adding password parameter columns to users table:', missingCols.join(', '));
+        if (!usersInfo.some(info => info.name === 'passwordVersion')) db.exec(`ALTER TABLE users ADD COLUMN passwordVersion INTEGER;`);
+        if (!usersInfo.some(info => info.name === 'passwordAlgorithm')) db.exec(`ALTER TABLE users ADD COLUMN passwordAlgorithm TEXT;`);
+        if (!usersInfo.some(info => info.name === 'passwordSalt')) db.exec(`ALTER TABLE users ADD COLUMN passwordSalt TEXT;`);
+        if (!usersInfo.some(info => info.name === 'passwordMemoryCost')) db.exec(`ALTER TABLE users ADD COLUMN passwordMemoryCost INTEGER;`);
+        if (!usersInfo.some(info => info.name === 'passwordTimeCost')) db.exec(`ALTER TABLE users ADD COLUMN passwordTimeCost INTEGER;`);
+        if (!usersInfo.some(info => info.name === 'passwordParallelism')) db.exec(`ALTER TABLE users ADD COLUMN passwordParallelism INTEGER;`);
+      }
+    } catch (error) {
+      console.warn('[DB] Warning: Could not check/add password parameter columns:', error.message);
+    }
+
+    // Block tokens for server-side filtering without revealing relationships
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS block_tokens (
+        tokenHash TEXT PRIMARY KEY,
+        blockerHash TEXT NOT NULL,
+        blockedHash TEXT NOT NULL,
+        createdAt INTEGER NOT NULL,
+        expiresAt INTEGER
+      );
+    `);
+
     checkMigration();
 
     db.exec(`CREATE INDEX IF NOT EXISTS idx_messages_from ON messages(fromUsername);`);
     db.exec(`CREATE INDEX IF NOT EXISTS idx_messages_to ON messages(toUsername);`);
     db.exec(`CREATE INDEX IF NOT EXISTS idx_messages_timestamp ON messages(timestamp);`);
     db.exec(`CREATE INDEX IF NOT EXISTS idx_messages_participants ON messages(fromUsername, toUsername);`);
+    
+    // Blocking system indexes for performance
+    db.exec(`CREATE INDEX IF NOT EXISTS idx_block_tokens_hash ON block_tokens(tokenHash);`);
+    db.exec(`CREATE INDEX IF NOT EXISTS idx_block_tokens_blocker ON block_tokens(blockerHash);`);
+    db.exec(`CREATE INDEX IF NOT EXISTS idx_block_tokens_expires ON block_tokens(expiresAt) WHERE expiresAt IS NOT NULL;`);
+    db.exec(`CREATE INDEX IF NOT EXISTS idx_user_block_lists_updated ON user_block_lists(lastUpdated);`);
   } else {
     // For Postgres, assume tables exist or handle migrations externally
     console.log('[DB] Using Postgres backend - assuming tables exist');
@@ -324,8 +396,9 @@ export class UserDatabase {
         await pool.query(`
           INSERT INTO users (
             username, passwordHash, passphraseHash,
-            version, algorithm, salt, memoryCost, timeCost, parallelism
-          ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+            version, algorithm, salt, memoryCost, timeCost, parallelism,
+            passwordVersion, passwordAlgorithm, passwordSalt, passwordMemoryCost, passwordTimeCost, passwordParallelism
+          ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
           ON CONFLICT (username) DO UPDATE SET
             passwordHash = EXCLUDED.passwordHash,
             passphraseHash = EXCLUDED.passphraseHash,
@@ -334,7 +407,13 @@ export class UserDatabase {
             salt = EXCLUDED.salt,
             memoryCost = EXCLUDED.memoryCost,
             timeCost = EXCLUDED.timeCost,
-            parallelism = EXCLUDED.parallelism
+            parallelism = EXCLUDED.parallelism,
+            passwordVersion = EXCLUDED.passwordVersion,
+            passwordAlgorithm = EXCLUDED.passwordAlgorithm,
+            passwordSalt = EXCLUDED.passwordSalt,
+            passwordMemoryCost = EXCLUDED.passwordMemoryCost,
+            passwordTimeCost = EXCLUDED.passwordTimeCost,
+            passwordParallelism = EXCLUDED.passwordParallelism
         `, [
           userRecord.username,
           userRecord.passwordHash,
@@ -344,16 +423,24 @@ export class UserDatabase {
           userRecord.salt,
           userRecord.memoryCost,
           userRecord.timeCost,
-          userRecord.parallelism
+          userRecord.parallelism,
+          userRecord.passwordVersion,
+          userRecord.passwordAlgorithm,
+          userRecord.passwordSalt,
+          userRecord.passwordMemoryCost,
+          userRecord.passwordTimeCost,
+          userRecord.passwordParallelism
         ]);
       } else {
         db.prepare(`
           INSERT INTO users (
             username, passwordHash, passphraseHash,
-            version, algorithm, salt, memoryCost, timeCost, parallelism
+            version, algorithm, salt, memoryCost, timeCost, parallelism,
+            passwordVersion, passwordAlgorithm, passwordSalt, passwordMemoryCost, passwordTimeCost, passwordParallelism
           )
           VALUES (@username, @passwordHash, @passphraseHash,
-            @version, @algorithm, @salt, @memoryCost, @timeCost, @parallelism)
+            @version, @algorithm, @salt, @memoryCost, @timeCost, @parallelism,
+            @passwordVersion, @passwordAlgorithm, @passwordSalt, @passwordMemoryCost, @passwordTimeCost, @passwordParallelism)
           ON CONFLICT(username) DO UPDATE SET
             passwordHash = excluded.passwordHash,
             passphraseHash = excluded.passphraseHash,
@@ -362,12 +449,120 @@ export class UserDatabase {
             salt = excluded.salt,
             memoryCost = excluded.memoryCost,
             timeCost = excluded.timeCost,
-            parallelism = excluded.parallelism
+            parallelism = excluded.parallelism,
+            passwordVersion = excluded.passwordVersion,
+            passwordAlgorithm = excluded.passwordAlgorithm,
+            passwordSalt = excluded.passwordSalt,
+            passwordMemoryCost = excluded.passwordMemoryCost,
+            passwordTimeCost = excluded.passwordTimeCost,
+            passwordParallelism = excluded.passwordParallelism
         `).run(userRecord);
       }
       console.log(`[DB] User record saved successfully: ${username}`);
     } catch (error) {
       console.error(`[DB] Error saving user record for ${username}:`, error);
+      throw error;
+    }
+  }
+
+  static async updateUserPassword(username, newPasswordHash) {
+    // SECURITY: Validate inputs
+    if (!username || typeof username !== 'string' || username.length < 3 || username.length > 32) {
+      console.error(`[DB] Invalid username for password update: ${username}`);
+      throw new Error('Invalid username for password update');
+    }
+    
+    if (!newPasswordHash || typeof newPasswordHash !== 'string' || newPasswordHash.length < 10) {
+      console.error('[DB] Invalid password hash for update');
+      throw new Error('Invalid password hash for update');
+    }
+    
+    // SECURITY: Validate username format
+    if (!/^[a-zA-Z0-9_-]+$/.test(username)) {
+      console.error(`[DB] Invalid username format for password update: ${username}`);
+      throw new Error('Invalid username format for password update');
+    }
+    
+    console.log(`[DB] Updating password for user: ${username}`);
+    try {
+      if (USE_PG) {
+        const pool = await getPgPool();
+        const result = await pool.query(
+          'UPDATE users SET passwordHash = $1 WHERE username = $2',
+          [newPasswordHash, username]
+        );
+        if (result.rowCount === 0) {
+          throw new Error('User not found for password update');
+        }
+      } else {
+        const result = db.prepare('UPDATE users SET passwordHash = ? WHERE username = ?')
+          .run(newPasswordHash, username);
+        if (result.changes === 0) {
+          throw new Error('User not found for password update');
+        }
+      }
+      console.log(`[DB] Password updated successfully for user: ${username}`);
+    } catch (error) {
+      console.error(`[DB] Error updating password for ${username}:`, error);
+      throw error;
+    }
+  }
+
+  static async updateUserPasswordParams(updateData) {
+    // SECURITY: Validate inputs
+    if (!updateData || typeof updateData !== 'object') {
+      console.error('[DB] Invalid update data structure');
+      throw new Error('Invalid update data structure');
+    }
+    
+    const { username, passwordVersion, passwordAlgorithm, passwordSalt, passwordMemoryCost, passwordTimeCost, passwordParallelism } = updateData;
+    
+    if (!username || typeof username !== 'string' || username.length < 3 || username.length > 32) {
+      console.error(`[DB] Invalid username for password params update: ${username}`);
+      throw new Error('Invalid username for password params update');
+    }
+    
+    // SECURITY: Validate username format
+    if (!/^[a-zA-Z0-9_-]+$/.test(username)) {
+      console.error(`[DB] Invalid username format for password params update: ${username}`);
+      throw new Error('Invalid username format for password params update');
+    }
+    
+    console.log(`[DB] Updating password parameters for user: ${username}`);
+    try {
+      if (USE_PG) {
+        const pool = await getPgPool();
+        const result = await pool.query(`
+          UPDATE users SET 
+            passwordVersion = $1, passwordAlgorithm = $2, passwordSalt = $3,
+            passwordMemoryCost = $4, passwordTimeCost = $5, passwordParallelism = $6
+          WHERE username = $7
+        `, [
+          passwordVersion, passwordAlgorithm, passwordSalt,
+          passwordMemoryCost, passwordTimeCost, passwordParallelism,
+          username
+        ]);
+        if (result.rowCount === 0) {
+          throw new Error('User not found for password params update');
+        }
+      } else {
+        const result = db.prepare(`
+          UPDATE users SET 
+            passwordVersion = ?, passwordAlgorithm = ?, passwordSalt = ?,
+            passwordMemoryCost = ?, passwordTimeCost = ?, passwordParallelism = ?
+          WHERE username = ?
+        `).run(
+          passwordVersion, passwordAlgorithm, passwordSalt,
+          passwordMemoryCost, passwordTimeCost, passwordParallelism,
+          username
+        );
+        if (result.changes === 0) {
+          throw new Error('User not found for password params update');
+        }
+      }
+      console.log(`[DB] Password parameters updated successfully for user: ${username}`);
+    } catch (error) {
+      console.error(`[DB] Error updating password parameters for ${username}:`, error);
       throw error;
     }
   }
@@ -1036,6 +1231,326 @@ export class LibsignalBundleDB {
     } catch (error) {
       console.error(`[DB] Error taking libsignal bundle for ${username}:`, error);
       return null;
+    }
+  }
+}
+
+/**
+ * Secure Blocking Database
+ * Manages user block lists with end-to-end encryption and zero-knowledge server design
+ */
+export class BlockingDatabase {
+  /**
+   * Store encrypted block list for a user
+   * @param {string} username - Username of the blocker
+   * @param {string} encryptedBlockList - Encrypted block list (client-encrypted)
+   * @param {string} blockListHash - Hash for integrity verification
+   * @param {string} salt - Salt used for encryption
+   * @param {number} version - Version number
+   * @param {number} lastUpdated - Last updated timestamp
+   */
+  static async storeEncryptedBlockList(username, encryptedBlockList, blockListHash, salt, version, lastUpdated) {
+    // SECURITY: Validate inputs
+    if (!username || typeof username !== 'string' || username.length < 3 || username.length > 32) {
+      console.error(`[BLOCKING] Invalid username: ${username}`);
+      throw new Error('Invalid username');
+    }
+    
+    if (!encryptedBlockList || typeof encryptedBlockList !== 'string') {
+      console.error('[BLOCKING] Invalid encrypted block list');
+      throw new Error('Invalid encrypted block list');
+    }
+    
+    if (!blockListHash || typeof blockListHash !== 'string') {
+      console.error('[BLOCKING] Invalid block list hash');
+      throw new Error('Invalid block list hash');
+    }
+    
+    if (!salt || typeof salt !== 'string') {
+      console.error('[BLOCKING] Invalid salt');
+      throw new Error('Invalid salt');
+    }
+    
+    // SECURITY: Validate username format
+    if (!/^[a-zA-Z0-9_-]+$/.test(username)) {
+      console.error(`[BLOCKING] Invalid username format: ${username}`);
+      throw new Error('Invalid username format');
+    }
+    
+    const now = lastUpdated || Date.now();
+    const blockListVersion = version || 1;
+    
+    try {
+      if (USE_PG) {
+        const pool = await getPgPool();
+        await pool.query(`
+          INSERT INTO user_block_lists (username, encryptedBlockList, blockListHash, salt, lastUpdated, version)
+          VALUES ($1, $2, $3, $4, $5, $6)
+          ON CONFLICT (username) DO UPDATE SET
+            encryptedBlockList = EXCLUDED.encryptedBlockList,
+            blockListHash = EXCLUDED.blockListHash,
+            salt = EXCLUDED.salt,
+            lastUpdated = EXCLUDED.lastUpdated,
+            version = EXCLUDED.version
+        `, [username, encryptedBlockList, blockListHash, salt, now, blockListVersion]);
+      } else {
+        db.prepare(`
+          INSERT INTO user_block_lists (username, encryptedBlockList, blockListHash, salt, lastUpdated, version)
+          VALUES (?, ?, ?, ?, ?, ?)
+          ON CONFLICT(username) DO UPDATE SET
+            encryptedBlockList = excluded.encryptedBlockList,
+            blockListHash = excluded.blockListHash,
+            salt = excluded.salt,
+            lastUpdated = excluded.lastUpdated,
+            version = excluded.version
+        `).run(username, encryptedBlockList, blockListHash, salt, now, blockListVersion);
+      }
+      
+      console.log(`[BLOCKING] Stored encrypted block list for user: ${username}`);
+    } catch (error) {
+      console.error(`[BLOCKING] Error storing block list for ${username}:`, error);
+      throw error;
+    }
+  }
+  
+  /**
+   * Retrieve encrypted block list for a user
+   * @param {string} username - Username of the blocker
+   * @returns {Object|null} Block list data or null if not found
+   */
+  static async getEncryptedBlockList(username) {
+    // SECURITY: Validate username
+    if (!username || typeof username !== 'string' || username.length < 3 || username.length > 32) {
+      console.error(`[BLOCKING] Invalid username: ${username}`);
+      return null;
+    }
+    
+    if (!/^[a-zA-Z0-9_-]+$/.test(username)) {
+      console.error(`[BLOCKING] Invalid username format: ${username}`);
+      return null;
+    }
+    
+    try {
+      if (USE_PG) {
+        const pool = await getPgPool();
+        const { rows } = await pool.query(
+          'SELECT encryptedBlockList, blockListHash, salt, lastUpdated, version FROM user_block_lists WHERE username = $1',
+          [username]
+        );
+        return rows[0] || null;
+      } else {
+        const row = db.prepare(
+          'SELECT encryptedBlockList, blockListHash, salt, lastUpdated, version FROM user_block_lists WHERE username = ?'
+        ).get(username);
+        return row || null;
+      }
+    } catch (error) {
+      console.error(`[BLOCKING] Error retrieving block list for ${username}:`, error);
+      return null;
+    }
+  }
+  
+  /**
+   * Store block tokens for server-side filtering
+   * Block tokens are cryptographic hashes that allow the server to filter messages
+   * without knowing the actual usernames or relationships
+   * @param {Array} blockTokens - Array of {tokenHash, blockerHash, blockedHash, expiresAt}
+   */
+  static async storeBlockTokens(blockTokens) {
+    if (!Array.isArray(blockTokens) || blockTokens.length === 0) {
+      return;
+    }
+    
+    // SECURITY: Validate each token
+    for (const token of blockTokens) {
+      if (!token || typeof token !== 'object') {
+        throw new Error('Invalid block token structure');
+      }
+      // Normalize hashes to accept both 64 and 128 character hashes (like isMessageBlocked does)
+      if (!token.tokenHash || typeof token.tokenHash !== 'string' || (token.tokenHash.length !== 64 && token.tokenHash.length !== 128)) {
+        throw new Error('Invalid token hash');
+      }
+      if (!token.blockerHash || typeof token.blockerHash !== 'string' || (token.blockerHash.length !== 64 && token.blockerHash.length !== 128)) {
+        throw new Error('Invalid blocker hash');
+      }
+      if (!token.blockedHash || typeof token.blockedHash !== 'string' || (token.blockedHash.length !== 64 && token.blockedHash.length !== 128)) {
+        throw new Error('Invalid blocked hash');
+      }
+    }
+    
+    const now = Date.now();
+    
+    // Normalize all hashes to 64 characters for consistent storage
+    const normalizedTokens = blockTokens.map(token => ({
+      tokenHash: token.tokenHash.length === 128 ? token.tokenHash.substring(0, 64) : token.tokenHash,
+      blockerHash: token.blockerHash.length === 128 ? token.blockerHash.substring(0, 64) : token.blockerHash,
+      blockedHash: token.blockedHash.length === 128 ? token.blockedHash.substring(0, 64) : token.blockedHash,
+      expiresAt: token.expiresAt
+    }));
+    
+    try {
+      if (USE_PG) {
+        const pool = await getPgPool();
+        const client = await pool.connect();
+        try {
+          await client.query('BEGIN');
+          
+          // Clear existing tokens for the blocker
+          const blockerHashes = [...new Set(normalizedTokens.map(t => t.blockerHash))];
+          if (blockerHashes.length > 0) {
+            const placeholders = blockerHashes.map((_, i) => `$${i + 1}`).join(',');
+            await client.query(
+              `DELETE FROM block_tokens WHERE blockerHash IN (${placeholders})`,
+              blockerHashes
+            );
+          }
+          
+          // Insert new tokens
+          for (const token of normalizedTokens) {
+            await client.query(`
+              INSERT INTO block_tokens (tokenHash, blockerHash, blockedHash, createdAt, expiresAt)
+              VALUES ($1, $2, $3, $4, $5)
+            `, [token.tokenHash, token.blockerHash, token.blockedHash, now, token.expiresAt || null]);
+          }
+          
+          await client.query('COMMIT');
+        } catch (error) {
+          await client.query('ROLLBACK');
+          throw error;
+        } finally {
+          client.release();
+        }
+      } else {
+        const insertStmt = db.prepare(`
+          INSERT INTO block_tokens (tokenHash, blockerHash, blockedHash, createdAt, expiresAt)
+          VALUES (?, ?, ?, ?, ?)
+        `);
+        
+        const transaction = db.transaction((tokens) => {
+          // Clear existing tokens for the blocker(s)
+          const blockerHashes = [...new Set(tokens.map(t => t.blockerHash))];
+          for (const blockerHash of blockerHashes) {
+            db.prepare('DELETE FROM block_tokens WHERE blockerHash = ?').run(blockerHash);
+          }
+          
+          // Insert new tokens
+          for (const token of tokens) {
+            insertStmt.run(
+              token.tokenHash,
+              token.blockerHash, 
+              token.blockedHash,
+              now,
+              token.expiresAt || null
+            );
+          }
+        });
+        
+        transaction(normalizedTokens);
+      }
+      
+      console.log(`[BLOCKING] Stored ${blockTokens.length} block tokens`);
+    } catch (error) {
+      console.error('[BLOCKING] Error storing block tokens:', error);
+      throw error;
+    }
+  }
+  
+  /**
+   * Check if a message should be blocked based on block tokens
+   * @param {string} fromHash - Hash of sender username
+   * @param {string} toHash - Hash of recipient username  
+   * @returns {boolean} True if message should be blocked
+   */
+  static async isMessageBlocked(fromHash, toHash) {
+    console.log(`[BLOCKING-DB-DEBUG] Checking if message is blocked:`);
+    console.log(`[BLOCKING-DB-DEBUG] From hash: ${fromHash.substring(0, 16)}...`);
+    console.log(`[BLOCKING-DB-DEBUG] To hash: ${toHash.substring(0, 16)}...`);
+    
+    // SECURITY: Validate hashes (SHA-512 can be 128 chars, but we truncate to 64)
+    if (!fromHash || typeof fromHash !== 'string' || (fromHash.length !== 64 && fromHash.length !== 128)) {
+      console.log(`[BLOCKING-DB-DEBUG] Invalid fromHash: length=${fromHash?.length}, type=${typeof fromHash}`);
+      return false;
+    }
+    if (!toHash || typeof toHash !== 'string' || (toHash.length !== 64 && toHash.length !== 128)) {
+      console.log(`[BLOCKING-DB-DEBUG] Invalid toHash: length=${toHash?.length}, type=${typeof toHash}`);
+      return false;
+    }
+    
+    // Normalize hashes to 64 characters if they're 128
+    const normalizedFromHash = fromHash.length === 128 ? fromHash.substring(0, 64) : fromHash;
+    const normalizedToHash = toHash.length === 128 ? toHash.substring(0, 64) : toHash;
+    
+    console.log(`[BLOCKING-DB-DEBUG] Normalized hashes - From: ${normalizedFromHash.substring(0, 16)}..., To: ${normalizedToHash.substring(0, 16)}...`);
+    
+    try {
+      // Create the block token using the same algorithm as client
+      // Client uses: blockerHash + blockedHash + 'block_token_v1'
+      // In this case, toHash (recipient) is the potential blocker, fromHash (sender) is potentially blocked
+      
+      // Convert hex strings to bytes (same as client)
+      const toHashBytes = new Uint8Array(normalizedToHash.match(/.{2}/g).map(byte => parseInt(byte, 16)));
+      const fromHashBytes = new Uint8Array(normalizedFromHash.match(/.{2}/g).map(byte => parseInt(byte, 16)));
+      const saltBytes = new TextEncoder().encode('block_token_v1');
+      
+      // Combine in same order as client: blockerHash + blockedHash + salt
+      const combined = new Uint8Array(toHashBytes.length + fromHashBytes.length + saltBytes.length);
+      combined.set(toHashBytes, 0);
+      combined.set(fromHashBytes, toHashBytes.length);
+      combined.set(saltBytes, toHashBytes.length + fromHashBytes.length);
+      
+      const blockTokenBuffer = await CryptoUtils.Hash.digestSHA512Bytes(combined);
+      // Truncate to 64 characters (128 hex chars -> 64) like client does
+      const tokenHash = Buffer.from(blockTokenBuffer).toString('hex').substring(0, 64);
+      
+      console.log(`[BLOCKING-DB-DEBUG] Generated token hash: ${tokenHash}`);
+      
+      if (USE_PG) {
+        const pool = await getPgPool();
+        const { rows } = await pool.query(
+          'SELECT 1 FROM block_tokens WHERE tokenHash = $1 AND (expiresAt IS NULL OR expiresAt > $2) LIMIT 1',
+          [tokenHash, Date.now()]
+        );
+        console.log(`[BLOCKING-DB-DEBUG] Database query result: ${rows.length} rows found`);
+        return rows.length > 0;
+      } else {
+        const row = db.prepare(
+          'SELECT 1 FROM block_tokens WHERE tokenHash = ? AND (expiresAt IS NULL OR expiresAt > ?) LIMIT 1'
+        ).get(tokenHash, Date.now());
+        console.log(`[BLOCKING-DB-DEBUG] Database query result: ${!!row}`);
+        return !!row;
+      }
+    } catch (error) {
+      console.error('[BLOCKING] Error checking block status:', error);
+      return false; // Fail open to avoid blocking legitimate messages
+    }
+  }
+  
+  /**
+   * Clean up expired block tokens
+   */
+  static async cleanupExpiredTokens() {
+    const now = Date.now();
+    
+    try {
+      if (USE_PG) {
+        const pool = await getPgPool();
+        const { rowCount } = await pool.query(
+          'DELETE FROM block_tokens WHERE expiresAt IS NOT NULL AND expiresAt <= $1',
+          [now]
+        );
+        if (rowCount > 0) {
+          console.log(`[BLOCKING] Cleaned up ${rowCount} expired block tokens`);
+        }
+      } else {
+        const result = db.prepare(
+          'DELETE FROM block_tokens WHERE expiresAt IS NOT NULL AND expiresAt <= ?'
+        ).run(now);
+        if (result.changes > 0) {
+          console.log(`[BLOCKING] Cleaned up ${result.changes} expired block tokens`);
+        }
+      }
+    } catch (error) {
+      console.error('[BLOCKING] Error cleaning up expired tokens:', error);
     }
   }
 }

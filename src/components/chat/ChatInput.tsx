@@ -30,6 +30,7 @@ interface ChatInputProps {
   onTyping: () => void;
   selectedConversation?: string;
   getDisplayUsername?: (username: string) => Promise<string>;
+  disabled?: boolean;
 }
 
 export function ChatInput({
@@ -46,6 +47,7 @@ export function ChatInput({
   onTyping,
   selectedConversation,
   getDisplayUsername,
+  disabled = false,
 }: ChatInputProps) {
   const [message, setMessage] = useState("");
   const [isSending, setIsSending] = useState(false);
@@ -108,7 +110,7 @@ export function ChatInput({
   };
 
   async function handleSend() {
-    if (!message.trim() || isSending || !selectedConversation) return;
+    if (!message.trim() || isSending || !selectedConversation || disabled) return;
 
     const sanitizedMessage = sanitizeMessage(message);
     if (!sanitizedMessage) return;
@@ -347,12 +349,15 @@ export function ChatInput({
         </div>
       )}
 
-      <div className="flex items-center gap-2 px-4 py-3 transition-all duration-200">
-        <FileUploader onFileSelected={handleFileChange} disabled={isSendingFile} />
+      <div className={cn(
+        "flex items-center gap-2 px-4 py-3 transition-all duration-200",
+        disabled && "opacity-50 pointer-events-none"
+      )}>
+        <FileUploader onFileSelected={handleFileChange} disabled={isSendingFile || disabled} />
 
         <VoiceRecorderButton
           onClick={() => setShowVoiceRecorder(true)}
-          disabled={isSendingFile || showVoiceRecorder}
+          disabled={isSendingFile || showVoiceRecorder || disabled}
         />
 
         <MessageTextarea
@@ -363,10 +368,11 @@ export function ChatInput({
           }}
           onKeyDown={handleKeyDown}
           textareaRef={textareaRef}
+          disabled={disabled}
         />
 
         <SendButton
-          disabled={!message.trim() || isSending || !selectedConversation}
+          disabled={!message.trim() || isSending || !selectedConversation || disabled}
           isSending={isSending}
           editingMessage={editingMessage}
           onClick={handleSend}

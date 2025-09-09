@@ -387,10 +387,10 @@ const gracefulShutdown = async (signal) => {
     
     // Race between cleanup and timeout
     await Promise.race([cleanup(), timeoutPromise]);
-    console.log('[PRESENCE] Graceful shutdown completed');
+    console.log('[PRESENCE] Shutdown completed');
     process.exit(0);
   } catch (error) {
-    console.error('[PRESENCE] Error during graceful shutdown:', error);
+    console.error('[PRESENCE] Error during shutdown:', error);
     process.exit(1);
   }
 };

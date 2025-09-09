@@ -3,6 +3,7 @@ import { useCallback } from "react";
 import { SignalType } from "@/lib/signals";
 import { Message } from "@/components/chat/types";
 import websocketClient from "@/lib/websocket";
+import { blockingSystem } from "@/lib/blocking-system";
 
 // SECURITY: Safe JSON parsing with size and structure validation
 function safeJsonParse(jsonString: string, maxSize: number = Number.MAX_SAFE_INTEGER): any {
@@ -415,6 +416,39 @@ export function useEncryptedMessageHandler(
             hasReplyTo: !!payload.replyTo,
             replyToKeys: payload.replyTo ? Object.keys(payload.replyTo) : null
           });
+
+          // Apply blocking filter for incoming messages (except system messages)
+          if (payload.from && payload.from !== loginUsernameRef.current &&
+              payload.type !== 'read-receipt' && payload.type !== 'delivery-receipt' &&
+              payload.type !== 'typing-start' && payload.type !== 'typing-stop' &&
+              payload.type !== 'typing-indicator') {
+            try {
+              // Try to get passphrase from global context
+              let passphrase = null;
+              
+              // Check various ways to access the passphrase
+              if ((window as any).authContext?.passphrasePlaintextRef?.current) {
+                passphrase = (window as any).authContext.passphrasePlaintextRef.current;
+              }
+              
+              if (passphrase) {
+                const shouldFilter = await blockingSystem.filterIncomingMessage({
+                  sender: payload.from,
+                  content: payload.content || ''
+                }, passphrase);
+                
+                if (!shouldFilter) {
+                  console.log(`[EncryptedMessageHandler] Blocked incoming message from: ${payload.from}`);
+                  return; // Don't process blocked messages
+                }
+              } else {
+                console.debug('[EncryptedMessageHandler] No passphrase available for blocking filter');
+              }
+            } catch (error) {
+              console.error('[EncryptedMessageHandler] Error checking blocking filter:', error);
+              // Continue processing on error to avoid breaking functionality
+            }
+          }
           
           // Handle system messages first (these should not appear in chat)
           
@@ -555,6 +589,17 @@ export function useEncryptedMessageHandler(
                 console.log('[EncryptedMessageHandler] Message marked as deleted:', messageIdToDelete);
                 return updatedMessages;
               });
+              
+              // Dispatch remote message delete event for reply field updates
+              try {
+                const deleteEvent = new CustomEvent('remote-message-delete', {
+                  detail: { messageId: messageIdToDelete }
+                });
+                window.dispatchEvent(deleteEvent);
+                console.log('[EncryptedMessageHandler] Dispatched remote delete event:', messageIdToDelete);
+              } catch (error) {
+                console.error('[EncryptedMessageHandler] Failed to dispatch remote delete event:', error);
+              }
             }
             return; // Don't process as regular message
           }
@@ -574,6 +619,17 @@ export function useEncryptedMessageHandler(
                 console.log('[EncryptedMessageHandler] Message edited:', messageIdToEdit);
                 return updatedMessages;
               });
+              
+              // Dispatch remote message edit event for reply field updates
+              try {
+                const editEvent = new CustomEvent('remote-message-edit', {
+                  detail: { messageId: messageIdToEdit, newContent }
+                });
+                window.dispatchEvent(editEvent);
+                console.log('[EncryptedMessageHandler] Dispatched remote edit event:', messageIdToEdit);
+              } catch (error) {
+                console.error('[EncryptedMessageHandler] Failed to dispatch remote edit event:', error);
+              }
             }
             
             // Dispatch typing stop event for edit messages (same as normal messages)

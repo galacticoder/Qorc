@@ -7,9 +7,10 @@ interface MessageTextareaProps {
   onChange: (e: React.ChangeEvent<HTMLTextAreaElement>) => void;
   onKeyDown: (e: React.KeyboardEvent) => void;
   textareaRef: React.RefObject<HTMLTextAreaElement>;
+  disabled?: boolean;
 }
 
-export function MessageTextarea({ value, onChange, onKeyDown, textareaRef }: MessageTextareaProps) {
+export function MessageTextarea({ value, onChange, onKeyDown, textareaRef, disabled = false }: MessageTextareaProps) {
   useEffect(() => {
     if (textareaRef.current) {
       textareaRef.current.style.height = "auto";
@@ -23,10 +24,12 @@ export function MessageTextarea({ value, onChange, onKeyDown, textareaRef }: Mes
       value={value}
       onChange={onChange}
       onKeyDown={onKeyDown}
-      placeholder="Type a message..."
+      placeholder={disabled ? "Messages disabled" : "Type a message..."}
+      disabled={disabled}
       className={cn(
         "min-h-[39px] max-h-[100px] resize-none border-0 bg-transparent px-0 py-2 text-sm",
-        "focus-visible:ring-0 focus-visible:ring-offset-0 focus:outline-none focus:ring-0 focus:border-transparent"
+        "focus-visible:ring-0 focus-visible:ring-offset-0 focus:outline-none focus:ring-0 focus:border-transparent",
+        disabled && "opacity-50 cursor-not-allowed"
       )}
       style={{
         color: 'var(--composer-text-color)',

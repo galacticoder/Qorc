@@ -31,6 +31,25 @@ log_error() {
     echo -e "${RED}[TUNNEL]${NC} $1"
 }
 
+# Clean up any existing tunnel processes
+cleanup_tunnel_processes() {
+    log_info "Cleaning up existing tunnel processes..."
+    
+    # Kill any existing cloudflared processes
+    pkill -f "cloudflared.*tunnel" 2>/dev/null || true
+    
+    # Remove stale PID file
+    if [[ -f "$CONFIG_DIR/tunnel.pid" ]]; then
+        rm "$CONFIG_DIR/tunnel.pid" 2>/dev/null || true
+    fi
+    
+    # Wait for processes to fully terminate
+    sleep 1
+    
+    # Force kill if any remain
+    pkill -9 -f "cloudflared.*tunnel" 2>/dev/null || true
+}
+
 # Setup directories
 setup_directories() {
     mkdir -p "$CONFIG_DIR"
@@ -84,24 +103,123 @@ EOF
     log_info "This URL will stay the same every time you restart the server"
 }
 
-# Start tunnel
+# Start tunnel with robust retry logic
 start_tunnel() {
+    # Check if tunnel is already running and healthy
     if pgrep -f "cloudflared.*tunnel" > /dev/null; then
-        log_info "Tunnel is already running"
-        return 0
+        if [[ -f "$CONFIG_DIR/tunnel.pid" ]]; then
+            EXISTING_PID=$(cat "$CONFIG_DIR/tunnel.pid")
+            if kill -0 $EXISTING_PID 2>/dev/null; then
+                log_info "Tunnel is already running (PID: $EXISTING_PID)"
+                return 0
+            fi
+        fi
     fi
-
-    log_info "Starting permanent Cloudflare tunnel..."
     
-    # Start tunnel with persistent subdomain
-    cloudflared tunnel --no-tls-verify --url https://localhost:8443 > "$CONFIG_DIR/tunnel.log" 2>&1 &
-    TUNNEL_PID=$!
+    # Clean up any stale processes first
+    cleanup_tunnel_processes
     
-    # Wait for tunnel to start
-    sleep 5
+    local max_retries=5
+    local retry_delay=2
+    local attempt=1
     
-    if kill -0 $TUNNEL_PID 2>/dev/null; then
-        echo $TUNNEL_PID > "$CONFIG_DIR/tunnel.pid"
+    while [ $attempt -le $max_retries ]; do
+        log_info "Starting permanent Cloudflare tunnel (attempt $attempt/$max_retries)..."
+        
+        # Try different approaches based on attempt number
+        case $attempt in
+            1|2)
+                # Standard approach
+                cloudflared tunnel --no-tls-verify --url https://localhost:8443 > "$CONFIG_DIR/tunnel.log" 2>&1 &
+                ;;
+            3)
+                # Try with different DNS
+                log_info "Trying with Google DNS..."
+                sudo systemctl flush-dns 2>/dev/null || true
+                echo "nameserver 8.8.8.8" | sudo tee /tmp/resolv.conf.backup > /dev/null
+                cloudflared tunnel --no-tls-verify --url https://localhost:8443 > "$CONFIG_DIR/tunnel.log" 2>&1 &
+                ;;
+            4)
+                # Try with Cloudflare DNS
+                log_info "Trying with Cloudflare DNS..."
+                echo "nameserver 1.1.1.1" | sudo tee /tmp/resolv.conf.backup > /dev/null
+                cloudflared tunnel --no-tls-verify --url https://localhost:8443 > "$CONFIG_DIR/tunnel.log" 2>&1 &
+                ;;
+            5)
+                # Last attempt with maximum timeout
+                log_info "Final attempt with extended timeout..."
+                timeout 60 cloudflared tunnel --no-tls-verify --url https://localhost:8443 > "$CONFIG_DIR/tunnel.log" 2>&1 &
+                ;;
+        esac
+        
+        TUNNEL_PID=$!
+        
+        # Wait for tunnel to start
+        sleep 5
+        
+        # Check if process is still alive
+        if ! kill -0 $TUNNEL_PID 2>/dev/null; then
+            log_warning "Tunnel process died immediately (attempt $attempt)"
+            attempt=$((attempt + 1))
+            sleep $retry_delay
+            continue
+        fi
+        
+        # Check for immediate errors in the log
+        if [[ -f "$CONFIG_DIR/tunnel.log" ]]; then
+            local error_patterns="failed to request quick Tunnel|dial tcp|server misbehaving|connection refused|context deadline exceeded|network is unreachable"
+            if timeout 10 grep -q "$error_patterns" "$CONFIG_DIR/tunnel.log" 2>/dev/null; then
+                log_warning "Tunnel startup failed due to network issues (attempt $attempt)"
+                kill $TUNNEL_PID 2>/dev/null || true
+                
+                # If it's a DNS issue, try to fix it
+                if grep -q "dial tcp\|server misbehaving" "$CONFIG_DIR/tunnel.log" 2>/dev/null; then
+                    log_info "Detected DNS issues, trying to flush DNS cache..."
+                    sudo systemctl restart systemd-resolved 2>/dev/null || true
+                    sleep 2
+                fi
+                
+                attempt=$((attempt + 1))
+                sleep $retry_delay
+                continue
+            fi
+        fi
+        
+        # Wait a bit more for tunnel to fully establish
+        sleep 5
+        
+        # Final check - look for success indicators
+        if [[ -f "$CONFIG_DIR/tunnel.log" ]]; then
+            if timeout 10 grep -q "https://.*\.trycloudflare\.com" "$CONFIG_DIR/tunnel.log" 2>/dev/null; then
+                log_success "Tunnel established successfully!"
+                echo $TUNNEL_PID > "$CONFIG_DIR/tunnel.pid"
+                break
+            fi
+        fi
+        
+        # If we get here, tunnel might be starting but URL not ready yet
+        if kill -0 $TUNNEL_PID 2>/dev/null; then
+            log_info "Tunnel process running, waiting for URL..."
+            echo $TUNNEL_PID > "$CONFIG_DIR/tunnel.pid"
+            break
+        fi
+        
+        log_warning "Tunnel startup incomplete (attempt $attempt)"
+        kill $TUNNEL_PID 2>/dev/null || true
+        attempt=$((attempt + 1))
+        sleep $retry_delay
+    done
+    
+    # Final validation
+    if [ $attempt -gt $max_retries ]; then
+        log_error "Failed to start tunnel after $max_retries attempts"
+        cleanup_tunnel_processes
+        return 1
+    fi
+    
+    # If we have a PID, proceed with URL extraction
+    if [[ -f "$CONFIG_DIR/tunnel.pid" ]]; then
+        TUNNEL_PID=$(cat "$CONFIG_DIR/tunnel.pid")
         
         # Use environment variable if set, otherwise extract from logs
         if [[ -z "${PUBLIC_URL:-}" ]]; then
@@ -118,14 +236,12 @@ start_tunnel() {
         fi
         
         if [[ -n "$PUBLIC_URL" ]]; then
-            echo "$PUBLIC_URL" > "$CONFIG_DIR/public-url"
+            # Export PUBLIC_URL as environment variable instead of file storage
+            export PUBLIC_URL="$PUBLIC_URL"
             
-            # Also update the server's public URL file if it exists (for backward compatibility)
-            if [[ -d "../server/config/cloudflared" ]]; then
-                mkdir -p "../server/config/cloudflared"
-                echo "$PUBLIC_URL" > "../server/config/cloudflared/public-url"
-                log_info "Updated server public URL file"
-            fi
+            # Write to environment file for persistence
+            echo "export PUBLIC_URL='$PUBLIC_URL'" > "$CONFIG_DIR/tunnel.env"
+            log_info "Public URL exported as environment variable"
             
             log_success "Tunnel started successfully (PID: $TUNNEL_PID)"
             log_success "Permanent URL: $PUBLIC_URL"

@@ -7,13 +7,13 @@ import { WebSocketServer } from 'ws';
 import selfsigned from 'selfsigned';
 import { SignalType } from './signals.js';
 import { CryptoUtils } from './crypto/unified-crypto.js';
-import { MessageDatabase, PrekeyDatabase, LibsignalBundleDB, UserDatabase, initDatabase } from './database/database.js';
+import { MessageDatabase, PrekeyDatabase, LibsignalBundleDB, UserDatabase, BlockingDatabase, initDatabase } from './database/database.js';
 import * as ServerConfig from './config/config.js';
 import { TTL_CONFIG } from './config/config.js';
 import * as authentication from './authentication/authentication.js';
 import { setServerPasswordOnInput } from './authentication/auth-utils.js';
 import { rateLimitMiddleware } from './rate-limiting/rate-limit-middleware.js';
-import { setOnline, setOffline, createSubscriber, publishToUser } from './presence/presence.js';
+import { setOnline, setOffline, createSubscriber, publishToUser, withRedisClient } from './presence/presence.js';
 import { ConnectionStateManager } from './presence/connection-state.js';
 
 // SECURITY: Input validation utilities
@@ -158,7 +158,7 @@ function validateCertPath(certPath) {
   return normalizedPath;
 }
 
-let server, key, cert, serverHybridKeyPair;
+let server, wss, key, cert, serverHybridKeyPair, blockTokenCleanupInterval, statusLogInterval, patternSub;
 
 function shouldPromptForServerPassword() {
   // Check if server password hash is missing
@@ -207,10 +207,102 @@ async function startServer() {
     console.log(`[SERVER] end2end relay running on wss://0.0.0.0:${ServerConfig.PORT}`)
   );
 
-  const wss = new WebSocketServer({ server });
+  wss = new WebSocketServer({ server });
 
   // Minimal debug toggle to reduce hot-path logging in production
   const DEBUG_SERVER_LOGS = (process.env.DEBUG_SERVER_LOGS || '').toString() === '1';
+
+  // Periodic cleanup of expired block tokens (every hour)
+  blockTokenCleanupInterval = setInterval(async () => {
+    try {
+      await BlockingDatabase.cleanupExpiredTokens();
+    } catch (error) {
+      console.error('[BLOCKING] Error during periodic token cleanup:', error);
+    }
+  }, 60 * 60 * 1000); // 1 hour
+
+  // Enhanced server shutdown handling
+  let heartbeatInterval = null; // Declare heartbeat interval variable
+  
+  const gracefulShutdown = async (signal) => {
+    console.log(`[SERVER] Received ${signal}, initiating graceful shutdown...`);
+    
+    try {
+      // Clear intervals
+      if (blockTokenCleanupInterval) {
+        clearInterval(blockTokenCleanupInterval);
+        blockTokenCleanupInterval = null;
+      }
+      if (statusLogInterval) {
+        clearInterval(statusLogInterval);
+        statusLogInterval = null;
+      }
+      if (heartbeatInterval) {
+        clearInterval(heartbeatInterval);
+        heartbeatInterval = null;
+      }
+      
+      // Close WebSocket server
+      if (wss) {
+        console.log('[SERVER] Closing WebSocket server...');
+        wss.close();
+      }
+      
+      // Close HTTPS server
+      if (server) {
+        console.log('[SERVER] Closing HTTPS server...');
+        server.close();
+      }
+      
+      // Close Redis subscriber
+      if (patternSub) {
+        console.log('[SERVER] Closing Redis subscriber...');
+        await patternSub.quit();
+        patternSub = null;
+      }
+      
+      // Clean up Cloudflare tunnel
+      try {
+        console.log('[SERVER] Cleaning up Cloudflare tunnel...');
+        const { execSync } = await import('child_process');
+        const scriptPath = path.join(process.cwd(), 'scripts', 'simple-tunnel.sh');
+        
+        if (fs.existsSync(scriptPath)) {
+          execSync(`bash "${scriptPath}" stop`, { 
+            stdio: 'inherit',
+            timeout: 10000 // 10 second timeout
+          });
+          console.log('[SERVER] Cloudflare tunnel cleaned up');
+        }
+      } catch (tunnelError) {
+        console.warn('[SERVER] Warning: Could not clean up tunnel:', tunnelError.message);
+      }
+      
+      console.log('[SERVER] Graceful shutdown completed');
+      process.exit(0);
+    } catch (error) {
+      console.error('[SERVER] Error during shutdown:', error);
+      process.exit(1);
+    }
+  };
+  
+  process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+  process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+  process.on('SIGQUIT', () => gracefulShutdown('SIGQUIT'));
+
+  // Set up heartbeat mechanism to detect and clean up dead connections
+  heartbeatInterval = setInterval(() => {
+    wss.clients.forEach((ws) => {
+      if (ws.isAlive === false) {
+        console.log('[SERVER] Terminating dead connection');
+        return ws.terminate();
+      }
+      
+      ws.isAlive = false;
+      try { ConnectionStateManager.refreshSession(ws._sessionId); } catch {}
+      ws.ping(() => {});
+    });
+  }, 30000); // Check every 30 seconds
 
   // Maintain local mapping of online users to their WebSocket(s) on THIS instance only
   // This avoids per-connection Redis subscribers and enables O(1) local delivery
@@ -236,7 +328,7 @@ async function startServer() {
   }
 
   // Single pattern-subscriber for this server instance to receive cross-instance deliveries
-  let patternSub = null;
+  patternSub = null;
   try {
     patternSub = await createSubscriber();
     await patternSub.psubscribe('deliver:*');
@@ -248,11 +340,70 @@ async function startServer() {
         if (set && set.size) {
           for (const client of set) {
             try {
+              // Skip and prune closed sockets
+              if (!client || client.readyState !== 1) {
+                removeLocalConnection(username, client);
+                continue;
+              }
               // Check if recipient client is authenticated with server password
               const recipientSessionId = client._sessionId;
               if (recipientSessionId) {
-                const recipientState = await ConnectionStateManager.getState(recipientSessionId);
-                if (recipientState?.hasAuthenticated) {
+                let recipientState = await ConnectionStateManager.getState(recipientSessionId);
+                let isAuthed = !!recipientState?.hasAuthenticated;
+                if (!isAuthed) {
+                  const userAuth = await ConnectionStateManager.getUserAuthState(username);
+                  isAuthed = !!userAuth?.hasAuthenticated;
+                }
+                if (isAuthed) {
+                  
+                  // SECURITY: Parse message to check for blocking before cross-instance delivery
+                  let parsedMessage;
+                  try {
+                    parsedMessage = JSON.parse(message);
+                  } catch (parseError) {
+                    console.error('[SERVER] Failed to parse cross-instance message for blocking check:', parseError);
+                    continue; // Skip this message if we can't parse it
+                  }
+                  
+                  // Extract sender and recipient for blocking check
+                  const senderUser = parsedMessage.encryptedPayload?.from || parsedMessage.from;
+                  const recipientUser = parsedMessage.encryptedPayload?.to || parsedMessage.to || username;
+                  
+                  if (senderUser && recipientUser && senderUser !== recipientUser) {
+                    // Check if this cross-instance message is blocked
+                    try {
+                      const encoder = new TextEncoder();
+                      const saltBytes = encoder.encode('user_hash_v1');
+                      
+                      // Sender hash
+                      const senderUsernameBytes = encoder.encode(senderUser);
+                      const senderHashData = new Uint8Array(senderUsernameBytes.length + saltBytes.length);
+                      senderHashData.set(senderUsernameBytes, 0);
+                      senderHashData.set(saltBytes, senderUsernameBytes.length);
+                      const senderHashBuffer = await CryptoUtils.Hash.digestSHA512Bytes(senderHashData);
+                      const senderHash = Buffer.from(senderHashBuffer).toString('hex');
+                      
+                      // Recipient hash
+                      const recipientUsernameBytes = encoder.encode(recipientUser);
+                      const recipientHashData = new Uint8Array(recipientUsernameBytes.length + saltBytes.length);
+                      recipientHashData.set(recipientUsernameBytes, 0);
+                      recipientHashData.set(saltBytes, recipientUsernameBytes.length);
+                      const recipientHashBuffer = await CryptoUtils.Hash.digestSHA512Bytes(recipientHashData);
+                      const recipientHash = Buffer.from(recipientHashBuffer).toString('hex');
+                      
+                      const isBlocked = await BlockingDatabase.isMessageBlocked(senderHash, recipientHash);
+                      
+                      if (isBlocked) {
+                        console.log(`[BLOCKING] Cross-instance message BLOCKED: ${senderUser} -> ${recipientUser}`);
+                        continue; // Skip delivery of this blocked message
+                      }
+                    } catch (blockingError) {
+                      console.error('[SERVER] Error checking blocking for cross-instance message:', blockingError);
+                      // Continue with delivery on error to prevent blocking legitimate messages
+                    }
+                  }
+                  
+                  // Message is not blocked, deliver it
                   client.send(message);
                   if (DEBUG_SERVER_LOGS) console.log(`[SERVER] Cross-instance message delivered to authenticated recipient: ${username}`);
                 } else {
@@ -260,11 +411,7 @@ async function startServer() {
                 }
               }
             } catch (err) {
-              console.error('[SERVER] Failed to send pattern delivery message to client:', {
-                username: username,
-                error: err.message,
-                clientReadyState: client.readyState
-              });
+              console.error('[SERVER] Failed to send cross-instance message to client:', err);
             }
           }
         }
@@ -303,7 +450,7 @@ async function startServer() {
   // SECURITY: Removed periodic pre-key maintenance - clients manage their own prekeys
 
   // Optimized periodic rate limiting status logging - only when needed
-  let statusLogInterval = null;
+  statusLogInterval = null;
   const startStatusLogging = () => {
     if (statusLogInterval) return;
     statusLogInterval = setInterval(async () => {
@@ -361,6 +508,21 @@ async function startServer() {
       ws.close(1011, 'Internal server error');
       return;
     }
+
+    // Initialize heartbeat state
+    ws.isAlive = true;
+    ws.on('pong', () => {
+      ws.isAlive = true;
+      // Refresh session TTL on heartbeat to keep authenticated state available for delivery
+      try { ConnectionStateManager.refreshSession(ws._sessionId); } catch {}
+    });
+    
+    // Handle client-initiated ping messages
+    ws.on('ping', () => {
+      ws.isAlive = true;
+      ws.pong();
+      try { ConnectionStateManager.refreshSession(ws._sessionId); } catch {}
+    });
 
 
 
@@ -454,6 +616,50 @@ async function startServer() {
 
       try {
         switch (parsed.type) {
+          case 'connection-restore': {
+            // Handle automatic connection restoration for reconnecting clients
+            const state = await ConnectionStateManager.getState(sessionId);
+            if (!state?.username) {
+              return ws.send(JSON.stringify({ 
+                type: SignalType.ERROR, 
+                message: 'No previous session to restore' 
+              }));
+            }
+            
+            console.log(`[SERVER] Attempting connection restoration for user: ${state.username}`);
+            
+            // Check if user has valid authentication state
+            if (state.hasAuthenticated) {
+              // Restore local connection mapping
+              ws._username = state.username;
+              addLocalConnection(state.username, ws);
+              
+              console.log(`[SERVER] Successfully restored authenticated connection for user: ${state.username}`);
+              ws.send(JSON.stringify({
+                type: 'connection-restored',
+                message: 'Connection restored successfully',
+                hasAuthenticated: true
+              }));
+            } else if (state.hasPassedAccountLogin) {
+              // User was partially authenticated, restore partial state
+              ws._username = state.username;
+              addLocalConnection(state.username, ws);
+              
+              console.log(`[SERVER] Restored partial authentication for user: ${state.username}`);
+              ws.send(JSON.stringify({
+                type: SignalType.IN_ACCOUNT,
+                message: 'Partial connection restored - server authentication required',
+                restored: true
+              }));
+            } else {
+              ws.send(JSON.stringify({
+                type: SignalType.ERROR,
+                message: 'No valid authentication state to restore'
+              }));
+            }
+            break;
+          }
+
           case SignalType.REQUEST_PREKEY_GENERATION: {
             // SECURITY: Requires authentication
             const state = await ConnectionStateManager.getState(sessionId);
@@ -743,11 +949,57 @@ async function startServer() {
                 storedAt: new Date(authState.storedAt).toISOString()
               });
               
-              // Restore authentication state to current session
-              await ConnectionStateManager.updateState(sessionId, {
+              // Check if user already has an active session to prevent conflicts
+              const existingSessionId = await ConnectionStateManager.getUserActiveSession(recoveryUsername);
+              if (existingSessionId && existingSessionId !== sessionId) {
+                console.log(`[SERVER] User ${recoveryUsername} already has active session ${existingSessionId}, rejecting recovery`);
+                return ws.send(JSON.stringify({
+                  type: SignalType.ERROR,
+                  message: 'User already logged in from another session'
+                }));
+              }
+              
+              // For recovery, we need to update the current session directly without going through username claiming
+              // This avoids interference with other users' sessions
+              const sessionState = await ConnectionStateManager.getState(sessionId);
+              if (!sessionState) {
+                return ws.send(JSON.stringify({
+                  type: SignalType.ERROR,
+                  message: 'Invalid session state'
+                }));
+              }
+              
+              // Update session state directly to avoid username claiming conflicts
+              const updatedState = {
+                ...sessionState,
                 username: recoveryUsername,
                 hasPassedAccountLogin: authState.hasPassedAccountLogin || false,
-                hasAuthenticated: authState.hasAuthenticated || false
+                hasAuthenticated: authState.hasAuthenticated || false,
+                lastActivity: Date.now()
+              };
+              
+              // Use Redis operations to safely update the session without interfering with other users
+              await withRedisClient(async (client) => {
+                // Store the session state
+                await client.setex(
+                  `connection_state:${sessionId}`,
+                  1800, // SESSION_TTL
+                  JSON.stringify(updatedState)
+                );
+                
+                // Update user session mapping only if not already claimed
+                const currentOwner = await client.get(`user_session:${recoveryUsername}`);
+                if (!currentOwner || currentOwner === sessionId) {
+                  await client.setex(`user_session:${recoveryUsername}`, 1800, sessionId);
+                } else {
+                  // Check if the owning session still exists
+                  const ownerSessionExists = await client.exists(`connection_state:${currentOwner}`);
+                  if (!ownerSessionExists) {
+                    // Cleanup stale mapping and claim username
+                    await client.setex(`user_session:${recoveryUsername}`, 1800, sessionId);
+                    console.log(`[SERVER] Cleaned up stale session mapping for ${recoveryUsername} during recovery`);
+                  }
+                }
               });
               
               // Restore local state
@@ -860,7 +1112,7 @@ async function startServer() {
                 console.log(`[SERVER] User '${result.username}' pending passphrase`);
               }
 
-              ws.send(JSON.stringify({ type: SignalType.IN_ACCOUNT, message: 'Logged in successfully' }));
+              // IN_ACCOUNT will be sent by AccountAuthHandler finalization after passphrase is processed
 
               if (!result.pending) {
                 const currentState = await ConnectionStateManager.getState(sessionId);
@@ -903,6 +1155,26 @@ async function startServer() {
                 type: SignalType.PASSPHRASE_SUCCESS,
                 message: successMessage,
               })
+            );
+            break;
+          }
+
+          case SignalType.PASSWORD_HASH_RESPONSE: {
+            const state = await ConnectionStateManager.getState(sessionId);
+            if (DEBUG_SERVER_LOGS) console.log(`[SERVER] Processing password hash response for user: ${state?.username || 'unknown'}`);
+            if (!state?.username) {
+              console.error('[SERVER] Username not set for password hash response');
+              return ws.send(JSON.stringify({ type: SignalType.ERROR, message: 'Username not set' }));
+            }
+            if (!parsed.passwordHash) {
+              console.error('[SERVER] Password hash missing');
+              return ws.send(JSON.stringify({ type: SignalType.ERROR, message: 'Password hash missing' }));
+            }
+
+            await authHandler.handlePasswordHash(
+              ws,
+              state.username,
+              parsed.passwordHash
             );
             break;
           }
@@ -1028,6 +1300,32 @@ async function startServer() {
               return ws.send(JSON.stringify({ type: SignalType.ERROR, message: 'Server authentication required' }));
             }
 
+            // SECURITY: Check if user has blocking errors - if so, prevent all message delivery
+            // This safety mechanism prevents potential abuse when block token updates fail
+            if (senderState?.blockingError) {
+              const errorAge = Date.now() - (senderState.blockingErrorTime || 0);
+              const maxErrorAge = 5 * 60 * 1000; // 5 minutes
+              
+              if (errorAge < maxErrorAge) {
+                console.log(`[BLOCKING] Preventing message delivery due to blocking errors for user: ${ws._username} (error age: ${Math.floor(errorAge/1000)}s)`);
+                // Send success response to prevent sender from knowing about the error
+                return ws.send(JSON.stringify({ type: 'ok', message: 'Message processing delayed due to system maintenance' }));
+              } else {
+                // Clear old blocking error after 5 minutes
+                try {
+                  await ConnectionStateManager.updateState(sessionId, { 
+                    blockingError: false,
+                    blockingErrorTime: null
+                  });
+                  console.log(`[BLOCKING] Cleared expired blocking error for user: ${ws._username}`);
+                } catch (clearError) {
+                  console.error(`[BLOCKING] Failed to clear blocking error state:`, clearError);
+                  // If we can't clear the error, continue blocking to be safe
+                  return ws.send(JSON.stringify({ type: 'ok', message: 'Message processing delayed due to system maintenance' }));
+                }
+              }
+            }
+
             // SECURITY: Validate recipient exists before processing
             if (!recipientUser || typeof recipientUser !== 'string' || recipientUser.length < 3) {
               console.error(`[SERVER] Invalid or missing recipient: ${recipientUser}`);
@@ -1050,6 +1348,67 @@ async function startServer() {
             } catch (error) {
               console.error(`[SERVER] Error checking recipient existence: ${error}`);
               return ws.send(JSON.stringify({ type: SignalType.ERROR, message: 'Failed to validate recipient' }));
+            }
+
+            // SECURITY: Check if message is blocked using privacy-preserving block tokens
+            // NOTE: Current architecture limitation - server still sees plaintext usernames for routing
+            // TODO: Future enhancement would use hash-based routing for complete privacy
+            try {
+              // Generate user hashes using the same algorithm as client (matching client exactly)
+              const encoder = new TextEncoder();
+              const saltBytes = encoder.encode('user_hash_v1');
+              
+              // Sender hash
+              const senderUsernameBytes = encoder.encode(ws._username);
+              const senderHashData = new Uint8Array(senderUsernameBytes.length + saltBytes.length);
+              senderHashData.set(senderUsernameBytes, 0);
+              senderHashData.set(saltBytes, senderUsernameBytes.length);
+              const senderHashBuffer = await CryptoUtils.Hash.digestSHA512Bytes(senderHashData);
+              const senderHash = Buffer.from(senderHashBuffer).toString('hex');
+              
+              // Recipient hash
+              const recipientUsernameBytes = encoder.encode(recipientUser);
+              const recipientHashData = new Uint8Array(recipientUsernameBytes.length + saltBytes.length);
+              recipientHashData.set(recipientUsernameBytes, 0);
+              recipientHashData.set(saltBytes, recipientUsernameBytes.length);
+              const recipientHashBuffer = await CryptoUtils.Hash.digestSHA512Bytes(recipientHashData);
+              const recipientHash = Buffer.from(recipientHashBuffer).toString('hex');
+              
+              console.log(`[BLOCKING-DEBUG] Checking message from ${ws._username} to ${recipientUser}`);
+              console.log(`[BLOCKING-DEBUG] Sender hash: ${senderHash.substring(0, 16)}...`);
+              console.log(`[BLOCKING-DEBUG] Recipient hash: ${recipientHash.substring(0, 16)}...`);
+              
+              const isBlocked = await BlockingDatabase.isMessageBlocked(senderHash, recipientHash);
+              console.log(`[BLOCKING-DEBUG] Block check result: ${isBlocked}`);
+              
+              if (isBlocked) {
+                console.log(`[SERVER] Message BLOCKED due to blocking relationship between users`);
+                console.log(`[BLOCKING] BLOCKED: ${ws._username} -> ${recipientUser} (Message Type: ${parsed.type})`);
+                
+                // Determine message type for logging
+                let messageTypeDesc = 'unknown';
+                if (parsed.type === 'encrypted-message') {
+                  // Check if it's a typing indicator by looking at the encryptedPayload structure
+                  // This is just for logging - we don't decrypt the actual content
+                  if (parsed.encryptedPayload?.content?.length < 200) {
+                    messageTypeDesc = 'short encrypted message (possibly typing indicator)';
+                  } else {
+                    messageTypeDesc = 'encrypted message';
+                  }
+                } else {
+                  messageTypeDesc = parsed.type;
+                }
+                
+                console.log(`[BLOCKING] Message type blocked: ${messageTypeDesc}`);
+                
+                // Send success response to sender to prevent them from knowing they're blocked
+                return ws.send(JSON.stringify({ type: 'ok', message: 'relayed' }));
+              } else {
+                console.log(`[BLOCKING-DEBUG] Message allowed - no blocking relationship found`);
+              }
+            } catch (error) {
+              console.error(`[SERVER] Error checking block status:`, error);
+              // Continue with delivery on error to prevent blocking legitimate messages
             }
 
             // If no recipient found, queue for offline delivery
@@ -1113,17 +1472,34 @@ async function startServer() {
               
               for (const client of localSet) {
                 try {
+                  // Skip and prune closed sockets
+                  if (!client || client.readyState !== 1) {
+                    removeLocalConnection(toUser, client);
+                    continue;
+                  }
                   // Check if recipient client is authenticated with server password
                   const recipientSessionId = client._sessionId;
+                  console.log(`[SERVER-DEBUG] Checking client for ${toUser}: sessionId=${recipientSessionId}`);
+                  let isAuthed = false;
                   if (recipientSessionId) {
-                    const recipientState = await ConnectionStateManager.getState(recipientSessionId);
-                    if (recipientState?.hasAuthenticated) {
+                    let recipientState = await ConnectionStateManager.getState(recipientSessionId);
+                    console.log(`[SERVER-DEBUG] Recipient state for ${toUser}: hasAuthenticated=${recipientState?.hasAuthenticated}`);
+                    if (!(recipientState && recipientState.hasAuthenticated)) {
+                      // Fallback to persistent user auth state (recovery cache)
+                      const userAuth = await ConnectionStateManager.getUserAuthState(toUser);
+                      isAuthed = !!userAuth?.hasAuthenticated;
+                    } else {
+                      isAuthed = true;
+                    }
+                    if (isAuthed) {
                       client.send(payload);
                       deliveredCount++;
-                      if (DEBUG_SERVER_LOGS) console.log(`[SERVER] Message delivered to authenticated recipient: ${toUser}`);
+                      console.log(`[SERVER-DEBUG] Message delivered to authenticated recipient: ${toUser}`);
                     } else {
-                      if (DEBUG_SERVER_LOGS) console.log(`[SERVER] Blocking message delivery to unauthenticated recipient: ${toUser}`);
+                      console.log(`[SERVER-DEBUG] Blocking message delivery to unauthenticated recipient: ${toUser}`);
                     }
+                  } else {
+                    console.log(`[SERVER-DEBUG] No session ID for recipient client: ${toUser}`);
                   }
                 } catch (err) {
                   console.error('[SERVER] Failed to send message to client:', err);
@@ -1359,6 +1735,147 @@ async function startServer() {
             }
 
             ws.send(JSON.stringify(response));
+            break;
+          }
+
+          case SignalType.BLOCK_LIST_SYNC: {
+            // Sync encrypted block list from client to server
+            const state = await ConnectionStateManager.getState(sessionId);
+            if (!state?.hasAuthenticated || !state?.username) {
+              return ws.send(JSON.stringify({ type: SignalType.ERROR, message: 'Authentication required' }));
+            }
+            
+            try {
+              const { encryptedBlockList, blockListHash, salt, version, lastUpdated } = parsed;
+              
+              if (!encryptedBlockList || !blockListHash || !salt) {
+                return ws.send(JSON.stringify({ 
+                  type: SignalType.ERROR, 
+                  message: 'Missing encrypted block list, hash, or salt' 
+                }));
+              }
+              
+              // Store the encrypted block list (server never decrypts it)
+              await BlockingDatabase.storeEncryptedBlockList(
+                state.username,
+                encryptedBlockList,
+                blockListHash,
+                salt,
+                version,
+                lastUpdated
+              );
+              
+              console.log(`[BLOCKING] Stored encrypted block list for user: ${state.username}`);
+              
+              ws.send(JSON.stringify({
+                type: SignalType.BLOCK_LIST_SYNC,
+                success: true,
+                message: 'Block list synchronized successfully'
+              }));
+            } catch (error) {
+              console.error(`[BLOCKING] Error syncing block list for ${state.username}:`, error);
+              ws.send(JSON.stringify({
+                type: SignalType.ERROR,
+                message: 'Failed to sync block list'
+              }));
+            }
+            break;
+          }
+
+          case SignalType.BLOCK_TOKENS_UPDATE: {
+            // Update block tokens for server-side filtering
+            const state = await ConnectionStateManager.getState(sessionId);
+            if (!state?.hasAuthenticated || !state?.username) {
+              return ws.send(JSON.stringify({ type: SignalType.ERROR, message: 'Authentication required' }));
+            }
+            
+            try {
+              const { blockTokens } = parsed;
+              
+              if (!Array.isArray(blockTokens)) {
+                return ws.send(JSON.stringify({ 
+                  type: SignalType.ERROR, 
+                  message: 'Invalid block tokens format' 
+                }));
+              }
+              
+              // Store the privacy-preserving block tokens
+              await BlockingDatabase.storeBlockTokens(blockTokens);
+              
+              if (blockTokens.length > 0) {
+                console.log(`[BLOCKING] Updated ${blockTokens.length} block tokens for user: ${state.username}`);
+                console.log(`[BLOCKING] User ${state.username} has blocked ${blockTokens.length} users - blocking is active`);
+              } else {
+                console.log(`[BLOCKING] Cleared block tokens for user: ${state.username} (no users blocked)`);
+              }
+              
+              ws.send(JSON.stringify({
+                type: SignalType.BLOCK_TOKENS_UPDATE,
+                success: true,
+                message: `Updated ${blockTokens.length} block tokens`,
+                count: blockTokens.length
+              }));
+            } catch (error) {
+              console.error(`[BLOCKING] Error updating block tokens for ${state.username}:`, error);
+              
+              // SECURITY: If block token update fails, temporarily mark user as having blocking issues
+              // This prevents potential abuse by ensuring messages are extra-carefully filtered
+              try {
+                await ConnectionStateManager.updateState(sessionId, { 
+                  blockingError: true,
+                  blockingErrorTime: Date.now()
+                });
+                console.log(`[BLOCKING] Marked user ${state.username} as having blocking errors for safety`);
+              } catch (stateError) {
+                console.error(`[BLOCKING] Failed to update blocking error state:`, stateError);
+              }
+              
+              ws.send(JSON.stringify({
+                type: SignalType.ERROR,
+                message: 'Failed to update block tokens'
+              }));
+            }
+            break;
+          }
+
+          case SignalType.BLOCK_LIST_UPDATE: {
+            // Get current encrypted block list for client
+            const state = await ConnectionStateManager.getState(sessionId);
+            if (!state?.hasAuthenticated || !state?.username) {
+              return ws.send(JSON.stringify({ type: SignalType.ERROR, message: 'Authentication required' }));
+            }
+            
+            try {
+              const blockListData = await BlockingDatabase.getEncryptedBlockList(state.username);
+              
+              if (!blockListData) {
+                // No block list exists yet
+                ws.send(JSON.stringify({
+                  type: SignalType.BLOCK_LIST_UPDATE,
+                  encryptedBlockList: null,
+                  blockListHash: null,
+                  lastUpdated: null,
+                  version: 0
+                }));
+              } else {
+                ws.send(JSON.stringify({
+                  type: SignalType.BLOCK_LIST_UPDATE,
+                  encryptedBlockList: blockListData.encryptedBlockList,
+                  blockListHash: blockListData.blockListHash,
+                  salt: blockListData.salt,
+                  lastUpdated: blockListData.lastUpdated,
+                  version: blockListData.version
+                }));
+              }
+              
+              console.log(`[BLOCKING] Sent block list data to user: ${state.username}`);
+            } catch (error) {
+              console.error(`[BLOCKING] Error getting block list for ${state.username}:`, error);
+              ws.send(JSON.stringify({
+                type: SignalType.ERROR,
+                message: 'Failed to get block list'
+              }));
+            }
             break;
           }
 
@@ -1719,7 +2236,7 @@ process.on('unhandledRejection', (reason, promise) => {
 });
 
 async function gracefulShutdown() {
-  console.log('[SERVER] Starting graceful shutdown...');
+  console.log('[SERVER] Starting shutdown...');
   
   try {
     // Clear batch timer
@@ -1734,22 +2251,62 @@ async function gracefulShutdown() {
       await processBatch();
     }
     
-    // No global data structures to clear - all user data in Redis and per-connection state
-    // Designed for millions of users without memory issues
+    // Close all WebSocket connections
+    if (wss && wss.clients) {
+      console.log(`[SERVER] Closing ${wss.clients.size} WebSocket connections...`);
+      wss.clients.forEach(ws => {
+        if (ws.readyState === 1) { // OPEN
+          ws.close(1001, 'Server shutting down');
+        }
+      });
+      
+      // Close the WebSocket server
+      wss.close();
+      console.log('[SERVER] WebSocket server closed');
+    }
+    
+    // Close Redis pattern subscriber
+    if (patternSub) {
+      try {
+        await patternSub.punsubscribe('deliver:*');
+        patternSub.disconnect();
+        console.log('[SERVER] Redis pattern subscriber closed');
+      } catch (error) {
+        console.warn('[SERVER] Error closing Redis subscriber:', error.message);
+      }
+    }
+    
+    // Clear the block token cleanup interval
+    if (blockTokenCleanupInterval) {
+      clearInterval(blockTokenCleanupInterval);
+      console.log('[SERVER] Block token cleanup interval cleared');
+    }
+    
+    // Clear status logging interval
+    if (statusLogInterval) {
+      clearInterval(statusLogInterval);
+      console.log('[SERVER] Status logging interval cleared');
+    }
     
     // Close server
     if (server) {
       await new Promise((resolve) => {
-        server.close(resolve);
+        server.close((error) => {
+          if (error) {
+            console.warn('[SERVER] Error closing server:', error.message);
+          }
+          resolve();
+        });
       });
+      console.log('[SERVER] HTTP/HTTPS server closed');
     }
     
-    console.log('[SERVER] Graceful shutdown completed');
+    console.log('[SERVER] Shutdown completed');
     
     // Exit the process after cleanup
     process.exit(0);
   } catch (error) {
-    console.error('[SERVER] Error during graceful shutdown:', error);
+    console.error('[SERVER] Error during shutdown:', error);
     process.exit(1);
   }
 }

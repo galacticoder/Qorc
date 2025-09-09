@@ -8,6 +8,7 @@ import { BrowserTorNotice } from "../ui/BrowserTorNotice";
 import { SignInForm } from "./Login/SignIn.tsx";
 import { SignUpForm } from "./Login/SignUp.tsx";
 import { PassphrasePrompt } from "./Login/PassphrasePrompt.tsx";
+import { PasswordHashPrompt } from "./Login/PasswordHashPrompt.tsx";
 import { ServerPasswordForm } from "./Login/ServerPassword.tsx";
 
 interface LoginProps {
@@ -30,8 +31,11 @@ interface LoginProps {
     passphrase?: string
   ) => Promise<void>;
   onPassphraseSubmit?: (passphrase: string, mode: "login" | "register") => Promise<void>;
+  onPasswordHashSubmit?: (password: string) => Promise<void>;
   showPassphrasePrompt: boolean;
   setShowPassphrasePrompt: (show: boolean) => void;
+  showPasswordPrompt?: boolean;
+  setShowPasswordPrompt?: (show: boolean) => void;
 }
 
 export function Login({
@@ -41,8 +45,11 @@ export function Login({
   authStatus,
   error,
   onPassphraseSubmit,
+  onPasswordHashSubmit,
   accountAuthenticated,
   showPassphrasePrompt,
+  showPasswordPrompt,
+  setShowPasswordPrompt,
   serverTrustRequest,
   onAcceptServerTrust,
   onRejectServerTrust,
@@ -83,6 +90,17 @@ export function Login({
       await onServerPasswordSubmit(serverPassword);
     } catch (err) {
       console.error("Server password submission failed", err);
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  const handlePasswordHashSubmit = async (password: string) => {
+    setIsSubmitting(true);
+    try {
+      await onPasswordHashSubmit?.(password);
+    } catch (err) {
+      console.error("Password hash submission failed", err);
     } finally {
       setIsSubmitting(false);
     }
@@ -148,7 +166,13 @@ export function Login({
               </div>
             </div>
           )}
-          {showPassphrasePrompt ? (
+          {showPasswordPrompt ? (
+            <PasswordHashPrompt
+              onSubmit={handlePasswordHashSubmit}
+              disabled={isSubmitting || isGeneratingKeys}
+              authStatus={authStatus}
+            />
+          ) : showPassphrasePrompt ? (
             <PassphrasePrompt
               mode={mode}
               onSubmit={handlePassphraseSubmit}

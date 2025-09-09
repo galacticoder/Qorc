@@ -495,6 +495,33 @@ async function createWebSocketConnection() {
         clearTimeout(reconnectTimer);
         reconnectTimer = null;
       }
+
+      // Set up heartbeat mechanism
+      wsConnection.isAlive = true;
+      wsConnection.on('ping', () => {
+        wsConnection.isAlive = true;
+      });
+      
+      // Send periodic pings to keep connection alive
+      const pingInterval = setInterval(() => {
+        if (wsConnection && wsConnection.readyState === WebSocket.OPEN) {
+          wsConnection.ping();
+        } else {
+          clearInterval(pingInterval);
+        }
+      }, 25000); // Ping every 25 seconds (before server's 30-second timeout)
+      
+      wsConnection._pingInterval = pingInterval;
+      
+      // Attempt to restore previous session if this is a reconnection
+      try {
+        if (reconnectAttempts > 0) {
+          console.log('[ELECTRON] Attempting to restore previous session...');
+          wsConnection.send(JSON.stringify({ type: 'connection-restore' }));
+        }
+      } catch (error) {
+        console.error('[ELECTRON] Error attempting session restoration:', error);
+      }
       
       // Process any queued messages
       if (messageQueue.length > 0) {
@@ -546,6 +573,11 @@ async function createWebSocketConnection() {
       const connectionDuration = wasConnected ? Date.now() - connectionEstablishedAt : 0;
       
       console.log(`[ELECTRON] WebSocket connection closed - Code: ${code}, Reason: ${reason || 'none'}, Duration: ${connectionDuration}ms`);
+      
+      // Clean up ping interval
+      if (wsConnection && wsConnection._pingInterval) {
+        clearInterval(wsConnection._pingInterval);
+      }
       
       wsConnection = null;
       isConnecting = false;

@@ -153,12 +153,18 @@ export class AccountAuthHandler {
       return rejectConnection(ws, SignalType.NAMEEXISTSERROR, SignalMessages.NAMEEXISTSERROR);
     }
 
-    const passwordHash = await CryptoUtils.Password.hashPassword(password);
-    console.log(`[AUTH] Password hashed for user: ${username}`);
+    // Password is already hashed client-side, parse and store parameters
+    console.log(`[AUTH] Processing client-hashed password for user: ${username}`);
+    
+    // SECURITY: Validate password hash format
+    if (!password.startsWith('$argon2')) {
+      console.error(`[AUTH] Invalid password hash format for new user: ${username}`);
+      return rejectConnection(ws, SignalType.AUTH_ERROR, "Invalid password hash format");
+    }
 
     const userRecord = {
       username,
-      passwordHash,
+      passwordHash: password, // Store the full Argon2 hash
       passphraseHash: null,
       version: null,
       algorithm: null,
@@ -167,6 +173,37 @@ export class AccountAuthHandler {
       timeCost: null,
       parallelism: null
     };
+    
+    // Parse password hash parameters for future login verification
+    try {
+      const parsed = await CryptoUtils.Password.parseArgon2Hash(password);
+      
+      // SECURITY: Validate parsed parameters
+      if (!parsed.salt || parsed.salt.length < 16) {
+        throw new Error('Invalid salt length');
+      }
+      if (parsed.memoryCost < 1024 || parsed.memoryCost > 1048576) {
+        throw new Error('Invalid memory cost');
+      }
+      if (parsed.timeCost < 1 || parsed.timeCost > 100) {
+        throw new Error('Invalid time cost');
+      }
+      if (parsed.parallelism < 1 || parsed.parallelism > 16) {
+        throw new Error('Invalid parallelism');
+      }
+      
+      // Store password hash parameters for login verification
+      userRecord.passwordVersion = parsed.version;
+      userRecord.passwordAlgorithm = parsed.algorithm;
+      userRecord.passwordSalt = parsed.salt.toString('base64');
+      userRecord.passwordMemoryCost = parsed.memoryCost;
+      userRecord.passwordTimeCost = parsed.timeCost;
+      userRecord.passwordParallelism = parsed.parallelism;
+      console.log(`[AUTH] Password hash parameters parsed for new user: ${username}`);
+    } catch (e) {
+      console.error(`[AUTH] Failed to parse password hash params for user ${username}:`, e);
+      return rejectConnection(ws, SignalType.AUTH_ERROR, "Invalid password hash parameters");
+    }
 
     await UserDatabase.saveUserRecord(userRecord);
     console.log(`[AUTH] User record saved for: ${username}`);
@@ -201,7 +238,130 @@ export class AccountAuthHandler {
       return rejectConnection(ws, SignalType.AUTH_ERROR, "Account does not exist, Register instead.");
     }
 
-    if (!await CryptoUtils.Password.verifyPassword(userData.passwordHash, password)) {
+    // Check if this is a password hash (Argon2) vs plaintext password
+    const isIncomingArgon2 = password.startsWith('$argon2');
+    const isStoredArgon2 = userData.passwordHash.startsWith('$argon2');
+    
+    // If stored password is Argon2 but incoming isn't, send challenge for proper hashing
+    if (isStoredArgon2 && !isIncomingArgon2) {
+      console.log(`[AUTH] Sending password hash parameters challenge to user: ${username}`);
+      
+      // Derive parameters directly from the stored Argon2 hash when not persisted
+      let hashParams;
+      if (userData.passwordSalt && userData.passwordMemoryCost && userData.passwordTimeCost && userData.passwordParallelism) {
+        // Use stored parameters
+        hashParams = {
+          version: userData.passwordVersion || 19, // Argon2 v1.3
+          algorithm: userData.passwordAlgorithm || 'argon2id',
+          salt: userData.passwordSalt,
+          memoryCost: userData.passwordMemoryCost,
+          timeCost: userData.passwordTimeCost,
+          parallelism: userData.passwordParallelism
+        };
+        console.log(`[AUTH] Using stored password parameters for user: ${username}`);
+      } else {
+        // Parse parameters from the existing encoded Argon2 password hash
+        try {
+          const parsed = await CryptoUtils.Password.parseArgon2Hash(userData.passwordHash);
+          hashParams = {
+            version: parsed.version,
+            algorithm: parsed.algorithm,
+            salt: parsed.salt.toString('base64'),
+            memoryCost: parsed.memoryCost,
+            timeCost: parsed.timeCost,
+            parallelism: parsed.parallelism
+          };
+          console.log(`[AUTH] Derived password parameters from stored hash for user: ${username}`);
+        } catch (e) {
+          console.error(`[AUTH] Failed to parse stored password hash for ${username}:`, e);
+          return rejectConnection(ws, SignalType.AUTH_ERROR, "Authentication failed");
+        }
+      }
+      
+      ws.send(JSON.stringify({
+        type: SignalType.PASSWORD_HASH_PARAMS,
+        version: hashParams.version,
+        algorithm: hashParams.algorithm,
+        salt: hashParams.salt,
+        memoryCost: hashParams.memoryCost,
+        timeCost: hashParams.timeCost,
+        parallelism: hashParams.parallelism,
+        message: "Please hash your password with these parameters and send back"
+      }));
+      
+      ws.clientState.pendingPasswordHash = true;
+      ws.clientState.plainTextPassword = password; // Store temporarily for verification
+      console.log(`[AUTH] User ${username} pending password hash challenge`);
+      return { username, pending: true };
+    }
+
+    // Handle both new client-hashed passwords and legacy plaintext passwords
+    let isPasswordValid = false;
+    let needsMigration = false;
+    
+    try {
+      // Check if stored password is an Argon2 hash (new format)
+      const isStoredArgon2 = userData.passwordHash.startsWith('$argon2');
+      // Check if incoming password is an Argon2 hash (from client hashing)
+      const isIncomingArgon2 = password.startsWith('$argon2');
+      
+      console.log(`[AUTH] Password format analysis for ${username}: stored=${isStoredArgon2 ? 'hash' : 'plaintext'}, incoming=${isIncomingArgon2 ? 'hash' : 'plaintext'}`);
+      
+      if (isStoredArgon2 && isIncomingArgon2) {
+        // Both are hashes - direct comparison (new format)
+        const crypto = await import('crypto');
+        const maxLength = Math.max(userData.passwordHash.length, password.length);
+        const normalizedStored = Buffer.from(userData.passwordHash.padEnd(maxLength, '\0'), 'utf8');
+        const normalizedProvided = Buffer.from(password.padEnd(maxLength, '\0'), 'utf8');
+        isPasswordValid = crypto.timingSafeEqual(normalizedStored, normalizedProvided) &&
+                         userData.passwordHash.length === password.length;
+        console.log(`[AUTH] Hash-to-hash comparison for ${username}: ${isPasswordValid}`);
+      } else if (!isStoredArgon2 && isIncomingArgon2) {
+        // Legacy migration: stored is plaintext, incoming is hash - need to verify and migrate
+        console.log(`[AUTH] Legacy password migration needed for ${username}`);
+        // For migration, we need the plaintext password to verify against stored plaintext
+        // Since client now sends hashes, we can't directly migrate here
+        // This user needs to reset their password or we need a migration flow
+        isPasswordValid = false;
+        console.error(`[AUTH] User ${username} has legacy plaintext password but client sent hash - migration required`);
+      } else if (isStoredArgon2 && !isIncomingArgon2) {
+        // Should not happen: stored is hash but incoming is plaintext
+        console.error(`[AUTH] Unexpected: stored hash but incoming plaintext for ${username}`);
+        isPasswordValid = false;
+      } else {
+        // Both plaintext (very old legacy case) - direct comparison
+        console.log(`[AUTH] Legacy plaintext comparison for ${username}`);
+        const crypto = await import('crypto');
+        const maxLength = Math.max(userData.passwordHash.length, password.length);
+        const normalizedStored = Buffer.from(userData.passwordHash.padEnd(maxLength, '\0'), 'utf8');
+        const normalizedProvided = Buffer.from(password.padEnd(maxLength, '\0'), 'utf8');
+        isPasswordValid = crypto.timingSafeEqual(normalizedStored, normalizedProvided) &&
+                         userData.passwordHash.length === password.length;
+        
+        if (isPasswordValid) {
+          needsMigration = true;
+          console.log(`[AUTH] Legacy user ${username} authenticated - will migrate to hash format`);
+        }
+      }
+    } catch (error) {
+      console.error(`[AUTH] Error during password verification: ${error.message}`);
+      isPasswordValid = false;
+    }
+    
+    // Migrate legacy passwords to hashed format after successful authentication
+    if (isPasswordValid && needsMigration) {
+      try {
+        console.log(`[AUTH] Migrating password to hash format for user: ${username}`);
+        const hashedPassword = await CryptoUtils.Password.hashPassword(userData.passwordHash);
+        await UserDatabase.updateUserPassword(username, hashedPassword);
+        console.log(`[AUTH] Password migration completed for user: ${username}`);
+      } catch (migrationError) {
+        console.error(`[AUTH] Failed to migrate password for user ${username}:`, migrationError);
+        // Don't fail login due to migration error, but log it
+      }
+    }
+    
+    if (!isPasswordValid) {
       console.error(`[AUTH] Incorrect password for user: ${username}`);
       // SECURITY: Enhanced rate limiting for failed password attempts
       try {
@@ -420,6 +580,89 @@ export class AccountAuthHandler {
 
     console.log(`[AUTH] Authentication successful for user: ${username}`);
     return { username, authenticated: true };
+  }
+
+  async handlePasswordHash(ws, username, hashedPassword) {
+    console.log(`[AUTH] Handling password hash response for user: ${username}`);
+    
+    // SECURITY: Validate inputs
+    if (!username || typeof username !== 'string' || username.length < 3 || username.length > 32) {
+      console.error(`[AUTH] Invalid username in password hash handling: ${username}`);
+      return rejectConnection(ws, SignalType.AUTH_ERROR, "Invalid username");
+    }
+    
+    if (!hashedPassword || typeof hashedPassword !== 'string' || !hashedPassword.startsWith('$argon2')) {
+      console.error(`[AUTH] Invalid password hash format for user: ${username}`);
+      return rejectConnection(ws, SignalType.AUTH_ERROR, "Invalid password hash format");
+    }
+    
+    if (!ws.clientState || ws.clientState.username !== username || !ws.clientState.pendingPasswordHash) {
+      console.error(`[AUTH] Unexpected password hash submission for user: ${username}`);
+      return rejectConnection(ws, SignalType.AUTH_ERROR, "Unexpected password hash submission");
+    }
+
+    const userData = await UserDatabase.loadUser(username);
+    if (!userData) {
+      console.error(`[AUTH] User does not exist: ${username}`);
+      return rejectConnection(ws, SignalType.AUTH_ERROR, "User does not exist");
+    }
+
+    // Verify the hashed password against stored hash
+    let isPasswordValid = false;
+    
+    try {
+      // Both should be Argon2 hashes - direct comparison
+      const crypto = await import('crypto');
+      const maxLength = Math.max(userData.passwordHash.length, hashedPassword.length);
+      const normalizedStored = Buffer.from(userData.passwordHash.padEnd(maxLength, '\0'), 'utf8');
+      const normalizedProvided = Buffer.from(hashedPassword.padEnd(maxLength, '\0'), 'utf8');
+      isPasswordValid = crypto.timingSafeEqual(normalizedStored, normalizedProvided) &&
+                       userData.passwordHash.length === hashedPassword.length;
+      console.log(`[AUTH] Password hash comparison for ${username}: ${isPasswordValid}`);
+    } catch (error) {
+      console.error(`[AUTH] Error during password hash verification: ${error.message}`);
+      isPasswordValid = false;
+    }
+    
+    if (!isPasswordValid) {
+      console.error(`[AUTH] Incorrect password hash for user: ${username}`);
+      // SECURITY: Enhanced rate limiting for failed password attempts
+      try {
+        await rateLimitMiddleware.rateLimiter.userAuthLimiter.consume(username, 3);
+      } catch (error) {
+        console.warn(`[AUTH] Rate limit consume failed for user ${username}:`, error.message);
+      }
+      
+      return rejectConnection(ws, SignalType.AUTH_ERROR, "Incorrect password");
+    }
+
+    console.log(`[AUTH] Password verified for user: ${username}`);
+    
+    // Clear sensitive data
+    ws.clientState.pendingPasswordHash = false;
+    ws.clientState.plainTextPassword = null;
+    
+    // Continue with passphrase verification like normal sign-in flow
+    if (userData.version && userData.salt) {
+      console.log(`[AUTH] Requesting passphrase for user: ${username}`);
+      ws.send(JSON.stringify({
+        type: SignalType.PASSPHRASE_HASH,
+        version: userData.version,
+        algorithm: userData.algorithm,
+        salt: userData.salt.toString('base64'),
+        memoryCost: userData.memoryCost,
+        timeCost: userData.timeCost,
+        parallelism: userData.parallelism,
+        message: "Please hash your passphrase with this info and send back"
+      }));
+
+      ws.clientState.pendingPassphrase = true;
+      console.log(`[AUTH] User ${username} pending passphrase set for sign in`);
+      return { username, pending: true };
+    }
+
+    console.error(`[AUTH] No passphrase hash info for user: ${username}`);
+    return rejectConnection(ws, SignalType.AUTH_ERROR, "No passphrase hash info stored. Sign up instead");
   }
 }
 

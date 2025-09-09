@@ -15,10 +15,15 @@ import { useTypingIndicatorContext } from "@/contexts/TypingIndicatorContext";
 import { resolveDisplayUsername } from "@/lib/unified-username-display";
 import { useMessageReceipts } from "@/hooks/useMessageReceipts";
 import { TorIndicator } from "@/components/ui/TorIndicator";
-import { Phone, Video } from "lucide-react";
+import { Phone, Video, MoreVertical } from "lucide-react";
 import { useCalling } from "@/hooks/useCalling";
 import { CallModal } from "./CallModal";
 import { useAuth } from "@/hooks/useAuth";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import { BlockUserButton } from "./BlockUserButton";
+import { blockingSystem } from "@/lib/blocking-system";
+import { AlertTriangle } from "lucide-react";
+import { useReplyUpdates } from "@/hooks/useReplyUpdates";
 
 
 interface ChatInterfaceProps {
@@ -57,6 +62,9 @@ export function ChatInterface({
   const [replyTo, setReplyTo] = useState<Message | null>(null);
   const [editingMessage, setEditingMessage] = useState<Message | null>(null);
   const [displayConversationName, setDisplayConversationName] = useState<string>("");
+  const [isUserBlocked, setIsUserBlocked] = useState(false);
+  const [isBlockedByUser, setIsBlockedByUser] = useState(false);
+  const [blockingCheckError, setBlockingCheckError] = useState<string | null>(null);
 
   // Calling functionality
   const callingHook = useCalling(callingAuthContext);
@@ -207,8 +215,55 @@ export function ChatInterface({
     };
   }, [selectedConversation, getDisplayUsername]);
 
+  // Check blocking status when conversation changes
+  useEffect(() => {
+    const checkBlockingStatus = async () => {
+      if (!selectedConversation || !callingAuthContext?.passphrasePlaintextRef?.current) {
+        setIsUserBlocked(false);
+        setIsBlockedByUser(false);
+        setBlockingCheckError(null);
+        return;
+      }
+
+      try {
+        const passphrase = callingAuthContext.passphrasePlaintextRef.current;
+        const blocked = await blockingSystem.isUserBlocked(selectedConversation, passphrase);
+        setIsUserBlocked(blocked);
+        setBlockingCheckError(null);
+        
+        // Note: We can't directly check if we are blocked by the other user
+        // as that would require server-side information or the other user's block list
+        // The server-side filtering will handle incoming messages from users who blocked us
+        setIsBlockedByUser(false);
+      } catch (error) {
+        console.error('[ChatInterface] Error checking blocking status:', error);
+        setBlockingCheckError('Unable to check blocking status');
+        setIsUserBlocked(false);
+        setIsBlockedByUser(false);
+      }
+    };
+
+    checkBlockingStatus();
+  }, [selectedConversation, callingAuthContext?.passphrasePlaintextRef?.current]);
+
+  // Listen for blocking status changes
+  useEffect(() => {
+    const handleBlockStatusChange = (event: CustomEvent) => {
+      const { username, isBlocked } = event.detail;
+      if (username === selectedConversation) {
+        setIsUserBlocked(isBlocked);
+      }
+    };
+
+    window.addEventListener('block-status-changed', handleBlockStatusChange as EventListener);
+    return () => window.removeEventListener('block-status-changed', handleBlockStatusChange as EventListener);
+  }, [selectedConversation]);
+
   // Message receipts hook
   const { sendReadReceipt, markMessageAsRead, getSmartReceiptStatus } = useMessageReceipts(messages, setMessages, currentUsername, saveMessageToLocalDB);
+
+  // Reply updates hook - handles efficient reply field updates when messages are edited
+  const { updateReplyFields, handleMessageDeleted } = useReplyUpdates(messages, setMessages);
 
   // Smart auto-scroll: only scroll to bottom when appropriate
   const prevMessagesLengthRef = useRef(messages.length);
@@ -425,7 +480,7 @@ export function ChatInterface({
                     alert('Failed to start call: ' + (error as Error).message);
                   }
                 }}
-                disabled={!!currentCall}
+                disabled={!!currentCall || isUserBlocked || isBlockedByUser}
                 className="flex items-center gap-2"
                 style={{
                   backgroundColor: 'transparent',
@@ -447,7 +502,7 @@ export function ChatInterface({
                     alert('Failed to start video call: ' + (error as Error).message);
                   }
                 }}
-                disabled={!!currentCall}
+                disabled={!!currentCall || isUserBlocked || isBlockedByUser}
                 className="flex items-center gap-2"
                 style={{
                   backgroundColor: 'transparent',
@@ -460,6 +515,42 @@ export function ChatInterface({
               </Button>
             </>
           )}
+          
+          {/* 3-dot menu */}
+          {selectedConversation && (
+            <Popover>
+              <PopoverTrigger asChild>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  className="p-2"
+                  style={{
+                    color: 'var(--color-text-primary)'
+                  }}
+                >
+                  <MoreVertical className="w-4 h-4" />
+                </Button>
+              </PopoverTrigger>
+              <PopoverContent className="w-48 p-2" align="end">
+                <div className="space-y-1">
+                  <div className="px-2 py-1 text-sm font-medium text-muted-foreground">
+                    Conversation Options
+                  </div>
+                  <div className="w-full">
+                    <BlockUserButton 
+                      username={selectedConversation}
+                      passphrase={callingAuthContext?.passphrasePlaintextRef?.current}
+                      variant="ghost"
+                      size="sm"
+                      className="w-full justify-start"
+                      showText={true}
+                    />
+                  </div>
+                </div>
+              </PopoverContent>
+            </Popover>
+          )}
+          
           <TorIndicator />
         </div>
       </div>
@@ -530,6 +621,35 @@ export function ChatInterface({
           </div>
         </div>
       )}
+      
+      {/* Blocked conversation warning */}
+      {(isUserBlocked || isBlockedByUser) && (
+        <div 
+          className="px-4 py-3 border-t flex items-center gap-3"
+          style={{
+            backgroundColor: 'var(--color-error-bg, #fef2f2)',
+            borderColor: 'var(--color-border)',
+            color: 'var(--color-error-text, #dc2626)'
+          }}
+        >
+          <AlertTriangle className="w-5 h-5 flex-shrink-0" />
+          <div className="flex-1">
+            <p className="text-sm font-medium">
+              {isUserBlocked 
+                ? `You have blocked ${displayConversationName || selectedConversation}` 
+                : `You have been blocked by ${displayConversationName || selectedConversation}`
+              }
+            </p>
+            <p className="text-xs opacity-80">
+              {isUserBlocked 
+                ? 'Messages and calls are disabled. Use the options menu to unblock.' 
+                : 'You cannot send messages or make calls to this user.'
+              }
+            </p>
+          </div>
+        </div>
+      )}
+      
       <div 
         className="px-4 pb-4"
         style={{ backgroundColor: 'var(--color-background)' }}
@@ -571,6 +691,7 @@ export function ChatInterface({
           onTyping={handleLocalTyping}
           selectedConversation={selectedConversation}
           getDisplayUsername={getDisplayUsername}
+          disabled={isUserBlocked || isBlockedByUser}
         />
       </div>
 

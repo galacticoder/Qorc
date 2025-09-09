@@ -7,6 +7,7 @@ import { Separator } from '@/components/ui/separator';
 import { useTheme } from 'next-themes';
 import { Moon, Sun, Monitor, Palette, Shield, Bell, Volume2, Trash2, Download, FolderOpen, X } from 'lucide-react';
 import { ScreenSharingSettings } from './ScreenSharingSettings';
+import { BlockedUsersSettings } from './BlockedUsersSettings';
 
 export function AppSettings() {
   const { theme, setTheme } = useTheme();
@@ -335,6 +336,8 @@ export function AppSettings() {
       {/* Screen Sharing Settings */}
       <ScreenSharingSettings />
 
+      {/* Blocked Users Management */}
+      <BlockedUsersSettings />
 
       {/* Data Management */}
       <Card>

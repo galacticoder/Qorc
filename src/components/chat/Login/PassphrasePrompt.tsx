@@ -84,6 +84,9 @@ export function PassphrasePrompt({ mode, onSubmit, disabled, authStatus }: Passp
             disabled={disabled || isSubmitting}
             required
           />
+          <div className="text-sm text-muted-foreground">
+            Your passphrase is required to enable blocking functionality and access encrypted data.
+          </div>
         </div>
       )}
 
