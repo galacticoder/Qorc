@@ -9,11 +9,18 @@ interface PassphrasePromptProps {
   onSubmit: (passphrase: string) => Promise<void>;
   disabled: boolean;
   authStatus?: string;
+  initialPassphrase?: string;
+  initialConfirmPassphrase?: string;
+  onChangePassphrase?: (v:string)=>void;
+  onChangeConfirm?: (v:string)=>void;
 }
 
-export function PassphrasePrompt({ mode, onSubmit, disabled, authStatus }: PassphrasePromptProps) {
-  const [passphrase, setPassphrase] = useState("");
-  const [confirmPassphrase, setConfirmPassphrase] = useState("");
+export function PassphrasePrompt({ mode, onSubmit, disabled, authStatus, initialPassphrase = "", initialConfirmPassphrase = "", onChangePassphrase, onChangeConfirm }: PassphrasePromptProps) {
+  const [passphrase, setPassphrase] = useState(initialPassphrase);
+  const [confirmPassphrase, setConfirmPassphrase] = useState(initialConfirmPassphrase);
+
+  const handlePassChange = (v:string) => { setPassphrase(v); onChangePassphrase?.(v); };
+  const handleConfirm = (v:string) => { setConfirmPassphrase(v); onChangeConfirm?.(v); };
   const [isSubmitting, setIsSubmitting] = useState(false);
 
   const isPassphraseValid = passphrase.length >= 12;
@@ -59,8 +66,8 @@ export function PassphrasePrompt({ mode, onSubmit, disabled, authStatus }: Passp
           label="Secure Encryption Passphrase"
           value={passphrase}
           confirmValue={confirmPassphrase}
-          onChange={setPassphrase}
-          onConfirmChange={setConfirmPassphrase}
+          onChange={handlePassChange}
+          onConfirmChange={handleConfirm}
           required
           minLength={12}
           strengthCheck
@@ -80,7 +87,7 @@ export function PassphrasePrompt({ mode, onSubmit, disabled, authStatus }: Passp
             type="password"
             placeholder="Enter your encryption passphrase"
             value={passphrase}
-            onChange={(e) => setPassphrase(e.target.value)}
+            onChange={(e) => handlePassChange(e.target.value)}
             disabled={disabled || isSubmitting}
             required
           />

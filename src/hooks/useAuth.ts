@@ -77,6 +77,7 @@ export const useAuth = (secureDB?: SecureDB) => {
   } | null>(null);
 
   const keyManagerRef = useRef<SecureKeyManager | null>(null);
+  const keyManagerOwnerRef = useRef<string>("");
   const loginUsernameRef = useRef("");
   // Keep original username only on client; never send to server
   const originalUsernameRef = useRef<string>("");
@@ -148,10 +149,14 @@ export const useAuth = (secureDB?: SecureDB) => {
   }, []);
 
   const passwordRef = useRef<string>("");
+  const confirmPasswordRef = useRef<string>("");
+  const passphraseConfirmRef = useRef<string>("");
+  const lastPasswordParamsForRef = useRef<string>("");
   const [passphraseHashParams, setPassphraseHashParams] = useState(null);
-  const [passwordHashParams, setPasswordHashParams] = useState(null);
+  const [passwordHashParams, setPasswordHashParams] = useState<any>(null);
   const [showPassphrasePrompt, setShowPassphrasePrompt] = useState(false);
   const [showPasswordPrompt, setShowPasswordPrompt] = useState(false);
+  const [maxStepReached, setMaxStepReached] = useState<'login' | 'passphrase' | 'server'>('login');
 
   const initializeKeys = useCallback(async () => {
     console.log('[AUTH] Starting key initialization process');
@@ -171,8 +176,19 @@ export const useAuth = (secureDB?: SecureDB) => {
       }
 
       console.log(`[AUTH] Initializing key manager for user: ${currentUsername}`);
-      if (!keyManagerRef.current) {
+      // Ensure manager is for the current user; if not, clear previous user DB and re-instantiate
+      if (!keyManagerRef.current || keyManagerOwnerRef.current !== currentUsername) {
+        try {
+          if (keyManagerRef.current) {
+            keyManagerRef.current.clearKeys();
+            await keyManagerRef.current.deleteDatabase();
+          }
+        } catch (e) {
+          console.warn('[AUTH] Failed to clear previous user key database:', (e as any)?.message || e);
+        }
         keyManagerRef.current = new SecureKeyManager(currentUsername);
+        keyManagerOwnerRef.current = currentUsername;
+        hybridKeysRef.current = null; // reset cached keys
       }
 
       const hasExistingKeys = await keyManagerRef.current.hasKeys();
@@ -233,6 +249,50 @@ export const useAuth = (secureDB?: SecureDB) => {
     }
   }, []);
 
+  // Best-effort clear of previous user's SecureDB stores by pseudonym
+  const clearSecureDBForUser = async (pseudonym: string) => {
+    try {
+      const sanitized = (pseudonym || 'unknown').replace(/[^a-zA-Z0-9_-]/g, '_');
+      const stableName = `securechat_${sanitized}_db`;
+      const deleteDb = (name: string) => new Promise<void>((resolve) => {
+        try {
+          const req = indexedDB.deleteDatabase(name);
+          req.onsuccess = () => resolve();
+          req.onerror = () => resolve();
+        } catch { resolve(); }
+      });
+      await deleteDb(stableName);
+      const anyIndexed: any = indexedDB as any;
+      if (anyIndexed && typeof anyIndexed.databases === 'function') {
+        const dbs = await anyIndexed.databases();
+        const prefix = `securechat_${sanitized}_`;
+        for (const d of (dbs || [])) {
+          const name = (d && (d as any).name) || '';
+          if (name && name.startsWith(prefix) && name !== stableName) {
+            await deleteDb(name);
+          }
+        }
+      }
+      // Also clear user-specific localStorage keys
+      try {
+        const userSpecificKeys = [
+          `securechat_sessions_${pseudonym}`,
+          `securechat_pins_${pseudonym}`,
+          `sentReadReceipts_${pseudonym}`,
+          `keystore_${pseudonym}`,
+          `identity_${pseudonym}`,
+          `prekeys_${pseudonym}`,
+          `signedprekey_${pseudonym}`,
+          `registrationid_${pseudonym}`
+        ];
+        userSpecificKeys.forEach(k => { try { localStorage.removeItem(k); } catch {} });
+      } catch {}
+      console.log('[AUTH] Cleared SecureDB and local storage for previous user:', pseudonym);
+    } catch (e) {
+      console.warn('[AUTH] Failed to clear previous user SecureDB:', (e as any)?.message || e);
+    }
+  };
+
   const handleAccountSubmit = async (
     mode: "login" | "register",
     userInput: string,
@@ -252,6 +312,22 @@ export const useAuth = (secureDB?: SecureDB) => {
     console.log(`[AUTH] Computing pseudonym for username: "${userInput}"`);
     const pseudonym = await pseudonymizeUsername(userInput);
     console.log(`[AUTH] Generated pseudonym: "${pseudonym}" (length: ${pseudonym.length})`);
+
+    // If changing users mid-flow, clear previous user's SecureDB and key DB
+    const prevUser = loginUsernameRef.current;
+    if (prevUser && prevUser !== pseudonym) {
+      await clearSecureDBForUser(prevUser);
+      try {
+        // Clear key DB too (in case initializeKeys is not triggered yet)
+        if (keyManagerRef.current) {
+          keyManagerRef.current.clearKeys();
+          await keyManagerRef.current.deleteDatabase();
+          keyManagerRef.current = null;
+          keyManagerOwnerRef.current = '' as any;
+          hybridKeysRef.current = null;
+        }
+      } catch {}
+    }
 
     // Use pseudonym as canonical identity
     loginUsernameRef.current = pseudonym;
@@ -295,7 +371,7 @@ export const useAuth = (secureDB?: SecureDB) => {
       );
 
       // For new registrations, hash password client-side with Argon2
-      // For existing users, send plaintext to get proper Argon2 parameters from server
+      // For existing users, request Argon2 parameters without sending plaintext password
       let passwordToSend: string;
       if (mode === "register") {
         setAuthStatus("Hashing password with Argon2...");
@@ -303,7 +379,6 @@ export const useAuth = (secureDB?: SecureDB) => {
         passwordToSend = await CryptoUtils.Hash.hashData(password);
         console.log(`[AUTH] Password hashed client-side for registration, hash length: ${passwordToSend.length}`);
       } else {
-        // For login, request Argon2 parameters without sending plaintext password
         console.log('[AUTH] Requesting password hash parameters (no plaintext password sent)');
         passwordToSend = 'REQUEST_PASSWORD_PARAMS';
       }
@@ -475,38 +550,6 @@ export const useAuth = (secureDB?: SecureDB) => {
     }
   };
 
-  const handlePasswordHashSubmit = async (password: string) => {
-    console.log(`[AUTH] Submitting password hash response`);
-    setAuthStatus("Processing password hash...");
-
-    try {
-      if (!passwordHashParams) {
-        setAuthStatus("Retrieving password hash parameters...");
-        throw new Error("Missing password hash parameters");
-      }
-
-      setAuthStatus("Computing secure password hash with Argon2...");
-      const passwordHash = await CryptoUtils.Hash.hashDataUsingInfo(
-        password,
-        passwordHashParams
-      );
-
-      console.log(`[AUTH] Sending password hash to server`);
-      setAuthStatus("Sending secure password hash to server...");
-      websocketClient.send(JSON.stringify({
-        type: SignalType.PASSWORD_HASH_RESPONSE,
-        passwordHash
-      }));
-      
-      // Clear the password prompt after sending the response
-      setShowPasswordPrompt(false);
-      setAuthStatus("Password verification in progress...");
-    } catch (error) {
-      console.error("Password hashing failed:", error);
-      setLoginError("Password processing failed");
-      setAuthStatus("");
-    }
-  };
 
   const handleAuthSuccess = async (username: string, isRecovered = false) => {
     console.log(`[AUTH] Authentication success for user: ${username} (recovered: ${isRecovered})`);
@@ -760,6 +803,150 @@ export const useAuth = (secureDB?: SecureDB) => {
     return async () => await logout(Database.secureDBRef, "Logged out");
   };
 
+  // Step progress tracking
+  useEffect(() => {
+    if (showPassphrasePrompt) setMaxStepReached(prev => prev === 'server' ? 'server' : 'passphrase');
+  }, [showPassphrasePrompt]);
+  useEffect(() => {
+    if (accountAuthenticated) setMaxStepReached('server');
+  }, [accountAuthenticated]);
+
+  // UI back navigation handler: clear statuses and optionally step back
+  useEffect(() => {
+    const handleAuthUiBack = (event: CustomEvent) => {
+      try {
+        const to = (event as any).detail?.to as 'login' | 'passphrase' | 'server' | undefined;
+        setLoginError("");
+        setAuthStatus("");
+        // For back to server: clear everything. For other backs, keep creds so Forward can reuse them.
+        if (to === 'login') {
+          setShowPassphrasePrompt(false);
+          setAccountAuthenticated(false);
+        } else if (to === 'passphrase') {
+          setShowPassphrasePrompt(true);
+        } else if (to === 'server') {
+          setShowPassphrasePrompt(false);
+          setAccountAuthenticated(false);
+          setIsLoggedIn(false);
+          setMaxStepReached('login');
+          // Fully clear client-side auth context so the next server is a fresh start
+          passwordRef.current = "";
+          passphraseRef.current = "";
+          passphrasePlaintextRef.current = "";
+          loginUsernameRef.current = "";
+          originalUsernameRef.current = "";
+          setUsername("");
+          setPassphraseHashParams(null as any);
+          setServerTrustRequest?.(null as any);
+        }
+      } catch (e) {
+        console.error('[AUTH] Failed to process UI back event:', e);
+      }
+    };
+
+    window.addEventListener('auth-ui-back', handleAuthUiBack as EventListener);
+    return () => window.removeEventListener('auth-ui-back', handleAuthUiBack as EventListener);
+  }, []);
+
+  // Wire UI input changes into persistent refs so values survive navigation
+  useEffect(() => {
+    const handleAuthUiInput = (event: CustomEvent) => {
+      try {
+        const { field, value } = (event as any).detail || {};
+        if (typeof value !== 'string') return;
+        switch (field) {
+          case 'username': setTypedUsername(value); break;
+          case 'password': setTypedPassword(value); break;
+          case 'confirmPassword': setTypedConfirmPassword(value); break;
+          case 'passphrase': setTypedPassphrase(value); break;
+          case 'passphraseConfirm': passphraseConfirmRef.current = value; break;
+        }
+      } catch (e) {
+        console.error('[AUTH] Failed to process auth-ui-input:', e);
+      }
+    };
+    window.addEventListener('auth-ui-input', handleAuthUiInput as EventListener);
+    return () => window.removeEventListener('auth-ui-input', handleAuthUiInput as EventListener);
+  }, []);
+
+  // UI forward navigation: resume the next step using stored credentials if available
+  useEffect(() => {
+    const handleAuthUiForward = async (event: CustomEvent) => {
+      try {
+        const to = (event as any).detail?.to as 'login' | 'passphrase' | 'server_password' | undefined;
+        setLoginError("");
+        setAuthStatus("");
+
+        // Honor explicit target first
+        if (to === 'passphrase') {
+          setShowPassphrasePrompt(true);
+          return;
+        }
+        if (to === 'server_password') {
+          // Just reveal server password screen when already reached; inputs are preserved in Login component
+          setShowPassphrasePrompt(false);
+          return;
+        }
+
+        // If instructed to go to login or currently at login, try to advance without network if possible
+        if (to === 'login' || (!showPassphrasePrompt && !accountAuthenticated)) {
+          const orig = originalUsernameRef.current;
+          const pwd = passwordRef.current;
+          if (orig && pwd) {
+            await handleAccountSubmit(isRegistrationMode ? 'register' : 'login', orig, pwd);
+            return;
+          }
+        }
+
+        // If passphrase prompt is active but no explicit 'to', keep showing it
+        if (showPassphrasePrompt) {
+          setShowPassphrasePrompt(true);
+          return;
+        }
+
+        // If moving to server password implicitly, do nothing; the form is already in view when accountAuthenticated is true
+        if (accountAuthenticated) return;
+      } catch (e) {
+        console.error('[AUTH] Failed to process UI forward event:', e);
+      }
+    };
+
+    window.addEventListener('auth-ui-forward', handleAuthUiForward as EventListener);
+    return () => window.removeEventListener('auth-ui-forward', handleAuthUiForward as EventListener);
+  }, [accountAuthenticated, showPassphrasePrompt, isRegistrationMode]);
+
+
+  // Add cleanup on page unload/refresh only
+  useEffect(() => {
+
+    const handleBeforeUnload = () => {
+      // Only clear if user is logged in
+      if (isLoggedIn && loginUsernameRef.current) {
+        try {
+          // Set a flag for cleanup on next app load
+          localStorage.setItem('securechat_pending_cleanup', JSON.stringify({
+            username: loginUsernameRef.current,
+            timestamp: Date.now()
+          }));
+
+          // Clear localStorage data synchronously (async won't work in beforeunload)
+          localStorage.removeItem(`securechat_sessions_${loginUsernameRef.current}`);
+          localStorage.removeItem(`securechat_pins_${loginUsernameRef.current}`);
+          localStorage.removeItem('securechat_server_pin_v1');
+          console.log('[AUTH] Emergency cleanup on page unload completed');
+        } catch (error) {
+          console.error('[AUTH] Emergency cleanup failed:', error);
+        }
+      }
+    };
+
+    window.addEventListener('beforeunload', handleBeforeUnload);
+
+    return () => {
+      window.removeEventListener('beforeunload', handleBeforeUnload);
+    };
+  }, [isLoggedIn]);
+
   // Listen for password hash parameters from server
   useEffect(() => {
     const handlePasswordHashParams = (event: CustomEvent) => {
@@ -775,6 +962,9 @@ export const useAuth = (secureDB?: SecureDB) => {
       
       // Persist for potential fallback prompt
       setPasswordHashParams(params);
+
+      // Track which pseudonym these params correspond to
+      try { lastPasswordParamsForRef.current = loginUsernameRef.current || ''; } catch {}
 
       // If we still have the user's plaintext password in memory from the account form,
       // hash it immediately and respond without showing a second prompt
@@ -813,36 +1003,11 @@ export const useAuth = (secureDB?: SecureDB) => {
     };
   }, []);
 
-  // Add cleanup on page unload/refresh only
-  useEffect(() => {
-
-    const handleBeforeUnload = () => {
-      // Only clear if user is logged in
-      if (isLoggedIn && loginUsernameRef.current) {
-        try {
-          // Set a flag for cleanup on next app load
-          localStorage.setItem('securechat_pending_cleanup', JSON.stringify({
-            username: loginUsernameRef.current,
-            timestamp: Date.now()
-          }));
-
-          // Clear localStorage data synchronously (async won't work in beforeunload)
-          localStorage.removeItem(`securechat_sessions_${loginUsernameRef.current}`);
-          localStorage.removeItem(`securechat_pins_${loginUsernameRef.current}`);
-          localStorage.removeItem('securechat_server_pin_v1');
-          console.log('[AUTH] Emergency cleanup on page unload completed');
-        } catch (error) {
-          console.error('[AUTH] Emergency cleanup failed:', error);
-        }
-      }
-    };
-
-    window.addEventListener('beforeunload', handleBeforeUnload);
-
-    return () => {
-      window.removeEventListener('beforeunload', handleBeforeUnload);
-    };
-  }, [isLoggedIn]);
+  // Expose setters so inputs persist across steps without submission
+  const setTypedUsername = (name: string) => { originalUsernameRef.current = name; };
+  const setTypedPassword = (pwd: string) => { passwordRef.current = pwd; };
+  const setTypedConfirmPassword = (pwd: string) => { confirmPasswordRef.current = pwd; };
+  const setTypedPassphrase = (pp: string) => { passphrasePlaintextRef.current = pp; };
 
   return {
     username,
@@ -882,7 +1047,16 @@ export const useAuth = (secureDB?: SecureDB) => {
     showPassphrasePrompt,
     setShowPasswordPrompt,
     showPasswordPrompt,
-    handlePasswordHashSubmit,
+    handlePasswordHashSubmit: async (password: string) => {
+      try {
+        if (!passwordHashParams) throw new Error('Missing password params');
+        const passwordHash = await CryptoUtils.Hash.hashDataUsingInfo(password, passwordHashParams);
+        websocketClient.send(JSON.stringify({ type: SignalType.PASSWORD_HASH_RESPONSE, passwordHash }));
+      } catch (e) {
+        console.error('[AUTH] Manual password hashing failed:', e);
+        setLoginError('Password processing failed');
+      }
+    },
     logout,
     useLogout,
     hybridKeysRef,
@@ -890,6 +1064,16 @@ export const useAuth = (secureDB?: SecureDB) => {
     getKeysOnDemand,
     attemptAuthRecovery,
     storeAuthenticationState,
-    clearAuthenticationState
+    clearAuthenticationState,
+
+    // persistent input setters and current values
+    setTypedUsername,
+    setTypedPassword,
+    setTypedConfirmPassword,
+    setTypedPassphrase,
+    confirmPasswordRef,
+
+    // step progress
+    maxStepReached,
   };
 };

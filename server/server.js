@@ -1080,13 +1080,7 @@ async function startServer() {
             console.log(`[SERVER] Processing ${parsed.type} request`);
             const result = await authHandler.processAuthRequest(ws, msg.toString());
             if (result?.authenticated || result?.pending) {
-              // Force cleanup any stale sessions for this user before claiming the username
-              try {
-                await ConnectionStateManager.forceCleanupUserSessions(result.username);
-              } catch (err) {
-                console.error(`[SERVER] Error cleaning up user sessions for ${result.username}:`, err);
-              }
-
+              // Claim/update username for this session atomically (also cleans stale mappings)
               await ConnectionStateManager.updateState(sessionId, {
                 hasPassedAccountLogin: true,
                 username: result.username
@@ -1119,9 +1113,11 @@ async function startServer() {
                 console.log(`[SERVER] User '${currentState?.username || 'unknown'}' completed account authentication`);
               }
             } else {
-              const currentState = await ConnectionStateManager.getState(sessionId);
-              console.error(`[SERVER] Login failed for user: ${currentState?.username || 'unknown'}`);
-              ws.send(JSON.stringify({ type: SignalType.ERROR, message: 'Login failed' }));
+              if (!(result && result.handled)) {
+                const currentState = await ConnectionStateManager.getState(sessionId);
+                console.error(`[SERVER] Login failed for user: ${currentState?.username || 'unknown'}`);
+                ws.send(JSON.stringify({ type: SignalType.ERROR, message: 'Login failed' }));
+              }
             }
             break;
           }
@@ -1139,45 +1135,28 @@ async function startServer() {
               return ws.send(JSON.stringify({ type: SignalType.ERROR, message: 'Passphrase hash missing' }));
             }
 
-            await authHandler.handlePassphrase(
+            const passphraseResult = await authHandler.handlePassphrase(
               ws,
               state.username,
               parsed.passphraseHash,
               parsed.type === SignalType.PASSPHRASE_HASH_NEW
             );
 
-            const successMessage = parsed.type === SignalType.PASSPHRASE_HASH_NEW
-              ? 'Passphrase saved successfully'
-              : 'Passphrase verified successfully';
-            if (DEBUG_SERVER_LOGS) console.log(`[SERVER] Sending passphrase success to user: ${state.username}`);
-            ws.send(
-              JSON.stringify({
-                type: SignalType.PASSPHRASE_SUCCESS,
-                message: successMessage,
-              })
-            );
+            if (passphraseResult?.authenticated) {
+              const successMessage = parsed.type === SignalType.PASSPHRASE_HASH_NEW
+                ? 'Passphrase saved successfully'
+                : 'Passphrase verified successfully';
+              if (DEBUG_SERVER_LOGS) console.log(`[SERVER] Sending passphrase success to user: ${state.username}`);
+              ws.send(
+                JSON.stringify({
+                  type: SignalType.PASSPHRASE_SUCCESS,
+                  message: successMessage,
+                })
+              );
+            }
             break;
           }
 
-          case SignalType.PASSWORD_HASH_RESPONSE: {
-            const state = await ConnectionStateManager.getState(sessionId);
-            if (DEBUG_SERVER_LOGS) console.log(`[SERVER] Processing password hash response for user: ${state?.username || 'unknown'}`);
-            if (!state?.username) {
-              console.error('[SERVER] Username not set for password hash response');
-              return ws.send(JSON.stringify({ type: SignalType.ERROR, message: 'Username not set' }));
-            }
-            if (!parsed.passwordHash) {
-              console.error('[SERVER] Password hash missing');
-              return ws.send(JSON.stringify({ type: SignalType.ERROR, message: 'Password hash missing' }));
-            }
-
-            await authHandler.handlePasswordHash(
-              ws,
-              state.username,
-              parsed.passwordHash
-            );
-            break;
-          }
 
           case SignalType.SERVER_LOGIN: {
             const state = await ConnectionStateManager.getState(sessionId);
@@ -1188,12 +1167,15 @@ async function startServer() {
             }
 
             if (state?.hasAuthenticated) {
-              console.error('[SERVER] User already authenticated');
-              return ws.send(JSON.stringify({ type: SignalType.ERROR, message: 'Already authenticated' }));
+              // Allow re-attempt if this connection is not authenticated yet (stale session state)
+              if (ws.clientState?.hasAuthenticated) {
+                console.error('[SERVER] User already authenticated');
+                return ws.send(JSON.stringify({ type: SignalType.ERROR, message: 'Already authenticated' }));
+              }
             }
 
-            const success = await serverAuthHandler.handleServerAuthentication(ws, msg.toString(), state);
-            if (success) {
+            const result = await serverAuthHandler.handleServerAuthentication(ws, msg.toString(), state);
+            if (result === true) {
               await ConnectionStateManager.updateState(sessionId, { hasAuthenticated: true });
               // AUTH_SUCCESS is already sent by ServerAuthHandler.handleServerAuthentication()
               console.log(`[SERVER] Server authentication successful for user: ${state.username}`);
@@ -1225,6 +1207,8 @@ async function startServer() {
               } catch (error) {
                 if (DEBUG_SERVER_LOGS) console.warn(`[SERVER] Failed to check prekey count:`, error);
               }
+            } else if (result && result.handled) {
+              // Soft error already sent by handler; do not send a duplicate error
             } else {
               console.error(`[SERVER] Server authentication failed for user: ${state.username}`);
               ws.send(JSON.stringify({ type: SignalType.AUTH_ERROR, message: 'Server authentication failed' }));
@@ -1609,7 +1593,27 @@ async function startServer() {
             break;
           }
 
-          case SignalType.RATE_LIMIT_RESET: {
+          case SignalType.PASSWORD_HASH_RESPONSE: {
+            const state = await ConnectionStateManager.getState(sessionId);
+            if (DEBUG_SERVER_LOGS) console.log(`[SERVER] Processing password hash response for user: ${state?.username || 'unknown'}`);
+            if (!state?.username) {
+              console.error('[SERVER] Username not set for password hash response');
+              return ws.send(JSON.stringify({ type: SignalType.ERROR, message: 'Username not set' }));
+            }
+            if (!parsed.passwordHash) {
+              console.error('[SERVER] Password hash missing');
+              return ws.send(JSON.stringify({ type: SignalType.ERROR, message: 'Password hash missing' }));
+            }
+
+            await authHandler.handlePasswordHash(
+              ws,
+              state.username,
+              parsed.passwordHash
+            );
+            break;
+          }
+
+          case SignalType.SERVER_LOGIN: {
             // Admin function: Reset rate limits
             // This could be restricted to admin users in production
             const state = await ConnectionStateManager.getState(sessionId);

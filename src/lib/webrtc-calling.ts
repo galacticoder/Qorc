@@ -358,15 +358,40 @@ export class WebRTCCallingService {
   /**
    * Toggle video on/off
    */
-  toggleVideo(): boolean {
+  async toggleVideo(): Promise<boolean> {
     if (!this.localStream) return false;
 
-    const videoTrack = this.localStream.getVideoTracks()[0];
-    if (videoTrack) {
-      videoTrack.enabled = !videoTrack.enabled;
-      return videoTrack.enabled; // Return video enabled state
+    let videoTrack = this.localStream.getVideoTracks()[0];
+
+    // If we don't have a video track (e.g., after certain device events), reacquire one when enabling
+    if (!videoTrack) {
+      try {
+        const newStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+        const newVideo = newStream.getVideoTracks()[0];
+        if (newVideo) {
+          if (this.peerConnection) {
+            const sender = this.peerConnection.getSenders().find(s => s.track && s.track.kind === 'video');
+            if (sender) {
+              await sender.replaceTrack(newVideo);
+            } else {
+              this.peerConnection.addTrack(newVideo, new MediaStream([newVideo]));
+              await this.renegotiateConnection();
+            }
+          }
+          if (!this.localStream) this.localStream = new MediaStream();
+          this.localStream.addTrack(newVideo);
+          this.onLocalStreamCallback?.(this.localStream);
+          videoTrack = newVideo;
+        }
+      } catch (e) {
+        console.error('[Calling] Failed to reacquire camera track on toggle:', e);
+        return false;
+      }
     }
-    return false;
+
+    // Toggle enabled state
+    videoTrack.enabled = !videoTrack.enabled;
+    return videoTrack.enabled; // Return video enabled state
   }
 
   /**
@@ -625,6 +650,9 @@ export class WebRTCCallingService {
 
       const videoTrack = this.screenStream.getVideoTracks()[0];
 
+      // Optimize screen content for clarity
+      try { (videoTrack as any).contentHint = 'detail'; } catch {}
+
       // Handle screen share end (user clicks "Stop sharing" in browser)
       videoTrack.onended = () => {
         console.log('[Calling] Screen share track ended by user or system');
@@ -635,6 +663,26 @@ export class WebRTCCallingService {
       // This ensures simultaneous screen shares are visible on both sides
       console.log('[Calling] Adding screen share track as additional sender');
       this.screenShareSender = this.peerConnection.addTrack(videoTrack, this.screenStream);
+
+      // Apply sender encoding parameters to allow higher resolutions/bitrate
+      try {
+        if (this.screenShareSender.setParameters) {
+          const params = this.screenShareSender.getParameters() || {};
+          params.encodings = params.encodings && params.encodings.length ? params.encodings : [{}];
+          // Choose bitrate based on user quality setting
+          const { quality, frameRate, resolution } = screenSharingSettings.getSettings();
+          const is4k = !resolution.isNative && (resolution.width >= 3840 || resolution.height >= 2160);
+          let maxBitrate = 6_000_000; // default ~6 Mbps
+          if (quality === 'high') maxBitrate = is4k ? 12_000_000 : 8_000_000;
+          if (quality === 'low') maxBitrate = 2_500_000;
+          params.encodings[0].maxBitrate = maxBitrate; // in bps
+          // Prefer full resolution
+          params.encodings[0].scaleResolutionDownBy = 1.0;
+          (this.screenShareSender as any).setParameters(params).catch?.(() => {});
+        }
+      } catch (e) {
+        console.warn('[Calling] Failed to apply screen share sender parameters (non-fatal):', e);
+      }
 
       // Renegotiate so the remote peer receives the additional m=video line
       console.log('[Calling] Triggering renegotiation for new screen share track');

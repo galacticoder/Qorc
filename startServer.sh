@@ -2,29 +2,93 @@
 
 set -euo pipefail
 
+# Clean up any leftover temp files from previous runs FIRST
+rm -f /tmp/server_startup.stop /tmp/tunnel_monitor.stop /tmp/startup_cleanup.lock /tmp/server_retry_attempted 2>/dev/null || true
+
+# Global stop flags used to coordinate graceful shutdown across background tasks
+STOP_FILE="/tmp/server_startup.stop"
+MONITOR_STOP_FILE="/tmp/tunnel_monitor.stop"
+CLEANUP_LOCK="/tmp/startup_cleanup.lock"
+# Session identifier to disambiguate monitors from previous runs
+START_SESSION_ID="start_$$_$(date +%s)"
+
 # Cleanup function for proper shutdown
 cleanup_on_exit() {
+    # Prevent double-execution
+    if [[ -f "$CLEANUP_LOCK" ]]; then
+        return 0
+    fi
+    touch "$CLEANUP_LOCK" 2>/dev/null || true
     echo -e "\n[STARTUP] Received shutdown signal, cleaning up..."
     
-    # Stop tunnel monitoring if it was started
-    if [[ -f "/tmp/tunnel_monitor.pid" ]]; then
-        MONITOR_PID=$(cat /tmp/tunnel_monitor.pid 2>/dev/null)
+    # Signal the tunnel monitor to stop before doing anything else to avoid restarts
+    echo "[STARTUP] Signaling tunnel monitor to stop..."
+    touch "$MONITOR_STOP_FILE" 2>/dev/null || true
+    # Signal any ongoing setup to abort cleanly
+    touch "$STOP_FILE" 2>/dev/null || true
+    
+    # Stop tunnel monitoring if it was started (kill this session's monitor first)
+    if [[ -f "/tmp/tunnel_monitor.pid.$START_SESSION_ID" ]]; then
+        MONITOR_PID=$(cat "/tmp/tunnel_monitor.pid.$START_SESSION_ID" 2>/dev/null || echo "")
         if [[ -n "$MONITOR_PID" ]]; then
-            echo "[STARTUP] Stopping tunnel monitor..."
-            kill "$MONITOR_PID" 2>/dev/null || true
+            echo "[STARTUP] Stopping tunnel monitor (PID: $MONITOR_PID)..."
+            kill -TERM "$MONITOR_PID" 2>/dev/null || true
+            # Wait longer for the monitor to exit gracefully
+            for i in {1..20}; do
+                if kill -0 "$MONITOR_PID" 2>/dev/null; then 
+                    sleep 0.5
+                else 
+                    break
+                fi
+            done
+            # If it's still running, force kill it
+            if kill -0 "$MONITOR_PID" 2>/dev/null; then
+                echo "[STARTUP] Force killing stubborn tunnel monitor..."
+                kill -9 "$MONITOR_PID" 2>/dev/null || true
+            fi
+        fi
+        rm -f "/tmp/tunnel_monitor.pid.$START_SESSION_ID"
+    fi
+    # Kill any stale monitors from previous sessions
+    for pidfile in /tmp/tunnel_monitor.pid.*; do
+        if [[ -f "$pidfile" ]]; then
+            OLD_PID=$(cat "$pidfile" 2>/dev/null || echo "")
+            if [[ -n "$OLD_PID" ]]; then
+                echo "[STARTUP] Stopping stale tunnel monitor (PID: $OLD_PID) from $pidfile..."
+                kill -TERM "$OLD_PID" 2>/dev/null || true
+                sleep 1
+                # Force kill if still running
+                if kill -0 "$OLD_PID" 2>/dev/null; then
+                    kill -9 "$OLD_PID" 2>/dev/null || true
+                fi
+            fi
+            rm -f "$pidfile" 2>/dev/null || true
+        fi
+    done
+    # Backward-compat: old single PID file
+    if [[ -f "/tmp/tunnel_monitor.pid" ]]; then
+        COMPAT_PID=$(cat /tmp/tunnel_monitor.pid 2>/dev/null || echo "")
+        if [[ -n "$COMPAT_PID" ]]; then 
+            kill -TERM "$COMPAT_PID" 2>/dev/null || true
+            sleep 1
+            # Force kill if still running
+            if kill -0 "$COMPAT_PID" 2>/dev/null; then
+                kill -9 "$COMPAT_PID" 2>/dev/null || true
+            fi
         fi
         rm -f /tmp/tunnel_monitor.pid
     fi
     
-    # Stop tunnel if running
-    if [[ -f "scripts/config/cloudflared/tunnel.pid" ]]; then
-        echo "[STARTUP] Stopping Cloudflare tunnel..."
-        bash scripts/simple-tunnel.sh stop 2>/dev/null || true
-    fi
+    # Stop tunnel unconditionally using the helper script (path is relative to server/)
+    echo "[STARTUP] Stopping Cloudflare tunnel..."
+    (cd .. && bash scripts/simple-tunnel.sh stop) 2>/dev/null || true
     
     # Kill any remaining processes
     pkill -f cloudflared 2>/dev/null || true
     pkill -f "node server.js" 2>/dev/null || true
+    
+    # Clean up temp files
+    rm -f "$STOP_FILE" "$MONITOR_STOP_FILE" "$CLEANUP_LOCK" /tmp/server_retry_attempted 2>/dev/null || true
     
     echo "[STARTUP] Cleanup completed"
     exit 0
@@ -32,6 +96,8 @@ cleanup_on_exit() {
 
 # Set up signal handlers
 trap cleanup_on_exit SIGINT SIGTERM SIGQUIT
+# Also ensure cleanup runs exactly once on script exit
+trap 'cleanup_on_exit' EXIT
 
 # Show help if requested
 if [[ "${1:-}" == "--help" ]] || [[ "${1:-}" == "-h" ]]; then
@@ -143,8 +209,22 @@ if [[ "$DDOS_ONLY" == "true" ]]; then
     exit 0
 fi
 
+# Interruptible sleep function for startServer
+interruptible_sleep() {
+    local duration=$1
+    local i=0
+    while [ $i -lt $duration ]; do
+        sleep 1
+        i=$((i + 1))
+    done
+}
+
 # Function to setup DDoS protection with monitoring
 setup_ddos_protection() {
+    # If shutdown has begun, abort setup immediately
+    if [[ -f "$STOP_FILE" ]]; then
+        return 1
+    fi
     if [[ "$ENABLE_DDOS_PROTECTION" != "true" ]]; then
         echo -e "${YELLOW}DDoS protection disabled (use --no-ddos to skip this message)${NC}"
         return 0
@@ -164,9 +244,20 @@ setup_ddos_protection() {
     local tunnel_success=false
     
     for attempt in $(seq 1 $tunnel_attempts); do
+        # Abort if shutdown was requested
+        if [[ -f "$STOP_FILE" ]]; then
+            echo -e "${YELLOW}Abort tunnel setup due to shutdown request${NC}"
+            return 1
+        fi
         echo -e "${BLUE}Tunnel attempt $attempt/$tunnel_attempts...${NC}"
         
-        if timeout 60 ../scripts/simple-tunnel.sh start; then
+        TUNNEL_EXIT_CODE=0
+        ../scripts/simple-tunnel.sh start || TUNNEL_EXIT_CODE=$?
+        
+        if [[ $TUNNEL_EXIT_CODE -eq 130 ]]; then
+            echo -e "${YELLOW}Tunnel setup interrupted by user${NC}"
+            return 130
+        elif [[ $TUNNEL_EXIT_CODE -eq 0 ]]; then
             echo -e "${GREEN}✓ DDoS protection active!${NC}"
             tunnel_success=true
             
@@ -180,10 +271,14 @@ setup_ddos_protection() {
             break
         else
             echo -e "${YELLOW}Tunnel attempt $attempt failed${NC}"
+            if [[ -f "$STOP_FILE" ]]; then
+                echo -e "${YELLOW}Abort tunnel setup due to shutdown request${NC}"
+                return 1
+            fi
             if [[ $attempt -lt $tunnel_attempts ]]; then
                 echo -e "${BLUE}Cleaning up and retrying in 5 seconds...${NC}"
                 pkill -f cloudflared 2>/dev/null || true
-                sleep 5
+                interruptible_sleep 5
             fi
         fi
     done
@@ -201,12 +296,43 @@ setup_ddos_protection() {
 
 # Function to monitor and restart tunnel if needed
 monitor_tunnel() {
+    # Detach from job control signals to ensure trap in parent can stop us
+    trap 'exit 0' SIGINT SIGTERM
     while true; do
-        sleep 30 # Check every 30 seconds
+        # Check stop conditions more frequently (every 5 seconds instead of 30)
+        for i in {1..6}; do
+            # Respect stop flag to avoid restarts during shutdown
+            if [[ -f "$MONITOR_STOP_FILE" ]]; then
+                echo -e "${BLUE}[STARTUP] Tunnel monitor stop flag detected; exiting monitor${NC}"
+                rm -f "$MONITOR_STOP_FILE" 2>/dev/null || true
+                exit 0
+            fi
+            
+            # If the server process is no longer running, exit the monitor
+            if ! pgrep -f "node server.js" >/dev/null 2>&1; then
+                echo -e "${BLUE}[STARTUP] Server process not found; exiting tunnel monitor${NC}"
+                exit 0
+            fi
+            
+            # If the main startup script is no longer running, exit
+            if ! pgrep -f "bash.*startServer.sh" >/dev/null 2>&1; then
+                echo -e "${BLUE}[STARTUP] Main startup script not found; exiting tunnel monitor${NC}"
+                exit 0
+            fi
+            
+            sleep 5 # Check every 5 seconds
+        done
         
+        # Only check tunnel status every 30 seconds (after 6 iterations of 5-second sleeps)
         if [[ "$ENABLE_DDOS_PROTECTION" == "true" ]] && [[ -f "../scripts/simple-tunnel.sh" ]]; then
             # Check if tunnel should be running but isn't
             if ! ../scripts/simple-tunnel.sh status >/dev/null 2>&1; then
+                # Double-check we should still be running before attempting restart
+                if [[ -f "$MONITOR_STOP_FILE" ]] || ! pgrep -f "node server.js" >/dev/null 2>&1; then
+                    echo -e "${BLUE}[STARTUP] Stop condition detected during tunnel check; exiting monitor${NC}"
+                    exit 0
+                fi
+                
                 echo -e "${YELLOW}[$(date)] Tunnel down, attempting restart...${NC}"
                 
                 # Try to restart the tunnel
@@ -895,7 +1021,15 @@ cleanup_and_retry() {
 }
 
 # Setup DDoS protection before starting server
-setup_ddos_protection
+DDOS_EXIT_CODE=0
+setup_ddos_protection || DDOS_EXIT_CODE=$?
+
+# Handle interrupt during tunnel setup
+if [[ $DDOS_EXIT_CODE -eq 130 ]]; then
+    echo -e "${YELLOW}Server startup interrupted during tunnel setup${NC}"
+    cleanup_on_exit
+    exit 130
+fi
 
 # Show final status
 echo
@@ -911,6 +1045,8 @@ if [[ "$ENABLE_DDOS_PROTECTION" == "true" ]] && [[ -f "../scripts/simple-tunnel.
     echo -e "${BLUE}Starting tunnel monitoring service...${NC}"
     monitor_tunnel &
     MONITOR_PID=$!
+    echo "$MONITOR_PID" > "/tmp/tunnel_monitor.pid.$START_SESSION_ID"
+    # Backward-compat single PID file for older cleanups
     echo "$MONITOR_PID" > /tmp/tunnel_monitor.pid
 fi
 

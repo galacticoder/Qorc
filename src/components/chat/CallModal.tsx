@@ -411,8 +411,8 @@ export const CallModal: React.FC<CallModalProps> = ({
     setIsMuted(muted);
   };
 
-  const handleToggleVideo = () => {
-    const enabled = onToggleVideo();
+  const handleToggleVideo = async () => {
+    const enabled = await onToggleVideo();
     setIsVideoEnabled(enabled);
   };
 

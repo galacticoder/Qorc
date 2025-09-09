@@ -11,6 +11,7 @@ const PinnedServer = {
 };
 import { Message } from '@/components/chat/types';
 import { SecureDB } from '@/lib/secureDB';
+import websocketClient from '@/lib/websocket';
 
 export enum SignalType {
   PUBLICKEYS = "public-keys",
@@ -222,6 +223,33 @@ export async function handleSignalMessages(
           });
         }
         setShowPassphrasePrompt(true);
+        break;
+      }
+
+      case SignalType.PASSWORD_HASH_PARAMS: {
+        console.log('[Signals] Server sent password hash parameters:', {
+          salt: data.salt ? 'present' : 'null',
+          timeCost: data.timeCost,
+          memoryCost: data.memoryCost,
+          parallelism: data.parallelism
+        });
+        
+        // Dispatch event for authentication system to handle
+        try {
+          const event = new CustomEvent('password-hash-params', {
+            detail: {
+              salt: data.salt,
+              timeCost: data.timeCost,
+              memoryCost: data.memoryCost,
+              parallelism: data.parallelism,
+              algorithm: data.algorithm,
+              version: data.version
+            }
+          });
+          window.dispatchEvent(event);
+        } catch (error) {
+          console.error('[Signals] Error dispatching password hash params event:', error);
+        }
         break;
       }
 
@@ -460,37 +488,45 @@ export async function handleSignalMessages(
         break;
       }
 
-      case 'password-hash-params': {
-        console.log('[Signals] Server sent password hash parameters:', {
-          salt: data.salt ? 'present' : 'null',
-          timeCost: data.timeCost,
-          memoryCost: data.memoryCost,
-          parallelism: data.parallelism
-        });
-        
-        // Dispatch event for authentication system to handle
-        try {
-          const event = new CustomEvent('password-hash-params', {
-            detail: {
-              salt: data.salt,
-              timeCost: data.timeCost,
-              memoryCost: data.memoryCost,
-              parallelism: data.parallelism
-            }
-          });
-          window.dispatchEvent(event);
-        } catch (error) {
-          console.error('[Signals] Error dispatching password hash params event:', error);
-        }
-        break;
-      }
 
       case SignalType.NAMEEXISTSERROR:
       case SignalType.INVALIDNAMELENGTH:
-      case SignalType.INVALIDNAME:
-      case SignalType.AUTH_ERROR:
+      case SignalType.INVALIDNAME: {
+        setLoginError(`Login error: ${message}`);
+        break;
+      }
+      case SignalType.AUTH_ERROR: {
+        // Rich auth error handling with attempts/cooldowns
+        const category = (data as any).category as string | undefined;
+        const attemptsRemaining = (data as any).attemptsRemaining as number | undefined;
+        const locked = !!(data as any).locked;
+        const cooldownSeconds = (data as any).cooldownSeconds as number | undefined;
+        const logout = !!(data as any).logout;
+        const code = (data as any).code as string | undefined;
+
+        let extra = '';
+        if (typeof attemptsRemaining === 'number') {
+          extra = ` (${attemptsRemaining} attempt${attemptsRemaining === 1 ? '' : 's'} remaining)`;
+        }
+        if (locked) {
+          extra += cooldownSeconds ? ` — too many attempts. Try again in ${cooldownSeconds}s.` : ' — too many attempts.';
+          if (typeof cooldownSeconds === 'number' && cooldownSeconds > 0) {
+            try { websocketClient.setGlobalRateLimit(cooldownSeconds); } catch {}
+          }
+        }
+
+        setLoginError(`${message}${extra}`.trim());
+
+        // Special handling per category
+        if (logout && category === 'passphrase') {
+          // Log out of account auth but keep socket connection
+          setAccountAuthenticated(false);
+          setIsLoggedIn(false);
+          setShowPassphrasePrompt(false);
+        }
+        break;
+      }
       case SignalType.SERVERLIMIT: {
-        setIsLoggedIn(false);
         setLoginError(`Login error: ${message}`);
         break;
       }

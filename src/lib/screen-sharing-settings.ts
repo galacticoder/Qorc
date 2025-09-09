@@ -272,9 +272,8 @@ export class ScreenSharingSettingsManager {
 
     // Apply resolution constraints (no min constraints for browser compatibility)
     if (resolution.isNative) {
-      // For native resolution, let the browser choose the best available
-      constraints.width = { ideal: 1920 };
-      constraints.height = { ideal: 1080 };
+      // For native resolution, do not constrain width/height at all — let the browser capture full monitor resolution
+      // Leaving width/height undefined enables true native capture (e.g., 1440p/4K on capable displays)
     } else {
       constraints.width = { ideal: resolution.width, max: resolution.width };
       constraints.height = { ideal: resolution.height, max: resolution.height };

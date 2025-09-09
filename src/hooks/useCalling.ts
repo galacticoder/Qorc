@@ -331,12 +331,12 @@ export const useCalling = (authContext?: ReturnType<typeof useAuth>) => {
   }, [callingService]);
 
   // Toggle video
-  const toggleVideo = useCallback(() => {
+  const toggleVideo = useCallback(async () => {
     if (!callingService) {
       return false;
     }
 
-    const isEnabled = callingService.toggleVideo();
+    const isEnabled = await callingService.toggleVideo();
     console.log('[useCalling] Video toggled:', isEnabled);
     return isEnabled;
   }, [callingService]);

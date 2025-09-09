@@ -358,6 +358,24 @@ const ChatApp: React.FC<ChatAppProps> = () => {
 
   useWebSocket(signalHandler, encryptedHandler, Authentication.setLoginError);
 
+  // Allow UI back to server selection
+  useEffect(() => {
+    const handleAuthUiBack = async (event: CustomEvent) => {
+      try {
+        const to = (event as any).detail?.to as 'server' | undefined;
+        if (to === 'server') {
+          try { await (window as any).electronAPI?.wsDisconnect?.(); } catch {}
+          setSelectedServerUrl('');
+          setShowServerSelection(true);
+        }
+      } catch (e) {
+        console.error('[Index] Failed to handle auth-ui-back (server):', e);
+      }
+    };
+    window.addEventListener('auth-ui-back', handleAuthUiBack as EventListener);
+    return () => window.removeEventListener('auth-ui-back', handleAuthUiBack as EventListener);
+  }, []);
+
   // Expose current user's original name for call signal encryption (renderer-only, safe variable)
   useEffect(() => {
     try {
@@ -559,6 +577,9 @@ const ChatApp: React.FC<ChatAppProps> = () => {
           showPasswordPrompt={Authentication.showPasswordPrompt}
           setShowPasswordPrompt={Authentication.setShowPasswordPrompt}
           onPassphraseSubmit={Authentication.handlePassphraseSubmit}
+          initialUsername={Authentication.originalUsernameRef.current || ''}
+          initialPassword={Authentication.passwordRef.current || ''}
+          maxStepReached={Authentication.maxStepReached}
         />
       </div>
     );

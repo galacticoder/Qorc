@@ -9,12 +9,18 @@ interface SignUpFormProps {
   authStatus?: string;
   error?: string;
   hasServerTrustRequest?: boolean;
+  initialUsername?: string;
+  initialPassword?: string;
 }
 
-export function SignUpForm({ onSubmit, disabled, authStatus, error, hasServerTrustRequest }: SignUpFormProps) {
-  const [username, setUsername] = useState("");
-  const [password, setPassword] = useState("");
+export function SignUpForm({ onSubmit, disabled, authStatus, error, hasServerTrustRequest, initialUsername = "", initialPassword = "", onChangeUsername, onChangePassword, onChangeConfirmPassword }: SignUpFormProps & { onChangeUsername?: (v:string)=>void; onChangePassword?: (v:string)=>void; onChangeConfirmPassword?: (v:string)=>void; }) {
+  const [username, setUsername] = useState(initialUsername);
+  const [password, setPassword] = useState(initialPassword);
   const [confirmPassword, setConfirmPassword] = useState("");
+
+  const handleUsernameChange = (v:string) => { setUsername(v); onChangeUsername?.(v); };
+  const handlePasswordChange = (v:string) => { setPassword(v); onChangePassword?.(v); };
+  const handleConfirmChange = (v:string) => { setConfirmPassword(v); onChangeConfirmPassword?.(v); };
   const [isSubmitting, setIsSubmitting] = useState(false);
 
   const isUsernameValid = username.trim().length >= 3;
@@ -65,7 +71,7 @@ export function SignUpForm({ onSubmit, disabled, authStatus, error, hasServerTru
           id="username"
           placeholder="Choose your username"
           value={username}
-          onChange={(e) => setUsername(e.target.value)}
+          onChange={(e) => handleUsernameChange(e.target.value)}
           disabled={disabled || isSubmitting}
           required
           minLength={3}
@@ -79,7 +85,7 @@ export function SignUpForm({ onSubmit, disabled, authStatus, error, hasServerTru
           type="password"
           placeholder="Choose a password"
           value={password}
-          onChange={(e) => setPassword(e.target.value)}
+          onChange={(e) => handlePasswordChange(e.target.value)}
           disabled={disabled || isSubmitting}
           required
         />
@@ -92,7 +98,7 @@ export function SignUpForm({ onSubmit, disabled, authStatus, error, hasServerTru
           type="password"
           placeholder="Confirm your password"
           value={confirmPassword}
-          onChange={(e) => setConfirmPassword(e.target.value)}
+          onChange={(e) => handleConfirmChange(e.target.value)}
           disabled={disabled || isSubmitting}
           required
         />

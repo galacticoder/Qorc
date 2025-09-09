@@ -7,7 +7,8 @@ export const TTL_CONFIG = {
   SESSION_TTL: 300,        // 5 minutes - Redis session state
   PRESENCE_TTL: 180,       // 3 minutes - User online status
   CONNECTION_COUNTER_TTL: 3600, // 1 hour - Connection counting
-  RATE_LIMIT_TTL: 3600     // 1 hour - Rate limiting data
+  RATE_LIMIT_TTL: 3600,    // 1 hour - Rate limiting data
+  AUTH_STATE_TTL: 604800   // 7 days - Persisted auth state (remember me)
 };
 // SECURITY: Private password storage with validation
 let _serverPasswordHash = null;
@@ -28,7 +29,7 @@ export const RATE_LIMIT_CONFIG = {
 
   AUTH_PER_USER: {
     WINDOW_MS: 600000, // 10 minutes
-    MAX_ATTEMPTS: 10, // max failed tries per user
+    MAX_ATTEMPTS: 50, // allow server rate limiter plenty of headroom; app enforces 5 visible attempts
     BLOCK_DURATION_MS: 900000 // block time (900 seconds / 15 minutes)
   },
 

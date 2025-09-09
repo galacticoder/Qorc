@@ -18,6 +18,9 @@ interface LoginProps {
   error?: string;
   accountAuthenticated: boolean;
   isRegistrationMode: boolean;
+  initialUsername?: string;
+  initialPassword?: string;
+  maxStepReached?: 'login' | 'passphrase' | 'server';
   serverTrustRequest?: { //trust prompt for new changed server keys
     newKeys: { x25519PublicBase64: string; kyberPublicBase64: string };
     pinned: { x25519PublicBase64: string; kyberPublicBase64: string } | null;
@@ -53,6 +56,11 @@ export function Login({
   serverTrustRequest,
   onAcceptServerTrust,
   onRejectServerTrust,
+  setShowPassphrasePrompt,
+  isRegistrationMode,
+  initialUsername = "",
+  initialPassword = "",
+  maxStepReached = 'login',
 }: LoginProps) {
   const [serverPassword, setServerPassword] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -95,15 +103,34 @@ export function Login({
     }
   };
 
-  const handlePasswordHashSubmit = async (password: string) => {
-    setIsSubmitting(true);
-    try {
-      await onPasswordHashSubmit?.(password);
-    } catch (err) {
-      console.error("Password hash submission failed", err);
-    } finally {
-      setIsSubmitting(false);
+
+  const handleBack = () => {
+    // Utility to dispatch back event so the auth hook can clean up state
+    const dispatchBack = (to: 'login' | 'passphrase' | 'server') => {
+      try {
+        const ev = new CustomEvent('auth-ui-back', { detail: { to } });
+        window.dispatchEvent(ev);
+      } catch {}
+    };
+
+    if (showPasswordPrompt && setShowPasswordPrompt) {
+      setShowPasswordPrompt(false);
+      dispatchBack('login');
+      return;
     }
+    if (showPassphrasePrompt) {
+      setShowPassphrasePrompt(false);
+      dispatchBack('login');
+      return;
+    }
+    if (accountAuthenticated) {
+      // Go back to passphrase step from server password screen
+      setShowPassphrasePrompt(true);
+      dispatchBack('passphrase');
+      return;
+    }
+    // If we're at the account login/register screen, go back to server selection
+    dispatchBack('server');
   };
 
   return (
@@ -113,6 +140,51 @@ export function Login({
     >
       <Card className="w-full">
         <CardHeader className="space-y-4">
+          {/* Navigation above the lock icon */}
+          <div className="flex justify-between items-center">
+            <button
+              type="button"
+              className="px-3 py-1.5 rounded-md border"
+              onClick={handleBack}
+              disabled={isSubmitting || isGeneratingKeys}
+            >
+              ← Back
+            </button>
+            <button
+              type="button"
+              className="px-3 py-1.5 rounded-md border"
+              onClick={() => {
+                try {
+                  // Determine current step
+                  const atLogin = !showPassphrasePrompt && !accountAuthenticated;
+                  const atPassphrase = !!showPassphrasePrompt;
+                  // Determine next reachable step based on maxStepReached
+                  let to: 'passphrase' | 'server_password' | null = null;
+                  if (atLogin) {
+                    if (maxStepReached === 'passphrase') to = 'passphrase';
+                    else if (maxStepReached === 'server') to = 'server_password';
+                  } else if (atPassphrase) {
+                    if (maxStepReached === 'server') to = 'server_password';
+                  }
+                  if (!to) return; // do nothing if step not yet reached
+                  const ev = new CustomEvent('auth-ui-forward', { detail: { to } });
+                  window.dispatchEvent(ev);
+                } catch {}
+              }}
+              disabled={isSubmitting || isGeneratingKeys || (
+                // Disable when no next step has been reached yet
+                (() => {
+                  const atLogin = !showPassphrasePrompt && !accountAuthenticated;
+                  const atPassphrase = !!showPassphrasePrompt;
+                  if (atLogin) return !(maxStepReached === 'passphrase' || maxStepReached === 'server');
+                  if (atPassphrase) return !(maxStepReached === 'server');
+                  return true; // at server step, no forward
+                })()
+              )}
+            >
+              Forward →
+            </button>
+          </div>
           <div className="flex justify-between items-start">
             <div className="flex-1 flex flex-col items-center">
               <div className="mx-auto w-16 h-16 rounded-full bg-primary/10 flex items-center justify-center">
@@ -128,6 +200,21 @@ export function Login({
         </CardHeader>
 
         <CardContent className="space-y-6">
+          {/* Step Indicator */}
+          <div className="flex items-center justify-center gap-6">
+            {[
+              { key: 'login', label: 'Login', active: !showPassphrasePrompt && !accountAuthenticated },
+              { key: 'passphrase', label: 'Passphrase', active: !!showPassphrasePrompt },
+              { key: 'server', label: 'Server', active: !!accountAuthenticated },
+            ].map((s, idx) => (
+              <div key={s.key} className="flex items-center gap-2">
+                <div className={`w-3 h-3 rounded-full ${s.active ? 'bg-primary' : 'bg-muted-foreground/30'}`} />
+                <span className={`text-sm ${s.active ? 'text-primary font-medium' : 'text-muted-foreground'}`}>{s.label}</span>
+                {idx < 2 && <span className="text-muted-foreground/50">→</span>}
+              </div>
+            ))}
+          </div>
+
           {serverTrustRequest && (
             <div className="p-3 border rounded-md bg-amber-50 border-amber-200">
               <div className="font-semibold mb-2">Server identity changed</div>
@@ -168,9 +255,15 @@ export function Login({
           )}
           {showPasswordPrompt ? (
             <PasswordHashPrompt
-              onSubmit={handlePasswordHashSubmit}
+              onSubmit={async (pwd) => {
+                try { await onPasswordHashSubmit?.(pwd); } catch {}
+              }}
               disabled={isSubmitting || isGeneratingKeys}
               authStatus={authStatus}
+              initialPassword={initialPassword}
+              onChangePassword={(v) => {
+                try { (window as any).dispatchEvent?.(new CustomEvent('auth-ui-input', { detail: { field: 'password', value: v } })); } catch {}
+              }}
             />
           ) : showPassphrasePrompt ? (
             <PassphrasePrompt
@@ -178,6 +271,14 @@ export function Login({
               onSubmit={handlePassphraseSubmit}
               disabled={isSubmitting || isGeneratingKeys}
               authStatus={authStatus}
+              initialPassphrase={""}
+              initialConfirmPassphrase={""}
+              onChangePassphrase={(v) => {
+                try { (window as any).dispatchEvent?.(new CustomEvent('auth-ui-input', { detail: { field: 'passphrase', value: v } })); } catch {}
+              }}
+              onChangeConfirm={(v) => {
+                try { (window as any).dispatchEvent?.(new CustomEvent('auth-ui-input', { detail: { field: 'passphraseConfirm', value: v } })); } catch {}
+              }}
             />
           ) : accountAuthenticated ? (
             <ServerPasswordForm
@@ -194,6 +295,17 @@ export function Login({
               authStatus={authStatus}
               error={error}
               hasServerTrustRequest={!!serverTrustRequest}
+              initialUsername={initialUsername}
+              initialPassword={initialPassword}
+              onChangeUsername={(v) => {
+                try { (window as any).dispatchEvent?.(new CustomEvent('auth-ui-input', { detail: { field: 'username', value: v } })); } catch {}
+              }}
+              onChangePassword={(v) => {
+                try { (window as any).dispatchEvent?.(new CustomEvent('auth-ui-input', { detail: { field: 'password', value: v } })); } catch {}
+              }}
+              onChangeConfirmPassword={(v) => {
+                try { (window as any).dispatchEvent?.(new CustomEvent('auth-ui-input', { detail: { field: 'confirmPassword', value: v } })); } catch {}
+              }}
             />
           ) : (
             <SignInForm
@@ -202,6 +314,14 @@ export function Login({
               authStatus={authStatus}
               error={error}
               hasServerTrustRequest={!!serverTrustRequest}
+              initialUsername={initialUsername}
+              initialPassword={initialPassword}
+              onChangeUsername={(v) => {
+                try { (window as any).dispatchEvent?.(new CustomEvent('auth-ui-input', { detail: { field: 'username', value: v } })); } catch {}
+              }}
+              onChangePassword={(v) => {
+                try { (window as any).dispatchEvent?.(new CustomEvent('auth-ui-input', { detail: { field: 'password', value: v } })); } catch {}
+              }}
             />
           )}
 

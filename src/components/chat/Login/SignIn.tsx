@@ -9,11 +9,16 @@ interface SignInFormProps {
   authStatus?: string;
   error?: string;
   hasServerTrustRequest?: boolean;
+  initialUsername?: string;
+  initialPassword?: string;
 }
 
-export function SignInForm({ onSubmit, disabled, authStatus, error, hasServerTrustRequest }: SignInFormProps) {
-  const [username, setUsername] = useState("");
-  const [password, setPassword] = useState("");
+export function SignInForm({ onSubmit, disabled, authStatus, error, hasServerTrustRequest, initialUsername = "", initialPassword = "", onChangeUsername, onChangePassword }: SignInFormProps & { onChangeUsername?: (v:string)=>void; onChangePassword?: (v:string)=>void; }) {
+  const [username, setUsername] = useState(initialUsername);
+  const [password, setPassword] = useState(initialPassword);
+
+  const handleUsernameChange = (v: string) => { setUsername(v); onChangeUsername?.(v); };
+  const handlePasswordChange = (v: string) => { setPassword(v); onChangePassword?.(v); };
   const [isSubmitting, setIsSubmitting] = useState(false);
 
   const isFormValid = username.trim().length >= 3 && password.length > 0;
@@ -59,7 +64,7 @@ export function SignInForm({ onSubmit, disabled, authStatus, error, hasServerTru
           id="username"
           placeholder="Enter your username"
           value={username}
-          onChange={(e) => setUsername(e.target.value)}
+          onChange={(e) => handleUsernameChange(e.target.value)}
           disabled={disabled || isSubmitting}
           required
           minLength={3}
@@ -73,7 +78,7 @@ export function SignInForm({ onSubmit, disabled, authStatus, error, hasServerTru
           type="password"
           placeholder="Enter your password"
           value={password}
-          onChange={(e) => setPassword(e.target.value)}
+          onChange={(e) => handlePasswordChange(e.target.value)}
           disabled={disabled || isSubmitting}
           required
         />

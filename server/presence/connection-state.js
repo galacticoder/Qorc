@@ -87,8 +87,8 @@ export class ConnectionStateManager {
       };
 
       return await withRedisClient(async (client) => {
-        // Store auth state with longer TTL (30 minutes) to handle reconnections
-        const AUTH_STATE_TTL = 1800; // 30 minutes
+        // Store auth state with longer TTL to handle reconnections
+        const AUTH_STATE_TTL = TTL_CONFIG.AUTH_STATE_TTL || 1800; // fallback 30 minutes
         await client.setex(`auth_state:${username}`, AUTH_STATE_TTL, JSON.stringify(stateToStore));
         return true;
       });
@@ -127,7 +127,7 @@ export class ConnectionStateManager {
         const authState = JSON.parse(authStateJson);
         authState.lastActivity = Date.now();
         
-        const AUTH_STATE_TTL = 1800; // 30 minutes
+        const AUTH_STATE_TTL = TTL_CONFIG.AUTH_STATE_TTL || 1800; // fallback 30 minutes
         await client.setex(`auth_state:${username}`, AUTH_STATE_TTL, JSON.stringify(authState));
         return true;
       });

@@ -7,10 +7,13 @@ interface PasswordHashPromptProps {
   onSubmit: (password: string) => Promise<void>;
   disabled: boolean;
   authStatus?: string;
+  initialPassword?: string;
+  onChangePassword?: (v:string)=>void;
 }
 
-export function PasswordHashPrompt({ onSubmit, disabled, authStatus }: PasswordHashPromptProps) {
-  const [password, setPassword] = useState("");
+export function PasswordHashPrompt({ onSubmit, disabled, authStatus, initialPassword = "", onChangePassword }: PasswordHashPromptProps) {
+  const [password, setPassword] = useState(initialPassword);
+  const handleChange = (v:string) => { setPassword(v); onChangePassword?.(v); };
   const [isSubmitting, setIsSubmitting] = useState(false);
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -18,9 +21,8 @@ export function PasswordHashPrompt({ onSubmit, disabled, authStatus }: PasswordH
     if (!password.trim() || disabled || isSubmitting) return;
 
     setIsSubmitting(true);
-    try {
+      try {
       await onSubmit(password);
-      setPassword(""); // Clear password after submission
     } catch (error) {
       console.error("Password hash submission failed:", error);
     } finally {
@@ -44,7 +46,7 @@ export function PasswordHashPrompt({ onSubmit, disabled, authStatus }: PasswordH
           type="password"
           placeholder="Enter your password"
           value={password}
-          onChange={(e) => setPassword(e.target.value)}
+          onChange={(e) => handleChange(e.target.value)}
           disabled={disabled || isSubmitting}
           required
           autoFocus

@@ -5,6 +5,14 @@
 
 set -euo pipefail
 
+# Ensure we respond to Ctrl-C/SIGTERM and cleanup any spawned processes
+on_sigint() {
+    log_info "Signal received; stopping tunnel operations..."
+    cleanup_tunnel_processes
+    exit 130
+}
+trap on_sigint SIGINT SIGTERM
+
 # Colors for output
 GREEN='\033[0;32m'
 BLUE='\033[0;34m'
@@ -103,8 +111,21 @@ EOF
     log_info "This URL will stay the same every time you restart the server"
 }
 
+# Interruptible sleep function
+interruptible_sleep() {
+    local duration=$1
+    local i=0
+    while [ $i -lt $duration ]; do
+        sleep 1
+        i=$((i + 1))
+    done
+}
+
 # Start tunnel with robust retry logic
 start_tunnel() {
+    # Set up signal handling for this function
+    trap 'log_info "Tunnel startup interrupted, cleaning up..."; cleanup_tunnel_processes; return 130' SIGINT SIGTERM
+    
     # Check if tunnel is already running and healthy
     if pgrep -f "cloudflared.*tunnel" > /dev/null; then
         if [[ -f "$CONFIG_DIR/tunnel.pid" ]]; then
@@ -154,14 +175,14 @@ start_tunnel() {
         
         TUNNEL_PID=$!
         
-        # Wait for tunnel to start
-        sleep 5
+        # Wait for tunnel to start (interruptible)
+        interruptible_sleep 5
         
         # Check if process is still alive
         if ! kill -0 $TUNNEL_PID 2>/dev/null; then
             log_warning "Tunnel process died immediately (attempt $attempt)"
             attempt=$((attempt + 1))
-            sleep $retry_delay
+            interruptible_sleep $retry_delay
             continue
         fi
         
@@ -176,17 +197,17 @@ start_tunnel() {
                 if grep -q "dial tcp\|server misbehaving" "$CONFIG_DIR/tunnel.log" 2>/dev/null; then
                     log_info "Detected DNS issues, trying to flush DNS cache..."
                     sudo systemctl restart systemd-resolved 2>/dev/null || true
-                    sleep 2
+                    interruptible_sleep 2
                 fi
                 
                 attempt=$((attempt + 1))
-                sleep $retry_delay
+                interruptible_sleep $retry_delay
                 continue
             fi
         fi
         
-        # Wait a bit more for tunnel to fully establish
-        sleep 5
+        # Wait a bit more for tunnel to fully establish (interruptible)
+        interruptible_sleep 5
         
         # Final check - look for success indicators
         if [[ -f "$CONFIG_DIR/tunnel.log" ]]; then
@@ -207,7 +228,7 @@ start_tunnel() {
         log_warning "Tunnel startup incomplete (attempt $attempt)"
         kill $TUNNEL_PID 2>/dev/null || true
         attempt=$((attempt + 1))
-        sleep $retry_delay
+        interruptible_sleep $retry_delay
     done
     
     # Final validation
@@ -231,7 +252,7 @@ start_tunnel() {
                         break
                     fi
                 fi
-                sleep 1
+                interruptible_sleep 1
             done
         fi
         

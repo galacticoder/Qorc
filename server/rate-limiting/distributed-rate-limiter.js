@@ -23,6 +23,19 @@ class DistributedRateLimiter {
 		this._initStores();
 	}
 
+	// Format a duration in ms to a human readable string (e.g., "14 minutes 56 seconds")
+	_formatDuration(ms) {
+		const s = Math.max(1, Math.ceil(ms / 1000));
+		const hrs = Math.floor(s / 3600);
+		const mins = Math.floor((s % 3600) / 60);
+		const secs = s % 60;
+		const parts = [];
+		if (hrs) parts.push(`${hrs} hour${hrs === 1 ? '' : 's'}`);
+		if (mins) parts.push(`${mins} minute${mins === 1 ? '' : 's'}`);
+		if (!hrs && secs) parts.push(`${secs} second${secs === 1 ? '' : 's'}`);
+		return parts.join(' ');
+	}
+
 	_initStores() {
 		const redisUrl = process.env.REDIS_URL || process.env.RATE_LIMIT_REDIS_URL || null;
 		if (redisUrl) {
@@ -135,12 +148,12 @@ class DistributedRateLimiter {
 			const ms = res.msBeforeNext || 1000;
 			// SECURITY: Prevent division by zero and ensure positive values
 			const safeMs = Math.max(1000, ms || 1000);
-			const remainingSeconds = Math.max(1, Math.ceil(safeMs / 1000));
+			const friendly = this._formatDuration(safeMs);
 
 			return {
 				allowed: false,
-				reason: `Server connection rate limit exceeded. Try again in ${remainingSeconds} seconds.`,
-				remainingBlockTime: remainingSeconds
+				reason: `Server connection rate limit exceeded. Try again in ${friendly}.`,
+				remainingBlockTime: Math.max(1, Math.ceil(safeMs / 1000))
 			};
 		}
 	}
@@ -161,12 +174,12 @@ class DistributedRateLimiter {
 			// Blocked auth logged (metrics removed for memory efficiency)
 			// SECURITY: Prevent division by zero and ensure positive values
 			const safeMs = Math.max(1000, res.msBeforeNext || 1000);
-			const remainingSeconds = Math.max(1, Math.ceil(safeMs / 1000));
+			const friendly = this._formatDuration(safeMs);
 
 			return {
 				allowed: false,
-				reason: `Authentication rate limit exceeded on this connection. Try again in ${remainingSeconds} seconds.`,
-				remainingBlockTime: remainingSeconds
+				reason: `Authentication rate limit exceeded on this connection. Try again in ${friendly}.`,
+				remainingBlockTime: Math.max(1, Math.ceil(safeMs / 1000))
 			};
 		}
 	}
@@ -177,11 +190,33 @@ class DistributedRateLimiter {
 			return { allowed: true };
 		} catch (res) {
 			const ms = res.msBeforeNext || 1000;
+			const friendly = this._formatDuration(ms);
 			return {
 				allowed: false,
-				reason: `Too many failed authentication attempts. Try again in ${Math.ceil(ms / 1000)} seconds.`,
-				remainingBlockTime: Math.ceil(ms / 1000)
+				reason: `Too many failed authentication attempts. Try again in ${friendly}.`,
+				remainingBlockTime: Math.max(1, Math.ceil(ms / 1000))
 			};
+		}
+	}
+
+	// Non-consuming status check for per-user auth limit
+	async getUserAuthStatus(username) {
+		try {
+			const res = await this.userAuthLimiter.get(username);
+			if (!res) return { allowed: true };
+			const cfg = RATE_LIMIT_CONFIG.AUTH_PER_USER;
+			const consumed = res.consumedPoints || 0;
+			const msBeforeNext = res.msBeforeNext || 0;
+			const isBlocked = consumed >= Math.max(1, cfg.MAX_ATTEMPTS) && msBeforeNext > 0;
+			if (!isBlocked) return { allowed: true };
+			const friendly = this._formatDuration(msBeforeNext);
+			return {
+				allowed: false,
+				reason: `Too many failed authentication attempts. Try again in ${friendly}.`,
+				remainingBlockTime: Math.max(1, Math.ceil(msBeforeNext / 1000))
+			};
+		} catch {
+			return { allowed: true };
 		}
 	}
 
@@ -192,10 +227,11 @@ class DistributedRateLimiter {
 		} catch (res) {
 			// Blocked message logged (metrics removed for memory efficiency)
 			const ms = res.msBeforeNext || 1000;
+			const friendly = this._formatDuration(ms);
 			return {
 				allowed: false,
-				reason: `Message rate limit exceeded. Try again in ${Math.ceil(ms / 1000)} seconds.`,
-				remainingBlockTime: Math.ceil(ms / 1000)
+				reason: `Message rate limit exceeded. Try again in ${friendly}.`,
+				remainingBlockTime: Math.max(1, Math.ceil(ms / 1000))
 			};
 		}
 	}
@@ -207,10 +243,11 @@ class DistributedRateLimiter {
 		} catch (res) {
 			// Blocked bundle logged (metrics removed for memory efficiency)
 			const ms = res.msBeforeNext || 1000;
+			const friendly = this._formatDuration(ms);
 			return {
 				allowed: false,
-				reason: `Bundle operation rate limit exceeded. Try again in ${Math.ceil(ms / 1000)} seconds.`,
-				remainingBlockTime: Math.ceil(ms / 1000)
+				reason: `Bundle operation rate limit exceeded. Try again in ${friendly}.`,
+				remainingBlockTime: Math.max(1, Math.ceil(ms / 1000))
 			};
 		}
 	}

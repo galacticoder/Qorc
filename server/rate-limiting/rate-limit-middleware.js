@@ -77,14 +77,13 @@ export class RateLimitMiddleware {
 		return true;
 	}
 
-	// Check per-user auth limit
-	async checkUserAuthLimit(username) {
+	// Non-consuming per-user auth status check
+	async checkUserAuthStatus(username) {
 		if (!this.isValidUsername(username)) {
 			console.warn('[RATE-LIMIT-SECURITY] Invalid username format in user auth check');
-			// Security violation logged (metrics removed for memory efficiency)
 			return { allowed: false, reason: 'Invalid user' };
 		}
-		return this.rateLimiter.checkUserAuthLimit(username);
+		return this.rateLimiter.getUserAuthStatus(username);
 	}
 
 	// Check message rate limit
