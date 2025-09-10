@@ -180,36 +180,43 @@ export function useMessageReceipts(
 		}
 	}, [setMessages, currentUsername, saveMessageToLocalDB]);
 
-	// Smart status management: show receipt status for all messages that have receipts
+	// Smart status management: show receipt status with improved ordering logic
 	const getSmartReceiptStatus = useCallback((message: Message) => {
-		// We only show status for messages sent by current user that are the latest read or delivered
+		// We only show status for messages sent by current user
 		if (!message.receipt || message.sender !== currentUsername) return undefined;
 
-		// Determine last read and last delivered (but not read) message IDs
-		let lastReadId: string | undefined;
-		let lastDeliveredId: string | undefined;
+		// Collect all current user messages with their timestamps and statuses
+		const currentUserMessages = messages
+			.filter(msg => msg.sender === currentUsername && msg.receipt)
+			.map(msg => ({
+				id: msg.id,
+				timestamp: new Date(msg.timestamp).getTime(),
+				receipt: msg.receipt!
+			}))
+			.sort((a, b) => b.timestamp - a.timestamp); // Sort newest first
 
-		for (let i = messages.length - 1; i >= 0; i--) {
-			const msg = messages[i];
-			if (msg.sender !== currentUsername) continue;
-			if (!lastReadId && msg.receipt?.read) {
-				lastReadId = msg.id;
-			}
-			if (!lastDeliveredId && msg.receipt?.delivered && !msg.receipt.read) {
-				lastDeliveredId = msg.id;
-			}
-			if (lastReadId && lastDeliveredId) break;
-		}
+		// Find the latest read message
+		const latestReadMessage = currentUserMessages.find(msg => msg.receipt.read);
+		
+		// Find the latest delivered-but-not-read message that's newer than the latest read message
+		const latestReadTimestamp = latestReadMessage ? latestReadMessage.timestamp : 0;
+		const latestDeliveredMessage = currentUserMessages.find(msg => 
+			msg.receipt.delivered && 
+			!msg.receipt.read && 
+			msg.timestamp > latestReadTimestamp
+		);
 
-		if (message.id === lastReadId) {
+		// Show read status for the latest read message
+		if (latestReadMessage && message.id === latestReadMessage.id) {
 			return { ...message.receipt, read: true };
 		}
 
-		if (message.id === lastDeliveredId) {
+		// Show delivered status for the latest delivered (unread) message that's newer than latest read
+		if (latestDeliveredMessage && message.id === latestDeliveredMessage.id) {
 			return { ...message.receipt, delivered: true };
 		}
 
-		// otherwise, no status
+		// For all other messages, don't show status to avoid clutter
 		return undefined;
 	}, [messages, currentUsername]);
 

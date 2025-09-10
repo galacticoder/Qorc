@@ -307,7 +307,7 @@ export function ChatInterface({
     prevMessagesLengthRef.current = currentMessagesLength;
   }, [messages, currentUsername]);
 
-  // Mark messages as read when they come into view
+  // Mark messages as read when they come into view or when scrolled to bottom
   useEffect(() => {
     const scrollContainer = scrollAreaRef.current?.querySelector('[data-radix-scroll-area-viewport]');
     if (!scrollContainer) return;
@@ -318,8 +318,8 @@ export function ChatInterface({
       if (!isTabActive()) return; // Do not mark as read if tab is not active
 
       const now = Date.now();
-      // Prevent multiple scroll calls in quick succession (within 500ms)
-      if (now - lastScrollTimeRef.current < 500) {
+      // Prevent multiple scroll calls in quick succession (within 300ms)
+      if (now - lastScrollTimeRef.current < 300) {
         return;
       }
       lastScrollTimeRef.current = now;
@@ -329,36 +329,49 @@ export function ChatInterface({
 
       const containerRect = scrollContainer.getBoundingClientRect();
       const containerBottom = containerRect.bottom;
+      
+      // Check if user is near the bottom (same threshold as auto-scroll: 100px)
+      const isNearBottom = scrollContainer.scrollTop >= scrollContainer.scrollHeight - scrollContainer.clientHeight - 100;
 
-      // Find all visible unread messages and send receipts for each
-      const visibleUnread: Message[] = [];
+      let messagesToMarkAsRead: Message[] = [];
 
-      messages.forEach(message => {
-        // Only process messages from OTHER users (not current user) and not already read
-        if (message.sender === currentUsername || message.receipt?.read) return;
+      if (isNearBottom) {
+        // If user is near bottom, mark ALL unread messages as read
+        // This prevents the issue where delivered receipts appear above read receipts
+        console.debug('[ChatInterface] User near bottom, marking all unread messages as read');
+        
+        messagesToMarkAsRead = messages.filter(message => {
+          return message.sender !== currentUsername && !message.receipt?.read;
+        });
+      } else {
+        // If not at bottom, only mark visible messages as read (original behavior)
+        messages.forEach(message => {
+          // Only process messages from OTHER users (not current user) and not already read
+          if (message.sender === currentUsername || message.receipt?.read) return;
 
-        // Skip if we've already processed this message in this scroll event
-        if (processedInScrollRef.current.has(message.id)) return;
+          // Skip if we've already processed this message in this scroll event
+          if (processedInScrollRef.current.has(message.id)) return;
 
-        const messageElement = document.getElementById(`message-${message.id}`);
-        if (messageElement) {
-          const messageRect = messageElement.getBoundingClientRect();
-          const messageBottom = messageRect.bottom;
+          const messageElement = document.getElementById(`message-${message.id}`);
+          if (messageElement) {
+            const messageRect = messageElement.getBoundingClientRect();
+            const messageBottom = messageRect.bottom;
 
-          // If message is visible in the scroll container
-          if (messageBottom <= containerBottom && messageBottom >= containerRect.top) {
-            visibleUnread.push(message);
-            // Mark this message as processed in this scroll event
-            processedInScrollRef.current.add(message.id);
+            // If message is visible in the scroll container
+            if (messageBottom <= containerBottom && messageBottom >= containerRect.top) {
+              messagesToMarkAsRead.push(message);
+              // Mark this message as processed in this scroll event
+              processedInScrollRef.current.add(message.id);
+            }
           }
-        }
-      });
+        });
+      }
 
       // Sort by timestamp ascending to send older first
-      visibleUnread.sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
+      messagesToMarkAsRead.sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
 
-      // Mark and send read receipts for all visible unread messages
-      visibleUnread.forEach((msg) => {
+      // Mark and send read receipts for all messages that should be read
+      messagesToMarkAsRead.forEach((msg) => {
         markMessageAsRead(msg.id);
         sendReadReceipt(msg.id, msg.sender);
       });
@@ -378,6 +391,9 @@ export function ChatInterface({
 
     // Initial check with a small delay to ensure DOM is ready
     setTimeout(handleScroll, 100);
+    
+    // Also trigger on conversation change to mark messages as read if user starts at bottom
+    setTimeout(handleScroll, 500); // Additional delay for conversation loading
 
     return () => {
       clearTimeout(scrollTimeout);
@@ -395,35 +411,46 @@ export function ChatInterface({
       if (document.visibilityState === 'visible' && document.hasFocus() && messages.length > 0) {
         console.debug('[ChatInterface] Periodic check for missed read receipts');
 
-        // Only check messages that are currently visible in the viewport
         const scrollContainer = scrollAreaRef.current?.querySelector('[data-radix-scroll-area-viewport]');
         if (scrollContainer) {
-          const containerRect = scrollContainer.getBoundingClientRect();
-          const containerBottom = containerRect.bottom;
+          const isNearBottom = scrollContainer.scrollTop >= scrollContainer.scrollHeight - scrollContainer.clientHeight - 100;
+          
+          let messagesToProcess: Message[] = [];
+          
+          if (isNearBottom) {
+            // If near bottom, check all unread messages
+            messagesToProcess = messages.filter(message => {
+              return message.sender !== currentUsername && !message.receipt?.read;
+            });
+          } else {
+            // If not at bottom, only check visible messages (original behavior)
+            const containerRect = scrollContainer.getBoundingClientRect();
+            const containerBottom = containerRect.bottom;
 
-          // Find all visible unread messages
-          const visibleUnread: Message[] = [];
+            messages.forEach(message => {
+              // Only process messages from OTHER users (not current user) and not already read
+              if (message.sender === currentUsername || message.receipt?.read) return;
 
-          messages.forEach(message => {
-            // Only process messages from OTHER users (not current user) and not already read
-            if (message.sender === currentUsername || message.receipt?.read) return;
+              const messageElement = document.getElementById(`message-${message.id}`);
+              if (messageElement) {
+                const messageRect = messageElement.getBoundingClientRect();
+                const messageBottom = messageRect.bottom;
 
-            const messageElement = document.getElementById(`message-${message.id}`);
-            if (messageElement) {
-              const messageRect = messageElement.getBoundingClientRect();
-              const messageBottom = messageRect.bottom;
-
-              // Only consider visible messages
-              if (messageBottom <= containerBottom && messageBottom >= containerRect.top) {
-                visibleUnread.push(message);
+                // Only consider visible messages
+                if (messageBottom <= containerBottom && messageBottom >= containerRect.top) {
+                  messagesToProcess.push(message);
+                }
               }
-            }
-          });
+            });
+          }
 
-          // Send read receipts for all visible unread messages
-          visibleUnread
+          // Send read receipts for messages that need them
+          messagesToProcess
             .sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime())
-            .forEach((m) => sendReadReceipt(m.id, m.sender));
+            .forEach((m) => {
+              markMessageAsRead(m.id);
+              sendReadReceipt(m.id, m.sender);
+            });
         }
       }
     };
