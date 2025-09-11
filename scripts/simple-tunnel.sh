@@ -5,6 +5,11 @@
 
 set -euo pipefail
 
+# Determine config dir and initialize variables
+CONFIG_DIR="$(dirname "$0")/config/cloudflared"
+TUNNEL_NAME="end2end-chat-tunnel"
+CLOUDFLARED_CMD="cloudflared"
+
 # Ensure we respond to Ctrl-C/SIGTERM and cleanup any spawned processes
 on_sigint() {
     log_info "Signal received; stopping tunnel operations..."
@@ -20,8 +25,6 @@ YELLOW='\033[1;33m'
 RED='\033[0;31m'
 NC='\033[0m'
 
-CONFIG_DIR="$(dirname "$0")/config/cloudflared"
-TUNNEL_NAME="end2end-chat-tunnel"
 
 log_info() {
     echo -e "${BLUE}[TUNNEL]${NC} $1"
@@ -37,6 +40,39 @@ log_warning() {
 
 log_error() {
     echo -e "${RED}[TUNNEL]${NC} $1"
+}
+
+# Install/locate cloudflared if missing (install locally to CONFIG_DIR)
+ensure_cloudflared() {
+  if command -v cloudflared >/dev/null 2>&1; then
+    CLOUDFLARED_CMD="cloudflared"
+    return 0
+  fi
+  # If a local copy exists, use it
+  if [[ -x "$CONFIG_DIR/cloudflared" ]]; then
+    CLOUDFLARED_CMD="$CONFIG_DIR/cloudflared"
+    return 0
+  fi
+  log_info "cloudflared not found; attempting local install..."
+  mkdir -p "$CONFIG_DIR"
+  # Detect arch for binary download
+  ARCH=$(uname -m)
+  case "$ARCH" in
+    x86_64|amd64) DL_ARCH="amd64" ;;
+    aarch64|arm64) DL_ARCH="arm64" ;;
+    armv7l|armv6l) DL_ARCH="arm" ;;
+    *) log_warning "Unknown arch '$ARCH', defaulting to amd64"; DL_ARCH="amd64" ;;
+  esac
+  URL="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${DL_ARCH}"
+  if curl -fsSL "$URL" -o "$CONFIG_DIR/cloudflared"; then
+    chmod +x "$CONFIG_DIR/cloudflared"
+    CLOUDFLARED_CMD="$CONFIG_DIR/cloudflared"
+    log_success "cloudflared installed locally at $CONFIG_DIR/cloudflared"
+    return 0
+  else
+    log_error "Failed to download cloudflared (URL: $URL). Please install cloudflared and re-run."
+    return 1
+  fi
 }
 
 # Clean up any existing tunnel processes
@@ -66,29 +102,34 @@ setup_directories() {
 
 # Create tunnel using token-based authentication
 create_simple_tunnel() {
-    if [[ -f "$CONFIG_DIR/tunnel.yml" ]] && [[ -f "$CONFIG_DIR/tunnel-token" ]]; then
-        log_info "Existing tunnel configuration found"
-        return 0
-    fi
+  if [[ -f "$CONFIG_DIR/tunnel.yml" ]] && [[ -f "$CONFIG_DIR/tunnel-token" ]]; then
+    log_info "Existing tunnel configuration found"
+    return 0
+  fi
 
-    log_info "Creating simple Cloudflare tunnel..."
-    log_info "This creates a PERMANENT domain that never changes"
-    echo
-    
-    # Try to create tunnel without authentication first
-    # This uses Cloudflare's newer approach that creates a token-based tunnel
-    TUNNEL_OUTPUT=$(cloudflared tunnel --no-tls-verify --url https://localhost:8443 --name "$TUNNEL_NAME" --credentials-contents '{}' 2>/dev/null || echo "failed")
-    
-    if [[ "$TUNNEL_OUTPUT" != "failed" ]]; then
-        log_success "Simple tunnel created successfully"
-        return 0
-    fi
-    
-    # If that fails, try the alternative approach
-    log_info "Attempting alternative tunnel creation..."
-    
-    # Create a basic tunnel configuration
-    cat > "$CONFIG_DIR/tunnel.yml" << EOF
+  log_info "Creating simple Cloudflare tunnel..."
+  log_info "This creates a PERMANENT domain that never changes"
+  echo
+  
+  # Ensure cloudflared is available
+  if ! ensure_cloudflared; then
+    return 1
+  fi
+  
+  # Try to create tunnel without authentication first
+  # This uses Cloudflare's newer approach that creates a token-based tunnel
+  TUNNEL_OUTPUT=$($CLOUDFLARED_CMD tunnel --no-tls-verify --url https://localhost:8443 --name "$TUNNEL_NAME" --credentials-contents '{}' 2>/dev/null || echo "failed")
+  
+  if [[ "$TUNNEL_OUTPUT" != "failed" ]]; then
+    log_success "Simple tunnel created successfully"
+    return 0
+  fi
+  
+  # If that fails, try the alternative approach
+  log_info "Attempting alternative tunnel creation..."
+  
+  # Create a basic tunnel configuration
+  cat > "$CONFIG_DIR/tunnel.yml" << EOF
 # Cloudflare Tunnel Configuration
 # This creates a persistent tunnel with a permanent subdomain
 
@@ -105,10 +146,10 @@ grace-period: 30s
 no-tls-verify: true
 EOF
 
-    log_success "Tunnel configuration created"
-    echo
-    log_info "Your tunnel will get a permanent URL like: https://abc-def-ghi.trycloudflare.com"
-    log_info "This URL will stay the same every time you restart the server"
+  log_success "Tunnel configuration created"
+  echo
+  log_info "Your tunnel will get a permanent URL like: https://abc-def-ghi.trycloudflare.com"
+  log_info "This URL will stay the same every time you restart the server"
 }
 
 # Interruptible sleep function
@@ -144,32 +185,37 @@ start_tunnel() {
     local retry_delay=2
     local attempt=1
     
-    while [ $attempt -le $max_retries ]; do
+while [ $attempt -le $max_retries ]; do
         log_info "Starting permanent Cloudflare tunnel (attempt $attempt/$max_retries)..."
+        
+        # Ensure cloudflared is available
+        if ! ensure_cloudflared; then
+          return 1
+        fi
         
         # Try different approaches based on attempt number
         case $attempt in
             1|2)
                 # Standard approach
-                cloudflared tunnel --no-tls-verify --url https://localhost:8443 > "$CONFIG_DIR/tunnel.log" 2>&1 &
+                "$CLOUDFLARED_CMD" tunnel --no-tls-verify --url https://localhost:8443 > "$CONFIG_DIR/tunnel.log" 2>&1 &
                 ;;
             3)
                 # Try with different DNS
                 log_info "Trying with Google DNS..."
                 sudo systemctl flush-dns 2>/dev/null || true
                 echo "nameserver 8.8.8.8" | sudo tee /tmp/resolv.conf.backup > /dev/null
-                cloudflared tunnel --no-tls-verify --url https://localhost:8443 > "$CONFIG_DIR/tunnel.log" 2>&1 &
+                "$CLOUDFLARED_CMD" tunnel --no-tls-verify --url https://localhost:8443 > "$CONFIG_DIR/tunnel.log" 2>&1 &
                 ;;
             4)
                 # Try with Cloudflare DNS
                 log_info "Trying with Cloudflare DNS..."
                 echo "nameserver 1.1.1.1" | sudo tee /tmp/resolv.conf.backup > /dev/null
-                cloudflared tunnel --no-tls-verify --url https://localhost:8443 > "$CONFIG_DIR/tunnel.log" 2>&1 &
+                "$CLOUDFLARED_CMD" tunnel --no-tls-verify --url https://localhost:8443 > "$CONFIG_DIR/tunnel.log" 2>&1 &
                 ;;
             5)
                 # Last attempt with maximum timeout
                 log_info "Final attempt with extended timeout..."
-                timeout 60 cloudflared tunnel --no-tls-verify --url https://localhost:8443 > "$CONFIG_DIR/tunnel.log" 2>&1 &
+                timeout 60 "$CLOUDFLARED_CMD" tunnel --no-tls-verify --url https://localhost:8443 > "$CONFIG_DIR/tunnel.log" 2>&1 &
                 ;;
         esac
         

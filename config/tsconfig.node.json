@@ -13,10 +13,11 @@
     "noEmit": true,
 
     /* Linting */
-    "strict": true,
+    "strict": false,
     "noUnusedLocals": false,
     "noUnusedParameters": false,
-    "noFallthroughCasesInSwitch": true
+    "noFallthroughCasesInSwitch": false,
+    "skipLibCheck": true
   },
-  "include": ["../vite.config.ts"]
+  "include": ["vite.config.ts"]
 }

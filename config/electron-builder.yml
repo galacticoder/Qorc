@@ -4,16 +4,73 @@ files:
   - dist/**
   - electron/main.cjs
   - electron/preload.cjs
-asar: true
+  - electron/tor-manager.cjs
+  - node_modules/tar/**
+  - node_modules/socks-proxy-agent/**
+  - node_modules/ws/**
+  - "!**/node_modules/*/{CHANGELOG.md,README.md,README,readme.md,readme}"
+  - "!**/node_modules/*/{test,__tests__,tests,powered-test,example,examples}"
+  - "!**/node_modules/*.d.ts"
+  - "!**/node_modules/.bin"
+  - "!**/*.{iml,o,hprof,orig,pyc,pyo,rbc,swp,csproj,sln,xproj}"
+  - "!.editorconfig"
+  - "!**/._*"
+  - "!**/{.DS_Store,.git,.hg,.svn,CVS,RCS,SCCS,.gitignore,.gitattributes}"
+  - "!**/{__pycache__,thumbs.db,.flowconfig,.idea,.vs,.nyc_output}"
+  - "!**/{appveyor.yml,.travis.yml,circle.yml}"
+  - "!**/{npm-debug.log,yarn.lock,.yarn-integrity,.yarn-metadata.json}"
+asar:
+  smartUnpack: false
 directories:
   output: dist-electron
+extraResources:
+  - from: "tor-bundles"
+    to: "tor-bundles"
+    filter:
+      - "**/*"
 mac:
   target:
-    - dmg
+    - target: dmg
+      arch:
+        - x64
+        - arm64
+  artifactName: "${productName}-${version}-mac-${arch}.${ext}"
+  extraResources:
+    - from: "tor-bundles/macos"
+      to: "tor-bundles/macos"
+      filter:
+        - "**/*"
 win:
   target:
-    - nsis
+    - target: nsis
+      arch:
+        - x64
+        - ia32
+  artifactName: "${productName}-${version}-win-${arch}.${ext}"
+  extraResources:
+    - from: "tor-bundles/windows"
+      to: "tor-bundles/windows"
+      filter:
+        - "**/*"
 linux:
   target:
-    - AppImage
+    - target: AppImage
+      arch:
+        - x64
+        - arm64
+    - target: snap
+      arch:
+        - x64
+  artifactName: "${productName}-${version}-linux-${arch}.${ext}"
+  extraResources:
+    - from: "tor-bundles/linux"
+      to: "tor-bundles/linux"
+      filter:
+        - "**/*"
+  category: Network
+  synopsis: "Secure end-to-end encrypted chat application"
+  description: "A privacy-focused chat application with built-in Tor anonymization for secure communications."
 publish: null
+compression: maximum
+nodeGypRebuild: false
+buildDependenciesFromSource: false

@@ -59,30 +59,77 @@ class ElectronTorManager {
   }
 
   /**
-   * Setup Tor installation paths
+   * Setup Tor installation paths for production and development
    */
   setupPaths() {
     try {
       const appDataPath = app.getPath('userData');
+      const isPackaged = app.isPackaged;
+      
+      // Data directory always in userData (writable)
       this.torDir = path.join(appDataPath, 'tor');
       this.configPath = path.join(this.torDir, 'torrc');
 
-      switch (this.platform) {
-        case 'win32':
-          this.torPath = path.join(this.torDir, 'tor.exe');
-          break;
-        case 'darwin':
-        case 'linux':
-          this.torPath = path.join(this.torDir, 'tor');
-          break;
-        default:
-          throw new Error(`Unsupported platform: ${this.platform}`);
+      // Binary paths depend on packaging
+      if (isPackaged) {
+        // In production, check for bundled Tor in extraResources first
+        const resourcesPath = process.resourcesPath;
+        let bundledTorPath;
+        
+        switch (this.platform) {
+          case 'win32':
+            bundledTorPath = path.join(resourcesPath, 'tor-bundles', 'windows', 'tor.exe');
+            this.torPath = bundledTorPath;
+            break;
+          case 'darwin':
+            bundledTorPath = path.join(resourcesPath, 'tor-bundles', 'macos', 'tor');
+            this.torPath = bundledTorPath;
+            break;
+          case 'linux':
+            bundledTorPath = path.join(resourcesPath, 'tor-bundles', 'linux', 'tor');
+            this.torPath = bundledTorPath;
+            break;
+          default:
+            throw new Error(`Unsupported platform: ${this.platform}`);
+        }
+        
+        // Check if bundled Tor exists, otherwise use data directory
+        if (!require('fs').existsSync(bundledTorPath)) {
+          console.log('[TOR-MANAGER] Bundled Tor not found, using data directory');
+          switch (this.platform) {
+            case 'win32':
+              this.torPath = path.join(this.torDir, 'tor.exe');
+              break;
+            case 'darwin':
+            case 'linux':
+              this.torPath = path.join(this.torDir, 'tor');
+              break;
+          }
+        }
+      } else {
+        // In development, use data directory
+        switch (this.platform) {
+          case 'win32':
+            this.torPath = path.join(this.torDir, 'tor.exe');
+            break;
+          case 'darwin':
+          case 'linux':
+            this.torPath = path.join(this.torDir, 'tor');
+            break;
+          default:
+            throw new Error(`Unsupported platform: ${this.platform}`);
+        }
       }
 
+      console.log('[TOR-MANAGER] App packaged:', isPackaged);
       console.log('[TOR-MANAGER] App data path:', appDataPath);
       console.log('[TOR-MANAGER] Tor directory:', this.torDir);
       console.log('[TOR-MANAGER] Tor binary path:', this.torPath);
       console.log('[TOR-MANAGER] Config path:', this.configPath);
+      
+      if (isPackaged) {
+        console.log('[TOR-MANAGER] Resources path:', process.resourcesPath);
+      }
     } catch (error) {
       console.error('[TOR-MANAGER] Failed to setup paths:', error);
       throw error;
@@ -90,97 +137,82 @@ class ElectronTorManager {
   }
 
   /**
-   * Check if Tor is installed
+   * Check if bundled Tor is installed or available
    */
   async checkTorInstallation() {
-    console.log('[TOR-MANAGER] Checking Tor installation...');
+    console.log('[TOR-MANAGER] Checking bundled Tor installation...');
 
     try {
-      // Check if our bundled Tor exists
+      // Check if bundled Tor binary exists
       const stats = await fs.stat(this.torPath);
       if (stats.isFile()) {
-        console.log('[TOR-MANAGER] Found bundled Tor installation');
-        const version = await this.getTorVersion();
-        return { isInstalled: true, version, path: this.torPath };
+        console.log('[TOR-MANAGER] Found bundled Tor installation at:', this.torPath);
+        
+        // Try to get version to verify it's working
+        try {
+          const version = await this.getTorVersion();
+          return { 
+            isInstalled: true, 
+            version, 
+            path: this.torPath, 
+            bundled: true,
+            inResources: app.isPackaged && this.torPath.includes('resources')
+          };
+        } catch (versionError) {
+          console.warn('[TOR-MANAGER] Tor binary found but version check failed:', versionError.message);
+          return { 
+            isInstalled: true, 
+            path: this.torPath, 
+            bundled: true,
+            inResources: app.isPackaged && this.torPath.includes('resources'),
+            versionError: versionError.message
+          };
+        }
       }
     } catch (error) {
-      console.log('[TOR-MANAGER] No bundled Tor found, checking system Tor...');
-      // File doesn't exist, check system Tor
-      return await this.checkSystemTor();
+      console.log('[TOR-MANAGER] Bundled Tor not found:', error.message);
     }
 
     return { isInstalled: false };
   }
 
-  /**
-   * Check for system-installed Tor
-   */
-  async checkSystemTor() {
-    return new Promise((resolve) => {
-      exec('tor --version', (error, stdout) => {
-        if (error) {
-          console.log('[TOR-MANAGER] No system Tor found:', error.message);
-          resolve({ isInstalled: false });
-        } else {
-          const version = stdout.split('\n')[0].match(/Tor (\d+\.\d+\.\d+)/)?.[1];
-          console.log('[TOR-MANAGER] Found system Tor version:', version);
-          console.log('[TOR-MANAGER] System Tor is available and working');
-          resolve({ isInstalled: true, version, systemVersion: version });
-        }
-      });
-    });
-  }
 
   /**
    * Get download URL for Tor Expert Bundle based on platform
    */
   getTorDownloadUrl() {
-    // Use the correct Tor Project distribution URLs
+    // Use the latest Tor Expert Bundle from the provided link
     const baseUrl = 'https://archive.torproject.org/tor-package-archive/torbrowser';
-    const version = '13.0.8'; // Latest stable version
+    const version = '15.0a2'; // Latest alpha version as specified
 
     console.log(`[TOR-MANAGER] Getting download URL for ${this.platform} ${this.arch}`);
 
     switch (this.platform) {
       case 'linux':
         if (this.arch === 'x64') {
-          return `${baseUrl}/${version}/tor-expert-bundle-${version}-linux-x86_64.tar.gz`;
+          return `${baseUrl}/${version}/tor-expert-bundle-linux-x86_64-${version}.tar.gz`;
         } else if (this.arch === 'arm64') {
-          return `${baseUrl}/${version}/tor-expert-bundle-${version}-linux-aarch64.tar.gz`;
+          return `${baseUrl}/${version}/tor-expert-bundle-linux-aarch64-${version}.tar.gz`;
         }
         break;
       case 'darwin':
-        return `${baseUrl}/${version}/tor-expert-bundle-${version}-macos.tar.gz`;
+        if (this.arch === 'x64') {
+          return `${baseUrl}/${version}/tor-expert-bundle-macos-x86_64-${version}.tar.gz`;
+        } else if (this.arch === 'arm64') {
+          return `${baseUrl}/${version}/tor-expert-bundle-macos-aarch64-${version}.tar.gz`;
+        }
+        break;
       case 'win32':
         if (this.arch === 'x64') {
-          return `${baseUrl}/${version}/tor-expert-bundle-${version}-windows-x86_64.tar.gz`;
+          return `${baseUrl}/${version}/tor-expert-bundle-windows-x86_64-${version}.tar.gz`;
         } else {
-          return `${baseUrl}/${version}/tor-expert-bundle-${version}-windows-i686.tar.gz`;
+          return `${baseUrl}/${version}/tor-expert-bundle-windows-i686-${version}.tar.gz`;
         }
     }
 
     throw new Error(`Unsupported platform: ${this.platform} ${this.arch}`);
   }
 
-  /**
-   * Get alternative download URL (fallback)
-   */
-  getAlternativeTorUrl() {
-    // Alternative: Use GitHub releases or direct Tor distribution
-    const baseUrl = 'https://dist.torproject.org/tor';
-    const version = '0.4.8.9'; // Tor daemon version
-
-    switch (this.platform) {
-      case 'linux':
-        return `${baseUrl}-${version}.tar.gz`;
-      case 'darwin':
-        return `${baseUrl}-${version}.tar.gz`;
-      case 'win32':
-        return `${baseUrl}-${version}-win32.zip`;
-    }
-
-    throw new Error(`No alternative URL for platform: ${this.platform}`);
-  }
 
   /**
    * Get Tor version
@@ -199,287 +231,274 @@ class ElectronTorManager {
   }
 
   /**
-   * Setup Tor without requiring sudo (user-friendly approach)
+   * Download and setup bundled Tor Expert Bundle
    */
   async downloadTor() {
     try {
-      console.log('[TOR-MANAGER] Setting up Tor installation...');
+      console.log('[TOR-MANAGER] === Starting bundled Tor download ===');
       console.log('[TOR-MANAGER] Platform:', this.platform, 'Architecture:', this.arch);
+      console.log('[TOR-MANAGER] Tor directory:', this.torDir);
+      console.log('[TOR-MANAGER] Tor binary path:', this.torPath);
 
       // Create tor directory
+      console.log('[TOR-MANAGER] Creating Tor directory...');
       await fs.mkdir(this.torDir, { recursive: true });
+      console.log('[TOR-MANAGER] Tor directory created successfully');
 
-      // Check if Tor is already available (no sudo needed)
-      const systemCheck = await this.installSystemTor();
-      if (systemCheck.success) {
-        console.log('[TOR-MANAGER] Using existing system Tor');
-        return { success: true };
-      }
-
-      // Create portable setup that works with or without system Tor
-      console.log('[TOR-MANAGER] Creating portable Tor setup...');
-      const portableSetup = await this.downloadTorAlternative();
-
-      if (portableSetup.success) {
-        console.log('[TOR-MANAGER] Portable Tor setup completed');
-        return { success: true };
-      }
-
-      // If all else fails, provide clear instructions
-      return {
-        success: false,
-        error: 'Tor setup requires system Tor. Please install with: sudo apt-get install tor'
-      };
-
-    } catch (error) {
-      console.error('[TOR-MANAGER] Failed to setup Tor:', error);
-      return { success: false, error: error.message };
-    }
-  }
-
-  /**
-   * Check if Tor is available without requiring installation
-   */
-  async installSystemTor() {
-    return new Promise((resolve) => {
-      // Check if tor command works (more reliable than 'which')
-      exec('tor --version', (error, stdout) => {
-        if (!error && stdout.includes('Tor version')) {
-          const version = stdout.split('\n')[0].match(/Tor version (\d+\.\d+\.\d+)/)?.[1];
-          console.log('[TOR-MANAGER] Found working Tor installation, version:', version);
-          this.torPath = 'tor'; // Use system tor command
-          resolve({ success: true, version });
-          return;
+      // Check if bundled Tor already exists
+      try {
+        const stats = await fs.stat(this.torPath);
+        if (stats.isFile()) {
+          console.log('[TOR-MANAGER] Bundled Tor already exists at:', this.torPath);
+          return { success: true, alreadyExists: true };
         }
-
-        console.log('[TOR-MANAGER] Tor version check failed:', error?.message || 'No output');
-
-        // Fallback: try 'which tor' to find the binary location
-        exec('which tor', (error2, stdout2) => {
-          if (!error2 && stdout2.trim()) {
-            console.log('[TOR-MANAGER] Found Tor binary at:', stdout2.trim());
-            this.torPath = 'tor';
-            resolve({ success: true });
-          } else {
-            console.log('[TOR-MANAGER] No system Tor found');
-            resolve({ success: false, reason: 'No system Tor available' });
-          }
-        });
-      });
-    });
-  }
-
-  /**
-   * Create portable Tor setup without requiring sudo
-   */
-  async downloadTorAlternative() {
-    try {
-      console.log('[TOR-MANAGER] Setting up portable Tor solution...');
-
-      // Check if system tor is available first
-      const systemCheck = await this.checkSystemTor();
-      if (systemCheck.isInstalled) {
-        console.log('[TOR-MANAGER] Using existing system Tor');
-        this.torPath = 'tor'; // Use system tor command
-        return { success: true };
+      } catch (error) {
+        console.log('[TOR-MANAGER] Bundled Tor not found, proceeding with download...');
       }
 
-      // Create a portable Tor setup using pre-compiled binaries
-      console.log('[TOR-MANAGER] Creating portable Tor installation...');
+      // Get download URL for current platform
+      console.log('[TOR-MANAGER] Getting download URL...');
+      const downloadUrl = this.getTorDownloadUrl();
+      console.log('[TOR-MANAGER] Download URL:', downloadUrl);
 
-      // For Linux, we can use the system's package manager without sudo by downloading .deb/.rpm
-      if (this.platform === 'linux') {
-        return await this.setupPortableLinuxTor();
+      // Download the Tor Expert Bundle
+      const archivePath = path.join(this.torDir, 'tor-expert-bundle.tar.gz');
+      console.log('[TOR-MANAGER] Archive will be saved to:', archivePath);
+      
+      console.log('[TOR-MANAGER] Starting file download...');
+      await this.downloadFile(downloadUrl, archivePath);
+      console.log('[TOR-MANAGER] Download completed successfully');
+
+      // Extract the bundle
+      console.log('[TOR-MANAGER] Extracting Tor Expert Bundle...');
+      await this.extractTorBundle(archivePath);
+      console.log('[TOR-MANAGER] Extraction completed');
+
+      // Clean up archive
+      console.log('[TOR-MANAGER] Cleaning up archive...');
+      await fs.unlink(archivePath).catch(() => {}); // Ignore errors
+
+      // Verify extraction was successful
+      console.log('[TOR-MANAGER] Verifying extraction...');
+      const stats = await fs.stat(this.torPath);
+      if (!stats.isFile()) {
+        throw new Error('Tor binary not found after extraction');
       }
+      console.log('[TOR-MANAGER] Tor binary verified at:', this.torPath);
 
-      // For other platforms, create a minimal working setup
-      console.log('[TOR-MANAGER] Creating minimal Tor configuration...');
-
-      // Create a tor executable wrapper that uses system tor if available
-      const torWrapper = this.platform === 'win32'
-        ? `@echo off\ntor.exe %*\n`
-        : `#!/bin/bash\n# Tor wrapper script\nif command -v tor >/dev/null 2>&1; then\n    tor "$@"\nelse\n    echo "Tor not found. Please install Tor manually: sudo apt-get install tor"\n    exit 1\nfi\n`;
-
-      const extension = this.platform === 'win32' ? '.bat' : '';
-      const wrapperPath = this.torPath + extension;
-
-      await fs.writeFile(wrapperPath, torWrapper, { mode: 0o755 });
-
-      // Update torPath to use the wrapper
-      this.torPath = wrapperPath;
-
-      console.log('[TOR-MANAGER] Portable Tor setup created at:', this.torPath);
+      console.log('[TOR-MANAGER] === Bundled Tor setup completed successfully ===');
       return { success: true };
 
     } catch (error) {
-      console.error('[TOR-MANAGER] Portable Tor setup failed:', error);
+      console.error('[TOR-MANAGER] === Failed to download bundled Tor ===');
+      console.error('[TOR-MANAGER] Error:', error.message);
+      console.error('[TOR-MANAGER] Stack:', error.stack);
       return { success: false, error: error.message };
     }
   }
 
-  /**
-   * Setup portable Tor for Linux without sudo
-   */
-  async setupPortableLinuxTor() {
-    try {
-      console.log('[TOR-MANAGER] Setting up portable Linux Tor...');
-
-      // Create a simple approach: use system tor if available, otherwise provide instructions
-      const torScript = `#!/bin/bash
-# Portable Tor launcher
-TOR_DIR="${this.torDir}"
-TOR_DATA_DIR="$TOR_DIR/data"
-TOR_CONFIG="$TOR_DIR/torrc"
-
-# Create data directory
-mkdir -p "$TOR_DATA_DIR"
-
-# Check if system tor is available
-if command -v tor >/dev/null 2>&1; then
-    echo "[TOR] Using system Tor binary"
-    exec tor -f "$TOR_CONFIG" --DataDirectory "$TOR_DATA_DIR" "$@"
-else
-    echo "[TOR] System Tor not found."
-    echo "[TOR] To install Tor, run: sudo apt-get install tor"
-    echo "[TOR] Or visit: https://www.torproject.org/download/"
-    exit 1
-fi
-`;
-
-      await fs.writeFile(this.torPath, torScript, { mode: 0o755 });
-
-      console.log('[TOR-MANAGER] Portable Linux Tor script created');
-      return { success: true };
-
-    } catch (error) {
-      console.error('[TOR-MANAGER] Failed to setup portable Linux Tor:', error);
-      return { success: false, error: error.message };
-    }
-  }
 
   /**
    * Download file with progress
    */
   async downloadFile(url, filePath) {
     return new Promise((resolve, reject) => {
+      console.log('[TOR-MANAGER] downloadFile - Starting download from:', url);
+      console.log('[TOR-MANAGER] downloadFile - Saving to:', filePath);
+      
       const file = require('fs').createWriteStream(filePath);
+      let downloadedBytes = 0;
+      let totalBytes = 0;
 
-      https.get(url, (response) => {
+      console.log('[TOR-MANAGER] downloadFile - Making HTTPS request...');
+      const request = https.get(url, (response) => {
+        console.log('[TOR-MANAGER] downloadFile - Response status:', response.statusCode);
+        console.log('[TOR-MANAGER] downloadFile - Response headers:', response.headers);
+        
         if (response.statusCode !== 200) {
+          console.error('[TOR-MANAGER] downloadFile - Bad status code:', response.statusCode, response.statusMessage);
           reject(new Error(`HTTP ${response.statusCode}: ${response.statusMessage}`));
           return;
         }
 
+        totalBytes = parseInt(response.headers['content-length'] || '0', 10);
+        console.log('[TOR-MANAGER] downloadFile - Total size:', totalBytes, 'bytes');
+
+        response.on('data', (chunk) => {
+          downloadedBytes += chunk.length;
+          if (totalBytes > 0) {
+            const progress = Math.round((downloadedBytes / totalBytes) * 100);
+            if (downloadedBytes % (1024 * 1024) < chunk.length) { // Log every MB
+              console.log(`[TOR-MANAGER] downloadFile - Progress: ${progress}% (${Math.round(downloadedBytes / 1024 / 1024)}MB / ${Math.round(totalBytes / 1024 / 1024)}MB)`);
+            }
+          }
+        });
+
         response.pipe(file);
 
         file.on('finish', () => {
+          console.log('[TOR-MANAGER] downloadFile - File write finished');
           file.close();
+          console.log('[TOR-MANAGER] downloadFile - File closed, download complete');
           resolve();
         });
 
         file.on('error', (error) => {
+          console.error('[TOR-MANAGER] downloadFile - File write error:', error);
           fs.unlink(filePath).catch(() => {}); // Clean up on error
           reject(error);
         });
 
-      }).on('error', reject);
+      });
+      
+      request.on('error', (error) => {
+        console.error('[TOR-MANAGER] downloadFile - HTTPS request error:', error);
+        reject(error);
+      });
+      
+      request.on('timeout', () => {
+        console.error('[TOR-MANAGER] downloadFile - Request timeout');
+        request.abort();
+        reject(new Error('Download timeout'));
+      });
+      
+      // Set timeout to 5 minutes
+      request.setTimeout(5 * 60 * 1000);
     });
   }
 
   /**
-   * Extract Tor bundle
+   * Extract Tor Expert Bundle
    */
   async extractTorBundle(archivePath) {
     return new Promise((resolve, reject) => {
       const tar = require('tar');
+      
+      console.log('[TOR-MANAGER] Extracting archive:', archivePath);
+      console.log('[TOR-MANAGER] Extract destination:', this.torDir);
 
       tar.extract({
         file: archivePath,
         cwd: this.torDir,
-        strip: 1, // Remove top-level directory
-      }).then(() => {
-        // Make tor executable on Unix systems
-        if (this.platform !== 'win32') {
-          require('fs').chmodSync(this.torPath, 0o755);
+        strip: 1, // Remove top-level directory from Expert Bundle
+        filter: (path, entry) => {
+          // Only extract necessary files to save space
+          const allowedFiles = [
+            'tor', 'tor.exe', // Main Tor binary
+            'lyrebird', 'lyrebird.exe', // Modern pluggable transport (v15.0a2+)
+            'obfs4proxy', 'obfs4proxy.exe', // Legacy pluggable transport
+            'conjure-client', 'conjure-client.exe', // Conjure transport
+            'snowflake-client', 'snowflake-client.exe', // Snowflake transport  
+            'geoip', 'geoip6', // GeoIP files
+            'libevent-2', 'libssl', 'libcrypto', // Required libraries (prefix match)
+            'libgcc_s', 'libstdc\+\+', 'libz', // Additional libraries (escaped for regex)
+            'pluggable_transports', 'pt_config.json' // PT directory and config
+          ];
+          
+          const fileName = path.split('/').pop() || path;
+          const isAllowed = allowedFiles.some(pattern => {
+            try {
+              // For patterns with special characters, do a simple prefix match
+              if (pattern.includes('+') || pattern.includes('\\')) {
+                return fileName.startsWith(pattern.replace(/\\\+/g, '+'));
+              }
+              // For others, check if it's an exact match or prefix match
+              return fileName === pattern || fileName.startsWith(pattern);
+            } catch (error) {
+              console.warn('[TOR-MANAGER] Regex error for pattern:', pattern, error.message);
+              return fileName === pattern; // Fallback to exact match
+            }
+          });
+          
+          if (isAllowed) {
+            console.log('[TOR-MANAGER] Extracting:', path);
+            return true;
+          }
+          return false;
         }
+      }).then(() => {
+        // Make binaries executable on Unix systems
+        if (this.platform !== 'win32') {
+          const binaries = ['tor'];
+          const ptBinaries = ['lyrebird', 'obfs4proxy', 'conjure-client', 'snowflake-client'];
+          
+          // Make main Tor binary executable
+          for (const binary of binaries) {
+            const binaryPath = path.join(this.torDir, binary);
+            try {
+              require('fs').chmodSync(binaryPath, 0o755);
+              console.log('[TOR-MANAGER] Made executable:', binaryPath);
+            } catch (error) {
+              console.warn('[TOR-MANAGER] Could not make executable:', binaryPath, error.message);
+            }
+          }
+          
+          // Make pluggable transport binaries executable
+          for (const ptBinary of ptBinaries) {
+            const ptPath = path.join(this.torDir, 'pluggable_transports', ptBinary);
+            try {
+              require('fs').chmodSync(ptPath, 0o755);
+              console.log('[TOR-MANAGER] Made PT executable:', ptPath);
+            } catch (error) {
+              console.log('[TOR-MANAGER] PT not found (normal):', ptBinary);
+            }
+          }
+        }
+        
+        console.log('[TOR-MANAGER] Extraction completed successfully');
         resolve();
-      }).catch(reject);
+      }).catch((error) => {
+        console.error('[TOR-MANAGER] Extraction failed:', error);
+        reject(error);
+      });
     });
   }
 
   /**
-   * Install Tor (verify setup and make executable)
+   * Verify bundled Tor installation
    */
   async installTor() {
     try {
-      console.log('[TOR-MANAGER] Verifying Tor installation...');
+      console.log('[TOR-MANAGER] Verifying bundled Tor installation...');
 
       // Ensure Tor directory exists
       await fs.mkdir(this.torDir, { recursive: true });
 
-      // Check if we have a Tor executable or wrapper
-      let torExists = false;
+      // Check if bundled Tor executable exists
       try {
         const stats = await fs.stat(this.torPath);
-        torExists = stats.isFile();
-        console.log('[TOR-MANAGER] Tor file found at:', this.torPath);
-      } catch (error) {
-        console.log('[TOR-MANAGER] Tor file not found, checking system Tor...');
-      }
-
-      // If no local Tor file, check if system Tor is available
-      if (!torExists) {
-        console.log('[TOR-MANAGER] No local Tor file, checking system Tor...');
-
-        // Check if system tor command works
-        const systemCheck = await new Promise((resolve) => {
-          const { exec } = require('child_process');
-          exec('tor --version', (error, stdout) => {
-            if (error) {
-              console.log('[TOR-MANAGER] System Tor check failed:', error.message);
-              resolve({ isInstalled: false });
-            } else {
-              console.log('[TOR-MANAGER] System Tor found:', stdout.split('\n')[0]);
-              resolve({ isInstalled: true });
-            }
-          });
-        });
-
-        if (systemCheck.isInstalled) {
-          console.log('[TOR-MANAGER] Using system Tor installation');
-          this.torPath = 'tor'; // Use system tor command
-          return { success: true };
-        } else {
-          console.log('[TOR-MANAGER] No system Tor found either');
-          // Instead of failing, let's create a working setup anyway
-          console.log('[TOR-MANAGER] Creating portable Tor setup...');
-
-          // Create the wrapper script that was supposed to be created in downloadTor
-          const torScript = this.platform === 'win32'
-            ? `@echo off\necho [TOR] Please install Tor: https://www.torproject.org/download/\necho [TOR] Or run: sudo apt-get install tor\npause\n`
-            : `#!/bin/bash\necho "[TOR] Checking for system Tor..."\nif command -v tor >/dev/null 2>&1; then\n    echo "[TOR] Using system Tor"\n    exec tor "$@"\nelse\n    echo "[TOR] Tor not found. Please install:"\n    echo "[TOR] Ubuntu/Debian: sudo apt-get install tor"\n    echo "[TOR] macOS: brew install tor"\n    exit 1\nfi\n`;
-
-          await fs.writeFile(this.torPath, torScript, { mode: 0o755 });
-          console.log('[TOR-MANAGER] Created Tor wrapper script at:', this.torPath);
-          return { success: true };
+        if (!stats.isFile()) {
+          throw new Error('Bundled Tor binary is not a valid file');
         }
+        console.log('[TOR-MANAGER] Bundled Tor found at:', this.torPath);
+      } catch (error) {
+        console.error('[TOR-MANAGER] Bundled Tor not found:', error.message);
+        return { success: false, error: 'Bundled Tor binary not found. Please run download first.' };
       }
 
       // Make executable on Unix systems
-      if (this.platform !== 'win32' && torExists) {
+      if (this.platform !== 'win32') {
         try {
           await fs.chmod(this.torPath, 0o755);
-          console.log('[TOR-MANAGER] Made Tor executable');
+          console.log('[TOR-MANAGER] Made bundled Tor executable');
         } catch (error) {
-          console.warn('[TOR-MANAGER] Could not make Tor executable:', error.message);
+          console.warn('[TOR-MANAGER] Could not make bundled Tor executable:', error.message);
         }
       }
 
-      console.log('[TOR-MANAGER] Tor installation verification completed');
+      // Verify Tor version
+      try {
+        const version = await this.getTorVersion();
+        console.log('[TOR-MANAGER] Bundled Tor version:', version);
+      } catch (error) {
+        console.warn('[TOR-MANAGER] Could not get Tor version:', error.message);
+      }
+
+      console.log('[TOR-MANAGER] Bundled Tor installation verified successfully');
       return { success: true };
 
     } catch (error) {
-      console.error('[TOR-MANAGER] Failed to verify Tor installation:', error);
+      console.error('[TOR-MANAGER] Failed to verify bundled Tor installation:', error);
       return { success: false, error: error.message };
     }
   }
@@ -641,96 +660,26 @@ fi
   }
 
   /**
-   * Start Tor service (or use existing system service)
+   * Start bundled Tor service
    */
   async startTor() {
     try {
-      console.log('[TOR-MANAGER] Starting Tor service...');
+      console.log('[TOR-MANAGER] Starting bundled Tor service...');
 
       if (this.torProcess) {
-        console.log('[TOR-MANAGER] Tor is already running');
+        console.log('[TOR-MANAGER] Bundled Tor is already running');
         return { success: true };
       }
 
-      // First check if system Tor is available and working
-      console.log('[TOR-MANAGER] Checking for running system Tor service...');
-      const systemTorCheck = await new Promise((resolve) => {
-        exec('ss -tlnp | grep :9050', (error, stdout) => {
-          if (!error && stdout.includes('127.0.0.1:9050')) {
-            console.log('[TOR-MANAGER] System Tor service detected on port 9050');
-            resolve({ running: true, port: 9050 });
-          } else {
-            console.log('[TOR-MANAGER] No system Tor service detected');
-            resolve({ running: false });
-          }
-        });
-      });
-
-      if (systemTorCheck.running) {
-        console.log('[TOR-MANAGER] System Tor detected, testing connectivity...');
-
-        // Set effective ports to system Tor defaults
-        this.effectiveSocksPort = 9050;
-        this.effectiveControlPort = 9051;
-
-        // Test if system Tor is actually working - use simple SOCKS test
-        try {
-          console.log('[TOR-MANAGER] Testing system Tor SOCKS proxy on port 9050...');
-          const socksWorking = await this.checkSocksProxy(9050);
-          if (socksWorking) {
-            console.log('[TOR-MANAGER] System Tor SOCKS proxy is responding, using system Tor');
-            
-            // Check if bridges are required from config
-            let needsBridges = false;
-            try {
-              const configContent = await fs.readFile(this.configPath, 'utf8').catch(() => '');
-              if (configContent && /\bUseBridges\s+1\b/i.test(configContent)) {
-                needsBridges = true;
-                console.log('[TOR-MANAGER] Bridge mode detected in config - need to start managed instance');
-              }
-            } catch (e) {
-              // ignore
-            }
-            
-            if (!needsBridges) {
-              this.usingSystemTor = true;
-              return { success: true, usingSystemTor: true };
-            } else {
-              console.log('[TOR-MANAGER] Bridges required, need to start managed Tor instance instead');
-            }
-          } else {
-            console.log('[TOR-MANAGER] System Tor SOCKS proxy not responding, will start managed instance');
-          }
-        } catch (testError) {
-          console.log('[TOR-MANAGER] Failed to test system Tor:', testError.message);
-          console.log('[TOR-MANAGER] Will start our own Tor instance instead');
-        }
-      } else {
-        console.log('[TOR-MANAGER] No system Tor detected, will start managed instance');
-      }
-
-      // If we reach here, we need to start our own Tor instance
-      console.log('[TOR-MANAGER] Starting managed Tor instance...');
-      
-
-      // Verify that Tor binary is available for starting our own instance
-      const torCheck = await new Promise((resolve) => {
-        exec('tor --version', (error, stdout) => {
-          if (error) {
-            console.log('[TOR-MANAGER] Tor binary not available:', error.message);
-            resolve({ available: false, error: error.message });
-          } else {
-            console.log('[TOR-MANAGER] Tor binary available:', stdout.split('\n')[0]);
-            resolve({ available: true });
-          }
-        });
-      });
-
-      if (!torCheck.available) {
-        console.error('[TOR-MANAGER] Cannot start Tor: binary not found');
+      // Verify bundled Tor binary exists
+      try {
+        await fs.access(this.torPath, fs.constants.F_OK | fs.constants.X_OK);
+        console.log('[TOR-MANAGER] Bundled Tor binary verified:', this.torPath);
+      } catch (error) {
+        console.error('[TOR-MANAGER] Bundled Tor binary not accessible:', error.message);
         return {
           success: false,
-          error: 'Tor is not installed. Please install Tor: sudo apt-get install tor'
+          error: 'Bundled Tor binary not found or not executable. Please download Tor Expert Bundle first.'
         };
       }
 
@@ -771,31 +720,15 @@ fi
         console.warn('[TOR-MANAGER] Could not ensure torrc has control settings:', e?.message || e);
       }
 
-      // Verify Tor binary exists and is executable
-      try {
-        await fs.access('tor', fs.constants.F_OK | fs.constants.X_OK);
-        console.log('[TOR-MANAGER] System Tor binary found and executable');
-      } catch (e) {
-        console.warn('[TOR-MANAGER] System Tor binary not accessible, checking app bundle...');
-        if (this.torPath) {
-          try {
-            await fs.access(this.torPath, fs.constants.F_OK | fs.constants.X_OK);
-            console.log('[TOR-MANAGER] App bundle Tor binary found and executable');
-          } catch (e2) {
-            console.error('[TOR-MANAGER] App bundle Tor binary not accessible:', e2.message);
-          }
-        }
-      }
-
-      // Start Tor process
-      console.log('[TOR-MANAGER] Spawning Tor process with args:', ['-f', this.configPath, '--DataDirectory', dataDir]);
+      // Start bundled Tor process
+      console.log('[TOR-MANAGER] Spawning bundled Tor process...');
 
       let processError = null;
 
-      // Build spawn arguments and handle port conflicts if system Tor is already using defaults
+      // Build spawn arguments for bundled Tor
       let spawnArgs = ['-f', this.configPath, '--DataDirectory', dataDir];
 
-      // Find available ports to avoid conflicts with other users/processes
+      // Find available ports to avoid conflicts
       const findAvailablePort = async (startPort) => {
         for (let port = startPort; port < startPort + 100; port++) {
           try {
@@ -805,49 +738,38 @@ fi
               });
             });
             if (!portsInUse || portsInUse === '') {
-              console.log(`[TOR-MANAGER] Found available port: ${port}`);
               return port;
-            } else {
-              console.log(`[TOR-MANAGER] Port ${port} is busy: ${portsInUse.split('\n')[0]}`);
             }
           } catch (e) {
-            // If ss command fails, try the port anyway
-            console.log(`[TOR-MANAGER] Port check failed for ${port}, using anyway`);
-            return port;
+            return port; // If port check fails, try the port anyway
           }
         }
-        console.warn(`[TOR-MANAGER] No available ports found starting from ${startPort}, using ${startPort}`);
         return startPort; // Fallback
       };
 
       try {
-        // Find available ports starting from 9150 for multi-user compatibility
+        // Find available ports starting from 9150
         const availableSocksPort = await findAvailablePort(9150);
-        // Ensure control port is different from SOCKS port
         const availableControlPort = await findAvailablePort(availableSocksPort + 1);
         
-        console.log(`[TOR-MANAGER] Using available ports: SOCKS=${availableSocksPort}, Control=${availableControlPort}`);
+        console.log(`[TOR-MANAGER] Using ports: SOCKS=${availableSocksPort}, Control=${availableControlPort}`);
         
         spawnArgs = ['-f', this.configPath, '--DataDirectory', dataDir, 'SocksPort', availableSocksPort.toString(), 'ControlPort', availableControlPort.toString()];
         this.effectiveSocksPort = availableSocksPort;
         this.effectiveControlPort = availableControlPort;
       } catch (e) {
         console.warn('[TOR-MANAGER] Port detection failed, using configured ports:', e?.message || e);
-        // Use configured ports as fallback
         this.effectiveSocksPort = configuredSocksPort;
         this.effectiveControlPort = configuredControlPort;
       }
-
-      // Use system Tor if available, otherwise use app bundle
-      const torBinary = this.torPath && await fs.access(this.torPath, fs.constants.F_OK).then(() => true).catch(() => false) 
-        ? this.torPath 
-        : 'tor';
       
-      console.log('[TOR-MANAGER] Using Tor binary:', torBinary);
+      console.log('[TOR-MANAGER] Using bundled Tor binary:', this.torPath);
       
-      this.torProcess = spawn(torBinary, spawnArgs, {
+      // Spawn the bundled Tor process
+      this.torProcess = spawn(this.torPath, spawnArgs, {
         stdio: ['ignore', 'pipe', 'pipe'],
-        detached: false
+        detached: false,
+        env: { ...process.env, LD_LIBRARY_PATH: this.torDir } // Ensure bundled libraries are found
       });
 
       // Handle process events
@@ -858,152 +780,67 @@ fi
           if (/Bootstrapped\s+100%/i.test(line)) {
             this.bootstrapped = true;
           }
-          // Detect port announcements with broad matching (SOCKS/SOCKS5, IPv4/IPv6/hostnames)
-          const socksMatch = line.match(/Opened\s+(?:Socks(?:5)?|SOCKS(?:5)?)\s+listener(?:\s+connection)?\s*(?:\(ready\))?\s+on\s+(?:\[[^\]]+\]|[^\s]+?)(?::(\d+)|\]:(\d+))/i);
+          // Detect port announcements
+          const socksMatch = line.match(/Opened\s+(?:Socks(?:5)?|SOCKS(?:5)?)\s+listener.*:(\d+)/i);
           if (socksMatch) {
-            const portStr = socksMatch[1] || socksMatch[2];
-            const p = parseInt(portStr, 10);
+            const p = parseInt(socksMatch[1], 10);
             if (Number.isFinite(p)) this.effectiveSocksPort = p;
           }
-          const controlMatch = line.match(/Opened\s+Control\s+listener(?:\s+connection)?\s*(?:\(ready\))?\s+on\s+(?:\[[^\]]+\]|[^\s]+?)(?::(\d+)|\]:(\d+))/i);
+          const controlMatch = line.match(/Opened\s+Control\s+listener.*:(\d+)/i);
           if (controlMatch) {
-            const portStr = controlMatch[1] || controlMatch[2];
-            const p = parseInt(portStr, 10);
+            const p = parseInt(controlMatch[1], 10);
             if (Number.isFinite(p)) this.effectiveControlPort = p;
           }
         } catch (e) {
-          console.warn('[TOR-MANAGER] Failed to parse Tor stdout for ports:', e?.message || e);
+          console.warn('[TOR-MANAGER] Failed to parse Tor stdout:', e?.message || e);
         }
       });
 
       this.torProcess.stderr.on('data', (data) => {
         const errorMsg = data.toString().trim();
         console.error('[TOR-ERROR]', errorMsg);
-        // Capture all error messages, not just permission/bind errors
         if (errorMsg && !processError) {
           processError = errorMsg;
-        }
-        // Log specific common error patterns
-        if (errorMsg.includes('Permission denied')) {
-          console.error('[TOR-ERROR] Permission denied - check file/directory permissions');
-        } else if (errorMsg.includes('Cannot bind')) {
-          console.error('[TOR-ERROR] Port binding failed - port may be in use');
-        } else if (errorMsg.includes('Configuration file')) {
-          console.error('[TOR-ERROR] Configuration file error - check torrc syntax');
-        } else if (errorMsg.includes('Invalid')) {
-          console.error('[TOR-ERROR] Invalid configuration option');
         }
       });
 
       this.torProcess.on('exit', (code) => {
-        console.log(`[TOR-MANAGER] Tor process exited with code ${code}`);
-        if (code !== 0) {
-          processError = processError ? 
-            `Tor exited with code ${code}: ${processError}` : 
-            `Tor exited with code ${code}`;
+        console.log(`[TOR-MANAGER] Bundled Tor process exited with code ${code}`);
+        if (code !== 0 && !processError) {
+          processError = `Tor exited with code ${code}`;
         }
         this.torProcess = null;
       });
 
       this.torProcess.on('error', (error) => {
         console.error('[TOR-MANAGER] Tor process spawn error:', error);
-        processError = `Failed to spawn Tor: ${error.message}`;
+        processError = `Failed to spawn bundled Tor: ${error.message}`;
         this.torProcess = null;
       });
 
-      // Wait for Tor to start; declare success if process is running even if verify later fails
-      console.log('[TOR-MANAGER] Waiting for Tor to initialize...');
-      let bootstrapTimeout = false;
-      for (let i = 0; i < 10; i++) {
+      // Wait for Tor to initialize
+      console.log('[TOR-MANAGER] Waiting for bundled Tor to initialize...');
+      for (let i = 0; i < 30; i++) {
         if (this.bootstrapped) break;
         if (processError) break;
+        if (!this.torProcess) break;
         await new Promise(resolve => setTimeout(resolve, 1000));
       }
 
-      if (bootstrapTimeout && !this.bootstrapped) {
-        console.warn('[TOR-MANAGER] Tor bootstrap timeout after 45 seconds');
-        processError = processError || 'Tor failed to bootstrap within 45 seconds';
-      }
-
       // Ensure effective ports are set
-      try {
-        if (!this.effectiveSocksPort) this.effectiveSocksPort = configuredSocksPort || 9050;
-        if (!this.effectiveControlPort) this.effectiveControlPort = configuredControlPort || 9051;
-      } catch {}
+      if (!this.effectiveSocksPort) this.effectiveSocksPort = configuredSocksPort || 9150;
+      if (!this.effectiveControlPort) this.effectiveControlPort = configuredControlPort || 9151;
 
-      // Check for critical errors only
+      // Check for critical errors
       if (processError) {
-        console.error('[TOR-MANAGER] Tor startup failed:', processError);
-
-        // Automatic fallback: if snowflake bridges are configured, disable bridges and retry
-        try {
-          const cfg = await fs.readFile(this.configPath, 'utf8').catch(() => '');
-          const hasSnowflake = /UseBridges\s+1/i.test(cfg) && /ClientTransportPlugin\s+snowflake/i.test(cfg);
-          if (hasSnowflake) {
-            console.warn('[TOR-MANAGER] Snowflake bridge startup failed. Falling back to direct connection automatically.');
-            // Backup current config
-            try { await fs.writeFile(this.configPath + '.bak', cfg, 'utf8'); } catch {}
-            // Remove bridge-related lines and disable bridges
-            const newCfg = cfg
-              .split('\n')
-              .filter(line => !/^\s*UseBridges\b/i.test(line) && !/^\s*ClientTransportPlugin\b/i.test(line) && !/^\s*Bridge\b/i.test(line))
-              .concat(['', '# Auto-fallback: disable bridges for direct connection', 'UseBridges 0'])
-              .join('\n');
-            await fs.writeFile(this.configPath, newCfg, 'utf8');
-
-            // Retry starting Tor with updated config
-            console.log('[TOR-MANAGER] Retrying Tor start without bridges...');
-            processError = null;
-            this.torProcess = spawn(torBinary, spawnArgs, { stdio: ['ignore', 'pipe', 'pipe'], detached: false });
-            let retryError = null;
-            this.torProcess.stderr.on('data', (data) => {
-              const err = data.toString().trim();
-              if (err) retryError = err;
-            });
-            await new Promise(resolve => setTimeout(resolve, 3000));
-            if (!retryError && this.torProcess && !this.torProcess.killed) {
-              console.log('[TOR-MANAGER] Tor started successfully after disabling bridges');
-              return { success: true };
-            }
-          }
-        } catch (e) {
-          console.warn('[TOR-MANAGER] Fallback attempt failed:', e?.message || e);
-        }
-
+        console.error('[TOR-MANAGER] Bundled Tor startup failed:', processError);
         return { success: false, error: processError };
       }
 
       // Verify the process is still running
       if (!this.torProcess || this.torProcess.killed) {
-        console.error('[TOR-MANAGER] Tor process failed to start or died');
-
-        // Attempt same automatic fallback for snowflake config
-        try {
-          const cfg = await fs.readFile(this.configPath, 'utf8').catch(() => '');
-          const hasSnowflake = /UseBridges\s+1/i.test(cfg) && /ClientTransportPlugin\s+snowflake/i.test(cfg);
-          if (hasSnowflake) {
-            console.warn('[TOR-MANAGER] Snowflake bridge process died. Falling back to direct connection automatically.');
-            try { await fs.writeFile(this.configPath + '.bak', cfg, 'utf8'); } catch {}
-            const newCfg = cfg
-              .split('\n')
-              .filter(line => !/^\s*UseBridges\b/i.test(line) && !/^\s*ClientTransportPlugin\b/i.test(line) && !/^\s*Bridge\b/i.test(line))
-              .concat(['', '# Auto-fallback: disable bridges for direct connection', 'UseBridges 0'])
-              .join('\n');
-            await fs.writeFile(this.configPath, newCfg, 'utf8');
-
-            console.log('[TOR-MANAGER] Retrying Tor start without bridges...');
-            this.torProcess = spawn(torBinary, spawnArgs, { stdio: ['ignore', 'pipe', 'pipe'], detached: false });
-            await new Promise(resolve => setTimeout(resolve, 3000));
-            if (this.torProcess && !this.torProcess.killed) {
-              console.log('[TOR-MANAGER] Tor started successfully after disabling bridges');
-              return { success: true };
-            }
-          }
-        } catch (e) {
-          console.warn('[TOR-MANAGER] Fallback attempt failed:', e?.message || e);
-        }
-
-        return { success: false, error: 'Tor process failed to start or died immediately' };
+        console.error('[TOR-MANAGER] Bundled Tor process failed to start or died');
+        return { success: false, error: 'Bundled Tor process failed to start' };
       }
 
       console.log('[TOR-MANAGER] Tor service started (verify may follow)');

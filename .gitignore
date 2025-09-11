@@ -29,6 +29,11 @@ components.json
 /.vercel
 /.netlify
 
+# Tor bundles and archives (too large for git)
+/tor-bundles
+*.tar.gz
+tor-expert-bundle-*
+
 # Database files
 /server/database/user_database.sqlite
 /server/database/*.db
@@ -49,6 +54,9 @@ yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
 lerna-debug.log*
+electron_*.log
+electron_output.log
+electron_test.log
 
 # Runtime data
 pids
@@ -127,7 +135,11 @@ Thumbs.db
 
 # Electron build outputs
 /electron-dist
+/dist-electron
 /release
+
+# AppImage extraction
+/squashfs-root
 
 # Docker
 .dockerignore

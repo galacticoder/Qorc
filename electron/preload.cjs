@@ -33,7 +33,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // Tor management functions with input validation
   checkTorInstallation: () => ipcRenderer.invoke('tor:check-installation'),
-  downloadTor: (options) => ipcRenderer.invoke('tor:download', options),
+  downloadTor: () => ipcRenderer.invoke('tor:download'),
   installTor: () => ipcRenderer.invoke('tor:install'),
   configureTor: (options) => {
     try {

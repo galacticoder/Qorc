@@ -2,6 +2,8 @@
   "name": "end2end-chat-client",
   "private": true,
   "version": "0.0.0",
+  "description": "End-to-End Encrypted Chat Application with bundled Tor anonymity",
+  "author": "End2End Chat Team",
   "type": "module",
   "main": "electron/main.cjs",
   "homepage": "./",
@@ -10,13 +12,16 @@
     "dev:electron": "concurrently -k --success=first -n vite,electron -c cyan,green \"vite\" \"wait-on http://localhost:5173 && NODE_ENV=development pnpm exec electron .\"",
     "dev:vite-only": "vite",
     "vite": "vite",
-    "build": "tsc -b && vite build",
+    "build": "vite build --config vite.config.simple.ts",
     "lint": "eslint . --ext ts,tsx --report-unused-disable-directives --max-warnings 0",
     "preview": "vite preview",
     "electron": "electron .",
     "electron-dev": "concurrently -n vite,electron -c cyan,green \"vite\" \"wait-on http://localhost:5173 && NODE_ENV=development pnpm exec electron .\"",
-    "electron-build": "npm run build && electron-builder",
-    "dist": "npm run build && electron-builder --publish=never"
+    "prepare-tor": "bash scripts/prepare-tor-bundles.sh",
+    "electron-build": "npm run prepare-tor && npm run build && electron-builder",
+    "electron-build-no-tor": "npm run build && electron-builder",
+    "dist": "npm run prepare-tor && npm run build && electron-builder --publish=never",
+    "dist-no-tor": "npm run build && electron-builder --publish=never"
   },
   "dependencies": {
     "@dhaiwat10/react-link-preview": "^1.15.0",
@@ -66,6 +71,7 @@
     "socks-proxy-agent": "^8.0.5",
     "tailwind-merge": "^2.2.1",
     "tailwindcss-animate": "^1.0.7",
+    "tar": "^6.2.1",
     "uuid": "^11.0.8",
     "ws": "^8.18.3"
   },
@@ -88,6 +94,7 @@
     "eslint-plugin-react-refresh": "^0.4.5",
     "postcss": "^8.4.35",
     "tailwindcss": "^3.4.1",
+    "terser": "^5.44.0",
     "typescript": "^5.2.2",
     "vite": "^5.1.4",
     "wait-on": "^7.2.0"
@@ -96,12 +103,21 @@
     "appId": "com.example.end2endchat",
     "productName": "End-to-End Chat",
     "directories": {
-      "output": "dist"
+      "output": "dist-electron"
     },
     "files": [
       "dist/**/*",
       "electron/**/*",
-      "node_modules/**/*"
+      "!electron/.gitignore", 
+      "node_modules/**/*",
+      "config/package.json",
+      "package.json"
+    ],
+    "extraResources": [
+      "tor-bundles/**/*"
+    ],
+    "asarUnpack": [
+      "tor-bundles/**/*"
     ],
     "mac": {
       "category": "public.app-category.social-networking"

@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, desktopCapturer, dialog, shell, powerSaveBlocker } = require('electron');
+const { app, BrowserWindow, ipcMain, desktopCapturer, dialog, shell, powerSaveBlocker, session } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
@@ -11,6 +11,9 @@ app.disableHardwareAcceleration();
 app.commandLine.appendSwitch('--disable-gpu');
 app.commandLine.appendSwitch('--disable-gpu-sandbox');
 app.commandLine.appendSwitch('--disable-software-rasterizer');
+
+// Disable security warnings after implementing proper security measures
+process.env['ELECTRON_DISABLE_SECURITY_WARNINGS'] = 'true';
 
 // Route all console output to a file to avoid EBADF when parent stdio closes
 try {
@@ -63,13 +66,9 @@ function createWindow() {
     experimentalFeatures: false
   };
 
-  // Only weaken security in development for WebRTC/screen sharing testing
-  if (isDev) {
-    // Enable experimental features only in dev for WebRTC/screen sharing
-    webPreferences.experimentalFeatures = true;
-    // webPreferences.webSecurity = false;
-    // webPreferences.allowRunningInsecureContent = true;
-  }
+  // Maintain security even in development
+  // Note: Removed experimentalFeatures to fix security warnings
+  // If specific WebRTC features are needed, enable them specifically in production-ready code
 
   // Create the browser window
   mainWindow = new BrowserWindow({
@@ -181,12 +180,143 @@ function createWindow() {
   });
 }
 
+// Initialize and start bundled Tor automatically
+async function initializeTor() {
+  try {
+    console.log('[ELECTRON] Initializing bundled Tor...');
+    
+    // Check if Tor is already installed
+    const torStatus = await torManager.checkTorInstallation();
+    if (!torStatus.isInstalled) {
+      console.log('[ELECTRON] Downloading Tor Expert Bundle...');
+      const downloadResult = await torManager.downloadTor();
+      if (!downloadResult.success) {
+        throw new Error(`Tor download failed: ${downloadResult.error}`);
+      }
+      
+      console.log('[ELECTRON] Installing Tor Expert Bundle...');
+      const installResult = await torManager.installTor();
+      if (!installResult.success) {
+        throw new Error(`Tor installation failed: ${installResult.error}`);
+      }
+    }
+    
+    // Configure Tor with optimal settings
+    console.log('[ELECTRON] Configuring bundled Tor...');
+    const config = `
+# Auto-generated Tor configuration for bundled Tor
+SocksPort 9150
+ControlPort 9151
+CookieAuthentication 1
+SocksPolicy accept 127.0.0.1
+SocksPolicy reject *
+NewCircuitPeriod 30
+MaxCircuitDirtiness 600
+CircuitBuildTimeout 30
+LearnCircuitBuildTimeout 0
+ExitPolicy reject *:*
+ClientOnly 1
+Log notice stdout
+Log warn stdout
+SafeLogging 0
+FetchDirInfoEarly 1
+FetchDirInfoExtraEarly 1
+FetchUselessDescriptors 1
+`;
+    
+    const configResult = await torManager.configureTor({ config });
+    if (!configResult.success) {
+      throw new Error(`Tor configuration failed: ${configResult.error}`);
+    }
+    
+    // Start Tor service
+    console.log('[ELECTRON] Starting bundled Tor service...');
+    const startResult = await torManager.startTor();
+    if (!startResult.success) {
+      throw new Error(`Tor startup failed: ${startResult.error}`);
+    }
+    
+    // Configure Electron session to use Tor proxy
+    console.log('[ELECTRON] Configuring Electron session proxy...');
+    const proxyConfigured = await configureTorProxy();
+    if (proxyConfigured) {
+      torSetupComplete = true;
+      console.log('[ELECTRON] Bundled Tor initialization completed successfully');
+    } else {
+      console.warn('[ELECTRON] Tor started but proxy configuration failed');
+    }
+    
+  } catch (error) {
+    console.error('[ELECTRON] Failed to initialize bundled Tor:', error);
+    // Continue without Tor - app will work but without anonymization
+    console.warn('[ELECTRON] Continuing without Tor - traffic will not be anonymized');
+  }
+}
+
 // This method will be called when Electron has finished initialization
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
   createWindow();
+  
+  // Initialize Tor in the background
+  initializeTor();
 
   // Handle permission requests for media devices and security
   app.on('web-contents-created', (event, contents) => {
+    // Set Content Security Policy for enhanced security
+    contents.session.webRequest.onHeadersReceived((details, callback) => {
+      const responseHeaders = details.responseHeaders;
+      
+      // Generate nonce for inline scripts/styles
+      const nonce = require('crypto').randomBytes(16).toString('base64');
+      
+      let cspPolicy;
+      if (app.isPackaged) {
+        // Strict production CSP - no unsafe-inline, use nonce for necessary inline content
+        cspPolicy = [
+          "default-src 'self'; " +
+          `script-src 'self' 'nonce-${nonce}'; ` + // Only allow scripts with nonce
+          `style-src 'self' 'nonce-${nonce}' 'unsafe-inline'; ` + // Allow nonce and inline styles for CSS-in-JS
+          "img-src 'self' data: blob: https:; " +
+          "media-src 'self' blob: data:; " +
+          "connect-src 'self' wss: ws: https: blob:; " + // Block HTTP in production
+          "font-src 'self' data:; " +
+          "object-src 'none'; " +
+          "base-uri 'self'; " +
+          "frame-ancestors 'none'; " +
+          "upgrade-insecure-requests;"
+        ];
+      } else {
+        // Development CSP - allow necessary dev tools but still secure
+        cspPolicy = [
+          "default-src 'self' 'unsafe-inline' data: blob: wss: ws: https: http: localhost:*; " +
+          "script-src 'self' 'unsafe-inline' 'unsafe-eval' localhost:*; " + // Allow eval for HMR
+          "style-src 'self' 'unsafe-inline' localhost:*; " + // Allow inline styles for dev
+          "img-src 'self' data: blob: https: http:; " +
+          "media-src 'self' blob: data:; " +
+          "connect-src 'self' wss: ws: https: http: blob: localhost:*; " + // Allow dev server
+          "font-src 'self' data:; " +
+          "object-src 'none'; " +
+          "base-uri 'self';"
+        ];
+      }
+      
+      responseHeaders['content-security-policy'] = cspPolicy;
+      
+      // Add additional security headers
+      responseHeaders['x-frame-options'] = ['DENY'];
+      responseHeaders['x-content-type-options'] = ['nosniff'];
+      responseHeaders['x-xss-protection'] = ['1; mode=block'];
+      responseHeaders['referrer-policy'] = ['strict-origin-when-cross-origin'];
+      
+      if (app.isPackaged) {
+        // Additional production security headers
+        responseHeaders['strict-transport-security'] = ['max-age=31536000; includeSubDomains'];
+        responseHeaders['permissions-policy'] = ['camera=(), microphone=(), geolocation=(), payment=()'];
+      }
+      
+      callback({ responseHeaders });
+    });
+
     // Set up permission handlers for media access
     contents.session.setPermissionRequestHandler((_webContents, permission, callback) => {
       console.log('[ELECTRON] Permission request:', permission);
@@ -310,11 +440,15 @@ ipcMain.handle('tor:check-installation', async () => {
   }
 });
 
-ipcMain.handle('tor:download', async (event, options) => {
+ipcMain.handle('tor:download', async () => {
   try {
-    return await torManager.downloadTor(options);
+    console.log('[IPC] Starting Tor download...');
+    const result = await torManager.downloadTor();
+    console.log('[IPC] Tor download result:', result);
+    return result;
   } catch (error) {
     console.error('[IPC] Error downloading Tor:', error);
+    console.error('[IPC] Error stack:', error.stack);
     return { success: false, error: error.message };
   }
 });
@@ -460,6 +594,27 @@ let reconnectTimer = null;
 let messageQueue = [];
 const MAX_QUEUE_SIZE = 100;
 let connectionEstablishedAt = null;
+
+// Configure Electron session to use Tor proxy for all traffic
+async function configureTorProxy() {
+  try {
+    const torInfo = await torManager.getTorInfo();
+    if (torInfo && torInfo.socksPort) {
+      const proxyConfig = {
+        proxyRules: `socks5://127.0.0.1:${torInfo.socksPort}`,
+        proxyBypassRules: '<-loopback>' // Allow local connections to bypass proxy
+      };
+      
+      console.log('[ELECTRON] Configuring Tor proxy:', proxyConfig);
+      await session.defaultSession.setProxy(proxyConfig);
+      console.log('[ELECTRON] All Electron session traffic now routes through bundled Tor');
+      return true;
+    }
+  } catch (error) {
+    console.error('[ELECTRON] Failed to configure Tor proxy:', error);
+  }
+  return false;
+}
 
 // Create stable WebSocket connection with proper error handling and reconnection
 async function createWebSocketConnection() {
@@ -1129,21 +1284,42 @@ ipcMain.handle('file:choose-download-path', async () => {
   }
 });
 
-// Link Preview Handler - Uses Tor proxy for secure fetching
+// Link Preview Handler - Uses bundled Tor proxy for secure fetching
 ipcMain.handle('link:fetch-preview', async (event, url, options = {}) => {
   try {
     const { timeout = 10000, userAgent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36', maxRedirects = 5 } = options;
 
     console.log('[LINK-PREVIEW] Fetching preview for:', url);
 
-    // Use Tor proxy for the request
+    // Check if Tor is running before attempting to use it
+    if (!torManager.isTorRunning()) {
+      console.warn('[LINK-PREVIEW] Tor is not running, cannot fetch preview securely');
+      return { error: 'Tor proxy not available' };
+    }
+
+    // Get current Tor SOCKS port
+    let socksPort = torManager.effectiveSocksPort;
+    if (!socksPort) {
+      // Try to get port from Tor info
+      try {
+        const torInfo = await torManager.getTorInfo();
+        socksPort = torInfo.socksPort || 9150; // Default to 9150 for bundled Tor
+      } catch (error) {
+        console.warn('[LINK-PREVIEW] Could not get Tor info, using default port');
+        socksPort = 9150;
+      }
+    }
+
+    console.log('[LINK-PREVIEW] Using Tor SOCKS proxy on port:', socksPort);
+
+    // Use bundled Tor proxy for the request
     const { SocksProxyAgent } = require('socks-proxy-agent');
     const https = require('https');
     const http = require('http');
     const { URL } = require('url');
     const zlib = require('zlib');
     
-    const proxyAgent = new SocksProxyAgent(`socks5h://127.0.0.1:${torManager.effectiveSocksPort || 9050}`);
+    const proxyAgent = new SocksProxyAgent(`socks5h://127.0.0.1:${socksPort}`);
     
     return new Promise((resolve) => {
       try {

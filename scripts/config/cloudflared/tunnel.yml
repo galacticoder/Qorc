@@ -1,0 +1,14 @@
+# Cloudflare Tunnel Configuration
+# This creates a persistent tunnel with a permanent subdomain
+
+# Tunnel settings
+url: https://localhost:8443
+logfile: ../scripts/config/cloudflared/tunnel.log
+
+# Connection settings
+retries: 5
+retry-interval: 1s
+grace-period: 30s
+
+# Security settings
+no-tls-verify: true

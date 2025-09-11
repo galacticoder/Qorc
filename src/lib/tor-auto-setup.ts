@@ -60,25 +60,25 @@ export class TorAutoSetup {
         return false;
       }
 
-      // Step 1: Check for system Tor first (more reliable and faster)
-      this.updateStatus(10, 'Checking for system Tor...');
-      console.log('[TOR-SETUP] Checking for system Tor installation first');
+      // Step 1: Check for bundled Tor first
+      this.updateStatus(10, 'Checking for bundled Tor...');
+      console.log('[TOR-SETUP] Checking for bundled Tor installation');
       
-      const systemTorCheck = await this.checkSystemTor();
-      if (systemTorCheck.isInstalled) {
-        console.log('[TOR-SETUP] Found system Tor, using it instead of downloading');
-        this.updateStatus(30, 'Using system Tor installation...');
+      const bundledTorCheck = await this.checkBundledTor();
+      if (bundledTorCheck.isInstalled) {
+        console.log('[TOR-SETUP] Found bundled Tor, skipping download');
+        this.updateStatus(40, 'Using existing bundled Tor...');
         this.status.isInstalled = true;
       } else {
-        console.log('[TOR-SETUP] No system Tor found, downloading Tor Expert Bundle');
+        console.log('[TOR-SETUP] No bundled Tor found, downloading Tor Expert Bundle');
         this.updateStatus(15, 'Preparing Tor Expert Bundle download...');
         
-        // Step 2: Download Tor Expert Bundle only if no system Tor
+        // Step 2: Download and install Tor Expert Bundle
         this.updateStatus(20, 'Downloading Tor Expert Bundle...', 'Downloading ~15MB from torproject.org');
         const downloadSuccess = await this.downloadTor();
 
         if (!downloadSuccess) {
-          this.updateStatus(0, 'Failed to download Tor', 'Could not download Tor Expert Bundle. Check internet connection or install system Tor: sudo apt-get install tor');
+          this.updateStatus(0, 'Failed to download Tor', 'Could not download Tor Expert Bundle. Check internet connection.');
           return false;
         }
 
@@ -88,7 +88,7 @@ export class TorAutoSetup {
         console.log('[TOR-SETUP] Install result:', installSuccess);
 
         if (!installSuccess) {
-          this.updateStatus(0, 'Failed to install Tor', 'Could not complete Tor installation. You may need to install Tor manually.');
+          this.updateStatus(0, 'Failed to install Tor', 'Could not complete bundled Tor installation.');
           return false;
         }
       }
@@ -162,22 +162,23 @@ export class TorAutoSetup {
 
 
   /**
-   * Check if system Tor is available
+   * Check if bundled Tor is available
    */
-  private async checkSystemTor(): Promise<{ isInstalled: boolean; version?: string }> {
+  private async checkBundledTor(): Promise<{ isInstalled: boolean; version?: string; bundled?: boolean }> {
     try {
       if (typeof window !== 'undefined' && (window as any).electronAPI) {
-        console.log('[TOR-SETUP] Checking system Tor through Electron API...');
+        console.log('[TOR-SETUP] Checking bundled Tor through Electron API...');
         const result = await (window as any).electronAPI.checkTorInstallation();
-        console.log('[TOR-SETUP] System Tor check result:', result);
+        console.log('[TOR-SETUP] Bundled Tor check result:', result);
         return { 
           isInstalled: result.isInstalled || false, 
-          version: result.version || result.systemVersion 
+          version: result.version, 
+          bundled: result.bundled || false
         };
       }
       return { isInstalled: false };
     } catch (error) {
-      console.error('[TOR-SETUP] Failed to check system Tor:', error);
+      console.error('[TOR-SETUP] Failed to check bundled Tor:', error);
       return { isInstalled: false };
     }
   }
