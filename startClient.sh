@@ -3,6 +3,23 @@
 set -euo pipefail
 IFS=$'\n\t'
 
+# Detect operating system
+OS="$(uname -s)"
+ARCH="$(uname -m)"
+
+# macOS-specific environment settings
+if [[ "$OS" == "Darwin" ]]; then
+    export HOMEBREW_NO_EMOJI=1
+    export HOMEBREW_NO_ENV_HINTS=1
+    export HOMEBREW_NO_INSTALL_CLEANUP=1
+    # Add Homebrew paths for both Intel and Apple Silicon
+    if [[ "$ARCH" == "arm64" ]]; then
+        export PATH="/opt/homebrew/bin:/opt/homebrew/sbin:$PATH"
+    else
+        export PATH="/usr/local/bin:/usr/local/sbin:$PATH"
+    fi
+fi
+
 GREEN='\033[0;32m'
 BLUE='\033[0;34m'
 YELLOW='\033[1;33m'
@@ -42,7 +59,7 @@ cd "$(dirname "$0")"
 
 # Function to install essential tools directly
 install_essential_tools_direct() {
-    echo -e "${YELLOW}Installing essential tools directly...${NC}"
+    echo -e "${YELLOW}Installing essential client tools...${NC}"
 
     if command -v apt-get &> /dev/null; then
         # Ubuntu/Debian/Mint/Pop!_OS/Elementary
@@ -79,8 +96,15 @@ install_essential_tools_direct() {
         # NixOS
         nix-env -iA nixpkgs.curl nixpkgs.wget nixpkgs.git
     elif command -v brew &> /dev/null; then
-        # macOS
-        brew install curl wget git
+        # macOS - install only client essentials, suppress emojis
+        echo -e "${GREEN}Installing client tools via Homebrew (no emojis)...${NC}"
+        brew install --quiet curl wget git 2>/dev/null || brew install curl wget git
+        # Fix curl PATH on macOS (keg-only)
+        if [[ "$ARCH" == "arm64" ]]; then
+            export PATH="/opt/homebrew/opt/curl/bin:$PATH"
+        else
+            export PATH="/usr/local/opt/curl/bin:$PATH"
+        fi
     else
         echo -e "${YELLOW}Could not detect package manager. Please install curl, wget, and git manually.${NC}"
         echo -e "${YELLOW}Supported package managers: apt-get, dnf, yum, pacman, zypper, apk, xbps-install, emerge, eopkg, swupd, nix-env, brew${NC}"
@@ -125,20 +149,45 @@ check_essential_tools() {
     fi
 }
 
+# Function to install Node.js directly
+install_nodejs_direct() {
+    echo -e "${GREEN}Installing Node.js...${NC}"
+    
+    if command -v brew &> /dev/null; then
+        # macOS
+        echo -e "${GREEN}Installing Node.js via Homebrew...${NC}"
+        brew install --quiet node 2>/dev/null || brew install node
+    elif command -v apt-get &> /dev/null; then
+        # Ubuntu/Debian - install latest LTS
+        curl -fsSL https://deb.nodesource.com/setup_lts.x | sudo -E bash -
+        sudo apt-get install -y nodejs
+    elif command -v dnf &> /dev/null; then
+        # Fedora/RHEL
+        sudo dnf install -y nodejs npm
+    elif command -v yum &> /dev/null; then
+        # CentOS/RHEL older
+        curl -fsSL https://rpm.nodesource.com/setup_lts.x | sudo bash -
+        sudo yum install -y nodejs
+    elif command -v pacman &> /dev/null; then
+        # Arch Linux
+        sudo pacman -S --noconfirm nodejs npm
+    else
+        echo -e "${YELLOW}Automatic Node.js installation not supported for this system.${NC}"
+        echo -e "${YELLOW}Please install Node.js 18+ manually from: https://nodejs.org/${NC}"
+        return 1
+    fi
+}
+
 # Function to check Node.js version
 check_nodejs() {
     local nodejs_updated=false
 
     if ! command -v node &> /dev/null; then
-        echo -e "${YELLOW}Node.js not found. Installing via install-dependencies.sh...${NC}"
-        if [[ -f install-dependencies.sh ]]; then
-            set +u
-            source install-dependencies.sh
-            set -u
-            install_nodejs || true
+        echo -e "${YELLOW}Node.js not found. Installing directly...${NC}"
+        if install_nodejs_direct; then
             nodejs_updated=true
         else
-            echo -e "${YELLOW}install-dependencies.sh not found. Please install Node.js manually.${NC}"
+            echo -e "${YELLOW}Node.js installation failed. Please install Node.js 18+ manually.${NC}"
             echo -e "${YELLOW}Visit: https://nodejs.org/${NC}"
             exit 1
         fi
@@ -150,13 +199,13 @@ check_nodejs() {
 
     if [ "$major_version" -lt 18 ]; then
         echo -e "${YELLOW}Node.js version $node_version is too old. Minimum required: 18.x${NC}"
-        echo -e "${GREEN}Updating Node.js via install-dependencies.sh...${NC}"
-        if [[ -f install-dependencies.sh ]]; then
-            set +u
-            source install-dependencies.sh
-            set -u
-            install_nodejs || true
+        echo -e "${GREEN}Updating Node.js...${NC}"
+        if install_nodejs_direct; then
             nodejs_updated=true
+        else
+            echo -e "${YELLOW}Node.js update failed. Please update Node.js 18+ manually.${NC}"
+            echo -e "${YELLOW}Visit: https://nodejs.org/${NC}"
+            exit 1
         fi
     fi
 
@@ -202,7 +251,16 @@ setup_symlinks() {
 setup_symlinks
 
 # Ensure PATH includes common global installation locations
-export PATH="/usr/local/bin:$HOME/.local/bin:$HOME/.local/share/pnpm:$PATH"
+if [[ "$OS" == "Darwin" ]]; then
+    # macOS specific paths including Homebrew and curl fix
+    if [[ "$ARCH" == "arm64" ]]; then
+        export PATH="/opt/homebrew/bin:/opt/homebrew/sbin:/opt/homebrew/opt/curl/bin:$HOME/.local/bin:$HOME/.local/share/pnpm:$PATH"
+    else
+        export PATH="/usr/local/bin:/usr/local/sbin:/usr/local/opt/curl/bin:$HOME/.local/bin:$HOME/.local/share/pnpm:$PATH"
+    fi
+else
+    export PATH="/usr/local/bin:$HOME/.local/bin:$HOME/.local/share/pnpm:$PATH"
+fi
 
 # Check for pnpm first (separate from dependency installation)
 if ! command -v pnpm >/dev/null 2>&1; then
@@ -225,11 +283,25 @@ if ! command -v pnpm >/dev/null 2>&1; then
             sudo npm install -g pnpm --no-audit --no-fund
         elif command -v curl &> /dev/null; then
             echo -e "${GREEN}Installing pnpm globally via installer...${NC}"
-            # Install to system location
-            sudo mkdir -p /usr/local/bin
-            curl -fsSL https://github.com/pnpm/pnpm/releases/latest/download/pnpm-linuxstatic-x64 -o /tmp/pnpm
-            sudo mv /tmp/pnpm /usr/local/bin/pnpm
-            sudo chmod +x /usr/local/bin/pnpm
+            # Install to system location with proper architecture detection
+            if [[ "$OS" == "Darwin" ]]; then
+                if [[ "$ARCH" == "arm64" ]]; then
+                    sudo mkdir -p /opt/homebrew/bin
+                    curl -fsSL https://github.com/pnpm/pnpm/releases/latest/download/pnpm-macos-arm64 -o /tmp/pnpm
+                    sudo mv /tmp/pnpm /opt/homebrew/bin/pnpm
+                    sudo chmod +x /opt/homebrew/bin/pnpm
+                else
+                    sudo mkdir -p /usr/local/bin
+                    curl -fsSL https://github.com/pnpm/pnpm/releases/latest/download/pnpm-macos-x64 -o /tmp/pnpm
+                    sudo mv /tmp/pnpm /usr/local/bin/pnpm
+                    sudo chmod +x /usr/local/bin/pnpm
+                fi
+            else
+                sudo mkdir -p /usr/local/bin
+                curl -fsSL https://github.com/pnpm/pnpm/releases/latest/download/pnpm-linuxstatic-x64 -o /tmp/pnpm
+                sudo mv /tmp/pnpm /usr/local/bin/pnpm
+                sudo chmod +x /usr/local/bin/pnpm
+            fi
         else
             echo -e "${RED}No suitable method found to install pnpm. Please install curl or npm first.${NC}"
             exit 1
@@ -242,10 +314,24 @@ if ! command -v pnpm >/dev/null 2>&1; then
             echo -e "${YELLOW}pnpm installation failed. Trying manual global installation...${NC}"
             # Try manual binary download as final fallback
             if command -v curl &> /dev/null; then
-                sudo mkdir -p /usr/local/bin
-                curl -fsSL https://github.com/pnpm/pnpm/releases/latest/download/pnpm-linuxstatic-x64 -o /tmp/pnpm
-                sudo mv /tmp/pnpm /usr/local/bin/pnpm
-                sudo chmod +x /usr/local/bin/pnpm
+                if [[ "$OS" == "Darwin" ]]; then
+                    if [[ "$ARCH" == "arm64" ]]; then
+                        sudo mkdir -p /opt/homebrew/bin
+                        curl -fsSL https://github.com/pnpm/pnpm/releases/latest/download/pnpm-macos-arm64 -o /tmp/pnpm
+                        sudo mv /tmp/pnpm /opt/homebrew/bin/pnpm
+                        sudo chmod +x /opt/homebrew/bin/pnpm
+                    else
+                        sudo mkdir -p /usr/local/bin
+                        curl -fsSL https://github.com/pnpm/pnpm/releases/latest/download/pnpm-macos-x64 -o /tmp/pnpm
+                        sudo mv /tmp/pnpm /usr/local/bin/pnpm
+                        sudo chmod +x /usr/local/bin/pnpm
+                    fi
+                else
+                    sudo mkdir -p /usr/local/bin
+                    curl -fsSL https://github.com/pnpm/pnpm/releases/latest/download/pnpm-linuxstatic-x64 -o /tmp/pnpm
+                    sudo mv /tmp/pnpm /usr/local/bin/pnpm
+                    sudo chmod +x /usr/local/bin/pnpm
+                fi
             fi
         fi
 
@@ -261,6 +347,7 @@ fi
 # Install deps when needed (first run or lockfile newer than installed modules)
 if [ ! -d node_modules ] || [ config/pnpm-lock.yaml -nt node_modules/.modules.yaml ]; then
     echo -e "${GREEN}Installing client dependencies...${NC}"
+    # Use standard pnpm install - dependency optimization happens at package.json level
     pnpm install --prefer-offline
 fi
 
