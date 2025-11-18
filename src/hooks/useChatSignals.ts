@@ -1,6 +1,6 @@
 import { useCallback } from "react";
 import { handleSignalMessages } from "@/lib/signals";
-import { useAuth } from "@/hooks/useAuth";
+import type { useAuth } from "@/hooks/useAuth";
 
 interface ChatSignalsProps {
   Authentication: ReturnType<typeof useAuth>;

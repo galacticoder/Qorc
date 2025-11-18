@@ -1,85 +1,159 @@
-import React, { useState } from "react";
-import { cn } from "@/lib/utils";
-import { Plus, MessageSquare, Settings, LogOut, Home, Users, Phone } from "lucide-react";
-import { Input } from "@/components/ui/input";
-import { Button } from "@/components/ui/button";
+import React, { useState, useCallback, useMemo, useRef, useEffect } from "react";
+import { cn } from "../../lib/utils";
+import { MessageSquare, Settings, LogOut, Pencil } from "lucide-react";
+import { Input } from "../ui/input";
+import { Button } from "../ui/button";
+import { sanitizeTextInput } from "../../lib/sanitizers";
 
 export interface User {
-  id: string;
-  username: string;
-  isOnline: boolean;
-  isTyping?: boolean;
-  hybridPublicKeys?: {
-    x25519PublicBase64: string;
-    kyberPublicBase64: string;
+  readonly id: string;
+  readonly username: string;
+  readonly isOnline: boolean;
+  readonly isTyping?: boolean;
+  readonly hybridPublicKeys?: {
+    readonly x25519PublicBase64: string;
+    readonly kyberPublicBase64: string;
   };
 }
 
 interface SidebarProps {
-  className?: string;
-  children?: React.ReactNode;
-  currentUsername?: string;
-  onAddConversation?: (username: string) => Promise<any>;
-  onLogout?: () => void;
-  onActiveTabChange?: (tab: string) => void;
+  readonly className?: string;
+  readonly children?: React.ReactNode;
+  readonly currentUsername?: string;
+  readonly onAddConversation?: (username: string) => Promise<void>;
+  readonly onLogout?: () => void;
+  readonly onActiveTabChange?: (tab: string) => void;
 }
 
-export function Sidebar({ className, children, currentUsername, onAddConversation, onLogout, onActiveTabChange }: SidebarProps) {
-  const [activeTab, setActiveTab] = useState("messages");
-  const [showAddUser, setShowAddUser] = useState(false);
-  const [newUsername, setNewUsername] = useState("");
-  const [isValidating, setIsValidating] = useState(false);
-  const [validationError, setValidationError] = useState("");
-  const [isCollapsed, setIsCollapsed] = useState(false);
+export const Sidebar = React.memo<SidebarProps>(({ className, children, currentUsername, onAddConversation, onLogout, onActiveTabChange }) => {
+  const [activeTab, setActiveTab] = useState<string>("messages");
+  const [showAddUser, setShowAddUser] = useState<boolean>(false);
+  const [newUsername, setNewUsername] = useState<string>("");
+  const [isValidating, setIsValidating] = useState<boolean>(false);
+  const [validationError, setValidationError] = useState<string>("");
+  const [isCollapsed] = useState<boolean>(false);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const abortControllerRef = useRef<AbortController | null>(null);
 
-  const handleAddUser = async () => {
-    const username = newUsername.trim();
+  useEffect(() => {
+    return () => {
+      abortControllerRef.current?.abort();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (showAddUser && inputRef.current) {
+      inputRef.current.focus();
+    }
+  }, [showAddUser]);
+
+  // Listen for global compose event to open "New Chat" modal
+  useEffect(() => {
+    const openNewChat = () => {
+      setShowAddUser(true); // keep sidebar open on messages
+    };
+    window.addEventListener('open-new-chat', openNewChat as EventListener);
+    return () => window.removeEventListener('open-new-chat', openNewChat as EventListener);
+  }, []);
+
+  const validateUsername = useCallback((username: string): boolean => {
+    if (typeof username !== 'string' || !username) return false;
+    const usernameRegex = /^[a-zA-Z0-9_-]{3,32}$/;
+    return usernameRegex.test(username);
+  }, []);
+
+  const handleAddUser = useCallback(async () => {
+    const sanitized = sanitizeTextInput(newUsername, { maxLength: 32, allowNewlines: false });
+    const username = sanitized.trim();
+    
     if (!username || username === currentUsername) return;
+    
+    if (!validateUsername(username)) {
+      setValidationError("Username must be 3-32 characters; letters, numbers, underscore or hyphen only");
+      return;
+    }
+
+    abortControllerRef.current?.abort();
+    abortControllerRef.current = new AbortController();
 
     setIsValidating(true);
     setValidationError("");
 
     try {
-      // Create conversation and automatically select it
       await onAddConversation?.(username);
       setNewUsername("");
       setShowAddUser(false);
-      // Switch to messages tab after adding conversation
       setActiveTab("messages");
       onActiveTabChange?.("messages");
-    } catch (error) {
-      console.error('[UserList] Failed to add conversation:', error);
-      setValidationError(error instanceof Error ? error.message : 'Failed to add user');
+    } catch (_error) {
+      if (_error instanceof Error && _error.name === 'AbortError') return;
+      setValidationError(_error instanceof Error ? _error.message : 'Failed to add conversation');
     } finally {
       setIsValidating(false);
+      abortControllerRef.current = null;
     }
-  };
+  }, [newUsername, currentUsername, validateUsername, onAddConversation, onActiveTabChange]);
 
-  const handleKeyPress = (e: React.KeyboardEvent) => {
+  const handleKeyPress = useCallback((e: React.KeyboardEvent<HTMLInputElement>) => {
     if (e.key === 'Enter' && !isValidating) {
-      handleAddUser();
+      e.preventDefault();
+      const sanitized = sanitizeTextInput(newUsername, { maxLength: 32, allowNewlines: false }).trim();
+      if (sanitized && validateUsername(sanitized)) {
+        handleAddUser();
+      }
     } else if (e.key === 'Escape') {
+      e.preventDefault();
       setShowAddUser(false);
       setNewUsername("");
       setValidationError("");
     }
-  };
+  }, [newUsername, isValidating, validateUsername, handleAddUser]);
 
-  const navigationItems = [
-    { id: 'home', icon: Home, label: 'Home', action: () => {} },
-    { id: 'messages', icon: MessageSquare, label: 'Messages', action: () => { setActiveTab('messages'); onActiveTabChange?.('messages'); } },
-    { id: 'newchat', icon: Plus, label: 'New Chat', action: () => { setActiveTab('newchat'); setShowAddUser(true); onActiveTabChange?.('newchat'); } },
-  ];
+  const handleInputChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    const sanitized = sanitizeTextInput(e.target.value, { maxLength: 32, allowNewlines: false });
+    setNewUsername(sanitized);
+    setValidationError("");
+  }, []);
 
-  const secondaryItems = [
-    { id: 'settings', icon: Settings, label: 'Settings', action: () => { 
-      // Set active tab for visual highlighting
-      setActiveTab('settings');
-      onActiveTabChange?.('settings');
-      // Open settings in main screen instead of sidebar tab
-      window.dispatchEvent(new CustomEvent('openSettings'));
-    } },
-  ];
+  const handleCloseModal = useCallback(() => {
+    setShowAddUser(false);
+    setNewUsername("");
+    setValidationError("");
+    setActiveTab("messages");
+  }, []);
+
+  const navigationItems = useMemo(() => [
+    { 
+      id: 'messages', 
+      icon: MessageSquare, 
+      label: 'Messages', 
+      action: () => { setActiveTab('messages'); onActiveTabChange?.('messages'); }
+    },
+  ], [onActiveTabChange]);
+
+  const secondaryItems = useMemo(() => [
+    { 
+      id: 'settings', 
+      icon: Settings, 
+      label: 'Settings', 
+      action: () => { 
+        setActiveTab('settings');
+        onActiveTabChange?.('settings');
+        window.dispatchEvent(new CustomEvent('openSettings'));
+      }
+    },
+  ], [onActiveTabChange]);
+
+  const handleLogout = useCallback(() => {
+    setActiveTab('logout');
+    onActiveTabChange?.('logout');
+    onLogout?.();
+  }, [onActiveTabChange, onLogout]);
+
+  const userInitial = useMemo(() => 
+    currentUsername?.charAt(0).toUpperCase() || "U",
+    [currentUsername]
+  );
 
   return (
     <div className={cn(
@@ -206,11 +280,7 @@ export function Sidebar({ className, children, currentUsername, onAddConversatio
         {/* User Profile Area */}
         <div className="border-t px-3 py-4" style={{ borderColor: 'var(--color-border)' }}>
           <button
-            onClick={() => {
-              setActiveTab('logout');
-              onActiveTabChange?.('logout');
-              onLogout?.();
-            }}
+            onClick={handleLogout}
             className="w-full flex items-center gap-3 px-3 py-3 rounded-lg transition-all duration-200 hover:bg-opacity-10"
             style={{
               color: 'var(--color-text-primary)',
@@ -222,19 +292,21 @@ export function Sidebar({ className, children, currentUsername, onAddConversatio
             onMouseLeave={(e) => {
               e.currentTarget.style.backgroundColor = 'transparent';
             }}
+            aria-label="Logout"
           >
             <div 
               className="w-8 h-8 rounded-full flex items-center justify-center text-white font-medium text-sm"
               style={{ backgroundColor: 'var(--color-accent-secondary)' }}
+              aria-hidden="true"
             >
-              {currentUsername?.charAt(0).toUpperCase() || "U"}
+              {userInitial}
             </div>
             {!isCollapsed && (
               <div className="flex-1 text-left min-w-0 mr-2">
                 <div
                   className="font-medium text-sm truncate"
                   style={{ color: 'var(--color-text-primary)' }}
-                  title={currentUsername || 'User'} // Show full username on hover
+                  title={currentUsername || 'User'}
                 >
                   {currentUsername || 'User'}
                 </div>
@@ -248,40 +320,53 @@ export function Sidebar({ className, children, currentUsername, onAddConversatio
         </div>
       </div>
 
-      {/* Add user modal/overlay */}
       {showAddUser && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-          <div className="bg-white rounded-lg p-6 w-80 shadow-xl">
-            <h3 className="text-lg font-semibold mb-4">Start New Conversation</h3>
+        <div 
+          className="fixed inset-0 bg-black/50 flex items-center justify-center z-50"
+          onClick={handleCloseModal}
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="new-conversation-title"
+        >
+          <div 
+            className="bg-white rounded-lg p-6 w-80 shadow-xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h3 id="new-conversation-title" className="text-lg font-semibold mb-4">Start New Conversation</h3>
             <div className="space-y-4">
               <div>
-                <label className="text-sm text-gray-600 mb-2 block">
+                <label htmlFor="username-input" className="text-sm text-gray-600 mb-2 block">
                   Enter username to chat with:
                 </label>
                 <Input
+                  id="username-input"
+                  ref={inputRef}
                   placeholder="e.g., alice, bob, charlie..."
                   value={newUsername}
-                  onChange={(e) => {
-                    setNewUsername(e.target.value);
-                    setValidationError(""); // Clear error when user types
-                  }}
+                  onChange={handleInputChange}
                   onKeyDown={handleKeyPress}
                   className="w-full"
-                  autoFocus
                   disabled={isValidating}
+                  autoCapitalize="off"
+                  autoCorrect="off"
+                  spellCheck={false}
+                  inputMode="text"
+                  maxLength={32}
+                  aria-invalid={!!validationError}
+                  aria-describedby={validationError ? "username-error" : undefined}
                 />
                 {newUsername.trim() === currentUsername && (
-                  <p className="text-xs text-red-500 mt-1">
+                  <p id="username-error" className="text-xs text-red-500 mt-1" role="alert">
                     Cannot start conversation with yourself
                   </p>
                 )}
                 {validationError && (
-                  <p className="text-xs text-red-500 mt-1">
+                  <p id="username-error" className="text-xs text-red-500 mt-1" role="alert">
                     {validationError}
                   </p>
                 )}
                 {isValidating && (
-                  <p className="text-xs text-blue-500 mt-1">
+                  <p className="text-xs text-blue-500 mt-1" role="status">
                     Validating user...
                   </p>
                 )}
@@ -291,19 +376,16 @@ export function Sidebar({ className, children, currentUsername, onAddConversatio
                   onClick={handleAddUser}
                   className="flex-1"
                   disabled={!newUsername.trim() || newUsername.trim() === currentUsername || isValidating}
+                  aria-label="Start chat"
                 >
                   {isValidating ? "Validating..." : "Start Chat"}
                 </Button>
                 <Button
-                  onClick={() => {
-                    setShowAddUser(false);
-                    setNewUsername("");
-                    setValidationError("");
-                    setActiveTab("messages");
-                  }}
+                  onClick={handleCloseModal}
                   variant="outline"
                   className="flex-1"
                   disabled={isValidating}
+                  aria-label="Cancel"
                 >
                   Cancel
                 </Button>
@@ -330,13 +412,23 @@ export function Sidebar({ className, children, currentUsername, onAddConversatio
           }}
         >
           <div className="h-full flex flex-col">
-            <div className="p-4 border-b" style={{ borderColor: 'var(--color-border)' }}>
+            <div className="p-4 border-b flex items-center justify-between" style={{ borderColor: 'var(--color-border)' }}>
               <h2 
                 className="text-lg font-semibold"
                 style={{ color: 'var(--color-text-primary)' }}
               >
                 Conversations
               </h2>
+              <Button
+                variant="ghost"
+                size="sm"
+                aria-label="Compose new chat"
+                onClick={() => {
+                  setShowAddUser(true);
+                }}
+              >
+                <Pencil className="h-4 w-4" />
+              </Button>
             </div>
             <div className="flex-1 overflow-hidden">
               {children}
@@ -347,4 +439,4 @@ export function Sidebar({ className, children, currentUsername, onAddConversatio
 
     </div>
   );
-}
+});

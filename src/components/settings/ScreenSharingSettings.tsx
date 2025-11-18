@@ -1,91 +1,128 @@
-/**
- * Screen Sharing Settings Component
- * Provides UI for configuring screen sharing resolution and framerate preferences
- */
-
-import React, { useState, useEffect } from 'react';
-import { Monitor, Settings } from 'lucide-react';
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
-import { Label } from '@/components/ui/label';
-import { Button } from '@/components/ui/button';
-import { Separator } from '@/components/ui/separator';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../../components/ui/card';
+import { Label } from '../../components/ui/label';
+import { Button } from '../../components/ui/button';
+import { Separator } from '../../components/ui/separator';
 import { 
   ScreenSharingSettings as ScreenSharingSettingsType,
   SCREEN_SHARING_RESOLUTIONS,
   SCREEN_SHARING_FRAMERATES 
-} from '@/lib/webrtc-calling';
-import { screenSharingSettings } from '@/lib/screen-sharing-settings';
+} from '../../lib/screen-sharing-consts';
+import { screenSharingSettings } from '../../lib/screen-sharing-settings';
+
+const QUALITY_LABELS: Record<'low' | 'medium' | 'high', string> = {
+  low: 'Low',
+  medium: 'Medium',
+  high: 'High'
+};
+
+const QUALITY_DESCRIPTIONS: Record<'low' | 'medium' | 'high', string> = {
+  low: 'Lower bandwidth usage',
+  medium: 'Balanced quality and bandwidth',
+  high: 'Best quality, higher bandwidth'
+};
+
+const QUALITY_OPTIONS: ReadonlyArray<'low' | 'medium' | 'high'> = ['low', 'medium', 'high'];
+
+const RESET_FEEDBACK_DURATION_MS = 1000;
+
+function validateQualityOption(value: string): value is 'low' | 'medium' | 'high' {
+  return QUALITY_OPTIONS.includes(value as any);
+}
+
+function getDefaultSettings(): ScreenSharingSettingsType {
+  return {
+    resolution: SCREEN_SHARING_RESOLUTIONS[0],
+    frameRate: SCREEN_SHARING_FRAMERATES[0],
+    quality: 'medium'
+  };
+}
 
 export function ScreenSharingSettings() {
-  const [settings, setSettings] = useState<ScreenSharingSettingsType>(
-    screenSharingSettings.getSettings()
-  );
+  const [settings, setSettings] = useState<ScreenSharingSettingsType>(getDefaultSettings);
+  const [isResetting, setIsResetting] = useState<boolean>(false);
 
   useEffect(() => {
-    // Subscribe to settings changes
+    let mounted = true;
+
+    const loadInitialSettings = async () => {
+      try {
+        const current = await screenSharingSettings.getSettings();
+        if (mounted) {
+          setSettings(current);
+        }
+      } catch {
+        if (mounted) {
+          setSettings(getDefaultSettings());
+        }
+      }
+    };
+
+    loadInitialSettings();
+
     const unsubscribe = screenSharingSettings.subscribe((newSettings) => {
-      console.log('[ScreenSharingSettings UI] Settings updated:', newSettings);
-      setSettings(newSettings);
+      if (mounted) {
+        setSettings(newSettings);
+      }
     });
 
-    return unsubscribe;
+    return () => {
+      mounted = false;
+      unsubscribe();
+    };
   }, []);
 
-  const handleResolutionChange = (resolutionId: string) => {
+  const handleResolutionChange = useCallback((resolutionId: string) => {
     const resolution = SCREEN_SHARING_RESOLUTIONS.find(r => r.id === resolutionId);
     if (resolution) {
-      console.log('[ScreenSharingSettings UI] Resolution changing to:', resolution.name);
-      screenSharingSettings.setResolution(resolution);
-      // Settings will be updated via the subscription
+      screenSharingSettings.setResolution(resolution).catch(() => {
+        setSettings(prev => prev);
+      });
     }
-  };
+  }, []);
 
-  const handleFrameRateChange = (frameRateStr: string) => {
+  const handleFrameRateChange = useCallback((frameRateStr: string) => {
     const frameRate = Number.parseInt(frameRateStr, 10);
     if (Number.isFinite(frameRate) && SCREEN_SHARING_FRAMERATES.includes(frameRate as typeof SCREEN_SHARING_FRAMERATES[number])) {
-      console.log('[ScreenSharingSettings UI] Frame rate changing to:', frameRate, 'FPS');
-      screenSharingSettings.setFrameRate(frameRate);
-      // Settings will be updated via the subscription
+      screenSharingSettings.setFrameRate(frameRate).catch(() => {
+        setSettings(prev => prev);
+      });
     }
-  };
+  }, []);
 
-  const handleQualityChange = (quality: 'low' | 'medium' | 'high') => {
-    console.log('[ScreenSharingSettings UI] Quality changing to:', quality);
-    screenSharingSettings.setQuality(quality);
-    // Settings will be updated via the subscription
-  };
-
-  const handleReset = () => {
-    console.log('[ScreenSharingSettings UI] Resetting to defaults');
-    screenSharingSettings.resetToDefaults();
-  };
-
-  const getQualityDescription = (quality: string) => {
-    switch (quality) {
-      case 'low':
-        return 'Lower bandwidth usage, suitable for slow connections';
-      case 'medium':
-        return 'Balanced quality and bandwidth usage';
-      case 'high':
-        return 'Best quality, higher bandwidth usage';
-      default:
-        return '';
+  const handleQualityChange = useCallback((qualityStr: string) => {
+    if (validateQualityOption(qualityStr)) {
+      screenSharingSettings.setQuality(qualityStr).catch(() => {
+        setSettings(prev => prev);
+      });
     }
-  };
+  }, []);
+
+  const handleReset = useCallback(() => {
+    if (isResetting) return;
+    setIsResetting(true);
+    screenSharingSettings.resetToDefaults().catch(() => {});
+    setTimeout(() => setIsResetting(false), RESET_FEEDBACK_DURATION_MS);
+  }, [isResetting]);
+
+  const qualityDescription = useMemo(() => {
+    return QUALITY_DESCRIPTIONS[settings.quality] || '';
+  }, [settings.quality]);
+
+  const resolutionDescription = useMemo(() => {
+    if (settings.resolution.isNative) {
+      return 'Uses display native resolution';
+    }
+    return `Fixed resolution: ${settings.resolution.width} × ${settings.resolution.height}`;
+  }, [settings.resolution]);
 
   return (
     <Card>
       <CardHeader>
-        <div className="flex items-center gap-2">
-          <Monitor className="h-5 w-5" />
-          <CardTitle>Screen Sharing</CardTitle>
-        </div>
-        <CardDescription>
-          Configure resolution and framerate for screen sharing
-        </CardDescription>
+        <CardTitle>Screen Sharing</CardTitle>
+        <CardDescription>Configure resolution and frame rate.</CardDescription>
       </CardHeader>
       <CardContent className="space-y-6">
-        {/* Resolution Setting */}
         <div className="space-y-2">
           <Label htmlFor="resolution-select">Resolution</Label>
           <select
@@ -93,6 +130,7 @@ export function ScreenSharingSettings() {
             value={settings.resolution.id}
             onChange={(e) => handleResolutionChange(e.target.value)}
             className="w-full px-3 py-2 border border-gray-300 rounded-md bg-white dark:bg-gray-700 dark:border-gray-600 dark:text-white focus:outline-none focus:ring-2 focus:ring-blue-500"
+            aria-label="Screen sharing resolution"
           >
             {SCREEN_SHARING_RESOLUTIONS.map((resolution) => (
               <option key={resolution.id} value={resolution.id}>
@@ -101,16 +139,12 @@ export function ScreenSharingSettings() {
             ))}
           </select>
           <div className="text-sm text-muted-foreground">
-            {settings.resolution.isNative
-              ? 'Uses your display\'s native resolution for best quality'
-              : `Fixed resolution: ${settings.resolution.width} × ${settings.resolution.height}`
-            }
+            {resolutionDescription}
           </div>
         </div>
 
         <Separator />
 
-        {/* Frame Rate Setting */}
         <div className="space-y-2">
           <Label htmlFor="framerate-select">Frame Rate</Label>
           <select
@@ -118,6 +152,7 @@ export function ScreenSharingSettings() {
             value={settings.frameRate.toString()}
             onChange={(e) => handleFrameRateChange(e.target.value)}
             className="w-full px-3 py-2 border border-gray-300 rounded-md bg-white dark:bg-gray-700 dark:border-gray-600 dark:text-white focus:outline-none focus:ring-2 focus:ring-blue-500"
+            aria-label="Screen sharing frame rate"
           >
             {SCREEN_SHARING_FRAMERATES.map((frameRate) => (
               <option key={frameRate} value={frameRate.toString()}>
@@ -126,46 +161,35 @@ export function ScreenSharingSettings() {
             ))}
           </select>
           <div className="text-sm text-muted-foreground">
-            Higher frame rates provide smoother motion but use more bandwidth
+            Higher frame rates use more bandwidth
           </div>
         </div>
 
         <Separator />
 
-        {/* Quality Setting */}
         <div className="space-y-2">
           <Label htmlFor="quality-select">Quality</Label>
           <select
             id="quality-select"
             value={settings.quality}
-            onChange={(e) => handleQualityChange(e.target.value as 'low' | 'medium' | 'high')}
+            onChange={(e) => handleQualityChange(e.target.value)}
             className="w-full px-3 py-2 border border-gray-300 rounded-md bg-white dark:bg-gray-700 dark:border-gray-600 dark:text-white focus:outline-none focus:ring-2 focus:ring-blue-500"
+            aria-label="Screen sharing quality"
           >
-            <option value="low">Low</option>
-            <option value="medium">Medium</option>
-            <option value="high">High</option>
+            {QUALITY_OPTIONS.map((quality) => (
+              <option key={quality} value={quality}>
+                {QUALITY_LABELS[quality]}
+              </option>
+            ))}
           </select>
           <div className="text-sm text-muted-foreground">
-            {getQualityDescription(settings.quality)}
+            {qualityDescription}
           </div>
         </div>
 
-        <Separator />
-
-        {/* Current Settings Summary */}
-        <div className="space-y-2">
-          <Label>Current Settings</Label>
-          <div className="text-sm text-muted-foreground space-y-1">
-            <div>Resolution: {settings.resolution.name}</div>
-            <div>Frame Rate: {settings.frameRate} FPS</div>
-            <div>Quality: {settings.quality.charAt(0).toUpperCase() + settings.quality.slice(1)}</div>
-          </div>
-        </div>
-
-        {/* Reset Button */}
         <div className="flex gap-2 pt-4">
-          <Button onClick={handleReset} variant="outline" size="sm">
-            Reset to Defaults
+          <Button onClick={handleReset} variant="outline" size="sm" disabled={isResetting} aria-label="Reset to default settings">
+            {isResetting ? 'Resetting…' : 'Reset to Defaults'}
           </Button>
         </div>
       </CardContent>

@@ -2,39 +2,22 @@ import React, { useState, useEffect } from 'react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
-import { Shield, Eye, EyeOff, RotateCcw } from 'lucide-react';
+import { Shield, RotateCcw } from 'lucide-react';
 import { torNetworkManager, TorConnectionStats } from '@/lib/tor-network';
 
 export function TorIndicator() {
-  const [stats, setStats] = useState<TorConnectionStats>({
-    isConnected: false,
-    circuitCount: 0,
-    lastCircuitRotation: 0,
-    connectionAttempts: 0,
-    failedConnections: 0,
-    bytesTransmitted: 0,
-    bytesReceived: 0,
-  });
-  
+  const [stats, setStats] = useState<TorConnectionStats>(torNetworkManager.getStats());
   const [isRotating, setIsRotating] = useState(false);
 
-  // Update stats periodically
   useEffect(() => {
-    const updateStats = () => {
-      setStats(torNetworkManager.getStats());
-    };
-
+    const updateStats = () => setStats(torNetworkManager.getStats());
     updateStats();
     const interval = setInterval(updateStats, 3000);
     return () => clearInterval(interval);
   }, []);
 
-  // Listen for connection changes
   useEffect(() => {
-    const handleConnectionChange = () => {
-      setStats(torNetworkManager.getStats());
-    };
-
+    const handleConnectionChange = () => setStats(torNetworkManager.getStats());
     torNetworkManager.onConnectionChange(handleConnectionChange);
     return () => torNetworkManager.offConnectionChange(handleConnectionChange);
   }, []);
@@ -43,12 +26,12 @@ export function TorIndicator() {
     setIsRotating(true);
     await torNetworkManager.rotateCircuit();
     setIsRotating(false);
+    setStats(torNetworkManager.getStats());
   };
 
   const formatTime = (timestamp: number) => {
-    if (timestamp === 0) return 'Never';
-    const now = Date.now();
-    const diff = now - timestamp;
+    if (!timestamp) return 'Never';
+    const diff = Date.now() - timestamp;
     const minutes = Math.floor(diff / 60000);
     if (minutes < 1) return 'Just now';
     if (minutes < 60) return `${minutes}m ago`;
@@ -56,17 +39,18 @@ export function TorIndicator() {
     return `${hours}h ago`;
   };
 
-  // Only show indicator if Tor is supported in this environment
   if (!torNetworkManager.isSupported()) {
     return null;
   }
+
+  const formattedLatency = stats.averageLatency ? `${Math.round(stats.averageLatency)} ms` : 'N/A';
 
   return (
     <Popover>
       <PopoverTrigger asChild>
         <Button variant="ghost" size="sm" className="h-8 px-2">
-          <Badge 
-            variant={stats.isConnected ? 'default' : 'secondary'} 
+          <Badge
+            variant={stats.isConnected ? 'default' : 'secondary'}
             className={`flex items-center gap-1 ${stats.isConnected ? 'bg-green-600 hover:bg-green-700' : 'bg-gray-600'}`}
           >
             <Shield className="h-3 w-3" />
@@ -86,10 +70,6 @@ export function TorIndicator() {
             </Badge>
           </div>
 
-          <div className="text-sm text-muted-foreground">
-            Your connection is being routed through the Tor network for enhanced anonymity.
-          </div>
-
           <div className="grid grid-cols-2 gap-4 text-sm">
             <div>
               <div className="font-medium">Circuit Rotations</div>
@@ -99,10 +79,18 @@ export function TorIndicator() {
               <div className="font-medium">Last Rotation</div>
               <div className="text-muted-foreground">{formatTime(stats.lastCircuitRotation)}</div>
             </div>
+            <div>
+              <div className="font-medium">Average Latency</div>
+              <div className="text-muted-foreground">{formattedLatency}</div>
+            </div>
+            <div>
+              <div className="font-medium">Circuit Health</div>
+              <div className="text-muted-foreground capitalize">{stats.circuitHealth}</div>
+            </div>
           </div>
 
           {stats.isConnected && (
-            <Button 
+            <Button
               onClick={handleRotateCircuit}
               disabled={isRotating}
               size="sm"
@@ -114,9 +102,8 @@ export function TorIndicator() {
             </Button>
           )}
 
-          <div className="flex items-center gap-2 text-xs text-muted-foreground">
-            <Eye className="h-3 w-3" />
-            <span>Your IP address and location are hidden</span>
+          <div className="text-xs text-muted-foreground">
+            Tor routing keeps your IP hidden from the relay destination.
           </div>
         </div>
       </PopoverContent>

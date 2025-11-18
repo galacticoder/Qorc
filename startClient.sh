@@ -1,553 +1,152 @@
 #!/bin/bash
-
 set -euo pipefail
-IFS=$'\n\t'
 
-# Detect operating system
-OS="$(uname -s)"
-ARCH="$(uname -m)"
+OS="$(uname -s)" ARCH="$(uname -m)"
+RED='\033[0;31m' GREEN='\033[0;32m' BLUE='\033[0;34m' YELLOW='\033[1;33m' NC='\033[0m'
 
-# macOS-specific environment settings
-if [[ "$OS" == "Darwin" ]]; then
-    export HOMEBREW_NO_EMOJI=1
-    export HOMEBREW_NO_ENV_HINTS=1
-    export HOMEBREW_NO_INSTALL_CLEANUP=1
-    # Add Homebrew paths for both Intel and Apple Silicon
-    if [[ "$ARCH" == "arm64" ]]; then
-        export PATH="/opt/homebrew/bin:/opt/homebrew/sbin:$PATH"
-    else
-        export PATH="/usr/local/bin:/usr/local/sbin:$PATH"
-    fi
-fi
+[[ "$OS" == "Darwin" ]] && {
+    export HOMEBREW_NO_EMOJI=1 HOMEBREW_NO_ENV_HINTS=1 HOMEBREW_NO_INSTALL_CLEANUP=1
+    export PATH="$([[ "$ARCH" == "arm64" ]] && echo "/opt/homebrew" || echo "/usr/local")/bin:$PATH"
+}
 
-GREEN='\033[0;32m'
-BLUE='\033[0;34m'
-YELLOW='\033[1;33m'
-NC='\033[0m'
-
-# Show help if requested
-if [[ "${1:-}" == "--help" ]] || [[ "${1:-}" == "-h" ]]; then
-    echo "End-to-End Chat Client Startup Script"
-    echo ""
-    echo "This script automatically checks and installs dependencies needed"
-    echo "to run the end-to-end chat client, including:"
-    echo "  • Essential system tools (curl, wget, git)"
-    echo "  • Node.js 18+ (JavaScript runtime)"
-    echo "  • pnpm (Package manager)"
-    echo "  • Electron (Desktop app framework)"
-    echo "  • Client dependencies (React, Vite, etc.)"
-    echo ""
-    echo "Usage: $0 [options]"
-    echo "Options:"
-    echo "  -h, --help     Show this help message"
-    echo ""
-    echo "The script will automatically:"
-    echo "  1. Check for essential tools and install if missing"
-    echo "  2. Verify Node.js version compatibility"
-    echo "  3. Install pnpm if not available"
-    echo "  4. Set up configuration symlinks"
-    echo "  5. Install client dependencies"
-    echo "  6. Start the Electron application"
-    echo ""
-    exit 0
-fi
+[[ "${1:-}" =~ ^(-h|--help)$ ]] && { echo "Usage: $0 - Starts end2end chat client"; exit 0; }
 
 echo -e "${BLUE}╔════════════════════════════════════════════╗${NC}"
 echo -e "${BLUE}║${GREEN}        end2end chat client        ${BLUE}║${NC}"
 echo -e "${BLUE}╚════════════════════════════════════════════╝${NC}"
 cd "$(dirname "$0")"
 
-# Function to install essential tools directly
-install_essential_tools_direct() {
-    echo -e "${YELLOW}Installing essential client tools...${NC}"
-
-    if command -v apt-get &> /dev/null; then
-        # Ubuntu/Debian/Mint/Pop!_OS/Elementary
-        sudo apt-get update
-        sudo apt-get install -y curl wget git
-    elif command -v dnf &> /dev/null; then
-        # Fedora/RHEL 8+/CentOS 8+/Rocky Linux/AlmaLinux/Amazon Linux 2022+
-        sudo dnf install -y curl wget git
-    elif command -v yum &> /dev/null; then
-        # CentOS 7/RHEL 7/Amazon Linux 2/Oracle Linux
-        sudo yum install -y curl wget git
-    elif command -v pacman &> /dev/null; then
-        # Arch Linux/Manjaro/EndeavourOS/Garuda
-        sudo pacman -S --noconfirm curl wget git
-    elif command -v zypper &> /dev/null; then
-        # openSUSE Leap/Tumbleweed/SLES
-        sudo zypper install -y curl wget git
-    elif command -v apk &> /dev/null; then
-        # Alpine Linux
-        sudo apk add --no-cache curl wget git
-    elif command -v xbps-install &> /dev/null; then
-        # Void Linux
-        sudo xbps-install -S curl wget git
-    elif command -v emerge &> /dev/null; then
-        # Gentoo
-        sudo emerge --ask=n net-misc/curl net-misc/wget dev-vcs/git
-    elif command -v eopkg &> /dev/null; then
-        # Solus
-        sudo eopkg install -y curl wget git
-    elif command -v swupd &> /dev/null; then
-        # Clear Linux
-        sudo swupd bundle-add curl wget git
-    elif command -v nix-env &> /dev/null; then
-        # NixOS
-        nix-env -iA nixpkgs.curl nixpkgs.wget nixpkgs.git
-    elif command -v brew &> /dev/null; then
-        # macOS - install only client essentials, suppress emojis
-        echo -e "${GREEN}Installing client tools via Homebrew (no emojis)...${NC}"
-        brew install --quiet curl wget git 2>/dev/null || brew install curl wget git
-        # Fix curl PATH on macOS (keg-only)
-        if [[ "$ARCH" == "arm64" ]]; then
-            export PATH="/opt/homebrew/opt/curl/bin:$PATH"
-        else
-            export PATH="/usr/local/opt/curl/bin:$PATH"
-        fi
-    else
-        echo -e "${YELLOW}Could not detect package manager. Please install curl, wget, and git manually.${NC}"
-        echo -e "${YELLOW}Supported package managers: apt-get, dnf, yum, pacman, zypper, apk, xbps-install, emerge, eopkg, swupd, nix-env, brew${NC}"
-    fi
+detect_pkg_mgr() {
+    for mgr in apt-get dnf yum pacman zypper apk xbps-install emerge eopkg swupd nix-env brew; do
+        command -v $mgr &>/dev/null && { echo $mgr; return; }
+    done
 }
 
-# Function to check and install essential tools
-check_essential_tools() {
-    local missing_tools=()
+PKG_MGR=$(detect_pkg_mgr)
 
-    # Check for essential tools
-    if ! command -v curl &> /dev/null; then
-        missing_tools+=("curl")
-    fi
-    if ! command -v wget &> /dev/null; then
-        missing_tools+=("wget")
-    fi
-    if ! command -v git &> /dev/null; then
-        missing_tools+=("git")
-    fi
-
-    if [ ${#missing_tools[@]} -gt 0 ]; then
-        echo -e "${YELLOW}Missing essential tools: ${missing_tools[*]}${NC}"
-        echo -e "${GREEN}Installing missing tools...${NC}"
-
-        # Try install-dependencies.sh first, then fallback to direct installation
-        if [[ -f install-dependencies.sh ]]; then
-            set +u
-            source install-dependencies.sh
-            set -u
-            install_system_deps || install_essential_tools_direct
-        else
-            install_essential_tools_direct
-        fi
-
-        # Verify installation
-        for tool in "${missing_tools[@]}"; do
-            if ! command -v "$tool" &> /dev/null; then
-                echo -e "${YELLOW}Warning: $tool is still not available. Some features may not work.${NC}"
-            fi
-        done
-    fi
+install_pkg() {
+    case "$PKG_MGR" in
+        apt-get) sudo apt-get update && sudo apt-get install -y $@ ;;
+        dnf) sudo dnf install -y $@ ;;
+        yum) sudo yum install -y $@ ;;
+        pacman) sudo pacman -Sy --noconfirm && sudo pacman -S --noconfirm $@ ;;
+        zypper) sudo zypper refresh && sudo zypper install -y $@ ;;
+        apk) sudo apk add --no-cache $@ ;;
+        xbps-install) sudo xbps-install -S $@ ;;
+        emerge) sudo emerge --ask=n $@ ;;
+        eopkg) sudo eopkg install -y $@ ;;
+        swupd) sudo swupd bundle-add $@ ;;
+        nix-env) nix-env -iA $(printf "nixpkgs.%s " $@) ;;
+        brew) brew install --quiet $@ 2>/dev/null || brew install $@ ;;
+    esac
 }
 
-# Function to install Node.js directly
-install_nodejs_direct() {
-    echo -e "${GREEN}Installing Node.js...${NC}"
+for tool in curl wget git; do
+    command -v $tool &>/dev/null || install_pkg $tool
+done
+
+install_nodejs() {
+    [[ "$PKG_MGR" =~ ^(apt-get|dnf|yum)$ ]] && \
+        curl -fsSL https://$([ "$PKG_MGR" = "apt-get" ] && echo "deb" || echo "rpm").nodesource.com/setup_lts.x | sudo bash -
+    install_pkg nodejs npm
+}
+
+if ! command -v node &>/dev/null || [ $(node --version 2>/dev/null | sed 's/v//' | cut -d. -f1) -lt 18 ]; then
+    install_nodejs
+fi
+
+
+check_and_install_tor_deps() {
+    case "$PKG_MGR" in
+        apt-get) 
+            dpkg -l libevent-2.1-7t64 2>/dev/null | grep -q ^ii || \
+            dpkg -l libevent-2.1-7 2>/dev/null | grep -q ^ii || \
+            install_pkg libevent-2.1-7t64 || install_pkg libevent-2.1-7 ;;
+        dnf|yum) rpm -q libevent &>/dev/null || install_pkg libevent ;;
+        pacman) pacman -Q libevent &>/dev/null || install_pkg libevent ;;
+        zypper) rpm -q libevent &>/dev/null || install_pkg libevent ;;
+        apk) apk info -e libevent &>/dev/null || install_pkg libevent ;;
+        brew) brew list libevent &>/dev/null || install_pkg libevent ;;
+    esac 2>/dev/null || true
+}
+check_and_install_tor_deps
+
+for f in package.json pnpm-lock.yaml postcss.config.js tailwind.config.ts vite.config.ts tsconfig.json tsconfig.app.json tsconfig.node.json; do
+    [ ! -L "$f" ] && ln -sf config/$f $f
+done
+
+export PATH="$([[ "$OS" == "Darwin" ]] && echo "$([[ "$ARCH" == "arm64" ]] && echo "/opt/homebrew" || echo "/usr/local")/opt/curl/bin:" || echo "")/usr/local/bin:$HOME/.local/bin:$HOME/.local/share/pnpm:$PATH"
+
+install_pnpm() {
+    local bin_dir="$([[ "$OS" == "Darwin" ]] && echo "$([[ "$ARCH" == "arm64" ]] && echo "/opt/homebrew" || echo "/usr/local")" || echo "/usr/local")/bin"
+    local pnpm_url="https://github.com/pnpm/pnpm/releases/latest/download/pnpm-$([[ "$OS" == "Darwin" ]] && echo "macos-$([[ "$ARCH" == "arm64" ]] && echo "arm64" || echo "x64")" || echo "linuxstatic-x64")"
     
-    if command -v brew &> /dev/null; then
-        # macOS
-        echo -e "${GREEN}Installing Node.js via Homebrew...${NC}"
-        brew install --quiet node 2>/dev/null || brew install node
-    elif command -v apt-get &> /dev/null; then
-        # Ubuntu/Debian - install latest LTS
-        curl -fsSL https://deb.nodesource.com/setup_lts.x | sudo -E bash -
-        sudo apt-get install -y nodejs
-    elif command -v dnf &> /dev/null; then
-        # Fedora/RHEL
-        sudo dnf install -y nodejs npm
-    elif command -v yum &> /dev/null; then
-        # CentOS/RHEL older
-        curl -fsSL https://rpm.nodesource.com/setup_lts.x | sudo bash -
-        sudo yum install -y nodejs
-    elif command -v pacman &> /dev/null; then
-        # Arch Linux
-        sudo pacman -S --noconfirm nodejs npm
-    else
-        echo -e "${YELLOW}Automatic Node.js installation not supported for this system.${NC}"
-        echo -e "${YELLOW}Please install Node.js 18+ manually from: https://nodejs.org/${NC}"
-        return 1
-    fi
+    sudo corepack enable pnpm 2>/dev/null || \
+    sudo npm install -g pnpm --no-audit --no-fund 2>/dev/null || \
+    { sudo mkdir -p $bin_dir && curl -fsSL $pnpm_url -o /tmp/pnpm && sudo mv /tmp/pnpm $bin_dir/pnpm && sudo chmod +x $bin_dir/pnpm; }
 }
 
-# Function to check Node.js version
-check_nodejs() {
-    local nodejs_updated=false
+command -v pnpm >/dev/null 2>&1 || { install_pnpm && command -v pnpm >/dev/null || { echo -e "${RED}pnpm install failed${NC}"; exit 1; }; }
 
-    if ! command -v node &> /dev/null; then
-        echo -e "${YELLOW}Node.js not found. Installing directly...${NC}"
-        if install_nodejs_direct; then
-            nodejs_updated=true
-        else
-            echo -e "${YELLOW}Node.js installation failed. Please install Node.js 18+ manually.${NC}"
-            echo -e "${YELLOW}Visit: https://nodejs.org/${NC}"
-            exit 1
-        fi
-    fi
+[ ! -d node_modules ] || [ config/pnpm-lock.yaml -nt node_modules/.modules.yaml ] && pnpm install --prefer-offline
 
-    # Check Node.js version
-    local node_version=$(node --version 2>/dev/null | sed 's/v//')
-    local major_version=$(echo $node_version | cut -d. -f1)
+for pkg in "@tailwindcss/aspect-ratio" tailwindcss autoprefixer "@vitejs/plugin-react" vite electron typescript; do
+    node -e "require.resolve('${pkg}')" 2>/dev/null || { pnpm install; break; }
+done
 
-    if [ "$major_version" -lt 18 ]; then
-        echo -e "${YELLOW}Node.js version $node_version is too old. Minimum required: 18.x${NC}"
-        echo -e "${GREEN}Updating Node.js...${NC}"
-        if install_nodejs_direct; then
-            nodejs_updated=true
-        else
-            echo -e "${YELLOW}Node.js update failed. Please update Node.js 18+ manually.${NC}"
-            echo -e "${YELLOW}Visit: https://nodejs.org/${NC}"
-            exit 1
-        fi
-    fi
-
-    # Only show ready message if Node.js was installed/updated
-    if [ "$nodejs_updated" = true ]; then
-        echo -e "${GREEN}Node.js $(node --version) is ready.${NC}"
-    fi
+node -e "require('electron')" 2>/dev/null || {
+    node $(node -e "console.log(require.resolve('electron/install.js'))" 2>/dev/null) 2>/dev/null || pnpm add -D electron@latest
 }
 
-# Check essential tools first
-check_essential_tools
-
-# Check Node.js
-check_nodejs
-
-# Create symlinks to package and config files (only show message if needed)
-setup_symlinks() {
-    local needs_setup=false
-
-    # Check if any symlinks are missing or broken
-    for file in package.json pnpm-lock.yaml postcss.config.js tailwind.config.ts vite.config.ts tsconfig.json tsconfig.app.json tsconfig.node.json; do
-        if [ ! -L "$file" ] || [ ! -e "$file" ]; then
-            needs_setup=true
-            break
-        fi
-    done
-
-    if [ "$needs_setup" = true ]; then
-        echo -e "${GREEN}Setting up package and config file symlinks...${NC}"
-        # Remove existing files/symlinks first
-        rm -f package.json pnpm-lock.yaml postcss.config.js tailwind.config.ts vite.config.ts tsconfig.json tsconfig.app.json tsconfig.node.json
-        # Create symlinks to config directory
-        ln -sf config/package.json package.json
-        ln -sf config/pnpm-lock.yaml pnpm-lock.yaml
-        ln -sf config/postcss.config.js postcss.config.js
-        ln -sf config/tailwind.config.ts tailwind.config.ts
-        ln -sf config/vite.config.ts vite.config.ts
-        ln -sf config/tsconfig.json tsconfig.json
-        ln -sf config/tsconfig.app.json tsconfig.app.json
-        ln -sf config/tsconfig.node.json tsconfig.node.json
-    fi
-}
-setup_symlinks
-
-# Ensure PATH includes common global installation locations
-if [[ "$OS" == "Darwin" ]]; then
-    # macOS specific paths including Homebrew and curl fix
-    if [[ "$ARCH" == "arm64" ]]; then
-        export PATH="/opt/homebrew/bin:/opt/homebrew/sbin:/opt/homebrew/opt/curl/bin:$HOME/.local/bin:$HOME/.local/share/pnpm:$PATH"
-    else
-        export PATH="/usr/local/bin:/usr/local/sbin:/usr/local/opt/curl/bin:$HOME/.local/bin:$HOME/.local/share/pnpm:$PATH"
-    fi
-else
-    export PATH="/usr/local/bin:$HOME/.local/bin:$HOME/.local/share/pnpm:$PATH"
-fi
-
-# Check for pnpm first (separate from dependency installation)
-if ! command -v pnpm >/dev/null 2>&1; then
-        echo -e "${YELLOW}pnpm not found. Installing pnpm...${NC}"
-
-        # Try multiple methods to install pnpm globally
-        if command -v corepack &> /dev/null; then
-            echo -e "${GREEN}Installing pnpm globally via corepack...${NC}"
-            sudo corepack enable pnpm || {
-                echo -e "${YELLOW}Corepack failed, trying npm global installation...${NC}"
-                if command -v npm &> /dev/null; then
-                    sudo npm install -g pnpm --no-audit --no-fund
-                else
-                    echo -e "${RED}Both corepack and npm failed. Please install pnpm manually.${NC}"
-                    exit 1
-                fi
-            }
-        elif command -v npm &> /dev/null; then
-            echo -e "${GREEN}Installing pnpm globally via npm...${NC}"
-            sudo npm install -g pnpm --no-audit --no-fund
-        elif command -v curl &> /dev/null; then
-            echo -e "${GREEN}Installing pnpm globally via installer...${NC}"
-            # Install to system location with proper architecture detection
-            if [[ "$OS" == "Darwin" ]]; then
-                if [[ "$ARCH" == "arm64" ]]; then
-                    sudo mkdir -p /opt/homebrew/bin
-                    curl -fsSL https://github.com/pnpm/pnpm/releases/latest/download/pnpm-macos-arm64 -o /tmp/pnpm
-                    sudo mv /tmp/pnpm /opt/homebrew/bin/pnpm
-                    sudo chmod +x /opt/homebrew/bin/pnpm
-                else
-                    sudo mkdir -p /usr/local/bin
-                    curl -fsSL https://github.com/pnpm/pnpm/releases/latest/download/pnpm-macos-x64 -o /tmp/pnpm
-                    sudo mv /tmp/pnpm /usr/local/bin/pnpm
-                    sudo chmod +x /usr/local/bin/pnpm
-                fi
-            else
-                sudo mkdir -p /usr/local/bin
-                curl -fsSL https://github.com/pnpm/pnpm/releases/latest/download/pnpm-linuxstatic-x64 -o /tmp/pnpm
-                sudo mv /tmp/pnpm /usr/local/bin/pnpm
-                sudo chmod +x /usr/local/bin/pnpm
-            fi
-        else
-            echo -e "${RED}No suitable method found to install pnpm. Please install curl or npm first.${NC}"
-            exit 1
-        fi
-
-        # Update PATH for current session
-        export PATH="/usr/local/bin:$HOME/.local/bin:$HOME/.local/share/pnpm:$PATH"
-
-        if ! command -v pnpm >/dev/null 2>&1; then
-            echo -e "${YELLOW}pnpm installation failed. Trying manual global installation...${NC}"
-            # Try manual binary download as final fallback
-            if command -v curl &> /dev/null; then
-                if [[ "$OS" == "Darwin" ]]; then
-                    if [[ "$ARCH" == "arm64" ]]; then
-                        sudo mkdir -p /opt/homebrew/bin
-                        curl -fsSL https://github.com/pnpm/pnpm/releases/latest/download/pnpm-macos-arm64 -o /tmp/pnpm
-                        sudo mv /tmp/pnpm /opt/homebrew/bin/pnpm
-                        sudo chmod +x /opt/homebrew/bin/pnpm
-                    else
-                        sudo mkdir -p /usr/local/bin
-                        curl -fsSL https://github.com/pnpm/pnpm/releases/latest/download/pnpm-macos-x64 -o /tmp/pnpm
-                        sudo mv /tmp/pnpm /usr/local/bin/pnpm
-                        sudo chmod +x /usr/local/bin/pnpm
-                    fi
-                else
-                    sudo mkdir -p /usr/local/bin
-                    curl -fsSL https://github.com/pnpm/pnpm/releases/latest/download/pnpm-linuxstatic-x64 -o /tmp/pnpm
-                    sudo mv /tmp/pnpm /usr/local/bin/pnpm
-                    sudo chmod +x /usr/local/bin/pnpm
-                fi
-            fi
-        fi
-
-        if ! command -v pnpm >/dev/null 2>&1; then
-            echo -e "${RED}pnpm installation failed. Please install pnpm manually.${NC}"
-            echo -e "${YELLOW}Visit: https://pnpm.io/installation${NC}"
-            exit 1
-        fi
-
-        echo -e "${GREEN}pnpm $(pnpm --version) installed globally.${NC}"
-fi
-
-# Install deps when needed (first run or lockfile newer than installed modules)
-if [ ! -d node_modules ] || [ config/pnpm-lock.yaml -nt node_modules/.modules.yaml ]; then
-    echo -e "${GREEN}Installing client dependencies...${NC}"
-    # Use standard pnpm install - dependency optimization happens at package.json level
-    pnpm install --prefer-offline
-fi
-
-# Ensure critical dev dependencies are present (no sleeps; install immediately if missing)
-ensure_deps() {
-    local missing=0
-    for pkg in "@tailwindcss/aspect-ratio" tailwindcss autoprefixer "@vitejs/plugin-react" vite electron concurrently wait-on typescript socks-proxy-agent; do
-        node -e "require.resolve('${pkg}')" >/dev/null 2>&1 || missing=1
-    done
-    if [ "$missing" -eq 1 ]; then
-        echo -e "${YELLOW}Detected missing dev dependencies. Installing now...${NC}"
-        pnpm install
-    fi
-}
-ensure_deps
-
-# Ensure Electron binary is fetched correctly
-ensure_electron_installed() {
-    if ! node -e "require('electron')" >/dev/null 2>&1; then
-        echo -e "${YELLOW}Electron not fully installed. Attempting to fetch platform binary...${NC}"
-        local install_js
-        install_js=$(node -e "try{console.log(require.resolve('electron/install.js'))}catch(e){process.exit(1)}") || true
-        if [ -n "$install_js" ] && [ -f "$install_js" ]; then
-            echo -e "${GREEN}Running Electron install script: $install_js${NC}"
-            node "$install_js" || true
-        fi
-    fi
-    # Re-check and fail clearly if still not available
-    if ! node -e "require('electron')" >/dev/null 2>&1; then
-        echo -e "${YELLOW}Electron still not available; reinstalling electron package...${NC}"
-        pnpm add -D electron@latest
-        # Run install script again
-        local install_js2
-        install_js2=$(node -e "try{console.log(require.resolve('electron/install.js'))}catch(e){process.exit(1)}") || true
-        if [ -n "$install_js2" ] && [ -f "$install_js2" ]; then
-            node "$install_js2" || true
-        fi
-    fi
+rebuild_electron_natives() {
+    local electron_ver=$(node -e "console.log(require('electron/package.json').version)" 2>/dev/null)
+    [ -z "$electron_ver" ] && return 0
+    [ -f ".cache/rebuilt-electron-natives-${electron_ver}" ] && [ -z "${FORCE_ELECTRON_REBUILD:-}" ] && return 0
+    
+    mkdir -p .cache
+    [ "$PKG_MGR" = "apt-get" ] && sudo apt-get install -y build-essential python3 2>/dev/null || true
+    command -v cargo >/dev/null || { curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y && source "$HOME/.cargo/env"; }
+    
+    node -e "require.resolve('@electron/rebuild')" 2>/dev/null || pnpm add -D @electron/rebuild
+    
+    local mods=()
+    node -e "require.resolve('@signalapp/libsignal-client')" 2>/dev/null && mods+=("@signalapp/libsignal-client")
+    
+    [ ${#mods[@]} -gt 0 ] && {
+        pnpm exec electron-rebuild --version "${electron_ver}" -f -w "$(IFS=,; echo "${mods[*]}")" && touch ".cache/rebuilt-electron-natives-${electron_ver}"
+    }
 }
 
-ensure_electron_installed
+rebuild_electron_natives || { echo -e "${YELLOW}Native rebuild failed. Try: FORCE_ELECTRON_REBUILD=1 ./startClient.sh${NC}"; exit 1; }
 
-# Ensure Electron sandboxing works correctly (Linux fix)
-fix_electron_sandbox() {
-    local electron_bin
-    electron_bin=$(pnpm root)/electron/dist/chrome-sandbox 2>/dev/null
-    if [ -f "$electron_bin" ]; then
-        # Check if permissions need fixing
-        local current_owner=$(stat -c '%U:%G' "$electron_bin" 2>/dev/null || echo "")
-        local current_perms=$(stat -c '%a' "$electron_bin" 2>/dev/null || echo "")
+[ -f "$(pnpm root 2>/dev/null)/electron/dist/chrome-sandbox" ] && \
+    sudo chown root:root "$(pnpm root)/electron/dist/chrome-sandbox" 2>/dev/null && \
+    sudo chmod 4755 "$(pnpm root)/electron/dist/chrome-sandbox" 2>/dev/null || true
 
-        if [ "$current_owner" != "root:root" ] || [ "$current_perms" != "4755" ]; then
-            echo -e "${GREEN}Fixing Electron sandbox permissions...${NC}"
-            sudo chown root:root "$electron_bin" || true
-            sudo chmod 4755 "$electron_bin" || true
-        fi
-    fi
-}
-fix_electron_sandbox
-
-# Prevent auto-opening external browser and enable Electron DevTools
-export BROWSER=none
-export ELECTRON_OPEN_DEVTOOLS=1
-export ELECTRON_DISABLE_SECURITY_WARNINGS=1
-
-# Ensure Vite uses fixed port and won't open
 export VITE_PORT=5173
+{ lsof -t -i TCP:5173 -sTCP:LISTEN 2>/dev/null | xargs -r kill -9 2>/dev/null; } || \
+{ fuser -k 5173/tcp 2>/dev/null; } || true
 
-# Ensure a TCP port is free by killing any process bound to it (best-effort)
-ensure_port_free() {
-    local port="$1"
-    echo -e "${GREEN}Ensuring port ${port} is free...${NC}"
-    # Try lsof
-    if command -v lsof >/dev/null 2>&1; then
-        local pids
-        pids=$(lsof -t -i TCP:"${port}" -sTCP:LISTEN 2>/dev/null || true)
-        if [ -n "$pids" ]; then
-            echo "$pids" | xargs -r kill -9 2>/dev/null || true
-        fi
-    fi
-    # Try fuser
-    if command -v fuser >/dev/null 2>&1; then
-        fuser -k "${port}/tcp" 2>/dev/null || true
-    fi
-    # Try ss (Linux)
-    if command -v ss >/dev/null 2>&1; then
-        local spids
-        spids=$(ss -ltnp 2>/dev/null | awk -v p=":${port}" '$4 ~ p {print $NF}' | sed -E 's/.*pid=([0-9]+).*/\1/' | sort -u)
-        if [ -n "$spids" ]; then
-            echo "$spids" | xargs -r kill -9 2>/dev/null || true
-        fi
-    fi
-}
-
-# Free vite dev port if occupied
-ensure_port_free "$VITE_PORT"
-
-# Function to cleanup and retry on module errors
 cleanup_and_retry() {
-    echo -e "${YELLOW}Module not found error detected. Cleaning up dependencies...${NC}"
-    
-    # Remove node_modules and lock files
-    if [ -d node_modules ]; then
-        echo -e "${YELLOW}Removing client node_modules...${NC}"
-        rm -rf node_modules
-    fi
-    
-    if [ -f pnpm-lock.yaml ]; then
-        echo -e "${YELLOW}Removing client pnpm-lock.yaml...${NC}"
-        rm -f pnpm-lock.yaml
-    fi
-    
-    if [ -f package-lock.json ]; then
-        echo -e "${YELLOW}Removing client package-lock.json...${NC}"
-        rm -f package-lock.json
-    fi
-    
-    echo -e "${GREEN}Reinstalling client dependencies (online)...${NC}"
-    # Recreate symlinked lockfile if present in config
-    if [ -f config/pnpm-lock.yaml ]; then
-        ln -sf config/pnpm-lock.yaml pnpm-lock.yaml
-    fi
-    pnpm install
-    ensure_deps
-    ensure_electron_installed
-    
-    echo -e "${GREEN}Retrying client startup (final attempt)...${NC}"
-    # Restart the client application using absolute script path
-    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-    exec /usr/bin/bash "$SCRIPT_DIR/startClient.sh" "$@"
+    rm -rf node_modules pnpm-lock.yaml package-lock.json
+    [ -f config/pnpm-lock.yaml ] && ln -sf config/pnpm-lock.yaml pnpm-lock.yaml
+    pnpm install && exec bash "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/startClient.sh" "$@"
 }
 
 START_ELECTRON="${START_ELECTRON:-1}"
 
-# Start client with error handling
-if [ "$START_ELECTRON" = "1" ]; then
-    echo -e "${GREEN}Starting client application (Vite + Electron)...${NC}"
-    # Start Vite in background
-    pnpm exec vite &
-    VITE_PID=$!
-    
-    # Ensure cleanup kills Vite on exit
-    CLIENT_PID=$VITE_PID
-    
-    # Wait for dev server to be ready without sleeps
-    if ! pnpm exec wait-on "http://localhost:${VITE_PORT}"; then
-        echo -e "${YELLOW}Dev server failed to start${NC}"
-        kill "$VITE_PID" 2>/dev/null || true
-        wait "$VITE_PID" 2>/dev/null || true
-        if [ ! -f /tmp/client_retry_attempted ]; then
-            touch /tmp/client_retry_attempted
-            cleanup_and_retry
-        else
-            rm -f /tmp/client_retry_attempted 2>/dev/null
-            exit 1
-        fi
-    fi
+cleanup() { [ -n "${CLIENT_PID:-}" ] && kill -0 "$CLIENT_PID" 2>/dev/null && { kill "$CLIENT_PID" 2>/dev/null; wait "$CLIENT_PID" 2>/dev/null; }; exit; }
+trap cleanup INT TERM
 
-    # Launch Electron in foreground; when it exits, stop Vite and exit with same code
-    NODE_ENV=development pnpm exec electron .
-    EC=$?
-    kill "$VITE_PID" 2>/dev/null || true
-    wait "$VITE_PID" 2>/dev/null || true
-    rm -f /tmp/client_retry_attempted 2>/dev/null || true
-    exit $EC
+if [ "$START_ELECTRON" = "1" ]; then
+    pnpm exec vite & VITE_PID=$!
+    pnpm exec wait-on "http://localhost:${VITE_PORT}" || { kill "$VITE_PID" 2>/dev/null; [ ! -f /tmp/client_retry_attempted ] && { touch /tmp/client_retry_attempted; cleanup_and_retry; } || exit 1; }
+    ./node_modules/.bin/electron .
+    EC=$? && kill "$VITE_PID" 2>/dev/null && rm -f /tmp/client_retry_attempted 2>/dev/null && exit $EC
 else
-    echo -e "${GREEN}Starting client application (Vite only; no window). Set START_ELECTRON=1 to launch Electron.${NC}"
-    if ! pnpm run vite 2>&1 | tee /tmp/client_output.log; then
-        # Check if the error was module not found and we haven't retried yet
-        if (grep -q "ERR_MODULE_NOT_FOUND" /tmp/client_output.log || \
-            grep -q "MODULE_NOT_FOUND" /tmp/client_output.log || \
-            grep -q "Cannot find module" /tmp/client_output.log || \
-            grep -q "Cannot find package" /tmp/client_output.log) && [ ! -f /tmp/client_retry_attempted ]; then
-            # Mark that we've attempted a retry
-            touch /tmp/client_retry_attempted
-            cleanup_and_retry
-        else
-            # For other errors or if we already retried once, just exit
-            rm -f /tmp/client_retry_attempted 2>/dev/null
-            exit 1
-        fi
-    fi &
+    pnpm run vite 2>&1 | tee /tmp/client_output.log || { grep -qE "(ERR_|MODULE_NOT_FOUND|Cannot find)" /tmp/client_output.log && [ ! -f /tmp/client_retry_attempted ] && { touch /tmp/client_retry_attempted; cleanup_and_retry; } || exit 1; } &
 fi
 
 CLIENT_PID=$!
-
-cleanup() {
-    if [ -n "${CLIENT_PID:-}" ] && kill -0 "$CLIENT_PID" 2>/dev/null; then
-        pkill -P "$CLIENT_PID" 2>/dev/null || true
-        kill "$CLIENT_PID" 2>/dev/null || true
-        wait "$CLIENT_PID" 2>/dev/null || true
-    fi
-    exit
-}
-
-trap cleanup INT TERM
-
-echo -e "${GREEN}==========================================${NC}"
-echo -e "${GREEN}end2end client is now running!${NC}"
-echo -e "${GREEN}==========================================${NC}"
-echo -e "${YELLOW}Press Ctrl+C to stop all processes${NC}"
-
+echo -e "${GREEN}end2end client is running! Press Ctrl+C to stop${NC}"
 wait

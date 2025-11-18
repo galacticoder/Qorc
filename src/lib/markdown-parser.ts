@@ -1,179 +1,134 @@
 /**
- * Simple markdown delimiter detection for chat messages
- * Uses react-markdown for actual parsing
+ * Markdown delimiter detection for chat messages
+ * Uses react-markdown for rendering
  */
 
-/**
- * Check if a message contains markdown formatting delimiters
- * More flexible detection - handles spacing and mixed content
- */
-export function isMarkdownMessage(content: string): boolean {
-  // 1) Explicit markdown block using {{{ ... }}}
-  const explicitBlockPattern = /\{\{\{([\s\S]*?)\}\}\}/;
-  if (explicitBlockPattern.test(content)) return true;
+const MARKDOWN_BLOCK_REGEX = /\{\{\{([\s\S]*?)\}\}\}/g;
+const SINGLE_MARKDOWN_BLOCK_REGEX = /\{\{\{([\s\S]*?)\}\}\}/;
+const MAX_CONTENT_LENGTH = 100 * 1024;
+const MAX_MARKDOWN_BLOCKS = 32;
+const RATE_WINDOW_MS = 60_000;
+const MAX_REQUESTS_PER_WINDOW = 60;
 
-  // 2) Heuristic detection for typical Markdown/README indicators
-  const text = content || "";
-  const hasCodeFence = /(^|\n)```/.test(text) || /(^|\n)~~~/.test(text);
-  const hasHeading = /(^|\n)#{1,6}\s+\S/.test(text);
-  const hasList = /(^|\n)(?:-|\*|\+)\s+\S/.test(text) || /(^|\n)\d+\.\s+\S/.test(text);
-  const hasLink = /\[[^\]]+\]\([^\)]+\)/.test(text);
-  const hasBlockquote = /(^|\n)>\s+\S/.test(text);
-  const hasTable = /(^|\n)\|[^\n]+\|\n\|[\s:|-]+\|/.test(text); // GFM table header
+let rateWindowStart = 0;
+let rateWindowCount = 0;
 
-  // Consider longer multi-line content with any strong markdown signal as markdown
-  const lineCount = text.split('\n').length;
-  const isLongForm = text.length > 240 || lineCount > 6;
+function enforceRateLimit(): void {
+  const now = Date.now();
+  if (now - rateWindowStart > RATE_WINDOW_MS) {
+    rateWindowStart = now;
+    rateWindowCount = 0;
+  }
 
-  return (
-    hasCodeFence ||
-    hasHeading ||
-    hasTable ||
-    (isLongForm && (hasList || hasLink || hasBlockquote))
-  );
+  rateWindowCount += 1;
+  if (rateWindowCount > MAX_REQUESTS_PER_WINDOW) {
+    throw new Error('Markdown parsing rate limit exceeded');
+  }
 }
 
-/**
- * Parse mixed content into segments of plain text and markdown blocks
- */
-export function parseMixedContent(content: string): Array<{type: 'text' | 'markdown', content: string, hasOriginalNewlines?: boolean}> {
-  const segments: Array<{type: 'text' | 'markdown', content: string, hasOriginalNewlines?: boolean}> = [];
-  const markdownPattern = /\{\{\{([\s\S]*?)\}\}\}/g;
-  
+function sanitizeMarkdown(text: string): string {
+  return text
+    .replace(/[\u0000-\u001F\u007F]+/g, '')
+    .replace(/<script[\s\S]*?>[\s\S]*?<\/script>/gi, '')
+    .replace(/javascript:/gi, '')
+    .trim();
+}
+
+function normalizeIndentation(input: string): string {
+  if (!input.includes('\n')) {
+    return input.trim();
+  }
+
+  const lines = input.split('\n');
+  const nonEmpty = lines.filter(line => line.trim() !== '');
+  if (nonEmpty.length === 0) return '';
+
+  const minIndent = Math.min(...nonEmpty.map(line => (line.match(/^(\s*)/)?.[1].length ?? 0)));
+
+  if (minIndent > 0) {
+    return lines.map(line => (line.trim() === '' ? '' : line.slice(minIndent))).join('\n').trim();
+  }
+
+  return input.trim();
+}
+
+export function isMarkdownMessage(content: string): boolean {
+  if (!content || content.length > MAX_CONTENT_LENGTH) {
+    return false;
+  }
+
+  if (MARKDOWN_BLOCK_REGEX.test(content)) {
+    MARKDOWN_BLOCK_REGEX.lastIndex = 0;
+    return true;
+  }
+
+  return /(^|\n)(```|~~~)/.test(content) ||
+         /(^|\n)#{1,6}\s+\S/.test(content) ||
+         /(^|\n)(?:-|\*|\+|\d+\.)\s+\S/.test(content) ||
+         /\[[^\]]+\]\([^\)]+\)/.test(content) ||
+         /(^|\n)>\s+\S/.test(content) ||
+         /(^|\n)\|[^\n]+\|\n\|[\s:|-]+\|/.test(content);
+}
+
+export function parseMixedContent(content: string): Array<{ type: 'text' | 'markdown'; content: string; hasOriginalNewlines?: boolean }> {
+  enforceRateLimit();
+  if (!content) return [];
+  if (content.length > MAX_CONTENT_LENGTH) {
+    throw new Error('Content too large');
+  }
+
+  const segments: Array<{ type: 'text' | 'markdown'; content: string; hasOriginalNewlines?: boolean }> = [];
   let lastIndex = 0;
-  let match;
-  
-  while ((match = markdownPattern.exec(content)) !== null) {
-    // Add any text before this markdown block
+  let blockCount = 0;
+
+  for (const match of content.matchAll(MARKDOWN_BLOCK_REGEX)) {
+    if (!match || match.index === undefined || blockCount >= MAX_MARKDOWN_BLOCKS) continue;
+    blockCount++;
+
     if (match.index > lastIndex) {
-      const textContent = content.slice(lastIndex, match.index);
-      if (textContent.length > 0) {
-        segments.push({ type: 'text', content: textContent });
+      const textSegment = content.slice(lastIndex, match.index).trim();
+      if (textSegment) {
+        segments.push({ type: 'text', content: sanitizeMarkdown(textSegment) });
       }
     }
-    
-    // Add the markdown block
-    const originalMarkdownContent = match[1]; // Keep original before trimming
-    const hasOriginalNewlines = originalMarkdownContent.includes('\n');
-    
-    let markdownContent = originalMarkdownContent.trim();
-    
-    // Apply the same cleaning logic as extractMarkdownContent
-    markdownContent = markdownContent.replace(/^(#{1,6})([^\s#])/gm, '$1 $2');
-    
-    if (markdownContent.startsWith('\n')) {
-      const lines = markdownContent.split('\n');
-      lines.shift();
-      
-      const nonEmptyLines = lines.filter(line => line.trim() !== '');
-      if (nonEmptyLines.length > 0) {
-        const minIndent = Math.min(...nonEmptyLines.map(line => {
-          const match = line.match(/^(\s*)/);
-          return match ? match[1].length : 0;
-        }));
-        
-        if (minIndent > 0) {
-          const dedentedLines = lines.map(line => {
-            if (line.trim() === '') return line;
-            return line.slice(minIndent);
-          });
-          markdownContent = dedentedLines.join('\n');
-        } else {
-          markdownContent = lines.join('\n');
-        }
-      }
+
+    const rawMarkdown = match[1] ?? '';
+    const normalized = sanitizeMarkdown(normalizeIndentation(rawMarkdown.replace(/^(#{1,6})([^\s#])/gm, '$1 $2')));
+    if (normalized) {
+      segments.push({ type: 'markdown', content: normalized, hasOriginalNewlines: rawMarkdown.includes('\n') });
     }
-    
-    segments.push({ type: 'markdown', content: markdownContent.trim(), hasOriginalNewlines });
+
     lastIndex = match.index + match[0].length;
   }
-  
-  // Add any remaining text after the last markdown block
+
   if (lastIndex < content.length) {
-    const textContent = content.slice(lastIndex);
-    if (textContent.length > 0) {
-      segments.push({ type: 'text', content: textContent });
+    const remaining = content.slice(lastIndex).trim();
+    if (remaining) {
+      segments.push({ type: 'text', content: sanitizeMarkdown(remaining) });
     }
   }
-  
+
   return segments;
 }
 
-/**
- * Check if content has mixed content (both text and markdown blocks)
- */
 export function hasMixedContent(content: string): boolean {
   const segments = parseMixedContent(content);
-  return segments.length > 1 || (segments.length === 1 && segments[0].type === 'markdown' && /\{\{\{[\s\S]*?\}\}\}/.test(content));
+  return segments.length > 1;
 }
 
-/**
- * Extract markdown content from {{{ }}} delimiters
- * Handles flexible spacing and extracts the first markdown block found
- */
 export function extractMarkdownContent(content: string): string {
-  // Find the first {{{ }}} block in the message
-  const markdownPattern = /\{\{\{([\s\S]*?)\}\}\}/;
-  const match = content.match(markdownPattern);
-  
+  enforceRateLimit();
+  if (!content) return '';
+  if (content.length > MAX_CONTENT_LENGTH) {
+    throw new Error('Content too large');
+  }
+
+  const match = content.match(SINGLE_MARKDOWN_BLOCK_REGEX);
   if (!match) {
-    // No explicit block; return original content while also attempting
-    // to gently de-indent common-leading whitespace for multi-line pastes.
-    const lines = content.split('\n');
-    if (lines.length <= 1) return content;
-
-    const nonEmpty = lines.filter(l => l.trim() !== '');
-    if (nonEmpty.length === 0) return content.trim();
-
-    const minIndent = Math.min(
-      ...nonEmpty.map(l => (l.match(/^(\s*)/)?.[1].length) || 0)
-    );
-    if (minIndent > 0) {
-      return lines
-        .map(l => (l.trim() === '' ? l : l.slice(minIndent)))
-        .join('\n')
-        .trim();
-    }
-    return content.trim();
+    return sanitizeMarkdown(normalizeIndentation(content));
   }
-  
-  // Extract and clean up the content between the delimiters
-  let extractedContent = match[1];
-  
-  // Clean up the content:
-  // 1. Remove leading/trailing whitespace
-  extractedContent = extractedContent.trim();
-  
-  // 2. Fix common markdown formatting issues
-  // Add missing spaces after # symbols for headers
-  extractedContent = extractedContent.replace(/^(#{1,6})([^\s#])/gm, '$1 $2');
-  
-  // 3. If it starts with a newline, normalize the indentation
-  if (extractedContent.startsWith('\n')) {
-    const lines = extractedContent.split('\n');
-    // Remove first empty line
-    lines.shift();
-    
-    // Find minimum indentation (ignoring empty lines)
-    const nonEmptyLines = lines.filter(line => line.trim() !== '');
-    if (nonEmptyLines.length > 0) {
-      const minIndent = Math.min(...nonEmptyLines.map(line => {
-        const match = line.match(/^(\s*)/);
-        return match ? match[1].length : 0;
-      }));
-      
-      // Remove common indentation
-      if (minIndent > 0) {
-        const dedentedLines = lines.map(line => {
-          if (line.trim() === '') return line; // Keep empty lines as-is
-          return line.slice(minIndent);
-        });
-        extractedContent = dedentedLines.join('\n');
-      } else {
-        extractedContent = lines.join('\n');
-      }
-    }
-  }
-  
-  return extractedContent.trim();
+
+  const extracted = match[1] ?? '';
+  const normalized = normalizeIndentation(extracted.replace(/^(#{1,6})([^\s#])/gm, '$1 $2'));
+  return sanitizeMarkdown(normalized);
 }

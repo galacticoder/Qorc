@@ -1,235 +1,370 @@
 import { CryptoUtils } from './unified-crypto';
+import { SecureAuditLogger } from './secure-error-handler';
 import * as argon2 from "argon2-wasm";
+import { blake3 as nobleBlake3 } from '@noble/hashes/blake3.js';
+import { PostQuantumUtils } from './post-quantum-crypto';
+import { SQLiteKV } from './sqlite-kv';
+
+const getCrypto = () => {
+  if (typeof globalThis !== 'undefined' && globalThis.crypto) {
+    return globalThis.crypto;
+  }
+  try {
+    return require('crypto').webcrypto;
+  } catch {
+    throw new Error('SecureKeyManager requires WebCrypto support');
+  }
+};
 
 interface EncryptedKeyData {
-	encryptedX25519Private: string;
-	encryptedKyberSecret: string;
-	encryptedDilithiumSecret?: string; // New field for Dilithium3 secret key
-	x25519Nonce: string; // Nonce for XChaCha20-Poly1305
-	kyberNonce: string; // Nonce for XChaCha20-Poly1305
-	dilithiumNonce?: string; // Nonce for Dilithium3 secret key
-	x25519PublicBase64: string;
+	bundleCiphertext: string;
+	bundleNonce: string;
+	bundleTag: string;
+	bundleAad: string;
+	bundleMac: string;
 	kyberPublicBase64: string;
-	dilithiumPublicBase64?: string; // New field for Dilithium3 public key
+	dilithiumPublicBase64: string;
+	x25519PublicBase64: string;
 	salt: string;
-	iv: string; // Keep for backward compatibility
-	argon2Params?: {
+	version: number; // Schema version for post-quantum format
+	argon2Params: {
 		version: number;
 		algorithm: string;
 		memoryCost: number;
 		timeCost: number;
 		parallelism: number;
 	};
+	createdAt: number;
+	expiresAt: number;
+	sequence: number;
+	payloadSize: number;
 }
 
+
 interface DecryptedKeys {
-	x25519: {
-		private: Uint8Array;
-		publicKeyBase64: string;
-	};
 	kyber: {
 		publicKeyBase64: string;
 		secretKey: Uint8Array;
 	};
-	dilithium?: { // New optional field for Dilithium3 keys
+	dilithium: {
 		publicKeyBase64: string;
 		secretKey: Uint8Array;
+	};
+	x25519: {
+		publicKeyBase64: string;
+		private: Uint8Array;
 	};
 }
 
 export class SecureKeyManager {
-	private dbName: string;
 	private storeName = 'encryptedKeys';
 	private masterKey: CryptoKey | null = null;
 	private username: string;
-	// In-memory fallback when IndexedDB is unavailable in dev
-	private memoryMode: boolean = false;
-	private memory: Record<string, any> = {};
+	private initializationPromise: Promise<void> | null = null; // Single-flight guard
 
 	constructor(username: string) {
 		this.username = username;
-		this.dbName = `SecureKeyDB_${username}`;
+		// Clear any stale state
+		this.masterKey = null;
+	}
+
+	/**
+	 * Get the master AES-GCM key for use by other components (e.g., SecureDB)
+	 * @returns {CryptoKey | null} The master encryption key, or null if not initialized
+	 */
+  getMasterKey(): CryptoKey | null {
+    return this.masterKey;
+  }
+
+  /**
+   * Initialize the key manager directly with a pre-existing master key (raw 32 bytes)
+   * Used for token-only unlock via wrapped device-bound key
+   */
+  async initializeWithMasterKey(masterKeyRaw: Uint8Array): Promise<void> {
+    if (!masterKeyRaw || !(masterKeyRaw instanceof Uint8Array) || masterKeyRaw.length !== 32) {
+      throw new Error('Master key must be 32 raw bytes');
+    }
+    // Import as AES-GCM key (extractable for PQ AEAD compatibility)
+    const masterKey = await (getCrypto().subtle.importKey(
+      'raw',
+      masterKeyRaw,
+      { name: 'AES-GCM' },
+      true,
+      ['encrypt', 'decrypt']
+    ));
+    this.masterKey = masterKey;
+    // Ensure metadata exists for subsequent operations; create if missing for token-only path
+    let meta = await this.getKeyMetadata();
+    if (!meta || !meta.salt || !meta.argon2Params) {
+      try {
+        const saltBytes = getCrypto().getRandomValues(new Uint8Array(32));
+        const argon2Params = {
+          version: 0x13,
+          algorithm: 'argon2id',
+          memoryCost: 524288,
+          timeCost: 6,
+          parallelism: 4,
+        };
+        await this.storeKeyMetadata({
+          salt: CryptoUtils.Base64.arrayBufferToBase64(saltBytes),
+          iv: CryptoUtils.Base64.arrayBufferToBase64(getCrypto().getRandomValues(new Uint8Array(16))),
+          argon2Params,
+        });
+        meta = await this.getKeyMetadata();
+      } catch (_e) {
+        this.masterKey = null;
+        throw new Error('Failed to create key metadata for token-based unlock');
+      }
+    }
+  }
+
+	/**
+	 * Get the Argon2 encoded hash for the current passphrase
+	 * This is used by useSecureDB for validation
+	 * @returns {Promise<string | null>} The Argon2 encoded hash string, or null if not initialized
+	 */
+	async getEncodedPassphraseHash(passphrase: string): Promise<string | null> {
+		if (!this.masterKey) {
+			return null;
+		}
+
+		try {
+			const metadata = await this.getKeyMetadata();
+			if (!metadata || !metadata.salt || !metadata.argon2Params) {
+				SecureAuditLogger.error('secure-key-manager', 'passphrase-hash', 'no-metadata', {});
+				return null;
+			}
+
+			// Re-hash the passphrase with the stored salt and params to get the encoded hash
+			const saltBytes = CryptoUtils.Base64.base64ToUint8Array(metadata.salt);
+			
+			const hashResult = await argon2.hash({
+				pass: passphrase,
+				salt: saltBytes,
+				time: metadata.argon2Params.timeCost,
+				mem: metadata.argon2Params.memoryCost,
+				parallelism: metadata.argon2Params.parallelism,
+				type: metadata.argon2Params.algorithm === 'argon2id' ? 2 : (metadata.argon2Params.algorithm === 'argon2i' ? 1 : 0),
+				version: metadata.argon2Params.version,
+				hashLen: 32
+			});
+
+			return hashResult.encoded;
+		} catch (_error) {
+			SecureAuditLogger.error('secure-key-manager', 'passphrase-hash', 'encode-failed', { error: (_error as Error).message });
+			return null;
+		}
+	}
+
+	// ----- Internal storage helpers (SQLite) -----
+	private async kv() { return SQLiteKV.forUser(this.username); }
+	
+	private async storeKeyMetadata(metadata: any): Promise<void> {
+		await (await this.kv()).setJsonKey('metadata', metadata);
+	}
+	
+	async getKeyMetadata(): Promise<any | null> {
+		return (await this.kv()).getJsonKey('metadata');
+	}
+	
+	private async storeEncryptedKeys(payload: EncryptedKeyData): Promise<void> {
+		await (await this.kv()).setJsonKey('keys', payload);
+	}
+	
+	private async getEncryptedKeys(): Promise<EncryptedKeyData | null> {
+		return (await this.kv()).getJsonKey<EncryptedKeyData>('keys');
 	}
 
 	async initialize(passphrase: string, salt?: string, argon2Params?: { version: number; algorithm: string; memoryCost: number; timeCost: number; parallelism: number }): Promise<void> {
+		// If already initialized, return immediately
 		if (this.masterKey) {
 			return;
 		}
+		
+		// If initialization is in progress, wait for it to complete
+		if (this.initializationPromise) {
+			return this.initializationPromise;
+		}
+		
+		// Create the initialization promise to prevent concurrent initialization
+		this.initializationPromise = this.doInitialize(passphrase, salt, argon2Params);
+		
+		try {
+			await this.initializationPromise;
+		} finally {
+			// Clear the promise once initialization is complete (success or failure)
+			this.initializationPromise = null;
+		}
+	}
+	
+	private async doInitialize(passphrase: string, salt?: string, argon2Params?: { version: number; algorithm: string; memoryCost: number; timeCost: number; parallelism: number }): Promise<void> {
+		// Double-check in case another thread completed initialization while we were waiting
+		if (this.masterKey) {
+			return;
+		}
+
+		// Clear any stale state first
+		this.masterKey = null;
 
 		let keySalt: Uint8Array;
 		let keyIv: Uint8Array;
 		let storedArgon2Params: { version: number; algorithm: string; memoryCost: number; timeCost: number; parallelism: number };
 
-		if (salt) {
-			keySalt = CryptoUtils.Base64.base64ToUint8Array(salt);
-			keyIv = crypto.getRandomValues(new Uint8Array(12));
-		} else {
-			keySalt = crypto.getRandomValues(new Uint8Array(16));
-			keyIv = crypto.getRandomValues(new Uint8Array(12));
-		}
-
-		// check if we have existing metadata to determine key derivation method
+		// Check if we have existing metadata for salt/params recovery
 		let existingMetadata: any = null;
 		try {
 			existingMetadata = await this.getKeyMetadata();
-		} catch {
-			this.memoryMode = true;
-			existingMetadata = this.memory['metadata'] || null;
-		}
-		const useArgon2 = !existingMetadata || existingMetadata.argon2Params;
-
-		if (useArgon2) {
-			if (argon2Params) {
-				storedArgon2Params = argon2Params;
-			} else if (existingMetadata?.argon2Params) {
-				storedArgon2Params = existingMetadata.argon2Params;
-			} else {
-				storedArgon2Params = {
-					version: 0x13,
-					algorithm: 'argon2id',
-					memoryCost: 131072,
-					timeCost: 3,
-					parallelism: 1
-				};
-			}
-
-			// SECURITY: Derive master key using argon2id with timing attack protection
-			const startTime = performance.now();
-			const argon2Result = await argon2.hash({
-				pass: passphrase,
-				salt: keySalt,
-				time: storedArgon2Params.timeCost,
-				mem: storedArgon2Params.memoryCost,
-				parallelism: storedArgon2Params.parallelism,
-				type: 2, // argon2id
-				version: storedArgon2Params.version,
-				hashLen: 32
+		} catch (_error) {
+			SecureAuditLogger.error('secure-key-manager', 'initialization', 'metadata-load-failed', { 
+				error: (_error as Error).message 
 			});
+			throw new Error('Failed to load key metadata. Use recoverFromCorruption() if corruption is suspected.');
+		}
 
-			// SECURITY: Add constant-time delay to prevent timing attacks
-			const elapsedTime = performance.now() - startTime;
-			const minTime = 100; // Minimum 100ms for key derivation
-			if (elapsedTime < minTime) {
-				await new Promise(resolve => setTimeout(resolve, minTime - elapsedTime));
-			}
-
-			// SECURITY: Validate Argon2 result
-			if (!argon2Result || !argon2Result.hash || argon2Result.hash.length !== 32) {
-				throw new Error('CRITICAL: Invalid Argon2 key derivation result');
-			}
-
-			// import the derived hash as a crypto key
-			const masterKey = await crypto.subtle.importKey(
-				'raw',
-				argon2Result.hash,
-				{ name: 'AES-GCM' },
-				true, // Make extractable for ChaCha20 encryption
-				['encrypt', 'decrypt']
-			);
-
-			this.masterKey = masterKey;
+		// Use stored salt if available, otherwise use provided salt or generate new one
+		if (salt) {
+			keySalt = CryptoUtils.Base64.base64ToUint8Array(salt);
+			keyIv = getCrypto().getRandomValues(new Uint8Array(16));
+		} else if (existingMetadata?.salt) {
+			keySalt = CryptoUtils.Base64.base64ToUint8Array(existingMetadata.salt);
+			keyIv = getCrypto().getRandomValues(new Uint8Array(16));
 		} else {
-			// fallback to pbkdf2 for backward compatibility with existing users
-			const masterKey = await crypto.subtle.importKey(
-				'raw',
-				new TextEncoder().encode(passphrase),
-				{ name: 'PBKDF2' },
-				false,
-				['deriveKey']
-			);
-
-			const derivedKey = await crypto.subtle.deriveKey(
-				{
-					name: 'PBKDF2',
-					salt: keySalt,
-					iterations: 100000,
-					hash: 'SHA-256'
-				},
-				masterKey,
-				{ name: 'AES-GCM', length: 256 },
-				false, // Keep non-extractable for legacy security
-				['encrypt', 'decrypt']
-			);
-
-			this.masterKey = derivedKey;
+			keySalt = getCrypto().getRandomValues(new Uint8Array(32)); // Increased from 16 to 32 for quantum security
+			keyIv = getCrypto().getRandomValues(new Uint8Array(16));
 		}
 
-		if (!salt) {
-			await this.storeKeyMetadata({
-				salt: CryptoUtils.Base64.arrayBufferToBase64(keySalt),
-				iv: CryptoUtils.Base64.arrayBufferToBase64(keyIv),
-				argon2Params: useArgon2 ? storedArgon2Params : undefined
-			});
+		// Use Argon2ID for quantum-resistant key derivation
+		if (argon2Params) {
+			storedArgon2Params = argon2Params;
+		} else if (existingMetadata?.argon2Params) {
+			storedArgon2Params = existingMetadata.argon2Params;
+		} else {
+			storedArgon2Params = {
+				version: 0x13,
+				algorithm: 'argon2id',
+				memoryCost: 524288, // 512MB for quantum-resistant security
+				timeCost: 6, // Increased iterations for stronger key derivation
+				parallelism: 4 // Optimal parallelism for modern systems
+			};
+		}
 
-			let storedMetadata: any = null;
-			try {
-				storedMetadata = await this.getKeyMetadata();
-			} catch {
-				storedMetadata = this.memory['metadata'] || null;
-			}
-			if (!storedMetadata) {
-				throw new Error('Failed to store key metadata');
-			}
+		const startTime = performance.now();
+		
+		const argon2Result = await argon2.hash({
+			pass: passphrase,
+			salt: keySalt,
+			time: storedArgon2Params.timeCost,
+			mem: storedArgon2Params.memoryCost,
+			parallelism: storedArgon2Params.parallelism,
+			type: 2, // argon2id
+			version: storedArgon2Params.version,
+			hashLen: 32
+		});
+
+		const elapsedTime = performance.now() - startTime;
+		const minTime = 200; // Minimum 200ms for enhanced security
+		if (elapsedTime < minTime) {
+			await new Promise(resolve => setTimeout(resolve, minTime - elapsedTime));
+		}
+
+		if (!argon2Result || !argon2Result.hash || argon2Result.hash.length !== 32) {
+			throw new Error('CRITICAL: Invalid Argon2 key derivation result');
+		}
+
+	// Import the derived hash as a crypto key (extractable for PostQuantumAEAD)
+	const masterKey = await getCrypto().subtle.importKey(
+		'raw',
+		argon2Result.hash,
+		{ name: 'AES-GCM' }, // Format for WebCrypto compatibility
+		true, // Make extractable for PostQuantumAEAD encryption
+		['encrypt', 'decrypt']
+	);
+
+	this.masterKey = masterKey;
+
+	// Always store metadata if it doesn't exist yet (even if salt was provided externally)
+	if (!existingMetadata || !existingMetadata.salt) {
+		await this.storeKeyMetadata({
+			salt: CryptoUtils.Base64.arrayBufferToBase64(keySalt),
+			iv: CryptoUtils.Base64.arrayBufferToBase64(keyIv),
+			argon2Params: storedArgon2Params
+		});
+
+		const storedMetadata = await this.getKeyMetadata();
+		if (!storedMetadata) {
+			throw new Error('Failed to verify stored key metadata');
 		}
 	}
+}
 
 	async storeKeys(keys: DecryptedKeys): Promise<void> {
 		if (!this.masterKey) {
 			throw new Error('Key manager not initialized');
 		}
 
-		const metadata = await this.getKeyMetadata();
-		if (!metadata) {
-			throw new Error('Key metadata not found');
-		}
+	const metadata = await this.getKeyMetadata();
+	if (!metadata || !metadata.salt || !metadata.argon2Params) {
+		throw new Error('Key metadata not found or incomplete');
+	}
 
-		const iv = CryptoUtils.Base64.base64ToUint8Array(metadata.iv);
-
-		// Export master key to raw bytes for ChaCha20
+		// Export master key to raw bytes for post-quantum AEAD
 		let key: Uint8Array;
 		try {
-			const masterKeyBytes = await crypto.subtle.exportKey('raw', this.masterKey);
+			const masterKeyBytes = await getCrypto().subtle.exportKey('raw', this.masterKey);
 			key = new Uint8Array(masterKeyBytes);
-		} catch (error) {
-			// Legacy PBKDF2 keys are not extractable - user needs to re-register with Argon2
-			throw new Error('Legacy key format detected. Please clear your data and re-register for enhanced security.');
+		} catch (_error) {
+			// All keys should be extractable now - this indicates a serious error
+			throw new Error('Failed to export master key for post-quantum encryption.');
 		}
 
-		const x25519PrivateBytes = new TextEncoder().encode(JSON.stringify(Array.from(keys.x25519.private)));
-		const { nonce: x25519Nonce, ciphertext: encryptedX25519Private } = CryptoUtils.XChaCha20Poly1305.encryptWithNonce(key, x25519PrivateBytes);
+	// Use PostQuantumAEAD from the post-quantum-crypto module directly
+	const { PostQuantumAEAD } = await import('./post-quantum-crypto');
 
+	// Encrypt secret keys using post-quantum AEAD
 		const kyberSecretBytes = new TextEncoder().encode(JSON.stringify(Array.from(keys.kyber.secretKey)));
-		const { nonce: kyberNonce, ciphertext: encryptedKyberSecret } = CryptoUtils.XChaCha20Poly1305.encryptWithNonce(key, kyberSecretBytes);
+		const dilithiumSecretBytes = new TextEncoder().encode(JSON.stringify(Array.from(keys.dilithium.secretKey)));
+		const x25519SecretBytes = new TextEncoder().encode(JSON.stringify(Array.from(keys.x25519.private)));
 
-		// Handle optional Dilithium3 keys
-		let encryptedDilithiumSecret: string | undefined;
-		let dilithiumNonce: string | undefined;
-		let dilithiumPublicBase64: string | undefined;
+		const payload = {
+			kyber: CryptoUtils.Base64.arrayBufferToBase64(kyberSecretBytes),
+			dilithium: CryptoUtils.Base64.arrayBufferToBase64(dilithiumSecretBytes),
+			x25519: CryptoUtils.Base64.arrayBufferToBase64(x25519SecretBytes)
+		};
 
-		if (keys.dilithium) {
-			const dilithiumSecretBytes = new TextEncoder().encode(JSON.stringify(Array.from(keys.dilithium.secretKey)));
-			const { nonce: dilithiumNonceBytes, ciphertext: encryptedDilithiumSecretBytes } = CryptoUtils.XChaCha20Poly1305.encryptWithNonce(key, dilithiumSecretBytes);
-			encryptedDilithiumSecret = CryptoUtils.Base64.arrayBufferToBase64(encryptedDilithiumSecretBytes);
-			dilithiumNonce = CryptoUtils.Base64.arrayBufferToBase64(dilithiumNonceBytes);
-			dilithiumPublicBase64 = keys.dilithium.publicKeyBase64;
-		}
+	const payloadBytes = new TextEncoder().encode(JSON.stringify(payload));
+	const pqNonce = getCrypto().getRandomValues(new Uint8Array(36)); // 36-byte nonce: 12 for AES-GCM + 24 for XChaCha20
+	const pqAad = new TextEncoder().encode(`secure-key-manager-pq-${this.username}`);
+	const pqEncResult = PostQuantumAEAD.encrypt(payloadBytes, key, pqAad, pqNonce);
+
+		const fullCiphertext = new Uint8Array(pqEncResult.ciphertext.length + pqEncResult.tag.length);
+		fullCiphertext.set(pqEncResult.ciphertext, 0);
+		fullCiphertext.set(pqEncResult.tag, pqEncResult.ciphertext.length);
+
+	const macInput = new Uint8Array(fullCiphertext.length + pqAad.length);
+	macInput.set(fullCiphertext, 0);
+	macInput.set(pqAad, fullCiphertext.length);
+	const mac = nobleBlake3(macInput, { key });
 
 		const encryptedData: EncryptedKeyData = {
-			encryptedX25519Private: CryptoUtils.Base64.arrayBufferToBase64(encryptedX25519Private),
-			encryptedKyberSecret: CryptoUtils.Base64.arrayBufferToBase64(encryptedKyberSecret),
-			encryptedDilithiumSecret,
-			x25519Nonce: CryptoUtils.Base64.arrayBufferToBase64(x25519Nonce),
-			kyberNonce: CryptoUtils.Base64.arrayBufferToBase64(kyberNonce),
-			dilithiumNonce,
-			x25519PublicBase64: keys.x25519.publicKeyBase64,
+			bundleCiphertext: CryptoUtils.Base64.arrayBufferToBase64(pqEncResult.ciphertext),
+			bundleNonce: CryptoUtils.Base64.arrayBufferToBase64(pqNonce),
+			bundleTag: CryptoUtils.Base64.arrayBufferToBase64(pqEncResult.tag),
+			bundleAad: CryptoUtils.Base64.arrayBufferToBase64(pqAad),
+			bundleMac: CryptoUtils.Base64.arrayBufferToBase64(mac),
 			kyberPublicBase64: keys.kyber.publicKeyBase64,
-			dilithiumPublicBase64,
+			dilithiumPublicBase64: keys.dilithium.publicKeyBase64,
+			x25519PublicBase64: keys.x25519.publicKeyBase64,
 			salt: metadata.salt,
-			iv: metadata.iv, // Keep for backward compatibility
-			argon2Params: metadata.argon2Params
+			version: 4,
+			argon2Params: metadata.argon2Params,
+			createdAt: Date.now(),
+			expiresAt: Date.now() + 365 * 24 * 60 * 60 * 1000,
+			sequence: Math.floor(Date.now() / 1000),
+			payloadSize: payloadBytes.byteLength
 		};
 
 		await this.storeEncryptedKeys(encryptedData);
+		key.fill(0);
 	}
 
 	async getKeys(): Promise<DecryptedKeys | null> {
@@ -237,330 +372,192 @@ export class SecureKeyManager {
 			throw new Error('Key manager not initialized');
 		}
 
-		const encryptedData = await this.getEncryptedKeys();
+		let encryptedData: EncryptedKeyData | null = null;
+		
+		try {
+			encryptedData = await this.getEncryptedKeys();
+		} catch (_error) {
+			SecureAuditLogger.error('secure-key-manager', 'get-keys', 'retrieval-failed', { 
+				error: (_error as Error).message 
+			});
+			throw new Error(`Failed to retrieve encrypted keys: ${_error instanceof Error ? _error.message : String(_error)}`);
+		}
+		
 		if (!encryptedData) {
 			return null;
 		}
 
-		// Export master key to raw bytes for ChaCha20
+		// Export master key to raw bytes for post-quantum AEAD
 		let key: Uint8Array;
 		try {
-			const masterKeyBytes = await crypto.subtle.exportKey('raw', this.masterKey);
+			const masterKeyBytes = await getCrypto().subtle.exportKey('raw', this.masterKey);
 			key = new Uint8Array(masterKeyBytes);
-		} catch (error) {
-			// Legacy PBKDF2 keys are not extractable - user needs to re-register with Argon2
-			throw new Error('Legacy key format detected. Please clear your data and re-register for enhanced security.');
+		} catch (_error) {
+			// All keys should be extractable now - this indicates a serious error
+			throw new Error('Failed to export master key for post-quantum decryption.');
 		}
 
-		const encryptedX25519Private = CryptoUtils.Base64.base64ToUint8Array(encryptedData.encryptedX25519Private);
+	// Import PostQuantumAEAD for decryption
+	const { PostQuantumAEAD } = await import('./post-quantum-crypto');
 
-		let x25519Private: Uint8Array;
-		try {
-			let decryptedX25519Private: Uint8Array;
+	const ciphertext = CryptoUtils.Base64.base64ToUint8Array(encryptedData.bundleCiphertext);
+	const nonce = CryptoUtils.Base64.base64ToUint8Array(encryptedData.bundleNonce);
+	const tag = CryptoUtils.Base64.base64ToUint8Array(encryptedData.bundleTag);
+	const storedAad = CryptoUtils.Base64.base64ToUint8Array(encryptedData.bundleAad);
+	const storedMac = CryptoUtils.Base64.base64ToUint8Array(encryptedData.bundleMac);
 
-			// Try XChaCha20-Poly1305 first (new format)
-			if (encryptedData.x25519Nonce) {
-				const x25519Nonce = CryptoUtils.Base64.base64ToUint8Array(encryptedData.x25519Nonce);
-				decryptedX25519Private = CryptoUtils.XChaCha20Poly1305.decryptWithNonce(key, x25519Nonce, encryptedX25519Private);
-			} else {
-				// Fallback to AES-GCM (legacy format)
-				const iv = CryptoUtils.Base64.base64ToUint8Array(encryptedData.iv);
-				const decryptedBuffer = await crypto.subtle.decrypt(
-					{ name: 'AES-GCM', iv },
-					this.masterKey,
-					encryptedX25519Private
-				);
-				decryptedX25519Private = new Uint8Array(decryptedBuffer);
-			}
-
-			const decryptedText = new TextDecoder().decode(decryptedX25519Private);
-			const parsedArray = JSON.parse(decryptedText);
-
-			if (!Array.isArray(parsedArray) || parsedArray.length !== 32) {
-				throw new Error(`Invalid X25519 private key length: ${parsedArray?.length}, expected 32`);
-			}
-
-			x25519Private = new Uint8Array(parsedArray);
-		} catch (error) {
-			console.error('X25519 decryption failed:', error);
-			throw error;
-		}
-
-		const encryptedKyberSecret = CryptoUtils.Base64.base64ToUint8Array(encryptedData.encryptedKyberSecret);
-
-		let kyberSecret: Uint8Array;
-		try {
-			let decryptedKyberSecret: Uint8Array;
-
-			// Try XChaCha20-Poly1305 first (new format)
-			if (encryptedData.kyberNonce) {
-				const kyberNonce = CryptoUtils.Base64.base64ToUint8Array(encryptedData.kyberNonce);
-				decryptedKyberSecret = CryptoUtils.XChaCha20Poly1305.decryptWithNonce(key, kyberNonce, encryptedKyberSecret);
-			} else {
-				// Fallback to AES-GCM (legacy format)
-				const iv = CryptoUtils.Base64.base64ToUint8Array(encryptedData.iv);
-				const decryptedBuffer = await crypto.subtle.decrypt(
-					{ name: 'AES-GCM', iv },
-					this.masterKey,
-					encryptedKyberSecret
-				);
-				decryptedKyberSecret = new Uint8Array(decryptedBuffer);
-			}
-
-			const decryptedText = new TextDecoder().decode(decryptedKyberSecret);
-			const parsedArray = JSON.parse(decryptedText);
-
-			if (!Array.isArray(parsedArray) || parsedArray.length !== 2400) {
-				throw new Error(`Invalid Kyber secret key length: ${parsedArray?.length}, expected 2400`);
-			}
-
-			kyberSecret = new Uint8Array(parsedArray);
-		} catch (error) {
-			console.error('Kyber decryption failed:', error);
-			throw error;
-		}
-
-		// Handle optional Dilithium3 keys
-		let dilithiumKeys: { publicKeyBase64: string; secretKey: Uint8Array } | undefined;
-
-		if (encryptedData.encryptedDilithiumSecret && encryptedData.dilithiumPublicBase64) {
-			try {
-				const encryptedDilithiumSecret = CryptoUtils.Base64.base64ToUint8Array(encryptedData.encryptedDilithiumSecret);
-				let decryptedDilithiumSecret: Uint8Array;
-
-				// Try XChaCha20-Poly1305 first (new format)
-				if (encryptedData.dilithiumNonce) {
-					const dilithiumNonce = CryptoUtils.Base64.base64ToUint8Array(encryptedData.dilithiumNonce);
-					decryptedDilithiumSecret = CryptoUtils.XChaCha20Poly1305.decryptWithNonce(key, dilithiumNonce, encryptedDilithiumSecret);
-				} else {
-					// Fallback to AES-GCM (legacy format)
-					const iv = CryptoUtils.Base64.base64ToUint8Array(encryptedData.iv);
-					const decryptedBuffer = await crypto.subtle.decrypt(
-						{ name: 'AES-GCM', iv },
-						this.masterKey,
-						encryptedDilithiumSecret
-					);
-					decryptedDilithiumSecret = new Uint8Array(decryptedBuffer);
-				}
-
-				const decryptedText = new TextDecoder().decode(decryptedDilithiumSecret);
-				const parsedArray = JSON.parse(decryptedText);
-
-				if (!Array.isArray(parsedArray)) {
-					throw new Error('Invalid Dilithium secret key format');
-				}
-
-				dilithiumKeys = {
-					publicKeyBase64: encryptedData.dilithiumPublicBase64,
-					secretKey: new Uint8Array(parsedArray)
-				};
-			} catch (error) {
-				console.error('Dilithium decryption failed:', error);
-				// Don't throw - Dilithium keys are optional for backward compatibility
-			}
-		}
-
-		const result: DecryptedKeys = {
-			x25519: {
-				private: x25519Private,
-				publicKeyBase64: encryptedData.x25519PublicBase64
-			},
-			kyber: {
-				publicKeyBase64: encryptedData.kyberPublicBase64,
-				secretKey: kyberSecret
-			}
-		};
-
-		if (dilithiumKeys) {
-			result.dilithium = dilithiumKeys;
-		}
-
-		return result;
+	if (nonce.length !== 36) {
+		throw new Error(`Invalid payload nonce length: ${nonce.length}, expected 36`);
+	}
+	
+	// PostQuantumAEAD returns 32-byte BLAKE3 MAC
+	if (tag.length !== 32) {
+		SecureAuditLogger.error('secure-key-manager', 'get-keys', 'invalid-tag-length', { 
+			tagLength: tag.length,
+			expected: 32
+		});
+		throw new Error(`Invalid payload tag length: ${tag.length}. Expected 32 bytes (PostQuantumAEAD format). Please clear your encrypted keys and re-register.`);
 	}
 
-	async getPublicKeys(): Promise<{ x25519PublicBase64: string; kyberPublicBase64: string; dilithiumPublicBase64?: string } | null> {
+	const fullCiphertext = new Uint8Array(ciphertext.length + tag.length);
+	fullCiphertext.set(ciphertext, 0);
+	fullCiphertext.set(tag, ciphertext.length);
+
+	const macInput = new Uint8Array(fullCiphertext.length + storedAad.length);
+	macInput.set(fullCiphertext, 0);
+	macInput.set(storedAad, fullCiphertext.length);
+	const expectedMac = nobleBlake3(macInput, { key });
+
+	if (!PostQuantumUtils.timingSafeEqual(expectedMac, storedMac)) {
+		console.error('[SecureKeyManager] MAC verification failed:', {
+			keyLength: key.length,
+			ciphertextLength: ciphertext.length,
+			tagLength: tag.length,
+			aadLength: storedAad.length,
+			fullCiphertextLength: fullCiphertext.length,
+			macInputLength: macInput.length,
+			expectedMacHex: Array.from(expectedMac.slice(0, 8)).map(b => b.toString(16).padStart(2, '0')).join(''),
+			storedMacHex: Array.from(storedMac.slice(0, 8)).map(b => b.toString(16).padStart(2, '0')).join(''),
+			aadText: new TextDecoder().decode(storedAad)
+		});
+		throw new Error('Payload integrity verification failed');
+	}
+
+		const decryptedPayload = PostQuantumAEAD.decrypt(ciphertext, nonce, tag, key, storedAad);
+		const parsed = JSON.parse(new TextDecoder().decode(decryptedPayload));
+		if (!parsed?.kyber || !parsed?.dilithium || !parsed?.x25519) {
+			throw new Error('Decrypted payload missing required key material');
+		}
+
+		const decodeKey = (base64: string, expectedLength: number): Uint8Array => {
+		// Decode from base64 to get UTF-8 encoded JSON string
+		const jsonBytes = CryptoUtils.Base64.base64ToUint8Array(base64);
+		// Decode UTF-8 to string
+		const jsonString = new TextDecoder().decode(jsonBytes);
+		// Parse JSON array
+		const array = JSON.parse(jsonString);
+		// Convert array back to Uint8Array
+		const bytes = new Uint8Array(array);
+		
+		if (bytes.length !== expectedLength) {
+			throw new Error(`Invalid key length (${bytes.length}), expected ${expectedLength}`);
+		}
+		return bytes;
+	};
+
+		// ML-KEM-1024 secret key = 3168 bytes; ML-DSA-87 secret key = 4896 bytes; X25519 secret key = 32 bytes
+		const kyberSecret = decodeKey(parsed.kyber, 3168);
+		const dilithiumSecret = decodeKey(parsed.dilithium, 4896);
+		const x25519Secret = decodeKey(parsed.x25519, 32);
+
+		key.fill(0);
+		return {
+		kyber: {
+			publicKeyBase64: encryptedData.kyberPublicBase64,
+			secretKey: kyberSecret
+		},
+		dilithium: {
+			publicKeyBase64: encryptedData.dilithiumPublicBase64,
+			secretKey: dilithiumSecret
+		},
+		x25519: {
+			publicKeyBase64: encryptedData.x25519PublicBase64,
+			private: x25519Secret
+		}
+	};
+	}
+
+	async getPublicKeys(): Promise<{ kyberPublicBase64: string; dilithiumPublicBase64: string; x25519PublicBase64: string } | null> {
 		const encryptedData = await this.getEncryptedKeys();
 		if (!encryptedData) {
 			return null;
 		}
 
-		const result: { x25519PublicBase64: string; kyberPublicBase64: string; dilithiumPublicBase64?: string } = {
-			x25519PublicBase64: encryptedData.x25519PublicBase64,
-			kyberPublicBase64: encryptedData.kyberPublicBase64
-		};
-
-		if (encryptedData.dilithiumPublicBase64) {
-			result.dilithiumPublicBase64 = encryptedData.dilithiumPublicBase64;
+		if (!encryptedData.dilithiumPublicBase64) {
+			throw new Error('Dilithium public key missing from stored key bundle');
+		}
+		
+		if (!encryptedData.x25519PublicBase64) {
+			throw new Error('X25519 public key missing from stored key bundle');
 		}
 
-		return result;
+		return {
+			kyberPublicBase64: encryptedData.kyberPublicBase64,
+			dilithiumPublicBase64: encryptedData.dilithiumPublicBase64,
+			x25519PublicBase64: encryptedData.x25519PublicBase64,
+		};
 	}
 
 	clearKeys(): void {
 		this.masterKey = null;
 	}
-
+	
 	async hasKeys(): Promise<boolean> {
-		const encryptedData = await this.getEncryptedKeys();
-		return encryptedData !== null;
-	}
-
-	async migrateToArgon2(passphrase: string): Promise<boolean> {
-		// check if migration is needed
-		const metadata = await this.getKeyMetadata();
-		if (!metadata || metadata.argon2Params) {
-			return false; // already using argon2 or no keys exist
-		}
-
-		// decrypt existing keys using pbkdf2
-		const existingKeys = await this.getKeys();
-		if (!existingKeys) {
+		try {
+			const encryptedData = await this.getEncryptedKeys();
+			return encryptedData !== null;
+		} catch (_error) {
 			return false;
 		}
-
-		// re-encrypt with argon2id
-		await this.storeKeys(existingKeys);
-		return true;
 	}
-
+	
+	
 	async deleteKeys(): Promise<void> {
-		const db = await this.openDB();
-		return new Promise((resolve, reject) => {
-			const tx = db.transaction(this.storeName, 'readwrite');
-			const store = tx.objectStore(this.storeName);
-
-			const deleteMetadata = store.delete('metadata');
-			const deleteKeys = store.delete('keys');
-
-			deleteMetadata.onsuccess = () => {
-				deleteKeys.onsuccess = () => {
-					tx.oncomplete = () => resolve();
-					tx.onerror = () => reject(tx.error);
-				};
-				deleteKeys.onerror = () => reject(deleteKeys.error);
-			};
-			deleteMetadata.onerror = () => reject(deleteMetadata.error);
-		});
+		this.masterKey = null;
+		try {
+			await (await this.kv()).deleteJsonKey('metadata');
+		}catch{}
+		try {
+			await (await this.kv()).deleteJsonKey('keys');
+		}catch{}
 	}
-
+	
+	/**
+	 * Explicit recovery method that must be called intentionally by the user
+	 * Only use when you are certain the data is corrupted and cannot be recovered
+	 */
+	async recoverFromCorruption(): Promise<void> {
+		SecureAuditLogger.warn('secure-key-manager', 'recovery', 'destructive-recovery-initiated', {});
+		try {
+			await this.deleteKeys();
+		} catch (keyDeleteError) {
+			SecureAuditLogger.error('secure-key-manager', 'recovery', 'key-delete-failed', { 
+				error: (keyDeleteError as Error).message 
+			});
+			try {
+				await this.deleteDatabase();
+			} catch (dbDeleteError) {
+				SecureAuditLogger.error('secure-key-manager', 'recovery', 'database-delete-failed', { 
+					error: (dbDeleteError as Error).message 
+				});
+				throw new Error(`Recovery failed: Could not delete keys or database. Manual intervention required.`);
+			}
+		}
+		this.masterKey = null;
+	}
+	
 	async deleteDatabase(): Promise<void> {
-		return new Promise((resolve, reject) => {
-			const request = indexedDB.deleteDatabase(this.dbName);
-
-			request.onsuccess = () => {
-				resolve();
-			};
-
-			request.onerror = () => {
-				reject(request.error);
-			};
-		});
+		this.masterKey = null;
+		await (await this.kv()).clearSecureKeys();
 	}
-
-	private async openDB(): Promise<IDBDatabase> {
-		return new Promise((resolve, reject) => {
-			const request = indexedDB.open(this.dbName, 1);
-
-			request.onerror = () => reject(request.error);
-			request.onsuccess = () => resolve(request.result);
-
-			request.onupgradeneeded = (event) => {
-				const db = (event.target as IDBOpenDBRequest).result;
-				if (!db.objectStoreNames.contains(this.storeName)) {
-					db.createObjectStore(this.storeName, { keyPath: 'username' });
-				}
-			};
-		});
-	}
-
-	private async storeKeyMetadata(metadata: { salt: string; iv: string; argon2Params?: { version: number; algorithm: string; memoryCost: number; timeCost: number; parallelism: number } }): Promise<void> {
-		try {
-			const db = await this.openDB();
-			return new Promise((resolve, reject) => {
-				const tx = db.transaction(this.storeName, 'readwrite');
-				const store = tx.objectStore(this.storeName);
-				const request = store.put({ username: 'metadata', type: 'metadata', ...metadata });
-				request.onsuccess = () => { tx.oncomplete = () => resolve(); tx.onerror = () => reject(tx.error); };
-				request.onerror = () => reject(request.error);
-			});
-		} catch {
-			this.memoryMode = true;
-			this.memory['metadata'] = metadata;
-		}
-	}
-
-	async getKeyMetadata(): Promise<{ salt: string; iv: string; argon2Params?: { version: number; algorithm: string; memoryCost: number; timeCost: number; parallelism: number } } | null> {
-		try {
-			const db = await this.openDB();
-			return new Promise((resolve, reject) => {
-				const tx = db.transaction(this.storeName, 'readonly');
-				const store = tx.objectStore(this.storeName);
-				const request = store.get('metadata');
-				request.onsuccess = () => {
-					const result = request.result;
-					if (result && result.type === 'metadata') {
-						resolve({ salt: result.salt, iv: result.iv, argon2Params: result.argon2Params });
-					} else {
-						resolve(null);
-					}
-				};
-				request.onerror = () => reject(request.error);
-			});
-		} catch {
-			this.memoryMode = true;
-			return this.memory['metadata'] || null;
-		}
-	}
-
-	private async storeEncryptedKeys(encryptedData: EncryptedKeyData): Promise<void> {
-		try {
-			const db = await this.openDB();
-			return new Promise((resolve, reject) => {
-				const tx = db.transaction(this.storeName, 'readwrite');
-				const store = tx.objectStore(this.storeName);
-				const request = store.put({ username: 'keys', type: 'keys', ...encryptedData });
-				request.onsuccess = () => { tx.oncomplete = () => resolve(); tx.onerror = () => reject(tx.error); };
-				request.onerror = () => reject(request.error);
-			});
-		} catch {
-			this.memoryMode = true;
-			this.memory['keys'] = encryptedData;
-		}
-	}
-
-	private async getEncryptedKeys(): Promise<EncryptedKeyData | null> {
-		try {
-			const db = await this.openDB();
-			return new Promise((resolve, reject) => {
-				const tx = db.transaction(this.storeName, 'readonly');
-				const store = tx.objectStore(this.storeName);
-				const request = store.get('keys');
-				request.onsuccess = () => {
-					const result = request.result;
-					if (result && result.type === 'keys') {
-						resolve({
-							encryptedX25519Private: result.encryptedX25519Private,
-							encryptedKyberSecret: result.encryptedKyberSecret,
-							x25519PublicBase64: result.x25519PublicBase64,
-							kyberPublicBase64: result.kyberPublicBase64,
-							salt: result.salt,
-							iv: result.iv
-						});
-					} else {
-						resolve(null);
-					}
-				};
-				request.onerror = () => reject(request.error);
-			});
-		} catch {
-			this.memoryMode = true;
-			return this.memory['keys'] || null;
-		}
-	}
-
-
-
-
-
-
 }

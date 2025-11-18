@@ -1,6 +1,5 @@
 import React from "react";
 import { cn } from "@/lib/utils";
-import { Avatar, AvatarFallback } from "../../ui/avatar";
 import { format } from "date-fns";
 
 interface DeletedMessageProps {
@@ -10,28 +9,33 @@ interface DeletedMessageProps {
 }
 
 export function DeletedMessage({ sender, timestamp, isCurrentUser }: DeletedMessageProps) {
+  const safeIsCurrentUser = isCurrentUser || false;
+  
   return (
-    <div className={cn("flex items-start gap-2 mb-4", isCurrentUser ? "flex-row-reverse" : "")}>
-      <Avatar className="w-8 h-8">
-        <AvatarFallback
+    <div className={cn("flex gap-3 mb-4 group", safeIsCurrentUser ? "flex-row-reverse" : "flex-row")} style={{ marginBottom: 'var(--spacing-md)' }}>
+      {/* Avatar*/}
+      <div className="flex-shrink-0 w-10">
+        <div 
+          className="w-10 h-10 rounded-full flex items-center justify-center font-medium text-sm"
           style={{
-            backgroundColor: isCurrentUser ? 'var(--color-accent-primary)' : 'var(--color-avatar-bg)',
-            color: isCurrentUser ? 'white' : 'var(--color-text-primary)'
+            backgroundColor: safeIsCurrentUser ? 'var(--color-accent-primary)' : 'var(--color-accent-secondary)',
+            color: 'white'
           }}
         >
           {sender.charAt(0).toUpperCase()}
-        </AvatarFallback>
-      </Avatar>
+        </div>
+      </div>
 
-      <div className={cn("flex flex-col min-w-0", isCurrentUser ? "items-end" : "items-start")} style={{ maxWidth: "75%" }}>
-        <div className="flex items-center gap-2 mb-1">
-          <span
+      {/* Message Content */}
+      <div className={cn("flex flex-col min-w-0", safeIsCurrentUser ? "items-end" : "items-start")} style={{ maxWidth: 'var(--message-bubble-max-width)' }}>
+        <div className={cn("flex items-center gap-2 mb-1", safeIsCurrentUser ? "flex-row-reverse" : "flex-row")}>
+          <span 
             className="text-sm font-medium"
             style={{ color: 'var(--color-text-primary)' }}
           >
             {sender}
           </span>
-          <span
+          <span 
             className="text-xs"
             style={{ color: 'var(--color-text-secondary)' }}
           >
@@ -40,11 +44,13 @@ export function DeletedMessage({ sender, timestamp, isCurrentUser }: DeletedMess
         </div>
 
         <div
-          className="rounded-lg px-3 py-2 text-sm min-w-[5rem] whitespace-pre-wrap break-words italic"
+          className="px-4 py-3 text-sm whitespace-pre-wrap break-words italic"
           style={{
-            backgroundColor: isCurrentUser ? 'var(--color-accent-primary)' : 'var(--color-message-bg)',
-            color: isCurrentUser ? 'white' : 'var(--color-text-secondary)',
-            opacity: 0.7
+            backgroundColor: safeIsCurrentUser ? 'var(--color-accent-primary)' : 'var(--color-surface)',
+            color: safeIsCurrentUser ? 'white' : 'var(--color-text-secondary)',
+            borderRadius: 'var(--message-bubble-radius)',
+            opacity: 0.7,
+            minWidth: '3rem'
           }}
         >
           Message deleted

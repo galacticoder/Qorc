@@ -1,31 +1,57 @@
-import { distributedRateLimiter } from './distributed-rate-limiter.js';
+import { getDistributedRateLimiter } from './distributed-rate-limiter.js';
 import { SignalType } from '../signals.js';
 import crypto from 'crypto';
 import { RATE_LIMIT_CONFIG } from '../config/config.js';
+import { logger as cryptoLogger } from '../crypto/crypto-logger.js';
+import { sendSecureMessage } from '../messaging/pq-envelope-handler.js';
 
 // Rate limiting middleware for WebSocket connections
 export class RateLimitMiddleware {
-	constructor() {
-		this.rateLimiter = distributedRateLimiter;
-		// REMOVED: securityMetrics to prevent memory issues with millions of users
-		// All metrics now handled by Redis-based rate limiter for scalability
-	}
+  constructor(limiters, { lazy = false } = {}) {
+    this._limiter = null;
+    this._limiterFactory = limiters
+      ? async () => limiters
+      : () => getDistributedRateLimiter();
+
+    if (!lazy && !limiters) {
+      this._initializePromise = this._limiterFactory().then((value) => {
+        this._limiter = value;
+        return value;
+      });
+    }
+  }
+
+  async #limiter() {
+    if (this._limiter) {
+      return this._limiter;
+    }
+
+    if (this._initializePromise) {
+      return this._initializePromise;
+    }
+
+    this._initializePromise = this._limiterFactory().then((value) => {
+      this._limiter = value;
+      return value;
+    });
+
+    return this._initializePromise;
+  }
 
 	// Check global connection rate limit
 	async checkConnectionLimit(ws) {
-		// Check WebSocket object
 		if (!this.isValidWebSocket(ws)) {
-			console.warn('[RATE-LIMIT] Invalid WebSocket in connection check');
+			cryptoLogger.warn('[RATE-LIMIT] Invalid WebSocket in connection check');
 			return false;
 		}
 
-		const result = await this.rateLimiter.checkGlobalConnectionLimit();
+		const limiter = await this.#limiter();
+		const result = await limiter.checkGlobalConnectionLimit();
 
-		if (!result.allowed) {
-			console.warn(`[RATE-LIMIT] Global connection blocked: ${result.reason}`);
+     if (!result.allowed) {
+			cryptoLogger.warn('[RATE-LIMIT] Global connection blocked', { reason: result.reason });
 
-			// Security: Send rate limit info with jittered timing
-			ws.send(JSON.stringify({
+			await sendSecureMessage(ws, {
 				type: SignalType.ERROR,
 				message: result.reason,
 				rateLimitInfo: {
@@ -33,35 +59,30 @@ export class RateLimitMiddleware {
 					remainingBlockTime: result.remainingBlockTime,
 					requestId: this.generateSecureRequestId()
 				}
-			}));
+			});
 
 			ws.close(1008, 'Rate limit exceeded');
 			return false;
 		}
 
-		console.log('[RATE-LIMIT] Global connection allowed');
+		cryptoLogger.debug('[RATE-LIMIT] Global connection allowed');
 		return true;
 	}
 
 	// Check auth rate limit for connection
 	async checkAuthLimit(ws) {
-		// Metrics removed for memory efficiency
-
-		// Check WebSocket object
 		if (!this.isValidWebSocket(ws)) {
-			console.warn('[RATE-LIMIT] Invalid WebSocket in auth check');
-			// Security violation logged (metrics removed for memory efficiency)
+			cryptoLogger.warn('[RATE-LIMIT] Invalid WebSocket in auth check');
 			return false;
 		}
 
-		const result = await this.rateLimiter.checkConnectionAuthLimit(ws);
+		const limiter = await this.#limiter();
+		const result = await limiter.checkConnectionAuthLimit(ws);
 
 		if (!result.allowed) {
-			// Blocked request logged (metrics removed for memory efficiency)
-			console.warn(`[RATE-LIMIT] Authentication blocked for connection: ${result.reason}`);
+			cryptoLogger.warn('[RATE-LIMIT] Authentication blocked for connection', { reason: result.reason });
 
-			// Security: Send rate limit info with jittered timing
-			ws.send(JSON.stringify({
+			await sendSecureMessage(ws, {
 				type: SignalType.AUTH_ERROR,
 				message: result.reason,
 				rateLimitInfo: {
@@ -69,54 +90,62 @@ export class RateLimitMiddleware {
 					remainingBlockTime: result.remainingBlockTime,
 					requestId: this.generateSecureRequestId()
 				}
-			}));
+			});
 			return false;
 		}
 
-		console.log('[RATE-LIMIT] Authentication allowed for connection');
+		cryptoLogger.debug('[RATE-LIMIT] Authentication allowed for connection');
 		return true;
 	}
 
-	// Non-consuming per-user auth status check
+	// Non-consuming per-user auth status check (long-window, aggregated)
 	async checkUserAuthStatus(username) {
 		if (!this.isValidUsername(username)) {
-			console.warn('[RATE-LIMIT-SECURITY] Invalid username format in user auth check');
+			cryptoLogger.warn('[RATE-LIMIT-SECURITY] Invalid username format in user auth check');
 			return { allowed: false, reason: 'Invalid user' };
 		}
-		return this.rateLimiter.getUserAuthStatus(username);
+		const limiter = await this.#limiter();
+		return limiter.getUserAuthStatus(username);
 	}
+
+  // Non-consuming category status (short-window)
+  async getUserCredentialStatus(username, category, ws = undefined) {
+    const limiter = await this.#limiter();
+    const ip = this._getClientIp(ws);
+    return limiter.getUserCategoryStatus(username, category, ip);
+  }
+
+  // Record a credential failure (persisted in Redis) and get attempts/cooldown info
+  async recordCredentialFailure(username, category, ws = undefined) {
+    const limiter = await this.#limiter();
+    const ip = this._getClientIp(ws);
+    return limiter.consumeUserAuthAttempt(username, category, ip);
+  }
 
 	// Check message rate limit
 	async checkMessageLimit(ws, username) {
-		// Metrics removed for memory efficiency
-
-		// Security: Validate WebSocket object
 		if (!this.isValidWebSocket(ws)) {
-			console.warn('[RATE-LIMIT-SECURITY] Invalid WebSocket object in message check');
-			// Security violation logged (metrics removed for memory efficiency)
+			cryptoLogger.warn('[RATE-LIMIT-SECURITY] Invalid WebSocket object in message check');
 			return false;
 		}
 
 		if (!username) {
-			console.warn('[RATE-LIMIT] No username provided for message rate limit check');
+			cryptoLogger.warn('[RATE-LIMIT] No username provided for message rate limit check');
 			return false;
 		}
 
-		// Security: Validate username format
 		if (!this.isValidUsername(username)) {
-			console.warn('[RATE-LIMIT-SECURITY] Invalid username format in message check');
-			// Security violation logged (metrics removed for memory efficiency)
+			cryptoLogger.warn('[RATE-LIMIT-SECURITY] Invalid username format in message check');
 			return false;
 		}
 
-		const result = await this.rateLimiter.checkMessageLimit(username);
+		const limiter = await this.#limiter();
+		const result = await limiter.checkMessageLimit(username);
 
 		if (!result.allowed) {
-			// Blocked request logged (metrics removed for memory efficiency)
-			console.warn(`[RATE-LIMIT] Message blocked for user ${username}: ${result.reason}`);
+			cryptoLogger.warn('[RATE-LIMIT] Message blocked for user', { username, reason: result.reason });
 
-			// Security: Send rate limit info with jittered timing
-			ws.send(JSON.stringify({
+			await sendSecureMessage(ws, {
 				type: SignalType.ERROR,
 				message: result.reason,
 				rateLimitInfo: {
@@ -124,11 +153,11 @@ export class RateLimitMiddleware {
 					remainingBlockTime: result.remainingBlockTime,
 					requestId: this.generateSecureRequestId()
 				}
-			}));
+			});
 			return false;
 		}
 
-		console.log(`[RATE-LIMIT] Message allowed for user ${username}`);
+		cryptoLogger.debug('[RATE-LIMIT] Message allowed for user', { username });
 		return true;
 	}
 
@@ -136,35 +165,28 @@ export class RateLimitMiddleware {
 	 * Check bundle operation rate limit for authenticated users
 	 */
 	async checkBundleLimit(ws, username) {
-		// Metrics removed for memory efficiency
-
-		// Security: Validate WebSocket object
 		if (!this.isValidWebSocket(ws)) {
-			console.warn('[RATE-LIMIT-SECURITY] Invalid WebSocket object in bundle check');
-			// Security violation logged (metrics removed for memory efficiency)
+			cryptoLogger.warn('[RATE-LIMIT-SECURITY] Invalid WebSocket object in bundle check');
 			return false;
 		}
 
 		if (!username) {
-			console.warn('[RATE-LIMIT] No username provided for bundle rate limit check');
+			cryptoLogger.warn('[RATE-LIMIT] No username provided for bundle rate limit check');
 			return false;
 		}
 
-		// Security: Validate username format
 		if (!this.isValidUsername(username)) {
-			console.warn('[RATE-LIMIT-SECURITY] Invalid username format in bundle check');
-			// Security violation logged (metrics removed for memory efficiency)
+			cryptoLogger.warn('[RATE-LIMIT-SECURITY] Invalid username format in bundle check');
 			return false;
 		}
 
-		const result = await this.rateLimiter.checkBundleLimit(username);
+		const limiter = await this.#limiter();
+		const result = await limiter.checkBundleLimit(username);
 
 		if (!result.allowed) {
-			// Blocked request logged (metrics removed for memory efficiency)
-			console.warn(`[RATE-LIMIT] Bundle operation blocked for user ${username}: ${result.reason}`);
+			cryptoLogger.warn('[RATE-LIMIT] Bundle operation blocked for user', { username, reason: result.reason });
 
-			// Security: Send rate limit info with jittered timing
-			ws.send(JSON.stringify({
+			await sendSecureMessage(ws, {
 				type: SignalType.ERROR,
 				message: result.reason,
 				rateLimitInfo: {
@@ -172,23 +194,20 @@ export class RateLimitMiddleware {
 					remainingBlockTime: result.remainingBlockTime,
 					requestId: this.generateSecureRequestId()
 				}
-			}));
+			});
 			return false;
 		}
 
-		console.log(`[RATE-LIMIT] Bundle operation allowed for user ${username}`);
+		cryptoLogger.debug('[RATE-LIMIT] Bundle operation allowed for user', { username });
 		return true;
 	}
 
 	/**
 	 * Apply rate limiting to WebSocket message based on message type
-	 * Enhanced with security validation
 	 */
 	async applyMessageRateLimiting(ws, messageType, username) {
-		// Security: Validate message type
 		if (!this.isValidMessageType(messageType)) {
-			console.warn('[RATE-LIMIT-SECURITY] Invalid message type provided');
-			// Security violation logged (metrics removed for memory efficiency)
+			cryptoLogger.warn('[RATE-LIMIT-SECURITY] Invalid message type provided');
 			return false;
 		}
 
@@ -207,59 +226,185 @@ export class RateLimitMiddleware {
 				return this.checkBundleLimit(ws, username);
 
 			default:
-				// Allow other message types without rate limiting
 				return true;
 		}
 	}
 
 	/**
-	 * Get comprehensive rate limiting statistics with security metrics
+	 * Get rate limiting statistics with security metrics
 	 */
-	getStats() {
-		const baseStats = this.rateLimiter.getStats();
+	async getStats() {
+		const limiter = await this.#limiter();
+		const baseStats = await limiter.getStats();
+		
+		const securityHealth = await this.getSecurityHealth();
+		
 		return {
 			...baseStats,
-			// Maintain legacy fields expected by server logging
-			userMessageLimiters: 0,
-			userBundleLimiters: 0,
-			totalUserLimiters: 0,
-			securityHealth: this.getSecurityHealth(),
-			timestamp: Date.now(),
-			note: "Individual metrics removed for memory efficiency with millions of users"
+			securityHealth,
+			recommendations: this._generateRecommendations(baseStats, securityHealth)
 		};
 	}
 
 	/**
-	 * Get security health status (simplified for memory efficiency)
+	 * Get real-time security health status from Redis
 	 */
-	getSecurityHealth() {
-		return {
-			status: "Security monitoring active",
-			note: "Detailed metrics removed for memory efficiency with millions of users",
-			rateLimiterActive: !!this.rateLimiter
-		};
+	async getSecurityHealth() {
+		try {
+			const limiter = await this.#limiter();
+			const stats = await limiter.getStats();
+			
+			const health = {
+				status: 'operational',
+				rateLimiterActive: true,
+				redisConnected: stats.redis?.connected || false,
+				alerts: [],
+				metrics: {
+					activeUsers: stats.users?.activeLimiters || 0,
+					blockedUsers: stats.users?.blocked || 0,
+					globalBlocked: stats.global?.isBlocked || false,
+					activeConnections: stats.connections?.activeLimiters || 0
+				}
+			};
+
+			// Generate alerts based on thresholds
+			if (!stats.redis?.connected) {
+				health.status = 'degraded';
+				health.alerts.push({
+					severity: 'critical',
+					message: 'Redis connection lost - rate limiting may be impaired'
+				});
+			}
+
+			if (stats.users?.blocked > 0) {
+				health.alerts.push({
+					severity: 'warning',
+					message: `${stats.users.blocked} users currently blocked by rate limits`
+				});
+			}
+
+			if (stats.global?.isBlocked) {
+				health.status = 'degraded';
+				health.alerts.push({
+					severity: 'critical',
+					message: 'Global connection limit exceeded - new connections blocked'
+				});
+			}
+
+			// Check for suspicious activity (many blocked users)
+			const blockRatio = stats.users.activeLimiters > 0
+				? stats.users.blocked / stats.users.activeLimiters
+				: 0;
+
+			if (blockRatio > 0.1) { // More than 10% blocked
+				health.alerts.push({
+					severity: 'warning',
+					message: `High block rate detected: ${(blockRatio * 100).toFixed(1)}% of active users blocked`
+				});
+			}
+
+			return health;
+		} catch (error) {
+			cryptoLogger.error('[RATE-LIMIT-HEALTH] Failed to get security health', {
+				error: error.message
+			});
+			
+			return {
+				status: 'error',
+				rateLimiterActive: false,
+				error: error.message,
+				alerts: [{
+					severity: 'critical',
+					message: 'Failed to retrieve security metrics'
+				}]
+			};
+		}
+	}
+
+	/**
+	 * Generate actionable recommendations based on current state
+	 */
+	_generateRecommendations(stats, _health) {
+		const recommendations = [];
+
+		if (!stats.redis?.connected) {
+			recommendations.push({
+				priority: 'critical',
+				action: 'Restore Redis connection immediately',
+				impact: 'Rate limiting may be bypassed'
+			});
+		}
+
+		if (stats.users?.blocked > 10) {
+			recommendations.push({
+				priority: 'high',
+				action: 'Review blocked users for potential attack',
+				impact: `${stats.users.blocked} users currently blocked`,
+				details: stats.users?.topAbusers || []
+			});
+		}
+
+		if (stats.global?.isBlocked) {
+			recommendations.push({
+				priority: 'critical',
+				action: 'Investigate connection flood',
+				impact: 'New connections being rejected',
+				blockedUntil: new Date(stats.global.blockedUntil).toISOString()
+			});
+		}
+
+		if (stats.users?.activeLimiters > 10000) {
+			recommendations.push({
+				priority: 'medium',
+				action: 'Monitor Redis memory usage',
+				impact: `${stats.users.activeLimiters} active rate limiters in Redis`
+			});
+		}
+
+		if (recommendations.length === 0) {
+			recommendations.push({
+				priority: 'info',
+				action: 'System operating normally',
+				impact: 'No immediate action required'
+			});
+		}
+
+		return recommendations;
 	}
 
 	/**
 	 * Reset rate limits for a specific user (admin function)
 	 */
 	async resetUserLimits(username) {
-		// Security: Validate username before reset
 		if (!this.isValidUsername(username)) {
-			console.warn('[RATE-LIMIT-SECURITY] Invalid username provided for reset');
+			cryptoLogger.warn('[RATE-LIMIT-SECURITY] Invalid username provided for reset');
 			return false;
 		}
 
-		await this.rateLimiter.userMessageLimiter.delete(username);
-		await this.rateLimiter.userBundleLimiter.delete(username);
-		return true;
+		const limiter = await this.#limiter();
+    try {
+      const hashed = (await (async () => {
+        try { return crypto.createHash('sha256').update(username).digest('hex'); } catch { return null; }
+      })());
+      if (hashed) {
+        await limiter.userMessageLimiter.delete(hashed);
+        await limiter.userBundleLimiter.delete(hashed);
+        await limiter.userAuthLimiter.delete(hashed);
+        await limiter.authAccountPasswordLimiter.delete(hashed);
+        await limiter.authPassphraseLimiter.delete(hashed);
+        await limiter.authServerPasswordLimiter.delete(hashed);
+        return true;
+      }
+    } catch {}
+		return false;
 	}
 
 	/**
 	 * Reset global connection limits (admin function)
 	 */
 	async resetGlobalConnectionLimits() {
-		await this.rateLimiter.globalConnectionLimiter.delete('global-conn');
+		const limiter = await this.#limiter();
+		await limiter.globalConnectionLimiter.delete('global-conn');
 		return true;
 	}
 
@@ -267,14 +412,14 @@ export class RateLimitMiddleware {
 	 * Get current rate limit status for a user
 	 */
 	async getUserStatus(username) {
-		// Security: Validate username
 		if (!this.isValidUsername(username)) {
-			console.warn('[RATE-LIMIT-SECURITY] Invalid username provided for status check');
+			cryptoLogger.warn('[RATE-LIMIT-SECURITY] Invalid username provided for status check');
 			return null;
 		}
 
-		const msgInfo = await this.rateLimiter.userMessageLimiter.get(username);
-		const bunInfo = await this.rateLimiter.userBundleLimiter.get(username);
+		const limiter = await this.#limiter();
+		const msgInfo = await limiter.userMessageLimiter.get(username);
+		const bunInfo = await limiter.userBundleLimiter.get(username);
 		const msgCfg = RATE_LIMIT_CONFIG.MESSAGES;
 		const bunCfg = RATE_LIMIT_CONFIG.BUNDLE_OPERATIONS;
 
@@ -299,7 +444,8 @@ export class RateLimitMiddleware {
 	 * Get global connection rate limit status
 	 */
 	async getGlobalConnectionStatus() {
-		return this.rateLimiter.getGlobalConnectionStatus();
+		const limiter = await this.#limiter();
+		return limiter.getGlobalConnectionStatus();
 	}
 
 	/**
@@ -309,8 +455,19 @@ export class RateLimitMiddleware {
 		return ws && typeof ws === 'object' && typeof ws.send === 'function' && typeof ws.close === 'function';
 	}
 
+  _getClientIp(ws) {
+    try {
+      if (!this.isValidWebSocket(ws)) return undefined;
+      const req = ws.upgradeReq || ws._socket || {};
+      const direct = (req.socket && req.socket.remoteAddress) || req.remoteAddress || undefined;
+      return direct || undefined;
+    } catch { return undefined; }
+  }
+
 	isValidUsername(username) {
-		return username && typeof username === 'string' && username.length >= 3 && username.length <= 32;
+		if (!username || typeof username !== 'string') return false;
+		const USERNAME_REGEX = /^[A-Za-z0-9_-]{3,32}$/;
+		return USERNAME_REGEX.test(username);
 	}
 
 	isValidMessageType(messageType) {
@@ -323,24 +480,79 @@ export class RateLimitMiddleware {
 	}
 
 	/**
-	 * Security audit function
+	 * Perform security audit with Redis metrics
 	 */
-	performSecurityAudit() {
-		const audit = {
-			timestamp: Date.now(),
-			rateLimiterStats: this.rateLimiter.getStats(),
-			securityHealth: this.getSecurityHealth(),
-			recommendations: [],
-			note: "Detailed security metrics removed for memory efficiency with millions of users"
-		};
+	async performSecurityAudit() {
+		try {
+			const limiter = await this.#limiter();
+			const stats = await limiter.getStats();
+			const health = await this.getSecurityHealth();
 
-		// Basic security recommendations (simplified)
-		audit.recommendations.push('Monitor Redis rate limiter logs for security violations');
-		audit.recommendations.push('Rate limiting active - check Redis stats for block rates');
+			const audit = {
+				timestamp: Date.now(),
+				timestampISO: new Date().toISOString(),
+				
+				// Real-time metrics from Redis
+				metrics: {
+					backend: stats.backend,
+					redis: stats.redis,
+					global: stats.global,
+					users: stats.users,
+					connections: stats.connections
+				},
 
-		console.log('[RATE-LIMIT-SECURITY] Security Audit:', JSON.stringify(audit, null, 2));
-		return audit;
+				// Security health assessment
+				securityHealth: health,
+
+				// Top abusers requiring investigation
+				topAbusers: stats.users?.topAbusers || [],
+
+				// Actionable recommendations
+				recommendations: this._generateRecommendations(stats, health),
+
+				// Compliance notes
+				compliance: {
+					rateLimitingActive: stats.redis?.connected || false,
+					ddosProtection: true,
+					abnormalActivity: (stats.users?.blocked || 0) > 10,
+					note: 'All rate limiting data persisted in Redis for cluster-wide enforcement'
+				}
+			};
+
+			cryptoLogger.info('[RATE-LIMIT-SECURITY] Security Audit Complete', {
+				activeUsers: audit.metrics.users.activeLimiters,
+				blockedUsers: audit.metrics.users.blocked,
+				globalBlocked: audit.metrics.global.isBlocked,
+				alertCount: health.alerts?.length || 0
+			});
+
+			return audit;
+		} catch (error) {
+			cryptoLogger.error('[RATE-LIMIT-SECURITY] Audit failed', {
+				error: error.message,
+				stack: error.stack
+			});
+
+			return {
+				timestamp: Date.now(),
+				error: error.message,
+				status: 'failed',
+				recommendations: [{
+					priority: 'critical',
+					action: 'Fix rate limiter immediately',
+					impact: 'Security monitoring unavailable'
+				}]
+			};
+		}
+	}
+
+	async close() {
+		if (this._limiter && typeof this._limiter.close === 'function') {
+			await this._limiter.close();
+		}
+		this._limiter = null;
+		this._initializePromise = null;
 	}
 }
 
-export const rateLimitMiddleware = new RateLimitMiddleware();
+export const rateLimitMiddleware = new RateLimitMiddleware(undefined, { lazy: false });

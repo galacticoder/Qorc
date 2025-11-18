@@ -1,23 +1,43 @@
-import { useRef } from "react";
+import { useRef, useCallback } from "react";
 import { Button } from "../../ui/button";
 import { PaperclipIcon } from "../icons.tsx";
 import { cn } from "@/lib/utils";
 
 interface FileUploaderProps {
-  onFileSelected: (file: File) => void;
-  disabled?: boolean;
+  readonly onFileSelected: (file: File) => void;
+  readonly disabled?: boolean;
 }
 
 export function FileUploader({ onFileSelected, disabled }: FileUploaderProps) {
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleChange = useCallback((e: React.ChangeEvent<HTMLInputElement>): void => {
     const file = e.target.files?.[0];
     if (file) {
       onFileSelected(file);
     }
     e.target.value = "";
-  };
+  }, [onFileSelected]);
+
+  const handleClick = useCallback((): void => {
+    if (!disabled) {
+      fileInputRef.current?.click();
+    }
+  }, [disabled]);
+
+  const handleMouseEnter = useCallback((e: React.MouseEvent<HTMLButtonElement>): void => {
+    if (!disabled) {
+      e.currentTarget.style.backgroundColor = 'var(--color-surface)';
+      e.currentTarget.style.color = 'var(--color-text-primary)';
+    }
+  }, [disabled]);
+
+  const handleMouseLeave = useCallback((e: React.MouseEvent<HTMLButtonElement>): void => {
+    if (!disabled) {
+      e.currentTarget.style.backgroundColor = 'transparent';
+      e.currentTarget.style.color = 'var(--color-text-secondary)';
+    }
+  }, [disabled]);
 
   return (
     <>
@@ -33,19 +53,9 @@ export function FileUploader({ onFileSelected, disabled }: FileUploaderProps) {
           color: 'var(--color-text-secondary)',
           backgroundColor: 'transparent'
         }}
-        onMouseEnter={(e) => {
-          if (!disabled) {
-            e.currentTarget.style.backgroundColor = 'var(--color-surface)';
-            e.currentTarget.style.color = 'var(--color-text-primary)';
-          }
-        }}
-        onMouseLeave={(e) => {
-          if (!disabled) {
-            e.currentTarget.style.backgroundColor = 'transparent';
-            e.currentTarget.style.color = 'var(--color-text-secondary)';
-          }
-        }}
-        onClick={() => !disabled && fileInputRef.current?.click()}
+        onMouseEnter={handleMouseEnter}
+        onMouseLeave={handleMouseLeave}
+        onClick={handleClick}
         disabled={disabled}
         type="button"
       >

@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { getEmojiCategories, type EmojiCategory } from '../../lib/system-emoji';
 
 interface EmojiPickerProps {
@@ -6,84 +6,136 @@ interface EmojiPickerProps {
   onClose: () => void;
   className?: string;
   triggerId?: string;
+  isCurrentUser?: boolean;
 }
 
-export function EmojiPicker({ onEmojiSelect, onClose, className = '', triggerId }: EmojiPickerProps) {
-  const [categories] = useState<EmojiCategory[]>(getEmojiCategories());
+export function EmojiPicker({ onEmojiSelect, onClose, className = '', triggerId, isCurrentUser = false }: EmojiPickerProps) {
+  const [categories, setCategories] = useState<EmojiCategory[]>([]);
   const [activeCategory, setActiveCategory] = useState(0);
-  const [position, setPosition] = useState({ top: 0, left: 0 });
+  const [position, setPosition] = useState({ top: -9999, left: -9999 }); // Start off-screen to prevent flash
+  const [isPositioned, setIsPositioned] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const pickerRef = useRef<HTMLDivElement>(null);
+  
+  // Load emoji categories asynchronously
+  useEffect(() => {
+    let mounted = true;
+    getEmojiCategories().then(cats => {
+      if (mounted) {
+        setCategories(cats);
+      }
+    }).catch(error => {
+      console.error('[EmojiPicker] Failed to load emoji categories:', error);
+      // Set a minimal fallback
+      if (mounted) {
+        setCategories([{ name: 'Smileys', emojis: ['😀', '😃', '😄', '😁', '😅', '😂', '🤣', '😊', '😍', '😎'] }]);
+      }
+    });
+    return () => { mounted = false; };
+  }, []);
+
+  // Function to calculate and set position
+  const calculatePosition = useCallback(() => {
+    const trigger = triggerId
+      ? document.querySelector(`[data-emoji-trigger="${triggerId}"]`) as HTMLElement
+      : document.querySelector('[data-emoji-add-button]') as HTMLElement;
+    
+    if (!trigger) {
+      // Fallback positioning - center the picker on screen
+      const pickerWidth = 280;
+      const pickerHeight = 320;
+      const left = (window.innerWidth - pickerWidth) / 2;
+      const top = (window.innerHeight - pickerHeight) / 2;
+      setPosition({ top, left });
+      setIsPositioned(true);
+      return;
+    }
+
+    const triggerRect = trigger.getBoundingClientRect();
+    const pickerWidth = 280;
+    const pickerHeight = 320;
+
+    // Use the isCurrentUser prop for better detection
+    const isCurrentUserMessage = isCurrentUser;
+    
+    let left: number;
+    let top: number;
+    
+    // Position the picker relative to the trigger button
+    top = triggerRect.top - 10; // Position just slightly above the trigger button
+    
+    if (isCurrentUserMessage) {
+      // For current user (right side): position to the left of the button
+      left = triggerRect.left - pickerWidth - 8;
+    } else {
+      // For other users (left side): position to the right of the button
+      left = triggerRect.right + 8;
+    }
+
+    // Ensure the picker stays within screen bounds
+    // Adjust horizontal position if going off screen
+    if (left < 16) {
+      left = 16; // Minimum left margin
+    }
+    if (left + pickerWidth > window.innerWidth - 16) {
+      left = window.innerWidth - pickerWidth - 16; // Maximum right position
+    }
+
+    // Adjust vertical position if going off screen
+    if (top < 16) {
+      top = triggerRect.bottom + 8; // Position below button if too high
+    }
+    if (top + pickerHeight > window.innerHeight - 16) {
+      top = window.innerHeight - pickerHeight - 16; // Position above if too low
+    }
+    setPosition({ top, left });
+    setIsPositioned(true);
+  }, [triggerId, isCurrentUser]);
 
   // Position the picker relative to the trigger button
   useEffect(() => {
-    if (pickerRef.current) {
-      const trigger = triggerId
-        ? document.querySelector(`[data-emoji-trigger="${triggerId}"]`) as HTMLElement
-        : document.querySelector('[data-emoji-add-button]') as HTMLElement;
-      if (trigger) {
-        const triggerRect = trigger.getBoundingClientRect();
-        const pickerWidth = 280;
-        const pickerHeight = 320;
+    // Add a small delay to ensure the button is rendered and visible
+    const timer = setTimeout(() => {
+      calculatePosition();
+    }, 10);
+    
+    return () => clearTimeout(timer);
+  }, [calculatePosition]);
 
-        // Calculate position to keep picker on screen and avoid overlapping message
-        // Find the message container to get better positioning
-        const messageContainer = trigger.closest('.mb-4') as HTMLElement;
-        const messageRect = messageContainer ? messageContainer.getBoundingClientRect() : triggerRect;
-        
-        // Detect if this is a current user message (right side) or other user message (left side)
-        // Current user messages have flex-row-reverse class
-        const isCurrentUserMessage = messageContainer?.classList.contains('flex-row-reverse') || false;
-        
-        let left: number;
-        let top = triggerRect.top - 10; // Position just slightly above the trigger button
-        
-        if (isCurrentUserMessage) {
-          // For current user (right side): prefer left positioning
-          left = triggerRect.left - pickerWidth - 8;
-          // If going off left edge, position to the right instead
-          if (left < 16) {
-            left = triggerRect.right + 8;
-          }
-        } else {
-          // For other users (left side): prefer right positioning  
-          left = triggerRect.right + 8;
-          // If going off right edge, position to the left instead
-          if (left + pickerWidth > window.innerWidth - 16) {
-            left = triggerRect.left - pickerWidth - 8;
-          }
-        }
+  // Recalculate position on scroll and resize
+  useEffect(() => {
+    let scrollTimeout: ReturnType<typeof setTimeout>;
+    
+    const handleScroll = () => {
+      // Debounce scroll events to prevent excessive recalculations
+      clearTimeout(scrollTimeout);
+      scrollTimeout = setTimeout(() => {
+        calculatePosition();
+      }, 16); // ~60fps
+    };
 
-        // Final fallback - ensure it's always on screen
-        if (left < 16) {
-          left = 16; // Minimum left margin
-        }
+    const handleResize = () => {
+      calculatePosition();
+    };
 
-        // Adjust if going off right edge
-        if (left + pickerWidth > window.innerWidth) {
-          left = window.innerWidth - pickerWidth - 16;
-        }
-
-        // If going off top, position below the trigger button instead
-        if (top < 16) {
-          top = triggerRect.bottom + 8; // Position below button
-        }
-
-        // If going off bottom, move up
-        if (top + pickerHeight > window.innerHeight) {
-          top = window.innerHeight - pickerHeight - 16;
-        }
-
-        setPosition({ top, left });
-      }
-    }
-  }, [triggerId]);
+    window.addEventListener('scroll', handleScroll, true);
+    window.addEventListener('resize', handleResize);
+    
+    return () => {
+      clearTimeout(scrollTimeout);
+      window.removeEventListener('scroll', handleScroll, true);
+      window.removeEventListener('resize', handleResize);
+    };
+  }, [calculatePosition]);
 
   // Close on outside click
   useEffect(() => {
     function handleClickOutside(event: MouseEvent) {
       if (pickerRef.current && !pickerRef.current.contains(event.target as Node)) {
-        onClose();
+        // Add a small delay to prevent immediate closing when button is clicked
+        setTimeout(() => {
+          onClose();
+        }, 100);
       }
     }
 
@@ -107,6 +159,11 @@ export function EmojiPicker({ onEmojiSelect, onClose, className = '', triggerId 
     onEmojiSelect(emoji);
     onClose();
   };
+
+  // Don't render until positioned and categories are loaded to prevent flash
+  if (!isPositioned || categories.length === 0) {
+    return null;
+  }
 
   return (
     <div

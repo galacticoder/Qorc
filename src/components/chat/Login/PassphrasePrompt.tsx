@@ -1,53 +1,58 @@
-import React, { useState } from "react";
-import { PasswordFieldWithConfirm } from "./PasswordFieldWithConfirm.tsx";
+import React, { useState, useCallback, useMemo } from "react";
+import { PasswordField } from "./PasswordField.tsx";
 import { Input } from "../../ui/input";
 import { Label } from "../../ui/label";
 import { Button } from "../../ui/button";
 
 interface PassphrasePromptProps {
-  mode: "login" | "register";
-  onSubmit: (passphrase: string) => Promise<void>;
-  disabled: boolean;
-  authStatus?: string;
-  initialPassphrase?: string;
-  initialConfirmPassphrase?: string;
-  onChangePassphrase?: (v:string)=>void;
-  onChangeConfirm?: (v:string)=>void;
+  readonly mode: "login" | "register";
+  readonly onSubmit: (passphrase: string) => Promise<void>;
+  readonly disabled: boolean;
+  readonly authStatus?: string;
+  readonly initialPassphrase?: string;
+  readonly initialConfirmPassphrase?: string;
+  readonly onChangePassphrase?: (v: string) => void;
+  readonly onChangeConfirm?: (v: string) => void;
 }
 
-export function PassphrasePrompt({ mode, onSubmit, disabled, authStatus, initialPassphrase = "", initialConfirmPassphrase = "", onChangePassphrase, onChangeConfirm }: PassphrasePromptProps) {
+const PASSPHRASE_MIN_LENGTH = 12;
+const PASSPHRASE_MAX_LENGTH = 1000;
+
+export function PassphrasePrompt({ 
+  mode, 
+  onSubmit, 
+  disabled, 
+  authStatus, 
+  initialPassphrase = "", 
+  initialConfirmPassphrase = "", 
+  onChangePassphrase, 
+  onChangeConfirm 
+}: PassphrasePromptProps) {
   const [passphrase, setPassphrase] = useState(initialPassphrase);
   const [confirmPassphrase, setConfirmPassphrase] = useState(initialConfirmPassphrase);
-
-  const handlePassChange = (v:string) => { setPassphrase(v); onChangePassphrase?.(v); };
-  const handleConfirm = (v:string) => { setConfirmPassphrase(v); onChangeConfirm?.(v); };
   const [isSubmitting, setIsSubmitting] = useState(false);
 
-  const isPassphraseValid = passphrase.length >= 12;
-  const doPassphrasesMatch = passphrase === confirmPassphrase;
+  const handlePassChange = useCallback((v: string): void => { 
+    setPassphrase(v); 
+    onChangePassphrase?.(v); 
+  }, [onChangePassphrase]);
+  
+  const handleConfirm = useCallback((v: string): void => { 
+    setConfirmPassphrase(v); 
+    onChangeConfirm?.(v); 
+  }, [onChangeConfirm]);
 
-  const handleSubmit = async (e: React.FormEvent) => {
+  const isPassphraseValid = useMemo(() => passphrase.length >= PASSPHRASE_MIN_LENGTH, [passphrase]);
+  const doPassphrasesMatch = useMemo(() => passphrase === confirmPassphrase, [passphrase, confirmPassphrase]);
+
+  const handleSubmit = useCallback(async (e: React.FormEvent): Promise<void> => {
     e.preventDefault();
     if (isSubmitting) return;
     
-    // SECURITY: Validate passphrase
     const trimmedPassphrase = passphrase.trim();
     if (!trimmedPassphrase) return;
-    
-    // SECURITY: Validate passphrase length
-    if (trimmedPassphrase.length < 12) {
-      console.error('Passphrase must be at least 12 characters');
-      return;
-    }
-    
-    if (trimmedPassphrase.length > 1000) {
-      console.error('Passphrase too long');
-      return;
-    }
-    
-    // NOTE: Weak passphrase pattern checks disabled per request.
-    // Only the minimum length requirement is enforced for the passphrase.
-    
+    if (trimmedPassphrase.length < PASSPHRASE_MIN_LENGTH) return;
+    if (trimmedPassphrase.length > PASSPHRASE_MAX_LENGTH) return;
     if (mode === "register" && !doPassphrasesMatch) return;
     if (!isPassphraseValid) return;
 
@@ -57,19 +62,20 @@ export function PassphrasePrompt({ mode, onSubmit, disabled, authStatus, initial
     } finally {
       setIsSubmitting(false);
     }
-  };
+  }, [isSubmitting, passphrase, mode, doPassphrasesMatch, isPassphraseValid, onSubmit]);
 
   return (
     <form onSubmit={handleSubmit} className="space-y-4">
       {mode === "register" ? (
-        <PasswordFieldWithConfirm
+        <PasswordField
           label="Secure Encryption Passphrase"
           value={passphrase}
           confirmValue={confirmPassphrase}
           onChange={handlePassChange}
           onConfirmChange={handleConfirm}
           required
-          minLength={12}
+          minLength={PASSPHRASE_MIN_LENGTH}
+          maxLength={PASSPHRASE_MAX_LENGTH}
           strengthCheck
           warningMessage={
             <>
@@ -90,6 +96,8 @@ export function PassphrasePrompt({ mode, onSubmit, disabled, authStatus, initial
             onChange={(e) => handlePassChange(e.target.value)}
             disabled={disabled || isSubmitting}
             required
+            autoComplete="current-password"
+            maxLength={PASSPHRASE_MAX_LENGTH}
           />
           <div className="text-sm text-muted-foreground">
             Your passphrase is required to enable blocking functionality and access encrypted data.

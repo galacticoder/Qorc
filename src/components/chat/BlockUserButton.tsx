@@ -1,62 +1,119 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger } from '@/components/ui/dialog';
-import { Input } from '@/components/ui/input';
-import { Label } from '@/components/ui/label';
-import { UserX, UserCheck, Shield } from 'lucide-react';
+import { UserX, UserCheck } from 'lucide-react';
 import { blockingSystem } from '@/lib/blocking-system';
+import { blockStatusCache } from '@/lib/block-status-cache';
 
 interface BlockUserButtonProps {
-  username: string;
-  passphrase?: string;
-  onPassphraseRequired?: () => void;
-  variant?: 'default' | 'outline' | 'ghost' | 'destructive' | 'secondary' | 'link';
-  size?: 'default' | 'sm' | 'lg' | 'icon';
-  className?: string;
-  showText?: boolean;
-  onBlockStatusChange?: (username: string, isBlocked: boolean) => void;
+  readonly username: string;
+  readonly passphraseRef?: React.MutableRefObject<string>;
+  readonly kyberSecretRef?: React.MutableRefObject<Uint8Array | null>;
+  readonly getDisplayUsername?: (username: string) => Promise<string>;
+  readonly onPassphraseRequired?: () => void;
+  readonly variant?: 'default' | 'outline' | 'ghost' | 'destructive' | 'secondary' | 'link';
+  readonly size?: 'default' | 'sm' | 'lg' | 'icon';
+  readonly className?: string;
+  readonly showText?: boolean;
+  readonly onBlockStatusChange?: (username: string, isBlocked: boolean) => void;
+  readonly initialBlocked?: boolean;
 }
 
 export function BlockUserButton({ 
   username, 
-  passphrase, 
-  onPassphraseRequired,
+  passphraseRef,
+  kyberSecretRef,
+  getDisplayUsername,
   variant = 'outline',
   size = 'sm',
   className = '',
   showText = true,
-  onBlockStatusChange
+  onBlockStatusChange,
+  initialBlocked,
 }: BlockUserButtonProps) {
   const [isBlocked, setIsBlocked] = useState(false);
   const [loading, setLoading] = useState(false);
   const [showBlockDialog, setShowBlockDialog] = useState(false);
   const [showUnblockDialog, setShowUnblockDialog] = useState(false);
-  const [blockReason, setBlockReason] = useState('');
   const [error, setError] = useState<string | null>(null);
-  const [tempPassphrase, setTempPassphrase] = useState('');
-  const [needsPassphrase, setNeedsPassphrase] = useState(!passphrase);
+  const [resolvedName, setResolvedName] = useState<string>(username);
 
-  // Check if user is blocked on mount
-  useEffect(() => {
-    checkBlockStatus();
-  }, [username, passphrase]);
-
-  const checkBlockStatus = async () => {
-    if (!username || (!passphrase && !tempPassphrase)) return;
-    
-    try {
-      const blocked = await blockingSystem.isUserBlocked(username, passphrase || tempPassphrase);
-      setIsBlocked(blocked);
-    } catch (error) {
-      console.error('Error checking block status:', error);
-    }
-  };
-
-  const handleBlockUser = async () => {
+  const checkBlockStatus = useCallback(async () => {
     if (!username) return;
     
-    if (!passphrase && !tempPassphrase) {
-      setNeedsPassphrase(true);
+    const passphrase = passphraseRef?.current;
+    const kyber = kyberSecretRef?.current || null;
+    await new Promise((r) => setTimeout(r, 0));
+    try {
+      const keyArg: any = passphrase ? passphrase : (kyber ? { kyberSecret: kyber } : '');
+      const blocked = await blockingSystem.isUserBlocked(username, keyArg);
+      setIsBlocked(blocked);
+      blockStatusCache.set(username, blocked);
+    } catch {
+      const cached = blockStatusCache.get(username);
+      if (cached !== null) {
+        setIsBlocked(cached);
+      }
+    }
+  }, [username, passphraseRef, kyberSecretRef]);
+
+  useEffect(() => {
+    if (typeof initialBlocked === 'boolean') {
+      setIsBlocked(initialBlocked);
+    }
+    checkBlockStatus();
+  }, [username, initialBlocked, checkBlockStatus]);
+
+  useEffect(() => {
+    let canceled = false;
+    (async () => {
+      try {
+        if (typeof getDisplayUsername === 'function' && typeof username === 'string' && username) {
+          const dn = await getDisplayUsername(username);
+          if (!canceled && typeof dn === 'string' && dn) {
+            setResolvedName(dn);
+          }
+        } else {
+          setResolvedName(username);
+        }
+      } catch {
+        setResolvedName(username);
+      }
+    })();
+    return () => { canceled = true; };
+  }, [username, getDisplayUsername]);
+
+  const handleVisibilityChange = useCallback(() => {
+    if (document.visibilityState === 'visible') {
+      checkBlockStatus();
+    }
+  }, [checkBlockStatus]);
+
+  useEffect(() => {
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    return () => document.removeEventListener('visibilitychange', handleVisibilityChange);
+  }, [handleVisibilityChange]);
+
+  const handleBlockStatusChangeEvent = useCallback((event: CustomEvent) => {
+    const { username: changedUsername, isBlocked: newBlockedState } = event.detail;
+    if (changedUsername === username) {
+      setIsBlocked(newBlockedState);
+    }
+  }, [username]);
+
+  useEffect(() => {
+    window.addEventListener('block-status-changed', handleBlockStatusChangeEvent as EventListener);
+    return () => window.removeEventListener('block-status-changed', handleBlockStatusChangeEvent as EventListener);
+  }, [handleBlockStatusChangeEvent]);
+
+
+  const handleBlockUser = useCallback(async () => {
+    if (!username) return;
+    
+    const passphrase = passphraseRef?.current;
+    const kyber = kyberSecretRef?.current || null;
+    if (!passphrase && !kyber) {
+      setError('Please log in.');
       return;
     }
 
@@ -64,35 +121,26 @@ export function BlockUserButton({
     setError(null);
 
     try {
-      await blockingSystem.blockUser(
-        username,
-        passphrase || tempPassphrase,
-        blockReason.trim() || undefined
-      );
-      
+      const keyArg: any = passphrase ? passphrase : { kyberSecret: kyber! };
+      await blockingSystem.blockUser(username, keyArg);
       setIsBlocked(true);
       setShowBlockDialog(false);
-      setBlockReason('');
-      
-      // Emit blocking status change event
-      window.dispatchEvent(new CustomEvent('block-status-changed', {
-        detail: { username, isBlocked: true }
-      }));
-      
+      blockStatusCache.set(username, true);
       onBlockStatusChange?.(username, true);
-    } catch (err) {
-      console.error('Error blocking user:', err);
+    } catch {
       setError('Failed to block user. Please try again.');
     } finally {
       setLoading(false);
     }
-  };
+  }, [username, passphraseRef, kyberSecretRef, onBlockStatusChange]);
 
-  const handleUnblockUser = async () => {
+  const handleUnblockUser = useCallback(async () => {
     if (!username) return;
     
-    if (!passphrase && !tempPassphrase) {
-      setNeedsPassphrase(true);
+    const passphrase = passphraseRef?.current;
+    const kyber = kyberSecretRef?.current || null;
+    if (!passphrase && !kyber) {
+      setError('Please log in.');
       return;
     }
 
@@ -100,75 +148,25 @@ export function BlockUserButton({
     setError(null);
 
     try {
-      await blockingSystem.unblockUser(username, passphrase || tempPassphrase);
+      const keyArg: any = passphrase ? passphrase : { kyberSecret: kyber! };
+      await blockingSystem.unblockUser(username, keyArg);
       setIsBlocked(false);
       setShowUnblockDialog(false);
-      
-      // Emit blocking status change event
-      window.dispatchEvent(new CustomEvent('block-status-changed', {
-        detail: { username, isBlocked: false }
-      }));
-      
+      blockStatusCache.set(username, false);
       onBlockStatusChange?.(username, false);
-    } catch (err) {
-      console.error('Error unblocking user:', err);
+    } catch {
       setError('Failed to unblock user. Please try again.');
     } finally {
       setLoading(false);
     }
-  };
+  }, [username, passphraseRef, kyberSecretRef, onBlockStatusChange]);
 
-  const handlePassphraseSubmit = async () => {
-    if (!tempPassphrase.trim()) {
-      setError('Please enter your passphrase');
-      return;
+  const buttonClassName = useMemo(() => {
+    if (isBlocked) {
+      return `${className} flex items-center gap-1`;
     }
-    
-    setNeedsPassphrase(false);
-    await checkBlockStatus();
-  };
-
-  if (needsPassphrase && !passphrase) {
-    return (
-      <Dialog open={needsPassphrase} onOpenChange={setNeedsPassphrase}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>Passphrase Required</DialogTitle>
-            <DialogDescription>
-              Enter your passphrase to manage blocked users.
-            </DialogDescription>
-          </DialogHeader>
-          <div className="space-y-4">
-            {error && (
-              <div className="text-sm text-red-600 dark:text-red-400">
-                {error}
-              </div>
-            )}
-            <div className="space-y-2">
-              <Label htmlFor="temp-passphrase">Passphrase</Label>
-              <Input
-                id="temp-passphrase"
-                type="password"
-                placeholder="Enter your passphrase"
-                value={tempPassphrase}
-                onChange={(e) => setTempPassphrase(e.target.value)}
-                onKeyPress={(e) => e.key === 'Enter' && handlePassphraseSubmit()}
-              />
-            </div>
-          </div>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setNeedsPassphrase(false)}>Cancel</Button>
-            <Button
-              onClick={handlePassphraseSubmit}
-              disabled={!tempPassphrase.trim()}
-            >
-              Continue
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-    );
-  }
+    return `${className} flex items-center gap-1`;
+  }, [isBlocked, className]);
 
   if (isBlocked) {
     return (
@@ -177,27 +175,29 @@ export function BlockUserButton({
           <Button
             variant={variant}
             size={size}
-            className={`text-green-600 hover:text-green-700 hover:bg-green-50 dark:hover:bg-green-950 ${className}`}
+            className={buttonClassName}
             disabled={loading}
           >
             <UserCheck className="h-4 w-4" />
-            {showText && <span className="ml-1">Unblock</span>}
+            {showText && <span>Unblock</span>}
           </Button>
         </DialogTrigger>
-        <DialogContent>
+        <DialogContent className="sm:max-w-md">
           <DialogHeader>
             <DialogTitle>Unblock User</DialogTitle>
             <DialogDescription>
-              Are you sure you want to unblock {username}? They will be able to send you messages and calls again.
+              Unblocking {resolvedName} will allow them to send you messages and calls again.
             </DialogDescription>
           </DialogHeader>
           {error && (
-            <div className="text-sm text-red-600 dark:text-red-400">
+            <div className="rounded-md bg-red-50 dark:bg-red-950 p-3 text-sm text-red-600 dark:text-red-400">
               {error}
             </div>
           )}
           <DialogFooter>
-            <Button variant="outline">Cancel</Button>
+            <Button variant="outline" onClick={() => setShowUnblockDialog(false)} disabled={loading}>
+              Cancel
+            </Button>
             <Button
               onClick={handleUnblockUser}
               disabled={loading}
@@ -217,39 +217,29 @@ export function BlockUserButton({
         <Button
           variant={variant}
           size={size}
-          className={`text-red-600 hover:text-red-700 hover:bg-red-50 dark:hover:bg-red-950 ${className}`}
+          className={buttonClassName}
           disabled={loading}
         >
           <UserX className="h-4 w-4" />
-          {showText && <span className="ml-1">Block</span>}
+          {showText && <span>Block</span>}
         </Button>
       </DialogTrigger>
-      <DialogContent>
+      <DialogContent className="sm:max-w-md">
         <DialogHeader>
           <DialogTitle>Block User</DialogTitle>
           <DialogDescription>
-            Are you sure you want to block {username}? They will not be able to send you messages or calls.
+            Blocking {resolvedName} will prevent them from sending you messages or calls.
           </DialogDescription>
         </DialogHeader>
-        <div className="space-y-4">
-          {error && (
-            <div className="text-sm text-red-600 dark:text-red-400">
-              {error}
-            </div>
-          )}
-          <div className="space-y-2">
-            <Label htmlFor="block-reason">Reason (optional)</Label>
-            <Input
-              id="block-reason"
-              placeholder="Reason for blocking (optional)"
-              value={blockReason}
-              onChange={(e) => setBlockReason(e.target.value)}
-              maxLength={100}
-            />
+        {error && (
+          <div className="rounded-md bg-red-50 dark:bg-red-950 p-3 text-sm text-red-600 dark:text-red-400">
+            {error}
           </div>
-        </div>
+        )}
         <DialogFooter>
-          <Button variant="outline">Cancel</Button>
+          <Button variant="outline" onClick={() => setShowBlockDialog(false)} disabled={loading}>
+            Cancel
+          </Button>
           <Button
             onClick={handleBlockUser}
             disabled={loading}

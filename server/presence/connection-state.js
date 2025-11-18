@@ -1,25 +1,121 @@
 import { withRedisClient } from './presence.js';
 import { TTL_CONFIG } from '../config/config.js';
 import crypto from 'crypto';
+import { logger as cryptoLogger } from '../crypto/crypto-logger.js';
 
-// Redis key patterns for connection state
-const CONNECTION_STATE_KEY = (sessionId) => `connection_state:${sessionId}`;
-const USER_SESSION_KEY = (username) => `user_session:${username}`;
-const SESSION_TTL = TTL_CONFIG.SESSION_TTL; // Use standardized TTL
+const SESSION_ID_BYTES = 32;
+const SESSION_ID_REGEX = /^[A-Za-z0-9_-]{43}$/;
+const USERNAME_REGEX = /^[A-Za-z0-9_-]{3,32}$/;
+const MAX_STATE_JSON_SIZE = 32 * 1024;
+const MAX_SCAN_ITERATIONS = 1000;
+const RATE_LIMIT_WINDOW_MS = 60_000;
+const RATE_LIMIT_MAX_REQUESTS = 200;
+
+const SERVER_STARTUP_KEY = 'server_startup_timestamp';
+const SESSION_TTL = sanitizeTtl(TTL_CONFIG.SESSION_TTL, 900, 86_400);
+const AUTH_STATE_TTL = sanitizeTtl(TTL_CONFIG.AUTH_STATE_TTL, 1800, 86_400);
+const PRESENCE_TTL = sanitizeTtl(TTL_CONFIG.PRESENCE_TTL, 300, 3600);
+
+// Track server startup time for stale session detection
+const serverStartupTime = Date.now();
+
+function sanitizeTtl(value, fallback, maxValue) {
+  const ttl = Number.parseInt(value ?? fallback, 10);
+  if (!Number.isFinite(ttl) || ttl <= 0) {
+    cryptoLogger.warn('Invalid TTL configuration value detected; using fallback', { fallback });
+    return fallback;
+  }
+  return Math.min(ttl, maxValue);
+}
+
+function generateSessionId() {
+  return crypto.randomBytes(SESSION_ID_BYTES).toString('base64url');
+}
+
+function isValidSessionId(sessionId) {
+  return typeof sessionId === 'string' && SESSION_ID_REGEX.test(sessionId);
+}
+
+function normalizeUsername(username) {
+  if (typeof username !== 'string') return null;
+  const trimmed = username.trim();
+  return USERNAME_REGEX.test(trimmed) ? trimmed : null;
+}
+
+function hashIdentifier(value) {
+  return crypto.createHash('sha256').update(value).digest('hex');
+}
+
+function CONNECTION_STATE_KEY(sessionId) {
+  return `connection_state:${sessionId}`;
+}
+
+function USER_SESSION_KEY(username) {
+  return `user_session:${hashIdentifier(username)}`;
+}
+
+function AUTH_STATE_KEY(username) {
+  return `auth_state:${hashIdentifier(username)}`;
+}
 
 /**
- * Redis-based connection state manager for millions of concurrent users
- * Replaces in-memory ws.clientState to prevent memory exhaustion
+ * Enforces rate limits across all cluster servers
+ * 
+ * @param {string} key - Rate limit key (e.g., "session:update:sessionId")
+ * @param {number} limit - Maximum requests allowed in window
+ * @param {number} windowMs - Time window in milliseconds
+ * @throws {Error} - If rate limit exceeded
+ */
+async function enforceRateLimit(key, limit = RATE_LIMIT_MAX_REQUESTS, windowMs = RATE_LIMIT_WINDOW_MS) {
+  try {
+    await withRedisClient(async (client) => {
+      const rateLimitKey = `ratelimit:${key}`;
+      const count = await client.incr(rateLimitKey);
+      
+      // Set expiry on first request (atomic with INCR)
+      if (count === 1) {
+        await client.pexpire(rateLimitKey, windowMs);
+      }
+      
+      if (count > limit) {
+        throw new Error('Rate limit exceeded');
+      }
+    });
+  } catch (error) {
+    if (error.message === 'Rate limit exceeded') {
+      throw error;
+    }
+    cryptoLogger.warn('[CONNECTION-STATE] Rate limit check failed, allowing request', { 
+      key: key?.slice(0, 20),
+      error: error?.message 
+    });
+  }
+}
+
+/**
+ * Connection state manager
  */
 export class ConnectionStateManager {
+  static async recordServerStartup() {
+    try {
+      await withRedisClient(async (client) => {
+        await client.setex(SERVER_STARTUP_KEY, SESSION_TTL, serverStartupTime.toString());
+        cryptoLogger.info('Recorded server startup time', { timestamp: serverStartupTime });
+      });
+    } catch (error) {
+      cryptoLogger.warn('Failed to record server startup time', { error: error?.message });
+    }
+  }
+
   /**
    * Create a new session and return session ID
    */
   static async createSession(username = null) {
-    const sessionId = `sess_${Date.now()}_${crypto.randomUUID().replace(/-/g, '')}`;
-    
+    const normalizedUsername = normalizeUsername(username);
+    const sessionId = generateSessionId();
+
     const initialState = {
-      username: username,
+      username: normalizedUsername,
       hasPassedAccountLogin: false,
       hasAuthenticated: false,
       pendingPassphrase: false,
@@ -30,9 +126,8 @@ export class ConnectionStateManager {
     await withRedisClient(async (client) => {
       await client.setex(CONNECTION_STATE_KEY(sessionId), SESSION_TTL, JSON.stringify(initialState));
       
-      // If username provided, link user to session for duplicate login prevention
-      if (username) {
-        await client.setex(USER_SESSION_KEY(username), SESSION_TTL, sessionId);
+      if (normalizedUsername) {
+        await client.setex(USER_SESSION_KEY(normalizedUsername), SESSION_TTL, sessionId);
       }
     });
 
@@ -43,15 +138,16 @@ export class ConnectionStateManager {
    * Get connection state by session ID
    */
   static async getState(sessionId) {
-    if (!sessionId) return null;
+    if (!isValidSessionId(sessionId)) return null;
 
     try {
       return await withRedisClient(async (client) => {
         const stateJson = await client.get(CONNECTION_STATE_KEY(sessionId));
-        return stateJson ? JSON.parse(stateJson) : null;
+        if (!stateJson || stateJson.length > MAX_STATE_JSON_SIZE) return null;
+        return JSON.parse(stateJson);
       });
     } catch (error) {
-      console.error(`[CONNECTION-STATE] Error getting state for session ${sessionId}:`, error);
+      cryptoLogger.error('Failed to get session state', error, { sessionId });
       return null;
     }
   }
@@ -60,15 +156,17 @@ export class ConnectionStateManager {
    * Get authentication state for a user (for reconnection recovery)
    */
   static async getUserAuthState(username) {
-    if (!username) return null;
+    const normalizedUsername = normalizeUsername(username);
+    if (!normalizedUsername) return null;
 
     try {
       return await withRedisClient(async (client) => {
-        const authStateJson = await client.get(`auth_state:${username}`);
-        return authStateJson ? JSON.parse(authStateJson) : null;
+        const authStateJson = await client.get(AUTH_STATE_KEY(normalizedUsername));
+        if (!authStateJson || authStateJson.length > MAX_STATE_JSON_SIZE) return null;
+        return JSON.parse(authStateJson);
       });
     } catch (error) {
-      console.error(`[CONNECTION-STATE] Error getting auth state for user ${username}:`, error);
+      cryptoLogger.error('Failed to get user auth state', error, { username: normalizedUsername });
       return null;
     }
   }
@@ -77,7 +175,8 @@ export class ConnectionStateManager {
    * Store authentication state for a user (persist across reconnections)
    */
   static async storeUserAuthState(username, authState) {
-    if (!username) return false;
+    const normalizedUsername = normalizeUsername(username);
+    if (!normalizedUsername) return false;
 
     try {
       const stateToStore = {
@@ -87,13 +186,11 @@ export class ConnectionStateManager {
       };
 
       return await withRedisClient(async (client) => {
-        // Store auth state with longer TTL to handle reconnections
-        const AUTH_STATE_TTL = TTL_CONFIG.AUTH_STATE_TTL || 1800; // fallback 30 minutes
-        await client.setex(`auth_state:${username}`, AUTH_STATE_TTL, JSON.stringify(stateToStore));
+        await client.setex(AUTH_STATE_KEY(normalizedUsername), AUTH_STATE_TTL, JSON.stringify(stateToStore));
         return true;
       });
     } catch (error) {
-      console.error(`[CONNECTION-STATE] Error storing auth state for user ${username}:`, error);
+      cryptoLogger.error('Failed to store user auth state', error, { username: normalizedUsername });
       return false;
     }
   }
@@ -102,14 +199,15 @@ export class ConnectionStateManager {
    * Clear authentication state for a user (on explicit logout)
    */
   static async clearUserAuthState(username) {
-    if (!username) return;
+    const normalizedUsername = normalizeUsername(username);
+    if (!normalizedUsername) return;
 
     try {
       await withRedisClient(async (client) => {
-        await client.del(`auth_state:${username}`);
+        await client.del(AUTH_STATE_KEY(normalizedUsername));
       });
     } catch (error) {
-      console.error(`[CONNECTION-STATE] Error clearing auth state for user ${username}:`, error);
+      cryptoLogger.error('Failed to clear auth state', error, { username: normalizedUsername });
     }
   }
 
@@ -117,22 +215,22 @@ export class ConnectionStateManager {
    * Refresh user auth state TTL (call on activity)
    */
   static async refreshUserAuthState(username) {
-    if (!username) return false;
+    const normalizedUsername = normalizeUsername(username);
+    if (!normalizedUsername) return false;
 
     try {
       return await withRedisClient(async (client) => {
-        const authStateJson = await client.get(`auth_state:${username}`);
+        const authStateJson = await client.get(AUTH_STATE_KEY(normalizedUsername));
         if (!authStateJson) return false;
 
         const authState = JSON.parse(authStateJson);
         authState.lastActivity = Date.now();
         
-        const AUTH_STATE_TTL = TTL_CONFIG.AUTH_STATE_TTL || 1800; // fallback 30 minutes
-        await client.setex(`auth_state:${username}`, AUTH_STATE_TTL, JSON.stringify(authState));
+        await client.setex(AUTH_STATE_KEY(normalizedUsername), AUTH_STATE_TTL, JSON.stringify(authState));
         return true;
       });
     } catch (error) {
-      console.error(`[CONNECTION-STATE] Error refreshing auth state for user ${username}:`, error);
+      cryptoLogger.error('Failed to refresh auth state', error, { username: normalizedUsername });
       return false;
     }
   }
@@ -141,7 +239,8 @@ export class ConnectionStateManager {
    * Update connection state
    */
   static async updateState(sessionId, updates) {
-    if (!sessionId) return false;
+    if (!isValidSessionId(sessionId)) return false;
+    enforceRateLimit(`session:update:${sessionId}`, 500);
 
     try {
       return await withRedisClient(async (client) => {
@@ -155,14 +254,12 @@ export class ConnectionStateManager {
           lastActivity: Date.now()
         };
 
-        // Handle username changes with atomic race condition protection
         if ('username' in updates && updates.username !== currentState.username) {
           const oldUsername = currentState.username;
-          const newUsername = updates.username;
+          const newUsername = normalizeUsername(updates.username);
 
           // Case 1: Clearing username (setting to null/empty)
           if (!newUsername && oldUsername) {
-            // Use Lua script for atomic check-and-delete
             const luaScript = `
               local userKey = KEYS[1]
               local sessionId = ARGV[1]
@@ -177,7 +274,6 @@ export class ConnectionStateManager {
           }
           // Case 2: Setting/changing to a new username
           else if (newUsername) {
-            // Use Lua script for atomic username claiming
             const luaScript = `
               local userKey = KEYS[1]
               local sessionKey = KEYS[2]
@@ -233,13 +329,12 @@ export class ConnectionStateManager {
             );
 
             if (result === 0) {
-              throw new Error(`Username '${newUsername}' is already taken by another active session`);
+              throw new Error('Username already in use by another active session');
             }
           }
         }
         // Case 3: No username change but refresh TTL if username exists
         else if (currentState.username && !('username' in updates)) {
-          // Refresh TTL for existing username mapping if we own it
           const currentOwner = await client.get(USER_SESSION_KEY(currentState.username));
           if (currentOwner === sessionId) {
             await client.setex(USER_SESSION_KEY(currentState.username), SESSION_TTL, sessionId);
@@ -250,7 +345,51 @@ export class ConnectionStateManager {
         return true;
       });
     } catch (error) {
-      console.error(`[CONNECTION-STATE] Error updating state for session ${sessionId}:`, error);
+      cryptoLogger.error('Failed to update connection state', error, { sessionId });
+      return false;
+    }
+  }
+
+  /**
+   * Cleanup session state when connection closes
+   */
+  static async cleanupConnection(sessionId) {
+    if (!isValidSessionId(sessionId)) return false;
+
+    try {
+      return await withRedisClient(async (client) => {
+        const stateJson = await client.get(CONNECTION_STATE_KEY(sessionId));
+        if (!stateJson) {
+          return false;
+        }
+
+        const state = JSON.parse(stateJson);
+        const pipeline = client.pipeline();
+        pipeline.del(CONNECTION_STATE_KEY(sessionId));
+
+        if (state.username) {
+          const usernameKey = USER_SESSION_KEY(state.username);
+          const luaScript = `
+            local key = KEYS[1]
+            local sessionId = ARGV[1]
+            if redis.call('GET', key) == sessionId then
+              redis.call('DEL', key)
+              return 1
+            end
+            return 0
+          `;
+          pipeline.eval(luaScript, 1, usernameKey, sessionId);
+        }
+
+        await pipeline.exec();
+        return true;
+      });
+    } catch (error) {
+      if (error.message?.includes('pool is draining') || error.message?.includes('cannot accept work')) {
+        cryptoLogger.debug('Connection cleanup skipped - pool shutting down', { sessionId });
+      } else {
+        cryptoLogger.error('Failed to cleanup connection state', error, { sessionId });
+      }
       return false;
     }
   }
@@ -259,7 +398,8 @@ export class ConnectionStateManager {
    * Refresh session TTL (call on activity)
    */
   static async refreshSession(sessionId) {
-    if (!sessionId) return false;
+    if (!isValidSessionId(sessionId)) return false;
+    enforceRateLimit(`session:refresh:${sessionId}`, 1000);
 
     try {
       return await withRedisClient(async (client) => {
@@ -269,25 +409,26 @@ export class ConnectionStateManager {
         const state = JSON.parse(stateJson);
         state.lastActivity = Date.now();
 
-        await client.setex(CONNECTION_STATE_KEY(sessionId), SESSION_TTL, JSON.stringify(state));
+        const pipeline = client.pipeline();
+        pipeline.setex(CONNECTION_STATE_KEY(sessionId), SESSION_TTL, JSON.stringify(state));
 
-        // Also refresh user session mapping if exists
         if (state.username) {
-          await client.setex(USER_SESSION_KEY(state.username), SESSION_TTL, sessionId);
+          pipeline.setex(USER_SESSION_KEY(state.username), SESSION_TTL, sessionId);
+        }
 
-          // Opportunistically bump presence TTL on activity
+        await pipeline.exec();
+        if (state.username) {
           try {
             const { bumpOnline } = await import('./presence.js');
-            await bumpOnline(state.username, TTL_CONFIG.PRESENCE_TTL); // Use standardized TTL
-          } catch (e) {
-            // Silently ignore presence bump errors
+            await bumpOnline(state.username, PRESENCE_TTL);
+          } catch (_e) {
           }
         }
 
         return true;
       });
     } catch (error) {
-      console.error(`[CONNECTION-STATE] Error refreshing session ${sessionId}:`, error);
+      cryptoLogger.error('Failed to refresh session', error, { sessionId });
       return false;
     }
   }
@@ -296,7 +437,7 @@ export class ConnectionStateManager {
    * Delete session (on disconnect)
    */
   static async deleteSession(sessionId) {
-    if (!sessionId) return;
+    if (!isValidSessionId(sessionId)) return;
 
     try {
       await withRedisClient(async (client) => {
@@ -310,21 +451,19 @@ export class ConnectionStateManager {
             if (currentOwner === sessionId) {
               await client.del(USER_SESSION_KEY(state.username));
             } else if (currentOwner) {
-              // Check if the owning session still exists (cleanup stale mappings)
               const ownerSessionExists = await client.exists(CONNECTION_STATE_KEY(currentOwner));
               if (!ownerSessionExists) {
-                console.log(`[CONNECTION-STATE] Cleaning up stale username mapping for ${state.username} during session deletion`);
+                cryptoLogger.debug('Cleaning up stale username mapping during session deletion', { username: state.username });
                 await client.del(USER_SESSION_KEY(state.username));
               }
             }
           }
         }
         
-        // Remove session state
         await client.del(CONNECTION_STATE_KEY(sessionId));
       });
     } catch (error) {
-      console.error(`[CONNECTION-STATE] Error deleting session ${sessionId}:`, error);
+      cryptoLogger.error('Failed to delete session', error, { sessionId });
     }
   }
 
@@ -332,19 +471,20 @@ export class ConnectionStateManager {
    * Check if user already has an active session (prevent duplicate logins)
    */
   static async getUserActiveSession(username) {
-    if (!username) return null;
+    const normalizedUsername = normalizeUsername(username);
+    if (!normalizedUsername) return null;
+    enforceRateLimit(`user:getActive:${normalizedUsername}`, 300);
 
     try {
       return await withRedisClient(async (client) => {
-        const sessionId = await client.get(USER_SESSION_KEY(username));
+        const sessionId = await client.get(USER_SESSION_KEY(normalizedUsername));
         if (!sessionId) return null;
 
-        // Verify session still exists
         const stateJson = await client.get(CONNECTION_STATE_KEY(sessionId));
         return stateJson ? sessionId : null;
       });
     } catch (error) {
-      console.error(`[CONNECTION-STATE] Error checking user session for ${username}:`, error);
+      cryptoLogger.error('Failed to get active session for user', error, { username: normalizedUsername });
       return null;
     }
   }
@@ -358,22 +498,24 @@ export class ConnectionStateManager {
         let totalSessions = 0;
         let authenticatedUsers = 0;
         const batchSize = 100;
-        
-        // Count connection_state keys using SCAN
+        let iterations = 0;
+
         let cursor = '0';
         do {
           const result = await client.scan(cursor, 'MATCH', 'connection_state:*', 'COUNT', batchSize);
           cursor = result[0];
           totalSessions += result[1].length;
-        } while (cursor !== '0');
+          iterations++;
+        } while (cursor !== '0' && iterations < MAX_SCAN_ITERATIONS);
         
-        // Count user_session keys using SCAN
         cursor = '0';
+        iterations = 0;
         do {
           const result = await client.scan(cursor, 'MATCH', 'user_session:*', 'COUNT', batchSize);
           cursor = result[0];
           authenticatedUsers += result[1].length;
-        } while (cursor !== '0');
+          iterations++;
+        } while (cursor !== '0' && iterations < MAX_SCAN_ITERATIONS);
         
         return {
           totalSessions,
@@ -382,7 +524,7 @@ export class ConnectionStateManager {
         };
       });
     } catch (error) {
-      console.error('[CONNECTION-STATE] Error getting session stats:', error);
+      cryptoLogger.error('Failed to compute session stats', error);
       return { totalSessions: 0, authenticatedUsers: 0, timestamp: Date.now() };
     }
   }
@@ -397,7 +539,6 @@ export class ConnectionStateManager {
         let cursor = '0';
         const batchSize = 100;
 
-        // Use SCAN instead of KEYS to avoid blocking Redis
         do {
           const result = await client.scan(cursor, 'MATCH', 'connection_state:*', 'COUNT', batchSize);
           cursor = result[0];
@@ -405,18 +546,93 @@ export class ConnectionStateManager {
 
           for (const key of keys) {
             const ttl = await client.ttl(key);
-            if (ttl === -1 || ttl === -2) { // No TTL or expired
+            if (ttl === -1 || ttl === -2) {
               await client.del(key);
               cleanedCount++;
             }
           }
         } while (cursor !== '0');
 
-        console.log(`[CONNECTION-STATE] Cleaned up ${cleanedCount} expired sessions`);
+        cryptoLogger.info('Expired session cleanup completed', { cleanedCount });
         return cleanedCount;
       });
     } catch (error) {
-      console.error('[CONNECTION-STATE] Error during session cleanup:', error);
+      cryptoLogger.error('Error during expired session cleanup', error);
+      return 0;
+    }
+  }
+
+  /**
+   * Clean up sessions that might be stale from a server restart
+   */
+  static async cleanupStaleSessionsFromRestart() {
+    try {
+      return await withRedisClient(async (client) => {
+        let cleanedCount = 0;
+        let cursor = '0';
+        const batchSize = 100;
+        const now = Date.now();
+        const staleThreshold = 10 * 60 * 1000;
+        
+        cryptoLogger.info('Checking for stale sessions from server restart');
+        
+        let currentServerStartup = serverStartupTime;
+        try {
+          const startupTimeStr = await client.get(SERVER_STARTUP_KEY);
+          if (startupTimeStr) {
+            const parsed = Number.parseInt(startupTimeStr, 10);
+            if (Number.isFinite(parsed)) {
+              currentServerStartup = parsed;
+            }
+          }
+        } catch (error) {
+          cryptoLogger.warn('Could not read server startup time from Redis', { error: error?.message });
+        }
+        
+        do {
+          const result = await client.scan(cursor, 'MATCH', 'connection_state:*', 'COUNT', batchSize);
+          cursor = result[0];
+          const keys = result[1];
+          
+          for (const key of keys) {
+            try {
+              const stateJson = await client.get(key);
+              if (stateJson) {
+                const state = JSON.parse(stateJson);
+                const sessionAge = now - state.createdAt;
+                const isStale = sessionAge > staleThreshold || state.createdAt < currentServerStartup;
+                
+                if (isStale) {
+                  const sessionId = key.replace('connection_state:', '');
+                  const reason = sessionAge > staleThreshold ? 'age' : 'pre-restart';
+                  cryptoLogger.debug('Removing stale session', { sessionId, reason, ageSeconds: Math.round(sessionAge / 1000) });
+                  
+                  if (state.username) {
+                    const userKey = USER_SESSION_KEY(state.username);
+                    const currentOwner = await client.get(userKey);
+                    if (currentOwner === sessionId) {
+                      await client.del(userKey);
+                    }
+                  }
+                  
+                  await client.del(key);
+                  cleanedCount++;
+                }
+              }
+            } catch (error) {
+              console.warn(`[CONNECTION-STATE] Error processing session ${key}:`, error);
+            }
+          }
+        } while (cursor !== '0');
+        
+        if (cleanedCount > 0) {
+          cryptoLogger.info('Stale session cleanup after restart', { cleanedCount });
+        }
+        
+        return cleanedCount;
+      });
+    } catch (error) {
+      cryptoLogger.error('Error during stale session cleanup', error);
       return 0;
     }
   }
@@ -425,38 +641,34 @@ export class ConnectionStateManager {
    * Force cleanup all sessions for a specific user (for login conflicts)
    */
   static async forceCleanupUserSessions(username) {
-    if (!username) return;
+    const normalizedUsername = normalizeUsername(username);
+    if (!normalizedUsername) return;
+    enforceRateLimit(`user:forceCleanup:${normalizedUsername}`, 10, 60_000);
 
     try {
       return await withRedisClient(async (client) => {
-        console.log(`[CONNECTION-STATE] Force cleaning up sessions for user: ${username}`);
+        cryptoLogger.info('Force cleaning up user sessions', { username: normalizedUsername });
 
         // Get the current session ID for this username
-        const currentSessionId = await client.get(USER_SESSION_KEY(username));
+        const currentSessionId = await client.get(USER_SESSION_KEY(normalizedUsername));
 
         if (currentSessionId) {
-          // Check if the session still exists
           const sessionExists = await client.exists(CONNECTION_STATE_KEY(currentSessionId));
 
           if (sessionExists) {
-            // Session exists, delete it
-            console.log(`[CONNECTION-STATE] Deleting existing session ${currentSessionId} for user ${username}`);
             await client.del(CONNECTION_STATE_KEY(currentSessionId));
           }
 
-          // Always remove the username mapping
-          await client.del(USER_SESSION_KEY(username));
-          console.log(`[CONNECTION-STATE] Removed username mapping for ${username}`);
+          await client.del(USER_SESSION_KEY(normalizedUsername));
         }
 
-        // Also clear presence data to ensure user is offline
         const { setOffline } = await import('./presence.js');
-        await setOffline(username);
+        await setOffline(normalizedUsername);
 
         return true;
       });
     } catch (error) {
-      console.error(`[CONNECTION-STATE] Error during force cleanup for user ${username}:`, error);
+      cryptoLogger.error('Error during force user session cleanup', error, { username: normalizedUsername });
       return false;
     }
   }
@@ -471,37 +683,39 @@ export class ConnectionStateManager {
         let cursor = '0';
         const batchSize = 100;
 
-        // Use SCAN instead of KEYS to avoid blocking Redis
+        let iterations = 0;
         do {
           const result = await client.scan(cursor, 'MATCH', 'user_session:*', 'COUNT', batchSize);
           cursor = result[0];
           const keys = result[1];
 
           for (const key of keys) {
-            const sessionId = await client.get(key);
-            if (sessionId) {
-              // Check if the session still exists
-              const sessionExists = await client.exists(CONNECTION_STATE_KEY(sessionId));
-              if (!sessionExists) {
-                // Session doesn't exist, remove the stale username mapping
+            try {
+              const sessionId = await client.get(key);
+              if (sessionId) {
+                const sessionExists = await client.exists(CONNECTION_STATE_KEY(sessionId));
+                if (!sessionExists) {
+                  await client.del(key);
+                  cleanedCount++;
+                }
+              } else {
                 await client.del(key);
                 cleanedCount++;
-                const username = key.replace('user_session:', '');
-                console.log(`[CONNECTION-STATE] Cleaned up stale username mapping for ${username} (session ${sessionId} no longer exists)`);
               }
-            } else {
-              // Empty mapping, remove it
-              await client.del(key);
-              cleanedCount++;
+            } catch (mappingError) {
+              cryptoLogger.warn('Failed to clean stale username mapping', { key, error: mappingError?.message });
             }
           }
-        } while (cursor !== '0');
+          iterations++;
+        } while (cursor !== '0' && iterations < MAX_SCAN_ITERATIONS);
 
-        console.log(`[CONNECTION-STATE] Cleaned up ${cleanedCount} stale username mappings`);
+        if (cleanedCount > 0) {
+          cryptoLogger.info('Stale username mapping cleanup', { cleanedCount });
+        }
         return cleanedCount;
       });
     } catch (error) {
-      console.error('[CONNECTION-STATE] Error during stale username cleanup:', error);
+      cryptoLogger.error('Error during stale username cleanup', error);
       return 0;
     }
   }

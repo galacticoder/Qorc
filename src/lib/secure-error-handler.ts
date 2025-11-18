@@ -31,18 +31,15 @@ interface SecureError {
   context?: Record<string, any>;
 }
 
-interface ErrorMetrics {
-  totalErrors: number;
-  errorsByCategory: Record<ErrorCategory, number>;
-  errorsBySeverity: Record<ErrorSeverity, number>;
-  recentErrors: SecureError[];
-}
-
 export class SecureErrorHandler {
   private static instance: SecureErrorHandler;
   private errors: SecureError[] = [];
   private readonly MAX_ERROR_HISTORY = 1000;
-  private readonly isDevelopment = process.env.NODE_ENV === 'development';
+  private readonly CRITICAL_ALERT_ENDPOINT = '/api/security/critical-error';
+  private readonly CRITICAL_LOCAL_KEY = 'secure_critical_errors_v1';
+  private readonly MAX_LOCAL_CRITICAL = 100;
+  private readonly MIN_ALERT_INTERVAL_MS = 5000;
+  private lastAlertSentAt = 0;
 
   private constructor() {}
 
@@ -185,9 +182,9 @@ export class SecureErrorHandler {
   }
 
   /**
-   * Log error appropriately based on environment
+   * Log error with secure information disclosure control
    */
-  private logError(secureError: SecureError, originalError: Error | string): void {
+  private logError(secureError: SecureError, _originalError: Error | string): void {
     const logData = {
       id: secureError.id,
       category: secureError.category,
@@ -196,30 +193,17 @@ export class SecureErrorHandler {
       context: secureError.context
     };
 
-    if (this.isDevelopment) {
-      // In development, log more details
-      console.error('[SecureErrorHandler]', {
-        ...logData,
-        internalMessage: secureError.internalMessage,
-        stack: originalError instanceof Error ? originalError.stack : undefined
+    console.error('[SecureErrorHandler]', logData);
+    
+    // Log internal details only for critical/high severity
+    if (secureError.severity === ErrorSeverity.CRITICAL || secureError.severity === ErrorSeverity.HIGH) {
+      console.error('[SecureErrorHandler-Internal]', {
+        id: secureError.id,
+        message: secureError.internalMessage
       });
-    } else {
-      // In production, log minimal information
-      console.error('[SecureErrorHandler]', logData);
-      
-      // Log internal details separately for debugging (without stack traces)
-      if (secureError.severity === ErrorSeverity.CRITICAL || secureError.severity === ErrorSeverity.HIGH) {
-        console.error('[SecureErrorHandler-Internal]', {
-          id: secureError.id,
-          message: secureError.internalMessage
-        });
-      }
     }
   }
 
-  /**
-   * Handle critical errors with immediate attention
-   */
   private handleCriticalError(error: SecureError): void {
     console.error('[CRITICAL ERROR]', {
       id: error.id,
@@ -227,8 +211,86 @@ export class SecureErrorHandler {
       timestamp: new Date(error.timestamp).toISOString()
     });
 
-    // In a production system, this would trigger alerts
-    // For now, we'll just ensure it's prominently logged
+    // Throttle duplicate alerts to avoid alert storms
+    const now = Date.now();
+    if (now - this.lastAlertSentAt < this.MIN_ALERT_INTERVAL_MS) {
+      this.persistCriticalMeta(error);
+      this.dispatchBrowserEvent(error);
+      return;
+    }
+    this.lastAlertSentAt = now;
+
+    try {
+      const payload = JSON.stringify({
+        id: error.id,
+        category: error.category,
+        severity: error.severity,
+        timestamp: error.timestamp,
+        context: error.context
+      });
+
+      let sent = false;
+      if (typeof navigator !== 'undefined' && 'sendBeacon' in navigator) {
+        try {
+          const blob = new Blob([payload], { type: 'application/json' });
+          sent = navigator.sendBeacon(this.CRITICAL_ALERT_ENDPOINT, blob);
+        } catch {
+          sent = false;
+        }
+      }
+
+      if (!sent && typeof fetch === 'function') {
+        try {
+          void fetch(this.CRITICAL_ALERT_ENDPOINT, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            keepalive: true,
+            body: payload,
+            credentials: 'omit',
+            cache: 'no-store',
+            mode: 'same-origin'
+          }).catch(() => {});
+        } catch {}
+      }
+    } finally {
+      this.persistCriticalMeta(error);
+      this.dispatchBrowserEvent(error);
+    }
+  }
+
+  private dispatchBrowserEvent(error: SecureError): void {
+    try {
+      if (typeof window !== 'undefined' && typeof window.dispatchEvent === 'function') {
+        const payload = {
+          id: error.id,
+          category: error.category,
+          severity: error.severity,
+          timestamp: error.timestamp,
+          context: error.context
+        };
+        window.dispatchEvent(new CustomEvent('secure-critical-error', { detail: payload }));
+      }
+    } catch {}
+  }
+
+  private persistCriticalMeta(error: SecureError): void {
+    try {
+      (async () => {
+        try {
+          const { encryptedStorage } = await import('./encrypted-storage');
+          const existing = await encryptedStorage.getItem(this.CRITICAL_LOCAL_KEY);
+          let list: Array<{ id: string; category: string; severity: string; ts: number }> = [];
+          if (existing) {
+            try { list = typeof existing === 'string' ? JSON.parse(existing) : existing; } catch { list = []; }
+          }
+          list.push({ id: error.id, category: error.category, severity: error.severity, ts: error.timestamp });
+          if (list.length > this.MAX_LOCAL_CRITICAL) {
+            list = list.slice(list.length - this.MAX_LOCAL_CRITICAL);
+          }
+          await encryptedStorage.setItem(this.CRITICAL_LOCAL_KEY, JSON.stringify(list));
+        } catch {}
+      })();
+    } catch {}
   }
 
   /**
@@ -236,44 +298,9 @@ export class SecureErrorHandler {
    */
   private generateErrorId(): string {
     const timestamp = Date.now().toString(36);
-    // SECURITY: Use cryptographically secure random for error IDs
     const randomBytes = crypto.getRandomValues(new Uint8Array(4));
     const secureRandom = Array.from(randomBytes, byte => byte.toString(36)).join('');
     return `err_${timestamp}_${secureRandom}`;
-  }
-
-  /**
-   * Get error metrics for monitoring
-   */
-  getMetrics(): ErrorMetrics {
-    const now = Date.now();
-    const recentThreshold = now - (24 * 60 * 60 * 1000); // Last 24 hours
-
-    const recentErrors = this.errors.filter(error => error.timestamp > recentThreshold);
-    
-    const errorsByCategory = Object.values(ErrorCategory).reduce((acc, category) => {
-      acc[category] = recentErrors.filter(error => error.category === category).length;
-      return acc;
-    }, {} as Record<ErrorCategory, number>);
-
-    const errorsBySeverity = Object.values(ErrorSeverity).reduce((acc, severity) => {
-      acc[severity] = recentErrors.filter(error => error.severity === severity).length;
-      return acc;
-    }, {} as Record<ErrorSeverity, number>);
-
-    return {
-      totalErrors: recentErrors.length,
-      errorsByCategory,
-      errorsBySeverity,
-      recentErrors: recentErrors.slice(-10) // Last 10 errors
-    };
-  }
-
-  /**
-   * Clear error history (for testing or maintenance)
-   */
-  clearHistory(): void {
-    this.errors = [];
   }
 }
 
@@ -282,16 +309,8 @@ export class SecureErrorHandler {
  */
 export const secureErrorHandler = SecureErrorHandler.getInstance();
 
-export function handleAuthError(error: Error | string, context?: Record<string, any>): SecureError {
-  return secureErrorHandler.handleError(error, ErrorCategory.AUTHENTICATION, ErrorSeverity.MEDIUM, context);
-}
-
 export function handleCryptoError(error: Error | string, context?: Record<string, any>): SecureError {
   return secureErrorHandler.handleError(error, ErrorCategory.CRYPTOGRAPHY, ErrorSeverity.HIGH, context);
-}
-
-export function handleValidationError(error: Error | string, context?: Record<string, any>): SecureError {
-  return secureErrorHandler.handleError(error, ErrorCategory.VALIDATION, ErrorSeverity.LOW, context);
 }
 
 export function handleNetworkError(error: Error | string, context?: Record<string, any>): SecureError {
@@ -300,6 +319,30 @@ export function handleNetworkError(error: Error | string, context?: Record<strin
 
 export function handleP2PError(error: Error | string, context?: Record<string, any>): SecureError {
   return secureErrorHandler.handleError(error, ErrorCategory.P2P, ErrorSeverity.MEDIUM, context);
+}
+
+export class SecureAuditLogger {
+  private static readonly CHANNEL = 'secure-audit';
+
+  static info(namespace: string, event: string, action: string, details?: Record<string, unknown>): void {
+  }
+
+  static warn(namespace: string, event: string, action: string, details?: Record<string, unknown>): void {
+  }
+
+  static error(namespace: string, event: string, action: string, details?: Record<string, unknown>): void {
+  }
+
+  private static sanitize(details?: Record<string, unknown>): Record<string, unknown> | undefined {
+    if (!details) return undefined;
+    const sanitized: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(details)) {
+      const lowerKey = key.toLowerCase();
+      const isSensitive = lowerKey.includes('key') || lowerKey.includes('secret') || lowerKey.includes('token');
+      sanitized[key] = isSensitive ? '[REDACTED]' : value;
+    }
+    return sanitized;
+  }
 }
 
 export function handleCriticalError(error: Error | string, context?: Record<string, any>): SecureError {

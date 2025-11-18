@@ -1,370 +1,586 @@
-import { useEffect, useCallback, useRef } from 'react';
-import { Message } from '@/components/chat/types';
-import { SignalType } from '@/lib/signals';
-import websocketClient from '@/lib/websocket';
+import { useEffect, useCallback, useMemo, useRef } from 'react';
+import { Message, User } from '@/components/chat/types';
+import { SignalType } from '@/lib/signal-types';
+import { sanitizeTextInput } from '@/lib/sanitizers';
+
+const READ_RECEIPT_PREFIX = 'read-receipt-';
+const DELIVERY_RECEIPT_PREFIX = 'delivery-receipt-';
+const RECEIPT_RETENTION_MS = 24 * 60 * 60 * 1000;
+const RATE_LIMIT_WINDOW_MS = 60_000;
+const RATE_LIMIT_MAX_RECEIPTS = 100;
+
+const sanitizeUsername = (value: string | undefined) => {
+  if (typeof value !== 'string') return undefined;
+  const sanitized = sanitizeTextInput(value, { maxLength: 96, allowNewlines: false });
+  return sanitized.length ? sanitized : undefined;
+};
+
+interface ReceiptEventDetail {
+  messageId: string;
+  from: string;
+}
+
+const isReceiptEventDetail = (value: unknown): value is ReceiptEventDetail => {
+  if (!value || typeof value !== 'object') return false;
+  const detail = value as Record<string, unknown>;
+  return typeof detail.messageId === 'string' && typeof detail.from === 'string';
+};
+
+const sanitizeMessageId = (id: string | undefined) => {
+  if (!id || typeof id !== 'string') return undefined;
+  const trimmed = sanitizeTextInput(id, { maxLength: 256, allowNewlines: false });
+  return trimmed.length ? trimmed : undefined;
+};
+
+const validateHybridKeys = (keys: any): boolean => {
+  if (!keys || typeof keys !== 'object') return false;
+  return (
+    typeof keys.kyberPublicBase64 === 'string' &&
+    keys.kyberPublicBase64.length > 0 &&
+    typeof keys.dilithiumPublicBase64 === 'string' &&
+    keys.dilithiumPublicBase64.length > 0
+  );
+};
+
+const buildSmartStatusMap = (messages: Message[], currentUsername: string) => {
+  const map = new Map<string, Message['receipt']>();
+  
+  // Group messages by conversation (recipient/peer)
+  const conversationGroups = new Map<string, Array<{id: string; timestamp: number; receipt: Message['receipt']; recipient: string}>>();
+  
+  for (const msg of messages) {
+    if (msg.sender !== currentUsername || !msg.receipt) continue;
+    const peer = msg.recipient || '';
+    if (!peer) continue;
+    
+    if (!conversationGroups.has(peer)) {
+      conversationGroups.set(peer, []);
+    }
+    conversationGroups.get(peer)!.push({
+      id: msg.id,
+      timestamp: new Date(msg.timestamp).getTime(),
+      receipt: msg.receipt,
+      recipient: peer,
+    });
+  }
+  
+  // For each conversation, find latest read and latest delivered
+  for (const [peer, msgs] of conversationGroups.entries()) {
+    // Sort by timestamp (newest first)
+    const sorted = msgs.sort((a, b) => b.timestamp - a.timestamp);
+    
+    // Find latest read message for this conversation
+    const latestRead = sorted.find((item) => item.receipt.read);
+    const latestReadTimestamp = latestRead ? latestRead.timestamp : 0;
+    
+    // Find latest delivered (newer than latest read) for this conversation
+    const latestDelivered = sorted.find(
+      (item) => item.receipt.delivered && !item.receipt.read && item.timestamp > latestReadTimestamp,
+    );
+    
+    if (latestRead) {
+      map.set(latestRead.id, { ...latestRead.receipt, read: true });
+    }
+    if (latestDelivered) {
+      map.set(latestDelivered.id, { ...latestDelivered.receipt, delivered: true });
+    }
+  }
+  
+  return map;
+};
+
+const markReceiptSent = (store: Map<string, number>, messageId: string) => {
+  store.set(messageId, Date.now());
+};
+
+const hasRecentReceipt = (store: Map<string, number>, messageId: string) => {
+  const timestamp = store.get(messageId);
+  if (!timestamp) return false;
+  if (Date.now() - timestamp > RECEIPT_RETENTION_MS) {
+    store.delete(messageId);
+    return false;
+  }
+  return true;
+};
+
+const pruneOldReceipts = (store: Map<string, number>) => {
+  const cutoff = Date.now() - RECEIPT_RETENTION_MS;
+  for (const [messageId, timestamp] of store.entries()) {
+    if (timestamp < cutoff) {
+      store.delete(messageId);
+    }
+  }
+};
+
+const updateMessageReceipt = async (
+  messageIndexRef: React.MutableRefObject<Map<string, number>>,
+  setMessages: React.Dispatch<React.SetStateAction<Message[]>>,
+  messageId: string,
+  updater: (receipt: Message['receipt'] | undefined) => Message['receipt'] | undefined,
+  dbReceiptQueueRef?: React.MutableRefObject<Map<string, (receipt: Message['receipt'] | undefined) => Message['receipt'] | undefined>>,
+  dbFlushTimeoutRef?: React.MutableRefObject<ReturnType<typeof setTimeout> | null>,
+  flushDBReceiptsRef?: React.MutableRefObject<(() => Promise<void>) | null>,
+): Promise<Message | null> => {
+  // First, update in-memory state if message is in current view
+  const index = messageIndexRef.current.get(messageId);
+  let updatedMessage: Message | null = null;
+  
+  if (index !== undefined) {
+    setMessages((prev) => {
+      if (index < 0 || index >= prev.length) {
+        return prev;
+      }
+      const target = prev[index];
+      const nextReceipt = updater(target.receipt);
+      if (nextReceipt === target.receipt) {
+        return prev;
+      }
+      updatedMessage = { ...target, receipt: nextReceipt };
+      const next = [...prev];
+      next[index] = updatedMessage;
+      return next;
+    });
+  } else {
+    // Message not in current view - queue for batched DB update
+    if (dbReceiptQueueRef && dbFlushTimeoutRef && flushDBReceiptsRef) {
+      dbReceiptQueueRef.current.set(messageId, updater);
+      
+      // Debounce DB flush - batch multiple receipts within 500ms window
+      if (dbFlushTimeoutRef.current) {
+        clearTimeout(dbFlushTimeoutRef.current);
+      }
+      dbFlushTimeoutRef.current = setTimeout(() => {
+        const flushFn = flushDBReceiptsRef.current;
+        if (flushFn) void flushFn();
+      }, 500);
+    }
+  }
+  
+  return updatedMessage;
+};
 
 export function useMessageReceipts(
-	messages: Message[],
-	setMessages: React.Dispatch<React.SetStateAction<Message[]>>,
-	currentUsername: string,
-	saveMessageToLocalDB: (msg: Message) => Promise<void>
+  messages: Message[],
+  setMessages: React.Dispatch<React.SetStateAction<Message[]>>,
+  currentUsername: string,
+  saveMessageToLocalDB: (msg: Message) => Promise<void>,
+  websocketClient: { send: (payload: string) => void },
+  users: User[],
+  getKeysOnDemand?: () => Promise<{
+    x25519: { private: Uint8Array; publicKeyBase64: string };
+    kyber: { publicKeyBase64: string; secretKey: Uint8Array };
+    dilithium: { publicKeyBase64: string; secretKey: Uint8Array };
+  } | null>,
+  secureDBRef?: React.MutableRefObject<any>,
 ) {
-	// Track which messages have already had read receipts sent in the current session only
-	const sentReadReceiptsRef = useRef<Set<string>>(new Set());
+  const sentReceiptsRef = useRef<Map<string, number>>(new Map());
+  const messageIndexRef = useRef<Map<string, number>>(new Map());
+  const rateLimitRef = useRef<{ windowStart: number; count: number }>({ windowStart: Date.now(), count: 0 });
+  const pendingReceiptsRef = useRef<Map<string, { kind: 'delivered' | 'read'; addedAt: number; attempts: number }>>(new Map());
+  const dbReceiptQueueRef = useRef<Map<string, (receipt: Message['receipt'] | undefined) => Message['receipt'] | undefined>>(new Map());
+  const dbFlushTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const flushDBReceiptsRef = useRef<(() => Promise<void>) | null>(null);
 
-	// Load sent read receipts from localStorage on mount, but only for recent messages
-	useEffect(() => {
-		const stored = localStorage.getItem(`sentReadReceipts_${currentUsername}`);
-		if (stored) {
-			try {
-				// SECURITY: Validate JSON size and parse safely
-				if (stored.length > 100000) {
-					console.error('[Receipt] Stored receipts data too large, clearing');
-					localStorage.removeItem(key);
-					return;
-				}
-				const receipts = JSON.parse(stored);
-				// Only load receipts from the last 24 hours to avoid permanent blocking
-				const oneDayAgo = Date.now() - (24 * 60 * 60 * 1000);
-				const recentReceipts = receipts.filter((receipt: any) => {
-					return receipt.timestamp && receipt.timestamp > oneDayAgo;
-				});
-				
-				// Convert to Set of message IDs
-				sentReadReceiptsRef.current = new Set(recentReceipts.map((r: any) => r.messageId));
-			} catch (error) {
-				console.error('Failed to load sent read receipts:', error);
-			}
-		}
-	}, [currentUsername]);
+  // Batched DB receipt flusher - only loads messages once and applies all queued receipts
+  useEffect(() => {
+    const flushDBReceipts = async () => {
+      if (!secureDBRef?.current || dbReceiptQueueRef.current.size === 0) return;
+      
+      const queue = new Map(dbReceiptQueueRef.current);
+      dbReceiptQueueRef.current.clear();
+      
+      try {
+        const allMessages = await secureDBRef.current.loadMessages().catch(() => []);
+        let hasChanges = false;
+        
+        // Apply all queued receipt updates in one pass
+        for (const [messageId, updater] of queue.entries()) {
+          const msgIndex = allMessages.findIndex((m: Message) => m.id === messageId);
+          if (msgIndex !== -1) {
+            const target = allMessages[msgIndex];
+            const nextReceipt = updater(target.receipt);
+            if (nextReceipt !== target.receipt) {
+              allMessages[msgIndex] = { ...target, receipt: nextReceipt };
+              hasChanges = true;
+            }
+          }
+        }
+        
+        // Smart receipt cleanup: Only keep latest read and latest delivered per conversation
+        if (hasChanges) {
+          // Group messages by conversation (peer)
+          const conversationGroups = new Map<string, Message[]>();
+          for (const msg of allMessages) {
+            if (msg.sender !== currentUsername) continue;
+            const peer = msg.recipient || '';
+            if (!peer) continue;
+            if (!conversationGroups.has(peer)) {
+              conversationGroups.set(peer, []);
+            }
+            conversationGroups.get(peer)!.push(msg);
+          }
+          
+          // For each conversation, find latest read and latest delivered
+          for (const [peer, msgs] of conversationGroups.entries()) {
+            // Sort by timestamp (newest first)
+            const sorted = msgs.sort((a, b) => 
+              new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()
+            );
+            
+            let latestRead: Message | null = null;
+            let latestDelivered: Message | null = null;
+            
+            // Find latest read message
+            for (const msg of sorted) {
+              if (msg.receipt?.read) {
+                latestRead = msg;
+                break;
+              }
+            }
+            
+            const latestReadTime = latestRead ? new Date(latestRead.timestamp).getTime() : 0;
+            for (const msg of sorted) {
+              const msgTime = new Date(msg.timestamp).getTime();
+              if (msg.receipt?.delivered && !msg.receipt?.read && msgTime > latestReadTime) {
+                latestDelivered = msg;
+                break;
+              }
+            }
+            
+            // Clear receipts from all messages except the latest read and latest delivered
+            for (const msg of msgs) {
+              const isLatestRead = latestRead && msg.id === latestRead.id;
+              const isLatestDelivered = latestDelivered && msg.id === latestDelivered.id;
+              
+              if (!isLatestRead && !isLatestDelivered && msg.receipt) {
+                // Clear receipt to save storage
+                const msgIndex = allMessages.findIndex((m: Message) => m.id === msg.id);
+                if (msgIndex !== -1) {
+                  allMessages[msgIndex] = { ...msg, receipt: undefined };
+                  hasChanges = true;
+                }
+              }
+            }
+          }
+          
+          await secureDBRef.current.saveMessages(allMessages).catch(() => {});
+        }
+      } catch (err) {
+        console.error('[Receipts] Failed to flush DB receipt queue', { queueSize: queue.size, error: err });
+      }
+    };
+    
+    flushDBReceiptsRef.current = flushDBReceipts;
+  }, [secureDBRef, currentUsername]);
+  
+  useEffect(() => {
+    const indexMap = new Map<string, number>();
+    messages.forEach((msg, idx) => {
+      indexMap.set(msg.id, idx);
+    });
+    messageIndexRef.current = indexMap;
+  
+    // Attempt to flush any pending receipts once messages index is refreshed
+    if (pendingReceiptsRef.current.size > 0) {
+      const entries = Array.from(pendingReceiptsRef.current.entries());
+      for (const [rawId, meta] of entries) {
+        const safeId = sanitizeMessageId(rawId);
+        if (!safeId) { pendingReceiptsRef.current.delete(rawId); continue; }
+        const apply = async () => {
+          const updated = await updateMessageReceipt(
+            messageIndexRef,
+            setMessages,
+            safeId,
+            (receipt) => {
+              if (meta.kind === 'delivered') {
+                if (receipt?.delivered) return receipt;
+                return { ...receipt, delivered: true, deliveredAt: new Date() };
+              }
+              if (receipt?.read) return receipt;
+              return { ...receipt, read: true, readAt: new Date() };
+            },
+            dbReceiptQueueRef,
+            dbFlushTimeoutRef,
+            flushDBReceiptsRef,
+          );
+          if (updated) {
+            try { await saveMessageToLocalDB(updated); } catch {}
+            pendingReceiptsRef.current.delete(rawId);
+          } else {
+            const next = { ...meta, attempts: (meta.attempts || 0) + 1 };
+            if (next.attempts >= 5) {
+              pendingReceiptsRef.current.delete(rawId);
+            } else {
+              pendingReceiptsRef.current.set(rawId, next);
+            }
+          }
+        };
+        void apply();
+      }
+    }
+  }, [messages, secureDBRef, saveMessageToLocalDB]);
 
-	// Save sent read receipts to localStorage with timestamps
-	const saveSentReadReceipts = useCallback(() => {
-		try {
-			// Convert Set to array with timestamps for better tracking
-			const receiptsWithTimestamps = Array.from(sentReadReceiptsRef.current).map(messageId => ({
-				messageId,
-				timestamp: Date.now()
-			}));
-			
-			localStorage.setItem(
-				`sentReadReceipts_${currentUsername}`,
-				JSON.stringify(receiptsWithTimestamps)
-			);
-		} catch (error) {
-			console.error('Failed to save sent read receipts:', error);
-		}
-	}, [currentUsername]);
+  useEffect(() => {
+    const interval = setInterval(() => pruneOldReceipts(sentReceiptsRef.current), RECEIPT_RETENTION_MS);
+    return () => {
+      try {
+        clearInterval(interval);
+      } catch {
+      }
+    };
+  }, []);
 
-	// Send read receipt when message is viewed (as encrypted message)
-	const sendReadReceipt = useCallback(async (messageId: string, sender: string) => {
-		console.log('[Receipt] sendReadReceipt called:', { messageId, sender, currentUsername });
-		
-		if (sender === currentUsername) {
-			console.log('[Receipt] Skipping read receipt for own message');
-			return; // Don't send receipt for own messages
-		}
+  const smartStatusMap = useMemo(() => buildSmartStatusMap(messages, currentUsername), [messages, currentUsername]);
 
-		// Check if we've already sent a read receipt for this message in the current session
-		if (sentReadReceiptsRef.current.has(messageId)) {
-			console.debug('[Receipt] Read receipt already sent for message in current session:', messageId);
-			return;
-		}
+  const getSmartReceiptStatus = useCallback(
+    (message: Message) => smartStatusMap.get(message.id),
+    [smartStatusMap],
+  );
 
-		console.log('[Receipt] Sending read receipt for message:', messageId);
+  const sendReadReceipt = useCallback(
+    async (messageId: string, sender: string) => {
+      const safeMessageId = sanitizeMessageId(messageId);
+      const safeSender = sanitizeUsername(sender);
+      if (!safeMessageId || !safeSender) {
+        return;
+      }
+      if (safeSender === currentUsername) {
+        return;
+      }
+      if (hasRecentReceipt(sentReceiptsRef.current, safeMessageId)) {
+        return;
+      }
+      if (!getKeysOnDemand) {
+        return;
+      }
 
-		try {
-			// First, ensure we have a session with the sender for read receipts
-			const sessionCheck = await (window as any).edgeApi?.hasSession?.({ 
-				selfUsername: currentUsername, 
-				peerUsername: sender, 
-				deviceId: 1 
-			});
-			
-			if (!sessionCheck?.hasSession) {
-				console.log('[Receipt] No session with sender, requesting bundle for read receipt');
-				// Request the sender's bundle so we can send read receipts
-				websocketClient.send(JSON.stringify({ 
-					type: SignalType.LIBSIGNAL_REQUEST_BUNDLE, 
-					username: sender 
-				}));
-				
-				// Wait a bit for the bundle to be processed
-				await new Promise(resolve => setTimeout(resolve, 500));
-			}
-			
-			// Create read receipt payload
-			const readReceiptData = {
-				messageId: `read-receipt-${messageId}`,
-				from: currentUsername,
-				to: sender,
-				content: 'read-receipt',
-				timestamp: Date.now(),
-				messageType: 'signal-protocol',
-				signalType: 'signal-protocol',
-				protocolType: 'signal',
-				type: 'read-receipt'
-			};
-			
-			// Use the proper Signal Protocol encryption flow through edgeApi
-			const encryptedMessage = await (window as any).edgeApi?.encrypt?.({
-				fromUsername: currentUsername,
-				toUsername: sender,
-				plaintext: JSON.stringify(readReceiptData)
-			});
-			
-			if (!encryptedMessage?.ciphertextBase64) {
-				console.error('[Receipt] Failed to encrypt read receipt');
-				return;
-			}
-			
-			// Send the properly encrypted read receipt
-			const readReceiptPayload = {
-				type: SignalType.ENCRYPTED_MESSAGE,
-				to: sender,
-				encryptedPayload: {
-					from: currentUsername,
-					to: sender,
-					content: encryptedMessage.ciphertextBase64,
-					messageId: `read-receipt-${messageId}`,
-					type: encryptedMessage.type,
-					sessionId: encryptedMessage.sessionId
-				}
-			};
-			
-			// Use websocketClient to send the encrypted read receipt
-			websocketClient.send(JSON.stringify(readReceiptPayload));
+      const now = Date.now();
+      const bucket = rateLimitRef.current;
+      if (now - bucket.windowStart > RATE_LIMIT_WINDOW_MS) {
+        bucket.windowStart = now;
+        bucket.count = 0;
+      }
+      bucket.count += 1;
+      if (bucket.count > RATE_LIMIT_MAX_RECEIPTS) {
+        return;
+      }
 
-			// Mark this message as having a read receipt sent in this session
-			sentReadReceiptsRef.current.add(messageId);
-			saveSentReadReceipts();
+      try {
+        const user = users.find(u => u.username === safeSender);
+        if (!user?.hybridPublicKeys || !validateHybridKeys(user.hybridPublicKeys)) {
+          return;
+        }
 
-			console.debug('[Receipt] Read receipt sent for message:', messageId);
-		} catch (error) {
-			console.error('Failed to send read receipt:', error);
-		}
-	}, [currentUsername, saveSentReadReceipts]);
+        const hybridKeys = user.hybridPublicKeys;
 
-	// Mark message as read and persist to database
-	const markMessageAsRead = useCallback(async (messageId: string) => {
-		console.log('[Receipt] markMessageAsRead called for message:', messageId);
-		
-		let updatedMessage: Message | null = null;
+        const sessionCheck = await (window as any).edgeApi?.hasSession?.({
+          selfUsername: currentUsername,
+          peerUsername: safeSender,
+          deviceId: 1,
+        });
+        
+        if (!sessionCheck?.hasSession) {
+          // Request bundle and wait briefly for session establishment, then proceed
+          try {
+            await websocketClient.sendSecureControlMessage({ 
+              type: SignalType.LIBSIGNAL_REQUEST_BUNDLE, 
+              username: safeSender,
+              from: currentUsername,
+              timestamp: now,
+            });
+          } catch {}
+          try {
+            await new Promise<void>((resolve, reject) => {
+              const timeout = setTimeout(() => { cleanup(); reject(new Error('bundle-timeout')); }, 6000);
+              const onReady = (evt: Event) => {
+                const d = (evt as CustomEvent).detail;
+                if (d?.peer === safeSender) { cleanup(); resolve(); }
+              };
+              const cleanup = () => {
+                clearTimeout(timeout);
+                window.removeEventListener('libsignal-session-ready', onReady as EventListener);
+              };
+              window.addEventListener('libsignal-session-ready', onReady as EventListener);
+            });
+          } catch {}
+        }
 
-		setMessages(prev => prev.map(msg => {
-			if (msg.id === messageId && !msg.receipt?.read && msg.sender !== currentUsername) {
-				console.log('[Receipt] Marking message as read:', messageId);
-				updatedMessage = {
-					...msg,
-					receipt: {
-						...msg.receipt,
-						read: true,
-						readAt: new Date()
-					}
-				};
-				return updatedMessage;
-			}
-			return msg;
-		}));
+        const readReceiptData = {
+          messageId: `${READ_RECEIPT_PREFIX}${safeMessageId}`,
+          from: currentUsername,
+          to: safeSender,
+          type: 'read-receipt',
+          timestamp: Date.now(),
+        };
 
-		// Persist the updated message with read status to database
-		if (updatedMessage) {
-			try {
-				await saveMessageToLocalDB(updatedMessage);
-				console.debug('[Receipt] Message marked as read and persisted:', messageId);
-			} catch (error) {
-				console.error('[Receipt] Failed to persist read status:', error);
-			}
-		} else {
-			console.log('[Receipt] Message already marked as read or not found:', messageId);
-		}
-	}, [setMessages, currentUsername, saveMessageToLocalDB]);
+        const encryptedMessage = await (window as any).edgeApi?.encrypt?.({
+          fromUsername: currentUsername,
+          toUsername: safeSender,
+          plaintext: JSON.stringify(readReceiptData),
+          recipientKyberPublicKey: hybridKeys.kyberPublicBase64,
+          recipientHybridKeys: hybridKeys
+        });
 
-	// Smart status management: show receipt status with improved ordering logic
-	const getSmartReceiptStatus = useCallback((message: Message) => {
-		// We only show status for messages sent by current user
-		if (!message.receipt || message.sender !== currentUsername) return undefined;
+        if (!encryptedMessage?.success || !encryptedMessage?.encryptedPayload) {
+          return;
+        }
 
-		// Collect all current user messages with their timestamps and statuses
-		const currentUserMessages = messages
-			.filter(msg => msg.sender === currentUsername && msg.receipt)
-			.map(msg => ({
-				id: msg.id,
-				timestamp: new Date(msg.timestamp).getTime(),
-				receipt: msg.receipt!
-			}))
-			.sort((a, b) => b.timestamp - a.timestamp); // Sort newest first
+        const readReceiptPayload = {
+          type: SignalType.ENCRYPTED_MESSAGE,
+          to: safeSender,
+          encryptedPayload: encryptedMessage.encryptedPayload,
+        };
 
-		// Find the latest read message
-		const latestReadMessage = currentUserMessages.find(msg => msg.receipt.read);
-		
-		// Find the latest delivered-but-not-read message that's newer than the latest read message
-		const latestReadTimestamp = latestReadMessage ? latestReadMessage.timestamp : 0;
-		const latestDeliveredMessage = currentUserMessages.find(msg => 
-			msg.receipt.delivered && 
-			!msg.receipt.read && 
-			msg.timestamp > latestReadTimestamp
-		);
+        websocketClient.send(JSON.stringify(readReceiptPayload));
 
-		// Show read status for the latest read message
-		if (latestReadMessage && message.id === latestReadMessage.id) {
-			return { ...message.receipt, read: true };
-		}
+        markReceiptSent(sentReceiptsRef.current, safeMessageId);
+      } catch (error) {
+      }
+    },
+    [currentUsername, websocketClient, users, getKeysOnDemand],
+  );
 
-		// Show delivered status for the latest delivered (unread) message that's newer than latest read
-		if (latestDeliveredMessage && message.id === latestDeliveredMessage.id) {
-			return { ...message.receipt, delivered: true };
-		}
+  const markMessageAsRead = useCallback(
+    async (messageId: string) => {
+      const safeMessageId = sanitizeMessageId(messageId);
+      if (!safeMessageId) return;
 
-		// For all other messages, don't show status to avoid clutter
-		return undefined;
-	}, [messages, currentUsername]);
+      const updated = await updateMessageReceipt(
+        messageIndexRef,
+        setMessages,
+        safeMessageId,
+        (receipt) => {
+          if (receipt?.read) {
+            return receipt;
+          }
+          return {
+            ...receipt,
+            read: true,
+            readAt: new Date(),
+          };
+        },
+        dbReceiptQueueRef,
+        dbFlushTimeoutRef,
+        flushDBReceiptsRef,
+      );
 
-	// Handle delivery receipts from other users
-	useEffect(() => {
-		const handleDeliveryReceipt = async (event: CustomEvent) => {
-			const { messageId, from } = event.detail;
-			console.log('[Receipt] Received delivery receipt event:', { messageId, from, currentUsername });
+      if (updated) {
+        try {
+          await saveMessageToLocalDB(updated);
+        } catch (error) {
+        }
+      }
+    },
+    [setMessages, saveMessageToLocalDB],
+  );
 
-			// Extract the original message ID from the receipt message ID
-			// Receipt message IDs are formatted as: "delivery-receipt-{originalMessageId}"
-			const originalMessageId = messageId.replace(/^delivery-receipt-/, '');
-			console.log('[Receipt] Extracted original message ID from delivery receipt:', { receiptMessageId: messageId, originalMessageId });
+  useEffect(() => {
+    const handler = async (event: Event) => {
+      const customEvent = event as CustomEvent;
+      if (!isReceiptEventDetail(customEvent.detail)) {
+        return;
+      }
+      const detail = customEvent.detail;
+      const rawId = detail.messageId || '';
+      const safeMessageId = sanitizeMessageId(
+        rawId.startsWith(DELIVERY_RECEIPT_PREFIX) ? rawId.replace(DELIVERY_RECEIPT_PREFIX, '') : rawId
+      );
+      if (!safeMessageId) {
+        return;
+      }
 
-			let updatedMessage: Message | null = null;
+      const index = messageIndexRef.current.get(safeMessageId);
+      
+      const updated = await updateMessageReceipt(
+        messageIndexRef,
+        setMessages,
+        safeMessageId,
+        (receipt) => {
+          if (receipt?.delivered) {
+            return receipt;
+          }
+          return {
+            ...receipt,
+            delivered: true,
+            deliveredAt: new Date(),
+          };
+        },
+        dbReceiptQueueRef,
+        dbFlushTimeoutRef,
+        flushDBReceiptsRef,
+      );
 
-			setMessages(prev => {
-				console.log('[Receipt] Current messages before delivery receipt update:', prev.map(m => ({ id: m.id, sender: m.sender, receipt: m.receipt })));
-				
-				return prev.map(msg => {
-					if (msg.id === originalMessageId && msg.sender === currentUsername) {
-						console.log('[Receipt] Updating message with delivery status:', originalMessageId);
-						updatedMessage = {
-							...msg,
-							receipt: {
-								...msg.receipt,
-								delivered: true,
-								deliveredAt: new Date()
-							}
-						};
-						return updatedMessage;
-					}
-					return msg;
-				});
-			});
+      if (updated) {
+        try {
+          await saveMessageToLocalDB(updated);
+        } catch (error) {
+        }
+      } else {
+        pendingReceiptsRef.current.set(safeMessageId, { kind: 'delivered', addedAt: Date.now(), attempts: 1 });
+      }
+    };
 
-			// Persist the updated message with delivery status to database
-			if (updatedMessage) {
-				try {
-					await saveMessageToLocalDB(updatedMessage);
-					console.debug('[Receipt] Delivery status persisted for message:', originalMessageId);
-				} catch (error) {
-					console.error('[Receipt] Failed to persist delivery status:', error);
-				}
-			} else {
-				console.log('[Receipt] Message not found or not from current user for delivery receipt:', originalMessageId);
-			}
-		};
+    window.addEventListener('message-delivered', handler as EventListener);
+    return () => window.removeEventListener('message-delivered', handler as EventListener);
+  }, [setMessages, saveMessageToLocalDB]);
 
-		window.addEventListener('message-delivered', handleDeliveryReceipt as EventListener);
+  useEffect(() => {
+    const handler = async (event: Event) => {
+      const customEvent = event as CustomEvent;
+      if (!isReceiptEventDetail(customEvent.detail)) {
+        return;
+      }
+      const detail = customEvent.detail;
+      const rawId = detail.messageId || '';
+      const safeMessageId = sanitizeMessageId(
+        rawId.startsWith(READ_RECEIPT_PREFIX) ? rawId.replace(READ_RECEIPT_PREFIX, '') : rawId
+      );
+      if (!safeMessageId) {
+        return;
+      }
 
-		return () => {
-			window.removeEventListener('message-delivered', handleDeliveryReceipt as EventListener);
-		};
-	}, [currentUsername, setMessages, saveMessageToLocalDB]);
+      const index = messageIndexRef.current.get(safeMessageId);
+      
+      const updated = await updateMessageReceipt(
+        messageIndexRef,
+        setMessages,
+        safeMessageId,
+        (receipt) => {
+          if (receipt?.read) {
+            return receipt;
+          }
+          return {
+            ...receipt,
+            read: true,
+            readAt: new Date(),
+          };
+        },
+        dbReceiptQueueRef,
+        dbFlushTimeoutRef,
+        flushDBReceiptsRef,
+      );
 
-	// Handle read receipts from other users
-	useEffect(() => {
-		const handleReadReceipt = async (event: CustomEvent) => {
-			const { messageId, from } = event.detail;
-			console.log('[Receipt] Received read receipt event:', { messageId, from, currentUsername });
+      if (updated) {
+        try {
+          await saveMessageToLocalDB(updated);
+        } catch (error) {
+        }
+      } else {
+        pendingReceiptsRef.current.set(safeMessageId, { kind: 'read', addedAt: Date.now(), attempts: 1 });
+      }
+    };
 
-			// Extract the original message ID from the receipt message ID
-			// Receipt message IDs are formatted as: "read-receipt-{originalMessageId}"
-			const originalMessageId = messageId.replace(/^read-receipt-/, '');
-			console.log('[Receipt] Extracted original message ID from receipt:', { receiptMessageId: messageId, originalMessageId });
+    window.addEventListener('message-read', handler as EventListener);
+    return () => window.removeEventListener('message-read', handler as EventListener);
+  }, [setMessages, saveMessageToLocalDB]);
 
-			let updatedMessage: Message | null = null;
+  useEffect(() => {
+    pruneOldReceipts(sentReceiptsRef.current);
+  }, [messages]);
 
-			setMessages(prev => {
-				console.log('[Receipt] Current messages before read receipt update:', prev.map(m => ({ id: m.id, sender: m.sender, receipt: m.receipt })));
-				
-				return prev.map(msg => {
-					if (msg.id === originalMessageId && msg.sender === currentUsername) {
-						console.log('[Receipt] Updating message with read status:', originalMessageId);
-						updatedMessage = {
-							...msg,
-							receipt: {
-								...msg.receipt,
-								read: true,
-								readAt: new Date()
-							}
-						};
-						return updatedMessage;
-					}
-					return msg;
-				});
-			});
-
-			// Persist the updated message with read status to database
-			if (updatedMessage) {
-				try {
-					await saveMessageToLocalDB(updatedMessage);
-					console.debug('[Receipt] Read receipt status persisted for message:', originalMessageId);
-				} catch (error) {
-					console.error('[Receipt] Failed to persist read receipt status:', error);
-				}
-			} else {
-				console.log('[Receipt] Message not found or not from current user for read receipt:', originalMessageId);
-			}
-		};
-
-		window.addEventListener('message-read', handleReadReceipt as EventListener);
-
-		return () => {
-			window.removeEventListener('message-read', handleReadReceipt as EventListener);
-		};
-	}, [currentUsername, setMessages, saveMessageToLocalDB]);
-
-	// Clean up old read receipt tracking data (older than 24 hours)
-	useEffect(() => {
-		const cleanupOldReceipts = () => {
-			try {
-				const oneDayAgo = Date.now() - (24 * 60 * 60 * 1000);
-
-				// Get all messages older than 24 hours
-				const oldMessageIds = messages
-					.filter(msg => new Date(msg.timestamp).getTime() < oneDayAgo)
-					.map(msg => msg.id);
-
-				// Remove old message IDs from tracking
-				let hasChanges = false;
-				oldMessageIds.forEach(messageId => {
-					if (sentReadReceiptsRef.current.has(messageId)) {
-						sentReadReceiptsRef.current.delete(messageId);
-						hasChanges = true;
-					}
-				});
-
-				if (hasChanges) {
-					saveSentReadReceipts();
-					console.debug('[Receipt] Cleaned up old read receipt tracking data');
-				}
-			} catch (error) {
-				console.error('Failed to cleanup old read receipts:', error);
-			}
-		};
-
-		// Run cleanup on mount and then periodically
-		cleanupOldReceipts();
-		const cleanupInterval = setInterval(cleanupOldReceipts, 24 * 60 * 60 * 1000); // Daily
-
-		return () => clearInterval(cleanupInterval);
-	}, [messages, saveSentReadReceipts]);
-
-	return {
-		sendReadReceipt,
-		markMessageAsRead,
-		getSmartReceiptStatus
-	};
+  return {
+    sendReadReceipt,
+    markMessageAsRead,
+    getSmartReceiptStatus,
+  };
 }

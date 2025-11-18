@@ -1,37 +1,160 @@
 /**
  * React Hook for WebRTC Calling Integration
+ * - Strict username validation
+ * - Post-quantum crypto handled by WebRTCCallingService
+ * - Secure event sanitization
+ * - Memory cleanup on unmount
  */
 
 import { useState, useEffect, useCallback, useRef } from 'react';
+import { unstable_batchedUpdates } from 'react-dom';
 import { WebRTCCallingService, CallState } from '../lib/webrtc-calling';
-import { useAuth } from './useAuth';
+import type { useAuth } from './useAuth';
 
-export const useCalling = (authContext?: ReturnType<typeof useAuth>) => {
-  const fallbackAuthContext = useAuth();
+const stopMediaStream = (stream: MediaStream | null) => {
+  if (!stream) return;
+
+  try {
+    const seen = new Set<string>();
+    const tracks = typeof stream.getTracks === 'function' ? stream.getTracks() : [];
+    tracks.forEach((track) => {
+      if (!track || seen.has(track.id)) {
+        return;
+      }
+      seen.add(track.id);
+      try {
+        if (track.readyState !== 'ended') {
+          track.stop();
+        }
+      } catch (_error) {
+      }
+    });
+  } catch (_error) {
+  }
+};
+
+const MAX_USERNAME_LENGTH = 120;
+const MAX_CALL_ID_LENGTH = 256;
+
+const EVENT_ALLOWED_PAYLOAD_KEYS = new Set(['type', 'peer', 'at', 'callId', 'status', 'startTime', 'endTime', 'durationMs', 'direction']);
+
+const isValidUsername = (username: string): boolean => {
+  if (!username || typeof username !== 'string') return false;
+  if (username.length === 0 || username.length > MAX_USERNAME_LENGTH) return false;
+  return /^[a-zA-Z0-9._-]+$/.test(username);
+};
+
+const isValidCallId = (callId: string): boolean => {
+  if (!callId || typeof callId !== 'string') return false;
+  if (callId.length === 0 || callId.length > MAX_CALL_ID_LENGTH) return false;
+  return /^[a-zA-Z0-9_-]+$/.test(callId);
+};
+
+const sanitizeEventDetail = (detail: any): Record<string, unknown> => {
+  if (!detail || typeof detail !== 'object') {
+    return {};
+  }
+
+  const sanitized: Record<string, unknown> = {};
+  for (const key of EVENT_ALLOWED_PAYLOAD_KEYS) {
+    if (!(key in detail)) {
+      continue;
+    }
+    const value = detail[key];
+    if (value === null || value === undefined) {
+      continue;
+    }
+    if (typeof value === 'string') {
+      const trimmed = value.slice(0, 256);
+      if (key === 'peer' && !isValidUsername(trimmed)) continue;
+      if (key === 'callId' && !isValidCallId(trimmed)) continue;
+      sanitized[key] = trimmed;
+    } else if (typeof value === 'number') {
+      if (!Number.isFinite(value)) continue;
+      if ((key === 'at' || key === 'startTime' || key === 'endTime' || key === 'durationMs') && value < 0) continue;
+      sanitized[key] = value;
+    } else if (typeof value === 'boolean') {
+      sanitized[key] = value;
+    }
+  }
+
+  return sanitized;
+};
+
+const debounceEventDispatcher = () => {
+  const queue = new Map<string, { detail: any; timestamp: number }>();
+  let timeoutId: ReturnType<typeof setTimeout> | null = null;
+  let pendingAnimationFrame: number | null = null;
+
+  const flush = () => {
+    timeoutId = null;
+    if (pendingAnimationFrame !== null) {
+      cancelAnimationFrame(pendingAnimationFrame);
+      pendingAnimationFrame = null;
+    }
+
+    const now = Date.now();
+    const entries = Array.from(queue.entries());
+    queue.clear();
+
+    pendingAnimationFrame = requestAnimationFrame(() => {
+      pendingAnimationFrame = null;
+      entries.forEach(([name, { detail, timestamp }]) => {
+        if (now - timestamp > 1000) {
+          return;
+        }
+        try {
+          window.dispatchEvent(new CustomEvent(name, { detail: sanitizeEventDetail(detail) }));
+        } catch (_error) {
+        }
+      });
+    });
+  };
+
+  const enqueue = (name: string, detail: any, immediate = false) => {
+    if (immediate) {
+      try {
+        window.dispatchEvent(new CustomEvent(name, { detail: sanitizeEventDetail(detail) }));
+      } catch (_error) {
+      }
+      return;
+    }
+
+    queue.set(name, { detail: sanitizeEventDetail(detail), timestamp: Date.now() });
+    if (timeoutId === null) {
+      timeoutId = setTimeout(flush, 20);
+    }
+  };
+
+  const cancel = () => {
+    if (timeoutId !== null) {
+      clearTimeout(timeoutId);
+      timeoutId = null;
+    }
+    if (pendingAnimationFrame !== null) {
+      cancelAnimationFrame(pendingAnimationFrame);
+      pendingAnimationFrame = null;
+    }
+    queue.clear();
+  };
+
+  return { enqueue, cancel };
+};
+
+export const useCalling = (authContext: ReturnType<typeof useAuth>) => {
+  if (!authContext) {
+    throw new Error('[useCalling] Auth context is required');
+  }
+
+  const eventDebouncer = useRef(debounceEventDispatcher());
+  const localStreamRef = useRef<MediaStream | null>(null);
+  const remoteStreamRef = useRef<MediaStream | null>(null);
+  const remoteScreenStreamRef = useRef<MediaStream | null>(null);
   
-  // Track if we've ever been fully authenticated to prevent re-initialization
   const hasBeenAuthenticatedRef = useRef(false);
-  // Store the authenticated username to prevent re-initialization with empty values
   const authenticatedUsernameRef = useRef<string>('');
-  // Store the original auth context to prevent switching to fallback
-  const originalAuthContextRef = useRef<ReturnType<typeof useAuth> | null>(null);
   
-  // Store the first valid auth context we receive and never change it
-  if (authContext && authContext.username && authContext.isLoggedIn && !originalAuthContextRef.current) {
-    console.log('[useCalling] Storing original auth context for user:', authContext.username);
-    originalAuthContextRef.current = authContext;
-  }
-  
-  // Also store fallback context if it has valid authentication and no original context yet
-  if (!originalAuthContextRef.current && fallbackAuthContext.username && fallbackAuthContext.isLoggedIn) {
-    console.log('[useCalling] Storing fallback auth context as original for user:', fallbackAuthContext.username);
-    originalAuthContextRef.current = fallbackAuthContext;
-  }
-  
-  // ALWAYS use the original context once we have it - never switch contexts
-  const actualAuthContext: ReturnType<typeof useAuth> = originalAuthContextRef.current || authContext || fallbackAuthContext;
-  
-  const { username, loginUsernameRef, isLoggedIn, accountAuthenticated } = actualAuthContext;
+  const { username, loginUsernameRef, isLoggedIn, accountAuthenticated } = authContext;
   
   const [callingService, setCallingService] = useState<WebRTCCallingService | null>(null);
   const [currentCall, setCurrentCall] = useState<CallState | null>(null);
@@ -41,362 +164,314 @@ export const useCalling = (authContext?: ReturnType<typeof useAuth>) => {
   const [isInitialized, setIsInitialized] = useState(false);
   
   const serviceRef = useRef<WebRTCCallingService | null>(null);
-  const stableUsernameRef = useRef<string>('');
-  const stableIsLoggedInRef = useRef<boolean>(false);
-  const stableAccountAuthenticatedRef = useRef<boolean>(false);
   const everConnectedRef = useRef<Set<string>>(new Set());
 
-  // Store stable values that never reset once set
-  if (username && username.trim() !== '' && !stableUsernameRef.current) {
-    stableUsernameRef.current = username;
-  }
-  if (isLoggedIn && !stableIsLoggedInRef.current) {
-    stableIsLoggedInRef.current = isLoggedIn;
-  }
-  if (accountAuthenticated && !stableAccountAuthenticatedRef.current) {
-    stableAccountAuthenticatedRef.current = accountAuthenticated;
-  }
+  const currentUsername = username || loginUsernameRef?.current || '';
+  const isFullyAuthenticated = isLoggedIn && accountAuthenticated;
 
-  // Use stable values that never reset
-  const stableUsername = stableUsernameRef.current || username;
-  const stableIsLoggedIn = stableIsLoggedInRef.current || isLoggedIn;
-  const stableAccountAuthenticated = stableAccountAuthenticatedRef.current || accountAuthenticated;
-
-  // Initialize calling service after complete authentication
   useEffect(() => {
-    // FIRST PRIORITY: If we have a service, preserve it regardless of auth state
-    if (serviceRef.current) {
-      console.log('[useCalling] Service exists - preserving service regardless of auth state');
-      return;
-    }
+    return () => {
+      eventDebouncer.current.cancel();
+      stopMediaStream(localStreamRef.current);
+      stopMediaStream(remoteStreamRef.current);
+      stopMediaStream(remoteScreenStreamRef.current);
+      try { (window as any).edgeApi?.powerSaveBlockerStop?.(); } catch {}
+    };
+  }, []);
 
-    const currentUsername = stableUsername || loginUsernameRef?.current;
-    const hasValidUsername = currentUsername && currentUsername.trim() !== '';
-    const isAuthenticated = stableIsLoggedIn && stableAccountAuthenticated; // Require BOTH flags
-    
-    // ALWAYS log to see what's happening
-    console.log('[useCalling] useEffect triggered:', {
-      currentUsername,
-      hasValidUsername,
-      isLoggedIn,
-      accountAuthenticated,
-      isAuthenticated,
-      stableUsername,
-      stableIsLoggedIn,
-      stableAccountAuthenticated,
-      hasExistingService: !!serviceRef.current,
-      hasBeenAuthenticated: hasBeenAuthenticatedRef.current,
-      authenticatedUsername: authenticatedUsernameRef.current,
-      usingOriginalContext: !!originalAuthContextRef.current,
-      passedAuthContext: !!authContext,
-      fallbackAuthContext: !!fallbackAuthContext
-    });
-    
-    // If we get empty authentication values but we've been authenticated before, ignore this trigger
-    if (hasBeenAuthenticatedRef.current && (!hasValidUsername || !isAuthenticated)) {
-      console.log('[useCalling] Ignoring authentication reset - service already initialized for:', authenticatedUsernameRef.current);
-      return;
-    }
+  useEffect(() => {
+    if (serviceRef.current) { return; }
+    if (!isValidUsername(currentUsername)) { return; }
+    if (!isFullyAuthenticated) { return; }
+    if (hasBeenAuthenticatedRef.current && !isFullyAuthenticated) { return; }
 
-    // NEVER clean up service if we have one - only on explicit logout
-    // This prevents accidental cleanup during temporary auth resets
-    if (!isLoggedIn && !accountAuthenticated && !hasBeenAuthenticatedRef.current && !serviceRef.current) {
-      console.log('[useCalling] No service to clean up on logout');
-      return;
-    }
-    
-    // Don't initialize if not properly authenticated (but preserve existing service)
-    if (!isAuthenticated || !hasValidUsername) {
-      return;
-    }
-
-    // Initialize if we have complete authentication AND valid username AND no existing service
-    // Remove the hasBeenAuthenticatedRef check to allow initialization even after context resets
-    if (hasValidUsername && isAuthenticated && !serviceRef.current) {
-      console.log('[useCalling] All conditions met - Initializing calling service for user:', currentUsername);
-      
       const service = new WebRTCCallingService(currentUsername);
       serviceRef.current = service;
 
       // Set up callbacks
       service.onIncomingCall((call) => {
-        console.log('[useCalling] Incoming call:', call);
-        // Clone to force React state update on subsequent mutations
         setCurrentCall({ ...call });
-        try {
-          window.dispatchEvent(new CustomEvent('ui-call-log', { detail: { type: 'incoming', peer: call.peer, at: Date.now(), callId: call.id } }));
-        } catch {}
+        eventDebouncer.current.enqueue('ui-call-log', { type: 'incoming', peer: call.peer, at: Date.now(), callId: call.id });
       });
 
       service.onCallStateChange((call) => {
-        console.log('[useCalling] Call state changed:', call.status);
-
-        // Broadcast UI call status for badges/indicators
-        try {
-          const statusDetail = {
-            peer: call.peer,
-            status: call.status,
-            type: call.type,
-            direction: call.direction,
-            startTime: call.startTime,
-            endTime: call.endTime
-          };
-          window.dispatchEvent(new CustomEvent('ui-call-status', { detail: statusDetail }));
-        } catch {}
+        const statusDetail = {
+          peer: call.peer,
+          status: call.status,
+          type: call.type,
+          direction: call.direction,
+          startTime: call.startTime,
+          endTime: call.endTime
+        };
+        const statusNeedsImmediateDispatch = call.status === 'ended' || call.status === 'declined' || call.status === 'missed';
+        eventDebouncer.current.enqueue('ui-call-status', statusDetail, statusNeedsImmediateDispatch);
 
         if (call.status === 'connecting') {
           try { (window as any).edgeApi?.powerSaveBlockerStart?.(); } catch {}
-          try { window.dispatchEvent(new CustomEvent('ui-call-log', { detail: { type: 'started', peer: call.peer, at: Date.now(), callId: call.id } })); } catch {}
+          eventDebouncer.current.enqueue('ui-call-log', { type: 'started', peer: call.peer, at: Date.now(), callId: call.id });
         } else if (call.status === 'connected') {
           try { everConnectedRef.current.add(call.id); } catch {}
           try { (window as any).edgeApi?.powerSaveBlockerStart?.(); } catch {}
-          try { window.dispatchEvent(new CustomEvent('ui-call-log', { detail: { type: 'connected', peer: call.peer, at: Date.now(), callId: call.id } })); } catch {}
+          eventDebouncer.current.enqueue('ui-call-log', { type: 'connected', peer: call.peer, at: Date.now(), callId: call.id });
         }
         if (call.status === 'ended' || call.status === 'declined' || call.status === 'missed') {
           try { (window as any).edgeApi?.powerSaveBlockerStop?.(); } catch {}
-          // For ended specifically, emit a call-ended summary for chat logging
           if (call.status === 'ended') {
             const wasConnected = everConnectedRef.current.has(call.id);
             if (!wasConnected && call.direction === 'outgoing') {
-              // Outgoing call ended without connection -> not answered
-              try { window.dispatchEvent(new CustomEvent('ui-call-log', { detail: { type: 'not-answered', peer: call.peer, at: Date.now(), callId: call.id } })); } catch {}
+              eventDebouncer.current.enqueue('ui-call-log', { type: 'not-answered', peer: call.peer, at: Date.now(), callId: call.id });
             } else {
-              try {
-                const durationMs = call.startTime && call.endTime ? (call.endTime - call.startTime) : 0;
-                const endedDetail = {
-                  peer: call.peer,
-                  type: call.type,
-                  startTime: call.startTime,
-                  endTime: call.endTime,
-                  durationMs
-                };
-                window.dispatchEvent(new CustomEvent('ui-call-ended', { detail: endedDetail }));
-                window.dispatchEvent(new CustomEvent('ui-call-log', { detail: { type: 'ended', peer: call.peer, at: Date.now(), callId: call.id, durationMs } }));
-              } catch {}
+              const durationMs = call.startTime && call.endTime ? (call.endTime - call.startTime) : 0;
+              eventDebouncer.current.enqueue('ui-call-ended', {
+                peer: call.peer,
+                type: call.type,
+                startTime: call.startTime,
+                endTime: call.endTime,
+                durationMs
+              });
+              eventDebouncer.current.enqueue('ui-call-log', { type: 'ended', peer: call.peer, at: Date.now(), callId: call.id, durationMs });
             }
           }
           if (call.status === 'declined') {
-            try { window.dispatchEvent(new CustomEvent('ui-call-log', { detail: { type: 'declined', peer: call.peer, at: Date.now(), callId: call.id } })); } catch {}
+            eventDebouncer.current.enqueue('ui-call-log', { type: 'declined', peer: call.peer, at: Date.now(), callId: call.id });
           }
           if (call.status === 'missed') {
-            try { window.dispatchEvent(new CustomEvent('ui-call-log', { detail: { type: 'missed', peer: call.peer, at: Date.now(), callId: call.id } })); } catch {}
+            eventDebouncer.current.enqueue('ui-call-log', { type: 'missed', peer: call.peer, at: Date.now(), callId: call.id });
           }
-          // Close modal and clear streams when call is finished
-          setCurrentCall(null);
-          setLocalStream(null);
-          setRemoteStream(null);
-          setRemoteScreenStream(null);
+          unstable_batchedUpdates(() => {
+            setCurrentCall(null);
+            stopMediaStream(localStreamRef.current);
+            stopMediaStream(remoteStreamRef.current);
+            stopMediaStream(remoteScreenStreamRef.current);
+            localStreamRef.current = null;
+            remoteStreamRef.current = null;
+            remoteScreenStreamRef.current = null;
+            setLocalStream(null);
+            setRemoteStream(null);
+            setRemoteScreenStream(null);
+          });
           try { everConnectedRef.current.delete(call.id); } catch {}
         } else {
-          // Clone to force React state update on subsequent mutations
-          setCurrentCall({ ...call });
+          unstable_batchedUpdates(() => {
+            setCurrentCall({ ...call });
+          });
         }
       });
 
       service.onLocalStream((stream) => {
-        console.log('[useCalling] Local stream received');
-        setLocalStream(stream);
+        stopMediaStream(localStreamRef.current);
+        unstable_batchedUpdates(() => {
+          localStreamRef.current = stream;
+          setLocalStream(stream);
+        });
       });
 
       service.onRemoteStream((stream) => {
-        console.log('[useCalling] Remote stream received');
-        setRemoteStream(stream);
+        stopMediaStream(remoteStreamRef.current);
+        unstable_batchedUpdates(() => {
+          remoteStreamRef.current = stream;
+          setRemoteStream(stream);
+        });
       });
 
       service.onRemoteScreenStream((stream) => {
-        console.log('[useCalling] Remote screen stream received:', !!stream);
-        setRemoteScreenStream(stream);
+        stopMediaStream(remoteScreenStreamRef.current);
+        unstable_batchedUpdates(() => {
+          remoteScreenStreamRef.current = stream;
+          setRemoteScreenStream(stream);
+        });
       });
 
-      // Initialize service immediately (it's synchronous)
-      try {
-        service.initialize();
-        console.log('[useCalling] Calling service initialized successfully');
-        
-        // Set authentication tracking AFTER successful initialization
-        hasBeenAuthenticatedRef.current = true;
-        authenticatedUsernameRef.current = currentUsername;
-        
-        // Update state after successful initialization
-        setCallingService(service);
-        setIsInitialized(true);
-        
-        console.log('[useCalling] State updated - service available for calls');
-      } catch (error) {
-        console.error('[useCalling] Failed to initialize calling service:', error);
-        serviceRef.current = null;
-        setCallingService(null);
-        setIsInitialized(false);
-        hasBeenAuthenticatedRef.current = false;
-        authenticatedUsernameRef.current = '';
-      }
-    }
-  }, [stableUsername, stableIsLoggedIn, stableAccountAuthenticated]);
+      const initializeService = async (attempt = 0): Promise<void> => {
+        try {
+          service.initialize();
 
-  // Start a call
+          hasBeenAuthenticatedRef.current = true;
+          authenticatedUsernameRef.current = currentUsername;
+
+          setCallingService(service);
+          setIsInitialized(true);
+        } catch (_error) {
+          if (attempt < 3) {
+            const baseDelay = 500;
+            const jitter = Math.floor(Math.random() * 200);
+            const delay = Math.min(5000, baseDelay * Math.pow(2, attempt)) + jitter;
+            await new Promise((resolve) => setTimeout(resolve, delay));
+            await initializeService(attempt + 1);
+            return;
+          }
+          console.error('[useCalling] Failed to initialize calling service:', _error);
+          serviceRef.current = null;
+          setCallingService(null);
+          setIsInitialized(false);
+          hasBeenAuthenticatedRef.current = false;
+          authenticatedUsernameRef.current = '';
+        }
+      };
+
+      initializeService();
+  }, [currentUsername, isFullyAuthenticated]);
+
+  // Start a call with strict validation
   const startCall = useCallback(async (targetUser: string, callType: 'audio' | 'video' = 'audio') => {
-    console.log('[useCalling] startCall called:', {
-      targetUser,
-      callType,
-      hasServiceRef: !!serviceRef.current,
-      hasServiceState: !!callingService,
-      isInitializedState: isInitialized,
-      currentAuthState: {
-        username,
-        loginUsernameRef: loginUsernameRef?.current,
-        isLoggedIn,
-        accountAuthenticated,
-        hasBeenAuthenticated: hasBeenAuthenticatedRef.current,
-        authenticatedUsername: authenticatedUsernameRef.current,
-        usingOriginalContext: !!originalAuthContextRef.current
-      }
-    });
-
     if (!serviceRef.current) {
-      console.log('[useCalling] No calling service available - detailed state:', {
-        serviceRef: serviceRef.current,
-        callingService,
-        isInitialized,
-        hasBeenAuthenticatedRef: hasBeenAuthenticatedRef.current,
-        authenticatedUsernameRef: authenticatedUsernameRef.current,
-        originalAuthContextRef: !!originalAuthContextRef.current
-      });
-      throw new Error('Calling service not available');
+      throw new Error('[useCalling] Calling service not initialized');
+    }
+
+    const peer = targetUser.trim();
+    if (!isValidUsername(peer)) {
+      throw new Error('[useCalling] Invalid target username format');
+    }
+    
+    if (callType !== 'audio' && callType !== 'video') {
+      throw new Error('[useCalling] Invalid call type');
+    }
+    
+    if (peer === currentUsername) {
+      throw new Error('[useCalling] Cannot call yourself');
     }
 
     try {
-      const callId = await serviceRef.current.startCall(targetUser, callType);
-      console.log('[useCalling] Call started:', callId);
+      const callId = await serviceRef.current.startCall(peer, callType);
       return callId;
-    } catch (error) {
-      console.error('[useCalling] Failed to start call:', error);
-      throw error;
+    } catch (_error) {
+      console.error('[useCalling] Failed to start call:', _error);
+      throw _error;
     }
-  }, [callingService, isInitialized]);
+  }, [currentUsername]);
 
-  // Answer a call
+  // Answer a call with validation
   const answerCall = useCallback(async (callId: string) => {
-    if (!callingService) {
-      throw new Error('Calling service not available');
+    if (!serviceRef.current) {
+      throw new Error('[useCalling] Calling service not initialized');
+    }
+    
+    if (!isValidCallId(callId)) {
+      throw new Error('[useCalling] Invalid call ID format');
     }
 
     try {
-      await callingService.answerCall(callId);
-      console.log('[useCalling] Call answered:', callId);
-    } catch (error) {
-      console.error('[useCalling] Failed to answer call:', error);
-      throw error;
+      await serviceRef.current.answerCall(callId);
+    } catch (_error) {
+      console.error('[useCalling] Failed to answer call:', _error);
+      throw _error;
     }
-  }, [callingService]);
+  }, []);
 
-  // Decline a call
+  // Decline a call with validation
   const declineCall = useCallback(async (callId: string) => {
-    if (!callingService) {
-      throw new Error('Calling service not available');
+    if (!serviceRef.current) {
+      throw new Error('[useCalling] Calling service not initialized');
+    }
+    
+    if (!isValidCallId(callId)) {
+      throw new Error('[useCalling] Invalid call ID format');
     }
 
     try {
-      await callingService.declineCall(callId);
-      console.log('[useCalling] Call declined:', callId);
-    } catch (error) {
-      console.error('[useCalling] Failed to decline call:', error);
-      throw error;
+      await serviceRef.current.declineCall(callId);
+    } catch (_error) {
+      console.error('[useCalling] Failed to decline call:', _error);
+      throw _error;
     }
-  }, [callingService]);
+  }, []);
 
   // End a call
   const endCall = useCallback(async () => {
-    if (!callingService) {
-      throw new Error('Calling service not available');
+    if (!serviceRef.current) {
+      throw new Error('[useCalling] Calling service not initialized');
     }
 
     try {
-      await callingService.endCall();
-      console.log('[useCalling] Call ended');
-    } catch (error) {
-      console.error('[useCalling] Failed to end call:', error);
-      throw error;
+      await serviceRef.current.endCall();
+    } catch (_error) {
+      console.error('[useCalling] Failed to end call:', _error);
+      throw _error;
     }
-  }, [callingService]);
+  }, []);
 
   // Toggle mute
   const toggleMute = useCallback(() => {
-    if (!callingService) {
+    if (!serviceRef.current) {
       return false;
     }
 
-    const isMuted = callingService.toggleMute();
-    console.log('[useCalling] Mute toggled:', isMuted);
+    const isMuted = serviceRef.current.toggleMute();
     return isMuted;
-  }, [callingService]);
+  }, []);
 
   // Toggle video
   const toggleVideo = useCallback(async () => {
-    if (!callingService) {
+    if (!serviceRef.current) {
       return false;
     }
 
-    const isEnabled = await callingService.toggleVideo();
-    console.log('[useCalling] Video toggled:', isEnabled);
+    const isEnabled = await serviceRef.current.toggleVideo();
     return isEnabled;
-  }, [callingService]);
+  }, []);
 
   // Switch camera
   const switchCamera = useCallback(async () => {
-    if (!callingService) {
+    if (!serviceRef.current) {
       return;
     }
 
     try {
-      await callingService.switchCamera();
-      console.log('[useCalling] Camera switched');
-    } catch (error) {
-      console.error('[useCalling] Failed to switch camera:', error);
+      await serviceRef.current.switchCamera();
+    } catch (_error) {
+      console.error('[useCalling] Failed to switch camera:', _error);
     }
-  }, [callingService]);
+  }, []);
 
-  // Start screen sharing
+  // Start screen sharing with validation
   const startScreenShare = useCallback(async (selectedSource?: { id: string; name: string; type: 'screen' | 'window' }) => {
-    if (!callingService) {
-      throw new Error('Calling service not available');
+    if (!serviceRef.current) {
+      throw new Error('[useCalling] Calling service not initialized');
+    }
+    
+    if (selectedSource) {
+      if (!selectedSource.id || typeof selectedSource.id !== 'string') {
+        throw new Error('[useCalling] Invalid source ID');
+      }
+      if (!selectedSource.type || !['screen', 'window'].includes(selectedSource.type)) {
+        throw new Error('[useCalling] Invalid source type');
+      }
     }
 
     try {
-      await callingService.startScreenShare(selectedSource);
-      console.log('[useCalling] Screen sharing started');
-    } catch (error) {
-      console.error('[useCalling] Failed to start screen sharing:', error);
-      throw error;
+      await serviceRef.current.startScreenShare(selectedSource);
+    } catch (_error) {
+      console.error('[useCalling] Failed to start screen sharing:', _error);
+      throw _error;
     }
-  }, [callingService]);
+  }, []);
 
   // Get available screen sources
   const getAvailableScreenSources = useCallback(async () => {
-    if (!callingService) {
-      throw new Error('Calling service not available');
+    if (!serviceRef.current) {
+      throw new Error('[useCalling] Calling service not initialized');
     }
 
     try {
-      return await callingService.getAvailableScreenSources();
-    } catch (error) {
-      console.error('[useCalling] Failed to get screen sources:', error);
-      throw error;
+      return await serviceRef.current.getAvailableScreenSources();
+    } catch (_error) {
+      console.error('[useCalling] Failed to get screen sources:', _error);
+      throw _error;
     }
-  }, [callingService]);
+  }, []);
 
   // Stop screen sharing
   const stopScreenShare = useCallback(async () => {
-    if (!callingService) {
+    if (!serviceRef.current) {
       return;
     }
 
     try {
-      await callingService.stopScreenShare();
-      console.log('[useCalling] Screen sharing stopped');
-    } catch (error) {
-      console.error('[useCalling] Failed to stop screen sharing:', error);
+      await serviceRef.current.stopScreenShare();
+    } catch (_error) {
+      console.error('[useCalling] Failed to stop screen sharing:', _error);
     }
-  }, [callingService]);
+  }, []);
 
   // Get screen sharing status
   const isScreenSharing = callingService?.getScreenSharingStatus() || false;
@@ -422,8 +497,6 @@ export const useCalling = (authContext?: ReturnType<typeof useAuth>) => {
     startScreenShare,
     stopScreenShare,
     getAvailableScreenSources,
-
-    // Service instance (for advanced usage)
     callingService
   };
 };

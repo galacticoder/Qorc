@@ -1,30 +1,63 @@
-import React, { memo, useMemo, useEffect, useState } from "react";
+import React, { memo, useMemo, useEffect, useState, useCallback } from "react";
 import { cn } from "@/lib/utils";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from "@/components/ui/dialog";
 import { Trash2 } from "lucide-react";
-import { useUnifiedUsernameDisplay } from "../../hooks/useUnifiedUsernameDisplay";
 
 export interface Conversation {
-  id: string;
-  username: string;
-  isOnline: boolean;
-  lastMessage?: string;
-  lastMessageTime?: Date;
-  unreadCount?: number;
+  readonly id: string;
+  readonly username: string;
+  readonly isOnline: boolean;
+  readonly lastMessage?: string;
+  readonly lastMessageTime?: Date;
+  readonly unreadCount?: number;
+  readonly displayName?: string;
 }
 
 interface ConversationListProps {
-  conversations: Conversation[];
-  selectedConversation?: string;
-  onSelectConversation: (username: string) => void;
-  onRemoveConversation?: (username: string) => void;
-  getDisplayUsername?: (username: string) => Promise<string>;
+  readonly conversations: ReadonlyArray<Conversation>;
+  readonly selectedConversation?: string;
+  readonly onSelectConversation: (username: string) => void;
+  readonly onRemoveConversation?: (username: string) => void;
+  readonly getDisplayUsername?: (username: string) => Promise<string>;
 }
 
-// Memoized conversation item to prevent unnecessary re-renders
-const ConversationItem = memo(({
+type CallStatus = 'ringing' | 'connecting' | 'connected' | null;
+
+const anonymize = (value: string): string => {
+  if (typeof value !== 'string' || value.length === 0) {
+    return 'anon:user';
+  }
+  try {
+    const bytes = new TextEncoder().encode(value);
+    const hex = Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('');
+    return `anon:${hex.slice(0, 12)}`;
+  } catch {
+    return 'anon:user';
+  }
+};
+
+const getAvatarColor = (username: string): string => {
+  if (typeof username !== 'string' || username.length === 0) {
+    return 'hsl(0, 65%, 55%)';
+  }
+  const hash = username.split('').reduce((acc, char) => acc + char.charCodeAt(0), 0);
+  const hue = Math.abs(hash) % 360;
+  return `hsl(${hue}, 65%, 55%)`;
+};
+
+interface ConversationItemProps {
+  readonly conversation: Conversation;
+  readonly isSelected: boolean;
+  readonly onSelect: (username: string) => void;
+  readonly onRemove?: (username: string) => void;
+  readonly formatTime: (date?: Date) => string;
+  readonly callStatus?: CallStatus;
+  readonly getDisplayUsername?: (username: string) => Promise<string>;
+}
+
+const ConversationItem = memo<ConversationItemProps>(({
   conversation,
   isSelected,
   onSelect,
@@ -32,187 +65,236 @@ const ConversationItem = memo(({
   formatTime,
   callStatus,
   getDisplayUsername
-}: {
-  conversation: Conversation;
-  isSelected: boolean;
-  onSelect: (username: string) => void;
-  onRemove?: (username: string) => void;
-  formatTime: (date?: Date) => string;
-  callStatus?: 'ringing' | 'connecting' | 'connected' | null;
-  getDisplayUsername?: (username: string) => Promise<string>;
 }) => {
-  // Use unified username display
-  const { displayName } = useUnifiedUsernameDisplay({
-    username: conversation.username,
-    getDisplayUsername,
-    fallbackToOriginal: true
-  });
+  const [resolvedName, setResolvedName] = useState<string | null>(null);
+  
+  // Stabilize the resolver function to avoid effect churn when parent re-renders
+  const resolverRef = React.useRef(getDisplayUsername);
+  useEffect(() => { resolverRef.current = getDisplayUsername; }, [getDisplayUsername]);
+  
+  useEffect(() => {
+    let ignore = false;
+    
+    const resolveName = async () => {
+      try {
+        if (resolverRef.current && typeof conversation.username === 'string') {
+          const dn = await resolverRef.current(conversation.username);
+          if (!ignore && typeof dn === 'string' && dn.trim().length > 0) {
+            setResolvedName(dn);
+          }
+        }
+      } catch {}
+    };
+    
+    resolveName();
+    return () => { ignore = true; };
+  }, [conversation.username]);
+
+  const displayName = useMemo(() => {
+    if (conversation.displayName && conversation.displayName.trim().length > 0) {
+      return conversation.displayName;
+    }
+    if (resolvedName && resolvedName.trim().length > 0) {
+      return resolvedName;
+    }
+    return anonymize(conversation.username);
+  }, [conversation.displayName, conversation.username, resolvedName]);
+
+  const avatarColor = useMemo(() => 
+    isSelected ? 'rgba(255, 255, 255, 0.2)' : getAvatarColor(conversation.username),
+    [isSelected, conversation.username]
+  );
+
+  const handleClick = useCallback(() => {
+    onSelect(conversation.username);
+  }, [onSelect, conversation.username]);
+
+  const handleRemove = useCallback((e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (onRemove) {
+      onRemove(conversation.username);
+    }
+  }, [onRemove, conversation.username]);
 
   return (
-  <div
-    className={cn(
-      "flex items-center gap-3 p-3 cursor-pointer transition-all duration-200 group relative",
-      "hover:bg-opacity-80 min-w-0" // Add min-w-0 to prevent flex item from growing
-    )}
-    style={{
-      backgroundColor: isSelected ? 'var(--color-accent-primary)' : 'transparent',
-      borderRadius: 'var(--radius-medium)'
-    }}
-    onMouseEnter={(e) => {
-      if (!isSelected) {
-        e.currentTarget.style.backgroundColor = 'rgba(59, 130, 246, 0.05)';
-      }
-    }}
-    onMouseLeave={(e) => {
-      if (!isSelected) {
-        e.currentTarget.style.backgroundColor = 'transparent';
-      }
-    }}
-    onClick={() => onSelect(conversation.username)}
-  >
-    {/* Avatar */}
-    <div 
-      className="w-10 h-10 rounded-full flex items-center justify-center font-medium text-sm flex-shrink-0"
+    <div
+      className={cn(
+        "flex items-center gap-3 p-3 cursor-pointer transition-all duration-200 group relative",
+        "hover:bg-opacity-80 min-w-0"
+      )}
       style={{
-        backgroundColor: isSelected ? 'rgba(255, 255, 255, 0.2)' : `hsl(${Math.abs(conversation.username.split('').reduce((a, b) => a + b.charCodeAt(0), 0)) % 360}, 65%, 55%)`,
-        color: isSelected ? 'white' : 'white'
+        backgroundColor: isSelected ? 'var(--color-accent-primary)' : 'transparent',
+        borderRadius: 'var(--radius-medium)'
       }}
+      onMouseEnter={(e) => {
+        if (!isSelected) {
+          e.currentTarget.style.backgroundColor = 'rgba(59, 130, 246, 0.05)';
+        }
+      }}
+      onMouseLeave={(e) => {
+        if (!isSelected) {
+          e.currentTarget.style.backgroundColor = 'transparent';
+        }
+      }}
+      onClick={handleClick}
+      role="button"
+      tabIndex={0}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          handleClick();
+        }
+      }}
+      aria-label={`Conversation with ${displayName}`}
+      aria-selected={isSelected}
     >
-      {(displayName || conversation.username).trim().charAt(0).toUpperCase()}
-    </div>
+      <div 
+        className="w-10 h-10 rounded-full flex items-center justify-center font-medium text-sm flex-shrink-0"
+        style={{
+          backgroundColor: avatarColor,
+          color: 'white'
+        }}
+        aria-hidden="true"
+      >
+        {displayName.trim().charAt(0).toUpperCase()}
+      </div>
     
-    {/* Content */}
-    <div className="flex-1 min-w-0">
-      {/* Primary line (name and timestamp) */}
-      <div className="flex items-center gap-2 mb-1">
-        <span
-          className="font-medium text-sm truncate flex-1 min-w-0"
-          style={{ color: isSelected ? 'white' : 'var(--color-text-primary)' }}
-          title={displayName} // Show full name on hover
-        >
-          {displayName}
-        </span>
-        {conversation.lastMessageTime && (
+      <div className="flex-1 min-w-0">
+        <div className="flex items-center gap-2 mb-1">
           <span
-            className="text-xs flex-shrink-0"
-            style={{ color: isSelected ? 'rgba(255, 255, 255, 0.7)' : 'var(--color-text-secondary)' }}
+            className="font-medium text-sm truncate flex-1 min-w-0"
+            style={{ color: isSelected ? 'white' : 'var(--color-text-primary)' }}
+            title={displayName}
           >
-            {formatTime(conversation.lastMessageTime)}
+            {displayName}
           </span>
+          {conversation.lastMessageTime && (
+            <span
+              className="text-xs flex-shrink-0"
+              style={{ color: isSelected ? 'rgba(255, 255, 255, 0.7)' : 'var(--color-text-secondary)' }}
+            >
+              {formatTime(conversation.lastMessageTime)}
+            </span>
+          )}
+        </div>
+
+        {conversation.lastMessage && (
+          <div
+            className="text-xs truncate pr-2"
+            style={{ color: isSelected ? 'rgba(255, 255, 255, 0.8)' : 'var(--color-text-secondary)' }}
+            title={conversation.lastMessage}
+          >
+            {conversation.lastMessage}
+          </div>
         )}
       </div>
 
-      {/* Secondary line (message preview) */}
-      {conversation.lastMessage && (
-        <div
-          className="text-xs truncate pr-2"
-          style={{ color: isSelected ? 'rgba(255, 255, 255, 0.8)' : 'var(--color-text-secondary)' }}
-          title={conversation.lastMessage} // Show full message on hover
+      {callStatus && (
+        <div 
+          className={cn(
+            "text-xs px-2 py-1 rounded-full font-medium flex-shrink-0",
+            callStatus === 'ringing' && "bg-yellow-100 text-yellow-800",
+            callStatus === 'connecting' && "bg-blue-100 text-blue-800",
+            callStatus === 'connected' && "bg-green-100 text-green-800"
+          )}
+          role="status"
+          aria-label={`Call status: ${callStatus}`}
         >
-          {conversation.lastMessage}
+          {callStatus === 'ringing' && "📞"}
+          {callStatus === 'connecting' && "🔄"}
+          {callStatus === 'connected' && "📞"}
         </div>
       )}
+
+      {onRemove && (
+        <Button
+          variant="ghost"
+          size="sm"
+          onClick={handleRemove}
+          className="absolute bottom-1 right-1 opacity-0 group-hover:opacity-100 transition-opacity p-1 h-6 w-6"
+          style={{
+            backgroundColor: 'transparent',
+            color: 'var(--color-error)'
+          }}
+          onMouseEnter={(e) => {
+            e.currentTarget.style.backgroundColor = 'rgba(239, 68, 68, 0.1)';
+          }}
+          onMouseLeave={(e) => {
+            e.currentTarget.style.backgroundColor = 'transparent';
+          }}
+          aria-label={`Remove conversation with ${displayName}`}
+        >
+          <Trash2 className="h-3 w-3" />
+        </Button>
+      )}
     </div>
-
-    {/* Call status badge only */}
-    {callStatus && (
-      <div className={cn(
-        "text-xs px-2 py-1 rounded-full font-medium flex-shrink-0",
-        callStatus === 'ringing' && "bg-yellow-100 text-yellow-800",
-        callStatus === 'connecting' && "bg-blue-100 text-blue-800",
-        callStatus === 'connected' && "bg-green-100 text-green-800"
-      )}>
-        {callStatus === 'ringing' && "📞"}
-        {callStatus === 'connecting' && "🔄"}
-        {callStatus === 'connected' && "📞"}
-      </div>
-    )}
-
-    {/* Remove button - only show on hover */}
-    {onRemove && (
-      <Button
-        variant="ghost"
-        size="sm"
-        onClick={(e) => {
-          e.stopPropagation();
-          onRemove(conversation.username);
-        }}
-        className="absolute bottom-1 right-1 opacity-0 group-hover:opacity-100 transition-opacity p-1 h-6 w-6"
-        style={{
-          backgroundColor: 'transparent',
-          color: 'var(--color-error)'
-        }}
-        onMouseEnter={(e) => {
-          e.currentTarget.style.backgroundColor = 'rgba(239, 68, 68, 0.1)';
-        }}
-        onMouseLeave={(e) => {
-          e.currentTarget.style.backgroundColor = 'transparent';
-        }}
-      >
-        <Trash2 className="h-3 w-3" />
-      </Button>
-    )}
-  </div>
   );
 });
 
-export const ConversationList = memo(function ConversationList({
+export const ConversationList = memo<ConversationListProps>(function ConversationList({
   conversations,
   selectedConversation,
   onSelectConversation,
   onRemoveConversation,
   getDisplayUsername
-}: ConversationListProps) {
-  // Track active call peer/status via global call-status events
+}) {
   const [activePeer, setActivePeer] = useState<string | null>(null);
-  const [activeStatus, setActiveStatus] = useState<'ringing' | 'connecting' | 'connected' | null>(null);
-  
-  // Confirmation dialog state
-  const [showConfirmDialog, setShowConfirmDialog] = useState(false);
+  const [activeStatus, setActiveStatus] = useState<CallStatus>(null);
+  const [showConfirmDialog, setShowConfirmDialog] = useState<boolean>(false);
   const [conversationToRemove, setConversationToRemove] = useState<string | null>(null);
 
-  const handleRemoveClick = (username: string) => {
+  const handleRemoveClick = useCallback((username: string) => {
     setConversationToRemove(username);
     setShowConfirmDialog(true);
-  };
+  }, []);
 
-  const handleConfirmRemove = () => {
+  const handleConfirmRemove = useCallback(() => {
     if (conversationToRemove && onRemoveConversation) {
       onRemoveConversation(conversationToRemove);
     }
     setShowConfirmDialog(false);
     setConversationToRemove(null);
-  };
+  }, [conversationToRemove, onRemoveConversation]);
 
-  const handleCancelRemove = () => {
+  const handleCancelRemove = useCallback(() => {
     setShowConfirmDialog(false);
     setConversationToRemove(null);
-  };
+  }, []);
 
   useEffect(() => {
     const handler = (e: Event) => {
-      const ce = e as CustomEvent;
-      const { peer, status } = ce.detail || {};
-      if (typeof peer === 'string' && typeof status === 'string') {
+      try {
+        const ce = e as CustomEvent;
+        const detail = ce.detail;
+        if (!detail || typeof detail !== 'object') return;
+        
+        const { peer, status } = detail as { peer?: unknown; status?: unknown };
+        if (typeof peer !== 'string' || typeof status !== 'string') return;
+        
         if (status === 'ringing' || status === 'connecting' || status === 'connected') {
           setActivePeer(peer);
-          setActiveStatus(status);
+          setActiveStatus(status as CallStatus);
         } else {
-          // Non-active status clears badge if it matches current peer
           setActivePeer(prev => (prev === peer ? null : prev));
-          setActiveStatus(prev => (prev && prev && prev ? null : prev));
+          setActiveStatus(null);
         }
-      }
+      } catch {}
     };
+    
     window.addEventListener('ui-call-status', handler as EventListener);
     return () => window.removeEventListener('ui-call-status', handler as EventListener);
   }, []);
 
-  // Memoize the formatTime function to prevent recreation on every render
-  const formatTime = useMemo(() => (date?: Date) => {
-    if (!date) return "";
+  const formatTime = useCallback((date?: Date): string => {
+    if (!date || !(date instanceof Date) || isNaN(date.getTime())) {
+      return "";
+    }
+    
     const now = new Date();
     const diff = now.getTime() - date.getTime();
+    
+    if (diff < 0) return "";
+    
     const minutes = Math.floor(diff / 60000);
     const hours = Math.floor(diff / 3600000);
     const days = Math.floor(diff / 86400000);
@@ -222,6 +304,11 @@ export const ConversationList = memo(function ConversationList({
     if (hours < 24) return `${hours}h`;
     return `${days}d`;
   }, []);
+
+  const displayUsername = useMemo(() => {
+    if (!conversationToRemove) return 'User';
+    return /^[a-f0-9]{32,}$/i.test(conversationToRemove) ? 'User' : conversationToRemove;
+  }, [conversationToRemove]);
 
   return (
     <>
@@ -253,22 +340,23 @@ export const ConversationList = memo(function ConversationList({
         </div>
       </ScrollArea>
 
-      {/* Confirmation Dialog */}
       <Dialog open={showConfirmDialog} onOpenChange={setShowConfirmDialog}>
-        <DialogContent style={{ backgroundColor: 'var(--color-surface)', borderColor: 'var(--color-border)' }}>
+        <DialogContent 
+          style={{ backgroundColor: 'var(--color-surface)', borderColor: 'var(--color-border)' }}
+          aria-describedby="dialog-description"
+        >
           <DialogHeader>
             <DialogTitle style={{ color: 'var(--color-text-primary)' }}>Remove Conversation</DialogTitle>
-            <DialogDescription style={{ color: 'var(--color-text-secondary)' }}>
-              Are you sure you want to remove the conversation with {/* Mask hashed in confirm dialog */}
-              {conversationToRemove && /^[a-f0-9]{32,}$/i.test(conversationToRemove) ? 'User' : conversationToRemove}? 
+            <DialogDescription id="dialog-description" style={{ color: 'var(--color-text-secondary)' }}>
+              Are you sure you want to remove the conversation with {displayUsername}? 
               This action cannot be undone and will delete all message history.
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>
-            <Button variant="outline" onClick={handleCancelRemove}>
+            <Button variant="outline" onClick={handleCancelRemove} aria-label="Cancel removal">
               Cancel
             </Button>
-            <Button variant="destructive" onClick={handleConfirmRemove}>
+            <Button variant="destructive" onClick={handleConfirmRemove} aria-label="Confirm removal">
               Remove
             </Button>
           </DialogFooter>

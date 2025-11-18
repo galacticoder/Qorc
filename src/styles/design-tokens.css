@@ -1,25 +1,25 @@
-/* Design Tokens - Dark Messaging Theme */
+/* Design Tokens - Adaptive Light/Dark Theme */
 :root {
-  /* Colors */
-  --color-background: #0f0f23;
-  --color-surface: #1a1a2e;
-  --color-panel: #16213e;
-  --color-muted-panel: #0e1628;
-  --color-text-primary: #e2e8f0;
-  --color-text-secondary: #94a3b8;
+  /* Light mode colors (default) */
+  --color-background: #ffffff;
+  --color-surface: #f8fafc;
+  --color-panel: #f1f5f9;
+  --color-muted-panel: #e2e8f0;
+  --color-text-primary: #0f172a;
+  --color-text-secondary: #475569;
   --color-accent-primary: #3b82f6;
   --color-accent-secondary: #6366f1;
-  --color-border: #334155;
+  --color-border: #cbd5e1;
   --color-success: #10b981;
-  --color-disabled: #475569;
+  --color-disabled: #94a3b8;
 
-  /* Markdown Content Colors */
+  /* Markdown Content Colors (Light mode) */
   --markdown-header-color: var(--color-text-primary);
-  --markdown-link-color: #58a6ff;
-  --markdown-code-bg: #161b22;
-  --markdown-code-border: #30363d;
-  --markdown-code-text: #e6edf3;
-  --markdown-inline-code-bg: rgba(110, 118, 129, 0.4);
+  --markdown-link-color: #0969da;
+  --markdown-code-bg: #f6f8fa;
+  --markdown-code-border: #d0d7de;
+  --markdown-code-text: #24292f;
+  --markdown-inline-code-bg: rgba(175, 184, 193, 0.2);
   --markdown-border-color: var(--color-border);
   --markdown-code-font: 'SFMono-Regular', 'Monaco', 'Inconsolata', 'Fira Code', 'Fira Mono', 'Droid Sans Mono', 'Courier New', monospace;
 
@@ -88,6 +88,30 @@
   --breakpoint-small: 768px;
   --breakpoint-medium: 1024px;
   --breakpoint-large: 1280px;
+}
+
+/* Dark mode overrides */
+.dark {
+  /* Dark mode colors */
+  --color-background: #0f0f23;
+  --color-surface: #1a1a2e;
+  --color-panel: #16213e;
+  --color-muted-panel: #0e1628;
+  --color-text-primary: #e2e8f0;
+  --color-text-secondary: #94a3b8;
+  --color-accent-primary: #3b82f6;
+  --color-accent-secondary: #6366f1;
+  --color-border: #334155;
+  --color-success: #10b981;
+  --color-disabled: #475569;
+
+  /* Dark mode markdown colors */
+  --markdown-header-color: var(--color-text-primary);
+  --markdown-link-color: #58a6ff;
+  --markdown-code-bg: #161b22;
+  --markdown-code-border: #30363d;
+  --markdown-code-text: #e6edf3;
+  --markdown-inline-code-bg: rgba(110, 118, 129, 0.4);
 }
 
 /* Custom Scrollbar Styling */

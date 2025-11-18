@@ -1,10 +1,11 @@
-import { CryptoUtils } from "./unified-crypto";
+import { SecureAuditLogger } from './secure-error-handler';
+import { SQLiteKV } from './sqlite-kv';
 
 interface EphemeralConfig {
   enabled: boolean;
-  defaultTTL: number; // Time to live in milliseconds
-  maxTTL: number; // Maximum TTL allowed
-  cleanupInterval: number; // Cleanup interval in milliseconds
+  defaultTTL: number; // ms
+  maxTTL: number; // ms
+  cleanupInterval: number; // ms
 }
 
 interface EphemeralData {
@@ -15,1015 +16,456 @@ interface EphemeralData {
   autoDelete: boolean;
 }
 
+interface StoredMessage {
+  id?: string;
+  timestamp?: number;
+  [key: string]: unknown;
+}
+
+interface StoredUser {
+  id?: string;
+  username?: string;
+  [key: string]: unknown;
+}
+
+type PostQuantumAEADLike = {
+  encrypt(plaintext: Uint8Array, key: Uint8Array, aad?: Uint8Array, nonce?: Uint8Array): {
+    ciphertext: Uint8Array;
+    nonce: Uint8Array;
+    tag: Uint8Array;
+  };
+  decrypt(ciphertext: Uint8Array, nonce: Uint8Array, tag: Uint8Array, key: Uint8Array, aad?: Uint8Array): Uint8Array;
+};
+
 export class SecureDB {
-  private dbName: string;
+  private static readonly MAX_VALUE_SIZE = 10 * 1024 * 1024; // 10 MB
+  private static readonly encoder = new TextEncoder();
+  private static readonly decoder = new TextDecoder();
+
   private username: string;
   private encryptionKey: CryptoKey | null = null;
-  // In-memory fallback when IndexedDB isn't available (e.g., dev sandbox issues)
-  private memoryMode: boolean = false;
-  private memoryStore = new Map<string, Uint8Array>();
-  private readonly MAX_MEMORY_ENTRIES = 1000; // SECURITY: Limit memory usage
   private readonly EPHEMERAL_PREFIX = 'ephemeral:';
   private ephemeralConfig: EphemeralConfig;
   private cleanupInterval: ReturnType<typeof setInterval> | null = null;
-
-  /**
-   * Create a safe composite key that avoids delimiter collisions
-   */
-  private createCompositeKey(storeName: string, key: string): string {
-    // Use JSON encoding to safely handle any characters in storeName or key
-    return JSON.stringify([storeName, key]);
-  }
-
-  /**
-   * Parse a composite key back to its components
-   */
-  private parseCompositeKey(compositeKey: string): [string, string] {
-    try {
-      const parsed = JSON.parse(compositeKey);
-      if (Array.isArray(parsed) && parsed.length === 2) {
-        return [parsed[0], parsed[1]];
-      }
-    } catch (error) {
-      // Handle legacy keys that might not be JSON encoded
-      const colonIndex = compositeKey.indexOf(':');
-      if (colonIndex !== -1) {
-        return [compositeKey.substring(0, colonIndex), compositeKey.substring(colonIndex + 1)];
-      }
-    }
-    throw new Error('Invalid composite key format: [REDACTED]');
-  }
-
-  /**
-   * Smart memory eviction policy that prioritizes keeping non-ephemeral data
-   */
-  private async smartMemoryEviction(): Promise<void> {
-    const now = Date.now();
-    let removedCount = 0;
-    const targetRemoval = Math.floor(this.MAX_MEMORY_ENTRIES * 0.1); // Remove 10%
-    
-    // Phase 1: Remove expired ephemeral items
-    const expiredKeys: string[] = [];
-    const ephemeralKeys: string[] = [];
-    const nonEphemeralKeys: string[] = [];
-    
-    for (const [key, encryptedData] of this.memoryStore.entries()) {
-      try {
-        const [storeName] = this.parseCompositeKey(key);
-        if (storeName.startsWith(this.EPHEMERAL_PREFIX)) {
-          // This is ephemeral data
-          ephemeralKeys.push(key);
-          try {
-            const decryptedData = await this.decryptData(encryptedData) as EphemeralData;
-            if (decryptedData.expiresAt && now > decryptedData.expiresAt && decryptedData.autoDelete) {
-              expiredKeys.push(key);
-            }
-          } catch (error) {
-            // If we can't decrypt, treat as candidate for removal
-            expiredKeys.push(key);
-          }
-        } else {
-          nonEphemeralKeys.push(key);
-        }
-      } catch (error) {
-        // Handle legacy keys - assume non-ephemeral for safety
-        if (key.startsWith(this.EPHEMERAL_PREFIX)) {
-          ephemeralKeys.push(key);
-        } else {
-          nonEphemeralKeys.push(key);
-        }
-      }
-    }
-    
-    // Remove expired ephemeral items first
-    for (const key of expiredKeys) {
-      if (removedCount >= targetRemoval) break;
-      this.memoryStore.delete(key);
-      removedCount++;
-    }
-    
-    // Phase 2: If still need space, remove oldest non-expired ephemeral items
-    if (removedCount < targetRemoval) {
-      const nonExpiredEphemeral = ephemeralKeys.filter(k => !expiredKeys.includes(k));
-      for (const key of nonExpiredEphemeral) {
-        if (removedCount >= targetRemoval) break;
-        this.memoryStore.delete(key);
-        removedCount++;
-      }
-    }
-    
-    // Phase 3: Last resort - remove oldest non-ephemeral items
-    if (removedCount < targetRemoval) {
-      for (const key of nonEphemeralKeys) {
-        if (removedCount >= targetRemoval) break;
-        this.memoryStore.delete(key);
-        removedCount++;
-      }
-    }
-    
-    console.warn(`[SecureDB] Memory cap reached, smart eviction removed ${removedCount} entries (${expiredKeys.length} expired, ${removedCount - expiredKeys.length} others)`);
-  }
+  private postQuantumAEAD: PostQuantumAEADLike | null = null;
+  private lastCleanup = 0;
+  private readonly MIN_CLEANUP_INTERVAL = 60_000;
+  private readonly MAX_EPHEMERAL_BATCH = 1000;
 
   constructor(username: string, ephemeralConfig?: Partial<EphemeralConfig>) {
+    if (!username || username.length > 255) {
+      throw new Error('Invalid username');
+    }
     this.username = username;
-    // Use a stable per-user database name to ensure consistent loading across sessions
-    this.dbName = SecureDB.getStableDbNameForUsername(username);
-    console.log(`[SecureDB] Using database (stable): ${this.dbName}`);
     this.ephemeralConfig = {
       enabled: true,
-      defaultTTL: 24 * 60 * 60 * 1000, // 24 hours
-      maxTTL: 7 * 24 * 60 * 60 * 1000, // 7 days
-      cleanupInterval: 60 * 60 * 1000, // 1 hour
+      defaultTTL: 24 * 60 * 60 * 1000,
+      maxTTL: 7 * 24 * 60 * 60 * 1000,
+      cleanupInterval: 60 * 60 * 1000,
       ...ephemeralConfig
     };
   }
 
+  private async kv() { return SQLiteKV.forUser(this.username); }
+
   async initializeWithKey(key: CryptoKey): Promise<void> {
-    this.encryptionKey = key;
-
-    // Start ephemeral cleanup if enabled
-    if (this.ephemeralConfig.enabled) {
-      this.startEphemeralCleanup();
+    try {
+      const alg = key.algorithm as Partial<AesKeyAlgorithm> | undefined;
+      const name = alg?.name;
+      const length = alg && 'length' in alg ? (alg.length as number | undefined) : undefined;
+      if (name !== 'AES-GCM' && name !== 'AES-CBC') throw new Error('Invalid key algorithm - must be AES');
+      if (length !== 256) throw new Error('Invalid key length - must be 256 bits');
+      this.encryptionKey = key;
+      if (this.ephemeralConfig.enabled) this.startEphemeralCleanup();
+    } catch (_error) {
+      if (this.cleanupInterval) { clearInterval(this.cleanupInterval); this.cleanupInterval = null; }
+      throw _error;
     }
-
-    // Attempt one-time migration from legacy session-based DB names
-    await this.migrateFromLegacyDatabases();
-
-    console.log("[SecureDB] SecureDB initialized with ephemeral support");
   }
 
-  private async encryptData(data: any): Promise<Uint8Array> {
-    if (!this.encryptionKey) throw new Error("Encryption key not initialized");
-
-    // Export the AES key to raw bytes for ChaCha20
+  private async encryptData(data: unknown): Promise<Uint8Array> {
+    if (!this.encryptionKey) throw new Error('Encryption key not initialized');
     const keyBytes = await crypto.subtle.exportKey('raw', this.encryptionKey);
     const key = new Uint8Array(keyBytes);
-
-    const encoder = new TextEncoder();
-    const dataBuffer = encoder.encode(JSON.stringify(data));
-
-    // Use XChaCha20-Poly1305 for better security and nonce reuse resistance
-    const { nonce, ciphertext } = CryptoUtils.XChaCha20Poly1305.encryptWithNonce(key, dataBuffer);
-
-    // Combine nonce and ciphertext
-    const combined = new Uint8Array(nonce.length + ciphertext.length);
-    combined.set(nonce);
-    combined.set(ciphertext, nonce.length);
+    const dataBuffer = SecureDB.encoder.encode(JSON.stringify(data));
+    if (dataBuffer.length > SecureDB.MAX_VALUE_SIZE) throw new Error(`Data too large: ${dataBuffer.length} bytes`);
+    const PostQuantumAEAD = await this.getPostQuantumAEAD();
+    const aad = SecureDB.encoder.encode(`securedb-aead-v2-${this.username}`);
+    let encResult;
+    try {
+      encResult = PostQuantumAEAD.encrypt(dataBuffer, key, aad);
+      if (!encResult || !encResult.nonce || !encResult.ciphertext || !encResult.tag) throw new Error('Invalid encryption result');
+    } catch (encryptError) {
+      SecureAuditLogger.error('securedb', 'encryption', 'encrypt-failed', { error: (encryptError as Error).message });
+      throw new Error('Failed to encrypt data');
+    }
+    const aadLengthBytes = new Uint8Array(2);
+    new DataView(aadLengthBytes.buffer).setUint16(0, Math.min(aad.length, 0xffff), false);
+    const combined = new Uint8Array(aadLengthBytes.length + aad.length + encResult.nonce.length + encResult.ciphertext.length + encResult.tag.length);
+    let offset = 0;
+    combined.set(aadLengthBytes, offset); offset += aadLengthBytes.length;
+    combined.set(aad, offset); offset += aad.length;
+    combined.set(encResult.nonce, offset); offset += encResult.nonce.length;
+    combined.set(encResult.ciphertext, offset); offset += encResult.ciphertext.length;
+    combined.set(encResult.tag, offset);
+    key.fill(0);
     return combined;
   }
 
-  private async decryptData(encryptedData: Uint8Array): Promise<any> {
-    if (!this.encryptionKey) throw new Error("Encryption key not initialized");
-
-    // Export the AES key to raw bytes for ChaCha20
+  private async decryptData(encryptedData: Uint8Array): Promise<unknown> {
+    if (!this.encryptionKey) throw new Error('Encryption key not initialized');
     const keyBytes = await crypto.subtle.exportKey('raw', this.encryptionKey);
     const key = new Uint8Array(keyBytes);
-
-    // XChaCha20-Poly1305 uses 24-byte nonces
-    const nonceLength = 24;
-    const nonce = encryptedData.slice(0, nonceLength);
-    const ciphertext = encryptedData.slice(nonceLength);
-
-    // Decrypt using XChaCha20-Poly1305
-    const decrypted = CryptoUtils.XChaCha20Poly1305.decryptWithNonce(key, nonce, ciphertext);
-
-    return JSON.parse(new TextDecoder().decode(decrypted));
+    const nonceLength = 36; const tagLength = 32; const minLength = nonceLength + tagLength + 1;
+    if (encryptedData.length < minLength) throw new Error('Encrypted data too short');
+    let offset = 0; let aad: Uint8Array | undefined;
+    if (encryptedData.length >= 2) {
+      const possibleAadLength = new DataView(encryptedData.buffer, encryptedData.byteOffset).getUint16(0, false);
+      const expectedLength = 2 + possibleAadLength + nonceLength + tagLength + 1;
+      if (possibleAadLength > 0 && possibleAadLength < 4096 && encryptedData.length >= expectedLength) {
+        offset = 2; aad = encryptedData.slice(offset, offset + possibleAadLength); offset += possibleAadLength;
+      }
+    }
+    const remainingLength = encryptedData.length - offset;
+    if (remainingLength < minLength) throw new Error('Encrypted data malformed');
+    const nonce = encryptedData.slice(offset, offset + nonceLength); offset += nonceLength;
+    const ciphertext = encryptedData.slice(offset, encryptedData.length - tagLength);
+    const tag = encryptedData.slice(encryptedData.length - tagLength);
+    const PostQuantumAEAD = await this.getPostQuantumAEAD();
+    try {
+      const decrypted = PostQuantumAEAD.decrypt(ciphertext, nonce, tag, key, aad);
+      key.fill(0);
+      return JSON.parse(SecureDB.decoder.decode(decrypted));
+    } catch (decryptError: any) {
+      const errorMessage = decryptError?.message || String(decryptError);
+      if (errorMessage.includes('MAC verification failed') || errorMessage.includes('BLAKE3')) {
+        SecureAuditLogger.warn('securedb', 'decryption', 'mac-verification-failed', {});
+      }
+      SecureAuditLogger.error('securedb', 'decryption', 'decrypt-failed', { error: (decryptError as Error).message });
+      throw new Error('Failed to decrypt data');
+    }
   }
 
-  private static getStableDbNameForUsername(username: string): string {
-    const sanitized = SecureDB.sanitizeIdentifier(username);
-    return `securechat_${sanitized}_db`;
+  private async getPostQuantumAEAD(): Promise<PostQuantumAEADLike> {
+    if (!this.postQuantumAEAD) {
+      try {
+        const module = await import('./post-quantum-crypto');
+        const aead = module.PostQuantumAEAD;
+        if (!aead) throw new Error('PostQuantumAEAD not found in module');
+        this.postQuantumAEAD = aead;
+      } catch (error) {
+        SecureAuditLogger.error('securedb', 'initialization', 'module-load-failed', { error: (error as Error).message });
+        throw new Error('Encryption module unavailable');
+      }
+    }
+    return this.postQuantumAEAD;
+  }
+
+  private async decryptDataWithYield(encryptedData: Uint8Array): Promise<any> {
+    await new Promise(r => setTimeout(r, 0));
+    const decrypted = await this.decryptData(encryptedData);
+    await new Promise(r => setTimeout(r, 0));
+    return decrypted;
   }
 
   private static sanitizeIdentifier(value: string): string {
-    // Replace anything other than alphanumerics, dash, underscore with underscore
     return (value || 'unknown').replace(/[^a-zA-Z0-9_-]/g, '_');
   }
 
-  private openSpecificDB(name: string): Promise<IDBDatabase> {
-    return new Promise((resolve, reject) => {
-      const request = indexedDB.open(name, 1);
-      request.onupgradeneeded = () => {
-        const db = request.result;
-        if (!db.objectStoreNames.contains("data")) {
-          db.createObjectStore("data");
-        }
-      };
-      request.onsuccess = () => resolve(request.result);
-      request.onerror = () => reject(request.error);
-    });
+  // Messages -----------------------------------------------------------------
+
+  async storeMessage(message: StoredMessage): Promise<void> {
+    const existingMessages = await this.loadMessages();
+    await this.saveMessages([...existingMessages, message]);
   }
 
-  /**
-   * Migrate from legacy session-based DB names to a stable per-username DB.
-   * Legacy format: securechat_${username}_${randomSession}_db
-   */
-  private async migrateFromLegacyDatabases(): Promise<void> {
-    try {
-      const idbAny: any = indexedDB as any;
-      if (!idbAny || typeof idbAny.databases !== 'function') {
-        return; // No listing API available; skip best-effort migration
-      }
-
-      const databases: Array<{ name?: string | null; version?: number }>|undefined = await idbAny.databases();
-      if (!databases || databases.length === 0) return;
-
-      const stableName = this.dbName;
-      const sanitizedUsername = SecureDB.sanitizeIdentifier(this.username);
-      const prefix = `securechat_${sanitizedUsername}_`;
-
-      // Identify legacy DBs for this username (exclude the stable target name)
-      const legacy = databases
-        .map(d => d.name)
-        .filter((n): n is string => !!n)
-        .filter(n => n.startsWith(prefix) && n.endsWith('_db') && n !== stableName);
-
-      if (legacy.length === 0) return;
-
-      console.log('[SecureDB] Found legacy databases to migrate:', legacy);
-
-      let aggregatedMessages: any[] = [];
-      let aggregatedUsers: any[] = [];
-
-      for (const legacyName of legacy) {
-        try {
-          const legacyDb = await this.openSpecificDB(legacyName);
-
-          // Helper to read raw encrypted value by key
-          const readRaw = (key: string) => new Promise<Uint8Array | null>((resolve, reject) => {
-            const tx = legacyDb.transaction('data', 'readonly');
-            const store = tx.objectStore('data');
-            const req = store.get(key);
-            req.onsuccess = () => resolve((req.result as Uint8Array) || null);
-            req.onerror = () => reject(req.error);
-          });
-
-          const rawMessages = await readRaw('messages').catch(() => null);
-          if (rawMessages) {
-            try {
-              const msgs = await this.decryptData(rawMessages);
-              if (Array.isArray(msgs)) {
-                aggregatedMessages = [...aggregatedMessages, ...msgs];
-              }
-            } catch {}
-          }
-
-          const rawUsers = await readRaw('users').catch(() => null);
-          if (rawUsers) {
-            try {
-              const usrs = await this.decryptData(rawUsers);
-              if (Array.isArray(usrs)) {
-                aggregatedUsers = [...aggregatedUsers, ...usrs];
-              }
-            } catch {}
-          }
-
-          try { legacyDb.close?.(); } catch {}
-        } catch (err) {
-          console.warn('[SecureDB] Failed to read legacy DB during migration:', err);
-        }
-      }
-
-      // Merge into the stable DB if we have anything
-      if (aggregatedMessages.length > 0) {
-        try {
-          const existing = await this.loadMessages().catch(() => []);
-          const merged = this.deduplicateMessages([...existing, ...aggregatedMessages]);
-          await this.saveMessages(merged);
-          console.log(`[SecureDB] Migrated ${aggregatedMessages.length} messages into stable DB`);
-        } catch (err) {
-          console.warn('[SecureDB] Failed to migrate messages into stable DB:', err);
-        }
-      }
-
-      if (aggregatedUsers.length > 0) {
-        try {
-          const existingUsers = await this.loadUsers().catch(() => []);
-          // Users array is small; simple merge by username if available
-          const seen = new Set<string>();
-          const mergedUsers = [...existingUsers, ...aggregatedUsers].filter((u: any) => {
-            const key = typeof u === 'object' && u && (u.username || u.id || JSON.stringify(u));
-            if (seen.has(key)) return false;
-            seen.add(key);
-            return true;
-          });
-          await this.saveUsers(mergedUsers);
-          console.log(`[SecureDB] Migrated ${aggregatedUsers.length} users into stable DB`);
-        } catch (err) {
-          console.warn('[SecureDB] Failed to migrate users into stable DB:', err);
-        }
-      }
-
-      // Cleanup legacy DBs now that migration is complete
-      for (const legacyName of legacy) {
-        try {
-          await new Promise<void>((resolve, reject) => {
-            const del = indexedDB.deleteDatabase(legacyName);
-            del.onsuccess = () => resolve();
-            del.onerror = () => reject(del.error);
-            del.onblocked = () => {
-              console.warn('[SecureDB] Deletion of legacy DB is blocked (will be removed on next run):', legacyName);
-              resolve();
-            };
-          });
-          console.log('[SecureDB] Deleted legacy DB:', legacyName);
-        } catch (err) {
-          console.warn('[SecureDB] Failed to delete legacy DB:', legacyName, err);
-        }
-      }
-    } catch (error) {
-      // Best-effort migration; never block initialization
-      console.warn('[SecureDB] Legacy DB migration skipped or failed:', error);
+  async saveMessages(messages: StoredMessage[], activeConversationPeer?: string): Promise<void> {
+    if (!this.encryptionKey) throw new Error('Encryption key not initialized');
+    const deduplicated = this.deduplicateMessages(messages);
+    const conversationMap = new Map<string, StoredMessage[]>();
+    const currentUser = this.username;
+    for (const msg of deduplicated) {
+      if (!(msg as any)?.sender || !(msg as any)?.recipient) continue;
+      const peer = (msg as any).sender === currentUser ? (msg as any).recipient : (msg as any).sender;
+      if (!conversationMap.has(peer)) conversationMap.set(peer, []);
+      conversationMap.get(peer)!.push(msg);
     }
-  }
-
-  private openDB(): Promise<IDBDatabase> {
-    return new Promise((resolve, reject) => {
-      const request = indexedDB.open(this.dbName, 1);
-
-      request.onupgradeneeded = () => {
-        const db = request.result;
-        if (!db.objectStoreNames.contains("data")) {
-          db.createObjectStore("data");
-        }
-      };
-
-      request.onsuccess = () => resolve(request.result);
-      request.onerror = () => reject(request.error);
-    });
-  }
-
-  async saveMessages(messages: any[]): Promise<void> {
-    if (!this.encryptionKey) throw new Error("Encryption key not initialized");
-    
-    // Deduplicate messages before saving
-    const deduplicatedMessages = this.deduplicateMessages(messages);
-    
-    const encrypted = await this.encryptData(deduplicatedMessages);
-    try {
-      const db = await this.openDB();
-      return new Promise((resolve, reject) => {
-        const tx = db.transaction("data", "readwrite");
-        const store = tx.objectStore("data");
-        store.put(encrypted, "messages");
-        tx.oncomplete = () => resolve();
-        tx.onerror = () => reject(tx.error);
-      });
-    } catch (e) {
-      // Fallback to memory mode
-      console.warn('[SecureDB] IndexedDB unavailable; using in-memory storage for messages');
-      this.memoryMode = true;
-      this.memoryStore.set('messages', encrypted);
+    const capped: StoredMessage[] = [];
+    for (const [peer, msgs] of conversationMap.entries()) {
+      const sorted = msgs.sort((a, b) => new Date(a.timestamp as any).getTime() - new Date(b.timestamp as any).getTime());
+      const limit = peer === activeConversationPeer ? 1000 : 500;
+      capped.push(...sorted.slice(-limit));
     }
+    const encrypted = await this.encryptData(capped);
+    await (await this.kv()).setBinary('data', 'messages', encrypted);
   }
 
-  async loadMessages(): Promise<any[]> {
-    if (this.memoryMode) {
-      const buf = this.memoryStore.get('messages');
-      if (!buf) {
-        console.log('[SecureDB] No messages found in memory storage');
+  async loadMessages(): Promise<StoredMessage[]> {
+    return this.loadEncryptedArray<StoredMessage>('messages', 'load-messages');
+  }
+
+  private async loadEncryptedArray<T>(key: string, logContext: string): Promise<T[]> {
+    const encrypted = await (await this.kv()).getBinary('data', key);
+    if (!encrypted) return [];
+    try {
+      const data = await this.decryptData(encrypted);
+      return Array.isArray(data) ? (data as T[]) : [];
+    } catch (err: any) {
+      const msg = err?.message || String(err);
+      if (/(decrypt|MAC|BLAKE3)/i.test(msg)) {
+        SecureAuditLogger.warn('securedb', logContext, 'decryption-failed', {});
         return [];
       }
-      try {
-        const messages = await this.decryptData(buf);
-        console.log(`[SecureDB] Loaded ${messages.length} messages from memory storage`);
-        return messages;
-      } catch (error) {
-        console.error('[SecureDB] Failed to decrypt messages from memory storage:', error);
-        return [];
-      }
-    }
-    
-    try {
-      const db = await this.openDB();
-      return new Promise((resolve, reject) => {
-        const tx = db.transaction("data", "readonly");
-        const store = tx.objectStore("data");
-        const request = store.get("messages");
-
-        request.onsuccess = async () => {
-          if (!request.result) {
-            console.log('[SecureDB] No messages found in IndexedDB');
-            return resolve([]);
-          }
-          try {
-            const data = await this.decryptData(request.result);
-            console.log(`[SecureDB] Loaded ${data.length} messages from IndexedDB`);
-            resolve(data);
-          } catch (err) {
-            console.error('[SecureDB] Failed to decrypt messages from IndexedDB:', err);
-            reject(err);
-          }
-        };
-
-        request.onerror = () => {
-          console.error('[SecureDB] Error loading messages from IndexedDB:', request.error);
-          reject(request.error);
-        };
-        
-        tx.onerror = () => {
-          console.error('[SecureDB] Transaction failed while loading messages:', tx.error);
-          reject(tx.error);
-        };
-      });
-    } catch (error) {
-      console.error('[SecureDB] Error opening database for message load:', error);
-      // Try memory fallback
-      console.log('[SecureDB] Attempting memory fallback for message load');
-      this.memoryMode = true;
-      return this.loadMessages(); // Recursively call with memory mode
+      throw err;
     }
   }
 
-  async saveUsers(users: any[]): Promise<void> {
-    if (!this.encryptionKey) throw new Error("Encryption key not initialized");
+  async loadMessagesPaginated(limit = 50, offset = 0): Promise<StoredMessage[]> {
+    const all = await this.loadMessages();
+    const sorted = all.sort((a, b) => new Date(b.timestamp as any).getTime() - new Date(a.timestamp as any).getTime());
+    return sorted.slice(offset, offset + limit);
+  }
+
+  async loadConversationMessages(peerUsername: string, currentUsername: string, limit = 50, offset = 0): Promise<StoredMessage[]> {
+    const all = await this.loadMessages();
+    const filtered = all.filter(m => ((m as any).sender === peerUsername && (m as any).recipient === currentUsername) || ((m as any).sender === currentUsername && (m as any).recipient === peerUsername));
+    const sorted = filtered.sort((a, b) => new Date(b.timestamp as any).getTime() - new Date(a.timestamp as any).getTime());
+    return sorted.slice(offset, offset + limit);
+  }
+
+  async getConversationMessageCount(peerUsername: string, currentUsername: string): Promise<number> {
+    const all = await this.loadMessages();
+    return all.filter(m => ((m as any).sender === peerUsername && (m as any).recipient === currentUsername) || ((m as any).sender === currentUsername && (m as any).recipient === peerUsername)).length;
+  }
+
+  async loadRecentMessagesByConversation(messagesPerConversation = 50, currentUsername?: string): Promise<StoredMessage[]> {
+    const encrypted = await (await this.kv()).getBinary('data', 'messages');
+    if (!encrypted) return [];
+    const allMessages = await this.decryptDataWithYield(encrypted);
+    if (!Array.isArray(allMessages)) return [];
+    const map = new Map<string, StoredMessage[]>();
+    const CHUNK = 100;
+    for (let i = 0; i < allMessages.length; i += CHUNK) {
+      const chunk = allMessages.slice(i, i + CHUNK);
+      for (const msg of chunk) {
+        if (!(msg as any)?.sender || !(msg as any)?.recipient) continue;
+        const peer = currentUsername ? ((msg as any).sender === currentUsername ? (msg as any).recipient : (msg as any).sender) : (msg as any).sender;
+        if (!map.has(peer)) map.set(peer, []);
+        map.get(peer)!.push(msg);
+      }
+      if (i + CHUNK < allMessages.length) await new Promise(r => setTimeout(r, 0));
+    }
+    const result: StoredMessage[] = [];
+    const entries = Array.from(map.entries());
+    for (let i = 0; i < entries.length; i++) {
+      const [, messages] = entries[i];
+      const sorted = messages.sort((a, b) => new Date(b.timestamp as any).getTime() - new Date(a.timestamp as any).getTime());
+      result.push(...sorted.slice(0, messagesPerConversation));
+      if (i > 0 && i % 5 === 0 && i < entries.length - 1) await new Promise(r => setTimeout(r, 0));
+    }
+    return result;
+  }
+
+  async saveUsers(users: StoredUser[]): Promise<void> {
+    if (!this.encryptionKey) throw new Error('Encryption key not initialized');
     const encrypted = await this.encryptData(users);
-    try {
-      const db = await this.openDB();
-      return new Promise((resolve, reject) => {
-        const tx = db.transaction("data", "readwrite");
-        const store = tx.objectStore("data");
-        store.put(encrypted, "users");
-        tx.oncomplete = () => resolve();
-        tx.onerror = () => reject(tx.error);
-      });
-    } catch (e) {
-      console.warn('[SecureDB] IndexedDB unavailable; using in-memory storage for users');
-      this.memoryMode = true;
-      this.memoryStore.set('users', encrypted);
-    }
+    await (await this.kv()).setBinary('data', 'users', encrypted);
   }
 
-  async loadUsers(): Promise<any[]> {
-    if (this.memoryMode) {
-      const buf = this.memoryStore.get('users');
-      if (!buf) return [];
-      return await this.decryptData(buf);
-    }
-    const db = await this.openDB();
-    return new Promise((resolve, reject) => {
-      const tx = db.transaction("data", "readonly");
-      const store = tx.objectStore("data");
-      const request = store.get("users");
-
-      request.onsuccess = async () => {
-        if (!request.result) return resolve([]);
-        try {
-          const data = await this.decryptData(request.result);
-          resolve(data);
-        } catch (err) {
-          reject(err);
-        }
-      };
-
-      request.onerror = () => reject(request.error);
+  async deleteConversationMessages(peerUsername: string, currentUsername: string): Promise<number> {
+    if (!peerUsername || !currentUsername) return 0;
+    const all = await this.loadMessages().catch(() => [] as StoredMessage[]);
+    if (!Array.isArray(all) || all.length === 0) return 0;
+    const before = all.length;
+    const remaining = all.filter((msg) => {
+      const s = (msg as any).sender; const r = (msg as any).recipient; if (!s || !r) return true;
+      return !((s === peerUsername && r === currentUsername) || (s === currentUsername && r === peerUsername));
     });
+    if (remaining.length === before) return 0;
+    const encrypted = await this.encryptData(remaining);
+    await (await this.kv()).setBinary('data', 'messages', encrypted);
+    return before - remaining.length;
   }
 
-  /**
-   * Store ephemeral data with automatic expiration
-   */
-  async storeEphemeral(
-    storeName: string,
-    key: string,
-    data: any,
-    ttl?: number,
-    autoDelete: boolean = true
-  ): Promise<void> {
-    if (!this.ephemeralConfig.enabled) {
-      return this.store(storeName, key, data);
-    }
+  async loadUsers(): Promise<StoredUser[]> {
+    return this.loadEncryptedArray<StoredUser>('users', 'load-users');
+  }
 
-    // Validate and clamp TTL to avoid negative/NaN expirations
+  // Ephemeral ---------------------------------------------------------------
+
+  async storeEphemeral(storeName: string, keyOrData: any, maybeData?: unknown, ttl?: number, autoDelete = true): Promise<void>;
+  async storeEphemeral(storeName: string, key: string, data: unknown, ttl?: number, autoDelete?: boolean): Promise<void>;
+  async storeEphemeral(storeName: string, a: any, b?: any, ttl?: number, autoDelete = true): Promise<void> {
+    if (!this.ephemeralConfig.enabled) {
+      if (typeof a === 'string') return this.store(storeName, a, b);
+      return this.store(storeName, '__singleton__', a);
+    }
+    let key: string; let data: unknown;
+    if (typeof a === 'string') { key = a; data = b; } else { key = '__singleton__'; data = a; }
     let validatedTTL = ttl || this.ephemeralConfig.defaultTTL;
     if (typeof validatedTTL !== 'number' || isNaN(validatedTTL) || validatedTTL <= 0) {
-      console.warn(`[SecureDB] Invalid TTL ${validatedTTL}, using default: ${this.ephemeralConfig.defaultTTL}`);
+      SecureAuditLogger.warn('securedb', 'ephemeral', 'invalid-ttl', {});
       validatedTTL = this.ephemeralConfig.defaultTTL;
     }
-    
-    const actualTTL = Math.min(validatedTTL, this.ephemeralConfig.maxTTL);
-    const now = Date.now();
-
-    // Ensure expiration time is valid
-    const expiresAt = now + actualTTL;
-    if (expiresAt <= now || !Number.isFinite(expiresAt)) {
-      throw new Error('[SecureDB] Invalid expiration time calculated: [REDACTED]');
-    }
-
-    const ephemeralData: EphemeralData = {
-      data,
-      createdAt: now,
-      expiresAt,
-      ttl: actualTTL,
-      autoDelete
-    };
-
-    // Use ephemeral prefix for efficient cleanup scanning
-    await this.storeWithPrefix(this.EPHEMERAL_PREFIX + storeName, key, ephemeralData);
-    console.log(`[SecureDB] Stored ephemeral data: ${key} (expires in ${actualTTL}ms)`);
+    const now = Date.now(); const expiresAt = now + Math.min(validatedTTL, this.ephemeralConfig.maxTTL);
+    if (expiresAt <= now || !Number.isFinite(expiresAt)) throw new Error('Invalid expiration time calculated');
+    const payload: EphemeralData = { data, createdAt: now, expiresAt, ttl: expiresAt - now, autoDelete };
+    await this.storeWithPrefix(`${this.EPHEMERAL_PREFIX}${storeName}`, key, payload);
   }
 
-  /**
-   * Retrieve ephemeral data, checking expiration
-   */
-  async retrieveEphemeral(storeName: string, key: string): Promise<any | null> {
-    if (!this.ephemeralConfig.enabled) {
-      return this.retrieve(storeName, key);
-    }
-
-    const ephemeralData = await this.retrieveWithPrefix(this.EPHEMERAL_PREFIX + storeName, key) as EphemeralData | null;
-    if (!ephemeralData) {
+  async retrieveEphemeral(storeName: string, keyOrUndefined?: string): Promise<unknown | null> {
+    const key = keyOrUndefined ?? '__singleton__';
+    if (!this.ephemeralConfig.enabled) return this.retrieve(storeName, key);
+    const ephe = await this.retrieveWithPrefix(`${this.EPHEMERAL_PREFIX}${storeName}`, key) as EphemeralData | null;
+    if (!ephe) return null;
+    if (!ephe.expiresAt) return null;
+    if (Date.now() > ephe.expiresAt) {
+      if (ephe.autoDelete) await this.deleteWithPrefix(`${this.EPHEMERAL_PREFIX}${storeName}`, key);
       return null;
     }
-
-    // Check if this is ephemeral data or legacy data
-    if (!ephemeralData.expiresAt) {
-      return ephemeralData; // Legacy data, return as-is
-    }
-
-    // Check expiration
-    if (Date.now() > ephemeralData.expiresAt) {
-      console.log(`[SecureDB] Ephemeral data expired: ${key}`);
-      if (ephemeralData.autoDelete) {
-        await this.deleteWithPrefix(this.EPHEMERAL_PREFIX + storeName, key);
-      }
-      return null;
-    }
-
-    return ephemeralData.data;
+    return ephe.data;
   }
 
-  /**
-   * Start ephemeral cleanup process
-   */
+  async appendEphemeralList(storeName: string, listKey: string, entry: number | string, maxCount = 500, ttl?: number): Promise<(number | string)[]> {
+    const existing = await this.retrieveEphemeral(storeName, listKey);
+    const list = Array.isArray(existing) ? existing.slice(0, maxCount) : [];
+    const normalized = (typeof entry === 'number' || typeof entry === 'string') ? entry : String(entry);
+    const deduped = list.filter((v) => v !== normalized);
+    deduped.push(normalized);
+    const trimmed = deduped.length > maxCount ? deduped.slice(deduped.length - maxCount) : deduped;
+    await this.storeEphemeral(storeName, listKey, trimmed, ttl, true);
+    return trimmed;
+  }
+
   private startEphemeralCleanup(): void {
-    if (this.cleanupInterval) {
-      clearInterval(this.cleanupInterval);
-    }
-
-    this.cleanupInterval = setInterval(async () => {
-      await this.cleanupExpiredData();
-    }, this.ephemeralConfig.cleanupInterval);
-
-    console.log(`[SecureDB] Started ephemeral cleanup (interval: ${this.ephemeralConfig.cleanupInterval}ms)`);
+    if (this.cleanupInterval) clearInterval(this.cleanupInterval);
+    this.cleanupInterval = setInterval(async () => { await this.cleanupExpiredData(); }, this.ephemeralConfig.cleanupInterval);
   }
 
-  /**
-   * Clean up expired ephemeral data
-   */
   private async cleanupExpiredData(): Promise<void> {
     try {
-      const now = Date.now();
-      let cleanedCount = 0;
-
-      if (this.memoryMode) {
-        // Clean up memory store - collect ephemeral keys first
-        const ephemeralEntries: Array<{key: string, encryptedData: Uint8Array}> = [];
-        
-        for (const [key, encryptedData] of this.memoryStore.entries()) {
-          try {
-            const [storeName] = this.parseCompositeKey(key);
-            if (storeName.startsWith(this.EPHEMERAL_PREFIX)) {
-              ephemeralEntries.push({key, encryptedData});
-            }
-          } catch (error) {
-            // Handle legacy keys
-            if (key.startsWith(this.EPHEMERAL_PREFIX)) {
-              ephemeralEntries.push({key, encryptedData});
-            }
-          }
-        }
-        
-        // Process ephemeral entries for expiration
-        for (const {key, encryptedData} of ephemeralEntries) {
-          try {
-            const decryptedData = await this.decryptData(encryptedData) as EphemeralData;
-            if (decryptedData.expiresAt && now > decryptedData.expiresAt && decryptedData.autoDelete) {
-              this.memoryStore.delete(key);
-              cleanedCount++;
-            }
-          } catch (error) {
-            // Skip invalid data
-          }
-        }
-      } else {
-        // Clean up IndexedDB store - only scan ephemeral prefixed keys
-        const db = await this.openDB();
-        const tx = db.transaction("data", "readwrite");
-        const store = tx.objectStore("data");
-        
-        // Use cursor with key range to only iterate through ephemeral keys
-        // With JSON encoding, ephemeral keys have structure ["ephemeral:storeName", "key"]
-        // Use proper composite bounds to ensure all ephemeral keys are included
-        const ephemeralStart = JSON.stringify([this.EPHEMERAL_PREFIX, '']);
-        const ephemeralEnd = JSON.stringify([this.EPHEMERAL_PREFIX + '\uFFFF', '']);
-        const ephemeralRange = IDBKeyRange.bound(
-          ephemeralStart,
-          ephemeralEnd,
-          false,
-          true
-        );
-        const cursorRequest = store.openCursor(ephemeralRange);
-        
-        // Collect encrypted data synchronously to avoid transaction inactivation
-        const candidateItems: Array<{key: string, encryptedData: Uint8Array}> = [];
-        
-        await new Promise<void>((resolve, reject) => {
-          cursorRequest.onsuccess = (event) => {
-            const cursor = (event.target as IDBRequest).result;
-            if (cursor) {
-              // Collect data synchronously - no async operations here
-              candidateItems.push({
-                key: cursor.key as string,
-                encryptedData: cursor.value as Uint8Array
-              });
-              cursor.continue();
-            } else {
-              // Cursor iteration complete
-              resolve();
-            }
-          };
-          
-          cursorRequest.onerror = () => {
-            reject(cursorRequest.error);
-          };
-        });
-        
-        // Now decrypt and check expiration outside the cursor (async safe)
-        const keysToDelete: string[] = [];
-        for (const {key, encryptedData} of candidateItems) {
-          try {
-            const decryptedData = await this.decryptData(encryptedData) as EphemeralData;
-            if (decryptedData.expiresAt && now > decryptedData.expiresAt && decryptedData.autoDelete) {
-              keysToDelete.push(key);
-            }
-          } catch (error) {
-            // Skip invalid data
-          }
-        }
-        
-        // Delete expired items using the correct keys in a single transaction
-        if (keysToDelete.length > 0) {
-          const deleteTx = db.transaction("data", "readwrite");
-          const deleteStore = deleteTx.objectStore("data");
-          
-          for (const key of keysToDelete) {
-            // Safely parse composite key and delete directly
-            try {
-              // For cleanup, we can delete the key directly since it's already the composite key
-              deleteStore.delete(key);
-            } catch (error) {
-              console.warn('[SecureDB] Failed to delete key during cleanup: [REDACTED]', error);
-            }
-          }
-          
-          await new Promise<void>((resolve, reject) => {
-            deleteTx.oncomplete = () => {
-              cleanedCount += keysToDelete.length;
-              resolve();
-            };
-            deleteTx.onerror = () => reject(deleteTx.error);
-          });
-        }
-      }
-
-      if (cleanedCount > 0) {
-        console.log(`[SecureDB] Cleaned up ${cleanedCount} expired ephemeral entries`);
-      }
-    } catch (error) {
-      console.error('[SecureDB] Error during ephemeral cleanup:', error);
-    }
-  }
-
-  // Deduplicate messages by ID or serialized content to prevent duplicates
-  private deduplicateMessages(messages: any[]): any[] {
-    const seen = new Set<string>();
-    return messages.filter(msg => {
-      if (!msg) return false;
-      
-      // Use message ID if available, otherwise use serialized content as identifier
-      const identifier = msg.id || JSON.stringify(msg);
-      
-      if (seen.has(identifier)) {
-        console.log(`[SecureDB] Skipping duplicate message: ${msg.id || 'content-based'}`);
-        return false;
-      }
-      seen.add(identifier);
-      return true;
-    });
-  }
-
-  // Merge new messages with existing ones, avoiding duplicates
-  async appendMessages(newMessages: any[]): Promise<void> {
-    try {
-      const existingMessages = await this.loadMessages();
-      // Merge and sort chronologically before saving (deduplication happens in saveMessages)
-      const allMessages = [...existingMessages, ...newMessages].sort((a, b) => {
-        const timeA = a.timestamp || 0;
-        const timeB = b.timestamp || 0;
-        return timeA - timeB;
-      });
-      await this.saveMessages(allMessages); // deduplication happens in saveMessages
-    } catch (error) {
-      console.error('[SecureDB] Failed to append messages:', error);
-      throw error;
-    }
-  }
-
-  // Clear all stored data (useful for logout)
-  async clearAllData(): Promise<void> {
-    if (this.memoryMode) {
-      this.memoryStore.clear();
-      console.log('[SecureDB] Cleared all data from memory storage');
-      return;
-    }
-
-    try {
-      const db = await this.openDB();
-      return new Promise((resolve, reject) => {
-        const tx = db.transaction("data", "readwrite");
-        const store = tx.objectStore("data");
-        const clearRequest = store.clear();
-
-        clearRequest.onsuccess = () => {
-          console.log('[SecureDB] Cleared all data from IndexedDB');
-          resolve();
-        };
-        clearRequest.onerror = () => {
-          console.error('[SecureDB] Failed to clear IndexedDB:', clearRequest.error);
-          reject(clearRequest.error);
-        };
-      });
-    } catch (error) {
-      console.error('[SecureDB] Error clearing database:', error);
-      throw error;
-    }
-  }
-
-  /**
-   * Clear all stored data except username mappings and cached username hashes.
-   * This preserves display-name resolution across sessions while removing
-   * potentially sensitive message/user content.
-   */
-  async clearAllDataExceptMappings(): Promise<void> {
-    const keepStores = new Set<string>(['username_mappings', 'username_hashes']);
-
-    // Memory mode handling
-    if (this.memoryMode) {
-      const keysToDelete: string[] = [];
-      for (const key of this.memoryStore.keys()) {
+      const now = Date.now(); if (now - this.lastCleanup < this.MIN_CLEANUP_INTERVAL) return; this.lastCleanup = now;
+      const kv = await this.kv();
+      const candidates = await kv.scanByStorePrefix(this.EPHEMERAL_PREFIX);
+      const toDeleteByStore = new Map<string, string[]>();
+      for (const { store, key, value } of candidates) {
         try {
-          const [storeName] = this.parseCompositeKey(key);
-          if (!keepStores.has(storeName)) {
-            keysToDelete.push(key);
+          const data = await this.decryptData(value) as EphemeralData;
+          if (data?.expiresAt && now > data.expiresAt && data.autoDelete) {
+            const arr = toDeleteByStore.get(store) || []; arr.push(key); toDeleteByStore.set(store, arr);
+            if (arr.length >= this.MAX_EPHEMERAL_BATCH) { await kv.deleteMany(store, arr.splice(0, arr.length)); }
           }
-        } catch {
-          // Legacy keys without JSON encoding: delete for safety
-          keysToDelete.push(key);
-        }
+        } catch {}
       }
-      keysToDelete.forEach(k => this.memoryStore.delete(k));
-      console.log('[SecureDB] Cleared all data except mappings (memory mode)');
-      return;
-    }
-
-    try {
-      const db = await this.openDB();
-      await new Promise<void>((resolve, reject) => {
-        const tx = db.transaction('data', 'readwrite');
-        const store = tx.objectStore('data');
-        const cursorRequest = store.openCursor();
-
-        cursorRequest.onsuccess = (event) => {
-          const cursor = (event.target as IDBRequest).result as IDBCursorWithValue | null;
-          if (!cursor) return; // Done
-          try {
-            const compositeKey = cursor.key as string;
-            let storeName = '';
-            try {
-              [storeName] = this.parseCompositeKey(compositeKey);
-            } catch {
-              // Legacy/unexpected key: delete for safety
-              store.delete(compositeKey);
-              cursor.continue();
-              return;
-            }
-
-            if (!keepStores.has(storeName)) {
-              store.delete(compositeKey);
-            }
-          } catch (err) {
-            console.warn('[SecureDB] Failed to process key during selective clear: [REDACTED]', err);
-          }
-          cursor.continue();
-        };
-
-        tx.oncomplete = () => {
-          console.log('[SecureDB] Cleared all data except mappings');
-          resolve();
-        };
-        tx.onerror = () => reject(tx.error);
-      });
+      for (const [store, keys] of toDeleteByStore.entries()) if (keys.length) await kv.deleteMany(store, keys);
     } catch (error) {
-      console.error('[SecureDB] Error during selective clear:', error);
-      throw error;
+      SecureAuditLogger.error('securedb', 'cleanup', 'cleanup-failed', { error: (error as Error).message });
     }
   }
 
-  async clearDatabase(): Promise<void> {
-    if (this.cleanupInterval) {
-      clearInterval(this.cleanupInterval);
-      this.cleanupInterval = null;
-    }
+  // Generic KV --------------------------------------------------------------
 
-    return new Promise((resolve, reject) => {
-      const request = indexedDB.deleteDatabase(this.dbName);
-      request.onsuccess = () => resolve();
-      request.onerror = () => reject(request.error);
-    });
+  private async storeWithPrefix(storeName: string, key: string, data: unknown): Promise<void> {
+    if (!this.encryptionKey) throw new Error('Encryption key not initialized');
+    const encrypted = await this.encryptData(data);
+    await (await this.kv()).setBinary(storeName, key, encrypted);
   }
 
-  /**
-   * Generic store method for saving data to a specific store
-   */
-  async store(storeName: string, key: string, data: any): Promise<void> {
+  async store(storeName: string, key: string, data: unknown): Promise<void> {
     return this.storeWithPrefix(storeName, key, data);
   }
 
-  /**
-   * Store method with prefix support for efficient indexing
-   */
-  private async storeWithPrefix(storeName: string, key: string, data: any): Promise<void> {
-    if (!this.encryptionKey) throw new Error("Encryption key not initialized");
-    
-    const encrypted = await this.encryptData(data);
-    const storeKey = this.createCompositeKey(storeName, key);
-    
-    if (this.memoryMode) {
-      // Enforce memory cap in memory mode with smart eviction policy
-      if (this.memoryStore.size >= this.MAX_MEMORY_ENTRIES) {
-        await this.smartMemoryEviction();
-      }
-      this.memoryStore.set(storeKey, encrypted);
-      return;
-    }
-
-    try {
-      const db = await this.openDB();
-      return new Promise((resolve, reject) => {
-        const tx = db.transaction("data", "readwrite");
-        const store = tx.objectStore("data");
-        store.put(encrypted, storeKey);
-        tx.oncomplete = () => resolve();
-        tx.onerror = () => reject(tx.error);
-      });
-    } catch (e) {
-      console.warn('[SecureDB] IndexedDB unavailable; using in-memory storage for [REDACTED]');
-      this.memoryMode = true;
-      this.memoryStore.set(storeKey, encrypted);
+  private async retrieveWithPrefix(storeName: string, key: string): Promise<unknown | null> {
+    const encrypted = await (await this.kv()).getBinary(storeName, key);
+    if (!encrypted) return null;
+    try { return await this.decryptData(encrypted); } catch (err) {
+      SecureAuditLogger.error('securedb', 'retrieval', 'decrypt-failed', { error: (err as Error).message });
+      throw err;
     }
   }
 
-  /**
-   * Generic retrieve method for loading data from a specific store
-   */
-  async retrieve(storeName: string, key: string): Promise<any | null> {
+  async retrieve(storeName: string, key: string): Promise<unknown | null> {
     return this.retrieveWithPrefix(storeName, key);
   }
 
-  /**
-   * Retrieve method with prefix support
-   */
-  private async retrieveWithPrefix(storeName: string, key: string): Promise<any | null> {
-    const storeKey = this.createCompositeKey(storeName, key);
-    
-    if (this.memoryMode) {
-      const buf = this.memoryStore.get(storeKey);
-      if (!buf) return null;
-      try {
-        return await this.decryptData(buf);
-      } catch (error) {
-        console.error('[SecureDB] Failed to decrypt data from memory storage: [REDACTED]', error);
-        return null;
-      }
-    }
-
-    try {
-      const db = await this.openDB();
-      return new Promise((resolve, reject) => {
-        const tx = db.transaction("data", "readonly");
-        const store = tx.objectStore("data");
-        const request = store.get(storeKey);
-
-        request.onsuccess = async () => {
-          if (!request.result) {
-            return resolve(null);
-          }
-          try {
-            const data = await this.decryptData(request.result);
-            resolve(data);
-          } catch (err) {
-            console.error('[SecureDB] Failed to decrypt data from IndexedDB: [REDACTED]', err);
-            reject(err);
-          }
-        };
-
-        request.onerror = () => {
-          console.error('[SecureDB] Error retrieving data from IndexedDB: [REDACTED]', request.error);
-          reject(request.error);
-        };
-      });
-    } catch (error) {
-      console.error('[SecureDB] Error opening database for retrieval: [REDACTED]', error);
-      return null;
-    }
-  }
-
-  /**
-   * Generic delete method for removing data from a specific store
-   */
-  async delete(storeName: string, key: string): Promise<void> {
-    return this.deleteWithPrefix(storeName, key);
-  }
-
-  /**
-   * Delete method with prefix support
-   */
   private async deleteWithPrefix(storeName: string, key: string): Promise<void> {
-    const storeKey = this.createCompositeKey(storeName, key);
-    
-    if (this.memoryMode) {
-      this.memoryStore.delete(storeKey);
-      return;
-    }
-
-    try {
-      const db = await this.openDB();
-      return new Promise((resolve, reject) => {
-        const tx = db.transaction("data", "readwrite");
-        const store = tx.objectStore("data");
-        const request = store.delete(storeKey);
-        
-        request.onsuccess = () => resolve();
-        request.onerror = () => reject(request.error);
-      });
-    } catch (error) {
-      console.error('[SecureDB] Error deleting data: [REDACTED]', error);
-      throw error;
-    }
+    await (await this.kv()).delete(storeName, key);
   }
 
-  /**
-   * Cache a username hash to avoid repeated expensive hashing operations
-   */
+  async delete(storeName: string, key: string): Promise<void> { return this.deleteWithPrefix(storeName, key); }
+
+  // Username mapping --------------------------------------------------------
+
   async cacheUsernameHash(originalUsername: string, hashedUsername: string): Promise<void> {
     await this.store('username_hashes', originalUsername, hashedUsername);
   }
 
-  /**
-   * Retrieve a cached username hash
-   */
   async getCachedUsernameHash(originalUsername: string): Promise<string | null> {
-    return await this.retrieve('username_hashes', originalUsername);
+    const result = await this.retrieve('username_hashes', originalUsername);
+    return typeof result === 'string' ? result : null;
   }
 
-  /**
-   * Check if a username hash is cached
-   */
   async hasUsernameHash(originalUsername: string): Promise<boolean> {
-    const cached = await this.getCachedUsernameHash(originalUsername);
-    return cached !== null;
+    return (await this.getCachedUsernameHash(originalUsername)) !== null;
   }
 
-  /**
-   * Store a reverse mapping from hash to original username for display purposes
-   */
   async storeUsernameMapping(hashedUsername: string, originalUsername: string): Promise<void> {
+    if (!hashedUsername || !originalUsername) { SecureAuditLogger.error('securedb', 'username-mapping', 'invalid-parameters', {}); return; }
+    await this.store('username_mappings', hashedUsername, originalUsername);
+  }
+
+  async getOriginalUsername(hashedUsername: string): Promise<string | null> {
+    if (!hashedUsername || typeof hashedUsername !== 'string') return null;
+    const result = await this.retrieve('username_mappings', hashedUsername);
+    return typeof result === 'string' ? result : null;
+  }
+
+  async getAllUsernameMappings(): Promise<Array<{ hashed: string; original: string }>> {
     try {
-      if (!hashedUsername || !originalUsername) {
-        console.error('[SecureDB] Invalid parameters for storeUsernameMapping:', { hashedUsername, originalUsername });
-        return;
+      const entries = await (await this.kv()).entriesForStore('username_mappings');
+      const out: Array<{ hashed: string; original: string }> = [];
+      for (const { key, value } of entries) {
+        try { const original = await this.decryptData(value); if (typeof original === 'string') out.push({ hashed: key, original }); } catch {}
       }
-      await this.store('username_mappings', hashedUsername, originalUsername);
+      return out;
     } catch (error) {
-      console.error('[SecureDB] Failed to store username mapping:', error);
-      throw error;
+      SecureAuditLogger.error('securedb', 'get-mappings', 'failed', { error: (error as Error).message });
+      return [];
     }
   }
 
-  /**
-   * Get the original username from a hash for display purposes
-   */
-  async getOriginalUsername(hashedUsername: string): Promise<string | null> {
-    try {
-      if (!hashedUsername || typeof hashedUsername !== 'string') {
-        return null;
-      }
-      const result = await this.retrieve('username_mappings', hashedUsername);
-      return result && typeof result === 'string' ? result : null;
-    } catch (error) {
-      console.error('[SecureDB] Failed to get original username:', error);
-      return null;
-    }
+  // Bulk / clear ------------------------------------------------------------
+
+  private deduplicateMessages(messages: StoredMessage[]): StoredMessage[] {
+    const seen = new Set<string>();
+    return messages.filter((msg) => {
+      if (!msg) return false;
+      const identifier = (msg.id && msg.id.trim().length > 0) ? msg.id : JSON.stringify(msg);
+      if (!identifier || seen.has(identifier)) return false; seen.add(identifier); return true;
+    });
   }
+
+  async appendMessages(newMessages: StoredMessage[]): Promise<void> {
+    const existing = await this.loadMessages();
+    const all = [...existing, ...newMessages].sort((a, b) => (a.timestamp ?? 0) - (b.timestamp ?? 0));
+    await this.saveMessages(all);
+  }
+
+  async clearAllData(): Promise<void> { await (await this.kv()).clearAll(); }
+
+  async clearAllDataExceptMappings(): Promise<void> {
+    await (await this.kv()).clearAllExcept(new Set(['username_mappings', 'username_hashes']));
+  }
+
+  async clearDatabase(): Promise<void> {
+    if (this.cleanupInterval) { clearInterval(this.cleanupInterval); this.cleanupInterval = null; }
+    await SQLiteKV.purgeUserDb(this.username);
+  }
+
+  async destroy(): Promise<void> {
+    if (this.cleanupInterval) { clearInterval(this.cleanupInterval); this.cleanupInterval = null; }
+    this.encryptionKey = null; this.postQuantumAEAD = null;
+  }
+
+  async clearStore(storeName: string): Promise<number> { return (await this.kv()).clearStore(storeName); }
 }

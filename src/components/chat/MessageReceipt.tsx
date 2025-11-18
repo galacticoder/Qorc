@@ -1,38 +1,53 @@
-import React from 'react';
+import React, { useMemo } from 'react';
+import { format } from 'date-fns';
 import { MessageReceipt as ReceiptType } from './types';
 import { Check, CheckCheck } from 'lucide-react';
+import { cn } from '../../lib/utils';
 
 interface MessageReceiptProps {
-	receipt?: ReceiptType;
-	isCurrentUser: boolean;
-	className?: string;
+	readonly receipt?: ReceiptType;
+	readonly isCurrentUser: boolean;
+	readonly className?: string;
 }
 
-export function MessageReceipt({ receipt, isCurrentUser, className }: MessageReceiptProps) {
+const formatTime = (date: Date | undefined): string | undefined => {
+  if (!date || !(date instanceof Date) || isNaN(date.getTime())) {
+    return undefined;
+  }
+  try {
+    return format(date, 'p');
+  } catch {
+    return undefined;
+  }
+};
+
+export const MessageReceipt: React.FC<MessageReceiptProps> = ({ receipt, isCurrentUser, className }) => {
 	if (!isCurrentUser || !receipt) return null;
 
-	if (receipt.read) {
+  const readTime = useMemo(() => formatTime(receipt.readAt), [receipt?.readAt]);
+  const deliveredTime = useMemo(() => formatTime(receipt.deliveredAt), [receipt?.deliveredAt]);
+
+  if (receipt.read) {
 		return (
-			<div className={`flex items-center gap-1 text-xs text-blue-600 ${className}`}>
-				<CheckCheck size={12} />
-				<span>Read</span>
+			<div className={cn('flex items-center gap-1 text-xs text-blue-600', className)} role="status" aria-label={readTime ? `Read at ${readTime}` : 'Read'}>
+				<CheckCheck size={12} aria-hidden="true" />
+        <span>{readTime ? `Read ${readTime}` : 'Read'}</span>
 			</div>
 		);
 	}
 
-	if (receipt.delivered) {
+  if (receipt.delivered) {
 		return (
-			<div className={`flex items-center gap-1 text-xs text-gray-500 ${className}`}>
-				<Check size={12} />
-				<span>Delivered</span>
+			<div className={cn('flex items-center gap-1 text-xs text-gray-500', className)} role="status" aria-label={deliveredTime ? `Delivered at ${deliveredTime}` : 'Delivered'}>
+				<Check size={12} aria-hidden="true" />
+        <span>{deliveredTime ? `Delivered ${deliveredTime}` : 'Delivered'}</span>
 			</div>
 		);
 	}
 
-	// Show sent status for messages that don't have delivery confirmation yet
 	return (
-		<div className={`flex items-center gap-1 text-xs text-gray-400 ${className}`}>
+		<div className={cn('flex items-center gap-1 text-xs text-gray-400', className)} role="status" aria-label="Sent">
 			<span>Sent</span>
 		</div>
 	);
-}
+};

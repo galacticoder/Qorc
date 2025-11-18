@@ -3,7 +3,7 @@ import { cn } from "@/lib/utils";
 import { Cross2Icon } from "../icons";
 
 interface EditingBannerProps {
-  onCancelEdit?: () => void;
+  readonly onCancelEdit?: () => void;
 }
 
 export function EditingBanner({ onCancelEdit }: EditingBannerProps) {

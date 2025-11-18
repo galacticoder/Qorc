@@ -1,21 +1,25 @@
-import promptSync from 'prompt-sync';
-import * as db from '../database/database.js';
 import { CryptoUtils } from '../crypto/unified-crypto.js';
 import * as ServerConfig from '../config/config.js';
 import { TTL_CONFIG } from '../config/config.js';
 import { UserDatabase } from '../database/database.js';
-import { redis } from '../presence/presence.js';
-
-const prompt = promptSync({ sigint: true });
+import { withRedisClient } from '../presence/presence.js';
 
 export const validateUsernameFormat = (username) => {
   if (!username || typeof username !== 'string') return false;
+  // Accept both original usernames (alphanumeric with underscores/hyphens) and pseudonymized usernames (32+ char hex)
+  const isPseudonym = /^[a-f0-9]{32,}$/i.test(username);
+  if (isPseudonym) return true;
   return /^[a-zA-Z0-9_-]+$/.test(username);
 };
 
 export const validateUsernameLength = (username) => {
   if (!username || typeof username !== 'string') return false;
-  return username.length >= 3 && username.length <= 32; // Increased to match database validation
+  // Pseudonymized usernames can be longer (32-128 chars for hex strings)
+  const isPseudonym = /^[a-f0-9]{32,}$/i.test(username);
+  if (isPseudonym) {
+    return username.length >= 32 && username.length <= 128;
+  }
+  return username.length >= 3 && username.length <= 32; // Original usernames
 };
 export const isUsernameAvailable = async (username) => {
   try {
@@ -24,21 +28,20 @@ export const isUsernameAvailable = async (username) => {
     }
     
     const existingUser = await UserDatabase.loadUser(username);
-    return existingUser === null; // Available if no user found
+    return existingUser === null;
   } catch (error) {
     console.error(`[AUTH] Error checking username availability for ${username}:`, error);
-    throw error; // Re-throw to surface DB errors
+    throw error; 
   }
 };
 
 // Configuration for server capacity
 const MAX_CONNECTIONS = parseInt(process.env.MAX_CONNECTIONS || '1000', 10);
 const CONNECTION_COUNTER_KEY = 'server:active_connections';
-const CONNECTION_COUNTER_TTL = TTL_CONFIG.CONNECTION_COUNTER_TTL; // Use standardized TTL
+const CONNECTION_COUNTER_TTL = TTL_CONFIG.CONNECTION_COUNTER_TTL; 
 
 export const isServerFull = async () => {
   try {
-    // Atomic check and increment using Lua script
     const luaScript = `
       local key = KEYS[1]
       local max_conn = tonumber(ARGV[1])
@@ -69,65 +72,99 @@ export const isServerFull = async () => {
       return 0  -- Server has capacity
     `;
     
-    const result = await redis.eval(luaScript, 1, CONNECTION_COUNTER_KEY, MAX_CONNECTIONS, CONNECTION_COUNTER_TTL);
+    const result = await withRedisClient(client => 
+      client.eval(luaScript, 1, CONNECTION_COUNTER_KEY, MAX_CONNECTIONS, CONNECTION_COUNTER_TTL)
+    );
     return result === 1;
   } catch (error) {
     console.error('[AUTH] Redis error in isServerFull, failing safe (treating as full):', error);
-    return true; // Fail-safe: treat server as full on Redis errors
+    return true;
   }
 };
 
 // Helper function to decrement connection count when a client disconnects
 export const decrementConnectionCount = async () => {
   try {
-    await redis.decr(CONNECTION_COUNTER_KEY);
+    await withRedisClient(client => client.decr(CONNECTION_COUNTER_KEY));
   } catch (error) {
     console.error('[AUTH] Error decrementing connection count:', error);
-    // Don't throw here - this is cleanup, shouldn't block disconnect
   }
 };
 
 export async function setServerPasswordOnInput() {
   try {
-    // Non-interactive paths first
     if (process.env.SERVER_PASSWORD_HASH && process.env.SERVER_PASSWORD_HASH.length > 0) {
       ServerConfig.setServerPassword(process.env.SERVER_PASSWORD_HASH);
       console.log('[SERVER] Server password hash set from environment');
       return;
     }
+
     if (process.env.SERVER_PASSWORD && process.env.SERVER_PASSWORD.length > 0) {
-      if (process.env.SERVER_PASSWORD.length > 512) {
-        console.error('SERVER_PASSWORD too long (max 512 characters). Exiting.');
-        process.exit(1);
+      const password = process.env.SERVER_PASSWORD;
+      if (password.length > 512) {
+        console.error('SERVER_PASSWORD too long (max 512 characters). Exiting gracefully...');
+        process.emit('SIGTERM');
+        return;
       }
-      const hash = await CryptoUtils.Password.hashPassword(process.env.SERVER_PASSWORD);
+
+      const hash = await CryptoUtils.Password.hashPassword(password);
       ServerConfig.setServerPassword(hash);
+
+      process.env.SERVER_PASSWORD_HASH = hash;
+      delete process.env.SERVER_PASSWORD;
+
+      if (process.env.ENABLE_CLUSTERING === 'true') {
+        try {
+          const { withRedisClient } = await import('../presence/presence.js');
+          await withRedisClient(async (client) => {
+            await client.hset('cluster:config', 'SERVER_PASSWORD_HASH', hash);
+            console.log('[SERVER] Stored password hash in cluster shared config');
+          });
+        } catch (error) {
+          console.log('[SERVER] Note: Could not store password in cluster (cluster may not be initialized yet):', error.message);
+        }
+      }
+
       console.log('[SERVER] Server password set from environment');
       return;
     }
-    // Interactive fallback only if TTY is available
-    if (!process.stdin.isTTY) {
-      throw new Error('No TTY available for interactive password prompt. Run in an interactive terminal or set SERVER_PASSWORD/SERVER_PASSWORD_HASH environment variable.');
+
+    if (process.env.ENABLE_CLUSTERING === 'true') {
+      try {
+        const { ClusterManager } = await import('../cluster/cluster-manager.js');
+        const sharedPasswordHash = await ClusterManager.getSharedConfig('SERVER_PASSWORD_HASH');
+        if (sharedPasswordHash && sharedPasswordHash.length > 0) {
+          ServerConfig.setServerPassword(sharedPasswordHash);
+          console.log('[SERVER] Server password hash loaded from cluster shared config');
+          return;
+        }
+      } catch (error) {
+        console.log('[SERVER] Could not load password from cluster: ' + error.message);
+      }
     }
-    const password = prompt.hide('Set server password (Input will not be visible): ').trim();
-    const confirm = prompt.hide('Confirm password: ').trim();
-    if (password.length > 512) {
-      console.error('Password too long (max 512 characters). Exiting.');
-      process.exit(1);
-    }
-    if (password !== confirm) {
-      console.error('Passwords do not match. Exiting.');
-      process.exit(1);
-    }
-    const serverPasswordHash = await CryptoUtils.Password.hashPassword(password);
-    ServerConfig.setServerPassword(serverPasswordHash);
-    console.log('Password set successfully.');
-  } catch (error) {
-    console.error('[SERVER] Failed to set server password:', {
-      message: error?.message || error,
-      stack: error?.stack,
-      type: error?.constructor?.name
-    });
+
+    console.error('\n' + '='.repeat(80));
+    console.error('ERROR: Server password required but not provided');
+    console.error('='.repeat(80));
+    console.error('\nPlease provide server password using one of these methods:');
+    console.error('\n1. Environment variable');
+    console.error('   export SERVER_PASSWORD_HASH="your_argon2_hash"');
+    console.error('   export SERVER_PASSWORD="your_password"');
+    console.error('\n' + '='.repeat(80) + '\n');
     process.exit(1);
+  } catch (error) {
+    if (error?.message?.includes('Password must be at least')) {
+      console.error(`[SERVER] Password too short: ${error.message}`);
+      console.error('Please set a server password with at least 12 characters via SERVER_PASSWORD or SERVER_PASSWORD_HASH.');
+      console.error('Exiting gracefully...');
+    } else {
+      console.error('[SERVER] Failed to set server password:', {
+        message: error?.message || error,
+        stack: error?.stack,
+        type: error?.constructor?.name
+      });
+      console.error('Password setting failed. Exiting...');
+    }
+    process.emit('SIGTERM');
   }
 }

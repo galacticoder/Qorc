@@ -17,7 +17,6 @@
     "noUnusedLocals": false,
     "noUnusedParameters": false,
     "noFallthroughCasesInSwitch": false,
-    "skipLibCheck": true
   },
   "include": ["vite.config.ts"]
 }

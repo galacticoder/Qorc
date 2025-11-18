@@ -1,52 +1,63 @@
-import React, { useState } from "react";
+import React, { useState, useCallback, useMemo } from "react";
 import { Input } from "../../ui/input";
 import { Label } from "../../ui/label";
 import { Button } from "../../ui/button";
 
 interface SignInFormProps {
-  onSubmit: (username: string, password: string) => Promise<void>;
-  disabled: boolean;
-  authStatus?: string;
-  error?: string;
-  hasServerTrustRequest?: boolean;
-  initialUsername?: string;
-  initialPassword?: string;
+  readonly onSubmit: (username: string, password: string) => Promise<void>;
+  readonly disabled: boolean;
+  readonly authStatus?: string;
+  readonly error?: string;
+  readonly hasServerTrustRequest?: boolean;
+  readonly initialUsername?: string;
+  readonly initialPassword?: string;
+  readonly onChangeUsername?: (v: string) => void;
+  readonly onChangePassword?: (v: string) => void;
 }
 
-export function SignInForm({ onSubmit, disabled, authStatus, error, hasServerTrustRequest, initialUsername = "", initialPassword = "", onChangeUsername, onChangePassword }: SignInFormProps & { onChangeUsername?: (v:string)=>void; onChangePassword?: (v:string)=>void; }) {
+const USERNAME_MIN_LENGTH = 3;
+const USERNAME_MAX_LENGTH = 32;
+const PASSWORD_MAX_LENGTH = 1000;
+const USERNAME_REGEX = /^[a-zA-Z0-9_-]+$/;
+
+export function SignInForm({ 
+  onSubmit, 
+  disabled, 
+  authStatus, 
+  hasServerTrustRequest,
+  initialUsername = "", 
+  initialPassword = "", 
+  onChangeUsername, 
+  onChangePassword 
+}: SignInFormProps) {
   const [username, setUsername] = useState(initialUsername);
   const [password, setPassword] = useState(initialPassword);
-
-  const handleUsernameChange = (v: string) => { setUsername(v); onChangeUsername?.(v); };
-  const handlePasswordChange = (v: string) => { setPassword(v); onChangePassword?.(v); };
   const [isSubmitting, setIsSubmitting] = useState(false);
 
-  const isFormValid = username.trim().length >= 3 && password.length > 0;
+  const handleUsernameChange = useCallback((v: string): void => { 
+    setUsername(v); 
+    onChangeUsername?.(v); 
+  }, [onChangeUsername]);
+  
+  const handlePasswordChange = useCallback((v: string): void => { 
+    setPassword(v); 
+    onChangePassword?.(v); 
+  }, [onChangePassword]);
 
-  const handleSubmit = async (e: React.FormEvent) => {
+  const isFormValid = useMemo(() => 
+    username.trim().length >= USERNAME_MIN_LENGTH && password.length > 0,
+    [username, password]
+  );
+
+  const handleSubmit = useCallback(async (e: React.FormEvent): Promise<void> => {
     e.preventDefault();
     if (disabled || isSubmitting || !isFormValid) return;
 
-    // SECURITY: Sanitize and validate inputs
     const sanitizedUsername = username.trim();
     
-    // SECURITY: Validate username format
-    if (!/^[a-zA-Z0-9_-]+$/.test(sanitizedUsername)) {
-      console.error('Invalid username format');
-      return;
-    }
-    
-    // SECURITY: Validate username length
-    if (sanitizedUsername.length < 3 || sanitizedUsername.length > 32) {
-      console.error('Username must be 3-32 characters');
-      return;
-    }
-    
-    // SECURITY: Validate password length
-    if (password.length < 1 || password.length > 1000) {
-      console.error('Invalid password length');
-      return;
-    }
+    if (!USERNAME_REGEX.test(sanitizedUsername)) return;
+    if (sanitizedUsername.length < USERNAME_MIN_LENGTH || sanitizedUsername.length > USERNAME_MAX_LENGTH) return;
+    if (password.length < 1 || password.length > PASSWORD_MAX_LENGTH) return;
 
     setIsSubmitting(true);
     try {
@@ -54,7 +65,7 @@ export function SignInForm({ onSubmit, disabled, authStatus, error, hasServerTru
     } finally {
       setIsSubmitting(false);
     }
-  };
+  }, [disabled, isSubmitting, isFormValid, username, password, onSubmit]);
 
   return (
     <form onSubmit={handleSubmit} className="space-y-4">
@@ -67,7 +78,9 @@ export function SignInForm({ onSubmit, disabled, authStatus, error, hasServerTru
           onChange={(e) => handleUsernameChange(e.target.value)}
           disabled={disabled || isSubmitting}
           required
-          minLength={3}
+          minLength={USERNAME_MIN_LENGTH}
+          maxLength={USERNAME_MAX_LENGTH}
+          autoComplete="username"
         />
       </div>
 
@@ -81,10 +94,11 @@ export function SignInForm({ onSubmit, disabled, authStatus, error, hasServerTru
           onChange={(e) => handlePasswordChange(e.target.value)}
           disabled={disabled || isSubmitting}
           required
+          autoComplete="current-password"
+          maxLength={PASSWORD_MAX_LENGTH}
         />
       </div>
 
-      {/* {error && <p className="text-red-500 text-sm">{error}</p>} */}
 
       {hasServerTrustRequest && !isSubmitting && (
         <p className="text-amber-600 text-sm text-center">

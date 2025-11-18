@@ -1,24 +1,23 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useCallback, useMemo } from "react";
 import { Button } from "../../ui/button";
 import { Cross2Icon } from "../icons";
 import { cn } from "@/lib/utils";
-import * as cm from "../ChatMessage";
 import { Message } from "../types";
 import { formatFileSize } from "../ChatMessage/FileMessage";
-import { Play, Pause } from "lucide-react";
+import { Play } from "lucide-react";
 
 interface ReplyBannerProps {
-  replyTo: Message;
-  onCancelReply: () => void;
-  getDisplayUsername?: (username: string) => Promise<string>;
+  readonly replyTo: Message;
+  readonly onCancelReply: () => void;
+  readonly getDisplayUsername?: (username: string) => Promise<string>;
 }
 
-// File type detection helpers
-const IMAGE_EXTENSIONS = ['jpg', 'jpeg', 'png', 'gif', 'bmp', 'webp', 'svg', 'ico', 'tiff'];
-const VIDEO_EXTENSIONS = ['mp4', 'webm', 'ogg', 'avi', 'mov', 'wmv', 'flv', 'mkv'];
-const AUDIO_EXTENSIONS = ['mp3', 'wav', 'ogg', 'webm', 'm4a', 'aac', 'flac'];
+const IMAGE_EXTENSIONS = ['jpg', 'jpeg', 'png', 'gif', 'bmp', 'webp', 'svg', 'ico', 'tiff'] as const;
+const VIDEO_EXTENSIONS = ['mp4', 'webm', 'ogg', 'avi', 'mov', 'wmv', 'flv', 'mkv'] as const;
+const AUDIO_EXTENSIONS = ['mp3', 'wav', 'ogg', 'webm', 'm4a', 'aac', 'flac'] as const;
+const HEX_PATTERN = /^[a-f0-9]{32,}$/i;
 
-const hasExtension = (filename: string, extensions: string[]): boolean => {
+const hasExtension = (filename: string, extensions: readonly string[]): boolean => {
   if (!filename) return false;
   const ext = filename.toLowerCase().split('.').pop();
   return ext ? extensions.includes(ext) : false;
@@ -40,32 +39,56 @@ const isVideo = (message: Message): boolean => {
   return Boolean(message.filename && hasExtension(message.filename, VIDEO_EXTENSIONS));
 };
 
-export function ReplyBanner({ replyTo, onCancelReply, getDisplayUsername }: ReplyBannerProps) {
-  const [displaySender, setDisplaySender] = useState(replyTo.sender);
+const sanitizeDisplayName = (name: string): string => {
+  return HEX_PATTERN.test(name) ? 'User' : name;
+};
 
-  // Load display username (mask hashed fallback)
+export function ReplyBanner({ replyTo, onCancelReply, getDisplayUsername }: ReplyBannerProps) {
+  const [displaySender, setDisplaySender] = useState(sanitizeDisplayName(replyTo.sender));
+
   useEffect(() => {
     if (getDisplayUsername) {
       getDisplayUsername(replyTo.sender)
-        .then((resolved) => {
-          try {
-            const hexPattern = /^[a-f0-9]{32,}$/i;
-            setDisplaySender(hexPattern.test(resolved) ? 'User' : resolved);
-          } catch {
-            setDisplaySender(resolved);
-          }
-        })
-        .catch((error) => {
-          console.error('Failed to get display username for reply banner:', error);
-          try {
-            const hexPattern = /^[a-f0-9]{32,}$/i;
-            setDisplaySender(hexPattern.test(replyTo.sender) ? 'User' : replyTo.sender);
-          } catch {
-            setDisplaySender(replyTo.sender);
-          }
-        });
+        .then((resolved) => setDisplaySender(sanitizeDisplayName(resolved)))
+        .catch(() => setDisplaySender(sanitizeDisplayName(replyTo.sender)));
     }
   }, [replyTo.sender, getDisplayUsername]);
+
+  const handleImageError = useCallback((e: React.SyntheticEvent<HTMLImageElement>): void => {
+    e.currentTarget.style.display = 'none';
+    const fallback = e.currentTarget.nextElementSibling as HTMLElement;
+    if (fallback) {
+      fallback.style.display = 'flex';
+    }
+  }, []);
+
+  const handleVideoError = useCallback((e: React.SyntheticEvent<HTMLVideoElement>): void => {
+    e.currentTarget.style.display = 'none';
+    const fallback = e.currentTarget.nextElementSibling as HTMLElement;
+    if (fallback) {
+      fallback.style.display = 'flex';
+    }
+  }, []);
+
+  const isImageMsg = useMemo(() => isImage(replyTo), [replyTo]);
+  const isVideoMsg = useMemo(() => isVideo(replyTo), [replyTo]);
+  const isVoiceMsg = useMemo(() => isVoiceNote(replyTo), [replyTo]);
+  const isFileMsg = useMemo(() => 
+    replyTo.type === 'file' || replyTo.type === 'file-message' || replyTo.filename,
+    [replyTo]
+  );
+
+  const waveformHeights = useMemo(() => 
+    Array.from({ length: 8 }, () => Math.random() * 8 + 4),
+    []
+  );
+
+  const contentPreview = useMemo(() => {
+    if (!replyTo.content) return "";
+    return replyTo.content.length > 100 
+      ? `${replyTo.content.slice(0, 100)}...` 
+      : replyTo.content;
+  }, [replyTo.content]);
   return (
     <div className="px-4 pt-3 pb-0">
       <div
@@ -94,19 +117,14 @@ export function ReplyBanner({ replyTo, onCancelReply, getDisplayUsername }: Repl
             </span>
           </div>
 
-          {/* Content preview based on message type */}
-          {isImage(replyTo) ? (
+          {isImageMsg ? (
             <div className="flex items-center gap-3">
               <div className="flex-shrink-0">
                 <img
                   src={replyTo.content}
                   alt={replyTo.filename}
                   className="w-12 h-12 object-cover rounded border"
-                  onError={(e) => {
-                    // Fallback to file icon if image fails to load
-                    e.currentTarget.style.display = 'none';
-                    e.currentTarget.nextElementSibling!.style.display = 'flex';
-                  }}
+                  onError={handleImageError}
                 />
                 <div className="w-12 h-12 bg-slate-200 rounded border items-center justify-center text-slate-500 hidden">
                   🖼️
@@ -121,18 +139,14 @@ export function ReplyBanner({ replyTo, onCancelReply, getDisplayUsername }: Repl
                 </p>
               </div>
             </div>
-          ) : isVideo(replyTo) ? (
+          ) : isVideoMsg ? (
             <div className="flex items-center gap-3">
               <div className="flex-shrink-0 relative">
                 <video
                   src={replyTo.content}
                   className="w-12 h-12 object-cover rounded border"
                   muted
-                  onError={(e) => {
-                    // Fallback to video icon if video fails to load
-                    e.currentTarget.style.display = 'none';
-                    e.currentTarget.nextElementSibling!.style.display = 'flex';
-                  }}
+                  onError={handleVideoError}
                 />
                 <div className="w-12 h-12 bg-slate-200 rounded border items-center justify-center text-slate-500 hidden">
                   🎬
@@ -150,7 +164,7 @@ export function ReplyBanner({ replyTo, onCancelReply, getDisplayUsername }: Repl
                 </p>
               </div>
             </div>
-          ) : isVoiceNote(replyTo) ? (
+          ) : isVoiceMsg ? (
             <div className="flex items-center gap-3">
               <div className="flex-shrink-0">
                 <div className="w-12 h-12 bg-blue-100 rounded-full flex items-center justify-center">
@@ -164,14 +178,13 @@ export function ReplyBanner({ replyTo, onCancelReply, getDisplayUsername }: Repl
                   Voice message
                 </p>
                 <div className="flex items-center gap-1 mt-1">
-                  {/* Mini waveform visualization */}
                   <div className="flex items-center gap-0.5">
-                    {[...Array(8)].map((_, i) => (
+                    {waveformHeights.map((height, i) => (
                       <div
                         key={i}
                         className="w-0.5 bg-blue-400 rounded-full"
                         style={{
-                          height: `${Math.random() * 8 + 4}px`,
+                          height: `${height}px`,
                           opacity: 0.7
                         }}
                       />
@@ -183,7 +196,7 @@ export function ReplyBanner({ replyTo, onCancelReply, getDisplayUsername }: Repl
                 </div>
               </div>
             </div>
-          ) : (replyTo.type === 'file' || replyTo.type === 'file-message' || replyTo.filename) ? (
+          ) : isFileMsg ? (
             <div className="flex items-center gap-3">
               <div className="flex-shrink-0">
                 <div className="w-12 h-12 bg-slate-200 rounded border flex items-center justify-center text-slate-500">
@@ -201,7 +214,7 @@ export function ReplyBanner({ replyTo, onCancelReply, getDisplayUsername }: Repl
             </div>
           ) : (
             <p className="text-sm line-clamp-2 text-slate-600">
-              {replyTo.content?.slice(0, 100)}{replyTo.content && replyTo.content.length > 100 ? "..." : ""}
+              {contentPreview}
             </p>
           )}
         </div>

@@ -4,12 +4,14 @@ import { Input } from "../../ui/input";
 import { Button } from "../../ui/button";
 
 interface ServerPasswordFormProps {
-  serverPassword: string;
-  setServerPassword: (v: string) => void;
-  disabled: boolean;
-  authStatus?: string;
-  onSubmit: (e: React.FormEvent) => void;
+  readonly serverPassword: string;
+  readonly setServerPassword: (v: string) => void;
+  readonly disabled: boolean;
+  readonly authStatus?: string;
+  readonly onSubmit: (e: React.FormEvent) => void;
 }
+
+const SERVER_PASSWORD_MAX_LENGTH = 1000;
 
 export function ServerPasswordForm({
   serverPassword,
@@ -30,6 +32,8 @@ export function ServerPasswordForm({
           onChange={(e) => setServerPassword(e.target.value)}
           disabled={disabled}
           required
+          autoComplete="current-password"
+          maxLength={SERVER_PASSWORD_MAX_LENGTH}
         />
       </div>
       <Button type="submit" className="w-full" disabled={disabled}>

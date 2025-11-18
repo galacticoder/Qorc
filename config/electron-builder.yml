@@ -5,6 +5,8 @@ files:
   - electron/main.cjs
   - electron/preload.cjs
   - electron/tor-manager.cjs
+  - electron/post-quantum-bridge.mjs
+  - electron/handlers/**
   - node_modules/tar/**
   - node_modules/socks-proxy-agent/**
   - node_modules/ws/**
@@ -68,8 +70,8 @@ linux:
       filter:
         - "**/*"
   category: Network
-  synopsis: "Secure end-to-end encrypted chat application"
-  description: "A privacy-focused chat application with built-in Tor anonymization for secure communications."
+  synopsis: "end2end chat"
+  description: "meant for maximum privacy and security"
 publish: null
 compression: maximum
 nodeGypRebuild: false

@@ -1,43 +1,384 @@
-import { webcrypto } from 'crypto';
+import crypto, { webcrypto } from 'crypto';
 import argon2 from 'argon2';
-import { MlKem768 } from 'mlkem';
+import { MlKem1024 } from 'mlkem';
 import { blake3 } from '@noble/hashes/blake3.js';
+import { sha3_512, shake256, shake128 } from '@noble/hashes/sha3.js';
 import { ml_dsa87 } from '@noble/post-quantum/ml-dsa.js';
-import { chacha20poly1305, xchacha20poly1305 } from '@noble/ciphers/chacha.js';
+import { gcm } from '@noble/ciphers/aes.js';
+import { xchacha20poly1305 } from '@noble/ciphers/chacha.js';
+import { x25519 } from '@noble/curves/ed25519.js';
+import { randomUUID } from 'crypto';
+import { logger } from './crypto-logger.js';
+import { canonicalizeRoutingHeader as canonicalizeRoutingHeaderHelper, buildRoutingHeader as buildRoutingHeaderHelper, computeRoutingDigest as computeRoutingDigestHelper, normalizePayload as normalizePayloadHelper, signRoutingHeader as signRoutingHeaderHelper, verifyRoutingHeader as verifyRoutingHeaderHelper, base64ToUint8Array, uint8ArrayToBase64 } from './helpers.js';
+import { PostQuantumHash } from './post-quantum-hash.js';
 
-const crypto = webcrypto;
-
-class CryptoConfig {
-  static AES_KEY_SIZE = 256;
-  static IV_LENGTH = 16;
-  static AUTH_TAG_LENGTH = 16;
-  static HKDF_HASH = 'SHA-512';
-  static HKDF_INFO = new TextEncoder().encode('endtoend-chat hybrid key v1');
-  static X25519_DERIVE_BITS = 256;
+function ensureUint8Array(value, label) {
+  if (value instanceof Uint8Array) return value;
+  if (ArrayBuffer.isView(value)) return new Uint8Array(value.buffer.slice(value.byteOffset, value.byteOffset + value.byteLength));
+  if (value instanceof ArrayBuffer) return new Uint8Array(value);
+  if (typeof value === 'string') {
+    try {
+      return QuantumHashService.base64ToUint8Array(value);
+    } catch {
+      throw new Error(`${label} must be base64 or Uint8Array`);
+    }
+  }
+  throw new Error(`${label} must be Uint8Array, ArrayBuffer view, or base64 string`);
 }
 
-class RandomGenerator {
-  static generateSecureRandom(length) {
-    // SECURITY: Validate length parameter to prevent DoS
+
+function concatUint8Arrays(...arrays) {
+  const totalLength = arrays.reduce((sum, arr) => sum + arr.length, 0);
+  const out = new Uint8Array(totalLength);
+  let offset = 0;
+  for (const arr of arrays) {
+    out.set(arr, offset);
+    offset += arr.length;
+  }
+  return out;
+}
+
+function deriveInnerKeyMaterial(pqSharedSecret, classicalSharedSecret, salt, routingDigest) {
+  const combined = new Uint8Array(pqSharedSecret.length);
+  for (let i = 0; i < pqSharedSecret.length; i++) {
+    combined[i] = pqSharedSecret[i] ^ classicalSharedSecret[i % classicalSharedSecret.length];
+  }
+  const info = `inner-envelope:${QuantumHashService.arrayBufferToBase64(routingDigest)}`;
+  const okm = PostQuantumHash.deriveKey(combined, salt, info, 64);
+  const encKey = okm.slice(0, 32);
+  const macKey = okm.slice(32, 64);
+  SecureMemory.wipe(okm);
+  SecureMemory.wipe(combined);
+  return { encKey, macKey };
+}
+
+// Minimum/maximum password length for security
+const MIN_PASSWORD_LENGTH = 12;
+const MAX_PASSWORD_LENGTH = 1024;
+
+// Secure memory utilities for wiping sensitive buffers
+class SecureMemory {
+  static wipe(buf) {
+    try {
+      if (buf instanceof Uint8Array || Buffer.isBuffer(buf)) {
+        crypto.randomFillSync(buf);
+        buf.fill(0);
+      }
+    } catch {}
+  }
+  static wipeAll(...buffers) {
+    for (const b of buffers) this.wipe(b);
+  }
+}
+
+class PostQuantumAEAD {
+  constructor(key) {
+    if (!key || key.length !== 32) {
+      throw new Error('PostQuantumAEAD requires a 32-byte key');
+    }
+    this.key = key;
+  }
+
+  // Derive 64-byte key material from 32-byte input
+  _deriveDoubleKey(inputKey) {
+    const expanded = sha3_512(inputKey);
+    const k1 = expanded.slice(0, 32);
+    const k2 = expanded.slice(32, 64); 
+    
+    // Derive separate MAC key using BLAKE3 with domain separation
+    const macKey = blake3(Buffer.concat([
+      Buffer.from('quantum-secure-mac-v1'),
+      inputKey
+    ]), { dkLen: 32 });
+    
+    return { k1, k2, macKey };
+  }
+
+  encrypt(plaintext, nonce, aad) {
+    if (!plaintext || !nonce) {
+      throw new Error('Plaintext and nonce are required');
+    }
+    if (nonce.length !== 36) {
+      throw new Error('Nonce must be 36 bytes for PostQuantumAEAD (12 AES-GCM + 24 XChaCha20)');
+    }
+
+    const aadBytes = aad || Buffer.alloc(0);
+    const { k1, k2, macKey } = this._deriveDoubleKey(this.key);
+
+    try {
+      // Layer 1: AES-256-GCM encryption
+      const iv = nonce.slice(0, 12);
+      const cipher = gcm(k1, iv, aadBytes);
+      const layer1 = cipher.encrypt(plaintext);
+      
+      // Layer 2: XChaCha20-Poly1305 encryption
+      const xnonce = nonce.slice(12, 36);
+      const xchacha = xchacha20poly1305(k2, xnonce, aadBytes);
+      const layer2 = xchacha.encrypt(layer1);
+      
+      // Layer 3: BLAKE3 MAC for post-quantum authentication
+      const macInput = Buffer.concat([layer2, aadBytes, nonce]);
+      const mac = blake3(macInput, { key: macKey });
+      
+      // Return ciphertext and MAC as separate components
+      return {
+        ciphertext: Buffer.from(layer2),
+        tag: Buffer.from(mac)
+      };
+    } finally {
+      SecureMemory.wipeAll(k1, k2, macKey);
+    }
+  }
+
+  decrypt(ciphertext, nonce, tag, aad) {
+    if (!ciphertext || !nonce || !tag) {
+      throw new Error('Ciphertext, nonce, and tag are required');
+    }
+    if (nonce.length !== 36) {
+      throw new Error('Nonce must be 36 bytes for PostQuantumAEAD (12 AES-GCM + 24 XChaCha20)');
+    }
+    if (tag.length !== 32) {
+      throw new Error('Tag must be 32 bytes (BLAKE3 MAC)');
+    }
+
+    const aadBytes = aad || Buffer.alloc(0);
+    const { k1, k2, macKey } = this._deriveDoubleKey(this.key);
+
+    try {
+      // Verify BLAKE3 MAC
+      const macInput = Buffer.concat([ciphertext, aadBytes, nonce]);
+      const expectedMac = blake3(macInput, { key: macKey });
+      
+      if (!QuantumHashService.constantTimeCompare(tag, expectedMac)) {
+        throw new Error('BLAKE3 MAC verification failed');
+      }
+      
+      // Layer 2: Decrypt XChaCha20-Poly1305 (reverse order)
+      const xnonce = nonce.slice(12, 36);
+      const xchacha = xchacha20poly1305(k2, xnonce, aadBytes);
+      const layer1 = xchacha.decrypt(ciphertext);
+      
+      // Layer 1: Decrypt AES-256-GCM
+      const iv = nonce.slice(0, 12);
+      const decipher = gcm(k1, iv, aadBytes);
+      const plaintext = decipher.decrypt(layer1);
+      
+      return Buffer.from(plaintext);
+    } catch (error) {
+      throw new Error(`PostQuantumAEAD decryption failed: ${error.message}`);
+    } finally {
+      SecureMemory.wipeAll(k1, k2, macKey);
+    }
+  }
+
+  static encrypt(plaintext, key, aad, explicitNonce) {
+    const keyBytes = ensureUint8Array(key, 'PostQuantumAEAD.encrypt.key');
+    const nonce = explicitNonce
+      ? ensureUint8Array(explicitNonce, 'PostQuantumAEAD.encrypt.nonce')
+      : QuantumRandomGenerator.generateRandomBytes(36);
+    const aadBytes = aad ? ensureUint8Array(aad, 'PostQuantumAEAD.encrypt.aad') : undefined;
+    const aead = new PostQuantumAEAD(keyBytes);
+    const { ciphertext, tag } = aead.encrypt(ensureUint8Array(plaintext, 'PostQuantumAEAD.encrypt.plaintext'), nonce, aadBytes);
+    return { ciphertext: ensureUint8Array(ciphertext, 'PostQuantumAEAD.encrypt.ciphertext'), nonce, tag: ensureUint8Array(tag, 'PostQuantumAEAD.encrypt.tag') };
+  }
+
+  static decrypt(ciphertext, nonce, tag, key, aad) {
+    const keyBytes = ensureUint8Array(key, 'PostQuantumAEAD.decrypt.key');
+    const nonceBytes = ensureUint8Array(nonce, 'PostQuantumAEAD.decrypt.nonce');
+    const tagBytes = ensureUint8Array(tag, 'PostQuantumAEAD.decrypt.tag');
+    const cipherBytes = ensureUint8Array(ciphertext, 'PostQuantumAEAD.decrypt.ciphertext');
+    const aadBytes = aad ? ensureUint8Array(aad, 'PostQuantumAEAD.decrypt.aad') : undefined;
+    const aead = new PostQuantumAEAD(keyBytes);
+    return aead.decrypt(cipherBytes, nonceBytes, tagBytes, aadBytes);
+  }
+}
+
+export function generateDeterministicId(prefix, ...parts) {
+  const input = parts.filter(Boolean).join('::');
+  const hash = blake3(Buffer.from(input || randomUUID())).slice(0, 16);
+  return `${prefix}_${Buffer.from(hash).toString('hex')}`;
+}
+
+export function anonymizeIdentifier(identifier) {
+  if (!identifier || typeof identifier !== 'string') {
+    throw new Error('anonymizeIdentifier requires a valid string identifier');
+  }
+  const bytes = blake3(Buffer.from(identifier)).slice(0, 12);
+  return Buffer.from(bytes).toString('hex');
+}
+
+
+// Quantum-resistant cryptographic configuration
+class CryptoConfig {
+  // Post-quantum security levels
+  static SECURITY_LEVEL = 256;              // 256-bit quantum security
+  static CLASSICAL_SECURITY_LEVEL = 256;    // Classical security level
+  static POST_QUANTUM_SECURITY_LEVEL = 256; // Post-quantum security level
+  
+  // Advanced encryption standards
+  static AES_KEY_SIZE = 256;                // AES-256 
+  static XCHACHA20_KEY_SIZE = 32;           // XChaCha20 key size (256-bit)
+  static XCHACHA20_NONCE_SIZE = 24;         // XChaCha20 nonce size (192-bit)
+  
+  // Enhanced authentication
+  static AUTH_TAG_LENGTH = 16;              // 128-bit authentication tags
+  static IV_LENGTH = 16;                    // 128-bit IVs
+  static SALT_LENGTH = 64;                  // 512-bit salts
+  static X25519_DERIVE_BITS = 256;          // Derive 256-bit shared secret
+  
+  // Post-quantum key exchange
+  static ML_KEM_LEVEL = 1024;               // ML-KEM-1024
+  static ML_DSA_LEVEL = 87;                 // ML-DSA-87
+  
+  // Advanced key derivation
+  static HKDF_HASH = 'SHA-512';              // SHA-512 for HKDF
+  static HKDF_INFO = new TextEncoder().encode('endtoend-chat hybrid key v2');
+  static HKDF_INFO_CLIENT_COMPATIBLE = new TextEncoder().encode('endtoend-chat post-quantum v1');
+  static SCRYPT_N = 65536;
+  static SCRYPT_R = 16;
+  static SCRYPT_P = 2;
+  
+  // Argon2id parameters (configurable via environment variables)
+  static get ARGON2_TIME() {
+    const MIN_TIME = 3;
+    const DEFAULT_TIME = 4;
+    const MAX_TIME = 10;
+    const envValue = parseInt(process.env.ARGON2_TIME, 10);
+    if (Number.isInteger(envValue)) {
+      if (envValue < MIN_TIME) return MIN_TIME;
+      if (envValue > MAX_TIME) return MAX_TIME;
+      return envValue;
+    }
+    return DEFAULT_TIME;
+  }
+  
+  static get ARGON2_MEMORY() {
+    const MIN = 1 << 17; // 128 MiB
+    const DEF = 1 << 18; // 256 MiB
+    const MAX = 1 << 20; // 1 GiB
+    const envValue = parseInt(process.env.ARGON2_MEMORY, 10);
+    if (Number.isInteger(envValue)) {
+      if (envValue < MIN) return MIN;
+      if (envValue > MAX) return MAX;
+      return envValue;
+    }
+    return DEF;
+  }
+  
+  static get ARGON2_PARALLELISM() {
+    const envValue = parseInt(process.env.ARGON2_PARALLELISM, 10);
+    if (Number.isInteger(envValue) && envValue >= 1 && envValue <= 16) {
+      return envValue;
+    }
+    return 2;
+  }
+  
+  // Quantum-resistant entropy
+  static ENTROPY_BITS = 512;
+  static TIMING_ROUNDS = 10;
+  
+  // Protocol versioning
+  static PROTOCOL_VERSION = 'quantum-v2';
+}
+
+class QuantumRandomGenerator {
+  /**
+   * Generate random bytes using multiple entropy sources
+   */
+  static async generateSecureRandom(length, useTimingEntropy = false) {
     if (!Number.isInteger(length) || length < 0) {
       throw new Error(`Invalid random length: ${length} - must be non-negative integer`);
     }
     
-    // SECURITY: Stricter limit for memory protection with millions of users
-    if (length > 65536) { // Max 64KB to prevent memory exhaustion
-      throw new Error(`Random length too large: ${length} - maximum 65536 bytes`);
+    if (length > 1048576) {
+      throw new Error(`Random length too large: ${length} - maximum 1MB`);
     }
     
     try {
-      return crypto.getRandomValues(new Uint8Array(length));
+      const systemRandom = new Uint8Array(crypto.randomBytes(length));
+      
+      if (!useTimingEntropy) {
+        return systemRandom;
+      }
+      
+      const timingEntropy = await this.generateTimingEntropy(Math.min(32, length));
+      
+      const combinedEntropy = new Uint8Array(systemRandom.length + timingEntropy.length);
+      combinedEntropy.set(systemRandom, 0);
+      combinedEntropy.set(timingEntropy, systemRandom.length);
+      
+      return shake256(combinedEntropy, { dkLen: length });
     } catch (error) {
-      console.error('[CRYPTO] Failed to generate secure random bytes:', error);
-      throw new Error('Failed to generate secure random bytes');
+      logger.error('Failed to generate quantum-resistant random bytes', error);
+      throw new Error('Failed to generate quantum-resistant random bytes');
     }
   }
+
+  /**
+   * Generate timing-based entropy for additional quantum resistance
+   */
+  static async generateTimingEntropy(length = 32) {
+    const measurements = [];
+    const loopSchedule = await QuantumRandomGenerator.generateSecureRandom(CryptoConfig.TIMING_ROUNDS);
+
+    for (let i = 0; i < CryptoConfig.TIMING_ROUNDS; i++) {
+      const start = process.hrtime.bigint();
+      
+      // Variable quantum-resistant operations driven by secure randomness
+      const iterationCount = 512 + (loopSchedule[i] % 768);
+      for (let j = 0; j < iterationCount; j++) {
+        const data = Buffer.from(String(j + i * 1000));
+        if (j % 4 === 0) blake3(data);
+        else if (j % 4 === 1) sha3_512(data);
+        else if (j % 4 === 2) shake256(data, { dkLen: 16 });
+        else shake128(data, 16);
+      }
+      
+      const end = process.hrtime.bigint();
+      measurements.push(end - start);
+
+      const delayMs = loopSchedule[i] % 10;
+      await new Promise(resolve => setTimeout(resolve, delayMs));
+    }
+    
+    const timingData = Buffer.from(measurements.map(m => m.toString(16)).join(''));
+    return shake256(timingData, { dkLen: length });
+  }
+
+  /**
+   * Generate cryptographically secure random bytes (synchronous)
+   */
+  static generateRandomBytes(length) {
+    if (!Number.isInteger(length) || length < 0) {
+      throw new Error(`Invalid random length: ${length} - must be non-negative integer`);
+    }
+    return new Uint8Array(crypto.randomBytes(length));
+  }
+
+  /**
+   * Generate cryptographically secure salt (synchronous)
+   */
+  static generateSalt(length = CryptoConfig.SALT_LENGTH) {
+    return this.generateRandomBytes(length);
+  }
+
+  /**
+   * Generate quantum-resistant nonce (synchronous)
+   */
+  static generateNonce(length = CryptoConfig.XCHACHA20_NONCE_SIZE) {
+    return this.generateRandomBytes(length);
+  }
+
+  /**
+   * Generate UUID v4
+   */
+  static generateUUID() {
+    return randomUUID();
+  }
+
 }
 
-class HashService {
+class QuantumHashService {
   static stringToUint8Array(str) {
     return new TextEncoder().encode(str);
   }
@@ -51,242 +392,209 @@ class HashService {
     return new Uint8Array(Buffer.from(base64, 'base64'));
   }
 
-  static async digestSHA512Bytes(...parts) {
-    const totalLen = parts.reduce((s, p) => s + (p?.byteLength ?? 0), 0);
+  static toUint8Array(value, name) {
+    if (value instanceof Uint8Array) {
+      return value;
+    }
+    if (Buffer.isBuffer(value)) {
+      return new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+    }
+    if (value instanceof ArrayBuffer) {
+      return new Uint8Array(value);
+    }
+    if (ArrayBuffer.isView(value)) {
+      return new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+    }
+    if (typeof value === 'string') {
+      return this.stringToUint8Array(value);
+    }
+    throw new TypeError(`${name} must be a byte array or convertible to Uint8Array`);
+  }
+
+  /**
+   * Quantum-resistant hash using multiple algorithms
+   */
+  static async digestQuantumResistant(...parts) {
+    const arrays = parts.map(p => (p instanceof Uint8Array ? p : new Uint8Array(p)));
+    const totalLen = arrays.reduce((s, a) => s + a.length, 0);
     const joined = new Uint8Array(totalLen);
     let offset = 0;
-    for (const p of parts) {
-      const arr = p instanceof Uint8Array ? p : new Uint8Array(p);
-      joined.set(arr, offset);
-      offset += arr.length;
-    }
-    const hashBuf = await crypto.subtle.digest('SHA-512', joined);
-    return new Uint8Array(hashBuf);
+    for (const a of arrays) { joined.set(a, offset); offset += a.length; }
+    return shake256(joined, { dkLen: 64 });
   }
 
-  // BLAKE3-based MAC for additional message authentication
+
+  /**
+   * BLAKE3-based MAC with quantum-resistant key derivation
+   */
   static async generateBlake3Mac(message, key) {
-    const keyedHash = blake3.create({ key });
-    keyedHash.update(message);
-    return keyedHash.digest();
-  }
-
-  static async verifyBlake3Mac(message, key, expectedMac) {
-    const computedMac = await this.generateBlake3Mac(message, key);
+    if (!key || key.length < 16) {
+      throw new Error('BLAKE3 MAC requires key length >= 16 bytes');
+    }
+    const messageBytes = QuantumHashService.toUint8Array(message, 'message');
+    const keyBytes = QuantumHashService.toUint8Array(key, 'key');
     
-    // SECURITY: Constant-time comparison to prevent timing attacks
-    return this.constantTimeCompare(computedMac, expectedMac);
-  }
-
-  // SECURITY: Constant-time comparison function to prevent timing attacks
-  static constantTimeCompare(a, b) {
-    if (!a || !b) return false;
-    if (a.length !== b.length) return false;
-
-    let result = 0;
-    for (let i = 0; i < a.length; i++) {
-      result |= a[i] ^ b[i];
+    // Normalize key to 32 bytes if needed
+    let normalizedKey = keyBytes;
+    if (keyBytes.length !== 32) {
+      normalizedKey = blake3(keyBytes, { dkLen: 32 });
     }
-    return result === 0;
-  }
-}
-
-class X25519Service {
-  static async generateKeyPair() {
-    return await crypto.subtle.generateKey(
-      { name: 'X25519' },
-      true,
-      ['deriveBits']
-    );
+    
+    return blake3(messageBytes, { key: normalizedKey });
   }
 
-  static async exportPublicKeyRaw(publicKeyCryptoKey) {
-    const raw = await crypto.subtle.exportKey('raw', publicKeyCryptoKey);
-    return new Uint8Array(raw);
-  }
-
-  static async importPublicKeyRaw(rawPubBytes) {
-    return await crypto.subtle.importKey(
-      'raw',
-      rawPubBytes,
-      { name: 'X25519' },
-      false,
-      []
-    );
-  }
-
-  static async deriveSharedSecretBits(privateKeyCryptoKey, remotePublicRaw) {
-    const remotePubKey = await this.importPublicKeyRaw(remotePublicRaw);
-    const bits = await crypto.subtle.deriveBits(
-      { name: 'X25519', public: remotePubKey },
-      privateKeyCryptoKey,
-      CryptoConfig.X25519_DERIVE_BITS
-    );
-    return new Uint8Array(bits);
-  }
-}
-
-class KyberService {
-  static kyberInstance() {
-    return new MlKem768();
-  }
-
-  static async generateKeyPair() {
-    const kyber = this.kyberInstance();
-    const result = await kyber.generateKeyPair();
-
-    if (Array.isArray(result)) {
-      const [publicKey, secretKey] = result;
-      return {
-        publicKey: new Uint8Array(publicKey),
-        secretKey: new Uint8Array(secretKey)
-      };
+  /**
+   * SHA-512 digest for a single byte array
+   * Used for hashing data
+   */
+  static async digestSHA512(data) {
+    if (!data) {
+      throw new Error('digestSHA512: data parameter must be defined');
     }
+    if (!data.length) {
+      throw new Error('digestSHA512: data parameter must have length > 0');
+    }
+    return new Uint8Array(await webcrypto.subtle.digest('SHA-512', data));
   }
 
-  static async encapsulate(publicKeyBytes) {
-    const kyber = this.kyberInstance();
-    const result = await kyber.encap(publicKeyBytes);
+  /**
+   * SHA-512 digest for combining two byte arrays
+   * Used for salt derivation in hybrid encryption
+   */
+  static async digestSHA512Bytes(a, b) {
+    if (!a || !b) {
+      throw new Error('digestSHA512Bytes: both parameters must be defined');
+    }
+    if (!a.length || !b.length) {
+      throw new Error('digestSHA512Bytes: both parameters must have length > 0');
+    }
+    const combined = new Uint8Array(a.length + b.length);
+    combined.set(a, 0);
+    combined.set(b, a.length);
+    return new Uint8Array(await webcrypto.subtle.digest('SHA-512', combined));
+  }
 
-    const [ciphertext, sharedSecret] = result;
+  /**
+   * BLAKE3 hash function
+   */
+  static blake3(data) {
+    return blake3(data);
+  }
+
+  /**
+   * BLAKE3 keyed hash
+   */
+  static blake3Keyed(data, key) {
+    const dataBytes = QuantumHashService.toUint8Array(data, 'data');
+    const keyBytes = QuantumHashService.toUint8Array(key, 'key');
+    const normalizedKey = keyBytes.length === 32 ? keyBytes : blake3(keyBytes, { dkLen: 32 });
+    return blake3(dataBytes, { key: normalizedKey });
+  }
+
+  /**
+   * SHA3-512 hash
+   */
+  static sha3_512(data) {
+    const dataBytes = data instanceof Uint8Array ? data : new Uint8Array(data);
+    return sha3_512(dataBytes);
+  }
+
+  /**
+   * SHAKE256 XOF
+   */
+  static shake256(data, dkLen) {
+    const dataBytes = data instanceof Uint8Array ? data : new Uint8Array(data);
+    return shake256(dataBytes, { dkLen });
+  }
+
+  /**
+   * Hash data using Argon2id
+   */
+  static async hashData(data) {
+    const salt = new Uint8Array(crypto.randomBytes(16));
+    const hash = await argon2.hash(Buffer.from(data), {
+      type: argon2.argon2id,
+      memoryCost: 65536,
+      timeCost: 3,
+      parallelism: 4,
+      salt,
+    });
+    return hash;
+  }
+
+  /**
+   * Hash data using provided Argon2 parameters
+   */
+  static async hashDataUsingInfo(data, params) {
+    const salt = params.salt ? 
+      (typeof params.salt === 'string' ? Buffer.from(params.salt, 'base64') : Buffer.from(params.salt)) : 
+      new Uint8Array(crypto.randomBytes(16));
+    const hash = await argon2.hash(Buffer.from(data), {
+      type: argon2.argon2id,
+      memoryCost: params.memoryCost || 65536,
+      timeCost: params.timeCost || 3,
+      parallelism: params.parallelism || 4,
+      salt,
+    });
+    return hash;
+  }
+
+  /**
+   * Parse Argon2 hash string
+   */
+  static async parseArgon2Hash(encodedHash) {
+    const parts = encodedHash.split("$");
+    if (parts.length !== 6) {
+      throw new Error("Invalid Argon2 encoded hash format");
+    }
+
+    const [, algorithm, versionPart, paramsPart, saltB64, hashB64] = parts;
+    
+    let version;
+    if (typeof versionPart === 'string') {
+      const eqIndex = versionPart.indexOf('=');
+      version = eqIndex >= 0 ? parseInt(versionPart.slice(eqIndex + 1), 10) : parseInt(versionPart, 10);
+    } else {
+      version = NaN;
+    }
+
+    const params = paramsPart.split(',');
+    const memoryCost = parseInt(params[0].split('=')[1]);
+    const timeCost = parseInt(params[1].split('=')[1]);
+    const parallelism = parseInt(params[2].split('=')[1]);
+    
     return {
-      ciphertext: new Uint8Array(ciphertext),
-      sharedSecret: new Uint8Array(sharedSecret)
+      algorithm,
+      version,
+      memoryCost,
+      timeCost,
+      parallelism,
+      salt: Buffer.from(saltB64, 'base64'),
+      hash: Buffer.from(hashB64, 'base64')
     };
   }
 
-  static async decapsulate(ciphertextBytes, secretKeyBytes) {
-    const kyber = this.kyberInstance();
-    const shared = await kyber.decap(ciphertextBytes, secretKeyBytes);
-    return new Uint8Array(shared);
-  }
-}
-
-class ChaCha20Poly1305Service {
   /**
-   * Encrypt data using ChaCha20-Poly1305
-   */
-  static encrypt(key, nonce, data, aad) {
-    const cipher = chacha20poly1305(key, nonce, aad);
-    return cipher.encrypt(data);
-  }
-
-  /**
-   * Decrypt data using ChaCha20-Poly1305
-   */
-  static decrypt(key, nonce, ciphertext, aad) {
-    const cipher = chacha20poly1305(key, nonce, aad);
-    return cipher.decrypt(ciphertext);
-  }
-
-  /**
-   * Generate a random 12-byte nonce for ChaCha20-Poly1305
-   */
-  static generateNonce() {
-    return crypto.getRandomValues(new Uint8Array(12));
-  }
-
-  /**
-   * Encrypt with automatic nonce generation and prepending
-   */
-  static encryptWithNonce(key, data, aad) {
-    const nonce = this.generateNonce();
-    const ciphertext = this.encrypt(key, nonce, data, aad);
-    return { nonce, ciphertext };
-  }
-
-  /**
-   * Decrypt with nonce extraction
-   */
-  static decryptWithNonce(key, nonce, ciphertext, aad) {
-    return this.decrypt(key, nonce, ciphertext, aad);
-  }
-}
-
-class XChaCha20Poly1305Service {
-  /**
-   * Encrypt data using XChaCha20-Poly1305 (extended nonce version)
-   */
-  static encrypt(key, nonce, data, aad) {
-    const cipher = xchacha20poly1305(key, nonce, aad);
-    return cipher.encrypt(data);
-  }
-
-  /**
-   * Decrypt data using XChaCha20-Poly1305
-   */
-  static decrypt(key, nonce, ciphertext, aad) {
-    const cipher = xchacha20poly1305(key, nonce, aad);
-    return cipher.decrypt(ciphertext);
-  }
-
-  /**
-   * Generate a random 24-byte nonce for XChaCha20-Poly1305
-   */
-  static generateNonce() {
-    return crypto.getRandomValues(new Uint8Array(24));
-  }
-
-  /**
-   * Encrypt with automatic nonce generation
-   */
-  static encryptWithNonce(key, data, aad) {
-    const nonce = this.generateNonce();
-    const ciphertext = this.encrypt(key, nonce, data, aad);
-    return { nonce, ciphertext };
-  }
-
-  /**
-   * Decrypt with nonce
-   */
-  static decryptWithNonce(key, nonce, ciphertext, aad) {
-    return this.decrypt(key, nonce, ciphertext, aad);
-  }
-}
-
-class DilithiumService {
-  static async generateKeyPair() {
-    const kp = await ml_dsa87.keygen(undefined);
-    return {
-      publicKey: new Uint8Array(kp.publicKey),
-      secretKey: new Uint8Array(kp.secretKey)
-    };
-  }
-
-  static async sign(secretKey, message) {
-    const signature = await ml_dsa87.sign(secretKey, message);
-    return new Uint8Array(signature);
-  }
-
-  static async verify(signature, message, publicKey) {
-    return await ml_dsa87.verify(signature, message, publicKey);
-  }
-}
-
-class KDFService {
-  /**
-   * BLAKE3-based HKDF implementation for enhanced security
+   * BLAKE3-based HKDF
    */
   static async blake3Hkdf(ikm, salt, info, outLen) {
-    // HKDF-Extract: PRK = BLAKE3-MAC(salt, ikm)
-    const prk = await HashService.generateBlake3Mac(ikm, salt);
+    // HKDF-Extract: PRK = BLAKE3-MAC(salt, ikm) - salt is key, ikm is message  
+    const prk = await this.generateBlake3Mac(ikm, salt);
 
-    // HKDF-Expand: Generate output key material
     const output = new Uint8Array(outLen);
-    const hashLen = 32; // BLAKE3 output length
+    const hashLen = 32;
     const n = Math.ceil(outLen / hashLen);
 
     let t = new Uint8Array(0);
     let outputOffset = 0;
 
     for (let i = 1; i <= n; i++) {
-      // T(i) = BLAKE3-MAC(PRK, T(i-1) || info || i)
       const input = new Uint8Array(t.length + info.length + 1);
       input.set(t, 0);
       input.set(info, t.length);
       input[input.length - 1] = i;
 
-      t = await HashService.generateBlake3Mac(input, prk);
+      t = await this.generateBlake3Mac(input, prk);
 
       const copyLen = Math.min(hashLen, outLen - outputOffset);
       output.set(t.slice(0, copyLen), outputOffset);
@@ -297,144 +605,546 @@ class KDFService {
   }
 
   /**
+   * Generate a fingerprint for a key
+   */
+  static async fingerprintKey(key) {
+    const keyBytes = key instanceof Uint8Array ? key : new Uint8Array(key);
+    return blake3(keyBytes).slice(0, 16); // 16-byte fingerprint
+  }
+
+  /**
+   * Constant-time comparison to prevent timing attacks
+   */
+  static constantTimeCompare(a, b) {
+    if (!a || !b) {
+      return false;
+    }
+
+    const aBuf = Buffer.from(a);
+    const bBuf = Buffer.from(b);
+
+    if (aBuf.length !== bBuf.length) {
+      // Ensure timingSafeEqual still runs for same duration
+      const maxLen = Math.max(aBuf.length, bBuf.length);
+      const paddedA = Buffer.alloc(maxLen);
+      const paddedB = Buffer.alloc(maxLen);
+      aBuf.copy(paddedA, 0, 0, Math.min(aBuf.length, maxLen));
+      bBuf.copy(paddedB, 0, 0, Math.min(bBuf.length, maxLen));
+
+      try {
+        crypto.timingSafeEqual(paddedA, paddedB);
+      } catch {
+        // Ignore errors; length mismatch already means failure
+      }
+      return false;
+    }
+
+    try {
+      return crypto.timingSafeEqual(aBuf, bBuf);
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Verify BLAKE3 concatenation MAC
+   */
+  static async verifyBlake3ConcatMac(message, key, expectedMac) {
+    const computedMac = await this.generateBlake3ConcatMac(message, key);
+    return QuantumHashService.safeCompare(computedMac, expectedMac);
+  }
+
+  static async generateBlake3ConcatMac(message, key) {
+    // Enhance key with SHAKE256 for quantum resistance 
+    const messageBytes = QuantumHashService.toUint8Array(message, 'message');
+    const keyBytes = QuantumHashService.toUint8Array(key, 'key');
+    const enhancedKey = shake256(keyBytes, { dkLen: 64 });
+    const macKey = enhancedKey.slice(0, 32);
+    return blake3(messageBytes, { key: macKey });
+  }
+
+
+  /**
+   * Quantum-resistant MAC using multiple algorithms
+   */
+  static async generateQuantumMAC(message, key) {
+    // Generate multiple MACs for quantum resistance
+    const messageBytes = QuantumHashService.toUint8Array(message, 'message');
+    const keyBytes = QuantumHashService.toUint8Array(key, 'key');
+    const blake3Mac = await this.generateBlake3Mac(messageBytes, keyBytes);
+    const sha3Mac = sha3_512(Buffer.concat([keyBytes.slice(0, 64), messageBytes]));
+    const shakeKey = shake256(keyBytes, { dkLen: 32 });
+    const shakeMac = shake256(Buffer.concat([shakeKey, messageBytes]), { dkLen: 32 });
+    
+    // Combine all MACs
+    const combined = new Uint8Array(blake3Mac.length + sha3Mac.length + shakeMac.length);
+    combined.set(blake3Mac, 0);
+    combined.set(sha3Mac, blake3Mac.length);
+    combined.set(shakeMac, blake3Mac.length + sha3Mac.length);
+    
+    return blake3(combined); // Final 256-bit MAC
+  }
+
+  static async verifyBlake3Mac(message, key, expectedMac) {
+    const computedMac = await this.generateBlake3Mac(message, key);
+    return QuantumHashService.safeCompare(computedMac, expectedMac);
+  }
+
+  static async verifyQuantumMAC(message, key, expectedMac) {
+    const computedMac = await this.generateQuantumMAC(message, key);
+    return QuantumHashService.safeCompare(computedMac, expectedMac);
+  }
+
+  /**
+   * Quantum-resistant HMAC using BLAKE3
+   */
+  static async hmacBlake3(key, message) {
+    const messageBytes = QuantumHashService.toUint8Array(message, 'message');
+    const keyBytes = QuantumHashService.toUint8Array(key, 'key');
+    const enhancedKey = shake256(keyBytes, { dkLen: 32 });
+    return blake3(messageBytes, { key: enhancedKey });
+  }
+
+
+  /**
+   * Enhanced constant-time comparison with quantum resistance
+   */
+  static constantTimeCompare(a, b) {
+    return QuantumHashService.safeCompare(a, b);
+  }
+
+  static safeCompare(a, b) {
+    if (!a || !b) return false;
+    const aBuf = Buffer.from(a);
+    const bBuf = Buffer.from(b);
+    const maxLen = Math.max(aBuf.length, bBuf.length, 1);
+    const pa = Buffer.alloc(maxLen);
+    const pb = Buffer.alloc(maxLen);
+    aBuf.copy(pa);
+    bBuf.copy(pb);
+    let isEqual = false;
+    try { isEqual = crypto.timingSafeEqual(pa, pb); } catch { isEqual = false; }
+    return isEqual && aBuf.length === bBuf.length;
+  }
+
+}
+
+
+class QuantumKyberService {
+  /**
+   * Use ML-KEM-1024 
+   */
+  static kyberInstance() {
+    return new MlKem1024(); 
+  }
+
+  /**
+   * Generate ML-KEM-1024 key pair with better entropy
+   */
+  static async generateKeyPair() {
+    const kyber = this.kyberInstance();
+    
+    // Add additional entropy for better resistance
+    const additionalEntropy = await QuantumRandomGenerator.generateSecureRandom(64);
+    const result = await kyber.generateKeyPair(additionalEntropy);
+
+    if (Array.isArray(result)) {
+      const [publicKey, secretKey] = result;
+      const keyPair = {
+        publicKey: new Uint8Array(publicKey),
+        secretKey: new Uint8Array(secretKey),
+        algorithm: 'ML-KEM-1024',
+        securityLevel: CryptoConfig.POST_QUANTUM_SECURITY_LEVEL,
+        timestamp: Date.now()
+      };
+      
+      // Add integrity protection to keys
+      keyPair.publicKeyHash = await QuantumHashService.fingerprintKey(keyPair.publicKey);
+      keyPair.secretKeyHash = await QuantumHashService.fingerprintKey(keyPair.secretKey);
+      
+      return keyPair;
+    }
+    
+    throw new Error('Failed to generate ML-KEM-1024 key pair');
+  }
+
+  /**
+   * Enhanced encapsulation with shared secret derivation
+   */
+  static async encapsulate(publicKeyBytes) {
+    if (!publicKeyBytes || publicKeyBytes.length === 0) {
+      throw new Error('Invalid public key for encapsulation');
+    }
+    
+    const kyber = this.kyberInstance();
+    
+    // Add quantum-resistant randomness to encapsulation
+    const additionalEntropy = await QuantumRandomGenerator.generateSecureRandom(32);
+    const result = await kyber.encap(publicKeyBytes, additionalEntropy);
+
+    const [ciphertext, rawSharedSecret] = result;
+    
+    // Use raw shared secret 
+    return {
+      ciphertext: new Uint8Array(ciphertext),
+      sharedSecret: new Uint8Array(rawSharedSecret),
+      algorithm: 'ML-KEM-1024',
+      timestamp: Date.now()
+    };
+  }
+
+  /**
+   * Enhanced decapsulation with quantum-resistant shared secret derivation
+   */
+  static async decapsulate(ciphertextBytes, secretKeyBytes) {
+    if (!ciphertextBytes || !secretKeyBytes) {
+      throw new Error('Invalid parameters for decapsulation');
+    }
+    // Skip expensive key validation for performance - server keys are internally generated and trusted
+
+    const kyber = this.kyberInstance();
+    const rawSharedSecret = await kyber.decap(ciphertextBytes, secretKeyBytes);
+    
+    // Use raw shared secret 
+    return new Uint8Array(rawSharedSecret);
+  }
+
+  /**
+   * Derive enhanced shared secret 
+   */
+  static async deriveEnhancedSharedSecret(rawSharedSecret, publicKeyBytes) {
+    // Use HKDF with BLAKE3 
+    const salt = await QuantumHashService.digestQuantumResistant(publicKeyBytes);
+    const info = new TextEncoder().encode('ML-KEM-1024-enhanced-shared-secret-v2');
+    
+    // Use quantum-resistant HKDF
+    return await QuantumKDFService.quantumHKDF(rawSharedSecret, salt.slice(0, 64), info, 64);
+  }
+
+  /**
+   * Validate ML-KEM-1024 key pair integrity with caching
+   */
+  static async validateKeyPair(keyPair, forceRevalidation = false) {
+    if (!keyPair.publicKey || !keyPair.secretKey) {
+      return false;
+    }
+    
+    // Check validation cache first
+    const cacheTTL = 5 * 60 * 1000; // 5 minutes cache TTL
+    
+    if (!forceRevalidation && keyPair._validation) {
+      const { valid, ts } = keyPair._validation;
+      if (valid !== undefined && (Date.now() - ts) < cacheTTL) {
+        return valid;
+      }
+    }
+    
+    // Verify key fingerprints if available
+    if (keyPair.publicKeyHash) {
+      const computedHash = await QuantumHashService.fingerprintKey(keyPair.publicKey);
+      if (!QuantumHashService.constantTimeCompare(keyPair.publicKeyHash, computedHash)) {
+        // Update cache with failure
+        keyPair._validation = { valid: false, ts: Date.now() };
+        return false;
+      }
+    }
+    
+    // Test encapsulation/decapsulation only if no cached result
+    try {
+      const encapResult = await this.encapsulate(keyPair.publicKey);
+      const decapSecret = await this.decapsulate(encapResult.ciphertext, keyPair.secretKey, keyPair.publicKey);
+      const isValid = QuantumHashService.constantTimeCompare(encapResult.sharedSecret, decapSecret);
+      
+      // Update cache with result
+      keyPair._validation = { valid: isValid, ts: Date.now() };
+      return isValid;
+    } catch {
+      // Update cache with failure
+      keyPair._validation = { valid: false, ts: Date.now() };
+      return false;
+    }
+  }
+
+}
+
+class DilithiumService {
+  static async generateKeyPair() {
+    const { publicKey, secretKey } = await ml_dsa87.keygen();
+    return {
+      publicKey: publicKey instanceof Uint8Array ? publicKey : new Uint8Array(publicKey),
+      secretKey: secretKey instanceof Uint8Array ? secretKey : new Uint8Array(secretKey)
+    };
+  }
+
+  static async sign(message, secretKey) {
+    return ml_dsa87.sign(message, secretKey);
+  }
+
+  static async verify(signature, message, publicKey) {
+    return ml_dsa87.verify(signature, message, publicKey);
+  }
+}
+
+class QuantumKDFService {
+  /**
+   * Quantum-resistant HKDF using multiple hash functions
+   */
+  static async quantumHKDF(ikm, salt, info, outLen) {
+    // Use multiple hash functions for quantum resistance
+    const blake3Prk = await QuantumHashService.generateBlake3Mac(ikm, salt);
+    const sha3Prk = sha3_512(Buffer.concat([salt.slice(0, 64), ikm]));
+    const shakePrk = shake256(Buffer.concat([salt.slice(0, 32), ikm]), { dkLen: 64 });
+    
+    // Combine PRKs for maximum security
+    const combinedPrk = new Uint8Array(blake3Prk.length + sha3Prk.length + shakePrk.length);
+    combinedPrk.set(blake3Prk, 0);
+    combinedPrk.set(sha3Prk, blake3Prk.length);
+    combinedPrk.set(shakePrk, blake3Prk.length + sha3Prk.length);
+    
+    const masterPrk = blake3(combinedPrk);
+
+    // HKDF-Expand with quantum resistance
+    const output = new Uint8Array(outLen);
+    const hashLen = 64; // Use 512-bit blocks for quantum resistance
+    const n = Math.ceil(outLen / hashLen);
+
+    let t = new Uint8Array(0);
+    let outputOffset = 0;
+
+    for (let i = 1; i <= n; i++) {
+      const input = new Uint8Array(t.length + info.length + 1);
+      input.set(t, 0);
+      input.set(info, t.length);
+      input[input.length - 1] = i;
+
+      // Use quantum-resistant expansion
+      const blake3T = await QuantumHashService.generateBlake3Mac(input, masterPrk);
+      const sha3T = sha3_512(Buffer.concat([masterPrk.slice(0, 64), input]));
+      const shakeT = shake256(Buffer.concat([masterPrk.slice(0, 32), input]), { dkLen: 32 });
+      
+      // Combine outputs
+      const combined = new Uint8Array(blake3T.length + sha3T.length + shakeT.length);
+      combined.set(blake3T, 0);
+      combined.set(sha3T, blake3T.length);
+      combined.set(shakeT, blake3T.length + sha3T.length);
+      
+      t = shake256(combined, { dkLen: hashLen });
+
+      const copyLen = Math.min(hashLen, outLen - outputOffset);
+      output.set(t.slice(0, copyLen), outputOffset);
+      outputOffset += copyLen;
+    }
+
+    return output;
+  }
+
+  /**
+   * Derive a KEK from username+password using Argon2id + quantumHKDF.
+   * Centralized helper for all password-based key encryption.
+   */
+  static async deriveUsernamePasswordKEK(username, password, options = {}) {
+    if (!username || typeof username !== 'string' || username.length < 3) {
+      throw new Error('deriveUsernamePasswordKEK: username must be at least 3 characters');
+    }
+    if (!password || typeof password !== 'string' || password.trim().length < 16) {
+      throw new Error('deriveUsernamePasswordKEK: password must be at least 16 characters');
+    }
+
+    const pwd = password.trim();
+    const usernameBytes = new TextEncoder().encode(String(username));
+
+    const {
+      salt,
+      timeCost = CryptoConfig.ARGON2_TIME + 1, 
+      memoryCost = Math.min(CryptoConfig.ARGON2_MEMORY * 2, 1 << 20), // cap at 1 GiB
+      parallelism = CryptoConfig.ARGON2_PARALLELISM,
+      hashLength = 64,
+    } = options;
+
+    let saltBuf;
+    if (salt) {
+      if (salt instanceof Uint8Array || Buffer.isBuffer(salt)) {
+        saltBuf = Buffer.from(salt);
+      } else if (typeof salt === 'string') {
+        // Accept base64-encoded salt
+        saltBuf = Buffer.from(salt, 'base64');
+      } else {
+        throw new Error('deriveUsernamePasswordKEK: salt must be a Uint8Array, Buffer, or base64 string');
+      }
+      if (saltBuf.length < 16) {
+        throw new Error('deriveUsernamePasswordKEK: salt must be at least 16 bytes');
+      }
+    } else {
+      saltBuf = crypto.randomBytes(32);
+    }
+
+    // Argon2id base key
+    const baseKey = await argon2.hash(pwd, {
+      type: argon2.argon2id,
+      timeCost,
+      memoryCost,
+      parallelism,
+      hashLength,
+      salt: saltBuf,
+      raw: true,
+    });
+
+    // Bind KEK to username with BLAKE3, then feed into quantumHKDF
+    const usernameHash = blake3(usernameBytes);
+    const ikm = new Uint8Array(baseKey.length + usernameHash.length);
+    ikm.set(baseKey, 0);
+    ikm.set(usernameHash, baseKey.length);
+
+    // Use a domain-separated salt for HKDF
+    const hkSalt = shake256(saltBuf, { dkLen: 64 });
+    const info = new TextEncoder().encode('username-password-kek-v1');
+
+    const kek = await this.quantumHKDF(ikm, hkSalt, info, 32);
+    return { kek, salt: new Uint8Array(saltBuf) };
+  }
+
+
+  /**
    * AES key derivation using BLAKE3-HKDF compatible with client
    */
   static async deriveAesKeyFromIkm(ikmUint8Array, saltUint8Array, context) {
     try {
-      // Create context-bound info parameter to match client
+      // Create context-bound info parameter
       const contextInfo = context ?
         new TextEncoder().encode(`endtoend-chat hybrid key v2:${context}`) :
         CryptoConfig.HKDF_INFO;
 
       // Use BLAKE3-HKDF for key derivation
-      const keyMaterial = await this.blake3Hkdf(ikmUint8Array, saltUint8Array, contextInfo, 32);
+      const keyMaterial = await QuantumHashService.blake3Hkdf(ikmUint8Array, saltUint8Array, contextInfo, 32);
 
       // Validate key material
       if (!keyMaterial || keyMaterial.length !== 32) {
         throw new Error(`Invalid key material length: ${keyMaterial?.length}`);
       }
 
-      // Import as AES key - fix for Node.js webcrypto compatibility
-      const derived = await crypto.subtle.importKey(
-        'raw',
-        keyMaterial,
-        { name: 'AES-GCM' },
-        false, // Set to false to avoid potential issues
-        ['encrypt', 'decrypt']
-      );
-
-      return derived;
+      return keyMaterial;
     } catch (error) {
-      console.error('[CRYPTO] AES key derivation failed:', error);
+      logger.error('AES key derivation failed', error);
       throw new Error(`AES key derivation failed: ${error.message}`);
     }
   }
+
 
   /**
    * Enhanced session key derivation with BLAKE3 and context binding
    */
   static async deriveSessionKey(ikm, salt, sessionContext) {
     const contextInfo = new TextEncoder().encode(`session-key-v2:${sessionContext}`);
-    return await this.blake3Hkdf(ikm, salt, contextInfo, 32);
+    return await QuantumHashService.blake3Hkdf(ikm, salt, contextInfo, 32);
+  }
+
+
+  /**
+   * Simple HKDF wrapper (synchronous) for tests using BLAKE3
+   */
+  static deriveKey(ikm, salt, info, outLen) {
+    return PostQuantumHash.deriveKey(ikm, salt, info, outLen);
   }
 
   /**
-   * Legacy AES key derivation using standard HKDF for client compatibility
+   * Derive multiple keys with different context strings
    */
-  static async deriveAesKeyFromIkmLegacy(ikmUint8Array, saltUint8Array) {
-    try {
-      // Use standard WebCrypto HKDF like the client
-      const baseKey = await crypto.subtle.importKey(
-        'raw',
-        ikmUint8Array,
-        { name: 'HKDF' },
-        false,
-        ['deriveKey']
-      );
-
-      const derived = await crypto.subtle.deriveKey(
-        {
-          name: 'HKDF',
-          hash: CryptoConfig.HKDF_HASH,
-          salt: saltUint8Array,
-          info: CryptoConfig.HKDF_INFO
-        },
-        baseKey,
-        { name: 'AES-GCM', length: CryptoConfig.AES_KEY_SIZE },
-        false,
-        ['encrypt', 'decrypt']
-      );
-
-      return derived;
-    } catch (error) {
-      console.error('[CRYPTO] Legacy AES key derivation failed:', error);
-      throw new Error(`Legacy AES key derivation failed: ${error.message}`);
+  static deriveMultipleKeys(ikm, salt, contexts, outLen) {
+    const out = {};
+    for (const ctx of contexts) {
+      out[ctx] = PostQuantumHash.deriveKey(ikm, salt, ctx, outLen);
     }
+    return out;
   }
 }
 
-class AESService {
-  static async encryptWithAesGcmRaw(data, cryptoKey) {
+class PostQuantumAESService {
+  static async encryptWithPostQuantumAead(data, key) {
     let dataBuf;
     if (typeof data === 'string') dataBuf = new TextEncoder().encode(data);
     else if (data instanceof ArrayBuffer) dataBuf = new Uint8Array(data);
     else if (data instanceof Uint8Array) dataBuf = data;
-    else throw new Error('Unsupported data type for AES encrypt');
+    else throw new Error('Unsupported data type for PostQuantum encrypt');
 
-    const iv = RandomGenerator.generateSecureRandom(CryptoConfig.IV_LENGTH);
+    // Use PostQuantumAEAD for encryption
+    const pqAead = new PostQuantumAEAD(key);
+    const nonce = await QuantumRandomGenerator.generateSecureRandom(36); // 36-byte nonce for PostQuantumAEAD
+    
+    const { ciphertext, tag } = pqAead.encrypt(dataBuf, nonce, new TextEncoder().encode('server-aes-service'));
 
-    const cipherBuf = await crypto.subtle.encrypt(
-      { name: 'AES-GCM', iv: iv, tagLength: 128 },
-      cryptoKey,
-      dataBuf
-    );
-
-    const cipherArray = new Uint8Array(cipherBuf);
-    const tagLength = CryptoConfig.AUTH_TAG_LENGTH;
-    const encrypted = cipherArray.slice(0, -tagLength);
-    const authTag = cipherArray.slice(-tagLength);
-
-    return { iv, authTag, encrypted };
+    // Return combined format for backward compatibility
+    const encrypted = Buffer.concat([ciphertext, tag]);
+    return { nonce, encrypted };
   }
 
-  static async decryptWithAesGcmRaw(iv, authTag, encrypted, cryptoKey) {
+  static async decryptWithPostQuantumAead(nonce, encrypted, key, aad) {
     try {
       // Validate inputs
-      if (!iv || iv.length !== 16) {
-        throw new Error(`Invalid IV length: ${iv?.length}`);
+      if (!nonce || nonce.length !== 36) {
+        throw new Error(`Invalid nonce length: ${nonce?.length}, expected 36 bytes`);
       }
-      if (!authTag || authTag.length !== 16) {
-        throw new Error(`Invalid auth tag length: ${authTag?.length}`);
+      if (!encrypted || encrypted.length < 32) {
+        throw new Error('No encrypted data provided or too short');
       }
-      if (!encrypted || encrypted.length === 0) {
-        throw new Error('No encrypted data provided');
-      }
-      if (!cryptoKey) {
-        throw new Error('No crypto key provided');
+      if (!key) {
+        throw new Error('No key provided');
       }
 
-      const combined = new Uint8Array(encrypted.length + authTag.length);
-      combined.set(encrypted, 0);
-      combined.set(authTag, encrypted.length);
+      // Split encrypted data into ciphertext and tag
+      const ciphertext = encrypted.slice(0, -32);
+      const tag = encrypted.slice(-32);
 
-      const plainBuf = await crypto.subtle.decrypt(
-        { name: 'AES-GCM', iv: iv, tagLength: 128 },
-        cryptoKey,
-        combined
-      );
+      // Use PostQuantumAEAD for decryption
+      const pqAead = new PostQuantumAEAD(key);
+      const plainBuf = pqAead.decrypt(ciphertext, nonce, tag, aad);
 
       return new TextDecoder().decode(plainBuf);
     } catch (error) {
-      console.error('[CRYPTO] AES decryption failed:', {
-        error: error.message,
-        ivLength: iv?.length,
-        authTagLength: authTag?.length,
+      const errMsg = error?.message || String(error);
+      logger.error('PostQuantum decryption failed', {
+        nonceLength: nonce?.length,
         encryptedLength: encrypted?.length,
-        hasKey: !!cryptoKey
+        hasKey: !!key,
+        errorMessage: errMsg,
       });
-      throw new Error(`AES decryption failed: ${error.message}`);
+      throw new Error(`PostQuantum decryption failed: ${errMsg}`);
     }
   }
+
+  /**
+   * Password-based encryption using PostQuantumAEAD
+   */
+  static async encryptData(data, password) {
+    if (typeof password !== 'string' || password.trim().length < MIN_PASSWORD_LENGTH) {
+      throw new Error('Password must be a non-empty string with sufficient length');
+    }
+    const pwdBytes = new TextEncoder().encode(password.trim());
+    const salt = QuantumRandomGenerator.generateSalt(32);
+    const info = new TextEncoder().encode('pq-password-aead-v1');
+    const key = await QuantumHashService.blake3Hkdf(pwdBytes, salt, info, 32);
+    const aead = new PostQuantumAEAD(key);
+    const nonce = QuantumRandomGenerator.generateNonce(36);
+    const plain = data instanceof Uint8Array ? data : new Uint8Array(data);
+    const { ciphertext: ct, tag } = aead.encrypt(plain, nonce);
+    // Store combined for backward compatibility
+    const ciphertext = Buffer.concat([ct, tag]);
+    return { ciphertext, salt, nonce };
+  }
+
+  static async decryptData(encrypted, password) {
+    if (!encrypted || !encrypted.ciphertext || !encrypted.salt || !encrypted.nonce) {
+      throw new Error('Invalid encrypted payload');
+    }
+    const pwdBytes = new TextEncoder().encode(String(password ?? ''));
+    const info = new TextEncoder().encode('pq-password-aead-v1');
+    const key = await QuantumHashService.blake3Hkdf(pwdBytes, encrypted.salt, info, 32);
+    const aead = new PostQuantumAEAD(key);
+    // Split ciphertext and tag
+    const ct = encrypted.ciphertext.slice(0, -32);
+    const tag = encrypted.ciphertext.slice(-32);
+    return aead.decrypt(ct, encrypted.nonce, tag);
+  }
+
 
   static serializeEncryptedData(iv, authTag, encrypted) {
     const version = 1;
@@ -495,372 +1205,417 @@ class AESService {
   }
 }
 
+
+function generateX25519PrivateKey() {
+  const key = crypto.randomBytes(32);
+  key[0] &= 248;
+  key[31] &= 127;
+  key[31] |= 64;
+  return new Uint8Array(key);
+}
+
+function createX25519KeyPair() {
+  const secretKey = generateX25519PrivateKey();
+  const publicKey = x25519.getPublicKey(secretKey);
+  return {
+    publicKey: new Uint8Array(publicKey),
+    secretKey
+  };
+}
+
 class HybridService {
   static async generateHybridKeyPair() {
-    const xkp = /** @type {CryptoKeyPair} */ (await X25519Service.generateKeyPair());
-    const kyberKP = await KyberService.generateKeyPair();
+    const xPair = createX25519KeyPair();
+    const kyberKP = await QuantumKyberService.generateKeyPair();
+    const dilithiumKP = await DilithiumService.generateKeyPair();
     return {
-      x25519: xkp,
-      kyber: kyberKP
+      mlKemPublicKey: new Uint8Array(kyberKP.publicKey),
+      mlKemSecretKey: new Uint8Array(kyberKP.secretKey),
+      x25519PublicKey: new Uint8Array(xPair.publicKey),
+      x25519SecretKey: new Uint8Array(xPair.secretKey),
+      mlDsaPublicKey: new Uint8Array(dilithiumKP.publicKey),
+      mlDsaSecretKey: new Uint8Array(dilithiumKP.secretKey)
     };
   }
 
-  static async exportX25519PublicBase64(publicKeyCryptoKey) {
-    const raw = await X25519Service.exportPublicKeyRaw(publicKeyCryptoKey);
-    return HashService.arrayBufferToBase64(raw);
-  }
-
-  static async exportKyberPublicBase64(kyberPublicUint8) {
-    return HashService.arrayBufferToBase64(kyberPublicUint8);
-  }
-
-  static async importX25519PublicFromBase64(base64) {
-    const raw = HashService.base64ToUint8Array(base64);
-    return raw;
-  }
-
-  static async importKyberPublicFromBase64(base64) {
-    return HashService.base64ToUint8Array(base64);
-  }
-
-  static async encryptHybridPayload(payloadObject, recipientHybridPublic) {
-    if (!recipientHybridPublic?.x25519PublicBase64 || !recipientHybridPublic?.kyberPublicBase64) {
-      throw new Error('recipientHybridPublic must include x25519PublicBase64 and kyberPublicBase64');
-    }
-
-    const eph = /** @type {CryptoKeyPair} */ (await X25519Service.generateKeyPair());
-    const ephPubRaw = await X25519Service.exportPublicKeyRaw(eph.publicKey);
-
-    const recipientKyberPub = HashService.base64ToUint8Array(recipientHybridPublic.kyberPublicBase64);
-    const { ciphertext: kyberCiphertext, sharedSecret: kyberShared } = await KyberService.encapsulate(recipientKyberPub);
-
-    const recipientX25519PubRaw = HashService.base64ToUint8Array(recipientHybridPublic.x25519PublicBase64);
-    const x25519Shared = await X25519Service.deriveSharedSecretBits(eph.privateKey, recipientX25519PubRaw);
-
-    const ikm = new Uint8Array(x25519Shared.length + kyberShared.length);
-    ikm.set(x25519Shared, 0);
-    ikm.set(kyberShared, x25519Shared.length);
-
-    const saltFull = await HashService.digestSHA512Bytes(ephPubRaw, kyberCiphertext);
-    const salt = saltFull.slice(0, 32);
-
-    const aesCryptoKey = await KDFService.deriveAesKeyFromIkm(ikm, salt);
-
-    const jsonStr = JSON.stringify(payloadObject);
-    const { iv, authTag, encrypted } = await AESService.encryptWithAesGcmRaw(jsonStr, aesCryptoKey);
-
-    const serializedMessage = AESService.serializeEncryptedData(iv, authTag, encrypted);
-
-    // Generate BLAKE3 MAC for additional integrity
-    const messageBytes = new TextEncoder().encode(jsonStr);
-    const macKey = ikm.slice(0, 32); // BLAKE3 expects 32-byte key
-    const blake3Mac = await HashService.generateBlake3Mac(messageBytes, macKey);
-    const blake3MacBase64 = HashService.arrayBufferToBase64(blake3Mac);
-
+  static async createSecureEnvelope(payload, routing, recipientKeys, senderKeys) {
+    const kyberPublicBase64 = uint8ArrayToBase64(recipientKeys.mlKemPublicKey);
+    const opts = { recipientX25519PublicKey: recipientKeys.x25519PublicKey };
+    const routingParams = {
+      ...routing,
+      senderDilithiumSecretKey: senderKeys?.mlDsaSecretKey,
+      senderDilithiumPublicKey: senderKeys?.mlDsaPublicKey
+    };
+    const env = await this.encryptForClient(payload, { kyberPublicBase64 }, routingParams, opts);
     return {
-      version: 'hybrid-v1',
-      ephemeralX25519Public: HashService.arrayBufferToBase64(ephPubRaw),
-      kyberCiphertext: HashService.arrayBufferToBase64(kyberCiphertext),
-      encryptedMessage: serializedMessage,
-      blake3Mac: blake3MacBase64
+      version: env.version,
+      routing: env.routing,
+      pqCiphertext: env.kemCiphertext,
+      outerLayer: env.outer,
+      signature: env.routingSignature,
+      metadata: env.metadata
     };
   }
 
-  static async decryptHybridPayload(encryptedPayload, localHybridKeys) {
-    if (!encryptedPayload || encryptedPayload.version !== 'hybrid-v1') {
-      throw new Error('Unsupported payload version or invalid payload');
+  static async openSecureEnvelope(envelope, ownKeys, senderDilithiumPublicKey) {
+    // Normalize to internal expected structure
+    const internal = {
+      version: envelope.version,
+      routing: envelope.routing,
+      routingSignature: envelope.signature,
+      kemCiphertext: envelope.pqCiphertext,
+      outer: envelope.outerLayer,
+      metadata: envelope.metadata
+    };
+    const result = await this.decryptIncoming(internal, {
+      kyberPublicKey: ensureUint8Array(ownKeys.mlKemPublicKey, 'kyberPublicKey'),
+      kyberSecretKey: ensureUint8Array(ownKeys.mlKemSecretKey, 'kyberSecretKey'),
+      x25519SecretKey: ensureUint8Array(ownKeys.x25519SecretKey, 'x25519SecretKey')
+    }, { senderDilithiumPublicKey });
+    return result;
+  }
+
+  static exportX25519PublicBase64(publicKey) {
+    return QuantumHashService.arrayBufferToBase64(publicKey);
+  }
+
+  static exportKyberPublicBase64(publicKey) {
+    return QuantumHashService.arrayBufferToBase64(publicKey);
+  }
+
+  static exportDilithiumPublicBase64(publicKey) {
+    return QuantumHashService.arrayBufferToBase64(publicKey);
+  }
+
+  static canonicalizeRoutingHeader(header) {
+    return canonicalizeRoutingHeaderHelper(header);
+  }
+
+  static computeRoutingDigest(header) {
+    return computeRoutingDigestHelper(header);
+  }
+
+  static buildRoutingHeader(input) {
+    return buildRoutingHeaderHelper(input);
+  }
+
+  static normalizePayload(payload) {
+    return normalizePayloadHelper(payload);
+  }
+
+  static async signRoutingHeader(header, dilithiumSecretKey) {
+    return signRoutingHeaderHelper(header, dilithiumSecretKey);
+  }
+
+  static async verifyRoutingHeader(header, signatureBase64, dilithiumPublicKey) {
+    return verifyRoutingHeaderHelper(header, signatureBase64, dilithiumPublicKey);
+  }
+
+  static generateEphemeralX25519() {
+    return createX25519KeyPair();
+  }
+
+  static computeClassicalSharedSecret(privateKey, publicKey) {
+    const shared = x25519.getSharedSecret(privateKey, publicKey);
+    return new Uint8Array(shared.slice(0, 32));
+  }
+
+  static async createInnerLayer(payload, recipientKeys, routingDigest, pqSharedSecret, recipientX25519) {
+    if (!recipientX25519) {
+      throw new Error('Recipient X25519 public key is required for inner layer');
+    }
+    const ephemeral = await createX25519KeyPair();
+    const classicalShared = this.computeClassicalSharedSecret(ephemeral.secretKey, recipientX25519);
+    const innerSalt = crypto.randomBytes(32);
+    const innerNonce = QuantumRandomGenerator.generateRandomBytes(36);
+    const { encKey, macKey } = deriveInnerKeyMaterial(pqSharedSecret, classicalShared, innerSalt, routingDigest);
+
+    try {
+      const aad = new TextEncoder().encode(payload.type);
+      const aead = new PostQuantumAEAD(encKey);
+      const { ciphertext, tag } = aead.encrypt(payload.bytes, innerNonce, aad);
+      const macInput = concatUint8Arrays(innerNonce, ciphertext, tag, routingDigest, ephemeral.publicKey, aad);
+      const mac = await QuantumHashService.generateBlake3Mac(macInput, macKey);
+
+      return {
+        version: 'inner-envelope-v1',
+        salt: QuantumHashService.arrayBufferToBase64(innerSalt),
+        ephemeralX25519: QuantumHashService.arrayBufferToBase64(ephemeral.publicKey),
+        nonce: QuantumHashService.arrayBufferToBase64(innerNonce),
+        ciphertext: QuantumHashService.arrayBufferToBase64(ciphertext),
+        tag: QuantumHashService.arrayBufferToBase64(tag),
+        mac: QuantumHashService.arrayBufferToBase64(mac),
+        payloadType: payload.type,
+        metadata: { contentLength: payload.bytes.length }
+      };
+    } finally {
+      SecureMemory.wipe(ephemeral.secretKey);
+      SecureMemory.wipe(classicalShared);
+      SecureMemory.wipe(encKey);
+      SecureMemory.wipe(macKey);
+    }
+  }
+
+  static deriveOuterKeys(sharedSecret, salt, routingDigest) {
+    const info = `outer-envelope:${QuantumHashService.arrayBufferToBase64(routingDigest)}`;
+    const okm = PostQuantumHash.deriveKey(sharedSecret, salt, info, 64);
+    const outerKey = okm.slice(0, 32);
+    const outerMacKey = okm.slice(32, 64);
+    SecureMemory.wipe(okm);
+    return { outerKey, outerMacKey };
+  }
+
+  static async encryptForClient(payload, recipientKeys, routingParams, options = {}) {
+    if (!recipientKeys?.kyberPublicBase64) {
+      throw new Error('Recipient Kyber public key is required');
+    }
+    if (!options.recipientX25519PublicKey) {
+      throw new Error('Recipient X25519 public key is required');
     }
 
-    const { ephemeralX25519Public, kyberCiphertext, encryptedMessage } = encryptedPayload;
+    const recipientX25519 = ensureUint8Array(options.recipientX25519PublicKey, 'recipientX25519PublicKey');
+    const normalizedPayload = this.normalizePayload(payload);
+    const header = this.buildRoutingHeader({ ...routingParams, size: normalizedPayload.bytes.length });
+    const signatureBase64 = await this.signRoutingHeader(header, routingParams.senderDilithiumSecretKey);
+    const routingDigest = this.computeRoutingDigest(header);
 
-    if (!ephemeralX25519Public || !kyberCiphertext || !encryptedMessage) {
-      throw new Error('Missing fields in hybrid payload');
-    }
+    const recipientKyber = QuantumHashService.base64ToUint8Array(recipientKeys.kyberPublicBase64);
+    const { ciphertext: kemCiphertext, sharedSecret: pqSharedSecret } = await QuantumKyberService.encapsulate(recipientKyber);
 
-    const ephPubRaw = HashService.base64ToUint8Array(ephemeralX25519Public);
-    const kyberCiphertextBytes = HashService.base64ToUint8Array(kyberCiphertext);
+    const innerLayer = await this.createInnerLayer(normalizedPayload, recipientKeys, routingDigest, pqSharedSecret, recipientX25519);
 
-    const kyberSecret = localHybridKeys?.kyber?.secretKey;
-    if (!kyberSecret) throw new Error('localHybridKeys.kyber.secretKey required to decrypt');
+    const outerSalt = crypto.randomBytes(32);
+    const { outerKey, outerMacKey } = this.deriveOuterKeys(pqSharedSecret, outerSalt, routingDigest);
+    try {
+      const innerPayloadBytes = new TextEncoder().encode(JSON.stringify(innerLayer));
+      const outerNonce = crypto.randomBytes(24);
+      const outerCipher = gcm(outerKey, outerNonce.slice(0, 12), routingDigest);
+      const outerEncrypted = outerCipher.encrypt(innerPayloadBytes);
+      const outerCiphertext = outerEncrypted.slice(0, -16);
+      const outerTag = outerEncrypted.slice(-16);
 
-    const kyberShared = await KyberService.decapsulate(kyberCiphertextBytes, kyberSecret);
+      const outerMacInput = new Uint8Array(outerCiphertext.length + outerTag.length + routingDigest.length);
+      let offset = 0;
+      outerMacInput.set(outerCiphertext, offset);
+      offset += outerCiphertext.length;
+      outerMacInput.set(outerTag, offset);
+      offset += outerTag.length;
+      outerMacInput.set(routingDigest, offset);
+      const outerMac = await QuantumHashService.generateBlake3Mac(outerMacInput, outerMacKey);
 
-    const localXPrivate = localHybridKeys?.x25519?.privateKey;
-    if (!localXPrivate) throw new Error('localHybridKeys.x25519.privateKey required to decrypt');
+      const envelope = {
+        version: 'hybrid-envelope-v1',
+        routing: header,
+        routingSignature: { algorithm: 'dilithium3', signature: signatureBase64 },
+        algorithms: { outer: 'mlkem1024', inner: 'x25519', aead: 'aes-256-gcm', mac: 'blake3' },
+        kemCiphertext: QuantumHashService.arrayBufferToBase64(kemCiphertext),
+        outer: {
+          salt: QuantumHashService.arrayBufferToBase64(outerSalt),
+          nonce: QuantumHashService.arrayBufferToBase64(outerNonce),
+          ciphertext: QuantumHashService.arrayBufferToBase64(outerCiphertext),
+          tag: QuantumHashService.arrayBufferToBase64(outerTag),
+          mac: QuantumHashService.arrayBufferToBase64(outerMac)
+        },
+        metadata: options.metadata
+      };
 
-    const x25519Shared = await X25519Service.deriveSharedSecretBits(localXPrivate, ephPubRaw);
-
-    const ikm = new Uint8Array(x25519Shared.length + kyberShared.length);
-    ikm.set(x25519Shared, 0);
-    ikm.set(kyberShared, x25519Shared.length);
-
-    const saltFull = await HashService.digestSHA512Bytes(ephPubRaw, kyberCiphertextBytes);
-    const salt = saltFull.slice(0, 32);
-
-    const aesCryptoKey = await KDFService.deriveAesKeyFromIkm(ikm, salt, "message-encryption");
-
-    const decryptedJson = await (async () => {
-      const deserialized = AESService.deserializeEncryptedData(encryptedMessage);
-      return await AESService.decryptWithAesGcmRaw(deserialized.iv, deserialized.authTag, deserialized.encrypted, aesCryptoKey);
-    })();
-
-    // Verify BLAKE3 MAC if present
-    if (encryptedPayload.blake3Mac) {
-      const messageBytes = new TextEncoder().encode(decryptedJson);
-      const expectedMac = HashService.base64ToUint8Array(encryptedPayload.blake3Mac);
-      const macKey = ikm.slice(0, 32); // BLAKE3 expects 32-byte key
-      const isValid = await HashService.verifyBlake3Mac(messageBytes, macKey, expectedMac);
-      if (!isValid) {
-        throw new Error('BLAKE3 MAC verification failed - hybrid payload integrity compromised');
+      if (routingParams.senderDilithiumPublicKey) {
+        envelope.metadata = {
+          ...envelope.metadata,
+          sender: {
+            ...(envelope.metadata?.sender ?? {}),
+            dilithiumPublicKey: QuantumHashService.arrayBufferToBase64(
+              ensureUint8Array(routingParams.senderDilithiumPublicKey, 'senderDilithiumPublicKey')
+            )
+          }
+        };
       }
+
+      if (options.context ?? routingParams.context) {
+        envelope.metadata = {
+          ...envelope.metadata,
+          context: options.context ?? routingParams.context
+        };
+      }
+
+      return envelope;
+    } finally {
+      SecureMemory.wipe(pqSharedSecret);
+      SecureMemory.wipe(outerKey);
+      SecureMemory.wipe(outerMacKey);
+    }
+  }
+
+  static async encryptForServer(payload, serverKeys, options = {}) {
+    const routing = {
+      to: 'server',
+      from: 'client',
+      type: 'server',
+      senderDilithiumSecretKey: options.senderDilithiumSecretKey,
+      timestamp: Date.now()
+    };
+    if (!routing.senderDilithiumSecretKey) {
+      throw new Error('Sender Dilithium secret key required for server encryption');
+    }
+    return this.encryptForClient(payload, serverKeys, routing, options);
+  }
+
+  static async decryptIncoming(envelope, ownKeys, options = {}) {
+    if (!envelope || envelope.version !== 'hybrid-envelope-v1') {
+      throw new Error('Unsupported envelope version');
     }
 
-    return JSON.parse(decryptedJson);
+    const header = envelope.routing;
+    const routingDigest = this.computeRoutingDigest(header);
+
+    const senderPublicBase64 = envelope.metadata?.sender?.dilithiumPublicKey || options.senderDilithiumPublicKey;
+    if (!senderPublicBase64) {
+      throw new Error('Sender Dilithium public key required for verification');
+    }
+    const senderPublicKey = base64ToUint8Array(senderPublicBase64, 'senderDilithiumPublicKey');
+    const signatureValid = await verifyRoutingHeaderHelper(header, envelope.routingSignature.signature, senderPublicKey);
+    if (!signatureValid) {
+      throw new Error('Routing header signature verification failed');
+    }
+
+    const kyberSecret = ensureUint8Array(ownKeys.kyberSecretKey, 'kyberSecretKey');
+    const kemCiphertext = QuantumHashService.base64ToUint8Array(envelope.kemCiphertext);
+    const pqSharedSecret = await QuantumKyberService.decapsulate(kemCiphertext, kyberSecret, ownKeys.kyberPublicKey);
+
+    const outerSalt = QuantumHashService.base64ToUint8Array(envelope.outer.salt);
+    const { outerKey, outerMacKey } = this.deriveOuterKeys(pqSharedSecret, outerSalt, routingDigest);
+
+    try {
+      const outerCiphertext = QuantumHashService.base64ToUint8Array(envelope.outer.ciphertext);
+      const outerTag = QuantumHashService.base64ToUint8Array(envelope.outer.tag);
+      const outerNonce = QuantumHashService.base64ToUint8Array(envelope.outer.nonce);
+      const expectedMac = QuantumHashService.base64ToUint8Array(envelope.outer.mac);
+      
+      const outerMacInput = concatUint8Arrays(outerCiphertext, outerTag, routingDigest);
+      
+      const outerMacValid = await QuantumHashService.verifyBlake3Mac(outerMacInput, outerMacKey, expectedMac);
+      if (!outerMacValid) {
+        throw new Error('Outer envelope MAC verification failed');
+      }
+
+      const outerCipher = gcm(outerKey, outerNonce.slice(0, 12), routingDigest);
+      const outerPlain = outerCipher.decrypt(new Uint8Array([...outerCiphertext, ...outerTag]));
+      const innerLayer = JSON.parse(Buffer.from(outerPlain).toString());
+
+      if (innerLayer.version !== 'inner-envelope-v1') {
+        throw new Error('Unsupported inner envelope version');
+      }
+
+      const innerSalt = QuantumHashService.base64ToUint8Array(innerLayer.salt);
+      const innerNonce = QuantumHashService.base64ToUint8Array(innerLayer.nonce);
+      const innerCiphertext = QuantumHashService.base64ToUint8Array(innerLayer.ciphertext);
+      const innerTag = QuantumHashService.base64ToUint8Array(innerLayer.tag);
+      const innerMac = QuantumHashService.base64ToUint8Array(innerLayer.mac);
+      const ephemeralPublic = QuantumHashService.base64ToUint8Array(innerLayer.ephemeralX25519);
+
+      if (!ownKeys.x25519SecretKey) {
+        throw new Error('x25519SecretKey required to decrypt inner envelope');
+      }
+      const x25519Secret = ensureUint8Array(ownKeys.x25519SecretKey, 'x25519SecretKey');
+      const classicalShared = this.computeClassicalSharedSecret(x25519Secret, ephemeralPublic);
+      const { encKey, macKey } = await deriveInnerKeyMaterial(pqSharedSecret, classicalShared, innerSalt, routingDigest);
+
+      try {
+        const macInput = concatUint8Arrays(
+          innerNonce,
+          innerCiphertext,
+          innerTag,
+          routingDigest,
+          ephemeralPublic,
+          new TextEncoder().encode(innerLayer.payloadType)
+        );
+        const innerMacValid = await QuantumHashService.verifyBlake3Mac(macInput, macKey, innerMac);
+        if (!innerMacValid) {
+          throw new Error('Inner envelope MAC verification failed');
+        }
+
+        // Decrypt inner payload with payloadType as AAD to bind ciphertext to context
+        const aad = new TextEncoder().encode(innerLayer.payloadType);
+        const aead = new PostQuantumAEAD(encKey);
+        const plaintextBytes = aead.decrypt(innerCiphertext, innerNonce, innerTag, aad);
+        let payloadJson;
+        if (innerLayer.payloadType === 'json') {
+          payloadJson = JSON.parse(Buffer.from(plaintextBytes).toString());
+    }
+
+    return {
+          routing: header,
+          payload: plaintextBytes,
+          payloadJson,
+          metadata: envelope.metadata,
+          senderDilithiumPublicKey: senderPublicBase64
+        };
+      } finally {
+        SecureMemory.wipe(classicalShared);
+        SecureMemory.wipe(macKey);
+      }
+    } finally {
+      SecureMemory.wipe(pqSharedSecret);
+      SecureMemory.wipe(outerKey);
+      SecureMemory.wipe(outerMacKey);
+    }
   }
+
 }
 
-class HashingService {
+class PasswordService {
   static async hashPassword(password) {
-    // SECURITY: Validate password input
-    if (!password || typeof password !== 'string') {
-      throw new Error('Password must be a non-empty string');
+    if (typeof password !== 'string') {
+      throw new Error('Password must be a string');
     }
-    
-    // SECURITY: Prevent extremely long passwords that could cause DoS
-    if (password.length > 512) {
-      throw new Error('Password too long - maximum 512 characters');
+    const trimmed = password.trim();
+    if (trimmed.length < MIN_PASSWORD_LENGTH) {
+      throw new Error(`Password must be at least ${MIN_PASSWORD_LENGTH} characters`);
     }
-    
-    // SECURITY: Warn about very short passwords
-    if (password.length < 8) {
-      console.warn('[CRYPTO] Warning: Password is shorter than 8 characters');
+    if (trimmed.length > MAX_PASSWORD_LENGTH) {
+      throw new Error(`Password must be no more than ${MAX_PASSWORD_LENGTH} characters`);
     }
-    
-    return await argon2.hash(password, {
+    return await argon2.hash(trimmed, {
       type: argon2.argon2id,
-      memoryCost: 2 ** 16,  // 64MB
-      timeCost: 3,          // 3 iterations
-      parallelism: 1,       // 1 thread
+      memoryCost: CryptoConfig.ARGON2_MEMORY,
+      timeCost: CryptoConfig.ARGON2_TIME,
+      parallelism: CryptoConfig.ARGON2_PARALLELISM,
+      hashLength: 64
     });
   }
 
-  static async verifyPassword(hash, inputPassword) {
-    // SECURITY: Validate inputs
+  static async verifyPassword(hash, password) {
     if (!hash || typeof hash !== 'string') {
-      throw new Error('Hash must be a non-empty string');
-    }
-    
-    if (!inputPassword || typeof inputPassword !== 'string') {
-      throw new Error('Input password must be a non-empty string');
-    }
-    
-    // SECURITY: Validate hash format before passing to argon2
-    if (!hash.startsWith('$argon2')) {
-      throw new Error('Invalid hash format - not an Argon2 hash');
-    }
-    
-    // SECURITY: Prevent extremely long inputs that could cause DoS
-    if (inputPassword.length > 512 || hash.length > 512) {
-      throw new Error('Input too long');
-    }
-    
-    try {
-      return await argon2.verify(hash, inputPassword);
-    } catch (error) {
-      console.error('[CRYPTO] Password verification error:', error.message);
-      return false; // Don't expose internal errors
-    }
-  }
-
-  static async parseArgon2Hash(encodedHash) {
-    // SECURITY: Validate input
-    if (!encodedHash || typeof encodedHash !== 'string') {
-      throw new Error('Encoded hash must be a non-empty string');
-    }
-    
-    // SECURITY: Prevent extremely long hashes that could cause DoS
-    if (encodedHash.length > 512) {
-      throw new Error('Hash too long');
-    }
-    
-    const parts = encodedHash.split('$');
-    if (parts.length !== 6) {
-      throw new Error('Invalid Argon2 encoded hash format - wrong number of parts');
-    }
-
-    const [, algorithm, versionPart, paramsPart, saltB64, hashB64] = parts;
-    
-    // SECURITY: Validate algorithm
-    if (!algorithm || !['argon2i', 'argon2d', 'argon2id'].includes(algorithm)) {
-      throw new Error('Invalid Argon2 algorithm type');
-    }
-    
-    // SECURITY: Validate version format
-    if (!versionPart || !versionPart.includes('=')) {
-      throw new Error('Invalid version format');
-    }
-    
-    const version = parseInt(versionPart.split('=')[1], 10);
-    if (isNaN(version) || version < 0x10 || version > 0x13) {
-      throw new Error('Invalid Argon2 version');
-    }
-
-    // SECURITY: Validate parameters format and values
-    if (!paramsPart) {
-      throw new Error('Missing parameters');
-    }
-    
-    const params = {};
-    paramsPart.split(',').forEach(param => {
-      const equalIndex = param.indexOf('=');
-      if (equalIndex === -1) {
-        throw new Error('Invalid parameter format');
-      }
-      
-      const key = param.substring(0, equalIndex);
-      const value = param.substring(equalIndex + 1);
-      
-      if (!['m', 't', 'p'].includes(key)) {
-        throw new Error(`Invalid parameter key: ${key}`);
-      }
-      
-      const numValue = Number(value);
-      if (isNaN(numValue) || numValue < 1 || numValue > 2**30) {
-        throw new Error(`Invalid parameter value for ${key}: ${value}`);
-      }
-      
-      params[key] = numValue;
-    });
-    
-    // SECURITY: Validate required parameters are present
-    if (!params.m || !params.t || !params.p) {
-      throw new Error('Missing required parameters (m, t, p)');
-    }
-
-    // SECURITY: Validate base64 format and decode safely
-    if (!saltB64 || !hashB64) {
-      throw new Error('Missing salt or hash');
-    }
-    
-    let salt, hash;
-    try {
-      salt = Buffer.from(saltB64, 'base64');
-      hash = Buffer.from(hashB64, 'base64');
-    } catch (error) {
-      throw new Error('Invalid base64 encoding in salt or hash');
-    }
-    
-    // SECURITY: Validate salt and hash lengths
-    if (salt.length < 8 || salt.length > 64) {
-      throw new Error('Invalid salt length');
-    }
-    
-    if (hash.length < 16 || hash.length > 128) {
-      throw new Error('Invalid hash length');
-    }
-
-    return {
-      algorithm,
-      version,
-      memoryCost: params.m,
-      timeCost: params.t,
-      parallelism: params.p,
-      salt,
-      hash
-    };
-  }
-}
-
-class PostQuantumHybridService {
-  /**
-   * Generate a complete hybrid key pair with X25519, Kyber768, and Dilithium3
-   */
-  static async generateHybridKeyPair() {
-    const x25519Pair = await X25519Service.generateKeyPair();
-    const kyberPair = await KyberService.generateKeyPair();
-    const dilithiumPair = await DilithiumService.generateKeyPair();
-
-    return {
-      x25519: x25519Pair,
-      kyber: kyberPair,
-      dilithium: dilithiumPair
-    };
-  }
-
-  /**
-   * Export public keys for sharing
-   */
-  static async exportPublicKeys(hybridKeyPair) {
-    return {
-      x25519PublicBase64: await HybridService.exportX25519PublicBase64(hybridKeyPair.x25519.publicKey),
-      kyberPublicBase64: HashService.arrayBufferToBase64(hybridKeyPair.kyber.publicKey),
-      dilithiumPublicBase64: HashService.arrayBufferToBase64(hybridKeyPair.dilithium.publicKey)
-    };
-  }
-
-  /**
-   * Sign a message using Dilithium3 (post-quantum signature)
-   */
-  static async signMessage(message, dilithiumSecretKey) {
-    return await DilithiumService.sign(dilithiumSecretKey, message);
-  }
-
-  /**
-   * Verify a Dilithium3 signature
-   */
-  static async verifySignature(signature, message, dilithiumPublicKey) {
-    return await DilithiumService.verify(signature, message, dilithiumPublicKey);
-  }
-
-  /**
-   * Create a hybrid signature that includes both Ed25519 (for compatibility) and Dilithium3
-   */
-  static async createHybridSignature(message, ed25519PrivateKey, dilithiumSecretKey) {
-    // Create Ed25519 signature (for backward compatibility)
-    const ed25519Signature = ed25519PrivateKey.sign(message);
-
-    // Create Dilithium3 signature (post-quantum)
-    const dilithiumSignature = await DilithiumService.sign(dilithiumSecretKey, message);
-
-    return {
-      ed25519: HashService.arrayBufferToBase64(ed25519Signature),
-      dilithium: HashService.arrayBufferToBase64(dilithiumSignature)
-    };
-  }
-
-  /**
-   * Verify a hybrid signature
-   */
-  static async verifyHybridSignature(hybridSignature, message, ed25519PublicKey, dilithiumPublicKey) {
-    try {
-      // Verify Ed25519 signature
-      const ed25519Sig = HashService.base64ToUint8Array(hybridSignature.ed25519);
-      const ed25519Valid = ed25519PublicKey.verify(message, ed25519Sig);
-
-      // Verify Dilithium3 signature
-      const dilithiumSig = HashService.base64ToUint8Array(hybridSignature.dilithium);
-      const dilithiumValid = await DilithiumService.verify(dilithiumSig, message, dilithiumPublicKey);
-
-      // Both signatures must be valid for maximum security
-      return ed25519Valid && dilithiumValid;
-    } catch (error) {
-      console.error('Hybrid signature verification failed:', error);
       return false;
     }
+    if (typeof password !== 'string') {
+      return false;
+    }
+    try {
+      return await argon2.verify(hash, password.trim());
+    } catch (error) {
+      logger.error('Password verification failed', { error: error.message });
+      return false;
+    }
+  }
+
+  static async parseArgon2Hash(hash) {
+    if (!hash || typeof hash !== 'string' || !hash.startsWith('$argon2')) {
+      throw new Error('Invalid Argon2 hash format');
+    }
+    return await QuantumHashService.parseArgon2Hash(hash);
   }
 }
 
 export const CryptoUtils = {
-  Random: RandomGenerator,
-  Hash: HashService,
-  X25519: X25519Service,
-  Kyber: KyberService,
-  Dilithium: DilithiumService,
-  ChaCha20Poly1305: ChaCha20Poly1305Service,
-  XChaCha20Poly1305: XChaCha20Poly1305Service,
-  KDF: KDFService,
-  AES: AESService,
+  Hash: QuantumHashService,
+  KDF: QuantumKDFService,
+  Random: QuantumRandomGenerator,
   Hybrid: HybridService,
-  PostQuantum: PostQuantumHybridService,
-  Password: HashingService,
+  Kyber: QuantumKyberService,
+  Dilithium: DilithiumService,
+  AES: PostQuantumAESService,
+  PostQuantumAEAD: PostQuantumAEAD,
+  Config: CryptoConfig,
+  Password: PasswordService
 };

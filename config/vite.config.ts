@@ -1,11 +1,16 @@
-import { defineConfig } from 'vite'
+import { defineConfig, Plugin } from 'vite'
 import react from '@vitejs/plugin-react'
 import path from 'path'
 
-// Vite config used by startClient.sh (symlinked as vite.config.ts)
-// Note: __dirname here is the `config/` directory, so alias must go to ../src
+const stripCrossorigin = (): Plugin => ({
+  name: 'strip-crossorigin',
+  transformIndexHtml(html) {
+    return html.replace(/\s+crossorigin(=("[^"]*"|'[^']*'|[^\s>]+))?/gi, '')
+  },
+})
+
 export default defineConfig({
-  plugins: [react()],
+  plugins: [stripCrossorigin(), react()],
   base: './',
   server: {
     port: 5173,
@@ -15,7 +20,6 @@ export default defineConfig({
   resolve: {
     alias: {
       '@': path.resolve(__dirname, '../src'),
-      // Avoid lucide-react's namespace re-export causing "Export 'index' is not defined in module"
       'lucide-react$': 'lucide-react/dist/esm/icons/index.js',
     },
   },
@@ -41,15 +45,6 @@ export default defineConfig({
         assetFileNames: 'assets/[name]-[hash].[ext]'
       }
     },
-    minify: 'terser',
-    terserOptions: {
-      compress: {
-        drop_console: true,
-        drop_debugger: true,
-        pure_funcs: ['console.log', 'console.info', 'console.debug', 'console.warn']
-      },
-      mangle: { safari10: true }
-    }
   },
   define: {
     global: 'globalThis',

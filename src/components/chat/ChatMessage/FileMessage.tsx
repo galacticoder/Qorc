@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useEffect, useCallback, useMemo } from "react";
 import { Avatar, AvatarFallback } from "../../ui/avatar";
 import { format } from "date-fns";
 import { cn } from "../../../lib/utils";
@@ -7,115 +7,138 @@ import { Message } from "../types.ts";
 import { MessageReceipt } from "../MessageReceipt.tsx";
 import { VoiceMessage } from "../VoiceMessage";
 import { copyTextToClipboard } from "@/lib/clipboard";
+import { sanitizeFilename } from "@/lib/sanitizers";
 
+interface ElectronSaveFileData {
+  readonly filename: string;
+  readonly data: string;
+  readonly mimeType: string;
+}
 
-// Type declaration for electronAPI
+interface ElectronSaveFileResult {
+  readonly success: boolean;
+  readonly path?: string;
+  readonly error?: string;
+  readonly canceled?: boolean;
+}
+
 declare global {
   interface Window {
     electronAPI?: {
-      isElectron: boolean;
-      saveFile: (data: { filename: string; data: string; mimeType: string }) => Promise<{ success: boolean; path?: string; error?: string; canceled?: boolean }>;
+      readonly isElectron: boolean;
+      saveFile: (data: ElectronSaveFileData) => Promise<ElectronSaveFileResult>;
     };
   }
 }
 
 interface FileMessageProps {
-  message: Message;
-  isCurrentUser?: boolean;
-  onReply?: (message: Message) => void;
-  onDelete?: (message: Message) => void;
-  onEdit?: (message: Message) => void;
+  readonly message: Message;
+  readonly isCurrentUser?: boolean;
+  readonly onReply?: (message: Message) => void;
+  readonly onDelete?: (message: Message) => void;
+  readonly onEdit?: (message: Message) => void;
 }
+
+interface FileContentProps {
+  readonly message: Message;
+  readonly isCurrentUser: boolean;
+}
+
+const MAX_FILENAME_LENGTH = 255;
+const FILENAME_SANITIZE_REGEX = /[^\w.-]/g;
 
 export const IMAGE_EXTENSIONS = ["jpg", "jpeg", "png", "gif", "webp"];
 export const VIDEO_EXTENSIONS = ["mp4", "webm", "ogg"];
 export const AUDIO_EXTENSIONS = ["mp3", "wav", "ogg", "m4a", "webm"];
 
-export function hasExtension(filename: string, extensions: string[]) {
-  // SECURITY: Prevent ReDoS attacks by validating filename length and format
-  if (!filename || typeof filename !== 'string' || filename.length > 255) {
+export const hasExtension = (filename: string, extensions: readonly string[]): boolean => {
+  if (!filename || typeof filename !== 'string' || filename.length > MAX_FILENAME_LENGTH) {
     return false;
   }
 
-  // SECURITY: Sanitize filename to prevent regex injection
-  const sanitizedFilename = filename.replace(/[^\w.-]/g, '');
-
-  // SECURITY: Use simple string matching instead of complex regex to prevent ReDoS
+  const sanitizedFilename = filename.replace(FILENAME_SANITIZE_REGEX, '');
   const lowerFilename = sanitizedFilename.toLowerCase();
   return extensions.some(ext => lowerFilename.endsWith('.' + ext.toLowerCase()));
-}
+};
 
-export function formatFileSize(bytes: number) {
+const FILE_SIZE_UNITS = ["Bytes", "KB", "MB", "GB"] as const;
+const FILE_SIZE_BASE = 1024;
+
+export const formatFileSize = (bytes: number): string => {
   if (bytes === 0) return "0 Bytes";
-  const k = 1024;
-  const sizes = ["Bytes", "KB", "MB", "GB"];
-  const i = Math.floor(Math.log(bytes) / Math.log(k));
-  return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + " " + sizes[i];
-}
+  if (bytes < 0 || !Number.isFinite(bytes)) return "Unknown";
+  
+  const i = Math.min(
+    Math.floor(Math.log(bytes) / Math.log(FILE_SIZE_BASE)),
+    FILE_SIZE_UNITS.length - 1
+  );
+  const value = bytes / Math.pow(FILE_SIZE_BASE, i);
+  return `${value.toFixed(1)} ${FILE_SIZE_UNITS[i]}`;
+};
 
-// Component for just the file content without user info (for embedding in ChatMessage)
-export function FileContent({ message, isCurrentUser }: { message: Message; isCurrentUser: boolean }) {
+const extractBase64Data = (dataUrl: string): string => {
+  if (!dataUrl.startsWith('data:')) return dataUrl;
+  const commaIndex = dataUrl.indexOf(',');
+  return commaIndex !== -1 ? dataUrl.substring(commaIndex + 1) : dataUrl;
+};
+
+const createDownloadLink = (href: string, filename: string): void => {
+  const link = document.createElement('a');
+  link.href = href;
+  link.download = sanitizeFilename(filename || 'download');
+  link.rel = 'noopener noreferrer';
+  link.style.display = 'none';
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+};
+
+export function FileContent({ message, isCurrentUser }: FileContentProps) {
   const { content, filename, fileSize, mimeType, originalBase64Data } = message;
 
-  const handleDownload = async (e: React.MouseEvent) => {
+  const fallbackDownload = useCallback((): void => {
+    if (!content) return;
+    try {
+      createDownloadLink(content, filename || 'download');
+    } catch {}
+  }, [content, filename]);
+
+  const handleDownload = useCallback(async (e: React.MouseEvent): Promise<void> => {
     e.preventDefault();
 
-    // Check if running in Electron
     if (window.electronAPI?.isElectron && originalBase64Data && filename) {
       try {
-        // Extract base64 data if it's a data URL
-        let base64Data = originalBase64Data;
-        if (originalBase64Data.startsWith('data:')) {
-          const base64Index = originalBase64Data.indexOf(',');
-          if (base64Index !== -1) {
-            base64Data = originalBase64Data.substring(base64Index + 1);
-          }
-        }
-
+        const base64Data = extractBase64Data(originalBase64Data);
         const result = await window.electronAPI.saveFile({
           filename,
           data: base64Data,
           mimeType: mimeType || 'application/octet-stream'
         });
 
-        if (result.success) {
-          console.log('File saved to:', result.path);
-        } else if (!result.canceled) {
-          console.error('Failed to save file:', result.error);
-          // Fallback to browser download
+        if (!result.success && !result.canceled) {
           fallbackDownload();
         }
-      } catch (error) {
-        console.error('[FileContent] Electron save failed:', error);
+      } catch {
         fallbackDownload();
       }
     } else {
-      // Browser download
       fallbackDownload();
     }
-
-    function fallbackDownload() {
-      if (content) {
-        const link = document.createElement('a');
-        link.href = content;
-        link.download = filename || 'download';
-        document.body.appendChild(link);
-        link.click();
-        document.body.removeChild(link);
-      }
-    }
-  };
+  }, [originalBase64Data, filename, mimeType, fallbackDownload]);
 
   return (
     <div className="flex flex-col gap-2">
       {/* Images */}
       {hasExtension(filename || "", IMAGE_EXTENSIONS) && (
-        <div className={cn("rounded-lg px-0 py-0 text-sm break-words", "bg-muted")}>
+        <div className={cn("rounded-lg px-0 py-0 text-sm break-words",
+          isCurrentUser ? "bg-primary text-primary-foreground" : "bg-[var(--color-surface)]")}
+        >
           <div className="relative group">
             <img src={content} alt={filename} className="max-w-full rounded-md" />
             <button
               onClick={handleDownload}
-              className="absolute top-2 right-2 bg-white p-1 rounded-full shadow hidden group-hover:block"
+              className="absolute top-2 right-2 p-1 rounded-full shadow hidden group-hover:block"
+              style={{ backgroundColor: 'var(--color-surface)', color: 'var(--color-text-primary)' }}
               aria-label={`Download ${filename}`}
             >
               <DownloadIcon />
@@ -209,105 +232,61 @@ export function FileContent({ message, isCurrentUser }: { message: Message; isCu
   );
 }
 
-export function FileMessage({ message, isCurrentUser, onReply, onDelete, onEdit }: FileMessageProps) {
+export function FileMessage({ message, isCurrentUser, onReply, onDelete }: FileMessageProps) {
   const { content, sender, timestamp, filename, fileSize, mimeType, originalBase64Data } = message;
 
-  const handleDownload = async (e: React.MouseEvent) => {
+  useEffect(() => {
+    if (typeof content === 'string' && content.startsWith('blob:')) {
+      return () => {
+        try { URL.revokeObjectURL(content); } catch {}
+      };
+    }
+    return undefined;
+  }, [content]);
+
+  const fallbackDownload = useCallback((): void => {
+    if (!content) return;
+    try {
+      createDownloadLink(content, filename || 'download');
+    } catch {
+      try {
+        window.open(content, '_blank', 'noopener,noreferrer');
+      } catch {}
+    }
+  }, [content, filename]);
+
+  const handleDownload = useCallback(async (e: React.MouseEvent): Promise<void> => {
     e.preventDefault();
     
-    console.log('[FileMessage] Download clicked:', { 
-      filename, 
-      hasOriginalBase64Data: !!originalBase64Data, 
-      isElectron: !!window.electronAPI?.isElectron,
-      contentUrl: content?.substring(0, 50) + '...'
-    });
-    
-    // Check if running in Electron
     if (window.electronAPI?.isElectron && originalBase64Data && filename) {
       try {
-        // Extract base64 data if it's a data URL
-        let base64Data = originalBase64Data;
-        if (originalBase64Data.startsWith('data:')) {
-          const base64Index = originalBase64Data.indexOf(',');
-          if (base64Index !== -1) {
-            base64Data = originalBase64Data.substring(base64Index + 1);
-          }
-        }
-        
-        console.log('[FileMessage] Calling Electron saveFile with:', {
-          filename,
-          dataLength: base64Data.length,
-          mimeType: mimeType || 'application/octet-stream'
-        });
-        
+        const base64Data = extractBase64Data(originalBase64Data);
         const result = await window.electronAPI.saveFile({
           filename,
           data: base64Data,
           mimeType: mimeType || 'application/octet-stream'
         });
         
-        console.log('[FileMessage] Save result:', result);
-        
-        if (result.success) {
-          console.log('File saved to:', result.path);
-          // Could show a toast notification here
-        } else if (!result.canceled) {
-          console.error('Failed to save file:', result.error);
-          // Fallback to browser download
+        if (!result.success && !result.canceled) {
           fallbackDownload();
         }
-      } catch (error) {
-        console.error('Error saving file:', error);
+      } catch {
         fallbackDownload();
       }
     } else {
-      console.log('[FileMessage] Using fallback download - conditions not met:', {
-        isElectron: !!window.electronAPI?.isElectron,
-        hasOriginalBase64Data: !!originalBase64Data,
-        hasFilename: !!filename
-      });
       fallbackDownload();
     }
-  };
-  
-  const fallbackDownload = () => {
-    console.log('[FileMessage] Fallback download:', { content, filename });
-    
-    try {
-      // Create a temporary link for browser download
-      const link = document.createElement('a');
-      link.href = content;
-      link.download = filename || 'download';
-      link.rel = 'noopener';
-      link.style.display = 'none';
-      document.body.appendChild(link);
-      link.click();
-      document.body.removeChild(link);
-      console.log('[FileMessage] Fallback download triggered successfully');
-    } catch (error) {
-      console.error('[FileMessage] Fallback download failed:', error);
-      
-      // Last resort: try to open in new tab
-      try {
-        window.open(content, '_blank');
-      } catch (openError) {
-        console.error('[FileMessage] Failed to open file in new tab:', openError);
-      }
-    }
-  };
+  }, [originalBase64Data, filename, mimeType, fallbackDownload]);
 
-  // Voice note detection: filename contains voice-note or MIME is audio/*
-  const isVoiceNote = Boolean(
-    (filename && filename.toLowerCase().includes('voice-note')) ||
-    (mimeType && mimeType.startsWith('audio/')) ||
-    (filename && hasExtension(filename, AUDIO_EXTENSIONS))
-  );
+  const isVoiceNote = useMemo(() => {
+    const name = (filename || '').toLowerCase();
+    return name.includes('voice-note');
+  }, [filename]);
 
   if (isVoiceNote) {
     return (
       <VoiceMessage
-        audioUrl={content}
-        sender={sender}
+        audioUrl={typeof content === 'string' ? content : ''}
         timestamp={timestamp}
         isCurrentUser={Boolean(isCurrentUser)}
         filename={filename}
@@ -425,7 +404,6 @@ export function FileMessage({ message, isCurrentUser, onReply, onDelete, onEdit 
           </div>
         )}
 
-        {/* Action buttons */}
         <div
           className={cn(
             "flex items-center gap-1 mt-2 opacity-0 group-hover:opacity-100 transition-opacity duration-200",
@@ -433,18 +411,18 @@ export function FileMessage({ message, isCurrentUser, onReply, onDelete, onEdit 
           )}
         >
           <button
-            onClick={() => { void copyTextToClipboard(filename || 'File'); }}
+            onClick={useCallback(() => { void copyTextToClipboard(filename || 'File'); }, [filename])}
             aria-label="Copy filename"
             className="p-1 rounded hover:bg-opacity-80 transition-colors"
             style={{ color: 'var(--color-text-secondary)' }}
-            onMouseEnter={(e) => {
+            onMouseEnter={useCallback((e: React.MouseEvent<HTMLButtonElement>) => {
               e.currentTarget.style.backgroundColor = 'var(--color-accent-primary)';
               e.currentTarget.style.color = 'white';
-            }}
-            onMouseLeave={(e) => {
+            }, [])}
+            onMouseLeave={useCallback((e: React.MouseEvent<HTMLButtonElement>) => {
               e.currentTarget.style.backgroundColor = 'transparent';
               e.currentTarget.style.color = 'var(--color-text-secondary)';
-            }}
+            }, [])}
           >
             <svg
               width="15"
@@ -463,18 +441,18 @@ export function FileMessage({ message, isCurrentUser, onReply, onDelete, onEdit 
           </button>
 
           <button
-            onClick={() => onReply?.(message)}
+            onClick={useCallback(() => onReply?.(message), [onReply, message])}
             aria-label="Reply to file"
             className="p-1 rounded hover:bg-opacity-80 transition-colors"
             style={{ color: 'var(--color-text-secondary)' }}
-            onMouseEnter={(e) => {
+            onMouseEnter={useCallback((e: React.MouseEvent<HTMLButtonElement>) => {
               e.currentTarget.style.backgroundColor = 'var(--color-accent-primary)';
               e.currentTarget.style.color = 'white';
-            }}
-            onMouseLeave={(e) => {
+            }, [])}
+            onMouseLeave={useCallback((e: React.MouseEvent<HTMLButtonElement>) => {
               e.currentTarget.style.backgroundColor = 'transparent';
               e.currentTarget.style.color = 'var(--color-text-secondary)';
-            }}
+            }, [])}
           >
             <svg
               xmlns="http://www.w3.org/2000/svg"
@@ -490,18 +468,18 @@ export function FileMessage({ message, isCurrentUser, onReply, onDelete, onEdit 
 
           {isCurrentUser && (
             <button
-              onClick={() => onDelete?.(message)}
+              onClick={useCallback(() => onDelete?.(message), [onDelete, message])}
               aria-label="Delete file"
               className="p-1 rounded hover:bg-opacity-80 transition-colors"
               style={{ color: 'var(--color-text-secondary)' }}
-              onMouseEnter={(e) => {
+              onMouseEnter={useCallback((e: React.MouseEvent<HTMLButtonElement>) => {
                 e.currentTarget.style.backgroundColor = '#ef4444';
                 e.currentTarget.style.color = 'white';
-              }}
-              onMouseLeave={(e) => {
+              }, [])}
+              onMouseLeave={useCallback((e: React.MouseEvent<HTMLButtonElement>) => {
                 e.currentTarget.style.backgroundColor = 'transparent';
                 e.currentTarget.style.color = 'var(--color-text-secondary)';
-              }}
+              }, [])}
             >
               <svg
                 xmlns="http://www.w3.org/2000/svg"
@@ -517,7 +495,6 @@ export function FileMessage({ message, isCurrentUser, onReply, onDelete, onEdit 
           )}
         </div>
 
-        {/* Message Receipt */}
         <MessageReceipt
           receipt={message.receipt}
           isCurrentUser={isCurrentUser || false}

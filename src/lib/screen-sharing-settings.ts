@@ -1,26 +1,95 @@
-/**
- * Screen Sharing Settings Manager
- * Handles persistence and management of user screen sharing preferences
- */
+/** Manages persisted screen sharing preferences. */
 
 import {
   ScreenSharingSettings,
   ScreenSharingResolution,
   SCREEN_SHARING_RESOLUTIONS,
   SCREEN_SHARING_FRAMERATES
-} from './webrtc-calling';
+} from './screen-sharing-consts';
+import { CryptoUtils } from './unified-crypto';
+import { SecureAuditLogger } from './secure-error-handler';
+import { PostQuantumRandom } from './post-quantum-crypto';
+import { SecureMemory } from './secure-memory';
 
 const STORAGE_KEY = 'screen_sharing_settings_v1';
+const DEVICE_KEY_STORAGE = 'screen_sharing_settings_device_key_v1';
+const AUDIT_CHANNEL = 'screen-sharing';
+const RATE_LIMIT_WINDOW_MS = 100;
+const MAX_REQUESTS_PER_WINDOW = 5;
+const SETTINGS_TTL_MS = 24 * 60 * 60 * 1000;
+
+interface PersistedEnvelope {
+  version: number;
+  ciphertext: string;
+  tag: string;
+  nonce: string;
+  mac: string;
+  expiresAt: number;
+}
+
+interface InternalSettings extends ScreenSharingSettings {
+  updatedAt: number;
+}
+
+const HKDF_SALT = new TextEncoder().encode('screen-sharing-settings-salt');
+const HKDF_INFO_ENC = new TextEncoder().encode('screen-sharing-settings:enc');
+const HKDF_INFO_MAC = new TextEncoder().encode('screen-sharing-settings:mac');
+const AAD_CONTEXT = new TextEncoder().encode('screen-sharing-settings:v1');
+
+function isTorMode(): boolean {
+  try {
+    return typeof window !== 'undefined' && !!(window as any).__TOR_ENABLED__;
+  } catch {
+    return false;
+  }
+}
+
+function buildDefaultResolution(): ScreenSharingResolution {
+  const viable = SCREEN_SHARING_RESOLUTIONS.filter(r => !r.isNative);
+  const pool = viable.length > 0 ? viable : SCREEN_SHARING_RESOLUTIONS;
+  const idx = PostQuantumRandom.randomBytes(2).reduce((acc, byte) => (acc + byte) % pool.length, 0);
+  return pool[idx];
+}
+
+function deepValidateSettings(settings: any): settings is InternalSettings {
+  if (!settings || typeof settings !== 'object') {
+    return false;
+  }
+  if (typeof settings.updatedAt !== 'number' || !Number.isFinite(settings.updatedAt)) {
+    return false;
+  }
+  const { resolution, frameRate, quality } = settings;
+  if (!resolution || typeof resolution !== 'object') {
+    return false;
+  }
+  const { id, name, width, height, isNative } = resolution;
+  if (typeof id !== 'string' || typeof name !== 'string') {
+    return false;
+  }
+  if (!Number.isInteger(width) || !Number.isInteger(height) || width < 0 || height < 0) {
+    return false;
+  }
+  if (typeof isNative !== 'boolean' && typeof isNative !== 'undefined') {
+    return false;
+  }
+  if (typeof frameRate !== 'number' || !SCREEN_SHARING_FRAMERATES.includes(frameRate as typeof SCREEN_SHARING_FRAMERATES[number])) {
+    return false;
+  }
+  if (!['low', 'medium', 'high'].includes(quality)) {
+    return false;
+  }
+  return true;
+}
 
 export class ScreenSharingSettingsManager {
   private static instance: ScreenSharingSettingsManager | null = null;
-  private settings: ScreenSharingSettings | null = null;
+  private settings: InternalSettings | null = null;
   private listeners: Set<(settings: ScreenSharingSettings) => void> = new Set();
+  private readonly rateBucket = new Map<string, { count: number; resetAt: number }>();
+  private readonly isTransient = isTorMode();
+  private deviceKey: Uint8Array | null = null;
 
-  private constructor() {
-    // Don't load settings immediately to avoid circular dependency
-    // Settings will be loaded lazily when first accessed
-  }
+  private constructor() {}
 
   public static getInstance(): ScreenSharingSettingsManager {
     if (!ScreenSharingSettingsManager.instance) {
@@ -29,215 +98,253 @@ export class ScreenSharingSettingsManager {
     return ScreenSharingSettingsManager.instance;
   }
 
-  /**
-   * Load settings from localStorage with validation
-   */
-  private loadSettings(): ScreenSharingSettings {
+  private async getKeyMaterial(): Promise<Uint8Array> {
+    if (this.isTransient) {
+      return PostQuantumRandom.randomBytes(32);
+    }
+    if (this.deviceKey) {
+      return this.deviceKey;
+    }
     try {
-      const stored = localStorage.getItem(STORAGE_KEY);
-      if (!stored) {
-        const defaultResolution = this.getDefaultResolution();
-        return {
-          resolution: defaultResolution,
-          frameRate: 30,
-          quality: 'medium'
-        };
+      const stored = await CryptoUtils.SecureStorage.retrieve<string>(DEVICE_KEY_STORAGE);
+      if (stored) {
+        this.deviceKey = CryptoUtils.Base64.base64ToUint8Array(stored);
+        return this.deviceKey;
       }
+    } catch (_error) {
+      SecureAuditLogger.warn(AUDIT_CHANNEL, 'screen-sharing', 'device-key-load-failed', { error: (_error as Error).message });
+    }
+    const generated = PostQuantumRandom.randomBytes(32);
+    try {
+      await CryptoUtils.SecureStorage.store(DEVICE_KEY_STORAGE, CryptoUtils.Base64.arrayBufferToBase64(generated));
+      this.deviceKey = generated;
+      return this.deviceKey;
+    } catch (_error) {
+      SecureAuditLogger.error(AUDIT_CHANNEL, 'screen-sharing', 'device-key-store-failed', { error: (_error as Error).message });
+      return generated;
+    }
+  }
 
-      const parsed = JSON.parse(stored);
-      
-      // Validate the loaded settings
-      if (!this.isValidSettings(parsed)) {
-        console.warn('[ScreenSharingSettings] Invalid stored settings, using defaults');
-        const defaultResolution = this.getDefaultResolution();
-        return {
-          resolution: defaultResolution,
-          frameRate: 30,
-          quality: 'medium'
-        };
+  private async deriveKeys(): Promise<{ encKey: Uint8Array; macKey: Uint8Array }> {
+    const material = await this.getKeyMaterial();
+    const encKey = await CryptoUtils.KDF.blake3Hkdf(material, HKDF_SALT, HKDF_INFO_ENC, 32);
+    const macKey = await CryptoUtils.KDF.blake3Hkdf(material, HKDF_SALT, HKDF_INFO_MAC, 32);
+    return { encKey, macKey };
+  }
+
+  private async encryptSettings(settings: InternalSettings): Promise<PersistedEnvelope> {
+    const { encKey, macKey } = await this.deriveKeys();
+    const plaintext = new TextEncoder().encode(JSON.stringify(settings));
+    const nonce = PostQuantumRandom.randomBytes(36);
+    const { ciphertext, tag } = CryptoUtils.PostQuantumAEAD.encrypt(plaintext, encKey, AAD_CONTEXT, nonce);
+    const macInput = new Uint8Array(nonce.length + ciphertext.length + tag.length);
+    macInput.set(nonce, 0);
+    macInput.set(ciphertext, nonce.length);
+    macInput.set(tag, nonce.length + ciphertext.length);
+    const mac = await CryptoUtils.Hash.generateBlake3Mac(macInput, macKey);
+    SecureMemory.zeroBuffer(encKey);
+    SecureMemory.zeroBuffer(macKey);
+    SecureMemory.zeroBuffer(macInput);
+    return {
+      version: 1,
+      ciphertext: CryptoUtils.Base64.arrayBufferToBase64(ciphertext),
+      tag: CryptoUtils.Base64.arrayBufferToBase64(tag),
+      nonce: CryptoUtils.Base64.arrayBufferToBase64(nonce),
+      mac: CryptoUtils.Base64.arrayBufferToBase64(mac),
+      expiresAt: Date.now() + SETTINGS_TTL_MS
+    };
+  }
+
+  private async decryptSettings(envelope: PersistedEnvelope): Promise<InternalSettings | null> {
+    if (!envelope || envelope.version !== 1) {
+      return null;
+    }
+    if (typeof envelope.expiresAt !== 'number' || envelope.expiresAt < Date.now()) {
+      return null;
+    }
+    try {
+      const { encKey, macKey } = await this.deriveKeys();
+      const ciphertext = CryptoUtils.Base64.base64ToUint8Array(envelope.ciphertext);
+      const tag = CryptoUtils.Base64.base64ToUint8Array(envelope.tag);
+      const nonce = CryptoUtils.Base64.base64ToUint8Array(envelope.nonce);
+      const storedMac = CryptoUtils.Base64.base64ToUint8Array(envelope.mac);
+      const macInput = new Uint8Array(nonce.length + ciphertext.length + tag.length);
+      macInput.set(nonce, 0);
+      macInput.set(ciphertext, nonce.length);
+      macInput.set(tag, nonce.length + ciphertext.length);
+      const computedMac = await CryptoUtils.Hash.generateBlake3Mac(macInput, macKey);
+      const macValid = SecureMemory.constantTimeCompare(computedMac, storedMac);
+      SecureMemory.zeroBuffer(computedMac);
+      SecureMemory.zeroBuffer(macInput);
+      if (!macValid) {
+        SecureMemory.zeroBuffer(encKey);
+        SecureMemory.zeroBuffer(macKey);
+        return null;
       }
-
-      // Ensure resolution exists in current presets
-      const resolution = SCREEN_SHARING_RESOLUTIONS.find(r => r.id === parsed.resolution?.id);
-      if (!resolution) {
-        console.warn('[ScreenSharingSettings] Stored resolution not found, using default');
-        const defaultResolution = this.getDefaultResolution();
-        return {
-          resolution: defaultResolution,
-          frameRate: 30,
-          quality: 'medium'
-        };
+      const decrypted = CryptoUtils.PostQuantumAEAD.decrypt(ciphertext, nonce, tag, encKey, AAD_CONTEXT);
+      SecureMemory.zeroBuffer(encKey);
+      SecureMemory.zeroBuffer(macKey);
+      const parsed = JSON.parse(new TextDecoder().decode(decrypted));
+      if (!deepValidateSettings(parsed)) {
+        return null;
       }
+      return parsed;
+    } catch (_error) {
+      SecureAuditLogger.error(AUDIT_CHANNEL, 'screen-sharing', 'decrypt-failed', { error: (_error as Error).message });
+      return null;
+    }
+  }
 
+  private async loadSettings(): Promise<InternalSettings> {
+    if (this.isTransient) {
       return {
-        resolution,
-        frameRate: parsed.frameRate,
-        quality: parsed.quality
-      };
-    } catch (error) {
-      console.error('[ScreenSharingSettings] Failed to load settings:', error);
-      const defaultResolution = this.getDefaultResolution();
-      return {
-        resolution: defaultResolution,
+        resolution: buildDefaultResolution(),
         frameRate: 30,
-        quality: 'medium'
+        quality: 'medium',
+        updatedAt: Date.now()
       };
     }
-  }
-
-  /**
-   * Return the default resolution preset (prefer 1080p, else first preset)
-   */
-  private getDefaultResolution(): ScreenSharingResolution {
-    return SCREEN_SHARING_RESOLUTIONS.find(r => r.id === '1080p') || SCREEN_SHARING_RESOLUTIONS[0];
-  }
-
-  /**
-   * Validate settings object structure
-   */
-  private isValidSettings(settings: any): boolean {
-    if (!settings || typeof settings !== 'object') return false;
-    
-    if (!settings.resolution || typeof settings.resolution !== 'object') return false;
-    if (typeof settings.resolution.id !== 'string') return false;
-    
-    if (typeof settings.frameRate !== 'number') return false;
-    if (!SCREEN_SHARING_FRAMERATES.includes(settings.frameRate as typeof SCREEN_SHARING_FRAMERATES[number])) return false;
-    
-    if (!['low', 'medium', 'high'].includes(settings.quality)) return false;
-    
-    return true;
-  }
-
-  /**
-   * Save settings to localStorage
-   */
-  private saveSettings(): void {
-    if (this.settings === null) return;
     try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(this.settings));
-    } catch (error) {
-      console.error('[ScreenSharingSettings] Failed to save settings:', error);
-    }
-  }
-
-  /**
-   * Ensure settings are loaded (lazy loading to avoid circular dependency)
-   */
-  private ensureSettingsLoaded(): void {
-    if (this.settings === null) {
-      this.settings = this.loadSettings();
-    }
-  }
-
-  /**
-   * Get current settings
-   */
-  public getSettings(): ScreenSharingSettings {
-    this.ensureSettingsLoaded();
-    return { ...this.settings! };
-  }
-
-  /**
-   * Update resolution setting
-   */
-  public setResolution(resolution: ScreenSharingResolution): void {
-    this.ensureSettingsLoaded();
-
-    // Validate resolution against known presets
-    const validResolution = SCREEN_SHARING_RESOLUTIONS.find(r =>
-      r.id === resolution.id || r.name === resolution.name
-    );
-
-    if (!validResolution) {
-      throw new Error(`Invalid resolution: ${resolution.id || resolution.name}. Must be one of: ${SCREEN_SHARING_RESOLUTIONS.map(r => r.id).join(', ')}.`);
-    }
-
-    console.log('[ScreenSharingSettings] Resolution changed to:', validResolution.name);
-    this.settings!.resolution = validResolution; // Use canonical preset
-    this.saveSettings();
-    this.notifyListeners();
-  }
-
-  /**
-   * Update framerate setting
-   */
-  public setFrameRate(frameRate: number): void {
-    if (!SCREEN_SHARING_FRAMERATES.includes(frameRate as typeof SCREEN_SHARING_FRAMERATES[number])) {
-      throw new Error(`Invalid framerate: ${frameRate}. Must be one of: ${SCREEN_SHARING_FRAMERATES.join(', ')}.`);
-    }
-    this.ensureSettingsLoaded();
-    console.log('[ScreenSharingSettings] Frame rate changed to:', frameRate, 'FPS');
-    this.settings!.frameRate = frameRate;
-    this.saveSettings();
-    this.notifyListeners();
-  }
-
-  /**
-   * Update quality setting
-   */
-  public setQuality(quality: 'low' | 'medium' | 'high'): void {
-    this.ensureSettingsLoaded();
-    console.log('[ScreenSharingSettings] Quality changed to:', quality);
-    this.settings!.quality = quality;
-    this.saveSettings();
-    this.notifyListeners();
-  }
-
-  /**
-   * Update all settings at once
-   */
-  public updateSettings(newSettings: Partial<ScreenSharingSettings>): void {
-    this.ensureSettingsLoaded();
-
-    if (newSettings.resolution) {
-      // Validate resolution against known presets
-      const validResolution = SCREEN_SHARING_RESOLUTIONS.find(r =>
-        r.id === newSettings.resolution!.id || r.name === newSettings.resolution!.name
-      );
-
-      if (!validResolution) {
-        throw new Error(`Invalid resolution: ${newSettings.resolution.id || newSettings.resolution.name}. Must be one of: ${SCREEN_SHARING_RESOLUTIONS.map(r => r.id).join(', ')}.`);
+      const stored = await CryptoUtils.SecureStorage.retrieve<string>(STORAGE_KEY);
+      if (!stored) {
+        return {
+          resolution: buildDefaultResolution(),
+          frameRate: 30,
+          quality: 'medium',
+          updatedAt: Date.now()
+        };
       }
-
-      this.settings!.resolution = validResolution; // Use canonical preset
+      const envelope = JSON.parse(stored) as PersistedEnvelope;
+      const decrypted = await this.decryptSettings(envelope);
+      if (decrypted) {
+        return decrypted;
+      }
+    } catch (_error) {
+      // If settings cannot be loaded, fall back to safe defaults.
     }
+    return {
+      resolution: buildDefaultResolution(),
+      frameRate: 30,
+      quality: 'medium',
+      updatedAt: Date.now()
+    };
+  }
 
+  private async saveSettings(): Promise<void> {
+    if (this.settings === null || this.isTransient) {
+      return;
+    }
+    try {
+      const envelope = await this.encryptSettings(this.settings);
+      await CryptoUtils.SecureStorage.store(STORAGE_KEY, JSON.stringify(envelope));
+    } catch (_error) {
+      SecureAuditLogger.error(AUDIT_CHANNEL, 'screen-sharing', 'save-failed', { error: (_error as Error).message });
+    }
+  }
+
+  private async ensureSettingsLoaded(): Promise<void> {
+    if (this.settings === null) {
+      this.settings = await this.loadSettings();
+    }
+  }
+
+  private enforceRateLimit(method: string): void {
+    const now = Date.now();
+    const bucket = this.rateBucket.get(method) ?? { count: 0, resetAt: now + RATE_LIMIT_WINDOW_MS };
+    if (now > bucket.resetAt) {
+      bucket.count = 0;
+      bucket.resetAt = now + RATE_LIMIT_WINDOW_MS;
+    }
+    bucket.count += 1;
+    if (bucket.count > MAX_REQUESTS_PER_WINDOW) {
+      SecureAuditLogger.warn(AUDIT_CHANNEL, 'screen-sharing', 'rate-limited', { method });
+      throw new Error('Screen sharing settings rate limit exceeded');
+    }
+    this.rateBucket.set(method, bucket);
+  }
+
+  public async getSettings(): Promise<ScreenSharingSettings> {
+    await this.ensureSettingsLoaded();
+    const { resolution, frameRate, quality } = this.settings!;
+    return { resolution, frameRate, quality };
+  }
+
+  public async setResolution(resolution: ScreenSharingResolution): Promise<void> {
+    this.enforceRateLimit('setResolution');
+    await this.ensureSettingsLoaded();
+    const validResolution = SCREEN_SHARING_RESOLUTIONS.find(r => r.id === resolution.id);
+    if (!validResolution) {
+      throw new Error('Invalid resolution preset');
+    }
+    this.settings!.resolution = validResolution;
+    this.settings!.updatedAt = Date.now();
+    await this.saveSettings();
+    this.notifyListeners();
+  }
+
+  public async setFrameRate(frameRate: number): Promise<void> {
+    this.enforceRateLimit('setFrameRate');
+    if (!SCREEN_SHARING_FRAMERATES.includes(frameRate as typeof SCREEN_SHARING_FRAMERATES[number])) {
+      throw new Error('Invalid frame rate preset');
+    }
+    await this.ensureSettingsLoaded();
+    this.settings!.frameRate = frameRate;
+    this.settings!.updatedAt = Date.now();
+    await this.saveSettings();
+    this.notifyListeners();
+  }
+
+  public async setQuality(quality: 'low' | 'medium' | 'high'): Promise<void> {
+    this.enforceRateLimit('setQuality');
+    if (!['low', 'medium', 'high'].includes(quality)) {
+      throw new Error('Invalid quality preset');
+    }
+    await this.ensureSettingsLoaded();
+    this.settings!.quality = quality;
+    this.settings!.updatedAt = Date.now();
+    await this.saveSettings();
+    this.notifyListeners();
+  }
+
+  public async updateSettings(newSettings: Partial<ScreenSharingSettings>): Promise<void> {
+    this.enforceRateLimit('updateSettings');
+    await this.ensureSettingsLoaded();
+    if (newSettings.resolution) {
+      const validResolution = SCREEN_SHARING_RESOLUTIONS.find(r => r.id === newSettings.resolution!.id);
+      if (!validResolution) {
+        throw new Error('Invalid resolution preset');
+      }
+      this.settings!.resolution = validResolution;
+    }
     if (newSettings.frameRate !== undefined) {
       if (!SCREEN_SHARING_FRAMERATES.includes(newSettings.frameRate as typeof SCREEN_SHARING_FRAMERATES[number])) {
-        throw new Error(`Invalid framerate: ${newSettings.frameRate}. Must be one of: ${SCREEN_SHARING_FRAMERATES.join(', ')}.`);
+        throw new Error('Invalid frame rate preset');
       }
       this.settings!.frameRate = newSettings.frameRate;
     }
-
     if (newSettings.quality) {
       if (!['low', 'medium', 'high'].includes(newSettings.quality)) {
-        throw new Error(`Invalid quality: ${newSettings.quality}. Must be one of: low, medium, high.`);
+        throw new Error('Invalid quality preset');
       }
       this.settings!.quality = newSettings.quality;
     }
-
-    this.saveSettings();
+    this.settings!.updatedAt = Date.now();
+    await this.saveSettings();
     this.notifyListeners();
   }
 
-  /**
-   * Reset to default settings
-   */
-  public resetToDefaults(): void {
-    const defaultResolution = this.getDefaultResolution();
+  public async resetToDefaults(): Promise<void> {
+    this.enforceRateLimit('resetToDefaults');
     this.settings = {
-      resolution: defaultResolution,
+      resolution: buildDefaultResolution(),
       frameRate: 30,
-      quality: 'medium'
+      quality: 'medium',
+      updatedAt: Date.now()
     };
-    this.saveSettings();
+    await this.saveSettings();
     this.notifyListeners();
   }
 
-  /**
-   * Subscribe to settings changes
-   */
   public subscribe(listener: (settings: ScreenSharingSettings) => void): () => void {
     this.listeners.add(listener);
     return () => {
@@ -245,74 +352,36 @@ export class ScreenSharingSettingsManager {
     };
   }
 
-  /**
-   * Notify all listeners of settings changes
-   */
   private notifyListeners(): void {
+    const snapshot = this.settings ? { resolution: this.settings.resolution, frameRate: this.settings.frameRate, quality: this.settings.quality } : undefined;
     this.listeners.forEach(listener => {
       try {
-        listener(this.getSettings());
+        if (snapshot) {
+          listener(snapshot);
+        }
       } catch (error) {
-        console.error('[ScreenSharingSettings] Error in settings listener:', error);
+        SecureAuditLogger.error(AUDIT_CHANNEL, 'screen-sharing', 'listener-error', { error: (error as Error).message });
       }
     });
   }
 
-  /**
-   * Get video constraints based on current settings (browser-compatible)
-   */
-  public getVideoConstraints(): MediaTrackConstraints {
-    this.ensureSettingsLoaded();
-    const { resolution, frameRate, quality } = this.settings!;
-
-    // Base constraints with frame rate (no min constraints for browser compatibility)
+  public async getVideoConstraints(): Promise<MediaTrackConstraints> {
+    await this.ensureSettingsLoaded();
+    const { resolution, frameRate } = this.settings!;
     const constraints: MediaTrackConstraints = {
       frameRate: { ideal: frameRate, max: frameRate }
     };
-
-    // Apply resolution constraints (no min constraints for browser compatibility)
-    if (resolution.isNative) {
-      // For native resolution, do not constrain width/height at all — let the browser capture full monitor resolution
-      // Leaving width/height undefined enables true native capture (e.g., 1440p/4K on capable displays)
-    } else {
+    if (!resolution.isNative) {
       constraints.width = { ideal: resolution.width, max: resolution.width };
       constraints.height = { ideal: resolution.height, max: resolution.height };
     }
-
-    // Don't apply quality settings as they may include unsupported constraints
-    console.log('[ScreenSharingSettings] Generated browser-compatible video constraints:', constraints);
     return constraints;
   }
 
-  /**
-   * Get quality-specific constraints
-   */
-  private getQualityConstraints(quality: 'low' | 'medium' | 'high'): Partial<MediaTrackConstraints> {
-    // Remove advanced constraints as they are not supported by browser getDisplayMedia API
-    // Instead, use basic constraints that are widely supported
-    switch (quality) {
-      case 'low':
-        return {}; // Let basic constraints handle quality
-      case 'medium':
-        return {}; // Let basic constraints handle quality
-      case 'high':
-        return {}; // Let basic constraints handle quality
-      default:
-        return {};
-    }
-  }
-
-  /**
-   * Get Electron-specific video constraints
-   */
-  public getElectronVideoConstraints(): any {
-    this.ensureSettingsLoaded();
-    const { resolution, frameRate, quality } = this.settings!;
-
-    console.log('[ScreenSharingSettings] Generating Electron constraints for:', { resolution: resolution.name, frameRate, quality });
-
+  public async getElectronVideoConstraints(): Promise<any> {
+    await this.ensureSettingsLoaded();
+    const { resolution, frameRate } = this.settings!;
     if (resolution.isNative) {
-      // For native resolution, use flexible constraints
       return {
         mandatory: {
           chromeMediaSource: 'desktop',
@@ -324,21 +393,29 @@ export class ScreenSharingSettingsManager {
           maxFrameRate: frameRate
         }
       };
-    } else {
-      return {
-        mandatory: {
-          chromeMediaSource: 'desktop',
-          minWidth: resolution.width,
-          maxWidth: resolution.width,
-          minHeight: resolution.height,
-          maxHeight: resolution.height,
-          minFrameRate: Math.max(1, frameRate - 2),
-          maxFrameRate: frameRate
-        }
-      };
+    }
+    return {
+      mandatory: {
+        chromeMediaSource: 'desktop',
+        minWidth: resolution.width,
+        maxWidth: resolution.width,
+        minHeight: resolution.height,
+        maxHeight: resolution.height,
+        minFrameRate: Math.max(1, frameRate - 2),
+        maxFrameRate: frameRate
+      }
+    };
+  }
+
+  public dispose(): void {
+    this.listeners.clear();
+    this.settings = null;
+    this.rateBucket.clear();
+    if (this.deviceKey) {
+      SecureMemory.zeroBuffer(this.deviceKey);
+      this.deviceKey = null;
     }
   }
 }
 
-// Export singleton instance
 export const screenSharingSettings = ScreenSharingSettingsManager.getInstance();

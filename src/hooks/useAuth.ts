@@ -1,59 +1,131 @@
 import { useState, useRef, useCallback, useEffect, MutableRefObject } from "react";
-import { SignalType } from "../lib/signals";
+import { SignalType } from "../lib/signal-types";
+import { retrieveAuthTokens, clearTokenEncryptionKey } from "../lib/signals";
 import websocketClient from "../lib/websocket";
 import { CryptoUtils } from "../lib/unified-crypto";
 import { SecureDB } from "../lib/secureDB";
 import { SecureKeyManager } from "../lib/secure-key-manager";
-import { pseudonymizeUsername, pseudonymizeUsernameWithCache } from "../lib/username-hash";
-// Legacy pinned server removed; use simple in-memory pinning here
+import { ensureVaultKeyCryptoKey, saveWrappedMasterKey } from "../lib/vault-key";
+import { encryptedStorage, syncEncryptedStorage } from "../lib/encrypted-storage";
+import { pseudonymizeUsername } from "../lib/username-hash";
+import { PostQuantumSignature, PostQuantumUtils } from "../lib/post-quantum-crypto";
+
+const secureWipeStringRef = (ref: MutableRefObject<string>) => {
+  try {
+    const len = ref.current?.length || 0;
+    if (len > 0) {
+      for (let pass = 0; pass < 2; pass++) {
+        const filler = Array(len)
+          .fill(0)
+          .map(() => String.fromCharCode(32 + Math.floor(Math.random() * 95)))
+          .join("");
+        ref.current = filler;
+      }
+    }
+    ref.current = "";
+  } catch {}
+};
+
+const safeDecodeB64 = (b64?: string): Uint8Array | null => {
+  try {
+    if (!b64 || typeof b64 !== 'string' || b64.length > 10000) return null;
+    return CryptoUtils.Base64.base64ToUint8Array(b64);
+  } catch { return null; }
+};
+
+const validateServerKeys = (val: any): boolean => {
+  if (!val || typeof val !== 'object') return false;
+  if (!val.x25519PublicBase64 || !val.kyberPublicBase64 || !val.dilithiumPublicBase64) return false;
+  if (typeof val.x25519PublicBase64 !== 'string' ||
+      typeof val.kyberPublicBase64 !== 'string' ||
+      typeof val.dilithiumPublicBase64 !== 'string') return false;
+  const expB64Len = (n: number) => 4 * Math.ceil(n / 3);
+  if (val.x25519PublicBase64.length > expB64Len(32) + 8) return false;
+  if (val.kyberPublicBase64.length > expB64Len(1568) + 8) return false;
+  if (val.dilithiumPublicBase64.length > expB64Len(2592) + 8) return false;
+  
+  const x = safeDecodeB64(val.x25519PublicBase64);
+  const k = safeDecodeB64(val.kyberPublicBase64);
+  const d = safeDecodeB64(val.dilithiumPublicBase64);
+  if (!x || !k || !d) return false;
+  if (x.length !== 32 || k.length !== 1568 || d.length !== 2592) return false;
+  return true;
+};
+
 const PinnedServer = {
   get() {
     try {
-      const stored = localStorage.getItem('securechat_server_pin_v1');
-      if (!stored || stored.length > 10000) return null; // SECURITY: Prevent DoS via large JSON
+      const storedStr = syncEncryptedStorage.getItem('securechat_server_pin_v2');
+      if (!storedStr || storedStr.length > 4096) return null;
       
-      const parsed = JSON.parse(stored);
-      // SECURITY: Validate parsed object structure
-      if (!parsed || typeof parsed !== 'object') return null;
-      if (!parsed.x25519PublicBase64 || !parsed.kyberPublicBase64) return null;
-      if (typeof parsed.x25519PublicBase64 !== 'string' || typeof parsed.kyberPublicBase64 !== 'string') return null;
-      
+      const parsed = JSON.parse(storedStr);
+      if (!validateServerKeys(parsed)) return null;
       return parsed;
     } catch { return null; }
   },
   set(val: any) {
     try { 
-      // SECURITY: Validate input before storing
-      if (!val || typeof val !== 'object') return;
-      if (!val.x25519PublicBase64 || !val.kyberPublicBase64) return;
-      if (typeof val.x25519PublicBase64 !== 'string' || typeof val.kyberPublicBase64 !== 'string') return;
-      
-      localStorage.setItem('securechat_server_pin_v1', JSON.stringify(val)); 
+      if (!validateServerKeys(val)) return;
+      syncEncryptedStorage.setItem('securechat_server_pin_v2', JSON.stringify(val));
     } catch {}
   }
 };
 
-export const useAuth = (secureDB?: SecureDB) => {
+const deriveCombinedSecretInput = (username: string, password: string, passphrase: string): string => {
+  const u = (username || "").trim();
+  const p = password || "";
+  const pp = passphrase || "";
+
+  if (!u || !p || !pp) {
+    throw new Error('[Auth] Missing username, password, or passphrase for key derivation');
+  }
+
+  return `${u}\u0000${p}\u0000${pp}`;
+};
+
+export const useAuth = (_secureDB?: SecureDB) => {
   const [username, setUsername] = useState("");
   const [isLoggedIn, setIsLoggedIn] = useState(false);
   const [isGeneratingKeys, setIsGeneratingKeys] = useState(false);
   const [authStatus, setAuthStatus] = useState<string>("");
   const [loginError, setLoginError] = useState("");
+  const [isSubmittingAuth, setIsSubmittingAuth] = useState(false);
   const [accountAuthenticated, setAccountAuthenticated] = useState(false);
   const [isRegistrationMode, setIsRegistrationMode] = useState(false);
+  const [tokenValidationInProgress, setTokenValidationInProgress] = useState(false);
   const passphraseRef = useRef<string>("");
   const passphrasePlaintextRef = useRef<string>("");
   const aesKeyRef = useRef<CryptoKey | null>(null);
+  const getKeysPromiseRef = useRef<Promise<any> | null>(null);
+  const passphraseLimiterRef = useRef<{ tokens: number; last: number }>({ tokens: 5, last: Date.now() });
 
   const [serverHybridPublic, setServerHybridPublic] = useState<{
     x25519PublicBase64: string;
-    kyberPublicBase64: string
+    kyberPublicBase64: string;
+    dilithiumPublicBase64: string;
+  } | null>(null);
+  const serverHybridPublicRef = useRef<{
+    x25519PublicBase64: string;
+    kyberPublicBase64: string;
+    dilithiumPublicBase64: string;
   } | null>(null);
 
-  //trust prompt for server key changes
+  useEffect(() => {
+    serverHybridPublicRef.current = serverHybridPublic;
+  }, [serverHybridPublic]);
+
+  // Ensure the login button always re-enables on any AUTH_ERROR signal
+  useEffect(() => {
+    const onAuthError = () => setIsSubmittingAuth(false);
+    try { window.addEventListener('auth-error', onAuthError as any); } catch {}
+    return () => {
+      try { window.removeEventListener('auth-error', onAuthError as any); } catch {}
+    };
+  }, []);
+
   const [serverTrustRequest, setServerTrustRequest] = useState<{
-    newKeys: { x25519PublicBase64: string; kyberPublicBase64: string };
-    pinned: { x25519PublicBase64: string; kyberPublicBase64: string } | null;
+    newKeys: { x25519PublicBase64: string; kyberPublicBase64: string; dilithiumPublicBase64: string };
+    pinned: { x25519PublicBase64: string; kyberPublicBase64: string; dilithiumPublicBase64: string } | null;
   } | null>(null);
 
   const acceptServerTrust = useCallback(() => {
@@ -71,225 +143,277 @@ export const useAuth = (secureDB?: SecureDB) => {
   }, []);
 
   const hybridKeysRef = useRef<{
-    x25519: { private: any; publicKeyBase64: string };
+    x25519: { private: Uint8Array; publicKeyBase64: string };
     kyber: { publicKeyBase64: string; secretKey: Uint8Array };
-    dilithium?: { publicKeyBase64: string; secretKey: Uint8Array };
+    dilithium: { publicKeyBase64: string; secretKey: Uint8Array };
   } | null>(null);
 
   const keyManagerRef = useRef<SecureKeyManager | null>(null);
   const keyManagerOwnerRef = useRef<string>("");
   const loginUsernameRef = useRef("");
-  // Keep original username only on client; never send to server
   const originalUsernameRef = useRef<string>("");
 
   const getKeysOnDemand = useCallback(async () => {
-    console.log('[AUTH] Getting keys on demand');
     if (!keyManagerRef.current) {
-      console.error("[AUTH] Key manager not initialized");
-      return null;
-    }
-
-    if (!passphrasePlaintextRef.current) {
-      console.error("[AUTH] Passphrase not available");
       return null;
     }
 
     try {
-      // Check if we already have keys in memory first
       if (hybridKeysRef.current) {
-        console.debug('[AUTH] Using cached keys from memory');
         return hybridKeysRef.current;
       }
 
-      // Try to get keys without re-initializing first
-      let keys = await keyManagerRef.current.getKeys().catch(() => null);
+      if (getKeysPromiseRef.current) {
+        const cached = await getKeysPromiseRef.current.catch(() => null);
+        if (cached) return cached;
+      }
 
-      if (!keys) {
-        console.log('[AUTH] Keys not available, initializing key manager');
-        const metadata = await keyManagerRef.current.getKeyMetadata();
-        if (metadata) {
-          await keyManagerRef.current.initialize(passphrasePlaintextRef.current, metadata.salt);
-        } else {
-          await keyManagerRef.current.initialize(passphrasePlaintextRef.current);
+      const fetching = (async () => {
+        try {
+          let keys = await keyManagerRef.current!.getKeys().catch(() => null);
+
+          if (!keys) {
+            try {
+              const effectivePassphrase = deriveEffectivePassphrase();
+              const metadata = await keyManagerRef.current!.getKeyMetadata();
+              if (metadata) {
+                await keyManagerRef.current!.initialize(effectivePassphrase, metadata.salt);
+              } else {
+                await keyManagerRef.current!.initialize(effectivePassphrase);
+              }
+              keys = await keyManagerRef.current!.getKeys();
+            } catch {
+              return null;
+            }
+          }
+
+          if (!keys || !keys.kyber || !keys.dilithium) {
+            return null;
+          }
+
+          hybridKeysRef.current = keys;
+          return keys;
+        } finally {
+          getKeysPromiseRef.current = null;
         }
-        keys = await keyManagerRef.current.getKeys();
-      }
+      })();
 
-      console.log('[AUTH] Keys retrieved successfully');
-
-      if (!keys) {
-        console.error('[AUTH] Keys are null after retrieval');
-        return null;
-      }
-
-      // Validate key structure
-      if (!keys.x25519 || !keys.kyber) {
-        console.error('[AUTH] Invalid key structure:', { hasX25519: !!keys.x25519, hasKyber: !!keys.kyber });
-        return null;
-      }
-
-      console.debug('[AUTH] Keys validation passed', {
-        x25519PublicLen: keys.x25519.publicKeyBase64?.length,
-        kyberPublicLen: keys.kyber.publicKeyBase64?.length,
-        x25519PrivateLen: keys.x25519.private?.byteLength,
-        kyberSecretLen: keys.kyber.secretKey?.byteLength,
-        hasDilithium: !!keys.dilithium,
-        dilithiumPublicLen: keys.dilithium?.publicKeyBase64?.length,
-        dilithiumSecretLen: keys.dilithium?.secretKey?.byteLength
-      });
-
-      // Cache the keys for future use
-      hybridKeysRef.current = keys;
-
+      getKeysPromiseRef.current = fetching;
+      const keys = await fetching;
       return keys;
-    } catch (error) {
-      console.error("[AUTH] Error loading keys on demand:", error);
+    } catch {
       return null;
     }
   }, []);
+
+  const waitForServerKeys = useCallback(
+    async (timeoutMs: number = 15000) => {
+      const start = Date.now();
+
+      let current = serverHybridPublicRef.current;
+      if (current && validateServerKeys(current)) {
+        return current;
+      }
+
+      setAuthStatus((prev) => prev || 'Fetching server keys...');
+
+      while (Date.now() - start < timeoutMs) {
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        current = serverHybridPublicRef.current;
+        if (current && validateServerKeys(current)) {
+          return current;
+        }
+      }
+
+      throw new Error('Failed to retrieve server keys from server');
+    },
+    [setAuthStatus],
+  );
 
   const passwordRef = useRef<string>("");
   const confirmPasswordRef = useRef<string>("");
   const passphraseConfirmRef = useRef<string>("");
   const lastPasswordParamsForRef = useRef<string>("");
-  const [passphraseHashParams, setPassphraseHashParams] = useState(null);
-  const [passwordHashParams, setPasswordHashParams] = useState<any>(null);
+  
+  type HashParams = { salt: string; memoryCost: number; timeCost: number; parallelism: number; version?: number; } | null;
+  const [passphraseHashParams, setPassphraseHashParams] = useState<HashParams>(null);
+  const [passwordHashParams, setPasswordHashParams] = useState<HashParams>(null);
   const [showPassphrasePrompt, setShowPassphrasePrompt] = useState(false);
   const [showPasswordPrompt, setShowPasswordPrompt] = useState(false);
   const [maxStepReached, setMaxStepReached] = useState<'login' | 'passphrase' | 'server'>('login');
+  const [recoveryActive, setRecoveryActive] = useState(false);
 
-  const initializeKeys = useCallback(async () => {
-    console.log('[AUTH] Starting key initialization process');
+  const deriveEffectivePassphrase = (): string => {
+    const passphrase = passphrasePlaintextRef.current;
+    const currentUsername = originalUsernameRef.current || loginUsernameRef.current;
+    let pwd = passwordRef.current;
+
+    if (!passphrase) {
+      throw new Error("Passphrase not available");
+    }
+    if (!currentUsername) {
+      throw new Error("Username not available");
+    }
+
+    if (!pwd && confirmPasswordRef.current) {
+      pwd = confirmPasswordRef.current;
+    }
+    if (!pwd) {
+      throw new Error("Password not available");
+    }
+
+    return deriveCombinedSecretInput(currentUsername, pwd, passphrase);
+  };
+
+  const initializeKeys = useCallback(async (isRecoveryMode = false, providedSalt?: string, providedArgon2Params?: any) => {
     setIsGeneratingKeys(true);
-    setAuthStatus("Initializing secure key manager...");
+    setAuthStatus("Initializing...");
     try {
-      const passphrase = passphrasePlaintextRef.current;
-      if (!passphrase) {
-        console.error("[AUTH] Passphrase not available for key generation");
-        throw new Error("Passphrase not available for key generation");
-      }
+      const effectivePassphrase = deriveEffectivePassphrase();
 
       const currentUsername = loginUsernameRef.current;
       if (!currentUsername) {
-        console.error("[AUTH] Username not available for key generation");
-        throw new Error("Username not available for key generation");
+        throw new Error("Username not available");
       }
 
-      console.log(`[AUTH] Initializing key manager for user: ${currentUsername}`);
-      // Ensure manager is for the current user; if not, clear previous user DB and re-instantiate
       if (!keyManagerRef.current || keyManagerOwnerRef.current !== currentUsername) {
         try {
           if (keyManagerRef.current) {
             keyManagerRef.current.clearKeys();
             await keyManagerRef.current.deleteDatabase();
           }
-        } catch (e) {
-          console.warn('[AUTH] Failed to clear previous user key database:', (e as any)?.message || e);
+        } catch {}
+        
+        try {
+          keyManagerRef.current = new SecureKeyManager(currentUsername);
+          keyManagerOwnerRef.current = currentUsername;
+          hybridKeysRef.current = null;
+        } catch (_e) {
+          throw new Error('Key manager init failed: ' + ((_e as any)?.message || _e));
         }
-        keyManagerRef.current = new SecureKeyManager(currentUsername);
-        keyManagerOwnerRef.current = currentUsername;
-        hybridKeysRef.current = null; // reset cached keys
       }
 
-      const hasExistingKeys = await keyManagerRef.current.hasKeys();
+      let hasExistingKeys = await keyManagerRef.current.hasKeys();
 
       if (hasExistingKeys) {
-        console.log('[AUTH] Loading existing keys');
-        setAuthStatus("Loading existing encryption keys...");
-        await keyManagerRef.current.initialize(passphrase);
-        const existingKeys = await keyManagerRef.current.getKeys();
-        if (existingKeys) {
-          console.log('[AUTH] Existing keys loaded successfully');
-          setAuthStatus("Verifying key integrity...");
-          try {
-            console.debug('[AUTH] Existing keys summary', {
-              x25519PublicBase64: existingKeys.x25519.publicKeyBase64?.slice(0, 28) + '...',
-              kyberPublicBase64: existingKeys.kyber.publicKeyBase64?.slice(0, 28) + '...',
-              x25519PrivateLen: existingKeys.x25519.private?.length,
-              kyberSecretLen: existingKeys.kyber.secretKey?.length,
-              hasDilithium: !!existingKeys.dilithium,
-              dilithiumPublicBase64: existingKeys.dilithium?.publicKeyBase64?.slice(0, 28) + '...',
-              dilithiumSecretLen: existingKeys.dilithium?.secretKey?.length,
-            });
-          } catch { }
-          hybridKeysRef.current = existingKeys;
-        }
-      } else {
-        console.log('[AUTH] Generating new hybrid key pair');
-        setAuthStatus("Generating post-quantum encryption keys...");
-        const seed = await CryptoUtils.Hash.hashData(passphrase + currentUsername);
-        setAuthStatus("Creating hybrid cryptographic key pair...");
-        const hybridKeyPair = await CryptoUtils.Hybrid.generateHybridKeyPairFromSeed(seed);
+        setAuthStatus("Loading keys...");
+        
+        let meta: { salt?: string; argon2Params?: any } | null = null;
+        try {
+          meta = await keyManagerRef.current.getKeyMetadata();
+          if (meta?.salt) {
+            await keyManagerRef.current.initialize(effectivePassphrase, meta.salt);
+          } else {
+            await keyManagerRef.current.initialize(effectivePassphrase);
+          }
+          const existingKeys = await keyManagerRef.current.getKeys();
+          
+          if (existingKeys) {
+            setAuthStatus("Verifying...");
+            hybridKeysRef.current = existingKeys;
+            try {
+              const pub = existingKeys.kyber.publicKeyBase64;
+              const secB64 = CryptoUtils.Base64.arrayBufferToBase64(existingKeys.kyber.secretKey);
+              if (typeof (window as any).edgeApi?.setStaticMlkemKeys === 'function' && pub && secB64) {
+                await (window as any).edgeApi.setStaticMlkemKeys({ username: currentUsername, publicKeyBase64: pub, secretKeyBase64: secB64 });
+              }
+            } catch {}
+            
+            const masterKey = keyManagerRef.current.getMasterKey();
+            if (masterKey) {
+              aesKeyRef.current = masterKey;
+              try {
+                const vaultKey = await ensureVaultKeyCryptoKey(currentUsername);
+                const raw = new Uint8Array(await CryptoUtils.Keys.exportAESKey(masterKey));
+                await saveWrappedMasterKey(currentUsername, raw, vaultKey);
+                raw.fill(0);
+              } catch {}
+            }
 
-        setAuthStatus("Securing keys with passphrase...");
-        await keyManagerRef.current.initialize(passphrase);
-        setAuthStatus("Storing encrypted keys securely...");
+            const encodedHash = await keyManagerRef.current.getEncodedPassphraseHash(effectivePassphrase);
+            if (encodedHash) {
+              passphraseRef.current = encodedHash;
+            }
+          }
+        } catch (_error) {
+          const isDecryptionFailure = _error instanceof Error && (
+            _error.message.includes('Decryption failed') ||
+            _error.message.includes('Invalid authentication tag') ||
+            _error.message.includes('X25519 key decryption failed') ||
+            _error.message.includes('Key data corruption')
+          );
+          
+          if (isDecryptionFailure) {
+            setLoginError('Incorrect passphrase. Please try again.');
+            setShowPassphrasePrompt(true);
+            throw new Error('Key decryption failed');
+          } else {
+            try {
+              await websocketClient.sendMessage({ type: 'client-error', error: _error instanceof Error ? _error.message : 'Unknown error' });
+            } catch {}
+            throw _error;
+          }
+        }
+      }
+      
+      if (!hasExistingKeys) {
+        if (isRecoveryMode || recoveryActive) {
+          setLoginError('Recovery failed: stored keys not found.');
+          throw new Error('Recovery mode: no existing keys');
+        }
+        setAuthStatus("Generating keys...");
+        const hybridKeyPair = await CryptoUtils.Hybrid.generateHybridKeyPair();
+
+        setAuthStatus("Securing...");
+        if (providedSalt && providedArgon2Params) {
+          await keyManagerRef.current.initialize(effectivePassphrase, providedSalt, providedArgon2Params);
+        } else {
+          await keyManagerRef.current.initialize(effectivePassphrase);
+        }
+        setAuthStatus("Storing...");
         await keyManagerRef.current.storeKeys(hybridKeyPair);
 
-        console.log('[AUTH] New keys generated and stored successfully');
-        try {
-          console.debug('[AUTH] New keys summary', {
-            x25519PublicBase64: hybridKeyPair.x25519.publicKeyBase64?.slice(0, 28) + '...',
-            kyberPublicBase64: hybridKeyPair.kyber.publicKeyBase64?.slice(0, 28) + '...',
-            x25519PrivateLen: hybridKeyPair.x25519.private?.length,
-            kyberSecretLen: hybridKeyPair.kyber.secretKey?.length,
-            hasDilithium: !!hybridKeyPair.dilithium,
-            dilithiumPublicBase64: hybridKeyPair.dilithium?.publicKeyBase64?.slice(0, 28) + '...',
-            dilithiumSecretLen: hybridKeyPair.dilithium?.secretKey?.length,
-          });
-        } catch { }
+        const masterKey = keyManagerRef.current.getMasterKey();
+        if (masterKey) {
+          aesKeyRef.current = masterKey;
+          try {
+            const vaultKey = await ensureVaultKeyCryptoKey(currentUsername);
+            const raw = new Uint8Array(await CryptoUtils.Keys.exportAESKey(masterKey));
+            await saveWrappedMasterKey(currentUsername, raw, vaultKey);
+            raw.fill(0);
+          } catch {}
+        }
+
+        const encodedHash = await keyManagerRef.current.getEncodedPassphraseHash(effectivePassphrase);
+        if (encodedHash) {
+          passphraseRef.current = encodedHash;
+        }
+
         hybridKeysRef.current = hybridKeyPair;
+        try {
+          const pub = hybridKeyPair.kyber.publicKeyBase64;
+          const secB64 = CryptoUtils.Base64.arrayBufferToBase64(hybridKeyPair.kyber.secretKey);
+          if (typeof (window as any).edgeApi?.setStaticMlkemKeys === 'function' && pub && secB64) {
+            await (window as any).edgeApi.setStaticMlkemKeys({ username: currentUsername, publicKeyBase64: pub, secretKeyBase64: secB64 });
+          }
+        } catch {}
       }
-    } catch (error) {
-      console.error("[AUTH] Error generating keys: ", error);
-      setLoginError("Key generation failed");
+    } catch (_error) {
+      const errorMessage = _error instanceof Error ? _error.message : String(_error);
+      console.error('[Auth] Key initialization failed:', errorMessage, _error);
+      setLoginError(`Key generation failed: ${errorMessage}`);
     } finally {
       setIsGeneratingKeys(false);
       setAuthStatus("");
     }
   }, []);
 
-  // Best-effort clear of previous user's SecureDB stores by pseudonym
   const clearSecureDBForUser = async (pseudonym: string) => {
     try {
-      const sanitized = (pseudonym || 'unknown').replace(/[^a-zA-Z0-9_-]/g, '_');
-      const stableName = `securechat_${sanitized}_db`;
-      const deleteDb = (name: string) => new Promise<void>((resolve) => {
-        try {
-          const req = indexedDB.deleteDatabase(name);
-          req.onsuccess = () => resolve();
-          req.onerror = () => resolve();
-        } catch { resolve(); }
-      });
-      await deleteDb(stableName);
-      const anyIndexed: any = indexedDB as any;
-      if (anyIndexed && typeof anyIndexed.databases === 'function') {
-        const dbs = await anyIndexed.databases();
-        const prefix = `securechat_${sanitized}_`;
-        for (const d of (dbs || [])) {
-          const name = (d && (d as any).name) || '';
-          if (name && name.startsWith(prefix) && name !== stableName) {
-            await deleteDb(name);
-          }
-        }
-      }
-      // Also clear user-specific localStorage keys
-      try {
-        const userSpecificKeys = [
-          `securechat_sessions_${pseudonym}`,
-          `securechat_pins_${pseudonym}`,
-          `sentReadReceipts_${pseudonym}`,
-          `keystore_${pseudonym}`,
-          `identity_${pseudonym}`,
-          `prekeys_${pseudonym}`,
-          `signedprekey_${pseudonym}`,
-          `registrationid_${pseudonym}`
-        ];
-        userSpecificKeys.forEach(k => { try { localStorage.removeItem(k); } catch {} });
-      } catch {}
-      console.log('[AUTH] Cleared SecureDB and local storage for previous user:', pseudonym);
-    } catch (e) {
-      console.warn('[AUTH] Failed to clear previous user SecureDB:', (e as any)?.message || e);
+      const { SQLiteKV } = await import('../lib/sqlite-kv');
+      await (SQLiteKV as any).purgeUserDb(pseudonym);
+    } catch {
+      // ignore
     }
   };
 
@@ -299,26 +423,35 @@ export const useAuth = (secureDB?: SecureDB) => {
     password: string,
     passphrase?: string
   ) => {
-    console.log(`[AUTH] Starting ${mode} process for user (client-only original): ${userInput}`);
+    if (isSubmittingAuth) {
+      return;
+    }
+    setIsSubmittingAuth(true);
     setLoginError("");
     setIsRegistrationMode(mode === "register");
-    setAuthStatus(mode === "register" ? "Creating new account..." : "Authenticating account...");
+    setAuthStatus(mode === "register" ? "Creating account..." : "Authenticating...");
 
-    // Store original username locally only; never send to server
-    originalUsernameRef.current = userInput;
+    const trimmedUsername = userInput.trim();
+    if (!trimmedUsername || trimmedUsername.length > 120 || /[^a-zA-Z0-9._-]/.test(trimmedUsername)) {
+      setLoginError('Invalid username format');
+      setIsSubmittingAuth(false);
+      return;
+    }
+    if (password.length > 1024) {
+      setLoginError('Password too long');
+      setIsSubmittingAuth(false);
+      return;
+    }
 
-    // Compute pseudonym for all server-facing operations
-    // Use non-cached version during login since SecureDB isn't initialized yet
-    console.log(`[AUTH] Computing pseudonym for username: "${userInput}"`);
-    const pseudonym = await pseudonymizeUsername(userInput);
-    console.log(`[AUTH] Generated pseudonym: "${pseudonym}" (length: ${pseudonym.length})`);
+    originalUsernameRef.current = trimmedUsername;
+    const pseudonym = await pseudonymizeUsername(trimmedUsername);
 
-    // If changing users mid-flow, clear previous user's SecureDB and key DB
+    setIsSubmittingAuth(true);
+
     const prevUser = loginUsernameRef.current;
     if (prevUser && prevUser !== pseudonym) {
       await clearSecureDBForUser(prevUser);
       try {
-        // Clear key DB too (in case initializeKeys is not triggered yet)
         if (keyManagerRef.current) {
           keyManagerRef.current.clearKeys();
           await keyManagerRef.current.deleteDatabase();
@@ -329,64 +462,94 @@ export const useAuth = (secureDB?: SecureDB) => {
       } catch {}
     }
 
-    // Use pseudonym as canonical identity
     loginUsernameRef.current = pseudonym;
     setUsername(pseudonym);
     passwordRef.current = password;
     passphraseRef.current = passphrase || "";
 
-    try {
-      if (!serverHybridPublic) {
-        console.error("[AUTH] Server public keys not available");
-        throw new Error("Server public keys not available");
-      }
+    storeAuthenticationState(pseudonym);
 
+    try {
       if (!websocketClient.isConnectedToServer()) {
-        console.log('[AUTH] Connecting to WebSocket server');
-        setAuthStatus("Connecting to secure server...");
+        setAuthStatus("Connecting...");
         await websocketClient.connect();
       }
 
+      const serverKeys = await waitForServerKeys();
+
       if (passphrase) {
-        console.log('[AUTH] Passphrase provided, initializing keys');
         passphrasePlaintextRef.current = passphrase;
-        await initializeKeys();
+        await initializeKeys(false);
+      }
+
+      let localKeys = await getKeysOnDemand();
+      if (!localKeys?.dilithium?.secretKey || !localKeys.dilithium.publicKeyBase64) {
+        setAuthStatus("Generating keys...");
+        const ephemeralDilithium = await PostQuantumSignature.generateKeyPair();
+        localKeys = {
+          dilithium: {
+            secretKey: ephemeralDilithium.secretKey,
+            publicKeyBase64: PostQuantumUtils.uint8ArrayToBase64(ephemeralDilithium.publicKey)
+          },
+          kyber: { secretKey: new Uint8Array(0), publicKeyBase64: "" },
+          x25519: { private: new Uint8Array(0), publicKeyBase64: "" }
+        };
       }
 
       const userPayload = {
-        // Only send pseudonym to server
         usernameSent: pseudonym,
         hybridPublicKeys: {
           x25519PublicBase64: "",
-          kyberPublicBase64: ""
+          kyberPublicBase64: "",
+          dilithiumPublicBase64: ""
         }
       };
 
-      console.log(`[AUTH] Client userPayload before encryption:`, JSON.stringify(userPayload, null, 2));
+      setAuthStatus("Encrypting...");
 
-      setAuthStatus("Encrypting user data with hybrid cryptography...");
-      const encryptedPayload = await CryptoUtils.Hybrid.encryptHybridPayload(
-        userPayload,
-        serverHybridPublic
+      const withTimeout = <T,>(p: Promise<T>, ms: number, label: string) => new Promise<T>((resolve, reject) => {
+        const t = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
+        p.then((v) => { clearTimeout(t); resolve(v as T); }).catch((e) => { clearTimeout(t); reject(e); });
+      });
+      const encryptedPayload = await withTimeout(
+        CryptoUtils.Hybrid.encryptForServer(
+          userPayload,
+          serverKeys,
+          {
+            senderDilithiumSecretKey: localKeys.dilithium.secretKey,
+            metadata: {
+              context: 'account-meta',
+              sender: { dilithiumPublicKey: localKeys.dilithium.publicKeyBase64 }
+            }
+          }
+        ),
+        15000,
+        'encrypt user payload'
       );
 
-      // For new registrations, hash password client-side with Argon2
-      // For existing users, request Argon2 parameters without sending plaintext password
       let passwordToSend: string;
       if (mode === "register") {
-        setAuthStatus("Hashing password with Argon2...");
-        console.log('[AUTH] Hashing password client-side using Argon2 for new registration');
+        setAuthStatus("Hashing...");
         passwordToSend = await CryptoUtils.Hash.hashData(password);
-        console.log(`[AUTH] Password hashed client-side for registration, hash length: ${passwordToSend.length}`);
       } else {
-        console.log('[AUTH] Requesting password hash parameters (no plaintext password sent)');
         passwordToSend = 'REQUEST_PASSWORD_PARAMS';
       }
       
-      setAuthStatus("Encrypting password with post-quantum security...");
-      const encryptedPassword = await CryptoUtils.Hybrid.encryptHybridPayload(
-        { content: passwordToSend },
-        serverHybridPublic
+      setAuthStatus("Securing...");
+      const encryptedPassword = await withTimeout(
+        CryptoUtils.Hybrid.encryptForServer(
+          { content: passwordToSend },
+          serverKeys,
+          {
+            senderDilithiumSecretKey: localKeys.dilithium.secretKey,
+            metadata: {
+              context: 'account-password',
+              sender: { dilithiumPublicKey: localKeys.dilithium.publicKeyBase64 }
+            }
+          }
+        ),
+        15000,
+        'encrypt password payload'
       );
 
       const payload = {
@@ -395,146 +558,330 @@ export const useAuth = (secureDB?: SecureDB) => {
         passwordData: encryptedPassword
       };
 
-      console.log(`[AUTH] Sending ${mode} request to server`);
-      setAuthStatus(`Sending secure ${mode} request to server...`);
+      setAuthStatus("Sending...");
       websocketClient.send(JSON.stringify(payload));
-    } catch (error) {
-      console.error(`[AUTH] ${mode} submission failed:`, error);
+    } catch (_error) {
       setAuthStatus('');
-      setLoginError('Submission error: Authentication request failed');
+      setLoginError(_error instanceof Error ? _error.message : 'Authentication request failed');
+      setIsSubmittingAuth(false);
+    } finally {
+      setIsGeneratingKeys(false);
     }
   };
 
   const handleServerPasswordSubmit = async (password: string) => {
-    console.log('[AUTH] Submitting server password');
     setLoginError("");
-    setAuthStatus("Verifying server access credentials...");
-    if (!serverHybridPublic) {
-      setLoginError("Server keys not available");
-      return;
-    }
+    setAuthStatus("Verifying...");
 
     try {
       if (!websocketClient.isConnectedToServer()) {
         try {
           await websocketClient.connect();
-        } catch (error) {
+        } catch {
           setAuthStatus("");
-          setLoginError('Failed to connect to server: Connection error');
+          setLoginError('Failed to connect');
           return;
         }
       }
 
-      setAuthStatus("Encrypting server password with hybrid cryptography...");
-      const encryptedPassword = await CryptoUtils.Hybrid.encryptHybridPayload(
+      const serverKeys = await waitForServerKeys();
+
+      setAuthStatus("Encrypting...");
+      const localKeys = await getKeysOnDemand();
+      if (!localKeys?.dilithium?.secretKey || !localKeys.dilithium.publicKeyBase64) {
+        throw new Error('Keys required');
+      }
+
+      const encryptedPassword = await CryptoUtils.Hybrid.encryptForServer(
         { content: password },
-        serverHybridPublic
+        serverKeys,
+        {
+          senderDilithiumSecretKey: localKeys.dilithium.secretKey,
+          metadata: {
+            context: 'server-password',
+            sender: { dilithiumPublicKey: localKeys.dilithium.publicKeyBase64 }
+          }
+        }
       );
-      // SECURITY: Log only non-sensitive metadata
-      try {
-        console.debug('[AUTH] Password payload encrypted (hybrid-v1)', {
-          hasEphemeralX25519Public: !!(encryptedPassword as any).ephemeralX25519Public,
-          kyberCiphertextLen: ((encryptedPassword as any).kyberCiphertext || '').length,
-          encryptedMessageLen: ((encryptedPassword as any).encryptedMessage || '').length,
-          // SECURITY: No actual key material or content logged
-        });
-      } catch { }
 
       const loginInfo = {
         type: SignalType.SERVER_LOGIN,
         passwordData: encryptedPassword
       };
 
-      console.log('[AUTH] Sending server password to server');
-      setAuthStatus("Authenticating with server...");
+      setAuthStatus("Authenticating...");
       websocketClient.send(JSON.stringify(loginInfo));
-      // Do not overwrite loginUsernameRef with any original string here
-    } catch (error) {
-      console.error("Login failed: ", error);
-      setLoginError("Password encryption failed");
+    } catch (_error) {
+      setAuthStatus('');
+      setLoginError(_error instanceof Error ? _error.message : "Encryption failed");
     }
   };
 
   const handlePassphraseSubmit = async (passphrase: string, mode: "login" | "register") => {
-    console.log(`[AUTH] Submitting passphrase for ${mode} mode`);
     passphrasePlaintextRef.current = passphrase;
-    setAuthStatus("Processing secure passphrase...");
+    setAuthStatus("Processing...");
 
     try {
-      await initializeKeys();
+      const limiter = passphraseLimiterRef.current;
+      const now = Date.now();
+      const elapsed = now - limiter.last;
+      limiter.last = now;
+      const refill = Math.floor(elapsed / 2000);
+      limiter.tokens = Math.min(5, limiter.tokens + refill);
+      if (limiter.tokens <= 0) {
+        const wait = 2000 - (elapsed % 2000);
+        await new Promise((resolve) => setTimeout(resolve, wait));
+        limiter.tokens = Math.min(5, limiter.tokens + 1);
+        limiter.last = Date.now();
+      }
+      limiter.tokens -= 1;
 
-      // Check if this is a recovery mode (already authenticated but need passphrase for functionality)
+      const isInRecoveryMode = recoveryActive || (isLoggedIn && accountAuthenticated && !passphraseHashParams);
+      if (mode === "login" && passphraseHashParams) {
+        await initializeKeys(isInRecoveryMode, passphraseHashParams.salt, passphraseHashParams);
+      } else {
+        await initializeKeys(isInRecoveryMode);
+      }
+
       const isRecoveryMode = isLoggedIn && accountAuthenticated && !passphraseHashParams;
       
       if (isRecoveryMode) {
-        console.log('[AUTH] Passphrase provided for recovery mode - enabling full functionality');
         setShowPassphrasePrompt(false);
-        setAuthStatus("Passphrase verified - full functionality enabled!");
-        
-        // Clear status after a brief delay
+        setRecoveryActive(false);
+        setAuthStatus("Verified");
         setTimeout(() => setAuthStatus(""), 2000);
         return;
       }
 
       let passphraseHash: string;
+      const combinedSecret = deriveEffectivePassphrase();
 
       if (mode === "login") {
         if (!passphraseHashParams) {
-          setAuthStatus("Retrieving secure hash parameters...");
-          throw new Error("Missing passphrase parameters");
+          setAuthStatus("Retrieving parameters...");
+          throw new Error("Missing parameters");
         }
 
-        setAuthStatus("Computing secure passphrase hash with Argon2...");
+        setAuthStatus("Hashing...");
         passphraseHash = await CryptoUtils.Hash.hashDataUsingInfo(
-          passphrase,
+          combinedSecret,
           passphraseHashParams
         );
       } else {
-        setAuthStatus("Generating secure passphrase hash...");
-        passphraseHash = await CryptoUtils.Hash.hashData(passphrase);
+        setAuthStatus("Generating hash...");
+        passphraseHash = await CryptoUtils.Hash.hashData(combinedSecret);
       }
 
       passphraseRef.current = passphraseHash;
 
-      console.log(`[AUTH] Sending passphrase hash to server`);
-      setAuthStatus("Sending secure hash to server...");
-      websocketClient.send(JSON.stringify({
-        type: mode === "register"
-          ? SignalType.PASSPHRASE_HASH_NEW
-          : SignalType.PASSPHRASE_HASH,
+      setAuthStatus("Sending...");
+      const messageToSend = {
+        type: SignalType.PASSPHRASE_HASH,
         passphraseHash
-      }));
+      };
+      
+      websocketClient.send(JSON.stringify(messageToSend));
 
-      // publish official libsignal bundle via edge IPC and publish to server; keep legacy hybrid pub for DB
       if (keyManagerRef.current) {
+        const waitForServerResponse = (timeoutMs = 20000) => new Promise<{ success: boolean; error?: string }>((resolve) => {
+          let timeout: any;
+          const onStatus = (ev: Event) => {
+            try {
+              const detail: any = (ev as CustomEvent).detail || {};
+              if (typeof detail?.success === 'boolean') {
+                cleanup();
+                resolve({ success: detail.success, error: detail.error });
+              }
+            } catch {}
+          };
+          const onDisconnect = () => {
+            cleanup();
+            resolve({ success: false, error: 'Server disconnected due to missing or invalid bundle' });
+          };
+          const cleanup = () => {
+            clearTimeout(timeout);
+            window.removeEventListener('libsignal-publish-status', onStatus as EventListener);
+            window.removeEventListener('beforeunload', onDisconnect);
+          };
+          window.addEventListener('libsignal-publish-status', onStatus as EventListener);
+          window.addEventListener('beforeunload', onDisconnect);
+          timeout = setTimeout(() => { 
+            cleanup(); 
+            resolve({ success: false, error: 'Server did not respond to bundle publication' });
+          }, timeoutMs);
+        });
+
         try {
-          setAuthStatus("Generating Signal Protocol identity...");
-          await (window as any).edgeApi.generateIdentity({ username: loginUsernameRef.current });
-          setAuthStatus("Creating Signal Protocol prekeys...");
-          await (window as any).edgeApi.generatePreKeys({ username: loginUsernameRef.current });
-          setAuthStatus("Publishing Signal Protocol bundle...");
+          setAuthStatus("Checking identity...");
+          let identityExists = false;
+          try {
+            const existing = await (window as any).edgeApi.getPreKeyBundle?.({ username: loginUsernameRef.current });
+            if (existing && existing.identityKeyBase64) {
+              identityExists = true;
+            }
+          } catch {
+            identityExists = false;
+          }
+
+          if (!identityExists) {
+            setAuthStatus("Generating identity...");
+            const identityResult = await (window as any).edgeApi.generateIdentity({ username: loginUsernameRef.current });
+            
+          if (!identityResult?.success) {
+              const error = identityResult?.error || 'Failed to generate identity (native module may be missing)';
+              
+              websocketClient.send(JSON.stringify({ 
+                type: 'signal-bundle-failure', 
+                error,
+                stage: 'identity-generation',
+                username: loginUsernameRef.current
+              }));
+              
+              setAuthStatus('');
+              setLoginError(`Signal initialization failed: ${error}. Server will disconnect for safety.`);
+              try {
+                setAccountAuthenticated(false);
+                setIsLoggedIn(false);
+                setShowPassphrasePrompt(false);
+                setMaxStepReached('login');
+              } catch {}
+              return;
+            }
+          }
+          
+          setAuthStatus("Generating prekeys...");
+          const prekeysResult = await (window as any).edgeApi.generatePreKeys({ 
+            username: loginUsernameRef.current,
+            startId: 1,
+            count: 100
+          });
+          
+          if (!prekeysResult?.success) {
+              const error = prekeysResult?.error || 'Failed to generate prekeys';
+              
+              websocketClient.send(JSON.stringify({ 
+                type: 'signal-bundle-failure', 
+                error,
+                stage: 'prekey-generation',
+                username: loginUsernameRef.current
+              }));
+              
+              setAuthStatus('');
+              setLoginError(`Signal initialization failed: ${error}. Server will disconnect for safety.`);
+              try {
+                setAccountAuthenticated(false);
+                setIsLoggedIn(false);
+                setShowPassphrasePrompt(false);
+                setMaxStepReached('login');
+              } catch {}
+              return;
+            }
+          
+          setAuthStatus("Publishing bundle...");
           const bundle = await (window as any).edgeApi.getPreKeyBundle({ username: loginUsernameRef.current });
-          websocketClient.send(JSON.stringify({ type: SignalType.LIBSIGNAL_PUBLISH_BUNDLE, bundle: { ...bundle } }));
-        } catch (err) {
-          console.error('[AUTH] Failed to publish libsignal bundle:', err);
+          
+          if (bundle?.success === false || bundle?.error) {
+            const error = bundle.error || 'Failed to create pre-key bundle';
+            
+            websocketClient.send(JSON.stringify({ 
+              type: 'signal-bundle-failure', 
+              error,
+              stage: 'bundle-creation',
+              username: loginUsernameRef.current
+            }));
+            
+            setAuthStatus('');
+            setLoginError(`Signal initialization failed: ${error}. Server will disconnect for safety.`);
+            try {
+              setAccountAuthenticated(false);
+              setIsLoggedIn(false);
+              setShowPassphrasePrompt(false);
+              setMaxStepReached('login');
+            } catch {}
+            return;
+          }
+          
+          if (!bundle.registrationId || !bundle.identityKeyBase64 || !bundle.signedPreKey) {
+            const error = 'Invalid bundle structure returned from Signal handler';
+            
+            websocketClient.send(JSON.stringify({ 
+              type: 'signal-bundle-failure', 
+              error,
+              stage: 'bundle-validation',
+              username: loginUsernameRef.current
+            }));
+            
+            setAuthStatus('');
+            setLoginError(`Signal initialization failed: ${error}. Server will disconnect for safety.`);
+            try {
+              setAccountAuthenticated(false);
+              setIsLoggedIn(false);
+              setShowPassphrasePrompt(false);
+              setMaxStepReached('login');
+            } catch {}
+            return;
+          }
+          
+          websocketClient.send(JSON.stringify({ type: SignalType.LIBSIGNAL_PUBLISH_BUNDLE, bundle }));
+
+          setAuthStatus("Verifying bundle...");
+          const response = await waitForServerResponse();
+          
+          if (!response.success) {
+            setAuthStatus('');
+            setLoginError(response.error || 'Server did not accept Signal bundle');
+            return;
+          }
+          
+        } catch (_err) {
+          const msg = _err instanceof Error ? _err.message : String(_err);
+          
+          try {
+            websocketClient.send(JSON.stringify({ 
+              type: 'signal-bundle-failure', 
+              error: msg,
+              stage: 'unexpected-error',
+              username: loginUsernameRef.current
+            }));
+          } catch {}
+          
+          setAuthStatus('');
+          setLoginError(`Signal initialization error: ${msg}`);
+          try {
+            setAccountAuthenticated(false);
+            setIsLoggedIn(false);
+            setShowPassphrasePrompt(false);
+            setMaxStepReached('login');
+          } catch {}
+          return;
         }
 
-        // also publish legacy hybrid public keys so server can encrypt system messages immediately
         if (keyManagerRef.current && serverHybridPublic) {
           const publicKeys = await keyManagerRef.current.getPublicKeys();
           if (publicKeys) {
-            const hybridKeysPayload = {
-              usernameSent: loginUsernameRef.current,
-              hybridPublicKeys: {
-                x25519PublicBase64: publicKeys.x25519PublicBase64,
-                kyberPublicBase64: publicKeys.kyberPublicBase64,
-                dilithiumPublicBase64: publicKeys.dilithiumPublicBase64,
-              },
+            const keysToSend = {
+              kyberPublicBase64: publicKeys.kyberPublicBase64 || '',
+              dilithiumPublicBase64: publicKeys.dilithiumPublicBase64 || '',
+              x25519PublicBase64: publicKeys.x25519PublicBase64 || ''
             };
+            
+            const hybridKeysPayload = JSON.stringify(keysToSend);
 
-            const encryptedHybridKeys = await CryptoUtils.Hybrid.encryptHybridPayload(
+            const localKeys = await getKeysOnDemand();
+            if (!localKeys?.dilithium?.secretKey || !localKeys.dilithium.publicKeyBase64) {
+              throw new Error('Dilithium keys required for hybrid key update');
+            }
+
+            const encryptedHybridKeys = await CryptoUtils.Hybrid.encryptForServer(
               hybridKeysPayload,
-              serverHybridPublic
+              serverHybridPublic,
+              {
+                senderDilithiumSecretKey: localKeys.dilithium.secretKey,
+                metadata: {
+                  context: 'hybrid-keys-update',
+                  sender: { dilithiumPublicKey: localKeys.dilithium.publicKeyBase64 }
+                }
+              }
             );
 
             websocketClient.send(JSON.stringify({
@@ -544,250 +891,215 @@ export const useAuth = (secureDB?: SecureDB) => {
           }
         }
       }
-    } catch (error) {
-      console.error("Passphrase hashing failed:", error);
-      setLoginError("Passphrase processing failed");
+    } catch (_error) {
+      if (_error instanceof Error && _error.message.includes('Key decryption failed')) {
+        return;
+      }
+      const message = _error instanceof Error ? _error.message : String(_error);
+      try {
+        console.error('[Auth] Passphrase processing failed:', message, _error);
+      } catch {}
+      setLoginError(`Passphrase processing failed: ${message}`);
     }
   };
 
 
   const handleAuthSuccess = async (username: string, isRecovered = false) => {
-    console.log(`[AUTH] Authentication success for user: ${username} (recovered: ${isRecovered})`);
-    console.log(`[AUTH] Setting authentication flags - isLoggedIn: true, accountAuthenticated: true`);
     
-    // For recovered authentication without passphrase, prompt for passphrase
     if (isRecovered && !passphrasePlaintextRef.current) {
-      console.log('[AUTH] Authentication recovered but passphrase needed for full functionality');
-      setAuthStatus("Authentication recovered - passphrase required for full functionality");
+      setAuthStatus("Passphrase required");
       setUsername(username);
       
-      // CRITICAL: Set loginUsernameRef for recovered authentication
       loginUsernameRef.current = username;
-      console.log(`[AUTH] Set loginUsernameRef.current to recovered username: ${username}`);
       
       setIsLoggedIn(true);
       setAccountAuthenticated(true);
       
-      // Store authentication state for future recovery
       storeAuthenticationState(username);
       
-      // Prompt for passphrase to enable full functionality
+      setRecoveryActive(true);
       setShowPassphrasePrompt(true);
-      setIsRegistrationMode(false); // This is a login scenario
+      setIsRegistrationMode(false);
       setLoginError("");
       return;
     }
     
-    setAuthStatus(isRecovered ? "Authentication recovered successfully!" : "Authentication successful! Logging in...");
+    setAuthStatus("Authenticated");
     setUsername(username);
-    console.log(`[AUTH] About to call setIsLoggedIn(true) - current value: ${isLoggedIn}`);
     setIsLoggedIn(true);
     setAccountAuthenticated(true);
-    console.log(`[AUTH] Called setIsLoggedIn(true) and setAccountAuthenticated(true)`);
     
-    // Store authentication state for future recovery
     storeAuthenticationState(username);
+
+    try { await new Promise(resolve => setTimeout(resolve, 0)); } catch {}
     
-    // Clear status after a brief delay
     setTimeout(() => setAuthStatus(""), 1000);
     setLoginError("");
 
+    try {
+      if ((window as any).edgeApi?.setSignalStorageKey) {
+        const label = new TextEncoder().encode('signal-storage-key-v1');
+        let derived: Uint8Array | null = null;
+        try {
+          const keys = await getKeysOnDemand?.();
+          const kyberSecret: Uint8Array | undefined = keys?.kyber?.secretKey;
+          if (kyberSecret && kyberSecret instanceof Uint8Array && kyberSecret.length > 0) {
+            derived = await (CryptoUtils as any).Hash.generateBlake3Mac(label, kyberSecret);
+          } else {
+            try {
+              const composite = deriveEffectivePassphrase();
+              const salt = new TextEncoder().encode('signal-storage-key-v1');
+              derived = await (CryptoUtils as any).KDF.argon2id(composite, {
+                salt,
+                time: 3,
+                memoryCost: 1 << 17,
+                parallelism: 2,
+                hashLen: 32
+              });
+            } catch {}
+          }
+          if (derived) {
+            const keyB64 = (CryptoUtils as any).Base64.arrayBufferToBase64(derived);
+            await (window as any).edgeApi.setSignalStorageKey({ keyBase64: keyB64 });
+            if ((derived as any)?.fill) (derived as any).fill(0);
+          }
+        } catch {}
+      }
+    } catch {}
+
+    try { await new Promise(resolve => setTimeout(resolve, 0)); } catch {}
+
     if (keyManagerRef.current && passphrasePlaintextRef.current) {
-      keyManagerRef.current.initialize(passphrasePlaintextRef.current).catch(error => {
-        console.error("Failed to initialize key manager after auth success:", error);
-      });
+      try {
+        const effectivePassphrase = deriveEffectivePassphrase();
+        keyManagerRef.current.initialize(effectivePassphrase).catch(_error => {
+        });
+      } catch {}
     }
+
+    try { await new Promise(resolve => setTimeout(resolve, 0)); } catch {}
+
+    try {
+      const { retrieveOfflineMessages } = await import('../lib/offline-message-queue');
+      retrieveOfflineMessages();
+    } catch {}
   };
 
-  // Authentication recovery function
   const attemptAuthRecovery = useCallback(async () => {
-    const storedUsername = loginUsernameRef.current || localStorage.getItem('last_authenticated_username');
+    const storedUsername = loginUsernameRef.current || syncEncryptedStorage.getItem('last_authenticated_username');
     
     if (!storedUsername) {
-      console.log('[AUTH] No stored username found for auth recovery');
       return false;
     }
 
-    console.log(`[AUTH] Attempting authentication recovery for user: ${storedUsername}`);
-    setAuthStatus("Recovering authentication state...");
-    
+    setAuthStatus("Recovering...");
+
     try {
       if (!websocketClient.isConnectedToServer()) {
-        console.log('[AUTH] Connecting to WebSocket server for auth recovery');
         await websocketClient.connect();
       }
 
-      // Send auth recovery request
+      loginUsernameRef.current = storedUsername;
+      try { originalUsernameRef.current = storedUsername; } catch {}
+      setUsername(storedUsername);
+
       websocketClient.send(JSON.stringify({
         type: SignalType.AUTH_RECOVERY,
         username: storedUsername
       }));
 
       return true;
-    } catch (error) {
-      console.error('[AUTH] Auth recovery attempt failed:', error);
+    } catch (_error) {
       setAuthStatus('');
       return false;
     }
   }, []);
 
-  // Store username for recovery on successful authentication
   const storeAuthenticationState = useCallback((username: string) => {
     try {
-      localStorage.setItem('last_authenticated_username', username);
-      console.log(`[AUTH] Stored authentication state for recovery: ${username}`);
-    } catch (error) {
-      console.error('[AUTH] Failed to store authentication state:', error);
-    }
+      syncEncryptedStorage.setItem('last_authenticated_username', username);
+    } catch {}
   }, []);
 
-  // Clear stored authentication state
   const clearAuthenticationState = useCallback(() => {
     try {
-      localStorage.removeItem('last_authenticated_username');
-      console.log('[AUTH] Cleared stored authentication state');
-    } catch (error) {
-      console.error('[AUTH] Failed to clear authentication state:', error);
-    }
+      syncEncryptedStorage.removeItem('last_authenticated_username');
+    } catch {}
   }, []);
 
-  // Function to store username mapping (called from outside when SecureDB is ready)
   const storeUsernameMapping = useCallback(async (secureDBInstance: SecureDB) => {
     if (originalUsernameRef.current && loginUsernameRef.current) {
       try {
-        console.log(`[AUTH] Storing username mapping: ${loginUsernameRef.current} -> ${originalUsernameRef.current}`);
         await secureDBInstance.storeUsernameMapping(loginUsernameRef.current, originalUsernameRef.current);
-        console.log(`[AUTH] Username mapping stored successfully`);
-      } catch (error) {
-        console.error('[AUTH] Failed to store username mapping:', error);
-      }
+        try {
+          window.dispatchEvent(new CustomEvent('username-mapping-updated', { detail: { username: loginUsernameRef.current } }));
+        } catch {}
+      } catch {}
     }
   }, []);
 
-  const handlePassphraseSuccess = () => {
-    console.log(`[AUTH] Passphrase success - registration mode: ${isRegistrationMode}`);
-    // Both registration and login should continue to server password prompt
-    // The server password is a security feature required for both flows
-  };
-
   const logout = async (secureDBRef?: MutableRefObject<SecureDB | null>, loginErrorMessage: string = "") => {
-    console.log('[AUTH] Logging out user');
-
-    // Clear stored authentication state for recovery
-    clearAuthenticationState();
-
-    // SECURITY: Clear sensitive data from memory first
     try {
-      // Clear sensitive references immediately
-      passwordRef.current = "";
-      passphraseRef.current = "";
-      passphrasePlaintextRef.current = "";
+      const user = loginUsernameRef.current || '';
+      if (user && websocketClient.isConnectedToServer()) {
+        try {
+          if (websocketClient.isPQSessionEstablished?.()) {
+            await websocketClient.sendSecureControlMessage({ type: SignalType.USER_DISCONNECT, username: user, timestamp: Date.now() });
+            try { await new Promise(res => setTimeout(res, 25)); } catch {}
+          }
+        } catch {}
+      }
+      try { websocketClient.close(); } catch {}
+      try { setTimeout(() => { try { void websocketClient.connect(); } catch {} }, 0); } catch {}
+    } catch {}
+
+    clearAuthenticationState();
+    clearTokenEncryptionKey();
+
+    try {
+      secureWipeStringRef(passwordRef as any);
+      secureWipeStringRef(passphraseRef as any);
+      secureWipeStringRef(passphrasePlaintextRef as any);
       aesKeyRef.current = null;
       hybridKeysRef.current = null;
 
-      // SECURITY: Force garbage collection of sensitive data if available
       if (typeof window !== 'undefined' && (window as any).gc) {
         (window as any).gc();
       }
-    } catch (error) {
-      console.error('[AUTH] Failed to clear sensitive data from memory:', error);
-    }
+    } catch {}
 
-    // Clear SecureDB database
     if (secureDBRef?.current) {
       try {
-        console.log('[AUTH] Clearing SecureDB database');
         await secureDBRef.current.clearDatabase();
-        console.log('[AUTH] SecureDB database cleared successfully');
-      } catch (error) {
-        console.error('[AUTH] Failed to clear SecureDB database:', error);
-      }
+      } catch {}
       secureDBRef.current = null;
     }
 
-    // SECURITY: Enhanced session data cleanup
-    try { 
-      if (typeof window !== 'undefined' && window.localStorage) {
-        const keysToRemove: string[] = [];
-        const currentUser = loginUsernameRef.current || '';
-        
-        // SECURITY: Safely iterate through localStorage
-        for (let i = 0; i < window.localStorage.length; i++) {
-          const key = window.localStorage.key(i);
-          if (key && currentUser && (
-            key.includes('session') && key.includes(currentUser) ||
-            key.includes('securechat') && key.includes(currentUser) ||
-            key.includes('keystore') && key.includes(currentUser) ||
-            key.includes('identity') && key.includes(currentUser)
-          )) {
-            keysToRemove.push(key);
-          }
-        }
-        
-        // SECURITY: Remove keys in a separate loop to avoid iteration issues
-        keysToRemove.forEach(key => {
-          try {
-            window.localStorage.removeItem(key);
-          } catch (error) {
-            console.error(`[AUTH] Failed to remove localStorage key ${key}:`, error);
-          }
-        });
-        
-        console.log(`[AUTH] Cleared ${keysToRemove.length} localStorage keys`);
-      }
-    } catch (error) {
-      console.error('[AUTH] Failed to clear session data:', error);
-    }
 
-    // Clear localStorage data for the current user
-    if (loginUsernameRef.current) {
-      try {
-        console.log('[AUTH] Clearing localStorage data for user');
-        const userSpecificKeys = [
-          `securechat_sessions_${loginUsernameRef.current}`,
-          `securechat_pins_${loginUsernameRef.current}`,
-          `sentReadReceipts_${loginUsernameRef.current}`,
-          `keystore_${loginUsernameRef.current}`,
-          `identity_${loginUsernameRef.current}`,
-          `prekeys_${loginUsernameRef.current}`,
-          `signedprekey_${loginUsernameRef.current}`,
-          `registrationid_${loginUsernameRef.current}`
-        ];
-        
-        userSpecificKeys.forEach(key => {
-          try {
-            localStorage.removeItem(key);
-          } catch (error) {
-            console.error(`[AUTH] Failed to remove key ${key}:`, error);
-          }
-        });
-        
-        console.log('[AUTH] localStorage data cleared successfully');
-      } catch (error) {
-        console.error('[AUTH] Failed to clear localStorage data:', error);
-      }
-    }
-
-    // Clear server pinned keys (global)
     try {
-      localStorage.removeItem('securechat_server_pin_v1');
-    } catch (error) {
-      console.error('[AUTH] Failed to clear server pin:', error);
-    }
+      const pseudonym = loginUsernameRef.current || '';
+      if (pseudonym && (window as any).electronAPI?.secureStore) {
+        await (window as any).electronAPI.secureStore.init();
+        try { await (window as any).electronAPI.secureStore.remove(`aes:${pseudonym}`); } catch {}
+        try { await (window as any).electronAPI.secureStore.remove(`pph:${pseudonym}`); } catch {}
+        try { await (window as any).electronAPI.secureStore.remove(`tok:${(window as any).electronAPI?.instanceId || '1'}`); } catch {}
+      }
+      try { const { removeVaultKey } = await import('../lib/vault-key'); if (pseudonym) await removeVaultKey(pseudonym); } catch {}
+    } catch {}
 
-    // SECURITY: Clear key manager with proper cleanup
+
+    try {
+      syncEncryptedStorage.removeItem('securechat_server_pin_v2');
+    } catch {}
+
     if (keyManagerRef.current) {
       try {
         keyManagerRef.current.clearKeys();
         await keyManagerRef.current.deleteDatabase();
         keyManagerRef.current = null;
-      } catch (error) {
-        console.error("[AUTH] Failed to delete user database:", error);
-      }
+      } catch {}
     }
 
-    // SECURITY: Clear username reference last to ensure cleanup works
-    const clearedUsername = loginUsernameRef.current;
     loginUsernameRef.current = "";
 
     setIsLoggedIn(false);
@@ -796,14 +1108,12 @@ export const useAuth = (secureDB?: SecureDB) => {
     setIsRegistrationMode(false);
     setUsername("");
 
-    console.log(`[AUTH] Logout completed for user: ${clearedUsername}`);
   };
 
-  const useLogout = (Database: any) => {
+  const useLogout = (Database: { secureDBRef: MutableRefObject<SecureDB | null> }) => {
     return async () => await logout(Database.secureDBRef, "Logged out");
   };
 
-  // Step progress tracking
   useEffect(() => {
     if (showPassphrasePrompt) setMaxStepReached(prev => prev === 'server' ? 'server' : 'passphrase');
   }, [showPassphrasePrompt]);
@@ -811,44 +1121,40 @@ export const useAuth = (secureDB?: SecureDB) => {
     if (accountAuthenticated) setMaxStepReached('server');
   }, [accountAuthenticated]);
 
-  // UI back navigation handler: clear statuses and optionally step back
   useEffect(() => {
     const handleAuthUiBack = (event: CustomEvent) => {
       try {
         const to = (event as any).detail?.to as 'login' | 'passphrase' | 'server' | undefined;
         setLoginError("");
         setAuthStatus("");
-        // For back to server: clear everything. For other backs, keep creds so Forward can reuse them.
         if (to === 'login') {
           setShowPassphrasePrompt(false);
+          setRecoveryActive(false);
           setAccountAuthenticated(false);
         } else if (to === 'passphrase') {
           setShowPassphrasePrompt(true);
         } else if (to === 'server') {
           setShowPassphrasePrompt(false);
+          setRecoveryActive(false);
           setAccountAuthenticated(false);
           setIsLoggedIn(false);
           setMaxStepReached('login');
-          // Fully clear client-side auth context so the next server is a fresh start
-          passwordRef.current = "";
-          passphraseRef.current = "";
-          passphrasePlaintextRef.current = "";
+          secureWipeStringRef(passwordRef as any);
+          secureWipeStringRef(passphraseRef as any);
+          secureWipeStringRef(passphrasePlaintextRef as any);
           loginUsernameRef.current = "";
           originalUsernameRef.current = "";
           setUsername("");
-          setPassphraseHashParams(null as any);
-          setServerTrustRequest?.(null as any);
+          setPassphraseHashParams(null);
+          setServerTrustRequest?.(null);
         }
-      } catch (e) {
-        console.error('[AUTH] Failed to process UI back event:', e);
-      }
+      } catch {}
     };
 
     window.addEventListener('auth-ui-back', handleAuthUiBack as EventListener);
     return () => window.removeEventListener('auth-ui-back', handleAuthUiBack as EventListener);
   }, []);
 
-  // Wire UI input changes into persistent refs so values survive navigation
   useEffect(() => {
     const handleAuthUiInput = (event: CustomEvent) => {
       try {
@@ -861,15 +1167,12 @@ export const useAuth = (secureDB?: SecureDB) => {
           case 'passphrase': setTypedPassphrase(value); break;
           case 'passphraseConfirm': passphraseConfirmRef.current = value; break;
         }
-      } catch (e) {
-        console.error('[AUTH] Failed to process auth-ui-input:', e);
-      }
+      } catch {}
     };
     window.addEventListener('auth-ui-input', handleAuthUiInput as EventListener);
     return () => window.removeEventListener('auth-ui-input', handleAuthUiInput as EventListener);
   }, []);
 
-  // UI forward navigation: resume the next step using stored credentials if available
   useEffect(() => {
     const handleAuthUiForward = async (event: CustomEvent) => {
       try {
@@ -877,18 +1180,15 @@ export const useAuth = (secureDB?: SecureDB) => {
         setLoginError("");
         setAuthStatus("");
 
-        // Honor explicit target first
         if (to === 'passphrase') {
           setShowPassphrasePrompt(true);
           return;
         }
         if (to === 'server_password') {
-          // Just reveal server password screen when already reached; inputs are preserved in Login component
           setShowPassphrasePrompt(false);
           return;
         }
 
-        // If instructed to go to login or currently at login, try to advance without network if possible
         if (to === 'login' || (!showPassphrasePrompt && !accountAuthenticated)) {
           const orig = originalUsernameRef.current;
           const pwd = passwordRef.current;
@@ -898,45 +1198,35 @@ export const useAuth = (secureDB?: SecureDB) => {
           }
         }
 
-        // If passphrase prompt is active but no explicit 'to', keep showing it
         if (showPassphrasePrompt) {
           setShowPassphrasePrompt(true);
           return;
         }
 
-        // If moving to server password implicitly, do nothing; the form is already in view when accountAuthenticated is true
         if (accountAuthenticated) return;
-      } catch (e) {
-        console.error('[AUTH] Failed to process UI forward event:', e);
-      }
+      } catch {}
     };
 
     window.addEventListener('auth-ui-forward', handleAuthUiForward as EventListener);
     return () => window.removeEventListener('auth-ui-forward', handleAuthUiForward as EventListener);
   }, [accountAuthenticated, showPassphrasePrompt, isRegistrationMode]);
 
-
-  // Add cleanup on page unload/refresh only
   useEffect(() => {
-
     const handleBeforeUnload = () => {
-      // Only clear if user is logged in
       if (isLoggedIn && loginUsernameRef.current) {
         try {
-          // Set a flag for cleanup on next app load
-          localStorage.setItem('securechat_pending_cleanup', JSON.stringify({
-            username: loginUsernameRef.current,
-            timestamp: Date.now()
-          }));
-
-          // Clear localStorage data synchronously (async won't work in beforeunload)
-          localStorage.removeItem(`securechat_sessions_${loginUsernameRef.current}`);
-          localStorage.removeItem(`securechat_pins_${loginUsernameRef.current}`);
-          localStorage.removeItem('securechat_server_pin_v1');
-          console.log('[AUTH] Emergency cleanup on page unload completed');
-        } catch (error) {
-          console.error('[AUTH] Emergency cleanup failed:', error);
-        }
+          (async () => {
+            try {
+              const queueRaw = await encryptedStorage.getItem('cleanup_queue_pending');
+              let queue: Array<{ username: string; timestamp: number }> = [];
+              if (queueRaw && Array.isArray(queueRaw)) {
+                queue = queueRaw;
+              }
+              queue.push({ username: loginUsernameRef.current, timestamp: Date.now() });
+              await encryptedStorage.setItem('cleanup_queue_pending', queue.slice(-10));
+            } catch {}
+          })();
+        } catch {}
       }
     };
 
@@ -947,52 +1237,156 @@ export const useAuth = (secureDB?: SecureDB) => {
     };
   }, [isLoggedIn]);
 
-  // Listen for password hash parameters from server
+  useEffect(() => {
+    const handleReconnection = async () => {
+      if (isLoggedIn && loginUsernameRef.current) {
+        try {
+          await attemptAuthRecovery();
+        } catch {}
+      }
+    };
+
+    window.addEventListener('ws-reconnected', handleReconnection);
+
+    return () => {
+      window.removeEventListener('ws-reconnected', handleReconnection);
+    };
+  }, [isLoggedIn, attemptAuthRecovery]);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        if (isLoggedIn && loginUsernameRef.current && (window as any).edgeApi?.setStaticMlkemKeys) {
+          const keys = await getKeysOnDemand?.();
+          const pub = keys?.kyber?.publicKeyBase64;
+          const secB64 = keys?.kyber?.secretKey ? CryptoUtils.Base64.arrayBufferToBase64(keys.kyber.secretKey) : undefined;
+          if (typeof pub === 'string' && typeof secB64 === 'string' && pub && secB64) {
+            await (window as any).edgeApi.setStaticMlkemKeys({ username: loginUsernameRef.current, publicKeyBase64: pub, secretKeyBase64: secB64 });
+          }
+        }
+      } catch {}
+    })();
+  }, [isLoggedIn, loginUsernameRef.current]);
+
+  // Upload hybrid public keys to server after login when keys become available
+  useEffect(() => {
+    if (!isLoggedIn || !serverHybridPublic || !hybridKeysRef.current) return;
+    
+    const uploadKeys = async () => {
+      try {
+        let attempts = 0;
+        while (attempts < 20 && !websocketClient.isPQSessionEstablished?.()) {
+          await new Promise(resolve => setTimeout(resolve, 100));
+          attempts++;
+        }
+        
+        if (!websocketClient.isPQSessionEstablished?.()) {
+          return;
+        }
+        
+        const keys = hybridKeysRef.current;
+        if (!keys?.dilithium?.publicKeyBase64 || !keys?.kyber?.publicKeyBase64 || !keys?.dilithium?.secretKey) {
+          return;
+        }
+        
+        const keysToSend = {
+          kyberPublicBase64: keys.kyber.publicKeyBase64,
+          dilithiumPublicBase64: keys.dilithium.publicKeyBase64,
+          x25519PublicBase64: keys.x25519?.publicKeyBase64 || ''
+        };
+        
+        const hybridKeysPayload = JSON.stringify(keysToSend);
+        
+        const encryptedHybridKeys = await CryptoUtils.Hybrid.encryptForServer(
+          hybridKeysPayload,
+          serverHybridPublic,
+          {
+            senderDilithiumSecretKey: keys.dilithium.secretKey,
+            metadata: {
+              context: 'hybrid-keys-update',
+              sender: { dilithiumPublicKey: keys.dilithium.publicKeyBase64 }
+            }
+          }
+        );
+        
+        await websocketClient.sendSecureControlMessage({
+          type: SignalType.HYBRID_KEYS_UPDATE,
+          userData: encryptedHybridKeys,
+        });
+        
+        // Notify P2P system that keys have been updated, caches should be cleared
+        try {
+          window.dispatchEvent(new CustomEvent('hybrid-keys-updated'));
+        } catch {}
+      } catch (_err) {
+      }
+    };
+    
+    uploadKeys();
+  }, [isLoggedIn, serverHybridPublic, hybridKeysRef.current]);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const tokens = await retrieveAuthTokens();
+        if (tokens?.accessToken && tokens?.refreshToken) {
+          const storedUsername = syncEncryptedStorage.getItem('last_authenticated_username');
+          if (storedUsername) {
+            loginUsernameRef.current = storedUsername;
+            setUsername(storedUsername);
+          }
+        }
+      } catch {}
+    })();
+  }, []);
+
+  useEffect(() => {
+    const onTokenValidationStart = (_ev: Event) => {
+      try {
+        setTokenValidationInProgress(true);
+        setAuthStatus('Verifying session...');
+      } catch {}
+    };
+    window.addEventListener('token-validation-start', onTokenValidationStart as EventListener);
+    return () => window.removeEventListener('token-validation-start', onTokenValidationStart as EventListener);
+  }, []);
+
   useEffect(() => {
     const handlePasswordHashParams = (event: CustomEvent) => {
-      console.log('[AUTH] Received password hash parameters event:', event.detail);
-      
-      // Validate that required parameters are present
       const params = event.detail;
       if (!params || !params.salt || !params.memoryCost || !params.timeCost || !params.parallelism) {
-        console.error('[AUTH] Invalid password hash parameters received:', params);
         setLoginError("Server sent invalid password hash parameters");
         return;
       }
       
-      // Persist for potential fallback prompt
       setPasswordHashParams(params);
 
-      // Track which pseudonym these params correspond to
       try { lastPasswordParamsForRef.current = loginUsernameRef.current || ''; } catch {}
+      
+      if (accountAuthenticated && !showPassphrasePrompt) {
+        setShowPassphrasePrompt(true);
+      }
 
-      // If we still have the user's plaintext password in memory from the account form,
-      // hash it immediately and respond without showing a second prompt
       const existingPassword = passwordRef.current || "";
       if (existingPassword) {
         (async () => {
           try {
-            setAuthStatus("Computing secure password hash with Argon2...");
+            setAuthStatus("Computing hash...");
             const passwordHash = await CryptoUtils.Hash.hashDataUsingInfo(existingPassword, params);
-            console.log('[AUTH] Auto-submitting password hash to server');
             websocketClient.send(JSON.stringify({
               type: SignalType.PASSWORD_HASH_RESPONSE,
               passwordHash
             }));
-            // Do not show the prompt since we auto-submitted
             setShowPasswordPrompt(false);
-            setAuthStatus("Password verification in progress...");
-          } catch (error) {
-            console.error('[AUTH] Auto password hashing failed:', error);
-            // Fallback to manual prompt
+            setAuthStatus("Verifying...");
+          } catch (_error) {
             setShowPasswordPrompt(true);
-            setAuthStatus("Server requires password for secure authentication...");
+            setAuthStatus("Password required");
           }
         })();
       } else {
-        // No password cached (e.g., recovery or resumed session) — prompt the user
         setShowPasswordPrompt(true);
-        setAuthStatus("Server requires password for secure authentication...");
+        setAuthStatus("Password required");
       }
     };
 
@@ -1003,14 +1397,28 @@ export const useAuth = (secureDB?: SecureDB) => {
     };
   }, []);
 
-  // Expose setters so inputs persist across steps without submission
   const setTypedUsername = (name: string) => { originalUsernameRef.current = name; };
   const setTypedPassword = (pwd: string) => { passwordRef.current = pwd; };
   const setTypedConfirmPassword = (pwd: string) => { confirmPasswordRef.current = pwd; };
   const setTypedPassphrase = (pp: string) => { passphrasePlaintextRef.current = pp; };
 
+  useEffect(() => {
+    try {
+      const pinned = PinnedServer.get();
+      if (pinned) {
+        setServerHybridPublic(pinned);
+      } else {
+        setServerHybridPublic(null);
+      }
+    } catch {
+      setServerHybridPublic(null);
+    }
+  }, []);
+
   return {
     username,
+    tokenValidationInProgress,
+    setTokenValidationInProgress,
     serverHybridPublic,
     setServerHybridPublic,
     serverTrustRequest,
@@ -1020,7 +1428,9 @@ export const useAuth = (secureDB?: SecureDB) => {
     isLoggedIn,
     setIsLoggedIn,
     isGeneratingKeys,
+    isSubmittingAuth,
     authStatus,
+    setAuthStatus,
     loginError,
     accountAuthenticated,
     isRegistrationMode,
@@ -1032,7 +1442,6 @@ export const useAuth = (secureDB?: SecureDB) => {
     handlePassphraseSubmit,
     handleServerPasswordSubmit,
     handleAuthSuccess,
-    handlePassphraseSuccess,
     setAccountAuthenticated,
     passwordRef,
     setLoginError,
@@ -1047,13 +1456,13 @@ export const useAuth = (secureDB?: SecureDB) => {
     showPassphrasePrompt,
     setShowPasswordPrompt,
     showPasswordPrompt,
+    setMaxStepReached,
     handlePasswordHashSubmit: async (password: string) => {
       try {
         if (!passwordHashParams) throw new Error('Missing password params');
         const passwordHash = await CryptoUtils.Hash.hashDataUsingInfo(password, passwordHashParams);
         websocketClient.send(JSON.stringify({ type: SignalType.PASSWORD_HASH_RESPONSE, passwordHash }));
-      } catch (e) {
-        console.error('[AUTH] Manual password hashing failed:', e);
+      } catch (_e) {
         setLoginError('Password processing failed');
       }
     },
@@ -1065,15 +1474,13 @@ export const useAuth = (secureDB?: SecureDB) => {
     attemptAuthRecovery,
     storeAuthenticationState,
     clearAuthenticationState,
-
-    // persistent input setters and current values
+    recoveryActive,
+    setRecoveryActive,
     setTypedUsername,
     setTypedPassword,
     setTypedConfirmPassword,
     setTypedPassphrase,
     confirmPasswordRef,
-
-    // step progress
     maxStepReached,
   };
 };

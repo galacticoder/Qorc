@@ -1,9 +1,80 @@
-import React, { createContext, useContext, useState, useCallback, ReactNode, useEffect, useRef } from 'react';
+import React, { createContext, useContext, useState, useCallback, ReactNode, useEffect, useRef, useMemo } from 'react';
+import { CryptoUtils } from '@/lib/unified-crypto';
+import { SecureMemory } from '@/lib/secure-memory';
+
+type TypingAction = 'start' | 'stop';
 
 interface TypingIndicatorContextType {
-	typingUsers: string[];
-	setTypingUser: (username: string, isTyping: boolean) => void;
-	clearTypingUser: (username: string) => void;
+	readonly typingUsers: string[];
+	readonly setTypingUser: (username: string, isTyping: boolean) => void;
+	readonly clearTypingUser: (username: string) => void;
+}
+
+interface TypingIndicatorProviderProps {
+	readonly children: ReactNode;
+	readonly currentUsername?: string;
+	readonly maxTypingUsers?: number;
+	readonly typingTimeoutMs?: number;
+	readonly rateLimitPerMinute?: number;
+}
+
+interface SecureEventDetail {
+	readonly signature: string;
+	readonly timestamp: number;
+	readonly nonce: string;
+	readonly payload: {
+		readonly username: string;
+		readonly action: TypingAction;
+	};
+}
+
+const VALID_USERNAME = /^[a-z0-9@._-]{1,64}$/i;
+const EVENT_RATE_LIMIT_WINDOW_MS = 60000;
+const MAX_EVENT_QUEUE = 500;
+const DEFAULT_MAX_TYPING_USERS = 200;
+const DEFAULT_TYPING_TIMEOUT_MS = 5500;
+const DEFAULT_RATE_LIMIT_PER_MINUTE = 240;
+
+class BoundedMap<K, V> extends Map<K, V> {
+	constructor(private readonly maxSize: number) {
+		super();
+	}
+
+	override set(key: K, value: V): this {
+		if (this.size >= this.maxSize) {
+			const firstKey = this.keys().next().value;
+			if (firstKey !== undefined) {
+				super.delete(firstKey);
+			}
+		}
+		return super.set(key, value);
+	}
+}
+
+class RateLimiter {
+	private readonly permitMap = new Map<string, { count: number; resetAt: number }>();
+
+	constructor(private readonly limit: number, private readonly windowMs: number) {}
+
+	public tryConsume(key: string): boolean {
+		const now = Date.now();
+		const record = this.permitMap.get(key);
+		if (!record || record.resetAt <= now) {
+			this.permitMap.set(key, { count: 1, resetAt: now + this.windowMs });
+			return true;
+		}
+
+		if (record.count >= this.limit) {
+			return false;
+		}
+
+		record.count += 1;
+		return true;
+	}
+
+	public reset(): void {
+		this.permitMap.clear();
+	}
 }
 
 const TypingIndicatorContext = createContext<TypingIndicatorContextType | undefined>(undefined);
@@ -11,171 +82,235 @@ const TypingIndicatorContext = createContext<TypingIndicatorContextType | undefi
 export function useTypingIndicatorContext() {
 	const context = useContext(TypingIndicatorContext);
 	if (!context) {
-		throw new Error('useTypingIndicatorContext must be used within a TypingIndicatorProvider');
+		throw new Error('Context not available');
 	}
 	return context;
 }
 
-interface TypingIndicatorProviderProps {
-	children: ReactNode;
-	currentUsername?: string; // Add current username to filter out own typing indicators
+async function validateAndVerifyEvent(
+	event: CustomEvent,
+	nonceMap: Map<string, number>,
+	rateLimiter: RateLimiter
+): Promise<SecureEventDetail | null> {
+	try {
+		if (!event?.detail || typeof event.detail !== 'object') {
+			return null;
+		}
+
+		const detail = event.detail as SecureEventDetail;
+		if (!detail.signature || typeof detail.signature !== 'string' || detail.signature.length < 32) {
+			return null;
+		}
+
+		if (!Number.isSafeInteger(detail.timestamp) || Math.abs(Date.now() - detail.timestamp) > 15000) {
+			return null;
+		}
+
+		if (!detail.nonce || typeof detail.nonce !== 'string' || detail.nonce.length < 32) {
+			return null;
+		}
+
+		const nonceKey = `${detail.nonce}:${detail.timestamp}`;
+		if (nonceMap.has(nonceKey)) {
+			return null;
+		}
+
+		nonceMap.set(nonceKey, detail.timestamp);
+		if (nonceMap.size > MAX_EVENT_QUEUE) {
+			const oldestKey = nonceMap.keys().next().value;
+			if (oldestKey) {
+				nonceMap.delete(oldestKey);
+			}
+		}
+
+		if (!detail.payload || typeof detail.payload !== 'object') {
+			return null;
+		}
+
+		const { username, action } = detail.payload;
+		if (!username || typeof username !== 'string' || !VALID_USERNAME.test(username)) {
+			return null;
+		}
+
+		if (action !== 'start' && action !== 'stop') {
+			return null;
+		}
+
+		if (!rateLimiter.tryConsume(username)) {
+			return null;
+		}
+
+		const encoder = new TextEncoder();
+		const payloadBytes = encoder.encode(JSON.stringify(detail.payload));
+		const expectedMac = CryptoUtils.Base64.base64ToUint8Array(detail.signature);
+		const macKey = await CryptoUtils.Hash.generateBlake3Mac(encoder.encode(detail.nonce), encoder.encode(String(detail.timestamp)));
+		const verified = await CryptoUtils.Hash.verifyBlake3Mac(payloadBytes, macKey, expectedMac);
+		SecureMemory.zeroBuffer(payloadBytes);
+		SecureMemory.zeroBuffer(expectedMac);
+		SecureMemory.zeroBuffer(macKey);
+		if (!verified) {
+			return null;
+		}
+
+		return detail;
+	} catch {
+		return null;
+	}
 }
 
-export function TypingIndicatorProvider({ children, currentUsername }: TypingIndicatorProviderProps) {
+export function TypingIndicatorProvider({
+	children,
+	currentUsername,
+	maxTypingUsers = DEFAULT_MAX_TYPING_USERS,
+	typingTimeoutMs = DEFAULT_TYPING_TIMEOUT_MS,
+	rateLimitPerMinute = DEFAULT_RATE_LIMIT_PER_MINUTE,
+}: TypingIndicatorProviderProps) {
 	const [typingUsers, setTypingUsers] = useState<Set<string>>(new Set());
-	const typingTimeoutsRef = useRef<Map<string, NodeJS.Timeout>>(new Map());
+	const typingTimeoutsRef = useRef(new BoundedMap<string, ReturnType<typeof setTimeout>>(maxTypingUsers));
+	const nonceMap = useRef(new BoundedMap<string, number>(MAX_EVENT_QUEUE));
+	const rateLimiterRef = useRef(new RateLimiter(rateLimitPerMinute, EVENT_RATE_LIMIT_WINDOW_MS));
 
 	const setTypingUser = useCallback((username: string, isTyping: boolean) => {
+		if (!VALID_USERNAME.test(username)) {
+			return;
+		}
 		setTypingUsers(prev => {
-			const newSet = new Set(prev);
 			const hasChanged = isTyping ? !prev.has(username) : prev.has(username);
-
-			if (!hasChanged) return prev; // No change needed, prevent unnecessary re-renders
-
+			if (!hasChanged) {
+				return prev;
+			}
+			const newSet = new Set(prev);
 			if (isTyping) {
+				if (newSet.size >= maxTypingUsers) {
+					return prev;
+				}
 				newSet.add(username);
 			} else {
 				newSet.delete(username);
 			}
 			return newSet;
 		});
-	}, []);
+	}, [maxTypingUsers]);
 
 	const clearTypingUser = useCallback((username: string) => {
-		console.log('[TypingIndicator] clearTypingUser called for:', username);
-		
-		// Clear any existing timeout for this user
+		if (!VALID_USERNAME.test(username)) {
+			return;
+		}
 		const existingTimeout = typingTimeoutsRef.current.get(username);
 		if (existingTimeout) {
 			clearTimeout(existingTimeout);
 			typingTimeoutsRef.current.delete(username);
 		}
-
 		setTypingUsers(prev => {
-			const newSet = new Set(prev);
-			if (!newSet.has(username)) {
-				console.log('[TypingIndicator] User not in typing list, returning new reference:', username);
-				return newSet; // No change needed, but return new reference
+			if (!prev.has(username)) {
+				return prev;
 			}
+			const newSet = new Set(prev);
 			newSet.delete(username);
-			console.log('[TypingIndicator] Removed user from typing list:', username, 'New list:', Array.from(newSet));
 			return newSet;
 		});
 	}, []);
 
-	// Listen for typing indicator events from encrypted messages
 	useEffect(() => {
-		const handleTypingIndicator = (event: CustomEvent) => {
-			const { from, indicatorType } = event.detail;
-			console.log('[TypingIndicator] Received typing indicator event:', event.detail);
-			console.log('[TypingIndicator] Event details:', { from, indicatorType, currentUsername });
-
-			// Handle typing indicators from encrypted messages
-			if (from && indicatorType) {
-				const username = from;
-				
-				// Skip if this is from the current user
-				if (currentUsername && username === currentUsername) {
-					console.log('[TypingIndicator] Skipping typing indicator from current user:', username);
-					return;
-				}
-				
-				console.log('[TypingIndicator] Processing typing indicator:', { indicatorType, username });
-				
-				if (indicatorType === 'typing-start') {
-					// Clear any existing timeout for this user
-					const existingTimeout = typingTimeoutsRef.current.get(username);
-					if (existingTimeout) {
-						clearTimeout(existingTimeout);
-					}
-
-					// Add user to typing list
-					setTypingUsers(prev => {
-						const newSet = new Set(prev);
-						if (newSet.has(username)) {
-							console.log('[TypingIndicator] User already typing, returning new reference:', username);
-							return newSet; // Already typing, but return new reference
-						}
-						newSet.add(username);
-						console.log('[TypingIndicator] Added user to typing list:', username, 'New list:', Array.from(newSet));
-						return newSet;
-					});
-
-					// Set auto-clear timeout (fallback in case typing-stop is missed)
-					const timeout = setTimeout(() => {
-						clearTypingUser(username);
-					}, 6000); // 6 second fallback timeout - longer than MIN_TYPING_INTERVAL
-
-					typingTimeoutsRef.current.set(username, timeout);
-
-				} else if (indicatorType === 'typing-stop') {
-					console.log('[TypingIndicator] Clearing typing user:', username);
-					clearTypingUser(username);
-				}
+		const handleTypingIndicator = async (event: Event) => {
+			if (!(event instanceof CustomEvent)) {
 				return;
 			}
 
-			// Handle legacy encrypted message typing indicators (for backward compatibility)
-			const { type, username, fromUsername } = event.detail;
-			if (type === 'typing-start' && (username || fromUsername)) {
-				const actualUsername = username || fromUsername;
-				
-				// Skip if this is from the current user
-				if (currentUsername && actualUsername === currentUsername) {
-					console.log('[TypingIndicator] Skipping legacy typing indicator from current user:', actualUsername);
-					return;
-				}
-				
-				console.log('[TypingIndicator] Processing legacy typing indicator:', { type, actualUsername });
-				
-				// Clear any existing timeout for this user
-				const existingTimeout = typingTimeoutsRef.current.get(actualUsername);
+			const secureEvent = await validateAndVerifyEvent(event, nonceMap.current, rateLimiterRef.current);
+
+			if (!secureEvent) {
+				return;
+			}
+
+			const { payload } = secureEvent;
+			const username = payload.username;
+			const action = payload.action;
+
+			if (currentUsername && username === currentUsername) {
+				return;
+			}
+
+			if (action === 'start') {
+				const existingTimeout = typingTimeoutsRef.current.get(username);
 				if (existingTimeout) {
 					clearTimeout(existingTimeout);
 				}
-
-				// Add user to typing list
-				setTypingUsers(prev => {
-					const newSet = new Set(prev);
-					if (newSet.has(actualUsername)) return newSet; // Already typing, but return new reference
-					newSet.add(actualUsername);
-					return newSet;
-				});
-
-				// Set auto-clear timeout (fallback in case typing-stop is missed)
+				setTypingUser(username, true);
 				const timeout = setTimeout(() => {
-					clearTypingUser(actualUsername);
-				}, 6000); // 6 second fallback timeout - longer than MIN_TYPING_INTERVAL
-
-				typingTimeoutsRef.current.set(actualUsername, timeout);
-
-			} else if (type === 'typing-stop' && (username || fromUsername)) {
-				const actualUsername = username || fromUsername;
-				clearTypingUser(actualUsername);
+					clearTypingUser(username);
+				}, typingTimeoutMs);
+				typingTimeoutsRef.current.set(username, timeout);
+			} else {
+				clearTypingUser(username);
 			}
 		};
 
-		// Listen for typing indicator events from encrypted messages
-		window.addEventListener('typing-indicator', handleTypingIndicator as EventListener);
+		const secureChannel = new MessageChannel();
+		const listener = (event: MessageEvent) => {
+			if (event.data?.type === 'typing-indicator') {
+				const customEvent = new CustomEvent('typing-indicator', {
+					detail: event.data.detail
+				});
+				handleTypingIndicator(customEvent);
+			}
+		};
+
+		secureChannel.port1.onmessage = listener;
+
+		const windowListener = (event: CustomEvent) => {
+			secureChannel.port2.postMessage({ 
+				type: 'typing-indicator', 
+				detail: event.detail 
+			});
+		};
+
+		window.addEventListener('typing-indicator', windowListener as EventListener);
+
+		const handleP2PTypingIndicator = (event: Event) => {
+			if (!(event instanceof CustomEvent)) return;
+			const { from, content } = event.detail || {};
+			if (!from || typeof from !== 'string' || !VALID_USERNAME.test(from)) return;
+			if (currentUsername && from === currentUsername) return;
+
+			const action = content === 'typing-start' ? 'start' : content === 'typing-stop' ? 'stop' : null;
+			if (!action) return;
+
+			if (action === 'start') {
+				const existingTimeout = typingTimeoutsRef.current.get(from);
+				if (existingTimeout) {
+					clearTimeout(existingTimeout);
+				}
+				setTypingUser(from, true);
+				const timeout = setTimeout(() => {
+					clearTypingUser(from);
+				}, typingTimeoutMs);
+				typingTimeoutsRef.current.set(from, timeout);
+			} else {
+				clearTypingUser(from);
+			}
+		};
+
+		window.addEventListener('p2p-typing-indicator', handleP2PTypingIndicator as EventListener);
 
 		return () => {
-			window.removeEventListener('typing-indicator', handleTypingIndicator as EventListener);
-			// Clear all timeouts on unmount
+			window.removeEventListener('typing-indicator', windowListener as EventListener);
+			window.removeEventListener('p2p-typing-indicator', handleP2PTypingIndicator as EventListener);
+			secureChannel.port1.onmessage = null;
+			secureChannel.port1.close();
+			secureChannel.port2.close();
 			typingTimeoutsRef.current.forEach(timeout => clearTimeout(timeout));
 			typingTimeoutsRef.current.clear();
+			rateLimiterRef.current.reset();
+			nonceMap.current.clear();
 		};
-	}, [clearTypingUser]);
+	}, [clearTypingUser, currentUsername, setTypingUser, typingTimeoutMs]);
 
-	const value: TypingIndicatorContextType = {
+	const value = useMemo<TypingIndicatorContextType>(() => ({
 		typingUsers: Array.from(typingUsers),
 		setTypingUser,
 		clearTypingUser,
-	};
-
-	// Log when typingUsers state changes
-	useEffect(() => {
-		console.log('[TypingIndicator] typingUsers state changed:', Array.from(typingUsers));
-	}, [typingUsers]);
+	}), [typingUsers, setTypingUser, clearTypingUser]);
 
 	return (
 		<TypingIndicatorContext.Provider value={value}>

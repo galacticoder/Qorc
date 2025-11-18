@@ -1,420 +1,1062 @@
-const { app, BrowserWindow, ipcMain, desktopCapturer, dialog, shell, powerSaveBlocker, session } = require('electron');
-const path = require('path');
-const fs = require('fs');
-const os = require('os');
-const isDev = process.env.NODE_ENV === 'development';
+/**
+ * Electron Main Process
+ */
 
-// Disable GPU acceleration to avoid Vulkan/graphics driver issues
-app.disableHardwareAcceleration();
-
-// Add additional command line switches for better compatibility
-app.commandLine.appendSwitch('--disable-gpu');
-app.commandLine.appendSwitch('--disable-gpu-sandbox');
-app.commandLine.appendSwitch('--disable-software-rasterizer');
-
-// Disable security warnings after implementing proper security measures
-process.env['ELECTRON_DISABLE_SECURITY_WARNINGS'] = 'true';
-
-// Route all console output to a file to avoid EBADF when parent stdio closes
-try {
-  const logFilePath = path.join(os.tmpdir(), 'end2end-chat-electron-main.log');
-  const formatArg = (a) => {
-    try {
-      if (typeof a === 'string') return a;
-      if (a instanceof Error) return a.stack || a.message;
-      return JSON.stringify(a);
-    } catch (_e) {
-      return String(a);
-    }
-  };
-  const writeLine = (level, args) => {
-    const line = `[${new Date().toISOString()}] [${level}] ` + Array.from(args).map(formatArg).join(' ') + '\n';
-    try { fs.appendFileSync(logFilePath, line); } catch (_e) { /* ignore */ }
-  };
-  const make = (level) => function() { writeLine(level, arguments); };
-  console.log = make('LOG');
-  console.info = make('INFO');
-  console.warn = make('WARN');
-  console.error = make('ERROR');
-  console.debug = make('DEBUG');
-  process.on('uncaughtException', (err) => {
-    try { writeLine('UNCAUGHT', [err && (err.stack || err.message || String(err))]); } catch (_) {}
-  });
-} catch (_e) {
-  // no-op
+const nodeCrypto = require('crypto');
+if (typeof global.crypto === 'undefined') {
+  global.crypto = nodeCrypto.webcrypto;
 }
 
-// Require Tor manager after console/stdio safety is applied
-const torManager = require('./tor-manager.cjs');
+const { app, BrowserWindow, ipcMain, desktopCapturer, dialog, shell, powerSaveBlocker } = require('electron');
 
-// Keep a global reference of the window object
-let mainWindow;
+// Ensure fatal errors are visible even without a window
+process.on('unhandledRejection', (reason) => {
+  try { console.error('[MAIN] UnhandledRejection:', reason?.message || String(reason)); } catch (_) {}
+  try { dialog.showErrorBox('Unhandled Error', String(reason?.message || reason || 'Unknown')); } catch (_) {}
+  try { app.exit(1); } catch (_) { try { process.exit(1); } catch (_) {} }
+});
+process.on('uncaughtException', (err) => {
+  try { console.error('[MAIN] UncaughtException:', err?.message || String(err)); } catch (_) {}
+  try { dialog.showErrorBox('Uncaught Exception', String(err?.message || err || 'Unknown')); } catch (_) {}
+  try { app.exit(1); } catch (_) { try { process.exit(1); } catch (_) {} }
+});
 
-function createWindow() {
-  // Use in-memory partition in dev to avoid orphaned profiles, persistent in production
-  const partitionName = isDev ? 'securechat-dev' : 'persist:securechat';
+function fatalExit(message) {
+  const msg = String(message || 'Fatal error');
+  try { console.error('[MAIN] FATAL:', msg); } catch (_) {}
+  try { process.stderr.write(msg + '\n'); } catch (_) {}
+  try { dialog.showErrorBox('Application Error', msg); } catch (_) {}
+  try { app.exit(1); } catch (_) { try { process.exit(1); } catch (_) {} }
+}
+const path = require('path');
+const fs = require('fs').promises;
+const crypto = require('crypto');
 
-  // Base web preferences with secure defaults
+app.disableHardwareAcceleration();
+
+const { SecurityMiddleware } = require('./handlers/security-middleware.cjs');
+const { StorageHandler } = require('./handlers/storage-handler.cjs');
+const { WebSocketHandler } = require('./handlers/websocket-handler.cjs');
+const { QuantumResistantSignalHandler } = require('./handlers/signal-handler-v2.cjs');
+const { FileHandler } = require('./handlers/file-handler.cjs');
+
+const ElectronTorManager = require('./tor-manager.cjs');
+const torManager = new ElectronTorManager({ appInstance: app });
+
+if (process.env.ELECTRON_INSTANCE_ID) {
+  const instanceId = process.env.ELECTRON_INSTANCE_ID;
+  const baseUserDataPath = app.getPath('userData');
+  const instanceUserDataPath = `${baseUserDataPath}-instance-${instanceId}`;
+  app.setPath('userData', instanceUserDataPath);
+}
+
+let mainWindow = null;
+let securityMiddleware = null;
+let storageHandler = null;
+let websocketHandler = null;
+let signalHandlerV2 = null;
+let fileHandler = null;
+let powerSaveBlockerId = null;
+
+async function setupSecureLogging() {
+  process.on('uncaughtException', (err) => {
+    dialog.showErrorBox('Critical Error', 'Application error occurred');
+    app.quit();
+  });
+}
+
+async function verifyLibsignalNativeAvailability() {
+  try {
+    const pkgJsonPath = require.resolve('@signalapp/libsignal-client/package.json');
+    const pkgDir = path.dirname(pkgJsonPath);
+    const prevCwd = process.cwd();
+    let native;
+    try {
+      if (prevCwd !== pkgDir) process.chdir(pkgDir);
+      const mod = await import('@signalapp/libsignal-client');
+      native = mod?.default ?? mod;
+    } finally {
+      try { if (process.cwd() !== prevCwd) process.chdir(prevCwd); } catch (_) {}
+    }
+
+    if (!native || !native.IdentityKeyPair || typeof native.IdentityKeyPair.generate !== 'function') {
+      throw new Error('libsignal-client API validation failed');
+    }
+    return { success: true };
+  } catch (_) {
+    dialog.showErrorBox('Cryptography Module Error', 'Required security modules are not available');
+    return { success: false };
+  }
+}
+
+async function initializeHandlers() {
+  try {
+    securityMiddleware = new SecurityMiddleware();
+    const securityInit = await securityMiddleware.initialize();
+    if (!securityInit?.success) {
+      throw new Error('Security middleware initialization failed');
+    }
+
+    storageHandler = new StorageHandler(app, securityMiddleware);
+    const storageInit = await storageHandler.initialize();
+    if (!storageInit?.success) {
+      throw new Error('Secure storage unavailable');
+    }
+
+    fileHandler = new FileHandler(securityMiddleware);
+    const fileInit = fileHandler.initialize({
+      maxFileSize: 100 * 1024 * 1024,
+      basePaths: [app.getPath('userData'), require('os').tmpdir()]
+    });
+    if (!fileInit?.success) {
+      throw new Error('File handler initialization failed');
+    }
+
+    // Ensure a stable device ID persisted on this machine 
+    let deviceId;
+
+    const existing = await storageHandler.getItem('device-id');
+    if (existing?.success && existing.value) {
+      deviceId = String(existing.value);
+    } else {
+      deviceId = crypto.randomBytes(16).toString('hex');
+      const stored = await storageHandler.setItem('device-id', deviceId);
+      if (!stored?.success) {
+        throw new Error('Failed to persist device ID');
+      }
+    }
+
+    // Ensure per-install Ed25519 device keypair (PEM 
+    let devicePubPem;
+    let devicePrivPem;
+
+    const pub = await storageHandler.getItem('device-ed25519-public-pem');
+    const priv = await storageHandler.getItem('device-ed25519-private-pem');
+
+    if (pub?.success && priv?.success && pub.value && priv.value) {
+      devicePubPem = String(pub.value);
+      devicePrivPem = String(priv.value);
+    } else {
+      const { generateKeyPairSync } = require('crypto');
+      const { publicKey, privateKey } = generateKeyPairSync('ed25519');
+
+      devicePrivPem = privateKey.export({ type: 'pkcs8', format: 'pem' });
+      devicePubPem = publicKey.export({ type: 'spki', format: 'pem' });
+
+      const setPub = await storageHandler.setItem('device-ed25519-public-pem', devicePubPem);
+      const setPriv = await storageHandler.setItem('device-ed25519-private-pem', devicePrivPem);
+
+      if (!setPub?.success || !setPriv?.success) {
+        throw new Error('Failed to persist device Ed25519 keypair');
+      }
+    }
+
+    websocketHandler = new WebSocketHandler(securityMiddleware);
+    
+    try {
+      const clientVersion = (typeof app.getVersion === 'function') ? app.getVersion() : 'unknown';
+      websocketHandler.setExtraHeaders({
+        'x-device-id': deviceId,
+        'x-client-version': String(clientVersion),
+        'x-client-name': 'End2End Chat'
+      });
+      if (devicePubPem && devicePrivPem) {
+        websocketHandler.setDeviceKeys({
+          deviceId,
+          publicKeyPem: devicePubPem,
+          privateKeyPem: devicePrivPem,
+        });
+      }
+    } catch (_) {}
+
+    const defaultWsUrl = process.env.VITE_WS_URL || 'wss://localhost:8443';
+    const wsInit = await websocketHandler.initialize({
+      defaultUrl: defaultWsUrl,
+      reconnectAttempts: 5,
+      reconnectDelay: 2000
+    });
+    if (!wsInit?.success) {
+      throw new Error('WebSocket handler initialization failed');
+    }
+
+    websocketHandler.onMessage = (message) => {
+      if (mainWindow && !mainWindow.isDestroyed() && mainWindow.webContents && !mainWindow.webContents.isDestroyed()) {
+        try {
+          mainWindow.webContents.send('edge:server-message', message);
+        } catch (error) {
+          console.error('[MAIN] Failed to send message to renderer:', error.message);
+        }
+      }
+    };
+
+    signalHandlerV2 = new QuantumResistantSignalHandler(securityMiddleware);
+    const nativeCheck = await verifyLibsignalNativeAvailability();
+    if (!nativeCheck.success) {
+      throw new Error('libsignal-client verification failed');
+    }
+
+    return true;
+  } catch (error) {
+    const msg = String(error?.message || 'Initialization failed');
+    console.error('[MAIN] Critical initialization failure:', msg);
+    try { dialog.showErrorBox('Critical Initialization Failure', msg); } catch (_) {}
+    return false;
+  }
+}
+
+async function createWindow() {
   const webPreferences = {
     nodeIntegration: false,
     contextIsolation: true,
     enableRemoteModule: false,
     preload: path.join(__dirname, 'preload.cjs'),
-    partition: partitionName,
-    // Enable media access for voice notes and video calls
+    partition: 'persist:securechat',
     allowRunningInsecureContent: false,
-    experimentalFeatures: false
+    experimentalFeatures: false,
+    sandbox: true,
+    webSecurity: true,
+    webgl: false
   };
-
-  // Maintain security even in development
-  // Note: Removed experimentalFeatures to fix security warnings
-  // If specific WebRTC features are needed, enable them specifically in production-ready code
-
-  // Create the browser window
+  
   mainWindow = new BrowserWindow({
     width: 1200,
     height: 800,
     webPreferences,
-    icon: path.join(__dirname, '../public/icon.png'), // Add your app icon
+    icon: path.join(__dirname, '../public/icon.png'),
     titleBarStyle: 'default',
-    show: false // Don't show until ready
+    show: false,
+    backgroundThrottling: false
   });
-
-  // Load the app - try dev server first, then dist build, then show error
-  const tryLoadDevServer = () => {
-    return new Promise((resolve) => {
-      const http = require('http');
-      const req = http.request({
-        hostname: 'localhost',
-        port: 5173,
-        path: '/',
-        method: 'HEAD',
-        timeout: 2000
-      }, (res) => {
-        resolve(true);
-      });
-      req.on('error', () => resolve(false));
-      req.on('timeout', () => {
-        req.destroy();
-        resolve(false);
-      });
-      req.end();
-    });
-  };
-
-  const loadApp = async () => {
-    // First try dev server (regardless of NODE_ENV since user might run electron directly)
-    const devServerAvailable = await tryLoadDevServer();
-    
-    if (devServerAvailable) {
-      console.log('Loading from Vite dev server...');
-      mainWindow.loadURL('http://localhost:5173');
-      // Open DevTools when loading from dev server
-      mainWindow.webContents.openDevTools();
-    } else {
-      // Try dist build
-      const distPath = path.join(__dirname, '../dist/index.html');
-      if (fs.existsSync(distPath)) {
-        console.log('Loading from dist build...');
-        mainWindow.loadFile(distPath);
-      } else {
-        console.error('Neither dev server nor dist build available.');
-        // Show helpful error page
-        const errorHtml = `
-          <html>
-            <head><title>End2End Chat - Setup Required</title></head>
-            <body style="font-family: Arial, sans-serif; padding: 40px; text-align: center;">
-              <h1>🔧 Setup Required</h1>
-              <p>To run the application, you need either:</p>
-              <ol style="text-align: left; display: inline-block;">
-                <li><strong>Development mode:</strong> Run <code>bash startClient.sh</code></li>
-                <li><strong>Production build:</strong> Run <code>pnpm run build</code> first</li>
-              </ol>
-              <p><small>This window will close in 10 seconds...</small></p>
-              <script>setTimeout(() => window.close(), 10000);</script>
-            </body>
-          </html>
-        `;
-        mainWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(errorHtml)}`);
-      }
-    }
+  
+  try {
+    await loadApp();
+  } catch (error) {
+    mainWindow.loadURL(`data:text/plain;charset=utf-8,Failed to load application`);
+  }
+  
+  const showWindow = () => {
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    mainWindow.show();
   };
   
-  loadApp();
-
-  // Show window when ready to prevent visual flash
-  mainWindow.once('ready-to-show', () => {
-    mainWindow.show();
-    
-    // Focus on window
-    if (isDev) {
-      mainWindow.focus();
+  mainWindow.once('ready-to-show', showWindow);
+  const fallbackTimer = setTimeout(showWindow, 3000);
+  mainWindow.once('show', () => clearTimeout(fallbackTimer));
+  
+  
+  mainWindow.on('close', async () => {
+    if (torManager?.isTorRunning()) {
+      await torManager.stopTor();
     }
   });
-
-  // Ensure app quits when last window is closed in dev to avoid relaunch loops
+  
   mainWindow.on('closed', () => {
+    mainWindow = null;
     if (process.platform !== 'darwin') {
       try { app.quit(); } catch (_) {}
     }
   });
-
-  // Emitted when the window is closed
-  mainWindow.on('closed', () => {
-    mainWindow = null;
-  });
-
-  // Handle window controls
-  mainWindow.on('minimize', (event) => {
-    event.preventDefault();
-    mainWindow.minimize();
-  });
-
-  mainWindow.on('close', async (event) => {
-    if (torManager.isTorRunning()) {
-      try {
-        console.log('[ELECTRON] Shutting down Tor before closing...');
-        await torManager.stopTor();
-      } catch (_) {}
-    }
-  });
+  
+  setupSecurityPolicies();
 }
 
-// Initialize and start bundled Tor automatically
-async function initializeTor() {
+async function loadApp() {
+  const distPath = path.join(__dirname, '../dist/index.html');
   try {
-    console.log('[ELECTRON] Initializing bundled Tor...');
-    
-    // Check if Tor is already installed
-    const torStatus = await torManager.checkTorInstallation();
-    if (!torStatus.isInstalled) {
-      console.log('[ELECTRON] Downloading Tor Expert Bundle...');
-      const downloadResult = await torManager.downloadTor();
-      if (!downloadResult.success) {
-        throw new Error(`Tor download failed: ${downloadResult.error}`);
-      }
-      
-      console.log('[ELECTRON] Installing Tor Expert Bundle...');
-      const installResult = await torManager.installTor();
-      if (!installResult.success) {
-        throw new Error(`Tor installation failed: ${installResult.error}`);
-      }
-    }
-    
-    // Configure Tor with optimal settings
-    console.log('[ELECTRON] Configuring bundled Tor...');
-    const config = `
-# Auto-generated Tor configuration for bundled Tor
-SocksPort 9150
-ControlPort 9151
-CookieAuthentication 1
-SocksPolicy accept 127.0.0.1
-SocksPolicy reject *
-NewCircuitPeriod 30
-MaxCircuitDirtiness 600
-CircuitBuildTimeout 30
-LearnCircuitBuildTimeout 0
-ExitPolicy reject *:*
-ClientOnly 1
-Log notice stdout
-Log warn stdout
-SafeLogging 0
-FetchDirInfoEarly 1
-FetchDirInfoExtraEarly 1
-FetchUselessDescriptors 1
-`;
-    
-    const configResult = await torManager.configureTor({ config });
-    if (!configResult.success) {
-      throw new Error(`Tor configuration failed: ${configResult.error}`);
-    }
-    
-    // Start Tor service
-    console.log('[ELECTRON] Starting bundled Tor service...');
-    const startResult = await torManager.startTor();
-    if (!startResult.success) {
-      throw new Error(`Tor startup failed: ${startResult.error}`);
-    }
-    
-    // Configure Electron session to use Tor proxy
-    console.log('[ELECTRON] Configuring Electron session proxy...');
-    const proxyConfigured = await configureTorProxy();
-    if (proxyConfigured) {
-      torSetupComplete = true;
-      console.log('[ELECTRON] Bundled Tor initialization completed successfully');
-    } else {
-      console.warn('[ELECTRON] Tor started but proxy configuration failed');
-    }
-    
-  } catch (error) {
-    console.error('[ELECTRON] Failed to initialize bundled Tor:', error);
-    // Continue without Tor - app will work but without anonymization
-    console.warn('[ELECTRON] Continuing without Tor - traffic will not be anonymized');
+    await fs.access(distPath);
+    await mainWindow.loadFile(distPath);
+  } catch (e) {
+    dialog.showErrorBox('Application Error', 'Application build not found');
+    app.quit();
   }
 }
 
-// This method will be called when Electron has finished initialization
-app.whenReady().then(async () => {
-  createWindow();
-  
-  // Initialize Tor in the background
-  initializeTor();
-
-  // Handle permission requests for media devices and security
+function setupSecurityPolicies() {
   app.on('web-contents-created', (event, contents) => {
-    // Set Content Security Policy for enhanced security
     contents.session.webRequest.onHeadersReceived((details, callback) => {
       const responseHeaders = details.responseHeaders;
+      const nonce = crypto.randomBytes(16).toString('base64');
       
-      // Generate nonce for inline scripts/styles
-      const nonce = require('crypto').randomBytes(16).toString('base64');
-      
-      let cspPolicy;
-      if (app.isPackaged) {
-        // Strict production CSP - no unsafe-inline, use nonce for necessary inline content
-        cspPolicy = [
-          "default-src 'self'; " +
-          `script-src 'self' 'nonce-${nonce}'; ` + // Only allow scripts with nonce
-          `style-src 'self' 'nonce-${nonce}' 'unsafe-inline'; ` + // Allow nonce and inline styles for CSS-in-JS
-          "img-src 'self' data: blob: https:; " +
-          "media-src 'self' blob: data:; " +
-          "connect-src 'self' wss: ws: https: blob:; " + // Block HTTP in production
-          "font-src 'self' data:; " +
-          "object-src 'none'; " +
-          "base-uri 'self'; " +
-          "frame-ancestors 'none'; " +
-          "upgrade-insecure-requests;"
-        ];
-      } else {
-        // Development CSP - allow necessary dev tools but still secure
-        cspPolicy = [
-          "default-src 'self' 'unsafe-inline' data: blob: wss: ws: https: http: localhost:*; " +
-          "script-src 'self' 'unsafe-inline' 'unsafe-eval' localhost:*; " + // Allow eval for HMR
-          "style-src 'self' 'unsafe-inline' localhost:*; " + // Allow inline styles for dev
-          "img-src 'self' data: blob: https: http:; " +
-          "media-src 'self' blob: data:; " +
-          "connect-src 'self' wss: ws: https: http: blob: localhost:*; " + // Allow dev server
-          "font-src 'self' data:; " +
-          "object-src 'none'; " +
-          "base-uri 'self';"
-        ];
-      }
+      const cspPolicy = [
+        "default-src 'self'; " +
+        `script-src 'self' 'nonce-${nonce}'; ` +
+        `style-src 'self' 'nonce-${nonce}' 'unsafe-inline'; ` +
+        "img-src 'self' data: blob: https:; " +
+        "media-src 'self' blob: data:; " +
+        "connect-src 'self' wss: ws: https: blob:; " +
+        "font-src 'self' data:; " +
+        "object-src 'none'; " +
+        "base-uri 'self'; " +
+        "frame-ancestors 'none'; " +
+        "upgrade-insecure-requests;"
+      ];
       
       responseHeaders['content-security-policy'] = cspPolicy;
-      
-      // Add additional security headers
       responseHeaders['x-frame-options'] = ['DENY'];
       responseHeaders['x-content-type-options'] = ['nosniff'];
       responseHeaders['x-xss-protection'] = ['1; mode=block'];
       responseHeaders['referrer-policy'] = ['strict-origin-when-cross-origin'];
-      
-      if (app.isPackaged) {
-        // Additional production security headers
-        responseHeaders['strict-transport-security'] = ['max-age=31536000; includeSubDomains'];
-        responseHeaders['permissions-policy'] = ['camera=(), microphone=(), geolocation=(), payment=()'];
-      }
+      responseHeaders['strict-transport-security'] = ['max-age=31536000; includeSubDomains'];
+      responseHeaders['permissions-policy'] = ['camera=(), microphone=(), geolocation=(), payment=()'];
       
       callback({ responseHeaders });
     });
-
-    // Set up permission handlers for media access
+    
     contents.session.setPermissionRequestHandler((_webContents, permission, callback) => {
-      console.log('[ELECTRON] Permission request:', permission);
-
-      // Allow media permissions (microphone, camera, screen capture)
-      if (permission === 'media' || permission === 'microphone' || permission === 'camera') {
-        console.log('[ELECTRON] Granting media permission:', permission);
-        callback(true);
-        return;
-      }
-
-      // Allow display capture for screen sharing
-      if (permission === 'display-capture') {
-        console.log('[ELECTRON] Granting display-capture permission');
-        callback(true);
-        return;
-      }
-
-      // Deny other permissions by default
-      console.log('[ELECTRON] Denying permission:', permission);
-      callback(false);
+      const allowed = ['media', 'microphone', 'camera', 'display-capture'];
+      callback(allowed.includes(permission));
     });
-
-    // Handle permission check requests
-    contents.session.setPermissionCheckHandler((_webContents, permission, requestingOrigin) => {
-      console.log('[ELECTRON] Permission check:', permission, 'from:', requestingOrigin);
-
-      // Allow media permissions
-      if (permission === 'media' || permission === 'microphone' || permission === 'camera' || permission === 'display-capture') {
-        console.log('[ELECTRON] Permission check granted for:', permission);
-        return true;
-      }
-
-      console.log('[ELECTRON] Permission check denied for:', permission);
-      return false;
+    
+    contents.session.setPermissionCheckHandler((_webContents, permission) => {
+      const allowed = ['media', 'microphone', 'camera', 'display-capture'];
+      return allowed.includes(permission);
     });
-
-    // Prevent external navigation while allowing same-origin/app-served URLs
+    
     contents.on('will-navigate', (e, targetUrl) => {
       try {
         const currentUrlStr = contents.getURL();
         const target = new URL(targetUrl);
-
-        // Always allow internal schemes served by the app
+        
         if (target.protocol === 'file:' || target.protocol === 'blob:') {
-          return; // allow navigation
+          return;
         }
-
+        
         if (currentUrlStr) {
           const current = new URL(currentUrlStr);
           if (current.origin === target.origin) {
-            return; // allow same-origin navigation (e.g., internal routes, OAuth redirects)
+            return;
           }
         }
+        
+        e.preventDefault();
+      } catch (_) {
+        e.preventDefault();
+      }
+    });
+    
+    contents.setWindowOpenHandler(({ url }) => {
+      shell.openExternal(url).catch(() => {});
+      return { action: 'deny' };
+    });
+  });
+}
 
-        // Different origin: block navigation
-        e.preventDefault();
-        console.log('[SECURITY] Blocked external navigation to:', targetUrl);
-      } catch (err) {
-        // On parsing error, be conservative and block
-        e.preventDefault();
-        console.warn('[SECURITY] Error evaluating navigation target; blocking:', targetUrl, err?.message || err);
+function registerIPCHandlers() {
+  ipcMain.handle('get-user-data-path', async () => {
+    try {
+      return app.getPath('userData');
+    } catch (_) {
+      return null;
+    }
+  });
+  
+  ipcMain.handle('system:platform', () => ({
+    platform: process.platform,
+    arch: process.arch,
+    version: process.version
+  }));
+
+  ipcMain.handle('app:version', () => app.getVersion());
+  ipcMain.handle('app:name', () => app.getName());
+  
+  ipcMain.handle('secure:init', async () => {
+    return storageHandler ? { success: true } : { success: false };
+  });
+  
+  ipcMain.handle('secure:set', async (_evt, key, value) => {
+    if (!storageHandler) {
+      return { success: false, error: 'Storage not initialized' };
+    }
+    return await storageHandler.setItem(key, value);
+  });
+  
+  ipcMain.handle('secure:get', async (_evt, key) => {
+    if (!storageHandler) {
+      return { success: false, error: 'Storage not initialized' };
+    }
+    return await storageHandler.getItem(key);
+  });
+  
+  ipcMain.handle('secure:remove', async (_evt, key) => {
+    if (!storageHandler) {
+      return { success: false, error: 'Storage not initialized' };
+    }
+    return await storageHandler.removeItem(key);
+  });
+  
+  ipcMain.handle('tor:start', async () => {
+    try {
+      return await torManager.startTor();
+    } catch (error) {
+      return { success: false, error: error.message };
+    }
+  });
+  
+  ipcMain.handle('tor:stop', async () => {
+    try {
+      return await torManager.stopTor();
+    } catch (error) {
+      return { success: false, error: error.message };
+    }
+  });
+  
+  ipcMain.handle('tor:status', async () => {
+    try {
+      return await torManager.getTorStatus();
+    } catch (error) {
+      return { success: false, error: error.message };
+    }
+  });
+  
+  ipcMain.handle('tor:test-connection', async () => {
+    try {
+      return await torManager.verifyTorConnection();
+    } catch (error) {
+      return { success: false, error: error.message };
+    }
+  });
+  
+  ipcMain.handle('tor:new-circuit', async () => {
+    try {
+      return await torManager.rotateCircuit();
+    } catch (error) {
+      return { success: false, error: error.message };
+    }
+  });
+
+  ipcMain.handle('tor:rotate-circuit', async () => {
+    try {
+      return await torManager.rotateCircuit();
+    } catch (error) {
+      return { success: false, error: error.message };
+    }
+  });
+  
+  ipcMain.handle('tor:check-installation', async () => {
+    try {
+      return await torManager.checkTorInstallation();
+    } catch (error) {
+      return { isInstalled: false, error: error.message };
+    }
+  });
+  
+  ipcMain.handle('tor:download', async () => {
+    try {
+      return await torManager.downloadTor();
+    } catch (error) {
+      return { success: false, error: error.message };
+    }
+  });
+  
+  ipcMain.handle('tor:install', async () => {
+    try {
+      return await torManager.installTor();
+    } catch (error) {
+      return { success: false, error: error.message };
+    }
+  });
+  
+  ipcMain.handle('tor:configure', async (_event, options) => {
+    setImmediate(async () => {
+      try {
+        const result = await torManager.configureTor(options);
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.send('tor:configure-complete', result);
+        }
+      } catch (error) {
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.send('tor:configure-complete', { success: false, error: error.message });
+        }
+      }
+    });
+    
+    return { success: true, pending: true };
+  });
+  
+  ipcMain.handle('tor:uninstall', async () => {
+    try {
+      return await torManager.uninstallTor();
+    } catch (error) {
+      return { success: false, error: error.message };
+    }
+  });
+  
+  ipcMain.handle('tor:cleanup-corrupted', async () => {
+    try {
+      return await torManager.cleanupCorruptedTor();
+    } catch (error) {
+      return { success: false, error: error.message };
+    }
+  });
+  
+  ipcMain.handle('tor:info', async () => {
+    try {
+      return await torManager.getTorInfo();
+    } catch (error) {
+      return { error: error.message };
+    }
+  });
+  
+  ipcMain.handle('tor:get-info', async () => {
+    try {
+      return await torManager.getTorInfo();
+    } catch (error) {
+      return { error: error.message };
+    }
+  });
+  
+  ipcMain.handle('tor:setup-complete', async () => {
+    if (websocketHandler) {
+      websocketHandler.setTorReady(true);
+    }
+    return { success: true };
+  });
+  
+  ipcMain.handle('tor:verify-connection', async () => {
+    try {
+      return await torManager.verifyTorConnection();
+    } catch (error) {
+      return { success: false, error: error.message };
+    }
+  });
+  
+  ipcMain.handle('tor:get-ws-url', async (_event, url) => {
+    try {
+      return { success: true, url };
+    } catch (error) {
+      return { success: false, error: error.message };
+    }
+  });
+  
+  ipcMain.handle('tor:initialize', async (_event, config) => {
+    try {
+      const status = await torManager.getTorStatus();
+      const bootstrapped = status.bootstrapped || false;
+
+      // If Tor is up, mark WebSocket handler as Tor-ready so probes and connections are allowed
+      if (websocketHandler && bootstrapped) {
+        try {
+          websocketHandler.setTorReady(true);
+        } catch (e) {
+          try {
+            console.error('[MAIN] Failed to set WebSocket Tor readiness:', e && e.message ? e.message : e);
+          } catch (_) {}
+        }
+      }
+
+      return { 
+        success: true, 
+        bootstrapped,
+        socksPort: torManager.effectiveSocksPort || 9150,
+        controlPort: torManager.effectiveControlPort || 9151
+      };
+    } catch (error) {
+      return { success: false, error: error.message };
+    }
+  });
+  
+  ipcMain.handle('edge:ws-connect', async () => {
+    if (!websocketHandler) return { success: false, error: 'WebSocket handler not initialized' };
+    return await websocketHandler.connect();
+  });
+
+  ipcMain.handle('edge:ws-disconnect', async () => {
+    if (!websocketHandler) return { success: false, error: 'WebSocket handler not initialized' };
+    return await websocketHandler.disconnect();
+  });
+  
+  ipcMain.handle('edge:ws-send', async (_event, payload) => {
+    if (!websocketHandler) return { success: false, error: 'WebSocket handler not initialized' };
+    return await websocketHandler.send(payload);
+  });
+
+  // Token refresh via HTTP with device proof
+  ipcMain.handle('auth:refresh', async (_event, { refreshToken }) => {
+    try {
+      if (!websocketHandler || !websocketHandler.serverUrl) {
+        return { success: false, error: 'Server URL not configured' };
+      }
+      const wsUrl = new URL(websocketHandler.serverUrl);
+      const httpProto = wsUrl.protocol === 'wss:' ? 'https:' : 'http:';
+      const base = `${httpProto}//${wsUrl.host}`;
+      const challengeUrl = `${base}/api/auth/refresh-challenge`;
+      const refreshUrl = `${base}/api/auth/refresh`;
+
+      const postJson = (url, headers, body) => new Promise((resolve, reject) => {
+        const mod = url.startsWith('https:') ? require('https') : require('http');
+        const data = Buffer.from(JSON.stringify(body), 'utf8');
+        const req = mod.request(url, {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            'content-length': Buffer.byteLength(data),
+            ...headers,
+          },
+          timeout: 15000,
+        }, (res) => {
+          const chunks = [];
+          res.on('data', (c) => chunks.push(c));
+          res.on('end', () => {
+            try {
+              const payload = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}');
+              if (res.statusCode && res.statusCode >= 200 && res.statusCode < 300) resolve(payload);
+              else resolve({ success: false, status: res.statusCode, ...payload });
+            } catch (e) { resolve({ success: false, error: 'Bad JSON' }); }
+          });
+        });
+        req.on('error', reject);
+        req.on('timeout', () => { try { req.destroy(new Error('timeout')); } catch {} });
+        req.write(data);
+        req.end();
+      });
+
+      const ch = await postJson(challengeUrl, {}, { refreshToken });
+      if (!ch || ch.success !== true || !ch.nonce) {
+        return { success: false, error: 'Challenge failed', details: ch };
+      }
+
+      const parts = String(refreshToken).split('.');
+      if (parts.length < 2) return { success: false, error: 'Invalid refresh token' };
+      const payloadJson = JSON.parse(Buffer.from(parts[1], 'base64').toString('utf8'));
+      const jti = payloadJson?.jti;
+      if (!jti) {
+        return { success: false, error: 'Missing jti' };
+      }
+
+      const deviceId = websocketHandler.getDeviceId?.();
+      if (!deviceId) {
+        return { success: false, error: 'No device id' };
+      }
+      const signature = websocketHandler.signRefreshProof?.({ nonce: ch.nonce, jti });
+      if (!signature) {
+        return { success: false, error: 'Failed to sign device proof' };
+      }
+
+      const headers = {
+        'x-device-id': deviceId,
+        'x-device-proof': signature,
+      };
+      const rr = await postJson(refreshUrl, headers, { refreshToken });
+      if (!rr || rr.success !== true || !rr.tokens?.accessToken || !rr.tokens?.refreshToken) {
+        return { success: false, error: 'Refresh failed', details: rr };
+      }
+      return { success: true, tokens: rr.tokens };
+    } catch (e) {
+      return { success: false, error: e?.message || String(e) };
+    }
+  });
+  
+  ipcMain.handle('edge:set-server-url', async (_event, url) => {
+    if (!websocketHandler) return { success: false, error: 'WebSocket handler not initialized' };
+    return await websocketHandler.setServerUrl(url);
+  });
+  
+  ipcMain.handle('edge:get-server-url', async () => {
+    if (!websocketHandler) return { success: false, serverUrl: null };
+    return { success: true, serverUrl: websocketHandler.serverUrl };
+  });
+
+  ipcMain.handle('edge:ws-probe-connect', async (_event, url, timeoutMs) => {
+    if (!websocketHandler) return { success: false, error: 'WebSocket handler not initialized' };
+    return await websocketHandler.probeConnect(url, typeof timeoutMs === 'number' ? timeoutMs : 12000);
+  });
+  
+  ipcMain.handle('signal-v2:generate-identity', async (_event, { username }) => {
+    if (!signalHandlerV2) return { success: false, error: 'Signal V2 handler not initialized' };
+    return await signalHandlerV2.generateIdentity(username);
+  });
+  
+  ipcMain.handle('signal-v2:generate-prekeys', async (_event, { username, startId, count }) => {
+    if (!signalHandlerV2) return { success: false, error: 'Signal V2 handler not initialized' };
+    return await signalHandlerV2.generatePreKeys(username, startId || 1, count || 100);
+  });
+  
+  ipcMain.handle('signal-v2:generate-signed-prekey', async (_event, { username, keyId }) => {
+    if (!signalHandlerV2) return { success: false, error: 'Signal V2 handler not initialized' };
+    return await signalHandlerV2.generateSignedPreKey(username, keyId || 1);
+  });
+  
+  ipcMain.handle('signal-v2:create-prekey-bundle', async (_event, args) => {
+    if (!signalHandlerV2) return { success: false, error: 'Signal V2 handler not initialized' };
+    const { username } = args || {};
+    if (!username || typeof username !== 'string') {
+      return { success: false, error: `Invalid username parameter: ${typeof username}` };
+    }
+    try {
+      return await signalHandlerV2.createPreKeyBundle(username);
+    } catch (error) {
+      return { success: false, error: error.message };
+    }
+  });
+  
+  ipcMain.handle('signal-v2:process-prekey-bundle', async (_event, { selfUsername, peerUsername, bundle }) => {
+    if (!signalHandlerV2) return { success: false, error: 'Signal V2 handler not initialized' };
+    return await signalHandlerV2.processPreKeyBundle(selfUsername, peerUsername, bundle);
+  });
+  
+  ipcMain.handle('signal-v2:has-session', async (_event, { selfUsername, peerUsername, deviceId }) => {
+    if (!signalHandlerV2) return { success: false, error: 'Signal V2 handler not initialized' };
+    return await signalHandlerV2.hasSession(selfUsername, peerUsername, deviceId);
+  });
+  
+  ipcMain.handle('signal-v2:encrypt', async (_event, args) => {
+    if (!signalHandlerV2) return { success: false, error: 'Signal V2 handler not initialized' };
+    try {
+      const { fromUsername, toUsername, plaintext, ...options } = args || {};
+      return await signalHandlerV2.encrypt(fromUsername, toUsername, plaintext, options);
+    } catch (e) {
+      return { success: false, error: e?.message || String(e) };
+    }
+  });
+  
+  ipcMain.handle('signal-v2:decrypt', async (_event, { fromUsername, toUsername, encryptedData }) => {
+    if (!signalHandlerV2) return { success: false, error: 'Signal V2 handler not initialized' };
+    return await signalHandlerV2.decrypt(fromUsername, toUsername, encryptedData);
+  });
+  
+  ipcMain.handle('signal-v2:delete-session', async (_event, { selfUsername, peerUsername, deviceId }) => {
+    if (!signalHandlerV2) return { success: false, error: 'Signal V2 handler not initialized' };
+    return await signalHandlerV2.deleteSession(selfUsername, peerUsername, deviceId);
+  });
+  
+  ipcMain.handle('signal-v2:delete-all-sessions', async (_event, { selfUsername, peerUsername }) => {
+    if (!signalHandlerV2) return { success: false, error: 'Signal V2 handler not initialized' };
+    return await signalHandlerV2.deleteAllSessions(selfUsername, peerUsername);
+  });
+  
+  ipcMain.handle('signal-v2:set-storage-key', async (_event, { keyBase64 }) => {
+    try {
+      const storage = require('./handlers/signal-storage.cjs');
+      const res = storage.setStorageKey({ keyBase64 });
+      return res;
+    } catch (e) {
+      return { success: false, error: e?.message || String(e) };
+    }
+  });
+
+  ipcMain.handle('signal-v2:set-static-mlkem-keys', async (_event, { username, publicKeyBase64, secretKeyBase64 }) => {
+    if (!signalHandlerV2) return { success: false, error: 'Signal V2 handler not initialized' };
+    try {
+      return await signalHandlerV2.setStaticMlkemKeys(username, publicKeyBase64, secretKeyBase64);
+    } catch (e) {
+      return { success: false, error: e?.message || String(e) };
+    }
+  });
+  
+  ipcMain.handle('signal-v2:trust-peer-identity', async (_event, { selfUsername, peerUsername, deviceId }) => {
+    if (!signalHandlerV2) return { success: false, error: 'Signal V2 handler not initialized' };
+    try {
+      return await signalHandlerV2.trustPeerIdentity(selfUsername, peerUsername, deviceId || 1);
+    } catch (e) {
+      return { success: false, error: e?.message || String(e) };
+    }
+  });
+
+  ipcMain.handle('signal-v2:clear-all', async () => {
+    if (!signalHandlerV2) return { success: false, error: 'Signal V2 handler not initialized' };
+    signalHandlerV2.clearAll();
+    return { success: true };
+  });
+
+  ipcMain.handle('screen:getSources', async () => {
+    try {
+      const options = {
+        types: ['window', 'screen'],
+        thumbnailSize: { width: 300, height: 300 },
+        fetchWindowIcons: process.platform === 'win32'
+      };
+      
+      const sources = await desktopCapturer.getSources(options);
+      const validSources = sources.filter(s => s.id && s.name !== undefined);
+      
+      return validSources;
+    } catch (error) {
+      throw error;
+    }
+  });
+  
+  ipcMain.handle('power:psb-start', () => {
+    try {
+      if (powerSaveBlockerId !== null && powerSaveBlocker.isStarted(powerSaveBlockerId)) {
+        return { success: true, id: powerSaveBlockerId };
+      }
+      powerSaveBlockerId = powerSaveBlocker.start('prevent-app-suspension');
+      return { success: true, id: powerSaveBlockerId };
+    } catch (e) {
+      return { success: false, error: e.message };
+    }
+  });
+  
+  ipcMain.handle('power:psb-stop', () => {
+    try {
+      if (powerSaveBlockerId !== null && powerSaveBlocker.isStarted(powerSaveBlockerId)) {
+        powerSaveBlocker.stop(powerSaveBlockerId);
+      }
+      powerSaveBlockerId = null;
+      return { success: true };
+    } catch (e) {
+      return { success: false, error: e.message };
+    }
+  });
+  
+  ipcMain.handle('file:save', async (_event, { filename, data, mimeType }) => {
+    try {
+      if (!fileHandler) {
+        return { success: false, error: 'File handler not initialized' };
+      }
+      
+      if (!filename || !data) {
+        throw new Error('Missing filename or data');
+      }
+      
+      const downloadPath = app.getPath('downloads');
+      const savePath = path.join(downloadPath, filename);
+      const buffer = Buffer.from(data, 'base64');
+      const result = await fileHandler.writeFile(savePath, buffer, { encoding: null });
+      
+      return { success: true, path: savePath };
+    } catch (error) {
+      return { success: false, error: error.message };
+    }
+  });
+  
+  ipcMain.handle('file:get-download-settings', () => {
+    return {
+      downloadPath: app.getPath('downloads'),
+      autoSave: true
+    };
+  });
+  
+  ipcMain.handle('file:set-download-path', async (_event, newPath) => {
+    try {
+      if (!newPath || typeof newPath !== 'string') {
+        return { success: false, error: 'Path must be a non-empty string' };
+      }
+      
+      if (!path.isAbsolute(newPath)) {
+        return { success: false, error: 'Path must be absolute' };
+      }
+      
+      if (newPath.includes('\0')) {
+        return { success: false, error: 'Path contains null bytes' };
+      }
+      
+      if (fileHandler) {
+        await fileHandler.validatePath(newPath);
+      }
+      
+      return { success: true };
+    } catch (error) {
+      return { success: false, error: error.message };
+    }
+  });
+  
+  ipcMain.handle('file:set-auto-save', (_event, autoSave) => {
+    return { success: true };
+  });
+  
+  ipcMain.handle('file:choose-download-path', async () => {
+    try {
+      const result = await dialog.showOpenDialog(mainWindow, {
+        properties: ['openDirectory'],
+        defaultPath: app.getPath('downloads')
+      });
+      
+      if (result.canceled) {
+        return { success: false, canceled: true };
+      }
+      
+      return { success: true, path: result.filePaths[0] };
+    } catch (error) {
+      return { success: false, error: error.message };
+    }
+  });
+  
+  ipcMain.handle('link:fetch-preview', async (_event, url, options = {}) => {
+    try {
+      if (!url || typeof url !== 'string') {
+        throw new Error('Invalid URL');
+      }
+      
+      const parsedUrl = new URL(url);
+      if (!['http:', 'https:'].includes(parsedUrl.protocol)) {
+        throw new Error('Only HTTP/HTTPS URLs allowed');
+      }
+      
+      const timeout = Math.min(options.timeout || 10000, 30000);
+      
+      return await new Promise((resolve, reject) => {
+        const https = require('https');
+        const req = https.get(url, { timeout }, (res) => {
+          if (res.statusCode !== 200) {
+            return resolve({ url, error: `HTTP ${res.statusCode}` });
+          }
+          
+          let data = '';
+          res.on('data', (chunk) => {
+            data += chunk;
+            if (data.length > 1048576) {
+              req.destroy();
+              resolve({ url, error: 'Response too large' });
+            }
+          });
+          
+          res.on('end', () => {
+            const titleMatch = data.match(/<title[^>]*>([^<]+)<\/title>/i);
+            const descMatch = data.match(/<meta[^>]*name=["']description["'][^>]*content=["']([^"']+)["']/i);
+            const ogTitleMatch = data.match(/<meta[^>]*property=["']og:title["'][^>]*content=["']([^"']+)["']/i);
+            const ogDescMatch = data.match(/<meta[^>]*property=["']og:description["'][^>]*content=["']([^"']+)["']/i);
+            
+            resolve({
+              url,
+              title: ogTitleMatch?.[1] || titleMatch?.[1] || parsedUrl.hostname,
+              description: ogDescMatch?.[1] || descMatch?.[1] || '',
+              success: true
+            });
+          });
+        });
+        
+        req.on('error', (error) => resolve({ url, error: error.message }));
+        req.on('timeout', () => { req.destroy(); resolve({ url, error: 'Timeout' }); });
+      });
+    } catch (error) {
+      return { url, error: error.message || 'Unknown error' };
+    }
+  });
+  
+  ipcMain.handle('shell:open-external', async (_event, url) => {
+    try {
+      if (!url || typeof url !== 'string') {
+        throw new Error('Invalid URL');
+      }
+      
+      if (!url.startsWith('http://') && !url.startsWith('https://')) {
+        throw new Error('Only HTTP/HTTPS URLs are allowed');
+      }
+      
+      if (url.length > 2048) {
+        throw new Error('URL too long');
+      }
+      
+      await shell.openExternal(url);
+      return { success: true };
+    } catch (error) {
+      return { success: false, error: error.message };
+    }
+  });
+
+  ipcMain.handle('renderer:ready', async () => {
+    return { success: true };
+  });
+
+  // Onion P2P handlers
+  try {
+    const { OnionHandler } = require('./handlers/onion-handler.cjs');
+    const onionHandler = new OnionHandler({ torManager, onInboundMessage: (msg) => {
+      try {
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.send('onion:message', msg);
+        }
+      } catch (_) {}
+    }});
+
+    ipcMain.handle('onion:create-endpoint', async (_event, args) => {
+      try {
+        const ttlSeconds = (args && typeof args.ttlSeconds === 'number') ? args.ttlSeconds : 600;
+        return await onionHandler.createEndpoint({ ttlSeconds });
+      } catch (e) {
+        return { success: false, error: e?.message || String(e) };
       }
     });
 
-    // Intercept downloads and log progress; default behavior should not navigate the page
-    contents.session.on('will-download', (event, item) => {
-      console.log('[ELECTRON] Download started:', item.getFilename());
-      item.on('done', (_e, state) => {
-        console.log('[ELECTRON] Download finished:', state);
-      });
+    ipcMain.handle('onion:send', async (_event, toUsername, payload) => {
+      try {
+        return await onionHandler.send(String(toUsername || ''), payload);
+      } catch (e) {
+        return { success: false, error: e?.message || String(e) };
+      }
     });
 
-    // Security: Prevent new window creation (legacy)
-    contents.on('new-window', (event, navigationUrl) => {
-      event.preventDefault();
-      console.log('[SECURITY] Blocked new window creation to:', navigationUrl);
+    ipcMain.handle('onion:close', async () => {
+      try { return await onionHandler.deleteEndpoint(); } catch (e) { return { success: false, error: e?.message || String(e) }; }
     });
+  } catch (e) {
+    console.error('[MAIN] Onion handler init failed:', e?.message || e);
+  }
 
-    // Security: Modern window open handler - redirect to external browser
-    contents.setWindowOpenHandler(({ url }) => {
-      console.log('[SECURITY] Redirecting window.open to external browser:', url);
-      // Use shell.openExternal to open in system browser
-      shell.openExternal(url).catch(err => {
-        console.error('[SECURITY] Failed to open URL externally:', err);
-      });
-      return { action: 'deny' }; // Deny opening in Electron
-    });
-  });
+  ipcMain.handle('webrtc:get-ice-config', async () => {
+    try {
+      const turnServers = process.env.TURN_SERVERS ? JSON.parse(process.env.TURN_SERVERS) : null;
+      const stunServers = process.env.STUN_SERVERS ? JSON.parse(process.env.STUN_SERVERS) : null;
+      const icePolicy = process.env.ICE_TRANSPORT_POLICY || 'all';
 
-  app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) {
-      createWindow();
+      const iceServers = [];
+      
+      if (stunServers && Array.isArray(stunServers)) {
+        iceServers.push(...stunServers.map(url => ({ urls: url })));
+      }
+      
+      if (turnServers && Array.isArray(turnServers)) {
+        iceServers.push(...turnServers);
+      }
+
+      if (iceServers.length === 0) {
+        return null;
+      }
+
+      return {
+        iceServers,
+        iceTransportPolicy: icePolicy
+      };
+    } catch (error) {
+      return null;
     }
   });
+}
+
+async function cleanup() {
+  try {
+    if (torManager && torManager.isTorRunning()) {
+      await torManager.stopTor();
+    }
+    
+    if (websocketHandler) {
+      await websocketHandler.disconnect();
+    }
+    
+    if (securityMiddleware) {
+      securityMiddleware.cleanup();
+    }
+  } catch (_) {}
+}
+
+app.whenReady().then(async () => {
+  try {
+    await setupSecureLogging();
+
+    registerIPCHandlers();
+
+    const handlersReady = await initializeHandlers();
+    if (!handlersReady) {
+      return fatalExit('Failed to initialize required services');
+    }
+
+    await createWindow();
+
+    setupSecurityPolicies();
+  } catch (e) {
+    return fatalExit(e?.message || 'Unexpected startup error');
+  }
+}).catch((err) => {
+  return fatalExit(err?.message || 'Startup chain failed');
 });
 
-// Quit when all windows are closed
+app.on('activate', () => {
+  if (BrowserWindow.getAllWindows().length === 0) {
+    createWindow();
+  }
+});
+
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') {
     app.quit();
@@ -422,1216 +1064,5 @@ app.on('window-all-closed', () => {
 });
 
 app.on('before-quit', async () => {
-  if (torManager.isTorRunning()) {
-    console.log('[ELECTRON] Shutting down Tor before quit...');
-    await torManager.stopTor();
-  }
+  await cleanup();
 });
-
-
-
-// IPC Handlers for Tor functionality
-ipcMain.handle('tor:check-installation', async () => {
-  try {
-    return await torManager.checkTorInstallation();
-  } catch (error) {
-    console.error('[IPC] Error checking Tor installation:', error);
-    return { isInstalled: false, error: error.message };
-  }
-});
-
-ipcMain.handle('tor:download', async () => {
-  try {
-    console.log('[IPC] Starting Tor download...');
-    const result = await torManager.downloadTor();
-    console.log('[IPC] Tor download result:', result);
-    return result;
-  } catch (error) {
-    console.error('[IPC] Error downloading Tor:', error);
-    console.error('[IPC] Error stack:', error.stack);
-    return { success: false, error: error.message };
-  }
-});
-
-ipcMain.handle('tor:install', async () => {
-  try {
-    return await torManager.installTor();
-  } catch (error) {
-    console.error('[IPC] Error installing Tor:', error);
-    return { success: false, error: error.message };
-  }
-});
-
-ipcMain.handle('tor:configure', async (event, options) => {
-  try {
-    return await torManager.configureTor(options);
-  } catch (error) {
-    console.error('[IPC] Error configuring Tor:', error);
-    return { success: false, error: error.message };
-  }
-});
-
-ipcMain.handle('tor:start', async () => {
-  try {
-    return await torManager.startTor();
-  } catch (error) {
-    console.error('[IPC] Error starting Tor:', error);
-    return { success: false, error: error.message };
-  }
-});
-
-ipcMain.handle('tor:stop', async () => {
-  try {
-    return await torManager.stopTor();
-  } catch (error) {
-    console.error('[IPC] Error stopping Tor:', error);
-    return { success: false, error: error.message };
-  }
-});
-
-ipcMain.handle('tor:status', () => {
-  try {
-    return torManager.getTorStatus();
-  } catch (error) {
-    console.error('[IPC] Error getting Tor status:', error);
-    return { isRunning: false, error: error.message };
-  }
-});
-
-ipcMain.handle('tor:uninstall', async () => {
-  try {
-    return await torManager.uninstallTor();
-  } catch (error) {
-    console.error('[IPC] Error uninstalling Tor:', error);
-    return { success: false, error: error.message };
-  }
-});
-
-ipcMain.handle('tor:info', async () => {
-  try {
-    return await torManager.getTorInfo();
-  } catch (error) {
-    console.error('[IPC] Error getting Tor info:', error);
-    return { error: error.message };
-  }
-});
-
-// Handle tor:get-info for compatibility (alias to tor:info)
-ipcMain.handle('tor:get-info', async () => {
-  // Delegate to the canonical tor:info handler
-  try {
-    return await torManager.getTorInfo();
-  } catch (error) {
-    console.error('[IPC] Error getting Tor info (via tor:get-info alias):', error);
-    return { error: error.message };
-  }
-});
-
-ipcMain.handle('tor:verify-connection', async () => {
-  try {
-    return await torManager.verifyTorConnection();
-  } catch (error) {
-    console.error('[IPC] Error verifying Tor connection:', error);
-    return { success: false, error: error.message };
-  }
-});
-
-ipcMain.handle('tor:rotate-circuit', async () => {
-  try {
-    return await torManager.rotateCircuit();
-  } catch (error) {
-    console.error('[IPC] Error rotating Tor circuit:', error);
-    return { success: false, error: error.message };
-  }
-});
-
-// Get platform info
-ipcMain.handle('system:platform', () => {
-  return {
-    platform: process.platform,
-    arch: process.arch,
-    version: process.version
-  };
-});
-
-// Handle server URL management
-ipcMain.handle('edge:set-server-url', async (event, newServerUrl) => {
-  try {
-    console.log('[ELECTRON] Setting server URL to:', newServerUrl);
-    
-    // Close existing connection if any
-    if (wsConnection) {
-      wsConnection.close();
-      wsConnection = null;
-    }
-    
-    // Update server URL
-    serverUrl = newServerUrl;
-    console.log('[ELECTRON] Server URL updated successfully');
-    
-    return { success: true, serverUrl };
-  } catch (error) {
-    console.error('[ELECTRON] Error setting server URL:', error);
-    return { success: false, error: error.message };
-  }
-});
-
-ipcMain.handle('edge:get-server-url', () => {
-  return { success: true, serverUrl };
-});
-
-// Enhanced WebSocket connection management with persistence and auto-reconnection
-// Import WebSocket once at module scope so handlers can reference WebSocket.OPEN/CONNECTING safely
-const WebSocket = require('ws');
-let wsConnection = null;
-let torSetupComplete = false;
-let serverUrl = 'wss://localhost:8443'; // Default server URL
-let isConnecting = false;
-let reconnectAttempts = 0;
-const MAX_RECONNECT_ATTEMPTS = 5;
-const RECONNECT_DELAY = 2000; // 2 seconds
-let reconnectTimer = null;
-let messageQueue = [];
-const MAX_QUEUE_SIZE = 100;
-let connectionEstablishedAt = null;
-
-// Configure Electron session to use Tor proxy for all traffic
-async function configureTorProxy() {
-  try {
-    const torInfo = await torManager.getTorInfo();
-    if (torInfo && torInfo.socksPort) {
-      const proxyConfig = {
-        proxyRules: `socks5://127.0.0.1:${torInfo.socksPort}`,
-        proxyBypassRules: '<-loopback>' // Allow local connections to bypass proxy
-      };
-      
-      console.log('[ELECTRON] Configuring Tor proxy:', proxyConfig);
-      await session.defaultSession.setProxy(proxyConfig);
-      console.log('[ELECTRON] All Electron session traffic now routes through bundled Tor');
-      return true;
-    }
-  } catch (error) {
-    console.error('[ELECTRON] Failed to configure Tor proxy:', error);
-  }
-  return false;
-}
-
-// Create stable WebSocket connection with proper error handling and reconnection
-async function createWebSocketConnection() {
-  if (isConnecting || (wsConnection && wsConnection.readyState === WebSocket.CONNECTING)) {
-    console.log('[ELECTRON] Connection already in progress');
-    return wsConnection;
-  }
-
-  if (wsConnection && wsConnection.readyState === WebSocket.OPEN) {
-    console.log('[ELECTRON] WebSocket already connected');
-    return wsConnection;
-  }
-
-  isConnecting = true;
-  console.log(`[ELECTRON] Creating new WebSocket connection to: ${serverUrl}`);
-  
-  try {
-    wsConnection = new WebSocket(serverUrl, {
-      rejectUnauthorized: false, // Accept self-signed certificates in development
-      handshakeTimeout: 10000,
-      perMessageDeflate: false
-    });
-
-    // Connection opened successfully
-    wsConnection.on('open', () => {
-      console.log('[ELECTRON] WebSocket connection established successfully');
-      isConnecting = false;
-      reconnectAttempts = 0;
-      connectionEstablishedAt = Date.now();
-      
-      // Clear any pending reconnection timer
-      if (reconnectTimer) {
-        clearTimeout(reconnectTimer);
-        reconnectTimer = null;
-      }
-
-      // Set up heartbeat mechanism
-      wsConnection.isAlive = true;
-      wsConnection.on('ping', () => {
-        wsConnection.isAlive = true;
-      });
-      
-      // Send periodic pings to keep connection alive
-      const pingInterval = setInterval(() => {
-        if (wsConnection && wsConnection.readyState === WebSocket.OPEN) {
-          wsConnection.ping();
-        } else {
-          clearInterval(pingInterval);
-        }
-      }, 25000); // Ping every 25 seconds (before server's 30-second timeout)
-      
-      wsConnection._pingInterval = pingInterval;
-      
-      // Attempt to restore previous session if this is a reconnection
-      try {
-        if (reconnectAttempts > 0) {
-          console.log('[ELECTRON] Attempting to restore previous session...');
-          wsConnection.send(JSON.stringify({ type: 'connection-restore' }));
-        }
-      } catch (error) {
-        console.error('[ELECTRON] Error attempting session restoration:', error);
-      }
-      
-      // Process any queued messages
-      if (messageQueue.length > 0) {
-        console.log(`[ELECTRON] Processing ${messageQueue.length} queued messages`);
-        const queuedMessages = [...messageQueue];
-        messageQueue.length = 0; // Clear queue
-        
-        for (const queuedMessage of queuedMessages) {
-          try {
-            if (wsConnection && wsConnection.readyState === WebSocket.OPEN) {
-              wsConnection.send(queuedMessage);
-              console.log('[ELECTRON] Sent queued message:', queuedMessage.substring(0, 100));
-            }
-          } catch (error) {
-            console.error('[ELECTRON] Error sending queued message:', error);
-            // Re-queue the message if send failed
-            if (messageQueue.length < MAX_QUEUE_SIZE) {
-              messageQueue.push(queuedMessage);
-            }
-          }
-        }
-      }
-    });
-
-    // Handle incoming messages
-    wsConnection.on('message', (data) => {
-      try {
-        const parsed = JSON.parse(data.toString());
-        console.log('[ELECTRON] Received from server:', parsed.type || 'unknown');
-        
-        // Forward to renderer process
-        if (mainWindow && !mainWindow.isDestroyed()) {
-          mainWindow.webContents.send('edge:server-message', parsed);
-        }
-      } catch (error) {
-        console.error('[ELECTRON] Error parsing server message:', error);
-      }
-    });
-
-    // Handle connection errors
-    wsConnection.on('error', (error) => {
-      console.error('[ELECTRON] WebSocket error:', error);
-      isConnecting = false;
-    });
-
-    // Handle connection close
-    wsConnection.on('close', (code, reason) => {
-      const wasConnected = connectionEstablishedAt !== null;
-      const connectionDuration = wasConnected ? Date.now() - connectionEstablishedAt : 0;
-      
-      console.log(`[ELECTRON] WebSocket connection closed - Code: ${code}, Reason: ${reason || 'none'}, Duration: ${connectionDuration}ms`);
-      
-      // Clean up ping interval
-      if (wsConnection && wsConnection._pingInterval) {
-        clearInterval(wsConnection._pingInterval);
-      }
-      
-      wsConnection = null;
-      isConnecting = false;
-      connectionEstablishedAt = null;
-      
-      // Only attempt reconnection if Tor setup is complete and we haven't exceeded max attempts
-      if (torSetupComplete && reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
-        reconnectAttempts++;
-        console.log(`[ELECTRON] Scheduling reconnection attempt ${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS} in ${RECONNECT_DELAY}ms`);
-        
-        reconnectTimer = setTimeout(() => {
-          console.log('[ELECTRON] Attempting to reconnect...');
-          createWebSocketConnection().catch(error => {
-            console.error('[ELECTRON] Reconnection failed:', error);
-          });
-        }, RECONNECT_DELAY * reconnectAttempts); // Exponential backoff
-      } else if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
-        console.error('[ELECTRON] Max reconnection attempts reached, giving up');
-        // Notify renderer of persistent connection failure
-        if (mainWindow && !mainWindow.isDestroyed()) {
-          mainWindow.webContents.send('edge:server-message', {
-            type: 'connection-failed',
-            error: 'Max reconnection attempts reached',
-            attempts: reconnectAttempts
-          });
-        }
-      }
-    });
-
-    // Wait for connection to be established or fail
-    await new Promise((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        isConnecting = false;
-        reject(new Error('Connection timeout'));
-      }, 10000);
-      
-      wsConnection.once('open', () => {
-        clearTimeout(timeout);
-        resolve(wsConnection);
-      });
-      
-      wsConnection.once('error', (error) => {
-        clearTimeout(timeout);
-        isConnecting = false;
-        reject(error);
-      });
-    });
-
-    return wsConnection;
-    
-  } catch (error) {
-    isConnecting = false;
-    console.error('[ELECTRON] Failed to create WebSocket connection:', error);
-    throw error;
-  }
-}
-
-ipcMain.handle('edge:ws-send', async (event, payload) => {
-  try {
-    // Check if Tor setup is complete before attempting connection
-    if (!torSetupComplete) {
-      console.log('[ELECTRON] WebSocket connection blocked - Tor setup not complete');
-      return { success: false, error: 'Tor setup not complete' };
-    }
-
-    // Ensure we have a stable connection before sending
-    if (!wsConnection || wsConnection.readyState !== WebSocket.OPEN) {
-      console.log('[ELECTRON] WebSocket not connected, establishing connection...');
-      await createWebSocketConnection();
-    }
-
-    // Prepare message for sending
-    const message = typeof payload === 'string' ? payload : JSON.stringify(payload);
-    
-    // Send message if connection is ready
-    if (wsConnection && wsConnection.readyState === WebSocket.OPEN) {
-      wsConnection.send(message);
-      console.log('[ELECTRON] Sent to server:', message.substring(0, 100));
-      return { success: true };
-    } else {
-      // Queue message if connection is not ready but Tor is set up
-      if (messageQueue.length < MAX_QUEUE_SIZE) {
-        messageQueue.push(message);
-        console.log('[ELECTRON] Message queued for later delivery');
-        return { success: true, queued: true };
-      } else {
-        console.error('[ELECTRON] Message queue full, dropping message');
-        return { success: false, error: 'Message queue full' };
-      }
-    }
-  } catch (error) {
-    console.error('[ELECTRON] Error sending websocket message:', error);
-    return { success: false, error: error.message };
-  }
-});
-
-// Explicitly connect the WebSocket without sending any payload
-ipcMain.handle('edge:ws-connect', async () => {
-  try {
-    // Check if Tor setup is complete before attempting connection
-    if (!torSetupComplete) {
-      console.log('[ELECTRON] WebSocket connection blocked - Tor setup not complete');
-      return { success: false, error: 'Tor setup not complete' };
-    }
-
-    // Use the new stable connection management
-    if (wsConnection && wsConnection.readyState === WebSocket.OPEN) {
-      console.log('[ELECTRON] WebSocket already connected');
-      return { success: true, alreadyConnected: true };
-    }
-
-    console.log('[ELECTRON] Establishing WebSocket connection...');
-    await createWebSocketConnection();
-    
-    return { success: true, newConnection: true };
-  } catch (error) {
-    console.error('[ELECTRON] Error connecting websocket:', error);
-    return { success: false, error: error.message };
-  }
-});
-
-// Minimal in-memory Signal-like session management and crypto placeholders
-const crypto = require('crypto');
-const signalState = {
-  identities: new Map(), // username -> identity/bundle
-  sessions: new Map(), // sortedPairKey -> { sessionId }
-};
-
-function sortedPairKey(a, b) {
-  return [String(a || ''), String(b || '')].sort().join('|');
-}
-
-function randomBase64(bytes) {
-  return crypto.randomBytes(bytes).toString('base64');
-}
-
-ipcMain.handle('signal:generate-identity', async (_event, { username } = {}) => {
-  try {
-    const registrationId = Math.floor(Math.random() * 1_000_000_000);
-    const deviceId = 1;
-    const identityKeyBase64 = randomBase64(32);
-    signalState.identities.set(username, {
-      registrationId,
-      deviceId,
-      identityKeyBase64,
-    });
-    return { success: true, registrationId, deviceId };
-  } catch (error) {
-    return { success: false, error: error.message };
-  }
-});
-
-ipcMain.handle('signal:generate-prekeys', async (_event, { username } = {}) => {
-  try {
-    const id = `${Date.now()}`;
-    const publicKeyBase64 = randomBase64(32);
-    const ed25519SignatureBase64 = randomBase64(64);
-    const dilithiumSignatureBase64 = randomBase64(64);
-    const kyberPreKeyId = 1;
-    const kyberPreKeyPublicBase64 = randomBase64(32);
-    const kyberPreKeySignatureBase64 = randomBase64(64);
-    // Generate ~100 one-time prekeys
-    const oneTimePreKeys = Array.from({ length: 100 }, (_, i) => ({ id: i + 1, publicKeyBase64: randomBase64(32) }));
-    const existing = signalState.identities.get(username) || {};
-    signalState.identities.set(username, {
-      ...existing,
-      signedPreKey: { id, publicKeyBase64, ed25519SignatureBase64, dilithiumSignatureBase64 },
-      kyber: { id: kyberPreKeyId, publicKeyBase64: kyberPreKeyPublicBase64, signatureBase64: kyberPreKeySignatureBase64 },
-      oneTimePreKeys,
-      updatedAt: Date.now(),
-    });
-    return { success: true, count: oneTimePreKeys.length };
-  } catch (error) {
-    return { success: false, error: error.message };
-  }
-});
-
-ipcMain.handle('signal:get-prekey-bundle', async (_event, { username } = {}) => {
-  try {
-    const entry = signalState.identities.get(username) || {};
-    const bundle = {
-      registrationId: entry.registrationId ?? Math.floor(Math.random() * 1_000_000_000),
-      deviceId: entry.deviceId ?? 1,
-      identityKeyBase64: entry.identityKeyBase64 ?? randomBase64(32),
-      preKeyId: entry.preKeyId ?? null,
-      preKeyPublicBase64: entry.preKeyPublicBase64 ?? null,
-      signedPreKeyId: entry.signedPreKey?.id ?? '1',
-      signedPreKeyPublicBase64: entry.signedPreKey?.publicKeyBase64 ?? randomBase64(32),
-      signedPreKeySignatureBase64: entry.signedPreKey?.ed25519SignatureBase64 ?? randomBase64(64),
-      kyberPreKeyId: entry.kyber?.id ?? 1,
-      kyberPreKeyPublicBase64: entry.kyber?.publicKeyBase64 ?? randomBase64(32),
-      kyberPreKeySignatureBase64: entry.kyber?.signatureBase64 ?? randomBase64(64),
-      oneTimePreKeys: Array.isArray(entry.oneTimePreKeys) ? entry.oneTimePreKeys : [],
-    };
-    return bundle;
-  } catch (error) {
-    return { success: false, error: error.message };
-  }
-});
-
-ipcMain.handle('signal:process-prekey-bundle', async (_event, { selfUsername, peerUsername } = {}) => {
-  try {
-    const key = sortedPairKey(selfUsername, peerUsername);
-    if (!signalState.sessions.has(key)) {
-      signalState.sessions.set(key, { sessionId: randomBase64(12), establishedAt: Date.now() });
-    }
-    return { success: true };
-  } catch (error) {
-    return { success: false, error: error.message };
-  }
-});
-
-ipcMain.handle('signal:has-session', async (_event, { selfUsername, peerUsername } = {}) => {
-  try {
-    const key = sortedPairKey(selfUsername, peerUsername);
-    const hasSession = signalState.sessions.has(key);
-    return { success: true, hasSession };
-  } catch (error) {
-    return { success: false, error: error.message };
-  }
-});
-
-ipcMain.handle('signal:encrypt', async (_event, { fromUsername, toUsername, plaintext } = {}) => {
-  try {
-    const key = sortedPairKey(fromUsername, toUsername);
-    if (!signalState.sessions.has(key)) {
-      signalState.sessions.set(key, { sessionId: randomBase64(12), establishedAt: Date.now() });
-    }
-    const session = signalState.sessions.get(key);
-    const ciphertextBase64 = Buffer.from(String(plaintext) ?? '', 'utf8').toString('base64');
-    return { type: 1, sessionId: session.sessionId, ciphertextBase64 };
-  } catch (error) {
-    return { success: false, error: error.message };
-  }
-});
-
-ipcMain.handle('signal:decrypt', async (_event, { ciphertextBase64 } = {}) => {
-  try {
-    const plaintext = Buffer.from(String(ciphertextBase64 || ''), 'base64').toString('utf8');
-    return { plaintext };
-  } catch (error) {
-    return { success: false, error: error.message };
-  }
-});
-
-ipcMain.handle('renderer:ready', async () => {
-  console.log('[ELECTRON] Renderer process ready');
-  return { success: true };
-});
-
-
-
-// Handle Tor setup completion notification
-ipcMain.handle('tor:setup-complete', async () => {
-  console.log('[ELECTRON] Tor setup marked as complete');
-  torSetupComplete = true;
-  return { success: true };
-});
-
-// Handle app info requests
-ipcMain.handle('app:version', () => {
-  return app.getVersion();
-});
-
-ipcMain.handle('app:name', () => {
-  return app.getName();
-});
-
-// Power save blocker controls for calls
-let psbId = null;
-ipcMain.handle('power:psb-start', () => {
-  try {
-    if (psbId !== null && powerSaveBlocker.isStarted(psbId)) {
-      return { success: true, id: psbId };
-    }
-    psbId = powerSaveBlocker.start('prevent-app-suspension');
-    console.log('[POWER] Power save blocker started:', psbId);
-    return { success: true, id: psbId };
-  } catch (e) {
-    console.error('[POWER] Failed to start power save blocker:', e);
-    return { success: false, error: e.message };
-  }
-});
-
-ipcMain.handle('power:psb-stop', () => {
-  try {
-    if (psbId !== null && powerSaveBlocker.isStarted(psbId)) {
-      powerSaveBlocker.stop(psbId);
-      console.log('[POWER] Power save blocker stopped:', psbId);
-    }
-    psbId = null;
-    return { success: true };
-  } catch (e) {
-    console.error('[POWER] Failed to stop power save blocker:', e);
-    return { success: false, error: e.message };
-  }
-});
-
-// Handle edge: IPC methods for compatibility with preload.js
-ipcMain.handle('edge:encrypt', async (_event, args) => {
-  try {
-    // Use the same logic as signal:encrypt
-    const plaintext = Buffer.from(String(args?.plaintext || ''), 'utf8').toString('base64');
-    return { ciphertextBase64: plaintext };
-  } catch (error) {
-    console.error('[IPC] Error in edge:encrypt:', error);
-    return { success: false, error: error.message };
-  }
-});
-
-ipcMain.handle('edge:decrypt', async (_event, args) => {
-  try {
-    // Use the same logic as signal:decrypt
-    const plaintext = Buffer.from(String(args?.ciphertextBase64 || ''), 'base64').toString('utf8');
-    return { plaintext };
-  } catch (error) {
-    console.error('[IPC] Error in edge:decrypt:', error);
-    return { success: false, error: error.message };
-  }
-});
-
-ipcMain.handle('edge:setupSession', async (_event, args) => {
-  try {
-    console.log('[IPC] edge:setupSession called with args:', args);
-    return { success: true, message: 'Session setup placeholder' };
-  } catch (error) {
-    console.error('[IPC] Error in edge:setupSession:', error);
-    return { success: false, error: error.message };
-  }
-});
-
-ipcMain.handle('edge:publishBundle', async (_event, args) => {
-  try {
-    console.log('[IPC] edge:publishBundle called with args:', args);
-    return { success: true, message: 'Bundle publish placeholder' };
-  } catch (error) {
-    console.error('[IPC] Error in edge:publishBundle:', error);
-    return { success: false, error: error.message };
-  }
-});
-
-ipcMain.handle('edge:requestBundle', async (_event, args) => {
-  try {
-    console.log('[IPC] edge:requestBundle called with args:', args);
-    return { success: true, message: 'Bundle request placeholder' };
-  } catch (error) {
-    console.error('[IPC] Error in edge:requestBundle:', error);
-    return { success: false, error: error.message };
-  }
-});
-
-// Handle screen sharing
-ipcMain.handle('screen:getSources', async () => {
-  try {
-    console.log('[ELECTRON] ===== SCREEN SOURCES REQUEST RECEIVED =====');
-    console.log('[ELECTRON] Getting screen sources...');
-    const sources = await desktopCapturer.getSources({
-      types: ['window', 'screen'],
-      thumbnailSize: { width: 150, height: 150 }
-    });
-    console.log('[ELECTRON] Found', sources.length, 'screen sources');
-    console.log('[ELECTRON] Sources:', sources.map(s => ({ id: s.id, name: s.name })));
-    return sources;
-  } catch (error) {
-    console.error('[ELECTRON] Error getting screen sources:', error);
-    throw error;
-  }
-});
-
-// Test handler for debugging
-ipcMain.on('test-screen-sources', (event, data) => {
-  console.log('[ELECTRON] ===== TEST SCREEN SOURCES RECEIVED =====');
-  console.log('[ELECTRON] Test data:', data);
-  event.reply('test-screen-sources-reply', { success: true, message: 'IPC is working!' });
-});
-
-// File download settings
-let downloadSettings = {
-  downloadPath: getDefaultDownloadPath(),
-  autoSave: true
-};
-
-function getDefaultDownloadPath() {
-  switch (process.platform) {
-    case 'win32':
-      return path.join(os.homedir(), 'Downloads');
-    case 'darwin':
-      return path.join(os.homedir(), 'Downloads');
-    case 'linux':
-      return path.join(os.homedir(), 'Downloads');
-    default:
-      return path.join(os.homedir(), 'Downloads');
-  }
-}
-
-// File download handlers
-ipcMain.handle('file:save', async (event, { filename, data, mimeType }) => {
-  try {
-    console.log('[ELECTRON] Saving file:', { 
-      filename, 
-      dataLength: data?.length, 
-      mimeType,
-      downloadPath: downloadSettings.downloadPath,
-      autoSave: downloadSettings.autoSave
-    });
-    
-    if (!filename || !data) {
-      throw new Error('Missing filename or data');
-    }
-    
-    let savePath;
-    if (downloadSettings.autoSave) {
-      // Auto-save to configured download directory
-      savePath = path.join(downloadSettings.downloadPath, filename);
-      
-      // Ensure directory exists
-      if (!fs.existsSync(downloadSettings.downloadPath)) {
-        console.log('[ELECTRON] Creating download directory:', downloadSettings.downloadPath);
-        fs.mkdirSync(downloadSettings.downloadPath, { recursive: true });
-      }
-      
-      // Handle duplicate filenames
-      let counter = 1;
-      let originalPath = savePath;
-      while (fs.existsSync(savePath)) {
-        const ext = path.extname(filename);
-        const name = path.basename(filename, ext);
-        savePath = path.join(downloadSettings.downloadPath, `${name} (${counter})${ext}`);
-        counter++;
-      }
-      console.log('[ELECTRON] Final save path:', savePath);
-    } else {
-      // Show save dialog
-      const result = await dialog.showSaveDialog(mainWindow, {
-        defaultPath: path.join(downloadSettings.downloadPath, filename),
-        filters: [
-          { name: 'All Files', extensions: ['*'] }
-        ]
-      });
-      
-      if (result.canceled) {
-        console.log('[ELECTRON] Save dialog canceled');
-        return { success: false, canceled: true };
-      }
-      
-      savePath = result.filePath;
-      console.log('[ELECTRON] User selected save path:', savePath);
-    }
-    
-    // Convert base64 data to buffer and save
-    console.log('[ELECTRON] Converting base64 to buffer...');
-    const buffer = Buffer.from(data, 'base64');
-    console.log('[ELECTRON] Buffer created, size:', buffer.length);
-    
-    fs.writeFileSync(savePath, buffer);
-    
-    console.log('[ELECTRON] File saved successfully to:', savePath);
-    return { success: true, path: savePath };
-  } catch (error) {
-    console.error('[ELECTRON] Error saving file:', error);
-    return { success: false, error: error.message };
-  }
-});
-
-ipcMain.handle('file:get-download-settings', () => {
-  return downloadSettings;
-});
-
-ipcMain.handle('file:set-download-path', async (event, newPath) => {
-  try {
-    // Input validation
-    if (!newPath || typeof newPath !== 'string') {
-      return { success: false, error: 'Path must be a non-empty string' };
-    }
-
-    // Require absolute path
-    if (!path.isAbsolute(newPath)) {
-      return { success: false, error: 'Path must be absolute' };
-    }
-
-    // Check for null bytes in raw input
-    if (newPath.includes('\0')) {
-      return { success: false, error: 'Path contains null bytes' };
-    }
-
-    // Validate raw path segments before normalization to catch traversal attempts
-    const pathSegments = newPath.split(path.sep);
-    for (const segment of pathSegments) {
-      if (segment === '..') {
-        return { success: false, error: 'Path contains directory traversal sequences' };
-      }
-    }
-
-    // Normalize and resolve path
-    const resolved = path.resolve(newPath);
-
-    // Additional safety check: ensure resolved path is within reasonable bounds
-    // This catches any remaining traversal attempts after resolution
-    const userHomeDir = require('os').homedir();
-    const commonBaseDirs = [userHomeDir, '/tmp', '/var/tmp'];
-    let isWithinAllowedBase = false;
-    
-    for (const baseDir of commonBaseDirs) {
-      const resolvedBase = path.resolve(baseDir);
-      if (resolved.startsWith(resolvedBase)) {
-        isWithinAllowedBase = true;
-        break;
-      }
-    }
-    
-    // Allow paths in common system locations or user directories
-    if (!isWithinAllowedBase && !resolved.startsWith('/home/') && !resolved.startsWith('/Users/')) {
-      return { success: false, error: 'Path is outside allowed directories' };
-    }
-
-    // Validate path exists or can be created
-    if (!fs.existsSync(resolved)) {
-      fs.mkdirSync(resolved, { recursive: true });
-    }
-    
-    downloadSettings.downloadPath = resolved;
-    return { success: true };
-  } catch (error) {
-    console.error('[ELECTRON] Error setting download path:', error);
-    return { success: false, error: error.message };
-  }
-});
-
-ipcMain.handle('file:set-auto-save', (event, autoSave) => {
-  downloadSettings.autoSave = autoSave;
-  return { success: true };
-});
-
-ipcMain.handle('file:choose-download-path', async () => {
-  try {
-    const result = await dialog.showOpenDialog(mainWindow, {
-      properties: ['openDirectory'],
-      defaultPath: downloadSettings.downloadPath
-    });
-    
-    if (result.canceled) {
-      return { success: false, canceled: true };
-    }
-    
-    return { success: true, path: result.filePaths[0] };
-  } catch (error) {
-    console.error('[ELECTRON] Error choosing download path:', error);
-    return { success: false, error: error.message };
-  }
-});
-
-// Link Preview Handler - Uses bundled Tor proxy for secure fetching
-ipcMain.handle('link:fetch-preview', async (event, url, options = {}) => {
-  try {
-    const { timeout = 10000, userAgent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36', maxRedirects = 5 } = options;
-
-    console.log('[LINK-PREVIEW] Fetching preview for:', url);
-
-    // Check if Tor is running before attempting to use it
-    if (!torManager.isTorRunning()) {
-      console.warn('[LINK-PREVIEW] Tor is not running, cannot fetch preview securely');
-      return { error: 'Tor proxy not available' };
-    }
-
-    // Get current Tor SOCKS port
-    let socksPort = torManager.effectiveSocksPort;
-    if (!socksPort) {
-      // Try to get port from Tor info
-      try {
-        const torInfo = await torManager.getTorInfo();
-        socksPort = torInfo.socksPort || 9150; // Default to 9150 for bundled Tor
-      } catch (error) {
-        console.warn('[LINK-PREVIEW] Could not get Tor info, using default port');
-        socksPort = 9150;
-      }
-    }
-
-    console.log('[LINK-PREVIEW] Using Tor SOCKS proxy on port:', socksPort);
-
-    // Use bundled Tor proxy for the request
-    const { SocksProxyAgent } = require('socks-proxy-agent');
-    const https = require('https');
-    const http = require('http');
-    const { URL } = require('url');
-    const zlib = require('zlib');
-    
-    const proxyAgent = new SocksProxyAgent(`socks5h://127.0.0.1:${socksPort}`);
-    
-    return new Promise((resolve) => {
-      try {
-        const parsedUrl = new URL(url);
-        const isHttps = parsedUrl.protocol === 'https:';
-        const client = isHttps ? https : http;
-        
-        const requestOptions = {
-          agent: proxyAgent,
-          timeout: timeout,
-          headers: {
-            'User-Agent': userAgent,
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-            'Accept-Language': 'en-US,en;q=0.5',
-            'Accept-Encoding': 'gzip, deflate, br',
-            'DNT': '1',
-            'Connection': 'close',
-            'Sec-Fetch-Dest': 'document',
-            'Sec-Fetch-Mode': 'navigate',
-            'Sec-Fetch-Site': 'none'
-          }
-        };
-        
-        const req = client.get(url, requestOptions, (res) => {
-          let data = Buffer.alloc(0);
-          let redirectCount = 0;
-
-          console.log(`[LINK-PREVIEW] Response status: ${res.statusCode}`);
-          console.log(`[LINK-PREVIEW] Response headers:`, res.headers);
-
-          // Handle redirects
-          if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-            if (redirectCount >= maxRedirects) {
-              resolve({ error: 'Too many redirects' });
-              return;
-            }
-
-            redirectCount++;
-            const redirectUrl = new URL(res.headers.location, url).href;
-            console.log(`[LINK-PREVIEW] Redirecting to: ${redirectUrl}`);
-
-            // Recursively handle redirect (simplified - in production you'd want proper redirect handling)
-            resolve({ error: 'Redirect handling not implemented in this version' });
-            return;
-          }
-
-          if (res.statusCode !== 200) {
-            console.log(`[LINK-PREVIEW] Non-200 status code: ${res.statusCode}`);
-            resolve({ error: `HTTP ${res.statusCode}` });
-            return;
-          }
-
-          // Check content type
-          const contentType = res.headers['content-type'] || '';
-          console.log(`[LINK-PREVIEW] Content type: ${contentType}`);
-          if (!contentType.includes('text/html') && !contentType.includes('application/xhtml')) {
-            console.log(`[LINK-PREVIEW] Not HTML content: ${contentType}`);
-            resolve({ error: 'Not HTML content' });
-            return;
-          }
-
-          // Handle compressed responses
-          const encoding = res.headers['content-encoding'];
-          console.log(`[LINK-PREVIEW] Content encoding: ${encoding}`);
-
-          res.on('data', chunk => {
-            data = Buffer.concat([data, chunk]);
-            // Limit response size to prevent memory issues
-            if (data.length > 1024 * 1024) { // 1MB limit
-              res.destroy();
-              resolve({ error: 'Response too large' });
-            }
-          });
-          
-          res.on('end', () => {
-            try {
-              let htmlContent = '';
-
-              // Decompress the response based on encoding
-              if (encoding === 'gzip') {
-                console.log('[LINK-PREVIEW] Decompressing gzip content...');
-                htmlContent = zlib.gunzipSync(data).toString('utf8');
-              } else if (encoding === 'deflate') {
-                console.log('[LINK-PREVIEW] Decompressing deflate content...');
-                htmlContent = zlib.inflateSync(data).toString('utf8');
-              } else if (encoding === 'br') {
-                console.log('[LINK-PREVIEW] Decompressing brotli content...');
-                htmlContent = zlib.brotliDecompressSync(data).toString('utf8');
-              } else {
-                console.log('[LINK-PREVIEW] No compression, using raw content...');
-                htmlContent = data.toString('utf8');
-              }
-
-              console.log(`[LINK-PREVIEW] Decompressed HTML length: ${htmlContent.length}`);
-              console.log(`[LINK-PREVIEW] HTML preview (first 500 chars): ${htmlContent.substring(0, 500)}`);
-
-              const preview = parseHtmlForPreview(htmlContent, url);
-              console.log('[LINK-PREVIEW] Successfully parsed preview:', preview);
-              resolve(preview);
-            } catch (parseError) {
-              console.error('[LINK-PREVIEW] Parse error:', parseError);
-              resolve({ error: 'Failed to parse HTML' });
-            }
-          });
-        });
-        
-        req.on('error', (error) => {
-          console.error('[LINK-PREVIEW] Request error:', error);
-          resolve({ error: error.message || 'Request failed' });
-        });
-        
-        req.on('timeout', () => {
-          req.destroy();
-          resolve({ error: 'Request timeout' });
-        });
-        
-      } catch (error) {
-        console.error('[LINK-PREVIEW] Setup error:', error);
-        resolve({ error: error.message || 'Failed to setup request' });
-      }
-    });
-    
-  } catch (error) {
-    console.error('[LINK-PREVIEW] Handler error:', error);
-    return { error: error.message || 'Unknown error' };
-  }
-});
-
-// HTML parsing function for link previews
-function parseHtmlForPreview(html, url) {
-  const preview = { url };
-
-  try {
-    console.log('[LINK-PREVIEW] Parsing HTML for URL:', url);
-    console.log('[LINK-PREVIEW] HTML length:', html.length);
-    console.log('[LINK-PREVIEW] HTML preview (first 500 chars):', html.substring(0, 500));
-
-    // Simple regex-based HTML parsing (for production, consider using a proper HTML parser)
-
-    // Extract title
-    const titleMatch = html.match(/<title[^>]*>(.*?)<\/title>/is);
-    if (titleMatch) {
-      preview.title = decodeHtmlEntities(titleMatch[1].trim());
-      console.log('[LINK-PREVIEW] Found title:', preview.title);
-    } else {
-      console.log('[LINK-PREVIEW] No title found');
-    }
-
-    // Extract Open Graph tags - improved regex patterns
-    // Try both property-first and content-first patterns
-    let ogTitleMatch = html.match(/<meta[^>]*property=["']og:title["'][^>]*content=["']([^"']*?)["']/i);
-    if (!ogTitleMatch) {
-      ogTitleMatch = html.match(/<meta[^>]*content=["']([^"']*?)["'][^>]*property=["']og:title["']/i);
-    }
-    if (ogTitleMatch) {
-      preview.title = decodeHtmlEntities(ogTitleMatch[1]);
-      console.log('[LINK-PREVIEW] Found OG title:', preview.title);
-    }
-
-    let ogDescMatch = html.match(/<meta[^>]*property=["']og:description["'][^>]*content=["']([^"']*?)["']/i);
-    if (!ogDescMatch) {
-      ogDescMatch = html.match(/<meta[^>]*content=["']([^"']*?)["'][^>]*property=["']og:description["']/i);
-    }
-    if (ogDescMatch) {
-      preview.description = decodeHtmlEntities(ogDescMatch[1]);
-      console.log('[LINK-PREVIEW] Found OG description:', preview.description);
-    }
-
-    let ogImageMatch = html.match(/<meta[^>]*property=["']og:image["'][^>]*content=["']([^"']*?)["']/i);
-    if (!ogImageMatch) {
-      ogImageMatch = html.match(/<meta[^>]*content=["']([^"']*?)["'][^>]*property=["']og:image["']/i);
-    }
-    if (ogImageMatch) {
-      preview.image = resolveUrl(ogImageMatch[1], url);
-      console.log('[LINK-PREVIEW] Found OG image:', preview.image);
-    }
-
-    let ogSiteMatch = html.match(/<meta[^>]*property=["']og:site_name["'][^>]*content=["']([^"']*?)["']/i);
-    if (!ogSiteMatch) {
-      ogSiteMatch = html.match(/<meta[^>]*content=["']([^"']*?)["'][^>]*property=["']og:site_name["']/i);
-    }
-    if (ogSiteMatch) {
-      preview.siteName = decodeHtmlEntities(ogSiteMatch[1]);
-      console.log('[LINK-PREVIEW] Found OG site name:', preview.siteName);
-    }
-
-    // Fallback to standard meta tags
-    if (!preview.description) {
-      let descMatch = html.match(/<meta[^>]*name=["']description["'][^>]*content=["']([^"']*?)["']/i);
-      if (!descMatch) {
-        descMatch = html.match(/<meta[^>]*content=["']([^"']*?)["'][^>]*name=["']description["']/i);
-      }
-      if (descMatch) {
-        preview.description = decodeHtmlEntities(descMatch[1]);
-        console.log('[LINK-PREVIEW] Found meta description:', preview.description);
-      } else {
-        console.log('[LINK-PREVIEW] No description found');
-      }
-    }
-    
-    // Additional fallbacks for Twitter Card meta tags
-    if (!preview.title) {
-      const twitterTitleMatch = html.match(/<meta[^>]*name=["']twitter:title["'][^>]*content=["']([^"']*?)["']/i);
-      if (twitterTitleMatch) {
-        preview.title = decodeHtmlEntities(twitterTitleMatch[1]);
-        console.log('[LINK-PREVIEW] Found Twitter title:', preview.title);
-      }
-    }
-
-    if (!preview.description) {
-      const twitterDescMatch = html.match(/<meta[^>]*name=["']twitter:description["'][^>]*content=["']([^"']*?)["']/i);
-      if (twitterDescMatch) {
-        preview.description = decodeHtmlEntities(twitterDescMatch[1]);
-        console.log('[LINK-PREVIEW] Found Twitter description:', preview.description);
-      }
-    }
-
-    if (!preview.image) {
-      const twitterImageMatch = html.match(/<meta[^>]*name=["']twitter:image["'][^>]*content=["']([^"']*?)["']/i);
-      if (twitterImageMatch) {
-        preview.image = resolveUrl(twitterImageMatch[1], url);
-        console.log('[LINK-PREVIEW] Found Twitter image:', preview.image);
-      }
-    }
-
-    // Extract favicon
-    const faviconMatch = html.match(/<link[^>]*rel=["'](?:shortcut icon|icon)["'][^>]*href=["']([^"']*?)["']/i);
-    if (faviconMatch) {
-      preview.faviconUrl = resolveUrl(faviconMatch[1], url);
-    } else {
-      // Fallback to default favicon location
-      try {
-        const { URL } = require('url');
-        const parsedUrl = new URL(url);
-        preview.faviconUrl = `${parsedUrl.protocol}//${parsedUrl.host}/favicon.ico`;
-      } catch (e) {
-        // Ignore favicon errors
-      }
-    }
-    
-    // Limit text lengths
-    if (preview.title && preview.title.length > 100) {
-      preview.title = preview.title.substring(0, 97) + '...';
-    }
-    if (preview.description && preview.description.length > 200) {
-      preview.description = preview.description.substring(0, 197) + '...';
-    }
-
-    console.log('[LINK-PREVIEW] Final preview object:', preview);
-    return preview;
-  } catch (error) {
-    console.error('[LINK-PREVIEW] HTML parsing error:', error);
-    return { url, error: 'Failed to parse HTML content' };
-  }
-}
-
-// Helper function to decode HTML entities
-function decodeHtmlEntities(text) {
-  const entities = {
-    '&amp;': '&',
-    '&lt;': '<',
-    '&gt;': '>',
-    '&quot;': '"',
-    '&#39;': "'",
-    '&apos;': "'",
-    '&nbsp;': ' '
-  };
-  
-  return text.replace(/&[#\w]+;/g, (entity) => {
-    return entities[entity] || entity;
-  });
-}
-
-// Helper function to resolve relative URLs
-function resolveUrl(relativeUrl, baseUrl) {
-  try {
-    const { URL } = require('url');
-    return new URL(relativeUrl, baseUrl).href;
-  } catch (error) {
-    return relativeUrl;
-  }
-}
-
-// External URL handler - secure opening of links
-ipcMain.handle('shell:open-external', async (event, url) => {
-  try {
-    // Validate URL for security
-    if (!url || typeof url !== 'string') {
-      throw new Error('Invalid URL');
-    }
-    
-    // Only allow HTTP/HTTPS URLs
-    if (!url.startsWith('http://') && !url.startsWith('https://')) {
-      throw new Error('Only HTTP/HTTPS URLs are allowed');
-    }
-    
-    // Limit URL length
-    if (url.length > 2048) {
-      throw new Error('URL too long');
-    }
-    
-    console.log('[ELECTRON] Opening external URL:', url);
-    await shell.openExternal(url);
-    return { success: true };
-  } catch (error) {
-    console.error('[ELECTRON] Error opening external URL:', error);
-    return { success: false, error: error.message };
-  }
-});
-
-console.log('[ELECTRON] Main process started');
-console.log('[ELECTRON] Platform:', process.platform);
-console.log('[ELECTRON] Architecture:', process.arch);
-console.log('[ELECTRON] Development mode:', isDev);
-console.log('[ELECTRON] Default download path:', downloadSettings.downloadPath);

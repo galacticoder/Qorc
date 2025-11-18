@@ -1,23 +1,78 @@
 import { useCallback, useEffect, useRef } from 'react';
 import { Message } from '@/components/chat/types';
 
+const MAX_TRACKED_ORIGINS = 5000;
+const MAX_REPLIES_PER_ORIGIN = 250;
+const RATE_LIMIT_WINDOW_MS = 10_000;
+const RATE_LIMIT_MAX_EVENTS = 100;
+
+const sanitizeMessageId = (value: unknown): string | null => {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  if (!trimmed || trimmed.length > 160) return null;
+  return trimmed;
+};
+
+const sanitizeContent = (value: unknown): string | null => {
+  if (typeof value !== 'string') return null;
+  const normalized = value.normalize('NFC').replace(/[\u0000-\u001F\u007F]/g, '').slice(0, 10000);
+  return normalized.length ? normalized : null;
+};
+
+const createReplyUpdateError = (code: string) => {
+  const error = new Error(code);
+  error.name = 'ReplyUpdatesError';
+  (error as Error & { code?: string }).code = code;
+  return error;
+};
+
+const isPlainObject = (value: unknown): value is Record<string, unknown> => {
+  if (typeof value !== 'object' || value === null) return false;
+  const proto = Object.getPrototypeOf(value);
+  return proto === Object.prototype || proto === null;
+};
+
+const hasPrototypePollutionKeys = (obj: Record<string, unknown>): boolean => {
+  return ['__proto__', 'prototype', 'constructor'].some(key => Object.prototype.hasOwnProperty.call(obj, key));
+};
+
+const validateEventDetail = (detail: unknown): detail is { messageId: string; newContent?: string } => {
+  if (!isPlainObject(detail)) return false;
+  if (hasPrototypePollutionKeys(detail)) return false;
+  return typeof detail.messageId === 'string';
+};
+
+const trimOriginMap = (map: Map<string, Set<string>>): void => {
+  if (map.size <= MAX_TRACKED_ORIGINS) return;
+  const iterator = map.keys();
+  while (map.size > MAX_TRACKED_ORIGINS) {
+    const next = iterator.next();
+    if (next.done) break;
+    map.delete(next.value);
+  }
+};
+
 /**
  * Hook for managing efficient reply field updates when messages are edited
  * Maintains a reverse mapping of messageId -> [replyingMessageIds] for O(1) lookups
  */
 export const useReplyUpdates = (
   messages: Message[],
-  onMessagesUpdate: (updatedMessages: Message[]) => void
+  onMessagesUpdate: React.Dispatch<React.SetStateAction<Message[]>>,
+  persistMessage?: (msg: Message) => Promise<void>
 ) => {
-  // Reverse mapping: original message ID -> array of message IDs that reply to it
-  const replyMappingRef = useRef<Map<string, string[]>>(new Map());
+// Reverse mapping: original message ID -> set of message IDs that reply to it
+const replyMappingRef = useRef<Map<string, Set<string>>>(new Map());
   
   // Index of messages by ID for fast lookup
   const messageIndexRef = useRef<Map<string, number>>(new Map());
 
+  // Rate limiting state
+  const rateLimitRef = useRef<{ windowStart: number; count: number }>({ windowStart: Date.now(), count: 0 });
+
   // Build and maintain the reply mapping whenever messages change
   useEffect(() => {
-    const replyMapping = new Map<string, string[]>();
+    const replyMapping = new Map<string, Set<string>>();
     const messageIndex = new Map<string, number>();
 
     messages.forEach((message, index) => {
@@ -28,133 +83,166 @@ export const useReplyUpdates = (
       if (message.replyTo?.id) {
         const replyToId = message.replyTo.id;
         if (!replyMapping.has(replyToId)) {
-          replyMapping.set(replyToId, []);
+          replyMapping.set(replyToId, new Set());
         }
-        replyMapping.get(replyToId)!.push(message.id);
+        const replyingSet = replyMapping.get(replyToId)!;
+        if (replyingSet.size < MAX_REPLIES_PER_ORIGIN) {
+          replyingSet.add(message.id);
+        }
       }
     });
 
     replyMappingRef.current = replyMapping;
     messageIndexRef.current = messageIndex;
+    trimOriginMap(replyMappingRef.current);
   }, [messages]);
 
   // Function to update reply fields when a message is edited
   const updateReplyFields = useCallback((editedMessageId: string, newContent: string) => {
     const replyingMessageIds = replyMappingRef.current.get(editedMessageId);
     
-    if (!replyingMessageIds || replyingMessageIds.length === 0) {
-      // No messages reply to this one, nothing to update
+    if (!replyingMessageIds || replyingMessageIds.size === 0) {
       return;
     }
 
-    // Use the callback to get fresh message state and update reply fields
-    onMessagesUpdate(currentMessages => {
-      // Find the edited message in the current (fresh) message state
-      const editedMessage = currentMessages.find(msg => msg.id === editedMessageId);
+    const toPersist: Message[] = [];
+
+    onMessagesUpdate((currentMessages) => {
+      const editedIndex = messageIndexRef.current.get(editedMessageId);
+      const editedMessage = editedIndex !== undefined ? currentMessages[editedIndex] : undefined;
       if (!editedMessage) {
-        console.warn('[ReplyUpdates] Could not find edited message in current state:', editedMessageId);
-        return currentMessages; // Return unchanged if message not found
+        return currentMessages;
       }
 
-      // Create updated messages array with efficient updates
       let hasUpdates = false;
-      const updatedMessages = currentMessages.map(msg => {
-        // Check if this message replies to the edited message
-        if (replyingMessageIds.includes(msg.id) && msg.replyTo?.id === editedMessageId) {
+      const updatedMessages = currentMessages.map((msg) => {
+        if (replyingMessageIds.has(msg.id) && msg.replyTo?.id === editedMessageId) {
           hasUpdates = true;
-          console.log(`[ReplyUpdates] Updated reply field for message ${msg.id} -> references ${editedMessageId}`);
-          return {
+          const updated = {
             ...msg,
             replyTo: {
               ...msg.replyTo,
-              content: newContent, // Use the new content passed to the function
-              sender: editedMessage.sender // Get sender from the current edited message
+              content: newContent,
+              sender: editedMessage.sender
             }
-          };
+          } as Message;
+          toPersist.push(updated);
+          return updated;
         }
         return msg;
       });
 
-      if (hasUpdates) {
-        console.log(`[ReplyUpdates] Updated ${replyingMessageIds.length} messages that reply to ${editedMessageId}`);
-        return updatedMessages;
-      } else {
-        return currentMessages;
-      }
+      return hasUpdates ? updatedMessages : currentMessages;
     });
-  }, [onMessagesUpdate]);
 
-  // Function to update reply fields when a message is deleted
+    if (persistMessage && toPersist.length > 0) {
+      (async () => {
+        try {
+          await Promise.allSettled(toPersist.map(m => persistMessage(m)));
+        } catch {}
+      })();
+    }
+  }, [onMessagesUpdate, persistMessage]);
+
   const handleMessageDeleted = useCallback((deletedMessageId: string) => {
     const replyingMessageIds = replyMappingRef.current.get(deletedMessageId);
     
-    if (!replyingMessageIds || replyingMessageIds.length === 0) {
+    if (!replyingMessageIds || replyingMessageIds.size === 0) {
       return;
     }
 
-    // Use the callback to get fresh message state and update reply fields
+    const toPersist: Message[] = [];
+
     onMessagesUpdate(currentMessages => {
       let hasUpdates = false;
       const updatedMessages = currentMessages.map(msg => {
-        // Check if this message replies to the deleted message
-        if (replyingMessageIds.includes(msg.id) && msg.replyTo?.id === deletedMessageId) {
+        if (replyingMessageIds.has(msg.id) && msg.replyTo?.id === deletedMessageId) {
           hasUpdates = true;
-          return {
+          const updated = {
             ...msg,
             replyTo: {
               ...msg.replyTo,
               content: '[Message deleted]',
               sender: msg.replyTo.sender || '[Unknown]'
             }
-          };
+          } as Message;
+          toPersist.push(updated);
+          return updated;
         }
         return msg;
       });
 
-      if (hasUpdates) {
-        console.log(`[ReplyUpdates] Updated ${replyingMessageIds.length} messages that replied to deleted message ${deletedMessageId}`);
-        return updatedMessages;
-      } else {
-        return currentMessages;
-      }
+      return hasUpdates ? updatedMessages : currentMessages;
     });
-  }, [onMessagesUpdate]);
+
+    if (persistMessage && toPersist.length > 0) {
+      (async () => {
+        try {
+          await Promise.allSettled(toPersist.map(m => persistMessage(m)));
+        } catch {}
+      })();
+    }
+  }, [onMessagesUpdate, persistMessage]);
 
   // Set up event listeners for message edits and deletions
   useEffect(() => {
     const handleMessageEdit = (event: CustomEvent) => {
       try {
-        const { messageId, newContent } = event.detail;
-        if (!messageId || !newContent) {
-          console.warn('[ReplyUpdates] Invalid edit event detail:', event.detail);
+        // Rate limiting
+        const now = Date.now();
+        const bucket = rateLimitRef.current;
+        if (now - bucket.windowStart > RATE_LIMIT_WINDOW_MS) {
+          bucket.windowStart = now;
+          bucket.count = 0;
+        }
+        bucket.count += 1;
+        if (bucket.count > RATE_LIMIT_MAX_EVENTS) {
+          return;
+        }
+
+        if (!validateEventDetail(event.detail)) {
+          throw createReplyUpdateError('INVALID_EVENT_DETAIL');
+        }
+        const messageId = sanitizeMessageId(event.detail.messageId);
+        const newContent = sanitizeContent(event.detail.newContent);
+        if (!messageId || newContent === null) {
           return;
         }
         updateReplyFields(messageId, newContent);
-      } catch (error) {
-        console.error('[ReplyUpdates] Error handling message edit event:', error);
+      } catch (_error) {
+        console.error('[ReplyUpdates] Error handling message edit event:', _error);
       }
     };
 
     const handleMessageDelete = (event: CustomEvent) => {
       try {
-        const { messageId } = event.detail;
+        // Rate limiting
+        const now = Date.now();
+        const bucket = rateLimitRef.current;
+        if (now - bucket.windowStart > RATE_LIMIT_WINDOW_MS) {
+          bucket.windowStart = now;
+          bucket.count = 0;
+        }
+        bucket.count += 1;
+        if (bucket.count > RATE_LIMIT_MAX_EVENTS) {
+          return;
+        }
+
+        if (!validateEventDetail(event.detail)) {
+          throw createReplyUpdateError('INVALID_EVENT_DETAIL');
+        }
+        const messageId = sanitizeMessageId(event.detail.messageId);
         if (!messageId) {
-          console.warn('[ReplyUpdates] Invalid delete event detail:', event.detail);
           return;
         }
         handleMessageDeleted(messageId);
-      } catch (error) {
-        console.error('[ReplyUpdates] Error handling message delete event:', error);
+      } catch (_error) {
+        console.error('[ReplyUpdates] Error handling message delete event:', _error);
       }
     };
 
-    // Listen for local message edits (from the sender's perspective)
-    // These should fire AFTER the original message has been updated in Index.tsx
     window.addEventListener('local-message-edit', handleMessageEdit as EventListener);
     window.addEventListener('local-message-delete', handleMessageDelete as EventListener);
-
-    // Listen for remote message edits (from encrypted message handler)
-    // These should fire AFTER the original message has been updated in useEncryptedMessageHandler
     window.addEventListener('remote-message-edit', handleMessageEdit as EventListener);
     window.addEventListener('remote-message-delete', handleMessageDelete as EventListener);
 
@@ -168,12 +256,6 @@ export const useReplyUpdates = (
 
   return {
     updateReplyFields,
-    handleMessageDeleted,
-    // Statistics for debugging
-    getStats: () => ({
-      totalMappings: replyMappingRef.current.size,
-      totalMessages: messageIndexRef.current.size,
-      replyCount: Array.from(replyMappingRef.current.values()).reduce((sum, arr) => sum + arr.length, 0)
-    })
+    handleMessageDeleted
   };
 };

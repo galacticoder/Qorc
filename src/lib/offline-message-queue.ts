@@ -1,18 +1,54 @@
 /**
- * Client-side offline message queue for handling messages to offline users
+ * Offline message queue for handling messages to offline users
  * Stores messages locally and retries delivery when users come online
  */
 
-import { Message } from '../components/chat/types';
+import { PostQuantumRandom } from './post-quantum-crypto';
+import { SecureAuditLogger } from './secure-error-handler';
+import { SecureDB } from './secureDB';
+
+const hasPrototypePollutionKeys = (obj: unknown): boolean => {
+  if (obj == null || typeof obj !== 'object') return false;
+  const keys = Object.keys(obj);
+  return keys.some((key) => key === '__proto__' || key === 'constructor' || key === 'prototype');
+};
+
+const isPlainObject = (value: unknown): value is Record<string, unknown> => {
+  if (value == null || typeof value !== 'object') return false;
+  const proto = Object.getPrototypeOf(value);
+  return proto === null || proto === Object.prototype;
+};
+
+interface EncryptedPayload {
+  content: string;
+  nonce: string;
+  tag: string;
+  mac: string;
+  aad?: string;
+  kemCiphertext?: string;
+  envelopeVersion?: string;
+  sessionId?: string;
+  type?: string;
+}
 
 interface QueuedMessage {
   id: string;
   to: string;
-  encryptedPayload: any;
+  encryptedPayload: EncryptedPayload;
   timestamp: number;
   retryCount: number;
   maxRetries: number;
   expiresAt: number;
+  nextAttempt: number;
+  sizeBytes: number;
+}
+
+interface OfflineMessage {
+  encryptedPayload: EncryptedPayload;
+  messageId?: string;
+  to?: string;
+  expiresAt?: number;
+  maxRetries?: number;
 }
 
 interface UserStatus {
@@ -21,320 +57,708 @@ interface UserStatus {
   lastSeen: number;
 }
 
+interface QueueStats {
+  totalQueuedMessages: number;
+  usersWithQueuedMessages: number;
+  onlineUsers: number;
+  totalUsers: number;
+}
+
+interface QueueMetrics {
+  messagesQueued: number;
+  messagesDelivered: number;
+  messagesFailed: number;
+  messagesExpired: number;
+}
+
+type SendCallback = (payload: EncryptedPayload) => Promise<boolean>;
+type OfflineMessagesEvent = CustomEvent<{ messages: OfflineMessage[] }>;
+
+const STORAGE_KEY = 'offlineMessageQueue';
+const AUDIT_CHANNEL = 'offlineQueue';
+const DEVICE_ID_KEY = 'offlineQueueDeviceId';
+import { syncEncryptedStorage } from './encrypted-storage';
+const DEFAULT_MAX_RETRIES = 3;
+const DEFAULT_MESSAGE_EXPIRY = 7 * 24 * 60 * 60 * 1000;
+const DEFAULT_RETRY_INTERVAL = 30_000;
+const MAX_MESSAGE_SIZE = 100 * 1024;
+const MAX_QUEUE_LENGTH_PER_USER = 100;
+const PROCESSED_IDS_MAX_SIZE = 1_000;
+const MAX_STORAGE_BYTES = 4.5 * 1024 * 1024;
+const MAX_RATE_LIMIT = 200;
+const SANITIZE_REGEX = /(javascript:|<script[^>]*>.*?<\/script>)/gi;
+const ENVELOPE_VERSION = 'pq-offline-v2';
+
+class SimpleRateLimiter {
+  private limit: number;
+  private window: number;
+  private tokens: Map<string, { count: number; resetAt: number }> = new Map();
+
+  constructor(limit: number, windowMs: number) {
+    this.limit = limit;
+    this.window = windowMs;
+  }
+
+  checkLimit(key: string = 'default'): boolean {
+    const now = Date.now();
+    const entry = this.tokens.get(key);
+
+    if (!entry || now > entry.resetAt) {
+      this.tokens.set(key, { count: 1, resetAt: now + this.window });
+      return true;
+    }
+
+    if (entry.count >= this.limit) {
+      return false;
+    }
+
+    entry.count++;
+    return true;
+  }
+}
+
+const rateLimiter = new SimpleRateLimiter(MAX_RATE_LIMIT, 60_000);
+
+function sanitizeString(input: string | undefined | null): string | undefined {
+  if (typeof input !== 'string') {
+    return undefined;
+  }
+  const sanitized = input.replace(SANITIZE_REGEX, '').trim();
+  if (!sanitized) {
+    return undefined;
+  }
+  return sanitized;
+}
+
+function sanitizePayload(payload: EncryptedPayload): EncryptedPayload {
+  return {
+    ...payload,
+    content: sanitizeString(payload.content) ?? '',
+    aad: sanitizeString(payload.aad),
+    kemCiphertext: sanitizeString(payload.kemCiphertext),
+    envelopeVersion: sanitizeString(payload.envelopeVersion) ?? ENVELOPE_VERSION,
+    sessionId: sanitizeString(payload.sessionId),
+    type: sanitizeString(payload.type)
+  };
+}
+
+function _getDeviceId(): string {
+  try {
+    const existing = syncEncryptedStorage.getItem(DEVICE_ID_KEY);
+    if (existing && typeof existing === 'string') {
+      return existing;
+    }
+  } catch {}
+  const deviceId = PostQuantumRandom.randomUUID();
+  try { syncEncryptedStorage.setItem(DEVICE_ID_KEY, deviceId); } catch {}
+  return deviceId;
+}
+
+let globalSecureDB: SecureDB | null = null;
+
+export function initializeOfflineMessageQueue(secureDB: SecureDB): void {
+  globalSecureDB = secureDB;
+}
+
+async function securePersist<T>(key: string, payload: T): Promise<void> {
+  if (!globalSecureDB) return;
+  try {
+    await globalSecureDB.store('offline_queue', key, { version: ENVELOPE_VERSION, payload });
+  } catch {}
+}
+
+async function secureLoad<T>(key: string): Promise<T | null> {
+  if (!globalSecureDB) return null;
+  try {
+    const stored = await globalSecureDB.retrieve('offline_queue', key);
+    if (!stored || typeof stored !== 'object' || !isPlainObject(stored) || hasPrototypePollutionKeys(stored)) {
+      return null;
+    }
+    
+    const envelope = stored as { version?: string; payload?: T };
+    if (envelope.version !== ENVELOPE_VERSION || typeof envelope.payload === 'undefined') {
+      return null;
+    }
+    return envelope.payload;
+  } catch {
+    return null;
+  }
+}
+
+class MessageValidator {
+  static validate(message: QueuedMessage): void {
+    if (!message.to || typeof message.to !== 'string') {
+      throw new Error('Invalid recipient username');
+    }
+
+    if (!message.id || typeof message.id !== 'string') {
+      throw new Error('Invalid message identifier');
+    }
+
+    if (message.expiresAt <= Date.now()) {
+      throw new Error(`Message ${message.id} already expired`);
+    }
+
+    if (message.sizeBytes > MAX_MESSAGE_SIZE) {
+      throw new Error(`Message ${message.id} size ${message.sizeBytes} exceeds ${MAX_MESSAGE_SIZE}`);
+    }
+
+    if (!message.encryptedPayload?.mac || !message.encryptedPayload?.tag) {
+      throw new Error(`Message ${message.id} missing integrity data`);
+    }
+  }
+
+  static canQueue(username: string, queue: Map<string, QueuedMessage[]>): boolean {
+    const userQueue = queue.get(username) ?? [];
+    return userQueue.length < MAX_QUEUE_LENGTH_PER_USER;
+  }
+}
+
+class RetryStrategy {
+  private static readonly BASE_DELAY = 5_000;
+  private static readonly MAX_DELAY = 5 * 60 * 1_000;
+  private static readonly JITTER_FACTOR = 0.1;
+
+  private static cryptoRandomFraction(): number {
+    // Derive a fraction in [0,1) from 32 bits of PQ-secure randomness
+    const bytes = PostQuantumRandom.randomBytes(4);
+    const value =
+      (bytes[0]! << 24) >>> 0 ^
+      (bytes[1]! << 16) ^
+      (bytes[2]! << 8) ^
+      bytes[3]!;
+    return value / 0xffffffff;
+  }
+
+  static calculateDelay(retryCount: number): number {
+    const exponential = Math.min(
+      RetryStrategy.BASE_DELAY * Math.pow(2, retryCount),
+      RetryStrategy.MAX_DELAY
+    );
+
+    const jitter = exponential * RetryStrategy.JITTER_FACTOR * RetryStrategy.cryptoRandomFraction();
+    return Math.floor(exponential + jitter);
+  }
+}
+
+class QueueMonitor {
+  private metrics: QueueMetrics = {
+    messagesQueued: 0,
+    messagesDelivered: 0,
+    messagesFailed: 0,
+    messagesExpired: 0
+  };
+
+  recordQueued(): void {
+    this.metrics.messagesQueued += 1;
+  }
+
+  recordDelivered(): void {
+    this.metrics.messagesDelivered += 1;
+  }
+
+  recordFailed(): void {
+    this.metrics.messagesFailed += 1;
+  }
+
+  recordExpired(): void {
+    this.metrics.messagesExpired += 1;
+  }
+
+  getMetrics(): QueueMetrics {
+    return { ...this.metrics };
+  }
+}
+
 export class OfflineMessageQueue {
   private queue: Map<string, QueuedMessage[]> = new Map();
   private userStatuses: Map<string, UserStatus> = new Map();
-  private sendCallback?: (payload: any) => Promise<boolean>;
-  private maxRetries = 3;
-  private messageExpiry = 7 * 24 * 60 * 60 * 1000; // 7 days
-  private retryInterval = 30000; // 30 seconds
-  private retryTimer?: NodeJS.Timeout;
+  private processingUsers: Set<string> = new Set();
+  private processedMessageIds: Set<string> = new Set();
+  private processedMessageOrder: string[] = [];
+  private sendCallback?: SendCallback;
+  private retryTimer?: number;
+  private readonly monitor = new QueueMonitor();
+  private readonly abortController = new AbortController();
 
-  constructor(sendCallback?: (payload: any) => Promise<boolean>) {
+  private readonly maxRetries = DEFAULT_MAX_RETRIES;
+  private readonly messageExpiry = DEFAULT_MESSAGE_EXPIRY;
+  private readonly fallbackRetryInterval = DEFAULT_RETRY_INTERVAL;
+
+  constructor(sendCallback?: SendCallback) {
     this.sendCallback = sendCallback;
-    this.startRetryLoop();
-    this.loadFromStorage();
+    void this.loadFromStorage();
+    this.setupEventListeners();
+    this.scheduleNextProcessing(this.fallbackRetryInterval);
   }
 
-  /**
-   * Set the callback function for sending messages
-   */
-  setSendCallback(callback: (payload: any) => Promise<boolean>) {
+  setSendCallback(callback: SendCallback): void {
     this.sendCallback = callback;
   }
 
-  /**
-   * Update user online status
-   */
-  updateUserStatus(username: string, isOnline: boolean) {
+  private setupEventListeners(): void {
+    window.addEventListener(
+      'offline-messages-response',
+      this.handleOfflineMessagesResponse as EventListener,
+      { signal: this.abortController.signal }
+    );
+  }
+
+  updateUserStatus(username: string, isOnline: boolean): void {
     this.userStatuses.set(username, {
       username,
       isOnline,
       lastSeen: Date.now()
     });
 
-    // If user came online, try to deliver their queued messages
     if (isOnline) {
-      this.processQueueForUser(username);
+      void this.processQueueForUser(username);
     }
   }
 
-  /**
-   * Queue a message for offline delivery
-   */
-  queueMessage(to: string, encryptedPayload: any): string {
-    const messageId = encryptedPayload?.encryptedPayload?.messageId || crypto.randomUUID();
-    
+  queueMessage(to: string, encryptedPayload: EncryptedPayload, options?: {
+    skipServerStore?: boolean;
+    messageId?: string;
+    expiresAt?: number;
+    maxRetries?: number;
+  }): string {
+    if (!rateLimiter.checkLimit(to)) {
+      throw new Error('Rate limit exceeded');
+    }
+    const messageId = options?.messageId ?? (crypto?.randomUUID?.() ?? PostQuantumRandom.randomUUID());
+
+    if (this.processedMessageIds.has(messageId)) {
+      return messageId;
+    }
+
+    if (!MessageValidator.canQueue(to, this.queue)) {
+      throw new Error('Offline queue limit reached');
+    }
+
+    const now = Date.now();
+    const expiresAt = options?.expiresAt ?? (now + this.messageExpiry);
+    const sanitizedPayload = sanitizePayload(encryptedPayload);
+    const serializedPayload = JSON.stringify(sanitizedPayload);
+    const sizeBytes = new Blob([serializedPayload]).size;
+
+    if (sizeBytes > MAX_MESSAGE_SIZE) {
+      throw new Error(`Message ${messageId} size ${sizeBytes} exceeds ${MAX_MESSAGE_SIZE}`);
+    }
+
     const queuedMessage: QueuedMessage = {
       id: messageId,
       to,
-      encryptedPayload,
-      timestamp: Date.now(),
+      encryptedPayload: sanitizedPayload,
+      timestamp: now,
       retryCount: 0,
-      maxRetries: this.maxRetries,
-      expiresAt: Date.now() + this.messageExpiry
+      maxRetries: options?.maxRetries ?? this.maxRetries,
+      expiresAt,
+      nextAttempt: Date.now(),
+      sizeBytes
     };
+
+    MessageValidator.validate(queuedMessage);
+    this.trackProcessedMessageId(messageId);
 
     if (!this.queue.has(to)) {
       this.queue.set(to, []);
     }
 
     this.queue.get(to)!.push(queuedMessage);
-    this.saveToStorage();
+    this.monitor.recordQueued();
 
-    console.log(`[OfflineQueue] Queued message for offline user: ${to}`, {
-      messageId,
-      queueSize: this.queue.get(to)!.length
-    });
+    if (!options?.skipServerStore) {
+      this.storeMessageOnServer(messageId, to, encryptedPayload);
+    }
+
+    void this.saveToStorage();
+    this.scheduleNextProcessing(0);
 
     return messageId;
   }
 
-  /**
-   * Check if a user is online
-   */
-  isUserOnline(username: string): boolean {
-    const status = this.userStatuses.get(username);
-    return status?.isOnline || false;
+  private storeMessageOnServer(messageId: string, to: string, encryptedPayload: EncryptedPayload): void {
+    void import('./websocket')
+      .then(async ({ default: websocketClient }) => {
+        if (websocketClient?.isConnectedToServer() && websocketClient?.isPQSessionEstablished()) {
+          try {
+            await websocketClient.sendSecureControlMessage({
+              type: 'store-offline-message',
+              messageId,
+              to,
+              encryptedPayload
+            });
+          } catch (error) {
+            console.error('[OfflineMessageQueue] Failed to store message on server:', error);
+          }
+        }
+      })
+      .catch(() => {});
   }
 
-  /**
-   * Process queued messages for a specific user
-   */
-  private async processQueueForUser(username: string) {
-    const userQueue = this.queue.get(username);
-    if (!userQueue || userQueue.length === 0) {
+  public retrieveOfflineMessagesFromServer(): void {
+    this._retrieveOfflineMessagesFromServer();
+  }
+
+  private _retrieveOfflineMessagesFromServer(): void {
+    void import('./websocket')
+      .then(async ({ default: websocketClient }) => {
+        if (websocketClient?.isConnectedToServer() && websocketClient?.isPQSessionEstablished()) {
+          try {
+            await websocketClient.sendSecureControlMessage({ type: 'retrieve-offline-messages' });
+          } catch (error) {
+            console.error('[OfflineMessageQueue] Failed to retrieve offline messages:', error);
+          }
+        }
+      })
+      .catch(() => {});
+  }
+
+  handleOfflineMessagesFromServer(messages: OfflineMessage[]): void {
+    this.processOfflineMessagesChunked(messages).catch(error => {
+      SecureAuditLogger.error(AUDIT_CHANNEL, 'offline-message-queue', 'chunked-processing-failed', {
+        error: (error as Error)?.message
+      });
+    });
+  }
+
+  private async processOfflineMessagesChunked(messages: OfflineMessage[]): Promise<void> {
+    const CHUNK_SIZE = 10; // Process 10 messages at a time
+
+    for (let i = 0; i < messages.length; i += CHUNK_SIZE) {
+      const chunk = messages.slice(i, i + CHUNK_SIZE);
+      
+      for (const message of chunk) {
+        try {
+          if (!message.encryptedPayload) {
+            throw new Error('Missing encrypted payload');
+          }
+          const sanitizedPayload = sanitizePayload(message.encryptedPayload);
+          const to = sanitizeString((sanitizedPayload?.to as string) ?? message.to) ?? '';
+          if (!to) {
+            continue;
+          }
+
+          const messageId = sanitizeString(message.messageId ?? (sanitizedPayload?.sessionId as string)) ?? PostQuantumRandom.randomUUID();
+          const expiresAt = Math.min(
+            message.expiresAt ?? (Date.now() + this.messageExpiry),
+            Date.now() + this.messageExpiry
+          );
+          const maxRetries = message.maxRetries ?? this.maxRetries;
+
+          this.queueMessage(to, sanitizedPayload, {
+            skipServerStore: true,
+            messageId,
+            expiresAt,
+            maxRetries
+          });
+        } catch (error) {
+          SecureAuditLogger.error(AUDIT_CHANNEL, 'offline-message-queue', 'queue-server-message-failed', {
+            error: (error as Error)?.message,
+            messagePreview: JSON.stringify({
+              id: message.messageId,
+              to: message.to
+            }).slice(0, 200)
+          });
+        }
+      }
+
+      // Yield to UI thread after each chunk
+      if (i + CHUNK_SIZE < messages.length) {
+        await new Promise(resolve => setTimeout(resolve, 0));
+      }
+    }
+
+    await this.saveToStorage();
+  }
+
+  isUserOnline(username: string): boolean {
+    return this.userStatuses.get(username)?.isOnline ?? false;
+  }
+
+  private async processQueueForUser(username: string): Promise<void> {
+    if (this.processingUsers.has(username)) {
       return;
     }
 
-    console.log(`[OfflineQueue] Processing ${userQueue.length} queued messages for user: ${username}`);
+    const userQueue = this.queue.get(username);
+    if (!userQueue || userQueue.length === 0) {
+      this.queue.delete(username);
+      return;
+    }
 
-    const messagesToRetry: QueuedMessage[] = [];
-    const now = Date.now();
+    this.processingUsers.add(username);
 
-    for (const message of userQueue) {
-      // Skip expired messages
-      if (message.expiresAt < now) {
-        console.log(`[OfflineQueue] Message expired, removing: ${message.id}`);
-        continue;
+    try {
+      const now = Date.now();
+      const remaining: QueuedMessage[] = [];
+      const ready: QueuedMessage[] = [];
+
+      for (const message of userQueue) {
+        if (message.expiresAt <= now) {
+          this.monitor.recordExpired();
+          continue;
+        }
+
+        if (message.retryCount >= message.maxRetries) {
+          this.monitor.recordFailed();
+          continue;
+        }
+
+        if (message.nextAttempt > now) {
+          remaining.push(message);
+          continue;
+        }
+
+        ready.push(message);
       }
 
-      // Skip messages that exceeded retry limit
-      if (message.retryCount >= message.maxRetries) {
-        console.log(`[OfflineQueue] Message exceeded retry limit, removing: ${message.id}`);
-        continue;
+      const retriable = await this.processBatch(ready);
+
+      const updatedQueue = [...remaining, ...retriable]
+        .filter((msg) => msg.retryCount < msg.maxRetries && msg.expiresAt > Date.now())
+        .sort((a, b) => a.nextAttempt - b.nextAttempt);
+
+      if (updatedQueue.length === 0) {
+        this.queue.delete(username);
+      } else {
+        this.queue.set(username, updatedQueue);
       }
 
+      void this.saveToStorage();
+    } finally {
+      this.processingUsers.delete(username);
+    }
+  }
+
+  private async processBatch(batch: QueuedMessage[]): Promise<QueuedMessage[]> {
+    const retriable: QueuedMessage[] = [];
+
+    if (!batch.length || !this.sendCallback) {
+      if (!this.sendCallback) {
+        const now = Date.now();
+        for (const message of batch) {
+          message.nextAttempt = now + RetryStrategy.calculateDelay(message.retryCount);
+          retriable.push(message);
+        }
+      }
+      return retriable;
+    }
+
+    for (const message of batch) {
       try {
-        if (this.sendCallback) {
-          const success = await this.sendCallback(message.encryptedPayload);
-          if (success) {
-            console.log(`[OfflineQueue] Successfully delivered queued message: ${message.id}`);
-          } else {
-            message.retryCount++;
-            messagesToRetry.push(message);
-            console.log(`[OfflineQueue] Failed to deliver message, will retry: ${message.id} (attempt ${message.retryCount}/${message.maxRetries})`);
-          }
+        const success = await this.sendCallback(message.encryptedPayload);
+        if (success) {
+          this.monitor.recordDelivered();
         } else {
-          // No send callback available, keep in queue
-          messagesToRetry.push(message);
+          message.retryCount += 1;
+          message.nextAttempt = Date.now() + RetryStrategy.calculateDelay(message.retryCount);
+          this.monitor.recordFailed();
+          retriable.push(message);
         }
       } catch (error) {
-        // Differentiate between network errors and other failures
-        const isNetworkError = error instanceof TypeError || 
-                               (error as any)?.code === 'ECONNREFUSED' ||
-                               (error as any)?.code === 'ETIMEDOUT';
-        
+        const isNetworkError = error instanceof TypeError || (error as { code?: string })?.code === 'ECONNREFUSED' || (error as { code?: string })?.code === 'ETIMEDOUT';
         if (isNetworkError && message.retryCount < message.maxRetries) {
-          message.retryCount++;
-          messagesToRetry.push(message);
-          console.error(`[OfflineQueue] Network error delivering message ${message.id}, will retry:`, error);
+          message.retryCount += 1;
+          message.nextAttempt = Date.now() + RetryStrategy.calculateDelay(message.retryCount);
+          retriable.push(message);
         } else {
-          console.error(`[OfflineQueue] Fatal error delivering message ${message.id}, removing:`, error);
+          this.monitor.recordFailed();
         }
       }
     }
 
-    // Update queue with messages that need retry
-    if (messagesToRetry.length === 0) {
-      this.queue.delete(username);
-    } else {
-      this.queue.set(username, messagesToRetry);
-    }
-
-    this.saveToStorage();
+    return retriable;
   }
 
-  /**
-   * Start the retry loop for processing queued messages
-   */
-  private startRetryLoop() {
-    this.retryTimer = setInterval(() => {
-      this.processAllQueues();
-    }, this.retryInterval);
-  }
+  private async processAllQueues(): Promise<void> {
+    const now = Date.now();
+    const upcomingAttempts: number[] = [];
 
-  /**
-   * Stop the retry loop and cleanup resources
-   */
-  public stop() {
-    if (this.retryTimer) {
-      clearInterval(this.retryTimer);
-      this.retryTimer = undefined;
-    }
-  }
-
-  /**
-   * Process all queued messages for online users
-   */
-  private async processAllQueues() {
     for (const [username, messages] of this.queue.entries()) {
-      if (this.isUserOnline(username) && messages.length > 0) {
+      if (messages.length === 0) {
+        this.queue.delete(username);
+        continue;
+      }
+
+      const earliestAttempt = Math.min(...messages.map((msg) => msg.nextAttempt ?? now));
+      if (earliestAttempt > now) {
+        upcomingAttempts.push(earliestAttempt - now);
+      }
+
+      if (this.isUserOnline(username)) {
         await this.processQueueForUser(username);
       }
     }
 
-    // Clean up expired messages
     this.cleanupExpiredMessages();
+
+    const nextDelay = upcomingAttempts.length > 0
+      ? Math.max(0, Math.min(...upcomingAttempts))
+      : this.fallbackRetryInterval;
+
+    this.scheduleNextProcessing(nextDelay);
   }
 
-  /**
-   * Clean up expired messages from all queues
-   */
-  private cleanupExpiredMessages() {
+  private cleanupExpiredMessages(): void {
     const now = Date.now();
-    let cleanedCount = 0;
+    let removed = 0;
 
     for (const [username, messages] of this.queue.entries()) {
-      const validMessages = messages.filter(msg => {
-        const isValid = msg.expiresAt > now && msg.retryCount < msg.maxRetries;
-        if (!isValid) cleanedCount++;
-        return isValid;
-      });
+      const valid = messages.filter((msg) => msg.expiresAt > now && msg.retryCount < msg.maxRetries);
+      removed += messages.length - valid.length;
 
-      if (validMessages.length === 0) {
+      if (valid.length === 0) {
         this.queue.delete(username);
       } else {
-        this.queue.set(username, validMessages);
+        this.queue.set(username, valid);
       }
     }
 
-    if (cleanedCount > 0) {
-      console.log(`[OfflineQueue] Cleaned up ${cleanedCount} expired/failed messages`);
-      this.saveToStorage();
+    if (removed > 0) {
+      for (let i = 0; i < removed; i++) {
+        this.monitor.recordExpired();
+      }
+      void this.saveToStorage();
     }
   }
 
-  /**
-   * Get queue statistics
-   */
-  getStats() {
-    const totalMessages = Array.from(this.queue.values()).reduce((sum, messages) => sum + messages.length, 0);
-    const onlineUsers = Array.from(this.userStatuses.values()).filter(status => status.isOnline).length;
+  getStats(): QueueStats {
+    const totalQueuedMessages = Array.from(this.queue.values()).reduce((sum, messages) => sum + messages.length, 0);
+    const onlineUsers = Array.from(this.userStatuses.values()).filter((status) => status.isOnline).length;
     const totalUsers = this.userStatuses.size;
 
     return {
-      totalQueuedMessages: totalMessages,
+      totalQueuedMessages,
       usersWithQueuedMessages: this.queue.size,
       onlineUsers,
       totalUsers
     };
   }
 
-  /**
-   * Save queue to localStorage
-   */
-  private saveToStorage() {
+  getMetrics(): QueueMetrics {
+    return this.monitor.getMetrics();
+  }
+
+  stop(): void {
+    if (this.retryTimer) {
+      clearTimeout(this.retryTimer);
+      this.retryTimer = undefined;
+    }
+    this.abortController.abort();
+  }
+
+  clearQueue(): void {
+    this.queue.clear();
+    void this.saveToStorage();
+  }
+
+  private scheduleNextProcessing(delay: number): void {
+    if (this.retryTimer) {
+      clearTimeout(this.retryTimer);
+    }
+
+    const safeDelay = Number.isFinite(delay) ? Math.max(0, delay) : this.fallbackRetryInterval;
+    this.retryTimer = window.setTimeout(() => {
+      this.retryTimer = undefined;
+      void this.processAllQueues();
+    }, safeDelay);
+  }
+
+  private handleOfflineMessagesResponse = (event: Event): void => {
+    try {
+      const customEvent = event as OfflineMessagesEvent;
+      const detail = customEvent.detail;
+      
+      if (!isPlainObject(detail) || hasPrototypePollutionKeys(detail)) {
+        return;
+      }
+      
+      const { messages } = detail ?? {};
+      if (Array.isArray(messages)) {
+        this.handleOfflineMessagesFromServer(messages);
+      }
+    } catch {}
+  };
+
+  private trackProcessedMessageId(messageId: string): void {
+    if (!this.processedMessageIds.has(messageId)) {
+      this.processedMessageIds.add(messageId);
+      this.processedMessageOrder.push(messageId);
+
+      if (this.processedMessageOrder.length > PROCESSED_IDS_MAX_SIZE) {
+        const oldest = this.processedMessageOrder.shift();
+        if (oldest) {
+          this.processedMessageIds.delete(oldest);
+        }
+      }
+    }
+  }
+
+  private async saveToStorage(): Promise<void> {
     try {
       const queueData = {
         queue: Array.from(this.queue.entries()),
         userStatuses: Array.from(this.userStatuses.entries()),
         timestamp: Date.now()
       };
-      
+
       const serializedData = JSON.stringify(queueData);
-      const dataSizeBytes = new Blob([serializedData]).size;
-      const maxSizeBytes = 4.5 * 1024 * 1024; // 4.5MB safe threshold
-      
-      if (dataSizeBytes > maxSizeBytes) {
-        console.warn(`[OfflineQueue] Queue data size (${Math.round(dataSizeBytes / 1024)}KB) exceeds safe localStorage limit. Trimming oldest entries.`);
-        
-        // Trim oldest messages from each user's queue
-        let trimmedEntries = 0;
+      const sizeBytes = new Blob([serializedData]).size;
+
+      if (sizeBytes > MAX_STORAGE_BYTES) {
+        SecureAuditLogger.warn(AUDIT_CHANNEL, 'offline-message-queue', 'storage-limit-exceeded', {
+          sizeBytes,
+          maxBytes: MAX_STORAGE_BYTES
+        });
         for (const [username, messages] of this.queue.entries()) {
           if (messages.length > 10) {
-            // Keep only the 10 most recent messages per user
-            const trimmed = messages.slice(-10);
-            this.queue.set(username, trimmed);
-            trimmedEntries += messages.length - trimmed.length;
+            this.queue.set(username, messages.slice(-10));
           }
         }
-        
-        if (trimmedEntries > 0) {
-          console.log(`[OfflineQueue] Trimmed ${trimmedEntries} oldest messages to reduce storage size`);
-          // Retry with trimmed data
-          const trimmedQueueData = {
-            queue: Array.from(this.queue.entries()),
-            userStatuses: Array.from(this.userStatuses.entries()),
-            timestamp: Date.now()
-          };
-          const trimmedSerialized = JSON.stringify(trimmedQueueData);
-          const trimmedSize = new Blob([trimmedSerialized]).size;
-          
-          if (trimmedSize > maxSizeBytes) {
-            console.warn('[OfflineQueue] Even after trimming, data is too large. Skipping localStorage save.');
-            return;
-          }
-          localStorage.setItem('offlineMessageQueue', trimmedSerialized);
-        } else {
-          console.warn('[OfflineQueue] Unable to reduce data size sufficiently. Skipping localStorage save.');
-          return;
-        }
-      } else {
-        localStorage.setItem('offlineMessageQueue', serializedData);
       }
+
+      await securePersist(STORAGE_KEY, queueData);
     } catch (error) {
-      console.error('[OfflineQueue] Failed to save to storage:', error);
+      SecureAuditLogger.error(AUDIT_CHANNEL, 'offline-message-queue', 'save-storage-failed', {
+        error: (error as Error)?.message
+      });
     }
   }
 
-  /**
-   * Load queue from localStorage
-   */
-  private loadFromStorage() {
+  private async loadFromStorage(): Promise<void> {
     try {
-      const stored = localStorage.getItem('offlineMessageQueue');
-      if (stored) {
-        const queueData = JSON.parse(stored);
-        
-        // Restore queue
-        this.queue = new Map(queueData.queue || []);
-        
-        // Restore user statuses (but mark all as offline initially)
-        const userStatuses = queueData.userStatuses || [];
-        for (const [username, status] of userStatuses) {
-          this.userStatuses.set(username, {
-            ...status,
-            isOnline: false // Reset to offline on app restart
-          });
-        }
-
-        console.log('[OfflineQueue] Loaded from storage:', this.getStats());
+      const stored = await secureLoad<{ queue: [string, QueuedMessage[]][]; userStatuses: [string, UserStatus][] }>(STORAGE_KEY);
+      if (!stored) {
+        return;
       }
-    } catch (error) {
-      console.error('[OfflineQueue] Failed to load from storage:', error);
-    }
-  }
 
-  /**
-   * Clear all queued messages (for testing/debugging)
-   */
-  clearQueue() {
-    this.queue.clear();
-    this.saveToStorage();
-    console.log('[OfflineQueue] Queue cleared');
+      this.queue = new Map(
+        (stored.queue ?? []).map(([username, messages]) => [
+          username,
+          (messages ?? []).map((message) => ({
+            ...message,
+            encryptedPayload: sanitizePayload(message.encryptedPayload),
+            nextAttempt: message.nextAttempt ?? Date.now()
+          }))
+        ])
+      );
+
+      for (const [username, status] of stored.userStatuses ?? []) {
+        this.userStatuses.set(username, { ...status, isOnline: false });
+      }
+
+      SecureAuditLogger.info(AUDIT_CHANNEL, 'offline-message-queue', 'restore-complete', this.getStats());
+    } catch (error) {
+      SecureAuditLogger.error(AUDIT_CHANNEL, 'offline-message-queue', 'load-storage-failed', {
+        error: (error as Error)?.message
+      });
+    }
   }
 }
 
-// Export singleton instance
 export const offlineMessageQueue = new OfflineMessageQueue();
+
+export function retrieveOfflineMessages(): void {
+  offlineMessageQueue.retrieveOfflineMessagesFromServer();
+}

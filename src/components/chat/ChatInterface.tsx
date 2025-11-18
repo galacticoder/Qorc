@@ -1,51 +1,77 @@
-import React, { useEffect, useRef, useState } from "react";
-import { Card } from "@/components/ui/card";
+import React, { useEffect, useRef, useState, useCallback, useMemo } from "react";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Button } from "@/components/ui/button";
 import { ChatMessage } from "./ChatMessage";
 import { Message } from "./types";
 import { ChatInput } from "./ChatInput.tsx";
-import { Separator } from "@/components/ui/separator";
 import { User } from "./UserList";
-import { SignalType } from "@/lib/signals.ts";
+import { SignalType } from "@/lib/signal-types.ts";
 import { MessageReply } from "./types";
 import { useTypingIndicator } from "@/hooks/useTypingIndicator";
 import { TypingIndicator } from "./TypingIndicator";
 import { useTypingIndicatorContext } from "@/contexts/TypingIndicatorContext";
 import { resolveDisplayUsername } from "@/lib/unified-username-display";
-import { useMessageReceipts } from "@/hooks/useMessageReceipts";
 import { TorIndicator } from "@/components/ui/TorIndicator";
 import { Phone, Video, MoreVertical } from "lucide-react";
 import { useCalling } from "@/hooks/useCalling";
-import { CallModal } from "./CallModal";
-import { useAuth } from "@/hooks/useAuth";
+const CallModalLazy = React.lazy(() => import('./CallModal'));
+import type { useAuth } from "@/hooks/useAuth";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { BlockUserButton } from "./BlockUserButton";
 import { blockingSystem } from "@/lib/blocking-system";
+import { blockStatusCache } from "@/lib/block-status-cache";
 import { AlertTriangle } from "lucide-react";
 import { useReplyUpdates } from "@/hooks/useReplyUpdates";
 
 
+interface HybridKeys {
+  readonly x25519: { readonly private: Uint8Array; readonly publicKeyBase64: string };
+  readonly kyber: { readonly publicKeyBase64: string; readonly secretKey: Uint8Array };
+  readonly dilithium: { readonly publicKeyBase64: string; readonly secretKey: Uint8Array };
+}
+
 interface ChatInterfaceProps {
-  onSendMessage: (
+  readonly onSendMessage: (
     messageId: string,
     content: string,
     messageSignalType: string,
     replyTo?: MessageReply | null
   ) => Promise<void>;
-  onSendFile: (fileData: any) => void;
-  messages: Message[];
-  setMessages: React.Dispatch<React.SetStateAction<Message[]>>;
-  isEncrypted?: boolean;
-  currentUsername: string;
-  users: User[];
-  selectedConversation?: string;
-  saveMessageToLocalDB: (msg: Message) => Promise<void>;
-  callingAuthContext?: ReturnType<typeof useAuth>;
-  getDisplayUsername?: (username: string) => Promise<string>;
+  readonly onSendFile: (fileData: unknown) => void;
+  readonly messages: ReadonlyArray<Message>;
+  readonly setMessages: React.Dispatch<React.SetStateAction<Message[]>>;
+  readonly isEncrypted?: boolean;
+  readonly currentUsername: string;
+  readonly users: ReadonlyArray<User>;
+  readonly selectedConversation?: string;
+  readonly saveMessageToLocalDB: (msg: Message) => Promise<void>;
+  readonly callingAuthContext?: ReturnType<typeof useAuth>;
+  readonly getDisplayUsername?: (username: string) => Promise<string>;
+  readonly getKeysOnDemand?: () => Promise<HybridKeys | null>;
+  readonly p2pConnected?: boolean;
+  readonly selectedDisplayName?: string;
+  readonly loadMoreMessages?: (peerUsername: string, currentOffset: number, limit?: number) => Promise<Message[]>;
+  readonly sendP2PReadReceipt?: (messageId: string, recipient: string) => Promise<void>;
+  readonly sendServerReadReceipt: (messageId: string, sender: string) => Promise<void>;
+  readonly markMessageAsRead: (messageId: string) => Promise<void>;
+  readonly getSmartReceiptStatus: (message: Message) => Message['receipt'] | undefined;
 }
 
-export function ChatInterface({
+const HEX_PATTERN = /^[a-f0-9]{32,}$/i;
+const SCROLL_THRESHOLD = 200;
+const NEAR_BOTTOM_THRESHOLD = 100;
+const SCROLL_DEBOUNCE_MS = 100;
+const SCROLL_THROTTLE_MS = 300;
+const READ_RECEIPT_CHECK_INTERVAL = 30000;
+const MAX_BACKGROUND_MESSAGES = 1000;
+const BACKGROUND_BATCH_SIZE = 100;
+
+const truncateHash = (hash: string): string => {
+  if (typeof hash !== 'string' || hash.length === 0) return '';
+  return HEX_PATTERN.test(hash) ? `${hash.slice(0, 8)}...` : hash;
+};
+
+export const ChatInterface = React.memo<ChatInterfaceProps>(({
   onSendMessage,
   onSendFile,
   messages,
@@ -57,16 +83,33 @@ export function ChatInterface({
   saveMessageToLocalDB,
   callingAuthContext,
   getDisplayUsername,
-}: ChatInterfaceProps) {
+  getKeysOnDemand,
+  p2pConnected = false,
+  selectedDisplayName,
+  loadMoreMessages,
+  sendP2PReadReceipt,
+  sendServerReadReceipt,
+  markMessageAsRead,
+  getSmartReceiptStatus,
+}) => {
   const scrollAreaRef = useRef<HTMLDivElement>(null);
+
+  const displayResolverRef = useRef(getDisplayUsername);
+  useEffect(() => { displayResolverRef.current = getDisplayUsername; }, [getDisplayUsername]);
+  const getDisplayUsernameStable = useCallback((username: string) => {
+    const fn = displayResolverRef.current;
+    return fn ? fn(username) : Promise.resolve(username);
+  }, []);
   const [replyTo, setReplyTo] = useState<Message | null>(null);
   const [editingMessage, setEditingMessage] = useState<Message | null>(null);
   const [displayConversationName, setDisplayConversationName] = useState<string>("");
-  const [isUserBlocked, setIsUserBlocked] = useState(false);
-  const [isBlockedByUser, setIsBlockedByUser] = useState(false);
-  const [blockingCheckError, setBlockingCheckError] = useState<string | null>(null);
+  const [isUserBlocked, setIsUserBlocked] = useState<boolean>(false);
+  const [isBlockedByUser, setIsBlockedByUser] = useState<boolean>(false);
+  const [isLoadingMore, setIsLoadingMore] = useState<boolean>(false);
+  const [hasMoreMessages, setHasMoreMessages] = useState<boolean>(true);
+  const loadedMessagesCountRef = useRef<Map<string, number>>(new Map());
+  const backgroundLoadConversationRef = useRef<string | null>(null);
 
-  // Calling functionality
   const callingHook = useCalling(callingAuthContext);
   const {
     currentCall,
@@ -91,63 +134,70 @@ export function ChatInterface({
   const processedInScrollRef = useRef<Set<string>>(new Set());
   const lastScrollTimeRef = useRef<number>(0);
 
-  // Typing hook
   const { handleLocalTyping, handleConversationChange, resetTypingAfterSend } = useTypingIndicator(currentUsername, selectedConversation, onSendMessage);
-  const { typingUsers } = useTypingIndicatorContext();
+  
+  const { typingUsers: allTypingUsers } = useTypingIndicatorContext();
+  
+  const typingUsers = useMemo(() => {
+    if (!selectedConversation) return [];
+    return allTypingUsers.filter(username => username === selectedConversation);
+  }, [allTypingUsers, selectedConversation]);
 
-  // Log typing users changes
+  const handleCallLog = useCallback(async (e: Event) => {
+    try {
+      const customEvent = e as CustomEvent;
+      const detail = customEvent.detail;
+      if (!detail || typeof detail !== 'object') return;
+      if (!selectedConversation || detail.peer !== selectedConversation) return;
+
+      const displayPeerName = await resolveDisplayUsername(detail.peer, getDisplayUsername);
+      const durationSeconds = Math.round((detail.durationMs || 0) / 1000);
+
+      const label = detail.type === 'incoming' ? `Incoming call from ${displayPeerName}`
+        : detail.type === 'connected' ? `Call connected with ${displayPeerName}`
+        : detail.type === 'started' ? `Calling ${displayPeerName}...`
+        : detail.type === 'ended' ? `Call with ${displayPeerName} ended (${durationSeconds}s)`
+        : detail.type === 'declined' ? `${displayPeerName} declined the call`
+        : detail.type === 'missed' ? `Missed call from ${displayPeerName}`
+        : detail.type === 'not-answered' ? `${displayPeerName} did not answer`
+        : `Call event: ${detail.type}`;
+        
+      const shouldHaveActions = ['missed', 'not-answered', 'ended', 'declined'].includes(detail.type);
+      const actions = shouldHaveActions
+        ? [{ label: 'Call back', onClick: () => startCall(detail.peer, 'audio').catch(() => {}) }]
+        : undefined;
+        
+      setMessages((prev) => [...prev, {
+        id: `call-log-${detail.callId || crypto.randomUUID()}-${detail.type}-${detail.at || Date.now()}`,
+        content: JSON.stringify({ label, actionsType: actions ? 'callback' : undefined }),
+        sender: 'System',
+        timestamp: new Date(),
+        isCurrentUser: false,
+        isSystemMessage: true,
+        type: 'system'
+      } as Message]);
+    } catch {}
+  }, [setMessages, selectedConversation, getDisplayUsername, startCall]);
+
   useEffect(() => {
-    console.log('[ChatInterface] typingUsers changed:', typingUsers);
-  }, [typingUsers]);
+    window.addEventListener('ui-call-log', handleCallLog as EventListener);
+    return () => window.removeEventListener('ui-call-log', handleCallLog as EventListener);
+  }, [handleCallLog]);
 
-  // Listen for call logs and inject system messages into conversation
-  useEffect(() => {
-    const handler = async (e: any) => {
-      try {
-        const d = e.detail || {};
-        if (!selectedConversation || d.peer !== selectedConversation) return;
-
-        // Resolve the peer name for display
-        const displayPeerName = await resolveDisplayUsername(d.peer, getDisplayUsername);
-
-        const label = d.type === 'incoming' ? `Incoming call from ${displayPeerName}`
-          : d.type === 'connected' ? `Call connected with ${displayPeerName}`
-          : d.type === 'started' ? `Calling ${displayPeerName}...`
-          : d.type === 'ended' ? `Call with ${displayPeerName} ended (${Math.round((d.durationMs||0)/1000)}s)`
-          : d.type === 'declined' ? `${displayPeerName} declined the call`
-          : d.type === 'missed' ? `Missed call from ${displayPeerName}`
-          : d.type === 'not-answered' ? `${displayPeerName} did not answer`
-          : `Call event: ${d.type}`;
-        const actions = (d.type === 'missed' || d.type === 'not-answered' || d.type === 'ended' || d.type === 'declined')
-          ? [{ label: 'Call back', onClick: () => startCall(d.peer, 'audio').catch(() => {}) }]
-          : undefined;
-        setMessages((prev) => [...prev, {
-          id: `call-log-${d.callId || crypto.randomUUID()}-${d.type}-${d.at || Date.now()}`,
-          content: JSON.stringify({ label, actionsType: actions ? 'callback' : undefined }),
-          sender: 'System',
-          timestamp: new Date(),
-          isCurrentUser: false,
-          isSystemMessage: true,
-          type: 'system'
-        } as Message]);
-      } catch {}
-    };
-    window.addEventListener('ui-call-log', handler as EventListener);
-    return () => window.removeEventListener('ui-call-log', handler as EventListener);
-  }, [setMessages, selectedConversation, getDisplayUsername]);
-
-  // Handle global call-back requests from system messages
-  useEffect(() => {
-    const cb = (e: any) => {
-      try {
-        const d = e.detail || {};
-        if (!d.peer) return;
-        startCall(d.peer, d.type === 'video' ? 'video' : 'audio').catch(() => {});
-      } catch {}
-    };
-    window.addEventListener('ui-call-request', cb as EventListener);
-    return () => window.removeEventListener('ui-call-request', cb as EventListener);
+  const handleCallRequest = useCallback((e: Event) => {
+    try {
+      const customEvent = e as CustomEvent;
+      const detail = customEvent.detail;
+      if (!detail || typeof detail !== 'object' || !detail.peer) return;
+      const callType = detail.type === 'video' ? 'video' : 'audio';
+      startCall(detail.peer, callType).catch(() => {});
+    } catch {}
   }, [startCall]);
+
+  useEffect(() => {
+    window.addEventListener('ui-call-request', handleCallRequest as EventListener);
+    return () => window.removeEventListener('ui-call-request', handleCallRequest as EventListener);
+  }, [handleCallRequest]);
 
   // Handle conversation changes to stop typing indicators
   useEffect(() => {
@@ -157,113 +207,226 @@ export function ChatInterface({
     lastScrollTimeRef.current = 0;
   }, [selectedConversation, handleConversationChange]);
 
-  // Resolve display name for selected conversation
+  const scrollToBottom = useCallback((container: Element) => {
+    try {
+      container.scrollTo({ top: container.scrollHeight, behavior: 'auto' });
+    } catch {}
+  }, []);
+
   useEffect(() => {
-    if (selectedConversation && getDisplayUsername) {
-      getDisplayUsername(selectedConversation)
-        .then((resolved) => {
-          try {
-            const hexPattern = /^[a-f0-9]{32,}$/i;
-            setDisplayConversationName(hexPattern.test(resolved) ? `${resolved.slice(0, 8)}...` : resolved);
-          } catch {
-            setDisplayConversationName(resolved);
-          }
-        })
-        .catch((error) => {
-          console.error('Failed to resolve conversation display name:', error);
-          try {
-            const hexPattern = /^[a-f0-9]{32,}$/i;
-            setDisplayConversationName(hexPattern.test(selectedConversation) ? `${selectedConversation.slice(0, 8)}...` : selectedConversation);
-          } catch {
-            setDisplayConversationName(selectedConversation);
-          }
-        });
+    const scrollContainer = scrollAreaRef.current?.querySelector('[data-radix-scroll-area-viewport]');
+    if (!scrollContainer) return;
+    
+    const t1 = setTimeout(() => scrollToBottom(scrollContainer), 80);
+    const t2 = setTimeout(() => scrollToBottom(scrollContainer), 400);
+    
+    return () => {
+      clearTimeout(t1);
+      clearTimeout(t2);
+    };
+  }, [selectedConversation, scrollToBottom]);
+
+  useEffect(() => {
+    if (selectedDisplayName && typeof selectedDisplayName === 'string') {
+      setDisplayConversationName(selectedDisplayName);
+    }
+  }, [selectedDisplayName]);
+
+  const resolveAndSetDisplayName = useCallback((username: string) => {
+    if (!username) {
+      setDisplayConversationName("");
+      return;
+    }
+    
+    if (getDisplayUsername) {
+      getDisplayUsername(username)
+        .then((resolved) => setDisplayConversationName(truncateHash(resolved)))
+        .catch(() => setDisplayConversationName(truncateHash(username)));
     } else {
-      if (!selectedConversation) {
-        setDisplayConversationName("");
-      } else {
-        try {
-          const hexPattern = /^[a-f0-9]{32,}$/i;
-          setDisplayConversationName(hexPattern.test(selectedConversation) ? `${selectedConversation.slice(0, 8)}...` : selectedConversation);
-        } catch {
-          setDisplayConversationName(selectedConversation);
-        }
+      setDisplayConversationName(truncateHash(username));
+    }
+  }, [getDisplayUsername]);
+
+  useEffect(() => {
+    if (selectedConversation) {
+      resolveAndSetDisplayName(selectedConversation);
+    } else {
+      setDisplayConversationName("");
+    }
+  }, [selectedConversation, resolveAndSetDisplayName]);
+
+  const handleUsernameMappingUpdate = useCallback(() => {
+    if (selectedConversation) {
+      resolveAndSetDisplayName(selectedConversation);
+    }
+  }, [selectedConversation, resolveAndSetDisplayName]);
+
+  useEffect(() => {
+    window.addEventListener('username-mapping-updated', handleUsernameMappingUpdate);
+    window.addEventListener('username-mapping-received', handleUsernameMappingUpdate);
+    return () => {
+      window.removeEventListener('username-mapping-updated', handleUsernameMappingUpdate);
+      window.removeEventListener('username-mapping-received', handleUsernameMappingUpdate);
+    };
+  }, [handleUsernameMappingUpdate]);
+
+  useEffect(() => {
+    if (selectedConversation) {
+      setHasMoreMessages(true);
+      setIsLoadingMore(false);
+      if (!loadedMessagesCountRef.current.has(selectedConversation)) {
+        loadedMessagesCountRef.current.set(selectedConversation, 50);
       }
     }
-  }, [selectedConversation, getDisplayUsername]);
+  }, [selectedConversation]);
 
-  // Re-resolve header name when a mapping is updated/received
   useEffect(() => {
-    const handler = () => {
-      if (!selectedConversation || !getDisplayUsername) return;
-      getDisplayUsername(selectedConversation)
-        .then((resolved) => {
-          try {
-            const hexPattern = /^[a-f0-9]{32,}$/i;
-            setDisplayConversationName(hexPattern.test(resolved) ? `${resolved.slice(0, 8)}...` : resolved);
-          } catch {
-            setDisplayConversationName(resolved);
-          }
-        })
-        .catch(() => {});
-    };
-    window.addEventListener('username-mapping-updated', handler as EventListener);
-    window.addEventListener('username-mapping-received', handler as EventListener);
-    return () => {
-      window.removeEventListener('username-mapping-updated', handler as EventListener);
-      window.removeEventListener('username-mapping-received', handler as EventListener);
-    };
-  }, [selectedConversation, getDisplayUsername]);
+    if (!selectedConversation || !loadMoreMessages) return;
 
-  // Check blocking status when conversation changes
+    const conversationToLoad = selectedConversation;
+    backgroundLoadConversationRef.current = conversationToLoad;
+
+    const loadBackgroundMessages = async () => {
+      try {
+        await new Promise(resolve => setTimeout(resolve, 500));
+        
+        const currentCount = loadedMessagesCountRef.current.get(conversationToLoad) || 50;
+        const maxMessages = MAX_BACKGROUND_MESSAGES;
+        const batchSize = BACKGROUND_BATCH_SIZE;
+        
+        // Load in batches up to 1000 messages
+        let loadedCount = currentCount;
+        while (loadedCount < maxMessages) {
+          if (backgroundLoadConversationRef.current !== conversationToLoad) break;
+          
+          const batch = await loadMoreMessages(conversationToLoad, loadedCount, batchSize);
+          if (batch.length === 0) break;
+          
+          loadedCount += batch.length;
+          loadedMessagesCountRef.current.set(conversationToLoad, loadedCount);
+          
+          await new Promise(resolve => setTimeout(resolve, 100));
+          
+          if (batch.length < batchSize) break;
+        }
+      } catch {
+      }
+    };
+
+    loadBackgroundMessages();
+  }, [selectedConversation, loadMoreMessages]);
+
+  const handleLazyLoadScroll = useCallback(async (scrollContainer: Element) => {
+    if (isLoadingMore || !hasMoreMessages || !selectedConversation || !loadMoreMessages) return;
+
+    const scrollTop = scrollContainer.scrollTop;
+
+    if (scrollTop < SCROLL_THRESHOLD) {
+      setIsLoadingMore(true);
+      
+      try {
+        const currentCount = loadedMessagesCountRef.current.get(selectedConversation) || 50;
+        const moreMessages = await loadMoreMessages(selectedConversation, currentCount, 50);
+        
+        if (moreMessages.length < 50) {
+          setHasMoreMessages(false);
+        }
+        
+        if (moreMessages.length > 0) {
+          loadedMessagesCountRef.current.set(selectedConversation, currentCount + moreMessages.length);
+        }
+      } catch {
+      } finally {
+        setIsLoadingMore(false);
+      }
+    }
+  }, [selectedConversation, loadMoreMessages, isLoadingMore, hasMoreMessages]);
+
+  useEffect(() => {
+    const scrollContainer = scrollAreaRef.current?.querySelector('[data-radix-scroll-area-viewport]');
+    if (!scrollContainer) return;
+
+    const handleScroll = () => handleLazyLoadScroll(scrollContainer);
+    scrollContainer.addEventListener('scroll', handleScroll);
+    return () => scrollContainer.removeEventListener('scroll', handleScroll);
+  }, [handleLazyLoadScroll]);
+
+  // Check blocking status when conversation changes or key material becomes available
   useEffect(() => {
     const checkBlockingStatus = async () => {
-      if (!selectedConversation || !callingAuthContext?.passphrasePlaintextRef?.current) {
+      if (!selectedConversation) {
         setIsUserBlocked(false);
         setIsBlockedByUser(false);
-        setBlockingCheckError(null);
         return;
       }
 
       try {
-        const passphrase = callingAuthContext.passphrasePlaintextRef.current;
-        const blocked = await blockingSystem.isUserBlocked(selectedConversation, passphrase);
+        const passphrase = callingAuthContext?.passphrasePlaintextRef?.current;
+        let keyArg: any = '';
+        if (passphrase && typeof passphrase === 'string' && passphrase.length > 0) {
+          keyArg = passphrase;
+        } else {
+          // Prefer Kyber secret when passphrase is not available (token-login)
+          let kyberSecret: Uint8Array | undefined = callingAuthContext?.hybridKeysRef?.current?.kyber?.secretKey;
+          if (!kyberSecret && typeof callingAuthContext?.getKeysOnDemand === 'function') {
+            try {
+              const keys = await callingAuthContext.getKeysOnDemand();
+              kyberSecret = keys?.kyber?.secretKey;
+            } catch {}
+          }
+          if (kyberSecret instanceof Uint8Array && kyberSecret.length > 0) {
+            keyArg = { kyberSecret };
+          }
+        }
+
+        if (!keyArg) {
+          const cached = blockStatusCache.get(selectedConversation);
+          setIsUserBlocked(cached ?? false);
+          setIsBlockedByUser(false);
+          return;
+        }
+
+        const blocked = await blockingSystem.isUserBlocked(selectedConversation, keyArg);
         setIsUserBlocked(blocked);
-        setBlockingCheckError(null);
+        blockStatusCache.set(selectedConversation, blocked);
         
-        // Note: We can't directly check if we are blocked by the other user
-        // as that would require server-side information or the other user's block list
-        // The server-side filtering will handle incoming messages from users who blocked us
         setIsBlockedByUser(false);
-      } catch (error) {
-        console.error('[ChatInterface] Error checking blocking status:', error);
-        setBlockingCheckError('Unable to check blocking status');
-        setIsUserBlocked(false);
+      } catch (_error) {
+        setIsUserBlocked(blockStatusCache.get(selectedConversation) ?? false);
         setIsBlockedByUser(false);
       }
     };
 
     checkBlockingStatus();
-  }, [selectedConversation, callingAuthContext?.passphrasePlaintextRef?.current]);
+  }, [selectedConversation, callingAuthContext?.passphrasePlaintextRef?.current, callingAuthContext?.hybridKeysRef?.current]);
 
-  // Listen for blocking status changes
-  useEffect(() => {
-    const handleBlockStatusChange = (event: CustomEvent) => {
-      const { username, isBlocked } = event.detail;
-      if (username === selectedConversation) {
-        setIsUserBlocked(isBlocked);
-      }
-    };
-
-    window.addEventListener('block-status-changed', handleBlockStatusChange as EventListener);
-    return () => window.removeEventListener('block-status-changed', handleBlockStatusChange as EventListener);
+  const handleBlockStatusChange = useCallback((event: CustomEvent) => {
+    const { username, isBlocked } = event.detail;
+    if (username === selectedConversation) {
+      setIsUserBlocked(isBlocked);
+    }
   }, [selectedConversation]);
 
-  // Message receipts hook
-  const { sendReadReceipt, markMessageAsRead, getSmartReceiptStatus } = useMessageReceipts(messages, setMessages, currentUsername, saveMessageToLocalDB);
+  useEffect(() => {
+    window.addEventListener('block-status-changed', handleBlockStatusChange as EventListener);
+    return () => window.removeEventListener('block-status-changed', handleBlockStatusChange as EventListener);
+  }, [handleBlockStatusChange]);
 
-  // Reply updates hook - handles efficient reply field updates when messages are edited
-  const { updateReplyFields, handleMessageDeleted } = useReplyUpdates(messages, setMessages);
+  // Unified read receipt function that handles both P2P and server messages
+  const sendReadReceipt = useCallback(async (messageId: string, sender: string) => {
+    const message = messages.find(m => m.id === messageId);
+    
+    if (message?.p2p === true && sendP2PReadReceipt) {
+      try {
+        await sendP2PReadReceipt(messageId, sender);
+      } catch (_error) {
+      }
+    } else {
+      await sendServerReadReceipt(messageId, sender);
+    }
+  }, [messages, sendP2PReadReceipt, sendServerReadReceipt]);
+
+  useReplyUpdates(messages, setMessages, saveMessageToLocalDB);
 
   // Smart auto-scroll: only scroll to bottom when appropriate
   const prevMessagesLengthRef = useRef(messages.length);
@@ -285,15 +448,11 @@ export function ChatInterface({
     const latestMessage = messages[messages.length - 1];
     const isNewMessageId = latestMessage && latestMessage.id !== lastMessageIdRef.current;
 
-    // Only auto-scroll if:
-    // 1. It's a new message (not just an update to existing messages)
-    // 2. User is near the bottom (within 100px) OR the new message is from current user
     if (isNewMessage && isNewMessageId && latestMessage) {
-      const isNearBottom = scrollContainer.scrollTop >= scrollContainer.scrollHeight - scrollContainer.clientHeight - 100;
+      const isNearBottom = scrollContainer.scrollTop >= scrollContainer.scrollHeight - scrollContainer.clientHeight - NEAR_BOTTOM_THRESHOLD;
       const isCurrentUserMessage = latestMessage.sender === currentUsername;
 
       if (isNearBottom || isCurrentUserMessage) {
-        // Smooth scroll to bottom
         scrollContainer.scrollTo({
           top: scrollContainer.scrollHeight,
           behavior: 'smooth'
@@ -315,41 +474,29 @@ export function ChatInterface({
     const isTabActive = () => document.visibilityState === 'visible' && document.hasFocus();
 
     const handleScroll = () => {
-      if (!isTabActive()) return; // Do not mark as read if tab is not active
+      if (!isTabActive()) return;
 
       const now = Date.now();
-      // Prevent multiple scroll calls in quick succession (within 300ms)
-      if (now - lastScrollTimeRef.current < 300) {
+      if (now - lastScrollTimeRef.current < SCROLL_THROTTLE_MS) {
         return;
       }
       lastScrollTimeRef.current = now;
-
-      // Clear the processed messages set for this scroll event
       processedInScrollRef.current.clear();
 
       const containerRect = scrollContainer.getBoundingClientRect();
       const containerBottom = containerRect.bottom;
       
-      // Check if user is near the bottom (same threshold as auto-scroll: 100px)
-      const isNearBottom = scrollContainer.scrollTop >= scrollContainer.scrollHeight - scrollContainer.clientHeight - 100;
+      const isNearBottom = scrollContainer.scrollTop >= scrollContainer.scrollHeight - scrollContainer.clientHeight - NEAR_BOTTOM_THRESHOLD;
 
       let messagesToMarkAsRead: Message[] = [];
 
       if (isNearBottom) {
-        // If user is near bottom, mark ALL unread messages as read
-        // This prevents the issue where delivered receipts appear above read receipts
-        console.debug('[ChatInterface] User near bottom, marking all unread messages as read');
-        
         messagesToMarkAsRead = messages.filter(message => {
           return message.sender !== currentUsername && !message.receipt?.read;
         });
       } else {
-        // If not at bottom, only mark visible messages as read (original behavior)
         messages.forEach(message => {
-          // Only process messages from OTHER users (not current user) and not already read
           if (message.sender === currentUsername || message.receipt?.read) return;
-
-          // Skip if we've already processed this message in this scroll event
           if (processedInScrollRef.current.has(message.id)) return;
 
           const messageElement = document.getElementById(`message-${message.id}`);
@@ -357,31 +504,25 @@ export function ChatInterface({
             const messageRect = messageElement.getBoundingClientRect();
             const messageBottom = messageRect.bottom;
 
-            // If message is visible in the scroll container
             if (messageBottom <= containerBottom && messageBottom >= containerRect.top) {
               messagesToMarkAsRead.push(message);
-              // Mark this message as processed in this scroll event
               processedInScrollRef.current.add(message.id);
             }
           }
         });
       }
 
-      // Sort by timestamp ascending to send older first
       messagesToMarkAsRead.sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
-
-      // Mark and send read receipts for all messages that should be read
       messagesToMarkAsRead.forEach((msg) => {
         markMessageAsRead(msg.id);
         sendReadReceipt(msg.id, msg.sender);
       });
     };
 
-    // Debounce the scroll handler to prevent excessive calls
-    let scrollTimeout: NodeJS.Timeout;
+    let scrollTimeout: ReturnType<typeof setTimeout>;
     const debouncedHandleScroll = () => {
       clearTimeout(scrollTimeout);
-      scrollTimeout = setTimeout(handleScroll, 100);
+      scrollTimeout = setTimeout(handleScroll, SCROLL_DEBOUNCE_MS);
     };
 
     scrollContainer.addEventListener('scroll', debouncedHandleScroll);
@@ -389,11 +530,8 @@ export function ChatInterface({
     window.addEventListener('focus', handleScroll);
     window.addEventListener('blur', handleScroll);
 
-    // Initial check with a small delay to ensure DOM is ready
     setTimeout(handleScroll, 100);
-    
-    // Also trigger on conversation change to mark messages as read if user starts at bottom
-    setTimeout(handleScroll, 500); // Additional delay for conversation loading
+    setTimeout(handleScroll, 500);
 
     return () => {
       clearTimeout(scrollTimeout);
@@ -402,33 +540,28 @@ export function ChatInterface({
       window.removeEventListener('focus', handleScroll);
       window.removeEventListener('blur', handleScroll);
     };
-  }, [messages, currentUsername, markMessageAsRead, sendReadReceipt, users]);
+  }, [messages, currentUsername, markMessageAsRead, sendReadReceipt]);
 
   // Periodic check to ensure read receipts are sent for visible messages
   useEffect(() => {
     const checkForMissedReadReceipts = () => {
-      // Only check if tab is active and we have messages
       if (document.visibilityState === 'visible' && document.hasFocus() && messages.length > 0) {
-        console.debug('[ChatInterface] Periodic check for missed read receipts');
 
         const scrollContainer = scrollAreaRef.current?.querySelector('[data-radix-scroll-area-viewport]');
         if (scrollContainer) {
-          const isNearBottom = scrollContainer.scrollTop >= scrollContainer.scrollHeight - scrollContainer.clientHeight - 100;
+          const isNearBottom = scrollContainer.scrollTop >= scrollContainer.scrollHeight - scrollContainer.clientHeight - NEAR_BOTTOM_THRESHOLD;
           
           let messagesToProcess: Message[] = [];
           
           if (isNearBottom) {
-            // If near bottom, check all unread messages
             messagesToProcess = messages.filter(message => {
               return message.sender !== currentUsername && !message.receipt?.read;
             });
           } else {
-            // If not at bottom, only check visible messages (original behavior)
             const containerRect = scrollContainer.getBoundingClientRect();
             const containerBottom = containerRect.bottom;
 
             messages.forEach(message => {
-              // Only process messages from OTHER users (not current user) and not already read
               if (message.sender === currentUsername || message.receipt?.read) return;
 
               const messageElement = document.getElementById(`message-${message.id}`);
@@ -456,23 +589,89 @@ export function ChatInterface({
     };
 
     // Check every 30 seconds for missed read receipts
-    const interval = setInterval(checkForMissedReadReceipts, 30000);
+    const interval = setInterval(checkForMissedReadReceipts, READ_RECEIPT_CHECK_INTERVAL);
 
     return () => clearInterval(interval);
-  }, [messages, sendReadReceipt]);
+  }, [messages, currentUsername, markMessageAsRead, sendReadReceipt]);
 
-  // Compute which messages should show status indicators: only latest read and latest delivered (unread)
-  const lastReadId = [...messages]
-    .reverse()
-    .find((m) => m.isCurrentUser && (getSmartReceiptStatus(m) || m.receipt)?.read)?.id;
 
-  const lastDeliveredId = [...messages]
-    .reverse()
-    .find((m) =>
-      m.isCurrentUser &&
-      (getSmartReceiptStatus(m) || m.receipt)?.delivered &&
-      !(getSmartReceiptStatus(m) || m.receipt)?.read
-    )?.id;
+
+  const handleAudioCall = useCallback(async () => {
+    if (!selectedConversation) return;
+    try {
+      await startCall(selectedConversation, 'audio');
+    } catch (_error) {
+      alert('Failed to start call: ' + (_error as Error).message);
+    }
+  }, [selectedConversation, startCall]);
+
+  const handleVideoCall = useCallback(async () => {
+    if (!selectedConversation) return;
+    try {
+      await startCall(selectedConversation, 'video');
+    } catch (_error) {
+      alert('Failed to start video call: ' + (_error as Error).message);
+    }
+  }, [selectedConversation, startCall]);
+
+  const handleMessageSend = useCallback(async (
+    messageId: string | undefined,
+    content: string,
+    messageSignalType: string,
+    replyToMsg?: MessageReply | null
+  ) => {
+    await onSendMessage(messageId ?? "", content, messageSignalType, replyToMsg);
+    
+    if (messageSignalType !== 'typing-start' && messageSignalType !== 'typing-stop') {
+      resetTypingAfterSend();
+      setReplyTo(null);
+    }
+  }, [onSendMessage, resetTypingAfterSend]);
+
+  const handleDeleteMessage = useCallback((message: Message) => {
+    onSendMessage(message.id, "", SignalType.DELETE_MESSAGE, null);
+  }, [onSendMessage]);
+
+  const handleReactToMessage = useCallback((targetMessage: Message, emoji: string) => {
+    const isRemove = !!(targetMessage.reactions && targetMessage.reactions[emoji] && targetMessage.reactions[emoji].includes(currentUsername));
+    const action = isRemove ? SignalType.REACTION_REMOVE : SignalType.REACTION_ADD;
+    onSendMessage(targetMessage.id, emoji, action, null);
+  }, [currentUsername, onSendMessage]);
+
+  const handleEditMessage = useCallback(async (newContent: string) => {
+    if (editingMessage) {
+      await onSendMessage(editingMessage.id, newContent, SignalType.EDIT_MESSAGE, editingMessage.replyTo);
+      setEditingMessage(null);
+    }
+  }, [editingMessage, onSendMessage]);
+
+  const handleCancelReply = useCallback(() => setReplyTo(null), []);
+  const handleCancelEdit = useCallback(() => setEditingMessage(null), []);
+  const handleReply = useCallback((message: Message) => setReplyTo(message), []);
+  const handleEdit = useCallback((message: Message) => setEditingMessage(message), []);
+
+  const handleBlockStatusChangeInline = useCallback((username: string, isBlocked: boolean) => {
+    if (username === selectedConversation) {
+      setIsUserBlocked(isBlocked);
+    }
+  }, [selectedConversation]);
+
+  const handleCallModalAnswer = useCallback(() => {
+    if (currentCall) answerCall(currentCall.id);
+  }, [currentCall, answerCall]);
+
+  const handleCallModalDecline = useCallback(() => {
+    if (currentCall) declineCall(currentCall.id);
+  }, [currentCall, declineCall]);
+
+  const emptyMessagesUI = useMemo(() => (
+    <div 
+      className="flex items-center justify-center h-full min-h-[200px] text-sm"
+      style={{ color: 'var(--color-text-secondary)' }}
+    >
+      {selectedConversation ? "No messages yet. Start the conversation!" : "Select a conversation to view messages"}
+    </div>
+  ), [selectedConversation]);
   return (
     <div 
       className="flex flex-col h-full"
@@ -499,14 +698,7 @@ export function ChatInterface({
               <Button
                 size="sm"
                 variant="outline"
-                onClick={async () => {
-                  try {
-                    await startCall(selectedConversation, 'audio');
-                  } catch (error) {
-                    console.error('[ChatInterface] Failed to start audio call:', error);
-                    alert('Failed to start call: ' + (error as Error).message);
-                  }
-                }}
+                onClick={handleAudioCall}
                 disabled={!!currentCall || isUserBlocked || isBlockedByUser}
                 className="flex items-center gap-2"
                 style={{
@@ -521,14 +713,7 @@ export function ChatInterface({
               <Button
                 size="sm"
                 variant="outline"
-                onClick={async () => {
-                  try {
-                    await startCall(selectedConversation, 'video');
-                  } catch (error) {
-                    console.error('[ChatInterface] Failed to start video call:', error);
-                    alert('Failed to start video call: ' + (error as Error).message);
-                  }
-                }}
+                onClick={handleVideoCall}
                 disabled={!!currentCall || isUserBlocked || isBlockedByUser}
                 className="flex items-center gap-2"
                 style={{
@@ -566,11 +751,15 @@ export function ChatInterface({
                   <div className="w-full">
                     <BlockUserButton 
                       username={selectedConversation}
-                      passphrase={callingAuthContext?.passphrasePlaintextRef?.current}
+                      passphraseRef={callingAuthContext?.passphrasePlaintextRef}
+                      kyberSecretRef={callingAuthContext?.hybridKeysRef?.current ? { current: callingAuthContext.hybridKeysRef.current.kyber?.secretKey || null } : undefined}
+                      getDisplayUsername={getDisplayUsername}
+                      initialBlocked={isUserBlocked}
                       variant="ghost"
                       size="sm"
                       className="w-full justify-start"
                       showText={true}
+                      onBlockStatusChange={handleBlockStatusChangeInline}
                     />
                   </div>
                 </div>
@@ -579,6 +768,34 @@ export function ChatInterface({
           )}
           
           <TorIndicator />
+          
+          {/* P2P Connection Indicator */}
+          {p2pConnected && (
+            <div 
+              className="flex items-center gap-1 px-2 py-1 rounded text-xs font-medium"
+              style={{
+                backgroundColor: 'var(--color-success-background, rgba(34, 197, 94, 0.1))',
+                color: 'var(--color-success, #22c55e)',
+                border: '1px solid var(--color-success, #22c55e)'
+              }}
+              title="Direct peer-to-peer connection active"
+            >
+              <svg 
+                className="w-3 h-3" 
+                fill="none" 
+                stroke="currentColor" 
+                viewBox="0 0 24 24"
+              >
+                <path 
+                  strokeLinecap="round" 
+                  strokeLinejoin="round" 
+                  strokeWidth={2} 
+                  d="M13 10V3L4 14h7v7l9-11h-7z" 
+                />
+              </svg>
+              <span>P2P</span>
+            </div>
+          )}
         </div>
       </div>
       <ScrollArea 
@@ -587,41 +804,26 @@ export function ChatInterface({
         style={{ backgroundColor: 'var(--color-background)' }}
       >
         <div className="space-y-4">
-          {messages.length === 0 ? (
-            <div 
-              className="flex items-center justify-center h-full min-h-[200px] text-sm"
-              style={{ color: 'var(--color-text-secondary)' }}
-            >
-              {selectedConversation ? "No messages yet. Start the conversation!" : "Select a conversation to view messages"}
-            </div>
-          ) : (
+          {messages.length === 0 ? emptyMessagesUI : (
             messages.map((message, index) => {
-              const smartReceipt = getSmartReceiptStatus(message) || message.receipt;
-              const shouldShowReceipt =
-                message.isCurrentUser && smartReceipt && (message.id === lastReadId || message.id === lastDeliveredId);
-              // Ensure unique key by combining message ID with index as fallback
-              const uniqueKey = message.id ? `${message.id}-${index}` : `message-${index}-${Date.now()}`;
+              const smartReceipt = getSmartReceiptStatus(message);
+              const isMine = message.isCurrentUser || message.sender === currentUsername;
+              const receiptToShow = isMine && smartReceipt ? smartReceipt : undefined;
+              const uniqueKey = message.id || `message-${index}`;
               return (
                 <div key={uniqueKey} id={`message-${message.id}`}>
                   <ChatMessage
                     message={{
                       ...message,
-                      receipt: shouldShowReceipt ? smartReceipt : undefined,
+                      receipt: receiptToShow,
                     }}
                     previousMessage={index > 0 ? messages[index - 1] : undefined}
-                    onReply={() => setReplyTo(message)}
-                    onDelete={() =>
-                      onSendMessage(message.id, "", SignalType.DELETE_MESSAGE, null) // add reply field later
-                    }
-                    onEdit={() => setEditingMessage(message)}
-                    onReact={(targetMessage, emoji) => {
-                      const isRemove = !!(targetMessage.reactions && targetMessage.reactions[emoji] && targetMessage.reactions[emoji].includes(currentUsername));
-                      const action = isRemove ? SignalType.REACTION_REMOVE : SignalType.REACTION_ADD;
-                      // Send reaction signal (no UI bubble). We pass target message id via messageId param.
-                      onSendMessage(targetMessage.id, emoji, action, null);
-                    }}
+                    onReply={() => handleReply(message)}
+                    onDelete={() => handleDeleteMessage(message)}
+                    onEdit={() => handleEdit(message)}
+                    onReact={handleReactToMessage}
                     currentUsername={currentUsername}
-                    getDisplayUsername={getDisplayUsername}
+                    getDisplayUsername={getDisplayUsernameStable}
                   />
                 </div>
               );
@@ -642,7 +844,7 @@ export function ChatInterface({
               <TypingIndicator 
                 key={username} 
                 username={username} 
-                getDisplayUsername={getDisplayUsername}
+                getDisplayUsername={getDisplayUsernameStable}
               />
             ))}
           </div>
@@ -682,67 +884,59 @@ export function ChatInterface({
         style={{ backgroundColor: 'var(--color-background)' }}
       >
         <ChatInput
-          onSendMessage={async (
-            messageId: string | undefined,
-            content: string,
-            messageSignalType: string,
-            replyToMsg?: MessageReply | null
-          ) => {
-            // Send all message types to the parent handler
-            await onSendMessage(messageId ?? "", content, messageSignalType, replyToMsg);
-            
-            // Reset typing indicator for ALL message types except typing indicators themselves
-            console.log('[ChatInterface] Message sent, checking typing reset:', { messageSignalType });
-            if (messageSignalType !== 'typing-start' && messageSignalType !== 'typing-stop') {
-              console.log('[ChatInterface] Resetting typing indicator for message type:', messageSignalType);
-              resetTypingAfterSend();
-              setReplyTo(null);
-            } else {
-              console.log('[ChatInterface] Skipping typing reset for typing indicator:', messageSignalType);
-            }
-          }}
+          onSendMessage={handleMessageSend}
           onSendFile={onSendFile}
           isEncrypted={isEncrypted}
           currentUsername={currentUsername}
           users={users}
           replyTo={replyTo}
-          onCancelReply={() => setReplyTo(null)}
+          onCancelReply={handleCancelReply}
           editingMessage={editingMessage}
-          onCancelEdit={() => setEditingMessage(null)}
-          onEditMessage={async (newContent) => {
-            if (editingMessage) { //never is called since is handled from chatinpuit and that took me 2 hours to realize
-              await onSendMessage(editingMessage.id, newContent, SignalType.EDIT_MESSAGE, editingMessage.replyTo);
-              setEditingMessage(null);
-            }
-          }}
+          onCancelEdit={handleCancelEdit}
+          onEditMessage={handleEditMessage}
           onTyping={handleLocalTyping}
           selectedConversation={selectedConversation}
-          getDisplayUsername={getDisplayUsername}
+          getDisplayUsername={getDisplayUsernameStable}
           disabled={isUserBlocked || isBlockedByUser}
+          getKeysOnDemand={getKeysOnDemand}
         />
       </div>
 
       {/* Call Modal */}
       {currentCall && (
-        <CallModal
-          call={currentCall}
-          localStream={localStream}
-          remoteStream={remoteStream}
-          remoteScreenStream={remoteScreenStream}
-          peerConnection={peerConnection}
-          onAnswer={() => currentCall && answerCall(currentCall.id)}
-          onDecline={() => currentCall && declineCall(currentCall.id)}
-          onEndCall={endCall}
-          onToggleMute={toggleMute}
-          onToggleVideo={toggleVideo}
-          onSwitchCamera={switchCamera}
-          onStartScreenShare={startScreenShare}
-          onStopScreenShare={stopScreenShare}
-          onGetAvailableScreenSources={getAvailableScreenSources}
-          isScreenSharing={isScreenSharing}
-          getDisplayUsername={getDisplayUsername}
-        />
+        <React.Suspense fallback={null}>
+          <CallModalLazy
+            call={currentCall}
+            localStream={localStream}
+            remoteStream={remoteStream}
+            remoteScreenStream={remoteScreenStream}
+            peerConnection={peerConnection}
+            onAnswer={handleCallModalAnswer}
+            onDecline={handleCallModalDecline}
+            onEndCall={endCall}
+            onToggleMute={toggleMute}
+            onToggleVideo={toggleVideo}
+            onSwitchCamera={switchCamera}
+            onStartScreenShare={startScreenShare}
+            onStopScreenShare={stopScreenShare}
+            onGetAvailableScreenSources={getAvailableScreenSources}
+            isScreenSharing={isScreenSharing}
+            getDisplayUsername={getDisplayUsernameStable}
+          />
+        </React.Suspense>
       )}
     </div>
   );
-}
+}, (prevProps, nextProps) => {
+  return (
+    prevProps.messages === nextProps.messages &&
+    prevProps.selectedConversation === nextProps.selectedConversation &&
+    prevProps.currentUsername === nextProps.currentUsername &&
+    prevProps.p2pConnected === nextProps.p2pConnected &&
+    prevProps.selectedDisplayName === nextProps.selectedDisplayName &&
+    prevProps.isEncrypted === nextProps.isEncrypted &&
+    prevProps.users === nextProps.users
+  );
+});
+
+ChatInterface.displayName = 'ChatInterface';

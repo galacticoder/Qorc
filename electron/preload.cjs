@@ -1,37 +1,120 @@
+/**
+ * Electron Preload Script 
+ * Secure bridge between renderer and main process with full input validation
+ */
+
 const { contextBridge, ipcRenderer } = require('electron');
 
-// SECURITY: Validate and sanitize all inputs to prevent injection attacks
+const MAX_TOR_CONFIG_SIZE = 50000;
+const MAX_URL_LENGTH = 2048;
+const MAX_PATH_LENGTH = 1000;
+const MAX_FILENAME_LENGTH = 255;
+
 function validateTorOptions(options) {
   if (!options || typeof options !== 'object') {
-    throw new Error('Invalid options: must be an object');
+    throw new Error('Invalid options');
   }
 
-  // Validate torrc text safely. The config is written to a file and never executed via a shell.
   if (typeof options.config === 'string') {
-    // Reasonable size limit to avoid abuse
-    if (options.config.length > 50000) {
+    if (options.config.length > MAX_TOR_CONFIG_SIZE) {
       throw new Error('Configuration too large');
     }
 
-    // Forbid embedded null bytes and non-printable characters (except tab/newline/CR)
     if (/\x00/.test(options.config)) {
-      throw new Error('Invalid configuration: contains null bytes');
+      throw new Error('Null bytes not allowed');
     }
     if (/[^\x09\x0A\x0D\x20-\x7E]/.test(options.config)) {
-      throw new Error('Invalid configuration: contains invalid characters');
+      throw new Error('Invalid characters in configuration');
+    }
+
+    const allowedDirectives = new Set([
+      'AvoidDiskWrites',
+      'Bridge',
+      'CircuitBuildTimeout',
+      'ClientOnly',
+      'ClientTransportPlugin',
+      'ControlPort',
+      'CookieAuthentication',
+      'DataDirectory',
+      'DisableDebuggerAttachment',
+      'DisableNetwork',
+      'EnforceDistinctSubnets',
+      'EntryNodes',
+      'ExitNodes',
+      'ExitPolicy',
+      'ExcludeExitNodes',
+      'ExcludeNodes',
+      'FetchDirInfoEarly',
+      'FetchDirInfoExtraEarly',
+      'FetchUselessDescriptors',
+      'GeoIPFile',
+      'GeoIPv6File',
+      'HashedControlPassword',
+      'LearnCircuitBuildTimeout',
+      'Log',
+      'MaxCircuitDirtiness',
+      'NewCircuitPeriod',
+      'NumEntryGuards',
+      'ProtocolWarnings',
+      'SafeLogging',
+      'SocksAuth',
+      'SocksListenAddress',
+      'SocksPolicy',
+      'SocksPort',
+      'StrictNodes',
+      'TrackHostExits',
+      'TrackHostExitsExpire',
+      'UseBridges',
+      'UseEntryGuards',
+      'UseMicrodescriptors'
+    ]);
+
+    const lines = options.config.split(/\r?\n/);
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith('#')) {
+        continue;
+      }
+      const match = trimmed.match(/^([A-Za-z][A-Za-z0-9_]*)\b/);
+      if (!match) {
+        throw new Error(`Invalid Tor config syntax: ${line}`);
+      }
+      const directive = match[1];
+      if (!allowedDirectives.has(directive)) {
+        throw new Error(`Forbidden Tor config directive: ${directive}`);
+      }
     }
   }
 
   return options;
 }
 
-// Expose Tor and system functionality for the auto-setup
 contextBridge.exposeInMainWorld('electronAPI', {
-  // Platform information - static values only
   platform: process.platform,
   arch: process.arch,
+  // Instance ID to allow per-instance isolation of secrets for multiple accounts on device just leaving it this way for now will change later
+  instanceId: process.env.ELECTRON_INSTANCE_ID || process.env.INSTANCE_ID || '1',
 
-  // Tor management functions with input validation
+  secureStore: {
+    init: async () => {
+      const res = await ipcRenderer.invoke('secure:init');
+      return !!res?.success;
+    },
+    get: async (key) => {
+      const res = await ipcRenderer.invoke('secure:get', key);
+      if (res && res.success) return res.value || null;
+      return null;
+    },
+    set: async (key, value) => {
+      const res = await ipcRenderer.invoke('secure:set', key, value);
+      return !!res?.success;
+    },
+    remove: async (key) => {
+      const res = await ipcRenderer.invoke('secure:remove', key);
+      return !!res?.success;
+    }
+  },
+
   checkTorInstallation: () => ipcRenderer.invoke('tor:check-installation'),
   downloadTor: () => ipcRenderer.invoke('tor:download'),
   installTor: () => ipcRenderer.invoke('tor:install'),
@@ -47,28 +130,73 @@ contextBridge.exposeInMainWorld('electronAPI', {
   stopTor: () => ipcRenderer.invoke('tor:stop'),
   getTorStatus: () => ipcRenderer.invoke('tor:status'),
   uninstallTor: () => ipcRenderer.invoke('tor:uninstall'),
+  
+  onTorConfigureComplete: (callback) => {
+    const listener = (_event, data) => callback(_event, data);
+    ipcRenderer.once('tor:configure-complete', listener);
+    return () => ipcRenderer.removeListener('tor:configure-complete', listener);
+  },
 
-  // System information
+  initializeTor: (config) => {
+    if (!config || typeof config !== 'object') {
+      return Promise.reject(new Error('Invalid Tor configuration'));
+    }
+    return ipcRenderer.invoke('tor:initialize', config);
+  },
+  testTorConnection: () => ipcRenderer.invoke('tor:test-connection'),
+  makeTorRequest: (options) => {
+    if (!options || typeof options !== 'object') {
+      return Promise.reject(new Error('Invalid Tor request options'));
+    }
+    return ipcRenderer.invoke('tor:request', options);
+  },
+  getTorWebSocketUrl: (url) => {
+    if (!url || typeof url !== 'string') {
+      return Promise.reject(new Error('URL must be a string'));
+    }
+    if (url.length > MAX_URL_LENGTH) {
+      return Promise.reject(new Error('URL too long'));
+    }
+    return ipcRenderer.invoke('tor:get-ws-url', url);
+  },
+
   getPlatformInfo: () => ipcRenderer.invoke('system:platform'),
 
-  // Tor verification
   verifyTorConnection: () => ipcRenderer.invoke('tor:verify-connection'),
   getTorInfo: () => ipcRenderer.invoke('tor:info'),
-  rotateTorCircuit: () => ipcRenderer.invoke('tor:rotate-circuit'),
+  rotateTorCircuit: () => ipcRenderer.invoke('tor:new-circuit'),
 
-  // Screen sharing
   getScreenSources: () => {
-    // No input validation needed - takes no parameters
     return ipcRenderer.invoke('screen:getSources');
   },
 
-  // File operations
+  getIceConfiguration: () => {
+    return ipcRenderer.invoke('webrtc:get-ice-config');
+  },
+
+  // Onion transport APIs
+  createOnionEndpoint: (options = {}) => {
+    const ttl = typeof options.ttlSeconds === 'number' && options.ttlSeconds > 0 && options.ttlSeconds <= 3600 ? options.ttlSeconds : 600;
+    return ipcRenderer.invoke('onion:create-endpoint', { ttlSeconds: ttl });
+  },
+  connectOnionWebSocket: async (_opts) => {
+    return null;
+  },
+  onOnionMessage: (callback) => {
+    if (typeof callback !== 'function') return () => {};
+    const listener = (_event, data) => { try { callback(_event, data); } catch (_) {} };
+    ipcRenderer.on('onion:message', listener);
+    return () => ipcRenderer.removeListener('onion:message', listener);
+  },
+  sendOnionMessage: (toUsername, payload) => {
+    return ipcRenderer.invoke('onion:send', toUsername, payload);
+  },
+
   saveFile: (data) => {
-    // Validate saveFile input
     if (!data || typeof data !== 'object') {
       return Promise.reject(new Error('saveFile requires an object parameter'));
     }
-    if (!data.filename || typeof data.filename !== 'string' || data.filename.length > 255) {
+    if (!data.filename || typeof data.filename !== 'string' || data.filename.length > MAX_FILENAME_LENGTH) {
       return Promise.reject(new Error('Invalid filename'));
     }
     if (!data.data || typeof data.data !== 'string') {
@@ -77,7 +205,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
     if (!data.mimeType || typeof data.mimeType !== 'string') {
       return Promise.reject(new Error('Invalid MIME type'));
     }
-    // Check for path traversal in filename
     if (data.filename.includes('..') || data.filename.includes('/') || data.filename.includes('\\')) {
       return Promise.reject(new Error('Filename contains invalid characters'));
     }
@@ -85,19 +212,16 @@ contextBridge.exposeInMainWorld('electronAPI', {
   },
   
   getDownloadSettings: () => {
-    // No input validation needed - takes no parameters
     return ipcRenderer.invoke('file:get-download-settings');
   },
   
   setDownloadPath: (path) => {
-    // Validate path input
     if (!path || typeof path !== 'string') {
       return Promise.reject(new Error('Path must be a non-empty string'));
     }
-    if (path.length > 1000) {
+    if (path.length > MAX_PATH_LENGTH) {
       return Promise.reject(new Error('Path too long'));
     }
-    // Check for null bytes
     if (path.includes('\0')) {
       return Promise.reject(new Error('Path contains null bytes'));
     }
@@ -105,7 +229,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
   },
   
   setAutoSave: (autoSave) => {
-    // Validate boolean input
     if (typeof autoSave !== 'boolean') {
       return Promise.reject(new Error('autoSave must be a boolean'));
     }
@@ -113,38 +236,36 @@ contextBridge.exposeInMainWorld('electronAPI', {
   },
   
   chooseDownloadPath: () => {
-    // No input validation needed - takes no parameters
     return ipcRenderer.invoke('file:choose-download-path');
   },
 
-  // Link Preview - secure fetching through Tor
   fetchLinkPreview: (url, options = {}) => {
-    // Validate URL input
     if (!url || typeof url !== 'string') {
       return Promise.reject(new Error('URL must be a non-empty string'));
     }
-    if (url.length > 2048) {
+    if (url.length > MAX_URL_LENGTH) {
       return Promise.reject(new Error('URL too long'));
     }
-    // Basic URL format validation
     try {
       new URL(url.startsWith('http') ? url : 'https://' + url);
     } catch {
       return Promise.reject(new Error('Invalid URL format'));
     }
     
-    // Validate options if provided
     if (options && typeof options !== 'object') {
       return Promise.reject(new Error('Options must be an object'));
     }
     
-    // Sanitize options
     const sanitizedOptions = {};
     if (options.timeout && typeof options.timeout === 'number' && options.timeout > 0 && options.timeout <= 60000) {
       sanitizedOptions.timeout = options.timeout;
     }
-    if (options.userAgent && typeof options.userAgent === 'string' && options.userAgent.length <= 500) {
-      sanitizedOptions.userAgent = options.userAgent;
+    if (options.userAgent !== undefined) {
+      const TOR_STANDARD_UA = 'Mozilla/5.0 (Windows NT 10.0; rv:102.0) Gecko/20100101 Firefox/102.0';
+      if (options.userAgent && options.userAgent !== TOR_STANDARD_UA) {
+        return Promise.reject(new Error('Custom User-Agent not allowed'));
+      }
+      sanitizedOptions.userAgent = TOR_STANDARD_UA;
     }
     if (options.maxRedirects && typeof options.maxRedirects === 'number' && options.maxRedirects >= 0 && options.maxRedirects <= 10) {
       sanitizedOptions.maxRedirects = options.maxRedirects;
@@ -153,16 +274,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
     return ipcRenderer.invoke('link:fetch-preview', url, sanitizedOptions);
   },
 
-  // External URL opening - secure shell.openExternal
   openExternal: (url) => {
-    // Validate URL input
     if (!url || typeof url !== 'string') {
       return Promise.reject(new Error('URL must be a non-empty string'));
     }
-    if (url.length > 2048) {
+    if (url.length > MAX_URL_LENGTH) {
       return Promise.reject(new Error('URL too long'));
     }
-    // Basic URL format validation
     try {
       new URL(url);
       if (!url.startsWith('http://') && !url.startsWith('https://')) {
@@ -175,41 +293,105 @@ contextBridge.exposeInMainWorld('electronAPI', {
     return ipcRenderer.invoke('shell:open-external', url);
   },
 
-  // Utility
-  isElectron: true,
-  isDevelopment: process.env.NODE_ENV === 'development',
+  isElectron: true
 });
 
+const validateSignalArgs = (methodName, args) => {
+  if (!args || typeof args !== 'object') {
+    throw new Error(`${methodName}: args must be an object`);
+  }
+  const size = JSON.stringify(args).length;
+  if (size > 100_000) {
+    throw new Error(`${methodName}: args too large`);
+  }
+  return args;
+};
+
 contextBridge.exposeInMainWorld('edgeApi', {
-  // Libsignal identity and prekeys
-  generateIdentity: (args) => ipcRenderer.invoke('signal:generate-identity', args),
-  generatePreKeys: (args) => ipcRenderer.invoke('signal:generate-prekeys', args),
-  getPreKeyBundle: (args) => ipcRenderer.invoke('signal:get-prekey-bundle', args),
-  processPreKeyBundle: (args) => ipcRenderer.invoke('signal:process-prekey-bundle', args),
+  generateIdentity(args) {
+    try { return ipcRenderer.invoke('signal-v2:generate-identity', validateSignalArgs('generateIdentity', args)); } catch (error) { return Promise.reject(error); }
+  },
+  generatePreKeys(args) {
+    try { return ipcRenderer.invoke('signal-v2:generate-prekeys', validateSignalArgs('generatePreKeys', args)); } catch (error) { return Promise.reject(error); }
+  },
+  getPreKeyBundle(args) {
+    try {
+      return ipcRenderer.invoke('signal-v2:create-prekey-bundle', validateSignalArgs('getPreKeyBundle', args)).then((res) => {
+        if (res && res.success && res.bundle) return res.bundle;
+        return res?.bundle || res;
+      });
+    } catch (error) { return Promise.reject(error); }
+  },
+  processPreKeyBundle(args) {
+    try { return ipcRenderer.invoke('signal-v2:process-prekey-bundle', validateSignalArgs('processPreKeyBundle', args)); } catch (error) { return Promise.reject(error); }
+  },
 
-  // Encryption helpers
-  hasSession: (args) => ipcRenderer.invoke('signal:has-session', args),
-  encrypt: (args) => ipcRenderer.invoke('signal:encrypt', args),
-  decrypt: (args) => ipcRenderer.invoke('signal:decrypt', args),
+  hasSession(args) {
+    try { return ipcRenderer.invoke('signal-v2:has-session', validateSignalArgs('hasSession', args)); } catch (error) { return Promise.reject(error); }
+  },
+  encrypt(args) {
+    try { return ipcRenderer.invoke('signal-v2:encrypt', validateSignalArgs('encrypt', args)); } catch (error) { return Promise.reject(error); }
+  },
+  setStaticMlkemKeys(args) {
+    try { return ipcRenderer.invoke('signal-v2:set-static-mlkem-keys', validateSignalArgs('setStaticMlkemKeys', args)); } catch (error) { return Promise.reject(error); }
+  },
+  decrypt(args) {
+    try { return ipcRenderer.invoke('signal-v2:decrypt', validateSignalArgs('decrypt', args)); } catch (error) { return Promise.reject(error); }
+  },
+  deleteSession(args) {
+    try { return ipcRenderer.invoke('signal-v2:delete-session', validateSignalArgs('deleteSession', args)); } catch (error) { return Promise.reject(error); }
+  },
+  deleteAllSessions(args) {
+    try { return ipcRenderer.invoke('signal-v2:delete-all-sessions', validateSignalArgs('deleteAllSessions', args)); } catch (error) { return Promise.reject(error); }
+  },
 
-  // Note: Typing indicators are now sent as encrypted messages through the normal message system
+  trustPeerIdentity(args) {
+    try { return ipcRenderer.invoke('signal-v2:trust-peer-identity', validateSignalArgs('trustPeerIdentity', args)); } catch (error) { return Promise.reject(error); }
+  },
 
-  // Legacy/unused placeholders (safe to keep for compatibility)
-  setupSession: (args) => ipcRenderer.invoke('signal:setup-session', args),
-  publishBundle: (args) => ipcRenderer.invoke('signal:publish-bundle', args),
-  requestBundle: (args) => ipcRenderer.invoke('signal:request-bundle', args),
+  setSignalStorageKey(args) {
+    try { return ipcRenderer.invoke('signal-v2:set-storage-key', validateSignalArgs('setSignalStorageKey', args)); } catch (error) { return Promise.reject(error); }
+  },
+
   wsSend: (payload) => ipcRenderer.invoke('edge:ws-send', payload),
   wsConnect: () => ipcRenderer.invoke('edge:ws-connect'),
-  setServerUrl: (url) => ipcRenderer.invoke('edge:set-server-url', url),
+  wsDisconnect: () => ipcRenderer.invoke('edge:ws-disconnect'),
+  wsProbeConnect: (url, timeoutMs) => {
+    if (!url || typeof url !== 'string') {
+      return Promise.reject(new Error('URL must be a non-empty string'));
+    }
+    if (url.length > MAX_URL_LENGTH) {
+      return Promise.reject(new Error('URL too long'));
+    }
+    return ipcRenderer.invoke('edge:ws-probe-connect', url, timeoutMs);
+  },
+  setServerUrl: (url) => {
+    if (!url || typeof url !== 'string') {
+      return Promise.reject(new Error('URL must be a non-empty string'));
+    }
+    if (url.length > MAX_URL_LENGTH) {
+      return Promise.reject(new Error('URL too long'));
+    }
+    return ipcRenderer.invoke('edge:set-server-url', url);
+  },
   getServerUrl: () => ipcRenderer.invoke('edge:get-server-url'),
   rendererReady: () => ipcRenderer.invoke('renderer:ready'),
   torSetupComplete: () => ipcRenderer.invoke('tor:setup-complete'),
-  // Power save blocker for calls
   powerSaveBlockerStart: () => ipcRenderer.invoke('power:psb-start'),
   powerSaveBlockerStop: () => ipcRenderer.invoke('power:psb-stop'),
+  refreshTokens: (args) => ipcRenderer.invoke('auth:refresh', args),
+  storePQKeys: async ({ username, kyberPublicKey, dilithiumPublicKey, x25519PublicKey }) => {
+    try {
+      if (!username || typeof username !== 'string') return { success: false, error: 'invalid-username' };
+      const payload = { kyberPublicKey: String(kyberPublicKey || ''), dilithiumPublicKey: String(dilithiumPublicKey || ''), x25519PublicKey: String(x25519PublicKey || '') };
+      await ipcRenderer.invoke('secure:init');
+      const key = `pq:${username}`;
+      const res = await ipcRenderer.invoke('secure:set', key, JSON.stringify(payload));
+      return { success: !!(res && res.success) };
+    } catch (e) { return { success: false, error: (e && e.message) || 'error' }; }
+  }
 });
 
-// Bridge server messages into the isolated world via a DOM event
 ipcRenderer.on('edge:server-message', (_event, data) => {
   try {
     window.dispatchEvent(new CustomEvent('edge:server-message', { detail: data }));
@@ -217,5 +399,3 @@ ipcRenderer.on('edge:server-message', (_event, data) => {
     console.error('[PRELOAD] Failed to dispatch server message:', error);
   }
 });
-
-// Note: Typing indicators are now handled as encrypted messages through the normal message system

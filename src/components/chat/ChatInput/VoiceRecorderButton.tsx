@@ -1,13 +1,28 @@
+import { useCallback } from "react";
 import { Button } from "../../ui/button";
 import { Mic } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 interface VoiceRecorderButtonProps {
-  onClick: () => void;
-  disabled?: boolean;
+  readonly onClick: () => void;
+  readonly disabled?: boolean;
 }
 
 export function VoiceRecorderButton({ onClick, disabled }: VoiceRecorderButtonProps) {
+  const handleMouseEnter = useCallback((e: React.MouseEvent<HTMLButtonElement>): void => {
+    if (!disabled) {
+      e.currentTarget.style.backgroundColor = 'var(--color-surface)';
+      e.currentTarget.style.color = 'var(--color-text-primary)';
+    }
+  }, [disabled]);
+
+  const handleMouseLeave = useCallback((e: React.MouseEvent<HTMLButtonElement>): void => {
+    if (!disabled) {
+      e.currentTarget.style.backgroundColor = 'transparent';
+      e.currentTarget.style.color = 'var(--color-text-secondary)';
+    }
+  }, [disabled]);
+
   return (
     <Button
       variant="ghost"
@@ -21,18 +36,8 @@ export function VoiceRecorderButton({ onClick, disabled }: VoiceRecorderButtonPr
         color: 'var(--color-text-secondary)',
         backgroundColor: 'transparent'
       }}
-      onMouseEnter={(e) => {
-        if (!disabled) {
-          e.currentTarget.style.backgroundColor = 'var(--color-surface)';
-          e.currentTarget.style.color = 'var(--color-text-primary)';
-        }
-      }}
-      onMouseLeave={(e) => {
-        if (!disabled) {
-          e.currentTarget.style.backgroundColor = 'transparent';
-          e.currentTarget.style.color = 'var(--color-text-secondary)';
-        }
-      }}
+      onMouseEnter={handleMouseEnter}
+      onMouseLeave={handleMouseLeave}
       onClick={onClick}
       disabled={disabled}
       type="button"

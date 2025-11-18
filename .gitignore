@@ -1,51 +1,53 @@
 # Dependencies
-/node_modules
-/server/node_modules
-/config/node_modules
-
-# Lock files (keep only the one in config/)
-pnpm-lock.yaml
-/server/pnpm-lock.yaml
-/server/package-lock.yaml
-package-lock.json
-
-# Symbolic links created by startClient.sh
-package.json
-postcss.config.js
-tailwind.config.ts
-vite.config.ts
-tsconfig.node.json
-tsconfig.app.json
-tsconfig.json
-eslint.config.js
-components.json
+node_modules/
+.pnp
+.pnp.js
 
 # Build outputs
-/dist
-/build
-/.next
-/.nuxt
-/.output
-/.vercel
-/.netlify
+dist/
+build/
+out/
+.next/
+.cache/
+.parcel-cache/
+.vite/
+.vscode/
+pnpm-lock.yaml
+package-lock.json
 
-# Tor bundles and archives (too large for git)
-/tor-bundles
-*.tar.gz
-tor-expert-bundle-*
+
+# Electron builder
+.electron-builder/
+electron-builder-output/
+release/
+
+# Testing
+coverage/
+.nyc_output/
+*.lcov
+
+# Secrets and private keys (server)
+server/config/*
+!server/config/config.js
+!server/config/constants.js
+!server/config/secure-credentials.js
+
+# Client secure storage
+.config/
 
 # Database files
-/server/database/user_database.sqlite
-/server/database/*.db
-/server/database/*.sqlite*
+*.sqlite
+*.sqlite3
+*.db
+*.db-journal
+*.db-shm
+*.db-wal
+server/database/*.sqlite
+server/database/*.db
 
-# Environment files
-.env
-.env.local
-.env.development.local
-.env.test.local
-.env.production.local
-/scripts/config/cloudflared/tunnel.env
+# Local certs folder
+certs/*
+!certs/.gitkeep
 
 # Logs
 *.log
@@ -54,95 +56,77 @@ yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
 lerna-debug.log*
-electron_*.log
-electron_output.log
-electron_test.log
 
-# Runtime data
-pids
-*.pid
-*.seed
-*.pid.lock
+# Environment variables
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+.env.*.local
 
-# Coverage directory used by tools like istanbul
-coverage
-*.lcov
-
-# nyc test coverage
-.nyc_output
-
-# Dependency directories
-jspm_packages/
-
-# TypeScript cache
-*.tsbuildinfo
-
-# Optional npm cache directory
-.npm
-
-# Optional eslint cache
-.eslintcache
-
-# Optional stylelint cache
-.stylelintcache
-
-# Microbundle cache
-.rpt2_cache/
-.rts2_cache_cjs/
-.rts2_cache_es/
-.rts2_cache_umd/
-
-# Optional REPL history
-.node_repl_history
-
-# Output of 'npm pack'
-*.tgz
-
-# Yarn Integrity file
-.yarn-integrity
-
-# parcel-bundler cache (https://parceljs.org/)
-.cache
-.parcel-cache
-
-# Vite cache
-.vite
-
-# Rollup cache
-.rollup.cache
-
-# Temporary folders
-tmp/
-temp/
-
-# Editor directories and files
-/.qodo
-/.vscode
-/.cursor
-.idea
-*.swp
-*.swo
-*~
-
-# OS generated files
+# OS files
 .DS_Store
 .DS_Store?
 ._*
 .Spotlight-V100
 .Trashes
 ehthumbs.db
+ehthumbs_vista.db
 Thumbs.db
+Desktop.ini
+$RECYCLE.BIN/
 
-# Electron build outputs
-/electron-dist
-/dist-electron
-/release
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.project
+.classpath
+.settings/
+*.sublime-*
 
-# AppImage extraction
-/squashfs-root
+# Temporary files
+*.tmp
+*.temp
+*.bak
+*.backup
+tmp/
 
-# Docker
-.dockerignore
+# NPM
+package-lock.json
+.npm/
 
-# Misc
-problem.txt
+# Yarn
+.yarn/*
+!.yarn/patches
+!.yarn/plugins
+!.yarn/releases
+!.yarn/sdks
+!.yarn/versions
+.yarn/cache
+.yarn/unplugged
+.yarn/build-state.yml
+.yarn/install-state.gz
+yarn-error.log
+
+# sys links
+
+# sys links
+/postcss.config.js
+/package.json
+/tailwind.config.ts
+/tsconfig.app.json
+/tsconfig.json
+/tsconfig.node.json
+/vite.config.ts
+
+# others
+startServer.tls.sh
+bin
+scripts/config/haproxy
+server/config/.haproxy-stats-creds.pqc
+scripts/config
+dump.rdb

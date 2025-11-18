@@ -1,14 +1,14 @@
-import React, { useState, useRef } from "react";
+import React, { useRef, useMemo, useCallback } from "react";
 import { cn } from "../../lib/utils";
-import { format, isSameMinute } from "date-fns";
+import { format, isSameMinute, isToday, isYesterday, isThisYear } from "date-fns";
 import { TrashIcon, Pencil1Icon } from "./icons.tsx";
 import { EmojiPicker } from "../ui/EmojiPicker";
-
+import { useEmojiPicker } from "../../contexts/EmojiPickerContext";
 import { ChatMessageProps } from "./types.ts";
 import { SystemMessage } from "./ChatMessage/SystemMessage.tsx";
 import { DeletedMessage } from "./ChatMessage/DeletedMessage.tsx";
 import { FileContent } from "./ChatMessage/FileMessage.tsx";
-import { VoiceMessage } from "./VoiceMessage.tsx";
+import { VoiceMessage } from "./VoiceMessage";
 import { MessageReceipt } from "./MessageReceipt.tsx";
 import { useUnifiedUsernameDisplay } from "../../hooks/useUnifiedUsernameDisplay";
 import { LinkifyWithPreviews } from "./LinkifyWithPreviews.tsx";
@@ -18,91 +18,137 @@ import { isMarkdownMessage } from "../../lib/markdown-parser";
 import { copyTextToClipboard } from "../../lib/clipboard";
 
 interface ExtendedChatMessageProps extends ChatMessageProps {
-  getDisplayUsername?: (username: string) => Promise<string>;
+  readonly getDisplayUsername?: (username: string) => Promise<string>;
 }
 
-export function ChatMessage({ message, onReply, previousMessage, onDelete, onEdit, onReact, getDisplayUsername, currentUsername }: ExtendedChatMessageProps) {
+interface SystemAction {
+  readonly label: string;
+  readonly onClick: () => void;
+}
+
+const isValidJson = (str: string): boolean => {
+  if (typeof str !== 'string' || str.length === 0) return false;
+  const trimmed = str.trim();
+  return trimmed.startsWith('{') || trimmed.startsWith('[');
+};
+
+const parseSystemMessage = (content: string, message: any): { label: string; actions?: SystemAction[] } => {
+  if (!isValidJson(content)) {
+    return { label: content };
+  }
+
+  try {
+    const parsed = JSON.parse(content);
+    if (!parsed || typeof parsed !== 'object' || !parsed.label) {
+      return { label: content };
+    }
+
+    const label = typeof parsed.label === 'string' ? parsed.label : content;
+    
+    if (parsed.actionsType === 'callback' && message) {
+      const peer = message.sender === 'System' ? (message.recipient || '') : message.sender;
+      if (typeof peer === 'string' && peer.length > 0) {
+        const actions: SystemAction[] = [{
+          label: 'Call back',
+          onClick: () => {
+            try {
+              window.dispatchEvent(new CustomEvent('ui-call-request', { detail: { peer, type: 'audio' } }));
+            } catch {}
+          }
+        }];
+        return { label, actions };
+      }
+    }
+
+    return { label };
+  } catch {
+    return { label: content };
+  }
+};
+
+const formatTimestamp = (timestamp: Date): string => {
+  try {
+    if (!(timestamp instanceof Date) || isNaN(timestamp.getTime())) {
+      return '';
+    }
+    // Today: show time only
+    if (isToday(timestamp)) {
+      return format(timestamp, 'h:mm a');
+    }
+    // Yesterday: prefix
+    if (isYesterday(timestamp)) {
+      return `Yesterday ${format(timestamp, 'h:mm a')}`;
+    }
+    // This year: Month day, time
+    if (isThisYear(timestamp)) {
+      return format(timestamp, 'MMM d, h:mm a');
+    }
+    // Other years: include year
+    return format(timestamp, 'MMM d, yyyy, h:mm a');
+  } catch {
+    return '';
+  }
+};
+
+export const ChatMessage = React.memo<ExtendedChatMessageProps>(({ message, onReply, previousMessage, onDelete, onEdit, onReact, getDisplayUsername, currentUsername }) => {
   const { content, sender, timestamp, isCurrentUser, isSystemMessage, isDeleted, type } = message;
 
-  // Use unified username display for sender
+  const senderKey = useMemo(() => sender, [sender]);
   const { displayName: displaySender } = useUnifiedUsernameDisplay({
-    username: sender,
+    username: senderKey,
     getDisplayUsername,
     fallbackToOriginal: true
   });
 
-  // Use unified username display for reply-to sender
+  const replyToSenderKey = useMemo(() => message.replyTo?.sender || '', [message.replyTo?.sender]);
   const { displayName: displayReplyToSender } = useUnifiedUsernameDisplay({
-    username: message.replyTo?.sender || '',
+    username: replyToSenderKey,
     getDisplayUsername,
     fallbackToOriginal: true
   });
 
-  const isGrouped =
-    previousMessage &&
-    previousMessage.sender === sender &&
-    isSameMinute(previousMessage.timestamp, timestamp);
+  const isGrouped = useMemo(() => {
+    if (!previousMessage) return false;
+    if (previousMessage.sender !== sender) return false;
+    if (!(previousMessage.timestamp instanceof Date) || !(timestamp instanceof Date)) return false;
+    const diff = Math.abs(timestamp.getTime() - previousMessage.timestamp.getTime());
+    const GROUP_GAP_MS = 3 * 60 * 1000; // group messages within 3 minutes from same sender
+    return diff <= GROUP_GAP_MS || isSameMinute(previousMessage.timestamp, timestamp);
+  }, [previousMessage, sender, timestamp]);
 
-  // Ensure isCurrentUser is always boolean
-  const safeIsCurrentUser = isCurrentUser || false;
+  const safeIsCurrentUser = useMemo(() => isCurrentUser || false, [isCurrentUser]);
 
-  // Hooks must be declared unconditionally to avoid hook-order mismatches on conditional returns
-  const [pickerOpen, setPickerOpen] = useState<string | null>(null);
   const bubbleRef = useRef<HTMLDivElement | null>(null);
-
-  if (isSystemMessage) {
-    // Allow simple structured content to carry actions, but keep plaintext fallback
-    let label = content;
-    let actions: Array<{ label: string; onClick: () => void }> | undefined = undefined;
-    try {
-      if (typeof content === 'string' && (content.trim().startsWith('{') || content.trim().startsWith('['))) {
-        const parsed = JSON.parse(content);
-        if (parsed && typeof parsed === 'object' && parsed.label) {
-          label = parsed.label;
-          if (parsed.actionsType === 'callback' && message) {
-            // Dispatch a global event; ChatInterface wires startCall logic from there
-            const peer = message.sender === 'System' ? (message.recipient || '') : message.sender;
-            actions = [{ label: 'Call back', onClick: () => {
-              try { window.dispatchEvent(new CustomEvent('ui-call-request', { detail: { peer, type: 'audio' } })); } catch {}
-            }}];
-          }
-        }
-      }
-    } catch {}
-    return <SystemMessage content={label} actions={actions} />;
+  const { openPicker, closePicker, isPickerOpen } = useEmojiPicker();
+  
+  const messageTriggerIdRef = useRef<string | null>(null);
+  if (!messageTriggerIdRef.current) {
+    const safeId = message.id || `msg-${timestamp instanceof Date ? timestamp.getTime() : Date.now()}`;
+    messageTriggerIdRef.current = `message-${safeId}`;
   }
+  const messageTriggerId = messageTriggerIdRef.current;
+  const pickerOpen = isPickerOpen(messageTriggerId);
 
-  if (isDeleted) {
-    return <DeletedMessage sender={displaySender} timestamp={timestamp} isCurrentUser={isCurrentUser || false} />;
-  }
 
-  // Check if it's a voice note (special handling - keeps its own layout)
-  const isVoiceNote = (type === "FILE_MESSAGE" || type === "file" || type === "file-message") &&
-                      (message.filename?.includes('voice-note') ||
-                       (message.mimeType && message.mimeType.startsWith('audio/')) ||
-                       (message.filename && /\.(webm|mp3|wav|ogg|m4a)$/i.test(message.filename)));
+  const isUrlOnly = useMemo(() => LinkExtractor.isUrlOnlyMessage(content), [content]);
+  const urls = useMemo(() => LinkExtractor.extractUrlStrings(content), [content]);
+  const isMarkdown = useMemo(() => isMarkdownMessage(content), [content]);
 
-  if (isVoiceNote) {
-    return (
-      <VoiceMessage
-        audioUrl={message.content}
-        sender={displaySender}
-        timestamp={message.timestamp}
-        isCurrentUser={isCurrentUser || false}
-        filename={message.filename}
-        originalBase64Data={message.originalBase64Data}
-        mimeType={message.mimeType}
-        onReply={onReply}
-        onDelete={onDelete}
-        onEdit={onEdit}
-      />
-    );
-  }
+  const isFileMessageType =
+    type === "FILE_MESSAGE" ||
+    type === "file" ||
+    type === "file-message";
 
-  // For file messages, we'll render them within the standard message layout below
+  const isVoiceNote = useMemo(() => {
+    if (!isFileMessageType) return false;
+    const name = (message.filename || '').toLowerCase();
+    return name.includes('voice-note');
+  }, [isFileMessageType, message.filename]);
+  
+  const timestampDisplay = useMemo(() => formatTimestamp(timestamp), [timestamp]);
+  const avatarLetter = useMemo(() => displaySender.charAt(0).toUpperCase(), [displaySender]);
 
-  const handlePickEmoji = (emoji: string) => {
-    // Enforce one reaction per user (client-side): toggle off other emoji first
+  const handlePickEmoji = useCallback((emoji: string) => {
     if (currentUsername && message.reactions) {
       for (const [e, users] of Object.entries(message.reactions)) {
         if (users.includes(currentUsername) && e !== emoji) {
@@ -111,7 +157,41 @@ export function ChatMessage({ message, onReply, previousMessage, onDelete, onEdi
       }
     }
     onReact?.(message, emoji);
-  };
+  }, [currentUsername, message, onReact]);
+
+  const handleCopyMessage = useCallback(() => {
+    void copyTextToClipboard(content);
+  }, [content]);
+
+  const handleReply = useCallback(() => {
+    onReply?.(message);
+  }, [onReply, message]);
+
+  const handleDelete = useCallback(() => {
+    onDelete?.(message);
+  }, [onDelete, message]);
+
+  const handleEdit = useCallback(() => {
+    onEdit?.(message.content);
+  }, [onEdit, message.content]);
+
+  const handleTogglePicker = useCallback((e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (pickerOpen) {
+      closePicker();
+    } else {
+      openPicker(messageTriggerId);
+    }
+  }, [pickerOpen, closePicker, openPicker, messageTriggerId]);
+
+  if (isSystemMessage) {
+    const { label, actions } = parseSystemMessage(content, message);
+    return <SystemMessage content={label} actions={actions} />;
+  }
+
+  if (isDeleted) {
+    return <DeletedMessage sender={displaySender} timestamp={timestamp} isCurrentUser={safeIsCurrentUser} />;
+  }
 
   return (
     <div 
@@ -123,8 +203,7 @@ export function ChatMessage({ message, onReply, previousMessage, onDelete, onEdi
         marginBottom: isGrouped ? 'var(--spacing-xs)' : 'var(--spacing-md)'
       }}
     >
-      {/* Avatar - only show for non-grouped messages */}
-      <div className={cn("flex-shrink-0", isGrouped ? "w-10" : "w-10")}>
+      <div className="flex-shrink-0 w-10">
         {!isGrouped && (
           <div 
             className="w-10 h-10 rounded-full flex items-center justify-center font-medium text-sm"
@@ -132,8 +211,9 @@ export function ChatMessage({ message, onReply, previousMessage, onDelete, onEdi
               backgroundColor: safeIsCurrentUser ? 'var(--color-accent-primary)' : 'var(--color-accent-secondary)',
               color: 'white'
             }}
+            aria-hidden="true"
           >
-            {displaySender.charAt(0).toUpperCase()}
+            {avatarLetter}
           </div>
         )}
       </div>
@@ -148,7 +228,6 @@ export function ChatMessage({ message, onReply, previousMessage, onDelete, onEdi
           maxWidth: 'var(--message-bubble-max-width)'
         }}
       >
-        {/* Sender name and timestamp - only for non-grouped messages */}
         {!isGrouped && (
           <div 
             className={cn(
@@ -165,13 +244,14 @@ export function ChatMessage({ message, onReply, previousMessage, onDelete, onEdi
             <span 
               className="text-xs"
               style={{ color: 'var(--color-text-secondary)' }}
+              role="time"
+              aria-label={`Message sent at ${timestampDisplay}`}
             >
-              {format(timestamp, "h:mm a")}
+              {timestampDisplay}
             </span>
           </div>
         )}
 
-        {/* Reply indicator */}
         {message.replyTo && (
           <div 
             className="mb-2 p-3 rounded-lg text-sm max-w-full"
@@ -180,59 +260,93 @@ export function ChatMessage({ message, onReply, previousMessage, onDelete, onEdi
               borderLeft: '3px solid var(--color-accent-primary)',
               color: 'var(--color-text-secondary)'
             }}
+            role="note"
+            aria-label={`Reply to ${displayReplyToSender}`}
           >
             <div className="flex items-center gap-2 mb-1">
-              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 10h10a8 8 0 018 8v2M3 10l6 6m-6-6l6-6" />
               </svg>
               <span className="font-semibold">{displayReplyToSender}</span>
             </div>
-            <p className="line-clamp-2">
-              {message.replyTo.content === "Message deleted"
-                ? "Message deleted"
-                : message.replyTo.content.slice(0, 100) +
-                (message.replyTo.content.length > 100 ? "..." : "")}
-            </p>
+            <div className="text-xs" style={{ color: 'var(--color-text-secondary)' }}>
+              {message.replyTo.content}
+            </div>
           </div>
         )}
 
-        {/* Link previews above message bubble (for messages with text + links) */}
-        {(() => {
-          const isUrlOnly = LinkExtractor.isUrlOnlyMessage(content);
-          const showPreviews = !isSystemMessage && !isDeleted;
-          const urls = LinkExtractor.extractUrlStrings(content);
+        {message.encrypted && (message.ciphertext || message.mac || message.kemCiphertext) && (
+          <details className="mb-2 w-full">
+            <summary className="text-[11px] text-accent cursor-pointer select-none">
+              Encryption details
+            </summary>
+            <div className="mt-1 p-2 rounded-md bg-[var(--color-muted-panel)] text-[10px] leading-relaxed break-words" role="region" aria-label="Encryption metadata">
+              {message.kemCiphertext && typeof message.kemCiphertext === 'string' && (
+                <div><strong>KEM</strong>: {message.kemCiphertext.slice(0, 32)}…</div>
+              )}
+              {message.ciphertext && typeof message.ciphertext === 'string' && (
+                <div><strong>CT</strong>: {message.ciphertext.slice(0, 32)}…</div>
+              )}
+              {message.nonce && typeof message.nonce === 'string' && (
+                <div><strong>Nonce</strong>: {message.nonce}</div>
+              )}
+              {message.tag && typeof message.tag === 'string' && (
+                <div><strong>Tag</strong>: {message.tag}</div>
+              )}
+              {message.mac && typeof message.mac === 'string' && (
+                <div><strong>MAC</strong>: {message.mac}</div>
+              )}
+              {message.aad && typeof message.aad === 'string' && (
+                <div><strong>AAD</strong>: {message.aad}</div>
+              )}
+              {message.pqContext && typeof message.pqContext === 'object' && (
+                <div><strong>Context</strong>: {JSON.stringify(message.pqContext)}</div>
+              )}
+            </div>
+          </details>
+        )}
 
-          // Show link previews above the message for non-URL-only messages that have links
-          if (!isUrlOnly && showPreviews && urls.length > 0 && type !== "FILE_MESSAGE" && type !== "file" && type !== "file-message") {
-            return (
-              <div className="mb-3">
-                <LinkifyWithPreviews
-                  options={{ rel: "noopener noreferrer" }}
-                  showPreviews={true}
-                  isCurrentUser={safeIsCurrentUser}
-                  previewsOnly={true}
-                >
-                  {content}
-                </LinkifyWithPreviews>
-              </div>
-            );
-          }
-          return null;
-        })()}
+        {!isUrlOnly && !isSystemMessage && !isDeleted && urls.length > 0 && type !== "FILE_MESSAGE" && type !== "file" && type !== "file-message" && (
+          <div className="mb-3">
+            <LinkifyWithPreviews
+              options={{ rel: "noopener noreferrer" }}
+              showPreviews={true}
+              isCurrentUser={safeIsCurrentUser}
+              previewsOnly={true}
+            >
+              {content}
+            </LinkifyWithPreviews>
+          </div>
+        )}
 
         {/* Message bubble */}
         <div className={cn("flex items-end gap-2", safeIsCurrentUser ? "flex-row-reverse" : "flex-row")}>
           {/* Render file content or text content */}
-          {(type === "FILE_MESSAGE" || type === "file" || type === "file-message") ? (
+          {isFileMessageType ? (
             <div className="max-w-[60%] relative" ref={bubbleRef}>
-              <FileContent message={message} isCurrentUser={isCurrentUser || false} />
-              {/* Reactions overlay bottom-left */}
-
-
+              <div
+                className="px-2 py-2"
+                style={{
+                  backgroundColor: safeIsCurrentUser ? 'var(--color-accent-primary)' : 'var(--color-surface)',
+                  color: safeIsCurrentUser ? 'white' : 'var(--color-text-primary)',
+                  borderRadius: 'var(--message-bubble-radius)'
+                }}
+              >
+                {isVoiceNote ? (
+                  <VoiceMessage
+                    audioUrl={typeof content === 'string' ? content : ''}
+                    timestamp={timestamp}
+                    isCurrentUser={safeIsCurrentUser}
+                    filename={message.filename}
+                    originalBase64Data={message.originalBase64Data}
+                    mimeType={message.mimeType}
+                  />
+                ) : (
+                  <FileContent message={message} isCurrentUser={safeIsCurrentUser} />
+                )}
+              </div>
             </div>
           ) : (() => {
-            // Check if this is a URL-only message for special handling
-            const isUrlOnly = LinkExtractor.isUrlOnlyMessage(content);
             const showPreviews = !isSystemMessage && !isDeleted;
 
             if (isUrlOnly && showPreviews) {
@@ -246,63 +360,62 @@ export function ChatMessage({ message, onReply, previousMessage, onDelete, onEdi
                   >
                     {content}
                   </LinkifyWithPreviews>
-                  {/* Overlays - removed plus button, will be handled by single button outside */}
-                </div>
-              );
-            } else {
-              // For regular messages, use the bubble styling WITHOUT link previews (they're shown above)
-              return (
-                <div className="relative max-w-full" ref={bubbleRef}>
-                  <div
-                    className={`px-4 py-3 ${
-                      isMarkdownMessage(content) ? 'text-base' : 'text-sm'
-                    } ${
-                      isMarkdownMessage(content) ? '' : 'whitespace-pre-wrap'
-                    } break-words`}
-                    style={{
-                      backgroundColor: safeIsCurrentUser ? 'var(--color-accent-primary)' : 'var(--color-surface)',
-                      color: safeIsCurrentUser ? 'white' : 'var(--color-text-primary)',
-                      borderRadius: 'var(--message-bubble-radius)',
-                      wordBreak: "break-word",
-                      whiteSpace: isMarkdownMessage(content) ? "normal" : "pre-wrap",
-                      minWidth: '3rem',
-                      maxWidth: '100%'
-                    }}
-                  >
-                    {isMarkdownMessage(content) ? (
-                      <MarkdownRenderer 
-                        content={content}
-                        isCurrentUser={safeIsCurrentUser}
-                        className="compact"
-                      />
-                    ) : (
-                      <LinkifyWithPreviews
-                        options={{ rel: "noopener noreferrer" }}
-                        showPreviews={false}
-                        isCurrentUser={safeIsCurrentUser}
-                      >
-                        {content}
-                      </LinkifyWithPreviews>
-                    )}
-                  </div>
                 </div>
               );
             }
+            
+            return (
+              <div className="relative max-w-full" ref={bubbleRef}>
+                <div
+                  className={`px-4 py-3 ${
+                    isMarkdown ? 'text-base' : 'text-sm'
+                  } ${
+                    isMarkdown ? '' : 'whitespace-pre-wrap'
+                  } break-words`}
+                  style={{
+                    backgroundColor: safeIsCurrentUser ? 'var(--color-accent-primary)' : 'var(--color-surface)',
+                    color: safeIsCurrentUser ? 'white' : 'var(--color-text-primary)',
+                    borderRadius: 'var(--message-bubble-radius)',
+                    wordBreak: "break-word",
+                    whiteSpace: isMarkdown ? "normal" : "pre-wrap",
+                    minWidth: '3rem',
+                    maxWidth: '100%'
+                  }}
+                >
+                  {isMarkdown ? (
+                    <MarkdownRenderer 
+                      content={content}
+                      isCurrentUser={safeIsCurrentUser}
+                      className="compact"
+                    />
+                  ) : (
+                    <LinkifyWithPreviews
+                      options={{ rel: "noopener noreferrer" }}
+                      showPreviews={false}
+                      isCurrentUser={safeIsCurrentUser}
+                    >
+                      {content}
+                    </LinkifyWithPreviews>
+                  )}
+                </div>
+              </div>
+            );
           })()}
 
-          {/* Single consolidated plus button for reactions - positioned outside message bubble */}
           <div className="flex items-end">
             <button
               data-emoji-add-button
-              data-emoji-trigger="main"
-              className="w-5 h-5 rounded-full text-[11px] flex items-center justify-center border opacity-0 group-hover:opacity-100 transition-opacity duration-200"
+              data-emoji-trigger={messageTriggerId}
+              className={`w-5 h-5 rounded-full text-[11px] flex items-center justify-center border transition-opacity duration-200 ${
+                pickerOpen === 'main' ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'
+              }`}
               style={{
                 backgroundColor: 'var(--color-surface)',
                 borderColor: 'var(--color-border)',
                 color: 'var(--color-text-secondary)',
                 boxShadow: 'var(--shadow-elevation-low)'
               }}
-              onClick={() => setPickerOpen(pickerOpen === 'main' ? null : 'main')}
+              onClick={handleTogglePicker}
               aria-label="Add reaction"
               title="Add reaction"
               onMouseEnter={(e) => {
@@ -318,7 +431,6 @@ export function ChatMessage({ message, onReply, previousMessage, onDelete, onEdi
             </button>
           </div>
 
-          {/* Action Buttons */}
           <div
             className={cn(
               "flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity duration-200",
@@ -328,9 +440,11 @@ export function ChatMessage({ message, onReply, previousMessage, onDelete, onEdi
               backgroundColor: 'var(--color-surface)',
               boxShadow: 'var(--shadow-elevation-low)'
             }}
+            role="toolbar"
+            aria-label="Message actions"
           >
             <button
-              onClick={() => { void copyTextToClipboard(content); }}
+              onClick={handleCopyMessage}
               aria-label="Copy message"
               className="p-1 rounded hover:bg-opacity-80 transition-colors"
               style={{ color: 'var(--color-text-secondary)' }}
@@ -360,7 +474,7 @@ export function ChatMessage({ message, onReply, previousMessage, onDelete, onEdi
             </button>
 
             <button
-              onClick={() => onReply?.(message)}
+              onClick={handleReply}
               aria-label="Reply to message"
               className="p-1 rounded hover:bg-opacity-80 transition-colors"
               style={{ color: 'var(--color-text-secondary)' }}
@@ -387,7 +501,7 @@ export function ChatMessage({ message, onReply, previousMessage, onDelete, onEdi
 
             {safeIsCurrentUser && !isSystemMessage && (
               <button 
-                onClick={() => onDelete?.(message)} 
+                onClick={handleDelete}
                 aria-label="Delete message" 
                 className="p-1 rounded hover:bg-opacity-80 transition-colors"
                 style={{ color: 'var(--color-text-secondary)' }}
@@ -406,7 +520,7 @@ export function ChatMessage({ message, onReply, previousMessage, onDelete, onEdi
 
             {safeIsCurrentUser && !message.isDeleted && (
               <button 
-                onClick={() => onEdit?.(message.content)} 
+                onClick={handleEdit}
                 aria-label="Edit message" 
                 className="p-1 rounded hover:bg-opacity-80 transition-colors"
                 style={{ color: 'var(--color-text-secondary)' }}
@@ -425,35 +539,31 @@ export function ChatMessage({ message, onReply, previousMessage, onDelete, onEdi
           </div>
         </div>
 
-        {/* Message metadata */}
         <div 
           className={cn(
             "flex items-center gap-2 mt-1 text-xs",
             safeIsCurrentUser ? "flex-row-reverse" : "flex-row"
           )}>
-          {/* Timestamp for grouped messages */}
-          {isGrouped && (
-            <span style={{ color: 'var(--color-text-secondary)' }}>
-              {format(timestamp, "h:mm a")}
-            </span>
-          )}
+          {/* No per-bubble bottom timestamp when grouped; only header on first bubble */}
           
-          {/* Edited indicator */}
           {message.isEdited && (
             <span 
               className="italic"
               style={{ color: 'var(--color-text-secondary)' }}
+              role="status"
+              aria-label="Message edited"
             >
               (edited)
             </span>
           )}
         </div>
 
-        {/* Reactions bar */}
         {message.reactions && Object.keys(message.reactions).length > 0 && (
           <div
             className="flex flex-wrap gap-1 mt-1"
             style={{ color: safeIsCurrentUser ? 'white' : 'var(--color-text-primary)' }}
+            role="group"
+            aria-label="Message reactions"
           >
             {Object.entries(message.reactions).map(([emoji, users]) => (
               <button
@@ -464,33 +574,30 @@ export function ChatMessage({ message, onReply, previousMessage, onDelete, onEdi
                   borderColor: 'var(--color-border)'
                 }}
                 onClick={() => onReact?.(message, emoji)}
-                title={`${emoji} · ${users.length}`}
+                aria-label={`${emoji} reaction, ${users.length} user${users.length !== 1 ? 's' : ''}`}
               >
-                <span className="mr-1">{emoji}</span>
+                <span className="mr-1" aria-hidden="true">{emoji}</span>
                 <span>{users.length}</span>
               </button>
             ))}
           </div>
         )}
 
-
-
-        {/* Message Receipt */}
         <MessageReceipt
           receipt={message.receipt}
-          isCurrentUser={isCurrentUser || false}
+          isCurrentUser={safeIsCurrentUser}
           className="mt-1"
         />
       </div>
 
-      {/* Single Emoji Picker positioned outside message bubble */}
-      {pickerOpen === 'main' && (
+      {pickerOpen && (
         <EmojiPicker
           onEmojiSelect={handlePickEmoji}
-          onClose={() => setPickerOpen(null)}
-          triggerId="main"
+          onClose={closePicker}
+          triggerId={messageTriggerId}
+          isCurrentUser={safeIsCurrentUser}
         />
       )}
     </div>
   );
-}
+});

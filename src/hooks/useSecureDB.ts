@@ -3,9 +3,50 @@ import { SecureDB } from "@/lib/secureDB";
 import { Message } from "@/components/chat/types";
 import { User } from "@/components/chat/UserList";
 import { CryptoUtils } from "@/lib/unified-crypto";
-import { SignalType } from "@/lib/signals";
+import { SignalType } from "@/lib/signal-types";
+import { encryptedStorage, syncEncryptedStorage } from "@/lib/encrypted-storage";
+import { prewarmUsernameCache } from "@/hooks/useUnifiedUsernameDisplay";
+import { blockingSystem } from "@/lib/blocking-system";
+ 
 
 import websocketClient from "@/lib/websocket";
+
+const MAX_PENDING_MESSAGES = 500;
+const MAX_PENDING_MAPPINGS = 1000;
+const MAX_DB_MESSAGES = 5000;
+const RATE_LIMIT_WINDOW_MS = 10_000;
+const RATE_LIMIT_MAX_EVENTS = 200;
+
+const sanitizeUsername = (value: unknown): string | null => {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  if (!trimmed || trimmed.length > 128) return null;
+  return trimmed;
+};
+
+const sanitizeMappingPayload = (value: unknown): { hashed: string; original: string } | null => {
+  if (!value || typeof value !== 'object') return null;
+  const hashed = sanitizeUsername((value as any).hashed);
+  const original = sanitizeUsername((value as any).original);
+  if (!hashed || !original) return null;
+  return { hashed, original };
+};
+
+const isPlainObject = (value: unknown): value is Record<string, unknown> => {
+  if (typeof value !== 'object' || value === null) return false;
+  const proto = Object.getPrototypeOf(value);
+  return proto === Object.prototype || proto === null;
+};
+
+const hasPrototypePollutionKeys = (obj: Record<string, unknown>): boolean => {
+  return ['__proto__', 'prototype', 'constructor'].some(key => Object.prototype.hasOwnProperty.call(obj, key));
+};
+
+const validateEventDetail = (detail: unknown): boolean => {
+  if (!isPlainObject(detail)) return false;
+  if (hasPrototypePollutionKeys(detail)) return false;
+  return true;
+};
 
 interface UseSecureDBProps {
 	Authentication: any;
@@ -16,143 +57,210 @@ export const useSecureDB = ({ Authentication, setMessages }: UseSecureDBProps) =
 	const secureDBRef = useRef<SecureDB | null>(null);
 	const [dbInitialized, setDbInitialized] = useState(false);
 	const [users, setUsers] = useState<User[]>([]);
+
 	const pendingMessagesRef = useRef<Message[]>([]);
 	const pendingMappingsRef = useRef<Array<{ hashed: string; original: string }>>([]);
-
-	// Debounced save optimization
-	const debouncedSaveRef = useRef<NodeJS.Timeout | null>(null);
+	const debouncedSaveRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 	const pendingSavesRef = useRef<Set<string>>(new Set());
+	const messageMapRef = useRef<Map<string, Message>>(new Map());
+	const inflightDbOpRef = useRef<Promise<void>>(Promise.resolve());
+	const eventRateLimitRef = useRef<{ windowStart: number; count: number }>({ windowStart: Date.now(), count: 0 });
 
 	useEffect(() => {
-		if (!Authentication?.isLoggedIn || dbInitialized || secureDBRef.current) return;
 
-		if (!Authentication.loginUsernameRef.current || !Authentication.passphraseRef.current || !Authentication.passphrasePlaintextRef.current) {
-			console.error("[useSecureDB] Cannot initialize DB: missing username, passphrase, or hash");
+		if (!Authentication?.isLoggedIn || dbInitialized || secureDBRef.current) {
+			return;
+		}
+
+		// Initialize when username and AES key are available; passphrase fields are optional
+		if (!Authentication.loginUsernameRef.current || !Authentication.aesKeyRef?.current) {
 			return;
 		}
 
 		const initializeDB = async () => {
 			try {
-				console.debug('[useSecureDB] Initializing SecureDB with auth context', {
-					username: Authentication.loginUsernameRef.current,
-					hasPassphraseHash: !!Authentication.passphraseRef.current,
-					hasPassphrasePlaintext: !!Authentication.passphrasePlaintextRef.current,
-					hasAesKey: !!Authentication.aesKeyRef.current,
-				});
-				const parsedStoredHash = CryptoUtils.Hash.parseArgon2Hash(Authentication.passphraseRef.current)
-
-				const { aesKey: newKey, encodedHash } = await CryptoUtils.Keys.deriveAESKeyFromPassphrase(Authentication.passphrasePlaintextRef.current, {
-					saltBase64: parsedStoredHash.salt,
-					time: parsedStoredHash.timeCost,
-					memoryCost: parsedStoredHash.memoryCost,
-					parallelism: parsedStoredHash.parallelism,
-					algorithm: parsedStoredHash.algorithm,
-					version: parsedStoredHash.version,
-				});
-
-				const exportedStoredKey = await CryptoUtils.Keys.exportAESKey(Authentication.aesKeyRef.current);
-				const exportedNewCheckKey = await CryptoUtils.Keys.exportAESKey(newKey)
-
-				const keysMatch =
-					exportedStoredKey.byteLength === exportedNewCheckKey.byteLength &&
-					new Uint8Array(exportedStoredKey).every((b, i) => b === new Uint8Array(exportedNewCheckKey)[i]);
-
-				if (!keysMatch) {
-					console.error("[useSecureDB] Stored key is not the correct key for this account — aborting initialization");
-					Authentication.setLoginError?.("Stored key is not the correct key for this account, cannot initialize secure storage");
+				const key = Authentication.aesKeyRef.current;
+				if (
+					!key ||
+					typeof key !== 'object' ||
+					!('type' in key) ||
+					!('extractable' in key) ||
+					!('algorithm' in key) ||
+					!('usages' in key)
+				) {
+					console.error("[useSecureDB] Invalid CryptoKey");
+					Authentication.setLoginError?.("Invalid stored key, cannot initialize secure storage");
 					secureDBRef.current = null;
 					Authentication.logout(secureDBRef).catch(console.error);
 					return;
 				}
 
-				if (encodedHash !== Authentication.passphraseRef.current) {
-					console.error("[useSecureDB] Passphrase does not match stored hash — aborting initialization");
-					Authentication.setLoginError?.("Incorrect passphrase, cannot initialize secure storage");
-					secureDBRef.current = null;
-					Authentication.logout(secureDBRef).catch(console.error);
-					return;
+secureDBRef.current = new SecureDB(Authentication.loginUsernameRef.current);
+await secureDBRef.current.initializeWithKey(Authentication.aesKeyRef.current);
+try { blockingSystem.setSecureDB(secureDBRef.current); } catch {}
+
+			// Initialize block list after SecureDB is set
+			try {
+				const passphrase = Authentication.passphrasePlaintextRef?.current;
+				const kyberSecret: Uint8Array | null = Authentication.hybridKeysRef?.current?.kyber?.secretKey || null;
+				if (passphrase) {
+					// Load the block list from local storage to restore blocked users
+					await blockingSystem.getBlockedUsers(passphrase);
+				} else if (kyberSecret) {
+					await blockingSystem.getBlockedUsers({ kyberSecret });
 				}
+			} catch (_err) {
+				console.error('[useSecureDB] Failed to load block list:', _err);
+				// If decryption failed due to key mismatch, clear only block list data and proceed
+				try {
+					const msg = (_err as Error)?.message || String(_err);
+					if (/decrypt|BLAKE3|passphrase|corrupt/i.test(msg)) {
+						await Promise.all([
+							secureDBRef.current!.clearStore('blockListData'),
+							secureDBRef.current!.clearStore('blockListMeta')
+						]);
+						// Retry block list load once
+						const passphrase = Authentication.passphrasePlaintextRef?.current;
+						if (passphrase) {
+							await blockingSystem.getBlockedUsers(passphrase).catch(() => {});
+						}
+					}
+				} catch {}
+			}
+			
+			if (Authentication.loginUsernameRef.current) {
+				try {
+					await secureDBRef.current.store('auth_metadata', 'current_user', Authentication.loginUsernameRef.current);
+				} catch (_err) {
+					console.error('[useSecureDB] Failed to store authenticated user:', _err);
+				}
+			}
 
-				secureDBRef.current = new SecureDB(Authentication.loginUsernameRef.current);
-				await secureDBRef.current.initializeWithKey(Authentication.aesKeyRef.current);
-				setDbInitialized(true);
-
-				console.debug('[useSecureDB] SecureDB initialized and session context set');
-
+			// Ensure our own username mapping exists (token-login case): map hashed -> original if present in SecureDB
+			try {
+				const currentHashed = Authentication.loginUsernameRef.current || '';
+				if (currentHashed) {
+					const existingOriginal = await secureDBRef.current.retrieve('auth_metadata', 'original_username');
+					if (typeof existingOriginal === 'string' && existingOriginal) {
+						try { await secureDBRef.current.storeUsernameMapping(currentHashed, existingOriginal); } catch {}
+						try { window.dispatchEvent(new CustomEvent('username-mapping-updated', { detail: { username: currentHashed, original: existingOriginal } })); } catch {}
+					}
+				}
+			} catch (_err) {
+			}
+			
+			if (Authentication.originalUsernameRef?.current && Authentication.loginUsernameRef.current) {
+				try {
+					await secureDBRef.current.storeUsernameMapping(
+						Authentication.loginUsernameRef.current,
+						Authentication.originalUsernameRef.current
+					);
+					await secureDBRef.current.store('auth_metadata', 'original_username', Authentication.originalUsernameRef.current);
+				} catch (_err) {
+					console.error('[useSecureDB] Failed to pre-store username mapping:', _err);
+				}
+			}
+			
+			try {
+				await encryptedStorage.initialize(secureDBRef.current);
+				await syncEncryptedStorage.initialize();
+			} catch (_err) {
+				console.error('[useSecureDB] Failed to initialize encrypted storage:', _err);
+				// If storage contains data from a previous key, clear only encrypted_storage entries and re-init
+				try {
+					const msg = (_err as Error)?.message || String(_err);
+					if (/decrypt|BLAKE3|passphrase|corrupt/i.test(msg)) {
+						await secureDBRef.current!.clearStore('encrypted_storage');
+						await encryptedStorage.initialize(secureDBRef.current);
+						await syncEncryptedStorage.initialize();
+					}
+				} catch {}
+			}
+			
+			setDbInitialized(true);
 				Authentication.passphraseRef.current = "";
-			} catch (err) {
-				console.error("[useSecureDB] Failed to initialize SecureDB", err);
+			} catch (_err) {
+				console.error("[useSecureDB] Failed to initialize SecureDB", _err);
 				Authentication.setLoginError?.("Failed to initialize secure storage");
 			}
 		};
 
-		initializeDB();
+	initializeDB();
 	}, [
 		Authentication?.isLoggedIn,
 		Authentication?.username,
-		Authentication?.loginUsernameRef?.current,
-		Authentication?.passphraseRef?.current,
-		Authentication?.passphrasePlaintextRef?.current
+		dbInitialized
 	]);
 
 	useEffect(() => {
 		if (!Authentication?.isLoggedIn || !dbInitialized || !secureDBRef.current) return;
 
-		const loadData = async () => {
-			try {
-				if (!secureDBRef.current) return;
+		const loadData = () => {
+			if (!secureDBRef.current) return;
 
-				const savedMessages = (await secureDBRef.current.loadMessages().catch(() => [])) || [];
-				const savedUsers = (await secureDBRef.current.loadUsers().catch(() => [])) || [];
-				console.debug('[useSecureDB] Loaded persisted data', { savedMessages: savedMessages.length, savedUsers: savedUsers.length });
-
-				const processedMessages = savedMessages.map((msg: any) => ({
-					...msg,
-					timestamp: new Date(msg.timestamp),
-					isCurrentUser:
-						msg.sender ===
-						(Authentication?.loginUsernameRef?.current ?? Authentication?.username),
-					// Ensure receipt information is properly restored
-					receipt: msg.receipt ? {
-						...msg.receipt,
-						deliveredAt: msg.receipt.deliveredAt ? new Date(msg.receipt.deliveredAt) : undefined,
-						readAt: msg.receipt.readAt ? new Date(msg.receipt.readAt) : undefined,
-					} : undefined,
-				}));
-
-				// Merge with existing messages instead of replacing them
-				setMessages(prevMessages => {
-					console.debug('[useSecureDB] Merging loaded messages with existing messages', {
-						loadedCount: processedMessages.length,
-						existingCount: prevMessages.length
-					});
-					
-					if (processedMessages.length === 0) {
-						// No stored messages, keep existing ones (including any received during login)
-						return prevMessages;
+			// Pre-warm username cache from SecureDB to avoid hashed flicker on login
+			(async () => {
+				try {
+					const mappings = await secureDBRef.current!.getAllUsernameMappings();
+					if (Array.isArray(mappings) && mappings.length > 0) {
+						prewarmUsernameCache(mappings);
 					}
+				} catch (_err) {
+				}
+			})();
+			
+			const currentUser = Authentication?.loginUsernameRef?.current;
+			
+			secureDBRef.current.loadRecentMessagesByConversation(50, currentUser)
+				.then(savedMessages => {
+					if (!savedMessages || savedMessages.length === 0) return;
 					
-					// Create a map of existing message IDs for deduplication
-					const existingIds = new Set(prevMessages.map(msg => msg.id));
-					
-					// Add loaded messages that don't already exist
-					const newMessages = processedMessages.filter(msg => !existingIds.has(msg.id));
-					
-					const merged = [...prevMessages, ...newMessages];
-					console.debug('[useSecureDB] Message merge complete', {
-						finalCount: merged.length,
-						addedFromDB: newMessages.length,
-						keptExisting: prevMessages.length
+					const processedMessages = savedMessages.map((msg: any) => ({
+						...msg,
+						timestamp: new Date(msg.timestamp),
+						isCurrentUser:
+							msg.sender === currentUser,
+						receipt: msg.receipt ? {
+							...msg.receipt,
+							deliveredAt: msg.receipt.deliveredAt ? new Date(msg.receipt.deliveredAt) : undefined,
+							readAt: msg.receipt.readAt ? new Date(msg.receipt.readAt) : undefined,
+						} : undefined,
+					}));
+
+					const sortedMessages = processedMessages.sort((a, b) => 
+						new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
+					);
+
+					setMessages(prevMessages => {
+						const existingIds = new Set(prevMessages.map(msg => msg.id));
+						const newMessages = sortedMessages.filter(msg => !existingIds.has(msg.id));
+						const merged = [...prevMessages, ...newMessages];
+						merged.sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
+						return merged;
 					});
 					
-					return merged;
+					// Count unique conversations
+					const uniquePeers = new Set<string>();
+					savedMessages.forEach(msg => {
+						const peer = msg.sender === currentUser ? msg.recipient : msg.sender;
+						uniquePeers.add(peer);
+					});
+					
+				})
+				.catch(err => {
+				console.error('[useSecureDB] Failed to load messages', err);
 				});
 
-				if (savedUsers.length) setUsers(savedUsers);
-			} catch (err) {
-				console.error("[useSecureDB] Failed to load secure data", err);
-				Authentication.setLoginError?.("Failed to load secure data");
-			}
+			// Load users asynchronously without blocking
+			secureDBRef.current.loadUsers()
+				.then(savedUsers => {
+					if (savedUsers && savedUsers.length > 0) {
+						setUsers(savedUsers);
+					}
+				})
+				.catch(err => {
+				console.error('[useSecureDB] Failed to load users', err);
+				});
 		};
 
 		loadData();
@@ -160,39 +268,54 @@ export const useSecureDB = ({ Authentication, setMessages }: UseSecureDBProps) =
 		// Listen for incoming username mappings attached to encrypted messages
 		const mappingListener = (e: any) => {
 			try {
-				const { hashed, original } = e.detail || {};
-				if (!hashed || !original) return;
-				secureDBRef.current!.storeUsernameMapping(hashed, original)
+				// Rate limiting
+				const now = Date.now();
+				const bucket = eventRateLimitRef.current;
+				if (now - bucket.windowStart > RATE_LIMIT_WINDOW_MS) {
+					bucket.windowStart = now;
+					bucket.count = 0;
+				}
+				bucket.count += 1;
+				if (bucket.count > RATE_LIMIT_MAX_EVENTS) {
+					return;
+				}
+
+				// Strict validation
+				if (!validateEventDetail(e.detail)) {
+					return;
+				}
+				const sanitized = sanitizeMappingPayload(e.detail);
+				if (!sanitized) return;
+				secureDBRef.current!.storeUsernameMapping(sanitized.hashed, sanitized.original)
 					.then(() => {
-						console.log('[useSecureDB] Stored username mapping from received message');
-						try { window.dispatchEvent(new CustomEvent('username-mapping-updated', { detail: { username: hashed } })); } catch {}
+						try { window.dispatchEvent(new CustomEvent('username-mapping-updated', { detail: { username: sanitized.hashed } })); } catch {}
 					})
-					.catch((err) => console.error('[useSecureDB] Failed to store username mapping from received message', err));
+					.catch((err) => console.error('[useSecureDB] Failed to store username mapping', err));
 			} catch {}
 		};
 		window.addEventListener('username-mapping-received', mappingListener as EventListener);
 		return () => window.removeEventListener('username-mapping-received', mappingListener as EventListener);
 	}, [Authentication?.isLoggedIn, dbInitialized]);
 
-	// Capture mapping events that arrive before DB is ready
 	useEffect(() => {
-		if (dbInitialized) return; // This pre-init listener is only active before DB is ready
+		if (dbInitialized) return;
 		const preInitListener = (e: any) => {
 			try {
-				const { hashed, original } = e.detail || {};
-				if (!hashed || !original) return;
-				pendingMappingsRef.current.push({ hashed, original });
-				console.debug('[useSecureDB] Queued username mapping (DB not ready):', { hashed });
+				if (!validateEventDetail(e.detail)) return;
+				const sanitized = sanitizeMappingPayload(e.detail);
+				if (!sanitized) return;
+				if (pendingMappingsRef.current.length >= MAX_PENDING_MAPPINGS) {
+					return;
+				}
+				pendingMappingsRef.current.push(sanitized);
 			} catch {}
 		};
 		window.addEventListener('username-mapping-received', preInitListener as EventListener);
 		return () => window.removeEventListener('username-mapping-received', preInitListener as EventListener);
 	}, [dbInitialized]);
 
-	// Flush queued mappings once DB becomes available
 	useEffect(() => {
-		if (!dbInitialized || !secureDBRef.current) return;
-		if (pendingMappingsRef.current.length === 0) return;
+		if (!dbInitialized || !secureDBRef.current || pendingMappingsRef.current.length === 0) return;
 		const toFlush = [...pendingMappingsRef.current];
 		pendingMappingsRef.current = [];
 		(async () => {
@@ -200,16 +323,14 @@ export const useSecureDB = ({ Authentication, setMessages }: UseSecureDBProps) =
 				try {
 					await secureDBRef.current!.storeUsernameMapping(m.hashed, m.original);
 					try { window.dispatchEvent(new CustomEvent('username-mapping-updated', { detail: { username: m.hashed } })); } catch {}
-				} catch (err) {
-					console.error('[useSecureDB] Failed to flush queued username mapping:', err);
+				} catch (_err) {
+					console.error('[useSecureDB] Failed to flush mapping:', _err);
 				}
 			}
-			// Also trigger a broad refresh for components that don't scope by username
 			try { window.dispatchEvent(new CustomEvent('username-mapping-updated', { detail: { username: '__all__' } })); } catch {}
 		})();
 	}, [dbInitialized]);
 
-	// After DB initializes, proactively re-resolve any UI showing hashed names
 	useEffect(() => {
 		if (!Authentication?.isLoggedIn || !dbInitialized || !secureDBRef.current) return;
 		try { window.dispatchEvent(new CustomEvent('username-mapping-updated', { detail: { username: '__all__' } })); } catch {}
@@ -221,12 +342,21 @@ export const useSecureDB = ({ Authentication, setMessages }: UseSecureDBProps) =
 		const flushPending = async () => {
 			try {
 				const currentMessages = (await secureDBRef.current!.loadMessages()) || [];
-				await secureDBRef.current!.saveMessages([...currentMessages, ...pendingMessagesRef.current]);
-				console.debug('[useSecureDB] Flushed pending messages', { count: pendingMessagesRef.current.length });
+				const mergedMap = new Map<string, Message>();
+				[...currentMessages, ...pendingMessagesRef.current].forEach((msg: Message) => {
+					mergedMap.set(msg.id!, msg);
+				});
+				const limited = Array.from(mergedMap.values()).slice(-MAX_DB_MESSAGES);
+				await inflightDbOpRef.current;
+				inflightDbOpRef.current = secureDBRef.current!.saveMessages(limited).catch((err) => {
+					console.error('[useSecureDB] Failed to flush pending messages', err);
+					pendingMessagesRef.current.push(...limited);
+				});
+				await inflightDbOpRef.current;
 				pendingMessagesRef.current = [];
-			} catch (err) {
-				console.error("[useSecureDB] Failed to flush pending messages", err);
-			}
+				} catch (_err) {
+					console.error('[useSecureDB] Failed to flush pending messages', _err);
+				}
 		};
 
 		flushPending();
@@ -239,7 +369,7 @@ export const useSecureDB = ({ Authentication, setMessages }: UseSecureDBProps) =
 	}, [users, Authentication?.isLoggedIn, dbInitialized]);
 
 	const saveMessageToLocalDB = useCallback(
-		async (message: Message) => {
+		async (message: Message, activeConversationPeer?: string) => {
 			if (!message.id) {
 				console.error("[useSecureDB] No message id provided");
 				return;
@@ -250,73 +380,47 @@ export const useSecureDB = ({ Authentication, setMessages }: UseSecureDBProps) =
 				if (idx !== -1) {
 					const updated = [...prev];
 					updated[idx] = message;
+					messageMapRef.current.set(message.id, message);
 					return updated;
 				} else {
+					messageMapRef.current.set(message.id, message);
 					return [...prev, message];
 				}
 			});
 
 			const saveToPending = () => {
-				// Prevent memory leak by limiting pending messages
-				const maxPending = 100;
 				const idx = pendingMessagesRef.current.findIndex((m) => m.id === message.id);
 				if (idx !== -1) {
 					pendingMessagesRef.current[idx] = message;
 				} else {
 					pendingMessagesRef.current.push(message);
-					// Trim to prevent memory leak
-					if (pendingMessagesRef.current.length > maxPending) {
-						pendingMessagesRef.current = pendingMessagesRef.current.slice(-maxPending);
+					if (pendingMessagesRef.current.length > MAX_PENDING_MESSAGES) {
+						pendingMessagesRef.current = pendingMessagesRef.current.slice(-MAX_PENDING_MESSAGES);
 					}
 				}
 			};
 
-			if (!dbInitialized || !secureDBRef.current) return saveToPending();
+			if (!dbInitialized || !secureDBRef.current) {
+				return saveToPending();
+			}
 
-			// Debounce saves to prevent excessive database operations
 			if (pendingSavesRef.current.has(message.id)) {
-				return; // Already pending save for this message
+				return;
 			}
 
 			pendingSavesRef.current.add(message.id);
 
-			// Clear existing debounce timer
 			if (debouncedSaveRef.current) {
 				clearTimeout(debouncedSaveRef.current);
 			}
 
-			// SECURITY: Debounce with event loop protection to prevent starvation
 			debouncedSaveRef.current = setTimeout(async () => {
 				try {
-					// SECURITY: Yield to event loop to prevent blocking
 					await new Promise(resolve => setTimeout(resolve, 0));
 
 					const msgs = (await secureDBRef.current!.loadMessages().catch(() => [])) || [];
 
-					// SECURITY: Limit processing time to prevent event loop starvation
-					const startTime = performance.now();
-					const maxProcessingTime = 50; // 50ms max processing time
-
-					const idx = msgs.findIndex((m: Message) => {
-						// Check if we've exceeded processing time
-						if (performance.now() - startTime > maxProcessingTime) {
-							console.warn('[useSecureDB] Processing time limit reached, deferring save');
-							// Reschedule for later
-							setTimeout(() => {
-								debouncedSaveRef.current = setTimeout(async () => {
-									// Retry the operation
-									try {
-										await secureDBRef.current!.saveMessages([message]);
-										pendingSavesRef.current.delete(message.id);
-									} catch (retryErr) {
-										saveToPending();
-									}
-								}, 10);
-							}, 10);
-							return false; // Stop processing
-						}
-						return m.id === message.id;
-					});
+					const idx = msgs.findIndex((m: Message) => m.id === message.id);
 
 					if (idx !== -1) {
 						msgs[idx] = message;
@@ -324,30 +428,77 @@ export const useSecureDB = ({ Authentication, setMessages }: UseSecureDBProps) =
 						msgs.push(message);
 					}
 
-					// Limit total messages to prevent memory issues
-					const maxMessages = 1000;
-					const limitedMsgs = msgs.length > maxMessages ? msgs.slice(-maxMessages) : msgs;
-
-					await secureDBRef.current!.saveMessages(limitedMsgs).catch(saveToPending);
+					// Let saveMessages handle per-conversation limits (500/1000)
+					await secureDBRef.current!.saveMessages(msgs, activeConversationPeer).catch(saveToPending);
 					pendingSavesRef.current.delete(message.id);
-				} catch (err) {
-					console.error("[useSecureDB] DB save failed, saving to pending", err);
+				} catch (_err) {
+					console.error("[useSecureDB] DB save failed", _err);
 					pendingSavesRef.current.delete(message.id);
 					saveToPending();
 				}
-			}, 100); // 100ms debounce
+			}, 100);
 		},
 		[dbInitialized, setMessages]
 	);
 
-	return { users, setUsers, dbInitialized, secureDBRef, saveMessageToLocalDB };
+	const loadMoreConversationMessages = useCallback(
+		async (peerUsername: string, currentOffset: number, limit: number = 50) => {
+			if (!secureDBRef.current || !Authentication?.loginUsernameRef?.current) {
+				console.error("[useSecureDB] Cannot load more messages: DB or username not available");
+				return [];
+			}
+
+			try {
+				const moreMessages = await secureDBRef.current.loadConversationMessages(
+					peerUsername,
+					Authentication.loginUsernameRef.current,
+					limit,
+					currentOffset
+				);
+
+				if (moreMessages.length === 0) return [];
+
+				const processedMessages = moreMessages.map((msg: any) => ({
+					...msg,
+					timestamp: new Date(msg.timestamp),
+					isCurrentUser:
+						msg.sender ===
+						(Authentication?.loginUsernameRef?.current ?? Authentication?.username),
+					receipt: msg.receipt ? {
+						...msg.receipt,
+						deliveredAt: msg.receipt.deliveredAt ? new Date(msg.receipt.deliveredAt) : undefined,
+						readAt: msg.receipt.readAt ? new Date(msg.receipt.readAt) : undefined,
+					} : undefined,
+				}));
+
+				// Ensure chronological order (oldest -> newest)
+				processedMessages.sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
+
+				setMessages(prevMessages => {
+					const existingIds = new Set(prevMessages.map(msg => msg.id));
+					const newMessages = processedMessages.filter(msg => !existingIds.has(msg.id));
+					const merged = [...prevMessages, ...newMessages];
+					merged.sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
+					return merged;
+				});
+
+				return processedMessages;
+			} catch (_err) {
+				console.error("[useSecureDB] Failed to load more messages", _err);
+				return [];
+			}
+		},
+		[Authentication?.loginUsernameRef?.current, secureDBRef, setMessages]
+	);
+
+	return { users, setUsers, dbInitialized, secureDBRef, saveMessageToLocalDB, loadMoreConversationMessages };
 };
 
 export class ServerDatabase {
 	static async sendDataToServerDb(args: {
 		content: string;
 		messageId: string;
-		serverHybridKeys: { x25519PublicBase64: string; kyberPublicBase64: string };
+		serverHybridKeys: { x25519PublicBase64: string; kyberPublicBase64: string; dilithiumPublicBase64: string },
 		fromUsername: string;
 		toUsername?: string;
 		timestamp: number;
@@ -377,29 +528,11 @@ export class ServerDatabase {
 				);
 			}
 
-			const serverPayloadDBUpdate = await CryptoUtils.Encrypt.encryptAndFormatPayload({
-				id: args.messageId,
-				recipientHybridKeys: args.serverHybridKeys,
-				from: args.fromUsername,
-				to: args.toUsername ?? "",
-				type: SignalType.UPDATE_DB,
-				content: serializedCiphertext,
-				timestamp: args.timestamp,
-				typeInside: args.typeInside,
-				...(args.replyTo && {
-					replyTo: {
-						id: args.replyTo.id,
-						sender: args.replyTo.sender,
-						content: replyContent,
-					},
-				}),
-			});
-
-			websocketClient.send(JSON.stringify(serverPayloadDBUpdate));
-		} catch (err) {
-			console.error("[useSecureDB] Failed to send encrypted server update", err);
-		}
-	}
+        return;
+      } catch (err) {
+        console.error("[useSecureDB] Failed to prepare encrypted server update", err);
+      }
+    }
 }
 
 export default useSecureDB;

@@ -1,7 +1,7 @@
 export interface MessageReply {
   id: string;
-  sender: string;
-  content: string;
+  sender?: string;
+  content?: string;
 }
 
 export interface FileInfo {
@@ -43,14 +43,30 @@ export interface Message {
   filename?: string;
   fileSize?: number;
   type?: string;
-  mimeType?: string; // MIME type for file messages
-  originalBase64Data?: string; // Original base64 data for reliable downloads
+  mimeType?: string;
+  originalBase64Data?: string;
   receipt?: MessageReceipt;
-  p2p?: boolean; // Indicates if message was sent via P2P
-  encrypted?: boolean; // Indicates if message is encrypted
-  transport?: 'websocket' | 'p2p' | 'relay'; // Transport method used
-  // Map of emoji -> array of usernames (pseudonyms) who reacted
+  p2p?: boolean;
+  encrypted?: boolean;
+  transport?: 'websocket' | 'p2p' | 'relay';
+  version: string;
+  envelopeVersion?: string;
+  ciphertext?: string;
+  nonce?: string;
+  tag?: string;
+  mac?: string;
+  aad?: string;
+  kemCiphertext?: string;
+  recipientDeviceId?: string;
+  senderDeviceId?: string;
+  pqContext?: {
+    aadLabel?: string;
+    timestamp?: number;
+    sender?: string;
+    recipient?: string;
+  };
   reactions?: Record<string, string[]>;
+  rateLimitBypass?: boolean;
 }
 
 export interface ChatMessageProps {

@@ -1,184 +1,120 @@
-# End-to-End Encrypted Chat Application
+# Endtoend — End‑to‑End Encrypted Messaging/Calling
 
-Secure chat app with post-quantum cryptography and Signal Protocol integration along with lots of other security.
+Endtoend is a desktop chat client and Node.js server designed for end2end quantum secure messaging. It uses the Signal Protocol for forward secrecy with an additional post‑quantum (PQ) envelope including others too long to explain here.
 
-## Setup and run
+For exact details of the Server/Client cryptography, read [`Server-Cryptography.md`](https://github.com/galacticoder/end2end-chat-site/blob/main/Server-Cryptography.md) and [`Client-Cryptography.md`](https://github.com/galacticoder/end2end-chat-site/blob/main/Client-Cryptography.md)
 
-**Prerequisites:**
-  - No need to worry about anything. The scripts will install everything you need automatically.
+## Setup
+- Clone the repository and install prerequisites: `node scripts/install-deps.cjs all`.
+- Configure required environment variables; see ENVIRONMENT_VARIABLES.md (.env file is already setup with what you need to start the server properly)
+- Generate TLS certificates: `node scripts/generate_ts_tls.cjs` (required).
+- Start the server: `node scripts/start-server.cjs`.
+- Start the desktop client: `./startClient.sh`.
 
-**Clone the repository:**
+Requirements enforced by the application:
+- Certificate pinning is required for all TLS endpoints used by the desktop client; a valid certificate chain is required (self‑signed is rejected).
+- All traffic is routed through a verified Tor SOCKS proxy that the desktop bootstraps and checks before use.
 
-```bash
-git clone https://github.com/galacticoder/end2end-chat-site.git
+## What this project is for
+- Privacy‑preserving one‑to‑one messaging with forward secrecy and PQ protection
+- Operating in adversarial networks (interception, replay, future decryption attempts)
+- Running as a self‑hosted service with optional clustering and a Linux‑based edge tier
 
-cd end2end-chat-site
-```
+This is not a metadata‑free system. The service retains the minimal routing data required to deliver messages; message contents and most user artifacts are encrypted end‑to‑end.
 
-**Start the client:**
-```bash
-./startClient.sh  # Launches Electron app + dev server
-```
+## Security model at a glance
+- Inner layer: Signal Protocol (libsignal‑client) provides double‑ratchet forward secrecy, break‑in recovery, and authenticated key exchange. Native Kyber pre‑keys are used where supported.
+- Outer layer: a PQ envelope wraps Signal ciphertext using ML‑KEM‑1024 (Kyber) for key encapsulation, AES‑256‑GCM and XChaCha20‑Poly1305 for confidentiality, and BLAKE3 for authentication.
+- Device‑bound auth: refresh flows require a signed device proof (Ed25519) tied to a stable device identifier; stolen tokens alone are not sufficient.
+- Local secrecy: the desktop stores history in an encrypted local database using a PQ AEAD construction; raw plaintext is not kept on disk.
+- Tor: the desktop downloads and runs a bundled Tor client, configures transports (obfs4/snowflake), and verifies connectivity before use. Tor routing is required.
 
-**Start the server:**
-```bash
-# Run server on your machine
-./startServer.sh  # In another terminal for starting the server
+## Cryptography details
+- Public‑key primitives
+  - ML‑KEM‑1024 (Kyber) via @noble/post‑quantum for PQ KEM
+  - ML‑DSA‑87 (Dilithium) via @noble/post‑quantum for signatures
+  - X25519 for classical ECDH where needed
+- Symmetric primitives
+  - AES‑256‑GCM
+  - XChaCha20‑Poly1305
+  - BLAKE3 for keyed MACs and KDF contexts
+- Signal layer
+  - libsignal‑client for Double Ratchet and PreKeys
+  - Uses native Kyber pre‑keys where available; sessions are created/rotated through standard Signal flows
+- PQ envelope
+  - Encapsulation: ML‑KEM‑1024 → shared secret
+  - Derivation: BLAKE3/HKDF contexts
+  - Encryption: AES‑GCM(inner) + XChaCha20‑Poly1305(outer) with BLAKE3 MAC
 
-# Or run server in docker
-./setup_chat_docker.sh
-```
+## Authentication, sessions, and tokens
+- Device keys: on first run, the desktop generates an Ed25519 keypair and a stable device identifier stored in encrypted local storage.
+- Refresh protocol: server issues a short challenge; client returns a signed proof binding the challenge, token ID (jti), and device ID. Server validates the signature before issuing new tokens.
+- Token storage: the server persists refresh tokens and token families, supports generation counters and revocation, and maintains a blacklist. Audit entries record token events and connection risk signals.
+- Session reset: when Signal session state becomes invalid, the client can request a fresh bundle and re‑establish secure channels without user intervention.
 
-**Supported platforms:**
-- **Linux**: Ubuntu/Debian (apt), Fedora (dnf), Arch (pacman), and most major distributions with supported package managers
-- **macOS**: Intel and Apple Silicon
-- **Windows**: Git Bash, WSL, or similar Unix-like environment
+## Message storage and data handling
+- On the client
+  - All conversation history, username mappings, block lists, queued messages, and file metadata are stored in an encrypted IndexedDB using a PQ AEAD (AES‑GCM + XChaCha20 with BLAKE3 MAC). Ephemeral stores support TTL and automatic cleanup.
+- On the server
+  - Messages are stored only as encrypted payloads. The server never needs plaintext to route or persist messages.
+  - Offline messages are queued encrypted and delivered on reconnection.
+  - User records hold password/parameter metadata and Signal key material necessary to distribute pre‑keys and bundles; sensitive values are stored as encoded hashes or ciphertext.
 
-Everything is handled automatically in the scripts and will do:
-- Install Node.js, pnpm, and system dependencies
-- Configure Tor for secure networking
-- Set up Electron dependencies
-- Install project dependencies
+## Transport and delivery
+- Primary channel: WebSockets over TLS with certificate pinning enforced by the desktop.
+- P2P path: a minimal WebRTC signaling path allows peer‑to‑peer messaging when available; the app automatically falls back to the server path when P2P is unavailable.
+- Tor: the desktop bootstraps its own Tor instance, verifies a working SOCKS proxy, and routes traffic through it. Bridge transports (obfs4 or snowflake) are supported. Bundle signature verification is performed when possible (see ENVIRONMENT_VARIABLES.md for verification controls).
 
-## Configuration
+## Server architecture
+- WebSocket gateway: authenticates clients, distributes server public keys, relays encrypted messages, and handles chunking for large key exchanges.
+- Presence and session state: Redis is used to track connection state, username session ownership, and to clean up stale session mappings with TTLs.
+- Rate limiting and abuse controls: distributed limiters enforce per‑user and per‑connection policies for authentication, messaging, and connection attempts. Stats can be collected to spot abuse.
+- Database layer: SQLite and PostgreSQL supported. Tables include users, messages, offline queues, token families/blacklist, device sessions, and audit logs.
+- Clustering: optional Redis‑coordinated cluster with server approval flow, health monitoring, queue‑based leader election, and periodic key rotation for inter‑server authentication.
+- Edge tier (optional, Linux): an auto‑configurable HAProxy layer can be generated and hot‑reloaded when cluster membership changes. An optional tunnel helper can expose a public URL for development. These automation scripts target Linux.
 
-### Docker Configuration
+## Desktop hardening
+- Electron main process guards:
+  - Strict IPC validation and per‑channel size/rate limits
+  - CSP and security headers injected at runtime
+  - Window navigation and external link handling locked down
+- Certificate pinning enforced for WebSocket TLS endpoints
+- Secure storage handler: structured input validation, bounded sizes, and path sanitation for file operations.
 
-**Environment Variables for Docker (Already handled by setup_chat_docker.sh automatically):**
-```bash
-# Create a .env file for custom configuration
-DB_BACKEND=sqlite|postgres
-DATABASE_URL=<connection_string>
-SERVER_PASSWORD=<password>
-RATE_LIMIT_ENABLED=true
-TOR_ENABLED=false
-```
+## Privacy characteristics and limitations
+- The server sees: pseudonymous user identifiers, timing data, and minimal routing metadata required to deliver messages. Contents remain encrypted end‑to‑end.
+- The desktop keeps local plaintext only in memory during use. Disk persistence is encrypted.
+- Optional Tor reduces network observability but does not eliminate all metadata or timing correlations.
+- Export controls, platform crypto backends, and OS trust stores can impact guarantees; pinning and Tor help but do not replace operational security.
 
-## Docker Usage (Server Only)
+## Threat model and coverage
+- Passive network monitoring: contents confidential (Signal + PQ envelope); routing metadata still observable.
+- Message harvesting for future decryption: mitigated by PQ envelope (ML‑KEM‑1024 + AES‑GCM/XChaCha20 + BLAKE3) and Signal forward secrecy.
+- Stolen refresh token: requires device‑bound proof (Ed25519); token alone is insufficient.
+- Server compromise: server stores only encrypted payloads; no plaintext message recovery. Keys are not present server‑side.
+- Local disk theft (desktop): IndexedDB contents are encrypted with PQ AEAD; plaintext exists only in memory during use.
+- Network path manipulation: TLS with certificate pinning; Tor path required.
 
-**Docker is used only for the server component. The client (Electron app) runs natively for the best user experience.**
+## Operating the system
+- Quick start
+- Certificates: `node scripts/generate_ts_tls.cjs` (required)
+-  Server: `node scripts/start-server.cjs`
+-  Desktop: `./startClient.sh`
+- Configuration highlights (see ENVIRONMENT_VARIABLES.md for full list)
+  - Database: `DB_BACKEND=sqlite|postgres`, `DATABASE_URL` (when using Postgres)
+  - Rate limiting: `RATE_LIMIT_ENABLED=true`
+  - Tor controls: see variables documented in ENVIRONMENT_VARIABLES.md for bundle verification and transport settings
+- Scaling
+  - Enable Redis and the cluster manager for multi‑node delivery
+- Linux edge (optional): HAProxy auto‑config, soft reloads, and tunnel helpers
 
-### Quick Server Setup
+## Platform support
+- Desktop: Electron app runs on Linux, macOS, and Windows. The Tor bootstrapper and PQ stack are bundled in the desktop app.
+- Server: Node.js on Linux/macOS/Windows. The optional HAProxy/systemd/tunnel automation is Linux‑only and not required to run the service.
 
-```bash
-# Automated server setup with Docker
-./setup_chat_docker.sh
+## Future Goals
 
-# Choose option 1: Run Server (Backend - Node.js) in Docker
-# This will build and run the server in an isolated container
-```
-
-### Manual Docker Commands
-
-```bash
-# Build server image
-docker build -t end2end-chat-server .
-
-# Run server container
-docker run -it --rm \
-  --name chat-server \
-  -p 8080:8080 \
-  -p 8443:8443 \
-  end2end-chat-server
-
-# View server logs
-docker logs chat-server
-
-# Clean up
-./setup_chat_docker.sh  # Choose option 2 (Cleanup)
-```
-
-### Why Docker for Server Only?
-
-- **Server**: Benefits from containerization (isolation, consistent environment, easy deployment)
-- **Client**: Electron apps work best natively (GUI access, system integration, performance)
-
-### Local Server Setup (No need to do this as is already handled by server script unless you want to do it manually)
-```bash
-# Environment Variables
-DB_BACKEND=sqlite|postgres
-DATABASE_URL=<connection_string>
-SERVER_PASSWORD=<password>
-RATE_LIMIT_ENABLED=true
-TOR_ENABLED=false
-```
-
-## Features
-
-### Communication
-- Real-time messaging with typing indicators
-- Secure file sharing with chunked encryption
-- Voice and video calls with WebRTC
-- Screen sharing with quality controls
-- Message replies and threading
-- Offline message delivery
-- Lots of other features
-
-### Privacy & Security
-- End-to-end encryption with Signal Protocol
-- Post-quantum cryptography (Kyber768, Dilithium3)
-- Tor network integration for anonymity
-- Zero-knowledge server architecture
-- Rate limiting and spam protection
-- Multi-layer authentication
-
-
-## Security Implementation
-
-### Encryption
-- **Signal Protocol:** Double Ratchet algorithm with X3DH key agreement
-- **Post-Quantum:** Kyber768 key encapsulation, Dilithium3 signatures
-- **Symmetric:** XChaCha20-Poly1305, ChaCha20-Poly1305, AES-256-GCM
-- **Hashing:** BLAKE3, Argon2id for passwords, HKDF-SHA512
-
-### Privacy Features
-- Zero-knowledge server design
-- Local encrypted storage (IndexedDB)
-- Optional Tor routing
-- Minimal metadata collection
-- Perfect forward secrecy
-
-## Technology Stack
-
-### Frontend
-- React 18 with TypeScript
-- Vite build system
-- Tailwind CSS + shadcn/ui
-- Electron for desktop apps
-
-### Backend
-- Node.js with WebSocket server
-- SQLite/PostgreSQL database
-- Self-signed TLS certificates
-- Redis support for scaling
-
-### Cryptography Libraries
-- @noble/post-quantum (Kyber, Dilithium)
-- @noble/ciphers (ChaCha20, XChaCha20)
-- @noble/hashes (BLAKE3)
-- argon2-wasm
-- Signal Protocol implementation
-
-## Security Highlights
-
-### Network Security
-- TLS 1.3 with certificate pinning
-- Encrypted WebSocket connections
-- Optional Tor routing with circuit rotation
-- Rate limiting and DDoS protection
-- Lots of other security measures
-
-### Data Protection
-- No plaintext storage on server
-- Encrypted local database (IndexedDB)
-- Automatic secure deletion
-- Minimal metadata collection
-- Server never knows original usernames
+All goals/to-dos are in the [issues tab](https://github.com/galacticoder/end2end-chat-site/issues). I am a solo developer working on making the safest app for users looking for an app where privacy and security truly matters for every small detail leaving their device. I plan on adding more user features and making huge ui improvements on my next update.
 
 ## License
-
-MIT License - see LICENSE file for details.
-
-## Have an idea or request?
-
-Found a bug or have a feature request? Open an issue [here](https://github.com/galacticoder/end2end-chat-site/issues).
+[![License: qorc Non-Commercial Copyleft v1.0](https://img.shields.io/badge/License-qorc%20Non--Commercial%20Copyleft%20v1.0-6d4aff.svg)](LICENSE)

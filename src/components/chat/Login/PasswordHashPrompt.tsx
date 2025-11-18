@@ -1,34 +1,45 @@
-import React, { useState } from "react";
+import React, { useState, useCallback } from "react";
 import { Button } from "../../ui/button";
 import { Input } from "../../ui/input";
 import { Label } from "../../ui/label";
 
 interface PasswordHashPromptProps {
-  onSubmit: (password: string) => Promise<void>;
-  disabled: boolean;
-  authStatus?: string;
-  initialPassword?: string;
-  onChangePassword?: (v:string)=>void;
+  readonly onSubmit: (password: string) => Promise<void>;
+  readonly disabled: boolean;
+  readonly authStatus?: string;
+  readonly initialPassword?: string;
+  readonly onChangePassword?: (v: string) => void;
 }
 
-export function PasswordHashPrompt({ onSubmit, disabled, authStatus, initialPassword = "", onChangePassword }: PasswordHashPromptProps) {
-  const [password, setPassword] = useState(initialPassword);
-  const handleChange = (v:string) => { setPassword(v); onChangePassword?.(v); };
-  const [isSubmitting, setIsSubmitting] = useState(false);
+const PASSWORD_MAX_LENGTH = 1000;
 
-  const handleSubmit = async (e: React.FormEvent) => {
+export function PasswordHashPrompt({ 
+  onSubmit, 
+  disabled, 
+  authStatus, 
+  initialPassword = "", 
+  onChangePassword 
+}: PasswordHashPromptProps) {
+  const [password, setPassword] = useState(initialPassword);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  
+  const handleChange = useCallback((v: string): void => { 
+    setPassword(v); 
+    onChangePassword?.(v); 
+  }, [onChangePassword]);
+
+  const handleSubmit = useCallback(async (e: React.FormEvent): Promise<void> => {
     e.preventDefault();
     if (!password.trim() || disabled || isSubmitting) return;
+    if (password.length > PASSWORD_MAX_LENGTH) return;
 
     setIsSubmitting(true);
-      try {
+    try {
       await onSubmit(password);
-    } catch (error) {
-      console.error("Password hash submission failed:", error);
     } finally {
       setIsSubmitting(false);
     }
-  };
+  }, [password, disabled, isSubmitting, onSubmit]);
 
   return (
     <form onSubmit={handleSubmit} className="space-y-4">
@@ -50,6 +61,8 @@ export function PasswordHashPrompt({ onSubmit, disabled, authStatus, initialPass
           disabled={disabled || isSubmitting}
           required
           autoFocus
+          autoComplete="current-password"
+          maxLength={PASSWORD_MAX_LENGTH}
         />
       </div>
 

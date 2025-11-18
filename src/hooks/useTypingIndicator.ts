@@ -1,279 +1,239 @@
-import { useCallback, useRef, useEffect } from 'react';
+import { useCallback, useEffect, useRef } from 'react';
+
+const TYPING_STOP_DELAY = 1500;
+const MIN_TYPING_INTERVAL = 4000;
+const CONVERSATION_CHANGE_DEBOUNCE = 100;
+const TYPING_DOMAIN = 'typing-indicator-v1';
+
+const createRandomHex = (byteLength: number) => {
+  const bytes = crypto.getRandomValues(new Uint8Array(byteLength));
+  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('');
+};
+
+const createTypingMessageId = (kind: 'start' | 'stop', sequence: number) => {
+  const timestampSegment = Date.now().toString(36);
+  const entropy = createRandomHex(16);
+  return `${TYPING_DOMAIN}:${kind}:v2:${timestampSegment}:${sequence.toString(36)}:${entropy}`;
+};
+
+const createTypingNonce = () => createRandomHex(16);
 
 export function useTypingIndicator(
-	currentUsername: string,
-	selectedConversation?: string,
-	sendEncryptedMessage?: (messageId: string, content: string, messageSignalType: string, replyTo?: any) => Promise<void>
+  currentUsername: string,
+  selectedConversation?: string,
+  sendEncryptedMessage?: (messageId: string, content: string, messageSignalType: string, replyTo?: any) => Promise<void>,
 ) {
-	const typingTimeoutRef = useRef<NodeJS.Timeout | null>(null);
-	const debounceTimeoutRef = useRef<NodeJS.Timeout | null>(null);
-	const lastTypingTimeRef = useRef<number>(0);
-	const isTypingRef = useRef<boolean>(false);
-	const pendingTypingRef = useRef<boolean>(false);
-	const lastTypingStartSentRef = useRef<number>(0);
-	const isProcessingTypingRef = useRef<boolean>(false);
-	const conversationChangeTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  if (!currentUsername || typeof currentUsername !== 'string' || currentUsername.trim().length === 0 || currentUsername.length > 128) {
+    throw new Error('[TypingIndicator] Invalid currentUsername');
+  }
 
-	// Optimized timing for better UX and performance
-	const TYPING_STOP_DELAY = 1500; // Reduced from 3000ms - more responsive
-	const MIN_TYPING_INTERVAL = 4000; // Send typing-start every 4 seconds to keep indicator alive
-	const DEBOUNCE_DELAY = 300; // Debounce keystrokes to prevent spam
-	const CONVERSATION_CHANGE_DEBOUNCE = 100; // Debounce conversation changes
+  const isTypingRef = useRef(false);
+  const pendingTypingRef = useRef(false);
+  const lastTypingStartSentRef = useRef(0);
+  const isProcessingRef = useRef(false);
+  const typingQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const timeoutsRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
+  const queueDepthRef = useRef(0);
+  const messageSequenceRef = useRef(0);
 
-	// Send typing start signal with smart throttling
-	const sendTypingStart = useCallback(async () => {
-		console.log('[Typing] sendTypingStart called', {
-			isTyping: isTypingRef.current,
-			pendingTyping: pendingTypingRef.current,
-			isProcessingTyping: isProcessingTypingRef.current,
-			hasSendEncryptedMessage: !!sendEncryptedMessage
-		});
-		
-		// Prevent concurrent typing start operations
-		if (isProcessingTypingRef.current) {
-			console.log('[Typing] Typing start already in progress, skipping');
-			return;
-		}
+  const clearManagedTimeout = useCallback((name: string) => {
+    const handle = timeoutsRef.current.get(name);
+    if (handle) {
+      clearTimeout(handle);
+      timeoutsRef.current.delete(name);
+    }
+  }, []);
 
-		const now = Date.now();
-		// Send if not already typing OR if enough time has passed since last typing start (keep-alive)
-		if ((!isTypingRef.current || now - lastTypingStartSentRef.current > MIN_TYPING_INTERVAL) && now - lastTypingStartSentRef.current > MIN_TYPING_INTERVAL) {
-			try {
-				isProcessingTypingRef.current = true;
-				const isKeepAlive = isTypingRef.current;
-				console.debug(`[Typing] Sending typing-start signal (${isKeepAlive ? 'keep-alive' : 'initial'})`);
+  const setManagedTimeout = useCallback(
+    (name: string, handler: () => void, delay: number) => {
+      clearManagedTimeout(name);
+      const handle = setTimeout(() => {
+        timeoutsRef.current.delete(name);
+        handler();
+      }, delay);
+      timeoutsRef.current.set(name, handle);
+      return handle;
+    },
+    [clearManagedTimeout],
+  );
 
-				// Send typing indicator as encrypted message with unique ID
-				if (sendEncryptedMessage) {
-					console.debug(`[Typing] Sending typing-start as encrypted message (${isKeepAlive ? 'keep-alive' : 'initial'})`);
-					// SECURITY: Use cryptographically secure random ID generation
-					const randomBytes = crypto.getRandomValues(new Uint8Array(6));
-					const secureId = Array.from(randomBytes, byte => byte.toString(36)).join('');
-					const uniqueId = `typing-start-${now}-${secureId}`;
-					await sendEncryptedMessage(
-						uniqueId,
-						JSON.stringify({ type: 'typing-start', timestamp: now }),
-						'typing-start'
-					);
-				}
-				lastTypingTimeRef.current = now;
-				lastTypingStartSentRef.current = now;
-				isTypingRef.current = true;
-				pendingTypingRef.current = false;
-				console.log(`[Typing] Typing ${isKeepAlive ? 'keep-alive' : 'started'} successfully`);
-			} catch (error) {
-				console.error('[Typing] Failed to send typing start:', error);
-				isTypingRef.current = false;
-			} finally {
-				isProcessingTypingRef.current = false;
-			}
-		} else if (!isTypingRef.current) {
-			// Mark that we want to send typing but are throttled
-			console.log('[Typing] Typing start throttled, marking as pending', {
-				timeSinceLastTypingStart: now - lastTypingStartSentRef.current,
-				minInterval: MIN_TYPING_INTERVAL
-			});
-			pendingTypingRef.current = true;
-		} else {
-			console.log('[Typing] Typing start skipped - already typing');
-		}
-	}, [currentUsername, sendEncryptedMessage, selectedConversation]);
+  const clearAllTimeouts = useCallback(() => {
+    timeoutsRef.current.forEach((handle) => clearTimeout(handle));
+    timeoutsRef.current.clear();
+  }, []);
 
-	// Send typing stop signal
-	const sendTypingStop = useCallback(async () => {
-		console.log('[Typing] sendTypingStop called', {
-			isTyping: isTypingRef.current,
-			pendingTyping: pendingTypingRef.current,
-			hasSendEncryptedMessage: !!sendEncryptedMessage
-		});
-		
-		// Only send if we were actually typing
-		if (isTypingRef.current) {
-			try {
-				console.debug('[Typing] Sending typing-stop signal');
-				
-				// Send typing indicator as encrypted message with unique ID
-				if (sendEncryptedMessage) {
-					console.debug('[Typing] Sending typing-stop as encrypted message');
-					// Use a more unique message ID for typing indicators to prevent duplicates
-					// SECURITY: Use cryptographically secure random ID generation
-					const randomBytes = crypto.getRandomValues(new Uint8Array(6));
-					const secureId = Array.from(randomBytes, byte => byte.toString(36)).join('');
-					const uniqueId = `typing-stop-${Date.now()}-${secureId}`;
-					await sendEncryptedMessage(
-						uniqueId,
-						JSON.stringify({ type: 'typing-stop', timestamp: Date.now() }),
-						'typing-stop'
-					);
-				}
-				isTypingRef.current = false;
-				pendingTypingRef.current = false;
-				console.log('[Typing] Typing stopped successfully');
-			} catch (error) {
-				console.error('[Typing] Failed to send typing stop:', error);
-				// Still mark as stopped locally even if network fails
-				isTypingRef.current = false;
-				pendingTypingRef.current = false;
-			}
-		} else {
-			console.log('[Typing] sendTypingStop called but not currently typing, skipping');
-		}
-	}, [currentUsername, sendEncryptedMessage, selectedConversation]);
+  const enqueueTypingTask = useCallback((task: () => Promise<void>) => {
+    const wrappedTask = async () => {
+      queueDepthRef.current = Math.min(queueDepthRef.current + 1, 32);
+      try {
+        await task();
+      } finally {
+        queueDepthRef.current = Math.max(queueDepthRef.current - 1, 0);
+      }
+    };
 
-	// Debounced typing handler - much more efficient
-	const handleLocalTyping = useCallback(() => {
-		console.log('[Typing] handleLocalTyping called', {
-			isTyping: isTypingRef.current,
-			pendingTyping: pendingTypingRef.current,
-			lastTypingStartSent: lastTypingStartSentRef.current,
-			timeSinceLastTypingStart: Date.now() - lastTypingStartSentRef.current,
-			minInterval: MIN_TYPING_INTERVAL,
-			isProcessingTyping: isProcessingTypingRef.current
-		});
+    typingQueueRef.current = typingQueueRef.current
+      .then(() => wrappedTask())
+      .catch(() => wrappedTask())
+      .catch(() => {});
 
-		// Clear existing debounce timeout
-		if (debounceTimeoutRef.current) {
-			clearTimeout(debounceTimeoutRef.current);
-		}
+    return typingQueueRef.current;
+  }, []);
 
-		const now = Date.now();
+  const sendTypingSignal = useCallback(
+    async (kind: 'start' | 'stop') => {
+      if (!sendEncryptedMessage) return;
+      const sequence = ++messageSequenceRef.current;
+      const id = createTypingMessageId(kind, sequence);
+      const payload = {
+        domain: TYPING_DOMAIN,
+        type: kind === 'start' ? 'typing-start' : 'typing-stop',
+        timestamp: Date.now(),
+        nonce: createTypingNonce(),
+        username: currentUsername,
+        conversation: selectedConversation ?? null,
+      };
+      await sendEncryptedMessage(id, JSON.stringify(payload), kind === 'start' ? 'typing-start' : 'typing-stop');
+      isTypingRef.current = kind === 'start';
+      if (kind === 'stop') {
+        pendingTypingRef.current = false;
+      }
+    },
+    [currentUsername, selectedConversation, sendEncryptedMessage],
+  );
 
-		// Send typing start if not processing and enough time has passed since last signal
-		// This handles both initial typing and keep-alive signals for long typing sessions
-		if (!isProcessingTypingRef.current && now - lastTypingStartSentRef.current > MIN_TYPING_INTERVAL) {
-			const isKeepAlive = isTypingRef.current;
-			console.log(`[Typing] Sending ${isKeepAlive ? 'keep-alive' : 'initial'} typing start - conditions met`);
-			sendTypingStart();
-		} else {
-			console.log('[Typing] Skipping typing start - conditions not met', {
-				isTyping: isTypingRef.current,
-				isProcessingTyping: isProcessingTypingRef.current,
-				timeSinceLastTypingStart: now - lastTypingStartSentRef.current,
-				minInterval: MIN_TYPING_INTERVAL
-			});
-		}
+  const sendTypingStart = useCallback(
+    () =>
+      enqueueTypingTask(async () => {
+        const now = Date.now();
+        const elapsed = now - lastTypingStartSentRef.current;
 
-		// Set new debounce timeout for typing stop
-		debounceTimeoutRef.current = setTimeout(() => {
-			console.log('[Typing] Debounce timeout expired, sending typing stop', {
-				isTyping: isTypingRef.current,
-				pendingTyping: pendingTypingRef.current
-			});
-			sendTypingStop();
-		}, TYPING_STOP_DELAY);
-	}, [sendTypingStart, sendTypingStop]);
+        if (isProcessingRef.current) {
+          pendingTypingRef.current = true;
+          return;
+        }
 
-	// Handle conversation changes to stop typing indicators (debounced)
-	const handleConversationChange = useCallback(() => {
-		console.log('[Typing] handleConversationChange called', {
-			isTyping: isTypingRef.current,
-			pendingTyping: pendingTypingRef.current,
-			hasDebounceTimeout: !!debounceTimeoutRef.current,
-			hasTypingTimeout: !!typingTimeoutRef.current,
-			hasConversationChangeTimeout: !!conversationChangeTimeoutRef.current
-		});
-		
-		// Clear any existing conversation change timeout
-		if (conversationChangeTimeoutRef.current) {
-			clearTimeout(conversationChangeTimeoutRef.current);
-		}
-		
-		// Debounce the conversation change handling
-		conversationChangeTimeoutRef.current = setTimeout(() => {
-			console.log('[Typing] Processing conversation change after debounce', {
-				isTyping: isTypingRef.current,
-				pendingTyping: pendingTypingRef.current,
-				hasDebounceTimeout: !!debounceTimeoutRef.current,
-				hasTypingTimeout: !!typingTimeoutRef.current
-			});
-			
-			// Clear any pending debounce timeouts first
-			if (debounceTimeoutRef.current) {
-				console.log('[Typing] Clearing debounce timeout');
-				clearTimeout(debounceTimeoutRef.current);
-				debounceTimeoutRef.current = null;
-			}
-			
-			// Clear any pending typing timeouts
-			if (typingTimeoutRef.current) {
-				console.log('[Typing] Clearing typing timeout');
-				clearTimeout(typingTimeoutRef.current);
-				typingTimeoutRef.current = null;
-			}
-			
-			// Only send typing stop if we were actually typing
-			if (isTypingRef.current) {
-				console.log('[Typing] Sending typing stop due to conversation change');
-				sendTypingStop();
-			} else {
-				console.log('[Typing] No typing stop needed - not currently typing');
-			}
-		}, CONVERSATION_CHANGE_DEBOUNCE);
-	}, [sendTypingStop]);
+        if (isTypingRef.current && elapsed < MIN_TYPING_INTERVAL) {
+          pendingTypingRef.current = true;
+          return;
+        }
 
-	// Cleanup when component unmounts or conversation changes
-	useEffect(() => {
-		return () => {
-			// Clear all timeouts
-			if (debounceTimeoutRef.current) {
-				clearTimeout(debounceTimeoutRef.current);
-			}
-			if (typingTimeoutRef.current) {
-				clearTimeout(typingTimeoutRef.current);
-			}
-			if (conversationChangeTimeoutRef.current) {
-				clearTimeout(conversationChangeTimeoutRef.current);
-			}
-			// Stop typing when leaving
-			if (isTypingRef.current) {
-				sendTypingStop();
-			}
-		};
-	}, [sendTypingStop]);
+        isProcessingRef.current = true;
+        try {
+          await sendTypingSignal('start');
+          lastTypingStartSentRef.current = now;
+          isTypingRef.current = true;
+          pendingTypingRef.current = false;
+        } catch (error) {
+          console.error('[TypingIndicator] Failed to send typing start:', error);
+          isTypingRef.current = false;
+          pendingTypingRef.current = true;
+        } finally {
+          isProcessingRef.current = false;
+        }
+      }),
+    [enqueueTypingTask, sendTypingSignal],
+  );
 
-	// Public helper: reset typing throttles after sending a message
-	const resetTypingAfterSend = useCallback(() => {
-		try {
-			if (debounceTimeoutRef.current) {
-				clearTimeout(debounceTimeoutRef.current);
-				debounceTimeoutRef.current = null;
-			}
-			if (typingTimeoutRef.current) {
-				clearTimeout(typingTimeoutRef.current);
-				typingTimeoutRef.current = null;
-			}
-			// Reset throttle and state so next keystroke can emit typing-start immediately
-			lastTypingStartSentRef.current = 0;
-			lastTypingTimeRef.current = 0;
-			pendingTypingRef.current = false;
-			isProcessingTypingRef.current = false;
-			isTypingRef.current = false;
-			console.log('[Typing] Reset typing throttle after message send');
-		} catch {}
-	}, []);
+  const sendTypingStop = useCallback(
+    () =>
+      enqueueTypingTask(async () => {
+        if (!isTypingRef.current) return;
 
-	// Auto-retry pending typing signals when throttle period expires
-	useEffect(() => {
-		if (pendingTypingRef.current && !isTypingRef.current) {
-			const now = Date.now();
-			const timeUntilNextAllowed = MIN_TYPING_INTERVAL - (now - lastTypingStartSentRef.current);
+        isProcessingRef.current = true;
+        try {
+          await sendTypingSignal('stop');
+          isTypingRef.current = false;
+          pendingTypingRef.current = false;
+        } catch (error) {
+          console.error('[TypingIndicator] Failed to send typing stop:', error);
+          isTypingRef.current = false;
+          pendingTypingRef.current = false;
+        } finally {
+          isProcessingRef.current = false;
+        }
+      }),
+    [enqueueTypingTask, sendTypingSignal],
+  );
 
-			if (timeUntilNextAllowed > 0) {
-				const retryTimeout = setTimeout(() => {
-					if (pendingTypingRef.current && !isTypingRef.current) {
-						sendTypingStart();
-					}
-				}, timeUntilNextAllowed);
+  const handleLocalTyping = useCallback(() => {
+    clearManagedTimeout('debounce');
 
-				return () => clearTimeout(retryTimeout);
-			}
-		}
-	}, [sendTypingStart]);
+    const now = Date.now();
+    const elapsed = now - lastTypingStartSentRef.current;
 
-	return {
-		handleLocalTyping,
-		handleConversationChange,
-		resetTypingAfterSend,
-		isTyping: isTypingRef.current
-	};
+    if (!isProcessingRef.current && elapsed > MIN_TYPING_INTERVAL) {
+      sendTypingStart();
+    }
+
+    setManagedTimeout('debounce', sendTypingStop, TYPING_STOP_DELAY);
+  }, [clearManagedTimeout, sendTypingStart, sendTypingStop, setManagedTimeout]);
+
+  const handleConversationChange = useCallback(() => {
+    clearManagedTimeout('conversation');
+    setManagedTimeout(
+      'conversation',
+      () => {
+        clearManagedTimeout('debounce');
+        clearManagedTimeout('retry');
+        if (isTypingRef.current) {
+          sendTypingStop();
+        }
+      },
+      CONVERSATION_CHANGE_DEBOUNCE,
+    );
+  }, [clearManagedTimeout, sendTypingStop, setManagedTimeout]);
+
+  const resetTypingAfterSend = useCallback(() => {
+    clearManagedTimeout('debounce');
+    clearManagedTimeout('retry');
+    lastTypingStartSentRef.current = 0;
+    pendingTypingRef.current = false;
+    isProcessingRef.current = false;
+    if (isTypingRef.current) {
+      sendTypingStop();
+    }
+    isTypingRef.current = false;
+  }, [clearManagedTimeout, sendTypingStop]);
+
+  useEffect(() => () => {
+    clearAllTimeouts();
+    if (isTypingRef.current) {
+      sendTypingStop();
+    }
+    isTypingRef.current = false;
+    pendingTypingRef.current = false;
+  }, [clearAllTimeouts, sendTypingStop]);
+
+  useEffect(() => {
+    if (!pendingTypingRef.current || isTypingRef.current) {
+      return;
+    }
+
+    const now = Date.now();
+    const timeUntil = Math.max(MIN_TYPING_INTERVAL - (now - lastTypingStartSentRef.current), 0);
+    if (timeUntil <= 0) {
+      sendTypingStart();
+      return;
+    }
+
+    setManagedTimeout(
+      'retry',
+      () => {
+        if (pendingTypingRef.current && !isTypingRef.current) {
+          sendTypingStart();
+        }
+      },
+      timeUntil,
+    );
+
+    return () => clearManagedTimeout('retry');
+  }, [clearManagedTimeout, sendTypingStart, setManagedTimeout]);
+
+  return {
+    handleLocalTyping,
+    handleConversationChange,
+    resetTypingAfterSend,
+    isTyping: isTypingRef.current,
+  };
 }

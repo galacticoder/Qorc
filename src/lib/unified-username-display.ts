@@ -1,226 +1,180 @@
 /**
- * Unified Username Display Utilities
- * 
- * This module provides simple, consistent utilities for displaying usernames
- * throughout the application with proper error handling and fallback mechanisms.
+ * Username Display Utilities
  */
 
+export interface UsernameDisplayConfig {
+  cacheSize?: number;
+  cacheTTL?: number;
+  maxUsernameLength?: number;
+  concurrentResolutionLimit?: number;
+  hashPreviewLength?: number;
+}
+
+export type UsernameResolutionOperation =
+  | 'resolve-single'
+  | 'batch-resolve'
+  | 'resolver-cache'
+  | 'context-resolve'
+  | 'context-batch'
+  | 'validate-resolver'
+  | 'ensure-mapping';
+
+const DEFAULT_USERNAME_DISPLAY_CONFIG: Required<UsernameDisplayConfig> = {
+  cacheSize: 1000,
+  cacheTTL: 30 * 60 * 1000,
+  maxUsernameLength: 50,
+  concurrentResolutionLimit: 10,
+  hashPreviewLength: 16
+};
+
+class UsernameResolutionMonitor {
+  private static readonly MAX_SAMPLES = 1000;
+  private static successDurations: number[] = [];
+  private static totalSuccessCount = 0;
+  private static totalFailureCount = 0;
+
+  static recordResolution(duration: number, success: boolean): void {
+    if (success) {
+      UsernameResolutionMonitor.successDurations.push(duration);
+      if (UsernameResolutionMonitor.successDurations.length > UsernameResolutionMonitor.MAX_SAMPLES) {
+        UsernameResolutionMonitor.successDurations.shift();
+      }
+      UsernameResolutionMonitor.totalSuccessCount += 1;
+    } else {
+      UsernameResolutionMonitor.totalFailureCount += 1;
+    }
+  }
+}
+
+export class UsernameDisplayConfiguration {
+  private static config: Required<UsernameDisplayConfig> = { ...DEFAULT_USERNAME_DISPLAY_CONFIG };
+
+  static configure(options: UsernameDisplayConfig = {}): void {
+    if (!options || typeof options !== 'object') {
+      return;
+    }
+
+    const next = { ...UsernameDisplayConfiguration.config, ...options } as Required<UsernameDisplayConfig>;
+
+    next.cacheSize = Math.max(1, Math.min(10000, Math.floor(next.cacheSize)));
+    next.cacheTTL = Math.max(1000, Math.floor(next.cacheTTL));
+    next.maxUsernameLength = Math.max(1, Math.min(200, Math.floor(next.maxUsernameLength)));
+    next.concurrentResolutionLimit = Math.max(1, Math.min(100, Math.floor(next.concurrentResolutionLimit)));
+    next.hashPreviewLength = Math.max(4, Math.min(32, Math.floor(next.hashPreviewLength)));
+
+    UsernameDisplayConfiguration.config = next;
+  }
+
+  static get(): Required<UsernameDisplayConfig> {
+    return { ...UsernameDisplayConfiguration.config };
+  }
+}
+
+export function recordUsernameResolutionEvent(
+  operation: UsernameResolutionOperation,
+  username: string,
+  result: string,
+  duration: number,
+  success: boolean
+): void {
+  UsernameResolutionMonitor.recordResolution(duration, success);
+}
+
+export function sanitizeUsernameInput(input: string): string {
+  return typeof input === 'string' ? input.trim() : '';
+}
+
 /**
- * Simple utility to resolve a username with proper error handling
- * This is the recommended way to resolve usernames in most components
+ * Resolve a username with robust error handling and metrics.
  */
 export async function resolveDisplayUsername(
   username: string,
   getDisplayUsername?: (username: string) => Promise<string>
 ): Promise<string> {
-  if (!username) {
+  const startTime = Date.now();
+  const sanitized = sanitizeUsernameInput(username);
+  const config = UsernameDisplayConfiguration.get();
+
+  if (!sanitized) {
+    UsernameResolutionMonitor.recordResolution(Date.now() - startTime, true);
     return '';
   }
 
-  if (!getDisplayUsername) {
-    return isHashedUsername(username) ? formatUsernameForDisplay(username, 16, true) : username;
+  if (sanitized.length > config.maxUsernameLength) {
+    UsernameResolutionMonitor.recordResolution(Date.now() - startTime, false);
+    return 'Unknown User';
   }
+
+  let result = sanitized;
+  let success = false;
 
   try {
-    const resolved = await getDisplayUsername(username);
-    return isHashedUsername(resolved) ? formatUsernameForDisplay(resolved, 16, true) : resolved;
-  } catch (error) {
-    console.error(`[resolveDisplayUsername] Failed to resolve username "${username}":`, error);
-    return isHashedUsername(username) ? formatUsernameForDisplay(username, 16, true) : username; // Show formatted pseudonym on fallback
-  }
-}
-
-/**
- * Batch resolve multiple usernames efficiently
- * Returns a map of original username -> display username
- */
-export async function batchResolveUsernames(
-  usernames: string[],
-  getDisplayUsername?: (username: string) => Promise<string>
-): Promise<Map<string, string>> {
-  const results = new Map<string, string>();
-
-  if (!getDisplayUsername) {
-    usernames.forEach(username => results.set(username, username));
-    return results;
-  }
-
-  // Process all usernames in parallel
-  const promises = usernames.map(async (username) => {
-    try {
-      const resolved = await getDisplayUsername(username);
-      results.set(username, resolved);
-    } catch (error) {
-      console.error(`[batchResolveUsernames] Failed to resolve username "${username}":`, error);
-      results.set(username, username); // Fallback to original
-    }
-  });
-
-  await Promise.allSettled(promises);
-  return results;
-}
-
-/**
- * Create a username resolver function with caching
- * This is useful for components that need to resolve many usernames
- */
-export function createUsernameResolver(
-  getDisplayUsername?: (username: string) => Promise<string>
-) {
-  const cache = new Map<string, string>();
-  const pendingRequests = new Map<string, Promise<string>>();
-
-  return async function resolveUsername(username: string): Promise<string> {
-    if (!username) {
-      return '';
-    }
-
     if (!getDisplayUsername) {
-      return username;
+      result = isHashedUsername(sanitized)
+        ? formatUsernameForDisplay(sanitized, config.hashPreviewLength, true)
+        : sanitized;
+      success = true;
+      return result;
     }
 
-    // Check cache first
-    if (cache.has(username)) {
-      return cache.get(username)!;
-    }
-
-    // Check if there's already a pending request for this username
-    if (pendingRequests.has(username)) {
-      return pendingRequests.get(username)!;
-    }
-
-    // Create new request
-    const request = (async () => {
-      try {
-        const resolved = await getDisplayUsername(username);
-        cache.set(username, resolved);
-        return resolved;
-      } catch (error) {
-        console.error(`[createUsernameResolver] Failed to resolve username "${username}":`, error);
-        const fallback = username;
-        cache.set(username, fallback);
-        return fallback;
-      } finally {
-        pendingRequests.delete(username);
-      }
-    })();
-
-    pendingRequests.set(username, request);
-    return request;
-  };
+    const resolved = await getDisplayUsername(sanitized);
+    result = isHashedUsername(resolved)
+      ? formatUsernameForDisplay(resolved, config.hashPreviewLength, true)
+      : resolved;
+    success = true;
+    return result;
+  } catch {
+    result = isHashedUsername(sanitized)
+      ? formatUsernameForDisplay(sanitized, config.hashPreviewLength, true)
+      : sanitized;
+    return result;
+  } finally {
+    UsernameResolutionMonitor.recordResolution(Date.now() - startTime, success);
+  }
 }
 
 /**
- * Utility to check if a username looks like a hash
- * This can be useful for UI decisions (e.g., showing different styling for unresolved usernames)
+ * Detect hashed usernames by matching against common hash formats.
  */
 export function isHashedUsername(username: string): boolean {
   if (!username) return false;
-  
-  // Check if it's a long hex string (typical hash format)
-  const hexPattern = /^[a-f0-9]{32,}$/i;
-  return hexPattern.test(username);
+  const trimmed = username.trim();
+  if (trimmed.length < 32) return false;
+
+  const hashPatterns = [
+    /^[a-f0-9]{32}$/i,
+    /^[a-f0-9]{40}$/i,
+    /^[a-f0-9]{64}$/i,
+    /^[a-f0-9]{128}$/i,
+    /^[a-f0-9]{32,}$/i
+  ];
+
+  return hashPatterns.some(pattern => pattern.test(trimmed));
 }
 
 /**
- * Get the first letter of a username for avatar display
- * Handles both original usernames and hashed usernames appropriately
- */
-export function getUsernameInitial(username: string): string {
-  if (!username) return 'U';
-  
-  // For hashed usernames, use 'U' for "User"
-  if (isHashedUsername(username)) {
-    return 'U';
-  }
-  
-  return username.charAt(0).toUpperCase();
-}
-
-/**
- * Format a username for display with optional truncation
+ * Format usernames for display with optional truncation and hash indicators.
  */
 export function formatUsernameForDisplay(
   username: string,
   maxLength?: number,
   showHashIndicator = false
 ): string {
-  if (!username) return 'Unknown User';
-  
-  let displayName = username;
-  
-  // If it's a hashed username and we want to show an indicator
-  if (showHashIndicator && isHashedUsername(username)) {
-    displayName = `User (${username.slice(0, 8)}...)`;
+  const sanitized = sanitizeUsernameInput(username);
+  if (!sanitized) return 'Unknown User';
+
+  const config = UsernameDisplayConfiguration.get();
+  const limit = typeof maxLength === 'number' && maxLength > 0 ? maxLength : config.maxUsernameLength;
+  const indicatorLength = config.hashPreviewLength;
+
+  let displayName = sanitized;
+  if (showHashIndicator && isHashedUsername(sanitized)) {
+    displayName = `User (${sanitized.slice(0, indicatorLength)}...)`;
   }
-  
-  // Truncate if needed
-  if (maxLength && displayName.length > maxLength) {
-    displayName = displayName.slice(0, maxLength - 3) + '...';
+
+  if (displayName.length > limit) {
+    displayName = `${displayName.slice(0, Math.max(0, limit - 3))}...`;
   }
-  
+
   return displayName;
-}
-
-/**
- * Validate that a username resolution function is working properly
- * Useful for debugging username display issues
- */
-export async function validateUsernameResolver(
-  testUsername: string,
-  getDisplayUsername?: (username: string) => Promise<string>
-): Promise<{
-  success: boolean;
-  originalUsername: string;
-  resolvedUsername: string;
-  error?: string;
-}> {
-  try {
-    const resolved = await resolveDisplayUsername(testUsername, getDisplayUsername);
-    return {
-      success: true,
-      originalUsername: testUsername,
-      resolvedUsername: resolved
-    };
-  } catch (error) {
-    return {
-      success: false,
-      originalUsername: testUsername,
-      resolvedUsername: testUsername,
-      error: error instanceof Error ? error.message : 'Unknown error'
-    };
-  }
-}
-
-/**
- * Ensure username mapping exists for a given original username
- * This can be called proactively to store mappings when we know the original username
- */
-export async function ensureUsernameMapping(
-  originalUsername: string,
-  secureDB?: any,
-  pseudonymizeFunction?: (username: string) => Promise<string>
-): Promise<boolean> {
-  if (!originalUsername || !secureDB || !pseudonymizeFunction) {
-    return false;
-  }
-
-  try {
-    // Generate the pseudonym for this username
-    const pseudonym = await pseudonymizeFunction(originalUsername);
-
-    // Check if mapping already exists
-    const existingMapping = await secureDB.getOriginalUsername(pseudonym);
-    if (existingMapping === originalUsername) {
-      return true; // Mapping already exists and is correct
-    }
-
-    // Store the mapping
-    await secureDB.storeUsernameMapping(pseudonym, originalUsername);
-    console.log(`[ensureUsernameMapping] Stored mapping: ${pseudonym} -> ${originalUsername}`);
-    return true;
-  } catch (error) {
-    console.error('[ensureUsernameMapping] Failed to ensure username mapping:', error);
-    return false;
-  }
 }

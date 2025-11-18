@@ -1,32 +1,34 @@
-/**
- * Call Modal Components for Incoming/Outgoing Calls
- */
-
-import React, { useState, useEffect, useRef } from 'react';
-import { Phone, PhoneOff, Video, VideoOff, Mic, MicOff, RotateCcw, Monitor, MonitorOff, Settings } from 'lucide-react';
-import { CallState, WebRTCCallingService } from '../../lib/webrtc-calling';
-import { ScreenSourceSelector } from './ScreenSourceSelector';
-import { ScreenSharingSettings } from '../settings/ScreenSharingSettings';
-import { VideoQualityMonitor } from '../debug/VideoQualityMonitor';
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
+import { Phone, PhoneOff, Video, VideoOff, Mic, MicOff, Monitor, MonitorOff, Settings } from 'lucide-react';
+import type { CallState } from '../../lib/webrtc-calling';
+// Lazy-load heavy subcomponents to avoid potential import cycles
+const ScreenSourceSelectorLazy = React.lazy(() => import('./ScreenSourceSelector').then(m => ({ default: m.ScreenSourceSelector || m.default })));
+const ScreenSharingSettingsLazy = React.lazy(() => import('../settings/ScreenSharingSettings').then(m => ({ default: m.ScreenSharingSettings || m.default })));
 import { useUnifiedUsernameDisplay } from '../../hooks/useUnifiedUsernameDisplay';
 
+interface ScreenSource {
+  readonly id: string;
+  readonly name: string;
+  readonly type: 'screen' | 'window';
+}
+
 interface CallModalProps {
-  call: CallState | null;
-  localStream: MediaStream | null;
-  remoteStream: MediaStream | null;
-  remoteScreenStream?: MediaStream | null;
-  peerConnection?: RTCPeerConnection | null;
-  onAnswer: () => void;
-  onDecline: () => void;
-  onEndCall: () => void;
-  onToggleMute: () => boolean;
-  onToggleVideo: () => boolean;
-  onSwitchCamera: () => void;
-  onStartScreenShare?: (selectedSource?: { id: string; name: string }) => Promise<void>;
-  onStopScreenShare?: () => Promise<void>;
-  onGetAvailableScreenSources?: () => Promise<Array<{ id: string; name: string; type: 'screen' | 'window' }>>;
-  isScreenSharing?: boolean;
-  getDisplayUsername?: (username: string) => Promise<string>;
+  readonly call: CallState | null;
+  readonly localStream: MediaStream | null;
+  readonly remoteStream: MediaStream | null;
+  readonly remoteScreenStream?: MediaStream | null;
+  readonly peerConnection?: RTCPeerConnection | null;
+  readonly onAnswer: () => void;
+  readonly onDecline: () => void;
+  readonly onEndCall: () => void;
+  readonly onToggleMute: () => boolean;
+  readonly onToggleVideo: () => boolean;
+  readonly onSwitchCamera: () => void;
+  readonly onStartScreenShare?: (selectedSource?: { id: string; name: string }) => Promise<void>;
+  readonly onStopScreenShare?: () => Promise<void>;
+  readonly onGetAvailableScreenSources?: () => Promise<readonly ScreenSource[]>;
+  readonly isScreenSharing?: boolean;
+  readonly getDisplayUsername?: (username: string) => Promise<string>;
 }
 
 export const CallModal: React.FC<CallModalProps> = ({
@@ -34,7 +36,6 @@ export const CallModal: React.FC<CallModalProps> = ({
   localStream,
   remoteStream,
   remoteScreenStream,
-  peerConnection,
   onAnswer,
   onDecline,
   onEndCall,
@@ -69,6 +70,10 @@ export const CallModal: React.FC<CallModalProps> = ({
   const [videoMenuOpen, setVideoMenuOpen] = useState(false);
   const [micDevices, setMicDevices] = useState<MediaDeviceInfo[]>([]);
   const [videoDevices, setVideoDevices] = useState<MediaDeviceInfo[]>([]);
+  // Camera devices & dropdown state (declare early to avoid TDZ in effects)
+  const [cameraDevices, setCameraDevices] = useState<MediaDeviceInfo[]>([]);
+  const [cameraMenuOpen, setCameraMenuOpen] = useState(false);
+  const [preferredCameraId, setPreferredCameraId] = useState<string | null>(null);
 
   // Load available devices
   useEffect(() => {
@@ -77,8 +82,8 @@ export const CallModal: React.FC<CallModalProps> = ({
         const devices = await navigator.mediaDevices.enumerateDevices();
         setMicDevices(devices.filter(device => device.kind === 'audioinput'));
         setVideoDevices(devices.filter(device => device.kind === 'videoinput'));
-      } catch (error) {
-        console.error('[CallModal] Failed to enumerate devices:', error);
+      } catch {
+        // Device enumeration failure - graceful degradation
       }
     };
 
@@ -103,14 +108,15 @@ export const CallModal: React.FC<CallModalProps> = ({
       if (!isInsideDropdown) {
         setMicMenuOpen(false);
         setVideoMenuOpen(false);
+        setCameraMenuOpen(false);
       }
     };
 
-    if (micMenuOpen || videoMenuOpen) {
+    if (micMenuOpen || videoMenuOpen || cameraMenuOpen) {
       document.addEventListener('mousedown', handleClickOutside);
       return () => document.removeEventListener('mousedown', handleClickOutside);
     }
-  }, [micMenuOpen, videoMenuOpen]);
+  }, [micMenuOpen, videoMenuOpen, cameraMenuOpen]);
   const audioCtxRef = useRef<AudioContext | null>(null);
   const analyserRef = useRef<AnalyserNode | null>(null);
   const rafRef = useRef<number | null>(null);
@@ -121,38 +127,34 @@ export const CallModal: React.FC<CallModalProps> = ({
   const [anchorCorner, setAnchorCorner] = useState<'tl' | 'tr' | 'bl' | 'br'>('br');
   const [anchorOffset, setAnchorOffset] = useState<{ x: number; y: number }>({ x: 16, y: 16 });
 
-  // Camera devices & dropdown state
-  const [cameraDevices, setCameraDevices] = useState<MediaDeviceInfo[]>([]);
-  const [cameraMenuOpen, setCameraMenuOpen] = useState(false);
-  const [preferredCameraId, setPreferredCameraId] = useState<string | null>(null);
 
   useEffect(() => {
     let mounted = true;
 
     const loadCameraDevices = async () => {
-      const devs = await WebRTCCallingService.getVideoInputDevices();
+      const all = await navigator.mediaDevices.enumerateDevices();
+      const devs = all.filter(d => d.kind === 'videoinput');
       if (!mounted) return;
 
       setCameraDevices(devs);
 
       // Load preferred camera and validate it still exists
       try {
-        const saved = localStorage.getItem('preferred_camera_deviceId_v1');
-        if (saved && saved.length < 256) {
-          // Check if the saved camera still exists
-          const deviceExists = devs.some(dev => dev.deviceId === saved);
-          if (deviceExists) {
+        const { encryptedStorage } = await import('../../lib/encrypted-storage');
+        const enc = await encryptedStorage.getItem('preferred_camera_deviceId_v1_pq');
+        const saved = typeof enc === 'string' ? enc : '';
+        if (saved && saved.length < 512) {
+          const exists = devs.some(dev => dev.deviceId === saved);
+          if (exists) {
             setPreferredCameraId(saved);
           } else {
-            // Reset to null if saved device no longer exists
             setPreferredCameraId(null);
-            localStorage.removeItem('preferred_camera_deviceId_v1');
+            await encryptedStorage.setItem('preferred_camera_deviceId_v1_pq', '');
           }
         }
       } catch {}
     };
 
-    // Initial load
     loadCameraDevices();
 
     // Listen for device changes (cameras plugged/unplugged)
@@ -170,13 +172,43 @@ export const CallModal: React.FC<CallModalProps> = ({
     };
   }, []);
 
-  const handleSelectCamera = async (deviceId: string) => {
-    try { localStorage.setItem('preferred_camera_deviceId_v1', deviceId || ''); } catch {}
-    setPreferredCameraId(deviceId || null);
-    setCameraMenuOpen(false);
-    // Note: live switching mid-call requires access to callingService.
-    // This selection will be applied automatically on the next video call.
-  };
+  // Camera selection handler
+  const handleCameraSelect = useCallback(async (deviceId: string) => {
+    try {
+      // Save preferred camera
+      const { encryptedStorage } = await import('../../lib/encrypted-storage');
+      await encryptedStorage.setItem('preferred_camera_deviceId_v1_pq', deviceId);
+      setPreferredCameraId(deviceId);
+      
+      // Switch to selected camera
+      if (localStream) {
+        const videoTrack = localStream.getVideoTracks()[0];
+        if (videoTrack) {
+          // Get new stream with selected camera
+          const constraints = {
+            video: { deviceId: { exact: deviceId } },
+            audio: false
+          };
+          const newStream = await navigator.mediaDevices.getUserMedia(constraints);
+          const newVideoTrack = newStream.getVideoTracks()[0];
+          
+          // Replace track in local stream
+          localStream.removeTrack(videoTrack);
+          localStream.addTrack(newVideoTrack);
+          videoTrack.stop();
+          
+          // Update the video element
+          if (localVideoRef.current) {
+            localVideoRef.current.srcObject = localStream;
+          }
+        }
+      }
+      
+      setCameraMenuOpen(false);
+    } catch (_error) {
+      console.error('Failed to switch camera:', _error);
+    }
+  }, [localStream]);
 
   // Drag handling
   useEffect(() => {
@@ -258,10 +290,8 @@ export const CallModal: React.FC<CallModalProps> = ({
       return;
     }
 
-    // Check if the stream has audio tracks before creating analyser
     const audioTracks = localStream.getAudioTracks();
     if (audioTracks.length === 0) {
-      console.log('[CallModal] No audio tracks in stream, skipping mic analyser setup');
       setMicLevel(0);
       return;
     }
@@ -290,8 +320,7 @@ export const CallModal: React.FC<CallModalProps> = ({
         rafRef.current = requestAnimationFrame(tick);
       };
       rafRef.current = requestAnimationFrame(tick);
-    } catch (e) {
-      console.warn('[CallModal] Failed to initialize mic analyser', e);
+    } catch {
       setMicLevel(0);
     }
 
@@ -304,7 +333,7 @@ export const CallModal: React.FC<CallModalProps> = ({
     };
   }, [localStream]);
 
-  const handleAnswerClick = async () => {
+  const handleAnswerClick = useCallback(async () => {
     if (isProcessing) return;
     setIsProcessing(true);
     try {
@@ -312,9 +341,9 @@ export const CallModal: React.FC<CallModalProps> = ({
     } finally {
       setTimeout(() => setIsProcessing(false), 300);
     }
-  };
+  }, [isProcessing, onAnswer]);
 
-  const handleDeclineClick = async () => {
+  const handleDeclineClick = useCallback(async () => {
     if (isProcessing) return;
     setIsProcessing(true);
     try {
@@ -322,9 +351,9 @@ export const CallModal: React.FC<CallModalProps> = ({
     } finally {
       setTimeout(() => setIsProcessing(false), 300);
     }
-  };
+  }, [isProcessing, onDecline]);
 
-  const handleEndClick = async () => {
+  const handleEndClick = useCallback(async () => {
     if (isProcessing) return;
     setIsProcessing(true);
     try {
@@ -332,12 +361,12 @@ export const CallModal: React.FC<CallModalProps> = ({
     } finally {
       setTimeout(() => setIsProcessing(false), 300);
     }
-  };
+  }, [isProcessing, onEndCall]);
   
   const localVideoRef = useRef<HTMLVideoElement>(null);
   const remoteVideoRef = useRef<HTMLVideoElement>(null);
   const remoteScreenVideoRef = useRef<HTMLVideoElement>(null);
-  const durationIntervalRef = useRef<NodeJS.Timeout | null>(null);
+  const durationIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   // Update video streams
   useEffect(() => {
@@ -351,12 +380,10 @@ export const CallModal: React.FC<CallModalProps> = ({
       if (remoteStream) {
         remoteVideoRef.current.srcObject = remoteStream;
       } else {
-        // Clear the last frame when stream ends
         try { remoteVideoRef.current.pause?.(); } catch {}
         remoteVideoRef.current.srcObject = null as any;
         try { 
-          remoteVideoRef.current.removeAttribute('src'); 
-          // Force clear by setting to empty video
+          remoteVideoRef.current.removeAttribute('src');
           (remoteVideoRef.current as any).src = '';
           remoteVideoRef.current.load(); 
         } catch {}
@@ -368,14 +395,20 @@ export const CallModal: React.FC<CallModalProps> = ({
     if (remoteScreenVideoRef.current) {
       if (remoteScreenStream) {
         remoteScreenVideoRef.current.srcObject = remoteScreenStream;
-        console.log('[CallModal] Remote screen stream connected to video element');
+        const playPromise = remoteScreenVideoRef.current.play();
+        if (playPromise) {
+          playPromise.catch(() => {
+            if (remoteScreenVideoRef.current) {
+              remoteScreenVideoRef.current.muted = true;
+              remoteScreenVideoRef.current.play().catch(() => {});
+            }
+          });
+        }
       } else {
-        // Clear the last frame when screen share ends
         try { remoteScreenVideoRef.current.pause?.(); } catch {}
         remoteScreenVideoRef.current.srcObject = null as any;
         try { 
-          remoteScreenVideoRef.current.removeAttribute('src'); 
-          // Force clear by setting to empty video
+          remoteScreenVideoRef.current.removeAttribute('src');
           (remoteScreenVideoRef.current as any).src = '';
           remoteScreenVideoRef.current.load(); 
         } catch {}
@@ -406,91 +439,86 @@ export const CallModal: React.FC<CallModalProps> = ({
     };
   }, [call?.status, call?.startTime]);
 
-  const handleToggleMute = () => {
+  const handleToggleMute = useCallback(() => {
     const muted = onToggleMute();
     setIsMuted(muted);
-  };
+  }, [onToggleMute]);
 
-  const handleToggleVideo = async () => {
+  const handleToggleVideo = useCallback(async () => {
     const enabled = await onToggleVideo();
     setIsVideoEnabled(enabled);
-  };
+  }, [onToggleVideo]);
 
-  const handleScreenShare = async () => {
+  const handleScreenShare = useCallback(async () => {
     if (isProcessing) return;
 
     if (isScreenSharing) {
-      // Stop screen sharing
       setIsProcessing(true);
       try {
         await onStopScreenShare?.();
-      } catch (error) {
-        console.error('Screen sharing error:', error);
-        alert('Failed to stop screen sharing: ' + (error as Error).message);
+      } catch (_error) {
+        alert('Failed to stop screen sharing: ' + (_error as Error).message);
       } finally {
         setIsProcessing(false);
       }
     } else {
-      // Start screen sharing - show source selector if available
       if (onGetAvailableScreenSources) {
         setShowScreenSourceSelector(true);
       } else {
-        // Fallback to direct screen sharing without selection
         setIsProcessing(true);
         try {
           await onStartScreenShare?.();
-        } catch (error) {
-          console.error('Screen sharing error:', error);
-          alert('Failed to start screen sharing: ' + (error as Error).message);
+        } catch (_error) {
+          alert('Failed to start screen sharing: ' + (_error as Error).message);
         } finally {
           setIsProcessing(false);
         }
       }
     }
-  };
+  }, [isProcessing, isScreenSharing, onStopScreenShare, onStartScreenShare, onGetAvailableScreenSources]);
 
-  const handleScreenSourceSelect = async (source: { id: string; name: string; type: 'screen' | 'window' }) => {
+  const handleScreenSourceSelect = useCallback(async (source: ScreenSource) => {
     setIsProcessing(true);
     try {
       await onStartScreenShare?.(source);
-    } catch (error) {
-      console.error('Screen sharing error:', error);
-      alert('Failed to start screen sharing: ' + (error as Error).message);
+    } catch (_error) {
+      alert('Failed to start screen sharing: ' + (_error as Error).message);
     } finally {
       setIsProcessing(false);
       setShowScreenSourceSelector(false);
     }
-  };
+  }, [onStartScreenShare]);
 
-  const handleScreenSourceCancel = () => {
-    // Close the screen source selector
+  const handleScreenSourceCancel = useCallback(() => {
     setShowScreenSourceSelector(false);
-  };
+  }, []);
 
-  const formatDuration = (seconds: number): string => {
+  const formatDuration = useCallback((seconds: number): string => {
     const mins = Math.floor(seconds / 60);
     const secs = seconds % 60;
     return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
-  };
+  }, []);
 
   if (!call) return null;
 
-  const isVideoCall = call.type === 'video';
-  const isIncoming = call.direction === 'incoming';
-  const isConnected = call.status === 'connected';
-  const isRinging = call.status === 'ringing';
-  const isConnecting = call.status === 'connecting';
+  const isVideoCall = useMemo(() => call.type === 'video', [call.type]);
+  const isIncoming = useMemo(() => call.direction === 'incoming', [call.direction]);
+  const isConnected = useMemo(() => call.status === 'connected', [call.status]);
+  const isRinging = useMemo(() => call.status === 'ringing', [call.status]);
+  const isConnecting = useMemo(() => call.status === 'connecting', [call.status]);
 
-  // Compute wrapper style based on drag/free or anchored corner
-  const wrapperStyle: React.CSSProperties = freePos
-    ? { position: 'fixed', left: Math.round(freePos.left), top: Math.round(freePos.top), zIndex: 50, width: '380px' }
-    : anchorCorner === 'tl'
-      ? { position: 'fixed', left: anchorOffset.x, top: anchorOffset.y, zIndex: 50, width: '380px' }
-      : anchorCorner === 'tr'
-        ? { position: 'fixed', right: anchorOffset.x, top: anchorOffset.y, zIndex: 50, width: '380px' }
-        : anchorCorner === 'bl'
-          ? { position: 'fixed', left: anchorOffset.x, bottom: anchorOffset.y, zIndex: 50, width: '380px' }
-          : { position: 'fixed', right: anchorOffset.x, bottom: anchorOffset.y, zIndex: 50, width: '380px' };
+  const wrapperStyle = useMemo((): React.CSSProperties => {
+    if (freePos) {
+      return { position: 'fixed', left: Math.round(freePos.left), top: Math.round(freePos.top), zIndex: 50, width: '380px' };
+    }
+    const base = { position: 'fixed' as const, zIndex: 50, width: '380px' };
+    switch (anchorCorner) {
+      case 'tl': return { ...base, left: anchorOffset.x, top: anchorOffset.y };
+      case 'tr': return { ...base, right: anchorOffset.x, top: anchorOffset.y };
+      case 'bl': return { ...base, left: anchorOffset.x, bottom: anchorOffset.y };
+      default: return { ...base, right: anchorOffset.x, bottom: anchorOffset.y };
+    }
+  }, [freePos, anchorCorner, anchorOffset]);
 
   return (
     <div ref={wrapperRef} style={wrapperStyle} className="sm:w-[420px]">
@@ -553,8 +581,8 @@ export const CallModal: React.FC<CallModalProps> = ({
           </div>
         </div>
 
-        {/* Video Area */}
-        {isVideoCall && (
+        {/* Video Area - Show for video calls OR if there's a remote screen/video stream */}
+        {(isVideoCall || remoteStream || remoteScreenStream) && (
           <div className="space-y-3">
             {/* Main Video Display */}
             <div className="relative bg-black h-56">
@@ -622,19 +650,11 @@ export const CallModal: React.FC<CallModalProps> = ({
               </div>
             )}
 
-            {/* Quality Monitor */}
-            {(remoteStream || remoteScreenStream) && (
-              <VideoQualityMonitor
-                peerConnection={peerConnection || null}
-                remoteStream={remoteScreenStream || remoteStream}
-                isVisible={true}
-              />
-            )}
           </div>
         )}
 
-        {/* Audio Only View */}
-        {!isVideoCall && (
+        {/* Audio Only View - Only show if no video/screen streams */}
+        {!isVideoCall && !remoteStream && !remoteScreenStream && (
           <div className="py-6 flex items-center justify-center bg-gradient-to-br from-gray-800 to-gray-900">
             <div className="text-center text-white">
               <div className="w-32 h-32 bg-gray-700 rounded-full flex items-center justify-center mx-auto mb-6">
@@ -800,19 +820,23 @@ export const CallModal: React.FC<CallModalProps> = ({
                       <div className="px-3 py-1 text-xs text-gray-400 border-b border-gray-600 mb-1">
                         Select Camera
                       </div>
-                      {videoDevices.map((device) => (
+                      {cameraDevices.map((device) => (
                         <button
                           key={device.deviceId}
-                          onClick={() => {
-                            // Handle camera selection
-                            setVideoMenuOpen(false);
-                          }}
-                          className="w-full text-left px-3 py-2 text-sm text-white hover:bg-gray-700 transition-colors"
+                          onClick={() => handleCameraSelect(device.deviceId)}
+                          className={`w-full text-left px-3 py-2 text-sm transition-colors ${
+                            device.deviceId === preferredCameraId
+                              ? 'bg-blue-600 text-white'
+                              : 'text-white hover:bg-gray-700'
+                          }`}
                         >
                           {device.label || `Camera ${device.deviceId.slice(0, 8)}...`}
+                          {device.deviceId === preferredCameraId && (
+                            <span className="ml-2 text-xs">✓</span>
+                          )}
                         </button>
                       ))}
-                      {videoDevices.length === 0 && (
+                      {cameraDevices.length === 0 && (
                         <div className="px-3 py-2 text-sm text-gray-400">
                           No cameras detected
                         </div>
@@ -823,7 +847,7 @@ export const CallModal: React.FC<CallModalProps> = ({
                             onSwitchCamera();
                             setVideoMenuOpen(false);
                           }}
-                          disabled={videoDevices.length <= 1}
+                          disabled={cameraDevices.length <= 1}
                           className="w-full text-left px-3 py-2 text-sm text-white hover:bg-gray-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                         >
                           Switch Camera
@@ -853,7 +877,8 @@ export const CallModal: React.FC<CallModalProps> = ({
                   </button>
                   <button
                     onClick={() => setShowScreenSharingSettings(true)}
-                    className="ml-2 w-10 h-10 rounded-full bg-gray-700 hover:bg-gray-600 flex items-center justify-center transition-colors"
+                    disabled={isProcessing}
+                    className="ml-2 w-10 h-10 rounded-full bg-gray-700 hover:bg-gray-600 flex items-center justify-center transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                     title="Screen sharing settings"
                   >
                     <Settings className="w-4 h-4 text-white" />
@@ -876,13 +901,15 @@ export const CallModal: React.FC<CallModalProps> = ({
       </div>
 
       {/* Screen Source Selector */}
-      <ScreenSourceSelector
-        isOpen={showScreenSourceSelector}
-        onClose={() => setShowScreenSourceSelector(false)}
-        onSelect={handleScreenSourceSelect}
-        onCancel={handleScreenSourceCancel}
-        onGetAvailableScreenSources={onGetAvailableScreenSources}
-      />
+<React.Suspense fallback={null}>
+        <ScreenSourceSelectorLazy
+          isOpen={showScreenSourceSelector}
+          onClose={() => setShowScreenSourceSelector(false)}
+          onSelect={handleScreenSourceSelect}
+          onCancel={handleScreenSourceCancel}
+          onGetAvailableScreenSources={onGetAvailableScreenSources}
+        />
+      </React.Suspense>
 
       {/* Screen Sharing Settings Modal */}
       {showScreenSharingSettings && (
@@ -892,16 +919,20 @@ export const CallModal: React.FC<CallModalProps> = ({
               <h3 className="text-lg font-semibold">Screen Sharing Settings</h3>
               <button
                 onClick={() => setShowScreenSharingSettings(false)}
-                className="text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200"
+                disabled={isProcessing}
+                className="text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200 disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 ✕
               </button>
             </div>
-            <ScreenSharingSettings />
+<React.Suspense fallback={null}>
+              <ScreenSharingSettingsLazy />
+            </React.Suspense>
             <div className="mt-4 flex justify-end">
               <button
                 onClick={() => setShowScreenSharingSettings(false)}
-                className="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700 transition-colors"
+                disabled={isProcessing}
+                className="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 Done
               </button>

@@ -7,28 +7,41 @@
   "scripts": {
     "start": "node server.js",
     "start:cluster": "cross-env CLUSTER_WORKERS=4 node server.js",
-    "start:prod": "cross-env NODE_ENV=production CLUSTER_WORKERS=4 node server.js",
+    "cluster": "node cluster/cluster-cli.js",
+    "cluster:status": "node cluster/cluster-cli.js status",
+    "cluster:pending": "node cluster/cluster-cli.js pending",
+    "cluster:approve": "node cluster/cluster-cli.js approve",
+    "cluster:reject": "node cluster/cluster-cli.js reject",
+    "cluster:keys": "node cluster/cluster-cli.js keys",
+    "cluster:health": "node cluster/cluster-cli.js health",
+    "cluster:watch": "node cluster/cluster-cli.js watch",
     "audit": "npm audit",
-    "audit:fix": "npm audit fix"
+    "audit:fix": "npm audit fix",
+    "lint": "../node_modules/.bin/eslint ."
   },
   "dependencies": {
     "@noble/ciphers": "^2.0.0",
-    "@noble/curves": "^1.9.7",
-    "@noble/post-quantum": "^0.4.1",
+    "@noble/curves": "^2.0.0",
+    "@noble/post-quantum": "^0.5.2",
     "argon2": "^0.44.0",
-    "better-sqlite3": "^12.2.0",
-    "cross-env": "^7.0.3",
-    "ioredis": "^5.7.0",
+    "chalk": "^5.3.0",
+    "cli-table3": "^0.6.5",
+    "commander": "^14.0.2",
+    "cross-env": "^10.1.0",
+    "express": "^5.1.0",
+    "express-rate-limit": "^8.2.1",
+    "generic-pool": "^3.9.0",
+    "ioredis": "^5.8.2",
     "mlkem": "^2.5.0",
+    "node-fetch": "^3.3.2",
+    "pg": "^8.12.0",
     "prompt-sync": "^4.2.0",
-    "rate-limiter-flexible": "^7.2.0",
-    "selfsigned": "^3.0.1",
-    "socks-proxy-agent": "^8.0.5",
-    "ws": "^8.18.3",
-    "generic-pool": "^3.9.0"
+    "rate-limiter-flexible": "^8.1.0",
+    "ws": "^8.18.3"
   },
   "devDependencies": {
-    "@types/ws": "^8.18.1"
+    "eslint": "^9.36.0",
+    "globals": "^14.0.0"
   },
   "engines": {
     "node": ">=18.0.0"

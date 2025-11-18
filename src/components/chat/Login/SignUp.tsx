@@ -1,59 +1,71 @@
-import React, { useState } from "react";
+import React, { useState, useCallback, useMemo } from "react";
 import { Input } from "../../ui/input";
 import { Label } from "../../ui/label";
 import { Button } from "../../ui/button";
 
 interface SignUpFormProps {
-  onSubmit: (username: string, password: string) => Promise<void>;
-  disabled: boolean;
-  authStatus?: string;
-  error?: string;
-  hasServerTrustRequest?: boolean;
-  initialUsername?: string;
-  initialPassword?: string;
+  readonly onSubmit: (username: string, password: string) => Promise<void>;
+  readonly disabled: boolean;
+  readonly authStatus?: string;
+  readonly error?: string;
+  readonly hasServerTrustRequest?: boolean;
+  readonly initialUsername?: string;
+  readonly initialPassword?: string;
+  readonly onChangeUsername?: (v: string) => void;
+  readonly onChangePassword?: (v: string) => void;
+  readonly onChangeConfirmPassword?: (v: string) => void;
 }
 
-export function SignUpForm({ onSubmit, disabled, authStatus, error, hasServerTrustRequest, initialUsername = "", initialPassword = "", onChangeUsername, onChangePassword, onChangeConfirmPassword }: SignUpFormProps & { onChangeUsername?: (v:string)=>void; onChangePassword?: (v:string)=>void; onChangeConfirmPassword?: (v:string)=>void; }) {
+const USERNAME_MIN_LENGTH = 3;
+const USERNAME_MAX_LENGTH = 32;
+const PASSWORD_MAX_LENGTH = 1000;
+const USERNAME_REGEX = /^[a-zA-Z0-9_-]+$/;
+
+export function SignUpForm({ 
+  onSubmit, 
+  disabled, 
+  authStatus, 
+  hasServerTrustRequest,
+  initialUsername = "", 
+  initialPassword = "", 
+  onChangeUsername, 
+  onChangePassword, 
+  onChangeConfirmPassword 
+}: SignUpFormProps) {
   const [username, setUsername] = useState(initialUsername);
   const [password, setPassword] = useState(initialPassword);
   const [confirmPassword, setConfirmPassword] = useState("");
-
-  const handleUsernameChange = (v:string) => { setUsername(v); onChangeUsername?.(v); };
-  const handlePasswordChange = (v:string) => { setPassword(v); onChangePassword?.(v); };
-  const handleConfirmChange = (v:string) => { setConfirmPassword(v); onChangeConfirmPassword?.(v); };
   const [isSubmitting, setIsSubmitting] = useState(false);
 
-  const isUsernameValid = username.trim().length >= 3;
-  const isPasswordValid = password.length > 0;
-  const doPasswordsMatch = password === confirmPassword;
+  const handleUsernameChange = useCallback((v: string): void => { 
+    setUsername(v); 
+    onChangeUsername?.(v); 
+  }, [onChangeUsername]);
+  
+  const handlePasswordChange = useCallback((v: string): void => { 
+    setPassword(v); 
+    onChangePassword?.(v); 
+  }, [onChangePassword]);
+  
+  const handleConfirmChange = useCallback((v: string): void => { 
+    setConfirmPassword(v); 
+    onChangeConfirmPassword?.(v); 
+  }, [onChangeConfirmPassword]);
 
-  const isFormValid = isUsernameValid && isPasswordValid && doPasswordsMatch;
+  const isUsernameValid = useMemo(() => username.trim().length >= USERNAME_MIN_LENGTH, [username]);
+  const isPasswordValid = useMemo(() => password.length > 0, [password]);
+  const doPasswordsMatch = useMemo(() => password === confirmPassword, [password, confirmPassword]);
+  const isFormValid = useMemo(() => isUsernameValid && isPasswordValid && doPasswordsMatch, [isUsernameValid, isPasswordValid, doPasswordsMatch]);
 
-  const handleSubmit = async (e: React.FormEvent) => {
+  const handleSubmit = useCallback(async (e: React.FormEvent): Promise<void> => {
     e.preventDefault();
     if (disabled || isSubmitting || !isFormValid) return;
 
-    // SECURITY: Sanitize and validate inputs
     const sanitizedUsername = username.trim();
     
-    // SECURITY: Validate username format
-    if (!/^[a-zA-Z0-9_-]+$/.test(sanitizedUsername)) {
-      console.error('Username can only contain letters, numbers, underscores, and hyphens');
-      return;
-    }
-    
-    // SECURITY: Validate username length
-    if (sanitizedUsername.length < 3 || sanitizedUsername.length > 32) {
-      console.error('Username must be 3-32 characters');
-      return;
-    }
-    
-    // NOTE: Password strength and complexity checks disabled per request.
-    // Only presence and matching confirmation are required.
-    if (password.length > 1000) {
-      console.error('Password too long');
-      return;
-    }
+    if (!USERNAME_REGEX.test(sanitizedUsername)) return;
+    if (sanitizedUsername.length < USERNAME_MIN_LENGTH || sanitizedUsername.length > USERNAME_MAX_LENGTH) return;
+    if (password.length > PASSWORD_MAX_LENGTH) return;
 
     setIsSubmitting(true);
     try {
@@ -61,7 +73,7 @@ export function SignUpForm({ onSubmit, disabled, authStatus, error, hasServerTru
     } finally {
       setIsSubmitting(false);
     }
-  };
+  }, [disabled, isSubmitting, isFormValid, username, password, onSubmit]);
 
   return (
     <form onSubmit={handleSubmit} className="space-y-4">
@@ -74,7 +86,9 @@ export function SignUpForm({ onSubmit, disabled, authStatus, error, hasServerTru
           onChange={(e) => handleUsernameChange(e.target.value)}
           disabled={disabled || isSubmitting}
           required
-          minLength={3}
+          minLength={USERNAME_MIN_LENGTH}
+          maxLength={USERNAME_MAX_LENGTH}
+          autoComplete="username"
         />
       </div>
 
@@ -88,6 +102,8 @@ export function SignUpForm({ onSubmit, disabled, authStatus, error, hasServerTru
           onChange={(e) => handlePasswordChange(e.target.value)}
           disabled={disabled || isSubmitting}
           required
+          autoComplete="new-password"
+          maxLength={PASSWORD_MAX_LENGTH}
         />
       </div>
 
@@ -101,13 +117,14 @@ export function SignUpForm({ onSubmit, disabled, authStatus, error, hasServerTru
           onChange={(e) => handleConfirmChange(e.target.value)}
           disabled={disabled || isSubmitting}
           required
+          autoComplete="new-password"
+          maxLength={PASSWORD_MAX_LENGTH}
         />
         {!doPasswordsMatch && confirmPassword.length > 0 && (
           <p className="text-red-500 text-xs">Passwords do not match</p>
         )}
       </div>
 
-      {/* {error && <p className="text-red-500 text-sm">{error}</p>} */}
 
       {hasServerTrustRequest && !isSubmitting && (
         <p className="text-amber-600 text-sm text-center">

@@ -1,36 +1,66 @@
 import Redis from 'ioredis';
 import { createPool } from 'generic-pool';
+import crypto from 'crypto';
 import { TTL_CONFIG } from '../config/config.js';
+import { logger as cryptoLogger } from '../crypto/crypto-logger.js';
 
-const REDIS_URL = process.env.REDIS_URL || 'redis://127.0.0.1:6379';
+const REDIS_URL = process.env.REDIS_URL;
+if (!REDIS_URL) {
+  throw new Error('REDIS_URL must be explicitly configured via environment variable');
+}
 const REDIS_CLUSTER_NODES = (process.env.REDIS_CLUSTER_NODES || '').trim();
 const USING_CLUSTER = REDIS_CLUSTER_NODES.length > 0;
 
-// Redis connection pool configuration
+const REDIS_QUIET_ERRORS = (process.env.PRESENCE_REDIS_QUIET_ERRORS || '').toLowerCase() === 'true';
+const REDIS_ERROR_THROTTLE_MS = clampNumber(process.env.REDIS_ERROR_THROTTLE_MS, {
+  min: 1000,
+  max: 60000,
+  defaultValue: 5000,
+});
+let lastRedisErrorMessage = null;
+let lastRedisErrorTime = 0;
+
+function logRedisError(context, error) {
+  const msg = error?.message || String(error || '');
+  const now = Date.now();
+
+  if (REDIS_QUIET_ERRORS) {
+    if (lastRedisErrorMessage === msg && (now - lastRedisErrorTime) < REDIS_ERROR_THROTTLE_MS) {
+      return;
+    }
+  }
+
+  lastRedisErrorMessage = msg;
+  lastRedisErrorTime = now;
+  cryptoLogger.error(context, error);
+}
+
+function clampNumber(value, defaults) {
+  const parsed = Number.parseInt(value ?? defaults.defaultValue, 10);
+  if (!Number.isFinite(parsed)) return defaults.defaultValue;
+  return Math.min(Math.max(parsed, defaults.min), defaults.max);
+}
+
 const POOL_CONFIG = {
-  min: 4,
-  max: Math.max(20, Number.parseInt(process.env.REDIS_POOL_MAX || '50', 10)),
-  acquireTimeoutMillis: 15000,
-  idleTimeoutMillis: 30000,
-  evictionRunIntervalMillis: 60000,
+  min: clampNumber(process.env.REDIS_POOL_MIN, { min: 1, max: 100, defaultValue: 4 }),
+  max: clampNumber(process.env.REDIS_POOL_MAX, { min: 10, max: 500, defaultValue: 50 }),
+  acquireTimeoutMillis: clampNumber(process.env.REDIS_POOL_ACQUIRE_TIMEOUT, { min: 1000, max: 60_000, defaultValue: 15_000 }),
+  idleTimeoutMillis: clampNumber(process.env.REDIS_POOL_IDLE_TIMEOUT, { min: 10_000, max: 120_000, defaultValue: 30_000 }),
+  evictionRunIntervalMillis: clampNumber(process.env.REDIS_POOL_EVICTION_INTERVAL, { min: 10_000, max: 120_000, defaultValue: 60_000 })
 };
 
-// Redis client options with robust error handling
 const REDIS_OPTIONS = {
-  host: process.env.REDIS_HOST || '127.0.0.1',
-  port: parseInt(process.env.REDIS_PORT || '6379', 10),
   maxRetriesPerRequest: 3,
   retryDelayOnFailover: 100,
   enableAutoPipelining: true,
-  reconnectOnError: (err) => {
-    const targetError = /READONLY|ECONNRESET|ENOTFOUND|ECONNREFUSED/;
-    return targetError.test(err.message);
-  },
-  connectTimeout: 10000,
-  commandTimeout: 5000,
+  reconnectOnError: (err) => /READONLY|ECONNRESET|ENOTFOUND|ECONNREFUSED/.test(err.message),
+  connectTimeout: clampNumber(process.env.REDIS_CONNECT_TIMEOUT, { min: 1000, max: 60_000, defaultValue: 15_000 }),
+  commandTimeout: clampNumber(process.env.REDIS_COMMAND_TIMEOUT, { min: 1000, max: 30_000, defaultValue: 10_000 }),
+  tls: {
+    servername: process.env.REDIS_TLS_SERVERNAME || undefined,
+  }
 };
 
-// Helper function to parse Redis cluster nodes from environment variable
 function parseRedisClusterNodes(redisClusterNodes) {
   if (!redisClusterNodes) return [];
   return redisClusterNodes.split(',').map(s => {
@@ -40,51 +70,46 @@ function parseRedisClusterNodes(redisClusterNodes) {
 }
 
 let clusterClient = null;
-// Connection pool for duplicate() calls to avoid exhausting connections
-let duplicateConnectionPool = [];
-const MAX_DUPLICATE_CONNECTIONS = 5;
+const duplicateConnectionPool = new Set();
+const MAX_DUPLICATE_CONNECTIONS = clampNumber(process.env.REDIS_DUPLICATE_POOL_MAX, { min: 1, max: 20, defaultValue: 5 });
 
 if (USING_CLUSTER) {
   try {
     const nodes = parseRedisClusterNodes(REDIS_CLUSTER_NODES);
     clusterClient = new Redis.Cluster(nodes, {
-      redisOptions: REDIS_OPTIONS
+      redisOptions: {
+        ...REDIS_OPTIONS,
+        username: process.env.REDIS_USERNAME,
+        password: process.env.REDIS_PASSWORD
+      }
     });
-    clusterClient.on('connect', () => console.log('[PRESENCE] Redis Cluster client connected'));
-    clusterClient.on('ready', () => console.log('[PRESENCE] Redis Cluster client ready'));
-    clusterClient.on('error', (e) => console.error('[PRESENCE] Redis Cluster error:', e));
+    clusterClient.on('connect', () => cryptoLogger.debug('Redis cluster client connected'));
+    clusterClient.on('ready', () => cryptoLogger.info('Redis cluster client ready'));
+    clusterClient.on('error', (error) => logRedisError('Redis cluster error', error));
   } catch (e) {
-    console.error('[PRESENCE] Failed to initialize Redis Cluster client:', e);
+    cryptoLogger.error('Failed to initialize Redis cluster client', e);
   }
 }
 
-// Factory for creating Redis clients (standalone mode)
+// Factory for creating Redis clients
 const factory = {
   create: async () => {
-    const client = new Redis(REDIS_URL, REDIS_OPTIONS);
-    
-    // Add event listeners for monitoring
-    client.on('error', (error) => {
-      console.error('[PRESENCE] Redis client error:', error);
+    if (typeof REDIS_URL !== 'string' || !REDIS_URL.startsWith('rediss://')) {
+      throw new Error('REDIS_URL must use rediss:// and TLS; plaintext redis:// is not supported');
+    }
+
+    const client = new Redis(REDIS_URL, {
+      ...REDIS_OPTIONS,
+      username: process.env.REDIS_USERNAME,
+      password: process.env.REDIS_PASSWORD
     });
     
-    client.on('connect', () => {
-      console.log('[PRESENCE] Redis pool client connected');
-    });
+    client.on('error', (error) => logRedisError('Redis client error', error));
+    client.on('connect', () => cryptoLogger.debug('Redis pool client connected'));
+    client.on('ready', () => cryptoLogger.debug('Redis pool client ready'));
+    client.on('close', () => cryptoLogger.warn('Redis client closed'));
+    client.on('reconnecting', () => cryptoLogger.warn('Redis client reconnecting'));
     
-    client.on('ready', () => {
-      console.log('[PRESENCE] Redis pool client ready');
-    });
-    
-    client.on('close', () => {
-      console.log('[PRESENCE] Redis client closed');
-    });
-    
-    client.on('reconnecting', () => {
-      console.log('[PRESENCE] Redis client reconnecting');
-    });
-    
-    // Wait for connection to be ready with timeout
     await new Promise((resolve, reject) => {
       if (client.status === 'ready') {
         resolve();
@@ -111,11 +136,10 @@ const factory = {
         reject(error);
       };
       
-      // Set up timeout (10 seconds)
       timeout = setTimeout(() => {
         cleanup();
-        reject(new Error('Redis client connection timeout - neither ready nor error event received within 10 seconds'));
-      }, 10000);
+        reject(new Error('Redis client connection timeout - neither ready nor error event received within 15 seconds'));
+      }, 15000);
       
       client.once('ready', readyHandler);
       client.once('error', errorHandler);
@@ -127,34 +151,43 @@ const factory = {
     try {
       await client.quit();
     } catch (error) {
-      console.error('[PRESENCE] Error destroying Redis client:', error);
+      cryptoLogger.error('Error destroying Redis client', error);
       try {
         client.disconnect();
       } catch (disconnectError) {
-        console.error('[PRESENCE] Error disconnecting Redis client:', disconnectError);
+        cryptoLogger.error('Error disconnecting Redis client', disconnectError);
       }
     }
   }
 };
 
-// Create the connection pool (standalone only)
 export const redisPool = USING_CLUSTER ? null : createPool(factory, POOL_CONFIG);
 
-// Helper function to execute Redis commands with automatic pool management
 export async function withRedisClient(operation) {
   if (USING_CLUSTER && clusterClient) {
     return operation(clusterClient);
   }
-  const client = await redisPool.acquire();
+  
+  if (!redisPool) {
+    throw new Error('Redis pool not available');
+  }
+  
   try {
-    return await operation(client);
-  } finally {
-    await redisPool.release(client);
+    const client = await redisPool.acquire();
+    try {
+      return await operation(client);
+    } finally {
+      await redisPool.release(client);
+    }
+  } catch (error) {
+    if (error.message && error.message.includes('draining')) {
+      throw new Error('Redis pool is shutting down - operation cannot be completed');
+    }
+    throw error;
   }
 }
 
-// Legacy export for backward compatibility (deprecated)
-export const redis = {
+const redis = {
   set: (...args) => withRedisClient(client => client.set(...args)),
   get: (...args) => withRedisClient(client => client.get(...args)),
   del: (...args) => withRedisClient(client => client.del(...args)),
@@ -165,11 +198,12 @@ export const redis = {
   publish: (...args) => withRedisClient(client => client.publish(...args)),
   eval: (...args) => withRedisClient(client => client.eval(...args)),
   duplicate: async () => {
-    // For subscribers, reuse cached connections to avoid exhausting connections
     if (USING_CLUSTER && clusterClient) {
-      // Try to reuse an existing connection from the pool with health check
-      while (duplicateConnectionPool.length > 0) {
-        const cachedClient = duplicateConnectionPool.pop();
+      const iterator = duplicateConnectionPool.values();
+      let result = iterator.next();
+      while (!result.done) {
+        const cachedClient = result.value;
+        duplicateConnectionPool.delete(cachedClient);
 
         // Perform lightweight health check
         if (cachedClient && cachedClient.status === 'ready') {
@@ -177,8 +211,7 @@ export const redis = {
             // Quick ping to verify connection is alive
             await cachedClient.ping();
             return cachedClient;
-          } catch (error) {
-            // Client failed health check, properly dispose of it
+          } catch (_error) {
             try {
               if (cachedClient._originalQuit) {
                 await cachedClient._originalQuit();
@@ -186,12 +219,10 @@ export const redis = {
                 await cachedClient.quit();
               }
             } catch (quitError) {
-              console.debug('[PRESENCE] Error disposing unhealthy cached client:', quitError.message);
+              cryptoLogger.debug('[PRESENCE] Error disposing unhealthy cached client:', { error: quitError.message });
             }
-            // Continue to next client in pool or create new one
           }
         } else {
-          // Client is not ready, dispose of it
           try {
             if (cachedClient && cachedClient._originalQuit) {
               await cachedClient._originalQuit();
@@ -199,50 +230,39 @@ export const redis = {
               await cachedClient.quit();
             }
           } catch (quitError) {
-            console.debug('[PRESENCE] Error disposing invalid cached client:', quitError.message);
+            cryptoLogger.debug('[PRESENCE] Error disposing invalid cached client:', { error: quitError.message });
           }
         }
       }
 
-      // Create new connection if pool is empty or all connections are invalid
       const nodes = parseRedisClusterNodes(REDIS_CLUSTER_NODES);
       const newClient = new Redis.Cluster(nodes, { redisOptions: REDIS_OPTIONS });
 
-      // Store original quit method
       const originalQuit = newClient.quit.bind(newClient);
       newClient._originalQuit = originalQuit;
 
-      // Add error handlers to remove client from pool on failure
       const removeFromPool = () => {
-        const index = duplicateConnectionPool.indexOf(newClient);
-        if (index > -1) {
-          duplicateConnectionPool.splice(index, 1);
-        }
+        duplicateConnectionPool.delete(newClient);
       };
 
       newClient.on('error', removeFromPool);
       newClient.on('close', removeFromPool);
       newClient.on('end', removeFromPool);
 
-      // Override quit to return connection to pool when done
       newClient.quit = async () => {
-        // Remove event listeners before returning to pool
         newClient.removeListener('error', removeFromPool);
         newClient.removeListener('close', removeFromPool);
         newClient.removeListener('end', removeFromPool);
 
-        // Validate client is still connected before pooling
-        if (newClient.status === 'ready' && duplicateConnectionPool.length < MAX_DUPLICATE_CONNECTIONS) {
+        if (newClient.status === 'ready' && duplicateConnectionPool.size < MAX_DUPLICATE_CONNECTIONS) {
           try {
             await newClient.ping();
-            duplicateConnectionPool.push(newClient);
+            duplicateConnectionPool.add(newClient);
             return Promise.resolve();
-          } catch (error) {
-            // Client failed validation, properly close it
+          } catch (_error) {
             return originalQuit();
           }
         } else {
-          // Pool is full or client is not ready, properly close it
           return originalQuit();
         }
       };
@@ -250,32 +270,28 @@ export const redis = {
       return newClient;
     }
 
-    // For standalone Redis, create new connection (lightweight)
+    if (typeof REDIS_URL !== 'string' || !REDIS_URL.startsWith('rediss://')) {
+      throw new Error('REDIS_URL must use rediss:// and TLS; plaintext redis:// is not allowed');
+    }
     return new Redis(REDIS_URL, REDIS_OPTIONS);
   }
 };
-
-// NOTE: Removed global activeSubscribers Set to avoid storing millions of connections in memory
-// Subscribers are now cleaned up per-connection when WebSocket closes
-
 export async function createSubscriber() {
+  if (typeof REDIS_URL !== 'string' || !REDIS_URL.startsWith('rediss://')) {
+    throw new Error('REDIS_URL must use rediss:// and TLS; plaintext redis:// is not allowed');
+  }
+
   // Dedicated subscriber connection (not pooled)
-  const sub = new Redis(REDIS_URL, REDIS_OPTIONS);
-  
-  // Add basic error logging
-  sub.on('error', (error) => {
-    console.error('[PRESENCE] Redis subscriber error:', error);
+  const sub = new Redis(REDIS_URL, {
+    ...REDIS_OPTIONS,
+    username: process.env.REDIS_USERNAME,
+    password: process.env.REDIS_PASSWORD
   });
   
-  sub.on('ready', () => {
-    console.log('[PRESENCE] Redis subscriber ready for user notifications');
-  });
+  sub.on('error', (error) => logRedisError('Redis subscriber error', error));
+  sub.on('ready', () => cryptoLogger.debug('Redis subscriber ready for user notifications'));
+  sub.on('close', () => cryptoLogger.warn('Redis subscriber closed'));
   
-  sub.on('close', () => {
-    console.log('[PRESENCE] Redis subscriber closed');
-  });
-  
-  // Wait for the subscriber to be ready
   await new Promise((resolve, reject) => {
     if (sub.status === 'ready') {
       resolve();
@@ -302,55 +318,47 @@ export async function createSubscriber() {
       reject(error);
     };
     
-    // Set up timeout (10 seconds)
     timeout = setTimeout(() => {
       cleanup();
-      reject(new Error('Redis subscriber connection timeout - neither ready nor error event received within 10 seconds'));
-    }, 10000);
+      reject(new Error('Redis subscriber connection timeout - neither ready nor error event received within 15 seconds'));
+    }, 15000);
     
     sub.once('ready', readyHandler);
     sub.once('error', errorHandler);
   });
-  
-  // NOTE: No longer tracking subscribers globally to avoid memory issues with millions of users
-  // Subscribers are cleaned up per-connection when WebSocket closes
-  
+
   return sub;
 }
 
-// Cleanup function for shutting down subscribers
 export async function closeSubscriber(subscriber) {
   if (subscriber) {
     try {
-      // Only try to quit if connection is still active
       if (subscriber.status !== 'end' && subscriber.status !== 'close') {
         await subscriber.quit();
       }
     } catch (error) {
-      console.error('[PRESENCE] Error closing subscriber:', error);
+    cryptoLogger.error('Error closing subscriber', error);
     }
   }
 }
 
 // Global cleanup on process termination
-const cleanup = async () => {
-  console.log('[PRESENCE] Cleaning up Redis connection pool...');
+export const cleanup = async () => {
+  cryptoLogger.info('Cleaning up Redis presence resources');
 
-  // Drain the connection pool (standalone)
   if (redisPool) {
     try {
       await redisPool.drain();
       await redisPool.clear();
-      console.log('[PRESENCE] Redis connection pool cleaned up');
+      cryptoLogger.info('Redis connection pool cleaned up');
     } catch (error) {
-      console.error('[PRESENCE] Error cleaning up Redis pool:', error);
+      cryptoLogger.error('Error cleaning up Redis pool', error);
     }
   }
 
-  // Clean up duplicate connection pool
-  if (duplicateConnectionPool.length > 0) {
-    console.log(`[PRESENCE] Cleaning up ${duplicateConnectionPool.length} duplicate connections...`);
-    const cleanupPromises = duplicateConnectionPool.map(async (client) => {
+  if (duplicateConnectionPool.size > 0) {
+    cryptoLogger.info('Cleaning up duplicate Redis connections', { count: duplicateConnectionPool.size });
+    const cleanupPromises = Array.from(duplicateConnectionPool).map(async (client) => {
       try {
         if (client && client._originalQuit && typeof client._originalQuit === 'function') {
           await client._originalQuit();
@@ -358,124 +366,198 @@ const cleanup = async () => {
           await client.quit();
         }
       } catch (err) {
-        console.error('[PRESENCE] Error quitting duplicate connection:', err);
+        cryptoLogger.error('Error quitting duplicate connection', err);
       }
     });
     await Promise.all(cleanupPromises);
-    duplicateConnectionPool = [];
+    duplicateConnectionPool.clear();
   }
 
-  // Quit cluster client
   if (clusterClient) {
     try {
       await clusterClient.quit();
     } catch (err) {
-      console.error('[PRESENCE] Error quitting clusterClient in presence cleanup:', err);
+      cryptoLogger.error('Error quitting cluster client in presence cleanup', err);
     }
   }
 };
 
-// Graceful shutdown with timeout fallback
-const gracefulShutdown = async (signal) => {
-  console.log(`[PRESENCE] Received ${signal}, shutting down gracefully...`);
-  
-  try {
-    // Set a timeout to force exit if cleanup takes too long
-    const timeoutPromise = new Promise((_, reject) => {
-      setTimeout(() => reject(new Error('Cleanup timeout')), 5000);
-    });
-    
-    // Race between cleanup and timeout
-    await Promise.race([cleanup(), timeoutPromise]);
-    console.log('[PRESENCE] Shutdown completed');
-    process.exit(0);
-  } catch (error) {
-    console.error('[PRESENCE] Error during shutdown:', error);
-    process.exit(1);
+const USERNAME_REGEX = /^[A-Za-z0-9_-]{3,32}$/;
+const MAX_SCAN_ITERATIONS = 1000;
+const MAX_PAYLOAD_BYTES = 64 * 1024;
+const RATE_LIMIT_WINDOW_MS = 60_000;
+const RATE_LIMIT_MAX_ACTIONS = 200;
+
+function normalizeUsername(username) {
+  if (typeof username !== 'string') return null;
+  const trimmed = username.trim();
+  return USERNAME_REGEX.test(trimmed) ? trimmed : null;
+}
+
+function hashUsername(username) {
+  const normalized = normalizeUsername(username);
+  if (!normalized) {
+    throw new Error('Invalid username');
   }
-};
+  return crypto.createHash('sha256').update(normalized).digest('hex');
+}
 
-// Use process.once to avoid multiple handlers
-process.once('SIGTERM', () => gracefulShutdown('SIGTERM'));
-process.once('SIGINT', () => gracefulShutdown('SIGINT'));
+/**
+ * Enforces rate limits across all cluster servers
+ * 
+ * @param {string} key - Rate limit key (e.g., "presence:set:username")
+ * @throws {Error} - If rate limit exceeded
+ */
+async function enforceRateLimit(key) {
+  try {
+    await withRedisClient(async (client) => {
+      const rateLimitKey = `ratelimit:${key}`;
+      const count = await client.incr(rateLimitKey);
+      
+      if (count === 1) {
+        await client.pexpire(rateLimitKey, RATE_LIMIT_WINDOW_MS);
+      }
+      
+      if (count > RATE_LIMIT_MAX_ACTIONS) {
+        throw new Error('Rate limit exceeded');
+      }
+    });
+  } catch (error) {
+    if (error.message === 'Rate limit exceeded') {
+      throw error;
+    }
+    cryptoLogger.warn('[PRESENCE] Rate limit check failed, allowing request', { 
+      key: key?.slice(0, 20),
+      error: error?.message 
+    });
+  }
+}
 
-const ONLINE_KEY = (u) => `online:${u}`;
-const DELIVER_CH = (u) => `deliver:${u}`;
+const ONLINE_KEY = (u) => `online:${hashUsername(u)}`;
+const DELIVER_CH = (u) => `deliver:${hashUsername(u)}`;
 
 export async function setOnline(username, ttlSeconds = TTL_CONFIG.PRESENCE_TTL) {
   try {
-    // Set online with TTL to auto-expire after crashes
-    const safeTtl = Math.max(10, ttlSeconds);
-    await redis.set(ONLINE_KEY(username), '1', 'EX', safeTtl);
-    console.log(`[PRESENCE] User ${username} set online with ${safeTtl}s TTL`);
+    const normalizedUsername = normalizeUsername(username);
+    if (!normalizedUsername) {
+      throw new Error('Invalid username');
+    }
+    enforceRateLimit(`presence:set:${normalizedUsername}`);
+    const safeTtl = clampNumber(ttlSeconds, { min: 10, max: 86_400, defaultValue: TTL_CONFIG.PRESENCE_TTL || 300 });
+    await redis.set(ONLINE_KEY(normalizedUsername), '1', 'EX', safeTtl);
+    cryptoLogger.debug('User presence set online', { username: normalizedUsername });
   } catch (error) {
-    console.error(`[PRESENCE] Error setting user ${username} online:`, error);
-    throw error; // Re-throw to let caller handle appropriately
+    cryptoLogger.error('Error setting user online', error, { username });
+    throw error;
   }
 }
 
 export async function bumpOnline(username, ttlSeconds = TTL_CONFIG.PRESENCE_TTL) {
+  const normalizedUsername = normalizeUsername(username);
+  if (!normalizedUsername) {
+    throw new Error('Invalid username');
+  }
+  
   try {
-    // Lightweight TTL refresh - silently ignore errors
-    const safeTtl = Math.max(10, ttlSeconds);
-    await redis.expire(ONLINE_KEY(username), safeTtl);
+    enforceRateLimit(`presence:bump:${normalizedUsername}`);
+    const safeTtl = clampNumber(ttlSeconds, { min: 10, max: 86_400, defaultValue: TTL_CONFIG.PRESENCE_TTL || 300 });
+    await redis.expire(ONLINE_KEY(normalizedUsername), safeTtl);
   } catch (error) {
-    // Log in debug mode but don't throw as this is opportunistic
-    if (process.env.DEBUG_SERVER_LOGS === 'true') {
-      console.debug(`[PRESENCE] Failed to bump online status for ${username}:`, error.message);
-    }
+    cryptoLogger.debug('Failed to bump online status', { username: normalizedUsername, error: error?.message });
   }
 }
 
 export async function setOffline(username) {
   try {
-    await redis.del(ONLINE_KEY(username));
-    console.log(`[PRESENCE] User ${username} set offline`);
+    const normalizedUsername = normalizeUsername(username);
+    if (!normalizedUsername) {
+      throw new Error('Invalid username');
+    }
+    enforceRateLimit(`presence:clear:${normalizedUsername}`);
+    await redis.del(ONLINE_KEY(normalizedUsername));
+    cryptoLogger.debug('User presence set offline', { username: normalizedUsername });
   } catch (error) {
-    console.error(`[PRESENCE] Error setting user ${username} offline:`, error);
-    throw error; // Re-throw to let caller handle appropriately
+    cryptoLogger.error('Error setting user offline', error, { username });
+    throw error;
   }
 }
 
 export async function isOnline(username) {
+  const normalizedUsername = normalizeUsername(username);
+  if (!normalizedUsername) {
+    throw new Error('Invalid username');
+  }
+  
   try {
-    const ex = await redis.exists(ONLINE_KEY(username));
+    const ex = await redis.exists(ONLINE_KEY(normalizedUsername));
     return ex === 1;
   } catch (error) {
-    console.error(`[PRESENCE] Error checking online status for user ${username}:`, error);
-    return false; // Safe fallback: assume offline on error
+    cryptoLogger.error('Error checking online status', error, { username });
+    throw error;
   }
 }
 
 export async function publishToUser(username, payloadObj) {
+  const normalizedUsername = normalizeUsername(username);
+  if (!normalizedUsername) {
+    throw new Error('Invalid username');
+  }
+  
+  if (payloadObj === null || payloadObj === undefined) {
+    throw new Error('Payload cannot be null or undefined');
+  }
+  
   try {
+    enforceRateLimit(`presence:publish:${normalizedUsername}`);
     const msg = typeof payloadObj === 'string' ? payloadObj : JSON.stringify(payloadObj);
-    await redis.publish(DELIVER_CH(username), msg);
-    return true; // Delivery will be handled by pattern subscribers on instances
+    if (Buffer.byteLength(msg) > MAX_PAYLOAD_BYTES) {
+      throw new Error(`Payload too large: ${Buffer.byteLength(msg)} bytes (max: ${MAX_PAYLOAD_BYTES})`);
+    }
+    await redis.publish(DELIVER_CH(normalizedUsername), msg);
+    cryptoLogger.debug('Message published to user', { username: normalizedUsername, size: Buffer.byteLength(msg) });
   } catch (error) {
-    console.error(`[PRESENCE] Error publishing message to user ${username}:`, error);
-    return false;
+    cryptoLogger.error('Error publishing message to user', error, { username });
+    throw error;
   }
 }
 
 export async function subscribeUserChannel(subscriber, username, onMessage) {
-  await subscriber.subscribe(DELIVER_CH(username));
+  const normalizedUsername = normalizeUsername(username);
+  if (!normalizedUsername) {
+    throw new Error('Invalid username');
+  }
+  if (!subscriber || typeof subscriber.subscribe !== 'function') {
+    throw new Error('Invalid subscriber object');
+  }
+  if (typeof onMessage !== 'function') {
+    throw new Error('onMessage must be a function');
+  }
+  
+  await subscriber.subscribe(DELIVER_CH(normalizedUsername));
+  
   const handler = (channel, message) => {
-    if (channel === DELIVER_CH(username)) {
-      onMessage(message);
+    try {
+      if (channel === DELIVER_CH(normalizedUsername)) {
+        if (message && typeof message === 'string' && message.length > 0 && message.length <= MAX_PAYLOAD_BYTES) {
+          onMessage(message);
+        } else {
+          cryptoLogger.warn('Invalid message received on channel', { username: normalizedUsername });
+        }
+      }
+    } catch (error) {
+      cryptoLogger.error('Error handling subscriber message', error, { username });
     }
   };
+  
   subscriber.on('message', handler);
+  
   return async () => {
     try {
       subscriber.off('message', handler);
+      await subscriber.unsubscribe(DELIVER_CH(normalizedUsername));
     } catch (error) {
-      console.error(`[PRESENCE] Error removing message handler for user ${username}:`, error);
-    }
-    try {
-      await subscriber.unsubscribe(DELIVER_CH(username));
-    } catch (error) {
-      console.error(`[PRESENCE] Error unsubscribing from channel for user ${username}:`, error);
+      cryptoLogger.error('Error unsubscribing from channel', error, { username });
+      throw error;
     }
   };
 }
@@ -489,8 +571,8 @@ export async function clearAllPresenceData() {
       let cleanedCount = 0;
       let cursor = '0';
       const batchSize = 100;
+      let iterations = 0;
 
-      // Clear all online:* keys
       do {
         const result = await client.scan(cursor, 'MATCH', 'online:*', 'COUNT', batchSize);
         cursor = result[0];
@@ -499,15 +581,15 @@ export async function clearAllPresenceData() {
         if (keys.length > 0) {
           await client.del(...keys);
           cleanedCount += keys.length;
-          console.log(`[PRESENCE] Cleared ${keys.length} presence keys`);
         }
-      } while (cursor !== '0');
+        iterations++;
+      } while (cursor !== '0' && iterations < MAX_SCAN_ITERATIONS);
 
-      console.log(`[PRESENCE] Cleared ${cleanedCount} total presence entries on startup`);
+      cryptoLogger.info('Cleared presence keys on startup', { cleanedCount });
       return cleanedCount;
     });
   } catch (error) {
-    console.error('[PRESENCE] Error during presence cleanup:', error);
+    cryptoLogger.error('Error during presence cleanup', error);
     return 0;
   }
 }

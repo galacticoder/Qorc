@@ -1,5 +1,3 @@
-// Electron API type declarations
-
 interface ScreenSource {
   id: string;
   name: string;
@@ -14,7 +12,6 @@ interface ElectronAPI {
   platform: string;
   arch: string;
   isElectron: boolean;
-  isDevelopment: boolean;
   
   // App information
   getAppVersion: () => Promise<string>;
@@ -33,10 +30,17 @@ interface ElectronAPI {
   uninstallTor: () => Promise<any>;
   verifyTorConnection: () => Promise<any>;
   rotateTorCircuit: () => Promise<any>;
+
+  // Onion P2P
+  createOnionEndpoint: (options: { purpose?: 'p2p'; ttlSeconds?: number }) => Promise<{ success: boolean; wsUrl?: string; token?: string; serviceId?: string; error?: string }>;
+  connectOnionWebSocket: (options: { wsUrl: string; token?: string }) => Promise<any> | null;
+  onOnionMessage: (callback: (event: any, data: any) => void) => () => void;
+  sendOnionMessage: (toUsername: string, payload: any) => Promise<{ success: boolean; error?: string }>;
   
   // Event listeners
   onTorStatusChange: (callback: (event: any, data: any) => void) => () => void;
   onTorProgress: (callback: (event: any, data: any) => void) => () => void;
+  onTorConfigureComplete: (callback: (event: any, data: any) => void) => () => void;
   
   // Communication
   send: (channel: string, data: any) => void;

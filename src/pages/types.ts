@@ -2,6 +2,7 @@ export interface AuthProps {
   username: string;
   isLoggedIn: boolean;
   isGeneratingKeys: boolean;
+  isSubmittingAuth?: boolean;
   loginError: string;
   accountAuthenticated: boolean;
   hybridKeysRef: React.MutableRefObject<{ x25519: { private: CryptoKey | Uint8Array }, kyber: { secretKey: Uint8Array } } | null>;

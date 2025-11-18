@@ -14,28 +14,26 @@ declare global {
       encrypt: (args: any) => Promise<any>;
       decrypt: (args: any) => Promise<any>;
 
-      // Typing indicators (bypasses Signal Protocol to prevent EBADF errors)
+      // Typing indicators
       sendTypingIndicator: (args: any) => Promise<any>;
 
-      // Legacy/unused placeholders
-      setupSession: (args: any) => Promise<any>;
-      publishBundle: (args: any) => Promise<any>;
-      requestBundle: (args: any) => Promise<any>;
+      // Identity / storage helpers
+      hasIdentity?: (args: { username: string }) => Promise<{ hasIdentity: boolean }>;
+      trustPeerIdentity?: (args: { selfUsername: string; peerUsername: string; deviceId?: number }) => Promise<{ success: boolean; error?: string }>;
+      setSignalStorageKey?: (args: { keyBase64: string }) => Promise<any>;
+
       wsSend: (payload: any) => Promise<any>;
       rendererReady: () => Promise<any>;
-      // Screen sharing bridge (preload can expose this)
       getScreenSources?: () => Promise<Array<{ id: string; name: string; type: 'screen' | 'window' }>>;
-      debugElectronAPI?: () => any;
-      testFunction?: () => any;
     };
     electronAPI?: {
       platform?: string;
       arch?: string;
       isElectron?: boolean;
-      isDevelopment?: boolean;
       getScreenSources?: () => Promise<Array<{ id: string; name: string }>>;
       send?: (channel: string, data?: any) => void;
       receive?: (channel: string, func: (...args: any[]) => void) => void;
+      showErrorDialog?: (args: { title: string; message: string }) => Promise<any>;
     };
   }
 }

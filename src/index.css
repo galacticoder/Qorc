@@ -1,13 +1,9 @@
 @import './styles/design-tokens.css';
 @import 'highlight.js/styles/github-dark.min.css';
-
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+@import 'tailwindcss';
 
 /* Link Preview Styles */
 .link-preview-container {
-  /* Ensure images load properly */
 }
 
 .link-preview-container img {
@@ -56,9 +52,9 @@
   :root { /* light mode colors */
     /* Backgrounds */
     --background: 0 0% 100%;            /* white */
-    --card: 0 0% 100%;                  /* white card background */
+    --card: 0 0% 98%;                   /* off-white card background for contrast */
     --popover: 0 0% 100%;               /* white popover background */
-    --sidebar-background: 0 0% 98%;    /* very light sidebar */
+    --sidebar-background: 0 0% 96%;    /* very light sidebar */
 
     /* foregrounds / text */
     --foreground: 222.2 84% 4.9%;      /* very dark blue text */
@@ -67,8 +63,8 @@
     --sidebar-foreground: 240 5.3% 26.1%; /* dark gray sidebar text */
 
     /* primary and secondary */
-    --primary: 222.2 47.4% 11.2%;      /* dark blue primary color */
-    --primary-foreground: 210 40% 98%; /* very light text on primary */
+    --primary: 221.2 83.2% 53.3%;      /* vibrant blue primary color */
+    --primary-foreground: 0 0% 100%;   /* white text on primary */
     --secondary: 210 40% 96.1%;        /* light secondary bg */
     --secondary-foreground: 222.2 47.4% 11.2%; /* dark text on secondary */
 
@@ -83,8 +79,8 @@
     --destructive-foreground: 210 40% 98%; /* light text on destructive */
 
     /* borders and inputs */
-    --border: 214.3 31.8% 91.4%;       /* light gray border */
-    --input: 214.3 31.8% 91.4%;        /* input background (same as border) */
+    --border: 214.3 31.8% 86%;         /* darker border for clearer separation */
+    --input: 214.3 31.8% 95%;          /* slightly darker than background */
     --ring: 222.2 84% 4.9%;             /* dark ring (focus) */
 
     /* border radius */
@@ -146,12 +142,13 @@
 @layer base {
   /* apply border color globally */
   * {
-    @apply border-border;
+    border-color: hsl(var(--border));
   }
 
   /* body background and text colors use css variables */
   body {
-    @apply bg-background text-foreground;
+    background-color: hsl(var(--background));
+    color: hsl(var(--foreground));
   }
 }
 
