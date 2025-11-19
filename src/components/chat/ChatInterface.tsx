@@ -12,7 +12,7 @@ import { TypingIndicator } from "./TypingIndicator";
 import { useTypingIndicatorContext } from "@/contexts/TypingIndicatorContext";
 import { resolveDisplayUsername } from "@/lib/unified-username-display";
 
-import { Phone, Video, MoreVertical, X, Reply, Smile, Paperclip, Send, Trash2, Edit3, AlertTriangle, ShieldOff } from 'lucide-react';
+import { Phone, Video, MoreVertical, ShieldOff } from 'lucide-react';
 import { useCalling } from "@/hooks/useCalling";
 const CallModalLazy = React.lazy(() => import('./CallModal'));
 import type { useAuth } from "@/hooks/useAuth";
