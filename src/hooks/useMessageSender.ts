@@ -714,7 +714,7 @@ export function useMessageSender(
           payload.coverPadding = coverPadding;
         }
 
-        const encrypted = await (window as any).edgeApi.encrypt({
+        let encrypted = await (window as any).edgeApi.encrypt({
           fromUsername: currentUser,
           toUsername: recipientUsername,
           plaintext: JSON.stringify(payload),
@@ -724,6 +724,33 @@ export function useMessageSender(
             kyberPublicBase64: recipientKyberKey,
           }
         });
+
+        // Retry logic for session not found error
+        if (!encrypted?.success && encrypted?.error?.includes('session') && encrypted?.error?.includes('not found')) {
+
+          // Force re-check session
+          const retrySession = await ensureSession(
+            sessionLocksRef.current,
+            lockContext,
+            currentUser,
+            recipientUsername,
+            { secretKey: localKeys.dilithium.secretKey, publicKeyBase64: localKeys.dilithium.publicKeyBase64 },
+          );
+
+          if (retrySession) {
+            // Try encrypting one more time
+            encrypted = await (window as any).edgeApi.encrypt({
+              fromUsername: currentUser,
+              toUsername: recipientUsername,
+              plaintext: JSON.stringify(payload),
+              recipientKyberPublicKey: recipientKyberKey,
+              recipientHybridKeys: {
+                ...recipient.hybridPublicKeys,
+                kyberPublicBase64: recipientKyberKey,
+              }
+            });
+          }
+        }
 
         if (!encrypted?.success || !encrypted?.encryptedPayload) {
           logError('encryption-failed', new Error(encrypted?.error || 'Unknown error'));

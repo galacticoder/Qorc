@@ -143,7 +143,9 @@ export function ChatInput({
       }
 
       setMessage("");
-    } catch {
+    } catch (error) {
+      console.error('Failed to send message:', error);
+      alert('Failed to send message. Please try again.');
     } finally {
       setIsSending(false);
     }
@@ -280,6 +282,11 @@ export function ChatInput({
     }
   }, [selectedConversation, validateFile, sendFile, blobToBase64, onSendFile, currentUsername]);
 
+  const handleMessageChange = useCallback((e: React.ChangeEvent<HTMLTextAreaElement>) => {
+    setMessage(e.target.value);
+    onTyping();
+  }, [onTyping]);
+
   return (
     <>
       {editingMessage && <EditingBanner onCancelEdit={onCancelEdit} />}
@@ -291,44 +298,43 @@ export function ChatInput({
         </div>
       )}
 
-      {showVoiceRecorder && (
-        <div className="px-4 pt-2">
-          <VoiceRecorder
-            onSendVoiceNote={handleSendVoiceNote}
-            onCancel={() => setShowVoiceRecorder(false)}
-            disabled={isSending || isSendingFile}
-          />
-        </div>
-      )}
+
 
       <div className={cn(
         "flex items-center gap-2 px-4 py-3 transition-all duration-200",
         disabled && "opacity-50 pointer-events-none"
       )}>
-        <FileUploader onFileSelected={handleFileChange} disabled={isSendingFile || disabled} />
+        {showVoiceRecorder ? (
+          <VoiceRecorder
+            onSendVoiceNote={handleSendVoiceNote}
+            onCancel={() => setShowVoiceRecorder(false)}
+            disabled={isSending || isSendingFile}
+          />
+        ) : (
+          <>
+            <FileUploader onFileSelected={handleFileChange} disabled={isSendingFile || disabled} />
 
-        <VoiceRecorderButton
-          onClick={() => setShowVoiceRecorder(true)}
-          disabled={isSendingFile || showVoiceRecorder || disabled}
-        />
+            <VoiceRecorderButton
+              onClick={() => setShowVoiceRecorder(true)}
+              disabled={isSendingFile || showVoiceRecorder || disabled}
+            />
 
-        <MessageTextarea
-          value={message}
-          onChange={useCallback((e: React.ChangeEvent<HTMLTextAreaElement>) => {
-            setMessage(e.target.value);
-            onTyping();
-          }, [onTyping])}
-          onKeyDown={handleKeyDown}
-          textareaRef={textareaRef}
-          disabled={disabled}
-        />
+            <MessageTextarea
+              value={message}
+              onChange={handleMessageChange}
+              onKeyDown={handleKeyDown}
+              textareaRef={textareaRef}
+              disabled={disabled}
+            />
 
-        <SendButton
-          disabled={!message.trim() || isSending || !selectedConversation || disabled}
-          isSending={isSending}
-          editingMessage={editingMessage}
-          onClick={handleSend}
-        />
+            <SendButton
+              disabled={!message.trim() || isSending || !selectedConversation || disabled}
+              isSending={isSending}
+              editingMessage={editingMessage}
+              onClick={handleSend}
+            />
+          </>
+        )}
       </div>
     </>
   );

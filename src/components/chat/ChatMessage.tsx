@@ -1,7 +1,7 @@
 import React, { useRef, useMemo, useCallback } from "react";
 import { cn } from "../../lib/utils";
 import { format, isSameMinute, isToday, isYesterday, isThisYear } from "date-fns";
-import { TrashIcon, Pencil1Icon } from "./icons.tsx";
+import { TrashIcon, Pencil1Icon, DownloadIcon } from "./icons.tsx";
 import { EmojiPicker } from "../ui/EmojiPicker";
 import { useEmojiPicker } from "../../contexts/EmojiPickerContext";
 import { ChatMessageProps } from "./types.ts";
@@ -145,6 +145,13 @@ export const ChatMessage = React.memo<ExtendedChatMessageProps>(({ message, onRe
     return name.includes('voice-note');
   }, [isFileMessageType, message.filename]);
 
+  const isImage = useMemo(() => {
+    if (!isFileMessageType) return false;
+    const name = (message.filename || '').toLowerCase();
+    const imageExtensions = ['jpg', 'jpeg', 'png', 'gif', 'webp'];
+    return imageExtensions.some(ext => name.endsWith('.' + ext));
+  }, [isFileMessageType, message.filename]);
+
   const timestampDisplay = useMemo(() => formatTimestamp(timestamp), [timestamp]);
   const avatarLetter = useMemo(() => displaySender.charAt(0).toUpperCase(), [displaySender]);
 
@@ -183,6 +190,49 @@ export const ChatMessage = React.memo<ExtendedChatMessageProps>(({ message, onRe
       openPicker(messageTriggerId);
     }
   }, [pickerOpen, closePicker, openPicker, messageTriggerId]);
+
+  const handleDownload = useCallback(async () => {
+    try {
+      const { originalBase64Data, mimeType, filename } = message;
+      const audioUrl = typeof content === 'string' ? content : '';
+
+      if (originalBase64Data) {
+        try {
+          const cleanBase64 = originalBase64Data.trim().replace(/[^A-Za-z0-9+/=]/g, '');
+          const binaryString = atob(cleanBase64);
+          const bytes = new Uint8Array(binaryString.length);
+          for (let i = 0; i < binaryString.length; i++) bytes[i] = binaryString.charCodeAt(i);
+          const blob = new Blob([bytes], { type: mimeType || 'application/octet-stream' });
+          const downloadUrl = URL.createObjectURL(blob);
+          const link = document.createElement('a');
+          link.href = downloadUrl;
+          link.download = filename || `file-${format(timestamp, 'yyyy-MM-dd-HH-mm-ss')}`;
+          link.style.display = 'none';
+          document.body.appendChild(link);
+          link.click();
+          document.body.removeChild(link);
+          setTimeout(() => URL.revokeObjectURL(downloadUrl), 1000);
+          return;
+        } catch (_base64Error) {
+        }
+      }
+
+      if (!audioUrl || audioUrl === 'File' || audioUrl === 'voice-note') {
+        alert('Cannot download file: Invalid data');
+        return;
+      }
+
+      const link = document.createElement('a');
+      link.href = audioUrl;
+      link.download = filename || `file-${format(timestamp, 'yyyy-MM-dd-HH-mm-ss')}`;
+      link.style.display = 'none';
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+    } catch (_error) {
+      alert('Failed to download file.');
+    }
+  }, [message, content, timestamp]);
 
   if (isSystemMessage) {
     const { label, actions } = parseSystemMessage(content, message);
@@ -324,27 +374,32 @@ export const ChatMessage = React.memo<ExtendedChatMessageProps>(({ message, onRe
           {/* Render file content or text content */}
           {isFileMessageType ? (
             <div className="max-w-[60%] relative" ref={bubbleRef}>
-              <div
-                className="px-2 py-2"
-                style={{
-                  backgroundColor: safeIsCurrentUser ? 'var(--color-accent-primary)' : 'var(--color-surface)',
-                  color: safeIsCurrentUser ? 'white' : 'var(--color-text-primary)',
-                  borderRadius: 'var(--message-bubble-radius)'
-                }}
-              >
-                {isVoiceNote ? (
-                  <VoiceMessage
-                    audioUrl={typeof content === 'string' ? content : ''}
-                    timestamp={timestamp}
-                    isCurrentUser={safeIsCurrentUser}
-                    filename={message.filename}
-                    originalBase64Data={message.originalBase64Data}
-                    mimeType={message.mimeType}
-                  />
-                ) : (
-                  <FileContent message={message} isCurrentUser={safeIsCurrentUser} />
-                )}
-              </div>
+              {isImage ? (
+                <FileContent message={message} isCurrentUser={safeIsCurrentUser} />
+              ) : (
+                <div
+                  className="px-2 py-2"
+                  style={{
+                    backgroundColor: safeIsCurrentUser ? 'var(--color-accent-primary)' : 'var(--color-surface)',
+                    color: safeIsCurrentUser ? 'white' : 'var(--color-text-primary)',
+                    borderRadius: 'var(--message-bubble-radius)',
+                    overflow: 'hidden'
+                  }}
+                >
+                  {isVoiceNote ? (
+                    <VoiceMessage
+                      audioUrl={typeof content === 'string' ? content : ''}
+                      timestamp={timestamp}
+                      isCurrentUser={safeIsCurrentUser}
+                      filename={message.filename}
+                      originalBase64Data={message.originalBase64Data}
+                      mimeType={message.mimeType}
+                    />
+                  ) : (
+                    <FileContent message={message} isCurrentUser={safeIsCurrentUser} />
+                  )}
+                </div>
+              )}
             </div>
           ) : (() => {
             const showPreviews = !isSystemMessage && !isDeleted;
@@ -404,7 +459,7 @@ export const ChatMessage = React.memo<ExtendedChatMessageProps>(({ message, onRe
             <button
               data-emoji-add-button
               data-emoji-trigger={messageTriggerId}
-              className={`w-5 h-5 rounded-full text-[11px] flex items-center justify-center border transition-opacity duration-200 ${pickerOpen === 'main' ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'
+              className={`w-5 h-5 rounded-full text-[11px] flex items-center justify-center border transition-opacity duration-200 ${pickerOpen ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'
                 }`}
               style={{
                 backgroundColor: 'var(--color-surface)',
@@ -515,7 +570,7 @@ export const ChatMessage = React.memo<ExtendedChatMessageProps>(({ message, onRe
               </button>
             )}
 
-            {safeIsCurrentUser && !message.isDeleted && (
+            {safeIsCurrentUser && !message.isDeleted && !isFileMessageType && (
               <button
                 onClick={handleEdit}
                 aria-label="Edit message"
@@ -531,6 +586,25 @@ export const ChatMessage = React.memo<ExtendedChatMessageProps>(({ message, onRe
                 }}
               >
                 <Pencil1Icon className="w-4 h-4" />
+              </button>
+            )}
+
+            {isFileMessageType && (
+              <button
+                onClick={handleDownload}
+                aria-label="Download file"
+                className="p-1 rounded hover:bg-opacity-80 transition-colors"
+                style={{ color: 'var(--color-text-secondary)' }}
+                onMouseEnter={(e) => {
+                  e.currentTarget.style.backgroundColor = 'var(--color-accent-primary)';
+                  e.currentTarget.style.color = 'white';
+                }}
+                onMouseLeave={(e) => {
+                  e.currentTarget.style.backgroundColor = 'transparent';
+                  e.currentTarget.style.color = 'var(--color-text-secondary)';
+                }}
+              >
+                <DownloadIcon className="w-4 h-4" />
               </button>
             )}
           </div>

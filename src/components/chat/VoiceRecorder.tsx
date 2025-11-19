@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { Button } from '../ui/button';
-import { Mic, Square, Play, Pause, Trash2, Send } from 'lucide-react';
+import { Square, Play, Pause, Trash2, Send, Mic } from 'lucide-react';
 import { cn } from '../../lib/utils';
 
 interface VoiceRecorderProps {
@@ -11,6 +11,7 @@ interface VoiceRecorderProps {
 
 export function VoiceRecorder({ onSendVoiceNote, onCancel, disabled }: VoiceRecorderProps) {
   const [isRecording, setIsRecording] = useState(false);
+  const isRecordingRef = useRef(false);
   const [isPlaying, setIsPlaying] = useState(false);
   const [recordedBlob, setRecordedBlob] = useState<Blob | null>(null);
   const [duration, setDuration] = useState(0);
@@ -27,6 +28,7 @@ export function VoiceRecorder({ onSendVoiceNote, onCancel, disabled }: VoiceReco
   const analyserRef = useRef<AnalyserNode | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
   const blobUrlRef = useRef<string | null>(null);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
 
   const cleanup = () => {
     if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
@@ -58,22 +60,61 @@ export function VoiceRecorder({ onSendVoiceNote, onCancel, disabled }: VoiceReco
       audioRef.current = null;
     }
     setIsRecording(false);
+    isRecordingRef.current = false;
     setIsPlaying(false);
     setAudioLevel(0);
   };
 
   useEffect(() => {
+    startRecording();
     return cleanup;
   }, []);
 
-  const monitorAudioLevel = () => {
-    if (!analyserRef.current) return;
-    const dataArray = new Uint8Array(analyserRef.current.frequencyBinCount);
+  const drawVisualizer = () => {
+    if (!analyserRef.current || !canvasRef.current) return;
+
+    const canvas = canvasRef.current;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+
+    const bufferLength = analyserRef.current.frequencyBinCount;
+    const dataArray = new Uint8Array(bufferLength);
     analyserRef.current.getByteFrequencyData(dataArray);
+
     const average = dataArray.reduce((sum, value) => sum + value, 0) / dataArray.length;
     setAudioLevel(average / 255);
-    if (isRecording) {
-      animationRef.current = requestAnimationFrame(monitorAudioLevel);
+
+    const dpr = window.devicePixelRatio || 1;
+    const rect = canvas.getBoundingClientRect();
+
+    canvas.width = rect.width * dpr;
+    canvas.height = rect.height * dpr;
+
+    ctx.scale(dpr, dpr);
+
+    ctx.clearRect(0, 0, rect.width, rect.height);
+
+    const barWidth = 4;
+    const gap = 2;
+    const barCount = Math.floor(rect.width / (barWidth + gap));
+    const step = Math.floor(bufferLength / barCount);
+
+    ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue('--color-accent-primary') || '#3b82f6';
+
+    for (let i = 0; i < barCount; i++) {
+      const value = dataArray[i * step];
+      const percent = value / 255;
+      const height = Math.max(4, percent * rect.height); // Minimum height of 4px
+      const y = (rect.height - height) / 2;
+
+      // Make bars rounded with 2px radius
+      ctx.beginPath();
+      ctx.roundRect(i * (barWidth + gap), y, barWidth, height, 2);
+      ctx.fill();
+    }
+
+    if (isRecordingRef.current) {
+      animationRef.current = requestAnimationFrame(drawVisualizer);
     }
   };
 
@@ -81,25 +122,27 @@ export function VoiceRecorder({ onSendVoiceNote, onCancel, disabled }: VoiceReco
     try {
       setError(null);
       if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-        throw new Error('Media devices not supported in this environment');
+        throw new Error('Media devices not supported');
       }
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: {
           echoCancellation: true,
           noiseSuppression: true,
           autoGainControl: true,
-          sampleRate: 16000,
-          channelCount: 1,
         }
       });
       streamRef.current = stream;
 
       const AudioCtx: typeof AudioContext = (window as any).AudioContext || (window as any).webkitAudioContext;
       const audioContext = new AudioCtx();
+      if (audioContext.state === 'suspended') {
+        await audioContext.resume();
+      }
       const analyser = audioContext.createAnalyser();
       const source = audioContext.createMediaStreamSource(stream);
       source.connect(analyser);
       analyser.fftSize = 256;
+      analyser.smoothingTimeConstant = 0.8;
       audioContextRef.current = audioContext;
       analyserRef.current = analyser;
 
@@ -114,47 +157,53 @@ export function VoiceRecorder({ onSendVoiceNote, onCancel, disabled }: VoiceReco
       for (const type of supportedTypes) {
         if (MediaRecorder.isTypeSupported(type)) { mimeType = type; break; }
       }
-      if (!mimeType) {
-        throw new Error('No supported audio recording format found');
-      }
+      if (!mimeType) throw new Error('No supported audio format');
 
-      const mediaRecorderOptions: MediaRecorderOptions = {
-        mimeType,
-        audioBitsPerSecond: 32000
-      };
-      const mediaRecorder = new MediaRecorder(stream, mediaRecorderOptions);
+      const mediaRecorder = new MediaRecorder(stream, { mimeType, audioBitsPerSecond: 32000 });
       mediaRecorderRef.current = mediaRecorder;
       chunksRef.current = [];
 
-      mediaRecorder.ondataavailable = (event) => {
-        if (event.data.size > 0) {
-          chunksRef.current.push(event.data);
-        }
+      mediaRecorder.ondataavailable = (e) => {
+        if (e.data.size > 0) chunksRef.current.push(e.data);
       };
 
       mediaRecorder.onstop = () => {
         const blob = new Blob(chunksRef.current, { type: mimeType });
         setRecordedBlob(blob);
-        cleanup();
-      };
-
-      mediaRecorder.onerror = () => {
-        setError('Recording failed');
-        cleanup();
+        if (streamRef.current) {
+          streamRef.current.getTracks().forEach(track => track.stop());
+          streamRef.current = null;
+        }
+        if (intervalRef.current) {
+          clearInterval(intervalRef.current);
+          intervalRef.current = null;
+        }
+        if (animationRef.current) {
+          cancelAnimationFrame(animationRef.current);
+          animationRef.current = null;
+        }
+        if (audioContextRef.current) {
+          audioContextRef.current.close();
+          audioContextRef.current = null;
+        }
+        setIsRecording(false);
+        isRecordingRef.current = false;
       };
 
       mediaRecorder.start();
       setIsRecording(true);
+      isRecordingRef.current = true;
       setDuration(0);
 
       intervalRef.current = setInterval(() => {
         setDuration(prev => prev + 1);
       }, 1000);
 
-      monitorAudioLevel();
+      drawVisualizer();
 
-    } catch (_err) {
-      setError('Failed to access microphone. Please check permissions.');
+    } catch (err) {
+      console.error(err);
+      setError('Failed to access microphone');
       cleanup();
     }
   };
@@ -162,32 +211,39 @@ export function VoiceRecorder({ onSendVoiceNote, onCancel, disabled }: VoiceReco
   const stopRecording = () => {
     if (mediaRecorderRef.current && isRecording) {
       mediaRecorderRef.current.stop();
-      setIsRecording(false);
-      setAudioLevel(0);
     }
   };
 
   const playRecording = () => {
     if (!recordedBlob) return;
-    if (audioRef.current) {
-      audioRef.current.pause();
-      audioRef.current = null;
+
+    if (!audioRef.current) {
+      const blobUrl = URL.createObjectURL(recordedBlob);
+      blobUrlRef.current = blobUrl;
+      const audio = new Audio(blobUrl);
+      audioRef.current = audio;
+
+      audio.onloadedmetadata = () => {
+        if (audio.duration === Infinity) {
+          audio.currentTime = 1e101;
+          audio.ontimeupdate = () => {
+            audio.ontimeupdate = null;
+            audio.currentTime = 0;
+            setDuration(Math.floor(audio.duration));
+          }
+        } else {
+          setDuration(Math.floor(audio.duration));
+        }
+      };
+
+      audio.ontimeupdate = () => { setCurrentTime(Math.floor(audio.currentTime)); };
+      audio.onended = () => {
+        setIsPlaying(false);
+        setCurrentTime(0);
+      };
     }
-    if (blobUrlRef.current) {
-      URL.revokeObjectURL(blobUrlRef.current);
-    }
-    const blobUrl = URL.createObjectURL(recordedBlob);
-    blobUrlRef.current = blobUrl;
-    const audio = new Audio(blobUrl);
-    audioRef.current = audio;
-    audio.onloadedmetadata = () => { setDuration(Math.floor(audio.duration)); };
-    audio.ontimeupdate = () => { setCurrentTime(Math.floor(audio.currentTime)); };
-    audio.onended = () => {
-      setIsPlaying(false);
-      setCurrentTime(0);
-      if (blobUrlRef.current) { URL.revokeObjectURL(blobUrlRef.current); blobUrlRef.current = null; }
-    };
-    audio.play();
+
+    audioRef.current.play();
     setIsPlaying(true);
   };
 
@@ -196,25 +252,6 @@ export function VoiceRecorder({ onSendVoiceNote, onCancel, disabled }: VoiceReco
       audioRef.current.pause();
       setIsPlaying(false);
     }
-  };
-
-  const deleteRecording = () => {
-    if (blobUrlRef.current) {
-      URL.revokeObjectURL(blobUrlRef.current);
-      blobUrlRef.current = null;
-    }
-    if (audioRef.current) {
-      audioRef.current.pause();
-      if (audioRef.current.src && audioRef.current.src.startsWith('blob:')) {
-        try { URL.revokeObjectURL(audioRef.current.src); } catch {}
-      }
-      audioRef.current.src = '';
-      audioRef.current = null;
-    }
-    setRecordedBlob(null);
-    setDuration(0);
-    setCurrentTime(0);
-    setIsPlaying(false);
   };
 
   const sendVoiceNote = () => {
@@ -230,97 +267,81 @@ export function VoiceRecorder({ onSendVoiceNote, onCancel, disabled }: VoiceReco
   };
 
   return (
-    <div className="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg p-4 shadow-lg">
-      {error && (
-        <div className="text-red-500 text-sm mb-3 p-2 bg-red-50 dark:bg-red-900/20 rounded">
-          {error}
-        </div>
-      )}
+    <div className="flex items-center gap-3 w-full h-full animate-in fade-in duration-200">
+      <Button
+        onClick={onCancel}
+        variant="ghost"
+        size="icon"
+        className="h-8 w-8 text-muted-foreground hover:text-destructive transition-colors"
+        title="Cancel recording"
+      >
+        <Trash2 className="w-5 h-5" />
+      </Button>
 
-      <div className="flex items-center gap-3">
-        {!recordedBlob ? (
-          <>
-            <Button
-              onClick={isRecording ? stopRecording : startRecording}
-              disabled={disabled}
-              variant={isRecording ? "destructive" : "default"}
-              size="sm"
-              className={cn(
-                "flex items-center gap-2",
-                isRecording && "animate-pulse"
-              )}
-            >
-              {isRecording ? <Square className="w-4 h-4" /> : <Mic className="w-4 h-4" />}
-              {isRecording ? 'Stop' : 'Record'}
-            </Button>
+      {error ? (
+        <div className="flex-1 text-destructive text-sm truncate">{error}</div>
+      ) : !recordedBlob ? (
+        // Recording State
+        <>
+          <div className="flex items-center gap-2 text-destructive animate-pulse font-mono text-sm min-w-[3rem]">
+            <div className="w-2 h-2 rounded-full bg-destructive" />
+            {formatTime(duration)}
+          </div>
 
-            {isRecording && (
-              <div className="flex items-center gap-2 flex-1">
-                <div className="text-sm font-mono text-red-500">
-                  {formatTime(duration)}
-                </div>
-                <div className="flex-1 h-2 bg-gray-200 dark:bg-gray-700 rounded-full overflow-hidden">
-                  <div 
-                    className="h-full bg-red-500 transition-all duration-100"
-                    style={{ width: `${audioLevel * 100}%` }}
-                  />
-                </div>
-              </div>
-            )}
-          </>
-        ) : (
-          <>
-            <Button
-              onClick={isPlaying ? pausePlayback : playRecording}
-              variant="outline"
-              size="sm"
-              className="flex items-center gap-2"
-            >
-              {isPlaying ? <Pause className="w-4 h-4" /> : <Play className="w-4 h-4" />}
-              {isPlaying ? 'Pause' : 'Play'}
-            </Button>
+          <div className="flex-1 h-8 flex items-center justify-center overflow-hidden mx-2">
+            <canvas
+              ref={canvasRef}
+              width={200}
+              height={32}
+              className="w-full h-full opacity-80"
+            />
+          </div>
 
-            <div className="flex items-center gap-2 flex-1">
-              <div className="text-sm font-mono">
-                {formatTime(currentTime)} / {formatTime(duration)}
-              </div>
-              <div className="flex-1 h-2 bg-gray-200 dark:bg-gray-700 rounded-full overflow-hidden">
-                <div 
-                  className="h-full bg-blue-500 transition-all duration-100"
-                  style={{ width: `${duration > 0 ? (currentTime / duration) * 100 : 0}%` }}
-                />
-              </div>
+          <Button
+            onClick={stopRecording}
+            variant="default"
+            size="icon"
+            className="h-8 w-8 rounded-full bg-destructive hover:bg-destructive/90 text-white shadow-sm"
+            title="Stop recording"
+          >
+            <Square className="w-4 h-4 fill-current" />
+          </Button>
+        </>
+      ) : (
+        // Review State
+        <>
+          <Button
+            onClick={isPlaying ? pausePlayback : playRecording}
+            variant="ghost"
+            size="icon"
+            className="h-8 w-8 text-primary"
+          >
+            {isPlaying ? <Pause className="w-5 h-5 fill-current" /> : <Play className="w-5 h-5 fill-current" />}
+          </Button>
+
+          <div className="flex-1 flex items-center gap-2">
+            <div className="h-1 flex-1 bg-muted rounded-full overflow-hidden relative">
+              <div
+                className="absolute top-0 left-0 h-full bg-primary transition-all duration-100"
+                style={{ width: `${duration > 0 ? (currentTime / duration) * 100 : 0}%` }}
+              />
             </div>
+            <span className="text-xs font-mono text-muted-foreground min-w-[6rem] text-right whitespace-nowrap">
+              {formatTime(currentTime)} / {formatTime(duration)}
+            </span>
+          </div>
 
-            <Button
-              onClick={deleteRecording}
-              variant="outline"
-              size="sm"
-              className="flex items-center gap-2 text-red-500 hover:text-red-700"
-            >
-              <Trash2 className="w-4 h-4" />
-            </Button>
-
-            <Button
-              onClick={sendVoiceNote}
-              disabled={disabled}
-              size="sm"
-              className="flex items-center gap-2"
-            >
-              <Send className="w-4 h-4" />
-              Send
-            </Button>
-          </>
-        )}
-
-        <Button
-          onClick={onCancel}
-          variant="outline"
-          size="sm"
-        >
-          Cancel
-        </Button>
-      </div>
+          <Button
+            onClick={sendVoiceNote}
+            variant="default"
+            size="icon"
+            className="h-8 w-8 rounded-full bg-primary hover:bg-primary/90 text-primary-foreground shadow-sm"
+            title="Send voice note"
+          >
+            <Send className="w-4 h-4" />
+          </Button>
+        </>
+      )}
     </div>
   );
 }

@@ -127,23 +127,16 @@ export function FileContent({ message, isCurrentUser }: FileContentProps) {
   }, [originalBase64Data, filename, mimeType, fallbackDownload]);
 
   return (
-    <div className="flex flex-col gap-2">
+    <>
       {/* Images */}
       {hasExtension(filename || "", IMAGE_EXTENSIONS) && (
-        <div className={cn("rounded-lg px-0 py-0 text-sm break-words",
-          isCurrentUser ? "bg-primary text-primary-foreground" : "bg-[var(--color-surface)]")}
-        >
-          <div className="relative group">
-            <img src={content} alt={filename} className="max-w-full rounded-md" />
-            <button
-              onClick={handleDownload}
-              className="absolute top-2 right-2 p-1 rounded-full shadow hidden group-hover:block"
-              style={{ backgroundColor: 'var(--color-surface)', color: 'var(--color-text-primary)' }}
-              aria-label={`Download ${filename}`}
-            >
-              <DownloadIcon />
-            </button>
-          </div>
+        <div className="relative">
+          <img
+            src={content}
+            alt={filename}
+            className="rounded-md"
+            style={{ maxWidth: '400px', maxHeight: '300px', objectFit: 'contain' }}
+          />
         </div>
       )}
 
@@ -164,16 +157,6 @@ export function FileContent({ message, isCurrentUser }: FileContentProps) {
             <div className="flex items-center gap-2 text-sm">
               <span className="font-medium break-all ml-1 mb-1">{filename}</span>
               <span className="text-xs text-muted-foreground">({formatFileSize(fileSize ?? 0)})</span>
-              <button
-                onClick={handleDownload}
-                className={cn(
-                  "hover:scale-110 transition-transform duration-100 ease-in-out",
-                  isCurrentUser ? "text-white hover:text-white/80" : "text-blue-500 hover:text-blue-700"
-                )}
-                title="Download"
-              >
-                <DownloadIcon className="w-5 h-5" />
-              </button>
             </div>
           </div>
         </div>
@@ -194,15 +177,12 @@ export function FileContent({ message, isCurrentUser }: FileContentProps) {
             </audio>
 
             <div className={cn(
-              "flex justify-between items-center gap-1 text-sm",
+              "flex items-center gap-1 text-sm",
               isCurrentUser ? "text-white" : "text-blue-500"
             )}>
               <span className="truncate max-w-[250px] ml-1" title={filename}>
                 {filename}
               </span>
-              <button onClick={handleDownload} title="Download" aria-label={`Download ${filename}`}>
-                <DownloadIcon className="w-5 h-5 hover:scale-110 transition-transform duration-100 ease-in-out" />
-              </button>
             </div>
 
             <span className="text-xs text-muted-foreground">({formatFileSize(fileSize ?? 0)})</span>
@@ -224,13 +204,10 @@ export function FileContent({ message, isCurrentUser }: FileContentProps) {
           )}>
             <PaperclipIcon className="h-5 w-5 shrink-0 mt-1" />
             <div className="flex flex-col min-w-0">
-              <div className="flex justify-between items-center gap-2">
+              <div className="flex items-center gap-2">
                 <span className="text-sm truncate max-w-[250px] w-full" title={filename}>
                   {filename}
                 </span>
-                <button onClick={handleDownload} title="Download" aria-label={`Download ${filename}`}>
-                  <DownloadIcon className="w-5 h-5 hover:scale-110 transition-transform duration-100 ease-in-out" />
-                </button>
               </div>
               <span className={cn(
                 "text-xs leading-tight",
@@ -240,7 +217,7 @@ export function FileContent({ message, isCurrentUser }: FileContentProps) {
           </div>
         </div>
       )}
-    </div>
+    </>
   );
 }
 
@@ -323,17 +300,13 @@ export function FileMessage({ message, isCurrentUser, onReply, onDelete }: FileM
         </div>
 
         {hasExtension(filename || "", IMAGE_EXTENSIONS) && (
-          <div className={cn("rounded-lg px-0 py-0 text-sm max-w-[60%] break-words", "bg-muted")}>
-            <div className="relative group">
-              <img src={content} alt={filename} className="max-w-full rounded-md" />
-              <button
-                onClick={handleDownload}
-                className="absolute top-2 right-2 bg-white p-1 rounded-full shadow hidden group-hover:block"
-                aria-label={`Download ${filename}`}
-              >
-                <DownloadIcon />
-              </button>
-            </div>
+          <div className="relative">
+            <img
+              src={content}
+              alt={filename}
+              className="rounded-md"
+              style={{ maxWidth: '400px', maxHeight: '300px', objectFit: 'contain' }}
+            />
           </div>
         )}
 
@@ -353,16 +326,6 @@ export function FileMessage({ message, isCurrentUser, onReply, onDelete }: FileM
               <div className="flex items-center gap-2 text-sm">
                 <span className="font-medium break-all ml-1 mb-1">{filename}</span>
                 <span className="text-xs text-muted-foreground">({formatFileSize(fileSize ?? 0)})</span>
-                <button
-                  onClick={handleDownload}
-                  className={cn(
-                    "hover:scale-110 transition-transform duration-100 ease-in-out",
-                    isCurrentUser ? "text-white hover:text-white/80" : "text-blue-500 hover:text-blue-700"
-                  )}
-                  title="Download"
-                >
-                  <DownloadIcon className="w-5 h-5" />
-                </button>
               </div>
             </div>
           </div>
@@ -382,15 +345,12 @@ export function FileMessage({ message, isCurrentUser, onReply, onDelete }: FileM
               </audio>
 
               <div className={cn(
-                "flex justify-between items-center gap-1 text-sm",
+                "flex items-center gap-1 text-sm",
                 isCurrentUser ? "text-white" : "text-blue-500"
               )}>
                 <span className="truncate max-w-[250px] ml-1" title={filename}>
                   {filename}
                 </span>
-                <button onClick={handleDownload} title="Download" aria-label={`Download ${filename}`}>
-                  <DownloadIcon className="w-5 h-5 hover:scale-110 transition-transform duration-100 ease-in-out" />
-                </button>
               </div>
 
               <span className="text-xs text-muted-foreground">({formatFileSize(fileSize ?? 0)})</span>
@@ -411,13 +371,10 @@ export function FileMessage({ message, isCurrentUser, onReply, onDelete }: FileM
             )}>
               <PaperclipIcon className="h-5 w-5 shrink-0 mt-1" />
               <div className="flex flex-col min-w-0">
-                <div className="flex justify-between items-center gap-2">
+                <div className="flex items-center gap-2">
                   <span className="text-sm truncate max-w-[250px] w-full" title={filename}>
                     {filename}
                   </span>
-                  <button onClick={handleDownload} title="Download" aria-label={`Download ${filename}`}>
-                    <DownloadIcon className="w-5 h-5 hover:scale-110 transition-transform duration-100 ease-in-out" />
-                  </button>
                 </div>
                 <span className={cn(
                   "text-xs leading-tight",

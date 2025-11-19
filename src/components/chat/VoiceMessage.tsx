@@ -46,8 +46,8 @@ export function VoiceMessage({
           }
         };
         el.addEventListener('timeupdate', onTimeUpdate);
-        el.play().then(() => { setTimeout(() => el.pause(), 50); }).catch(() => {});
-      } catch {}
+        el.play().then(() => { setTimeout(() => el.pause(), 50); }).catch(() => { });
+      } catch { }
     }
     setIsLoading(false);
   }, []);
@@ -85,10 +85,8 @@ export function VoiceMessage({
     };
   }, [handleLoadedMetadata, handleTimeUpdate, handleEnded, handleError]);
 
-  const formatTime = (seconds: number) => {
-    const mins = Math.floor(seconds / 60);
-    const secs = Math.floor(seconds % 60);
-    return `${mins}:${secs.toString().padStart(2, '0')}`;
+  const formatDuration = (seconds: number) => {
+    return `${Math.round(seconds)}s`;
   };
 
   const togglePlayback = async () => {
@@ -121,6 +119,29 @@ export function VoiceMessage({
     }
   };
 
+  const handleCanvasClick = useCallback(async (e: React.MouseEvent<HTMLCanvasElement>) => {
+    const canvas = canvasRef.current;
+    if (!canvas || !audioRef.current || duration === 0) return;
+
+    const rect = canvas.getBoundingClientRect();
+    const clickX = e.clientX - rect.left;
+    const progress = Math.max(0, Math.min(1, clickX / rect.width));
+    const seekTime = progress * duration;
+
+    try {
+      audioRef.current.currentTime = seekTime;
+      setCurrentTime(seekTime);
+
+      // If not already playing, start playback
+      if (!isPlaying) {
+        await audioRef.current.play();
+        setIsPlaying(true);
+      }
+    } catch (err) {
+      console.error('Failed to seek:', err);
+    }
+  }, [duration, isPlaying]);
+
   const drawWaveform = () => {
     const canvas = canvasRef.current;
     const peaks = peaksRef.current;
@@ -133,33 +154,79 @@ export function VoiceMessage({
       }
       return;
     }
+    const dpr = window.devicePixelRatio || 1;
+    const rect = canvas.getBoundingClientRect();
+
+    canvas.width = rect.width * dpr;
+    canvas.height = rect.height * dpr;
+
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
 
-    const width = canvas.width;
-    const height = canvas.height;
+    ctx.scale(dpr, dpr);
+
+    const width = rect.width;
+    const height = rect.height;
     const centerY = Math.floor(height / 2);
 
-    const baseColor = isCurrentUser ? 'rgba(255,255,255,0.45)' : 'rgba(59,130,246,0.35)';
-    const progressColor = isCurrentUser ? 'rgba(255,255,255,0.95)' : 'rgba(59,130,246,0.9)';
+    const styles = getComputedStyle(document.body);
+    const surfaceColor = styles.getPropertyValue('--color-text-primary').trim() || '#000000';
+
+    const hexToRgba = (hex: string, alpha: number) => {
+      if (hex.length === 4) {
+        hex = '#' + hex[1] + hex[1] + hex[2] + hex[2] + hex[3] + hex[3];
+      }
+      const r = parseInt(hex.slice(1, 3), 16);
+      const g = parseInt(hex.slice(3, 5), 16);
+      const b = parseInt(hex.slice(5, 7), 16);
+      return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+    };
+
+    const baseColor = isCurrentUser
+      ? 'rgba(255,255,255,0.45)'
+      : (surfaceColor.startsWith('#') ? hexToRgba(surfaceColor, 0.35) : 'rgba(59,130,246,0.35)');
+
+    const progressColor = isCurrentUser
+      ? 'rgba(255,255,255,0.95)'
+      : (surfaceColor.startsWith('#') ? hexToRgba(surfaceColor, 0.9) : 'rgba(59,130,246,0.9)');
 
     ctx.clearRect(0, 0, width, height);
 
     ctx.fillStyle = baseColor;
-    for (let x = 0; x < width; x++) {
-      const amp = peaks[x];
-      const y = Math.max(1, Math.round(amp * (height / 2)));
-      ctx.fillRect(x, centerY - y, 1, y * 2);
+    const barWidth = width / peaks.length;
+    const gap = 1;
+    const effectiveBarWidth = Math.max(1, barWidth - gap);
+
+    for (let i = 0; i < peaks.length; i++) {
+      const x = i * barWidth;
+      const amp = peaks[i];
+      const y = Math.max(2, Math.round(amp * (height / 2)));
+
+      // Draw rounded bar
+      ctx.beginPath();
+      ctx.roundRect(x, centerY - y, effectiveBarWidth, y * 2, 2);
+      ctx.fill();
     }
 
     const progress = duration > 0 ? Math.min(1, currentTime / duration) : 0;
-    const progressX = Math.round(progress * width);
+
+    // Create a clipping region for the progress
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(0, 0, width * progress, height);
+    ctx.clip();
+
     ctx.fillStyle = progressColor;
-    for (let x = 0; x < progressX; x++) {
-      const amp = peaks[x];
-      const y = Math.max(1, Math.round(amp * (height / 2)));
-      ctx.fillRect(x, centerY - y, 1, y * 2);
+    for (let i = 0; i < peaks.length; i++) {
+      const x = i * barWidth;
+      const amp = peaks[i];
+      const y = Math.max(2, Math.round(amp * (height / 2)));
+
+      ctx.beginPath();
+      ctx.roundRect(x, centerY - y, effectiveBarWidth, y * 2, 2);
+      ctx.fill();
     }
+    ctx.restore();
   };
 
   useEffect(() => {
@@ -168,38 +235,40 @@ export function VoiceMessage({
 
     const decodeAndComputePeaks = async () => {
       try {
-        // Prefer originalBase64Data when available; this avoids any network/CSP interactions
-        // and keeps processing local to memory.
         if (!originalBase64Data) {
-          // If we only have a blob: URL, skip waveform generation rather than issuing
-          // a Fetch API call that would hit CSP connect-src.
-          if (typeof audioUrl === 'string' && audioUrl.startsWith('blob:')) {
-            peaksRef.current = null;
-            drawWaveform();
-            return;
+          if (!originalBase64Data && typeof audioUrl === 'string' && audioUrl.startsWith('blob:')) {
           }
         }
 
         const arrayBuffer = originalBase64Data
           ? (() => {
-              const clean = originalBase64Data.trim().replace(/[^A-Za-z0-9+/=]/g, '');
-              const binaryString = atob(clean);
-              const bytes = new Uint8Array(binaryString.length);
-              for (let i = 0; i < binaryString.length; i++) bytes[i] = binaryString.charCodeAt(i);
-              return bytes.buffer;
-            })()
+            const clean = originalBase64Data.trim().replace(/[^A-Za-z0-9+/=]/g, '');
+            const binaryString = atob(clean);
+            const bytes = new Uint8Array(binaryString.length);
+            for (let i = 0; i < binaryString.length; i++) bytes[i] = binaryString.charCodeAt(i);
+            return bytes.buffer;
+          })()
           : await (await fetch(audioUrl)).arrayBuffer();
 
         const AudioCtx: typeof AudioContext = (window as any).AudioContext || (window as any).webkitAudioContext;
         const audioCtx = new AudioCtx();
         const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer.slice(0));
 
+        // Set duration from the decoded buffer if not already set
+        if (audioBuffer.duration && audioBuffer.duration > 0) {
+          setDuration(audioBuffer.duration);
+        }
+
         const canvas = canvasRef.current;
-        const width = canvas?.width || 240;
+        const targetWidth = 120;
         const channelData = audioBuffer.getChannelData(0);
-        const samplesPerPixel = Math.max(1, Math.floor(channelData.length / width));
-        const peaks: number[] = new Array(width);
-        for (let i = 0; i < width; i++) {
+        const samplesPerPixel = Math.max(1, Math.floor(channelData.length / targetWidth));
+        const peaks: number[] = new Array(targetWidth);
+        const minThreshold = 0.05;
+
+        // First pass: calculate raw peaks and find global maximum
+        let globalMax = 0;
+        for (let i = 0; i < targetWidth; i++) {
           const start = i * samplesPerPixel;
           const end = Math.min(start + samplesPerPixel, channelData.length);
           let min = 1.0;
@@ -209,15 +278,23 @@ export function VoiceMessage({
             if (v < min) min = v;
             if (v > max) max = v;
           }
-          const amp = Math.max(-min, max);
-          peaks[i] = Math.min(1, amp);
+          let amp = Math.max(-min, max);
+          if (amp > globalMax) globalMax = amp;
+          peaks[i] = amp;
+        }
+
+        // Second pass: normalize peaks
+        // If globalMax is very small (silence), don't boost too much to avoid noise
+        const normalizationFactor = globalMax > 0.01 ? 1 / globalMax : 1;
+        for (let i = 0; i < targetWidth; i++) {
+          peaks[i] = Math.min(1, Math.max(minThreshold, peaks[i] * normalizationFactor));
         }
 
         peaksRef.current = peaks;
         drawWaveform();
         try {
           audioCtx.close();
-        } catch {}
+        } catch { }
       } catch (_e) {
         peaksRef.current = null;
         drawWaveform();
@@ -238,96 +315,41 @@ export function VoiceMessage({
     drawWaveform();
   }, [currentTime, duration, isCurrentUser]);
 
-  const handleDownload = async () => {
-    try {
-      if (originalBase64Data) {
-        try {
-          const cleanBase64 = originalBase64Data.trim().replace(/[^A-Za-z0-9+/=]/g, '');
-          const binaryString = atob(cleanBase64);
-          const bytes = new Uint8Array(binaryString.length);
-          for (let i = 0; i < binaryString.length; i++) bytes[i] = binaryString.charCodeAt(i);
-          const blob = new Blob([bytes], { type: mimeType || 'audio/webm' });
-          const downloadUrl = URL.createObjectURL(blob);
-          const link = document.createElement('a');
-          link.href = downloadUrl;
-          link.download = filename || `voice-note-${format(timestamp, 'yyyy-MM-dd-HH-mm-ss')}.webm`;
-          link.style.display = 'none';
-          document.body.appendChild(link);
-          link.click();
-          document.body.removeChild(link);
-          setTimeout(() => URL.revokeObjectURL(downloadUrl), 1000);
-          return;
-        } catch (_base64Error) {
-        }
-      }
-
-      if (!audioUrl || audioUrl === 'File' || audioUrl === 'voice-note') {
-        alert('Cannot download voice note: Invalid audio data');
-        return;
-      }
-      if (audioUrl.startsWith('blob:')) {
-        const link = document.createElement('a');
-        link.href = audioUrl;
-        link.download = filename || `voice-note-${format(timestamp, 'yyyy-MM-dd-HH-mm-ss')}.webm`;
-        link.style.display = 'none';
-        document.body.appendChild(link);
-        link.click();
-        document.body.removeChild(link);
-      } else {
-        const link = document.createElement('a');
-        link.href = audioUrl;
-        link.download = filename || `voice-note-${format(timestamp, 'yyyy-MM-dd-HH-mm-ss')}.webm`;
-        link.style.display = 'none';
-        document.body.appendChild(link);
-        link.click();
-        document.body.removeChild(link);
-      }
-    } catch (_error) {
-      alert('Failed to download voice note.');
-    }
-  };
-
   if (error) {
     return <div className="text-xs text-red-500">{error}</div>;
   }
 
   return (
-    <div className="flex items-center gap-3">
-      <Button
-        onClick={togglePlayback}
-        disabled={isLoading}
-        variant="ghost"
-        size="sm"
-        className="h-8 w-8 p-0 rounded-full"
-      >
-        {isLoading ? (
-          <div className="w-4 h-4 border-2 border-current border-t-transparent rounded-full animate-spin" />
-        ) : isPlaying ? (
-          <Pause className="w-4 h-4" />
-        ) : (
-          <Play className="w-4 h-4" />
-        )}
-      </Button>
-
-      <div className="flex-1 min-w-0">
-        <div className="flex items-center gap-2 mb-1">
-          <span className="text-xs font-mono">{formatTime(currentTime)}</span>
-          <span className="text-xs opacity-70">/ {formatTime(duration)}</span>
-        </div>
-        <div className="mt-1">
-          <canvas ref={canvasRef} width={240} height={40} className="w-full h-10" />
-        </div>
+    <div className="flex items-end gap-3 w-full min-w-[160px] max-w-[300px] select-none py-1 pr-2">
+      <div className="flex flex-col items-center justify-end gap-1 shrink-0 min-w-[2rem]">
+        <span className="text-[10px] font-mono opacity-80 tabular-nums leading-none">
+          {formatDuration(isPlaying ? Math.max(0, duration - currentTime) : duration)}
+        </span>
+        <Button
+          onClick={togglePlayback}
+          disabled={isLoading}
+          variant="ghost"
+          size="sm"
+          className="h-8 w-8 p-0 rounded-full shrink-0"
+        >
+          {isLoading ? (
+            <div className="w-4 h-4 border-2 border-current border-t-transparent rounded-full animate-spin" />
+          ) : isPlaying ? (
+            <Pause className="w-4 h-4" />
+          ) : (
+            <Play className="w-4 h-4" />
+          )}
+        </Button>
       </div>
 
-      <Button
-        onClick={handleDownload}
-        variant="ghost"
-        size="sm"
-        className="h-8 w-8 p-0 rounded-full"
-        title="Download voice note"
-      >
-        <Download className="w-3 h-3" />
-      </Button>
+      <div className="flex-1 h-8 relative flex items-center">
+        <canvas
+          ref={canvasRef}
+          className="w-full h-full block cursor-pointer"
+          onClick={handleCanvasClick}
+          aria-label="Click to seek in voice message"
+        />
+      </div>
     </div>
   );
 }
