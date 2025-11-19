@@ -74,13 +74,13 @@ export class ClusterKeyManager {
         const result = await (window as any).edgeApi.getServerUrl();
         storedUrl = result?.serverUrl || null;
       }
-      
+
       const url = serverUrl || storedUrl || import.meta.env.VITE_WS_URL;
-      
+
       if (!url) {
         return;
       }
-      
+
       const httpUrl = url.replace('ws://', 'http://').replace('wss://', 'https://');
       const endpoint = `${httpUrl}/api/cluster/server-keys`;
 
@@ -109,7 +109,7 @@ export class ClusterKeyManager {
 
       for (const server of data.serverKeys) {
         const fingerprint = this.computeFingerprint(server.publicKeys);
-        
+
         this.serverKeys.set(server.serverId, {
           serverId: server.serverId,
           publicKeys: server.publicKeys,
@@ -157,13 +157,13 @@ export class ClusterKeyManager {
    */
   matchServerKeys(publicKeys: ServerPublicKeys): string | null {
     const fingerprint = this.computeFingerprint(publicKeys);
-    
+
     for (const entry of this.serverKeys.values()) {
       if (entry.fingerprint === fingerprint) {
         return entry.serverId;
       }
     }
-    
+
     return null;
   }
 
@@ -172,7 +172,7 @@ export class ClusterKeyManager {
    */
   updateServerKeys(serverId: string, publicKeys: ServerPublicKeys): void {
     const fingerprint = this.computeFingerprint(publicKeys);
-    
+
     this.serverKeys.set(serverId, {
       serverId,
       publicKeys,
@@ -198,7 +198,7 @@ export class ClusterKeyManager {
   }
 
   /**
-   * Save keys to localStorage
+   * Save keys to encrypted storage
    */
   private saveToStorage(): void {
     try {
@@ -219,7 +219,7 @@ export class ClusterKeyManager {
   }
 
   /**
-   * Load keys from localStorage
+   * Load keys from encrypted storage
    */
   private loadFromStorage(): void {
     try {
@@ -237,7 +237,7 @@ export class ClusterKeyManager {
             }
             this.lastFetchTime = data.lastFetch;
           }
-        } catch {}
+        } catch { }
       })();
     } catch (error) {
       console.error('[ClusterKeyManager] Failed to load keys:', error);
@@ -251,8 +251,8 @@ export class ClusterKeyManager {
     this.serverKeys.clear();
     this.lastFetchTime = 0;
     try {
-      (async () => { try { const { encryptedStorage } = await import('./encrypted-storage'); await encryptedStorage.setItem(this.STORAGE_KEY, ''); } catch {} })();
-    } catch {}
+      (async () => { try { const { encryptedStorage } = await import('./encrypted-storage'); await encryptedStorage.setItem(this.STORAGE_KEY, ''); } catch { } })();
+    } catch { }
   }
 
   /**

@@ -16,6 +16,7 @@ class WebSocketHandler {
     this.isConnecting = false;
     this.serverUrl = null;
     this.torReady = false;
+    this.connectHostOverride = null;
     
     // Reconnection state
     this.reconnectAttempts = 0;
@@ -77,6 +78,27 @@ class WebSocketHandler {
     this.torReady = Boolean(ready);
   }
 
+  setConnectHost(host) {
+    if (typeof host === 'string' && host.length && (host === '127.0.0.1' || host === 'localhost' || host === '::1')) {
+      this.connectHostOverride = host;
+    }
+  }
+
+  buildConnectTarget(url) {
+    try {
+      const u = new URL(url);
+      const tlsServername = u.hostname;
+      let host = u.hostname;
+      if (this.connectHostOverride && (this.connectHostOverride === '127.0.0.1' || this.connectHostOverride === 'localhost' || this.connectHostOverride === '::1')) {
+        host = this.connectHostOverride;
+      }
+      const address = `${u.protocol}//${host}${u.port ? ':' + u.port : ''}${u.pathname || ''}${u.search || ''}`;
+      return { address, tlsServername };
+    } catch {
+      return { address: url, tlsServername: null };
+    }
+  }
+
   async connect() {
     if (!this.serverUrl) {
       return { success: false, error: 'Server URL not configured. Call setServerUrl() first.' };
@@ -114,11 +136,15 @@ const wsOptions = {
           headers: this.extraHeaders || {}
         };
 
+        const target = this.buildConnectTarget(this.serverUrl);
+        if (target.tlsServername) {
+          wsOptions.servername = target.tlsServername;
+        }
+
         if (this.pinnedFingerprints.size > 0) {
           wsOptions.checkServerIdentity = (hostname, cert) => this.validateServerCertificate(hostname, cert);
         }
-        // Use default TLS (SNI, CA, ALPN) managed by ws/Node
-        this.connection = new WebSocket(this.serverUrl, undefined, wsOptions);
+        this.connection = new WebSocket(target.address, undefined, wsOptions);
         
         let reqSocketMonitored = false;
         const reqMonitor = setInterval(() => {
@@ -253,14 +279,18 @@ const wsOptions = {
         return { success: false, error: 'Tor setup not complete' };
       }
 
-      // Build ws options similar to primary connection
       const wsOptions = {
         handshakeTimeout: Math.min(10000, timeoutMs),
         perMessageDeflate: false,
         headers: this.extraHeaders || {},
       };
 
-      const probe = new WebSocket(url, undefined, wsOptions);
+      const target = this.buildConnectTarget(url);
+      if (target.tlsServername) {
+        wsOptions.servername = target.tlsServername;
+      }
+
+      const probe = new WebSocket(target.address, undefined, wsOptions);
 
       return await new Promise((resolve) => {
         let settled = false;

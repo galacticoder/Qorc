@@ -32,11 +32,11 @@ class EncryptedStorageManager {
   async initialize(secureDB: SecureDB): Promise<void> {
     this.secureDB = secureDB;
     this.initialized = true;
-    
+
     // Process queued operations
     const queue = this.preInitQueue.slice(0, MAX_QUEUE_SIZE);
     this.preInitQueue = [];
-    
+
     for (const op of queue) {
       try {
         if (op.operation === 'set') {
@@ -57,13 +57,13 @@ class EncryptedStorageManager {
   async setItem(key: string, value: any): Promise<void> {
     this.enforceRateLimit();
     validateKey(key);
-    
+
     if (value != null && typeof value === 'object') {
       if (hasPrototypePollutionKeys(value)) {
         throw new Error('Value contains prototype pollution keys');
       }
     }
-    
+
     if (!this.isInitialized()) {
       if (this.preInitQueue.length >= MAX_QUEUE_SIZE) {
         throw new Error('Pre-initialization queue is full');
@@ -83,21 +83,21 @@ class EncryptedStorageManager {
   async getItem(key: string): Promise<any | null> {
     this.enforceRateLimit();
     validateKey(key);
-    
+
     if (!this.isInitialized()) {
       return null;
     }
 
     try {
       const value = await this.secureDB!.retrieve('encrypted_storage', key);
-      
+
       if (value != null && typeof value === 'object') {
         if (hasPrototypePollutionKeys(value)) {
           console.error('[EncryptedStorage] Retrieved value contains prototype pollution keys');
           return null;
         }
       }
-      
+
       return value;
     } catch (_error) {
       console.error('[EncryptedStorage] Failed to retrieve item:', _error);
@@ -108,7 +108,7 @@ class EncryptedStorageManager {
   async removeItem(key: string): Promise<void> {
     this.enforceRateLimit();
     validateKey(key);
-    
+
     if (!this.isInitialized()) {
       if (this.preInitQueue.length >= MAX_QUEUE_SIZE) {
         throw new Error('Pre-initialization queue is full');
@@ -153,7 +153,7 @@ class EncryptedStorageManager {
       this.rateLimitWindowStart = now;
       this.rateLimitCount = 0;
     }
-    
+
     this.rateLimitCount += 1;
     if (this.rateLimitCount > RATE_LIMIT_MAX_OPS) {
       throw new Error('Storage operation rate limit exceeded');
@@ -174,7 +174,8 @@ class SyncEncryptedStorageAdapter {
 
     const syncAccessKeys = [
       'last_authenticated_username',
-      'securechat_server_pin_v2'
+      'securechat_server_pin_v2',
+      'call_history_v1'
     ];
 
     for (const key of syncAccessKeys) {
@@ -217,7 +218,7 @@ class SyncEncryptedStorageAdapter {
 
   setItem(key: string, value: string): void {
     this.memoryCache.set(key, value);
-    
+
     encryptedStorage.setItem(key, value).catch(error => {
       console.error('[SyncEncryptedStorage] Failed to store key:', error);
     });

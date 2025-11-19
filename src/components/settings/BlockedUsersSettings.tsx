@@ -85,7 +85,7 @@ export function BlockedUsersSettings({ passphraseRef, kyberSecretRef, getDisplay
           for (const [k, v] of entries) next[k] = v;
           setDisplayMap(next);
         }
-      } catch {}
+      } catch { }
     })();
     return () => { canceled = true; };
   }, [blockedUsers, getDisplayUsername]);
@@ -204,49 +204,6 @@ export function BlockedUsersSettings({ passphraseRef, kyberSecretRef, getDisplay
           </div>
         )}
 
-        <div className="flex items-center justify-between">
-          <Label className="text-sm font-medium">Block New User</Label>
-          <Dialog open={showBlockDialog} onOpenChange={setShowBlockDialog}>
-            <DialogTrigger asChild>
-              <Button variant="outline" size="sm">Block User</Button>
-            </DialogTrigger>
-            <DialogContent>
-              <DialogHeader>
-                <DialogTitle>Block User</DialogTitle>
-                <DialogDescription>Enter the username to block.</DialogDescription>
-              </DialogHeader>
-              <div className="space-y-2">
-                <Label htmlFor="block-username">Username</Label>
-                <Input
-                  id="block-username"
-                  placeholder="Enter username to block"
-                  value={newBlockUsername}
-                  onChange={(e) => {
-                    setNewBlockUsername(e.target.value);
-                    setError(null);
-                  }}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter' && isValidUsername && !loading) {
-                      handleBlockUser();
-                    }
-                  }}
-                />
-                {newBlockUsername && !isValidUsername && (
-                  <p className="text-xs text-red-600 dark:text-red-400">
-                    Username must be 3-32 characters and contain only letters, numbers, underscores, or hyphens
-                  </p>
-                )}
-              </div>
-              <DialogFooter>
-                <Button variant="outline" onClick={() => setShowBlockDialog(false)}>Cancel</Button>
-                <Button onClick={handleBlockUser} disabled={loading || !isValidUsername}>Block</Button>
-              </DialogFooter>
-            </DialogContent>
-          </Dialog>
-        </div>
-
-        <Separator />
-
         <div className="space-y-3">
           <div className="flex items-center justify-between">
             <Label className="text-sm font-medium">Blocked Users ({blockedUsers.length})</Label>
@@ -262,43 +219,39 @@ export function BlockedUsersSettings({ passphraseRef, kyberSecretRef, getDisplay
             </div>
           ) : (
             <div className="space-y-2">
-                  {blockedUsers.map((user) => {
-                    const dn = displayMap[user.username] || user.username;
-                    return (
-                      <div key={user.username} className="flex items-center justify-between p-3 rounded-md border bg-card">
-                        <div className="flex-1 min-w-0">
-                          <div className="flex items-center gap-2">
-                            <span className="font-medium truncate" title={dn}>{dn}</span>
-                            <span className="text-xs text-muted-foreground">Blocked</span>
-                          </div>
-                          <div className="text-xs text-muted-foreground mt-1">
-                            {format(new Date(user.blockedAt), "MMM d, yyyy 'at' h:mm a")}
-                          </div>
-                        </div>
-                        <Dialog>
-                          <DialogTrigger asChild>
-                            <Button variant="ghost" size="sm" disabled={loading}>Unblock</Button>
-                          </DialogTrigger>
-                          <DialogContent>
-                            <DialogHeader>
-                              <DialogTitle>Unblock User</DialogTitle>
-                              <DialogDescription>Unblock {dn}?</DialogDescription>
-                            </DialogHeader>
-                            <DialogFooter>
-                              <Button variant="outline">Cancel</Button>
-                              <Button onClick={() => handleUnblockUser(user.username)}>Unblock</Button>
-                            </DialogFooter>
-                          </DialogContent>
-                        </Dialog>
+              {blockedUsers.map((user) => {
+                const dn = displayMap[user.username] || user.username;
+                return (
+                  <div key={user.username} className="flex items-center justify-between p-3 rounded-md border bg-card">
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-2">
+                        <span className="font-medium truncate select-auto" title={dn}>{dn}</span>
+                        <span className="text-xs text-muted-foreground">Blocked</span>
                       </div>
-                    );
-                  })}
+                      <div className="text-xs text-muted-foreground mt-1">
+                        {format(new Date(user.blockedAt), "MMM d, yyyy 'at' h:mm a")}
+                      </div>
+                    </div>
+                    <Dialog>
+                      <DialogTrigger asChild>
+                        <Button variant="ghost" size="sm" disabled={loading}>Unblock</Button>
+                      </DialogTrigger>
+                      <DialogContent>
+                        <DialogHeader>
+                          <DialogTitle>Unblock User</DialogTitle>
+                          <DialogDescription>Unblock {dn}?</DialogDescription>
+                        </DialogHeader>
+                        <DialogFooter>
+                          <Button variant="outline">Cancel</Button>
+                          <Button onClick={() => handleUnblockUser(user.username)}>Unblock</Button>
+                        </DialogFooter>
+                      </DialogContent>
+                    </Dialog>
+                  </div>
+                );
+              })}
             </div>
           )}
-        </div>
-
-        <div className="text-xs text-muted-foreground border-t pt-3">
-          <p><strong>Note:</strong> Blocking is end-to-end encrypted and private. The server cannot see who you have blocked. Blocked users will not be notified.</p>
         </div>
       </CardContent>
     </Card>

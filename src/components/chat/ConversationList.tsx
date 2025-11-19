@@ -1,9 +1,11 @@
 import React, { memo, useMemo, useEffect, useState, useCallback } from "react";
-import { cn } from "@/lib/utils";
-import { ScrollArea } from "@/components/ui/scroll-area";
-import { Button } from "@/components/ui/button";
-import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from "@/components/ui/dialog";
-import { Trash2 } from "lucide-react";
+import { cn } from "../../lib/utils";
+import { ScrollArea } from "../ui/scroll-area";
+import { Button } from "../ui/button";
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from "../ui/dialog";
+import { Trash2, Search } from "lucide-react";
+import { Input } from "../ui/input";
+import { toast } from "sonner";
 
 export interface Conversation {
   readonly id: string;
@@ -20,7 +22,9 @@ interface ConversationListProps {
   readonly selectedConversation?: string;
   readonly onSelectConversation: (username: string) => void;
   readonly onRemoveConversation?: (username: string) => void;
+  readonly onAddConversation?: (username: string) => Promise<void>;
   readonly getDisplayUsername?: (username: string) => Promise<string>;
+  readonly showNewChatInput?: boolean;
 }
 
 type CallStatus = 'ringing' | 'connecting' | 'connected' | null;
@@ -67,14 +71,14 @@ const ConversationItem = memo<ConversationItemProps>(({
   getDisplayUsername
 }) => {
   const [resolvedName, setResolvedName] = useState<string | null>(null);
-  
+
   // Stabilize the resolver function to avoid effect churn when parent re-renders
   const resolverRef = React.useRef(getDisplayUsername);
   useEffect(() => { resolverRef.current = getDisplayUsername; }, [getDisplayUsername]);
-  
+
   useEffect(() => {
     let ignore = false;
-    
+
     const resolveName = async () => {
       try {
         if (resolverRef.current && typeof conversation.username === 'string') {
@@ -83,9 +87,9 @@ const ConversationItem = memo<ConversationItemProps>(({
             setResolvedName(dn);
           }
         }
-      } catch {}
+      } catch { }
     };
-    
+
     resolveName();
     return () => { ignore = true; };
   }, [conversation.username]);
@@ -100,7 +104,7 @@ const ConversationItem = memo<ConversationItemProps>(({
     return anonymize(conversation.username);
   }, [conversation.displayName, conversation.username, resolvedName]);
 
-  const avatarColor = useMemo(() => 
+  const avatarColor = useMemo(() =>
     isSelected ? 'rgba(255, 255, 255, 0.2)' : getAvatarColor(conversation.username),
     [isSelected, conversation.username]
   );
@@ -120,7 +124,7 @@ const ConversationItem = memo<ConversationItemProps>(({
     <div
       className={cn(
         "flex items-center gap-3 p-3 cursor-pointer transition-all duration-200 group relative",
-        "hover:bg-opacity-80 min-w-0"
+        "hover:bg-opacity-80 min-w-0 w-full max-w-full overflow-hidden"
       )}
       style={{
         backgroundColor: isSelected ? 'var(--color-accent-primary)' : 'transparent',
@@ -148,8 +152,8 @@ const ConversationItem = memo<ConversationItemProps>(({
       aria-label={`Conversation with ${displayName}`}
       aria-selected={isSelected}
     >
-      <div 
-        className="w-10 h-10 rounded-full flex items-center justify-center font-medium text-sm flex-shrink-0"
+      <div
+        className="w-10 h-10 rounded-full flex items-center justify-center font-medium text-sm flex-shrink-0 select-none"
         style={{
           backgroundColor: avatarColor,
           color: 'white'
@@ -158,11 +162,11 @@ const ConversationItem = memo<ConversationItemProps>(({
       >
         {displayName.trim().charAt(0).toUpperCase()}
       </div>
-    
-      <div className="flex-1 min-w-0">
-        <div className="flex items-center gap-2 mb-1">
+
+      <div className="flex-1 min-w-0 w-0">
+        <div className="flex items-center gap-2 mb-1 min-w-0 w-full">
           <span
-            className="font-medium text-sm truncate flex-1 min-w-0"
+            className="font-medium text-sm truncate flex-1 min-w-0 block select-none"
             style={{ color: isSelected ? 'white' : 'var(--color-text-primary)' }}
             title={displayName}
           >
@@ -170,7 +174,7 @@ const ConversationItem = memo<ConversationItemProps>(({
           </span>
           {conversation.lastMessageTime && (
             <span
-              className="text-xs flex-shrink-0"
+              className="text-xs flex-shrink-0 select-none"
               style={{ color: isSelected ? 'rgba(255, 255, 255, 0.7)' : 'var(--color-text-secondary)' }}
             >
               {formatTime(conversation.lastMessageTime)}
@@ -180,7 +184,7 @@ const ConversationItem = memo<ConversationItemProps>(({
 
         {conversation.lastMessage && (
           <div
-            className="text-xs truncate pr-2"
+            className="text-xs truncate pr-2 select-none"
             style={{ color: isSelected ? 'rgba(255, 255, 255, 0.8)' : 'var(--color-text-secondary)' }}
             title={conversation.lastMessage}
           >
@@ -190,7 +194,7 @@ const ConversationItem = memo<ConversationItemProps>(({
       </div>
 
       {callStatus && (
-        <div 
+        <div
           className={cn(
             "text-xs px-2 py-1 rounded-full font-medium flex-shrink-0",
             callStatus === 'ringing' && "bg-yellow-100 text-yellow-800",
@@ -236,30 +240,48 @@ export const ConversationList = memo<ConversationListProps>(function Conversatio
   selectedConversation,
   onSelectConversation,
   onRemoveConversation,
-  getDisplayUsername
-}) {
+  onAddConversation,
+  getDisplayUsername,
+  showNewChatInput = false
+}: ConversationListProps) {
   const [activePeer, setActivePeer] = useState<string | null>(null);
   const [activeStatus, setActiveStatus] = useState<CallStatus>(null);
   const [showConfirmDialog, setShowConfirmDialog] = useState<boolean>(false);
-  const [conversationToRemove, setConversationToRemove] = useState<string | null>(null);
+  const [conversationToDelete, setConversationToDelete] = useState<string | null>(null);
+  const [newChatUsername, setNewChatUsername] = useState("");
+  const [isAdding, setIsAdding] = useState(false);
 
   const handleRemoveClick = useCallback((username: string) => {
-    setConversationToRemove(username);
+    setConversationToDelete(username);
     setShowConfirmDialog(true);
   }, []);
 
   const handleConfirmRemove = useCallback(() => {
-    if (conversationToRemove && onRemoveConversation) {
-      onRemoveConversation(conversationToRemove);
+    if (conversationToDelete && onRemoveConversation) {
+      onRemoveConversation(conversationToDelete);
     }
     setShowConfirmDialog(false);
-    setConversationToRemove(null);
-  }, [conversationToRemove, onRemoveConversation]);
+    setConversationToDelete(null);
+  }, [conversationToDelete, onRemoveConversation]);
 
   const handleCancelRemove = useCallback(() => {
     setShowConfirmDialog(false);
-    setConversationToRemove(null);
+    setConversationToDelete(null);
   }, []);
+
+  const handleAddChat = useCallback(async () => {
+    if (!newChatUsername.trim() || !onAddConversation) return;
+
+    setIsAdding(true);
+    try {
+      await onAddConversation(newChatUsername.trim());
+      setNewChatUsername("");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Failed to add conversation");
+    } finally {
+      setIsAdding(false);
+    }
+  }, [newChatUsername, onAddConversation]);
 
   useEffect(() => {
     const handler = (e: Event) => {
@@ -267,10 +289,10 @@ export const ConversationList = memo<ConversationListProps>(function Conversatio
         const ce = e as CustomEvent;
         const detail = ce.detail;
         if (!detail || typeof detail !== 'object') return;
-        
+
         const { peer, status } = detail as { peer?: unknown; status?: unknown };
         if (typeof peer !== 'string' || typeof status !== 'string') return;
-        
+
         if (status === 'ringing' || status === 'connecting' || status === 'connected') {
           setActivePeer(peer);
           setActiveStatus(status as CallStatus);
@@ -278,9 +300,9 @@ export const ConversationList = memo<ConversationListProps>(function Conversatio
           setActivePeer(prev => (prev === peer ? null : prev));
           setActiveStatus(null);
         }
-      } catch {}
+      } catch { }
     };
-    
+
     window.addEventListener('ui-call-status', handler as EventListener);
     return () => window.removeEventListener('ui-call-status', handler as EventListener);
   }, []);
@@ -289,12 +311,12 @@ export const ConversationList = memo<ConversationListProps>(function Conversatio
     if (!date || !(date instanceof Date) || isNaN(date.getTime())) {
       return "";
     }
-    
+
     const now = new Date();
     const diff = now.getTime() - date.getTime();
-    
+
     if (diff < 0) return "";
-    
+
     const minutes = Math.floor(diff / 60000);
     const hours = Math.floor(diff / 3600000);
     const days = Math.floor(diff / 86400000);
@@ -306,16 +328,35 @@ export const ConversationList = memo<ConversationListProps>(function Conversatio
   }, []);
 
   const displayUsername = useMemo(() => {
-    if (!conversationToRemove) return 'User';
-    return /^[a-f0-9]{32,}$/i.test(conversationToRemove) ? 'User' : conversationToRemove;
-  }, [conversationToRemove]);
+    if (!conversationToDelete) return 'User';
+    return /^[a-f0-9]{32,}$/i.test(conversationToDelete) ? 'User' : conversationToDelete;
+  }, [conversationToDelete]);
 
   return (
-    <>
-      <ScrollArea className="h-full">
+    <div className="flex flex-col h-full">
+      {showNewChatInput && (
+        <div className="p-4 space-y-4">
+          <div className="relative">
+            <Search className="absolute left-2 top-2.5 h-4 w-4 text-muted-foreground" />
+            <Input
+              placeholder="New chat username..."
+              value={newChatUsername}
+              onChange={(e) => setNewChatUsername(e.target.value)}
+              className="pl-8 select-none"
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') {
+                  handleAddChat();
+                }
+              }}
+            />
+          </div>
+        </div>
+      )}
+
+      <ScrollArea className="flex-1">
         <div className="p-2">
           {conversations.length === 0 ? (
-            <div 
+            <div
               className="text-center text-xs py-8"
               style={{ color: 'var(--color-text-secondary)' }}
             >
@@ -341,14 +382,14 @@ export const ConversationList = memo<ConversationListProps>(function Conversatio
       </ScrollArea>
 
       <Dialog open={showConfirmDialog} onOpenChange={setShowConfirmDialog}>
-        <DialogContent 
+        <DialogContent
           style={{ backgroundColor: 'var(--color-surface)', borderColor: 'var(--color-border)' }}
           aria-describedby="dialog-description"
         >
           <DialogHeader>
-            <DialogTitle style={{ color: 'var(--color-text-primary)' }}>Remove Conversation</DialogTitle>
-            <DialogDescription id="dialog-description" style={{ color: 'var(--color-text-secondary)' }}>
-              Are you sure you want to remove the conversation with {displayUsername}? 
+            <DialogTitle className="text-foreground">Remove Conversation</DialogTitle>
+            <DialogDescription id="dialog-description" className="text-muted-foreground">
+              Are you sure you want to remove the conversation with {displayUsername}?
               This action cannot be undone and will delete all message history.
             </DialogDescription>
           </DialogHeader>
@@ -362,6 +403,6 @@ export const ConversationList = memo<ConversationListProps>(function Conversatio
           </DialogFooter>
         </DialogContent>
       </Dialog>
-    </>
+    </div>
   );
 });

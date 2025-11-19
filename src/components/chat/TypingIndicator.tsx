@@ -16,13 +16,20 @@ export const TypingIndicator = memo(function TypingIndicator({ username, classNa
   });
 
   return (
-    <div className={cn("flex items-center gap-2 text-sm text-muted-foreground", className)} aria-live="polite" aria-atomic="true">
-      <span className="font-medium text-foreground">{displayName}</span>
-      <span>is typing</span>
-      <div className="flex items-center gap-1" aria-hidden="true">
-        <div className="w-1.5 h-1.5 bg-primary rounded-full animate-bounce" style={{ animationDelay: '0ms', animationDuration: '1s' }} />
-        <div className="w-1.5 h-1.5 bg-primary rounded-full animate-bounce" style={{ animationDelay: '150ms', animationDuration: '1s' }} />
-        <div className="w-1.5 h-1.5 bg-primary rounded-full animate-bounce" style={{ animationDelay: '300ms', animationDuration: '1s' }} />
+    <div className={cn("flex items-center gap-2 mb-2", className)} style={{ marginLeft: '50px' }} aria-live="polite" aria-atomic="true">
+      <div
+        className="px-4 py-3 rounded-2xl rounded-tl-none select-none"
+        style={{
+          backgroundColor: 'var(--color-typing-bubble)',
+          borderTopLeftRadius: '4px'
+        }}
+      >
+        <div className="flex items-center gap-1 h-4" aria-hidden="true">
+          <div className="w-2 h-2 rounded-full animate-bounce" style={{ backgroundColor: 'var(--color-typing-dot)', animationDelay: '0ms', animationDuration: '1.4s' }} />
+          <div className="w-2 h-2 rounded-full animate-bounce" style={{ backgroundColor: 'var(--color-typing-dot)', animationDelay: '200ms', animationDuration: '1.4s' }} />
+          <div className="w-2 h-2 rounded-full animate-bounce" style={{ backgroundColor: 'var(--color-typing-dot)', animationDelay: '400ms', animationDuration: '1.4s' }} />
+        </div>
+        <span className="sr-only">{displayName} is typing</span>
       </div>
     </div>
   );

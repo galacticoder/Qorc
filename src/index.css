@@ -3,8 +3,7 @@
 @import 'tailwindcss';
 
 /* Link Preview Styles */
-.link-preview-container {
-}
+.link-preview-container {}
 
 .link-preview-container img {
   max-width: 100%;
@@ -38,7 +37,7 @@
     -webkit-line-clamp: 2;
     line-clamp: 2;
   }
-  
+
   .line-clamp-3 {
     overflow: hidden;
     display: -webkit-box;
@@ -49,124 +48,151 @@
 }
 
 @layer base {
-  :root { /* light mode colors */
-    /* Backgrounds */
-    --background: 0 0% 100%;            /* white */
-    --card: 0 0% 98%;                   /* off-white card background for contrast */
-    --popover: 0 0% 100%;               /* white popover background */
-    --sidebar-background: 0 0% 96%;    /* very light sidebar */
+  :root {
+    /* Premium Light Mode */
+    --background: 210 40% 98%;
+    /* Soft white/blue tint */
+    --foreground: 222.2 84% 4.9%;
+    /* Deep dark blue text */
 
-    /* foregrounds / text */
-    --foreground: 222.2 84% 4.9%;      /* very dark blue text */
+    --card: 0 0% 100%;
+    /* Pure white cards */
     --card-foreground: 222.2 84% 4.9%;
+
+    --popover: 0 0% 100%;
     --popover-foreground: 222.2 84% 4.9%;
-    --sidebar-foreground: 240 5.3% 26.1%; /* dark gray sidebar text */
 
-    /* primary and secondary */
-    --primary: 221.2 83.2% 53.3%;      /* vibrant blue primary color */
-    --primary-foreground: 0 0% 100%;   /* white text on primary */
-    --secondary: 210 40% 96.1%;        /* light secondary bg */
-    --secondary-foreground: 222.2 47.4% 11.2%; /* dark text on secondary */
+    --primary: 221.2 83.2% 53.3%;
+    /* Vibrant Blue */
+    --primary-foreground: 210 40% 98%;
 
-    /* muted and accent */
-    --muted: 210 40% 96.1%;            /* light muted bg */
-    --muted-foreground: 215.4 16.3% 46.9%; /* gray text */
-    --accent: 210 40% 96.1%;           /* light accent bg */
-    --accent-foreground: 222.2 47.4% 11.2%; /* dark accent text */
+    --secondary: 210 40% 96.1%;
+    /* Light gray/blue secondary */
+    --secondary-foreground: 222.2 47.4% 11.2%;
 
-    /* destructive (error) */
-    --destructive: 0 84.2% 60.2%;      /* bright red background */
-    --destructive-foreground: 210 40% 98%; /* light text on destructive */
+    --muted: 210 40% 96.1%;
+    --muted-foreground: 215.4 16.3% 46.9%;
 
-    /* borders and inputs */
-    --border: 214.3 31.8% 86%;         /* darker border for clearer separation */
-    --input: 214.3 31.8% 95%;          /* slightly darker than background */
-    --ring: 222.2 84% 4.9%;             /* dark ring (focus) */
+    --accent: 210 40% 96.1%;
+    --accent-foreground: 222.2 47.4% 11.2%;
 
-    /* border radius */
-    --radius: 0.5rem;
+    --destructive: 0 84.2% 60.2%;
+    --destructive-foreground: 210 40% 98%;
 
-    /* sidebar colors */
-    --sidebar-primary: 240 5.9% 10%;           /* very dark blue sidebar */
-    --sidebar-primary-foreground: 0 0% 98%;    /* almost white text */
-    --sidebar-accent: 240 4.8% 95.9%;          /* very light accent */
-    --sidebar-accent-foreground: 240 5.9% 10%; /* dark accent text */
-    --sidebar-border: 220 13% 91%;              /* light gray sidebar border */
-    --sidebar-ring: 217.2 91.2% 59.8%;          /* yellowish focus ring */
+    --border: 214.3 31.8% 91%;
+    --input: 214.3 31.8% 91%;
+    --ring: 221.2 83.2% 53.3%;
+
+    --radius: 0.75rem;
+
+    /* Sidebar - Light */
+    --sidebar-background: 0 0% 100%;
+    --sidebar-foreground: 240 5.3% 26.1%;
+    --sidebar-primary: 221.2 83.2% 53.3%;
+    --sidebar-primary-foreground: 0 0% 98%;
+    --sidebar-accent: 210 40% 96.1%;
+    --sidebar-accent-foreground: 240 5.9% 10%;
+    --sidebar-border: 220 13% 91%;
+    --sidebar-ring: 217.2 91.2% 59.8%;
   }
 
-  .dark { /* dark mode overrides */
-    /* backgrounds */
-    --background: 222.2 84% 4.9%;       /* very dark background */
-    --card: 222.2 84% 4.9%;             /* dark card background */
-    --popover: 222.2 84% 4.9%;          /* dark popover background */
-    --sidebar-background: 240 5.9% 10%; /* very dark sidebar */
+  .dark {
+    /* Premium Dark Mode (Softer/Zinc-like) */
+    --background: 240 5% 10%;
+    /* Zinc-950ish */
+    --foreground: 240 5% 96%;
 
-    /* foregrounds / text */
-    --foreground: 210 40% 98%;           /* very light text */
-    --card-foreground: 210 40% 98%;      /* very light card text */
-    --popover-foreground: 210 40% 98%;   /* very light popover text */
-    --sidebar-foreground: 240 4.8% 95.9%;/* light sidebar text */
+    --card: 240 5% 13%;
+    /* Slightly lighter */
+    --card-foreground: 240 5% 96%;
 
-    /* primary and secondary */
-    --primary: 210 40% 98%;              /* very light primary bg */
-    --primary-foreground: 222.2 47.4% 11.2%; /* dark text on primary */
-    --secondary: 217.2 32.6% 17.5%;      /* dark secondary bg */
-    --secondary-foreground: 210 40% 98%; /* light text on secondary */
+    --popover: 240 5% 13%;
+    --popover-foreground: 240 5% 96%;
 
-    /* muted and accent */
-    --muted: 217.2 32.6% 17.5%;          /* dark muted bg */
-    --muted-foreground: 215 20.2% 65.1%; /* lighter gray text */
-    --accent: 217.2 32.6% 17.5%;         /* dark accent bg */
-    --accent-foreground: 210 40% 98%;    /* light accent text */
+    --primary: 217 91% 60%;
+    /* Electric Blue (Keep brand color) */
+    --primary-foreground: 0 0% 100%;
 
-    /* errors */
-    --destructive: 0 62.8% 30.6%;        /* darker red bg */
-    --destructive-foreground: 210 40% 98%; /* light text */
+    --secondary: 240 4% 18%;
+    --secondary-foreground: 240 5% 96%;
 
-    /* borders and inputs */
-    --border: 217.2 32.6% 17.5%;          /* dark border */
-    --input: 217.2 32.6% 17.5%;           /* dark input bg */
-    --ring: 212.7 26.8% 83.9%;            /* light ring */
-    
-    /* sidebar colors */
-    --sidebar-primary: 224.3 76.3% 48%;           /* medium blue sidebar */
-    --sidebar-primary-foreground: 0 0% 100%;       /* white text */
-    --sidebar-accent: 240 3.7% 15.9%;              /* dark accent */
-    --sidebar-accent-foreground: 240 4.8% 95.9%;   /* light accent text */
-    --sidebar-border: 240 3.7% 15.9%;               /* dark sidebar border */
-    --sidebar-ring: 217.2 91.2% 59.8%;             /* yellowish focus ring */
+    --muted: 240 4% 18%;
+    --muted-foreground: 240 5% 65%;
+
+    --accent: 240 4% 18%;
+    --accent-foreground: 240 5% 96%;
+
+    --destructive: 0 62.8% 30.6%;
+    --destructive-foreground: 240 5% 96%;
+
+    --border: 240 4% 18%;
+    --input: 240 4% 18%;
+    --ring: 217 91% 60%;
+
+    /* Sidebar - Dark */
+    --sidebar-background: 240 5% 12%;
+    --sidebar-foreground: 240 5% 96%;
+    --sidebar-primary: 217 91% 60%;
+    --sidebar-primary-foreground: 0 0% 100%;
+    --sidebar-accent: 240 4% 18%;
+    --sidebar-accent-foreground: 240 5% 96%;
+    --sidebar-border: 240 4% 18%;
+    --sidebar-ring: 217 91% 60%;
   }
 }
 
 @layer base {
-  /* apply border color globally */
   * {
     border-color: hsl(var(--border));
   }
 
-  /* body background and text colors use css variables */
   body {
     background-color: hsl(var(--background));
     color: hsl(var(--foreground));
+    font-feature-settings: "rlig" 1, "calt" 1;
+  }
+}
+
+@layer utilities {
+  .glass {
+    background: rgba(255, 255, 255, 0.1);
+    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
+    border: 1px solid rgba(255, 255, 255, 0.2);
+  }
+
+  .dark .glass {
+    background: rgba(0, 0, 0, 0.2);
+    border: 1px solid rgba(255, 255, 255, 0.05);
+  }
+
+  .text-gradient {
+    background-clip: text;
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-image: linear-gradient(to right, hsl(var(--primary)), #a855f7);
   }
 }
 
 /* Hide scrollbars while keeping scroll functionality */
 .scrollbar-hide {
-  -ms-overflow-style: none;  /* IE and Edge */
-  scrollbar-width: none;     /* Firefox */
+  -ms-overflow-style: none;
+  /* IE and Edge */
+  scrollbar-width: none;
+  /* Firefox */
 }
 
 .scrollbar-hide::-webkit-scrollbar {
-  display: none;             /* Chrome, Safari and Opera */
+  display: none;
+  /* Chrome, Safari and Opera */
 }
 
 /* Markdown Content Styles */
 .markdown-content {
   font-family: inherit;
   line-height: 1.6;
-  max-width: none; /* Allow full width for README content */
+  max-width: none;
+  /* Allow full width for README content */
   width: 100%;
 }
 
@@ -184,22 +210,36 @@
 }
 
 /* Better header sizing for README content */
-.markdown-content h1 { 
-  font-size: 2em; 
+.markdown-content h1 {
+  font-size: 2em;
   margin-top: 0;
   border-bottom: 2px solid rgba(128, 128, 128, 0.3);
 }
-.markdown-content h2 { 
-  font-size: 1.5em; 
+
+.markdown-content h2 {
+  font-size: 1.5em;
   border-bottom: 1px solid rgba(128, 128, 128, 0.2);
 }
-.markdown-content h3 { 
-  font-size: 1.25em; 
+
+.markdown-content h3 {
+  font-size: 1.25em;
   border-bottom: none;
 }
-.markdown-content h4 { font-size: 1.1em; border-bottom: none; }
-.markdown-content h5 { font-size: 1em; border-bottom: none; }
-.markdown-content h6 { font-size: 0.9em; border-bottom: none; }
+
+.markdown-content h4 {
+  font-size: 1.1em;
+  border-bottom: none;
+}
+
+.markdown-content h5 {
+  font-size: 1em;
+  border-bottom: none;
+}
+
+.markdown-content h6 {
+  font-size: 0.9em;
+  border-bottom: none;
+}
 
 .markdown-content p {
   margin: 0.5em 0;
@@ -260,8 +300,8 @@
   line-height: 1.6;
 }
 
-.markdown-content li > ul,
-.markdown-content li > ol {
+.markdown-content li>ul,
+.markdown-content li>ol {
   margin: 0.3em 0;
 }
 
@@ -415,4 +455,151 @@
 .markdown-message .markdown-content ol {
   margin: 0.8em 0 !important;
   padding-left: 1.5em !important;
+}
+
+/* Animated Theme Icon Styles */
+/* From Uiverse.io by Type-Delta */
+
+.themeToggle {
+  color: #bbb;
+  width: 25px;
+  height: 25px;
+  display: block;
+}
+
+.st-sunMoonThemeToggleBtn {
+  position: relative;
+  cursor: pointer;
+  transition: transform 0.2s ease;
+}
+
+.theme-toggle-btn:hover .st-sunMoonThemeToggleBtn {
+  transform: scale(1.1);
+}
+
+.st-sunMoonThemeToggleBtn .themeToggleInput {
+  position: absolute;
+  opacity: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  pointer-events: none;
+}
+
+.st-sunMoonThemeToggleBtn svg {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  transition: transform 0.4s ease;
+  transform: rotate(40deg);
+}
+
+.st-sunMoonThemeToggleBtn svg .sunMoon {
+  transform-origin: center center;
+  transition: inherit;
+  transform: scale(1);
+}
+
+.st-sunMoonThemeToggleBtn svg .sunRay {
+  transform-origin: center center;
+  transform: scale(0);
+}
+
+.st-sunMoonThemeToggleBtn svg mask>circle {
+  transition: transform 0.64s cubic-bezier(0.41, 0.64, 0.32, 1.575);
+  transform: translate(0px, 0px);
+}
+
+.st-sunMoonThemeToggleBtn svg .sunRay2 {
+  animation-delay: 0.05s !important;
+}
+
+.st-sunMoonThemeToggleBtn svg .sunRay3 {
+  animation-delay: 0.1s !important;
+}
+
+.st-sunMoonThemeToggleBtn svg .sunRay4 {
+  animation-delay: 0.17s !important;
+}
+
+.st-sunMoonThemeToggleBtn svg .sunRay5 {
+  animation-delay: 0.25s !important;
+}
+
+.st-sunMoonThemeToggleBtn svg .sunRay6 {
+  animation-delay: 0.29s !important;
+}
+
+.st-sunMoonThemeToggleBtn .themeToggleInput:checked+svg {
+  transform: rotate(90deg);
+}
+
+.st-sunMoonThemeToggleBtn .themeToggleInput:checked+svg mask>circle {
+  transform: translate(16px, -3px);
+}
+
+.st-sunMoonThemeToggleBtn .themeToggleInput:checked+svg .sunMoon {
+  transform: scale(0.55);
+}
+
+.st-sunMoonThemeToggleBtn .themeToggleInput:checked+svg .sunRay {
+  animation: showRay1832 0.4s ease 0s 1 forwards;
+}
+
+@keyframes showRay1832 {
+  0% {
+    transform: scale(0);
+  }
+
+  100% {
+    transform: scale(1);
+  }
+}
+
+/* Custom Animated Switch Styles */
+/* From Uiverse.io by vinodjangid07 */
+
+.custom-switch-input {
+  display: none;
+}
+
+.toggleSwitch {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+  width: 50px;
+  height: 30px;
+  background-color: rgb(82, 82, 82);
+  border-radius: 20px;
+  cursor: pointer;
+  transition-duration: .2s;
+}
+
+.toggleSwitch::after {
+  content: "";
+  position: absolute;
+  height: 10px;
+  width: 10px;
+  left: 5px;
+  background-color: white;
+  border-radius: 50%;
+  transition-duration: .2s;
+  box-shadow: 5px 2px 7px rgba(8, 8, 8, 0.26);
+  border: 5px solid white;
+}
+
+.custom-switch-input:checked+.toggleSwitch::after {
+  transform: translateX(25px);
+  transition-duration: .2s;
+  background-color: white;
+}
+
+/* Switch background change */
+.custom-switch-input:checked+.toggleSwitch {
+  background-color: rgb(148, 118, 255);
+  transition-duration: .2s;
 }

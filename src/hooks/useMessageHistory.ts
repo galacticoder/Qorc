@@ -132,7 +132,7 @@ const transformServerMessage = (serverMsg: any, currentUsername: string): Messag
     console.error('[MessageHistory] Invalid timestamp - rejecting message');
     return null;
   }
-  
+
   const now = Date.now();
   const fiveMinutesFromNow = now + 5 * 60 * 1000;
   const tenYearsAgo = now - 10 * 365 * 24 * 60 * 60 * 1000;
@@ -221,20 +221,20 @@ const mergeMessages = (currentMessages: Message[], incoming: Message[]): Message
 
 const persistMessages = async (messages: Message[], saveFn: (msg: Message) => Promise<void>) => {
   if (messages.length === 0) return;
-  
+
   // Batch large sets to avoid overwhelming the database with too many concurrent operations
   const batches: Message[][] = [];
   for (let i = 0; i < messages.length; i += MAX_PERSIST_CONCURRENCY) {
     batches.push(messages.slice(i, i + MAX_PERSIST_CONCURRENCY));
   }
-  
+
   let totalFailed = 0;
   for (const batch of batches) {
     const results = await Promise.allSettled(batch.map(msg => saveFn(msg)));
     totalFailed += results.filter(r => r.status === 'rejected').length;
     await new Promise(resolve => setTimeout(resolve, 0));
   }
-  
+
   if (totalFailed > 0) {
     console.error(`[MessageHistory] Failed to persist ${totalFailed}/${messages.length} messages`);
   }
@@ -316,7 +316,7 @@ export function useMessageHistory(
       const transformed: Message[] = [];
       const seenIds = new Set<string>();
       const CHUNK_SIZE = 50;
-      
+
       for (let i = 0; i < serverMessages.length; i += CHUNK_SIZE) {
         const chunk = serverMessages.slice(i, i + CHUNK_SIZE);
         for (const serverMsg of chunk) {
@@ -356,7 +356,7 @@ export function useMessageHistory(
       }, 1000);
 
       return () => {
-        try { clearTimeout(timer); } catch {}
+        try { clearTimeout(timer); } catch { }
       };
     }
   }, [isLoggedIn, currentUsername, isFullyAuthenticated, requestMessageHistory]);

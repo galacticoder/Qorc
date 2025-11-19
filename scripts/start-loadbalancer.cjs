@@ -114,7 +114,7 @@ async function ensureQuantumReady() {
     if (!ok) needSetup = true;
   }
   if (needSetup) {
-    log('Running quantum setup (no classical fallback)...');
+    log('Running quantum setup...');
     await runNodeScript(path.join(repoRoot, 'scripts', 'setup-quantum-haproxy.cjs'));
     // Reload detected module path after setup
     oqsModule = await readOqsModulePath();
@@ -130,7 +130,7 @@ async function ensureQuantumReady() {
   // Re-check provider
   const ok2 = await hasOqsProvider(env);
   if (!ok2) {
-    log('Ensuring quantum dependencies (may prompt for sudo)...');
+    log('Ensuring dependencies (may prompt for sudo)...');
     await runNodeScript(path.join(repoRoot, 'scripts', 'install-deps.cjs'), ['quantum'], { ...process.env, FORCE_REBUILD: '1' });
     await runNodeScript(path.join(repoRoot, 'scripts', 'setup-quantum-haproxy.cjs'));
     oqsModule = await readOqsModulePath();

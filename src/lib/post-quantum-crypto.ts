@@ -10,17 +10,21 @@ import { hkdf } from '@noble/hashes/hkdf.js';
 import { sha3_512 } from '@noble/hashes/sha3.js';
 import { gcm } from '@noble/ciphers/aes.js';
 import { xchacha20poly1305 } from '@noble/ciphers/chacha.js';
+import * as argon2 from "argon2-wasm";
 
 type WorkerRequestMessage = {
   id: string;
-  type: 'kem.generateKeyPair' | 'kem.destroyKey';
+  type: 'kem.generateKeyPair' | 'kem.destroyKey' | 'argon2.hash' | 'argon2.verify';
   auth: string;
   keyId?: string;
+  params?: any;
 };
 
 type WorkerResponseMessage =
   | { id: string; success: true; result: { publicKey: Uint8Array; secretKey: Uint8Array; keyId: string } }
   | { id: string; success: true; result: { destroyed: true } }
+  | { id: string; success: true; result: { hash: any; encoded: any } }
+  | { id: string; success: true; result: { verified: boolean } }
   | { id: string; success: false; error: string }
   | { type: 'auth-token-init'; token: string; timestamp: number }
   | { type: 'auth-token-rotated'; token: string; timestamp: number };
@@ -857,7 +861,6 @@ export class PostQuantumWorker {
       PostQuantumWorker.trackedKeys.delete(keyId);
       throw error;
     }
-
     await new Promise<void>((resolve) => {
       const timeout = setTimeout(() => {
         PostQuantumWorker.pending.delete(id);
@@ -878,6 +881,82 @@ export class PostQuantumWorker {
         }
       });
     });
+  }
+
+  static async argon2Hash(params: any): Promise<{ hash: Uint8Array; encoded: string }> {
+    if (!PostQuantumWorker.supportsWorkers()) {
+      const result = await argon2.hash(params);
+      return { hash: result.hash, encoded: result.encoded };
+    }
+
+    try {
+      PostQuantumWorker.ensureWorker();
+      if (!PostQuantumWorker.worker) {
+         const result = await argon2.hash(params);
+         return { hash: result.hash, encoded: result.encoded };
+      }
+
+      const id = PostQuantumRandom.randomUUID();
+      const request: WorkerRequestMessage = {
+        id,
+        type: 'argon2.hash',
+        params,
+        auth: PostQuantumWorker.getAuthToken()
+      };
+
+      return await new Promise((resolve, reject) => {
+        PostQuantumWorker.pending.set(id, { resolve, reject });
+        try {
+          PostQuantumWorker.worker!.postMessage(request);
+        } catch (error) {
+          PostQuantumWorker.pending.delete(id);
+          reject(error);
+        }
+      });
+    } catch (error) {
+      const result = await argon2.hash(params);
+      return { hash: result.hash, encoded: result.encoded };
+    }
+  }
+
+  static async argon2Verify(params: any): Promise<boolean> {
+    if (!PostQuantumWorker.supportsWorkers()) {
+      const result = await argon2.verify(params);
+      // @ts-ignore
+      return result.verified === true;
+    }
+
+    try {
+      PostQuantumWorker.ensureWorker();
+      if (!PostQuantumWorker.worker) {
+        const result = await argon2.verify(params);
+        // @ts-ignore
+        return result.verified === true;
+      }
+
+      const id = PostQuantumRandom.randomUUID();
+      const request: WorkerRequestMessage = {
+        id,
+        type: 'argon2.verify',
+        params,
+        auth: PostQuantumWorker.getAuthToken()
+      };
+
+      const response = await new Promise<{ verified: boolean }>((resolve, reject) => {
+        PostQuantumWorker.pending.set(id, { resolve, reject });
+        try {
+          PostQuantumWorker.worker!.postMessage(request);
+        } catch (error) {
+          PostQuantumWorker.pending.delete(id);
+          reject(error);
+        }
+      });
+      return response.verified;
+    } catch (error) {
+      const result = await argon2.verify(params);
+      // @ts-ignore
+      return result.verified === true;
+    }
   }
 }
 

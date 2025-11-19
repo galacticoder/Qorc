@@ -9,19 +9,7 @@ interface VoiceRecorderButtonProps {
 }
 
 export function VoiceRecorderButton({ onClick, disabled }: VoiceRecorderButtonProps) {
-  const handleMouseEnter = useCallback((e: React.MouseEvent<HTMLButtonElement>): void => {
-    if (!disabled) {
-      e.currentTarget.style.backgroundColor = 'var(--color-surface)';
-      e.currentTarget.style.color = 'var(--color-text-primary)';
-    }
-  }, [disabled]);
 
-  const handleMouseLeave = useCallback((e: React.MouseEvent<HTMLButtonElement>): void => {
-    if (!disabled) {
-      e.currentTarget.style.backgroundColor = 'transparent';
-      e.currentTarget.style.color = 'var(--color-text-secondary)';
-    }
-  }, [disabled]);
 
   return (
     <Button
@@ -30,14 +18,9 @@ export function VoiceRecorderButton({ onClick, disabled }: VoiceRecorderButtonPr
       className={cn(
         "h-8 w-8 rounded-full transition-all duration-200 flex items-center justify-center flex-shrink-0",
         "focus:outline-none focus:ring-0 focus-visible:ring-0 focus-visible:ring-offset-0",
+        "text-muted-foreground hover:bg-muted hover:text-foreground",
         disabled && "opacity-50 cursor-not-allowed"
       )}
-      style={{
-        color: 'var(--color-text-secondary)',
-        backgroundColor: 'transparent'
-      }}
-      onMouseEnter={handleMouseEnter}
-      onMouseLeave={handleMouseLeave}
       onClick={onClick}
       disabled={disabled}
       type="button"

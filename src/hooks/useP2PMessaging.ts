@@ -330,7 +330,7 @@ export function useP2PMessaging(
   const authLockRef = useRef<Promise<void> | null>(null);
   const rateLimitRef = useRef<Map<string, { windowStart: number; count: number }>>(new Map());
   const handleIncomingP2PMessageRef = useRef<((message: P2PMessage) => Promise<void>) | null>(null);
-  
+
   // Deduplicate P2P read-receipts we send (per messageId)
   const sentP2PReceiptsRef = useRef<Map<string, number>>(new Map());
   // Deduplicate incoming read-receipts we process (avoid event storms)
@@ -342,7 +342,7 @@ export function useP2PMessaging(
   const outboundQueueRef = useRef(new Map<string, QueuedItem[]>());
   const flushTimersRef = useRef(new Map<string, ReturnType<typeof setTimeout>>());
   // Use a ref to always call the latest flush function from timers (avoids stale closures)
-  const flushPeerQueueRef = useRef<(peer: string) => void>(() => {});
+  const flushPeerQueueRef = useRef<(peer: string) => void>(() => { });
 
   const appendIncoming = useCallback((message: EncryptedMessage) => {
     incomingQueueRef.current.push(message);
@@ -377,9 +377,9 @@ export function useP2PMessaging(
     peerCertificateCacheRef.current.clear();
     peerAuthCacheRef.current = buildAuthenticator();
     try {
-      outboundQueueRef.current.forEach((arr) => arr.forEach(it => { try { it.envelope = null; } catch {} }));
+      outboundQueueRef.current.forEach((arr) => arr.forEach(it => { try { it.envelope = null; } catch { } }));
       outboundQueueRef.current.clear();
-    } catch {}
+    } catch { }
     flushTimersRef.current.forEach(t => clearTimeout(t));
     flushTimersRef.current.clear();
     incomingQueueRef.current.clear();
@@ -546,17 +546,17 @@ export function useP2PMessaging(
         routeProofCacheRef.current.clear();
         peerCertificateCacheRef.current.clear();
         peerAuthCacheRef.current = buildAuthenticator();
-        outboundQueueRef.current.forEach((arr) => arr.forEach(it => { try { it.envelope = null; } catch {} }));
+        outboundQueueRef.current.forEach((arr) => arr.forEach(it => { try { it.envelope = null; } catch { } }));
         outboundQueueRef.current.clear();
         flushTimersRef.current.forEach(t => clearTimeout(t));
         flushTimersRef.current.clear();
         incomingQueueRef.current.clear();
         setIncomingMessages([]);
-        
+
         if (!username || !hybridKeys?.dilithium?.secretKey) {
           throw createP2PError('AUTH_REQUIRED');
         }
-        try { SecurityAuditLogger.log('info', 'p2p-initiate', { server: signalingServerUrl, user: username }); } catch {}
+        try { SecurityAuditLogger.log('info', 'p2p-initiate', { server: signalingServerUrl, user: username }); } catch { }
 
         const service = new WebRTCP2PService(username);
         p2pServiceRef.current = service;
@@ -568,7 +568,8 @@ export function useP2PMessaging(
         }
 
         service.onMessage((message: P2PMessage) => {
-          handleIncomingP2PMessageRef.current?.(message).catch(() => {
+          handleIncomingP2PMessageRef.current?.(message).catch((err) => {
+            console.error('[P2P] Error handling incoming message:', err);
           });
         });
 
@@ -581,17 +582,17 @@ export function useP2PMessaging(
           try {
             const set = peerWaitersRef.current.get(peerUsername);
             if (set) {
-              set.forEach(fn => { try { fn(true); } catch {} });
+              set.forEach(fn => { try { fn(true); } catch { } });
               peerWaitersRef.current.delete(peerUsername);
             }
-          } catch {}
-          try { SecurityAuditLogger.log('info', 'p2p-peer-connected', { peer: peerUsername }); } catch {}
-          
+          } catch { }
+          try { SecurityAuditLogger.log('info', 'p2p-peer-connected', { peer: peerUsername }); } catch { }
+
           try {
             window.dispatchEvent(new CustomEvent('p2p-peer-reconnected', { detail: { peer: peerUsername } }));
-          } catch {}
-          
-          try { window.dispatchEvent(new CustomEvent('p2p-peer-connected', { detail: { peer: peerUsername } })); } catch {}
+          } catch { }
+
+          try { window.dispatchEvent(new CustomEvent('p2p-peer-connected', { detail: { peer: peerUsername } })); } catch { }
           clearLastError();
         });
 
@@ -600,7 +601,7 @@ export function useP2PMessaging(
             ...prev,
             connectedPeers: prev.connectedPeers.filter((p) => p !== peerUsername),
           }));
-          try { SecurityAuditLogger.log('info', 'p2p-peer-disconnected', { peer: peerUsername }); } catch {}
+          try { SecurityAuditLogger.log('info', 'p2p-peer-disconnected', { peer: peerUsername }); } catch { }
         });
 
         const token = (await options?.signalingTokenProvider?.()) ?? null;
@@ -618,7 +619,7 @@ export function useP2PMessaging(
           registrationSignature: CryptoUtils.Base64.arrayBufferToBase64(registrationSig),
           registrationPublicKey: hybridKeys.dilithium.publicKeyBase64,
         });
-        try { SecurityAuditLogger.log('info', 'p2p-init-complete', { server: signalingServerUrl }); } catch {}
+        try { SecurityAuditLogger.log('info', 'p2p-init-complete', { server: signalingServerUrl }); } catch { }
 
         setP2PStatus((prev) => ({
           ...prev,
@@ -639,7 +640,7 @@ export function useP2PMessaging(
       if (!p2pServiceRef.current) {
         throw createP2PError('SERVICE_UNINITIALIZED');
       }
-      try { SecurityAuditLogger.log('info', 'p2p-connect-request', { peer: peerUsername }); } catch {}
+      try { SecurityAuditLogger.log('info', 'p2p-connect-request', { peer: peerUsername }); } catch { }
       if (!hybridKeys?.dilithium?.secretKey) {
         throw createP2PError('LOCAL_KEYS_MISSING');
       }
@@ -681,14 +682,14 @@ export function useP2PMessaging(
         try {
           const pk = toUint8(cert.dilithiumPublicKey);
           if (pk) p2pServiceRef.current.addPeerDilithiumKey(peerUsername, pk);
-        } catch {}
+        } catch { }
         await p2pServiceRef.current.connectToPeer(peerUsername, {
           peerCertificate: cert,
           routeProof: routeProofCacheRef.current.get(conversationKey)?.proof,
         });
-        try { SecurityAuditLogger.log('info', 'p2p-connect-dispatched', { peer: peerUsername }); } catch {}
+        try { SecurityAuditLogger.log('info', 'p2p-connect-dispatched', { peer: peerUsername }); } catch { }
       } catch (_error) {
-        try { SecurityAuditLogger.log('warn', 'p2p-connect-error', { peer: peerUsername, error: String((_error as any)?.message || _error) }); } catch {}
+        try { SecurityAuditLogger.log('warn', 'p2p-connect-error', { peer: peerUsername, error: String((_error as any)?.message || _error) }); } catch { }
         setLastError(_error);
         throw _error;
       }
@@ -711,7 +712,7 @@ export function useP2PMessaging(
     if (!existing) {
       const t = setTimeout(() => {
         flushTimersRef.current.delete(to);
-        try { flushPeerQueueRef.current(to); } catch {}
+        try { flushPeerQueueRef.current(to); } catch { }
       }, 300);
       flushTimersRef.current.set(to, t);
     }
@@ -728,12 +729,12 @@ export function useP2PMessaging(
     const remaining: QueuedItem[] = [];
     for (const item of arr) {
       if (now - item.enqueuedAt >= item.ttlMs) {
-        try { item.envelope = null; } catch {}
+        try { item.envelope = null; } catch { }
         continue;
       }
       try {
-        service.sendMessage(peer, item.envelope, item.type === 'text' ? 'chat' : item.type);
-        try { item.envelope = null; } catch {}
+        service.sendMessage(peer, item.envelope, item.type === 'text' ? 'chat' : (item.type as any));
+        try { item.envelope = null; } catch { }
       } catch (_e) {
         remaining.push(item);
       }
@@ -887,13 +888,13 @@ export function useP2PMessaging(
         else if (options?.messageType === 'reaction') p2pType = 'reaction';
         else if (options?.messageType === 'file') p2pType = 'file';
 
-        try { SecurityAuditLogger.log('info', 'p2p-send-request', { to, type: p2pType }); } catch {}
+        try { SecurityAuditLogger.log('info', 'p2p-send-request', { to, type: p2pType }); } catch { }
         const connectedPeers = p2pServiceRef.current?.getConnectedPeers() ?? [];
         const serviceConnected = connectedPeers.includes(to);
         if (!serviceConnected) {
           const ttl = p2pType === 'typing' ? 5000 : p2pType === 'reaction' ? 30000 : p2pType === 'file' ? 180000 : 120000;
-          enqueueOutbound(to, encryptedEnvelope, p2pType, ttl);
-          try { SecurityAuditLogger.log('info', 'p2p-enqueued-not-connected', { to, type: p2pType }); } catch {}
+          enqueueOutbound(to, encryptedEnvelope, p2pType as any, ttl);
+          try { SecurityAuditLogger.log('info', 'p2p-enqueued-not-connected', { to, type: p2pType }); } catch { }
           connectToPeer(to).catch(() => {
           });
           setLastError(createP2PError('PEER_NOT_CONNECTED'));
@@ -901,10 +902,10 @@ export function useP2PMessaging(
         }
 
         await p2pServiceRef.current.sendMessage(to, encryptedEnvelope, p2pType);
-        try { SecurityAuditLogger.log('info', 'p2p-send-ok', { to, type: p2pType }); } catch {}
+        try { SecurityAuditLogger.log('info', 'p2p-send-ok', { to, type: p2pType }); } catch { }
         return { status: 'sent', messageId };
       } catch (_error) {
-        try { SecurityAuditLogger.log('warn', 'p2p-send-error', { to, error: String((_error as any)?.message || _error) }); } catch {}
+        try { SecurityAuditLogger.log('warn', 'p2p-send-error', { to, error: String((_error as any)?.message || _error) }); } catch { }
         const errorMsg = String((_error as any)?.message || _error);
         const errorCode = (_error as any)?.code as string | undefined;
 
@@ -915,15 +916,15 @@ export function useP2PMessaging(
             code: errorCode,
             message: errorMsg,
           });
-        } catch {}
+        } catch { }
 
         if (errorMsg.includes('no PQ session') || errorMsg.includes('without established PQ session')) {
           try {
             const p2pType: 'chat' | 'typing' | 'reaction' | 'file' =
               options?.messageType === 'typing' ? 'typing'
-              : options?.messageType === 'reaction' ? 'reaction'
-              : options?.messageType === 'file' ? 'file'
-              : 'chat';
+                : options?.messageType === 'reaction' ? 'reaction'
+                  : options?.messageType === 'file' ? 'file'
+                    : 'chat';
             const ttl = p2pType === 'typing' ? 5000 : p2pType === 'reaction' ? 30000 : p2pType === 'file' ? 180000 : 120000;
             const messageObj = {
               id: messageId,
@@ -947,9 +948,9 @@ export function useP2PMessaging(
                 messageType: options?.messageType || 'text',
               },
             });
-            enqueueOutbound(to, encryptedEnvelope, p2pType, ttl);
-            try { SecurityAuditLogger.log('info', 'p2p-enqueued-no-session', { to, type: p2pType }); } catch {}
-          } catch {}
+            enqueueOutbound(to, encryptedEnvelope, p2pType as any, ttl);
+            try { SecurityAuditLogger.log('info', 'p2p-enqueued-no-session', { to, type: p2pType }); } catch { }
+          } catch { }
           setLastError(_error);
           return {
             status: 'queued_no_session',
@@ -962,9 +963,9 @@ export function useP2PMessaging(
         try {
           const p2pType: 'chat' | 'typing' | 'reaction' | 'file' =
             options?.messageType === 'typing' ? 'typing'
-            : options?.messageType === 'reaction' ? 'reaction'
-            : options?.messageType === 'file' ? 'file'
-            : 'chat';
+              : options?.messageType === 'reaction' ? 'reaction'
+                : options?.messageType === 'file' ? 'file'
+                  : 'chat';
           const ttl = p2pType === 'typing' ? 5000 : p2pType === 'reaction' ? 30000 : p2pType === 'file' ? 180000 : 120000;
           const messageObj = {
             id: messageId,
@@ -977,7 +978,7 @@ export function useP2PMessaging(
             metadata: options?.metadata,
           };
           const encryptedEnvelope = await CryptoUtils.Hybrid.encryptForClient(messageObj, effectiveRemoteKeys, {
-            to: peerCert.dilithiumPublicKey,
+            to: peerCert.dilithium.publicKeyBase64,
             from: hybridKeys.dilithium.publicKeyBase64,
             type: `p2p-${options?.messageType || 'message'}`,
             senderDilithiumSecretKey: hybridKeys.dilithium.secretKey,
@@ -988,8 +989,9 @@ export function useP2PMessaging(
               messageType: options?.messageType || 'text',
             },
           });
-          enqueueOutbound(to, encryptedEnvelope, p2pType, ttl);
-        } catch {}
+          // Queue for flush
+          enqueueOutbound(to, encryptedEnvelope, (options?.messageType === 'typing' ? 'typing' : (options?.messageType === 'reaction' ? 'reaction' : 'chat')) as any, 60000);
+        } catch { }
         setLastError(_error);
         return {
           status: 'fatal_transport',
@@ -1017,8 +1019,8 @@ export function useP2PMessaging(
               try {
                 const callSignal = obj.signal;
                 window.dispatchEvent(new CustomEvent('call-signal', { detail: callSignal }));
-              } catch {}
-              return; 
+              } catch { }
+              return;
             }
           } catch (_err) {
           }
@@ -1030,12 +1032,12 @@ export function useP2PMessaging(
             if (!hybridKeys?.kyber?.secretKey || !hybridKeys?.x25519?.private) {
               return;
             }
-            
-          const peerCert = await getPeerCertificate(message.from);
-          if (!peerCert) {
-            return;
-          }
-            
+
+            const peerCert = await getPeerCertificate(message.from);
+            if (!peerCert) {
+              return;
+            }
+
             // Decrypt the acknowledgment
             const decryptedAck = await CryptoUtils.Hybrid.decryptIncoming(
               message.payload,
@@ -1046,7 +1048,7 @@ export function useP2PMessaging(
               },
               { expectJsonPayload: true },
             );
-            
+
             const ackData = decryptedAck.payloadJson as any;
             if (ackData?.messageId) {
               window.dispatchEvent(
@@ -1067,12 +1069,12 @@ export function useP2PMessaging(
             if (!hybridKeys?.kyber?.secretKey || !hybridKeys?.x25519?.private) {
               return;
             }
-            
+
             const peerCert = await getPeerCertificate(message.from);
             if (!peerCert) {
               return;
             }
-            
+
             // Decrypt the read receipt
             const decryptedReceipt = await CryptoUtils.Hybrid.decryptIncoming(
               message.payload,
@@ -1083,7 +1085,7 @@ export function useP2PMessaging(
               },
               { expectJsonPayload: true },
             );
-            
+
             const receiptData = decryptedReceipt.payloadJson as any;
             if (receiptData?.messageId) {
               const id = String(receiptData.messageId);
@@ -1111,11 +1113,13 @@ export function useP2PMessaging(
           throw createP2PError('LOCAL_KEYS_MISSING');
         }
         if (!hybridKeys?.kyber?.secretKey || !hybridKeys?.x25519?.private) {
+          console.error('[P2P] Local decryption keys missing');
           throw createP2PError('LOCAL_DECRYPTION_KEYS_MISSING');
         }
 
         const peerCert = await getPeerCertificate(message.from);
         if (!peerCert) {
+          console.error('[P2P] Peer certificate missing for:', message.from);
           throw createP2PError('PEER_CERT_MISSING');
         }
 
@@ -1129,7 +1133,7 @@ export function useP2PMessaging(
           getChannelId(hybridKeys.dilithium.publicKeyBase64, peerCert.dilithiumPublicKey),
           minSequence,
         );
-        
+
         let freshPeerCert = peerCert;
         if (!validProof) {
           invalidatePeerCert(message.from);
@@ -1147,16 +1151,17 @@ export function useP2PMessaging(
             }
           }
         }
-        
+
         if (!validProof) {
-          try { SecurityAuditLogger.log('warn', 'p2p-route-proof-invalid', { from: message.from }); } catch {}
+          try { SecurityAuditLogger.log('warn', 'p2p-route-proof-invalid', { from: message.from }); } catch { }
           throw createP2PError('ROUTE_PROOF_INVALID');
         } else {
-          try { SecurityAuditLogger.log('info', 'p2p-route-proof-ok', { from: message.from }); } catch {}
+          try { SecurityAuditLogger.log('info', 'p2p-route-proof-ok', { from: message.from }); } catch { }
         }
 
         const authenticated = await ensurePeerAuthenticated(message.from, message.payload);
         if (!authenticated) {
+          console.error('[P2P] Peer authentication failed for:', message.from);
           throw createP2PError('PEER_AUTH_FAILED');
         }
 
@@ -1181,10 +1186,10 @@ export function useP2PMessaging(
           0,
         );
         if (!proofValid) {
-          try { SecurityAuditLogger.log('warn', 'p2p-payload-route-proof-invalid', { from: message.from }); } catch {}
+          try { SecurityAuditLogger.log('warn', 'p2p-payload-route-proof-invalid', { from: message.from }); } catch { }
           throw createP2PError('PAYLOAD_ROUTE_PROOF_INVALID');
         } else {
-          try { SecurityAuditLogger.log('info', 'p2p-payload-route-proof-ok', { from: message.from }); } catch {}
+          try { SecurityAuditLogger.log('info', 'p2p-payload-route-proof-ok', { from: message.from }); } catch { }
         }
         const currentSequence = channelSequenceRef.current.get(conversationKey) ?? 0;
         const nextSequence = Math.max(currentSequence, routeProofPayload?.payload?.sequence ?? currentSequence) + 1;
@@ -1194,16 +1199,20 @@ export function useP2PMessaging(
 
         const messageSequence = routeProofPayload?.payload?.sequence ?? currentSequence;
         const messageId = await generateMessageId(channelId, messageSequence);
-        
+
         // Determine message type from P2P message type or decrypted message
         let messageType: 'text' | 'typing' | 'reaction' | 'file' | 'edit' | 'delete' = 'text';
         if (message.type === 'typing') messageType = 'typing';
         else if (message.type === 'reaction') messageType = 'reaction';
         else if (message.type === 'file') messageType = 'file';
-        else if (message.type === 'edit') messageType = 'edit';
-        else if (message.type === 'delete') messageType = 'delete';
-        else if (decryptedMessage.messageType) messageType = decryptedMessage.messageType;
-        
+        else if ((message.type as string) === 'edit') {
+          // Handle edit
+          messageType = 'edit';
+        } else if ((message.type as string) === 'delete') {
+          // Handle delete
+          messageType = 'delete';
+        } else if (decryptedMessage.messageType) messageType = decryptedMessage.messageType;
+
         const encryptedMessage: EncryptedMessage = {
           id: decryptedMessage.id || messageId,
           from: message.from,
@@ -1229,12 +1238,41 @@ export function useP2PMessaging(
                 },
               }),
             );
-          } catch {}
-          return; 
+          } catch { }
+          return;
         }
 
-        appendIncoming(encryptedMessage);
-        messageCallbackRef.current?.(encryptedMessage);
+        if (messageCallbackRef.current) {
+          console.log('[P2P] Dispatching decrypted message to callback:', { id: decryptedMessage.id, type: messageType });
+          messageCallbackRef.current({
+            id: decryptedMessage.id || messageId,
+            from: message.from,
+            to: decryptedMessage.to || username,
+            content: decryptedMessage.content,
+            timestamp: decryptedMessage.timestamp || message.timestamp,
+            encrypted: true,
+            p2p: true,
+            transport: 'p2p',
+            routeProof: routeProofPayload?.signature,
+            messageType: messageType,
+            metadata: decryptedMessage.metadata,
+          });
+        } else {
+          console.warn('[P2P] No message callback registered!');
+          appendIncoming({
+            id: decryptedMessage.id || messageId,
+            from: message.from,
+            to: decryptedMessage.to || username,
+            content: decryptedMessage.content,
+            timestamp: decryptedMessage.timestamp || message.timestamp,
+            encrypted: true,
+            p2p: true,
+            transport: 'p2p',
+            routeProof: routeProofPayload?.signature,
+            messageType: messageType,
+            metadata: decryptedMessage.metadata,
+          });
+        }
 
         if (message.type === 'chat' || message.type === 'file') {
           try {
@@ -1242,7 +1280,7 @@ export function useP2PMessaging(
               messageId: encryptedMessage.id,
               timestamp: Date.now(),
             };
-            
+
             // Encrypt the delivery acknowledgment
             const encryptedAck = await CryptoUtils.Hybrid.encryptForClient(
               ackPayload,
@@ -1260,9 +1298,9 @@ export function useP2PMessaging(
                 timestamp: Date.now(),
               },
             );
-            
+
             await p2pServiceRef.current?.sendMessage(message.from, encryptedAck, 'delivery-ack');
-            try { SecurityAuditLogger.log('info', 'p2p-delivery-ack-sent', { to: message.from, messageId: encryptedMessage.id }); } catch {}
+            try { SecurityAuditLogger.log('info', 'p2p-delivery-ack-sent', { to: message.from, messageId: encryptedMessage.id }); } catch { }
           } catch (_error) {
           }
         }
@@ -1273,14 +1311,14 @@ export function useP2PMessaging(
             from: (message as any)?.from,
             error: _error instanceof Error ? _error.message : String(_error),
           });
-        } catch {}
+        } catch { }
         try {
           SecurityAuditLogger.log('error', 'p2p-incoming-error', {
             from: (message as any)?.from || null,
             type: (message as any)?.type || null,
             error: _error instanceof Error ? _error.message : String(_error),
           });
-        } catch {}
+        } catch { }
       }
     },
     [appendIncoming, deriveConversationKey, ensurePeerAuthenticated, getPeerCertificate, hybridKeys],
@@ -1319,15 +1357,15 @@ export function useP2PMessaging(
         if (peer) {
           flushPeerQueueRefStable.current?.(peer);
         }
-      } catch {}
+      } catch { }
     };
     try {
       window.addEventListener('p2p-pq-established', onPqEstablished as EventListener);
-    } catch {}
+    } catch { }
     return () => {
       try {
         window.removeEventListener('p2p-pq-established', onPqEstablished as EventListener);
-      } catch {}
+      } catch { }
     };
   }, []);
 
@@ -1346,7 +1384,7 @@ export function useP2PMessaging(
         const resolver = (ok: boolean) => {
           if (resolved) return;
           resolved = true;
-          try { clearTimeout(timer); } catch {}
+          try { clearTimeout(timer); } catch { }
           resolve(ok);
         };
         const set = peerWaitersRef.current.get(peerUsername) || new Set<(ok: boolean) => void>();
@@ -1361,7 +1399,7 @@ export function useP2PMessaging(
               s.delete(resolver);
               if (s.size === 0) peerWaitersRef.current.delete(peerUsername);
             }
-          } catch {}
+          } catch { }
           resolve(false);
         }, Math.max(0, timeoutMs | 0));
       });
@@ -1383,7 +1421,7 @@ export function useP2PMessaging(
         if (last && (Date.now() - last) < RECEIPT_RETENTION_MS) {
           return;
         }
-      } catch {}
+      } catch { }
 
       try {
         const peerCert = await getPeerCertificate(recipient);
@@ -1395,7 +1433,7 @@ export function useP2PMessaging(
           messageId,
           timestamp: Date.now(),
         };
-        
+
         // Encrypt the read receipt
         const encryptedReceipt = await CryptoUtils.Hybrid.encryptForClient(
           readReceiptPayload,
@@ -1413,10 +1451,10 @@ export function useP2PMessaging(
             timestamp: Date.now(),
           },
         );
-        
+
         await p2pServiceRef.current.sendMessage(recipient, encryptedReceipt, 'read-receipt');
-        try { sentP2PReceiptsRef.current.set(messageId, Date.now()); } catch {}
-        try { SecurityAuditLogger.log('info', 'p2p-read-receipt-sent', { to: recipient, messageId }); } catch {}
+        try { sentP2PReceiptsRef.current.set(messageId, Date.now()); } catch { }
+        try { SecurityAuditLogger.log('info', 'p2p-read-receipt-sent', { to: recipient, messageId }); } catch { }
       } catch (_error) {
       }
     },
@@ -1433,9 +1471,9 @@ export function useP2PMessaging(
         if (processedReadReceiptsRef.current.size > 5000) {
           processedReadReceiptsRef.current.clear();
         }
-      } catch {}
+      } catch { }
     }, RECEIPT_RETENTION_MS);
-    return () => { try { clearInterval(interval); } catch {} };
+    return () => { try { clearInterval(interval); } catch { } };
   }, []);
 
   // Refresh peer certificate on new connection (keys may have rotated)
@@ -1453,17 +1491,17 @@ export function useP2PMessaging(
                 p2pServiceRef.current.addPeerDilithiumKey(peer, pk);
               }
             }
-          }).catch(() => {});
+          }).catch(() => { });
         }
-      } catch {}
+      } catch { }
     };
     try {
       window.addEventListener('p2p-peer-connected', onPeerConnected as EventListener);
-    } catch {}
+    } catch { }
     return () => {
       try {
         window.removeEventListener('p2p-peer-connected', onPeerConnected as EventListener);
-      } catch {}
+      } catch { }
     };
   }, [getPeerCertificate, invalidatePeerCert]);
 
@@ -1484,15 +1522,15 @@ export function useP2PMessaging(
           }).catch(() => {
           });
         }
-      } catch {}
+      } catch { }
     };
     try {
       window.addEventListener('p2p-fetch-peer-cert', onFetchPeerCert as EventListener);
-    } catch {}
+    } catch { }
     return () => {
       try {
         window.removeEventListener('p2p-fetch-peer-cert', onFetchPeerCert as EventListener);
-      } catch {}
+      } catch { }
     };
   }, [getPeerCertificate]);
 
@@ -1505,11 +1543,11 @@ export function useP2PMessaging(
     };
     try {
       window.addEventListener('hybrid-keys-updated', onKeysUpdated as EventListener);
-    } catch {}
+    } catch { }
     return () => {
       try {
         window.removeEventListener('hybrid-keys-updated', onKeysUpdated as EventListener);
-      } catch {}
+      } catch { }
     };
   }, []);
 

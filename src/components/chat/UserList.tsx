@@ -13,6 +13,7 @@ export interface User {
   readonly hybridPublicKeys?: {
     readonly x25519PublicBase64: string;
     readonly kyberPublicBase64: string;
+    readonly dilithiumPublicBase64: string;
   };
 }
 
@@ -65,9 +66,9 @@ export const Sidebar = React.memo<SidebarProps>(({ className, children, currentU
   const handleAddUser = useCallback(async () => {
     const sanitized = sanitizeTextInput(newUsername, { maxLength: 32, allowNewlines: false });
     const username = sanitized.trim();
-    
+
     if (!username || username === currentUsername) return;
-    
+
     if (!validateUsername(username)) {
       setValidationError("Username must be 3-32 characters; letters, numbers, underscore or hyphen only");
       return;
@@ -123,20 +124,20 @@ export const Sidebar = React.memo<SidebarProps>(({ className, children, currentU
   }, []);
 
   const navigationItems = useMemo(() => [
-    { 
-      id: 'messages', 
-      icon: MessageSquare, 
-      label: 'Messages', 
+    {
+      id: 'messages',
+      icon: MessageSquare,
+      label: 'Messages',
       action: () => { setActiveTab('messages'); onActiveTabChange?.('messages'); }
     },
   ], [onActiveTabChange]);
 
   const secondaryItems = useMemo(() => [
-    { 
-      id: 'settings', 
-      icon: Settings, 
-      label: 'Settings', 
-      action: () => { 
+    {
+      id: 'settings',
+      icon: Settings,
+      label: 'Settings',
+      action: () => {
         setActiveTab('settings');
         onActiveTabChange?.('settings');
         window.dispatchEvent(new CustomEvent('openSettings'));
@@ -150,7 +151,7 @@ export const Sidebar = React.memo<SidebarProps>(({ className, children, currentU
     onLogout?.();
   }, [onActiveTabChange, onLogout]);
 
-  const userInitial = useMemo(() => 
+  const userInitial = useMemo(() =>
     currentUsername?.charAt(0).toUpperCase() || "U",
     [currentUsername]
   );
@@ -162,26 +163,20 @@ export const Sidebar = React.memo<SidebarProps>(({ className, children, currentU
       className
     )}>
       {/* Main Sidebar */}
-      <div 
-        className="h-full flex flex-col"
-        style={{
-          backgroundColor: 'var(--color-panel)',
-          borderRight: '1px solid var(--color-border)'
-        }}
+      <div
+        className="h-full flex flex-col bg-card border-r border-border"
       >
         {/* App Logo / Header */}
-        <div className="p-4 border-b" style={{ borderColor: 'var(--color-border)' }}>
+        <div className="p-4 border-b border-border">
           <div className="flex items-center gap-3">
-            <div 
-              className="w-8 h-8 rounded-lg flex items-center justify-center"
-              style={{ backgroundColor: 'var(--color-accent-primary)' }}
+            <div
+              className="w-8 h-8 rounded-lg flex items-center justify-center bg-primary text-primary-foreground"
             >
-              <MessageSquare className="w-5 h-5 text-white" />
+              <MessageSquare className="w-5 h-5" />
             </div>
             {!isCollapsed && (
-              <span 
-                className="font-semibold text-lg"
-                style={{ color: 'var(--color-text-primary)' }}
+              <span
+                className="font-semibold text-lg text-foreground"
               >
                 endtoend
               </span>
@@ -195,40 +190,24 @@ export const Sidebar = React.memo<SidebarProps>(({ className, children, currentU
             {navigationItems.map((item) => {
               const Icon = item.icon;
               const isActive = activeTab === item.id;
-              
+
               return (
                 <button
                   key={item.id}
                   onClick={item.action}
                   className={cn(
                     "w-full flex items-center gap-3 px-3 py-3 rounded-lg transition-all duration-200",
-                    "hover:bg-opacity-80",
-                    isActive ? "bg-opacity-100" : "bg-opacity-0 hover:bg-opacity-10"
+                    "h-[var(--sidebar-item-height)]",
+                    isActive ? "bg-primary text-primary-foreground" : "text-foreground hover:bg-primary/10"
                   )}
-                  style={{
-                    backgroundColor: isActive ? 'var(--color-accent-primary)' : 'transparent',
-                    color: isActive ? 'white' : 'var(--color-text-primary)',
-                    height: 'var(--sidebar-item-height)'
-                  }}
-                  onMouseEnter={(e) => {
-                    if (!isActive) {
-                      e.currentTarget.style.backgroundColor = 'rgba(59, 130, 246, 0.1)';
-                    }
-                  }}
-                  onMouseLeave={(e) => {
-                    if (!isActive) {
-                      e.currentTarget.style.backgroundColor = 'transparent';
-                    }
-                  }}
                 >
                   <Icon size={20} />
                   {!isCollapsed && (
                     <span className="font-medium">{item.label}</span>
                   )}
                   {isActive && (
-                    <div 
-                      className="absolute left-0 w-1 h-6 rounded-r"
-                      style={{ backgroundColor: 'var(--color-accent-secondary)' }}
+                    <div
+                      className="absolute left-0 w-1 h-6 rounded-r bg-secondary"
                     />
                   )}
                 </button>
@@ -238,35 +217,20 @@ export const Sidebar = React.memo<SidebarProps>(({ className, children, currentU
         </div>
 
         {/* Secondary Links */}
-        <div className="border-t px-3 py-4" style={{ borderColor: 'var(--color-border)' }}>
+        <div className="border-t px-3 py-4 border-border">
           {secondaryItems.map((item) => {
             const Icon = item.icon;
             const isActive = activeTab === item.id;
-            
+
             return (
               <button
                 key={item.id}
                 onClick={item.action}
                 className={cn(
                   "w-full flex items-center gap-3 px-3 py-3 rounded-lg transition-all duration-200",
-                  "hover:bg-opacity-80",
-                  isActive ? "bg-opacity-100" : "bg-opacity-0 hover:bg-opacity-10"
+                  "h-[var(--sidebar-item-height)]",
+                  isActive ? "bg-primary text-primary-foreground" : "text-foreground hover:bg-primary/10"
                 )}
-                style={{
-                  backgroundColor: isActive ? 'var(--color-accent-primary)' : 'transparent',
-                  color: isActive ? 'white' : 'var(--color-text-primary)',
-                  height: 'var(--sidebar-item-height)'
-                }}
-                onMouseEnter={(e) => {
-                  if (!isActive) {
-                    e.currentTarget.style.backgroundColor = 'rgba(59, 130, 246, 0.1)';
-                  }
-                }}
-                onMouseLeave={(e) => {
-                  if (!isActive) {
-                    e.currentTarget.style.backgroundColor = 'transparent';
-                  }
-                }}
               >
                 <Icon size={20} />
                 {!isCollapsed && (
@@ -278,25 +242,14 @@ export const Sidebar = React.memo<SidebarProps>(({ className, children, currentU
         </div>
 
         {/* User Profile Area */}
-        <div className="border-t px-3 py-4" style={{ borderColor: 'var(--color-border)' }}>
+        <div className="border-t px-3 py-4 border-border">
           <button
             onClick={handleLogout}
-            className="w-full flex items-center gap-3 px-3 py-3 rounded-lg transition-all duration-200 hover:bg-opacity-10"
-            style={{
-              color: 'var(--color-text-primary)',
-              height: 'var(--sidebar-item-height)'
-            }}
-            onMouseEnter={(e) => {
-              e.currentTarget.style.backgroundColor = 'rgba(239, 68, 68, 0.1)';
-            }}
-            onMouseLeave={(e) => {
-              e.currentTarget.style.backgroundColor = 'transparent';
-            }}
+            className="w-full flex items-center gap-3 px-3 py-3 rounded-lg transition-all duration-200 hover:bg-destructive/10 text-foreground h-[var(--sidebar-item-height)]"
             aria-label="Logout"
           >
-            <div 
-              className="w-8 h-8 rounded-full flex items-center justify-center text-white font-medium text-sm"
-              style={{ backgroundColor: 'var(--color-accent-secondary)' }}
+            <div
+              className="w-8 h-8 rounded-full flex items-center justify-center text-secondary-foreground font-medium text-sm bg-secondary"
               aria-hidden="true"
             >
               {userInitial}
@@ -304,13 +257,12 @@ export const Sidebar = React.memo<SidebarProps>(({ className, children, currentU
             {!isCollapsed && (
               <div className="flex-1 text-left min-w-0 mr-2">
                 <div
-                  className="font-medium text-sm truncate"
-                  style={{ color: 'var(--color-text-primary)' }}
+                  className="font-medium text-sm truncate text-foreground"
                   title={currentUsername || 'User'}
                 >
                   {currentUsername || 'User'}
                 </div>
-                <div className="text-xs truncate" style={{ color: 'var(--color-text-secondary)' }}>
+                <div className="text-xs truncate text-muted-foreground">
                   Click to logout
                 </div>
               </div>
@@ -321,21 +273,21 @@ export const Sidebar = React.memo<SidebarProps>(({ className, children, currentU
       </div>
 
       {showAddUser && (
-        <div 
+        <div
           className="fixed inset-0 bg-black/50 flex items-center justify-center z-50"
           onClick={handleCloseModal}
           role="dialog"
           aria-modal="true"
           aria-labelledby="new-conversation-title"
         >
-          <div 
-            className="bg-white rounded-lg p-6 w-80 shadow-xl"
+          <div
+            className="bg-card rounded-lg p-6 w-80 shadow-xl border border-border"
             onClick={(e) => e.stopPropagation()}
           >
-            <h3 id="new-conversation-title" className="text-lg font-semibold mb-4">Start New Conversation</h3>
+            <h3 id="new-conversation-title" className="text-lg font-semibold mb-4 text-foreground">Start New Conversation</h3>
             <div className="space-y-4">
               <div>
-                <label htmlFor="username-input" className="text-sm text-gray-600 mb-2 block">
+                <label htmlFor="username-input" className="text-sm text-muted-foreground mb-2 block">
                   Enter username to chat with:
                 </label>
                 <Input
@@ -390,7 +342,7 @@ export const Sidebar = React.memo<SidebarProps>(({ className, children, currentU
                   Cancel
                 </Button>
               </div>
-              <div className="text-xs text-gray-500">
+              <div className="text-xs text-muted-foreground">
                 You can message any username. If they're online, they'll receive your message instantly.
               </div>
             </div>
@@ -400,22 +352,16 @@ export const Sidebar = React.memo<SidebarProps>(({ className, children, currentU
 
       {/* Conversations panel - only show when messages tab is active */}
       {activeTab === "messages" && (
-        <div 
+        <div
           className={cn(
-            "fixed top-0 h-full transition-all duration-300 z-30",
+            "fixed top-0 h-full transition-all duration-300 z-30 bg-card border-r border-border shadow-sm",
             isCollapsed ? "left-16 w-80" : "left-60 w-80"
           )}
-          style={{
-            backgroundColor: 'var(--color-surface)',
-            borderRight: '1px solid var(--color-border)',
-            boxShadow: 'var(--shadow-elevation-low)'
-          }}
         >
           <div className="h-full flex flex-col">
-            <div className="p-4 border-b flex items-center justify-between" style={{ borderColor: 'var(--color-border)' }}>
-              <h2 
-                className="text-lg font-semibold"
-                style={{ color: 'var(--color-text-primary)' }}
+            <div className="p-4 border-b flex items-center justify-between border-border">
+              <h2
+                className="text-lg font-semibold text-foreground"
               >
                 Conversations
               </h2>

@@ -136,7 +136,7 @@ export class BlockingSystem {
 
   private secureDbHasKey(): boolean {
     if (!this.secureDB) return false;
-    return Boolean((this.secureDB as unknown as { encryptionKey: CryptoKey | null }).encryptionKey);
+    return this.secureDB.isInitialized();
   }
 
   private getActiveSecureDB(): SecureDB {
@@ -272,20 +272,20 @@ export class BlockingSystem {
     if (typeof username !== 'string' || username.length < 3 || username.length > 128) {
       throw new Error('Invalid username');
     }
-    
+
     if (/[\x00-\x1F\x7F]/.test(username)) {
       throw new Error('Username contains invalid control characters');
     }
-    
+
     const isPseudonym = /^[a-f0-9]{32,}$/i.test(username);
-    
+
     if (isPseudonym) {
       if (username.length > 128) {
         throw new Error('Invalid pseudonymized username length');
       }
       return;
     }
-    
+
     if (!/^(?!__)[a-zA-Z0-9](?:[a-zA-Z0-9._-]*[a-zA-Z0-9])$/.test(username)) {
       throw new Error('Username contains invalid characters');
     }
@@ -441,7 +441,7 @@ export class BlockingSystem {
           throw new Error('Prototype pollution detected in blocked user entry');
         }
         if (!user.username || typeof user.username !== 'string' ||
-            !user.blockedAt || typeof user.blockedAt !== 'number') {
+          !user.blockedAt || typeof user.blockedAt !== 'number') {
           throw new Error('Invalid blocked user entry format');
         }
       }
@@ -466,29 +466,29 @@ export class BlockingSystem {
       const currentUser = await this.getCurrentAuthenticatedUser();
       const storageKey = currentUser ? `blocklist:${currentUser}` : 'blocklist:__global__';
       this.log('loadBlockList.attempt', { currentUser: currentUser?.slice(0, 8), storageKey });
-      
+
       const storedData = await db.retrieve('blockListData', storageKey);
       if (!storedData || typeof storedData !== 'object') {
         this.log('loadBlockList.empty', { storageKey });
         this.cachedBlockList = [];
         return [];
       }
-      
+
       const { blockList, version: _version } = storedData as { blockList: BlockedUser[]; version: number; lastUpdated: number };
-      
+
       if (!Array.isArray(blockList)) {
         this.log('loadBlockList.invalid', { storageKey });
         this.cachedBlockList = [];
         return [];
       }
-      
+
       this.cachedBlockList = blockList;
       this.log('loadBlockList.success', { count: blockList.length });
       this.resetCircuitBreaker();
       return blockList;
     } catch (_error) {
       // On decryption failure, prefer last known cache to avoid UI flicker
-      const msg = error instanceof Error ? error.message : String(error);
+      const msg = _error instanceof Error ? _error.message : String(_error);
       this.log('loadBlockList.error', { error: msg });
       if (this.cachedBlockList !== null) {
         return this.cachedBlockList;
@@ -497,7 +497,7 @@ export class BlockingSystem {
         this.cachedBlockList = [];
         return [];
       }
-      throw error;
+      throw _error;
     }
   }
 
@@ -508,13 +508,13 @@ export class BlockingSystem {
       const currentUser = await this.getCurrentAuthenticatedUser();
       const storageKey = currentUser ? `blocklist:${currentUser}` : 'blocklist:__global__';
       this.log('saveBlockList.attempt', { count: blockList.length, currentUser: currentUser?.slice(0, 8), storageKey });
-      
+
       await db.store('blockListData', storageKey, {
         version: 3,
         blockList,
         lastUpdated: Date.now()
       });
-      
+
       this.cachedBlockList = blockList;
       this.log('saveBlockList.success', { count: blockList.length });
       await this.updateBlockTokens(blockList);
@@ -550,7 +550,7 @@ export class BlockingSystem {
         blockerHash,
         blockTokens: tokens
       });
-      
+
       this.log('updateBlockTokens.sent', { count: tokens.length });
     } catch (error) {
       this.log('updateBlockTokens.error', { error: error instanceof Error ? error.message : String(error) });
@@ -565,7 +565,7 @@ export class BlockingSystem {
         if (last && typeof last === 'string') {
           return last;
         }
-      } catch {}
+      } catch { }
 
       if (this.secureDbHasKey()) {
         try {
@@ -574,7 +574,7 @@ export class BlockingSystem {
           if (stored && typeof stored === 'string') {
             return stored;
           }
-        } catch {}
+        } catch { }
       }
       return null;
     } catch (error) {
@@ -603,14 +603,14 @@ export class BlockingSystem {
       const nonce = CryptoUtils.Base64.base64ToUint8Array(message.nonce);
       const plaintext = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: nonce as BufferSource }, sessionKey, ciphertext as BufferSource);
       const parsed = JSON.parse(decoder.decode(plaintext));
-      
+
       if (!isPlainObject(parsed)) {
         throw new Error('Decrypted message is not a plain object');
       }
       if (hasPrototypePollutionKeys(parsed)) {
         throw new Error('Prototype pollution detected');
       }
-      
+
       return parsed;
     } catch (error) {
       this.log('queue.decrypt.error', { error: error instanceof Error ? error.message : String(error) });
@@ -728,7 +728,7 @@ export class BlockingSystem {
     await this.saveBlockList(blockList, key);
     blockStatusCache.set(username, true);
     this.log('block.success', { username: username.slice(0, 8) + '...', totalBlocked: blockList.length });
-    
+
     window.dispatchEvent(new CustomEvent('block-status-changed', {
       detail: { username, isBlocked: true }
     }));
@@ -747,7 +747,7 @@ export class BlockingSystem {
       await this.saveBlockList(filteredList, key);
       blockStatusCache.set(username, false);
       this.log('unblock.success', { username: username.slice(0, 8) + '...', totalBlocked: filteredList.length });
-      
+
       // Dispatch event to update UI
       window.dispatchEvent(new CustomEvent('block-status-changed', {
         detail: { username, isBlocked: false }
@@ -755,7 +755,7 @@ export class BlockingSystem {
     } else {
       blockStatusCache.set(username, false);
       this.log('unblock.notFound', { username: username.slice(0, 8) + '...' });
-      
+
       window.dispatchEvent(new CustomEvent('block-status-changed', {
         detail: { username, isBlocked: false }
       }));
@@ -768,7 +768,7 @@ export class BlockingSystem {
       const blockList = await this.loadBlockList(key);
       return blockList.some(user => user.username === username);
     } catch (_error) {
-      this.log('isUserBlocked.error', { error: error instanceof Error ? error.message : String(error) });
+      this.log('isUserBlocked.error', { error: _error instanceof Error ? _error.message : String(_error) });
       if (this.cachedBlockList) {
         return this.cachedBlockList.some(user => user.username === username);
       }
@@ -789,7 +789,7 @@ export class BlockingSystem {
       this.log('incoming.invalid', { reason: 'prototype pollution' });
       return false;
     }
-    
+
     const sender = typeof message.sender === 'string' ? message.sender : undefined;
     if (!sender) return true;
 
@@ -827,7 +827,7 @@ export class BlockingSystem {
         this.log('outgoing.invalid', { reason: 'prototype pollution' });
         return null;
       }
-      
+
       const recipient = typeof message.recipient === 'string'
         ? message.recipient
         : typeof message.to === 'string'
@@ -866,7 +866,7 @@ export class BlockingSystem {
     window.dispatchEvent(new CustomEvent('blocked-message', {
       detail: { timestamp: Date.now() }
     }));
-    
+
     // Also show a simple alert for immediate feedback
     alert('Cannot send message to blocked user.');
   }
@@ -947,7 +947,7 @@ export class BlockingSystem {
       try {
         const currentUser = await this.getCurrentAuthenticatedUser();
         storageKey = currentUser ? `encrypted:${currentUser}` : storageKey;
-      } catch {}
+      } catch { }
 
       try {
         const db = this.getActiveSecureDB();

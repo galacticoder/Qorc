@@ -12,11 +12,7 @@ interface SendButtonProps {
 }
 
 export function SendButton({ disabled, isSending, editingMessage, onClick }: SendButtonProps) {
-  const buttonStyle = useMemo(() => ({
-    backgroundColor: disabled ? 'var(--color-disabled)' : 
-      editingMessage ? 'var(--color-warning)' : 'var(--color-accent-primary)',
-    color: 'white'
-  }), [disabled, editingMessage]);
+
 
   const buttonContent = useMemo(() => {
     if (isSending) {
@@ -54,9 +50,9 @@ export function SendButton({ disabled, isSending, editingMessage, onClick }: Sen
       className={cn(
         "h-8 w-8 rounded-full text-white shadow-md transition-all duration-200 flex items-center justify-center flex-shrink-0",
         "focus:outline-none focus:ring-0 focus-visible:ring-0 focus-visible:ring-offset-0",
-        disabled ? "opacity-50 cursor-not-allowed" : ""
+        disabled ? "opacity-50 cursor-not-allowed bg-muted text-muted-foreground" :
+          editingMessage ? "bg-yellow-500 hover:bg-yellow-600 text-white" : "bg-primary hover:bg-primary/90 text-primary-foreground"
       )}
-      style={buttonStyle}
       aria-label={isSending ? "Sending message" : editingMessage ? "Save edit" : "Send message"}
     >
       {buttonContent}

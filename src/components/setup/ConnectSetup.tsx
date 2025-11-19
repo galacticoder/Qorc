@@ -51,11 +51,23 @@ export function ConnectSetup({ onComplete, initialServerUrl = '' }: ConnectSetup
         const initialStatus = await getTorAutoSetup().refreshStatus();
         setStatus(initialStatus);
 
-        // Preferred server: from Electron secure storage or env
         const stored = await (window as any).edgeApi?.getServerUrl?.();
         const storedUrl = typeof stored?.serverUrl === 'string' ? stored.serverUrl : '';
         const envUrl = (import.meta as any)?.env?.VITE_WS_URL || '';
-        const preferred = initialServerUrl || storedUrl || envUrl || '';
+        let preferred = initialServerUrl || '';
+        if (!preferred) {
+          try {
+            const storedHost = storedUrl ? new URL(storedUrl).hostname : '';
+            const envHost = envUrl ? new URL(envUrl).hostname : '';
+            if (envHost && (storedHost === 'localhost' || storedHost === '127.0.0.1' || storedHost === '::1')) {
+              preferred = envUrl || storedUrl || '';
+            } else {
+              preferred = storedUrl || envUrl || '';
+            }
+          } catch {
+            preferred = storedUrl || envUrl || '';
+          }
+        }
         if (preferred) {
           setCustomServerUrl(preferred);
         }

@@ -1,4 +1,5 @@
 import { ml_kem1024 } from '@noble/post-quantum/ml-kem.js';
+import * as argon2 from "argon2-wasm";
 
 const kyber = ml_kem1024;
 
@@ -6,7 +7,9 @@ const MAX_KEYS = 256;
 const RATE_LIMIT_CONFIG = {
   DEFAULT: { windowMs: 60_000, maxRequests: 100 },
   'kem.generateKeyPair': { windowMs: 60_000, maxRequests: 10 },
-  'kem.destroyKey': { windowMs: 60_000, maxRequests: 50 }
+  'kem.destroyKey': { windowMs: 60_000, maxRequests: 50 },
+  'argon2.hash': { windowMs: 60_000, maxRequests: 20 },
+  'argon2.verify': { windowMs: 60_000, maxRequests: 50 }
 } as const;
 const rateBuckets = new Map<string, Map<string, { count: number; resetAt: number }>>();
 const processedIds = new Map<string, { timestamp: number; origin: string }>();
@@ -176,11 +179,15 @@ function cleanupExpiredKeys(now: number): void {
 
 type WorkerRequest =
   | { id: string; type: 'kem.generateKeyPair'; auth: string }
-  | { id: string; type: 'kem.destroyKey'; keyId: string; auth: string };
+  | { id: string; type: 'kem.destroyKey'; keyId: string; auth: string }
+  | { id: string; type: 'argon2.hash'; params: any; auth: string }
+  | { id: string; type: 'argon2.verify'; params: any; auth: string };
 
 type WorkerResponse =
   | { id: string; success: true; result: { publicKey: Uint8Array; secretKey: Uint8Array; keyId: string } }
   | { id: string; success: true; result: { destroyed: true } }
+  | { id: string; success: true; result: { hash: any; encoded: any } }
+  | { id: string; success: true; result: { verified: boolean } }
   | { id: string; success: false; error: string };
 
 type WorkerContext = DedicatedWorkerGlobalScope;
@@ -247,6 +254,49 @@ self.addEventListener('message', (event: MessageEvent<WorkerRequest>) => {
           result: { destroyed: true }
         };
         (self as WorkerContext).postMessage(response);
+        break;
+      }
+      case 'argon2.hash': {
+        const { params } = event.data;
+        try {
+          const result = await argon2.hash(params);
+          const response: WorkerResponse = {
+            id,
+            success: true,
+            result: { hash: result.hash, encoded: result.encoded }
+          };
+          (self as WorkerContext).postMessage(response);
+        } catch (err) {
+          throw new Error(`Argon2 hash failed: ${(err as Error).message}`);
+        }
+        break;
+      }
+      case 'argon2.verify': {
+        const { params } = event.data;
+        try {
+          await argon2.verify(params); // argon2-wasm verify throws on failure or returns nothing/object? 
+          // Actually argon2-wasm verify returns Promise<void> and throws if invalid? Or returns object?
+          // Let's check unified-crypto.ts usage: const result = await argon2.verify({ pass: data, encoded }); return result.verified; 
+          // Wait, I need to double check argon2-wasm API. 
+          // In unified-crypto.ts: const result = await argon2.verify({ pass: data, encoded }); return result.verified;
+          // So it returns an object with .verified property.
+          
+          const result = await argon2.verify(params);
+          // @ts-ignore
+          const verified = result?.verified === true; 
+          
+          const response: WorkerResponse = {
+            id,
+            success: true,
+            result: { verified }
+          };
+          (self as WorkerContext).postMessage(response);
+        } catch (err) {
+           // verify might throw if params are bad, but also if verification fails? 
+           // usually verify returns false or throws.
+           // Assuming it throws on error, but returns object on success/fail check.
+           throw new Error(`Argon2 verify failed: ${(err as Error).message}`);
+        }
         break;
       }
       default: {

@@ -67,7 +67,7 @@ const FILE_SIZE_BASE = 1024;
 export const formatFileSize = (bytes: number): string => {
   if (bytes === 0) return "0 Bytes";
   if (bytes < 0 || !Number.isFinite(bytes)) return "Unknown";
-  
+
   const i = Math.min(
     Math.floor(Math.log(bytes) / Math.log(FILE_SIZE_BASE)),
     FILE_SIZE_UNITS.length - 1
@@ -100,7 +100,7 @@ export function FileContent({ message, isCurrentUser }: FileContentProps) {
     if (!content) return;
     try {
       createDownloadLink(content, filename || 'download');
-    } catch {}
+    } catch { }
   }, [content, filename]);
 
   const handleDownload = useCallback(async (e: React.MouseEvent): Promise<void> => {
@@ -166,10 +166,13 @@ export function FileContent({ message, isCurrentUser }: FileContentProps) {
               <span className="text-xs text-muted-foreground">({formatFileSize(fileSize ?? 0)})</span>
               <button
                 onClick={handleDownload}
-                className="text-blue-500 hover:text-blue-700"
+                className={cn(
+                  "hover:scale-110 transition-transform duration-100 ease-in-out",
+                  isCurrentUser ? "text-white hover:text-white/80" : "text-blue-500 hover:text-blue-700"
+                )}
                 title="Download"
               >
-                <DownloadIcon className="w-5 h-5 hover:scale-110 transition-transform duration-100 ease-in-out" />
+                <DownloadIcon className="w-5 h-5" />
               </button>
             </div>
           </div>
@@ -190,7 +193,10 @@ export function FileContent({ message, isCurrentUser }: FileContentProps) {
               Your browser does not support the audio element.
             </audio>
 
-            <div className="flex justify-between items-center gap-1 text-sm text-blue-500">
+            <div className={cn(
+              "flex justify-between items-center gap-1 text-sm",
+              isCurrentUser ? "text-white" : "text-blue-500"
+            )}>
               <span className="truncate max-w-[250px] ml-1" title={filename}>
                 {filename}
               </span>
@@ -212,7 +218,10 @@ export function FileContent({ message, isCurrentUser }: FileContentProps) {
             isCurrentUser ? "bg-primary text-primary-foreground" : "bg-muted"
           )}
         >
-          <div className="flex items-start gap-2 w-full text-blue-500">
+          <div className={cn(
+            "flex items-start gap-2 w-full",
+            isCurrentUser ? "text-white" : "text-blue-500"
+          )}>
             <PaperclipIcon className="h-5 w-5 shrink-0 mt-1" />
             <div className="flex flex-col min-w-0">
               <div className="flex justify-between items-center gap-2">
@@ -223,7 +232,10 @@ export function FileContent({ message, isCurrentUser }: FileContentProps) {
                   <DownloadIcon className="w-5 h-5 hover:scale-110 transition-transform duration-100 ease-in-out" />
                 </button>
               </div>
-              <span className="text-xs text-muted-foreground leading-tight">({formatFileSize(fileSize ?? 0)})</span>
+              <span className={cn(
+                "text-xs leading-tight",
+                isCurrentUser ? "text-white/80" : "text-muted-foreground"
+              )}>({formatFileSize(fileSize ?? 0)})</span>
             </div>
           </div>
         </div>
@@ -238,7 +250,7 @@ export function FileMessage({ message, isCurrentUser, onReply, onDelete }: FileM
   useEffect(() => {
     if (typeof content === 'string' && content.startsWith('blob:')) {
       return () => {
-        try { URL.revokeObjectURL(content); } catch {}
+        try { URL.revokeObjectURL(content); } catch { }
       };
     }
     return undefined;
@@ -251,13 +263,13 @@ export function FileMessage({ message, isCurrentUser, onReply, onDelete }: FileM
     } catch {
       try {
         window.open(content, '_blank', 'noopener,noreferrer');
-      } catch {}
+      } catch { }
     }
   }, [content, filename]);
 
   const handleDownload = useCallback(async (e: React.MouseEvent): Promise<void> => {
     e.preventDefault();
-    
+
     if (window.electronAPI?.isElectron && originalBase64Data && filename) {
       try {
         const base64Data = extractBase64Data(originalBase64Data);
@@ -266,7 +278,7 @@ export function FileMessage({ message, isCurrentUser, onReply, onDelete }: FileM
           data: base64Data,
           mimeType: mimeType || 'application/octet-stream'
         });
-        
+
         if (!result.success && !result.canceled) {
           fallbackDownload();
         }
@@ -343,10 +355,13 @@ export function FileMessage({ message, isCurrentUser, onReply, onDelete }: FileM
                 <span className="text-xs text-muted-foreground">({formatFileSize(fileSize ?? 0)})</span>
                 <button
                   onClick={handleDownload}
-                  className="text-blue-500 hover:text-blue-700"
+                  className={cn(
+                    "hover:scale-110 transition-transform duration-100 ease-in-out",
+                    isCurrentUser ? "text-white hover:text-white/80" : "text-blue-500 hover:text-blue-700"
+                  )}
                   title="Download"
                 >
-                  <DownloadIcon className="w-5 h-5 hover:scale-110 transition-transform duration-100 ease-in-out" />
+                  <DownloadIcon className="w-5 h-5" />
                 </button>
               </div>
             </div>
@@ -366,7 +381,10 @@ export function FileMessage({ message, isCurrentUser, onReply, onDelete }: FileM
                 Your browser does not support the audio element.
               </audio>
 
-              <div className="flex justify-between items-center gap-1 text-sm text-blue-500">
+              <div className={cn(
+                "flex justify-between items-center gap-1 text-sm",
+                isCurrentUser ? "text-white" : "text-blue-500"
+              )}>
                 <span className="truncate max-w-[250px] ml-1" title={filename}>
                   {filename}
                 </span>
@@ -387,7 +405,10 @@ export function FileMessage({ message, isCurrentUser, onReply, onDelete }: FileM
               isCurrentUser ? "bg-primary text-primary-foreground" : "bg-muted"
             )}
           >
-            <div className="flex items-start gap-2 w-full text-blue-500">
+            <div className={cn(
+              "flex items-start gap-2 w-full",
+              isCurrentUser ? "text-white" : "text-blue-500"
+            )}>
               <PaperclipIcon className="h-5 w-5 shrink-0 mt-1" />
               <div className="flex flex-col min-w-0">
                 <div className="flex justify-between items-center gap-2">
@@ -398,7 +419,10 @@ export function FileMessage({ message, isCurrentUser, onReply, onDelete }: FileM
                     <DownloadIcon className="w-5 h-5 hover:scale-110 transition-transform duration-100 ease-in-out" />
                   </button>
                 </div>
-                <span className="text-xs text-muted-foreground leading-tight">({formatFileSize(fileSize ?? 0)})</span>
+                <span className={cn(
+                  "text-xs leading-tight",
+                  isCurrentUser ? "text-white/80" : "text-muted-foreground"
+                )}>({formatFileSize(fileSize ?? 0)})</span>
               </div>
             </div>
           </div>

@@ -29,15 +29,12 @@ export function MessageTextarea({ value, onChange, onKeyDown, textareaRef, disab
       placeholder={disabled ? "Messages disabled" : "Type a message..."}
       disabled={disabled}
       className={cn(
-        "min-h-[39px] max-h-[100px] resize-none border-0 bg-transparent px-0 py-2 text-sm",
+        "min-h-[39px] max-h-[100px] resize-none border-0 bg-transparent px-0 py-2 text-sm select-none",
         "focus-visible:ring-0 focus-visible:ring-offset-0 focus:outline-none focus:ring-0 focus:border-transparent",
         disabled && "opacity-50 cursor-not-allowed"
       )}
       aria-label="Message input"
-      style={{
-        color: 'var(--composer-text-color)',
-        backgroundColor: 'transparent'
-      }}
+
       rows={1}
     />
   );

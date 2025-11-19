@@ -83,6 +83,10 @@ export class SecureDB {
     }
   }
 
+  isInitialized(): boolean {
+    return this.encryptionKey !== null;
+  }
+
   private async encryptData(data: unknown): Promise<Uint8Array> {
     if (!this.encryptionKey) throw new Error('Encryption key not initialized');
     const keyBytes = await crypto.subtle.exportKey('raw', this.encryptionKey);
@@ -293,7 +297,7 @@ export class SecureDB {
 
   // Ephemeral ---------------------------------------------------------------
 
-  async storeEphemeral(storeName: string, keyOrData: any, maybeData?: unknown, ttl?: number, autoDelete = true): Promise<void>;
+  async storeEphemeral(storeName: string, keyOrData: any, maybeData?: unknown, ttl?: number, autoDelete?: boolean): Promise<void>;
   async storeEphemeral(storeName: string, key: string, data: unknown, ttl?: number, autoDelete?: boolean): Promise<void>;
   async storeEphemeral(storeName: string, a: any, b?: any, ttl?: number, autoDelete = true): Promise<void> {
     if (!this.ephemeralConfig.enabled) {
@@ -355,7 +359,7 @@ export class SecureDB {
             const arr = toDeleteByStore.get(store) || []; arr.push(key); toDeleteByStore.set(store, arr);
             if (arr.length >= this.MAX_EPHEMERAL_BATCH) { await kv.deleteMany(store, arr.splice(0, arr.length)); }
           }
-        } catch {}
+        } catch { }
       }
       for (const [store, keys] of toDeleteByStore.entries()) if (keys.length) await kv.deleteMany(store, keys);
     } catch (error) {
@@ -425,7 +429,7 @@ export class SecureDB {
       const entries = await (await this.kv()).entriesForStore('username_mappings');
       const out: Array<{ hashed: string; original: string }> = [];
       for (const { key, value } of entries) {
-        try { const original = await this.decryptData(value); if (typeof original === 'string') out.push({ hashed: key, original }); } catch {}
+        try { const original = await this.decryptData(value); if (typeof original === 'string') out.push({ hashed: key, original }); } catch { }
       }
       return out;
     } catch (error) {

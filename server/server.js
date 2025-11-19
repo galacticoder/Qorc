@@ -114,6 +114,50 @@ async function createExpressApp() {
       res.status(500).type('text/plain').send('Server error');
     }
   });
+
+  app.get('/api/ice/config', (req, res) => {
+    try {
+      const turnRaw = process.env.TURN_SERVERS || '';
+      const stunRaw = process.env.STUN_SERVERS || '';
+      let turnServers = null;
+      let stunServers = null;
+      if (turnRaw) {
+        try {
+          const parsed = JSON.parse(turnRaw);
+          if (Array.isArray(parsed)) turnServers = parsed;
+        } catch {}
+      }
+      if (stunRaw) {
+        try {
+          const parsed = JSON.parse(stunRaw);
+          if (Array.isArray(parsed)) stunServers = parsed;
+        } catch {}
+      }
+      const iceServers = [];
+      if (stunServers && Array.isArray(stunServers)) {
+        for (const url of stunServers) {
+          if (typeof url === 'string' && url.startsWith('stun:')) {
+            iceServers.push({ urls: url });
+          }
+        }
+      }
+      if (turnServers && Array.isArray(turnServers)) {
+        for (const entry of turnServers) {
+          if (!entry) continue;
+          const urls = entry.urls;
+          const hasUrls = Array.isArray(urls) ? urls.length > 0 : typeof urls === 'string';
+          if (!hasUrls) continue;
+          if (!entry.username || !entry.credential) continue;
+          iceServers.push(entry);
+        }
+      }
+      const iceTransportPolicy = process.env.ICE_TRANSPORT_POLICY === 'relay' ? 'relay' : 'all';
+      res.json({ iceServers, iceTransportPolicy });
+    } catch (error) {
+      logError(error, { endpoint: '/api/ice/config' });
+      res.status(500).json({ error: 'ICE configuration error' });
+    }
+  });
   
   // Serve static frontend files
   const distPath = path.join(process.cwd(), '../dist');

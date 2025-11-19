@@ -1,12 +1,13 @@
 import * as argon2 from "argon2-wasm";
 import { blake3 as nobleBlake3 } from "@noble/hashes/blake3.js";
 import { x25519 } from "@noble/curves/ed25519.js";
-import { 
-  KEM as PostQuantumKEM, 
-  Signature as PostQuantumSignature, 
+import {
+  KEM as PostQuantumKEM,
+  Signature as PostQuantumSignature,
   Hash as PostQuantumHash,
   AEAD as PostQuantumAEAD,
-  Random as PostQuantumRandom
+  Random as PostQuantumRandom,
+  PostQuantumWorker
 } from "./post-quantum-crypto";
 import { SecureMemory } from "./secure-memory";
 import { gcm } from "@noble/ciphers/aes.js";
@@ -81,7 +82,7 @@ class Base64 {
   }
 
   static base64ToArrayBuffer(base64: string): ArrayBuffer {
-    return this.base64ToUint8Array(base64).buffer;
+    return this.base64ToUint8Array(base64).buffer as ArrayBuffer;
   }
 
   static stringToArrayBuffer(str: string): ArrayBuffer {
@@ -120,12 +121,10 @@ class DilithiumService {
 }
 
 // Convert Argon2 algorithm string to enum value
+// Enforce Argon2id only
 function mapArgon2Algorithm(algorithm: string | number): number {
-  if (typeof algorithm === "number") return algorithm;
-  const algMap: Record<string, number> = { argon2d: 0, argon2i: 1, argon2id: 2 };
-  const result = algMap[algorithm.toLowerCase()];
-  if (result === undefined) throw new Error(`Unknown Argon2 algorithm: ${algorithm}`);
-  return result;
+  if (algorithm === 2 || algorithm === 'argon2id') return 2;
+  throw new Error('Only Argon2id is supported for maximum security');
 }
 
 class HashingService {
@@ -136,7 +135,7 @@ class HashingService {
     if (encodedHash.length > 512) {
       throw new Error("Hash too long - potential DoS attack");
     }
-    
+
     const parts = encodedHash.split("$");
     if (parts.length !== 6) {
       throw new Error("Invalid Argon2 encoded hash format - wrong number of parts");
@@ -149,7 +148,7 @@ class HashingService {
     if (!versionPart || !versionPart.includes("=")) {
       throw new Error("Invalid version format");
     }
-    
+
     const version = parseInt(versionPart.split("=")[1], 10);
     if (Number.isNaN(version) || version < 0x10 || version > 0x13) {
       throw new Error("Invalid Argon2 version");
@@ -158,7 +157,7 @@ class HashingService {
     if (!paramsPart) {
       throw new Error("Missing parameters");
     }
-    
+
     const params: Record<string, number> = {};
     paramsPart.split(",").forEach((param) => {
       const equalIndex = param.indexOf("=");
@@ -184,7 +183,7 @@ class HashingService {
     if (!saltB64 || !hashB64) {
       throw new Error("Missing salt or hash");
     }
-    
+
     let hashBytes: Uint8Array;
     try {
       hashBytes = Uint8Array.from(atob(hashB64), (c) => c.charCodeAt(0));
@@ -194,7 +193,7 @@ class HashingService {
     if (hashBytes.length < 16 || hashBytes.length > 128) {
       throw new Error("Invalid hash length");
     }
-    
+
     return {
       version,
       algorithm,
@@ -233,7 +232,7 @@ class HashingService {
       hashLen: 32
     };
 
-    const result = await argon2.hash(opts);
+    const result = await PostQuantumWorker.argon2Hash(opts);
     return result.encoded;
   }
 
@@ -261,7 +260,7 @@ class HashingService {
     };
 
     return Promise.race([
-      argon2.hash(opts).then((res) => {
+      PostQuantumWorker.argon2Hash(opts).then((res) => {
         if (!res || !res.encoded) {
           throw new Error("Argon2 hash operation failed");
         }
@@ -274,8 +273,8 @@ class HashingService {
   }
 
   static async verifyHash(encoded: string, data: string) {
-    const result = await argon2.verify({ pass: data, encoded });
-    return result.verified;
+    const verified = await PostQuantumWorker.argon2Verify({ pass: data, encoded });
+    return verified;
   }
 
   static async generateBlake3Mac(message: Uint8Array, key: Uint8Array): Promise<Uint8Array> {
@@ -341,7 +340,7 @@ class HashingService {
       hashLen
     };
 
-    const result = await argon2.hash(hashOptions);
+    const result = await PostQuantumWorker.argon2Hash(hashOptions);
     return result.hash;
   }
 }
@@ -358,7 +357,7 @@ class KeyService {
     if (!subtle) {
       throw new Error("SubtleCrypto not available");
     }
-    const rawKey = keyBytes instanceof Uint8Array ? keyBytes.buffer : keyBytes;
+    const rawKey = keyBytes instanceof Uint8Array ? keyBytes.buffer as ArrayBuffer : keyBytes;
     return await subtle.importKey("raw", rawKey, { name: algorithm, length: 256 }, true, ["encrypt", "decrypt"]);
   }
 
@@ -408,7 +407,7 @@ class KeyService {
       hashLen
     };
 
-    const result = await argon2.hash(hashOptions);
+    const result = await PostQuantumWorker.argon2Hash(hashOptions);
     const rawKeyBytes = result.hash;
     const aesKey = await this.importAESKey(rawKeyBytes);
     return {
@@ -423,7 +422,10 @@ class KeyService {
 }
 
 class KyberService {
-  static generateKeyPair() {
+  static async generateKeyPair() {
+    if (PostQuantumWorker.supportsWorkers()) {
+      return await PostQuantumWorker.generateKemKeyPair();
+    }
     return PostQuantumKEM.generateKeyPair();
   }
 
@@ -463,7 +465,7 @@ class KDF {
       hashLen: options.hashLen
     };
 
-    const result = await argon2.hash(hashOptions);
+    const result = await PostQuantumWorker.argon2Hash(hashOptions);
     return result.hash;
   }
 
@@ -484,13 +486,13 @@ class KDF {
         input[input.length - 1] = i;
 
         const newT = await HashingService.generateBlake3Mac(input, prk);
-        
+
         // Securely zero old t before replacing
         if (t.length > 0) {
-          SecureMemory.zeroBuffer(t);
+          SecureMemory.zeroBuffer(t as Uint8Array);
         }
         t = newT;
-        
+
         const copyLen = Math.min(hashLen, outLen - outputOffset);
         output.set(t.subarray(0, copyLen), outputOffset);
         outputOffset += copyLen;
@@ -510,9 +512,9 @@ class KDF {
     if (!subtle) {
       throw new Error("SubtleCrypto not available");
     }
-    const baseKey = await subtle.importKey("raw", ikm, { name: "HKDF" }, false, ["deriveKey"]);
+    const baseKey = await subtle.importKey("raw", ikm.buffer as ArrayBuffer, { name: "HKDF" }, false, ["deriveKey"]);
     const derivedKey = await subtle.deriveKey(
-      { name: "HKDF", hash: CryptoConfig.HKDF_HASH, salt, info: context ? textEncoder.encode(context) : CryptoConfig.HKDF_INFO },
+      { name: "HKDF", hash: CryptoConfig.HKDF_HASH, salt: salt.buffer as ArrayBuffer, info: context ? textEncoder.encode(context).buffer as ArrayBuffer : CryptoConfig.HKDF_INFO.buffer as ArrayBuffer },
       baseKey,
       { name: "AES-GCM", length: CryptoConfig.AES_KEY_SIZE },
       false,
@@ -538,7 +540,7 @@ export class AES {
     if (aad && aad.byteLength) {
       (params as any).additionalData = aad;
     }
-    const ciphertextWithTag = new Uint8Array(await subtle.encrypt(params, aesKey, data));
+    const ciphertextWithTag = new Uint8Array(await subtle.encrypt(params, aesKey, data.buffer as ArrayBuffer));
     const authTag = ciphertextWithTag.slice(-CryptoConfig.AUTH_TAG_LENGTH);
     const encrypted = ciphertextWithTag.slice(0, -CryptoConfig.AUTH_TAG_LENGTH);
     return { iv, authTag, encrypted };
@@ -550,7 +552,7 @@ export class AES {
       (params as any).additionalData = aad;
     }
     const ciphertextWithTag = concatUint8Arrays(encrypted, authTag);
-    const plaintext = new Uint8Array(await subtle.decrypt(params, aesKey, ciphertextWithTag));
+    const plaintext = new Uint8Array(await subtle.decrypt(params, aesKey, ciphertextWithTag.buffer as ArrayBuffer));
     return plaintext;
   }
 
@@ -820,12 +822,12 @@ function normalizePayload(payload: unknown): NormalizedPayload {
 function concatUint8Arrays(...arrays: Uint8Array[]): Uint8Array {
   if (arrays.length === 0) return new Uint8Array(0);
   if (arrays.length === 1) return new Uint8Array(arrays[0]);
-  
+
   let totalLength = 0;
   for (let i = 0; i < arrays.length; i++) {
     totalLength += arrays[i].length;
   }
-  
+
   const out = new Uint8Array(totalLength);
   let offset = 0;
   for (let i = 0; i < arrays.length; i++) {
@@ -871,7 +873,7 @@ export async function verifyRoutingHeader(
 ): Promise<boolean> {
   const signature = Base64.base64ToUint8Array(signatureBase64);
   const publicKey = ensureUint8Array(dilithiumPublicKey, "dilithiumPublicKey");
-  
+
   try {
     const message = textEncoder.encode(canonicalizeRoutingHeader(header));
     return await DilithiumService.verify(signature, message, publicKey);
@@ -883,13 +885,13 @@ export async function verifyRoutingHeader(
 function deriveOuterKeys(sharedSecret: Uint8Array, salt: Uint8Array, routingDigest: Uint8Array) {
   const info = `outer-envelope:${Base64.arrayBufferToBase64(routingDigest)}`;
   const okm = PostQuantumHash.deriveKey(sharedSecret, salt, info, 64);
-  
+
   // Efficient key material split with proper copying
   const outerKey = new Uint8Array(32);
   const outerMacKey = new Uint8Array(32);
   outerKey.set(okm.subarray(0, 32));
   outerMacKey.set(okm.subarray(32, 64));
-  
+
   SecureMemory.zeroBuffer(okm);
   return { outerKey, outerMacKey };
 }
@@ -901,10 +903,11 @@ async function deriveInnerKeyMaterial(
   routingDigest: Uint8Array
 ) {
   const info = `inner-envelope:${Base64.arrayBufferToBase64(routingDigest)}`;
-  const combined = new Uint8Array(pqSharedSecret.length);
-  for (let i = 0; i < pqSharedSecret.length; i++) {
-    combined[i] = pqSharedSecret[i] ^ classicalSharedSecret[i % classicalSharedSecret.length];
-  }
+  // Use concatenation instead of XOR for better hybrid security (NIST SP 800-56C)
+  const combined = new Uint8Array(pqSharedSecret.length + classicalSharedSecret.length);
+  combined.set(pqSharedSecret, 0);
+  combined.set(classicalSharedSecret, pqSharedSecret.length);
+
   const okm = PostQuantumHash.deriveKey(combined, salt, info, 64);
   const encKey = new Uint8Array(32);
   const macKey = new Uint8Array(32);
@@ -938,9 +941,9 @@ function generateEphemeralX25519() {
     return { secretKey: clamped, publicKey: new Uint8Array(publicKey) };
   } catch (_e) {
     try {
-      const secretKey = x25519.utils.randomPrivateKey();
-      const publicKey = x25519.getPublicKey(secretKey);
-      return { secretKey: new Uint8Array(secretKey), publicKey: new Uint8Array(publicKey) };
+      const ephemeralPrivate = x25519.utils.randomSecretKey();
+      const publicKey = x25519.getPublicKey(ephemeralPrivate);
+      return { secretKey: new Uint8Array(ephemeralPrivate), publicKey: new Uint8Array(publicKey) };
     } catch (e2) {
       throw new Error('Failed to generate X25519 ephemeral keypair: ' + (e2 as any)?.message);
     }
@@ -1052,11 +1055,11 @@ class Hybrid {
     try {
       const innerPayloadBytes = textEncoder.encode(JSON.stringify(innerLayer));
       const outerNonce = PostQuantumRandom.randomBytes(24);
-      
+
       const outerIv = outerNonce.slice(0, 12);
       const outerCipher = gcm(outerKey, outerIv, routingDigest);
       const outerEncryptedWithTag = outerCipher.encrypt(innerPayloadBytes);
-      
+
       // Extract ciphertext and GCM tag
       const outerCiphertext = outerEncryptedWithTag.slice(0, -16);
       const outerTag = outerEncryptedWithTag.slice(-16);
@@ -1146,7 +1149,7 @@ class Hybrid {
 
     const header = envelope.routing;
     const routingDigest = computeRoutingDigest(header);
-    
+
     const signatureValid = await verifyRoutingHeader(header, envelope.routingSignature.signature, senderPublicKey);
     if (!signatureValid) {
       throw new Error("Routing header signature verification failed");

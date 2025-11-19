@@ -4,7 +4,7 @@
   --color-background: #ffffff;
   --color-surface: #f8fafc;
   --color-panel: #f1f5f9;
-  --color-muted-panel: #e2e8f0;
+  --color-muted-panel: #d1d9e3;
   --color-text-primary: #0f172a;
   --color-text-secondary: #475569;
   --color-accent-primary: #3b82f6;
@@ -12,6 +12,10 @@
   --color-border: #cbd5e1;
   --color-success: #10b981;
   --color-disabled: #94a3b8;
+
+  /* Typing Indicator */
+  --color-typing-bubble: #d1d9e3fb;
+  --color-typing-dot: #8b95a3;
 
   /* Markdown Content Colors (Light mode) */
   --markdown-header-color: var(--color-text-primary);
@@ -28,24 +32,30 @@
   --font-weight-regular: 400;
   --font-weight-medium: 500;
   --font-weight-bold: 600;
-  
+
   --font-size-display: 2rem;
   --font-size-heading: 1.25rem;
   --font-size-body: 0.875rem;
   --font-size-caption: 0.75rem;
   --font-size-ui-small: 0.6875rem;
-  
+
   --line-height-display: 1.2;
   --line-height-body: 1.5;
 
   /* Spacing */
   --spacing-base: 4px;
-  --spacing-xxs: calc(var(--spacing-base) * 1); /* 4px */
-  --spacing-xs: calc(var(--spacing-base) * 2); /* 8px */
-  --spacing-sm: calc(var(--spacing-base) * 3); /* 12px */
-  --spacing-md: calc(var(--spacing-base) * 4); /* 16px */
-  --spacing-lg: calc(var(--spacing-base) * 6); /* 24px */
-  --spacing-xl: calc(var(--spacing-base) * 8); /* 32px */
+  --spacing-xxs: calc(var(--spacing-base) * 1);
+  /* 4px */
+  --spacing-xs: calc(var(--spacing-base) * 2);
+  /* 8px */
+  --spacing-sm: calc(var(--spacing-base) * 3);
+  /* 12px */
+  --spacing-md: calc(var(--spacing-base) * 4);
+  /* 16px */
+  --spacing-lg: calc(var(--spacing-base) * 6);
+  /* 24px */
+  --spacing-xl: calc(var(--spacing-base) * 8);
+  /* 32px */
 
   /* Radius */
   --radius-small: 6px;
@@ -60,30 +70,30 @@
   --grid-columns: 12;
   --grid-gutter: var(--spacing-md);
   --max-content-width: 1200px;
-  
+
   /* Desktop Layout */
   --sidebar-width: 240px;
   --list-column-width: 320px;
   --main-content-padding: 0;
   --main-content-max-width: none;
-  
+
   /* Component Specific */
   --sidebar-item-height: 48px;
   --sidebar-icon-size: 20px;
   --avatar-size-small: 32px;
   --avatar-size-medium: 40px;
   --avatar-size-large: 48px;
-  
+
   /* Message Bubbles */
   --message-bubble-max-width: 65%;
   --message-bubble-radius: var(--radius-medium);
-  
+
   /* Composer */
   --composer-height: 56px;
   --composer-input-bg: var(--color-surface);
   --composer-text-color: var(--color-text-primary);
   --composer-placeholder-color: var(--color-text-secondary);
-  
+
   /* Responsive Breakpoints */
   --breakpoint-small: 768px;
   --breakpoint-medium: 1024px;
@@ -104,6 +114,10 @@
   --color-border: #334155;
   --color-success: #10b981;
   --color-disabled: #475569;
+
+  /* Typing Indicator - Dark Mode */
+  --color-typing-bubble: rgba(30, 41, 59, 0.901);
+  --color-typing-dot: #64748b;
 
   /* Dark mode markdown colors */
   --markdown-header-color: var(--color-text-primary);
@@ -153,11 +167,11 @@
     --main-content-padding: var(--spacing-md);
     --message-bubble-max-width: 85%;
   }
-  
+
   .mobile-hide {
     display: none !important;
   }
-  
+
   .mobile-full-width {
     width: 100vw !important;
     left: 0 !important;
@@ -172,41 +186,88 @@
 }
 
 /* Component Classes */
-.design-token-bg { background-color: var(--color-background); }
-.design-token-surface { background-color: var(--color-surface); }
-.design-token-panel { background-color: var(--color-panel); }
-.design-token-muted-panel { background-color: var(--color-muted-panel); }
-.design-token-text-primary { color: var(--color-text-primary); }
-.design-token-text-secondary { color: var(--color-text-secondary); }
-.design-token-accent-primary { background-color: var(--color-accent-primary); }
-.design-token-accent-secondary { background-color: var(--color-accent-secondary); }
-.design-token-border { border-color: var(--color-border); }
+.design-token-bg {
+  background-color: var(--color-background);
+}
 
-.design-token-font-body { 
+.design-token-surface {
+  background-color: var(--color-surface);
+}
+
+.design-token-panel {
+  background-color: var(--color-panel);
+}
+
+.design-token-muted-panel {
+  background-color: var(--color-muted-panel);
+}
+
+.design-token-text-primary {
+  color: var(--color-text-primary);
+}
+
+.design-token-text-secondary {
+  color: var(--color-text-secondary);
+}
+
+.design-token-accent-primary {
+  background-color: var(--color-accent-primary);
+}
+
+.design-token-accent-secondary {
+  background-color: var(--color-accent-secondary);
+}
+
+.design-token-border {
+  border-color: var(--color-border);
+}
+
+.design-token-font-body {
   font-family: var(--font-family);
   font-size: var(--font-size-body);
   line-height: var(--line-height-body);
 }
 
-.design-token-font-caption { 
+.design-token-font-caption {
   font-family: var(--font-family);
   font-size: var(--font-size-caption);
   line-height: var(--line-height-body);
 }
 
-.design-token-font-heading { 
+.design-token-font-heading {
   font-family: var(--font-family);
   font-size: var(--font-size-heading);
   font-weight: var(--font-weight-medium);
 }
 
-.design-token-spacing-sm { padding: var(--spacing-sm); }
-.design-token-spacing-md { padding: var(--spacing-md); }
-.design-token-spacing-lg { padding: var(--spacing-lg); }
+.design-token-spacing-sm {
+  padding: var(--spacing-sm);
+}
 
-.design-token-radius-small { border-radius: var(--radius-small); }
-.design-token-radius-medium { border-radius: var(--radius-medium); }
-.design-token-radius-pill { border-radius: var(--radius-pill); }
+.design-token-spacing-md {
+  padding: var(--spacing-md);
+}
 
-.design-token-shadow-low { box-shadow: var(--shadow-elevation-low); }
-.design-token-shadow-high { box-shadow: var(--shadow-elevation-high); }
+.design-token-spacing-lg {
+  padding: var(--spacing-lg);
+}
+
+.design-token-radius-small {
+  border-radius: var(--radius-small);
+}
+
+.design-token-radius-medium {
+  border-radius: var(--radius-medium);
+}
+
+.design-token-radius-pill {
+  border-radius: var(--radius-pill);
+}
+
+.design-token-shadow-low {
+  box-shadow: var(--shadow-elevation-low);
+}
+
+.design-token-shadow-high {
+  box-shadow: var(--shadow-elevation-high);
+}

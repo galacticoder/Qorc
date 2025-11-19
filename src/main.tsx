@@ -56,7 +56,7 @@ function bootstrap() {
     return;
   }
 
-  try { (window as any)?.edgeApi?.rendererReady?.(); } catch {}
+  try { (window as any)?.edgeApi?.rendererReady?.(); } catch { }
 
   const waitForBody = (callback: () => void) => {
     if (document.body) {
@@ -90,7 +90,7 @@ function bootstrap() {
     }
 
     createRoot(root as HTMLElement).render(
-      <ThemeProvider attribute="class" defaultTheme="light" forcedTheme="light">
+      <ThemeProvider attribute="class" defaultTheme="system" enableSystem>
         <App />
       </ThemeProvider>
     );

@@ -154,6 +154,28 @@ async function initializeHandlers() {
     websocketHandler = new WebSocketHandler(securityMiddleware);
     
     try {
+      let connectHostOverride = null;
+      try {
+        const envText = await fs.readFile(path.join(__dirname, '..', '.env'), 'utf8');
+        for (const rawLine of envText.split(/\r?\n/)) {
+          const line = rawLine.trim();
+          if (!line || line.startsWith('#')) continue;
+          const eq = line.indexOf('=');
+          if (eq === -1) continue;
+          const key = line.slice(0, eq).trim();
+          let val = line.slice(eq + 1);
+          if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
+            val = val.slice(1, -1);
+          }
+          if (key === 'SERVER_HOST') {
+            connectHostOverride = val;
+            break;
+          }
+        }
+      } catch (_) {}
+      if (connectHostOverride && (connectHostOverride === '127.0.0.1' || connectHostOverride === 'localhost' || connectHostOverride === '::1')) {
+        websocketHandler.setConnectHost(connectHostOverride);
+      }
       const clientVersion = (typeof app.getVersion === 'function') ? app.getVersion() : 'unknown';
       websocketHandler.setExtraHeaders({
         'x-device-id': deviceId,

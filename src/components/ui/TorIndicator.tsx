@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
-import { Shield, RotateCcw } from 'lucide-react';
+import { Shield, RotateCw } from 'lucide-react';
 import { torNetworkManager, TorConnectionStats } from '@/lib/tor-network';
 
 export function TorIndicator() {
@@ -19,7 +19,22 @@ export function TorIndicator() {
   useEffect(() => {
     const handleConnectionChange = () => setStats(torNetworkManager.getStats());
     torNetworkManager.onConnectionChange(handleConnectionChange);
-    return () => torNetworkManager.offConnectionChange(handleConnectionChange);
+
+    // Automatic circuit rotation
+    const rotationIntervalMs = 5 * 60 * 1000; // 5 minutes
+    const rotationInterval = setInterval(async () => {
+      if (torNetworkManager.isConnected()) {
+        setIsRotating(true);
+        await torNetworkManager.rotateCircuit();
+        setIsRotating(false);
+        setStats(torNetworkManager.getStats());
+      }
+    }, rotationIntervalMs);
+
+    return () => {
+      torNetworkManager.offConnectionChange(handleConnectionChange);
+      clearInterval(rotationInterval);
+    };
   }, []);
 
   const handleRotateCircuit = async () => {
@@ -48,7 +63,7 @@ export function TorIndicator() {
   return (
     <Popover>
       <PopoverTrigger asChild>
-        <Button variant="ghost" size="sm" className="h-8 px-2">
+        <Button variant="ghost" size="sm" className="h-8 px-2 select-none">
           <Badge
             variant={stats.isConnected ? 'default' : 'secondary'}
             className={`flex items-center gap-1 ${stats.isConnected ? 'bg-green-600 hover:bg-green-700' : 'bg-gray-600'}`}
@@ -58,7 +73,7 @@ export function TorIndicator() {
           </Badge>
         </Button>
       </PopoverTrigger>
-      <PopoverContent className="w-80" align="end">
+      <PopoverContent className="w-80 select-none" align="end">
         <div className="space-y-4">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2">
@@ -97,7 +112,7 @@ export function TorIndicator() {
               variant="outline"
               className="w-full flex items-center gap-2"
             >
-              <RotateCcw className={`h-4 w-4 ${isRotating ? 'animate-spin' : ''}`} />
+              <RotateCw className={`h-4 w-4 ${isRotating ? 'animate-spin' : ''}`} />
               {isRotating ? 'Rotating...' : 'Rotate Circuit'}
             </Button>
           )}

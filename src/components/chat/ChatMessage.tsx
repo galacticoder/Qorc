@@ -44,7 +44,7 @@ const parseSystemMessage = (content: string, message: any): { label: string; act
     }
 
     const label = typeof parsed.label === 'string' ? parsed.label : content;
-    
+
     if (parsed.actionsType === 'callback' && message) {
       const peer = message.sender === 'System' ? (message.recipient || '') : message.sender;
       if (typeof peer === 'string' && peer.length > 0) {
@@ -53,7 +53,7 @@ const parseSystemMessage = (content: string, message: any): { label: string; act
           onClick: () => {
             try {
               window.dispatchEvent(new CustomEvent('ui-call-request', { detail: { peer, type: 'audio' } }));
-            } catch {}
+            } catch { }
           }
         }];
         return { label, actions };
@@ -120,7 +120,7 @@ export const ChatMessage = React.memo<ExtendedChatMessageProps>(({ message, onRe
 
   const bubbleRef = useRef<HTMLDivElement | null>(null);
   const { openPicker, closePicker, isPickerOpen } = useEmojiPicker();
-  
+
   const messageTriggerIdRef = useRef<string | null>(null);
   if (!messageTriggerIdRef.current) {
     const safeId = message.id || `msg-${timestamp instanceof Date ? timestamp.getTime() : Date.now()}`;
@@ -144,7 +144,7 @@ export const ChatMessage = React.memo<ExtendedChatMessageProps>(({ message, onRe
     const name = (message.filename || '').toLowerCase();
     return name.includes('voice-note');
   }, [isFileMessageType, message.filename]);
-  
+
   const timestampDisplay = useMemo(() => formatTimestamp(timestamp), [timestamp]);
   const avatarLetter = useMemo(() => displaySender.charAt(0).toUpperCase(), [displaySender]);
 
@@ -194,19 +194,19 @@ export const ChatMessage = React.memo<ExtendedChatMessageProps>(({ message, onRe
   }
 
   return (
-    <div 
+    <div
       className={cn(
-        "flex gap-3 mb-4 group",
+        "flex gap-3 mb-4",
         safeIsCurrentUser ? "flex-row-reverse" : "flex-row"
       )}
-      style={{ 
+      style={{
         marginBottom: isGrouped ? 'var(--spacing-xs)' : 'var(--spacing-md)'
       }}
     >
       <div className="flex-shrink-0 w-10">
         {!isGrouped && (
-          <div 
-            className="w-10 h-10 rounded-full flex items-center justify-center font-medium text-sm"
+          <div
+            className="w-10 h-10 rounded-full flex items-center justify-center font-medium text-sm select-none"
             style={{
               backgroundColor: safeIsCurrentUser ? 'var(--color-accent-primary)' : 'var(--color-accent-secondary)',
               color: 'white'
@@ -221,28 +221,28 @@ export const ChatMessage = React.memo<ExtendedChatMessageProps>(({ message, onRe
       {/* Message Content */}
       <div
         className={cn(
-          "flex flex-col min-w-0",
+          "flex flex-col min-w-0 group",
           safeIsCurrentUser ? "items-end" : "items-start"
         )}
-        style={{ 
+        style={{
           maxWidth: 'var(--message-bubble-max-width)'
         }}
       >
         {!isGrouped && (
-          <div 
+          <div
             className={cn(
               "flex items-center gap-2 mb-1",
               safeIsCurrentUser ? "flex-row-reverse" : "flex-row"
             )}
           >
-            <span 
+            <span
               className="text-sm font-medium"
               style={{ color: 'var(--color-text-primary)' }}
             >
               {displaySender}
             </span>
-            <span 
-              className="text-xs"
+            <span
+              className="text-xs select-none"
               style={{ color: 'var(--color-text-secondary)' }}
               role="time"
               aria-label={`Message sent at ${timestampDisplay}`}
@@ -253,7 +253,7 @@ export const ChatMessage = React.memo<ExtendedChatMessageProps>(({ message, onRe
         )}
 
         {message.replyTo && (
-          <div 
+          <div
             className="mb-2 p-3 rounded-lg text-sm max-w-full"
             style={{
               backgroundColor: 'var(--color-muted-panel)',
@@ -363,15 +363,13 @@ export const ChatMessage = React.memo<ExtendedChatMessageProps>(({ message, onRe
                 </div>
               );
             }
-            
+
             return (
               <div className="relative max-w-full" ref={bubbleRef}>
                 <div
-                  className={`px-4 py-3 ${
-                    isMarkdown ? 'text-base' : 'text-sm'
-                  } ${
-                    isMarkdown ? '' : 'whitespace-pre-wrap'
-                  } break-words`}
+                  className={`px-4 py-3 ${isMarkdown ? 'text-base' : 'text-sm'
+                    } ${isMarkdown ? '' : 'whitespace-pre-wrap'
+                    } break-words`}
                   style={{
                     backgroundColor: safeIsCurrentUser ? 'var(--color-accent-primary)' : 'var(--color-surface)',
                     color: safeIsCurrentUser ? 'white' : 'var(--color-text-primary)',
@@ -383,7 +381,7 @@ export const ChatMessage = React.memo<ExtendedChatMessageProps>(({ message, onRe
                   }}
                 >
                   {isMarkdown ? (
-                    <MarkdownRenderer 
+                    <MarkdownRenderer
                       content={content}
                       isCurrentUser={safeIsCurrentUser}
                       className="compact"
@@ -406,9 +404,8 @@ export const ChatMessage = React.memo<ExtendedChatMessageProps>(({ message, onRe
             <button
               data-emoji-add-button
               data-emoji-trigger={messageTriggerId}
-              className={`w-5 h-5 rounded-full text-[11px] flex items-center justify-center border transition-opacity duration-200 ${
-                pickerOpen === 'main' ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'
-              }`}
+              className={`w-5 h-5 rounded-full text-[11px] flex items-center justify-center border transition-opacity duration-200 ${pickerOpen === 'main' ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'
+                }`}
               style={{
                 backgroundColor: 'var(--color-surface)',
                 borderColor: 'var(--color-border)',
@@ -500,9 +497,9 @@ export const ChatMessage = React.memo<ExtendedChatMessageProps>(({ message, onRe
             </button>
 
             {safeIsCurrentUser && !isSystemMessage && (
-              <button 
+              <button
                 onClick={handleDelete}
-                aria-label="Delete message" 
+                aria-label="Delete message"
                 className="p-1 rounded hover:bg-opacity-80 transition-colors"
                 style={{ color: 'var(--color-text-secondary)' }}
                 onMouseEnter={(e) => {
@@ -519,9 +516,9 @@ export const ChatMessage = React.memo<ExtendedChatMessageProps>(({ message, onRe
             )}
 
             {safeIsCurrentUser && !message.isDeleted && (
-              <button 
+              <button
                 onClick={handleEdit}
-                aria-label="Edit message" 
+                aria-label="Edit message"
                 className="p-1 rounded hover:bg-opacity-80 transition-colors"
                 style={{ color: 'var(--color-text-secondary)' }}
                 onMouseEnter={(e) => {
@@ -539,15 +536,15 @@ export const ChatMessage = React.memo<ExtendedChatMessageProps>(({ message, onRe
           </div>
         </div>
 
-        <div 
+        <div
           className={cn(
             "flex items-center gap-2 mt-1 text-xs",
             safeIsCurrentUser ? "flex-row-reverse" : "flex-row"
           )}>
           {/* No per-bubble bottom timestamp when grouped; only header on first bubble */}
-          
+
           {message.isEdited && (
-            <span 
+            <span
               className="italic"
               style={{ color: 'var(--color-text-secondary)' }}
               role="status"

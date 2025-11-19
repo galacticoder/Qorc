@@ -73,20 +73,20 @@ export function ReplyBanner({ replyTo, onCancelReply, getDisplayUsername }: Repl
   const isImageMsg = useMemo(() => isImage(replyTo), [replyTo]);
   const isVideoMsg = useMemo(() => isVideo(replyTo), [replyTo]);
   const isVoiceMsg = useMemo(() => isVoiceNote(replyTo), [replyTo]);
-  const isFileMsg = useMemo(() => 
+  const isFileMsg = useMemo(() =>
     replyTo.type === 'file' || replyTo.type === 'file-message' || replyTo.filename,
     [replyTo]
   );
 
-  const waveformHeights = useMemo(() => 
+  const waveformHeights = useMemo(() =>
     Array.from({ length: 8 }, () => Math.random() * 8 + 4),
     []
   );
 
   const contentPreview = useMemo(() => {
     if (!replyTo.content) return "";
-    return replyTo.content.length > 100 
-      ? `${replyTo.content.slice(0, 100)}...` 
+    return replyTo.content.length > 100
+      ? `${replyTo.content.slice(0, 100)}...`
       : replyTo.content;
   }, [replyTo.content]);
   return (
@@ -94,13 +94,13 @@ export function ReplyBanner({ replyTo, onCancelReply, getDisplayUsername }: Repl
       <div
         className={cn(
           "flex items-start gap-3 p-4 border-l-4 rounded-lg shadow-sm transition-colors duration-200",
-          "bg-gradient-to-r from-slate-50 to-slate-100 border-slate-400 text-slate-900"
+          "bg-muted/50 border-border text-foreground"
         )}
       >
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2 mb-2">
             <svg
-              className={cn("w-4 h-4", "text-slate-500")}
+              className={cn("w-4 h-4", "text-muted-foreground")}
               fill="none"
               viewBox="0 0 24 24"
               stroke="currentColor"
@@ -112,7 +112,7 @@ export function ReplyBanner({ replyTo, onCancelReply, getDisplayUsername }: Repl
                 d="M3 10h10a8 8 0 018 8v2M3 10l6 6m-6-6l6-6"
               />
             </svg>
-            <span className="text-sm font-semibold text-slate-700">
+            <span className="text-sm font-semibold text-foreground">
               {displaySender}
             </span>
           </div>
@@ -131,10 +131,10 @@ export function ReplyBanner({ replyTo, onCancelReply, getDisplayUsername }: Repl
                 </div>
               </div>
               <div className="min-w-0 flex-1">
-                <p className="text-sm font-medium text-slate-700 truncate">
+                <p className="text-sm font-medium text-foreground truncate">
                   {replyTo.filename || 'Image'}
                 </p>
-                <p className="text-xs text-slate-500">
+                <p className="text-xs text-muted-foreground">
                   {replyTo.fileSize ? formatFileSize(replyTo.fileSize) : 'Image'}
                 </p>
               </div>
@@ -156,10 +156,10 @@ export function ReplyBanner({ replyTo, onCancelReply, getDisplayUsername }: Repl
                 </div>
               </div>
               <div className="min-w-0 flex-1">
-                <p className="text-sm font-medium text-slate-700 truncate">
+                <p className="text-sm font-medium text-foreground truncate">
                   {replyTo.filename || 'Video'}
                 </p>
-                <p className="text-xs text-slate-500">
+                <p className="text-xs text-muted-foreground">
                   {replyTo.fileSize ? formatFileSize(replyTo.fileSize) : 'Video'}
                 </p>
               </div>
@@ -174,7 +174,7 @@ export function ReplyBanner({ replyTo, onCancelReply, getDisplayUsername }: Repl
                 </div>
               </div>
               <div className="min-w-0 flex-1">
-                <p className="text-sm font-medium text-slate-700">
+                <p className="text-sm font-medium text-foreground">
                   Voice message
                 </p>
                 <div className="flex items-center gap-1 mt-1">
@@ -190,7 +190,7 @@ export function ReplyBanner({ replyTo, onCancelReply, getDisplayUsername }: Repl
                       />
                     ))}
                   </div>
-                  <span className="text-xs text-slate-500 ml-1">
+                  <span className="text-xs text-muted-foreground ml-1">
                     Voice note
                   </span>
                 </div>
@@ -204,16 +204,16 @@ export function ReplyBanner({ replyTo, onCancelReply, getDisplayUsername }: Repl
                 </div>
               </div>
               <div className="min-w-0 flex-1">
-                <p className="text-sm font-medium text-slate-700 truncate">
+                <p className="text-sm font-medium text-foreground truncate">
                   {replyTo.filename || 'File'}
                 </p>
-                <p className="text-xs text-slate-500">
+                <p className="text-xs text-muted-foreground">
                   {replyTo.fileSize ? formatFileSize(replyTo.fileSize) : 'Document'}
                 </p>
               </div>
             </div>
           ) : (
-            <p className="text-sm line-clamp-2 text-slate-600">
+            <p className="text-sm line-clamp-2 text-muted-foreground">
               {contentPreview}
             </p>
           )}
@@ -221,7 +221,7 @@ export function ReplyBanner({ replyTo, onCancelReply, getDisplayUsername }: Repl
         <Button
           variant="ghost"
           size="sm"
-          className="h-8 w-8 p-0 transition-colors hover:bg-slate-200 text-slate-500 hover:text-slate-700"
+          className="h-8 w-8 p-0 transition-colors hover:bg-muted text-muted-foreground hover:text-foreground"
           onClick={onCancelReply}
         >
           <Cross2Icon className="h-4 w-4" />

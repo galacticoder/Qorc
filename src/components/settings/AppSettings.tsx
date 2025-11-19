@@ -1,13 +1,15 @@
 import React, { useState, useEffect } from 'react';
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../../components/ui/card';
-import { Label } from '../../components/ui/label';
-import { Switch } from '../../components/ui/switch';
-import { Button } from '../../components/ui/button';
-import { Separator } from '../../components/ui/separator';
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../ui/card';
+import { Label } from '../ui/label';
+import { AnimatedSwitch } from '../ui/AnimatedSwitch';
+import { Button } from '../ui/button';
+import { Separator } from '../ui/separator';
 import { useTheme } from 'next-themes';
 import { ScreenSharingSettings } from './ScreenSharingSettings';
 import { syncEncryptedStorage } from '../../lib/encrypted-storage';
 import { BlockedUsersSettings } from './BlockedUsersSettings';
+import { Bell, Monitor, Volume2, Download, Shield, Database, Moon, Sun, Laptop } from 'lucide-react';
+import { ScrollArea } from '../ui/scroll-area';
 
 interface AppSettingsProps {
   passphraseRef?: React.MutableRefObject<string>;
@@ -26,11 +28,8 @@ interface AudioSettings {
 }
 
 export const AppSettings = React.memo(function AppSettings({ passphraseRef, kyberSecretRef, getDisplayUsername }: AppSettingsProps = {}) {
-  
-  const { theme, setTheme: rawSetTheme } = useTheme();
-  const setTheme = React.useCallback((newTheme: string) => {
-    rawSetTheme(newTheme);
-  }, [rawSetTheme]);
+
+  const { theme, setTheme } = useTheme();
   const [downloadSettings, setDownloadSettings] = useState<{ downloadPath: string; autoSave: boolean } | null>(null);
   const [isChoosingPath, setIsChoosingPath] = useState(false);
   const [isClearingData, setIsClearingData] = useState(false);
@@ -57,7 +56,7 @@ export const AppSettings = React.memo(function AppSettings({ passphraseRef, kybe
         if (parsed.notifications) setNotifications(parsed.notifications);
         if (parsed.audioSettings) setAudioSettings(parsed.audioSettings);
       }
-    } catch {}
+    } catch { }
   }, []);
 
   const handleChooseDownloadPath = async () => {
@@ -108,7 +107,7 @@ export const AppSettings = React.memo(function AppSettings({ passphraseRef, kybe
       const parsed = stored ? JSON.parse(stored) : {};
       syncEncryptedStorage.setItem('app_settings_v1', JSON.stringify({ ...parsed, notifications: updated }));
       window.dispatchEvent(new CustomEvent('settings-changed', { detail: { notifications: updated } }));
-    } catch {}
+    } catch { }
   };
 
   const handleAudioSettingChange = (key: keyof AudioSettings, value: boolean) => {
@@ -119,140 +118,182 @@ export const AppSettings = React.memo(function AppSettings({ passphraseRef, kybe
       const parsed = stored ? JSON.parse(stored) : {};
       syncEncryptedStorage.setItem('app_settings_v1', JSON.stringify({ ...parsed, audioSettings: updated }));
       window.dispatchEvent(new CustomEvent('settings-changed', { detail: { audioSettings: updated } }));
-    } catch {}
+    } catch { }
   };
 
   const handleClearData = async () => {
     if (isClearingData) return;
     if (confirm('Clear all local data? This will log you out and remove all stored messages.')) {
       setIsClearingData(true);
-      try { const { encryptedStorage } = await import('../../lib/encrypted-storage'); await encryptedStorage.setItem('app_settings_v1', ''); } catch {}
+      try { const { encryptedStorage } = await import('../../lib/encrypted-storage'); await encryptedStorage.setItem('app_settings_v1', ''); } catch { }
       window.location.reload();
     }
   };
 
-  const handleClose = () => {
-    window.dispatchEvent(new CustomEvent('closeSettings'));
-  };
-
   return (
-    <div className="flex flex-col h-full" style={{ backgroundColor: 'var(--color-background)' }}>
-      <div className="p-4 border-b flex items-center justify-between" style={{ backgroundColor: 'var(--color-surface)', borderColor: 'var(--color-border)' }}>
-        <div>
-          <h2 className="text-lg font-semibold" style={{ color: 'var(--color-text-primary)' }}>Settings</h2>
-        </div>
-        <Button variant="ghost" size="sm" onClick={handleClose} className="h-8 w-8 p-0" style={{ color: 'var(--color-text-secondary)' }}>
-          Close
-        </Button>
+    <div className="flex flex-col h-full bg-background">
+      <div className="p-6 border-b border-border bg-background sticky top-0 z-10 select-none">
+        <h1 className="text-2xl font-bold tracking-tight">Settings</h1>
+        <p className="text-muted-foreground text-sm">Manage your application preferences</p>
       </div>
 
-      <div className="flex-1 overflow-auto p-6">
-        <div className="space-y-6 max-w-2xl">
-          <p style={{ color: 'var(--color-text-secondary)' }}>Manage preferences.</p>
+      <ScrollArea className="flex-1 p-6">
+        <div className="max-w-4xl mx-auto space-y-8 pb-10 select-none">
 
-          <Card>
-            <CardHeader>
-              <CardTitle>Appearance</CardTitle>
-              <CardDescription>Choose theme.</CardDescription>
-            </CardHeader>
-            <CardContent className="space-y-4">
-              <div className="space-y-3">
-                <Label className="text-sm font-medium">Theme</Label>
-                <div className="flex gap-2">
-                  <Button variant={theme === 'light' ? 'default' : 'outline'} size="sm" onClick={() => setTheme('light')}>Light</Button>
-                  <Button variant={theme === 'dark' ? 'default' : 'outline'} size="sm" onClick={() => setTheme('dark')}>Dark</Button>
-                  <Button variant={theme === 'system' ? 'default' : 'outline'} size="sm" onClick={() => setTheme('system')}>System</Button>
-                </div>
-              </div>
-            </CardContent>
-          </Card>
-
-
-          <Card>
-            <CardHeader>
-              <CardTitle>Notifications</CardTitle>
-              <CardDescription>Configure notifications.</CardDescription>
-            </CardHeader>
-            <CardContent className="space-y-4">
-              <div className="flex items-center justify-between">
-                <div className="space-y-0.5">
-                  <Label>Desktop Notifications</Label>
-                  <div className="text-sm text-muted-foreground">Show notifications when app is in background.</div>
-                </div>
-                <Switch checked={notifications.desktop} onCheckedChange={(v) => handleNotificationChange('desktop', v)} />
-              </div>
-              <Separator />
-              <div className="flex items-center justify-between">
-                <div className="space-y-0.5">
-                  <Label>Sound Notifications</Label>
-                  <div className="text-sm text-muted-foreground">Play sound on new messages.</div>
-                </div>
-                <Switch checked={notifications.sound} onCheckedChange={(v) => handleNotificationChange('sound', v)} />
-              </div>
-            </CardContent>
-          </Card>
-
-          <Card>
-            <CardHeader>
-              <CardTitle>Audio & Video</CardTitle>
-              <CardDescription>Configure call settings.</CardDescription>
-            </CardHeader>
-            <CardContent className="space-y-4">
-              <div className="flex items-center justify-between">
-                <div className="space-y-0.5">
-                  <Label>Noise Suppression</Label>
-                  <div className="text-sm text-muted-foreground">Reduce background noise during calls.</div>
-                </div>
-                <Switch checked={audioSettings.noiseSuppression} onCheckedChange={(v) => handleAudioSettingChange('noiseSuppression', v)} />
-              </div>
-              <Separator />
-              <div className="flex items-center justify-between">
-                <div className="space-y-0.5">
-                  <Label>Echo Cancellation</Label>
-                  <div className="text-sm text-muted-foreground">Prevent audio feedback during calls.</div>
-                </div>
-                <Switch checked={audioSettings.echoCancellation} onCheckedChange={(v) => handleAudioSettingChange('echoCancellation', v)} />
-              </div>
-            </CardContent>
-          </Card>
-
-          {downloadSettings && (
+          {/* Appearance */}
+          <section className="space-y-4">
+            <div className="flex items-center gap-2 text-primary dark:text-primary-foreground">
+              <Monitor className="w-5 h-5" />
+              <h2 className="text-lg font-semibold text-foreground">Appearance</h2>
+            </div>
             <Card>
-              <CardHeader>
-                <CardTitle>File Downloads</CardTitle>
-                <CardDescription>Configure file saving.</CardDescription>
-              </CardHeader>
-              <CardContent className="space-y-4">
-                <div className="space-y-3">
-                  <Label className="text-sm font-medium">Download Location</Label>
-                  <div className="flex items-center gap-2">
-                    <div className="flex-1 p-2 bg-muted rounded-md text-sm font-mono truncate" title={downloadSettings.downloadPath}>{downloadSettings.downloadPath}</div>
-                    <Button variant="outline" size="sm" onClick={handleChooseDownloadPath} disabled={isChoosingPath}>{isChoosingPath ? 'Browsing…' : 'Browse'}</Button>
-                  </div>
-                </div>
-                <Separator />
+              <CardContent className="pt-6">
                 <div className="flex items-center justify-between">
-                  <div className="space-y-0.5"><Label>Auto-save Files</Label><div className="text-sm text-muted-foreground">Automatically save files without asking.</div></div>
-                  <Switch checked={downloadSettings.autoSave} onCheckedChange={handleAutoSaveToggle} />
+                  <div className="space-y-1">
+                    <Label className="text-base">Theme</Label>
+                    <p className="text-sm text-muted-foreground">Select your preferred interface theme</p>
+                  </div>
+                  <div className="flex gap-2 bg-secondary/50 p-1 rounded-lg">
+                    <Button
+                      variant={theme === 'light' ? 'default' : 'ghost'}
+                      size="sm"
+                      onClick={() => setTheme('light')}
+                      className="gap-2"
+                    >
+                      <Sun className="w-4 h-4" /> Light
+                    </Button>
+                    <Button
+                      variant={theme === 'dark' ? 'default' : 'ghost'}
+                      size="sm"
+                      onClick={() => setTheme('dark')}
+                      className="gap-2"
+                    >
+                      <Moon className="w-4 h-4" /> Dark
+                    </Button>
+                    <Button
+                      variant={theme === 'system' ? 'default' : 'ghost'}
+                      size="sm"
+                      onClick={() => setTheme('system')}
+                      className="gap-2"
+                    >
+                      <Laptop className="w-4 h-4" /> System
+                    </Button>
+                  </div>
                 </div>
               </CardContent>
             </Card>
+          </section>
+
+          {/* Notifications */}
+          <section className="space-y-4">
+            <div className="flex items-center gap-2 text-primary dark:text-primary-foreground">
+              <Bell className="w-5 h-5" />
+              <h2 className="text-lg font-semibold text-foreground">Notifications</h2>
+            </div>
+            <Card>
+              <CardContent className="pt-6 space-y-6">
+                <div className="flex items-center justify-between">
+                  <div className="space-y-1">
+                    <Label className="text-base">Desktop Notifications</Label>
+                    <p className="text-sm text-muted-foreground">Show notifications when app is in background</p>
+                  </div>
+                  <AnimatedSwitch checked={notifications.desktop} onCheckedChange={(v) => handleNotificationChange('desktop', v)} />
+                </div>
+                <Separator />
+                <div className="flex items-center justify-between">
+                  <div className="space-y-1">
+                    <Label className="text-base">Sound Notifications</Label>
+                    <p className="text-sm text-muted-foreground">Play sound on new messages</p>
+                  </div>
+                  <AnimatedSwitch checked={notifications.sound} onCheckedChange={(v) => handleNotificationChange('sound', v)} />
+                </div>
+              </CardContent>
+            </Card>
+          </section>
+
+          {/* Audio & Video */}
+          <section className="space-y-4">
+            <div className="flex items-center gap-2 text-primary dark:text-primary-foreground">
+              <Volume2 className="w-5 h-5" />
+              <h2 className="text-lg font-semibold text-foreground">Audio & Video</h2>
+            </div>
+            <Card>
+              <CardContent className="pt-6 space-y-6">
+                <div className="flex items-center justify-between">
+                  <div className="space-y-1">
+                    <Label className="text-base">Noise Suppression</Label>
+                    <p className="text-sm text-muted-foreground">Reduce background noise during calls</p>
+                  </div>
+                  <AnimatedSwitch checked={audioSettings.noiseSuppression} onCheckedChange={(v) => handleAudioSettingChange('noiseSuppression', v)} />
+                </div>
+                <Separator />
+                <div className="flex items-center justify-between">
+                  <div className="space-y-1">
+                    <Label className="text-base">Echo Cancellation</Label>
+                    <p className="text-sm text-muted-foreground">Prevent audio feedback during calls</p>
+                  </div>
+                  <AnimatedSwitch checked={audioSettings.echoCancellation} onCheckedChange={(v) => handleAudioSettingChange('echoCancellation', v)} />
+                </div>
+              </CardContent>
+            </Card>
+          </section>
+
+          {/* Downloads */}
+          {downloadSettings && (
+            <section className="space-y-4">
+              <div className="flex items-center gap-2 text-primary dark:text-primary-foreground">
+                <Download className="w-5 h-5" />
+                <h2 className="text-lg font-semibold text-foreground">File Downloads</h2>
+              </div>
+              <Card>
+                <CardContent className="pt-6 space-y-6">
+                  <div className="space-y-3">
+                    <Label className="text-base">Download Location</Label>
+                    <div className="flex items-center gap-2">
+                      <div className="flex-1 p-3 bg-secondary/50 rounded-lg text-sm font-mono truncate border border-border/50" title={downloadSettings.downloadPath}>
+                        {downloadSettings.downloadPath}
+                      </div>
+                      <Button variant="outline" onClick={handleChooseDownloadPath} disabled={isChoosingPath}>
+                        {isChoosingPath ? 'Browsing…' : 'Browse'}
+                      </Button>
+                    </div>
+                  </div>
+                </CardContent>
+              </Card>
+            </section>
           )}
 
-          <ScreenSharingSettings />
-          <BlockedUsersSettings passphraseRef={passphraseRef} kyberSecretRef={kyberSecretRef} getDisplayUsername={getDisplayUsername} />
+          {/* Privacy & Security */}
+          <section className="space-y-4">
+            <div className="flex items-center gap-2 text-primary dark:text-primary-foreground">
+              <Shield className="w-5 h-5" />
+              <h2 className="text-lg font-semibold text-foreground">Privacy & Security</h2>
+            </div>
+            <ScreenSharingSettings />
+            <BlockedUsersSettings passphraseRef={passphraseRef} kyberSecretRef={kyberSecretRef} getDisplayUsername={getDisplayUsername} />
+          </section>
 
-          <Card>
-            <CardHeader>
-              <CardTitle>Data Management</CardTitle>
-              <CardDescription>Manage local data and storage.</CardDescription>
-            </CardHeader>
-            <CardContent>
-              <Button variant="destructive" onClick={handleClearData} disabled={isClearingData} className="w-full">{isClearingData ? 'Clearing Data…' : 'Clear All Data'}</Button>
-            </CardContent>
-          </Card>
+          {/* Data Management */}
+          <section className="space-y-4">
+            <div className="flex items-center gap-2 text-destructive">
+              <Database className="w-5 h-5" />
+              <h2 className="text-lg font-semibold text-destructive">Data Management</h2>
+            </div>
+            <Card className="border-destructive/20">
+              <CardHeader>
+                <CardTitle className="text-destructive">Danger Zone</CardTitle>
+                <CardDescription>Irreversible actions regarding your data</CardDescription>
+              </CardHeader>
+              <CardContent>
+                <Button variant="destructive" onClick={handleClearData} disabled={isClearingData} className="w-full sm:w-auto">
+                  {isClearingData ? 'Clearing Data…' : 'Clear All Local Data'}
+                </Button>
+              </CardContent>
+            </Card>
+          </section>
+
         </div>
-      </div>
+      </ScrollArea>
     </div>
   );
 });

@@ -67,7 +67,7 @@ const LinkifyWithPreviewsComponent: React.FC<LinkifyWithPreviewsProps> = ({
     const extracted = LinkExtractor.extractUrlStrings(children);
     return extracted.filter(isValidUrl);
   }, [children]);
-  
+
   const isUrlOnly = useMemo(() => LinkExtractor.isUrlOnlyMessage(children), [children]);
 
   const customFetcher = useCallback(async (url: string): Promise<CachedPreview | null> => {
@@ -113,7 +113,7 @@ const LinkifyWithPreviewsComponent: React.FC<LinkifyWithPreviewsProps> = ({
   const handleLinkClick = useCallback(async (url: string, e: React.MouseEvent): Promise<void> => {
     e.preventDefault();
     e.stopPropagation();
-    
+
     if (!isValidUrl(url)) {
       return;
     }
@@ -145,8 +145,8 @@ const LinkifyWithPreviewsComponent: React.FC<LinkifyWithPreviewsProps> = ({
             }}
             className="underline decoration-1 underline-offset-2 transition-colors cursor-pointer"
             style={{
-              color: '#ffffff',
-              textDecorationColor: '#ffffff',
+              color: isCurrentUser ? '#ffffff' : 'var(--color-accent-primary)',
+              textDecorationColor: isCurrentUser ? '#ffffff' : 'var(--color-accent-primary)',
             }}
             role="link"
             tabIndex={0}
@@ -157,7 +157,7 @@ const LinkifyWithPreviewsComponent: React.FC<LinkifyWithPreviewsProps> = ({
         );
       }
     }
-  }), [options, handleLinkClick]);
+  }), [options, handleLinkClick, isCurrentUser]);
 
   const renderLinkPreview = useCallback((url: string, size: 'large' | 'small' = 'large') => {
     const hostname = getHostname(url);
@@ -187,10 +187,10 @@ const LinkifyWithPreviewsComponent: React.FC<LinkifyWithPreviewsProps> = ({
             width={width}
             height="auto"
             borderRadius={borderRadius}
-            backgroundColor={isCurrentUser ? '#1c1c1e' : '#2d3748'}
-            primaryTextColor="#ffffff"
-            secondaryTextColor={isCurrentUser ? '#d1d5db' : '#cbd5e0'}
-            borderColor={isCurrentUser ? '#38383a' : '#4a5568'}
+            backgroundColor={isCurrentUser ? '#1c1c1e' : 'transparent'}
+            primaryTextColor={isCurrentUser ? '#ffffff' : 'inherit'}
+            secondaryTextColor={isCurrentUser ? '#d1d5db' : 'inherit'}
+            borderColor={isCurrentUser ? '#38383a' : 'transparent'}
             showLoader={true}
             openInNewTab={false}
             fetcher={customFetcher}
@@ -199,52 +199,52 @@ const LinkifyWithPreviewsComponent: React.FC<LinkifyWithPreviewsProps> = ({
             showPlaceholderIfNoImage={true}
             placeholderImageSrc="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='100' height='100' viewBox='0 0 24 24' fill='none' stroke='%23666' stroke-width='1' stroke-linecap='round' stroke-linejoin='round'%3E%3Crect x='3' y='3' width='18' height='18' rx='2' ry='2'/%3E%3Ccircle cx='8.5' cy='8.5' r='1.5'/%3E%3Cpolyline points='21,15 16,10 5,21'/%3E%3C/svg%3E"
             fallback={
-            <div
-              className={`rounded-${size === 'large' ? 'xl' : 'lg'} overflow-hidden max-w-${size === 'large' ? 'md' : 'sm'} cursor-pointer hover:scale-[1.01] transition-all duration-200`}
-              style={{
-                backgroundColor: isCurrentUser ? '#1c1c1e' : '#2d3748',
-                border: `1px solid ${isCurrentUser ? '#38383a' : '#4a5568'}`,
-                boxShadow: size === 'large' ? '0 4px 16px rgba(0, 0, 0, 0.1)' : '0 2px 8px rgba(0, 0, 0, 0.1)'
-              }}
-              onClick={(e) => handleLinkClick(url, e)}
-            >
-              <div className={`p-${size === 'large' ? '3' : '2'}`}>
-                <div className="flex items-center space-x-${size === 'large' ? '3' : '2'}">
-                  <div
-                    className={`w-${size === 'large' ? '8' : '6'} h-${size === 'large' ? '8' : '6'} rounded${size === 'large' ? '-lg' : ''} flex items-center justify-center flex-shrink-0`}
-                    style={{ backgroundColor: isCurrentUser ? '#374151' : '#4a5568' }}
-                    aria-hidden="true"
-                  >
-                    <svg
-                      className={`w-${size === 'large' ? '4' : '3'} h-${size === 'large' ? '4' : '3'}`}
-                      style={{ color: isCurrentUser ? '#9ca3af' : '#cbd5e0' }}
-                      fill="none"
-                      stroke="currentColor"
-                      viewBox="0 0 24 24"
-                    >
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1" />
-                    </svg>
-                  </div>
-                  <div className="flex-1 min-w-0">
+              <div
+                className={`rounded-${size === 'large' ? 'xl' : 'lg'} overflow-hidden max-w-${size === 'large' ? 'md' : 'sm'} cursor-pointer hover:scale-[1.01] transition-all duration-200`}
+                style={{
+                  backgroundColor: isCurrentUser ? '#1c1c1e' : 'var(--color-surface)',
+                  border: `1px solid ${isCurrentUser ? '#38383a' : 'var(--color-border)'}`,
+                  boxShadow: size === 'large' ? '0 4px 16px rgba(0, 0, 0, 0.1)' : '0 2px 8px rgba(0, 0, 0, 0.1)'
+                }}
+                onClick={(e) => handleLinkClick(url, e)}
+              >
+                <div className={`p-${size === 'large' ? '3' : '2'}`}>
+                  <div className="flex items-center space-x-${size === 'large' ? '3' : '2'}">
                     <div
-                      className={`font-medium text-${size === 'large' ? 'sm' : 'xs'} truncate`}
-                      style={{ color: '#ffffff' }}
+                      className={`w-${size === 'large' ? '8' : '6'} h-${size === 'large' ? '8' : '6'} rounded${size === 'large' ? '-lg' : ''} flex items-center justify-center flex-shrink-0`}
+                      style={{ backgroundColor: isCurrentUser ? '#374151' : 'var(--color-panel)' }}
+                      aria-hidden="true"
                     >
-                      {url}
-                    </div>
-                    {hostname && (
-                      <div
-                        className="text-xs truncate mt-0.5"
-                        style={{ color: isCurrentUser ? '#d1d5db' : '#cbd5e0' }}
+                      <svg
+                        className={`w-${size === 'large' ? '4' : '3'} h-${size === 'large' ? '4' : '3'}`}
+                        style={{ color: isCurrentUser ? '#9ca3af' : 'var(--color-text-secondary)' }}
+                        fill="none"
+                        stroke="currentColor"
+                        viewBox="0 0 24 24"
                       >
-                        {hostname}
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1" />
+                      </svg>
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <div
+                        className={`font-medium text-${size === 'large' ? 'sm' : 'xs'} truncate`}
+                        style={{ color: isCurrentUser ? '#ffffff' : 'var(--color-text-primary)' }}
+                      >
+                        {url}
                       </div>
-                    )}
+                      {hostname && (
+                        <div
+                          className="text-xs truncate mt-0.5"
+                          style={{ color: isCurrentUser ? '#d1d5db' : 'var(--color-text-secondary)' }}
+                        >
+                          {hostname}
+                        </div>
+                      )}
+                    </div>
                   </div>
                 </div>
               </div>
-            </div>
-          }
+            }
           />
         </div>
       </div>

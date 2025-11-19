@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { Button } from '@/components/ui/button';
-import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger } from '@/components/ui/dialog';
+import { toast } from 'sonner';
 import { UserX, UserCheck } from 'lucide-react';
 import { blockingSystem } from '@/lib/blocking-system';
 import { blockStatusCache } from '@/lib/block-status-cache';
@@ -19,8 +19,8 @@ interface BlockUserButtonProps {
   readonly initialBlocked?: boolean;
 }
 
-export function BlockUserButton({ 
-  username, 
+export function BlockUserButton({
+  username,
   passphraseRef,
   kyberSecretRef,
   getDisplayUsername,
@@ -33,14 +33,12 @@ export function BlockUserButton({
 }: BlockUserButtonProps) {
   const [isBlocked, setIsBlocked] = useState(false);
   const [loading, setLoading] = useState(false);
-  const [showBlockDialog, setShowBlockDialog] = useState(false);
-  const [showUnblockDialog, setShowUnblockDialog] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+
   const [resolvedName, setResolvedName] = useState<string>(username);
 
   const checkBlockStatus = useCallback(async () => {
     if (!username) return;
-    
+
     const passphrase = passphraseRef?.current;
     const kyber = kyberSecretRef?.current || null;
     await new Promise((r) => setTimeout(r, 0));
@@ -109,57 +107,55 @@ export function BlockUserButton({
 
   const handleBlockUser = useCallback(async () => {
     if (!username) return;
-    
+
     const passphrase = passphraseRef?.current;
     const kyber = kyberSecretRef?.current || null;
     if (!passphrase && !kyber) {
-      setError('Please log in.');
+      toast.error('Please log in.');
       return;
     }
 
     setLoading(true);
-    setError(null);
 
     try {
       const keyArg: any = passphrase ? passphrase : { kyberSecret: kyber! };
       await blockingSystem.blockUser(username, keyArg);
       setIsBlocked(true);
-      setShowBlockDialog(false);
       blockStatusCache.set(username, true);
       onBlockStatusChange?.(username, true);
+      toast.success(`Blocked ${resolvedName}`);
     } catch {
-      setError('Failed to block user. Please try again.');
+      toast.error('Failed to block user. Please try again.');
     } finally {
       setLoading(false);
     }
-  }, [username, passphraseRef, kyberSecretRef, onBlockStatusChange]);
+  }, [username, passphraseRef, kyberSecretRef, onBlockStatusChange, resolvedName]);
 
   const handleUnblockUser = useCallback(async () => {
     if (!username) return;
-    
+
     const passphrase = passphraseRef?.current;
     const kyber = kyberSecretRef?.current || null;
     if (!passphrase && !kyber) {
-      setError('Please log in.');
+      toast.error('Please log in.');
       return;
     }
 
     setLoading(true);
-    setError(null);
 
     try {
       const keyArg: any = passphrase ? passphrase : { kyberSecret: kyber! };
       await blockingSystem.unblockUser(username, keyArg);
       setIsBlocked(false);
-      setShowUnblockDialog(false);
       blockStatusCache.set(username, false);
       onBlockStatusChange?.(username, false);
+      toast.success(`Unblocked ${resolvedName}`);
     } catch {
-      setError('Failed to unblock user. Please try again.');
+      toast.error('Failed to unblock user. Please try again.');
     } finally {
       setLoading(false);
     }
-  }, [username, passphraseRef, kyberSecretRef, onBlockStatusChange]);
+  }, [username, passphraseRef, kyberSecretRef, onBlockStatusChange, resolvedName]);
 
   const buttonClassName = useMemo(() => {
     if (isBlocked) {
@@ -170,85 +166,29 @@ export function BlockUserButton({
 
   if (isBlocked) {
     return (
-      <Dialog open={showUnblockDialog} onOpenChange={setShowUnblockDialog}>
-        <DialogTrigger asChild>
-          <Button
-            variant={variant}
-            size={size}
-            className={buttonClassName}
-            disabled={loading}
-          >
-            <UserCheck className="h-4 w-4" />
-            {showText && <span>Unblock</span>}
-          </Button>
-        </DialogTrigger>
-        <DialogContent className="sm:max-w-md">
-          <DialogHeader>
-            <DialogTitle>Unblock User</DialogTitle>
-            <DialogDescription>
-              Unblocking {resolvedName} will allow them to send you messages and calls again.
-            </DialogDescription>
-          </DialogHeader>
-          {error && (
-            <div className="rounded-md bg-red-50 dark:bg-red-950 p-3 text-sm text-red-600 dark:text-red-400">
-              {error}
-            </div>
-          )}
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setShowUnblockDialog(false)} disabled={loading}>
-              Cancel
-            </Button>
-            <Button
-              onClick={handleUnblockUser}
-              disabled={loading}
-              className="bg-green-600 hover:bg-green-700 text-white"
-            >
-              {loading ? 'Unblocking...' : 'Unblock'}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      <Button
+        variant={variant}
+        size={size}
+        className={buttonClassName}
+        disabled={loading}
+        onClick={handleUnblockUser}
+      >
+        <UserCheck className="h-4 w-4" />
+        {showText && <span>{loading ? 'Unblocking...' : 'Unblock'}</span>}
+      </Button>
     );
   }
 
   return (
-    <Dialog open={showBlockDialog} onOpenChange={setShowBlockDialog}>
-      <DialogTrigger asChild>
-        <Button
-          variant={variant}
-          size={size}
-          className={buttonClassName}
-          disabled={loading}
-        >
-          <UserX className="h-4 w-4" />
-          {showText && <span>Block</span>}
-        </Button>
-      </DialogTrigger>
-      <DialogContent className="sm:max-w-md">
-        <DialogHeader>
-          <DialogTitle>Block User</DialogTitle>
-          <DialogDescription>
-            Blocking {resolvedName} will prevent them from sending you messages or calls.
-          </DialogDescription>
-        </DialogHeader>
-        {error && (
-          <div className="rounded-md bg-red-50 dark:bg-red-950 p-3 text-sm text-red-600 dark:text-red-400">
-            {error}
-          </div>
-        )}
-        <DialogFooter>
-          <Button variant="outline" onClick={() => setShowBlockDialog(false)} disabled={loading}>
-            Cancel
-          </Button>
-          <Button
-            onClick={handleBlockUser}
-            disabled={loading}
-            className="bg-red-600 hover:bg-red-700 text-white"
-          >
-            {loading ? 'Blocking...' : 'Block User'}
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
+    <Button
+      variant={variant}
+      size={size}
+      className={buttonClassName}
+      disabled={loading}
+      onClick={handleBlockUser}
+    >
+      <UserX className="h-4 w-4" />
+      {showText && <span>{loading ? 'Blocking...' : 'Block'}</span>}
+    </Button>
   );
 }

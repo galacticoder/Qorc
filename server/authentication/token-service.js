@@ -345,9 +345,8 @@ class TokenService {
   /**
    * Create token pair (access + refresh)
    */
-  async createTokenPair(userId, deviceId = null, tlsBinding = null) {
-    const family = await this.generateSecureTokenId();
-
+  async createTokenPair(userId, deviceId = null, tlsBinding = null, existingFamily = null) {
+    const family = existingFamily || await this.generateSecureTokenId();
     
     const [accessToken, refreshToken] = await Promise.all([
       // Do not bind any user metadata; privacy-first tokens

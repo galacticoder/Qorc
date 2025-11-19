@@ -124,7 +124,9 @@ export function ChatInput({
   }, []);
 
   const handleSend = useCallback(async () => {
-    if (!message.trim() || isSending || !selectedConversation || disabled) return;
+    if (!message.trim() || isSending || !selectedConversation || disabled) {
+      return;
+    }
 
     const sanitizedMessage = sanitizeMessage(message);
     if (!sanitizedMessage) return;
@@ -240,7 +242,7 @@ export function ChatInput({
 
       const fileUrl = URL.createObjectURL(file);
       let originalBase64Data: string = '';
-      
+
       try {
         originalBase64Data = await blobToBase64(file);
         if (!originalBase64Data) {

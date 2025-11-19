@@ -700,7 +700,10 @@ export class AccountAuthHandler {
       return rejectConnection(ws, SignalType.AUTH_ERROR, "User does not exist");
     }
 
-    if (isNewUser) {
+    const hasStoredPassphrase = typeof userRecord.passphrasehash === 'string' && userRecord.passphrasehash.length > 0;
+    const isInitialPassphrase = isNewUser || !hasStoredPassphrase;
+
+    if (isInitialPassphrase) {
       console.log(`[AUTH] Processing passphrase for: ${username}`);
       
       if (!passphraseHash.startsWith('$argon2')) {

@@ -193,7 +193,7 @@ const ensureSession = async (
         const customEvent = event as CustomEvent;
         if (customEvent.detail?.peer === peer) {
           sessionReadyFlag = true;
-          try { window.removeEventListener('libsignal-session-ready', readyHandler as EventListener); } catch {}
+          try { window.removeEventListener('libsignal-session-ready', readyHandler as EventListener); } catch { }
         }
       };
       window.addEventListener('libsignal-session-ready', readyHandler as EventListener);
@@ -204,7 +204,7 @@ const ensureSession = async (
         const lastBundleRequest = bundleRequestTracker.get(peer) || 0;
         const nowTs = Date.now();
         const canRequestBundle = (nowTs - lastBundleRequest) >= BUNDLE_REQUEST_COOLDOWN_MS;
-        
+
         if (canRequestBundle) {
           requestCount++;
           const requestBase = {
@@ -245,7 +245,7 @@ const ensureSession = async (
             const nowTs = Date.now();
             const lastBundleRequest = bundleRequestTracker.get(peer) || 0;
             const canRetryBundle = (nowTs - lastBundleRequest) >= BUNDLE_REQUEST_COOLDOWN_MS;
-            
+
             if (canRetryBundle) {
               requestCount++;
               const requestBase = {
@@ -272,9 +272,9 @@ const ensureSession = async (
           delay = Math.min(delay + poisson * SESSION_POLL_BASE_MS, SESSION_POLL_MAX_MS);
         }
       } finally {
-        try { window.removeEventListener('libsignal-session-ready', readyHandler as EventListener); } catch {}
+        try { window.removeEventListener('libsignal-session-ready', readyHandler as EventListener); } catch { }
       }
-      
+
       console.error(`[MessageSender] Failed to establish session with ${peer} after ${requestCount} attempts`);
       return false;
     } finally {
@@ -332,6 +332,7 @@ const recipientKeyValidator = () => {
 export function useMessageSender(
   users: { username: string; hybridPublicKeys: { kyberPublicBase64: string; dilithiumPublicBase64: string; x25519PublicBase64?: string } }[],
   loginUsernameRef: React.MutableRefObject<string>,
+  currentUsername: string,
   originalUsernameRef: React.MutableRefObject<string>,
   onNewMessage: (message: Message) => void,
   _serverHybridPublic: { x25519PublicBase64: string; kyberPublicBase64: string; dilithiumPublicBase64: string } | null,
@@ -346,6 +347,7 @@ export function useMessageSender(
   isLoggedIn?: boolean,
   hasUsernameMapping?: (hashedUsername: string) => Promise<boolean>,
   secureDBRef?: React.MutableRefObject<SecureDB | null>,
+  resolvePeerHybridKeys?: (peerUsername: string) => Promise<{ kyberPublicBase64: string; dilithiumPublicBase64: string; x25519PublicBase64?: string } | null>
 ) {
   const recipientDirectory = useMemo(() => {
     const map = new Map<string, { username: string; hybridPublicKeys: { kyberPublicBase64: string; dilithiumPublicBase64: string; x25519PublicBase64?: string } }>();
@@ -358,7 +360,7 @@ export function useMessageSender(
   }, [users]);
 
   // Attempt to resolve a peer's hybrid keys on-demand, waiting briefly for server response
-  const resolvePeerHybridKeys = useCallback(async (peerUsername: string): Promise<{ kyberPublicBase64: string; dilithiumPublicBase64: string; x25519PublicBase64?: string } | null> => {
+  const defaultResolvePeerHybridKeys = useCallback(async (peerUsername: string): Promise<{ kyberPublicBase64: string; dilithiumPublicBase64: string; x25519PublicBase64?: string } | null> => {
     if (!peerUsername) return null;
 
     // If already have in directory, return
@@ -368,7 +370,7 @@ export function useMessageSender(
     }
     try {
       await websocketClient.sendSecureControlMessage({ type: SignalType.CHECK_USER_EXISTS, username: peerUsername });
-    } catch {}
+    } catch { }
 
     try {
       const keys = await getKeysOnDemand?.();
@@ -376,7 +378,7 @@ export function useMessageSender(
         const requestBase = {
           type: SignalType.LIBSIGNAL_REQUEST_BUNDLE,
           username: peerUsername,
-          from: loginUsernameRef.current,
+          from: currentUsername || loginUsernameRef.current,
           timestamp: Date.now(),
           challenge: CryptoUtils.Base64.arrayBufferToBase64(globalThis.crypto.getRandomValues(new Uint8Array(32))),
           senderDilithium: keys.dilithium.publicKeyBase64,
@@ -387,7 +389,7 @@ export function useMessageSender(
         const signature = CryptoUtils.Base64.arrayBufferToBase64(sigRaw);
         await websocketClient.sendSecureControlMessage({ ...requestBase, signature });
       }
-    } catch {}
+    } catch { }
 
     // Wait up to 2000ms for a user-keys-available event (or a users list update)
     const hybrid = await new Promise<any>((resolve) => {
@@ -402,8 +404,8 @@ export function useMessageSender(
         }
       };
       const cleanup = () => {
-        try { clearTimeout(timeout); } catch {}
-        try { window.removeEventListener('user-keys-available', onKeys as EventListener); } catch {}
+        try { clearTimeout(timeout); } catch { }
+        try { window.removeEventListener('user-keys-available', onKeys as EventListener); } catch { }
       };
 
       window.addEventListener('user-keys-available', onKeys as EventListener);
@@ -414,6 +416,8 @@ export function useMessageSender(
     const refreshed = recipientDirectory.get(peerUsername)?.hybridPublicKeys || null;
     return refreshed || null;
   }, [recipientDirectory, getKeysOnDemand, loginUsernameRef]);
+
+  const resolvePeerHybridKeysToUse = resolvePeerHybridKeys || defaultResolvePeerHybridKeys;
 
   const sessionLocksRef = useRef(new WeakMap<object, Map<string, Promise<boolean>>>());
   const idCacheRef = useRef(getIdCache());
@@ -442,8 +446,8 @@ export function useMessageSender(
   const preKeyFailureCountRef = useRef<Map<string, number>>(new Map());
 
   useEffect(() => {
-    
-    
+
+
     const handleSessionReset = (event: Event) => {
       try {
         const { peerUsername } = (event as CustomEvent).detail || {};
@@ -452,27 +456,27 @@ export function useMessageSender(
           peerCanDecryptRef.current.delete(peerUsername);
           preKeyFailureCountRef.current.delete(peerUsername);
         }
-      } catch {}
+      } catch { }
     };
-    
+
     const handleSessionEstablished = async (event: Event) => {
       try {
         const { peer, fromPeer } = (event as CustomEvent).detail || {};
         const peerUsername = peer || fromPeer;
         if (typeof peerUsername !== 'string') return;
-        
+
         // Peer has processed our bundle and can now decrypt messages from us
         peerCanDecryptRef.current.set(peerUsername, true);
-        
+
         // Process any queued messages for this peer
-        window.dispatchEvent(new CustomEvent('libsignal-session-ready', { 
-          detail: { peer: peerUsername } 
+        window.dispatchEvent(new CustomEvent('libsignal-session-ready', {
+          detail: { peer: peerUsername }
         }));
       } catch (_err) {
         console.error('[MessageSender] Error handling SESSION_ESTABLISHED:', _err);
       }
     };
-    
+
     window.addEventListener('session-reset-received', handleSessionReset as EventListener);
     window.addEventListener('session-established-received', handleSessionEstablished as EventListener);
     return () => {
@@ -497,8 +501,10 @@ export function useMessageSender(
         return;
       }
 
-      const currentUser = sanitizeUsername(loginUsernameRef.current);
+      const currentUser = sanitizeUsername(currentUsername || loginUsernameRef.current);
       if (!currentUser) {
+        console.error('[MessageSender] Missing current user', { currentUsername, ref: loginUsernameRef.current });
+        alert('Error: Could not identify current user. Please try reloading.');
         logError('AUTH-CURRENT');
         return;
       }
@@ -516,60 +522,16 @@ export function useMessageSender(
 
       let recipient = recipientDirectory.get(recipientUsername);
       if (!recipient?.hybridPublicKeys) {
-        const fetchedKeys = await resolvePeerHybridKeys(recipientUsername);
+        const fetchedKeys = await resolvePeerHybridKeysToUse(recipientUsername);
         if (!fetchedKeys) {
           if (originalMessageId) {
-            resolvePeerHybridKeys(recipientUsername).catch(() => {});
+            resolvePeerHybridKeysToUse(recipientUsername).catch(() => { });
             logError('KEYS-UNAVAILABLE-RETRY');
             return;
           }
-          
-          try {
-            const timestamp = Date.now();
-            let messageId: string;
-            do { messageId = crypto.randomUUID().replace(/-/g, ''); } while (!idCacheRef.current.isStale(messageId));
-            idCacheRef.current.add(messageId);
-
-            const isTyping = (messageSignalType === 'typing-start' || messageSignalType === 'typing-stop');
-
-            if (!isTyping) {
-              const localMessage = createLocalMessage(
-                messageId,
-                currentUser,
-                recipientUsername,
-                sanitizedContent ?? '',
-                timestamp,
-                replyToData,
-                fileData,
-              );
-              (localMessage as any).pending = true;
-              onNewMessage(localMessage);
-              
-              if (secureDBRef?.current) {
-                try {
-                  await secureDBRef.current.storeMessage(localMessage);
-              } catch (_err) {
-                  console.error('[MessageSender] Failed to save queued message to SecureDB:', _err);
-                }
-              }
-            }
-
-            await secureMessageQueue.queueMessage(recipientUsername, sanitizedContent ?? '', {
-              messageId,
-              replyTo: replyToData,
-              fileData,
-              messageSignalType,
-              originalMessageId: messageId,
-              editMessageId,
-            });
-            // Proactively request keys/bundle in background
-            resolvePeerHybridKeys(recipientUsername).catch(() => {});
-          } catch (_err) {
-            logError('QUEUE', _err);
-          }
-          return;
+          throw new Error('Recipient keys unavailable');
         }
-        recipient = { username: recipientUsername, hybridPublicKeys: fetchedKeys } as any;
+        recipient = { username: recipientUsername, hybridPublicKeys: fetchedKeys };
       }
       if (!validatorRef.current(recipient.hybridPublicKeys)) {
         logError('RECIPIENT-KEYS-INVALID');
@@ -579,11 +541,11 @@ export function useMessageSender(
       if (!recipient?.hybridPublicKeys || !recipient.hybridPublicKeys.kyberPublicBase64 || !isValidKyberPublicKeyBase64(recipient.hybridPublicKeys.kyberPublicBase64)) {
         if (originalMessageId) {
           // Proactively request keys in background for next retry
-          resolvePeerHybridKeys(recipientUsername).catch(() => {});
+          resolvePeerHybridKeys(recipientUsername).catch(() => { });
           logError('INVALID-KEYS-RETRY');
           return;
         }
-        
+
         try {
           const timestamp = Date.now();
           // Generate messageId now so UI and queue share the same id
@@ -608,11 +570,11 @@ export function useMessageSender(
             );
             (localMessage as any).pending = true;
             onNewMessage(localMessage);
-            
+
             // Save to SecureDB immediately so it persists
             if (secureDBRef?.current) {
               try {
-                await secureDBRef.current.storeMessage(localMessage);
+                await secureDBRef.current.storeMessage({ ...localMessage, timestamp: localMessage.timestamp.getTime() });
               } catch (_err) {
                 console.error('[MessageSender] Failed to save queued message to SecureDB:', _err);
               }
@@ -630,7 +592,7 @@ export function useMessageSender(
           });
 
           // Proactively request keys/bundle in background (no await)
-          resolvePeerHybridKeys(recipientUsername).catch(() => {});
+          resolvePeerHybridKeys(recipientUsername).catch(() => { });
           return;
         } catch (_err) {
           logError('QUEUE', _err);
@@ -652,7 +614,7 @@ export function useMessageSender(
         (messageType === 'reaction-add' || messageType === 'reaction-remove') &&
         !sanitizedContent
       ) {
-          return;
+        return;
       }
 
       const localKeys = await getKeysOnDemand();
@@ -666,7 +628,7 @@ export function useMessageSender(
       idCacheRef.current = idCache;
 
       let messageId: string;
-      
+
       // Reuse the original message ID if this is a retry to prevent duplicates in UI
       if (originalMessageId) {
         messageId = originalMessageId;
@@ -696,7 +658,7 @@ export function useMessageSender(
         if (!peerCanDecryptRef.current.get(recipientUsername) && preKeyFailures < 3) {
           try {
             senderSignalBundle = await (window as any).edgeApi?.getPreKeyBundle?.({ selfUsername: currentUser, deviceId: 1 });
-          } catch {}
+          } catch { }
         }
 
         const wireMessageId = (messageType === 'edit-message' && editMessageId) ? editMessageId : messageId;
@@ -712,6 +674,8 @@ export function useMessageSender(
           ...(includeSenderKyber ? { senderKyberPublicBase64: localKeys.kyber.publicKeyBase64 } : {}),
           ...(senderSignalBundle ? { senderSignalBundle } : {}),
         };
+
+        console.log('[MessageSender] Preparing to encrypt payload:', JSON.stringify(payload, null, 2));
 
         if (originalUsernameRef.current && originalUsernameRef.current !== currentUser) {
           payload.fromOriginal = originalUsernameRef.current;
@@ -760,12 +724,12 @@ export function useMessageSender(
             kyberPublicBase64: recipientKyberKey,
           }
         });
-        
+
         if (!encrypted?.success || !encrypted?.encryptedPayload) {
           logError('encryption-failed', new Error(encrypted?.error || 'Unknown error'));
           throw new Error(`Encryption failed: ${encrypted?.error || 'Unknown error'}`);
         }
-        
+
         const encryptedPayload = encrypted.encryptedPayload;
 
         websocketClient.send(
@@ -775,12 +739,13 @@ export function useMessageSender(
             encryptedPayload
           }),
         );
+        console.log('[MessageSender] Sent encrypted message to websocket:', { to: recipientUsername, payloadSize: encryptedPayload.length });
 
         if (
-            secureDBRef?.current &&
-            messageType !== 'typing-indicator' && 
-            messageType !== 'delivery-receipt' && 
-            messageType !== 'read-receipt') {
+          secureDBRef?.current &&
+          messageType !== 'typing-indicator' &&
+          messageType !== 'delivery-receipt' &&
+          messageType !== 'read-receipt') {
           try {
             const messageData = {
               user: user,
@@ -792,7 +757,7 @@ export function useMessageSender(
               editMessageId,
               timestamp
             };
-            
+
             // Store the message data
             await secureDBRef.current.storeEphemeral(
               'unacknowledged-messages',
@@ -801,7 +766,7 @@ export function useMessageSender(
               30000,
               true
             );
-            
+
             const messageListKey = `${recipientUsername}:message-list`;
             await secureDBRef.current.appendEphemeralList(
               'unacknowledged-messages',
@@ -829,7 +794,6 @@ export function useMessageSender(
           );
           return;
         }
-
         if (
           (messageSignalType === SignalType.REACTION_ADD || messageSignalType === SignalType.REACTION_REMOVE) &&
           originalMessageId
@@ -838,8 +802,8 @@ export function useMessageSender(
         }
 
         if (messageType === 'typing-indicator') {
-        return;
-      }
+          return;
+        }
 
         if (!originalMessageId) {
           const localMessage = createLocalMessage(
@@ -855,7 +819,7 @@ export function useMessageSender(
           onNewMessage(localMessage);
           if (secureDBRef?.current) {
             try {
-              await secureDBRef.current.storeMessage(localMessage);
+              await secureDBRef.current.storeMessage({ ...localMessage, timestamp: localMessage.timestamp.getTime() });
             } catch (_err) {
               console.error('[MessageSender] Failed to save message to SecureDB:', _err);
             }
@@ -870,7 +834,7 @@ export function useMessageSender(
           const currentCount = preKeyFailureCountRef.current.get(recipientUsername) || 0;
           preKeyFailureCountRef.current.set(recipientUsername, currentCount + 1);
         }
-        
+
         if (isSessionError && recipientUsername) {
           const existingPending = pendingRetryMessagesRef.current.get(recipientUsername);
           const retryCount = (existingPending?.retryCount || 0) + 1;
@@ -912,9 +876,9 @@ export function useMessageSender(
                 await websocketClient.sendSecureControlMessage({ ...req, signature });
               }
             }
-          } catch {}
+          } catch { }
         }
-        
+
         logError('SEND', _error);
       }
     },
@@ -942,7 +906,7 @@ export function useMessageSender(
       lastSessionBundleReqTsRef.current.set(peer, now);
 
       if (sessionPrefetchMap.current.has(peer)) {
-        await sessionPrefetchMap.current.get(peer)!.catch(() => {});
+        await sessionPrefetchMap.current.get(peer)!.catch(() => { });
         return;
       }
       const p = (async () => {
@@ -962,14 +926,14 @@ export function useMessageSender(
           const sigRaw = await CryptoUtils.Dilithium.sign(keys.dilithium.secretKey, canonical);
           const signature = CryptoUtils.Base64.arrayBufferToBase64(sigRaw);
           await websocketClient.sendSecureControlMessage({ ...req, signature });
-        } catch {}
+        } catch { }
         finally {
           sessionPrefetchMap.current.delete(peer);
         }
       })();
       sessionPrefetchMap.current.set(peer, p);
-      await p.catch(() => {});
-    } catch {}
+      await p.catch(() => { });
+    } catch { }
   }, [getKeysOnDemand, isLoggedIn, loginUsernameRef]);
 
   // Handle session establishment - retry pending messages
@@ -979,11 +943,11 @@ export function useMessageSender(
         const { peer, peerUsername, fromPeer } = (event as CustomEvent).detail || {};
         const id = (peerUsername || fromPeer || peer) as string | undefined;
         if (!id || typeof id !== 'string') return;
-        
+
         const pending = pendingRetryMessagesRef.current.get(id);
         pendingRetryMessagesRef.current.delete(id);
         if (!pending) return;
-        
+
         handleSendMessage(
           pending.user,
           pending.content,
@@ -999,18 +963,18 @@ export function useMessageSender(
         console.error('[MessageSender] Error handling session-ready event:', _error);
       }
     };
-    
+
     // Handler for when peer confirms they've established the session
     const handleSessionEstablishedReceived = (event: Event) => {
       try {
         const { fromPeer, peer, peerUsername } = (event as CustomEvent).detail || {};
         const id = (fromPeer || peerUsername || peer) as string | undefined;
         if (!id || typeof id !== 'string') return;
-        
+
         const pending = pendingRetryMessagesRef.current.get(id);
         pendingRetryMessagesRef.current.delete(id);
         if (!pending) return;
-        
+
         handleSendMessage(
           pending.user,
           pending.content,
@@ -1026,16 +990,16 @@ export function useMessageSender(
         console.error('[MessageSender] Error handling session-established-received event:', _error);
       }
     };
-    
+
     window.addEventListener('libsignal-session-ready', handleSessionReady as EventListener);
     window.addEventListener('session-established-received', handleSessionEstablishedReceived as EventListener);
-    
+
     // Handle session resets - queue unacknowledged messages for retry
     const handleSessionReset = async (event: Event) => {
       try {
         const { peerUsername } = (event as CustomEvent).detail || {};
         if (!peerUsername || !secureDBRef?.current) return;
-        
+
         const db = secureDBRef.current;
         const unacknowledged: Array<{
           user: { username: string; hybridPublicKeys: { kyberPublicBase64: string; dilithiumPublicBase64: string; x25519PublicBase64?: string } };
@@ -1047,15 +1011,15 @@ export function useMessageSender(
           editMessageId?: string;
           timestamp: number;
         }> = [];
-        
+
         // Retrieve messages from ephemeral storage
         const messageListKey = `${peerUsername}:message-list`;
         const messageList = (await db.retrieveEphemeral('unacknowledged-messages', messageListKey) as number[] | null) || [];
-        
+
         if (messageList.length === 0) {
           return;
         }
-        
+
         // Retrieve each message
         for (const timestamp of messageList) {
           const messageKey = `${peerUsername}:${timestamp}`;
@@ -1064,11 +1028,11 @@ export function useMessageSender(
             unacknowledged.push(messageData as any);
           }
         }
-        
+
         if (unacknowledged.length === 0) {
           return;
         }
-        
+
         // Queue the most recent unacknowledged message for retry
         const lastMessage = unacknowledged[unacknowledged.length - 1];
         pendingRetryMessagesRef.current.set(peerUsername, {
@@ -1081,23 +1045,23 @@ export function useMessageSender(
           editMessageId: lastMessage.editMessageId,
           retryCount: 0,
         });
-        
+
         // Clear unacknowledged messages for this peer from secure storage
         for (const timestamp of messageList) {
           try {
             await db.delete('ephemeral:unacknowledged-messages', `${peerUsername}:${timestamp}`);
-          } catch {}
+          } catch { }
         }
         try {
           await db.delete('ephemeral:unacknowledged-messages', messageListKey);
-        } catch {}
+        } catch { }
       } catch (_error) {
         logError('session-reset-handler-error', _error);
       }
     };
-    
+
     window.addEventListener('session-reset-received', handleSessionReset as EventListener);
-    
+
     return () => {
       window.removeEventListener('libsignal-session-ready', handleSessionReady as EventListener);
       window.removeEventListener('session-established-received', handleSessionEstablishedReceived as EventListener);

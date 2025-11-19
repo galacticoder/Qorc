@@ -298,7 +298,7 @@ class TokenDatabase {
 
       if (revokeFamily) {
         // Revoke entire token family
-        await client.query(
+        const result = await client.query(
           'UPDATE refresh_tokens SET revokedAt = $1, revokeReason = $2 WHERE family = $3 AND revokedAt IS NULL',
           [now, `family_revoke: ${reason}`, tokenRecord.family],
         );
@@ -307,16 +307,19 @@ class TokenDatabase {
           [now, reason, tokenRecord.family],
         );
         console.log(`[TOKEN-DB] Revoked token family ${tokenRecord.family} for user ${tokenRecord.userId}`);
+        await client.query('COMMIT');
+        return (result.rowCount || 0) > 0;
       } else {
         // Revoke single token
-        await client.query(
+        const result = await client.query(
           'UPDATE refresh_tokens SET revokedAt = $1, revokeReason = $2 WHERE tokenId = $3 AND revokedAt IS NULL',
           [now, reason, tokenId],
         );
         console.log(`[TOKEN-DB] Revoked token ${tokenId} for user ${tokenRecord.userId}`);
+        
+        await client.query('COMMIT');
+        return (result.rowCount || 0) > 0;
       }
-
-      await client.query('COMMIT');
     } catch (error) {
       await client.query('ROLLBACK');
       console.error('[TOKEN-DB] Token revocation failed:', error);

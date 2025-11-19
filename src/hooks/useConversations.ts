@@ -88,11 +88,11 @@ export const useConversations = (currentUsername: string, users: User[], message
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [selectedConversation, setSelectedConversation] = useState<string | null>(null);
   const [removedConversations, setRemovedConversations] = useState<Set<string>>(new Set());
-  
+
   // Rate limiting state
   const rateStateRef = useRef<{ windowStart: number; count: number }>({ windowStart: 0, count: 0 });
   const pendingAddsRef = useRef<Map<string, Promise<Conversation | null>>>(new Map());
-  
+
   const eventCleanupRef = useRef<Map<string, () => void>>(new Map());
 
   const addConversation = useCallback(async (username: string, autoSelect: boolean = true): Promise<Conversation | null> => {
@@ -110,7 +110,7 @@ export const useConversations = (currentUsername: string, users: User[], message
     if (!looksLikePseudonym && !isValidUsername(trimmed)) {
       throw new Error('[useConversations] Invalid username format (2-64 chars, alphanumeric/._- only)');
     }
-    
+
     // Prevent adding too many conversations
     if (conversations.length >= MAX_CONVERSATIONS) {
       throw new Error('[useConversations] Maximum conversation limit reached');
@@ -187,7 +187,7 @@ export const useConversations = (currentUsername: string, users: User[], message
 
           const handleUserExistsResponse = (event: Event) => {
             if (resolved) return;
-            
+
             const customEvent = event as CustomEvent;
             const detail = typeof customEvent.detail === 'object' && customEvent.detail !== null ? customEvent.detail : {};
             const { username: responseUsername, exists, error, hybridPublicKeys } = detail as { username?: string; exists?: boolean; error?: string; hybridPublicKeys?: any };
@@ -202,12 +202,12 @@ export const useConversations = (currentUsername: string, users: User[], message
 
             // Handle errors
             if (error) {
-              reject(new Error(`[useConversations] User validation failed: ${error}`));
+              reject(new Error(`User validation failed: ${error}`));
               return;
             }
 
             if (!exists) {
-              reject(new Error('[useConversations] User does not exist'));
+              reject(new Error('User does not exist'));
               return;
             }
 
@@ -216,7 +216,7 @@ export const useConversations = (currentUsername: string, users: User[], message
               try {
                 dispatchSafeEvent('user-keys-available', { username: pseudonym, hybridKeys: hybridPublicKeys }, ['username', 'hybridKeys']);
               } catch (dispatchError) {
-                console.error('[useConversations] Failed to dispatch user-keys-available:', dispatchError);
+                console.error('Failed to dispatch user-keys-available:', dispatchError);
               }
             }
 
@@ -246,8 +246,8 @@ export const useConversations = (currentUsername: string, users: User[], message
           } catch (_error) {
             resolved = true;
             cleanup();
-            console.error('[useConversations] Failed to send check-user-exists:', _error);
-            reject(new Error('[useConversations] Failed to validate user'));
+            console.error('Failed to send check-user-exists:', _error);
+            reject(new Error('Failed to validate user'));
             return;
           }
 
@@ -256,9 +256,9 @@ export const useConversations = (currentUsername: string, users: User[], message
             if (resolved) return;
             resolved = true;
             cleanup();
-            reject(new Error('[useConversations] User validation timeout'));
+            reject(new Error('User validation timeout'));
           }, VALIDATION_TIMEOUT_MS);
-          
+
           eventCleanupRef.current.set(pseudonym, cleanup);
         });
       } catch (_error) {
@@ -279,10 +279,10 @@ export const useConversations = (currentUsername: string, users: User[], message
     if (!username || typeof username !== 'string') {
       return;
     }
-    
+
     if (selectedConversation !== username) {
       setSelectedConversation(username);
-      setConversations(prev => prev.map(conv => 
+      setConversations(prev => prev.map(conv =>
         conv.username === username ? { ...conv, unreadCount: 0 } : conv
       ));
     }
@@ -300,11 +300,13 @@ export const useConversations = (currentUsername: string, users: User[], message
   // Get messages for the selected conversation
   const getConversationMessages = useCallback((conversationUsername?: string) => {
     if (!conversationUsername) return [];
-    
-    return messages.filter(msg => 
+
+    const filtered = messages.filter(msg =>
       (msg.sender === conversationUsername && msg.recipient === currentUsername) ||
       (msg.sender === currentUsername && msg.recipient === conversationUsername)
     );
+
+    return filtered;
   }, [messages, currentUsername]);
 
   const userLookup = useMemo(() => {
@@ -340,11 +342,11 @@ export const useConversations = (currentUsername: string, users: User[], message
     for (const msg of messages) {
       // Validate message structure
       if (!msg.sender || !msg.recipient) continue;
-      
+
       const content = msg.content;
-      if (content && (content.includes('"type":"typing-') || 
-          content.includes('delivery-receipt') || 
-          content.includes('read-receipt'))) {
+      if (content && (content.includes('"type":"typing-') ||
+        content.includes('delivery-receipt') ||
+        content.includes('read-receipt'))) {
         continue;
       }
 
@@ -364,12 +366,14 @@ export const useConversations = (currentUsername: string, users: User[], message
           unreadCount: unreadIncrement
         });
       } else {
-        if (!existing.lastMessageTime || msgTime > existing.lastMessageTime) {
-          existing.lastMessage = getConversationPreview(msg);
-          existing.lastMessageTime = msgTime;
+        const updated = { ...existing };
+        if (!updated.lastMessageTime || msgTime > updated.lastMessageTime) {
+          updated.lastMessage = getConversationPreview(msg);
+          updated.lastMessageTime = msgTime;
         }
-        existing.unreadCount = (existing.unreadCount || 0) + unreadIncrement;
-        existing.isOnline = isOnline;
+        updated.unreadCount = (updated.unreadCount || 0) + unreadIncrement;
+        updated.isOnline = isOnline;
+        convMap.set(other, updated);
       }
     }
 
@@ -463,9 +467,9 @@ export const useConversations = (currentUsername: string, users: User[], message
             resolvedMap.set(result.value.username, result.value.displayName);
           }
         }
-        
+
         if (resolvedMap.size > 0) {
-          setConversations(prev => 
+          setConversations(prev =>
             prev.map(c => {
               const resolved = resolvedMap.get(c.username);
               return resolved ? { ...c, displayName: resolved } : c;
@@ -490,14 +494,14 @@ export const useConversations = (currentUsername: string, users: User[], message
     if (!username || typeof username !== 'string') {
       return;
     }
-    
+
     setConversations(prev => prev.filter(conv => conv.username !== username));
     setRemovedConversations(prev => new Set(prev).add(username));
-    
+
     if (selectedConversation === username) {
       setSelectedConversation(null);
     }
-    
+
     // Clear messages from UI
     if (clearMessages) {
       dispatchSafeEvent('clear-conversation-messages', { username }, ['username']);
@@ -508,7 +512,7 @@ export const useConversations = (currentUsername: string, users: User[], message
         void secureDB.deleteConversationMessages(username, currentUsername)
           .catch((e) => console.error('[useConversations] Failed to delete conversation messages from DB:', e));
       }
-    } catch {}
+    } catch { }
   }, [selectedConversation, secureDB, currentUsername]);
 
   return {

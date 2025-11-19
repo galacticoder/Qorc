@@ -1,3 +1,6 @@
+import tailwindcssAnimate from "tailwindcss-animate";
+import tailwindcssAspectRatio from "@tailwindcss/aspect-ratio";
+
 /** Tailwind v4 config in plain JS so PostCSS can load it without TS transpilation. */
 /** @type {import('tailwindcss').Config} */
 export default {
@@ -71,5 +74,9 @@ export default {
         sm: 'calc(var(--radius) - 4px)',
       },
     },
-  }
+  },
+  plugins: [
+    tailwindcssAnimate,
+    tailwindcssAspectRatio,
+  ],
 };

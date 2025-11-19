@@ -91,7 +91,7 @@ export class WebRTCCallingService {
   private readonly MEDIA_SESSION_KEY_TTL_MS = 5 * 60 * 1000;
   private readonly KYBER_CACHE_TTL_MS = 10 * 60 * 1000; // 10 minutes
   private readonly KYBER_REFRESH_BACKOFF_MS = 5_000; // min gap between refresh attempts per peer
-  
+
   private onIncomingCallCallback: ((call: CallState) => void) | null = null;
   private onCallStateChangeCallback: ((call: CallState) => void) | null = null;
   private onRemoteStreamCallback: ((stream: MediaStream | null) => void) | null = null;
@@ -249,8 +249,8 @@ export class WebRTCCallingService {
           to: this.currentCall.peer,
           data: { connectedAt: this.currentCall.startTime, source },
           timestamp: now
-        }).catch(() => {});
-      } catch {}
+        }).catch(() => { });
+      } catch { }
     }
   }
 
@@ -367,7 +367,7 @@ export class WebRTCCallingService {
               }
             }
           }
-        } catch {}
+        } catch { }
 
         try {
           const { encryptedStorage } = await import('./encrypted-storage');
@@ -378,7 +378,7 @@ export class WebRTCCallingService {
               .then(deviceId => { this.preferredCameraDeviceId = deviceId; })
               .catch(() => { this.preferredCameraDeviceId = null; });
           }
-        } catch {}
+        } catch { }
 
         try {
           const { encryptedStorage } = await import('./encrypted-storage');
@@ -387,7 +387,7 @@ export class WebRTCCallingService {
           if (keyStr) {
             try { this.pqAuditPublicKey = PostQuantumUtils.hexToBytes(keyStr); } catch { this.pqAuditPublicKey = null; }
           }
-        } catch {}
+        } catch { }
 
         try {
           const { encryptedStorage } = await import('./encrypted-storage');
@@ -401,22 +401,22 @@ export class WebRTCCallingService {
               };
             }
           }
-        } catch {}
-      } catch {}
+        } catch { }
+      } catch { }
     })();
   }
 
   async initialize(): Promise<void> {
     SecurityAuditLogger.log('info', 'calling-service-init', { username: this.localUsername });
-    
+
     const handleWindowClose = () => {
       if (this.currentCall && this.currentCall.status !== 'ended') {
-        this.endCall('shutdown').catch(() => {});
+        this.endCall('shutdown').catch(() => { });
       }
     };
     window.addEventListener('beforeunload', handleWindowClose);
-    window.addEventListener('unload', handleWindowClose);
-    
+    window.addEventListener('pagehide', handleWindowClose);
+
     try {
       const handlerHybrid = (event: Event) => {
         try {
@@ -424,11 +424,11 @@ export class WebRTCCallingService {
           if (typeof username === 'string' && hybridKeys && typeof hybridKeys.kyberPublicBase64 === 'string') {
             this.peerHybridKeysCache.set(username, { keys: hybridKeys, updatedAt: Date.now() });
           }
-        } catch {}
+        } catch { }
       };
       window.addEventListener('user-keys-available', handlerHybrid as EventListener);
-    } catch {}
-    
+    } catch { }
+
     if (!this.pqDeviceKeyPair) {
       this.pqDeviceKeyPair = this.generatePQDeviceKey();
       try {
@@ -437,20 +437,20 @@ export class WebRTCCallingService {
           publicKey: PostQuantumUtils.bytesToHex(this.pqDeviceKeyPair.publicKey),
           privateKey: PostQuantumUtils.bytesToHex(this.pqDeviceKeyPair.privateKey)
         }));
-      } catch {}
+      } catch { }
     }
 
     if (!this.pqCallSigningKey) {
       const kp = await PostQuantumSignature.generateKeyPair();
       this.pqCallSigningKey = { publicKey: new Uint8Array(kp.publicKey), privateKey: new Uint8Array(kp.secretKey) } as any;
-      
+
       try {
         const { encryptedStorage } = await import('./encrypted-storage');
         await encryptedStorage.setItem('pq_call_signing_key_v1', JSON.stringify({
           publicKey: PostQuantumUtils.uint8ArrayToBase64(this.pqCallSigningKey.publicKey),
           privateKey: PostQuantumUtils.uint8ArrayToBase64(this.pqCallSigningKey.privateKey)
         }));
-      } catch {}
+      } catch { }
     }
 
     this.setupSignalHandlers();
@@ -481,13 +481,13 @@ export class WebRTCCallingService {
 
       await this.setupLocalMedia(callType);
       await this.createPeerConnection();
-      
+
       if (this.localStream) {
         this.localStream.getTracks().forEach(track => {
           const sender = this.peerConnection!.addTrack(track, this.localStream!);
           // Apply E2EE to local senders
           const ctx = track.kind === 'audio' ? 'audio' : 'camera';
-          try { this.enablePqE2eeForSender(sender, ctx as any, targetUser); } catch {}
+          try { this.enablePqE2eeForSender(sender, ctx as any, targetUser); } catch { }
         });
       }
 
@@ -495,7 +495,7 @@ export class WebRTCCallingService {
         offerToReceiveAudio: true,
         offerToReceiveVideo: callType === 'video'
       });
-      
+
       // SDP munging for Opus CBR and bitrate clamp
       offer = { ...offer, sdp: this.mungeOpusForCBR(offer.sdp || '') };
       await this.peerConnection!.setLocalDescription(offer);
@@ -545,12 +545,12 @@ export class WebRTCCallingService {
       await this.ensurePqSecureMediaReady(this.currentCall.peer);
 
       await this.setupLocalMedia(this.currentCall.type);
-      
+
       if (this.localStream && this.peerConnection) {
         this.localStream.getTracks().forEach(track => {
           const sender = this.peerConnection!.addTrack(track, this.localStream!);
           const ctx = track.kind === 'audio' ? 'audio' : 'camera';
-          try { this.enablePqE2eeForSender(sender, ctx as any, this.currentCall!.peer); } catch {}
+          try { this.enablePqE2eeForSender(sender, ctx as any, this.currentCall!.peer); } catch { }
         });
       }
 
@@ -570,7 +570,7 @@ export class WebRTCCallingService {
               break;
             }
           }
-        } catch {}
+        } catch { }
       }
 
       await this.sendCallSignal({
@@ -718,7 +718,7 @@ export class WebRTCCallingService {
       this.localStream.removeTrack(videoTrack);
       this.localStream.addTrack(newVideoTrack);
       this.onLocalStreamCallback?.(this.localStream);
-      
+
     } catch (_error) {
       console.error('[Calling] Failed to switch camera:', _error);
     }
@@ -844,9 +844,9 @@ export class WebRTCCallingService {
       try {
         const pqKeyPair = await this.getOrGenerateSessionKeyPair();
         (this.screenStream as any)._pqSessionKey = pqKeyPair;
-      } catch {}
+      } catch { }
 
-      try { (videoTrack as any).contentHint = 'detail'; } catch {}
+      try { (videoTrack as any).contentHint = 'detail'; } catch { }
       videoTrack.onended = () => this.stopScreenShare();
 
       this.screenShareSender = this.peerConnection.addTrack(videoTrack, this.screenStream);
@@ -860,10 +860,10 @@ export class WebRTCCallingService {
             this.currentCall?.peer || 'unknown'
           );
         }
-      } catch {}
+      } catch { }
 
       try {
-          if (this.screenShareSender.setParameters) {
+        if (this.screenShareSender.setParameters) {
           const params: RTCRtpSendParameters = this.screenShareSender.getParameters();
           if (!params.encodings || params.encodings.length === 0) {
             params.encodings = [{}];
@@ -889,9 +889,9 @@ export class WebRTCCallingService {
           }
           (params.encodings[0] as any).maxBitrate = maxBitrate;
           (params.encodings[0] as any).scaleResolutionDownBy = 1.0;
-          try { await (this.screenShareSender as any).setParameters(params); } catch {}
+          try { await (this.screenShareSender as any).setParameters(params); } catch { }
         }
-      } catch {}
+      } catch { }
 
       await this.renegotiateConnection();
       this.isScreenSharing = true;
@@ -944,7 +944,7 @@ export class WebRTCCallingService {
       if (peerConnection && this.screenShareSender) {
         try {
           peerConnection.removeTrack(this.screenShareSender);
-        } catch {}
+        } catch { }
       } else if (localStream && peerConnection) {
         const cameraTrack = localStream.getVideoTracks()[0];
         if (cameraTrack) {
@@ -952,7 +952,7 @@ export class WebRTCCallingService {
           if (sender) {
             try {
               await sender.replaceTrack(cameraTrack);
-            } catch {}
+            } catch { }
           }
         }
       }
@@ -973,7 +973,7 @@ export class WebRTCCallingService {
               track.stop();
             }
           });
-        } catch {}
+        } catch { }
         if ((this.screenStream as any)._pqSessionKey) {
           const keyMaterial = (this.screenStream as any)._pqSessionKey;
           try {
@@ -983,7 +983,7 @@ export class WebRTCCallingService {
             if (keyMaterial?.publicKey) {
               PostQuantumUtils.clearMemory(keyMaterial.publicKey);
             }
-          } catch {}
+          } catch { }
           delete (this.screenStream as any)._pqSessionKey;
         }
         this.screenStream = null;
@@ -1003,7 +1003,7 @@ export class WebRTCCallingService {
       const sAny: any = (RTCRtpSender as any);
       const rAny: any = (RTCRtpReceiver as any);
       return !!(sAny && sAny.prototype && typeof sAny.prototype.createEncodedStreams === 'function' &&
-                rAny && rAny.prototype && typeof rAny.prototype.createEncodedStreams === 'function');
+        rAny && rAny.prototype && typeof rAny.prototype.createEncodedStreams === 'function');
     } catch { return false; }
   }
 
@@ -1021,9 +1021,9 @@ export class WebRTCCallingService {
     try {
       const peers: string[] = typeof svc.getConnectedPeers === 'function' ? svc.getConnectedPeers() : [];
       if (!peers.includes(peer) && typeof svc.connectToPeer === 'function') {
-        try { await svc.connectToPeer(peer); } catch {}
+        try { await svc.connectToPeer(peer); } catch { }
       }
-    } catch {}
+    } catch { }
     // Waitfor PQ session establishment event
     const hasSession = (): boolean => {
       try {
@@ -1122,7 +1122,7 @@ export class WebRTCCallingService {
         }
       });
       // @ts-ignore
-      readable.pipeThrough(transformer).pipeTo(writable).catch(() => {});
+      readable.pipeThrough(transformer).pipeTo(writable).catch(() => { });
 
       // Apply audio bitrate clamp (CBR-ish) via sender parameters
       if (context === 'audio' && typeof sender.getParameters === 'function' && typeof sender.setParameters === 'function') {
@@ -1131,9 +1131,9 @@ export class WebRTCCallingService {
           if (!params.encodings || params.encodings.length === 0) params.encodings = [{}];
           (params.encodings[0] as any).maxBitrate = 40_000;
           await (sender as any).setParameters(params);
-        } catch {}
+        } catch { }
       }
-    } catch {}
+    } catch { }
   }
 
   private async enablePqE2eeForReceiver(receiver: RTCRtpReceiver, context: 'audio' | 'camera' | 'screen', peer: string): Promise<void> {
@@ -1188,8 +1188,8 @@ export class WebRTCCallingService {
         }
       });
       // @ts-ignore
-      readable.pipeThrough(transformer).pipeTo(writable).catch(() => {});
-    } catch {}
+      readable.pipeThrough(transformer).pipeTo(writable).catch(() => { });
+    } catch { }
   }
 
   private async renegotiateConnection(): Promise<void> {
@@ -1228,7 +1228,7 @@ export class WebRTCCallingService {
         if (this.peerConnection.signalingState === 'have-local-offer') {
           try {
             await this.peerConnection.setLocalDescription({ type: 'rollback' } as RTCSessionDescriptionInit);
-          } catch {}
+          } catch { }
         }
         this.isRenegotiating = false;
       }, 10000);
@@ -1286,7 +1286,7 @@ export class WebRTCCallingService {
           if (videoDevices.length === 0) {
             callType = 'audio';
           }
-        } catch {}
+        } catch { }
       }
 
       let video: boolean | MediaTrackConstraints = false;
@@ -1314,7 +1314,7 @@ export class WebRTCCallingService {
             noiseSuppression = parsed.audioSettings.noiseSuppression ?? true;
           }
         }
-      } catch {}
+      } catch { }
 
       const constraints: MediaStreamConstraints = {
         audio: {
@@ -1356,8 +1356,8 @@ export class WebRTCCallingService {
         try {
           const audioOnlyConstraints: MediaStreamConstraints = {
             audio: {
-              echoCancellation,
-              noiseSuppression,
+              echoCancellation: true,
+              noiseSuppression: true,
               autoGainControl: true,
               sampleRate: 48000,
               channelCount: 1
@@ -1418,28 +1418,28 @@ export class WebRTCCallingService {
     this.peerConnection = new RTCPeerConnection(this.rtcConfig);
 
     this.peerConnection.ontrack = async (event) => {
-        let stream: MediaStream;
-        if (event.streams && event.streams[0]) {
-          stream = event.streams[0];
-        } else {
-          stream = new MediaStream([event.track]);
+      let stream: MediaStream;
+      if (event.streams && event.streams[0]) {
+        stream = event.streams[0];
+      } else {
+        stream = new MediaStream([event.track]);
+      }
+
+      const videoTrack = stream.getVideoTracks()[0];
+
+      if (videoTrack) {
+        const settings = videoTrack.getSettings();
+        let isScreenShare = false;
+
+        if (this.currentCall?.type === 'audio') {
+          isScreenShare = true;
         }
-
-        const videoTrack = stream.getVideoTracks()[0];
-
-        if (videoTrack) {
-          const settings = videoTrack.getSettings();
-          let isScreenShare = false;
-
-          if (this.currentCall?.type === 'audio') {
-            isScreenShare = true;
-          }
-          else if (this.expectingScreenShare) {
-            isScreenShare = true;
-            this.expectingScreenShare = false;
-          } else {
-            isScreenShare = this.isScreenShareTrack(settings);
-          }
+        else if (this.expectingScreenShare) {
+          isScreenShare = true;
+          this.expectingScreenShare = false;
+        } else {
+          isScreenShare = this.isScreenShareTrack(settings);
+        }
 
         if (isScreenShare) {
           if (this.remoteScreenStream) {
@@ -1450,20 +1450,20 @@ export class WebRTCCallingService {
 
           videoTrack.onended = () => this.clearRemoteScreenStream();
           const handleRemove = () => this.clearRemoteScreenStream();
-          try { (stream as any).onremovetrack = handleRemove; } catch {}
+          try { (stream as any).onremovetrack = handleRemove; } catch { }
 
           try {
             const pqKeyPair = await this.getOrGenerateSessionKeyPair();
             (stream as any)._pqSessionKey = pqKeyPair;
             const receiveKey = await this.deriveMediaSessionKey(pqKeyPair, 'screen', this.currentCall?.peer || 'unknown');
             this.updateSessionKeys({ receive: receiveKey });
-          } catch {}
+          } catch { }
 
           // Enable PQ E2EE decrypt on receiver for screen
           try {
             const receiver = event.receiver;
             if (receiver) { await this.enablePqE2eeForReceiver(receiver, 'screen', this.currentCall?.peer || 'unknown'); }
-          } catch {}
+          } catch { }
 
           this.onRemoteScreenStreamCallback?.(this.remoteScreenStream);
         } else {
@@ -1475,20 +1475,20 @@ export class WebRTCCallingService {
 
           videoTrack.onended = () => this.clearRemoteStream();
           const handleRemoveCam = () => this.clearRemoteStream();
-          try { (stream as any).onremovetrack = handleRemoveCam; } catch {}
+          try { (stream as any).onremovetrack = handleRemoveCam; } catch { }
 
           try {
             const pqKeyPair = await this.getOrGenerateSessionKeyPair();
             (stream as any)._pqSessionKey = pqKeyPair;
             const receiveKey = await this.deriveMediaSessionKey(pqKeyPair, 'camera', this.currentCall?.peer || 'unknown');
             this.updateSessionKeys({ receive: receiveKey });
-          } catch {}
+          } catch { }
 
           // Enable PQ E2EE decrypt on receiver for camera/video
           try {
             const receiver = event.receiver;
             if (receiver) { await this.enablePqE2eeForReceiver(receiver, 'camera', this.currentCall?.peer || 'unknown'); }
-          } catch {}
+          } catch { }
 
           this.onRemoteStreamCallback?.(this.remoteStream);
         }
@@ -1508,7 +1508,7 @@ export class WebRTCCallingService {
         try {
           const receiver = event.receiver;
           if (receiver) { await this.enablePqE2eeForReceiver(receiver, 'audio', this.currentCall?.peer || 'unknown'); }
-        } catch {}
+        } catch { }
 
         this.onRemoteStreamCallback?.(this.remoteStream);
       }
@@ -1520,14 +1520,14 @@ export class WebRTCCallingService {
           if (!t.muted) {
             this.markConnectedIfConnecting(`immediate:${label}`);
           }
-        } catch {}
+        } catch { }
       };
       try {
         bindUnmute(stream.getAudioTracks()[0], 'audio');
-      } catch {}
+      } catch { }
       try {
         bindUnmute(stream.getVideoTracks()[0], 'video');
-      } catch {}
+      } catch { }
     };
 
     this.peerConnection.onconnectionstatechange = () => {
@@ -1637,7 +1637,7 @@ export class WebRTCCallingService {
               }
             } catch { /* noop */ }
           };
-          try { window.addEventListener('p2p-call-signal-result', onResult as EventListener); } catch {}
+          try { window.addEventListener('p2p-call-signal-result', onResult as EventListener); } catch { }
           try {
             window.dispatchEvent(new CustomEvent('p2p-call-signal-send', {
               detail: { to: signal.to, signal: signedSignal, requestId: reqId }
@@ -1646,7 +1646,7 @@ export class WebRTCCallingService {
         });
         const ok = await tryP2P;
         if (ok) return;
-      } catch {}
+      } catch { }
 
       const signalData = {
         messageId: this.generateCallId(),
@@ -1670,7 +1670,7 @@ export class WebRTCCallingService {
             timestamp: Date.now(),
             challenge: (window as any).CryptoUtils?.Base64?.arrayBufferToBase64?.(crypto.getRandomValues(new Uint8Array(32))) || ''
           };
-          try { await websocketClient.sendSecureControlMessage(reqBase); } catch {}
+          try { await websocketClient.sendSecureControlMessage(reqBase); } catch { }
           await new Promise<void>((resolve) => {
             const timeout = setTimeout(() => {
               window.removeEventListener('libsignal-session-ready', handler as EventListener);
@@ -1687,15 +1687,15 @@ export class WebRTCCallingService {
             window.addEventListener('libsignal-session-ready', handler as EventListener, { once: true });
           });
         }
-      } catch {}
+      } catch { }
 
       let recipientResolved = await this.resolveRecipientHybridKeys(signal.to);
-      
+
       if (!recipientResolved && (signal.type === 'end-call' || signal.type === 'decline-call')) {
         await new Promise(resolve => setTimeout(resolve, 500));
         recipientResolved = await this.resolveRecipientHybridKeys(signal.to);
       }
-      
+
       let recipientKyber = recipientResolved?.kyber || null;
       let recipientHybridKeys = recipientResolved?.hybrid || undefined;
 
@@ -1735,7 +1735,7 @@ export class WebRTCCallingService {
               timestamp: Date.now(),
               reason: 'call-signal-retry'
             });
-          } catch {}
+          } catch { }
           await new Promise<void>((resolve) => {
             let settled = false;
             const timeout = setTimeout(() => { if (!settled) { settled = true; resolve(); } }, 5000);
@@ -1821,7 +1821,7 @@ export class WebRTCCallingService {
       }
       this.kyberRefreshTimestamps.set(peer, now);
 
-      try { await websocketClient.sendSecureControlMessage({ type: SignalType.CHECK_USER_EXISTS, username: peer }); } catch {}
+      try { await websocketClient.sendSecureControlMessage({ type: SignalType.CHECK_USER_EXISTS, username: peer }); } catch { }
 
       await new Promise<void>((resolve) => {
         let settled = false;
@@ -1957,7 +1957,7 @@ export class WebRTCCallingService {
         if (Array.isArray(list) && list.length > 0) parsed.push({ urls: list });
       }
       if (parsed.length > 0) config.iceServers = parsed;
-    } catch {}
+    } catch { }
 
     // Prefer Electron-provided ICE if env not provided
     try {
@@ -1973,7 +1973,7 @@ export class WebRTCCallingService {
           }
         }
       }
-    } catch {}
+    } catch { }
 
     // Try self-host ICE endpoint if still empty
     try {
@@ -1984,7 +1984,7 @@ export class WebRTCCallingService {
           const u = new URL(envUrl.replace('ws://', 'http://').replace('wss://', 'https://'));
           baseHttp = `${u.protocol}//${u.host}`;
         }
-      } catch {}
+      } catch { }
       try {
         if (!baseHttp && typeof window !== 'undefined' && window.location?.origin) {
           const { protocol, origin } = window.location as Location;
@@ -1992,7 +1992,7 @@ export class WebRTCCallingService {
             baseHttp = origin;
           }
         }
-      } catch {}
+      } catch { }
 
       if (config.iceServers.length === 0 && (baseHttp && (baseHttp.startsWith('http://') || baseHttp.startsWith('https://')))) {
         fetch(`${baseHttp}/api/ice/config`, { method: 'GET', credentials: 'omit' })
@@ -2012,9 +2012,9 @@ export class WebRTCCallingService {
                 iceTransportPolicy: this.rtcConfig.iceTransportPolicy
               });
             }
-          }).catch(() => {});
+          }).catch(() => { });
       }
-    } catch {}
+    } catch { }
 
     // Sanitize ICE servers: remove TURN without credentials; validate all entries
     const sanitized: RTCIceServer[] = [];
@@ -2022,18 +2022,18 @@ export class WebRTCCallingService {
       const urls = Array.isArray(server.urls) ? server.urls : [server.urls];
       const isTurn = urls.some(url => typeof url === 'string' && (url.startsWith('turn:') || url.startsWith('turns:')));
       const isStun = urls.some(url => typeof url === 'string' && url.startsWith('stun:'));
-      
+
       if (isTurn && (!server.username || !server.credential)) {
         SecurityAuditLogger.log('warn', 'ice-turn-dropped-no-creds', { urls });
         continue;
       }
-      
+
       if (isStun || (isTurn && server.username && server.credential)) {
         sanitized.push(server);
       }
     }
     config.iceServers = sanitized;
-    
+
     const hasTurnServer = sanitized.some(server => {
       const urls = Array.isArray(server.urls) ? server.urls : [server.urls];
       return urls.some(url => typeof url === 'string' && (url.startsWith('turn:') || url.startsWith('turns:')));
@@ -2114,7 +2114,7 @@ export class WebRTCCallingService {
           if (this.peerConnection.signalingState === 'have-local-offer') {
             try {
               await this.peerConnection.setLocalDescription({ type: 'rollback' } as RTCSessionDescriptionInit);
-            } catch {}
+            } catch { }
           }
 
           await this.peerConnection.setRemoteDescription(signal.data);
@@ -2189,7 +2189,7 @@ export class WebRTCCallingService {
           to: this.currentCall.peer,
           data: { reason: 'missed' },
           timestamp: now
-        }).catch(() => {});
+        }).catch(() => { });
         this.cleanup();
       }
     }, this.RING_TIMEOUT);
@@ -2224,7 +2224,7 @@ export class WebRTCCallingService {
         clearTimeout(this.callTimeoutId);
         this.callTimeoutId = null;
       }
-      
+
       if (this.currentCall) {
         this.currentCall.status = 'connecting';
         this.onCallStateChangeCallback?.(this.currentCall);
@@ -2241,7 +2241,7 @@ export class WebRTCCallingService {
               break;
             }
           }
-        } catch {}
+        } catch { }
       }
     } else {
       this.currentCall.status = 'declined';
@@ -2277,12 +2277,12 @@ export class WebRTCCallingService {
       return;
     }
     const remoteConnectedAt = typeof (signal.data?.connectedAt) === 'number' ? signal.data.connectedAt : signal.timestamp;
-    
+
     if (this.callTimeoutId) {
       clearTimeout(this.callTimeoutId);
       this.callTimeoutId = null;
     }
-    
+
     if (this.currentCall.status === 'ringing' || this.currentCall.status === 'connecting') {
       this.currentCall.status = 'connected';
       const local = this.connectedDetectedAtLocal ?? Date.now();
@@ -2290,7 +2290,7 @@ export class WebRTCCallingService {
       this.onCallStateChangeCallback?.(this.currentCall);
       return;
     }
-    
+
     if (this.currentCall.status === 'connected') {
       const localStart = this.currentCall.startTime ?? this.connectedDetectedAtLocal ?? Date.now();
       const synced = Math.min(localStart, remoteConnectedAt);
@@ -2342,7 +2342,7 @@ export class WebRTCCallingService {
         if (keyMaterial?.publicKey) {
           PostQuantumUtils.clearMemory(keyMaterial.publicKey);
         }
-      } catch {}
+      } catch { }
     };
 
     if (this.localStream) {
@@ -2431,8 +2431,8 @@ export class WebRTCCallingService {
     if (this.pqDeviceKeyPair) {
       try {
         const encrypted = await this.encryptDeviceIdPQ(deviceId || '', this.pqDeviceKeyPair.publicKey);
-        try { const { encryptedStorage } = await import('./encrypted-storage'); await encryptedStorage.setItem('preferred_camera_deviceId_v1_pq', encrypted); } catch {}
-      } catch {}
+        try { const { encryptedStorage } = await import('./encrypted-storage'); await encryptedStorage.setItem('preferred_camera_deviceId_v1_pq', encrypted); } catch { }
+      } catch { }
     }
 
     if (this.peerConnection) {

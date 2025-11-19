@@ -236,7 +236,7 @@ export class ConnectionStateManager {
   }
 
   /**
-   * Update connection state
+   * Update connection state atomically using Lua
    */
   static async updateState(sessionId, updates) {
     if (!isValidSessionId(sessionId)) return false;
@@ -244,105 +244,101 @@ export class ConnectionStateManager {
 
     try {
       return await withRedisClient(async (client) => {
-        const stateJson = await client.get(CONNECTION_STATE_KEY(sessionId));
-        if (!stateJson) return false;
+        // Prepare the Lua script
+        const luaScript = `
+          local sessionKey = KEYS[1]
+          local sessionId = ARGV[1]
+          local updatesJson = ARGV[2]
+          local ttl = tonumber(ARGV[3])
 
-        const currentState = JSON.parse(stateJson);
-        const newState = {
-          ...currentState,
-          ...updates,
-          lastActivity: Date.now()
-        };
+          -- Get current state
+          local currentStateJson = redis.call('GET', sessionKey)
+          if not currentStateJson then
+            return 0 -- Session not found
+          end
 
-        if ('username' in updates && updates.username !== currentState.username) {
-          const oldUsername = currentState.username;
-          const newUsername = normalizeUsername(updates.username);
+          local currentState = cjson.decode(currentStateJson)
+          local updates = cjson.decode(updatesJson)
+          
+          -- Merge updates
+          for k, v in pairs(updates) do
+            currentState[k] = v
+          end
+          currentState['lastActivity'] = tonumber(ARGV[4]) -- Update lastActivity
 
-          // Case 1: Clearing username (setting to null/empty)
-          if (!newUsername && oldUsername) {
-            const luaScript = `
-              local userKey = KEYS[1]
-              local sessionId = ARGV[1]
-              local currentOwner = redis.call('GET', userKey)
-              if currentOwner == sessionId then
-                redis.call('DEL', userKey)
-                return 1
-              end
-              return 0
-            `;
-            await client.eval(luaScript, 1, USER_SESSION_KEY(oldUsername), sessionId);
-          }
-          // Case 2: Setting/changing to a new username
-          else if (newUsername) {
-            const luaScript = `
-              local userKey = KEYS[1]
-              local sessionKey = KEYS[2]
-              local oldUserKey = KEYS[3]
-              local sessionId = ARGV[1]
-              local ttl = tonumber(ARGV[2])
-              local oldUsername = ARGV[3]
-
-              -- Check if new username is available or owned by this session
-              local currentOwner = redis.call('GET', userKey)
-              local canClaim = false
-
-              if not currentOwner or currentOwner == sessionId then
-                canClaim = true
-              else
-                -- Check if the owning session still exists
-                local ownerSessionExists = redis.call('EXISTS', 'connection_state:' .. currentOwner)
-                if ownerSessionExists == 0 then
-                  -- Cleanup stale mapping
-                  redis.call('DEL', userKey)
-                  canClaim = true
+          -- Handle username changes
+          local oldUsername = currentState['username']
+          local newUsername = updates['username']
+          
+          -- If username is being updated (explicitly present in updates)
+          if newUsername ~= nil then
+            -- Normalize empty string to nil/null logic
+            if newUsername == "" then newUsername = nil end
+            
+            if newUsername ~= oldUsername then
+              -- 1. Release old username if we owned it
+              if oldUsername and oldUsername ~= cjson.null then
+                local oldUserKey = 'user_session:' .. redis.sha256hex(oldUsername)
+                local currentOwner = redis.call('GET', oldUserKey)
+                if currentOwner == sessionId then
+                  redis.call('DEL', oldUserKey)
                 end
               end
 
-              if canClaim then
-                -- Claim the new username
-                redis.call('SETEX', userKey, ttl, sessionId)
+              -- 2. Claim new username if specified
+              if newUsername and newUsername ~= cjson.null then
+                local newUserKey = 'user_session:' .. redis.sha256hex(newUsername)
+                local currentOwner = redis.call('GET', newUserKey)
+                local canClaim = false
 
-                -- Remove old username mapping if it belongs to this session and is different
-                if oldUsername and oldUsername ~= '' and oldUserKey ~= userKey then
-                  local oldOwner = redis.call('GET', oldUserKey)
-                  if oldOwner == sessionId then
-                    redis.call('DEL', oldUserKey)
+                if not currentOwner or currentOwner == sessionId then
+                  canClaim = true
+                else
+                  -- Check if the owning session still exists (stale check)
+                  local ownerSessionKey = 'connection_state:' .. currentOwner
+                  local ownerSessionExists = redis.call('EXISTS', ownerSessionKey)
+                  if ownerSessionExists == 0 then
+                    canClaim = true -- Steal from stale session
                   end
                 end
 
-                return 1  -- Success
-              else
-                return 0  -- Username taken
+                if canClaim then
+                  redis.call('SETEX', newUserKey, ttl, sessionId)
+                else
+                  return -1 -- Username taken
+                end
               end
-            `;
+            end
+          elseif oldUsername and oldUsername ~= cjson.null then
+             -- No username change, but refresh the TTL on the user mapping
+             local userKey = 'user_session:' .. redis.sha256hex(oldUsername)
+             local currentOwner = redis.call('GET', userKey)
+             if currentOwner == sessionId then
+               redis.call('EXPIRE', userKey, ttl)
+             end
+          end
 
-            const oldUserKey = oldUsername ? USER_SESSION_KEY(oldUsername) : '';
-            const result = await client.eval(
-              luaScript,
-              3,
-              USER_SESSION_KEY(newUsername),
-              CONNECTION_STATE_KEY(sessionId),
-              oldUserKey,
-              sessionId,
-              SESSION_TTL,
-              oldUsername || ''
-            );
+          -- Save updated state
+          local newStateJson = cjson.encode(currentState)
+          redis.call('SETEX', sessionKey, ttl, newStateJson)
+          return 1
+        `;
 
-            if (result === 0) {
-              throw new Error('Username already in use by another active session');
-            }
-          }
+        const result = await client.eval(
+          luaScript,
+          1, // 1 Key (sessionKey), others are derived/dynamic
+          CONNECTION_STATE_KEY(sessionId),
+          sessionId,
+          JSON.stringify(updates),
+          SESSION_TTL,
+          Date.now()
+        );
+
+        if (result === -1) {
+          throw new Error('Username already in use by another active session');
         }
-        // Case 3: No username change but refresh TTL if username exists
-        else if (currentState.username && !('username' in updates)) {
-          const currentOwner = await client.get(USER_SESSION_KEY(currentState.username));
-          if (currentOwner === sessionId) {
-            await client.setex(USER_SESSION_KEY(currentState.username), SESSION_TTL, sessionId);
-          }
-        }
 
-        await client.setex(CONNECTION_STATE_KEY(sessionId), SESSION_TTL, JSON.stringify(newState));
-        return true;
+        return result === 1;
       });
     } catch (error) {
       cryptoLogger.error('Failed to update connection state', error, { sessionId });
