@@ -465,7 +465,8 @@ export const ChatMessage = React.memo<ExtendedChatMessageProps>(({ message, onRe
                 backgroundColor: 'var(--color-surface)',
                 borderColor: 'var(--color-border)',
                 color: 'var(--color-text-secondary)',
-                boxShadow: 'var(--shadow-elevation-low)'
+                boxShadow: 'var(--shadow-elevation-low)',
+                userSelect: 'none'
               }}
               onClick={handleTogglePicker}
               aria-label="Add reaction"
@@ -634,6 +635,7 @@ export const ChatMessage = React.memo<ExtendedChatMessageProps>(({ message, onRe
             className="flex flex-wrap gap-1 mt-1"
             role="group"
             aria-label="Message reactions"
+            style={{ userSelect: 'none' }}
           >
             {Object.entries(message.reactions).map(([emoji, users]) => (
               <button
@@ -642,7 +644,8 @@ export const ChatMessage = React.memo<ExtendedChatMessageProps>(({ message, onRe
                 style={{
                   backgroundColor: 'var(--color-surface)',
                   borderColor: 'var(--color-border)',
-                  color: 'var(--color-text-primary)'
+                  color: 'var(--color-text-primary)',
+                  userSelect: 'none'
                 }}
                 onClick={() => onReact?.(message, emoji)}
                 aria-label={`${emoji} reaction, ${users.length} user${users.length !== 1 ? 's' : ''}`}

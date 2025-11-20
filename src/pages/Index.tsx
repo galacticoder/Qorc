@@ -1348,6 +1348,8 @@ const ChatApp: React.FC<ChatAppProps> = () => {
       const { messageId, emoji, isAdd, username } = event.detail;
       if (!messageId || !emoji || !username) return;
 
+      let updatedMessage: Message | null = null;
+
       setMessages(prev => prev.map(msg => {
         if (msg.id !== messageId) return msg;
 
@@ -1371,8 +1373,18 @@ const ChatApp: React.FC<ChatAppProps> = () => {
           delete currentReactions[emoji];
         }
 
-        return { ...msg, reactions: currentReactions };
+        const updated = { ...msg, reactions: currentReactions };
+        updatedMessage = updated;
+        return updated;
       }));
+
+      if (updatedMessage) {
+        try {
+          saveMessageWithContext(updatedMessage);
+        } catch (e) {
+          console.error('[Index] Failed to persist reaction update:', e);
+        }
+      }
     };
 
     window.addEventListener('local-reaction-update', handleLocalReactionUpdate as EventListener);

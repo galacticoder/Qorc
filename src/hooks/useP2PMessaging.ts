@@ -974,7 +974,7 @@ export function useP2PMessaging(
             metadata: options?.metadata,
           };
           const encryptedEnvelope = await CryptoUtils.Hybrid.encryptForClient(messageObj, effectiveRemoteKeys, {
-            to: peerCert.dilithium.publicKeyBase64,
+            to: peerCert.dilithiumPublicKey,
             from: hybridKeys.dilithium.publicKeyBase64,
             type: `p2p-${options?.messageType || 'message'}`,
             senderDilithiumSecretKey: hybridKeys.dilithium.secretKey,
