@@ -48,10 +48,9 @@ export const Sidebar = React.memo<SidebarProps>(({ className, children, currentU
     }
   }, [showAddUser]);
 
-  // Listen for global compose event to open "New Chat" modal
   useEffect(() => {
     const openNewChat = () => {
-      setShowAddUser(true); // keep sidebar open on messages
+      setShowAddUser(true);
     };
     window.addEventListener('open-new-chat', openNewChat as EventListener);
     return () => window.removeEventListener('open-new-chat', openNewChat as EventListener);
@@ -272,85 +271,7 @@ export const Sidebar = React.memo<SidebarProps>(({ className, children, currentU
         </div>
       </div>
 
-      {showAddUser && (
-        <div
-          className="fixed inset-0 bg-black/50 flex items-center justify-center z-50"
-          onClick={handleCloseModal}
-          role="dialog"
-          aria-modal="true"
-          aria-labelledby="new-conversation-title"
-        >
-          <div
-            className="bg-card rounded-lg p-6 w-80 shadow-xl border border-border"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <h3 id="new-conversation-title" className="text-lg font-semibold mb-4 text-foreground">Start New Conversation</h3>
-            <div className="space-y-4">
-              <div>
-                <label htmlFor="username-input" className="text-sm text-muted-foreground mb-2 block">
-                  Enter username to chat with:
-                </label>
-                <Input
-                  id="username-input"
-                  ref={inputRef}
-                  placeholder="e.g., alice, bob, charlie..."
-                  value={newUsername}
-                  onChange={handleInputChange}
-                  onKeyDown={handleKeyPress}
-                  className="w-full"
-                  disabled={isValidating}
-                  autoCapitalize="off"
-                  autoCorrect="off"
-                  spellCheck={false}
-                  inputMode="text"
-                  maxLength={32}
-                  aria-invalid={!!validationError}
-                  aria-describedby={validationError ? "username-error" : undefined}
-                />
-                {newUsername.trim() === currentUsername && (
-                  <p id="username-error" className="text-xs text-red-500 mt-1" role="alert">
-                    Cannot start conversation with yourself
-                  </p>
-                )}
-                {validationError && (
-                  <p id="username-error" className="text-xs text-red-500 mt-1" role="alert">
-                    {validationError}
-                  </p>
-                )}
-                {isValidating && (
-                  <p className="text-xs text-blue-500 mt-1" role="status">
-                    Validating user...
-                  </p>
-                )}
-              </div>
-              <div className="flex gap-2">
-                <Button
-                  onClick={handleAddUser}
-                  className="flex-1"
-                  disabled={!newUsername.trim() || newUsername.trim() === currentUsername || isValidating}
-                  aria-label="Start chat"
-                >
-                  {isValidating ? "Validating..." : "Start Chat"}
-                </Button>
-                <Button
-                  onClick={handleCloseModal}
-                  variant="outline"
-                  className="flex-1"
-                  disabled={isValidating}
-                  aria-label="Cancel"
-                >
-                  Cancel
-                </Button>
-              </div>
-              <div className="text-xs text-muted-foreground">
-                You can message any username. If they're online, they'll receive your message instantly.
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Conversations panel - only show when messages tab is active */}
+      {/* Conversations panel */}
       {activeTab === "messages" && (
         <div
           className={cn(
@@ -372,6 +293,13 @@ export const Sidebar = React.memo<SidebarProps>(({ className, children, currentU
                 onClick={() => {
                   setShowAddUser(true);
                 }}
+                onMouseEnter={(e) => {
+                  e.currentTarget.style.transform = 'scale(1.15) rotate(-5deg)';
+                }}
+                onMouseLeave={(e) => {
+                  e.currentTarget.style.transform = 'scale(1) rotate(0deg)';
+                }}
+                style={{ transition: 'transform 0.2s cubic-bezier(0.34, 1.56, 0.64, 1)', transformOrigin: 'center' }}
               >
                 <Pencil className="h-4 w-4" />
               </Button>

@@ -1515,6 +1515,13 @@ const ChatApp: React.FC<ChatAppProps> = () => {
                         size="icon"
                         onClick={() => setShowNewChatInput(!showNewChatInput)}
                         className="h-8 w-8"
+                        onMouseEnter={(e) => {
+                          e.currentTarget.style.transform = 'scale(1.15) rotate(-5deg)';
+                        }}
+                        onMouseLeave={(e) => {
+                          e.currentTarget.style.transform = 'scale(1) rotate(0deg)';
+                        }}
+                        style={{ transition: 'transform 0.2s cubic-bezier(0.34, 1.56, 0.64, 1)', transformOrigin: 'center' }}
                       >
                         <Pencil className="h-4 w-4" />
                       </Button>

@@ -3,8 +3,6 @@
 @import 'tailwindcss';
 
 /* Link Preview Styles */
-.link-preview-container {}
-
 .link-preview-container img {
   max-width: 100%;
   height: auto;
@@ -602,4 +600,18 @@
 .custom-switch-input:checked+.toggleSwitch {
   background-color: rgb(148, 118, 255);
   transition-duration: .2s;
+}
+
+/* Pencil Icon Animation */
+.pencil-icon-anim svg,
+.pencil-icon-anim .lucide {
+  transition: transform 0.2s cubic-bezier(0.34, 1.56, 0.64, 1), fill 0.2s ease;
+  transform-origin: center;
+  transform-box: fill-box;
+}
+
+.pencil-icon-anim:hover svg,
+.pencil-icon-anim:hover .lucide {
+  fill: currentColor !important;
+  transform: scale(1.2) rotate(-10deg) !important;
 }
