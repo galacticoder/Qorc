@@ -8,6 +8,7 @@ import { AppSettings } from "../components/settings/AppSettings";
 import { Layout } from "../components/ui/Layout";
 import { CallLogs } from "../components/chat/CallLogs";
 import { Message } from "../components/chat/types";
+import { Dialog, DialogContent } from "../components/ui/dialog";
 import { EmojiPickerProvider } from "../contexts/EmojiPickerContext";
 import { CallHistoryProvider } from "../contexts/CallHistoryContext";
 import { formatFileSize } from "../components/chat/ChatMessage/FileMessage";
@@ -1465,7 +1466,13 @@ const ChatApp: React.FC<ChatAppProps> = () => {
       <TypingIndicatorProvider currentUsername={Authentication.loginUsernameRef.current || ''}>
         <Layout
           activeTab={sidebarActiveTab as 'chats' | 'calls' | 'settings'}
-          onTabChange={(tab) => setSidebarActiveTab(tab)}
+          onTabChange={(tab) => {
+            if (tab === 'settings') {
+              setShowSettings(true);
+            } else {
+              setSidebarActiveTab(tab);
+            }
+          }}
           currentUser={{
             username: currentDisplayName || Authentication.originalUsernameRef.current || Authentication.loginUsernameRef.current || '',
             avatarUrl: undefined
@@ -1775,15 +1782,18 @@ const ChatApp: React.FC<ChatAppProps> = () => {
             <div className={sidebarActiveTab === 'calls' ? 'h-full w-full' : 'hidden'}>
               <CallLogs />
             </div>
+          </div>
 
-            <div className={sidebarActiveTab === 'settings' ? 'h-full w-full' : 'hidden'}>
+          {/* Settings Modal */}
+          <Dialog open={showSettings} onOpenChange={setShowSettings}>
+            <DialogContent className="max-w-2xl max-h-[85vh] overflow-hidden p-0">
               <AppSettings
                 passphraseRef={Authentication.passphrasePlaintextRef}
                 kyberSecretRef={kyberSecretRefForSettings as any}
                 getDisplayUsername={stableGetDisplayUsername}
               />
-            </div>
-          </div>
+            </DialogContent>
+          </Dialog>
         </Layout>
       </TypingIndicatorProvider>
       <Toaster position="top-right" theme={theme as any} richColors toastOptions={{ className: 'select-none' }} />

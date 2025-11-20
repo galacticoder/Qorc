@@ -92,50 +92,88 @@
     --sidebar-accent-foreground: 240 5.9% 10%;
     --sidebar-border: 220 13% 91%;
     --sidebar-ring: 217.2 91.2% 59.8%;
+
+    /* New Palette Variables (HSL Channels) */
+    --clr-dark-a0: 0 0% 0%;
+    --clr-light-a0: 0 0% 100%;
+
+    --clr-primary-a0: 263 82% 74%;
+    --clr-primary-a10: 264 82% 78%;
+    --clr-primary-a20: 264 82% 80%;
+    --clr-primary-a30: 265 82% 82%;
+    --clr-primary-a40: 265 82% 86%;
+    --clr-primary-a50: 265 82% 88%;
+
+    --clr-surface-a0: 0 0% 5%;
+    --clr-surface-a10: 0 0% 14%;
+    --clr-surface-a20: 0 0% 23%;
+    --clr-surface-a30: 0 0% 33%;
+    --clr-surface-a40: 0 0% 43%;
+    --clr-surface-a50: 0 0% 54%;
+
+    --clr-surface-tonal-a0: 274 12% 12%;
+    --clr-surface-tonal-a10: 266 7% 20%;
+    --clr-surface-tonal-a20: 264 5% 28%;
+    --clr-surface-tonal-a30: 264 4% 38%;
+    --clr-surface-tonal-a40: 264 3% 47%;
+    --clr-surface-tonal-a50: 264 2% 57%;
+
+    --clr-success-a0: 160 63% 36%;
+    --clr-success-a10: 160 63% 56%;
+    --clr-success-a20: 160 63% 76%;
+
+    --clr-warning-a0: 38 60% 41%;
+    --clr-warning-a10: 38 60% 61%;
+    --clr-warning-a20: 38 60% 81%;
+
+    --clr-danger-a0: 0 65% 37%;
+    --clr-danger-a10: 0 66% 57%;
+    --clr-danger-a20: 0 66% 77%;
+
+    --clr-info-a0: 217 61% 34%;
+    --clr-info-a10: 217 61% 54%;
+    --clr-info-a20: 217 61% 74%;
   }
 
   .dark {
-    /* Premium Dark Mode (Softer/Zinc-like) */
-    --background: 240 5% 10%;
-    /* Zinc-950ish */
-    --foreground: 240 5% 96%;
+    /* Premium Dark Mode (New Palette) */
+    --background: var(--clr-surface-a0);
+    --foreground: var(--clr-light-a0);
 
-    --card: 240 5% 13%;
-    /* Slightly lighter */
-    --card-foreground: 240 5% 96%;
+    --card: var(--clr-surface-a10);
+    --card-foreground: var(--clr-light-a0);
 
-    --popover: 240 5% 13%;
-    --popover-foreground: 240 5% 96%;
+    --popover: var(--clr-surface-a10);
+    --popover-foreground: var(--clr-light-a0);
 
-    --primary: 217 91% 60%;
-    /* Electric Blue (Keep brand color) */
-    --primary-foreground: 0 0% 100%;
+    --primary: var(--clr-primary-a0);
+    --primary-foreground: var(--clr-surface-a0);
 
-    --secondary: 240 4% 18%;
-    --secondary-foreground: 240 5% 96%;
+    --secondary: var(--clr-surface-a20);
+    --secondary-foreground: var(--clr-light-a0);
 
-    --muted: 240 4% 18%;
-    --muted-foreground: 240 5% 65%;
+    --muted: var(--clr-surface-a20);
+    --muted-foreground: var(--clr-surface-a40);
 
-    --accent: 240 4% 18%;
-    --accent-foreground: 240 5% 96%;
+    --accent: var(--clr-surface-a20);
+    --accent-foreground: var(--clr-light-a0);
 
-    --destructive: 0 62.8% 30.6%;
-    --destructive-foreground: 240 5% 96%;
+    --destructive: var(--clr-danger-a10);
+    --destructive-foreground: var(--clr-light-a0);
 
-    --border: 240 4% 18%;
-    --input: 240 4% 18%;
-    --ring: 217 91% 60%;
+    --border: var(--clr-surface-a20);
+    --input: var(--clr-surface-a20);
+    --ring: var(--clr-primary-a20);
 
     /* Sidebar - Dark */
-    --sidebar-background: 240 5% 12%;
-    --sidebar-foreground: 240 5% 96%;
-    --sidebar-primary: 217 91% 60%;
-    --sidebar-primary-foreground: 0 0% 100%;
-    --sidebar-accent: 240 4% 18%;
-    --sidebar-accent-foreground: 240 5% 96%;
-    --sidebar-border: 240 4% 18%;
-    --sidebar-ring: 217 91% 60%;
+    --sidebar-background: var(--clr-surface-a0);
+    --sidebar-foreground: var(--clr-light-a0);
+    --sidebar-primary: var(--clr-primary-a0);
+    --sidebar-primary-foreground: var(--clr-surface-a0);
+    --sidebar-accent: var(--clr-surface-a10);
+    --sidebar-accent-foreground: var(--clr-light-a0);
+    --sidebar-border: var(--clr-surface-a20);
+    --sidebar-ring: var(--clr-primary-a20);
   }
 }
 

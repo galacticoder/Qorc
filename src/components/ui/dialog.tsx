@@ -59,19 +59,59 @@ export const DialogContent: React.FC<{ children: ReactNode; className?: string }
   if (!context.isOpen) return null;
 
   return createPortal(
-    <div className="fixed inset-0 z-50 flex items-center justify-center">
-      <div
-        className="fixed inset-0 bg-black/50"
-        onClick={() => context.setIsOpen(false)}
-      />
-      <div
-        className={cn("relative rounded-lg shadow-lg max-w-md w-full mx-4 p-6", className)}
-        style={{ backgroundColor: 'var(--color-background)', color: 'var(--color-text-primary)' }}
-        {...props}
-      >
-        {children}
+    <>
+      <style>{`
+        @keyframes dialogOverlayShow {
+          from {
+            opacity: 0;
+          }
+          to {
+            opacity: 1;
+          }
+        }
+        
+        @keyframes dialogContentShow {
+          from {
+            opacity: 0;
+            transform: translate(-50%, -48%) scale(0.96);
+          }
+          to {
+            opacity: 1;
+            transform: translate(-50%, -50%) scale(1);
+          }
+        }
+        
+        .dialog-overlay {
+          animation: dialogOverlayShow 200ms cubic-bezier(0.16, 1, 0.3, 1);
+        }
+        
+        .dialog-content {
+          animation: dialogContentShow 200ms cubic-bezier(0.16, 1, 0.3, 1);
+        }
+      `}</style>
+      <div className="fixed inset-0 z-50 flex items-center justify-center">
+        <div
+          className="dialog-overlay fixed inset-0 bg-black/50"
+          onClick={() => context.setIsOpen(false)}
+        />
+        <div
+          className={cn(
+            "dialog-content relative rounded-lg shadow-lg max-w-md w-full mx-4 p-6",
+            "left-1/2 top-1/2 fixed",
+            className
+          )}
+          style={{
+            backgroundColor: 'hsl(var(--card))',
+            color: 'hsl(var(--card-foreground))',
+            transform: 'translate(-50%, -50%)'
+          }}
+          onClick={(e) => e.stopPropagation()}
+          {...props}
+        >
+          {children}
+        </div>
       </div>
-    </div>,
+    </>,
     document.body
   );
 };
@@ -85,7 +125,7 @@ export const DialogHeader: React.FC<{ children: ReactNode; className?: string } 
 export const DialogTitle: React.FC<{ children: ReactNode; className?: string } & React.HTMLAttributes<HTMLHeadingElement>> = ({ children, className, ...props }) => (
   <h2
     className={cn("text-lg font-semibold", className)}
-    style={{ color: 'var(--color-text-primary)' }}
+    style={{ color: 'hsl(var(--card-foreground))' }}
     {...props}
   >
     {children}
@@ -95,7 +135,7 @@ export const DialogTitle: React.FC<{ children: ReactNode; className?: string } &
 export const DialogDescription: React.FC<{ children: ReactNode; className?: string } & React.HTMLAttributes<HTMLParagraphElement>> = ({ children, className, ...props }) => (
   <p
     className={cn("text-sm mt-2", className)}
-    style={{ color: 'var(--color-text-secondary)' }}
+    style={{ color: 'hsl(var(--muted-foreground))' }}
     {...props}
   >
     {children}
