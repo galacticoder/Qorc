@@ -22,7 +22,7 @@ import { useConversations } from "../hooks/useConversations";
 import { useMessageHistory } from "../hooks/useMessageHistory";
 import { useUsernameDisplay } from "../hooks/useUsernameDisplay";
 import { storeUsernameMapping } from "../lib/username-display";
-import { useP2PMessaging, type HybridKeys, type PeerCertificateBundle } from "../hooks/useP2PMessaging";
+import { useP2PMessaging, type HybridKeys, type PeerCertificateBundle, type EncryptedMessage } from "../hooks/useP2PMessaging";
 import { useMessageReceipts } from "../hooks/useMessageReceipts";
 import { p2pConfig, getSignalingServerUrl } from "../config/p2p.config";
 import websocketClient from "../lib/websocket";
@@ -673,7 +673,7 @@ const ChatApp: React.FC<ChatAppProps> = () => {
 
   // Handle incoming P2P messages 
   useEffect(() => {
-    p2pMessaging.onMessage((encryptedMessage) => {
+    p2pMessaging.onMessage(async (encryptedMessage: EncryptedMessage) => {
       try {
         // Handle typing indicators
         if (encryptedMessage.messageType === 'typing') {
@@ -690,17 +690,19 @@ const ChatApp: React.FC<ChatAppProps> = () => {
 
         // Handle reactions
         if (encryptedMessage.messageType === 'reaction') {
-          const reactionData = encryptedMessage.metadata;
-          if (reactionData) {
-            const reactionEvent = new CustomEvent('message-reaction', {
+          const targetMessageId = encryptedMessage.metadata?.targetMessageId;
+          const action = encryptedMessage.metadata?.action;
+          const emoji = encryptedMessage.content;
+
+          if (targetMessageId && emoji && (action === 'reaction-add' || action === 'reaction-remove')) {
+            window.dispatchEvent(new CustomEvent('local-reaction-update', {
               detail: {
-                messageId: reactionData.targetMessageId,
-                reaction: reactionData.reaction,
-                action: reactionData.action,
-                sender: encryptedMessage.from,
+                messageId: targetMessageId,
+                emoji: emoji,
+                isAdd: action === 'reaction-add',
+                username: encryptedMessage.from
               }
-            });
-            window.dispatchEvent(reactionEvent);
+            }));
             SecurityAuditLogger.log('info', 'p2p-reaction-received', {});
           }
           return;
@@ -770,6 +772,7 @@ const ChatApp: React.FC<ChatAppProps> = () => {
           }
           return;
         }
+
 
         if (encryptedMessage.messageType === 'file') {
           SecurityAuditLogger.log('info', 'p2p-file-metadata-ignored', {});
@@ -1340,10 +1343,45 @@ const ChatApp: React.FC<ChatAppProps> = () => {
     window.addEventListener('local-message-edit', handleLocalMessageEdit as EventListener);
     window.addEventListener('local-file-message', handleLocalFileMessage as EventListener);
 
+    const handleLocalReactionUpdate = (event: CustomEvent) => {
+      if (!event.detail || typeof event.detail !== 'object') { return; }
+      const { messageId, emoji, isAdd, username } = event.detail;
+      if (!messageId || !emoji || !username) return;
+
+      setMessages(prev => prev.map(msg => {
+        if (msg.id !== messageId) return msg;
+
+        const currentReactions = { ...(msg.reactions || {}) };
+        const users = currentReactions[emoji] ? [...currentReactions[emoji]] : [];
+
+        if (isAdd) {
+          if (!users.includes(username)) {
+            users.push(username);
+          }
+        } else {
+          const idx = users.indexOf(username);
+          if (idx !== -1) {
+            users.splice(idx, 1);
+          }
+        }
+
+        if (users.length > 0) {
+          currentReactions[emoji] = users;
+        } else {
+          delete currentReactions[emoji];
+        }
+
+        return { ...msg, reactions: currentReactions };
+      }));
+    };
+
+    window.addEventListener('local-reaction-update', handleLocalReactionUpdate as EventListener);
+
     return () => {
       window.removeEventListener('local-message-delete', handleLocalMessageDelete as EventListener);
       window.removeEventListener('local-message-edit', handleLocalMessageEdit as EventListener);
       window.removeEventListener('local-file-message', handleLocalFileMessage as EventListener);
+      window.removeEventListener('local-reaction-update', handleLocalReactionUpdate as EventListener);
     };
   }, [setMessages, saveMessageWithContext]);
 
@@ -1399,7 +1437,7 @@ const ChatApp: React.FC<ChatAppProps> = () => {
     );
   }
 
-  // Wait for DB initialization before showing the main app to prevent race conditions
+  // Wait for DB initialization before showing the main app
   if (!Database.dbInitialized) {
     return (
       <div className="flex items-center justify-center min-h-screen p-4 bg-white dark:bg-[hsl(var(--background))]">
@@ -1429,7 +1467,7 @@ const ChatApp: React.FC<ChatAppProps> = () => {
                   className="border-r border-border bg-card hidden md:flex flex-col relative"
                   style={{ width: `${conversationPanelWidth}px`, minWidth: '200px', maxWidth: '600px' }}
                 >
-                  {/* Resize Handle - positioned over the right border */}
+                  {/* Resize Handle */}
                   <div
                     className="absolute top-0 right-0 w-1 h-full cursor-col-resize hover:bg-primary/30 transition-colors select-none z-10"
                     onMouseDown={(e) => {
@@ -1518,14 +1556,50 @@ const ChatApp: React.FC<ChatAppProps> = () => {
                             return messageSender.handleSendMessage(targetUser as any, content, replyToMessage, undefined, messageSignalType);
                           }
 
-
-
                           if (messageSignalType === 'delete-message' || messageSignalType === 'edit-message') {
                             return messageSender.handleSendMessage(targetUser as any, content, replyToMessage, undefined, messageSignalType, messageId);
                           }
 
                           // Standard message send
                           const isConnected = p2pMessaging.isPeerConnected(selectedConversation);
+
+                          if (messageSignalType === 'reaction-add' || messageSignalType === 'reaction-remove') {
+                            if (p2pConfig.features.textMessages && isConnected && targetUser.hybridPublicKeys) {
+                              try {
+                                const result = await p2pMessaging.sendP2PMessage(
+                                  selectedConversation,
+                                  content,
+                                  {
+                                    dilithiumPublicBase64: targetUser.hybridPublicKeys.dilithiumPublicBase64,
+                                    kyberPublicBase64: targetUser.hybridPublicKeys.kyberPublicBase64,
+                                    x25519PublicBase64: targetUser.hybridPublicKeys.x25519PublicBase64,
+                                  },
+                                  {
+                                    messageType: 'reaction',
+                                    metadata: {
+                                      targetMessageId: messageId,
+                                      action: messageSignalType
+                                    }
+                                  }
+                                );
+
+                                if (result.status === 'sent') {
+                                  // Dispatch local update immediately
+                                  window.dispatchEvent(new CustomEvent('local-reaction-update', {
+                                    detail: {
+                                      messageId,
+                                      emoji: content,
+                                      isAdd: messageSignalType === 'reaction-add',
+                                      username: Authentication.loginUsernameRef.current
+                                    }
+                                  }));
+                                  return;
+                                }
+                              } catch (e) { }
+                            }
+                            // Fallback to server
+                            return messageSender.handleSendMessage(targetUser as any, content, replyToMessage, undefined, messageSignalType, messageId);
+                          }
 
                           if (p2pConfig.features.textMessages && isConnected) {
                             try {
@@ -1592,51 +1666,64 @@ const ChatApp: React.FC<ChatAppProps> = () => {
                         onSendFile={async (fileData: any) => {
                           try {
                             // Try P2P file transfer if enabled and peer is connected
-                            if (p2pConfig.features.fileTransfers &&
-                              selectedConversation &&
-                              p2pMessaging.isPeerConnected(selectedConversation)) {
-                              const targetUser = Database.users.find(user => user.username === selectedConversation);
+                            // Try P2P file transfer if enabled
+                            if (p2pConfig.features.fileTransfers && selectedConversation) {
+                              let isConnected = p2pMessaging.isPeerConnected(selectedConversation);
 
-                              if (targetUser && targetUser.hybridPublicKeys) {
+                              // Try to connect if not connected
+                              if (!isConnected) {
                                 try {
-                                  // Send file metadata via P2P
-                                  const result = await p2pMessaging.sendP2PMessage(
-                                    selectedConversation,
-                                    JSON.stringify({
-                                      filename: fileData.filename,
-                                      size: fileData.size,
-                                      type: fileData.type,
-                                      url: fileData.url,
-                                    }),
-                                    {
-                                      dilithiumPublicBase64: targetUser.hybridPublicKeys.dilithiumPublicBase64 || '',
-                                      kyberPublicBase64: targetUser.hybridPublicKeys.kyberPublicBase64 || '',
-                                      x25519PublicBase64: targetUser.hybridPublicKeys.x25519PublicBase64,
-                                    },
-                                    {
-                                      messageType: 'file',
-                                      metadata: {
+                                  await p2pMessaging.connectToPeer(selectedConversation);
+                                  isConnected = true;
+                                } catch (e) {
+                                  // Failed to connect, will fall back to server
+                                }
+                              }
+
+                              if (isConnected) {
+                                const targetUser = Database.users.find(user => user.username === selectedConversation);
+
+                                if (targetUser && targetUser.hybridPublicKeys) {
+                                  try {
+                                    // Send file metadata via P2P
+                                    const result = await p2pMessaging.sendP2PMessage(
+                                      selectedConversation,
+                                      JSON.stringify({
                                         filename: fileData.filename,
                                         size: fileData.size,
                                         type: fileData.type,
                                         url: fileData.url,
+                                      }),
+                                      {
+                                        dilithiumPublicBase64: targetUser.hybridPublicKeys.dilithiumPublicBase64 || '',
+                                        kyberPublicBase64: targetUser.hybridPublicKeys.kyberPublicBase64 || '',
+                                        x25519PublicBase64: targetUser.hybridPublicKeys.x25519PublicBase64,
+                                      },
+                                      {
+                                        messageType: 'file',
+                                        metadata: {
+                                          filename: fileData.filename,
+                                          size: fileData.size,
+                                          type: fileData.type,
+                                          url: fileData.url,
+                                        }
                                       }
+                                    );
+                                    if (result.status === 'sent') {
+                                      SecurityAuditLogger.log('info', 'p2p-file-sent', {});
+                                      return;
                                     }
-                                  );
-                                  if (result.status === 'sent') {
-                                    SecurityAuditLogger.log('info', 'p2p-file-sent', {});
-                                    return;
+                                    SecurityAuditLogger.log('info', 'p2p-file-queued-or-not-sent', { status: result.status });
+                                  } catch (_error) {
+                                    SecurityAuditLogger.log('info', 'p2p-file-failed-fallback-server', {});
+                                    await Database.saveMessageToLocalDB(fileData);
                                   }
-                                  SecurityAuditLogger.log('info', 'p2p-file-queued-or-not-sent', { status: result.status });
-                                } catch (_error) {
-                                  SecurityAuditLogger.log('info', 'p2p-file-failed-fallback-server', {});
+                                } else {
                                   await Database.saveMessageToLocalDB(fileData);
                                 }
                               } else {
                                 await Database.saveMessageToLocalDB(fileData);
                               }
-                            } else {
-                              await Database.saveMessageToLocalDB(fileData);
                             }
                           } catch (error) {
                             SecurityAuditLogger.log('error', 'file-transfer-failed', { error: error instanceof Error ? error.message : 'unknown' });

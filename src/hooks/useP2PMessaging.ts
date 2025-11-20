@@ -331,17 +331,13 @@ export function useP2PMessaging(
   const rateLimitRef = useRef<Map<string, { windowStart: number; count: number }>>(new Map());
   const handleIncomingP2PMessageRef = useRef<((message: P2PMessage) => Promise<void>) | null>(null);
 
-  // Deduplicate P2P read-receipts we send (per messageId)
   const sentP2PReceiptsRef = useRef<Map<string, number>>(new Map());
-  // Deduplicate incoming read-receipts we process (avoid event storms)
   const processedReadReceiptsRef = useRef<Set<string>>(new Set());
   const RECEIPT_RETENTION_MS = 24 * 60 * 60 * 1000; // 24h
 
-  // Secure outbound P2P queue (stores already-hybrid-encrypted envelopes; memory-only, TTL enforced)
   type QueuedItem = { to: string; envelope: any; type: 'text' | 'typing' | 'reaction' | 'file'; enqueuedAt: number; ttlMs: number };
   const outboundQueueRef = useRef(new Map<string, QueuedItem[]>());
   const flushTimersRef = useRef(new Map<string, ReturnType<typeof setTimeout>>());
-  // Use a ref to always call the latest flush function from timers (avoids stale closures)
   const flushPeerQueueRef = useRef<(peer: string) => void>(() => { });
 
   const appendIncoming = useCallback((message: EncryptedMessage) => {
@@ -1243,7 +1239,6 @@ export function useP2PMessaging(
         }
 
         if (messageCallbackRef.current) {
-          console.log('[P2P] Dispatching decrypted message to callback:', { id: decryptedMessage.id, type: messageType });
           messageCallbackRef.current({
             id: decryptedMessage.id || messageId,
             from: message.from,
@@ -1258,7 +1253,6 @@ export function useP2PMessaging(
             metadata: decryptedMessage.metadata,
           });
         } else {
-          console.warn('[P2P] No message callback registered!');
           appendIncoming({
             id: decryptedMessage.id || messageId,
             from: message.from,
@@ -1415,7 +1409,6 @@ export function useP2PMessaging(
         return;
       }
 
-      // Deduplicate: if we have recently sent a receipt for this messageId, skip
       try {
         const last = sentP2PReceiptsRef.current.get(messageId);
         if (last && (Date.now() - last) < RECEIPT_RETENTION_MS) {

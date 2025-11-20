@@ -632,7 +632,6 @@ export const ChatMessage = React.memo<ExtendedChatMessageProps>(({ message, onRe
         {message.reactions && Object.keys(message.reactions).length > 0 && (
           <div
             className="flex flex-wrap gap-1 mt-1"
-            style={{ color: safeIsCurrentUser ? 'white' : 'var(--color-text-primary)' }}
             role="group"
             aria-label="Message reactions"
           >
@@ -641,8 +640,9 @@ export const ChatMessage = React.memo<ExtendedChatMessageProps>(({ message, onRe
                 key={emoji}
                 className="px-2 py-0.5 rounded-full text-xs border"
                 style={{
-                  backgroundColor: safeIsCurrentUser ? 'rgba(255,255,255,0.15)' : 'var(--color-muted-panel)',
-                  borderColor: 'var(--color-border)'
+                  backgroundColor: 'var(--color-surface)',
+                  borderColor: 'var(--color-border)',
+                  color: 'var(--color-text-primary)'
                 }}
                 onClick={() => onReact?.(message, emoji)}
                 aria-label={`${emoji} reaction, ${users.length} user${users.length !== 1 ? 's' : ''}`}

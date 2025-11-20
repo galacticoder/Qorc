@@ -675,8 +675,6 @@ export function useMessageSender(
           ...(senderSignalBundle ? { senderSignalBundle } : {}),
         };
 
-        console.log('[MessageSender] Preparing to encrypt payload:', JSON.stringify(payload, null, 2));
-
         if (originalUsernameRef.current && originalUsernameRef.current !== currentUser) {
           payload.fromOriginal = originalUsernameRef.current;
         }
@@ -766,7 +764,6 @@ export function useMessageSender(
             encryptedPayload
           }),
         );
-        console.log('[MessageSender] Sent encrypted message to websocket:', { to: recipientUsername, payloadSize: encryptedPayload.length });
 
         if (
           secureDBRef?.current &&
@@ -825,6 +822,14 @@ export function useMessageSender(
           (messageSignalType === SignalType.REACTION_ADD || messageSignalType === SignalType.REACTION_REMOVE) &&
           originalMessageId
         ) {
+          window.dispatchEvent(new CustomEvent('local-reaction-update', {
+            detail: {
+              messageId: originalMessageId,
+              emoji: sanitizedContent,
+              isAdd: messageSignalType === SignalType.REACTION_ADD,
+              username: currentUser
+            }
+          }));
           return;
         }
 

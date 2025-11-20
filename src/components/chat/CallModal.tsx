@@ -620,7 +620,6 @@ export const CallModal: React.FC<CallModalProps> = ({
                 </div>
               )}
 
-              {/* No video placeholder */}
               {!remoteStream && !remoteScreenStream && (
                 <div className="absolute inset-0 flex items-center justify-center">
                   <div className="text-center text-gray-400">
@@ -753,7 +752,6 @@ export const CallModal: React.FC<CallModalProps> = ({
                       <button
                         key={device.deviceId}
                         onClick={() => {
-                          // Handle microphone selection
                           setMicMenuOpen(false);
                         }}
                         className="w-full text-left px-3 py-2 text-sm text-white hover:bg-gray-700 transition-colors"
@@ -925,7 +923,7 @@ export const CallModal: React.FC<CallModalProps> = ({
                 ✕
               </button>
             </div>
-<React.Suspense fallback={null}>
+            <React.Suspense fallback={null}>
               <ScreenSharingSettingsLazy />
             </React.Suspense>
             <div className="mt-4 flex justify-end">
