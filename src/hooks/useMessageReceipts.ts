@@ -44,15 +44,15 @@ const validateHybridKeys = (keys: any): boolean => {
 
 const buildSmartStatusMap = (messages: Message[], currentUsername: string) => {
   const map = new Map<string, Message['receipt']>();
-  
+
   // Group messages by conversation (recipient/peer)
-  const conversationGroups = new Map<string, Array<{id: string; timestamp: number; receipt: Message['receipt']; recipient: string}>>();
-  
+  const conversationGroups = new Map<string, Array<{ id: string; timestamp: number; receipt: Message['receipt']; recipient: string }>>();
+
   for (const msg of messages) {
     if (msg.sender !== currentUsername || !msg.receipt) continue;
     const peer = msg.recipient || '';
     if (!peer) continue;
-    
+
     if (!conversationGroups.has(peer)) {
       conversationGroups.set(peer, []);
     }
@@ -63,35 +63,52 @@ const buildSmartStatusMap = (messages: Message[], currentUsername: string) => {
       recipient: peer,
     });
   }
-  
+
   // For each conversation, find latest read and latest delivered
   for (const [peer, msgs] of conversationGroups.entries()) {
-    // Sort by timestamp (newest first)
-    const sorted = msgs.sort((a, b) => b.timestamp - a.timestamp);
-    
+    // Sort by timestamp (newest first), handling invalid dates safely
+    const sorted = msgs.sort((a, b) => {
+      const tA = new Date(a.timestamp).getTime();
+      const tB = new Date(b.timestamp).getTime();
+      return (isNaN(tB) ? 0 : tB) - (isNaN(tA) ? 0 : tA);
+    });
+
+    let latestRead: Message | null = null;
+    let latestDelivered: Message | null = null;
+
     // Find latest read message for this conversation
-    const latestRead = sorted.find((item) => item.receipt.read);
-    const latestReadTimestamp = latestRead ? latestRead.timestamp : 0;
-    
-    // Find latest delivered (newer than latest read) for this conversation
-    const latestDelivered = sorted.find(
-      (item) => item.receipt.delivered && !item.receipt.read && item.timestamp > latestReadTimestamp,
-    );
-    
-    if (latestRead) {
-      map.set(latestRead.id, { ...latestRead.receipt, read: true });
+    const latestReadMsg = sorted.find((item) => item.receipt.read);
+    if (latestReadMsg) {
+      latestRead = { ...latestReadMsg, receipt: latestReadMsg.receipt } as any;
     }
-    if (latestDelivered) {
-      map.set(latestDelivered.id, { ...latestDelivered.receipt, delivered: true });
+
+    const latestReadTime = latestReadMsg ? latestReadMsg.timestamp : 0;
+
+    // Find latest delivered (must be newer than latest read) for this conversation
+    const latestDeliveredMsg = sorted.find(
+      (item) => item.receipt.delivered && !item.receipt.read && item.timestamp > latestReadTime,
+    );
+
+    if (latestDeliveredMsg) {
+      latestDelivered = { ...latestDeliveredMsg, receipt: latestDeliveredMsg.receipt } as any;
+    }
+
+    if (latestReadMsg) {
+      map.set(latestReadMsg.id, { ...latestReadMsg.receipt, read: true });
+    }
+    if (latestDeliveredMsg) {
+      map.set(latestDeliveredMsg.id, { ...latestDeliveredMsg.receipt, delivered: true });
     }
   }
-  
+
   return map;
 };
 
 const markReceiptSent = (store: Map<string, number>, messageId: string) => {
   store.set(messageId, Date.now());
 };
+
+
 
 const hasRecentReceipt = (store: Map<string, number>, messageId: string) => {
   const timestamp = store.get(messageId);
@@ -124,7 +141,7 @@ const updateMessageReceipt = async (
   // First, update in-memory state if message is in current view
   const index = messageIndexRef.current.get(messageId);
   let updatedMessage: Message | null = null;
-  
+
   if (index !== undefined) {
     setMessages((prev) => {
       if (index < 0 || index >= prev.length) {
@@ -144,8 +161,7 @@ const updateMessageReceipt = async (
     // Message not in current view - queue for batched DB update
     if (dbReceiptQueueRef && dbFlushTimeoutRef && flushDBReceiptsRef) {
       dbReceiptQueueRef.current.set(messageId, updater);
-      
-      // Debounce DB flush - batch multiple receipts within 500ms window
+
       if (dbFlushTimeoutRef.current) {
         clearTimeout(dbFlushTimeoutRef.current);
       }
@@ -155,7 +171,7 @@ const updateMessageReceipt = async (
       }, 500);
     }
   }
-  
+
   return updatedMessage;
 };
 
@@ -185,15 +201,17 @@ export function useMessageReceipts(
   useEffect(() => {
     const flushDBReceipts = async () => {
       if (!secureDBRef?.current || dbReceiptQueueRef.current.size === 0) return;
-      
+
       const queue = new Map(dbReceiptQueueRef.current);
       dbReceiptQueueRef.current.clear();
-      
+
       try {
         const allMessages = await secureDBRef.current.loadMessages().catch(() => []);
         let hasChanges = false;
-        
+
         // Apply all queued receipt updates in one pass
+        const unappliedUpdates = new Map<string, (receipt: Message['receipt'] | undefined) => Message['receipt'] | undefined>();
+
         for (const [messageId, updater] of queue.entries()) {
           const msgIndex = allMessages.findIndex((m: Message) => m.id === messageId);
           if (msgIndex !== -1) {
@@ -203,83 +221,36 @@ export function useMessageReceipts(
               allMessages[msgIndex] = { ...target, receipt: nextReceipt };
               hasChanges = true;
             }
+          } else {
+            unappliedUpdates.set(messageId, updater);
           }
         }
-        
-        // Smart receipt cleanup: Only keep latest read and latest delivered per conversation
+
+        // Restore unapplied updates to the main queue
+        if (unappliedUpdates.size > 0) {
+          for (const [id, updater] of unappliedUpdates.entries()) {
+            dbReceiptQueueRef.current.set(id, updater);
+          }
+        }
+
         if (hasChanges) {
-          // Group messages by conversation (peer)
-          const conversationGroups = new Map<string, Message[]>();
-          for (const msg of allMessages) {
-            if (msg.sender !== currentUsername) continue;
-            const peer = msg.recipient || '';
-            if (!peer) continue;
-            if (!conversationGroups.has(peer)) {
-              conversationGroups.set(peer, []);
-            }
-            conversationGroups.get(peer)!.push(msg);
-          }
-          
-          // For each conversation, find latest read and latest delivered
-          for (const [peer, msgs] of conversationGroups.entries()) {
-            // Sort by timestamp (newest first)
-            const sorted = msgs.sort((a, b) => 
-              new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()
-            );
-            
-            let latestRead: Message | null = null;
-            let latestDelivered: Message | null = null;
-            
-            // Find latest read message
-            for (const msg of sorted) {
-              if (msg.receipt?.read) {
-                latestRead = msg;
-                break;
-              }
-            }
-            
-            const latestReadTime = latestRead ? new Date(latestRead.timestamp).getTime() : 0;
-            for (const msg of sorted) {
-              const msgTime = new Date(msg.timestamp).getTime();
-              if (msg.receipt?.delivered && !msg.receipt?.read && msgTime > latestReadTime) {
-                latestDelivered = msg;
-                break;
-              }
-            }
-            
-            // Clear receipts from all messages except the latest read and latest delivered
-            for (const msg of msgs) {
-              const isLatestRead = latestRead && msg.id === latestRead.id;
-              const isLatestDelivered = latestDelivered && msg.id === latestDelivered.id;
-              
-              if (!isLatestRead && !isLatestDelivered && msg.receipt) {
-                // Clear receipt to save storage
-                const msgIndex = allMessages.findIndex((m: Message) => m.id === msg.id);
-                if (msgIndex !== -1) {
-                  allMessages[msgIndex] = { ...msg, receipt: undefined };
-                  hasChanges = true;
-                }
-              }
-            }
-          }
-          
-          await secureDBRef.current.saveMessages(allMessages).catch(() => {});
+          await secureDBRef.current.saveMessages(allMessages).catch(() => { });
         }
       } catch (err) {
         console.error('[Receipts] Failed to flush DB receipt queue', { queueSize: queue.size, error: err });
       }
     };
-    
+
     flushDBReceiptsRef.current = flushDBReceipts;
   }, [secureDBRef, currentUsername]);
-  
+
   useEffect(() => {
     const indexMap = new Map<string, number>();
     messages.forEach((msg, idx) => {
       indexMap.set(msg.id, idx);
     });
     messageIndexRef.current = indexMap;
-  
+
     // Attempt to flush any pending receipts once messages index is refreshed
     if (pendingReceiptsRef.current.size > 0) {
       const entries = Array.from(pendingReceiptsRef.current.entries());
@@ -304,7 +275,7 @@ export function useMessageReceipts(
             flushDBReceiptsRef,
           );
           if (updated) {
-            try { await saveMessageToLocalDB(updated); } catch {}
+            try { await saveMessageToLocalDB(updated); } catch { }
             pendingReceiptsRef.current.delete(rawId);
           } else {
             const next = { ...meta, attempts: (meta.attempts || 0) + 1 };
@@ -378,17 +349,17 @@ export function useMessageReceipts(
           peerUsername: safeSender,
           deviceId: 1,
         });
-        
+
         if (!sessionCheck?.hasSession) {
           // Request bundle and wait briefly for session establishment, then proceed
           try {
-            await websocketClient.sendSecureControlMessage({ 
-              type: SignalType.LIBSIGNAL_REQUEST_BUNDLE, 
+            await websocketClient.sendSecureControlMessage({
+              type: SignalType.LIBSIGNAL_REQUEST_BUNDLE,
               username: safeSender,
               from: currentUsername,
               timestamp: now,
             });
-          } catch {}
+          } catch { }
           try {
             await new Promise<void>((resolve, reject) => {
               const timeout = setTimeout(() => { cleanup(); reject(new Error('bundle-timeout')); }, 6000);
@@ -402,7 +373,7 @@ export function useMessageReceipts(
               };
               window.addEventListener('libsignal-session-ready', onReady as EventListener);
             });
-          } catch {}
+          } catch { }
         }
 
         const readReceiptData = {
@@ -490,7 +461,7 @@ export function useMessageReceipts(
       }
 
       const index = messageIndexRef.current.get(safeMessageId);
-      
+
       const updated = await updateMessageReceipt(
         messageIndexRef,
         setMessages,
@@ -540,7 +511,7 @@ export function useMessageReceipts(
       }
 
       const index = messageIndexRef.current.get(safeMessageId);
-      
+
       const updated = await updateMessageReceipt(
         messageIndexRef,
         setMessages,

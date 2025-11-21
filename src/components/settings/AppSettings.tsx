@@ -131,16 +131,23 @@ export const AppSettings = React.memo(function AppSettings({ passphraseRef, kybe
     }
   };
 
+  const [activeSection, setActiveSection] = useState<'appearance' | 'notifications' | 'audio' | 'screen-sharing' | 'downloads' | 'privacy' | 'data'>('appearance');
+
+  const sections = [
+    { id: 'appearance' as const, label: 'Appearance', icon: Monitor },
+    { id: 'notifications' as const, label: 'Notifications', icon: Bell },
+    { id: 'audio' as const, label: 'Audio', icon: Volume2 },
+    { id: 'screen-sharing' as const, label: 'Screen Sharing', icon: Monitor },
+    { id: 'downloads' as const, label: 'Downloads', icon: Download },
+    { id: 'privacy' as const, label: 'Privacy', icon: Shield },
+    { id: 'data' as const, label: 'Data', icon: Database },
+  ];
+
   return (
     <>
       <style>{`
         .settings-scroll-container {
           scrollbar-width: thin;
-          scrollbar-color: transparent transparent;
-          transition: scrollbar-color 0.3s ease;
-        }
-        
-        .settings-scroll-container:hover {
           scrollbar-color: hsl(var(--muted-foreground) / 0.3) transparent;
         }
         
@@ -153,234 +160,264 @@ export const AppSettings = React.memo(function AppSettings({ passphraseRef, kybe
         }
         
         .settings-scroll-container::-webkit-scrollbar-thumb {
-          background-color: transparent;
-          border-radius: 4px;
-          transition: background-color 0.3s ease;
-        }
-        
-        .settings-scroll-container:hover::-webkit-scrollbar-thumb {
           background-color: hsl(var(--muted-foreground) / 0.3);
+          border-radius: 4px;
+          transition: background-color 0.2s ease;
         }
         
         .settings-scroll-container::-webkit-scrollbar-thumb:hover {
           background-color: hsl(var(--muted-foreground) / 0.5);
         }
+        
+        .settings-scroll-container::-webkit-scrollbar-button {
+          display: none;
+          width: 0;
+          height: 0;
+        }
+        
+        .settings-scroll-container::-webkit-scrollbar-button:vertical:start:decrement,
+        .settings-scroll-container::-webkit-scrollbar-button:vertical:end:increment {
+          display: none;
+        }
       `}</style>
-      <div className="flex flex-col h-full max-h-[85vh]">
-        <div className="p-6 border-b border-border flex-shrink-0">
-          <h1 className="text-2xl font-semibold">Settings</h1>
-          <p className="text-sm text-muted-foreground mt-1">Manage your application preferences</p>
+      <div className="flex h-[85vh] w-full">
+        {/* Sidebar Navigation */}
+        <div className="w-48 border-r border-border flex-shrink-0">
+          <div className="p-4 border-b border-border">
+            <h2 className="text-lg font-semibold">Settings</h2>
+          </div>
+          <nav className="p-2">
+            {sections.map((section) => {
+              const Icon = section.icon;
+              return (
+                <button
+                  key={section.id}
+                  onClick={() => setActiveSection(section.id)}
+                  className={`w-full flex items-center gap-3 px-3 py-2 rounded-md text-sm transition-colors ${activeSection === section.id
+                    ? 'bg-secondary text-secondary-foreground font-medium'
+                    : 'text-muted-foreground hover:bg-secondary/50 hover:text-foreground'
+                    }`}
+                >
+                  <Icon className="h-4 w-4 flex-shrink-0" />
+                  <span>{section.label}</span>
+                </button>
+              );
+            })}
+          </nav>
         </div>
 
-        <div className="settings-scroll-container flex-1 overflow-y-auto p-6 space-y-6">
-          {/* Appearance Section */}
-          <Card>
-            <CardHeader>
-              <CardTitle className="flex items-center gap-2">
-                <Monitor className="h-5 w-5" />
-                Appearance
-              </CardTitle>
-              <CardDescription>Customize how the app looks</CardDescription>
-            </CardHeader>
-            <CardContent className="space-y-4">
-              <div className="space-y-2">
-                <Label>Theme</Label>
-                <ThemeToggle />
-              </div>
-            </CardContent>
-          </Card>
-
-          {/* Notifications Section */}
-          <Card>
-            <CardHeader>
-              <CardTitle className="flex items-center gap-2">
-                <Bell className="h-5 w-5" />
-                Notifications
-              </CardTitle>
-              <CardDescription>Configure notification preferences</CardDescription>
-            </CardHeader>
-            <CardContent className="space-y-4">
-              <div className="flex items-center justify-between">
-                <div className="space-y-0.5">
-                  <Label htmlFor="desktop-notifications">Desktop Notifications</Label>
-                  <p className="text-sm text-muted-foreground">Show notifications on your desktop</p>
+        {/* Content Area */}
+        <div className="flex-1 flex flex-col overflow-hidden">
+          <div className="settings-scroll-container flex-1 overflow-y-auto p-6">
+            {activeSection === 'appearance' && (
+              <div className="space-y-4">
+                <div>
+                  <h3 className="text-xl font-semibold mb-1">Appearance</h3>
+                  <p className="text-xs text-muted-foreground">Customize how the app looks</p>
                 </div>
-                <AnimatedSwitch
-                  checked={notifications.desktop}
-                  onCheckedChange={(checked) => {
-                    setNotifications(prev => ({ ...prev, desktop: checked }));
-                    try {
-                      syncEncryptedStorage.setItem('app_settings_v1', JSON.stringify({
-                        notifications: { ...notifications, desktop: checked },
-                        audioSettings
-                      }));
-                    } catch { }
-                  }}
-                />
-              </div>
-              <Separator />
-              <div className="flex items-center justify-between">
-                <div className="space-y-0.5">
-                  <Label htmlFor="sound-notifications">Sound Notifications</Label>
-                  <p className="text-sm text-muted-foreground">Play sound for new messages</p>
-                </div>
-                <AnimatedSwitch
-                  checked={notifications.sound}
-                  onCheckedChange={(checked) => {
-                    setNotifications(prev => ({ ...prev, sound: checked }));
-                    try {
-                      syncEncryptedStorage.setItem('app_settings_v1', JSON.stringify({
-                        notifications: { ...notifications, sound: checked },
-                        audioSettings
-                      }));
-                    } catch { }
-                  }}
-                />
-              </div>
-            </CardContent>
-          </Card>
-
-          {/* Audio Settings Section */}
-          <Card>
-            <CardHeader>
-              <CardTitle className="flex items-center gap-2">
-                <Volume2 className="h-5 w-5" />
-                Audio
-              </CardTitle>
-              <CardDescription>Configure audio call settings</CardDescription>
-            </CardHeader>
-            <CardContent className="space-y-4">
-              <div className="flex items-center justify-between">
-                <div className="space-y-0.5">
-                  <Label htmlFor="noise-suppression">Noise Suppression</Label>
-                  <p className="text-sm text-muted-foreground">Filter out background noise during calls</p>
-                </div>
-                <AnimatedSwitch
-                  checked={audioSettings.noiseSuppression}
-                  onCheckedChange={(checked) => {
-                    setAudioSettings(prev => ({ ...prev, noiseSuppression: checked }));
-                    try {
-                      syncEncryptedStorage.setItem('app_settings_v1', JSON.stringify({
-                        notifications,
-                        audioSettings: { ...audioSettings, noiseSuppression: checked }
-                      }));
-                    } catch { }
-                  }}
-                />
-              </div>
-              <Separator />
-              <div className="flex items-center justify-between">
-                <div className="space-y-0.5">
-                  <Label htmlFor="echo-cancellation">Echo Cancellation</Label>
-                  <p className="text-sm text-muted-foreground">Reduce echo during calls</p>
-                </div>
-                <AnimatedSwitch
-                  checked={audioSettings.echoCancellation}
-                  onCheckedChange={(checked) => {
-                    setAudioSettings(prev => ({ ...prev, echoCancellation: checked }));
-                    try {
-                      syncEncryptedStorage.setItem('app_settings_v1', JSON.stringify({
-                        notifications,
-                        audioSettings: { ...audioSettings, echoCancellation: checked }
-                      }));
-                    } catch { }
-                  }}
-                />
-              </div>
-            </CardContent>
-          </Card>
-
-          {/* Screen Sharing Settings */}
-          <ScreenSharingSettings />
-
-          {/* Downloads Section */}
-          {downloadSettings && (
-            <Card>
-              <CardHeader>
-                <CardTitle className="flex items-center gap-2">
-                  <Download className="h-5 w-5" />
-                  Downloads
-                </CardTitle>
-                <CardDescription>Manage download preferences</CardDescription>
-              </CardHeader>
-              <CardContent className="space-y-4">
                 <div className="space-y-2">
-                  <Label htmlFor="download-path">Download Location</Label>
-                  <div className="flex gap-2">
-                    <input
-                      id="download-path"
-                      type="text"
-                      readOnly
-                      value={downloadSettings.downloadPath || ''}
-                      className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background file:border-0 file:bg-transparent file:text-sm file:font-medium placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
-                    />
-                    <Button
-                      onClick={handleChooseDownloadPath}
-                      variant="outline"
-                      disabled={isChoosingPath}
-                    >
-                      {isChoosingPath ? 'Choosing...' : 'Browse'}
-                    </Button>
-                  </div>
+                  <Label>Theme</Label>
+                  <ThemeToggle />
                 </div>
-                <Separator />
-                <div className="flex items-center justify-between">
-                  <div className="space-y-0.5">
-                    <Label htmlFor="auto-save">Auto-save Files</Label>
-                    <p className="text-sm text-muted-foreground">Automatically save files to download location</p>
-                  </div>
-                  <AnimatedSwitch
-                    checked={downloadSettings.autoSave || false}
-                    onCheckedChange={handleAutoSaveToggle}
-                  />
-                </div>
-              </CardContent>
-            </Card>
-          )}
-
-          {/* Privacy Section */}
-          <Card>
-            <CardHeader>
-              <CardTitle className="flex items-center gap-2">
-                <Shield className="h-5 w-5" />
-                Privacy
-              </CardTitle>
-              <CardDescription>Manage your privacy settings</CardDescription>
-            </CardHeader>
-            <CardContent className="space-y-4">
-              <BlockedUsersSettings
-                passphraseRef={passphraseRef}
-                kyberSecretRef={kyberSecretRef}
-                getDisplayUsername={getDisplayUsername}
-              />
-            </CardContent>
-          </Card>
-
-          {/* Data Management Section */}
-          <Card>
-            <CardHeader>
-              <CardTitle className="flex items-center gap-2">
-                <Database className="h-5 w-5" />
-                Data Management
-              </CardTitle>
-              <CardDescription>Manage your app data</CardDescription>
-            </CardHeader>
-            <CardContent>
-              <div className="space-y-2">
-                <Label>Clear All Data</Label>
-                <p className="text-sm text-muted-foreground mb-2">
-                  This will delete all your messages, conversations, and settings. This action cannot be undone.
-                </p>
-                <Button
-                  variant="destructive"
-                  onClick={handleClearData}
-                  disabled={isClearingData}
-                >
-                  {isClearingData ? 'Clearing...' : 'Clear All Data'}
-                </Button>
               </div>
-            </CardContent>
-          </Card>
+            )}
+
+            {activeSection === 'notifications' && (
+              <div className="space-y-4">
+                <div>
+                  <h3 className="text-xl font-semibold mb-1">Notifications</h3>
+                  <p className="text-xs text-muted-foreground">Configure notification preferences</p>
+                </div>
+                <Card>
+                  <CardContent className="pt-6 space-y-4">
+                    <div className="flex items-center justify-between">
+                      <div className="space-y-0.5">
+                        <Label>Desktop Notifications</Label>
+                        <p className="text-xs text-muted-foreground">Show notifications on your desktop</p>
+                      </div>
+                      <AnimatedSwitch
+                        checked={notifications.desktop}
+                        onCheckedChange={(checked) => {
+                          setNotifications(prev => ({ ...prev, desktop: checked }));
+                          try {
+                            syncEncryptedStorage.setItem('app_settings_v1', JSON.stringify({
+                              notifications: { ...notifications, desktop: checked },
+                              audioSettings
+                            }));
+                          } catch { }
+                        }}
+                      />
+                    </div>
+                    <Separator />
+                    <div className="flex items-center justify-between">
+                      <div className="space-y-0.5">
+                        <Label>Sound Notifications</Label>
+                        <p className="text-xs text-muted-foreground">Play sound for new messages</p>
+                      </div>
+                      <AnimatedSwitch
+                        checked={notifications.sound}
+                        onCheckedChange={(checked) => {
+                          setNotifications(prev => ({ ...prev, sound: checked }));
+                          try {
+                            syncEncryptedStorage.setItem('app_settings_v1', JSON.stringify({
+                              notifications: { ...notifications, sound: checked },
+                              audioSettings
+                            }));
+                          } catch { }
+                        }}
+                      />
+                    </div>
+                  </CardContent>
+                </Card>
+              </div>
+            )}
+
+            {activeSection === 'audio' && (
+              <div className="space-y-4">
+                <div>
+                  <h3 className="text-xl font-semibold mb-1">Audio</h3>
+                  <p className="text-xs text-muted-foreground">Configure audio call settings</p>
+                </div>
+                <Card>
+                  <CardContent className="pt-6 space-y-4">
+                    <div className="flex items-center justify-between">
+                      <div className="space-y-0.5">
+                        <Label>Noise Suppression</Label>
+                        <p className="text-xs text-muted-foreground">Filter out background noise during calls</p>
+                      </div>
+                      <AnimatedSwitch
+                        checked={audioSettings.noiseSuppression}
+                        onCheckedChange={(checked) => {
+                          setAudioSettings(prev => ({ ...prev, noiseSuppression: checked }));
+                          try {
+                            syncEncryptedStorage.setItem('app_settings_v1', JSON.stringify({
+                              notifications,
+                              audioSettings: { ...audioSettings, noiseSuppression: checked }
+                            }));
+                          } catch { }
+                        }}
+                      />
+                    </div>
+                    <Separator />
+                    <div className="flex items-center justify-between">
+                      <div className="space-y-0.5">
+                        <Label>Echo Cancellation</Label>
+                        <p className="text-xs text-muted-foreground">Reduce echo during calls</p>
+                      </div>
+                      <AnimatedSwitch
+                        checked={audioSettings.echoCancellation}
+                        onCheckedChange={(checked) => {
+                          setAudioSettings(prev => ({ ...prev, echoCancellation: checked }));
+                          try {
+                            syncEncryptedStorage.setItem('app_settings_v1', JSON.stringify({
+                              notifications,
+                              audioSettings: { ...audioSettings, echoCancellation: checked }
+                            }));
+                          } catch { }
+                        }}
+                      />
+                    </div>
+                  </CardContent>
+                </Card>
+              </div>
+            )}
+
+            {activeSection === 'screen-sharing' && (
+              <div className="space-y-4">
+                <div>
+                  <h3 className="text-xl font-semibold mb-1">Screen Sharing</h3>
+                  <p className="text-xs text-muted-foreground">Configure screen sharing preferences</p>
+                </div>
+                <ScreenSharingSettings />
+              </div>
+            )}
+
+            {activeSection === 'downloads' && downloadSettings && (
+              <div className="space-y-4">
+                <div>
+                  <h3 className="text-xl font-semibold mb-1">Downloads</h3>
+                  <p className="text-xs text-muted-foreground">Manage download preferences</p>
+                </div>
+                <Card>
+                  <CardContent className="pt-6 space-y-4">
+                    <div className="space-y-2">
+                      <Label>Download Location</Label>
+                      <div className="flex gap-2">
+                        <input
+                          type="text"
+                          readOnly
+                          value={downloadSettings.downloadPath || ''}
+                          className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background file:border-0 file:bg-transparent file:text-sm file:font-medium placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
+                        />
+                        <Button
+                          onClick={handleChooseDownloadPath}
+                          variant="outline"
+                          disabled={isChoosingPath}
+                        >
+                          {isChoosingPath ? 'Choosing...' : 'Browse'}
+                        </Button>
+                      </div>
+                    </div>
+                    <Separator />
+                    <div className="flex items-center justify-between">
+                      <div className="space-y-0.5">
+                        <Label>Auto-save Files</Label>
+                        <p className="text-xs text-muted-foreground">Automatically save files to download location</p>
+                      </div>
+                      <AnimatedSwitch
+                        checked={downloadSettings.autoSave || false}
+                        onCheckedChange={handleAutoSaveToggle}
+                      />
+                    </div>
+                  </CardContent>
+                </Card>
+              </div>
+            )}
+
+            {activeSection === 'privacy' && (
+              <div className="space-y-4">
+                <div>
+                  <h3 className="text-xl font-semibold mb-1">Privacy</h3>
+                  <p className="text-xs text-muted-foreground">Manage your privacy settings</p>
+                </div>
+                <Card>
+                  <CardContent className="pt-6">
+                    <BlockedUsersSettings
+                      passphraseRef={passphraseRef}
+                      kyberSecretRef={kyberSecretRef}
+                      getDisplayUsername={getDisplayUsername}
+                    />
+                  </CardContent>
+                </Card>
+              </div>
+            )}
+
+            {activeSection === 'data' && (
+              <div className="space-y-4">
+                <div>
+                  <h3 className="text-xl font-semibold mb-1">Data Management</h3>
+                  <p className="text-xs text-muted-foreground">Manage your app data</p>
+                </div>
+                <Card>
+                  <CardContent className="pt-6">
+                    <div className="space-y-2">
+                      <Label>Clear All Data</Label>
+                      <p className="text-xs text-muted-foreground mb-2">
+                        This will delete all your messages, conversations, and settings. This action cannot be undone.
+                      </p>
+                      <Button
+                        variant="destructive"
+                        onClick={handleClearData}
+                        disabled={isClearingData}
+                      >
+                        {isClearingData ? 'Clearing...' : 'Clear All Data'}
+                      </Button>
+                    </div>
+                  </CardContent>
+                </Card>
+              </div>
+            )}
+          </div>
         </div>
       </div>
     </>

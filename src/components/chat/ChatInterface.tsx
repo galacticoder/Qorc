@@ -13,6 +13,7 @@ import { useTypingIndicatorContext } from "@/contexts/TypingIndicatorContext";
 import { resolveDisplayUsername } from "@/lib/unified-username-display";
 
 import { Phone, Video, MoreVertical, ShieldOff } from 'lucide-react';
+import { CallIcon } from './icons';
 import { useCalling } from "@/hooks/useCalling";
 const CallModalLazy = React.lazy(() => import('./CallModal'));
 import type { useAuth } from "@/hooks/useAuth";
@@ -55,13 +56,12 @@ interface ChatInterfaceProps {
   readonly sendServerReadReceipt: (messageId: string, sender: string) => Promise<void>;
   readonly markMessageAsRead: (messageId: string) => Promise<void>;
   readonly getSmartReceiptStatus: (message: Message) => Message['receipt'] | undefined;
+  readonly secureDB?: any;
 }
 
 const HEX_PATTERN = /^[a-f0-9]{32,}$/i;
 const SCROLL_THRESHOLD = 200;
 const NEAR_BOTTOM_THRESHOLD = 100;
-const SCROLL_DEBOUNCE_MS = 100;
-const SCROLL_THROTTLE_MS = 300;
 const READ_RECEIPT_CHECK_INTERVAL = 30000;
 const MAX_BACKGROUND_MESSAGES = 1000;
 const BACKGROUND_BATCH_SIZE = 100;
@@ -91,6 +91,7 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
   sendServerReadReceipt,
   markMessageAsRead,
   getSmartReceiptStatus,
+  secureDB,
 }) => {
   const scrollAreaRef = useRef<HTMLDivElement>(null);
   const { addCallLog } = useCallHistory();
@@ -218,7 +219,6 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
   // Handle conversation changes to stop typing indicators
   useEffect(() => {
     handleConversationChange();
-    // Clear processed messages tracking when conversation changes
     processedInScrollRef.current.clear();
     lastScrollTimeRef.current = 0;
   }, [selectedConversation, handleConversationChange]);
@@ -444,7 +444,6 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
 
   useReplyUpdates(messages, setMessages, saveMessageToLocalDB);
 
-  // Smart auto-scroll: only scroll to bottom when appropriate
   const prevMessagesLengthRef = useRef(messages.length);
   const lastMessageIdRef = useRef<string | null>(null);
 
@@ -457,7 +456,7 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
     const currentMessagesLength = messages.length;
     const prevMessagesLength = prevMessagesLengthRef.current;
 
-    // Check if this is a new message (length increased)
+    // Check if this is a new message 
     const isNewMessage = currentMessagesLength > prevMessagesLength;
 
     // Get the latest message
@@ -482,83 +481,80 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
     prevMessagesLengthRef.current = currentMessagesLength;
   }, [messages, currentUsername]);
 
-  // Mark messages as read when they come into view or when scrolled to bottom
+  // IntersectionObserver for read receipts
   useEffect(() => {
     const scrollContainer = scrollAreaRef.current?.querySelector('[data-radix-scroll-area-viewport]');
-    if (!scrollContainer) return;
+    if (!scrollContainer || !window.IntersectionObserver) return;
 
-    const isTabActive = () => document.visibilityState === 'visible' && document.hasFocus();
-
-    const handleScroll = () => {
-      if (!isTabActive()) return;
-
-      const now = Date.now();
-      if (now - lastScrollTimeRef.current < SCROLL_THROTTLE_MS) {
-        return;
-      }
-      lastScrollTimeRef.current = now;
-      processedInScrollRef.current.clear();
-
-      const containerRect = scrollContainer.getBoundingClientRect();
-      const containerBottom = containerRect.bottom;
-
-      const isNearBottom = scrollContainer.scrollTop >= scrollContainer.scrollHeight - scrollContainer.clientHeight - NEAR_BOTTOM_THRESHOLD;
-
-      let messagesToMarkAsRead: Message[] = [];
-
-      if (isNearBottom) {
-        messagesToMarkAsRead = messages.filter(message => {
-          return message.sender !== currentUsername && !message.receipt?.read;
-        });
-      } else {
-        messages.forEach(message => {
-          if (message.sender === currentUsername || message.receipt?.read) return;
-          if (processedInScrollRef.current.has(message.id)) return;
-
-          const messageElement = document.getElementById(`message-${message.id}`);
-          if (messageElement) {
-            const messageRect = messageElement.getBoundingClientRect();
-            const messageBottom = messageRect.bottom;
-
-            if (messageBottom <= containerBottom && messageBottom >= containerRect.top) {
-              messagesToMarkAsRead.push(message);
-              processedInScrollRef.current.add(message.id);
+    const observer = new IntersectionObserver(
+      (entries) => {
+        entries.forEach((entry) => {
+          if (entry.isIntersecting) {
+            const messageId = entry.target.getAttribute('data-message-id');
+            if (messageId) {
+              // Only mark as read if the window is focused
+              if (document.hasFocus()) {
+                markMessageAsRead(messageId);
+                // Find sender to send receipt
+                const msg = messages.find(m => m.id === messageId);
+                if (msg) {
+                  sendReadReceipt(messageId, msg.sender);
+                }
+                observer.unobserve(entry.target);
+              }
             }
           }
         });
+      },
+      {
+        root: scrollContainer,
+        threshold: 0.5,
       }
+    );
 
-      messagesToMarkAsRead.sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
-      messagesToMarkAsRead.forEach((msg) => {
-        markMessageAsRead(msg.id);
-        sendReadReceipt(msg.id, msg.sender);
+    // Observe unread messages from others
+    messages.forEach((msg) => {
+      if (msg.sender !== currentUsername && !msg.receipt?.read) {
+        const el = document.getElementById(`message-${msg.id}`);
+        if (el) {
+          el.setAttribute('data-message-id', msg.id);
+          observer.observe(el);
+        }
+      }
+    });
+
+    // Handle window focus to check for visible messages that were skipped
+    const handleFocus = () => {
+      messages.forEach((msg) => {
+        if (msg.sender !== currentUsername && !msg.receipt?.read) {
+          const el = document.getElementById(`message-${msg.id}`);
+          if (el) {
+            const rect = el.getBoundingClientRect();
+            const containerRect = scrollContainer.getBoundingClientRect();
+
+            // Check if currently visible
+            if (
+              rect.top < containerRect.bottom &&
+              rect.bottom > containerRect.top
+            ) {
+              markMessageAsRead(msg.id);
+              sendReadReceipt(msg.id, msg.sender);
+              // Stop observing this one since we just handled it
+              observer.unobserve(el);
+            }
+          }
+        }
       });
     };
 
-    let scrollTimeout: ReturnType<typeof setTimeout>;
-    const debouncedHandleScroll = () => {
-      clearTimeout(scrollTimeout);
-      scrollTimeout = setTimeout(handleScroll, SCROLL_DEBOUNCE_MS);
-    };
-
-    scrollContainer.addEventListener('scroll', debouncedHandleScroll);
-    window.addEventListener('visibilitychange', handleScroll);
-    window.addEventListener('focus', handleScroll);
-    window.addEventListener('blur', handleScroll);
-
-    setTimeout(handleScroll, 100);
-    setTimeout(handleScroll, 500);
+    window.addEventListener('focus', handleFocus);
 
     return () => {
-      clearTimeout(scrollTimeout);
-      scrollContainer.removeEventListener('scroll', debouncedHandleScroll);
-      window.removeEventListener('visibilitychange', handleScroll);
-      window.removeEventListener('focus', handleScroll);
-      window.removeEventListener('blur', handleScroll);
+      observer.disconnect();
+      window.removeEventListener('focus', handleFocus);
     };
   }, [messages, currentUsername, markMessageAsRead, sendReadReceipt]);
 
-  // Auto-scroll to bottom when messages change or typing users change
   useEffect(() => {
     const scrollContainer = scrollAreaRef.current?.querySelector('[data-radix-scroll-area-viewport]');
     if (!scrollContainer || isLoadingMore) return;
@@ -569,58 +565,6 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
       scrollToBottom(scrollContainer);
     }
   }, [messages, typingUsers, isLoadingMore, scrollToBottom]);
-
-  // Periodic check to ensure read receipts are sent for visible messages
-  useEffect(() => {
-    const checkForMissedReadReceipts = () => {
-      if (document.visibilityState === 'visible' && document.hasFocus() && messages.length > 0) {
-
-        const scrollContainer = scrollAreaRef.current?.querySelector('[data-radix-scroll-area-viewport]');
-        if (scrollContainer) {
-          const isNearBottom = scrollContainer.scrollTop >= scrollContainer.scrollHeight - scrollContainer.clientHeight - NEAR_BOTTOM_THRESHOLD;
-
-          let messagesToProcess: Message[] = [];
-
-          if (isNearBottom) {
-            messagesToProcess = messages.filter(message => {
-              return message.sender !== currentUsername && !message.receipt?.read;
-            });
-          } else {
-            const containerRect = scrollContainer.getBoundingClientRect();
-            const containerBottom = containerRect.bottom;
-
-            messages.forEach(message => {
-              if (message.sender === currentUsername || message.receipt?.read) return;
-
-              const messageElement = document.getElementById(`message-${message.id}`);
-              if (messageElement) {
-                const messageRect = messageElement.getBoundingClientRect();
-                const messageBottom = messageRect.bottom;
-
-                // Only consider visible messages
-                if (messageBottom <= containerBottom && messageBottom >= containerRect.top) {
-                  messagesToProcess.push(message);
-                }
-              }
-            });
-          }
-
-          // Send read receipts for messages that need them
-          messagesToProcess
-            .sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime())
-            .forEach((m) => {
-              markMessageAsRead(m.id);
-              sendReadReceipt(m.id, m.sender);
-            });
-        }
-      }
-    };
-
-    // Check every 30 seconds for missed read receipts
-    const interval = setInterval(checkForMissedReadReceipts, READ_RECEIPT_CHECK_INTERVAL);
-
-    return () => clearInterval(interval);
-  }, [messages, currentUsername, markMessageAsRead, sendReadReceipt]);
 
 
 
@@ -701,26 +645,13 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
     </div>
   ), [selectedConversation]);
   return (
-    <div
-      className="flex flex-col h-full"
-      style={{ backgroundColor: 'var(--color-background)' }}
-    >
+    <div className="flex flex-col h-full relative" style={{ backgroundColor: 'var(--chat-background)' }}>
       <div
-        className="p-4 border-b flex items-center justify-between"
+        className="p-4 flex items-center justify-end absolute top-0 left-0 right-0 z-10"
         style={{
-          backgroundColor: 'var(--color-surface)',
-          borderColor: 'var(--color-border)'
+          border: 'none'
         }}
       >
-        <div className="min-w-0 flex-1 mr-4">
-          <h2
-            className="text-lg font-semibold truncate block"
-            style={{ color: 'var(--color-text-primary)' }}
-            title={displayConversationName || "Chat"}
-          >
-            {displayConversationName || "Chat"}
-          </h2>
-        </div>
         <div className="flex items-center gap-2">
           {selectedConversation && (
             <>
@@ -730,13 +661,8 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
                 onClick={handleAudioCall}
                 disabled={!!currentCall || isUserBlocked || isBlockedByUser}
                 className="flex items-center gap-2 select-none"
-                style={{
-                  backgroundColor: 'transparent',
-                  borderColor: 'var(--color-border)',
-                  color: 'var(--color-text-primary)'
-                }}
               >
-                <Phone className="w-4 h-4" />
+                <CallIcon className="w-4 h-4" />
                 <span>Call</span>
               </Button>
               <Button
@@ -745,11 +671,6 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
                 onClick={handleVideoCall}
                 disabled={!!currentCall || isUserBlocked || isBlockedByUser}
                 className="flex items-center gap-2 select-none"
-                style={{
-                  backgroundColor: 'transparent',
-                  borderColor: 'var(--color-border)',
-                  color: 'var(--color-text-primary)'
-                }}
               >
                 <Video className="w-4 h-4" />
                 <span>Video</span>
@@ -798,7 +719,7 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
 
 
           {/* P2P Connection Indicator */}
-          {p2pConnected && (
+          {/* {p2pConnected && (
             <div
               className="flex items-center gap-1 px-2 py-1 rounded text-xs font-medium"
               style={{
@@ -823,7 +744,7 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
               </svg>
               <span className="select-none">P2P</span>
             </div>
-          )}
+          )} */}
 
           {/* Block Status Indicator */}
           {(isUserBlocked || isBlockedByUser) && (
@@ -837,11 +758,17 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
         </div>
       </div>
       <ScrollArea
-        className="flex-1 p-4"
+        className="absolute inset-0"
+        style={{
+          paddingTop: '0px',
+          paddingLeft: '16px',
+          paddingRight: '16px',
+          backgroundColor: 'var(--chat-background)',
+          zIndex: 0
+        }}
         ref={scrollAreaRef}
-        style={{ backgroundColor: 'var(--color-background)' }}
       >
-        <div className="space-y-4">
+        <div className="space-y-4 pb-24 pt-20">
           {messages.length === 0 ? emptyMessagesUI : (
             messages.map((message, index) => {
               const smartReceipt = getSmartReceiptStatus(message);
@@ -862,6 +789,7 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
                     onReact={handleReactToMessage}
                     currentUsername={currentUsername}
                     getDisplayUsername={getDisplayUsernameStable}
+                    secureDB={secureDB}
                   />
                 </div>
               );
@@ -883,12 +811,12 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
         </div>
       </ScrollArea>
 
-
-
-
       <div
-        className="px-4 pb-4"
-        style={{ backgroundColor: 'var(--color-background)' }}
+        className="absolute bottom-0 left-0 right-0 px-4 pb-4 z-20"
+        style={{
+          backgroundColor: 'transparent',
+          backgroundImage: 'linear-gradient(to top, var(--chat-background), transparent)'
+        }}
       >
         <ChatInput
           onSendMessage={handleMessageSend}

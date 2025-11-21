@@ -188,7 +188,7 @@ const ConversationItem = memo<ConversationItemProps>(({
             style={{ color: isSelected ? 'rgba(255, 255, 255, 0.8)' : 'var(--color-text-secondary)' }}
             title={conversation.lastMessage}
           >
-            {conversation.lastMessage}
+            {conversation.lastMessage.replace(conversation.username, displayName)}
           </div>
         )}
       </div>
@@ -339,7 +339,7 @@ export const ConversationList = memo<ConversationListProps>(function Conversatio
           <div className="relative">
             <Search className="absolute left-2 top-2.5 h-4 w-4 text-muted-foreground" />
             <Input
-              placeholder="New chat username..."
+              placeholder="Username"
               value={newChatUsername}
               onChange={(e) => setNewChatUsername(e.target.value)}
               className="pl-8 select-none"

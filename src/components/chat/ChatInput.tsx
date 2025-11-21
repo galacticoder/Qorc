@@ -1,69 +1,66 @@
 import React, { useState, useRef, useEffect, useCallback } from "react";
-import { cn } from "@/lib/utils";
 import { User } from "./UserList";
 import { SignalType } from "../../lib/signal-types";
 import { Message } from "./types";
+
+import { useFileSender } from "./ChatInput/useFileSender";
+import { ProgressBar } from "./ChatInput/ProgressBar";
 import { EditingBanner } from "./ChatInput/EditingBanner";
 import { ReplyBanner } from "./ChatInput/ReplyBanner";
 import { VoiceRecorder } from "./VoiceRecorder";
-import { useFileSender } from "./ChatInput/useFileSender";
-import { ProgressBar } from "./ChatInput/ProgressBar.tsx";
-import { FileUploader } from "./ChatInput/FileUploader.tsx";
-import { MessageTextarea } from "./ChatInput/MessageTextarea.tsx";
-import { SendButton } from "./ChatInput/SendButton.tsx";
-import { VoiceRecorderButton } from "./ChatInput/VoiceRecorderButton.tsx";
+import { VoiceRecorderButton } from "./ChatInput/VoiceRecorderButton";
 import { MessageReply } from "./types";
 
 interface HybridKeys {
-  readonly x25519: { readonly private: Uint8Array; readonly publicKeyBase64: string };
-  readonly kyber: { readonly publicKeyBase64: string; readonly secretKey: Uint8Array };
-  readonly dilithium: { readonly publicKeyBase64: string; readonly secretKey: Uint8Array };
+  x25519: { private: Uint8Array; publicKeyBase64: string };
+  kyber: { publicKeyBase64: string; secretKey: Uint8Array };
+  dilithium: { publicKeyBase64: string; secretKey: Uint8Array };
 }
 
 interface P2PConnector {
-  readonly connectToPeer?: (peer: string) => Promise<void>;
-  readonly getConnectedPeers?: () => readonly string[];
+  connectToPeer?: (peer: string) => Promise<void>;
+  getConnectedPeers?: () => string[];
 }
 
 interface FileData {
-  readonly id: string;
-  readonly content: string;
-  readonly timestamp: Date;
-  readonly isCurrentUser: boolean;
-  readonly isSystemMessage: boolean;
-  readonly type: string;
-  readonly filename: string;
-  readonly fileSize: number;
-  readonly mimeType: string;
-  readonly sender: string;
-  readonly originalBase64Data: string;
-  readonly size?: number;
-  readonly url?: string;
+  id: string;
+  content: string;
+  timestamp: Date;
+  isCurrentUser: boolean;
+  isSystemMessage: boolean;
+  type: string;
+  filename: string;
+  fileSize: number;
+  mimeType: string;
+  sender: string;
+  originalBase64Data: string;
+  size?: number;
+  url?: string;
 }
 
 interface ChatInputProps {
-  readonly onSendMessage: (messageId: string, content: string, messageSignalType: string, replyTo?: MessageReply | null) => void;
-  readonly onSendFile: (fileData: FileData) => void;
-  readonly isEncrypted: boolean;
-  readonly currentUsername: string;
-  readonly users: readonly User[];
-  readonly replyTo: Message | null;
-  readonly onCancelReply: () => void;
-  readonly editingMessage?: Message | null;
-  readonly onCancelEdit?: () => void;
-  readonly onEditMessage?: (newContent: string) => void;
-  readonly onTyping: () => void;
-  readonly selectedConversation?: string;
-  readonly getDisplayUsername?: (username: string) => Promise<string>;
-  readonly disabled?: boolean;
-  readonly p2pConnector?: P2PConnector;
-  readonly getKeysOnDemand?: () => Promise<HybridKeys | null>;
+  onSendMessage: (messageId: string, content: string, messageSignalType: string, replyTo?: MessageReply | null) => void;
+  onSendFile: (fileData: FileData) => void;
+  isEncrypted: boolean;
+
+  currentUsername: string;
+  users: User[];
+  replyTo?: MessageReply | null;
+  onCancelReply?: () => void;
+  editingMessage?: Message | null;
+  onCancelEdit?: () => void;
+  onEditMessage?: (messageId: string, newContent: string) => void;
+  onTyping: () => void;
+  selectedConversation?: string;
+  getDisplayUsername?: (username: string) => Promise<string>;
+  disabled?: boolean;
+  p2pConnector?: P2PConnector;
+  getKeysOnDemand?: () => Promise<HybridKeys | null>;
 }
 
 export function ChatInput({
   onSendMessage,
   onSendFile,
-
   currentUsername,
   users,
   replyTo,
@@ -81,7 +78,8 @@ export function ChatInput({
   const [message, setMessage] = useState("");
   const [isSending, setIsSending] = useState(false);
   const [showVoiceRecorder, setShowVoiceRecorder] = useState(false);
-  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const messageInputRef = useRef<HTMLInputElement>(null);
 
   const { sendFile, progress, isSendingFile } = useFileSender(
     currentUsername,
@@ -94,7 +92,7 @@ export function ChatInput({
   useEffect(() => {
     if (editingMessage) {
       setMessage(editingMessage.content);
-      textareaRef.current?.focus();
+      messageInputRef.current?.focus();
     }
   }, [editingMessage]);
 
@@ -151,69 +149,55 @@ export function ChatInput({
     }
   }, [message, isSending, selectedConversation, disabled, sanitizeMessage, editingMessage, onEditMessage, onSendMessage, onCancelEdit, replyTo, onCancelReply]);
 
-  const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
-    if (e.key === "Enter" && !e.shiftKey) {
-      e.preventDefault();
-      handleSend();
+  const validateFile = useCallback((file: File): string | null => {
+    const MAX_SIZE = 50 * 1024 * 1024;
+    if (file.size > MAX_SIZE) {
+      return 'File is too large. Maximum size is 50MB.';
     }
-  }, [handleSend]);
-
-  const validateFile = useCallback(async (file: File): Promise<{ valid: boolean; error?: string }> => {
-    const MAX_FILE_SIZE = 100 * 1024 * 1024;
-    const MAX_FILENAME_LENGTH = 255;
-
-    if (file.size === 0) {
-      return { valid: false, error: 'Empty files are not allowed' };
-    }
-
-    if (file.size > MAX_FILE_SIZE) {
-      return { valid: false, error: `File too large. Maximum size is ${Math.round(MAX_FILE_SIZE / (1024 * 1024))}MB` };
-    }
-
-    if (/\x00|[\x01-\x1f\x7f-\x9f]/.test(file.name)) {
-      return { valid: false, error: 'Filename contains invalid characters' };
-    }
-
-    if (!file.name || file.name.trim().length === 0) {
-      return { valid: false, error: 'File must have a valid name' };
-    }
-
-    if (file.name.length > MAX_FILENAME_LENGTH) {
-      return { valid: false, error: 'Filename too long (maximum 255 characters)' };
-    }
-
-    return { valid: true };
+    return null;
   }, []);
-
-  const handleFileChange = useCallback(async (file: File) => {
-    const validation = await validateFile(file);
-    if (!validation.valid) {
-      alert(`File upload failed: ${validation.error}`);
-      return;
-    }
-
-    try {
-      await sendFile(file);
-    } catch {
-    }
-  }, [validateFile, sendFile]);
 
   const blobToBase64 = useCallback((blob: Blob): Promise<string> => {
     return new Promise((resolve, reject) => {
       const reader = new FileReader();
       reader.onloadend = () => {
-        try {
-          const result = reader.result as string;
-          const commaIndex = result.indexOf(',');
-          resolve(commaIndex >= 0 ? result.substring(commaIndex + 1) : result);
-        } catch (_err) {
-          reject(_err);
+        if (typeof reader.result === 'string') {
+          resolve(reader.result);
+        } else {
+          reject(new Error('Failed to convert blob to base64'));
         }
       };
-      reader.onerror = () => reject(reader.error);
+      reader.onerror = () => reject(new Error('FileReader error'));
       reader.readAsDataURL(blob);
     });
   }, []);
+
+  const handleFileChange = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    const validationError = validateFile(file);
+    if (validationError) {
+      alert(validationError);
+      if (fileInputRef.current) {
+        fileInputRef.current.value = '';
+      }
+      return;
+    }
+
+    try {
+      setIsSending(true);
+      await sendFile(file);
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error occurred';
+      alert('Failed to send file: ' + errorMessage);
+    } finally {
+      setIsSending(false);
+      if (fileInputRef.current) {
+        fileInputRef.current.value = '';
+      }
+    }
+  }, [validateFile, sendFile]);
 
   const handleSendVoiceNote = useCallback(async (audioBlob: Blob) => {
     if (!selectedConversation) return;
@@ -221,71 +205,42 @@ export function ChatInput({
     try {
       setIsSending(true);
 
-      const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+      const timestamp = Date.now();
       const filename = `voice-note-${timestamp}.webm`;
-      const file = new File([audioBlob], filename, { type: 'audio/webm' });
+      const file = new File([audioBlob], filename, { type: audioBlob.type || 'audio/webm' });
 
-      const validation = await validateFile(file);
-      if (!validation.valid) {
-        alert('Voice note too large: ' + validation.error);
-        setIsSending(false);
-        return;
-      }
-
-      try {
-        await sendFile(file);
-      } catch (_error) {
-        const msg = _error instanceof Error ? _error.message : 'Unknown error';
-        alert('Failed to send voice note: ' + msg);
+      const validationError = validateFile(file);
+      if (validationError) {
+        alert(validationError);
         setIsSending(false);
         setShowVoiceRecorder(false);
         return;
       }
 
-      const fileUrl = URL.createObjectURL(file);
-      let originalBase64Data: string = '';
-
-      try {
-        originalBase64Data = await blobToBase64(file);
-        if (!originalBase64Data) {
-          throw new Error('Empty base64 data produced');
-        }
-      } catch {
-        alert('Failed to process voice note for sending. Please try again.');
-        setIsSending(false);
-        setShowVoiceRecorder(false);
-        return;
-      }
-
-      onSendFile({
-        id: crypto.randomUUID(),
-        content: fileUrl,
-        timestamp: new Date(),
-        isCurrentUser: true,
-        isSystemMessage: false,
-        type: 'file-message',
-        filename,
-        fileSize: file.size,
-        mimeType: file.type || 'audio/webm',
-        sender: currentUsername,
-        originalBase64Data,
-        size: file.size,
-        url: fileUrl,
-      });
+      // Use sendFile from useFileSender to handle chunking, encryption, and local saving
+      await sendFile(file);
 
       setShowVoiceRecorder(false);
     } catch (_error) {
+      console.error('Failed to send voice note:', _error);
       const msg = _error instanceof Error ? _error.message : 'Unknown error';
       alert('Failed to send voice note: ' + msg);
     } finally {
       setIsSending(false);
     }
-  }, [selectedConversation, validateFile, sendFile, blobToBase64, onSendFile, currentUsername]);
+  }, [selectedConversation, validateFile, sendFile]);
 
-  const handleMessageChange = useCallback((e: React.ChangeEvent<HTMLTextAreaElement>) => {
+  const handleMessageChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     setMessage(e.target.value);
     onTyping();
   }, [onTyping]);
+
+  const handleKeyDown = useCallback((e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      handleSend();
+    }
+  }, [handleSend]);
 
   return (
     <>
@@ -298,12 +253,7 @@ export function ChatInput({
         </div>
       )}
 
-
-
-      <div className={cn(
-        "flex items-center gap-2 px-4 py-3 transition-all duration-200",
-        disabled && "opacity-50 pointer-events-none"
-      )}>
+      <div className="px-4 py-3">
         {showVoiceRecorder ? (
           <VoiceRecorder
             onSendVoiceNote={handleSendVoiceNote}
@@ -311,29 +261,147 @@ export function ChatInput({
             disabled={isSending || isSendingFile}
           />
         ) : (
-          <>
-            <FileUploader onFileSelected={handleFileChange} disabled={isSendingFile || disabled} />
+          <div
+            className="messageBox"
+            style={{
+              width: '100%',
+              height: '40px',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '8px',
+              backgroundColor: "var(--chat-background)",
+              padding: '0 15px',
+              borderRadius: '10px',
+              border: '1px solid hsl(var(--border))',
+              minWidth: 0,
+              userSelect: 'none',
+            }}
+          >
+            {/* File Upload */}
+            <div
+              className="fileUploadWrapper"
+              style={{
+                flexShrink: 0,
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+              }}
+            >
+              <label
+                htmlFor="file-input"
+                style={{
+                  cursor: 'pointer',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                }}
+              >
+                <svg
+                  xmlns="http://www.w3.org/2000/svg"
+                  fill="none"
+                  viewBox="0 0 337 337"
+                  style={{ height: '18px', width: '18px' }}
+                >
+                  <circle
+                    strokeWidth={20}
+                    stroke="hsl(var(--muted-foreground))"
+                    fill="none"
+                    r="158.5"
+                    cy="168.5"
+                    cx="168.5"
+                  />
+                  <path
+                    strokeLinecap="round"
+                    strokeWidth={25}
+                    stroke="hsl(var(--muted-foreground))"
+                    d="M167.759 79V259"
+                  />
+                  <path
+                    strokeLinecap="round"
+                    strokeWidth={25}
+                    stroke="hsl(var(--muted-foreground))"
+                    d="M79 167.138H259"
+                  />
+                </svg>
+              </label>
+              <input
+                ref={fileInputRef}
+                type="file"
+                id="file-input"
+                style={{ display: 'none' }}
+                onChange={handleFileChange}
+                disabled={disabled || isSendingFile}
+              />
+            </div>
 
-            <VoiceRecorderButton
-              onClick={() => setShowVoiceRecorder(true)}
-              disabled={isSendingFile || showVoiceRecorder || disabled}
-            />
+            {/* Voice Recorder Button */}
+            <div style={{ flexShrink: 0 }}>
+              <VoiceRecorderButton
+                onClick={() => setShowVoiceRecorder(true)}
+                disabled={isSendingFile || showVoiceRecorder || disabled}
+              />
+            </div>
 
-            <MessageTextarea
+            {/* Message Input */}
+            <input
+              ref={messageInputRef}
+              required
+              placeholder="Message..."
+              type="text"
+              id="messageInput"
               value={message}
               onChange={handleMessageChange}
               onKeyDown={handleKeyDown}
-              textareaRef={textareaRef}
               disabled={disabled}
+              style={{
+                flex: 1,
+                minWidth: 0,
+                height: '100%',
+                backgroundColor: 'transparent',
+                outline: 'none',
+                border: 'none',
+                color: 'hsl(var(--foreground))',
+                userSelect: 'text',
+              }}
             />
 
-            <SendButton
-              disabled={!message.trim() || isSending || !selectedConversation || disabled}
-              isSending={isSending}
-              editingMessage={editingMessage}
+            {/* Send Button */}
+            <button
+              id="sendButton"
               onClick={handleSend}
-            />
-          </>
+              disabled={!message.trim() || isSending || !selectedConversation || disabled}
+              style={{
+                flexShrink: 0,
+                width: 'fit-content',
+                height: '100%',
+                backgroundColor: 'transparent',
+                outline: 'none',
+                border: 'none',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                cursor: disabled || !message.trim() ? 'not-allowed' : 'pointer',
+                opacity: disabled || !message.trim() ? 0.5 : 1,
+              }}
+            >
+              <svg
+                xmlns="http://www.w3.org/2000/svg"
+                fill="none"
+                viewBox="0 0 664 663"
+                style={{ height: '18px', width: '18px' }}
+              >
+                <path fill="none" d="M646.293 331.888L17.7538 17.6187L155.245 331.888M646.293 331.888L17.753 646.157L155.245 331.888M646.293 331.888L318.735 330.228L155.245 331.888" />
+                <path
+                  strokeLinejoin="round"
+                  strokeLinecap="round"
+                  strokeWidth="33.67"
+                  stroke={message.trim() ? 'hsl(var(--primary))' : 'hsl(var(--muted-foreground))'}
+                  fill={message.trim() ? 'hsl(var(--primary) / 0.2)' : 'none'}
+                  d="M646.293 331.888L17.7538 17.6187L155.245 331.888M646.293 331.888L17.753 646.157L155.245 331.888M646.293 331.888L318.735 330.228L155.245 331.888"
+                />
+              </svg>
+            </button>
+          </div>
         )}
       </div>
     </>

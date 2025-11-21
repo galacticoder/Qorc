@@ -1,6 +1,7 @@
 import React, { useState, useCallback, useMemo, useRef, useEffect } from "react";
 import { cn } from "../../lib/utils";
-import { MessageSquare, Settings, LogOut, Pencil } from "lucide-react";
+import { MessageSquare, Settings, LogOut } from "lucide-react";
+import { ComposeIcon } from "./icons";
 import { Input } from "../ui/input";
 import { Button } from "../ui/button";
 import { sanitizeTextInput } from "../../lib/sanitizers";
@@ -216,7 +217,7 @@ export const Sidebar = React.memo<SidebarProps>(({ className, children, currentU
         </div>
 
         {/* Secondary Links */}
-        <div className="border-t px-3 py-4 border-border">
+        <div className="px-3 py-4">
           {secondaryItems.map((item) => {
             const Icon = item.icon;
             const isActive = activeTab === item.id;
@@ -241,7 +242,7 @@ export const Sidebar = React.memo<SidebarProps>(({ className, children, currentU
         </div>
 
         {/* User Profile Area */}
-        <div className="border-t px-3 py-4 border-border">
+        <div className="px-3 py-4">
           <button
             onClick={handleLogout}
             className="w-full flex items-center gap-3 px-3 py-3 rounded-lg transition-all duration-200 hover:bg-destructive/10 text-foreground h-[var(--sidebar-item-height)]"
@@ -301,7 +302,7 @@ export const Sidebar = React.memo<SidebarProps>(({ className, children, currentU
                 }}
                 style={{ transition: 'transform 0.2s cubic-bezier(0.34, 1.56, 0.64, 1)', transformOrigin: 'center' }}
               >
-                <Pencil className="h-4 w-4" />
+                <ComposeIcon className="h-4 w-4" />
               </Button>
             </div>
             <div className="flex-1 overflow-hidden">

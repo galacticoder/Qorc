@@ -39,6 +39,7 @@ import { toast, Toaster } from 'sonner';
 import { TorIndicator } from '@/components/ui/TorIndicator';
 import { Button } from "../components/ui/button";
 import { Pencil } from "lucide-react";
+import { ComposeIcon } from "../components/chat/icons";
 
 const getReplyContent = (message: Message): string => {
   if (message.type === 'file' || message.type === 'file-message' || message.filename) {
@@ -1309,10 +1310,33 @@ const ChatApp: React.FC<ChatAppProps> = () => {
       }
     };
 
-    const handleLocalFileMessage = (event: CustomEvent) => {
+    const handleLocalFileMessage = async (event: CustomEvent) => {
       if (!event.detail || typeof event.detail !== 'object') { return; }
       const fileMessage = event.detail;
       if (!fileMessage.id || typeof fileMessage.id !== 'string') { return; }
+
+      // Save file data to SecureDB for persistence
+      try {
+        if (Database.secureDBRef.current && fileMessage.originalBase64Data) {
+          // Convert base64 to Blob for storage
+          const base64Data = fileMessage.originalBase64Data.includes(',')
+            ? fileMessage.originalBase64Data.split(',')[1]
+            : fileMessage.originalBase64Data;
+
+          const binaryString = atob(base64Data);
+          const bytes = new Uint8Array(binaryString.length);
+          for (let i = 0; i < binaryString.length; i++) {
+            bytes[i] = binaryString.charCodeAt(i);
+          }
+
+          const blob = new Blob([bytes], { type: fileMessage.mimeType || 'application/octet-stream' });
+
+          // Save to SecureDB using message ID as file ID
+          await Database.secureDBRef.current.saveFile(fileMessage.id, blob);
+        }
+      } catch (err) {
+        console.error('[Index] Failed to save file to SecureDB:', err);
+      }
 
       setMessages(prev => {
         const existingMessage = prev.find(msg => msg.id === fileMessage.id);
@@ -1483,8 +1507,8 @@ const ChatApp: React.FC<ChatAppProps> = () => {
             <div className={sidebarActiveTab === 'chats' ? 'h-full w-full' : 'hidden'}>
               <div className="flex h-full">
                 <div
-                  className="border-r border-border bg-card hidden md:flex flex-col relative"
-                  style={{ width: `${conversationPanelWidth}px`, minWidth: '200px', maxWidth: '600px' }}
+                  className="border-r border-border hidden md:flex flex-col relative"
+                  style={{ width: `${conversationPanelWidth}px`, minWidth: '200px', maxWidth: '600px', backgroundColor: 'var(--chats-section-bg)' }}
                 >
                   {/* Resize Handle */}
                   <div
@@ -1523,14 +1547,14 @@ const ChatApp: React.FC<ChatAppProps> = () => {
                         onClick={() => setShowNewChatInput(!showNewChatInput)}
                         className="h-8 w-8"
                         onMouseEnter={(e) => {
-                          e.currentTarget.style.transform = 'scale(1.15) rotate(-5deg)';
+                          e.currentTarget.style.transform = 'scale(1.15) rotate(0deg)';
                         }}
                         onMouseLeave={(e) => {
                           e.currentTarget.style.transform = 'scale(1) rotate(0deg)';
                         }}
                         style={{ transition: 'transform 0.2s cubic-bezier(0.34, 1.56, 0.64, 1)', transformOrigin: 'center' }}
                       >
-                        <Pencil className="h-4 w-4" />
+                        <ComposeIcon className="h-4 w-4" />
                       </Button>
                     </div>
                   </div>
@@ -1563,6 +1587,7 @@ const ChatApp: React.FC<ChatAppProps> = () => {
                         sendServerReadReceipt={sendServerReadReceipt}
                         markMessageAsRead={markMessageAsRead}
                         getSmartReceiptStatus={getSmartReceiptStatus}
+                        secureDB={Database.secureDBRef.current}
                         onSendMessage={async (messageId, content, messageSignalType, replyTo) => {
                           if (!selectedConversation) return;
 
@@ -1690,9 +1715,21 @@ const ChatApp: React.FC<ChatAppProps> = () => {
                           }
                         }}
                         onSendFile={async (fileData: any) => {
+                          const MAX_LOCAL_STORAGE_SIZE = 5 * 1024 * 1024; // 5MB
+
+                          const dataToSave = { ...fileData };
+                          if (fileData.size > MAX_LOCAL_STORAGE_SIZE) {
+                            if (dataToSave.originalBase64Data) {
+                              dataToSave.originalBase64Data = null;
+                            }
+                            if (typeof dataToSave.content === 'string' && dataToSave.content.startsWith('data:')) {
+                              dataToSave.content = '';
+                            }
+                            dataToSave.isLocalStorageTruncated = true;
+                          }
+
                           try {
                             // Try P2P file transfer if enabled and peer is connected
-                            // Try P2P file transfer if enabled
                             if (p2pConfig.features.fileTransfers && selectedConversation) {
                               let isConnected = p2pMessaging.isPeerConnected(selectedConversation);
 
@@ -1701,9 +1738,7 @@ const ChatApp: React.FC<ChatAppProps> = () => {
                                 try {
                                   await p2pMessaging.connectToPeer(selectedConversation);
                                   isConnected = true;
-                                } catch (e) {
-                                  // Failed to connect, will fall back to server
-                                }
+                                } catch (e) { }
                               }
 
                               if (isConnected) {
@@ -1735,28 +1770,31 @@ const ChatApp: React.FC<ChatAppProps> = () => {
                                         }
                                       }
                                     );
+
                                     if (result.status === 'sent') {
                                       SecurityAuditLogger.log('info', 'p2p-file-sent', {});
+
+                                      await Database.saveMessageToLocalDB(dataToSave);
                                       return;
                                     }
                                     SecurityAuditLogger.log('info', 'p2p-file-queued-or-not-sent', { status: result.status });
                                   } catch (_error) {
                                     SecurityAuditLogger.log('info', 'p2p-file-failed-fallback-server', {});
-                                    await Database.saveMessageToLocalDB(fileData);
                                   }
-                                } else {
-                                  await Database.saveMessageToLocalDB(fileData);
                                 }
-                              } else {
-                                await Database.saveMessageToLocalDB(fileData);
                               }
                             }
+
+                            // Fallback: Always save to local DB if P2P didn't return early
+                            await Database.saveMessageToLocalDB(dataToSave);
+
                           } catch (error) {
                             SecurityAuditLogger.log('error', 'file-transfer-failed', { error: error instanceof Error ? error.message : 'unknown' });
                             toast.error(error instanceof Error ? error.message : "Failed to send file", {
                               duration: 5000
                             });
-                            await Database.saveMessageToLocalDB(fileData);
+
+                            await Database.saveMessageToLocalDB(dataToSave);
                           }
                         }}
                         isEncrypted={true}
@@ -1771,7 +1809,7 @@ const ChatApp: React.FC<ChatAppProps> = () => {
                         <div className="w-12 h-12 mx-auto mb-4 opacity-20 bg-gray-400 rounded-full flex items-center justify-center">
                           <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a 2 2 0 0 1 2 -2h14a2 2 0 0 1 2 2z" /></svg>
                         </div>
-                        <p>Select a conversation to start chatting</p>
+                        <p className="select-none">Select a conversation to start chatting</p>
                       </div>
                     </div>
                   )}

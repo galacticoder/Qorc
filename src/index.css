@@ -2,6 +2,28 @@
 @import 'highlight.js/styles/github-dark.min.css';
 @import 'tailwindcss';
 
+@theme {
+  --color-primary: 263 82% 74%;
+  --color-primary-foreground: 0 0% 5%;
+  --color-secondary: 0 0% 7%;
+  --color-secondary-foreground: 0 0% 100%;
+  --color-destructive: 0 66% 57%;
+  --color-destructive-foreground: 0 0% 100%;
+  --color-muted: 240 8% 5%;
+  --color-muted-foreground: 0 0% 43%;
+  --color-accent: 240 8% 5%;
+  --color-accent-foreground: 0 0% 100%;
+  --color-card: 240 8% 10%;
+  --color-card-foreground: 0 0% 100%;
+  --color-popover: 240 8% 10%;
+  --color-popover-foreground: 0 0% 100%;
+  --color-background: 240 13% 3%;
+  --color-foreground: 0 0% 100%;
+  --color-border: 240 8% 5%;
+  --color-input: 240 8% 5%;
+  --color-ring: 264 82% 80%;
+}
+
 /* Link Preview Styles */
 .link-preview-container img {
   max-width: 100%;
@@ -133,47 +155,60 @@
     --clr-info-a0: 217 61% 34%;
     --clr-info-a10: 217 61% 54%;
     --clr-info-a20: 217 61% 74%;
+
+    /* Chat Interface Specifics */
+    --chat-background: var(--color-background);
+    --chat-header-background: var(--color-surface);
+    --chat-bubble-received-bg: var(--color-surface);
+    --chats-section-bg: hsl(var(--card));
   }
 
   .dark {
-    /* Premium Dark Mode (New Palette) */
-    --background: var(--clr-surface-a0);
-    --foreground: var(--clr-light-a0);
+    /* Premium Dark Mode */
+    /* #070709 -> 240 13% 3% */
+    --background: 240 13% 3%;
+    --foreground: 0 0% 100%;
 
-    --card: var(--clr-surface-a10);
-    --card-foreground: var(--clr-light-a0);
+    /* #0C0C0E -> 240 8% 5% */
+    --card: 240 8% 10%;
+    --card-foreground: 0 0% 100%;
 
-    --popover: var(--clr-surface-a10);
-    --popover-foreground: var(--clr-light-a0);
+    --popover: 240 8% 10%;
+    --popover-foreground: 0 0% 100%;
 
-    --primary: var(--clr-primary-a0);
-    --primary-foreground: var(--clr-surface-a0);
+    --primary: 263 82% 74%;
+    --primary-foreground: 0 0% 5%;
 
-    --secondary: var(--clr-surface-a20);
-    --secondary-foreground: var(--clr-light-a0);
+    --secondary: 0 0% 7%;
+    --secondary-foreground: 0 0% 100%;
 
-    --muted: var(--clr-surface-a20);
-    --muted-foreground: var(--clr-surface-a40);
+    --muted: 240 8% 5%;
+    --muted-foreground: 0 0% 43%;
 
-    --accent: var(--clr-surface-a20);
-    --accent-foreground: var(--clr-light-a0);
+    --accent: 240 8% 5%;
+    --accent-foreground: 0 0% 100%;
 
-    --destructive: var(--clr-danger-a10);
-    --destructive-foreground: var(--clr-light-a0);
+    --destructive: 0 66% 57%;
+    --destructive-foreground: 0 0% 100%;
 
-    --border: var(--clr-surface-a20);
-    --input: var(--clr-surface-a20);
-    --ring: var(--clr-primary-a20);
+    --border: 240 8% 5%;
+    --input: 240 8% 5%;
+    --ring: 264 82% 80%;
 
     /* Sidebar - Dark */
-    --sidebar-background: var(--clr-surface-a0);
-    --sidebar-foreground: var(--clr-light-a0);
-    --sidebar-primary: var(--clr-primary-a0);
-    --sidebar-primary-foreground: var(--clr-surface-a0);
-    --sidebar-accent: var(--clr-surface-a10);
-    --sidebar-accent-foreground: var(--clr-light-a0);
-    --sidebar-border: var(--clr-surface-a20);
-    --sidebar-ring: var(--clr-primary-a20);
+    --sidebar-background: 0 0% 5%;
+    --sidebar-foreground: 0 0% 100%;
+    --sidebar-primary: 263 82% 74%;
+    --sidebar-primary-foreground: 0 0% 5%;
+    --sidebar-accent: 240 8% 5%;
+    --sidebar-accent-foreground: 0 0% 100%;
+    --sidebar-border: 240 8% 5%;
+    --sidebar-ring: 264 82% 80%;
+
+    /* Chat Interface Specifics - Dark Mode Override */
+    --chat-background: #1C1C21;
+    --chat-header-background: #1C1C21;
+    --chats-section-bg: #111114;
   }
 }
 
@@ -220,7 +255,6 @@
 
 .scrollbar-hide::-webkit-scrollbar {
   display: none;
-  /* Chrome, Safari and Opera */
 }
 
 /* Markdown Content Styles */
@@ -228,7 +262,6 @@
   font-family: inherit;
   line-height: 1.6;
   max-width: none;
-  /* Allow full width for README content */
   width: 100%;
 }
 
@@ -245,7 +278,6 @@
   padding-bottom: 0.3em;
 }
 
-/* Better header sizing for README content */
 .markdown-content h1 {
   font-size: 2em;
   margin-top: 0;
@@ -493,9 +525,6 @@
   padding-left: 1.5em !important;
 }
 
-/* Animated Theme Icon Styles */
-/* From Uiverse.io by Type-Delta */
-
 .themeToggle {
   color: #bbb;
   width: 25px;
@@ -595,9 +624,6 @@
   }
 }
 
-/* Custom Animated Switch Styles */
-/* From Uiverse.io by vinodjangid07 */
-
 .custom-switch-input {
   display: none;
 }
@@ -652,4 +678,30 @@
 .pencil-icon-anim:hover .lucide {
   fill: currentColor !important;
   transform: scale(1.2) rotate(-10deg) !important;
+}
+
+input::placeholder,
+textarea::placeholder {
+  user-select: none;
+  -webkit-user-select: none;
+  -moz-user-select: none;
+  -ms-user-select: none;
+}
+
+/* Auto-hiding scrollbar with smooth transitions */
+[data-radix-scroll-area-scrollbar] {
+  opacity: 0;
+  transition: opacity 0.3s ease-out;
+}
+
+[data-radix-scroll-area-viewport]:hover+[data-radix-scroll-area-scrollbar],
+[data-radix-scroll-area-scrollbar]:hover,
+[data-radix-scroll-area-scrollbar][data-state="visible"] {
+  opacity: 1;
+  transition: opacity 0.15s ease-in;
+}
+
+[data-radix-scroll-area-scrollbar][data-state="hidden"] {
+  opacity: 0;
+  transition: opacity 0.5s ease-out;
 }

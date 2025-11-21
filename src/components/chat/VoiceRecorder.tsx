@@ -254,9 +254,13 @@ export function VoiceRecorder({ onSendVoiceNote, onCancel, disabled }: VoiceReco
     }
   };
 
-  const sendVoiceNote = () => {
-    if (recordedBlob) {
-      onSendVoiceNote(recordedBlob);
+  const sendVoiceNote = async () => {
+    if (recordedBlob && !disabled) {
+      try {
+        await onSendVoiceNote(recordedBlob);
+      } catch (error) {
+        console.error('Error sending voice note:', error);
+      }
     }
   };
 
@@ -333,9 +337,10 @@ export function VoiceRecorder({ onSendVoiceNote, onCancel, disabled }: VoiceReco
 
           <Button
             onClick={sendVoiceNote}
+            disabled={disabled}
             variant="default"
             size="icon"
-            className="h-8 w-8 rounded-full bg-primary hover:bg-primary/90 text-primary-foreground shadow-sm"
+            className="h-8 w-8 rounded-full bg-primary hover:bg-primary/90 text-primary-foreground shadow-sm disabled:opacity-50"
             title="Send voice note"
           >
             <Send className="w-4 h-4" />

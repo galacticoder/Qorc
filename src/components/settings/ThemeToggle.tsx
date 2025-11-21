@@ -13,7 +13,7 @@ const ThemeToggle = () => {
     if (!mounted) return null;
 
     return (
-        <div className="flex items-center p-[3px] border border-solid border-zinc-500/30 dark:border-zinc-700 rounded-full w-max bg-background">
+        <div className="flex items-center p-[3px] rounded-full w-max bg-background">
             <code className="sr-only hidden tracking-wide select-none pointer-events-none">⌘+J</code>
 
             {/* Light Mode */}

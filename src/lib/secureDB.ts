@@ -176,8 +176,6 @@ export class SecureDB {
     return (value || 'unknown').replace(/[^a-zA-Z0-9_-]/g, '_');
   }
 
-  // Messages -----------------------------------------------------------------
-
   async storeMessage(message: StoredMessage): Promise<void> {
     const existingMessages = await this.loadMessages();
     await this.saveMessages([...existingMessages, message]);
@@ -185,21 +183,50 @@ export class SecureDB {
 
   async saveMessages(messages: StoredMessage[], activeConversationPeer?: string): Promise<void> {
     if (!this.encryptionKey) throw new Error('Encryption key not initialized');
-    const deduplicated = this.deduplicateMessages(messages);
+
+    const uniqueMap = new Map<string, StoredMessage>();
+    for (const msg of messages) {
+      if (msg && msg.id) {
+        uniqueMap.set(msg.id, msg);
+      }
+    }
+
     const conversationMap = new Map<string, StoredMessage[]>();
     const currentUser = this.username;
-    for (const msg of deduplicated) {
+
+    for (const msg of uniqueMap.values()) {
       if (!(msg as any)?.sender || !(msg as any)?.recipient) continue;
       const peer = (msg as any).sender === currentUser ? (msg as any).recipient : (msg as any).sender;
-      if (!conversationMap.has(peer)) conversationMap.set(peer, []);
-      conversationMap.get(peer)!.push(msg);
+
+      let list = conversationMap.get(peer);
+      if (!list) {
+        list = [];
+        conversationMap.set(peer, list);
+      }
+      list.push(msg);
     }
+
     const capped: StoredMessage[] = [];
+    // Process each conversation to enforce limits
     for (const [peer, msgs] of conversationMap.entries()) {
-      const sorted = msgs.sort((a, b) => new Date(a.timestamp as any).getTime() - new Date(b.timestamp as any).getTime());
+      // Sort by timestamp (oldest to newest)
+      msgs.sort((a, b) => new Date(a.timestamp as any).getTime() - new Date(b.timestamp as any).getTime());
+
       const limit = peer === activeConversationPeer ? 1000 : 500;
-      capped.push(...sorted.slice(-limit));
+
+      if (msgs.length > limit) {
+        // Keep only the most recent 'limit' messages
+        const start = msgs.length - limit;
+        for (let i = start; i < msgs.length; i++) {
+          capped.push(msgs[i]);
+        }
+      } else {
+        for (const m of msgs) {
+          capped.push(m);
+        }
+      }
     }
+
     const encrypted = await this.encryptData(capped);
     await (await this.kv()).setBinary('data', 'messages', encrypted);
   }
@@ -295,8 +322,6 @@ export class SecureDB {
     return this.loadEncryptedArray<StoredUser>('users', 'load-users');
   }
 
-  // Ephemeral ---------------------------------------------------------------
-
   async storeEphemeral(storeName: string, keyOrData: any, maybeData?: unknown, ttl?: number, autoDelete?: boolean): Promise<void>;
   async storeEphemeral(storeName: string, key: string, data: unknown, ttl?: number, autoDelete?: boolean): Promise<void>;
   async storeEphemeral(storeName: string, a: any, b?: any, ttl?: number, autoDelete = true): Promise<void> {
@@ -367,8 +392,6 @@ export class SecureDB {
     }
   }
 
-  // Generic KV --------------------------------------------------------------
-
   private async storeWithPrefix(storeName: string, key: string, data: unknown): Promise<void> {
     if (!this.encryptionKey) throw new Error('Encryption key not initialized');
     const encrypted = await this.encryptData(data);
@@ -397,8 +420,6 @@ export class SecureDB {
   }
 
   async delete(storeName: string, key: string): Promise<void> { return this.deleteWithPrefix(storeName, key); }
-
-  // Username mapping --------------------------------------------------------
 
   async cacheUsernameHash(originalUsername: string, hashedUsername: string): Promise<void> {
     await this.store('username_hashes', originalUsername, hashedUsername);
@@ -438,8 +459,6 @@ export class SecureDB {
     }
   }
 
-  // Bulk / clear ------------------------------------------------------------
-
   private deduplicateMessages(messages: StoredMessage[]): StoredMessage[] {
     const seen = new Set<string>();
     return messages.filter((msg) => {
@@ -472,4 +491,89 @@ export class SecureDB {
   }
 
   async clearStore(storeName: string): Promise<number> { return (await this.kv()).clearStore(storeName); }
+
+  private static readonly MAX_FILE_SIZE = 50 * 1024 * 1024; // 50 MB
+  private static readonly BLOCKED_MIME_TYPES = [
+    'application/x-msdownload',
+    'application/x-msdos-program',
+    'application/x-sh',
+    'application/x-bat',
+    'application/x-executable',
+    'application/vnd.microsoft.portable-executable',
+  ];
+
+  private validateFileData(data: ArrayBuffer | Blob, fileId: string): void {
+    const size = data instanceof Blob ? data.size : data.byteLength;
+
+    if (size > SecureDB.MAX_FILE_SIZE) {
+      throw new Error(`File too large: ${size} bytes (max: ${SecureDB.MAX_FILE_SIZE})`);
+    }
+
+    if (size === 0) {
+      throw new Error('File is empty');
+    }
+
+    if (!fileId || typeof fileId !== 'string' || fileId.length === 0 || fileId.length > 255) {
+      throw new Error('Invalid file ID');
+    }
+
+    // Check MIME type if it's a Blob
+    if (data instanceof Blob && data.type) {
+      const mimeType = data.type.toLowerCase();
+      if (SecureDB.BLOCKED_MIME_TYPES.some(blocked => mimeType.includes(blocked))) {
+        throw new Error(`Blocked file type: ${data.type}`);
+      }
+    }
+  }
+
+  async saveFile(fileId: string, data: ArrayBuffer | Blob): Promise<void> {
+    if (!this.encryptionKey) throw new Error('Encryption key not initialized');
+
+    this.validateFileData(data, fileId);
+
+    const arrayBuffer = data instanceof Blob ? await data.arrayBuffer() : data;
+    const uint8Array = new Uint8Array(arrayBuffer);
+
+    // Encrypt the file data
+    const encrypted = await this.encryptData(uint8Array);
+
+    // Store in the 'files' store using fileId as key
+    await (await this.kv()).setBinary('files', fileId, encrypted);
+  }
+
+  async getFile(fileId: string): Promise<Blob | null> {
+    if (!fileId || typeof fileId !== 'string') {
+      return null;
+    }
+
+    const encrypted = await (await this.kv()).getBinary('files', fileId);
+    if (!encrypted) return null;
+
+    try {
+      const decrypted = await this.decryptData(encrypted);
+
+      // The decrypted data should be a Uint8Array (stored from saveFile)
+      if (decrypted instanceof Uint8Array) {
+        const regularBuffer = new ArrayBuffer(decrypted.byteLength);
+        const regularArray = new Uint8Array(regularBuffer);
+        regularArray.set(decrypted);
+        return new Blob([regularArray]);
+      }
+
+      // Fallback: if it's an array-like object convert it
+      if (Array.isArray(decrypted) || (decrypted && typeof decrypted === 'object' && 'length' in decrypted)) {
+        const arr = new Uint8Array(decrypted as any);
+        const regularBuffer = new ArrayBuffer(arr.byteLength);
+        const regularArray = new Uint8Array(regularBuffer);
+        regularArray.set(arr);
+        return new Blob([regularArray]);
+      }
+
+      return null;
+    } catch (err) {
+      SecureAuditLogger.error('securedb', 'file-retrieval', 'decrypt-failed', { error: (err as Error).message });
+      return null;
+    }
+  }
 }
+

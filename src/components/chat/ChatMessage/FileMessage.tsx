@@ -8,6 +8,7 @@ import { MessageReceipt } from "../MessageReceipt.tsx";
 import { VoiceMessage } from "../VoiceMessage";
 import { copyTextToClipboard } from "@/lib/clipboard";
 import { sanitizeFilename } from "@/lib/sanitizers";
+import { useFileUrl } from "../../../hooks/useFileUrl";
 
 interface ElectronSaveFileData {
   readonly filename: string;
@@ -37,11 +38,13 @@ interface FileMessageProps {
   readonly onReply?: (message: Message) => void;
   readonly onDelete?: (message: Message) => void;
   readonly onEdit?: (message: Message) => void;
+  readonly secureDB?: any;
 }
 
 interface FileContentProps {
   readonly message: Message;
   readonly isCurrentUser: boolean;
+  readonly secureDB?: any;
 }
 
 const MAX_FILENAME_LENGTH = 255;
@@ -93,8 +96,28 @@ const createDownloadLink = (href: string, filename: string): void => {
   document.body.removeChild(link);
 };
 
-export function FileContent({ message, isCurrentUser }: FileContentProps) {
+export const FileContent: React.FC<FileContentProps> = ({ message, isCurrentUser, secureDB }) => {
   const { content, filename, fileSize, mimeType, originalBase64Data } = message;
+  const [imageError, setImageError] = React.useState(false);
+  const [videoError, setVideoError] = React.useState(false);
+  const [audioError, setAudioError] = React.useState(false);
+
+  const { url: resolvedFileUrl, loading: fileLoading, error: fileError } = useFileUrl({
+    secureDB: secureDB || null,
+    fileId: message.id,
+    mimeType: mimeType || 'application/octet-stream',
+    initialUrl: typeof content === 'string' ? content : '',
+  });
+
+  const effectiveFileUrl = resolvedFileUrl || (typeof content === 'string' ? content : '');
+
+  useEffect(() => {
+    if (effectiveFileUrl) {
+      setImageError(false);
+      setVideoError(false);
+      setAudioError(false);
+    }
+  }, [effectiveFileUrl]);
 
   const fallbackDownload = useCallback((): void => {
     if (!content) return;
@@ -106,16 +129,38 @@ export function FileContent({ message, isCurrentUser }: FileContentProps) {
   const handleDownload = useCallback(async (e: React.MouseEvent): Promise<void> => {
     e.preventDefault();
 
-    if (window.electronAPI?.isElectron && originalBase64Data && filename) {
+    if (window.electronAPI?.isElectron && filename) {
       try {
-        const base64Data = extractBase64Data(originalBase64Data);
-        const result = await window.electronAPI.saveFile({
-          filename,
-          data: base64Data,
-          mimeType: mimeType || 'application/octet-stream'
-        });
+        let base64Data = '';
 
-        if (!result.success && !result.canceled) {
+        if (originalBase64Data) {
+          base64Data = extractBase64Data(originalBase64Data);
+        } else if (secureDB) {
+          // Try to load from SecureDB
+          const blob = await secureDB.getFile(message.id);
+          if (blob) {
+            const buffer = await blob.arrayBuffer();
+            const bytes = new Uint8Array(buffer);
+            // Convert to base64
+            let binary = '';
+            for (let i = 0; i < bytes.byteLength; i++) {
+              binary += String.fromCharCode(bytes[i]);
+            }
+            base64Data = btoa(binary);
+          }
+        }
+
+        if (base64Data) {
+          const result = await window.electronAPI.saveFile({
+            filename,
+            data: base64Data,
+            mimeType: mimeType || 'application/octet-stream'
+          });
+
+          if (!result.success && !result.canceled) {
+            fallbackDownload();
+          }
+        } else {
           fallbackDownload();
         }
       } catch {
@@ -124,84 +169,137 @@ export function FileContent({ message, isCurrentUser }: FileContentProps) {
     } else {
       fallbackDownload();
     }
-  }, [originalBase64Data, filename, mimeType, fallbackDownload]);
+  }, [originalBase64Data, filename, mimeType, fallbackDownload, secureDB, message.id]);
 
   return (
     <>
       {/* Images */}
       {hasExtension(filename || "", IMAGE_EXTENSIONS) && (
         <div className="relative">
-          <img
-            src={content}
-            alt={filename}
-            className="rounded-md"
-            style={{ maxWidth: '400px', maxHeight: '300px', objectFit: 'contain' }}
-          />
+          {!imageError ? (
+            <img
+              src={effectiveFileUrl}
+              alt={filename}
+              className="rounded-md"
+              style={{ maxWidth: '400px', maxHeight: '300px', objectFit: 'contain' }}
+              onError={() => setImageError(true)}
+            />
+          ) : (
+            <div
+              className="px-3 py-2 rounded-lg text-sm italic select-none"
+              style={{
+                backgroundColor: 'var(--color-surface)',
+                color: 'var(--color-text-secondary)',
+                border: '1px dashed var(--color-border)'
+              }}
+            >
+              Image cannot be loaded
+            </div>
+          )}
         </div>
       )}
 
       {/* Videos */}
       {hasExtension(filename || "", VIDEO_EXTENSIONS) && (
-        <div
-          className={cn(
-            "rounded-lg text-sm break-words",
-            isCurrentUser ? "bg-primary text-primary-foreground" : "bg-muted"
-          )}
-        >
-          <div className="flex flex-col gap-2">
-            <video controls className="max-w-full rounded-md">
-              <source src={content} />
-              Your browser does not support the video tag.
-            </video>
+        !videoError ? (
+          <div
+            className={cn(
+              "rounded-lg text-sm break-words",
+              isCurrentUser ? "bg-primary text-primary-foreground" : "bg-muted"
+            )}
+          >
+            <div className="flex flex-col gap-2">
+              <video
+                controls
+                className="max-w-full rounded-md"
+                onError={() => setVideoError(true)}
+              >
+                <source src={effectiveFileUrl} />
+                Your browser does not support the video tag.
+              </video>
 
-            <div className="flex items-center gap-2 text-sm">
-              <span className="font-medium break-all ml-1 mb-1">{filename}</span>
-              <span className="text-xs text-muted-foreground">({formatFileSize(fileSize ?? 0)})</span>
+              <div className="flex items-center gap-2 text-sm">
+                <span className="font-medium break-all ml-1 mb-1">{filename}</span>
+                <span className="text-xs text-muted-foreground">({formatFileSize(fileSize ?? 0)})</span>
+              </div>
             </div>
           </div>
-        </div>
+        ) : (
+          <div
+            className="px-3 py-2 rounded-lg text-sm italic select-none"
+            style={{
+              backgroundColor: 'var(--color-surface)',
+              color: 'var(--color-text-secondary)',
+              border: '1px dashed var(--color-border)'
+            }}
+          >
+            Video cannot be loaded
+          </div>
+        )
       )}
 
       {/* Audio files */}
       {hasExtension(filename || "", AUDIO_EXTENSIONS) && !filename?.includes('voice-note') && (
-        <div
-          className={cn(
-            "rounded-lg text-sm break-words",
-            isCurrentUser ? "bg-primary text-primary-foreground" : "bg-muted"
-          )}
-        >
-          <div className="flex flex-col gap-1">
-            <audio controls className="w-full rounded-md">
-              <source src={content} />
-              Your browser does not support the audio element.
-            </audio>
+        !audioError ? (
+          <div
+            className="rounded-lg text-sm break-words"
+            style={{
+              backgroundColor: isCurrentUser ? 'var(--color-accent-primary)' : 'var(--chat-bubble-received-bg)',
+              color: isCurrentUser ? 'white' : 'var(--color-text-primary)',
+              borderRadius: 'var(--message-bubble-radius)'
+            }}
+          >
+            <div className="flex flex-col gap-1">
+              <audio
+                controls
+                className="w-full rounded-md"
+                onError={() => setAudioError(true)}
+              >
+                <source src={effectiveFileUrl} />
+                Your browser does not support the audio element.
+              </audio>
 
-            <div className={cn(
-              "flex items-center gap-1 text-sm",
-              isCurrentUser ? "text-white" : "text-blue-500"
-            )}>
-              <span className="truncate max-w-[250px] ml-1" title={filename}>
-                {filename}
-              </span>
+              <div className={cn(
+                "flex items-center gap-1 text-sm",
+                isCurrentUser ? "text-white" : "text-blue-500"
+              )}>
+                <span className="truncate max-w-[250px] ml-1" title={filename}>
+                  {filename}
+                </span>
+              </div>
+
+              <span className="text-xs text-muted-foreground">({formatFileSize(fileSize ?? 0)})</span>
             </div>
-
-            <span className="text-xs text-muted-foreground">({formatFileSize(fileSize ?? 0)})</span>
           </div>
-        </div>
+        ) : (
+          <div
+            className="px-3 py-2 rounded-lg text-sm italic select-none"
+            style={{
+              backgroundColor: 'var(--color-surface)',
+              color: 'var(--color-text-secondary)',
+              border: '1px dashed var(--color-border)'
+            }}
+          >
+            Audio cannot be loaded
+          </div>
+        )
       )}
 
       {/* Other files */}
       {!hasExtension(filename || "", [...IMAGE_EXTENSIONS, ...VIDEO_EXTENSIONS, ...AUDIO_EXTENSIONS]) && (
         <div
-          className={cn(
-            "rounded-lg px-1 py-1 text-sm break-words",
-            isCurrentUser ? "bg-primary text-primary-foreground" : "bg-muted"
-          )}
+          className="rounded-lg px-1 py-1 text-sm break-words"
+          style={{
+            backgroundColor: isCurrentUser ? 'var(--color-accent-primary)' : 'var(--chat-bubble-received-bg)',
+            borderRadius: 'var(--message-bubble-radius)'
+          }}
         >
-          <div className={cn(
-            "flex items-start gap-2 w-full",
-            isCurrentUser ? "text-white" : "text-blue-500"
-          )}>
+          <div
+            className="flex items-start gap-2 w-full"
+            style={{
+              color: isCurrentUser ? 'white' : 'var(--color-link)'
+            }}
+          >
             <PaperclipIcon className="h-5 w-5 shrink-0 mt-1" />
             <div className="flex flex-col min-w-0">
               <div className="flex items-center gap-2">
@@ -209,10 +307,12 @@ export function FileContent({ message, isCurrentUser }: FileContentProps) {
                   {filename}
                 </span>
               </div>
-              <span className={cn(
-                "text-xs leading-tight",
-                isCurrentUser ? "text-white/80" : "text-muted-foreground"
-              )}>({formatFileSize(fileSize ?? 0)})</span>
+              <span
+                className="text-xs leading-tight"
+                style={{
+                  color: isCurrentUser ? 'rgba(255,255,255,0.8)' : 'var(--color-text-secondary)'
+                }}
+              >({formatFileSize(fileSize ?? 0)})</span>
             </div>
           </div>
         </div>
@@ -244,29 +344,6 @@ export function FileMessage({ message, isCurrentUser, onReply, onDelete }: FileM
     }
   }, [content, filename]);
 
-  const handleDownload = useCallback(async (e: React.MouseEvent): Promise<void> => {
-    e.preventDefault();
-
-    if (window.electronAPI?.isElectron && originalBase64Data && filename) {
-      try {
-        const base64Data = extractBase64Data(originalBase64Data);
-        const result = await window.electronAPI.saveFile({
-          filename,
-          data: base64Data,
-          mimeType: mimeType || 'application/octet-stream'
-        });
-
-        if (!result.success && !result.canceled) {
-          fallbackDownload();
-        }
-      } catch {
-        fallbackDownload();
-      }
-    } else {
-      fallbackDownload();
-    }
-  }, [originalBase64Data, filename, mimeType, fallbackDownload]);
-
   const isVoiceNote = useMemo(() => {
     const name = (filename || '').toLowerCase();
     return name.includes('voice-note');
@@ -281,6 +358,8 @@ export function FileMessage({ message, isCurrentUser, onReply, onDelete }: FileM
         filename={filename}
         originalBase64Data={originalBase64Data}
         mimeType={mimeType}
+        messageId={message.id}
+        secureDB={secureDB}
       />
     );
   }

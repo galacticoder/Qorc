@@ -45,19 +45,22 @@ const sanitizePreviewText = (input: string | undefined | null): string => {
 };
 
 // Generate safe preview text from message
-const getConversationPreview = (message: Message): string => {
+const getConversationPreview = (message: Message, currentUsername: string): string => {
   const filename = sanitizePreviewText(message.filename);
+  const isMe = message.sender === currentUsername;
+  const prefix = isMe ? 'You sent' : `${message.sender} sent`;
+
   if (message.type === 'file' || message.type === 'file-message' || filename) {
     if (filename && filename.match(/\.(jpg|jpeg|png|gif|bmp|webp|svg|ico|tiff)$/i)) {
-      return `Image: ${filename}`;
+      return `${prefix} an image`;
     }
     if (filename && filename.match(/\.(mp4|webm|ogg|avi|mov|wmv|flv|mkv)$/i)) {
-      return `Video: ${filename}`;
+      return `${prefix} a video`;
     }
     if (filename && (filename.toLowerCase().includes('voice-note') || filename.match(/\.(mp3|wav|ogg|webm|m4a|aac|flac)$/i))) {
-      return 'Voice message';
+      return `${prefix} a voice message`;
     }
-    return `File: ${filename || 'File'}`;
+    return `${prefix} a file`;
   }
 
   return sanitizePreviewText(message.content);
@@ -339,7 +342,10 @@ export const useConversations = (currentUsername: string, users: User[], message
 
     const convMap = new Map<string, Conversation>();
 
-    for (const msg of messages) {
+    // Optimization: Iterate backwards to find latest messages first
+    // This avoids updating the 'lastMessage' repeatedly for every message in the history
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const msg = messages[i];
       // Validate message structure
       if (!msg.sender || !msg.recipient) continue;
 
@@ -355,25 +361,26 @@ export const useConversations = (currentUsername: string, users: User[], message
       const msgTime = new Date(msg.timestamp);
       const unreadIncrement = (msg.sender !== currentUsername && (!msg.receipt || !msg.receipt.read)) ? 1 : 0;
 
-      const existing = convMap.get(other);
-      if (!existing) {
-        convMap.set(other, {
-          id: crypto.randomUUID(),
+      let conv = convMap.get(other);
+      if (!conv) {
+        // First time seeing this peer (scanning from newest), so this is the latest message
+        conv = {
+          id: crypto.randomUUID(), // Will be overwritten by existing ID in merge step
           username: other,
           isOnline,
-          lastMessage: getConversationPreview(msg),
+          lastMessage: getConversationPreview(msg, currentUsername),
           lastMessageTime: msgTime,
           unreadCount: unreadIncrement
-        });
+        };
+        convMap.set(other, conv);
       } else {
-        const updated = { ...existing };
-        if (!updated.lastMessageTime || msgTime > updated.lastMessageTime) {
-          updated.lastMessage = getConversationPreview(msg);
-          updated.lastMessageTime = msgTime;
+        // Already have the latest message, just update unread count
+        if (unreadIncrement > 0) {
+          convMap.set(other, {
+            ...conv,
+            unreadCount: (conv.unreadCount || 0) + unreadIncrement
+          });
         }
-        updated.unreadCount = (updated.unreadCount || 0) + unreadIncrement;
-        updated.isOnline = isOnline;
-        convMap.set(other, updated);
       }
     }
 

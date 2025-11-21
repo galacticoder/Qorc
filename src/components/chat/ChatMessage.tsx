@@ -90,7 +90,7 @@ const formatTimestamp = (timestamp: Date): string => {
   }
 };
 
-export const ChatMessage = React.memo<ExtendedChatMessageProps>(({ message, onReply, previousMessage, onDelete, onEdit, onReact, getDisplayUsername, currentUsername }) => {
+export const ChatMessage = React.memo<ExtendedChatMessageProps>(({ message, onReply, previousMessage, onDelete, onEdit, onReact, getDisplayUsername, currentUsername, secureDB }) => {
   const { content, sender, timestamp, isCurrentUser, isSystemMessage, isDeleted, type } = message;
 
   const senderKey = useMemo(() => sender, [sender]);
@@ -374,31 +374,19 @@ export const ChatMessage = React.memo<ExtendedChatMessageProps>(({ message, onRe
           {/* Render file content or text content */}
           {isFileMessageType ? (
             <div className="max-w-[60%] relative" ref={bubbleRef}>
-              {isImage ? (
-                <FileContent message={message} isCurrentUser={safeIsCurrentUser} />
+              {isVoiceNote ? (
+                <VoiceMessage
+                  audioUrl={typeof content === 'string' ? content : ''}
+                  timestamp={timestamp}
+                  isCurrentUser={safeIsCurrentUser}
+                  filename={message.filename}
+                  originalBase64Data={message.originalBase64Data}
+                  mimeType={message.mimeType}
+                  messageId={message.id}
+                  secureDB={secureDB}
+                />
               ) : (
-                <div
-                  className="px-2 py-2"
-                  style={{
-                    backgroundColor: safeIsCurrentUser ? 'var(--color-accent-primary)' : 'var(--color-surface)',
-                    color: safeIsCurrentUser ? 'white' : 'var(--color-text-primary)',
-                    borderRadius: 'var(--message-bubble-radius)',
-                    overflow: 'hidden'
-                  }}
-                >
-                  {isVoiceNote ? (
-                    <VoiceMessage
-                      audioUrl={typeof content === 'string' ? content : ''}
-                      timestamp={timestamp}
-                      isCurrentUser={safeIsCurrentUser}
-                      filename={message.filename}
-                      originalBase64Data={message.originalBase64Data}
-                      mimeType={message.mimeType}
-                    />
-                  ) : (
-                    <FileContent message={message} isCurrentUser={safeIsCurrentUser} />
-                  )}
-                </div>
+                <FileContent message={message} isCurrentUser={safeIsCurrentUser} secureDB={secureDB} />
               )}
             </div>
           ) : (() => {
@@ -426,7 +414,7 @@ export const ChatMessage = React.memo<ExtendedChatMessageProps>(({ message, onRe
                     } ${isMarkdown ? '' : 'whitespace-pre-wrap'
                     } break-words`}
                   style={{
-                    backgroundColor: safeIsCurrentUser ? 'var(--color-accent-primary)' : 'var(--color-surface)',
+                    backgroundColor: safeIsCurrentUser ? 'var(--color-accent-primary)' : 'var(--chat-bubble-received-bg)',
                     color: safeIsCurrentUser ? 'white' : 'var(--color-text-primary)',
                     borderRadius: 'var(--message-bubble-radius)',
                     wordBreak: "break-word",
@@ -455,7 +443,7 @@ export const ChatMessage = React.memo<ExtendedChatMessageProps>(({ message, onRe
             );
           })()}
 
-          <div className="flex items-end">
+          <div className={cn("flex gap-1 items-start", safeIsCurrentUser ? "flex-row" : "flex-row-reverse")}>
             <button
               data-emoji-add-button
               data-emoji-trigger={messageTriggerId}
@@ -482,99 +470,22 @@ export const ChatMessage = React.memo<ExtendedChatMessageProps>(({ message, onRe
             >
               +
             </button>
-          </div>
 
-          <div
-            className={cn(
-              "flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity duration-200",
-              "p-1 rounded"
-            )}
-            style={{
-              backgroundColor: 'var(--color-surface)',
-              boxShadow: 'var(--shadow-elevation-low)'
-            }}
-            role="toolbar"
-            aria-label="Message actions"
-          >
-            <button
-              onClick={handleCopyMessage}
-              aria-label="Copy message"
-              className="p-1 rounded hover:bg-opacity-80 transition-colors"
-              style={{ color: 'var(--color-text-secondary)' }}
-              onMouseEnter={(e) => {
-                e.currentTarget.style.backgroundColor = 'var(--color-accent-primary)';
-                e.currentTarget.style.color = 'white';
+            <div
+              className={cn(
+                "flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity duration-200",
+                "p-1 rounded"
+              )}
+              style={{
+                backgroundColor: 'var(--color-surface)',
+                boxShadow: 'var(--shadow-elevation-low)'
               }}
-              onMouseLeave={(e) => {
-                e.currentTarget.style.backgroundColor = 'transparent';
-                e.currentTarget.style.color = 'var(--color-text-secondary)';
-              }}
+              role="toolbar"
+              aria-label="Message actions"
             >
-              <svg
-                width="15"
-                height="15"
-                viewBox="0 0 15 15"
-                fill="none"
-                xmlns="http://www.w3.org/2000/svg"
-              >
-                <path
-                  d="M1 9.50006C1 10.3285 1.67157 11.0001 2.5 11.0001H4L4 10.0001H2.5C2.22386 10.0001 2 9.7762 2 9.50006L2 2.50006C2 2.22392 2.22386 2.00006 2.5 2.00006L9.5 2.00006C9.77614 2.00006 10 2.22392 10 2.50006V4.00002H5.5C4.67158 4.00002 4 4.67159 4 5.50002V12.5C4 13.3284 4.67158 14 5.5 14H12.5C13.3284 14 14 13.3284 14 12.5V5.50002C14 4.67159 13.3284 4.00002 12.5 4.00002H11V2.50006C11 1.67163 10.3284 1.00006 9.5 1.00006H2.5C1.67157 1.00006 1 1.67163 1 2.50006V9.50006ZM5 5.50002C5 5.22388 5.22386 5.00002 5.5 5.00002H12.5C12.7761 5.00002 13 5.22388 13 5.50002V12.5C13 12.7762 12.7761 13 12.5 13H5.5C5.22386 13 5 12.7762 5 12.5V5.50002Z"
-                  fill="currentColor"
-                  fillRule="evenodd"
-                  clipRule="evenodd"
-                />
-              </svg>
-            </button>
-
-            <button
-              onClick={handleReply}
-              aria-label="Reply to message"
-              className="p-1 rounded hover:bg-opacity-80 transition-colors"
-              style={{ color: 'var(--color-text-secondary)' }}
-              onMouseEnter={(e) => {
-                e.currentTarget.style.backgroundColor = 'var(--color-accent-primary)';
-                e.currentTarget.style.color = 'white';
-              }}
-              onMouseLeave={(e) => {
-                e.currentTarget.style.backgroundColor = 'transparent';
-                e.currentTarget.style.color = 'var(--color-text-secondary)';
-              }}
-            >
-              <svg
-                xmlns="http://www.w3.org/2000/svg"
-                fill="none"
-                viewBox="0 0 24 24"
-                strokeWidth={1.5}
-                stroke="currentColor"
-                className="w-4 h-4"
-              >
-                <path strokeLinecap="round" strokeLinejoin="round" d="M9 15 3 9m0 0 6-6M3 9h12a6 6 0 0 1 0 12h-3" />
-              </svg>
-            </button>
-
-            {safeIsCurrentUser && !isSystemMessage && (
               <button
-                onClick={handleDelete}
-                aria-label="Delete message"
-                className="p-1 rounded hover:bg-opacity-80 transition-colors"
-                style={{ color: 'var(--color-text-secondary)' }}
-                onMouseEnter={(e) => {
-                  e.currentTarget.style.backgroundColor = '#ef4444';
-                  e.currentTarget.style.color = 'white';
-                }}
-                onMouseLeave={(e) => {
-                  e.currentTarget.style.backgroundColor = 'transparent';
-                  e.currentTarget.style.color = 'var(--color-text-secondary)';
-                }}
-              >
-                <TrashIcon className="w-4 h-4" />
-              </button>
-            )}
-
-            {safeIsCurrentUser && !message.isDeleted && !isFileMessageType && (
-              <button
-                onClick={handleEdit}
-                aria-label="Edit message"
+                onClick={handleCopyMessage}
+                aria-label="Copy message"
                 className="p-1 rounded hover:bg-opacity-80 transition-colors"
                 style={{ color: 'var(--color-text-secondary)' }}
                 onMouseEnter={(e) => {
@@ -586,14 +497,25 @@ export const ChatMessage = React.memo<ExtendedChatMessageProps>(({ message, onRe
                   e.currentTarget.style.color = 'var(--color-text-secondary)';
                 }}
               >
-                <Pencil1Icon className="w-4 h-4" />
+                <svg
+                  width="15"
+                  height="15"
+                  viewBox="0 0 15 15"
+                  fill="none"
+                  xmlns="http://www.w3.org/2000/svg"
+                >
+                  <path
+                    d="M1 9.50006C1 10.3285 1.67157 11.0001 2.5 11.0001H4L4 10.0001H2.5C2.22386 10.0001 2 9.7762 2 9.50006L2 2.50006C2 2.22392 2.22386 2.00006 2.5 2.00006L9.5 2.00006C9.77614 2.00006 10 2.22392 10 2.50006V4.00002H5.5C4.67158 4.00002 4 4.67159 4 5.50002V12.5C4 13.3284 4.67158 14 5.5 14H12.5C13.3284 14 14 13.3284 14 12.5V5.50002C14 4.67159 13.3284 4.00002 12.5 4.00002H11V2.50006C11 1.67163 10.3284 1.00006 9.5 1.00006H2.5C1.67157 1.00006 1 1.67163 1 2.50006V9.50006ZM5 5.50002C5 5.22388 5.22386 5.00002 5.5 5.00002H12.5C12.7761 5.00002 13 5.22388 13 5.50002V12.5C13 12.7762 12.7761 13 12.5 13H5.5C5.22386 13 5 12.7762 5 12.5V5.50002Z"
+                    fill="currentColor"
+                    fillRule="evenodd"
+                    clipRule="evenodd"
+                  />
+                </svg>
               </button>
-            )}
 
-            {isFileMessageType && (
               <button
-                onClick={handleDownload}
-                aria-label="Download file"
+                onClick={handleReply}
+                aria-label="Reply to message"
                 className="p-1 rounded hover:bg-opacity-80 transition-colors"
                 style={{ color: 'var(--color-text-secondary)' }}
                 onMouseEnter={(e) => {
@@ -605,9 +527,75 @@ export const ChatMessage = React.memo<ExtendedChatMessageProps>(({ message, onRe
                   e.currentTarget.style.color = 'var(--color-text-secondary)';
                 }}
               >
-                <DownloadIcon className="w-4 h-4" />
+                <svg
+                  xmlns="http://www.w3.org/2000/svg"
+                  fill="none"
+                  viewBox="0 0 24 24"
+                  strokeWidth={1.5}
+                  stroke="currentColor"
+                  className="w-4 h-4"
+                >
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M9 15 3 9m0 0 6-6M3 9h12a6 6 0 0 1 0 12h-3" />
+                </svg>
               </button>
-            )}
+
+              {safeIsCurrentUser && !isSystemMessage && (
+                <button
+                  onClick={handleDelete}
+                  aria-label="Delete message"
+                  className="p-1 rounded hover:bg-opacity-80 transition-colors"
+                  style={{ color: 'var(--color-text-secondary)' }}
+                  onMouseEnter={(e) => {
+                    e.currentTarget.style.backgroundColor = '#ef4444';
+                    e.currentTarget.style.color = 'white';
+                  }}
+                  onMouseLeave={(e) => {
+                    e.currentTarget.style.backgroundColor = 'transparent';
+                    e.currentTarget.style.color = 'var(--color-text-secondary)';
+                  }}
+                >
+                  <TrashIcon className="w-4 h-4" />
+                </button>
+              )}
+
+              {safeIsCurrentUser && !message.isDeleted && !isFileMessageType && (
+                <button
+                  onClick={handleEdit}
+                  aria-label="Edit message"
+                  className="p-1 rounded hover:bg-opacity-80 transition-colors"
+                  style={{ color: 'var(--color-text-secondary)' }}
+                  onMouseEnter={(e) => {
+                    e.currentTarget.style.backgroundColor = 'var(--color-accent-primary)';
+                    e.currentTarget.style.color = 'white';
+                  }}
+                  onMouseLeave={(e) => {
+                    e.currentTarget.style.backgroundColor = 'transparent';
+                    e.currentTarget.style.color = 'var(--color-text-secondary)';
+                  }}
+                >
+                  <Pencil1Icon className="w-4 h-4" />
+                </button>
+              )}
+
+              {isFileMessageType && (
+                <button
+                  onClick={handleDownload}
+                  aria-label="Download file"
+                  className="p-1 rounded hover:bg-opacity-80 transition-colors"
+                  style={{ color: 'var(--color-text-secondary)' }}
+                  onMouseEnter={(e) => {
+                    e.currentTarget.style.backgroundColor = 'var(--color-accent-primary)';
+                    e.currentTarget.style.color = 'white';
+                  }}
+                  onMouseLeave={(e) => {
+                    e.currentTarget.style.backgroundColor = 'transparent';
+                    e.currentTarget.style.color = 'var(--color-text-secondary)';
+                  }}
+                >
+                  <DownloadIcon className="w-4 h-4" />
+                </button>
+              )}
+            </div>
           </div>
         </div>
 
@@ -616,7 +604,6 @@ export const ChatMessage = React.memo<ExtendedChatMessageProps>(({ message, onRe
             "flex items-center gap-2 mt-1 text-xs",
             safeIsCurrentUser ? "flex-row-reverse" : "flex-row"
           )}>
-          {/* No per-bubble bottom timestamp when grouped; only header on first bubble */}
 
           {message.isEdited && (
             <span

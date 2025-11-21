@@ -54,9 +54,27 @@ export const DialogTrigger: React.FC<{ children: ReactNode; asChild?: boolean }>
 
 export const DialogContent: React.FC<{ children: ReactNode; className?: string } & React.HTMLAttributes<HTMLDivElement>> = ({ children, className, ...props }) => {
   const context = useContext(DialogContext);
+  const [isAnimatingOut, setIsAnimatingOut] = React.useState(false);
+
   if (!context) throw new Error('DialogContent must be used within Dialog');
 
-  if (!context.isOpen) return null;
+  // Handle closing with animation
+  const handleClose = React.useCallback(() => {
+    setIsAnimatingOut(true);
+    setTimeout(() => {
+      context.setIsOpen(false);
+      setIsAnimatingOut(false);
+    }, 200); // Match animation duration
+  }, [context]);
+
+  // Reset animation state when opening
+  React.useEffect(() => {
+    if (context.isOpen) {
+      setIsAnimatingOut(false);
+    }
+  }, [context.isOpen]);
+
+  if (!context.isOpen && !isAnimatingOut) return null;
 
   return createPortal(
     <>
@@ -67,6 +85,15 @@ export const DialogContent: React.FC<{ children: ReactNode; className?: string }
           }
           to {
             opacity: 1;
+          }
+        }
+        
+        @keyframes dialogOverlayHide {
+          from {
+            opacity: 1;
+          }
+          to {
+            opacity: 0;
           }
         }
         
@@ -81,23 +108,43 @@ export const DialogContent: React.FC<{ children: ReactNode; className?: string }
           }
         }
         
+        @keyframes dialogContentHide {
+          from {
+            opacity: 1;
+            transform: translate(-50%, -50%) scale(1);
+          }
+          to {
+            opacity: 0;
+            transform: translate(-50%, -48%) scale(0.96);
+          }
+        }
+        
         .dialog-overlay {
           animation: dialogOverlayShow 200ms cubic-bezier(0.16, 1, 0.3, 1);
+        }
+        
+        .dialog-overlay.closing {
+          animation: dialogOverlayHide 200ms cubic-bezier(0.16, 1, 0.3, 1);
         }
         
         .dialog-content {
           animation: dialogContentShow 200ms cubic-bezier(0.16, 1, 0.3, 1);
         }
+        
+        .dialog-content.closing {
+          animation: dialogContentHide 200ms cubic-bezier(0.16, 1, 0.3, 1);
+        }
       `}</style>
       <div className="fixed inset-0 z-50 flex items-center justify-center">
         <div
-          className="dialog-overlay fixed inset-0 bg-black/50"
-          onClick={() => context.setIsOpen(false)}
+          className={`dialog-overlay fixed inset-0 bg-black/50 ${isAnimatingOut ? 'closing' : ''}`}
+          onClick={handleClose}
         />
         <div
           className={cn(
             "dialog-content relative rounded-lg shadow-lg max-w-md w-full mx-4 p-6",
             "left-1/2 top-1/2 fixed",
+            isAnimatingOut ? 'closing' : '',
             className
           )}
           style={{

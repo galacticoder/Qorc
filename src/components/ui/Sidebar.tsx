@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { MessageSquare, Phone, Settings, LogOut, User as UserIcon, Moon, Sun, ChevronLeft, ChevronRight } from 'lucide-react';
+import { ChatBubbleIcon, SettingsIcon, CallIcon } from '../chat/icons';
 import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
 import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar';
@@ -22,9 +23,9 @@ export function Sidebar({ activeTab, onTabChange, currentUser, onLogout }: Sideb
     const [isCollapsed, setIsCollapsed] = useState(true);
 
     const navItems = [
-        { id: 'chats', icon: MessageSquare, label: 'Chats' },
-        { id: 'calls', icon: Phone, label: 'Calls' },
-        { id: 'settings', icon: Settings, label: 'Settings' },
+        { id: 'chats', icon: ChatBubbleIcon, label: 'Chats' },
+        { id: 'calls', icon: CallIcon, label: 'Calls' },
+        { id: 'settings', icon: SettingsIcon, label: 'Settings' },
     ] as const;
 
     return (
@@ -43,7 +44,7 @@ export function Sidebar({ activeTab, onTabChange, currentUser, onLogout }: Sideb
                 <div className="flex items-center overflow-hidden">
                     <div className="w-16 flex items-center justify-center shrink-0">
                         <div className="w-12 h-12 bg-primary rounded-lg flex items-center justify-center text-primary-foreground">
-                            <MessageSquare className="!w-[25px] !h-[25px]" size={25} />
+                            <ChatBubbleIcon className="!w-[25px] !h-[25px]" />
                         </div>
                     </div>
                     <div className={cn(
@@ -98,7 +99,7 @@ export function Sidebar({ activeTab, onTabChange, currentUser, onLogout }: Sideb
             </div>
 
             {/* Footer */}
-            <div className="py-2 border-t border-border space-y-4">
+            <div className="py-2 space-y-4">
                 {/* Theme Toggle */}
                 <Button
                     variant="ghost"

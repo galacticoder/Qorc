@@ -77,4 +77,5 @@ export interface ChatMessageProps {
   onEdit?: (newContent: string) => void;
   onReact?: (message: Message, emoji: string) => void;
   currentUsername?: string;
+  secureDB?: any;
 }

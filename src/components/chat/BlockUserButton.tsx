@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { Button } from '@/components/ui/button';
 import { toast } from 'sonner';
-import { UserX, UserCheck } from 'lucide-react';
+import { BlockIcon, UnblockIcon } from './icons';
 import { blockingSystem } from '@/lib/blocking-system';
 import { blockStatusCache } from '@/lib/block-status-cache';
 
@@ -173,7 +173,7 @@ export function BlockUserButton({
         disabled={loading}
         onClick={handleUnblockUser}
       >
-        <UserCheck className="h-4 w-4" />
+        <UnblockIcon className="h-4 w-4" />
         {showText && <span>{loading ? 'Unblocking...' : 'Unblock'}</span>}
       </Button>
     );
@@ -187,7 +187,7 @@ export function BlockUserButton({
       disabled={loading}
       onClick={handleBlockUser}
     >
-      <UserX className="h-4 w-4" />
+      <BlockIcon className="h-4 w-4" />
       {showText && <span>{loading ? 'Blocking...' : 'Block'}</span>}
     </Button>
   );

@@ -1,7 +1,10 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
+import { cn } from '../../lib/utils';
 import { Button } from '../ui/button';
 import { Play, Pause, Download } from 'lucide-react';
 import { format } from 'date-fns';
+import { useFileUrl } from '../../hooks/useFileUrl';
+import type { SecureDB } from '../../lib/secureDB';
 
 interface VoiceMessageProps {
   audioUrl: string;
@@ -10,6 +13,8 @@ interface VoiceMessageProps {
   filename?: string;
   originalBase64Data?: string;
   mimeType?: string;
+  messageId?: string;
+  secureDB?: SecureDB | null;
 }
 
 export function VoiceMessage({
@@ -19,17 +24,30 @@ export function VoiceMessage({
   filename,
   originalBase64Data,
   mimeType,
+  messageId,
+  secureDB,
 }: VoiceMessageProps) {
+  // Use useFileUrl to resolve the audio source from SecureDB if needed
+  const { url: resolvedUrl, loading: urlLoading, error: urlError } = useFileUrl({
+    secureDB: secureDB || null,
+    fileId: messageId,
+    mimeType: mimeType || 'audio/webm',
+    initialUrl: audioUrl,
+  });
+
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
   const [isLoading, setIsLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(urlError);
 
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const peaksRef = useRef<number[] | null>(null);
   const drawRafRef = useRef<number | null>(null);
+
+  // Use the resolved URL or fall back to the original audioUrl
+  const effectiveAudioUrl = resolvedUrl || audioUrl;
 
   const handleLoadedMetadata = useCallback(() => {
     if (!audioRef.current) return;
@@ -101,7 +119,7 @@ export function VoiceMessage({
       }
       setIsLoading(true);
       if (!audioRef.current) {
-        const audio = new Audio(audioUrl);
+        const audio = new Audio(effectiveAudioUrl);
         audio.preload = 'metadata';
         audioRef.current = audio;
         audio.addEventListener('loadedmetadata', handleLoadedMetadata);
@@ -248,7 +266,7 @@ export function VoiceMessage({
             for (let i = 0; i < binaryString.length; i++) bytes[i] = binaryString.charCodeAt(i);
             return bytes.buffer;
           })()
-          : await (await fetch(audioUrl)).arrayBuffer();
+          : await (await fetch(effectiveAudioUrl)).arrayBuffer();
 
         const AudioCtx: typeof AudioContext = (window as any).AudioContext || (window as any).webkitAudioContext;
         const audioCtx = new AudioCtx();
@@ -284,7 +302,6 @@ export function VoiceMessage({
         }
 
         // Second pass: normalize peaks
-        // If globalMax is very small (silence), don't boost too much to avoid noise
         const normalizationFactor = globalMax > 0.01 ? 1 / globalMax : 1;
         for (let i = 0; i < targetWidth; i++) {
           peaks[i] = Math.min(1, Math.max(minThreshold, peaks[i] * normalizationFactor));
@@ -297,6 +314,7 @@ export function VoiceMessage({
         } catch { }
       } catch (_e) {
         peaksRef.current = null;
+        setError('Failed to load audio');
         drawWaveform();
       }
     };
@@ -316,11 +334,32 @@ export function VoiceMessage({
   }, [currentTime, duration, isCurrentUser]);
 
   if (error) {
-    return <div className="text-xs text-red-500">{error}</div>;
+    return (
+      <div
+        className="px-3 py-2 rounded-lg text-sm italic select-none"
+        style={{
+          backgroundColor: 'var(--color-surface)',
+          color: 'var(--color-text-secondary)',
+          border: '1px dashed var(--color-border)'
+        }}
+      >
+        Voice message cannot be loaded
+      </div>
+    );
   }
 
   return (
-    <div className="flex items-end gap-3 w-full min-w-[160px] max-w-[300px] select-none py-1 pr-2">
+    <div
+      className={cn(
+        "flex items-end gap-3 w-full min-w-[160px] max-w-[300px] select-none py-2 px-2 rounded-md",
+        isCurrentUser ? "text-primary-foreground" : ""
+      )}
+      style={{
+        backgroundColor: isCurrentUser ? 'var(--color-accent-primary)' : 'var(--chat-bubble-received-bg)',
+        color: isCurrentUser ? 'white' : 'var(--color-text-primary)',
+        borderRadius: 'var(--message-bubble-radius)',
+      }}
+    >
       <div className="flex flex-col items-center justify-end gap-1 shrink-0 min-w-[2rem]">
         <span className="text-[10px] font-mono opacity-80 tabular-nums leading-none">
           {formatDuration(isPlaying ? Math.max(0, duration - currentTime) : duration)}
@@ -330,7 +369,7 @@ export function VoiceMessage({
           disabled={isLoading}
           variant="ghost"
           size="sm"
-          className="h-8 w-8 p-0 rounded-full shrink-0"
+          className="h-8 w-8 p-0 rounded-full shrink-0 hover:bg-black/10"
         >
           {isLoading ? (
             <div className="w-4 h-4 border-2 border-current border-t-transparent rounded-full animate-spin" />
