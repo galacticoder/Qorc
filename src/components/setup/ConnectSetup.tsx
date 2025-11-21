@@ -1,14 +1,14 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
-import { Progress } from '@/components/ui/progress';
-import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
 import { TorVerification } from './TorVerification';
 import { getTorAutoSetup, TorSetupStatus } from '@/lib/tor-auto-setup';
 import { torNetworkManager } from '@/lib/tor-network';
+import { ShieldCheck, Server, Settings, ChevronDown, ChevronUp, RefreshCw, Loader2, Zap } from 'lucide-react';
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
+import { toast } from 'sonner';
 
 interface ConnectSetupProps {
   onComplete?: (serverUrl: string) => Promise<void> | void;
@@ -29,9 +29,7 @@ export function ConnectSetup({ onComplete, initialServerUrl = '' }: ConnectSetup
   const [showVerification, setShowVerification] = useState(false);
 
   // Server selection state
-  const [selectedOption, setSelectedOption] = useState<'tunnel' | 'custom'>('custom');
   const [customServerUrl, setCustomServerUrl] = useState('');
-  const [defaultServerUrl, setDefaultServerUrl] = useState('');
   const [isTesting, setIsTesting] = useState(false);
   const [testStatus, setTestStatus] = useState<string>('');
   const [testError, setTestError] = useState<string>('');
@@ -41,7 +39,6 @@ export function ConnectSetup({ onComplete, initialServerUrl = '' }: ConnectSetup
   const [enableBridges, setEnableBridges] = useState(false);
   const [transport, setTransport] = useState<'obfs4' | 'snowflake'>('obfs4');
   const [bridgesText, setBridgesText] = useState('');
-  const [obfs4ProxyPath, setObfs4ProxyPath] = useState('');
 
   // Prefill defaults on mount
   useEffect(() => {
@@ -71,8 +68,7 @@ export function ConnectSetup({ onComplete, initialServerUrl = '' }: ConnectSetup
         if (preferred) {
           setCustomServerUrl(preferred);
         }
-        setSelectedOption('custom');
-      } catch {}
+      } catch { }
     })();
   }, [initialServerUrl]);
 
@@ -118,24 +114,42 @@ export function ConnectSetup({ onComplete, initialServerUrl = '' }: ConnectSetup
         enableBridges,
         transport,
         bridges,
-        obfs4ProxyPath: obfs4ProxyPath || undefined,
         onProgress: (newStatus) => {
           setStatus(prevStatus => ({ ...prevStatus, ...newStatus, error: newStatus.error || undefined }));
         }
       });
       if (success) {
+        // Refresh status to get version and full Tor info
         const refreshed = await getTorAutoSetup().refreshStatus();
         setStatus(refreshed);
+        console.log('[ConnectSetup] Tor setup complete, version:', refreshed.version);
+
+        // Initialize the network manager so the app knows Tor is ready
+        torNetworkManager.updateConfig({
+          enabled: true,
+          socksPort: refreshed.socksPort,
+          controlPort: refreshed.controlPort
+        });
+        await torNetworkManager.initialize();
+
+        // Notify Electron that Tor setup is complete
+        try {
+          await (window as any).electronAPI?.torSetupComplete?.();
+        } catch (e) {
+          console.warn('[ConnectSetup] Failed to notify Electron of Tor completion:', e);
+        }
       }
     } catch (_error) {
       console.error('[ConnectSetup] Auto-setup failed:', _error);
-      setStatus(prev => ({ ...prev, error: _error instanceof Error ? _error.message : 'Setup failed', setupProgress: 0 }));
+      const errorMsg = _error instanceof Error ? _error.message : 'Setup failed';
+      setStatus(prev => ({ ...prev, error: errorMsg, setupProgress: 0 }));
+      toast.error(`Tor setup failed: ${errorMsg}`);
     } finally {
       setIsSetupRunning(false);
     }
   };
 
-  const testConnection = async (url: string, timeoutMs = 12000): Promise<void> => {
+  const testConnection = async (url: string, timeoutMs = 5000): Promise<void> => {
     const edgeApi: any = (window as any).edgeApi;
     if (!edgeApi?.wsProbeConnect) {
       console.error('[ConnectSetup] wsProbeConnect not available on edgeApi');
@@ -143,25 +157,42 @@ export function ConnectSetup({ onComplete, initialServerUrl = '' }: ConnectSetup
     }
     const res = await edgeApi.wsProbeConnect(url, timeoutMs);
     if (!res || res.success === false) {
-      console.error('[ConnectSetup] WebSocket probe failed', {
-        url,
-        timeoutMs,
-        result: res
-      });
       throw new Error(res?.error || 'Connection failed');
     }
   };
 
   const ensureTorInitialized = async (): Promise<boolean> => {
     try {
-      // Notify Electron main process that Tor setup is complete
-      await (window as any).electronAPI?.torSetupComplete?.();
-    } catch {}
-    try {
-      torNetworkManager.updateConfig({ enabled: true });
+      // Get current status to find the correct ports
+      const currentStatus = await getTorAutoSetup().refreshStatus();
+
+      // Configure the network manager with correct ports
+      torNetworkManager.updateConfig({
+        enabled: true,
+        socksPort: currentStatus.socksPort || 9150,
+        controlPort: currentStatus.controlPort || 9151
+      });
+
+      // Initialize the network manager
       const ok = await torNetworkManager.initialize();
+
+      if (ok) {
+        try {
+          const edgeApi = (window as any).edgeApi;
+          if (edgeApi?.torSetupComplete) {
+            await edgeApi.torSetupComplete();
+          } else {
+            await (window as any).electronAPI?.torSetupComplete?.();
+          }
+        } catch (e) {
+          console.warn('[ConnectSetup] Failed to notify backend after init:', e);
+        }
+      }
+
       return !!ok;
-    } catch { return false; }
+    } catch {
+      return false;
+    }
   };
 
   const humanizeConnectionError = (err: unknown): string => {
@@ -170,24 +201,24 @@ export function ConnectSetup({ onComplete, initialServerUrl = '' }: ConnectSetup
     const text = `${code} ${raw}`.toLowerCase();
 
     // DNS issues
-    if (text.includes('eai_again')) return 'Temporary DNS issue resolving the server name. Check your internet connection or try again in a moment.';
-    if (text.includes('enotfound') || text.includes('eai_noname') || text.includes('getaddrinfo')) return 'Couldn’t find the server. Check the URL (wss://) and spelling.';
+    if (text.includes('eai_again')) return 'Temporary DNS issue. Check internet connection.';
+    if (text.includes('enotfound') || text.includes('eai_noname') || text.includes('getaddrinfo')) return 'Server not found. Check the URL.';
 
     // Connectivity
-    if (text.includes('econnrefused') || text.includes('connection refused')) return 'The server refused the connection. The server may be down or blocking connections.';
-    if (text.includes('etimedout') || text.includes('timeout')) return 'The connection timed out. Check your network, firewall, or try again.';
+    if (text.includes('econnrefused') || text.includes('connection refused')) return 'Connection refused. Server may be down.';
+    if (text.includes('etimedout') || text.includes('timeout')) return 'Connection timed out. Check network/firewall.';
 
     // TLS/cert
-    if (text.includes('self signed') || text.includes('certificate') || text.includes('err_ssl') || text.includes('cert_')) return 'Secure connection failed: the server’s TLS certificate is not trusted. Use a valid certificate or trust your self-signed cert.';
-    if (text.includes('tls') && text.includes('handshake')) return 'Secure connection failed during TLS handshake.';
+    if (text.includes('self signed') || text.includes('certificate') || text.includes('err_ssl') || text.includes('cert_')) return 'Untrusted certificate.';
+    if (text.includes('tls') && text.includes('handshake')) return 'TLS handshake failed.';
 
     // HTTP gateways
-    if (text.includes(' 401') || text.includes('unauthorized')) return 'Unauthorized. The server requires authentication.';
-    if (text.includes(' 403') || text.includes('forbidden')) return 'Forbidden. Access to the server is blocked.';
-    if (text.includes(' 502') || text.includes(' 503') || text.includes(' 504')) return 'Server is temporarily unavailable. Please try again later.';
+    if (text.includes(' 401') || text.includes('unauthorized')) return 'Unauthorized.';
+    if (text.includes(' 403') || text.includes('forbidden')) return 'Forbidden.';
+    if (text.includes(' 502') || text.includes(' 503') || text.includes(' 504')) return 'Server unavailable.';
 
     // Fallback
-    return 'Failed to connect to the server. Please verify the URL (wss://) and try again.';
+    return 'Failed to connect. Verify URL.';
   };
 
   const handleContinue = async () => {
@@ -199,14 +230,14 @@ export function ConnectSetup({ onComplete, initialServerUrl = '' }: ConnectSetup
       // Ensure Tor ready in network manager
       const torReady = await ensureTorInitialized();
       if (!torReady) {
-        setTestError('Tor verification failed. Please retry.');
+        toast.error('Tor verification failed. Please retry.');
         setIsContinuing(false);
         return;
       }
 
       const serverUrl = chosenServerUrl;
       if (!serverUrl) {
-        setTestError('Invalid server URL. Please enter a valid wss:// URL.');
+        toast.error('Invalid server URL.');
         setIsContinuing(false);
         return;
       }
@@ -229,7 +260,7 @@ export function ConnectSetup({ onComplete, initialServerUrl = '' }: ConnectSetup
             await edgeApi.setServerUrl(serverUrl);
           }
         }
-      } catch {}
+      } catch { }
 
       // Let parent continue flow (e.g., wsConnect + navigate)
       await (onComplete?.(serverUrl));
@@ -237,219 +268,186 @@ export function ConnectSetup({ onComplete, initialServerUrl = '' }: ConnectSetup
       console.error('[ConnectSetup] handleContinue error', _error);
       setIsTesting(false);
       const friendly = humanizeConnectionError(_error);
-      setTestError(friendly);
+      toast.error(friendly);
     } finally {
       setIsContinuing(false);
     }
   };
 
   return (
-    <div className="space-y-6">
-      <Card>
-        <CardHeader>
-          <div className="flex items-center justify-between">
-            <div>
-              <CardTitle>Connect</CardTitle>
-              <CardDescription>Set up Tor and select your server. Continue when both are ready.</CardDescription>
-            </div>
-            {testStatus && !testError && (
-              <div className="text-sm text-muted-foreground">{testStatus}</div>
-            )}
+    <div className="relative flex flex-col items-center justify-center min-h-[80vh] p-6 overflow-hidden select-none">
+      {/* Background Effects */}
+      <div className="absolute top-0 left-1/2 -translate-x-1/2 w-[600px] h-[600px] bg-primary/10 rounded-full blur-3xl opacity-50 pointer-events-none animate-pulse" />
+      <div className="absolute bottom-0 right-0 w-[400px] h-[400px] bg-blue-500/10 rounded-full blur-3xl opacity-30 pointer-events-none" />
+
+      <div className="relative w-full max-w-md space-y-8 z-10">
+        {/* Header */}
+        <div className="text-center space-y-2 animate-in slide-in-from-bottom-4 fade-in duration-700">
+          <div className="mx-auto w-20 h-20 rounded-3xl bg-gradient-to-br from-primary/20 to-primary/5 flex items-center justify-center mb-6 ring-1 ring-white/10 shadow-2xl shadow-primary/20 backdrop-blur-xl">
+            <ShieldCheck className="w-10 h-10 text-primary drop-shadow-[0_0_15px_rgba(124,58,237,0.5)]" />
           </div>
-        </CardHeader>
+          <h1
+            className="text-4xl font-bold tracking-tight"
+            style={{ color: document.documentElement.classList.contains('dark') ? '#ffffff' : '#000000' }}
+          >
+            Secure Connect
+          </h1>
+          <p
+            className="text-lg font-light"
+            style={{ color: document.documentElement.classList.contains('dark') ? '#9ca3af' : '#6b7280' }}
+          >
+            Establish a private, encrypted connection
+          </p>
+        </div>
 
-        <CardContent className="space-y-8">
-          {testError && (
-            <Alert variant="destructive">
-              <AlertDescription>
-                <strong>Connection Error:</strong> {testError}
-              </AlertDescription>
-            </Alert>
-          )}
-          {/* Tor Setup Section */}
-          <div className="space-y-4">
-            <div className="flex items-center justify-between">
-              <div className="font-medium">Tor Setup</div>
-              <div className="text-sm text-muted-foreground">
-                {isSetupRunning ? 'Setting up…' : (status.setupProgress === 100 ? 'Complete' : (status.error ? 'Failed' : 'Not configured'))}
+        {/* Tor Status Section */}
+        <div className="space-y-4 animate-in slide-in-from-bottom-8 fade-in duration-700 delay-100">
+          <div className="group p-5 rounded-2xl bg-card/30 border border-white/10 hover:border-primary/30 hover:bg-card/50 transition-all duration-500 backdrop-blur-md shadow-lg">
+            <div className="flex items-center justify-between mb-4">
+              <div className="flex items-center gap-3">
+                <span className="font-medium text-lg">Tor Network</span>
+              </div>
+              <div className="flex items-center gap-2">
+                <div className="text-sm font-medium text-muted-foreground">
+                  {(status.isRunning && !isSetupRunning) ? 'Active' : 'Inactive'}
+                </div>
+                {status.isRunning && status.version && status.version !== 'unknown' && (
+                  <span className="text-xs font-bold text-muted-foreground/70 animate-in fade-in-0 duration-300">v{status.version}</span>
+                )}
               </div>
             </div>
 
-            {status.error && !isSetupRunning && status.setupProgress === 0 && (
-              <Alert variant="destructive">
-                <AlertDescription>
-                  <strong>Setup Error:</strong> {status.error}
-                </AlertDescription>
-              </Alert>
+            {/* Setup Button */}
+            {(!status.isRunning || isSetupRunning) && (
+              <Button
+                onClick={handleAutoSetup}
+                disabled={isSetupRunning}
+                className="w-full bg-primary/10 hover:bg-primary/20 text-primary border border-primary/20 hover:border-primary/40 transition-all"
+                variant="outline"
+              >
+                <RefreshCw className={`w-4 h-4 mr-2 ${isSetupRunning ? 'animate-spin' : ''}`} />
+                {isSetupRunning ? status.currentStep : 'Initialize Tor'}
+              </Button>
             )}
 
-            {(isSetupRunning || status.setupProgress > 0) && (
-              <div className="space-y-2">
-                <div className="flex justify-between text-sm">
-                  <span>{status.currentStep}</span>
-                  <span>{status.setupProgress}%</span>
-                </div>
-                <Progress value={status.setupProgress} className="w-full" />
-              </div>
-            )}
 
-            <div className="grid grid-cols-3 gap-4 text-sm">
-              <div className="flex items-center gap-2">
-                <div className={`w-2 h-2 rounded-full ${status.isInstalled ? 'bg-green-500' : 'bg-gray-300'}`} />
-                <span>Installed</span>
-              </div>
-              <div className="flex items-center gap-2">
-                <div className={`w-2 h-2 rounded-full ${status.isConfigured ? 'bg-green-500' : 'bg-gray-300'}`} />
-                <span>Configured</span>
-              </div>
-              <div className="flex items-center gap-2">
-                <div className={`w-2 h-2 rounded-full ${status.isRunning ? 'bg-green-500' : 'bg-gray-300'}`} />
-                <span>Running</span>
-              </div>
-            </div>
-
-            {status.setupProgress !== 100 && (
-              <div className="space-y-3">
-                <Button onClick={handleAutoSetup} disabled={isSetupRunning} className="w-full" size="lg">
-                  {isSetupRunning ? 'Setting up…' : 'Auto-Setup Tor'}
+            {/* Advanced Options */}
+            <Collapsible open={showAdvanced} onOpenChange={setShowAdvanced} className="mt-3">
+              <CollapsibleTrigger asChild>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="w-full h-9 text-xs text-muted-foreground hover:text-foreground transition-colors"
+                  disabled={isSetupRunning}
+                >
+                  <Settings className="w-3.5 h-3.5 mr-2" />
+                  Advanced Configuration
+                  {showAdvanced ? <ChevronUp className="w-3.5 h-3.5 ml-auto" /> : <ChevronDown className="w-3.5 h-3.5 ml-auto" />}
                 </Button>
-              </div>
-            )}
-
-            {status.setupProgress === 100 && !isSetupRunning && (
-              <div className="flex gap-2">
-                <Button onClick={() => setShowVerification(true)} variant="outline" className="w-full">
-                  Verify Tor
-                </Button>
-              </div>
-            )}
-
-            <Button variant="ghost" size="sm" onClick={() => setShowAdvanced(!showAdvanced)} className="w-full">
-              {showAdvanced ? 'Hide' : 'Show'} Advanced Options
-            </Button>
-
-            {showAdvanced && (
-              <div className="space-y-4 p-4 border rounded-lg bg-gray-50">
-                <h4 className="font-semibold text-sm">Advanced Configuration</h4>
-
-                <div className="space-y-2 text-sm">
-                  <div className="flex justify-between">
-                    <span>Tor Version:</span>
-                    <span className="font-mono">{status.version || 'Not detected'}</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span>SOCKS Port:</span>
-                    <span className="font-mono">{status.socksPort || 'Not detected'}</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span>Control Port:</span>
-                    <span className="font-mono">{status.controlPort || 'Not detected'}</span>
-                  </div>
-                </div>
-
-                <div className="space-y-3 p-3 bg-white rounded-md border">
-                  <div className="flex items-center justify-between">
-                    <Label htmlFor="enableBridges" className="text-sm font-medium">Use Bridges</Label>
-                    <input id="enableBridges" type="checkbox" className="h-4 w-4" checked={enableBridges} onChange={(e) => setEnableBridges(e.target.checked)} />
+              </CollapsibleTrigger>
+              <CollapsibleContent className="overflow-hidden transition-all duration-300 ease-in-out data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:animate-in data-[state=open]:fade-in-0">
+                <div className="space-y-4 pt-4">
+                  {/* Bridge Transport Selection */}
+                  <div className="space-y-2">
+                    <Label htmlFor="transport" className="text-sm font-medium">Bridge Transport</Label>
+                    <select
+                      id="transport"
+                      className="w-full h-10 rounded-lg border border-input bg-background px-3 text-sm focus:ring-2 focus:ring-primary/20 focus:border-primary/50 transition-all"
+                      value={transport}
+                      onChange={(e) => {
+                        setTransport(e.target.value as 'obfs4' | 'snowflake');
+                      }}
+                    >
+                      <option value="obfs4">obfs4 (Standard)</option>
+                      <option value="snowflake">snowflake (Resilient)</option>
+                    </select>
                   </div>
 
-                  {enableBridges && (
-                    <div className="space-y-3">
-                      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                        <div className="space-y-1">
-                          <Label htmlFor="transport" className="text-sm">Transport</Label>
-                          <select id="transport" className="border rounded px-2 py-1 text-sm w-full bg-white" value={transport} onChange={(e) => setTransport((e.target.value as 'obfs4' | 'snowflake'))}>
-                            <option value="obfs4">obfs4</option>
-                            <option value="snowflake">snowflake</option>
-                          </select>
-                        </div>
-                        {transport === 'obfs4' && (
-                          <div className="space-y-1">
-                            <Label htmlFor="obfs4path" className="text-sm">obfs4proxy path (optional)</Label>
-                            <Input id="obfs4path" placeholder="e.g. /usr/bin/obfs4proxy" value={obfs4ProxyPath} onChange={(e) => setObfs4ProxyPath(e.target.value)} />
-                          </div>
-                        )}
-                      </div>
+                  {/* Bridge Lines */}
+                  <div className="space-y-2 pl-4 border-l-2 border-primary/30">
+                    <Label htmlFor="bridges" className="text-sm font-medium">Bridge Lines</Label>
+                    <Textarea
+                      id="bridges"
+                      placeholder="Paste bridge lines here..."
+                      value={bridgesText}
+                      onChange={(e) => {
+                        setBridgesText(e.target.value);
+                        // Auto-enable bridges when user enters bridge lines
+                        if (e.target.value.trim() && !enableBridges) {
+                          setEnableBridges(true);
+                        } else if (!e.target.value.trim() && enableBridges) {
+                          setEnableBridges(false);
+                        }
+                      }}
+                      className="min-h-[100px] text-sm font-mono resize-none bg-background border-input focus:border-primary/50 focus:ring-2 focus:ring-primary/20 transition-all rounded-lg"
+                    />
+                  </div>
 
-                      <div className="space-y-1">
-                        <Label htmlFor="bridges" className="text-sm">Bridge lines</Label>
-                        <Textarea id="bridges" placeholder="One per line" value={bridgesText} onChange={(e) => setBridgesText(e.target.value)} className="min-h-[120px]" />
-                      </div>
-                    </div>
-                  )}
-
-                  <div className="flex gap-2">
-                    <Button variant="outline" size="sm" onClick={async () => {
+                  {/* Stop Tor Button */}
+                  <Button
+                    variant="destructive"
+                    size="sm"
+                    className="w-full h-9 text-sm"
+                    onClick={async () => {
                       await getTorAutoSetup().stopTor();
                       const newStatus = await getTorAutoSetup().refreshStatus();
                       setStatus({ ...newStatus, setupProgress: 0, currentStep: 'Ready to setup' });
-                    }} disabled={!status.isRunning}>Stop Tor</Button>
-
-                    <Button variant="outline" size="sm" onClick={async () => {
-                      await getTorAutoSetup().uninstallTor();
-                      const newStatus = await getTorAutoSetup().refreshStatus();
-                      setStatus({ ...newStatus, setupProgress: 0, currentStep: 'Ready to setup' });
-                    }} disabled={isSetupRunning}>Uninstall</Button>
-                  </div>
+                    }}
+                    disabled={!status.isRunning || isSetupRunning}
+                  >
+                    Stop Tor
+                  </Button>
                 </div>
-              </div>
-            )}
+              </CollapsibleContent>
+            </Collapsible>
           </div>
+        </div>
 
-          {/* Server Selection Section */}
-          <div className="space-y-4">
-            <div className="font-medium">Server Selection</div>
-
-            <div className="space-y-4">
-
-              <div
-                className={`p-4 border rounded-lg transition-all border-primary bg-primary/5 ring-1 ring-primary/20`}
-              >
-                <div className="flex items-start gap-3">
-                  <div className="flex-1 space-y-3">
-                    <div>
-                      <div className="font-medium text-base">Custom server</div>
-                    </div>
-                    <div className="space-y-2">
-                      <Label htmlFor="custom-url" className="text-sm font-medium">Server URL</Label>
-                      <Input
-                        id="custom-url"
-                        placeholder="wss://your-server.example.com"
-                        value={customServerUrl}
-                        onChange={(e) => setCustomServerUrl(e.target.value)}
-                        className="font-mono text-sm"
-                      />
-                      <div className="text-xs text-muted-foreground">Only secure WebSocket (wss://) is allowed.</div>
-                    </div>
-                  </div>
-                </div>
-              </div>
+        {/* Server Connection */}
+        <div className="space-y-6 animate-in slide-in-from-bottom-8 fade-in duration-700 delay-200">
+          <div className="space-y-3">
+            <Label htmlFor="server-url" className="text-sm font-medium flex items-center gap-2 ml-1 text-muted-foreground">
+              <Server className="w-4 h-4" />
+              Server Address
+            </Label>
+            <div className="relative group">
+              <div className="absolute -inset-0.5 bg-gradient-to-r from-primary/50 to-primary/40 rounded-lg blur opacity-0 group-hover:opacity-50 transition duration-500" />
+              <Input
+                id="server-url"
+                placeholder="wss://your-server.onion"
+                value={customServerUrl}
+                onChange={(e) => setCustomServerUrl(e.target.value)}
+                className="relative h-14 font-mono text-sm bg-background/80 border-white/10 focus:border-primary/50 focus:ring-2 focus:ring-primary/20 transition-all rounded-lg shadow-sm"
+                disabled={!status.isRunning}
+              />
             </div>
-          </div>
-
-          {/* Unified Continue Button */}
-          <div>
-            <Button
-              onClick={handleContinue}
-              disabled={!canContinue}
-              className="w-full"
-              size="lg"
-            >
-              {isContinuing || isTesting ? 'Continuing…' : 'Continue'}
-            </Button>
             {!status.isRunning && (
-              <div className="mt-2 text-xs text-muted-foreground text-center">Start or complete Tor setup to continue.</div>
-            )}
-            {status.isRunning && !chosenServerUrl && (
-              <div className="mt-2 text-xs text-muted-foreground text-center">Select or enter a server to continue.</div>
+              <p className="text-xs text-muted-foreground ml-1 opacity-70">Initialize Tor to connect to a server.</p>
             )}
           </div>
-        </CardContent>
-      </Card>
 
+          <Button
+            onClick={handleContinue}
+            disabled={!canContinue}
+            className="w-full h-14 text-base font-semibold transition-all shadow-xl shadow-primary/20 hover:shadow-primary/40 hover:scale-[1.02] active:scale-[0.98] bg-primary hover:bg-primary/90 border-0"
+            size="lg"
+          >
+            {isContinuing || isTesting ? (
+              <>
+                <Loader2 className="w-5 h-5 mr-2 animate-spin" />
+                {isTesting ? 'Testing Connection...' : 'Connecting...'}
+              </>
+            ) : (
+              'Connect to Server'
+            )}
+          </Button>
+        </div>
+      </div>
+
+      {/* Verification Modal */}
       {showVerification && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50 overflow-hidden" onClick={(e) => { if (e.target === e.currentTarget) setShowVerification(false); }}>
-          <div className="max-h-[90vh] overflow-y-auto">
+        <div className="fixed inset-0 bg-background/80 backdrop-blur-md z-50 flex items-center justify-center p-4" onClick={(e) => { if (e.target === e.currentTarget) setShowVerification(false); }}>
+          <div className="w-full max-w-2xl animate-in zoom-in-95 duration-300">
             <TorVerification onClose={() => setShowVerification(false)} />
           </div>
         </div>

@@ -342,16 +342,16 @@ export class TorNetworkManager {
     try {
       const result = await api.getTorWebSocketUrl(url);
       let torUrl = typeof result === 'string' ? result : (result?.url || url);
-      
+
       if (!torUrl || typeof torUrl !== 'string') {
         throw new Error('Invalid Tor WebSocket URL: empty or non-string');
       }
-      
+
       const lowerUrl = torUrl.toLowerCase();
       if (!lowerUrl.startsWith('ws://') && !lowerUrl.startsWith('wss://')) {
         throw new Error(`Invalid Tor WebSocket URL scheme: ${torUrl.split(':')[0]}. Only ws:// or wss:// allowed.`);
       }
-      
+
       return new WebSocket(torUrl);
     } catch (_error) {
       console.error('[TOR] Failed to create Tor WebSocket:', _error);
@@ -474,7 +474,7 @@ export class TorNetworkManager {
 
   updateConfig(newConfig: Partial<TorConfig>): void {
     const validatedConfig: Partial<TorConfig> = {};
-    
+
     if (newConfig.enabled !== undefined) {
       validatedConfig.enabled = Boolean(newConfig.enabled);
     }

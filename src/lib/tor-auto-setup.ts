@@ -65,21 +65,24 @@ export class TorAutoSetup {
   async autoSetup(options: TorInstallOptions = { autoStart: true, enableBridges: false }): Promise<boolean> {
     this.progressCallback = options.onProgress;
     this.bridgeFallbackAllowed = Boolean(options.allowBridgeFallback);
-    
+
     try {
       this.updateStatus(5, 'Checking system requirements...');
-      
+
       if (!this.isElectronEnvironment()) {
         this.updateStatus(0, 'Desktop application required', 'Tor auto-setup requires the desktop application.');
         return false;
       }
 
       this.updateStatus(10, 'Checking for bundled Tor...');
-      
+
       const bundledTorCheck = await this.checkBundledTor();
       if (bundledTorCheck.isInstalled) {
         this.updateStatus(40, 'Using existing bundled Tor...');
         this.status.isInstalled = true;
+        if (bundledTorCheck.version) {
+          this.status.version = bundledTorCheck.version;
+        }
       } else {
         this.updateStatus(15, 'Preparing Tor Expert Bundle download...');
         this.updateStatus(20, 'Downloading Tor Expert Bundle...', 'Downloading ~15MB from torproject.org');
@@ -109,7 +112,7 @@ export class TorAutoSetup {
       if (options.autoStart) {
         this.updateStatus(80, 'Starting Tor service...');
         const startResult = await this.startTor();
-        
+
         if (!startResult.success) {
           this.updateStatus(0, 'Startup failed', 'Unable to start Tor service.');
           return false;
@@ -117,7 +120,7 @@ export class TorAutoSetup {
 
         this.updateStatus(90, 'Verifying Tor connection...');
         let verifySuccess = await this.verifyTorConnection();
-        
+
         if (!verifySuccess && this.bridgeFallbackAllowed) {
           try {
             this.updateStatus(85, 'Enabling bridge transport...');
@@ -157,7 +160,7 @@ export class TorAutoSetup {
       console.error('[TOR-SETUP] Auto setup failed:', _error);
       this.updateStatus(0, 'Setup failed', _error instanceof Error ? _error.message : 'Unknown error');
       handleCriticalError(_error as Error, { context: 'tor_auto_setup' });
-      return false;
+      throw _error;
     }
   }
 
@@ -168,11 +171,11 @@ export class TorAutoSetup {
       if (!api) {
         return { isInstalled: false };
       }
-      
+
       const result = await api.checkTorInstallation();
-      return { 
-        isInstalled: result.isInstalled || false, 
-        version: result.version, 
+      return {
+        isInstalled: result.isInstalled || false,
+        version: result.version,
         bundled: result.bundled || false
       };
     } catch (_error) {
@@ -245,12 +248,12 @@ export class TorAutoSetup {
         };
 
         const listener = (_event: any, data: any) => finish(data);
-        
+
         // Subscribe to completion event
         const unsubscribe = window.electronAPI?.onTorConfigureComplete
           ? window.electronAPI.onTorConfigureComplete(listener)
           : null;
-        
+
         // Fire configure request
         api.configureTor({ config }).then((initialResult) => {
           if (!initialResult.pending) {
@@ -260,20 +263,20 @@ export class TorAutoSetup {
           console.error('[TOR-SETUP] Configuration failed:', error);
           finish({ success: false, error: error.message });
         });
-        
+
         setTimeout(() => {
           if (!done) {
-            try { if (typeof unsubscribe === 'function') unsubscribe(); } catch {}
+            try { if (typeof unsubscribe === 'function') unsubscribe(); } catch { }
             finish({ success: false, error: 'Tor configuration timeout' });
           }
         }, 20000);
       });
-      
+
       this.status.isConfigured = result.success;
       return result.success;
     } catch (_error) {
       console.error('[TOR-SETUP] Failed to configure Tor:', _error);
-      return false;
+      throw _error;
     }
   }
 
@@ -302,8 +305,8 @@ export class TorAutoSetup {
         return false;
       }
 
-      const maxAttempts = 20;
-      const waitMs = 1000;
+      const maxAttempts = 30;
+      const waitMs = 2000;
       for (let attempt = 0; attempt < maxAttempts; attempt++) {
         const result = await api.verifyTorConnection();
         if (result && result.success && result.isTor) {
@@ -332,23 +335,12 @@ export class TorAutoSetup {
       '# Performance',
       'NewCircuitPeriod 30',
       'MaxCircuitDirtiness 600',
-      'CircuitBuildTimeout 30',
+      'CircuitBuildTimeout 60',
       'LearnCircuitBuildTimeout 0',
       '',
       '# Privacy',
       'ExitPolicy reject *:*',
       'ClientOnly 1',
-      'SafeLogging 1',
-      'Log notice stdout',
-      'Log warn stdout',
-      '',
-      '# Data directory',
-      'DataDirectory ./tor-data',
-      '',
-      '# Network resilience',
-      'FetchDirInfoEarly 1',
-      'FetchDirInfoExtraEarly 1',
-      'FetchUselessDescriptors 1',
     ];
 
     if (options.enableBridges) {
@@ -357,7 +349,7 @@ export class TorAutoSetup {
       config.push('', '# Bridge configuration', 'UseBridges 1');
 
       if (transport === 'obfs4') {
-        const obfs4Path = this.sanitizeBinaryPath(options.obfs4ProxyPath?.trim() || 'obfs4proxy');
+        const obfs4Path = this.sanitizeBinaryPath(options.obfs4ProxyPath?.trim() || './pluggable_transports/lyrebird');
         config.push(`ClientTransportPlugin obfs4 exec ${obfs4Path}`);
       } else if (transport === 'snowflake') {
         config.push('ClientTransportPlugin snowflake exec snowflake-client');
@@ -365,15 +357,24 @@ export class TorAutoSetup {
       }
 
       if (hasBridges) {
+        const validBridges: string[] = [];
         for (const line of options.bridges!) {
           const trimmed = (line || '').trim();
           if (!trimmed) continue;
-          
+
           if (!this.isValidBridgeLine(trimmed)) {
+            console.warn('[TOR-SETUP] Invalid bridge line skipped:', trimmed);
             continue;
           }
-          
-          config.push(trimmed.startsWith('Bridge ') ? trimmed : `Bridge ${trimmed}`);
+
+          const bridgeLine = trimmed.startsWith('Bridge ') ? trimmed : `Bridge ${trimmed}`;
+          validBridges.push(bridgeLine);
+          config.push(bridgeLine);
+        }
+
+        // Require at least one valid bridge when user provides bridge lines
+        if (validBridges.length === 0) {
+          throw new Error('Invalid bridge lines provided.');
         }
       }
     }
@@ -407,9 +408,16 @@ export class TorAutoSetup {
   }
 
   private isValidBridgeLine(line: string): boolean {
-    const bridgePattern = /^(Bridge\s+)?(obfs4|snowflake|vanilla)\s+[\w\d.:]+(\s+\w+)?(\s+.+)?$/i;
+    // More strict validation: requires transport type, address:port, and fingerprint for obfs4/vanilla
+    // Format: "obfs4 IP:PORT FINGERPRINT" or "Bridge obfs4 IP:PORT FINGERPRINT"
     const startsWithBridge = line.startsWith('Bridge ') ? line : `Bridge ${line}`;
-    return bridgePattern.test(startsWithBridge);
+
+    // obfs4 or vanilla bridges require: transport, IP:port, and fingerprint
+    const obfs4Pattern = /^Bridge\s+(obfs4|vanilla)\s+[\d.]+:\d+\s+[A-F0-9]{40}(\s+.+)?$/i;
+    // snowflake can be just "Bridge snowflake"
+    const snowflakePattern = /^Bridge\s+snowflake(\s+.+)?$/i;
+
+    return obfs4Pattern.test(startsWithBridge) || snowflakePattern.test(startsWithBridge);
   }
 
   private getElectronAPI(): ElectronTorSetupAPI | null {
@@ -448,13 +456,31 @@ export class TorAutoSetup {
 
       const torStatus = await api.getTorStatus();
       const torInfo = await api.getTorInfo();
-      
+
       this.status.isRunning = torStatus.isRunning || false;
-      this.status.version = torInfo.systemTorVersion || torInfo.version || undefined;
+
+      let newVersion = torInfo.systemTorVersion || torInfo.version;
+      if (!newVersion || newVersion === 'unknown') {
+        newVersion = this.status.version;
+      }
+
+      // If still unknown, try checking installation directly
+      if ((!newVersion || newVersion === 'unknown') && this.status.isRunning) {
+        try {
+          const check = await this.checkBundledTor();
+          if (check.version && check.version !== 'unknown') {
+            newVersion = check.version;
+          }
+        } catch (e) {
+          console.warn('[TOR-SETUP] Failed to fallback check version:', e);
+        }
+      }
+
+      this.status.version = newVersion;
       this.status.socksPort = torInfo.socksPort;
       this.status.controlPort = torInfo.controlPort;
-      
-      if (this.status.isRunning && this.status.version) {
+
+      if (this.status.isRunning && this.status.version && this.status.version !== 'unknown') {
         this.status.isInstalled = true;
         this.status.isConfigured = true;
         this.status.setupProgress = 100;
@@ -463,7 +489,7 @@ export class TorAutoSetup {
     } catch (_error) {
       console.error('[TOR-SETUP] Failed to refresh status:', _error);
     }
-    
+
     return { ...this.status };
   }
 

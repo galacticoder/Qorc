@@ -29,7 +29,7 @@ const ALLOWED_DIRECTIVES = new Set([
   'LearnCircuitBuildTimeout', 'Log', 'MaxCircuitDirtiness', 'NewCircuitPeriod',
   'NumEntryGuards', 'ProtocolWarnings', 'SafeLogging', 'SocksAuth', 'SocksListenAddress',
   'SocksPolicy', 'SocksPort', 'StrictNodes', 'TrackHostExits', 'TrackHostExitsExpire',
-  'UseBridges', 'UseEntryGuards', 'UseMicrodescriptors'
+  'UpdateBridgesFromAuthority', 'UseBridges', 'UseEntryGuards', 'UseMicrodescriptors'
 ]);
 
 class ElectronTorManager {
@@ -57,16 +57,16 @@ class ElectronTorManager {
   setupPaths() {
     const appDataPath = this.app.getPath('userData');
     const resourcesPath = process.resourcesPath;
-    
+
     this.torDir = path.join(appDataPath, 'tor');
     this.configPath = path.join(this.torDir, 'torrc');
-    
+
     const ext = this.platform === 'win32' ? '.exe' : '';
     const platformDir = this.platform === 'darwin' ? 'macos' : this.platform === 'win32' ? 'windows' : 'linux';
     const bundledPath = path.join(resourcesPath, 'tor-bundles', platformDir, `tor${ext}`);
-    
-    this.torPath = require('fs').existsSync(bundledPath) 
-      ? bundledPath 
+
+    this.torPath = require('fs').existsSync(bundledPath)
+      ? bundledPath
       : path.join(this.torDir, `tor${ext}`);
   }
 
@@ -141,15 +141,15 @@ class ElectronTorManager {
         continue;
       }
       if (trimmed.length > 1024) throw new Error('Configuration line too long');
-      
+
       const match = trimmed.match(/^([A-Za-z][A-Za-z0-9_]*)\b(.*)$/);
       if (!match) throw new Error('Invalid configuration syntax');
-      
+
       const [, directive, value] = match;
       if (!ALLOWED_DIRECTIVES.has(directive)) {
         throw new Error(`Forbidden directive: ${directive}`);
       }
-      
+
       if (directive === 'DataDirectory') {
         const resolved = path.isAbsolute(value.trim()) ? value.trim() : path.join(this.torDir, value.trim() || 'data');
         const normalized_path = path.normalize(resolved);
@@ -179,14 +179,14 @@ class ElectronTorManager {
       path.join(this.torDir, 'lib'),
       this.torDir
     ].filter(d => require('fs').existsSync(d));
-    
+
     if (libDirs.length > 0) {
       const libPath = libDirs.join(path.delimiter);
       env.LD_LIBRARY_PATH = libPath;
       if (this.platform === 'darwin') env.DYLD_LIBRARY_PATH = libPath;
     }
     // Ensure pluggable transport binaries (snowflake-client, obfs4proxy, etc.) are discoverable
-    env.PATH = `${this.torDir}${path.delimiter}${env.PATH || ''}`;
+    env.PATH = `${this.torDir}${path.delimiter}${path.join(this.torDir, 'pluggable_transports')}${path.delimiter}${env.PATH || ''}`;
     return env;
   }
 
@@ -196,7 +196,7 @@ class ElectronTorManager {
       if (!stats || !stats.isFile()) {
         return { isInstalled: false };
       }
-      
+
       await fs.access(this.torPath, constants.F_OK | constants.X_OK);
       const version = await this.getTorVersion();
       return { isInstalled: true, version, path: this.torPath };
@@ -223,7 +223,7 @@ class ElectronTorManager {
         cwd: this.torDir,
         timeout: 5000
       });
-      return stdout.split('\n')[0].match(/Tor (\d+\.\d+\.\d+)/)?.[1] || 'unknown';
+      return stdout.split('\n')[0].match(/Tor (?:version )?(\d+\.\d+\.\d+)/i)?.[1] || 'unknown';
     } catch {
       throw new Error('Failed to get Tor version');
     }
@@ -231,12 +231,12 @@ class ElectronTorManager {
 
   async downloadTor() {
     await fs.mkdir(this.torDir, { recursive: true });
-    
+
     try {
       if ((await fs.stat(this.torPath)).isFile()) {
         return { success: true, alreadyExists: true };
       }
-    } catch {}
+    } catch { }
 
     const downloadUrl = this.getTorDownloadUrl();
     const archiveFilename = path.basename(new URL(downloadUrl).pathname);
@@ -256,13 +256,13 @@ class ElectronTorManager {
     } catch (_) {
       await this.downloadFile(signedChecksums, checksumPath);
     }
-    
+
     await this.verifySha256(archivePath, checksumPath);
     await this.extractTorBundle(archivePath);
 
-    await fs.unlink(archivePath).catch(() => {});
-    await fs.unlink(signaturePath).catch(() => {});
-    await fs.unlink(checksumPath).catch(() => {});
+    await fs.unlink(archivePath).catch(() => { });
+    await fs.unlink(signaturePath).catch(() => { });
+    await fs.unlink(checksumPath).catch(() => { });
 
     if (this.platform !== 'win32') {
       await fs.chmod(this.torPath, 0o755);
@@ -288,7 +288,7 @@ class ElectronTorManager {
         }
         response.pipe(file);
         file.on('finish', () => { file.close(); resolve(); });
-        file.on('error', (err) => { require('fs').unlink(filePath).catch(() => {}); reject(err); });
+        file.on('error', (err) => { require('fs').unlink(filePath).catch(() => { }); reject(err); });
       });
       request.on('error', reject);
       request.on('timeout', () => { request.abort(); reject(new Error('Download timeout')); });
@@ -317,7 +317,7 @@ class ElectronTorManager {
     const expected = match[1].toLowerCase();
     const fileBuffer = await fs.readFile(archivePath);
     const actual = crypto.createHash('sha256').update(fileBuffer).digest('hex');
-    
+
     if (actual !== expected) {
       throw new Error('SHA256 checksum mismatch');
     }
@@ -342,8 +342,13 @@ class ElectronTorManager {
     if (this.platform !== 'win32') {
       const binaries = ['tor', 'obfs4proxy', 'snowflake-client', 'conjure-client', 'lyrebird'];
       for (const bin of binaries) {
-        const binPath = path.join(this.torDir, bin);
-        await fs.chmod(binPath, 0o755).catch(() => {});
+        // Check root dir
+        let binPath = path.join(this.torDir, bin);
+        await fs.chmod(binPath, 0o755).catch(() => { });
+
+        // Check pluggable_transports dir
+        binPath = path.join(this.torDir, 'pluggable_transports', bin);
+        await fs.chmod(binPath, 0o755).catch(() => { });
       }
     }
   }
@@ -409,11 +414,11 @@ class ElectronTorManager {
       const key = await this.getCredentialEncryptionKey();
       const iv = crypto.randomBytes(16);
       const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
-      
+
       let encrypted = cipher.update(password, 'utf8', 'hex');
       encrypted += cipher.final('hex');
       const authTag = cipher.getAuthTag();
-      
+
       const result = Buffer.concat([iv, authTag, Buffer.from(encrypted, 'hex')]);
       const filePath = path.join(this.torDir, CONTROL_PASSWORD_FILE);
       await fs.writeFile(filePath, result, { mode: 0o600 });
@@ -430,13 +435,13 @@ class ElectronTorManager {
       const iv = data.slice(0, 16);
       const authTag = data.slice(16, 32);
       const encrypted = data.slice(32);
-      
+
       const decipher = crypto.createDecipheriv('aes-256-gcm', key, iv);
       decipher.setAuthTag(authTag);
-      
+
       let decrypted = decipher.update(encrypted, null, 'utf8');
       decrypted += decipher.final('utf8');
-      
+
       return decrypted;
     } catch (e) {
       return null;
@@ -466,11 +471,11 @@ class ElectronTorManager {
     const key = await this.getCredentialEncryptionKey();
     const iv = crypto.randomBytes(16);
     const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
-    
+
     let encrypted = cipher.update(JSON.stringify(credentials), 'utf8', 'hex');
     encrypted += cipher.final('hex');
     const authTag = cipher.getAuthTag();
-    
+
     const result = Buffer.concat([iv, authTag, Buffer.from(encrypted, 'hex')]);
     await fs.writeFile(path.join(this.torDir, '.socks_credentials'), result, { mode: 0o600 });
   }
@@ -482,13 +487,13 @@ class ElectronTorManager {
       const iv = data.slice(0, 16);
       const authTag = data.slice(16, 32);
       const encrypted = data.slice(32);
-      
+
       const decipher = crypto.createDecipheriv('aes-256-gcm', key, iv);
       decipher.setAuthTag(authTag);
-      
+
       let decrypted = decipher.update(encrypted, null, 'utf8');
       decrypted += decipher.final('utf8');
-      
+
       return JSON.parse(decrypted);
     } catch {
       return null;
@@ -501,12 +506,12 @@ class ElectronTorManager {
     }
 
     await fs.access(this.torPath, constants.F_OK | constants.X_OK);
-    
+
     const dataDir = this.configuredDataDirectory || this.getDataDir();
     await fs.mkdir(dataDir, { recursive: true, mode: 0o700 });
-    
+
     const lockFile = path.join(dataDir, 'lock');
-    await fs.unlink(lockFile).catch(() => {});
+    await fs.unlink(lockFile).catch(() => { });
 
     if (!this.controlPassword) {
       this.controlPassword = await this.loadControlPassword();
@@ -514,10 +519,10 @@ class ElectronTorManager {
 
     const availableSocksPort = await this.findAvailablePort(9150);
     const availableControlPort = await this.findAvailablePort(availableSocksPort + 1);
-    
+
     this.effectiveSocksPort = availableSocksPort;
     this.effectiveControlPort = availableControlPort;
-    
+
     const args = [
       '-f', this.configPath,
       '--DataDirectory', dataDir,
@@ -543,20 +548,12 @@ class ElectronTorManager {
           if (Number.isFinite(pct) && pct >= 100) this.bootstrapped = true;
         }
       }
-      if (/Bootstrapped 100%/.test(line)) {
-        this.bootstrapped = true;
-        if (this._bootstrapTimeout) {
-          clearTimeout(this._bootstrapTimeout);
-          this._bootstrapTimeout = null;
-        }
-      }
     });
 
     this.torProcess.stderr.on('data', (data) => {
       const line = data.toString().trim();
       if (line) {
         if (/\[err\]/i.test(line)) {
-          console.error('[Tor]', line);
           processError = line;
         }
 
@@ -599,7 +596,7 @@ class ElectronTorManager {
       if (bootstrapped) {
         this.startHealthMonitor();
       }
-    })().catch(() => {});
+    })().catch(() => { });
 
     return { success: true, starting: true };
   }
@@ -610,7 +607,7 @@ class ElectronTorManager {
       if (this.bootstrapped) {
         return true;
       }
-      
+
       await new Promise((res) => setImmediate(res));
       await new Promise((res) => setTimeout(res, 100));
     }
@@ -636,38 +633,38 @@ class ElectronTorManager {
   async stopTor() {
     if (this.torProcess) {
       const proc = this.torProcess;
-      
+
       // Clear health monitor
       if (this.healthInterval) {
         clearInterval(this.healthInterval);
         this.healthInterval = null;
       }
-      
+
       // Clear bootstrap timeout
       if (this._bootstrapTimeout) {
         clearTimeout(this._bootstrapTimeout);
         this._bootstrapTimeout = null;
       }
-      
+
       return new Promise((resolve) => {
         const exitHandler = () => {
           this.torProcess = null;
           this.bootstrapped = false;
           resolve({ success: true });
         };
-        
+
         proc.once('exit', exitHandler);
-        
+
         // Force kill after 5 seconds if SIGTERM doesn't work
         const killTimeout = setTimeout(() => {
           if (proc && !proc.killed) {
             proc.kill('SIGKILL');
           }
         }, 5000);
-        
+
         // Clear the timeout if process exits normally
         proc.once('exit', () => clearTimeout(killTimeout));
-        
+
         // Send SIGTERM
         proc.kill('SIGTERM');
       });
@@ -702,14 +699,14 @@ class ElectronTorManager {
 
     const beforeIP = await this.getCurrentTorIP();
     const result = await this.sendNewNymSignal();
-    
+
     if (!result.success) {
       return { success: false, error: result.error };
     }
 
     await new Promise(resolve => setTimeout(resolve, 2000));
     const afterIP = await this.getCurrentTorIP();
-    
+
     return {
       success: true,
       ipChanged: beforeIP !== afterIP,
@@ -801,10 +798,13 @@ class ElectronTorManager {
         return { success: false, error: 'SOCKS proxy not responding' };
       }
 
+      // Check if bridges are configured
+      const bridgesConfigured = await this.areBridgesConfigured();
+
       const { SocksProxyAgent } = await import('socks-proxy-agent');
       const proxyAgent = new SocksProxyAgent(`socks5h://127.0.0.1:${this.effectiveSocksPort}`);
 
-      return new Promise((resolve) => {
+      const torCheckResult = await new Promise((resolve) => {
         const req = https.request({
           hostname: 'check.torproject.org',
           path: '/api/ip',
@@ -832,9 +832,108 @@ class ElectronTorManager {
         });
         req.end();
       });
+
+      if (!torCheckResult.success || !torCheckResult.isTor) {
+        return torCheckResult;
+      }
+
+      // If bridges are configured, verify they're actually being used
+      if (bridgesConfigured) {
+        const bridgesInUse = await this.verifyBridgesInUse();
+        if (!bridgesInUse) {
+          return { success: false, error: 'Bridges configured but not in use' };
+        }
+      }
+
+      return torCheckResult;
     } catch (error) {
       return { success: false, error: error.message };
     }
+  }
+
+  async areBridgesConfigured() {
+    try {
+      const cfg = await fs.readFile(this.configPath, 'utf8').catch(() => '');
+      return /^UseBridges\s+1/m.test(cfg);
+    } catch {
+      return false;
+    }
+  }
+
+  async getBridgeFingerprints() {
+    try {
+      const cfg = await fs.readFile(this.configPath, 'utf8').catch(() => '');
+      const lines = cfg.split('\n');
+      const fingerprints = [];
+
+      for (const line of lines) {
+        const trimmed = line.trim();
+        const match = trimmed.match(/^Bridge\s+(?:\S+\s+)?(?:\S+:\d+\s+)?([A-F0-9]{40})/i);
+        if (match) {
+          fingerprints.push(match[1].toUpperCase());
+        }
+      }
+
+      return fingerprints;
+    } catch {
+      return [];
+    }
+  }
+
+  async verifyBridgesInUse() {
+    return new Promise(async (resolve) => {
+      const bridgeFingerprints = await this.getBridgeFingerprints();
+
+      if (bridgeFingerprints.length === 0) {
+        resolve(false);
+        return;
+      }
+
+      const socket = net.createConnection(this.effectiveControlPort, '127.0.0.1');
+      let authenticated = false;
+      let response = '';
+
+      socket.on('connect', () => {
+        socket.write(`AUTHENTICATE "${this.controlPassword}"\r\n`);
+      });
+
+      socket.on('data', (data) => {
+        response += data.toString();
+
+        if (/^250/.test(response) && !authenticated) {
+          authenticated = true;
+          response = '';
+          // Get entry guard information
+          socket.write('GETINFO entry-guards\r\n');
+        } else if (authenticated && /^250/.test(response)) {
+          socket.end();
+
+          const entryGuardMatches = response.matchAll(/\$([A-F0-9]{40})/gi);
+          const activeGuards = Array.from(entryGuardMatches).map(m => m[1].toUpperCase());
+
+          // Check if any active guard matches a configured bridge
+          const bridgeInUse = activeGuards.some(guard =>
+            bridgeFingerprints.includes(guard)
+          );
+
+          resolve(bridgeInUse);
+        } else if (/^[45]\d\d/.test(response)) {
+          socket.end();
+          resolve(false);
+        }
+      });
+
+      socket.on('error', (err) => {
+        resolve(false);
+      });
+
+      setTimeout(() => {
+        if (!socket.destroyed) {
+          socket.destroy();
+          resolve(false);
+        }
+      }, 5000);
+    });
   }
 }
 

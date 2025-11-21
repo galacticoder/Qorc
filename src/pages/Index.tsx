@@ -1428,6 +1428,7 @@ const ChatApp: React.FC<ChatAppProps> = () => {
         <div className="w-full max-w-2xl">
           <ConnectSetup onComplete={handleConnectSetupComplete} initialServerUrl={selectedServerUrl} />
         </div>
+        <Toaster position="top-right" theme={theme as any} richColors toastOptions={{ className: 'select-none' }} />
       </div>
     );
   }

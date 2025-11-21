@@ -66,7 +66,7 @@ export function TorIndicator() {
         <Button variant="ghost" size="sm" className="h-8 px-2 select-none">
           <Badge
             variant={stats.isConnected ? 'default' : 'secondary'}
-            className={`flex items-center gap-1 ${stats.isConnected ? 'bg-green-600 hover:bg-green-700' : 'bg-gray-600'}`}
+            className={`flex items-center gap-1 ${stats.isConnected ? 'bg-green-600 hover:bg-green-700' : 'bg-gray-600 hover:bg-gray-600'}`}
           >
             <Shield className="h-3 w-3" />
             <span className="hidden sm:inline">Tor</span>
