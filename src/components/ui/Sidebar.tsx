@@ -29,10 +29,13 @@ export function Sidebar({ activeTab, onTabChange, currentUser, onLogout }: Sideb
     ] as const;
 
     return (
-        <div className={cn(
-            "flex flex-col h-full bg-card border-r border-border transition-all duration-300 ease-in-out relative z-20",
-            isCollapsed ? "w-13" : "w-40"
-        )}>
+        <div
+            className={cn(
+                "flex flex-col h-full border-r border-border transition-all duration-300 ease-in-out relative z-20",
+                isCollapsed ? "w-13" : "w-40"
+            )}
+            style={{ backgroundColor: 'var(--chats-section-bg)' }}
+        >
             {/* Header */}
             <div
                 className={cn(
