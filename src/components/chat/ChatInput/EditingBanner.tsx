@@ -1,6 +1,5 @@
-import { Button } from "../../ui/button";
-import { cn } from "@/lib/utils";
 import { Cross2Icon } from "../icons";
+import { Pencil } from "lucide-react";
 
 interface EditingBannerProps {
   readonly onCancelEdit?: () => void;
@@ -8,22 +7,17 @@ interface EditingBannerProps {
 
 export function EditingBanner({ onCancelEdit }: EditingBannerProps) {
   return (
-    <div className="px-4 pt-3 pb-0">
-      <div
-        className={cn(
-          "flex items-center justify-between p-3 border-l-4 rounded-lg shadow-sm",
-          "bg-muted/50 border-yellow-500/50 text-foreground"
-        )}
-      >
-        <span className="text-sm font-medium text-yellow-600 dark:text-yellow-500">Editing message</span>
-        <Button
-          variant="ghost"
-          size="sm"
-          className="h-8 w-8 p-0 text-muted-foreground hover:text-foreground"
+    <div className="px-4 py-2">
+      <div className="flex items-center gap-2 px-3 py-1.5 rounded-md bg-yellow-500/10 text-yellow-600 dark:text-yellow-500">
+        <Pencil className="w-3.5 h-3.5 flex-shrink-0" />
+        <span className="text-xs font-medium flex-1">Editing message</span>
+        <button
+          className="flex-shrink-0 w-5 h-5 rounded hover:bg-yellow-500/20 flex items-center justify-center transition-colors"
           onClick={onCancelEdit}
+          aria-label="Cancel edit"
         >
-          <Cross2Icon className="h-4 w-4" />
-        </Button>
+          <Cross2Icon className="h-3 w-3" />
+        </button>
       </div>
     </div>
   );

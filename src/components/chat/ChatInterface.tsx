@@ -660,7 +660,7 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
                 variant="outline"
                 onClick={handleAudioCall}
                 disabled={!!currentCall || isUserBlocked || isBlockedByUser}
-                className="flex items-center gap-2 select-none"
+                className="flex items-center gap-2 select-none dark:border-gray-600 [&:hover]:!bg-background [&:hover]:!text-foreground dark:[&:hover]:!border-gray-600"
               >
                 <CallIcon className="w-4 h-4" />
                 <span>Call</span>
@@ -670,7 +670,7 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
                 variant="outline"
                 onClick={handleVideoCall}
                 disabled={!!currentCall || isUserBlocked || isBlockedByUser}
-                className="flex items-center gap-2 select-none"
+                className="flex items-center gap-2 select-none dark:border-gray-600 [&:hover]:!bg-background [&:hover]:!text-foreground dark:[&:hover]:!border-gray-600"
               >
                 <Video className="w-4 h-4" />
                 <span>Video</span>

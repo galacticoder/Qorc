@@ -31,7 +31,7 @@ export function Sidebar({ activeTab, onTabChange, currentUser, onLogout }: Sideb
     return (
         <div className={cn(
             "flex flex-col h-full bg-card border-r border-border transition-all duration-300 ease-in-out relative z-20",
-            isCollapsed ? "w-16" : "w-60"
+            isCollapsed ? "w-13" : "w-40"
         )}>
             {/* Header */}
             <div
@@ -42,14 +42,14 @@ export function Sidebar({ activeTab, onTabChange, currentUser, onLogout }: Sideb
                 title={isCollapsed ? "Expand sidebar" : "Collapse sidebar"}
             >
                 <div className="flex items-center overflow-hidden">
-                    <div className="w-16 flex items-center justify-center shrink-0">
+                    <div className="w-13 flex items-center justify-center shrink-0">
                         <div className="w-12 h-12 bg-primary rounded-lg flex items-center justify-center text-primary-foreground">
                             <ChatBubbleIcon className="!w-[25px] !h-[25px]" />
                         </div>
                     </div>
                     <div className={cn(
                         "overflow-hidden transition-[width] duration-300 ease-in-out",
-                        isCollapsed ? "w-0 ml-0" : "w-[150px]"
+                        isCollapsed ? "w-0 ml-0" : "w-[100px]"
                     )}>
                         <span className={cn(
                             "font-semibold text-lg truncate block whitespace-nowrap transition-opacity duration-300",
@@ -73,7 +73,7 @@ export function Sidebar({ activeTab, onTabChange, currentUser, onLogout }: Sideb
                             activeTab === item.id ? "bg-secondary text-secondary-foreground" : "text-muted-foreground hover:bg-secondary/50 hover:text-foreground"
                         )}
                     >
-                        <div className="w-16 h-12 flex items-center justify-center shrink-0">
+                        <div className="w-13 h-12 flex items-center justify-center shrink-0">
                             <item.icon
                                 className={cn(
                                     "!h-[25px] !w-[25px] transition-all duration-300",
@@ -85,7 +85,7 @@ export function Sidebar({ activeTab, onTabChange, currentUser, onLogout }: Sideb
                         </div>
                         <div className={cn(
                             "overflow-hidden transition-all duration-300 ease-in-out",
-                            isCollapsed ? "w-0 ml-0 delay-150" : "w-[150px]"
+                            isCollapsed ? "w-0 ml-0 delay-150" : "w-[100px]"
                         )}>
                             <span className={cn(
                                 "truncate block text-left text-base whitespace-nowrap transition-opacity duration-300",
@@ -109,7 +109,7 @@ export function Sidebar({ activeTab, onTabChange, currentUser, onLogout }: Sideb
                     )}
                     onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}
                 >
-                    <div className="w-16 h-12 flex items-center justify-center shrink-0">
+                    <div className="w-13 h-12 flex items-center justify-center shrink-0">
                         <div className="themeToggle st-sunMoonThemeToggleBtn">
                             <input
                                 type="checkbox"
@@ -154,7 +154,7 @@ export function Sidebar({ activeTab, onTabChange, currentUser, onLogout }: Sideb
                             "truncate block text-left text-base whitespace-nowrap transition-opacity duration-300",
                             isCollapsed ? "opacity-0" : "opacity-100 delay-150"
                         )}>
-                            Toggle Theme
+                            Theme
                         </span>
                     </div>
                 </Button>
@@ -166,7 +166,7 @@ export function Sidebar({ activeTab, onTabChange, currentUser, onLogout }: Sideb
                             <Button variant="ghost" className={cn(
                                 "w-full h-auto hover:bg-secondary/50 transition-all duration-300 ease-in-out flex items-center justify-start p-0 pl-0 select-none",
                             )}>
-                                <div className="w-16 h-14 flex items-center justify-center shrink-0">
+                                <div className="w-13 h-14 flex items-center justify-center shrink-0">
                                     <Avatar className="!h-[25px] !w-[25px] border border-border shrink-0">
                                         <AvatarImage src={currentUser.avatarUrl} />
                                         <AvatarFallback>{currentUser.username.slice(0, 2).toUpperCase()}</AvatarFallback>

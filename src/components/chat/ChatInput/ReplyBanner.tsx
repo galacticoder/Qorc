@@ -1,10 +1,7 @@
-import React, { useState, useEffect, useCallback, useMemo } from "react";
-import { Button } from "../../ui/button";
+import React, { useState, useEffect, useMemo } from "react";
 import { Cross2Icon } from "../icons";
-import { cn } from "@/lib/utils";
 import { Message } from "../types";
-import { formatFileSize } from "../ChatMessage/FileMessage";
-import { Play } from "lucide-react";
+import { Image, Video, Mic, Paperclip } from "lucide-react";
 
 interface ReplyBannerProps {
   readonly replyTo: Message;
@@ -54,21 +51,6 @@ export function ReplyBanner({ replyTo, onCancelReply, getDisplayUsername }: Repl
     }
   }, [replyTo.sender, getDisplayUsername]);
 
-  const handleImageError = useCallback((e: React.SyntheticEvent<HTMLImageElement>): void => {
-    e.currentTarget.style.display = 'none';
-    const fallback = e.currentTarget.nextElementSibling as HTMLElement;
-    if (fallback) {
-      fallback.style.display = 'flex';
-    }
-  }, []);
-
-  const handleVideoError = useCallback((e: React.SyntheticEvent<HTMLVideoElement>): void => {
-    e.currentTarget.style.display = 'none';
-    const fallback = e.currentTarget.nextElementSibling as HTMLElement;
-    if (fallback) {
-      fallback.style.display = 'flex';
-    }
-  }, []);
 
   const isImageMsg = useMemo(() => isImage(replyTo), [replyTo]);
   const isVideoMsg = useMemo(() => isVideo(replyTo), [replyTo]);
@@ -78,11 +60,6 @@ export function ReplyBanner({ replyTo, onCancelReply, getDisplayUsername }: Repl
     [replyTo]
   );
 
-  const waveformHeights = useMemo(() =>
-    Array.from({ length: 8 }, () => Math.random() * 8 + 4),
-    []
-  );
-
   const contentPreview = useMemo(() => {
     if (!replyTo.content) return "";
     return replyTo.content.length > 100
@@ -90,142 +67,62 @@ export function ReplyBanner({ replyTo, onCancelReply, getDisplayUsername }: Repl
       : replyTo.content;
   }, [replyTo.content]);
   return (
-    <div className="px-4 pt-3 pb-0">
+    <div className="px-4 py-2">
       <div
-        className={cn(
-          "flex items-start gap-3 p-4 border-l-4 rounded-lg shadow-sm transition-colors duration-200",
-          "bg-muted/50 border-border text-foreground"
-        )}
+        className="flex items-center gap-2 px-3 py-1.5 rounded-md bg-muted/30 text-muted-foreground"
       >
-        <div className="flex-1 min-w-0">
-          <div className="flex items-center gap-2 mb-2">
-            <svg
-              className={cn("w-4 h-4", "text-muted-foreground")}
-              fill="none"
-              viewBox="0 0 24 24"
-              stroke="currentColor"
-            >
-              <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                strokeWidth={2}
-                d="M3 10h10a8 8 0 018 8v2M3 10l6 6m-6-6l6-6"
-              />
-            </svg>
-            <span className="text-sm font-semibold text-foreground">
-              {displaySender}
-            </span>
-          </div>
+        <svg
+          className="w-3.5 h-3.5 flex-shrink-0"
+          fill="none"
+          viewBox="0 0 24 24"
+          stroke="currentColor"
+        >
+          <path
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            strokeWidth={2}
+            d="M3 10h10a8 8 0 018 8v2M3 10l6 6m-6-6l6-6"
+          />
+        </svg>
+
+        <div className="flex items-center gap-1.5 min-w-0 flex-1">
+          <span className="text-xs font-medium text-foreground flex-shrink-0">
+            {displaySender}
+          </span>
+          <span className="text-xs flex-shrink-0">•</span>
 
           {isImageMsg ? (
-            <div className="flex items-center gap-3">
-              <div className="flex-shrink-0">
-                <img
-                  src={replyTo.content}
-                  alt={replyTo.filename}
-                  className="w-12 h-12 object-cover rounded border"
-                  onError={handleImageError}
-                />
-                <div className="w-12 h-12 bg-slate-200 rounded border items-center justify-center text-slate-500 hidden">
-                  🖼️
-                </div>
-              </div>
-              <div className="min-w-0 flex-1">
-                <p className="text-sm font-medium text-foreground truncate">
-                  {replyTo.filename || 'Image'}
-                </p>
-                <p className="text-xs text-muted-foreground">
-                  {replyTo.fileSize ? formatFileSize(replyTo.fileSize) : 'Image'}
-                </p>
-              </div>
-            </div>
+            <>
+              <Image className="w-3 h-3 flex-shrink-0" />
+              <span className="text-xs truncate">{replyTo.filename || 'Image'}</span>
+            </>
           ) : isVideoMsg ? (
-            <div className="flex items-center gap-3">
-              <div className="flex-shrink-0 relative">
-                <video
-                  src={replyTo.content}
-                  className="w-12 h-12 object-cover rounded border"
-                  muted
-                  onError={handleVideoError}
-                />
-                <div className="w-12 h-12 bg-slate-200 rounded border items-center justify-center text-slate-500 hidden">
-                  🎬
-                </div>
-                <div className="absolute inset-0 flex items-center justify-center">
-                  <Play className="w-4 h-4 text-white drop-shadow-lg" />
-                </div>
-              </div>
-              <div className="min-w-0 flex-1">
-                <p className="text-sm font-medium text-foreground truncate">
-                  {replyTo.filename || 'Video'}
-                </p>
-                <p className="text-xs text-muted-foreground">
-                  {replyTo.fileSize ? formatFileSize(replyTo.fileSize) : 'Video'}
-                </p>
-              </div>
-            </div>
+            <>
+              <Video className="w-3 h-3 flex-shrink-0" />
+              <span className="text-xs truncate">{replyTo.filename || 'Video'}</span>
+            </>
           ) : isVoiceMsg ? (
-            <div className="flex items-center gap-3">
-              <div className="flex-shrink-0">
-                <div className="w-12 h-12 bg-blue-100 rounded-full flex items-center justify-center">
-                  <div className="w-6 h-6 bg-blue-500 rounded-full flex items-center justify-center">
-                    <Play className="w-3 h-3 text-white ml-0.5" />
-                  </div>
-                </div>
-              </div>
-              <div className="min-w-0 flex-1">
-                <p className="text-sm font-medium text-foreground">
-                  Voice message
-                </p>
-                <div className="flex items-center gap-1 mt-1">
-                  <div className="flex items-center gap-0.5">
-                    {waveformHeights.map((height, i) => (
-                      <div
-                        key={i}
-                        className="w-0.5 bg-blue-400 rounded-full"
-                        style={{
-                          height: `${height}px`,
-                          opacity: 0.7
-                        }}
-                      />
-                    ))}
-                  </div>
-                  <span className="text-xs text-muted-foreground ml-1">
-                    Voice note
-                  </span>
-                </div>
-              </div>
-            </div>
+            <>
+              <Mic className="w-3 h-3 flex-shrink-0" />
+              <span className="text-xs truncate">Voice message</span>
+            </>
           ) : isFileMsg ? (
-            <div className="flex items-center gap-3">
-              <div className="flex-shrink-0">
-                <div className="w-12 h-12 bg-slate-200 rounded border flex items-center justify-center text-slate-500">
-                  📎
-                </div>
-              </div>
-              <div className="min-w-0 flex-1">
-                <p className="text-sm font-medium text-foreground truncate">
-                  {replyTo.filename || 'File'}
-                </p>
-                <p className="text-xs text-muted-foreground">
-                  {replyTo.fileSize ? formatFileSize(replyTo.fileSize) : 'Document'}
-                </p>
-              </div>
-            </div>
+            <>
+              <Paperclip className="w-3 h-3 flex-shrink-0" />
+              <span className="text-xs truncate">{replyTo.filename || 'File'}</span>
+            </>
           ) : (
-            <p className="text-sm line-clamp-2 text-muted-foreground">
-              {contentPreview}
-            </p>
+            <span className="text-xs truncate">{contentPreview}</span>
           )}
         </div>
-        <Button
-          variant="ghost"
-          size="sm"
-          className="h-8 w-8 p-0 transition-colors hover:bg-muted text-muted-foreground hover:text-foreground"
+
+        <button
+          className="flex-shrink-0 w-5 h-5 rounded hover:bg-muted/50 flex items-center justify-center transition-colors"
           onClick={onCancelReply}
+          aria-label="Cancel reply"
         >
-          <Cross2Icon className="h-4 w-4" />
-        </Button>
+          <Cross2Icon className="h-3 w-3" />
+        </button>
       </div>
     </div>
   );
