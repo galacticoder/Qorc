@@ -196,7 +196,7 @@
     --ring: 264 82% 80%;
 
     /* Sidebar - Dark */
-    --sidebar-background: 0 0% 5%;
+    --sidebar-background: #111114;
     --sidebar-foreground: 0 0% 100%;
     --sidebar-primary: 263 82% 74%;
     --sidebar-primary-foreground: 0 0% 5%;
