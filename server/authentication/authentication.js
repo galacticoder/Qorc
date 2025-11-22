@@ -39,12 +39,14 @@ async function sendAuthError(ws, { message, code = 'AUTH_FAILED', category = 'ge
 function ensureAttemptState(ws) {
   if (!ws.clientState) ws.clientState = {};
   if (!ws.clientState.attempts) {
+    // Randomize attempts between 5-10 for security 
+    const randomAttempts = () => crypto.randomInt(5, 11);
     ws.clientState = SecureStateManager.setState(ws, {
       attempts: {
-        username: 5,
-        account_password: 5,
-        passphrase: 5,
-        server_password: 5
+        username: randomAttempts(),
+        account_password: randomAttempts(),
+        passphrase: randomAttempts(),
+        server_password: randomAttempts()
       }
     });
   }
@@ -61,13 +63,13 @@ class DistributedLockManager {
     const lockKey = `lock:${key}`;
     const token = crypto.randomBytes(16).toString('hex');
     const ttlSeconds = Math.ceil(ttlMs / 1000);
-    
+
     try {
       const acquired = await withRedisClient(async (client) => {
         const result = await client.set(lockKey, token, 'NX', 'EX', ttlSeconds);
         return result === 'OK';
       });
-      
+
       if (acquired) {
         return { key: lockKey, token };
       }
@@ -77,7 +79,7 @@ class DistributedLockManager {
       return null;
     }
   }
-  
+
   /**
    * Release a distributed lock with token verification
    * @param {string} key - Lock key
@@ -131,7 +133,7 @@ class SecureString {
     return this.buffer?.toString('utf8') || '';
   }
   clear() {
-    try { if (this.buffer) crypto.randomFillSync(this.buffer); } catch {}
+    try { if (this.buffer) crypto.randomFillSync(this.buffer); } catch { }
     this.buffer = null;
   }
 }
@@ -145,26 +147,26 @@ export class AccountAuthHandler {
 
   async processAuthRequest(ws, str) {
     console.log('[AUTH] Processing authentication request');
-    
+
     if (!str || typeof str !== 'string') {
       console.error('[AUTH] Invalid authentication request format');
       return rejectConnection(ws, SignalType.AUTH_ERROR, "Invalid request format");
     }
-    
+
     if (str.length > 1048576) { // 1MB limit
       console.error('[AUTH] Authentication request too large');
       return rejectConnection(ws, SignalType.AUTH_ERROR, "Request too large");
     }
-    
+
     try {
       const parsed = JSON.parse(str);
       const { type, passwordData, userData } = parsed;
-      
+
       if (!parsed || typeof parsed !== 'object') {
         console.error('[AUTH] Invalid authentication data structure');
         return rejectConnection(ws, SignalType.AUTH_ERROR, "Invalid request structure");
       }
-      
+
       console.log(`[AUTH] Auth type: ${type}`);
 
       // Verify request signature only if a client public key is already known for this connection
@@ -216,26 +218,27 @@ export class AccountAuthHandler {
       const username = userPayload.usernameSent;
       const passwordSecure = new SecureString(passwordPayload.content);
       const password = passwordSecure.toString();
-      
+
       // Reset per-connection attempt state when username changes mid-connection
       try {
         ensureAttemptState(ws);
         if (ws.clientState?.username && ws.clientState.username !== username) {
+          const randomAttempts = () => crypto.randomInt(5, 11);
           ws.clientState = SecureStateManager.setState(ws, {
-            attempts: { username: 5, account_password: 5, passphrase: 5, server_password: 5 },
+            attempts: { username: randomAttempts(), account_password: randomAttempts(), passphrase: randomAttempts(), server_password: randomAttempts() },
             accountPasswordLockedUntil: undefined,
             serverPasswordLockedUntil: undefined,
             pendingPasswordHash: false,
             pendingPassphrase: false
           });
         }
-      } catch {}
-      
+      } catch { }
+
       if (!username || typeof username !== 'string' || username.length > 32) {
         console.error(`[AUTH] Invalid username in authentication data (type: ${typeof username}, length: ${username?.length || 0})`);
         return rejectConnection(ws, SignalType.AUTH_ERROR, "Authentication failed");
       }
-      
+
       if (!password || typeof password !== 'string' || password.length > 512) {
         console.error('[AUTH] Invalid password in authentication data');
         return rejectConnection(ws, SignalType.AUTH_ERROR, "Authentication failed");
@@ -265,15 +268,15 @@ export class AccountAuthHandler {
           console.warn(`[AUTH] User auth blocked by rate limit for ${username}: ${userAuthCheck.reason}`);
           return sendAuthError(ws, { message: userAuthCheck.reason, code: 'USER_AUTH_RATE_LIMIT', category: 'rate_limit' });
         }
-      } catch {}
+      } catch { }
 
       if (!authUtils.validateUsernameFormat(username)) {
         console.error(`[AUTH] Invalid username format: "${username}" (length: ${username.length}, regex test: ${/^[a-zA-Z0-9_-]+$/.test(username)})`);
         const info = await rateLimitMiddleware.recordCredentialFailure(username, 'account_password', ws);
-        return sendAuthError(ws, { 
-          message: SignalMessages.INVALIDNAME, 
-          code: 'INVALID_USERNAME_FORMAT', 
-          category: 'username', 
+        return sendAuthError(ws, {
+          message: SignalMessages.INVALIDNAME,
+          code: 'INVALID_USERNAME_FORMAT',
+          category: 'username',
           attemptsRemaining: typeof info?.attemptsRemaining === 'number' ? info.attemptsRemaining : undefined,
           locked: !!info?.locked,
           cooldownSeconds: info?.locked ? info.remainingBlockTime : undefined
@@ -282,10 +285,10 @@ export class AccountAuthHandler {
       if (!authUtils.validateUsernameLength(username)) {
         console.error(`[AUTH] Invalid username length: "${username}" (length: ${username.length}, expected: 3-32)`);
         const info = await rateLimitMiddleware.recordCredentialFailure(username, 'account_password', ws);
-        return sendAuthError(ws, { 
-          message: SignalMessages.INVALIDNAMELENGTH, 
-          code: 'INVALID_USERNAME_LENGTH', 
-          category: 'username', 
+        return sendAuthError(ws, {
+          message: SignalMessages.INVALIDNAMELENGTH,
+          code: 'INVALID_USERNAME_LENGTH',
+          category: 'username',
           attemptsRemaining: typeof info?.attemptsRemaining === 'number' ? info.attemptsRemaining : undefined,
           locked: !!info?.locked,
           cooldownSeconds: info?.locked ? info.remainingBlockTime : undefined
@@ -304,7 +307,7 @@ export class AccountAuthHandler {
       console.error(`[AUTH] Invalid auth type: ${type}`);
       return rejectConnection(ws, SignalType.AUTH_ERROR, "Invalid auth type");
     } catch (error) {
-      try { if (typeof passwordSecure !== 'undefined') passwordSecure.clear(); } catch {}
+      try { if (typeof passwordSecure !== 'undefined') passwordSecure.clear(); } catch { }
       console.error('[AUTH] Auth processing error:', error);
       return rejectConnection(ws, SignalType.AUTH_ERROR, "Authentication failed");
     }
@@ -316,10 +319,10 @@ export class AccountAuthHandler {
     if (existingUser) {
       console.error(`[AUTH] Username already exists: ${username}`);
       const info = await rateLimitMiddleware.recordCredentialFailure(username, 'account_password', ws);
-      return sendAuthError(ws, { 
-        message: SignalMessages.NAMEEXISTSERROR, 
-        code: 'USERNAME_TAKEN', 
-        category: 'username', 
+      return sendAuthError(ws, {
+        message: SignalMessages.NAMEEXISTSERROR,
+        code: 'USERNAME_TAKEN',
+        category: 'username',
         attemptsRemaining: typeof info?.attemptsRemaining === 'number' ? info.attemptsRemaining : undefined,
         locked: !!info?.locked,
         cooldownSeconds: info?.locked ? info.remainingBlockTime : undefined
@@ -330,11 +333,11 @@ export class AccountAuthHandler {
 
     if (typeof password !== 'string' || !password.startsWith('$argon2')) {
       console.error(`[AUTH] Expected Argon2 encoded hash for new user ${username}`);
-    const info = await rateLimitMiddleware.recordCredentialFailure(username, 'account_password', ws);
-      return sendAuthError(ws, { 
-        message: "Invalid password hash format", 
-        code: 'INVALID_PASSWORD_HASH', 
-        category: 'account_password', 
+      const info = await rateLimitMiddleware.recordCredentialFailure(username, 'account_password', ws);
+      return sendAuthError(ws, {
+        message: "Invalid password hash format",
+        code: 'INVALID_PASSWORD_HASH',
+        category: 'account_password',
         attemptsRemaining: typeof info?.attemptsRemaining === 'number' ? info.attemptsRemaining : undefined,
         locked: !!info?.locked,
         cooldownSeconds: info?.locked ? info.remainingBlockTime : undefined
@@ -396,7 +399,7 @@ export class AccountAuthHandler {
     });
 
     ws.clientState = SecureStateManager.setState(ws, { username, pendingPassphrase: true, hasPassedAccountLogin: true });
-    try { ws._username = username; } catch {}
+    try { ws._username = username; } catch { }
     if (ws._sessionId) {
       try {
         const { ConnectionStateManager: StateManager } = await import('../presence/connection-state.js');
@@ -410,30 +413,30 @@ export class AccountAuthHandler {
         console.error(`[AUTH] Failed to persist state to Redis for user ${username}:`, error.message);
       }
     }
-    
+
     console.log(`[AUTH] User ${username} pending passphrase set on connection`);
     return { username, pending: true };
   }
 
   async handleSignIn(ws, username, password) {
     console.log(`[AUTH] Starting sign in for user: ${username}`);
-    
+
     {
       const status = await rateLimitMiddleware.getUserCredentialStatus(username, 'account_password', ws);
       if (!status.allowed) {
-        return sendAuthError(ws, { 
-          message: "Too many attempts. Please wait before trying again.", 
-          code: 'ACCOUNT_PASSWORD_COOLDOWN', 
-          category: 'account_password', 
-          attemptsRemaining: 0, 
-          locked: true, 
-          cooldownSeconds: status.remainingBlockTime 
+        return sendAuthError(ws, {
+          message: "Too many attempts. Please wait before trying again.",
+          code: 'ACCOUNT_PASSWORD_COOLDOWN',
+          category: 'account_password',
+          attemptsRemaining: 0,
+          locked: true,
+          cooldownSeconds: status.remainingBlockTime
         });
       }
     }
-    
+
     const startTime = Date.now();
-    
+
     const userData = await UserDatabase.loadUser(username);
     if (!userData) {
       // Consistent timing to prevent user enumeration
@@ -441,13 +444,13 @@ export class AccountAuthHandler {
       const minTime = 300;
       if (elapsedTime < minTime) await new Promise(r => setTimeout(r, minTime - elapsedTime));
       const info = await rateLimitMiddleware.recordCredentialFailure(username, 'credentials', ws);
-      return sendAuthError(ws, { 
-        message: "Invalid username or password", 
-        code: info?.locked ? 'ACCOUNT_PASSWORD_LOCKED' : 'AUTH_FAILED', 
-        category: 'credentials', 
-        attemptsRemaining: typeof info?.attemptsRemaining === 'number' ? info.attemptsRemaining : undefined, 
-        locked: !!info?.locked, 
-        cooldownSeconds: info?.locked ? info.remainingBlockTime : undefined 
+      return sendAuthError(ws, {
+        message: "Invalid username or password",
+        code: info?.locked ? 'ACCOUNT_PASSWORD_LOCKED' : 'AUTH_FAILED',
+        category: 'credentials',
+        attemptsRemaining: typeof info?.attemptsRemaining === 'number' ? info.attemptsRemaining : undefined,
+        locked: !!info?.locked,
+        cooldownSeconds: info?.locked ? info.remainingBlockTime : undefined
       });
     }
 
@@ -511,7 +514,7 @@ export class AccountAuthHandler {
     }
 
     let isPasswordValid = false;
-    
+
     try {
       if (isStoredArgon2) {
         const crypto = await import('crypto');
@@ -519,7 +522,7 @@ export class AccountAuthHandler {
         const normalizedStored = Buffer.from(userData.passwordHash.padEnd(maxLength, '\0'), 'utf8');
         const normalizedProvided = Buffer.from(password.padEnd(maxLength, '\0'), 'utf8');
         isPasswordValid = crypto.timingSafeEqual(normalizedStored, normalizedProvided) &&
-                         userData.passwordHash.length === password.length;
+          userData.passwordHash.length === password.length;
       } else {
         console.error(`[AUTH] Account ${username} uses unsupported password format`);
         isPasswordValid = false;
@@ -528,22 +531,22 @@ export class AccountAuthHandler {
       console.error(`[AUTH] Error during password verification: ${error.message}`);
       isPasswordValid = false;
     }
-    
+
     if (!isPasswordValid) {
       const elapsedTime = Date.now() - startTime;
       const minTime = 300; // Minimum 300ms for failed attempts
       if (elapsedTime < minTime) {
         await new Promise(resolve => setTimeout(resolve, minTime - elapsedTime));
       }
-      
+
       const info = await rateLimitMiddleware.recordCredentialFailure(username, 'credentials', ws);
-      return sendAuthError(ws, { 
-        message: "Invalid username or password", 
-        code: info?.locked ? 'ACCOUNT_PASSWORD_LOCKED' : 'AUTH_FAILED', 
-        category: 'credentials', 
-        attemptsRemaining: typeof info?.attemptsRemaining === 'number' ? info.attemptsRemaining : undefined, 
-        locked: !!info?.locked, 
-        cooldownSeconds: info?.locked ? info.remainingBlockTime : undefined 
+      return sendAuthError(ws, {
+        message: "Invalid username or password",
+        code: info?.locked ? 'ACCOUNT_PASSWORD_LOCKED' : 'AUTH_FAILED',
+        category: 'credentials',
+        attemptsRemaining: typeof info?.attemptsRemaining === 'number' ? info.attemptsRemaining : undefined,
+        locked: !!info?.locked,
+        cooldownSeconds: info?.locked ? info.remainingBlockTime : undefined
       });
     }
 
@@ -602,18 +605,18 @@ export class AccountAuthHandler {
 
     if (passParams) {
       const requiredFields = ['version', 'algorithm', 'salt', 'memoryCost', 'timeCost', 'parallelism'];
-      const missingFields = requiredFields.filter(field => 
-        passParams[field] === undefined || 
-        passParams[field] === null || 
+      const missingFields = requiredFields.filter(field =>
+        passParams[field] === undefined ||
+        passParams[field] === null ||
         (typeof passParams[field] === 'number' && !Number.isFinite(passParams[field]))
       );
-      
+
       if (missingFields.length > 0) {
         console.error(`[AUTH] Incomplete passphrase parameters for user ${username}, missing: ${missingFields.join(', ')}`);
         passParams = null;
       }
     }
-    
+
     if (passParams) {
       console.log(`[AUTH] Requesting passphrase for user: ${username}`);
       await sendSecureMessage(ws, {
@@ -634,7 +637,7 @@ export class AccountAuthHandler {
           const { ConnectionStateManager: StateManager } = await import('../presence/connection-state.js');
           await StateManager.updateState(ws._sessionId, { username, hasPassedAccountLogin: true });
         }
-      } catch {}
+      } catch { }
 
       console.log(`[AUTH] User ${username} pending passphrase set for sign in`);
       return { username, pending: true };
@@ -655,40 +658,40 @@ export class AccountAuthHandler {
 
   async handlePassphrase(ws, username, passphraseHash, isNewUser = false) {
     console.log(`[AUTH] Handling passphrase for user: ${username}, isNewUser: ${isNewUser}`);
-    
+
     if (!username || typeof username !== 'string' || username.length < 3 || username.length > 32) {
       console.error(`[AUTH] Invalid username in passphrase handling: ${username}`);
       const info = await rateLimitMiddleware.recordCredentialFailure(username, 'passphrase', ws);
-      return sendAuthError(ws, { 
-        message: "Invalid username", 
-        code: 'INVALID_USERNAME', 
-        category: 'username', 
-        attemptsRemaining: typeof info?.attemptsRemaining === 'number' ? info.attemptsRemaining : undefined, 
-        locked: !!info?.locked, 
-        cooldownSeconds: info?.locked ? info.remainingBlockTime : undefined 
+      return sendAuthError(ws, {
+        message: "Invalid username",
+        code: 'INVALID_USERNAME',
+        category: 'username',
+        attemptsRemaining: typeof info?.attemptsRemaining === 'number' ? info.attemptsRemaining : undefined,
+        locked: !!info?.locked,
+        cooldownSeconds: info?.locked ? info.remainingBlockTime : undefined
       });
     }
-    
+
     if (!passphraseHash || typeof passphraseHash !== 'string' || passphraseHash.length < 10 || passphraseHash.length > 5000) {
       console.error(`[AUTH] Invalid passphrase hash format for user: ${username}`);
       const info = await rateLimitMiddleware.recordCredentialFailure(username, 'passphrase', ws);
-      return sendAuthError(ws, { 
-        message: info?.locked ? "Invalid passphrase format" : "Invalid passphrase format", 
-        code: info?.locked ? 'PASSPHRASE_LOCKED' : 'INVALID_PASSPHRASE_FORMAT', 
-        category: 'passphrase', 
-        attemptsRemaining: typeof info?.attemptsRemaining === 'number' ? info.attemptsRemaining : undefined, 
-        locked: !!info?.locked, 
-        cooldownSeconds: info?.locked ? info.remainingBlockTime : undefined 
+      return sendAuthError(ws, {
+        message: info?.locked ? "Invalid passphrase format" : "Invalid passphrase format",
+        code: info?.locked ? 'PASSPHRASE_LOCKED' : 'INVALID_PASSPHRASE_FORMAT',
+        category: 'passphrase',
+        attemptsRemaining: typeof info?.attemptsRemaining === 'number' ? info.attemptsRemaining : undefined,
+        locked: !!info?.locked,
+        cooldownSeconds: info?.locked ? info.remainingBlockTime : undefined
       });
     }
-    
+
     {
       const status = await rateLimitMiddleware.getUserCredentialStatus(username, 'passphrase', ws);
       if (!status.allowed) {
         return sendAuthError(ws, { message: "Too many attempts. Please wait before trying again.", code: 'PASSPHRASE_COOLDOWN', category: 'passphrase', attemptsRemaining: 0, locked: true, cooldownSeconds: status.remainingBlockTime });
       }
     }
-    
+
     if (!ws.clientState || ws.clientState.username !== username || !ws.clientState.pendingPassphrase) {
       console.error(`[AUTH] Unexpected passphrase submission for user: ${username}`);
       return rejectConnection(ws, SignalType.AUTH_ERROR, "Unexpected passphrase submission");
@@ -705,24 +708,24 @@ export class AccountAuthHandler {
 
     if (isInitialPassphrase) {
       console.log(`[AUTH] Processing passphrase for: ${username}`);
-      
+
       if (!passphraseHash.startsWith('$argon2')) {
         console.error(`[AUTH] Invalid passphrase hash format for user: ${username}`);
         const info = await rateLimitMiddleware.recordCredentialFailure(username, 'passphrase', ws);
-        return sendAuthError(ws, { 
-          message: "Invalid passphrase hash format", 
-          code: info?.locked ? 'PASSPHRASE_LOCKED' : 'INVALID_PASSPHRASE_HASH', 
-          category: 'passphrase', 
-          attemptsRemaining: typeof info?.attemptsRemaining === 'number' ? info.attemptsRemaining : undefined, 
-          locked: !!info?.locked, 
-          cooldownSeconds: info?.locked ? info.remainingBlockTime : undefined 
+        return sendAuthError(ws, {
+          message: "Invalid passphrase hash format",
+          code: info?.locked ? 'PASSPHRASE_LOCKED' : 'INVALID_PASSPHRASE_HASH',
+          category: 'passphrase',
+          attemptsRemaining: typeof info?.attemptsRemaining === 'number' ? info.attemptsRemaining : undefined,
+          locked: !!info?.locked,
+          cooldownSeconds: info?.locked ? info.remainingBlockTime : undefined
         });
       }
-      
+
       userRecord.passphraseHash = passphraseHash;
       try {
         const parsed = await CryptoUtils.Password.parseArgon2Hash(passphraseHash);
-        
+
         if (!parsed.salt || parsed.salt.length < 16) {
           throw new Error('Invalid salt length');
         }
@@ -735,7 +738,7 @@ export class AccountAuthHandler {
         if (parsed.parallelism < 1 || parsed.parallelism > 16) {
           throw new Error('Invalid parallelism');
         }
-        
+
         userRecord.version = parsed.version;
         userRecord.algorithm = parsed.algorithm;
         userRecord.salt = typeof parsed.salt === 'string' ? parsed.salt : parsed.salt.toString('base64');
@@ -751,20 +754,20 @@ export class AccountAuthHandler {
       console.log(`[AUTH] User record updated with passphrase for: ${username}`);
     } else {
       console.log(`[AUTH] Verifying passphrase for user: ${username}`);
-      
+
       const storedHash = userRecord.passphrasehash;
       const providedHash = passphraseHash;
 
       if (!storedHash || !providedHash) {
         console.error(`[AUTH] Missing passphrase hash for user: ${username}`);
         const info = await rateLimitMiddleware.recordCredentialFailure(username, 'passphrase', ws);
-        return sendAuthError(ws, { 
-          message: "Authentication failed", 
-          code: info?.locked ? 'PASSPHRASE_LOCKED' : 'PASSPHRASE_MISSING', 
-          category: 'passphrase', 
-          attemptsRemaining: typeof info?.attemptsRemaining === 'number' ? info.attemptsRemaining : undefined, 
-          locked: !!info?.locked, 
-          cooldownSeconds: info?.locked ? info.remainingBlockTime : undefined 
+        return sendAuthError(ws, {
+          message: "Authentication failed",
+          code: info?.locked ? 'PASSPHRASE_LOCKED' : 'PASSPHRASE_MISSING',
+          category: 'passphrase',
+          attemptsRemaining: typeof info?.attemptsRemaining === 'number' ? info.attemptsRemaining : undefined,
+          locked: !!info?.locked,
+          cooldownSeconds: info?.locked ? info.remainingBlockTime : undefined
         });
       }
 
@@ -802,16 +805,16 @@ export class AccountAuthHandler {
       if (!isValid) {
         console.error(`[AUTH] Passphrase verification failed for user: ${username}`);
         const info = await rateLimitMiddleware.recordCredentialFailure(username, 'passphrase', ws);
-        return sendAuthError(ws, { 
-          message: "Authentication failed", 
-          code: info?.locked ? 'PASSPHRASE_LOCKED' : 'INCORRECT_PASSPHRASE', 
-          category: 'passphrase', 
-          attemptsRemaining: typeof info?.attemptsRemaining === 'number' ? info.attemptsRemaining : undefined, 
-          locked: !!info?.locked, 
-          cooldownSeconds: info?.locked ? info.remainingBlockTime : undefined 
+        return sendAuthError(ws, {
+          message: "Authentication failed",
+          code: info?.locked ? 'PASSPHRASE_LOCKED' : 'INCORRECT_PASSPHRASE',
+          category: 'passphrase',
+          attemptsRemaining: typeof info?.attemptsRemaining === 'number' ? info.attemptsRemaining : undefined,
+          locked: !!info?.locked,
+          cooldownSeconds: info?.locked ? info.remainingBlockTime : undefined
         });
       }
-      
+
       console.log(`[AUTH] Passphrase verified for user: ${username}`);
     }
 
@@ -838,40 +841,40 @@ export class AccountAuthHandler {
 
   async handlePasswordHash(ws, username, hashedPassword) {
     console.log(`[AUTH] Handling password hash response for user: ${username}`);
-    
+
     {
       const status = await rateLimitMiddleware.getUserCredentialStatus(username, 'account_password', ws);
       if (!status.allowed) {
         return sendAuthError(ws, { message: "Too many attempts. Please wait before trying again.", code: 'ACCOUNT_PASSWORD_COOLDOWN', category: 'account_password', attemptsRemaining: 0, locked: true, cooldownSeconds: status.remainingBlockTime });
       }
     }
-    
+
     if (!username || typeof username !== 'string' || username.length < 3 || username.length > 32) {
       console.error(`[AUTH] Invalid username in password hash handling: ${username}`);
       const info = await rateLimitMiddleware.recordCredentialFailure(username, 'account_password', ws);
-      return sendAuthError(ws, { 
-        message: "Invalid username", 
-        code: 'INVALID_USERNAME', 
-        category: 'username', 
-        attemptsRemaining: typeof info?.attemptsRemaining === 'number' ? info.attemptsRemaining : undefined, 
-        locked: !!info?.locked, 
-        cooldownSeconds: info?.locked ? info.remainingBlockTime : undefined 
+      return sendAuthError(ws, {
+        message: "Invalid username",
+        code: 'INVALID_USERNAME',
+        category: 'username',
+        attemptsRemaining: typeof info?.attemptsRemaining === 'number' ? info.attemptsRemaining : undefined,
+        locked: !!info?.locked,
+        cooldownSeconds: info?.locked ? info.remainingBlockTime : undefined
       });
     }
-    
+
     if (!hashedPassword || typeof hashedPassword !== 'string' || !hashedPassword.startsWith('$argon2')) {
       console.error(`[AUTH] Invalid password hash format for user: ${username}`);
       const info = await rateLimitMiddleware.recordCredentialFailure(username, 'account_password', ws);
-      return sendAuthError(ws, { 
-        message: "Invalid password hash format", 
-        code: 'INVALID_PASSWORD_HASH', 
-        category: 'account_password', 
-        attemptsRemaining: typeof info?.attemptsRemaining === 'number' ? info.attemptsRemaining : undefined, 
-        locked: !!info?.locked, 
-        cooldownSeconds: info?.locked ? info.remainingBlockTime : undefined 
+      return sendAuthError(ws, {
+        message: "Invalid password hash format",
+        code: 'INVALID_PASSWORD_HASH',
+        category: 'account_password',
+        attemptsRemaining: typeof info?.attemptsRemaining === 'number' ? info.attemptsRemaining : undefined,
+        locked: !!info?.locked,
+        cooldownSeconds: info?.locked ? info.remainingBlockTime : undefined
       });
     }
-    
+
     if (!ws.clientState || ws.clientState.username !== username || !ws.clientState.pendingPasswordHash) {
       console.error(`[AUTH] Unexpected password hash submission for user: ${username}`);
       return rejectConnection(ws, SignalType.AUTH_ERROR, "Unexpected password hash submission");
@@ -897,27 +900,27 @@ export class AccountAuthHandler {
       console.error(`[AUTH] Error during password hash verification: ${error.message}`);
       isPasswordValid = false;
     }
-    
+
     if (!isPasswordValid) {
       console.error(`[AUTH] Incorrect password hash for user: ${username}`);
       const info = await rateLimitMiddleware.recordCredentialFailure(username, 'account_password', ws);
-      return sendAuthError(ws, { 
-        message: "Incorrect password", 
-        code: info?.locked ? 'ACCOUNT_PASSWORD_LOCKED' : 'INCORRECT_PASSWORD', 
-        category: 'account_password', 
-        attemptsRemaining: typeof info?.attemptsRemaining === 'number' ? info.attemptsRemaining : undefined, 
-        locked: !!info?.locked, 
-        cooldownSeconds: info?.locked ? info.remainingBlockTime : undefined 
+      return sendAuthError(ws, {
+        message: "Incorrect password",
+        code: info?.locked ? 'ACCOUNT_PASSWORD_LOCKED' : 'INCORRECT_PASSWORD',
+        category: 'account_password',
+        attemptsRemaining: typeof info?.attemptsRemaining === 'number' ? info.attemptsRemaining : undefined,
+        locked: !!info?.locked,
+        cooldownSeconds: info?.locked ? info.remainingBlockTime : undefined
       });
     }
 
     console.log(`[AUTH] Password verified for user: ${username}`);
-    
+
     ws.clientState = SecureStateManager.setState(ws, { pendingPasswordHash: false });
 
     // Derive passphrase parameters either from stored columns or by parsing stored passphrase hash
     let passParams = null;
-    try { 
+    try {
       if (userData.version && userData.salt) {
         passParams = {
           version: userData.version,
@@ -948,18 +951,18 @@ export class AccountAuthHandler {
     if (passParams) {
       // Validate all required fields are present before sending
       const requiredFields = ['version', 'algorithm', 'salt', 'memoryCost', 'timeCost', 'parallelism'];
-      const missingFields = requiredFields.filter(field => 
-        passParams[field] === undefined || 
-        passParams[field] === null || 
+      const missingFields = requiredFields.filter(field =>
+        passParams[field] === undefined ||
+        passParams[field] === null ||
         (typeof passParams[field] === 'number' && !Number.isFinite(passParams[field]))
       );
-      
+
       if (missingFields.length > 0) {
         console.error(`[AUTH] Incomplete passphrase parameters for user ${username}, missing: ${missingFields.join(', ')}`);
         passParams = null;
       }
     }
-    
+
     if (passParams) {
       console.log(`[AUTH] Requesting passphrase for user: ${username}`);
       await sendSecureMessage(ws, {
@@ -980,7 +983,7 @@ export class AccountAuthHandler {
           const { ConnectionStateManager: StateManager } = await import('../presence/connection-state.js');
           await StateManager.updateState(ws._sessionId, { username, hasPassedAccountLogin: true });
         }
-      } catch {}
+      } catch { }
 
       console.log(`[AUTH] User ${username} pending passphrase set for sign in`);
       return { username, pending: true };
@@ -1243,21 +1246,21 @@ export class AccountAuthHandler {
   extractDeviceName(ws) {
     try {
       const request = ws.upgradeReq || ws._socket;
-      
+
       const headers = request?.headers || {};
       const userAgent = headers['user-agent'] || '';
       const clientName = headers['x-client-name'] || 'End2End Chat';
       const clientVersion = headers['x-client-version'] || 'unknown';
-    
+
       if (userAgent.includes('Electron')) {
         return `${clientName} (${clientVersion})`;
       }
-      
+
       // Parse basic device info from user agent
       if (userAgent.includes('Windows')) return `${clientName} on Windows`;
       if (userAgent.includes('Mac')) return `${clientName} on macOS`;
       if (userAgent.includes('Linux')) return `${clientName} on Linux`;
-      
+
       return `${clientName} Desktop`;
     } catch (error) {
       console.warn('[AUTH] Failed to extract device name:', error.message);
@@ -1271,7 +1274,7 @@ export class AccountAuthHandler {
   async generatePasswordHashParams() {
     const salt = new Uint8Array(crypto.randomBytes(16));
     const saltBase64 = Buffer.from(salt).toString('base64');
-    
+
     return {
       version: 19,
       algorithm: 'argon2id',
@@ -1296,15 +1299,15 @@ export class ServerAuthHandler {
 
   async handleServerAuthentication(ws, str, clientState) {
     const username = clientState?.username;
-    
+
     if (!username) {
       console.error('[AUTH] No username found - account authentication required first');
       console.error('[AUTH] clientState:', JSON.stringify(clientState));
       return rejectConnection(ws, SignalType.AUTH_ERROR, "Please complete account authentication first");
     }
-    
+
     console.log(`[AUTH] Handling server authentication for user: ${username}`);
-    
+
     const parsed = JSON.parse(str);
 
     if (parsed.type !== SignalType.SERVER_LOGIN) {
@@ -1335,13 +1338,13 @@ export class ServerAuthHandler {
       if (!passwordPayload || !passwordPayload.content) {
         console.error(`[AUTH] Invalid password format for user: ${username}`);
         const info = await rateLimitMiddleware.recordCredentialFailure(username, 'server_password', ws);
-        return sendAuthError(ws, { 
-          message: "Invalid password format", 
-          code: 'INVALID_SERVER_PASSWORD_FORMAT', 
-          category: 'server_password', 
-          attemptsRemaining: typeof info?.attemptsRemaining === 'number' ? info.attemptsRemaining : undefined, 
-          locked: !!info?.locked, 
-          cooldownSeconds: info?.locked ? info.remainingBlockTime : undefined 
+        return sendAuthError(ws, {
+          message: "Invalid password format",
+          code: 'INVALID_SERVER_PASSWORD_FORMAT',
+          category: 'server_password',
+          attemptsRemaining: typeof info?.attemptsRemaining === 'number' ? info.attemptsRemaining : undefined,
+          locked: !!info?.locked,
+          cooldownSeconds: info?.locked ? info.remainingBlockTime : undefined
         });
       }
 
@@ -1350,19 +1353,19 @@ export class ServerAuthHandler {
         console.error('[AUTH] Server password not configured');
         return rejectConnection(ws, SignalType.AUTH_ERROR, "Server not properly configured");
       }
-      
+
       const passwordValid = await CryptoUtils.Password.verifyPassword(serverPasswordHash, passwordPayload.content);
 
       if (!passwordValid) {
         console.error(`[AUTH] Incorrect server password for user: ${username}`);
         const info = await rateLimitMiddleware.recordCredentialFailure(username, 'server_password', ws);
-        return sendAuthError(ws, { 
-          message: "Incorrect password", 
-          code: info?.locked ? 'SERVER_PASSWORD_LOCKED' : 'INCORRECT_SERVER_PASSWORD', 
-          category: 'server_password', 
-          attemptsRemaining: typeof info?.attemptsRemaining === 'number' ? info.attemptsRemaining : undefined, 
-          locked: !!info?.locked, 
-          cooldownSeconds: info?.locked ? info.remainingBlockTime : undefined 
+        return sendAuthError(ws, {
+          message: "Incorrect password",
+          code: info?.locked ? 'SERVER_PASSWORD_LOCKED' : 'INCORRECT_SERVER_PASSWORD',
+          category: 'server_password',
+          attemptsRemaining: typeof info?.attemptsRemaining === 'number' ? info.attemptsRemaining : undefined,
+          locked: !!info?.locked,
+          cooldownSeconds: info?.locked ? info.remainingBlockTime : undefined
         });
       }
 
@@ -1379,7 +1382,7 @@ export class ServerAuthHandler {
       ws.clientState = SecureStateManager.setState(ws, { hasAuthenticated: true, serverAuthTime: Date.now(), finalizedBy: 'ServerAuthHandler' });
 
       // Map this authenticated connection for local delivery and mark presence online
-      try { ws._username = username; } catch {}
+      try { ws._username = username; } catch { }
       try { global.gateway?.addLocalConnection?.(username, ws); } catch (e) { console.warn('[AUTH] addLocalConnection failed:', e?.message || e); }
       try { await presenceService.setUserOnline(username, ws._sessionId || ''); } catch (e) { console.warn('[AUTH] setUserOnline failed:', e?.message || e); }
 
@@ -1387,39 +1390,39 @@ export class ServerAuthHandler {
         console.error('[AUTH] No session ID available for state update');
         return rejectConnection(ws, SignalType.AUTH_ERROR, "Session state error");
       }
-      
+
       const { ConnectionStateManager: StateManager } = await import('../presence/connection-state.js');
       const stateUpdateSuccess = await StateManager.updateState(ws._sessionId, {
         username: username,
         hasAuthenticated: true,
         serverAuthTime: Date.now()
       });
-      
+
       if (!stateUpdateSuccess) {
         console.error(`[AUTH] Failed to persist authentication state to Redis for user: ${username}`);
         return rejectConnection(ws, SignalType.AUTH_ERROR, "Failed to save authentication state");
       }
-      
+
       console.log(`[AUTH] Authentication state persisted to Redis for user: ${username}`);
 
       let finalTokens = ws.clientState.tokenPair || null;
-      
+
       if (!finalTokens) {
         console.log(`[AUTH] No stored tokens found, generating new tokens for user: ${username}`);
-        
+
         const authContext = await TokenMiddleware.createAuthContext(
-          username, 
-          ws.deviceId, 
+          username,
+          ws.deviceId,
           ws.upgradeReq || ws._socket
         );
-        
+
         // Ensure deviceId is set and stable for this connection
         const deviceId = ws.deviceId || await this.generateDeviceId(ws);
         ws.deviceId = deviceId;
 
         let tlsBinding = null;
-        try { 
-          tlsBinding = TokenMiddleware.getTLSFingerprint(ws.upgradeReq || ws._socket); 
+        try {
+          tlsBinding = TokenMiddleware.getTLSFingerprint(ws.upgradeReq || ws._socket);
         } catch (e) {
           console.error('[AUTH] TLS fingerprint unavailable during server auth token issuance:', e?.message || e);
           return rejectConnection(ws, SignalType.AUTH_ERROR, 'TLS fingerprint required');
@@ -1434,7 +1437,7 @@ export class ServerAuthHandler {
           deviceId,
           tlsBinding
         );
-        
+
         // Store refresh token
         await TokenDatabase.storeRefreshToken({
           tokenId: TokenService.parseTokenUnsafe(finalTokens.refreshToken).jti,
@@ -1451,15 +1454,15 @@ export class ServerAuthHandler {
       } else {
         console.log(`[AUTH] Using stored tokens from account authentication for user: ${username}`);
       }
-      
+
       // Detect suspicious activity on server authentication
       try {
         const authContext = await TokenMiddleware.createAuthContext(
-          username, 
-          ws.deviceId, 
+          username,
+          ws.deviceId,
           ws.upgradeReq || ws._socket
         );
-        
+
         const suspiciousActivity = await TokenSecurityManager.detectSuspiciousActivity(
           username,
           TokenService.parseTokenUnsafe(finalTokens.refreshToken).jti,
@@ -1470,14 +1473,14 @@ export class ServerAuthHandler {
             deviceFingerprint: authContext.deviceFingerprint
           }
         );
-        
+
         if (suspiciousActivity.suspicious) {
           console.warn(`[AUTH] Suspicious activity on server auth: ${username}`, suspiciousActivity.flags);
         }
       } catch (error) {
         console.warn('[AUTH] Failed to check suspicious activity for server auth:', error.message);
       }
-      
+
       ws.clientState = SecureStateManager.setState(ws, {
         ...ws.clientState,
         accessToken: finalTokens.accessToken,
@@ -1505,7 +1508,7 @@ export class ServerAuthHandler {
         quantumSecure: true,
         securityLevel: 256
       };
-      
+
       // Include final tokens if newly generated
       if (finalTokens) {
         response.tokens = {
@@ -1516,10 +1519,10 @@ export class ServerAuthHandler {
           quantumSecure: true
         };
       }
-      
+
       // Mark WebSocket as authenticated for PQ session
       ws._authenticated = true;
-      
+
       await sendSecureMessage(ws, response);
 
       // Deliver any queued offline messages after complete server authentication
@@ -1528,7 +1531,7 @@ export class ServerAuthHandler {
         console.log(`[AUTH] Checking for offline messages for user: ${username}`);
         const queued = await MessageDatabase.takeOfflineMessages(username, 200);
         console.log(`[AUTH] Found ${queued.length} offline messages for user: ${username}`);
-        
+
         if (queued.length) {
           let deliveredCount = 0;
           for (const msg of queued) {
@@ -1565,7 +1568,7 @@ export class ServerAuthHandler {
 
 }
 
-AccountAuthHandler.validateArgon2Parameters = async function(parsed) {
+AccountAuthHandler.validateArgon2Parameters = async function (parsed) {
   const MIN_MEMORY = 65536;
   const MIN_TIME = 3;
   const MIN_SALT_LENGTH = 16;
@@ -1577,7 +1580,7 @@ AccountAuthHandler.validateArgon2Parameters = async function(parsed) {
   return parsed;
 };
 
-AccountAuthHandler.prototype.verifyRequestSignature = async function(data, signature, ws) {
+AccountAuthHandler.prototype.verifyRequestSignature = async function (data, signature, ws) {
   const clientKeyBase64 = ws.clientPublicKey;
   if (!clientKeyBase64 || typeof clientKeyBase64 !== 'string') {
     return false;

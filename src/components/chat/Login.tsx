@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback, useMemo } from "react";
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "../ui/card";
-import { Alert, AlertDescription } from "../ui/alert";
-import { EncryptionIcon, LockClosedIcon, CheckIcon } from "./icons";
+import { Button } from "../ui/button";
+import { EncryptionIcon, LockClosedIcon } from "./icons";
 import { TorIndicator } from "../ui/TorIndicator";
 import { SignInForm } from "./Login/SignIn.tsx";
 import { SignUpForm } from "./Login/SignUp.tsx";
@@ -9,6 +9,7 @@ import { PassphrasePrompt } from "./Login/PassphrasePrompt.tsx";
 import { PasswordHashPrompt } from "./Login/PasswordHashPrompt.tsx";
 import { ServerPasswordForm } from "./Login/ServerPassword.tsx";
 import { RecoveryPassphrase } from "./Login/RecoveryPassphrase.tsx";
+import { toast } from "sonner";
 
 interface ServerKeys {
   readonly x25519PublicBase64: string;
@@ -53,13 +54,13 @@ interface LoginProps {
 const dispatchAuthEvent = (eventName: string, detail: Record<string, unknown>): void => {
   try {
     window.dispatchEvent(new CustomEvent(eventName, { detail }));
-  } catch {}
+  } catch { }
 };
 
-const truncateKey = (key: string, maxLength: number = 44): string => {
+const truncateKey = (key: string, maxLength: number = 16): string => {
   if (typeof key !== 'string' || key.length === 0) return '';
   const safeLength = Math.min(maxLength, key.length);
-  return key.slice(0, safeLength) + (key.length > maxLength ? '...' : '');
+  return key.slice(0, safeLength) + '...';
 };
 
 export const Login = React.memo<LoginProps>(({
@@ -87,14 +88,59 @@ export const Login = React.memo<LoginProps>(({
   const [serverPassword, setServerPassword] = useState<string>("");
   const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
   const [mode, setMode] = useState<"login" | "register">("login");
+  const [isRateLimited, setIsRateLimited] = useState<boolean>(false);
+
+  // Show error as toast notification
+  useEffect(() => {
+    if (error) {
+      toast.error(error);
+      setIsSubmitting(false);
+    }
+  }, [error]);
+
+  // Reset local submitting state when rate limited or auth error
+  useEffect(() => {
+    const handleRateLimited = () => {
+      console.log('[Login] Rate limit event received, resetting local isSubmitting');
+      toast.error('Too many attempts. Please wait before trying again.');
+      setIsSubmitting(false);
+      setIsRateLimited(true);
+    };
+    const handleAuthError = () => {
+      console.log('[Login] Auth error event received, resetting local isSubmitting');
+      setIsSubmitting(false);
+    };
+    window.addEventListener('auth-rate-limited', handleRateLimited as any);
+    window.addEventListener('auth-error', handleAuthError as any);
+    return () => {
+      window.removeEventListener('auth-rate-limited', handleRateLimited as any);
+      window.removeEventListener('auth-error', handleAuthError as any);
+    };
+  }, []);
 
   const displayUsername = useMemo(() => pseudonym || initialUsername || '', [pseudonym, initialUsername]);
 
+  const resetToLogin = useCallback((): void => {
+    setIsSubmitting(false);
+    setIsRateLimited(false);
+    setShowPassphrasePrompt(false);
+    if (setShowPasswordPrompt) {
+      setShowPasswordPrompt(false);
+    }
+    dispatchAuthEvent('auth-ui-back', { to: 'server' });
+  }, [setShowPassphrasePrompt, setShowPasswordPrompt]);
+
   const handleRecoveryPassphraseSubmit = useCallback(async (pp: string): Promise<void> => {
+    if (isRateLimited) return;
+    setIsSubmitting(true);
     try {
       await onPassphraseSubmit?.(pp, 'login');
-    } catch {}
-  }, [onPassphraseSubmit]);
+    } catch (err) {
+      setIsSubmitting(false);
+      toast.error(err instanceof Error ? err.message : 'Authentication failed. Please log in again.');
+      resetToLogin();
+    }
+  }, [onPassphraseSubmit, isRateLimited, resetToLogin]);
 
   const handleUseDifferentAccount = useCallback((): void => {
     dispatchAuthEvent('auth-ui-back', { to: 'server' });
@@ -102,20 +148,20 @@ export const Login = React.memo<LoginProps>(({
 
   if (recoveryActive && showPassphrasePrompt) {
     return (
-      <div className="w-full max-w-md mx-auto">
-        <Card className="w-full">
-          <CardHeader>
-            <div className="flex-1 flex flex-col items-center">
-              <div className="mx-auto w-16 h-16 rounded-full bg-primary/10 flex items-center justify-center" aria-hidden="true">
+      <div className="w-full max-w-md mx-auto select-none">
+        <Card className="w-full bg-card/30 border border-white/10 hover:border-primary/30 hover:bg-card/50 transition-all duration-500 backdrop-blur-md shadow-lg rounded-2xl overflow-hidden">
+          <CardHeader className="space-y-4 p-8 select-none">
+            <div className="flex-1 flex flex-col items-center gap-4">
+              <div className="w-16 h-16 rounded-full bg-primary/10 flex items-center justify-center" aria-hidden="true">
                 <LockClosedIcon className="h-8 w-8 text-primary" />
               </div>
-              <CardTitle className="text-2xl text-center">Unlock your vault</CardTitle>
-              <CardDescription className="text-center">
-                Enter your passphrase to restore access
+              <CardTitle className="text-2xl text-center select-none">Unlock Vault</CardTitle>
+              <CardDescription className="text-center select-none">
+                Enter your passphrase
               </CardDescription>
             </div>
           </CardHeader>
-          <CardContent>
+          <CardContent className="p-8 pt-0 select-none">
             <RecoveryPassphrase
               username={displayUsername}
               authStatus={authStatus}
@@ -130,34 +176,45 @@ export const Login = React.memo<LoginProps>(({
   }
 
   const handleAccountSubmit = useCallback(async (username: string, password: string): Promise<void> => {
+    if (isRateLimited) return;
     setIsSubmitting(true);
     try {
       await onAccountSubmit(mode, username, password);
-    } catch {
+      setIsRateLimited(false);
+    } catch (err) {
       setIsSubmitting(false);
+      if (err instanceof Error) {
+        toast.error(err.message);
+      }
     }
-  }, [mode, onAccountSubmit]);
+  }, [mode, onAccountSubmit, isRateLimited]);
 
   const handlePassphraseSubmit = useCallback(async (passphrase: string): Promise<void> => {
+    if (isRateLimited) return;
     setIsSubmitting(true);
     try {
       await onPassphraseSubmit?.(passphrase, mode);
-    } catch {
+      setIsRateLimited(false);
+    } catch (err) {
       setIsSubmitting(false);
+      toast.error(err instanceof Error ? err.message : 'Authentication failed.');
+      resetToLogin();
     }
-  }, [mode, onPassphraseSubmit]);
+  }, [mode, onPassphraseSubmit, isRateLimited, resetToLogin]);
 
   const handleServerPasswordSubmit = useCallback(async (e: React.FormEvent): Promise<void> => {
     e.preventDefault();
-    if (!serverPassword.trim() || isSubmitting || isGeneratingKeys || !onServerPasswordSubmit) return;
+    if (!serverPassword.trim() || isSubmitting || isGeneratingKeys || !onServerPasswordSubmit || isRateLimited) return;
 
     setIsSubmitting(true);
     try {
       await onServerPasswordSubmit(serverPassword);
-    } catch {
+      setIsRateLimited(false);
+    } catch (err) {
       setIsSubmitting(false);
+      toast.error(err instanceof Error ? err.message : 'Server authentication failed.');
     }
-  }, [serverPassword, isSubmitting, isGeneratingKeys, onServerPasswordSubmit]);
+  }, [serverPassword, isSubmitting, isGeneratingKeys, onServerPasswordSubmit, isRateLimited]);
 
   useEffect(() => {
     if (showPassphrasePrompt) {
@@ -168,6 +225,7 @@ export const Login = React.memo<LoginProps>(({
   useEffect(() => {
     if (accountAuthenticated) {
       setIsSubmitting(false);
+      setIsRateLimited(false);
     }
   }, [accountAuthenticated]);
 
@@ -177,75 +235,6 @@ export const Login = React.memo<LoginProps>(({
     }
   }, [accountAuthenticated, isGeneratingKeys]);
 
-  const handleAuthError = useCallback((_e: Event): void => {
-    try {
-      setIsSubmitting(false);
-    } catch {}
-  }, []);
-
-  useEffect(() => {
-    window.addEventListener('auth-error', handleAuthError as EventListener);
-    return () => window.removeEventListener('auth-error', handleAuthError as EventListener);
-  }, [handleAuthError]);
-
-  useEffect(() => {
-    if (error) {
-      setIsSubmitting(false);
-    }
-  }, [error]);
-
-
-  const handleBack = useCallback((): void => {
-    const dispatchBack = (to: 'login' | 'passphrase' | 'server'): void => {
-      dispatchAuthEvent('auth-ui-back', { to });
-    };
-
-    if (showPasswordPrompt && setShowPasswordPrompt) {
-      setShowPasswordPrompt(false);
-      dispatchBack('login');
-      return;
-    }
-    if (showPassphrasePrompt) {
-      setShowPassphrasePrompt(false);
-      dispatchBack('login');
-      return;
-    }
-    if (accountAuthenticated) {
-      setShowPassphrasePrompt(true);
-      dispatchBack('passphrase');
-      return;
-    }
-    dispatchBack('server');
-  }, [showPasswordPrompt, setShowPasswordPrompt, showPassphrasePrompt, setShowPassphrasePrompt, accountAuthenticated]);
-
-  const handleForward = useCallback((): void => {
-    try {
-      const atLogin = !showPassphrasePrompt && !accountAuthenticated;
-      const atPassphrase = !!showPassphrasePrompt;
-      let to: 'passphrase' | 'server_password' | null = null;
-      
-      if (atLogin) {
-        if (maxStepReached === 'passphrase') to = 'passphrase';
-        else if (maxStepReached === 'server') to = 'server_password';
-      } else if (atPassphrase) {
-        if (maxStepReached === 'server') to = 'server_password';
-      }
-      
-      if (to) {
-        dispatchAuthEvent('auth-ui-forward', { to });
-      }
-    } catch {}
-  }, [showPassphrasePrompt, accountAuthenticated, maxStepReached]);
-
-  const isForwardDisabled = useMemo(() => {
-    const atLogin = !showPassphrasePrompt && !accountAuthenticated;
-    const atPassphrase = !!showPassphrasePrompt;
-    
-    if (atLogin) return !(maxStepReached === 'passphrase' || maxStepReached === 'server');
-    if (atPassphrase) return !(maxStepReached === 'server');
-    return true;
-  }, [showPassphrasePrompt, accountAuthenticated, maxStepReached]);
-
   const handleInputChange = useCallback((field: string, value: string): void => {
     dispatchAuthEvent('auth-ui-input', { field, value });
   }, []);
@@ -254,208 +243,171 @@ export const Login = React.memo<LoginProps>(({
     setMode((prev) => (prev === 'login' ? 'register' : 'login'));
   }, []);
 
-  const stepIndicators = useMemo(() => [
-    { key: 'login', label: 'Login', active: !showPassphrasePrompt && !accountAuthenticated },
-    { key: 'passphrase', label: 'Passphrase', active: !!showPassphrasePrompt },
-    { key: 'server', label: 'Server', active: !!accountAuthenticated },
-  ], [showPassphrasePrompt, accountAuthenticated]);
+  const handleAcceptTrust = useCallback(() => {
+    onAcceptServerTrust?.();
+  }, [onAcceptServerTrust]);
+
+  const handleRejectTrust = useCallback(() => {
+    onRejectServerTrust?.();
+  }, [onRejectServerTrust]);
 
   return (
-    <div className="w-full max-w-md mx-auto">
-      <Card className="w-full">
-        <CardHeader className="space-y-4">
-          {!(recoveryActive && showPassphrasePrompt) && (
-            <div className="flex justify-between items-center">
-              <button
-                type="button"
-                className="px-3 py-1.5 rounded-md border"
-                onClick={handleBack}
-                disabled={isSubmitting || isGeneratingKeys}
-                aria-label="Go back"
-              >
-                ← Back
-              </button>
-              <button
-                type="button"
-                className="px-3 py-1.5 rounded-md border"
-                onClick={handleForward}
-                disabled={isSubmitting || isGeneratingKeys || isForwardDisabled}
-                aria-label="Go forward"
-              >
-                Forward →
-              </button>
-            </div>
-          )}
-          <div className="flex justify-between items-start">
-            <div className="flex-1 flex flex-col items-center">
-              <div className="mx-auto w-16 h-16 rounded-full bg-primary/10 flex items-center justify-center" aria-hidden="true">
+    <div className="w-full max-w-md mx-auto select-none">
+      <Card className="w-full bg-card/30 border border-white/10 hover:border-primary/30 hover:bg-card/50 transition-all duration-500 backdrop-blur-md shadow-lg rounded-2xl overflow-hidden">
+        <CardHeader className="space-y-6 p-8 select-none">
+          <div className="flex flex-col sm:flex-row justify-between items-center sm:items-start gap-4">
+            <div className="flex-1 flex flex-col items-center gap-4 w-full">
+              <div className="w-16 h-16 rounded-full bg-primary/10 flex items-center justify-center" aria-hidden="true">
                 <EncryptionIcon className="h-8 w-8 text-primary" />
               </div>
-              <CardTitle className="text-2xl text-center">end2end</CardTitle>
-              <CardDescription className="text-center">
-                End-to-end encrypted messaging using X25519 + ML-KEM-1024 hybrid encryption and PostQuantumAEAD
-              </CardDescription>
+              <div className="text-center space-y-2">
+                <CardTitle className="text-2xl select-none">
+                  {mode === "login" ? "Sign In" : "Sign Up"}
+                </CardTitle>
+                <CardDescription className="select-none">
+                  {showPasswordPrompt
+                    ? "Enter your password"
+                    : showPassphrasePrompt
+                      ? "Secure your account"
+                      : accountAuthenticated
+                        ? "Complete setup"
+                        : mode === "login"
+                          ? "Enter your credentials"
+                          : "Create your account"}
+                </CardDescription>
+              </div>
             </div>
-            <TorIndicator />
+            <div className="sm:absolute sm:top-8 sm:right-8">
+              <TorIndicator />
+            </div>
           </div>
         </CardHeader>
 
-        <CardContent className="space-y-6">
-          {!(recoveryActive && showPassphrasePrompt) && (
-            <div className="flex items-center justify-center gap-6" role="navigation" aria-label="Authentication progress">
-              {stepIndicators.map((s, idx) => (
-                <div key={s.key} className="flex items-center gap-2">
-                  <div className={`w-3 h-3 rounded-full ${s.active ? 'bg-primary' : 'bg-muted-foreground/30'}`} aria-hidden="true" />
-                  <span className={`text-sm ${s.active ? 'text-primary font-medium' : 'text-muted-foreground'}`}>{s.label}</span>
-                  {idx < 2 && <span className="text-muted-foreground/50" aria-hidden="true">→</span>}
-                </div>
-              ))}
-            </div>
-          )}
-
-          {recoveryActive && showPassphrasePrompt ? (
-            <RecoveryPassphrase
-              username={displayUsername}
-              authStatus={authStatus}
-              error={error}
-              onSubmit={handlePassphraseSubmit}
-              onUseDifferentAccount={handleUseDifferentAccount}
-            />
-          ) : serverTrustRequest && (
-            <Alert variant="warning" className="space-y-2" role="alert">
-              <AlertDescription>
-                <p className="font-semibold">Server keys changed. Review before trusting:</p>
-                <div className="grid grid-cols-1 gap-1 text-xs font-mono" aria-label="Server key comparison">
-                  <span>
-                    <span className="font-semibold">Old X25519:</span> {truncateKey(serverTrustRequest.pinned?.x25519PublicBase64 || '')}
-                  </span>
-                  <span>
-                    <span className="font-semibold">Old Kyber:</span> {truncateKey(serverTrustRequest.pinned?.kyberPublicBase64 || '')}
-                  </span>
-                  <span>
-                    <span className="font-semibold">Old Dilithium:</span> {truncateKey(serverTrustRequest.pinned?.dilithiumPublicBase64 || '')}
-                  </span>
-                  <span>
-                    <span className="font-semibold">New X25519:</span> {truncateKey(serverTrustRequest.newKeys.x25519PublicBase64)}
-                  </span>
-                  <span>
-                    <span className="font-semibold">New Kyber:</span> {truncateKey(serverTrustRequest.newKeys.kyberPublicBase64)}
-                  </span>
-                  <span>
-                    <span className="font-semibold">New Dilithium:</span> {truncateKey(serverTrustRequest.newKeys.dilithiumPublicBase64)}
-                  </span>
-                </div>
-              </AlertDescription>
-              <div className="flex gap-2">
-                <button
-                  type="button"
-                  className="px-3 py-1.5 rounded-md bg-primary text-white"
-                  onClick={onAcceptServerTrust}
-                  disabled={isSubmitting || isGeneratingKeys}
-                  aria-label="Trust new server keys"
-                >
-                  Trust new server
-                </button>
-                <button
-                  type="button"
-                  className="px-3 py-1.5 rounded-md border"
-                  onClick={onRejectServerTrust}
-                  disabled={isSubmitting || isGeneratingKeys}
-                  aria-label="Reject server keys"
-                >
-                  Cancel
-                </button>
+        <CardContent className="space-y-6 p-8 pt-0 select-none transition-all duration-300 ease-in-out">
+          {/* Server Trust Request */}
+          {serverTrustRequest && (
+            <div className="p-6 rounded-lg bg-card/30 border border-primary/30 space-y-4 backdrop-blur-sm overflow-hidden transition-all duration-300 ease-in-out animate-in fade-in-0">
+              <div className="space-y-2">
+                <p className="font-semibold text-primary select-none">Server Keys Changed</p>
+                <p className="text-sm text-muted-foreground select-none">Review the new server keys before proceeding</p>
               </div>
-            </Alert>
-          )}
-          {showPasswordPrompt ? (
-            <PasswordHashPrompt
-              onSubmit={async (pwd) => {
-                try { await onPasswordHashSubmit?.(pwd); } catch {}
-              }}
-              disabled={isSubmitting || isGeneratingKeys}
-              authStatus={authStatus}
-              initialPassword={initialPassword}
-              onChangePassword={(v) => handleInputChange('password', v)}
-            />
-          ) : (showPassphrasePrompt && !recoveryActive) ? (
-            <PassphrasePrompt
-              mode={mode}
-              onSubmit={handlePassphraseSubmit}
-              disabled={isSubmitting || isGeneratingKeys}
-              authStatus={authStatus}
-              initialPassphrase={""}
-              initialConfirmPassphrase={""}
-              onChangePassphrase={(v) => handleInputChange('passphrase', v)}
-              onChangeConfirm={(v) => handleInputChange('passphraseConfirm', v)}
-            />
-          ) : accountAuthenticated ? (
-            <ServerPasswordForm
-              serverPassword={serverPassword}
-              setServerPassword={setServerPassword}
-              disabled={isSubmitting || isGeneratingKeys}
-              authStatus={authStatus}
-              onSubmit={handleServerPasswordSubmit}
-            />
-          ) : mode === "register" ? (
-            <SignUpForm
-              onSubmit={handleAccountSubmit}
-              disabled={isSubmitting || isGeneratingKeys || !!serverTrustRequest}
-              authStatus={authStatus}
-              error={error}
-              hasServerTrustRequest={!!serverTrustRequest}
-              initialUsername={initialUsername}
-              initialPassword={initialPassword}
-              onChangeUsername={(v) => handleInputChange('username', v)}
-              onChangePassword={(v) => handleInputChange('password', v)}
-              onChangeConfirmPassword={(v) => handleInputChange('confirmPassword', v)}
-            />
-          ) : (
-            <SignInForm
-              onSubmit={handleAccountSubmit}
-              disabled={isSubmitting || isGeneratingKeys || !!serverTrustRequest}
-              authStatus={authStatus}
-              error={error}
-              hasServerTrustRequest={!!serverTrustRequest}
-              initialUsername={initialUsername}
-              initialPassword={initialPassword}
-              onChangeUsername={(v) => handleInputChange('username', v)}
-              onChangePassword={(v) => handleInputChange('password', v)}
-            />
+              <div className="grid grid-cols-1 gap-2 text-xs font-mono bg-muted/30 p-3 rounded select-none">
+                <div>
+                  <span className="text-muted-foreground">Old X25519:</span>{' '}
+                  <span>{truncateKey(serverTrustRequest.pinned?.x25519PublicBase64 || 'None')}</span>
+                </div>
+                <div>
+                  <span className="text-muted-foreground">New X25519:</span>{' '}
+                  <span className="text-primary">{truncateKey(serverTrustRequest.newKeys.x25519PublicBase64)}</span>
+                </div>
+              </div>
+              <div className="flex gap-2">
+                <Button
+                  onClick={handleAcceptTrust}
+                  disabled={isSubmitting || isGeneratingKeys || isRateLimited}
+                  className="flex-1"
+                  size="sm"
+                >
+                  Trust Server
+                </Button>
+                <Button
+                  onClick={handleRejectTrust}
+                  disabled={isSubmitting || isGeneratingKeys || isRateLimited}
+                  variant="outline"
+                  size="sm"
+                  className="flex-1"
+                  size="sm"
+                >
+                  Reject
+                </Button>
+              </div>
+            </div>
           )}
 
-          {error && (
-            <Alert variant="destructive" role="alert">
-              <AlertDescription>{error}</AlertDescription>
-            </Alert>
-          )}
-
-          <div className="space-y-2">
-            <div className="flex items-center gap-2 text-muted-foreground text-sm">
-              <LockClosedIcon className="h-3 w-3" aria-hidden="true" />
-              <span>Your messages are secured with end-to-end encryption</span>
-            </div>
-            <div className="flex items-center gap-2 text-muted-foreground text-sm">
-              <CheckIcon className="h-3 w-3" aria-hidden="true" />
-              <span>Only the intended recipients can read your messages</span>
-            </div>
+          {/* Form Content with proper animation key */}
+          <div
+            key={`${showPasswordPrompt}-${showPassphrasePrompt}-${accountAuthenticated}-${mode}`}
+            className="overflow-hidden transition-all duration-300 ease-in-out data-[state=open]:animate-in data-[state=open]:fade-in-0"
+            data-state="open"
+          >
+            {showPasswordPrompt ? (
+              <PasswordHashPrompt
+                onSubmit={async (pwd) => {
+                  try {
+                    await onPasswordHashSubmit?.(pwd);
+                  } catch (err) {
+                    if (err instanceof Error) {
+                      toast.error(err.message);
+                    }
+                  }
+                }}
+                disabled={isSubmitting || isGeneratingKeys || isRateLimited}
+                authStatus={authStatus}
+                initialPassword={initialPassword}
+                onChangePassword={(v) => handleInputChange('password', v)}
+              />
+            ) : showPassphrasePrompt && !recoveryActive ? (
+              <PassphrasePrompt
+                mode={mode}
+                onSubmit={handlePassphraseSubmit}
+                disabled={isSubmitting || isGeneratingKeys || isRateLimited}
+                authStatus={authStatus}
+                initialPassphrase={""}
+                initialConfirmPassphrase={""}
+                onChangePassphrase={(v) => handleInputChange('passphrase', v)}
+                onChangeConfirm={(v) => handleInputChange('passphraseConfirm', v)}
+              />
+            ) : accountAuthenticated ? (
+              <ServerPasswordForm
+                serverPassword={serverPassword}
+                setServerPassword={setServerPassword}
+                disabled={isSubmitting || isGeneratingKeys || isRateLimited}
+                authStatus={authStatus}
+                onSubmit={handleServerPasswordSubmit}
+              />
+            ) : mode === "register" ? (
+              <SignUpForm
+                onSubmit={handleAccountSubmit}
+                disabled={isSubmitting || isGeneratingKeys || !!serverTrustRequest || isRateLimited}
+                authStatus={authStatus}
+                error={error}
+                hasServerTrustRequest={!!serverTrustRequest}
+                initialUsername={initialUsername}
+                initialPassword={initialPassword}
+                onChangeUsername={(v) => handleInputChange('username', v)}
+                onChangePassword={(v) => handleInputChange('password', v)}
+                onChangeConfirmPassword={(v) => handleInputChange('confirmPassword', v)}
+              />
+            ) : (
+              <SignInForm
+                onSubmit={handleAccountSubmit}
+                disabled={isSubmitting || isGeneratingKeys || !!serverTrustRequest || isRateLimited}
+                authStatus={authStatus}
+                error={error}
+                hasServerTrustRequest={!!serverTrustRequest}
+                initialUsername={initialUsername}
+                initialPassword={initialPassword}
+                onChangeUsername={(v) => handleInputChange('username', v)}
+                onChangePassword={(v) => handleInputChange('password', v)}
+              />
+            )}
           </div>
         </CardContent>
 
-        <CardFooter className="flex flex-col gap-2">
-          {!accountAuthenticated && !showPassphrasePrompt && (
+        <CardFooter className="flex flex-col gap-2 p-8 pt-0 select-none">
+          {!accountAuthenticated && !showPassphrasePrompt && !showPasswordPrompt && (
             <div className="text-sm text-center text-muted-foreground">
               {mode === "login" ? (
                 <>
                   Don't have an account?{" "}
                   <button
                     type="button"
-                    className="text-primary underline disabled:opacity-50 disabled:cursor-not-allowed"
+                    className="text-primary underline hover:no-underline disabled:opacity-50 disabled:cursor-not-allowed transition-all"
                     onClick={handleModeToggle}
-                    disabled={isSubmitting || isGeneratingKeys}
+                    disabled={isSubmitting || isGeneratingKeys || isRateLimited}
                     aria-label="Switch to registration"
                   >
-                    Register
+                    Sign Up
                   </button>
                 </>
               ) : (
@@ -463,12 +415,12 @@ export const Login = React.memo<LoginProps>(({
                   Already have an account?{" "}
                   <button
                     type="button"
-                    className="text-primary underline disabled:opacity-50 disabled:cursor-not-allowed"
+                    className="text-primary underline hover:no-underline disabled:opacity-50 disabled:cursor-not-allowed transition-all"
                     onClick={handleModeToggle}
-                    disabled={isSubmitting || isGeneratingKeys}
+                    disabled={isSubmitting || isGeneratingKeys || isRateLimited}
                     aria-label="Switch to login"
                   >
-                    Login
+                    Sign In
                   </button>
                 </>
               )}
@@ -476,7 +428,6 @@ export const Login = React.memo<LoginProps>(({
           )}
         </CardFooter>
       </Card>
-
     </div>
   );
 });

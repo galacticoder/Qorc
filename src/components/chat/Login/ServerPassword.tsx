@@ -23,7 +23,7 @@ export function ServerPasswordForm({
   return (
     <form onSubmit={onSubmit} className="space-y-4">
       <div className="space-y-2">
-        <Label htmlFor="serverPassword">Server Password</Label>
+        <Label htmlFor="serverPassword" className="text-muted-foreground font-medium">Server Password</Label>
         <Input
           id="serverPassword"
           type="password"
@@ -34,10 +34,16 @@ export function ServerPasswordForm({
           required
           autoComplete="current-password"
           maxLength={SERVER_PASSWORD_MAX_LENGTH}
+          className="bg-background/50 border-border/50 focus:bg-background/80 transition-all duration-200"
         />
       </div>
-      <Button type="submit" className="w-full" disabled={disabled}>
-        {disabled ? (authStatus || "Submitting...") : "Submit Server Password"}
+      <Button
+        type="submit"
+        size="lg"
+        className="w-full h-14 text-base font-semibold transition-all shadow-xl shadow-primary/20 hover:shadow-primary/40 hover:scale-[1.02] active:scale-[0.98] bg-primary hover:bg-primary/90 border-0"
+        disabled={disabled}
+      >
+        {disabled ? (authStatus || "Verifying...") : "Submit Server Password"}
       </Button>
     </form>
   );

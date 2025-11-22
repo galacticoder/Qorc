@@ -164,14 +164,14 @@ class WebSocketClient {
   private handshakeInFlight = false;
   private handshakePromise: Promise<void> | null = null;
   private seenMessageFingerprints: Map<string, number> = new Map();
-  
+
   // Rate limiting state
   private rateLimitState: RateLimitState = {
     messageTimestamps: [],
     lastResetTime: Date.now(),
     violationCount: 0
   };
-  
+
   // Health monitoring
   private heartbeatTimer?: ReturnType<typeof setInterval>;
   private heartbeatTimeoutTimer?: ReturnType<typeof setTimeout>;
@@ -179,18 +179,18 @@ class WebSocketClient {
   private lastHeartbeatReceived: number | null = null;
   private missedHeartbeats = 0;
   private connectionStateCallbacks = new Set<(health: ConnectionHealth) => void>();
-  
+
   // Circuit breaker
   private circuitBreakerFailures = 0;
   private circuitBreakerOpenUntil = 0;
-  
+
   // Message signing
   private signingKeyPair?: { publicKey: Uint8Array; privateKey: Uint8Array };
   private serverSignatureKey?: Uint8Array;
-  
+
   // Tor circuit tracking
   private lastTorCircuitRotation: number | null = null;
-private torCircuitListener?: () => void;
+  private torCircuitListener?: () => void;
   private torCircuitInterval?: ReturnType<typeof setInterval>;
 
   // Token validation single-run guard per session lifecycle
@@ -205,7 +205,7 @@ private torCircuitListener?: () => void;
     window.addEventListener('edge:server-message', ((event: CustomEvent) => {
       const message = event.detail;
       const messageType = message?.type;
-      
+
       if (messageType === '__ws_connection_closed') {
         SecureAuditLogger.info('ws', 'connection', 'closed-by-electron', {
           code: message.code,
@@ -216,7 +216,7 @@ private torCircuitListener?: () => void;
         this.lifecycleState = 'disconnected';
         return;
       }
-      
+
       if (messageType === '__ws_connection_error') {
         SecureAuditLogger.error('ws', 'connection', 'error-from-electron', {
           error: message.error
@@ -225,20 +225,20 @@ private torCircuitListener?: () => void;
         this.lifecycleState = 'error';
         return;
       }
-      
+
       if (messageType === '__ws_connection_opened') {
         SecureAuditLogger.info('ws', 'connection', 'opened-by-electron', {
           previousState: this.lifecycleState
         });
         const wasConnectedBefore = this.lifecycleState !== 'idle' || this.sessionKeyMaterial != null;
-        
+
         if (this.lifecycleState === 'disconnected' || this.lifecycleState === 'error' || this.lifecycleState === 'idle') {
           this.lifecycleState = 'handshaking';
           this.performHandshake(false)
             .then(() => {
               this.lifecycleState = 'connected';
               SecureAuditLogger.info('ws', 'reconnect', 'handshake-success', {});
-              
+
               this.startHeartbeat();
               void this.flushPendingQueue();
 
@@ -252,13 +252,13 @@ private torCircuitListener?: () => void;
               SecureAuditLogger.error('ws', 'reconnect', 'handshake-failed', {
                 error: error instanceof Error ? error.message : String(error)
               });
-              
+
               this.lifecycleState = 'error';
             });
         }
         return;
       }
-      
+
       if (typeof messageType === 'string' && this.messageHandlers.has(messageType)) {
         void this.handleMessage(message);
       }
@@ -279,7 +279,7 @@ private torCircuitListener?: () => void;
             };
             return;
           }
-        } catch {}
+        } catch { }
       }
 
       const kp = await PostQuantumSignature.generateKeyPair();
@@ -291,7 +291,7 @@ private torCircuitListener?: () => void;
           publicKey: PostQuantumUtils.uint8ArrayToBase64(publicKey),
           privateKey: PostQuantumUtils.uint8ArrayToBase64(privateKey)
         }));
-      } catch {}
+      } catch { }
     } catch (_error) {
       handleCriticalError(_error as Error, { context: 'ws-signing-init' });
     }
@@ -300,7 +300,7 @@ private torCircuitListener?: () => void;
   public async connect(): Promise<void> {
     if (this.lifecycleState === 'connecting' || this.lifecycleState === 'handshaking') {
       if (this.handshakeInFlight && this.handshakePromise) {
-        try { await this.handshakePromise; } catch {}
+        try { await this.handshakePromise; } catch { }
       }
       return;
     }
@@ -431,21 +431,21 @@ private torCircuitListener?: () => void;
   private registerSessionErrorHandler(): void {
     this.registerMessageHandler(SignalType.ERROR, async (message: any) => {
       const errorMsg = message.message || '';
-      
+
       if (errorMsg.includes('Unknown PQ session') || errorMsg.includes('PQ session')) {
         SecureAuditLogger.warn('ws', 'session-error', 'unknown-session', {
           message: errorMsg,
           action: 'rehandshaking'
         });
-        
+
         // Reset session keys to force new handshake
         this.resetSessionKeys(true);
-        
+
         // Perform new handshake
         try {
           await this.performHandshake(false);
           SecureAuditLogger.info('ws', 'session-error', 'rehandshake-success', {});
-          
+
           // Retry pending queue after successful handshake
           void this.flushPendingQueue();
         } catch (_error) {
@@ -487,7 +487,7 @@ private torCircuitListener?: () => void;
    */
   private checkRateLimit(): boolean {
     const now = Date.now();
-    
+
     // Remove timestamps outside the window
     this.rateLimitState.messageTimestamps = this.rateLimitState.messageTimestamps.filter(
       ts => now - ts < RATE_LIMIT_WINDOW_MS
@@ -497,7 +497,7 @@ private torCircuitListener?: () => void;
     const recentMessages = this.rateLimitState.messageTimestamps.filter(
       ts => now - ts < 1000
     ).length;
-    
+
     if (recentMessages >= MAX_BURST_MESSAGES) {
       this.rateLimitState.violationCount += 1;
       this.metrics.securityEvents.rateLimitHits += 1;
@@ -506,13 +506,13 @@ private torCircuitListener?: () => void;
         limit: MAX_BURST_MESSAGES,
         violations: this.rateLimitState.violationCount
       });
-      
+
       if (this.rateLimitState.violationCount >= RATE_LIMIT_VIOLATION_THRESHOLD) {
         SecureAuditLogger.warn('ws', 'rate-limit', 'threshold-exceeded', {
           violations: this.rateLimitState.violationCount
         });
       }
-      
+
       return false;
     }
 
@@ -654,14 +654,14 @@ private torCircuitListener?: () => void;
       const message = new TextEncoder().encode(payload);
       const signature = PostQuantumUtils.base64ToUint8Array(envelope.signature);
       const valid = PostQuantumSignature.verify(signature, message, this.serverSignatureKey);
-      
+
       if (!valid) {
         this.metrics.securityEvents.signatureFailures += 1;
         SecurityAuditLogger.log('error', 'ws-signature-invalid', {
           messageId: envelope.messageId
         });
       }
-      
+
       return valid;
     } catch (_error) {
       this.metrics.securityEvents.signatureFailures += 1;
@@ -757,7 +757,7 @@ private torCircuitListener?: () => void;
     if (this.lastHeartbeatSent) {
       const latency = now - this.lastHeartbeatSent;
       this.updateLatencyMetrics(latency);
-      
+
       SecurityAuditLogger.log('info', 'ws-heartbeat-received', {
         latency,
         timestamp: now
@@ -770,7 +770,7 @@ private torCircuitListener?: () => void;
    */
   private handleMissedHeartbeat(): void {
     this.missedHeartbeats += 1;
-    
+
     SecurityAuditLogger.log('warn', 'ws-heartbeat-missed', {
       consecutive: this.missedHeartbeats,
       maxAllowed: MAX_MISSED_HEARTBEATS
@@ -780,7 +780,7 @@ private torCircuitListener?: () => void;
       SecureAuditLogger.error('ws', 'heartbeat', 'connection-lost', {
         missedCount: this.missedHeartbeats
       });
-      
+
       // Connection appears dead, trigger reconnect
       this.handleConnectionError(new Error('Heartbeat timeout'), 'heartbeat-timeout');
     }
@@ -791,12 +791,12 @@ private torCircuitListener?: () => void;
    */
   private updateLatencyMetrics(latency: number): void {
     this.metrics.lastLatencyMs = latency;
-    
+
     if (this.metrics.averageLatencyMs === 0) {
       this.metrics.averageLatencyMs = latency;
     } else {
-      this.metrics.averageLatencyMs = 
-        this.metrics.averageLatencyMs * (1 - LATENCY_SAMPLE_WEIGHT) + 
+      this.metrics.averageLatencyMs =
+        this.metrics.averageLatencyMs * (1 - LATENCY_SAMPLE_WEIGHT) +
         latency * LATENCY_SAMPLE_WEIGHT;
     }
   }
@@ -810,7 +810,7 @@ private torCircuitListener?: () => void;
     }
 
     const latency = this.metrics.averageLatencyMs;
-    
+
     if (latency < 100) return 'excellent';
     if (latency < 300) return 'good';
     if (latency < 1000) return 'fair';
@@ -822,7 +822,7 @@ private torCircuitListener?: () => void;
    */
   private checkCircuitBreaker(): boolean {
     const now = Date.now();
-    
+
     if (now < this.circuitBreakerOpenUntil) {
       SecurityAuditLogger.log('warn', 'ws-circuit-breaker-open', {
         opensUntil: this.circuitBreakerOpenUntil,
@@ -839,15 +839,15 @@ private torCircuitListener?: () => void;
    */
   private recordCircuitBreakerFailure(): void {
     this.circuitBreakerFailures += 1;
-    
+
     if (this.circuitBreakerFailures >= CIRCUIT_BREAKER_THRESHOLD) {
       this.circuitBreakerOpenUntil = Date.now() + CIRCUIT_BREAKER_TIMEOUT_MS;
-      
+
       SecurityAuditLogger.log('error', 'ws-circuit-breaker-triggered', {
         failures: this.circuitBreakerFailures,
         openDurationMs: CIRCUIT_BREAKER_TIMEOUT_MS
       });
-      
+
       // Reset failure count
       this.circuitBreakerFailures = 0;
     }
@@ -880,7 +880,7 @@ private torCircuitListener?: () => void;
       try {
         callback(health);
       } catch (_error) {
-        
+
       }
     }
   }
@@ -889,8 +889,8 @@ private torCircuitListener?: () => void;
    * Get comprehensive connection health metrics
    */
   public getConnectionHealth(): ConnectionHealth {
-    const sessionAge = this.sessionKeyMaterial 
-      ? Date.now() - this.sessionKeyMaterial.establishedAt 
+    const sessionAge = this.sessionKeyMaterial
+      ? Date.now() - this.sessionKeyMaterial.establishedAt
       : null;
 
     const torHealth = torNetworkManager.isSupported()
@@ -926,20 +926,20 @@ private torCircuitListener?: () => void;
       try {
         const stats = torNetworkManager.getStats?.();
         if (stats && stats.lastCircuitRotation) {
-          if (this.lastTorCircuitRotation && 
-              stats.lastCircuitRotation > this.lastTorCircuitRotation) {
+          if (this.lastTorCircuitRotation &&
+            stats.lastCircuitRotation > this.lastTorCircuitRotation) {
             this.handleTorCircuitRotation();
           }
           this.lastTorCircuitRotation = stats.lastCircuitRotation;
         }
       } catch (_error) {
-        
+
       }
     };
 
     this.torCircuitListener = checkCircuitRotation;
-    
-// Check periodically
+
+    // Check periodically
     this.torCircuitInterval = setInterval(checkCircuitRotation, 10000);
   }
 
@@ -999,7 +999,7 @@ private torCircuitListener?: () => void;
       }
 
       const adapted = Math.floor(baseTimeout * multiplier);
-      
+
       SecurityAuditLogger.log('info', 'ws-tor-timeout-adapted', {
         base: baseTimeout,
         adapted,
@@ -1009,9 +1009,9 @@ private torCircuitListener?: () => void;
       });
 
       return adapted;
-      } catch (_error) {
-        return baseTimeout;
-      }
+    } catch (_error) {
+      return baseTimeout;
+    }
   }
 
   /**
@@ -1145,9 +1145,9 @@ private torCircuitListener?: () => void;
 
   private async dispatchPayload(data: unknown, allowQueue: boolean): Promise<void> {
     const msgType = typeof data === 'string' ? (JSON.parse(data).type || 'unknown') : (data as any)?.type || 'unknown';
-    
+
     const needsBypassEncryption = this.shouldBypassEncryption(data);
-    
+
     if (needsBypassEncryption) {
       const message = typeof data === 'string' ? data : JSON.stringify(data);
       this.metrics.messagesSent += 1;
@@ -1156,7 +1156,7 @@ private torCircuitListener?: () => void;
       await this.transmit(message);
       return;
     }
-    
+
     // Check circuit breaker
     if (!this.checkCircuitBreaker()) {
       if (allowQueue) {
@@ -1186,17 +1186,66 @@ private torCircuitListener?: () => void;
     }
 
     if (this.isGloballyRateLimited()) {
-      SecureAuditLogger.warn('ws', 'send', 'rate-limited', { queued: allowQueue });
-      if (allowQueue) {
-        this.enqueuePending({
-          id: uuidv4(),
-          payload: data,
-          createdAt: Date.now(),
-          attempt: 0,
-          flushAfter: this.globalRateLimitUntil
-        });
+      const remainingMs = this.globalRateLimitUntil - Date.now();
+      const remainingSeconds = Math.max(1, Math.ceil(remainingMs / 1000));
+
+      SecureAuditLogger.warn('ws', 'send', 'rate-limited', {
+        queued: allowQueue,
+        remainingSeconds
+      });
+
+      // Check if it's an auth message
+      let isAuthMessage = false;
+      let msgType = '';
+
+      if (typeof data === 'string') {
+        try {
+          const parsed = JSON.parse(data);
+          msgType = parsed?.type || '';
+          isAuthMessage = msgType === 'account-sign-in' ||
+            msgType === 'account-sign-up' ||
+            msgType === 'password-hash' ||
+            msgType === 'passphrase-hash' ||
+            msgType === 'server-password';
+        } catch { }
+      } else if (typeof data === 'object' && data !== null) {
+        msgType = (data as any)?.type || '';
+        isAuthMessage = msgType === 'account-sign-in' ||
+          msgType === 'account-sign-up' ||
+          msgType === 'password-hash' ||
+          msgType === 'passphrase-hash' ||
+          msgType === 'server-password';
       }
-      return;
+
+      if (isAuthMessage) {
+        // Block auth messages client-side to prevent server spam
+        // Dispatch event with countdown info for live timer
+        console.log('[WS] Blocking auth message - rate limited');
+        try {
+          const event = new CustomEvent('auth-rate-limited', {
+            detail: {
+              remainingSeconds,
+              rateLimitUntil: this.globalRateLimitUntil
+            }
+          });
+          window.dispatchEvent(event);
+        } catch (e) {
+          console.error('[WS] Failed to dispatch event:', e);
+        }
+        return;
+      } else {
+        // Queue non-auth messages
+        if (allowQueue) {
+          this.enqueuePending({
+            id: uuidv4(),
+            payload: data,
+            createdAt: Date.now(),
+            attempt: 0,
+            flushAfter: this.globalRateLimitUntil
+          });
+        }
+        return;
+      }
     }
 
     if (this.lifecycleState !== 'connected') {
@@ -1232,14 +1281,14 @@ private torCircuitListener?: () => void;
     await this.ensureSessionKeys(false);
 
     const message = await this.prepareSecureEnvelope(data);
-    
+
     // Update metrics
     this.metrics.messagesSent += 1;
     this.metrics.bytesSent += message.length;
-    
+
     // Reset circuit breaker on successful send
     this.resetCircuitBreaker();
-    
+
     await this.transmit(message);
   }
 
@@ -1358,29 +1407,29 @@ private torCircuitListener?: () => void;
     }
 
     let serverMaterial = this.serverKeyMaterial;
-    
+
     if (!serverMaterial) {
       const startTime = Date.now();
       const timeout = 10000;
       let requested = false;
-      
+
       while (!serverMaterial && (Date.now() - startTime) < timeout) {
         if (!requested && (Date.now() - startTime) > 500) {
           try {
             await this.transmit(JSON.stringify({ type: 'request-server-public-key' }));
             SecureAuditLogger.info('ws', 'handshake', 'requested-server-keys', {});
-          } catch {}
+          } catch { }
           requested = true;
         }
         await new Promise(resolve => setTimeout(resolve, 100));
         serverMaterial = this.serverKeyMaterial;
       }
-      
+
       if (!serverMaterial) {
         throw new Error('Server key material unavailable (timeout)');
       }
     }
-    
+
     this.serverKeyMaterial = serverMaterial;
 
     if (this.handshakeInFlight) {
@@ -1434,7 +1483,7 @@ private torCircuitListener?: () => void;
         establishedAt: timestamp,
         fingerprint: serverMaterial.fingerprint
       };
-      
+
       // Store server's Dilithium public key for signature verification
       this.serverSignatureKey = serverMaterial.dilithiumPublicKey;
 
@@ -1474,20 +1523,20 @@ private torCircuitListener?: () => void;
             matches: msg.sessionId === sessionId,
             messageType: msg.type
           });
-          
+
           if (msg.sessionId === sessionId) {
             clearTimeout(timeout);
             this.unregisterMessageHandler('pq-handshake-ack');
-            
-            if (this.sessionKeyMaterial?.fingerprint && 
-                this.sessionKeyMaterial.fingerprint !== pendingSession.fingerprint) {
+
+            if (this.sessionKeyMaterial?.fingerprint &&
+              this.sessionKeyMaterial.fingerprint !== pendingSession.fingerprint) {
               this.previousSessionFingerprint = this.sessionKeyMaterial.fingerprint;
               this.sessionTransitionTime = Date.now();
             }
-            
+
             this.sessionKeyMaterial = pendingSession;
             this.sessionNonceCounter = 0;
-            
+
             SecureAuditLogger.info('ws', 'handshake', 'acknowledged', {
               sessionId: sessionId.slice(0, 16)
             });
@@ -1506,7 +1555,7 @@ private torCircuitListener?: () => void;
           sessionId: sessionId.slice(0, 16)
         });
       });
-      
+
       await this.transmit(JSON.stringify(handshakeMessage));
       SecureAuditLogger.info('ws', 'handshake', 'sent', {
         sessionId: sessionId.slice(0, 8),
@@ -1518,9 +1567,9 @@ private torCircuitListener?: () => void;
       this.handshakeAttempts = 0;
       this.seenMessageFingerprints.clear();
       this.scheduleRekey();
-      
-      try { 
-        void this.attemptTokenValidationOnce('pq-handshake-complete'); 
+
+      try {
+        void this.attemptTokenValidationOnce('pq-handshake-complete');
       } catch (tokenError) {
         SecureAuditLogger.warn('ws', 'handshake', 'token-validation-error', {
           error: tokenError instanceof Error ? tokenError.message : String(tokenError)
@@ -1634,7 +1683,7 @@ private torCircuitListener?: () => void;
 
     const isEncryptedMessage = canonical.type === 'encrypted-message';
     let payloadToEncrypt: any;
-    
+
     if (isEncryptedMessage && canonical.body.to && canonical.body.encryptedPayload) {
       payloadToEncrypt = {
         to: canonical.body.to,
@@ -1692,13 +1741,13 @@ private torCircuitListener?: () => void;
 
     const currentFingerprint = this.sessionKeyMaterial.fingerprint;
     const receivedFingerprint = envelope.sessionFingerprint;
-    
+
     if (receivedFingerprint !== currentFingerprint) {
       const now = Date.now();
-      const isWithinGracePeriod = this.previousSessionFingerprint && 
-                                  this.sessionTransitionTime &&
-                                  (now - this.sessionTransitionTime) < SESSION_FAILOVER_GRACE_PERIOD_MS;
-      
+      const isWithinGracePeriod = this.previousSessionFingerprint &&
+        this.sessionTransitionTime &&
+        (now - this.sessionTransitionTime) < SESSION_FAILOVER_GRACE_PERIOD_MS;
+
       if (isWithinGracePeriod && receivedFingerprint === this.previousSessionFingerprint) {
         if (!this.validateTimestamp(envelope.timestamp)) {
           this.recordCircuitBreakerFailure();
@@ -1709,7 +1758,7 @@ private torCircuitListener?: () => void;
         });
         return null;
       }
-      
+
       this.metrics.securityEvents.fingerprintMismatches += 1;
       SecureAuditLogger.warn('ws', 'decrypt', 'fingerprint-mismatch', {
         expected: currentFingerprint,
@@ -1770,7 +1819,7 @@ private torCircuitListener?: () => void;
           const hasChunk = typeof env?.chunkData === 'string' && env.chunkData.length > 0;
           const len = hasChunk ? env.chunkData.length : 0;
         }
-      } catch {}
+      } catch { }
 
       this.trackMessageFingerprint(messageId, envelope.timestamp ?? Date.now());
 
@@ -1809,13 +1858,13 @@ private torCircuitListener?: () => void;
 
   private async transmit(message: string): Promise<void> {
     const edgeApi = (window as any).edgeApi as { wsSend?: (payload: string) => Promise<any> } | undefined;
-    
+
     if (!edgeApi?.wsSend) {
       throw new Error('edgeApi.wsSend not available');
     }
 
     const result = await edgeApi.wsSend(message);
-    
+
     if (result && result.success === false) {
       throw new Error(result.error || 'Failed to dispatch websocket payload');
     }
@@ -1850,7 +1899,7 @@ private torCircuitListener?: () => void;
       }
 
       let message: any;
-      
+
       if (typeof data === 'object' && data !== null) {
         message = data;
       } else {
@@ -1889,7 +1938,7 @@ private torCircuitListener?: () => void;
           try {
             handler(message);
           } catch (handlerError) {
-            
+
           }
           return;
         }
@@ -1899,56 +1948,56 @@ private torCircuitListener?: () => void;
       if (rawHandler) {
         try {
           rawHandler(message);
-        } catch (handlerError) {}
+        } catch (handlerError) { }
       }
     } catch (_error) {
-      
+
     }
   }
 
   public async attemptTokenValidationOnce(source: string = 'auto'): Promise<void> {
     if (this.tokenValidationAttempted) {
-      try { SecureAuditLogger.info('auth', 'token-validate', 'skip-already-attempted', { source }); } catch {}
+      try { SecureAuditLogger.info('auth', 'token-validate', 'skip-already-attempted', { source }); } catch { }
       return;
     }
     this.tokenValidationAttempted = true;
     try {
       const api = (window as any).electronAPI;
       if (!api?.secureStore) {
-        try { SecureAuditLogger.warn('auth', 'token-validate', 'secure-store-missing', { source }); } catch {}
+        try { SecureAuditLogger.warn('auth', 'token-validate', 'secure-store-missing', { source }); } catch { }
         return;
       }
-      try { await api.secureStore.init?.(); } catch { try { SecureAuditLogger.warn('auth', 'token-validate', 'secure-store-init-failed', { source }); } catch {} }
+      try { await api.secureStore.init?.(); } catch { try { SecureAuditLogger.warn('auth', 'token-validate', 'secure-store-init-failed', { source }); } catch { } }
       const inst = api?.instanceId ? String(api.instanceId) : '1';
-      try { SecureAuditLogger.info('auth', 'token-validate', 'lookup', { slot: `tok:${inst}`, instanceId: inst, source }); } catch {}
+      try { SecureAuditLogger.info('auth', 'token-validate', 'lookup', { slot: `tok:${inst}`, instanceId: inst, source }); } catch { }
       const raw = await api.secureStore.get?.(`tok:${inst}`);
       if (!raw || typeof raw !== 'string') {
-        try { SecureAuditLogger.warn('auth', 'token-validate', 'no-tokens', { slot: `tok:${inst}`, instanceId: inst, source }); } catch {}
+        try { SecureAuditLogger.warn('auth', 'token-validate', 'no-tokens', { slot: `tok:${inst}`, instanceId: inst, source }); } catch { }
         return;
       }
       let parsed: any;
       try { parsed = JSON.parse(raw); } catch {
-      try { SecureAuditLogger.warn('auth', 'token-validate', 'parse-failed', { source }); } catch {}
+        try { SecureAuditLogger.warn('auth', 'token-validate', 'parse-failed', { source }); } catch { }
         return;
       }
       const accessToken = typeof parsed?.a === 'string' ? parsed.a : '';
       const refreshToken = typeof parsed?.r === 'string' ? parsed.r : '';
       if (!accessToken || !refreshToken) {
-        try { SecureAuditLogger.warn('auth', 'token-validate', 'tokens-incomplete', { hasA: !!accessToken, hasR: !!refreshToken, source }); } catch {}
+        try { SecureAuditLogger.warn('auth', 'token-validate', 'tokens-incomplete', { hasA: !!accessToken, hasR: !!refreshToken, source }); } catch { }
         return;
       }
       try {
         window.dispatchEvent(new CustomEvent('token-validation-start', { detail: { source } }));
         SecureAuditLogger.info('auth', 'token-validate', 'sending', { source });
-      } catch {}
+      } catch { }
       await this.sendSecureControlMessage({
         type: SignalType.TOKEN_VALIDATION,
         accessToken,
         refreshToken,
       });
-      try { SecureAuditLogger.info('auth', 'token-validate', 'sent', { source }); } catch {}
+      try { SecureAuditLogger.info('auth', 'token-validate', 'sent', { source }); } catch { }
     } catch (e) {
-      try { SecureAuditLogger.error('auth', 'token-validate', 'failed', { source, error: e instanceof Error ? e.message : String(e) }); } catch {}
+      try { SecureAuditLogger.error('auth', 'token-validate', 'failed', { source, error: e instanceof Error ? e.message : String(e) }); } catch { }
     }
   }
 
@@ -1989,7 +2038,7 @@ private torCircuitListener?: () => void;
     if (this.torListener) {
       try {
         torNetworkManager.offConnectionChange(this.torListener);
-      } catch {}
+      } catch { }
       this.torListener = undefined;
     }
 
@@ -2013,10 +2062,10 @@ private torCircuitListener?: () => void;
    */
   public async sendSecureControlMessage(message: any): Promise<void> {
     if (!this.isPQSessionEstablished()) {
-      SecureAuditLogger.warn('ws', 'control-message', 'waiting-for-pq-session', { 
-        messageType: message?.type 
+      SecureAuditLogger.warn('ws', 'control-message', 'waiting-for-pq-session', {
+        messageType: message?.type
       });
-      
+
       if (this.lifecycleState !== 'connected') {
         this.enqueuePending({
           id: uuidv4(),
@@ -2028,25 +2077,25 @@ private torCircuitListener?: () => void;
         });
         return;
       }
-      
+
       const maxWaitTime = 10000; // 10 seconds
       const startTime = Date.now();
       while (!this.isPQSessionEstablished() && (Date.now() - startTime) < maxWaitTime) {
         await new Promise(resolve => setTimeout(resolve, 100));
       }
-      
+
       if (!this.isPQSessionEstablished()) {
         throw new Error('PQ session not established - cannot send control message securely');
       }
     }
-    
+
     // Ensure message is properly formatted
     const payload = typeof message === 'string' ? message : JSON.stringify(message);
-    
-    SecureAuditLogger.info('ws', 'control-message', 'sending-pq-encrypted', { 
-      messageType: message?.type || 'unknown' 
+
+    SecureAuditLogger.info('ws', 'control-message', 'sending-pq-encrypted', {
+      messageType: message?.type || 'unknown'
     });
-    
+
     // Send via PQ envelope
     await this.dispatchPayload(payload, true);
   }
@@ -2061,15 +2110,15 @@ private torCircuitListener?: () => void;
   }, serverId?: string): void {
     try {
       const kyberPublicKey = PostQuantumUtils.base64ToUint8Array(hybridKeys.kyberPublicBase64);
-      const dilithiumPublicKey = 
-        hybridKeys.dilithiumPublicBase64 
+      const dilithiumPublicKey =
+        hybridKeys.dilithiumPublicBase64
           ? PostQuantumUtils.base64ToUint8Array(hybridKeys.dilithiumPublicBase64)
           : undefined;
       const x25519PublicKey =
         hybridKeys.x25519PublicBase64
           ? PostQuantumUtils.base64ToUint8Array(hybridKeys.x25519PublicBase64)
           : undefined;
-      
+
       const fingerprint = this.computeServerFingerprint({
         kyber: hybridKeys.kyberPublicBase64,
         dilithium: hybridKeys.dilithiumPublicBase64 || '',

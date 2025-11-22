@@ -1471,6 +1471,7 @@ const ChatApp: React.FC<ChatAppProps> = () => {
           recoveryActive={Authentication.recoveryActive}
           pseudonym={Authentication.loginUsernameRef.current || ''}
         />
+        <Toaster position="top-right" theme={theme as any} richColors toastOptions={{ className: 'select-none' }} />
       </div>
     );
   }

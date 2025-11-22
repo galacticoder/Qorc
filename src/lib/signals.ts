@@ -67,7 +67,7 @@ class SecureTokenStorage {
   static clear(): void {
     try {
       (window as any).electronAPI?.secureStore?.remove?.(this.keyForInstance());
-    } catch {}
+    } catch { }
   }
 
   static clearEncryptionKey(): void {
@@ -180,7 +180,7 @@ export async function handleSignalMessages(data: any, handlers: SignalHandlers) 
       case SignalType.SERVER_PUBLIC_KEY: {
         const rawKeys = data?.hybridKeys;
         const serverId = data?.serverId;
-        
+
         if (!rawKeys) {
           console.error('[SIGNALS] SERVER_PUBLIC_KEY missing hybridKeys!');
           SecureAuditLogger.warn('signals', 'server-key', 'missing-keys', {});
@@ -196,12 +196,12 @@ export async function handleSignalMessages(data: any, handlers: SignalHandlers) 
 
         try {
           websocketClient.setServerKeyMaterial(hybridKeys as any, serverId);
-          
+
           if (serverId) {
             clusterKeyManager.updateServerKeys(serverId, hybridKeys as any);
           }
-          
-          try { const { encryptedStorage } = await import('./encrypted-storage'); await encryptedStorage.setItem('securechat_server_pin_v2', JSON.stringify(hybridKeys)); } catch {}
+
+          try { const { encryptedStorage } = await import('./encrypted-storage'); await encryptedStorage.setItem('securechat_server_pin_v2', JSON.stringify(hybridKeys)); } catch { }
         } catch (_err) {
           SecureAuditLogger.error('signals', 'server-key', 'persist-failed', { error: (_err as Error).message });
         }
@@ -227,12 +227,12 @@ export async function handleSignalMessages(data: any, handlers: SignalHandlers) 
               : user
           )
         );
-        
+
         // Trigger event to process queued messages for this user
         window.dispatchEvent(new CustomEvent('user-keys-available', {
           detail: { username, hybridKeys: sanitized }
         }));
-        
+
         break;
       }
 
@@ -241,7 +241,7 @@ export async function handleSignalMessages(data: any, handlers: SignalHandlers) 
           SecureAuditLogger.warn('signals', 'pq-session', 'missing-server-keys', {});
           return;
         }
-        try { const { encryptedStorage } = await import('./encrypted-storage'); await encryptedStorage.setItem('securechat_server_pin_v2', JSON.stringify(data.serverKeys)); } catch {}
+        try { const { encryptedStorage } = await import('./encrypted-storage'); await encryptedStorage.setItem('securechat_server_pin_v2', JSON.stringify(data.serverKeys)); } catch { }
         (websocketClient as any).initiateSessionKeyExchange?.(data.serverKeys);
         break;
       }
@@ -277,7 +277,7 @@ export async function handleSignalMessages(data: any, handlers: SignalHandlers) 
 
         if (recoveredUser && /^[a-zA-Z0-9._-]{3,100}$/.test(recoveredUser)) {
           loginUsernameRef && (loginUsernameRef.current = recoveredUser);
-          try { (await import('./encrypted-storage')).syncEncryptedStorage.setItem('last_authenticated_username', recoveredUser); } catch {}
+          try { (await import('./encrypted-storage')).syncEncryptedStorage.setItem('last_authenticated_username', recoveredUser); } catch { }
         } else {
           SecureAuditLogger.warn('signals', 'auth-success', 'invalid-username', {});
           recoveredUser = '';
@@ -302,16 +302,16 @@ export async function handleSignalMessages(data: any, handlers: SignalHandlers) 
           return;
         }
 
-        try { SecureAuditLogger.info('auth', 'token-validate', 'response', { valid: !!(data as any).valid, error: (data as any)?.error || null }); } catch {}
+        try { SecureAuditLogger.info('auth', 'token-validate', 'response', { valid: !!(data as any).valid, error: (data as any)?.error || null }); } catch { }
 
         if (data.valid) {
           if (typeof data.username === 'string' && data.username) {
             // Persist and set username early
             if (loginUsernameRef) loginUsernameRef.current = data.username;
-            try { (await import('./encrypted-storage')).syncEncryptedStorage.setItem('last_authenticated_username', data.username); } catch {}
+            try { (await import('./encrypted-storage')).syncEncryptedStorage.setItem('last_authenticated_username', data.username); } catch { }
             Authentication?.setUsername?.(data.username);
           }
-          try { setLoginError?.(''); } catch {}
+          try { setLoginError?.(''); } catch { }
 
           // Load or create device-bound vault key (but DO NOT use it as DB key)
           let vaultKey: CryptoKey | null = null;
@@ -352,7 +352,7 @@ export async function handleSignalMessages(data: any, handlers: SignalHandlers) 
                 const SKM = (mod as any).SecureKeyManager || (mod as any).default;
                 Authentication.keyManagerRef.current = new SKM(loginUsernameRef!.current);
               }
-              try { await Authentication.keyManagerRef.current!.initializeWithMasterKey(masterKeyBytes); } catch {}
+              try { await Authentication.keyManagerRef.current!.initializeWithMasterKey(masterKeyBytes); } catch { }
               // Ensure local PQ keypair exists; generate and store if missing
               try {
                 const existingKeys = await Authentication.keyManagerRef.current!.getKeys().catch(() => null);
@@ -361,12 +361,12 @@ export async function handleSignalMessages(data: any, handlers: SignalHandlers) 
                   const pair = await CryptoUtils.Hybrid.generateHybridKeyPair();
                   await Authentication.keyManagerRef.current!.storeKeys(pair);
                 }
-              } catch {}
+              } catch { }
             } finally {
-              try { masterKeyBytes.fill(0); } catch {}
+              try { masterKeyBytes.fill(0); } catch { }
             }
           } else {
-            try { setShowPassphrasePrompt?.(true); setAuthStatus?.('Passphrase required to unlock local keys'); } catch {}
+            try { setShowPassphrasePrompt?.(true); setAuthStatus?.('Passphrase required to unlock local keys'); } catch { }
           }
 
           try {
@@ -379,7 +379,7 @@ export async function handleSignalMessages(data: any, handlers: SignalHandlers) 
                   const pair = await CryptoUtils.Hybrid.generateHybridKeyPair();
                   await Authentication.keyManagerRef.current.storeKeys(pair);
                 }
-              } catch {}
+              } catch { }
               const publicKeys = await Authentication.keyManagerRef.current.getPublicKeys();
               if (publicKeys) {
                 const keysToSend = {
@@ -398,10 +398,10 @@ export async function handleSignalMessages(data: any, handlers: SignalHandlers) 
                     }
                   );
                   websocketClient.send(JSON.stringify({ type: SignalType.HYBRID_KEYS_UPDATE, userData: encryptedHybridKeys }));
-                } catch {}
+                } catch { }
               }
             }
-          } catch {}
+          } catch { }
 
           // Configure Signal storage key using PQ-only material (Kyber secret preferred, passphrase fallback)
           try {
@@ -425,32 +425,32 @@ export async function handleSignalMessages(data: any, handlers: SignalHandlers) 
                 }
                 if (derived) {
                   const keyB64 = (CryptoUtils as any).Base64.arrayBufferToBase64(derived);
-                  try { await (window as any).edgeApi.setSignalStorageKey({ keyBase64: keyB64 }); } catch {}
+                  try { await (window as any).edgeApi.setSignalStorageKey({ keyBase64: keyB64 }); } catch { }
                   try {
                     const existing = await (window as any).edgeApi.getPreKeyBundle?.({ username: loginUsernameRef.current });
                     if (!existing || !existing.identityKeyBase64) {
-                      try { await (window as any).edgeApi.generateIdentity?.({ username: loginUsernameRef.current }); } catch {}
-                      try { await (window as any).edgeApi.generatePreKeys?.({ username: loginUsernameRef.current, startId: 1, count: 100 }); } catch {}
+                      try { await (window as any).edgeApi.generateIdentity?.({ username: loginUsernameRef.current }); } catch { }
+                      try { await (window as any).edgeApi.generatePreKeys?.({ username: loginUsernameRef.current, startId: 1, count: 100 }); } catch { }
                     }
-                    try { await (window as any).edgeApi.trustPeerIdentity?.({ selfUsername: loginUsernameRef.current, peerUsername: loginUsernameRef.current, deviceId: 1 }); } catch {}
+                    try { await (window as any).edgeApi.trustPeerIdentity?.({ selfUsername: loginUsernameRef.current, peerUsername: loginUsernameRef.current, deviceId: 1 }); } catch { }
                     try {
                       const bundle = await (window as any).edgeApi.getPreKeyBundle?.({ username: loginUsernameRef.current });
                       if (bundle && !bundle.error) {
                         await websocketClient.sendSecureControlMessage({ type: SignalType.LIBSIGNAL_PUBLISH_BUNDLE, bundle });
                       }
-                    } catch {}
-                  } catch {}
-                  try { if ((derived as any)?.fill) (derived as any).fill(0); } catch {}
+                    } catch { }
+                  } catch { }
+                  try { if ((derived as any)?.fill) (derived as any).fill(0); } catch { }
                 }
-              } catch {}
+              } catch { }
             }
-          } catch {}
+          } catch { }
 
           // Mark authenticated/logged-in
           setAccountAuthenticated?.(true);
           setIsLoggedIn?.(true);
           Authentication?.setMaxStepReached?.('passphrase');
-          try { Authentication?.setTokenValidationInProgress?.(false); } catch {}
+          try { Authentication?.setTokenValidationInProgress?.(false); } catch { }
 
           if (data.tokens?.accessToken && data.tokens.refreshToken) {
             clearTokenEncryptionKey();
@@ -463,11 +463,11 @@ export async function handleSignalMessages(data: any, handlers: SignalHandlers) 
               const inst = api?.instanceId ? String(api.instanceId) : '1';
               const verify = api?.secureStore?.get ? await api.secureStore.get(`tok:${inst}`) : null;
               SecureAuditLogger.info('auth', 'tokens', 'persist-verify', { ok: !!ok, hasValue: typeof verify === 'string', instanceId: inst });
-            } catch {}
+            } catch { }
           }
         } else {
           if (Authentication?.accountAuthenticated || Authentication?.isLoggedIn) {
-            try { SecureAuditLogger.info('auth', 'token-validate', 'ignored-stale-failure', {}); } catch {}
+            try { SecureAuditLogger.info('auth', 'token-validate', 'ignored-stale-failure', {}); } catch { }
             break;
           }
 
@@ -477,25 +477,25 @@ export async function handleSignalMessages(data: any, handlers: SignalHandlers) 
             setAuthStatus?.('Refreshing session...');
             const tokens = await retrieveAuthTokens();
             const rt = tokens?.refreshToken;
-            try { SecureAuditLogger.info('auth', 'refresh', 'start', { hasRefreshToken: !!rt }); } catch {}
+            try { SecureAuditLogger.info('auth', 'refresh', 'start', { hasRefreshToken: !!rt }); } catch { }
             if (rt && (window as any).edgeApi?.refreshTokens) {
-              try { SecureAuditLogger.info('auth', 'refresh', 'challenge', {}); } catch {}
+              try { SecureAuditLogger.info('auth', 'refresh', 'challenge', {}); } catch { }
               const res = await (window as any).edgeApi.refreshTokens({ refreshToken: rt });
-              try { SecureAuditLogger.info('auth', 'refresh', 'result', { success: !!res?.success, status: res?.status || null, hasTokens: !!(res?.tokens?.accessToken && res?.tokens?.refreshToken) }); } catch {}
+              try { SecureAuditLogger.info('auth', 'refresh', 'result', { success: !!res?.success, status: res?.status || null, hasTokens: !!(res?.tokens?.accessToken && res?.tokens?.refreshToken) }); } catch { }
               if (res?.success && res.tokens?.accessToken && res.tokens?.refreshToken) {
                 await persistAuthTokens({ accessToken: res.tokens.accessToken, refreshToken: res.tokens.refreshToken });
-                try { await websocketClient.attemptTokenValidationOnce?.('refresh'); } catch {}
+                try { await websocketClient.attemptTokenValidationOnce?.('refresh'); } catch { }
                 setAuthStatus?.('');
                 setTokenValidationInProgress?.(false);
                 break;
               }
             } else {
-              try { SecureAuditLogger.warn('auth', 'refresh', 'edge-api-missing', { hasEdgeApi: !!(window as any).edgeApi, hasMethod: !!(window as any).edgeApi?.refreshTokens }); } catch {}
+              try { SecureAuditLogger.warn('auth', 'refresh', 'edge-api-missing', { hasEdgeApi: !!(window as any).edgeApi, hasMethod: !!(window as any).edgeApi?.refreshTokens }); } catch { }
             }
           } catch (e) {
             SecureAuditLogger.error('auth', 'refresh', 'failed', { error: (e as Error)?.message || String(e) });
           } finally {
-            try { setAuthStatus?.(''); setTokenValidationInProgress?.(false); } catch {}
+            try { setAuthStatus?.(''); setTokenValidationInProgress?.(false); } catch { }
           }
 
           await clearAuthTokens();
@@ -503,7 +503,7 @@ export async function handleSignalMessages(data: any, handlers: SignalHandlers) 
           setAccountAuthenticated?.(false);
           Authentication?.setMaxStepReached?.('login');
           setShowPassphrasePrompt?.(false);
-          try { Authentication?.setTokenValidationInProgress?.(false); } catch {}
+          try { Authentication?.setTokenValidationInProgress?.(false); } catch { }
           if (data.error) {
             setLoginError?.(`Token validation failed: ${data.message}`);
           }
@@ -521,7 +521,7 @@ export async function handleSignalMessages(data: any, handlers: SignalHandlers) 
         const userCandidate = typeof data?.username === 'string' ? data.username.trim() : loginUsernameRef?.current;
         if (userCandidate) {
           if (loginUsernameRef) loginUsernameRef.current = userCandidate;
-          try { (await import('./encrypted-storage')).syncEncryptedStorage.setItem('last_authenticated_username', userCandidate as string); } catch {}
+          try { (await import('./encrypted-storage')).syncEncryptedStorage.setItem('last_authenticated_username', userCandidate as string); } catch { }
         }
 
         if (data?.tokens?.accessToken && data.tokens.refreshToken) {
@@ -535,13 +535,13 @@ export async function handleSignalMessages(data: any, handlers: SignalHandlers) 
             const inst = api?.instanceId ? String(api.instanceId) : '1';
             const verify = api?.secureStore?.get ? await api.secureStore.get(`tok:${inst}`) : null;
             SecureAuditLogger.info('auth', 'tokens', 'persist-verify', { ok: !!ok, hasValue: typeof verify === 'string', instanceId: inst });
-          } catch {}
+          } catch { }
         }
-        
+
         setIsSubmittingAuth?.(false);
         break;
       }
-      
+
       case SignalType.PASSPHRASE_HASH: {
         const requiredFields = ['version', 'algorithm', 'salt', 'memoryCost', 'timeCost', 'parallelism'];
         const hasAllFields = requiredFields.every((field) => field in (data ?? {}));
@@ -567,7 +567,7 @@ export async function handleSignalMessages(data: any, handlers: SignalHandlers) 
               missing,
               raw: data
             });
-          } catch {}
+          } catch { }
           setPassphraseHashParams?.(null);
         }
 
@@ -600,7 +600,7 @@ export async function handleSignalMessages(data: any, handlers: SignalHandlers) 
             setAccountAuthenticated?.(false);
             setIsLoggedIn?.(false);
             setShowPassphrasePrompt?.(false);
-          } catch {}
+          } catch { }
         }
         break;
       }
@@ -646,48 +646,48 @@ export async function handleSignalMessages(data: any, handlers: SignalHandlers) 
         try {
           const currentUser = loginUsernameRef?.current;
           const targetUser = data?.username;
-          
+
           if (!data?.success || data?.error || !data?.bundle) {
             SecureAuditLogger.warn('signals', 'libsignal', 'bundle-request-failed', { hasError: !!data?.error });
-            window.dispatchEvent(new CustomEvent('libsignal-bundle-failed', { 
-              detail: { peer: targetUser, error: data?.error || 'Bundle not available' } 
+            window.dispatchEvent(new CustomEvent('libsignal-bundle-failed', {
+              detail: { peer: targetUser, error: data?.error || 'Bundle not available' }
             }));
             return;
           }
-          
+
           if (!currentUser || !targetUser) {
             SecureAuditLogger.warn('signals', 'libsignal', 'missing-fields', {});
             return;
           }
-          
+
           // Check if session already exists before processing bundle
           await new Promise(resolve => setTimeout(resolve, 0));
-          const sessionCheck = await (window as any).edgeApi?.hasSession?.({ 
-            selfUsername: currentUser, 
-            peerUsername: targetUser, 
-            deviceId: 1 
+          const sessionCheck = await (window as any).edgeApi?.hasSession?.({
+            selfUsername: currentUser,
+            peerUsername: targetUser,
+            deviceId: 1
           });
           await new Promise(resolve => setTimeout(resolve, 0));
-          
+
           if (sessionCheck?.hasSession) {
             break;
           }
-          
+
           // Only process bundle if we do not already have a session with this peer
           await new Promise(resolve => setTimeout(resolve, 0));
           const result = await (window as any).edgeApi?.processPreKeyBundle?.({ selfUsername: currentUser, peerUsername: targetUser, bundle: data.bundle });
           await new Promise(resolve => setTimeout(resolve, 0));
-          
+
           if (!result?.success) {
             throw new Error(result?.error || 'Failed to process pre-key bundle');
           }
-          
-          
+
+
           await new Promise(resolve => setTimeout(resolve, 0));
           const confirm = await (window as any).edgeApi?.hasSession?.({ selfUsername: currentUser, peerUsername: targetUser, deviceId: 1 });
           await new Promise(resolve => setTimeout(resolve, 0));
           if (confirm?.hasSession) {
-            try { await (window as any).edgeApi?.trustPeerIdentity?.({ selfUsername: currentUser, peerUsername: targetUser, deviceId: 1 }); } catch {}
+            try { await (window as any).edgeApi?.trustPeerIdentity?.({ selfUsername: currentUser, peerUsername: targetUser, deviceId: 1 }); } catch { }
             window.dispatchEvent(new CustomEvent('libsignal-session-ready', { detail: { peer: targetUser } }));
             await websocketClient.sendSecureControlMessage({
               type: SignalType.SESSION_ESTABLISHED,
@@ -702,8 +702,8 @@ export async function handleSignalMessages(data: any, handlers: SignalHandlers) 
           SecureAuditLogger.error('signals', 'libsignal', 'bundle-processing-failed', { error: (_error as Error).message });
           const targetUser = data?.username;
           if (targetUser) {
-            window.dispatchEvent(new CustomEvent('libsignal-bundle-failed', { 
-              detail: { peer: targetUser, error: String(_error) } 
+            window.dispatchEvent(new CustomEvent('libsignal-bundle-failed', {
+              detail: { peer: targetUser, error: String(_error) }
             }));
           }
         }
@@ -739,7 +739,7 @@ export async function handleSignalMessages(data: any, handlers: SignalHandlers) 
             __userExistsDebounce.set(uname, now);
           }
           setTimeout(() => {
-            try { window.dispatchEvent(new CustomEvent('user-exists-response', { detail: data })); } catch {}
+            try { window.dispatchEvent(new CustomEvent('user-exists-response', { detail: data })); } catch { }
           }, 0);
         } catch (_error) {
           SecureAuditLogger.error('signals', 'user-exists', 'dispatch-failed', { error: (_error as Error).message });
@@ -766,10 +766,10 @@ export async function handleSignalMessages(data: any, handlers: SignalHandlers) 
                   }
                   return prev;
                 });
-              } catch {}
+              } catch { }
             }, 0);
           }
-        } catch {}
+        } catch { }
         break;
       }
 
@@ -819,7 +819,7 @@ export async function handleSignalMessages(data: any, handlers: SignalHandlers) 
         }
         break;
       }
-      
+
       case 'libsignal-publish-status': {
         try {
           window.dispatchEvent(new CustomEvent('libsignal-publish-status', { detail: data }));
@@ -848,8 +848,8 @@ export async function handleSignalMessages(data: any, handlers: SignalHandlers) 
         if (setLoginError) {
           setLoginError(`Login error: ${message ?? type}`);
         }
-        try { setAuthStatus?.(''); } catch {}
-        try { setIsSubmittingAuth?.(false); } catch {}
+        try { setAuthStatus?.(''); } catch { }
+        try { setIsSubmittingAuth?.(false); } catch { }
         break;
       }
 
@@ -860,25 +860,30 @@ export async function handleSignalMessages(data: any, handlers: SignalHandlers) 
         const logout = Boolean(data?.logout);
         const category = typeof data?.category === 'string' ? data.category : undefined;
 
-        let extra = '';
-        if (typeof attemptsRemaining === 'number') {
-          extra += ` (${attemptsRemaining} attempt${attemptsRemaining === 1 ? '' : 's'} remaining)`;
-        }
-        if (locked) {
-          extra += `Try again in ${cooldownSeconds}s.`;
-          if (cooldownSeconds && cooldownSeconds > 0) {
-            try {
-              websocketClient.setGlobalRateLimit?.(cooldownSeconds);
-            } catch {}
-          }
+        let errorMessage = message ?? 'Authentication failed';
+
+        if (locked && cooldownSeconds) {
+          errorMessage = `Too many attempts. Try again in ${cooldownSeconds}s.`;
+          try {
+            websocketClient.setGlobalRateLimit?.(cooldownSeconds);
+          } catch { }
+
+          try {
+            setAccountAuthenticated?.(false);
+            setIsLoggedIn?.(false);
+            setShowPassphrasePrompt?.(false);
+            Authentication?.setMaxStepReached?.('login');
+          } catch { }
+        } else if (typeof attemptsRemaining === 'number' && !locked) {
+          errorMessage += ` (${attemptsRemaining} attempt${attemptsRemaining === 1 ? '' : 's'} remaining)`;
         }
 
-        setLoginError?.(`${message ?? 'Authentication failed'}${extra}`.trim());
-        try { setAuthStatus?.(''); } catch {}
-        try { setIsSubmittingAuth?.(false); } catch {}
-        try { window.dispatchEvent(new CustomEvent('auth-error', { detail: { category, code: (data as any)?.code } })); } catch {}
+        setLoginError?.(errorMessage);
+        try { setAuthStatus?.(''); } catch { }
+        try { setIsSubmittingAuth?.(false); } catch { }
+        try { window.dispatchEvent(new CustomEvent('auth-error', { detail: { category, code: (data as any)?.code } })); } catch { }
 
-        if (category === 'passphrase') {
+        if (category === 'passphrase' && !locked) {
           setAccountAuthenticated?.(false);
           setIsLoggedIn?.(false);
           setShowPassphrasePrompt?.(false);
@@ -890,23 +895,23 @@ export async function handleSignalMessages(data: any, handlers: SignalHandlers) 
       case SignalType.SESSION_RESET_REQUEST: {
         const peerUsername = data?.from || data?.username;
         const deviceId = data?.deviceId || 1;
-        
+
         if (!peerUsername || !loginUsernameRef?.current) {
           SecureAuditLogger.warn('signals', 'session-reset', 'missing-peer', {});
           break;
         }
-        
+
         try {
           await (window as any).edgeApi?.deleteSession?.({
             selfUsername: loginUsernameRef.current,
             peerUsername: peerUsername,
             deviceId: deviceId
           });
-          
+
           window.dispatchEvent(new CustomEvent('session-reset-received', {
             detail: { peerUsername, reason: data?.reason || 'peer-request' }
           }));
-          
+
         } catch (_err) {
           SecureAuditLogger.error('signals', 'session-reset', 'delete-failed', {
             error: _err instanceof Error ? _err.message : String(_err),
@@ -915,34 +920,34 @@ export async function handleSignalMessages(data: any, handlers: SignalHandlers) 
         }
         break;
       }
-      
+
       case SignalType.SESSION_ESTABLISHED: {
         // Peer has successfully established their session and is ready to receive messages
         const peerUsername = data?.from || data?.username;
-        
+
         if (!peerUsername) {
           SecureAuditLogger.warn('signals', 'session-established', 'missing-peer', {});
           break;
         }
-      
+
         window.dispatchEvent(new CustomEvent('session-established-received', {
           detail: { fromPeer: peerUsername }
         }));
-        
+
         break;
       }
 
       case SignalType.ERROR: {
         const errorMsg = message || '';
-        
-        try { setIsSubmittingAuth?.(false); } catch {}
-        
+
+        try { setIsSubmittingAuth?.(false); } catch { }
+
         if (errorMsg.includes('Unknown PQ session') || errorMsg.includes('PQ session')) {
           SecureAuditLogger.warn('signals', 'session-error', 'unknown-session', {
             message: errorMsg,
             action: 'rehandshaking'
           });
-          
+
           try {
             websocketClient.resetSessionKeys();
             await websocketClient.performHandshake(false);

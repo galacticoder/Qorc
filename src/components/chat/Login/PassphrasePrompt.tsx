@@ -18,28 +18,28 @@ interface PassphrasePromptProps {
 const PASSPHRASE_MIN_LENGTH = 12;
 const PASSPHRASE_MAX_LENGTH = 1000;
 
-export function PassphrasePrompt({ 
-  mode, 
-  onSubmit, 
-  disabled, 
-  authStatus, 
-  initialPassphrase = "", 
-  initialConfirmPassphrase = "", 
-  onChangePassphrase, 
-  onChangeConfirm 
+export function PassphrasePrompt({
+  mode,
+  onSubmit,
+  disabled,
+  authStatus,
+  initialPassphrase = "",
+  initialConfirmPassphrase = "",
+  onChangePassphrase,
+  onChangeConfirm
 }: PassphrasePromptProps) {
   const [passphrase, setPassphrase] = useState(initialPassphrase);
   const [confirmPassphrase, setConfirmPassphrase] = useState(initialConfirmPassphrase);
   const [isSubmitting, setIsSubmitting] = useState(false);
 
-  const handlePassChange = useCallback((v: string): void => { 
-    setPassphrase(v); 
-    onChangePassphrase?.(v); 
+  const handlePassChange = useCallback((v: string): void => {
+    setPassphrase(v);
+    onChangePassphrase?.(v);
   }, [onChangePassphrase]);
-  
-  const handleConfirm = useCallback((v: string): void => { 
-    setConfirmPassphrase(v); 
-    onChangeConfirm?.(v); 
+
+  const handleConfirm = useCallback((v: string): void => {
+    setConfirmPassphrase(v);
+    onChangeConfirm?.(v);
   }, [onChangeConfirm]);
 
   const isPassphraseValid = useMemo(() => passphrase.length >= PASSPHRASE_MIN_LENGTH, [passphrase]);
@@ -48,7 +48,7 @@ export function PassphrasePrompt({
   const handleSubmit = useCallback(async (e: React.FormEvent): Promise<void> => {
     e.preventDefault();
     if (isSubmitting) return;
-    
+
     const trimmedPassphrase = passphrase.trim();
     if (!trimmedPassphrase) return;
     if (trimmedPassphrase.length < PASSPHRASE_MIN_LENGTH) return;
@@ -68,7 +68,7 @@ export function PassphrasePrompt({
     <form onSubmit={handleSubmit} className="space-y-4">
       {mode === "register" ? (
         <PasswordField
-          label="Secure Encryption Passphrase"
+          label="Encryption Passphrase"
           value={passphrase}
           confirmValue={confirmPassphrase}
           onChange={handlePassChange}
@@ -77,37 +77,30 @@ export function PassphrasePrompt({
           minLength={PASSPHRASE_MIN_LENGTH}
           maxLength={PASSPHRASE_MAX_LENGTH}
           strengthCheck
-          warningMessage={
-            <>
-              This passphrase encrypts all your account data. If you forget it,{" "}
-              <strong>you will lose access</strong> to all your messages and files.
-            </>
-          }
+          warningMessage="This passphrase encrypts your data. Do not forget it."
           disabled={disabled || isSubmitting}
         />
       ) : (
         <div className="space-y-2">
-          <Label htmlFor="passphrase">Secure Encryption Passphrase</Label>
+          <Label htmlFor="passphrase" className="text-muted-foreground font-medium">Encryption Passphrase</Label>
           <Input
             id="passphrase"
             type="password"
-            placeholder="Enter your encryption passphrase"
+            placeholder="Enter your passphrase"
             value={passphrase}
             onChange={(e) => handlePassChange(e.target.value)}
             disabled={disabled || isSubmitting}
             required
             autoComplete="current-password"
             maxLength={PASSPHRASE_MAX_LENGTH}
+            className="bg-background/50 border-border/50 focus:bg-background/80 transition-all duration-200"
           />
-          <div className="text-sm text-muted-foreground">
-            Your passphrase is required to enable blocking functionality and access encrypted data.
-          </div>
         </div>
       )}
 
       <Button
         type="submit"
-        className="w-full"
+        className="w-full font-semibold shadow-lg hover:shadow-xl transition-all duration-200"
         disabled={
           disabled ||
           isSubmitting ||
@@ -116,7 +109,7 @@ export function PassphrasePrompt({
           !isPassphraseValid
         }
       >
-        {isSubmitting ? (authStatus || "Submitting Passphrase...") : "Submit Passphrase"}
+        {isSubmitting ? (authStatus || "Processing...") : "Submit Passphrase"}
       </Button>
     </form>
   );

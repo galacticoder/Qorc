@@ -21,35 +21,35 @@ const USERNAME_MAX_LENGTH = 32;
 const PASSWORD_MAX_LENGTH = 1000;
 const USERNAME_REGEX = /^[a-zA-Z0-9_-]+$/;
 
-export function SignUpForm({ 
-  onSubmit, 
-  disabled, 
-  authStatus, 
+export function SignUpForm({
+  onSubmit,
+  disabled,
+  authStatus,
   hasServerTrustRequest,
-  initialUsername = "", 
-  initialPassword = "", 
-  onChangeUsername, 
-  onChangePassword, 
-  onChangeConfirmPassword 
+  initialUsername = "",
+  initialPassword = "",
+  onChangeUsername,
+  onChangePassword,
+  onChangeConfirmPassword
 }: SignUpFormProps) {
   const [username, setUsername] = useState(initialUsername);
   const [password, setPassword] = useState(initialPassword);
   const [confirmPassword, setConfirmPassword] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
 
-  const handleUsernameChange = useCallback((v: string): void => { 
-    setUsername(v); 
-    onChangeUsername?.(v); 
+  const handleUsernameChange = useCallback((v: string): void => {
+    setUsername(v);
+    onChangeUsername?.(v);
   }, [onChangeUsername]);
-  
-  const handlePasswordChange = useCallback((v: string): void => { 
-    setPassword(v); 
-    onChangePassword?.(v); 
+
+  const handlePasswordChange = useCallback((v: string): void => {
+    setPassword(v);
+    onChangePassword?.(v);
   }, [onChangePassword]);
-  
-  const handleConfirmChange = useCallback((v: string): void => { 
-    setConfirmPassword(v); 
-    onChangeConfirmPassword?.(v); 
+
+  const handleConfirmChange = useCallback((v: string): void => {
+    setConfirmPassword(v);
+    onChangeConfirmPassword?.(v);
   }, [onChangeConfirmPassword]);
 
   const isUsernameValid = useMemo(() => username.trim().length >= USERNAME_MIN_LENGTH, [username]);
@@ -62,7 +62,7 @@ export function SignUpForm({
     if (disabled || isSubmitting || !isFormValid) return;
 
     const sanitizedUsername = username.trim();
-    
+
     if (!USERNAME_REGEX.test(sanitizedUsername)) return;
     if (sanitizedUsername.length < USERNAME_MIN_LENGTH || sanitizedUsername.length > USERNAME_MAX_LENGTH) return;
     if (password.length > PASSWORD_MAX_LENGTH) return;
@@ -78,7 +78,7 @@ export function SignUpForm({
   return (
     <form onSubmit={handleSubmit} className="space-y-4">
       <div className="space-y-2">
-        <Label htmlFor="username">Username</Label>
+        <Label htmlFor="username" className="text-muted-foreground font-medium">Username</Label>
         <Input
           id="username"
           placeholder="Choose your username"
@@ -89,11 +89,12 @@ export function SignUpForm({
           minLength={USERNAME_MIN_LENGTH}
           maxLength={USERNAME_MAX_LENGTH}
           autoComplete="username"
+          className="bg-background/50 border-border/50 focus:bg-background/80 transition-all duration-200"
         />
       </div>
 
       <div className="space-y-2">
-        <Label htmlFor="password">Create Password</Label>
+        <Label htmlFor="password" className="text-muted-foreground font-medium">Create Password</Label>
         <Input
           id="password"
           type="password"
@@ -104,11 +105,12 @@ export function SignUpForm({
           required
           autoComplete="new-password"
           maxLength={PASSWORD_MAX_LENGTH}
+          className="bg-background/50 border-border/50 focus:bg-background/80 transition-all duration-200"
         />
       </div>
 
       <div className="space-y-2">
-        <Label htmlFor="confirmPassword">Confirm Password</Label>
+        <Label htmlFor="confirmPassword" className="text-muted-foreground font-medium">Confirm Password</Label>
         <Input
           id="confirmPassword"
           type="password"
@@ -119,25 +121,26 @@ export function SignUpForm({
           required
           autoComplete="new-password"
           maxLength={PASSWORD_MAX_LENGTH}
+          className="bg-background/50 border-border/50 focus:bg-background/80 transition-all duration-200"
         />
         {!doPasswordsMatch && confirmPassword.length > 0 && (
-          <p className="text-red-500 text-xs">Passwords do not match</p>
+          <p className="text-destructive text-xs font-medium animate-pulse">Passwords do not match</p>
         )}
       </div>
 
-
       {hasServerTrustRequest && !isSubmitting && (
-        <p className="text-amber-600 text-sm text-center">
-          Please verify the server identity before registering
+        <p className="text-destructive text-sm text-center font-medium animate-pulse">
+          Verify server identity before registering
         </p>
       )}
 
       <Button
         type="submit"
-        className="w-full"
+        size="lg"
+        className="w-full h-14 text-base font-semibold transition-all shadow-xl shadow-primary/20 hover:shadow-primary/40 hover:scale-[1.02] active:scale-[0.98] bg-primary hover:bg-primary/90 border-0"
         disabled={disabled || isSubmitting || !isFormValid}
       >
-        {isSubmitting ? (authStatus || "Registering...") : "Register Account"}
+        {isSubmitting ? (authStatus || "Registering...") : "Create Account"}
       </Button>
     </form>
   );

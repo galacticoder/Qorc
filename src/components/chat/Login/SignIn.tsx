@@ -20,31 +20,31 @@ const USERNAME_MAX_LENGTH = 32;
 const PASSWORD_MAX_LENGTH = 1000;
 const USERNAME_REGEX = /^[a-zA-Z0-9_-]+$/;
 
-export function SignInForm({ 
-  onSubmit, 
-  disabled, 
-  authStatus, 
+export function SignInForm({
+  onSubmit,
+  disabled,
+  authStatus,
   hasServerTrustRequest,
-  initialUsername = "", 
-  initialPassword = "", 
-  onChangeUsername, 
-  onChangePassword 
+  initialUsername = "",
+  initialPassword = "",
+  onChangeUsername,
+  onChangePassword
 }: SignInFormProps) {
   const [username, setUsername] = useState(initialUsername);
   const [password, setPassword] = useState(initialPassword);
   const [isSubmitting, setIsSubmitting] = useState(false);
 
-  const handleUsernameChange = useCallback((v: string): void => { 
-    setUsername(v); 
-    onChangeUsername?.(v); 
+  const handleUsernameChange = useCallback((v: string): void => {
+    setUsername(v);
+    onChangeUsername?.(v);
   }, [onChangeUsername]);
-  
-  const handlePasswordChange = useCallback((v: string): void => { 
-    setPassword(v); 
-    onChangePassword?.(v); 
+
+  const handlePasswordChange = useCallback((v: string): void => {
+    setPassword(v);
+    onChangePassword?.(v);
   }, [onChangePassword]);
 
-  const isFormValid = useMemo(() => 
+  const isFormValid = useMemo(() =>
     username.trim().length >= USERNAME_MIN_LENGTH && password.length > 0,
     [username, password]
   );
@@ -54,7 +54,7 @@ export function SignInForm({
     if (disabled || isSubmitting || !isFormValid) return;
 
     const sanitizedUsername = username.trim();
-    
+
     if (!USERNAME_REGEX.test(sanitizedUsername)) return;
     if (sanitizedUsername.length < USERNAME_MIN_LENGTH || sanitizedUsername.length > USERNAME_MAX_LENGTH) return;
     if (password.length < 1 || password.length > PASSWORD_MAX_LENGTH) return;
@@ -70,7 +70,7 @@ export function SignInForm({
   return (
     <form onSubmit={handleSubmit} className="space-y-4">
       <div className="space-y-2">
-        <Label htmlFor="username">Username</Label>
+        <Label htmlFor="username" className="text-muted-foreground font-medium">Username</Label>
         <Input
           id="username"
           placeholder="Enter your username"
@@ -81,11 +81,12 @@ export function SignInForm({
           minLength={USERNAME_MIN_LENGTH}
           maxLength={USERNAME_MAX_LENGTH}
           autoComplete="username"
+          className="bg-background/50 border-border/50 focus:bg-background/80 transition-all duration-200"
         />
       </div>
 
       <div className="space-y-2">
-        <Label htmlFor="password">Password</Label>
+        <Label htmlFor="password" className="text-muted-foreground font-medium">Password</Label>
         <Input
           id="password"
           type="password"
@@ -96,22 +97,23 @@ export function SignInForm({
           required
           autoComplete="current-password"
           maxLength={PASSWORD_MAX_LENGTH}
+          className="bg-background/50 border-border/50 focus:bg-background/80 transition-all duration-200"
         />
       </div>
 
-
       {hasServerTrustRequest && !isSubmitting && (
-        <p className="text-amber-600 text-sm text-center">
-          Please verify the server identity before logging in
+        <p className="text-destructive text-sm text-center font-medium animate-pulse">
+          Verify server identity before proceeding
         </p>
       )}
 
       <Button
         type="submit"
-        className="w-full"
+        size="lg"
+        className="w-full h-14 text-base font-semibold transition-all shadow-xl shadow-primary/20 hover:shadow-primary/40 hover:scale-[1.02] active:scale-[0.98] bg-primary hover:bg-primary/90 border-0"
         disabled={disabled || isSubmitting || !isFormValid}
       >
-        {isSubmitting ? (authStatus || "Logging In...") : "Login to Account"}
+        {isSubmitting ? (authStatus || "Logging In...") : "Sign In"}
       </Button>
     </form>
   );

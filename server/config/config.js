@@ -1,8 +1,23 @@
+import crypto from 'crypto';
+
 function parsePort(portValue) {
   if (!portValue) return 8443;
   if (typeof portValue === 'string' && portValue.toLowerCase() === 'dynamic') return 0;
   const parsed = parseInt(portValue, 10);
   return isNaN(parsed) ? 8443 : parsed;
+}
+
+/**
+ * Generates a cryptographically random number of attempts between min and max
+ * @param {number} min - Minimum attempts (default 5)
+ * @param {number} max - Maximum attempts (default 10)
+ * @returns {number} Random number of attempts
+ */
+function getRandomizedAttempts(min = 5, max = 10) {
+  const range = max - min + 1;
+  const randomBytes = crypto.randomBytes(4);
+  const randomValue = randomBytes.readUInt32BE(0) / 0xFFFFFFFF;
+  return Math.floor(randomValue * range) + min;
 }
 
 export const PORT = parsePort(process.env.PORT);
@@ -34,25 +49,26 @@ export const RATE_LIMIT_CONFIG = {
 
   AUTH_PER_USER: {
     WINDOW_MS: 600000, // 10 minutes
-    MAX_ATTEMPTS: 50, // allow server rate limiter plenty of headroom; app enforces 5 visible attempts
+    MAX_ATTEMPTS: 50, // allow server rate limiter plenty of headroom
     BLOCK_DURATION_MS: 900000 // block time (900 seconds / 15 minutes)
   },
 
   // Category-specific auth attempt limits (short windows)
+  // Randomized between 5-10 attempts for security
   AUTH_CATEGORIES: {
     ACCOUNT_PASSWORD: {
       WINDOW_MS: 60000,
-      MAX_ATTEMPTS: 5,
+      MAX_ATTEMPTS: getRandomizedAttempts(5, 10),
       BLOCK_DURATION_MS: 60000
     },
     PASSPHRASE: {
       WINDOW_MS: 30000,
-      MAX_ATTEMPTS: 5,
+      MAX_ATTEMPTS: getRandomizedAttempts(5, 10),
       BLOCK_DURATION_MS: 30000
     },
     SERVER_PASSWORD: {
       WINDOW_MS: 60000,
-      MAX_ATTEMPTS: 5,
+      MAX_ATTEMPTS: getRandomizedAttempts(5, 10),
       BLOCK_DURATION_MS: 60000
     }
   },
@@ -74,15 +90,15 @@ export function setServerPassword(passwordHash) {
   if (!passwordHash || typeof passwordHash !== 'string') {
     throw new Error('Invalid password hash - must be non-empty string');
   }
-  
+
   if (passwordHash.length < 16) {
     throw new Error('Invalid password hash - hash too short');
   }
-  
+
   if (passwordHash === 'null' || passwordHash === 'undefined') {
     throw new Error('Invalid password hash - cannot be null/undefined string');
   }
-  
+
   _serverPasswordHash = passwordHash;
 }
 
@@ -91,9 +107,9 @@ export function getServerPasswordHash() {
 }
 
 export function validateConfig() {
-  const configs = [RATE_LIMIT_CONFIG.CONNECTION, RATE_LIMIT_CONFIG.AUTHENTICATION, 
-                   RATE_LIMIT_CONFIG.AUTH_PER_USER, RATE_LIMIT_CONFIG.MESSAGES, 
-                   RATE_LIMIT_CONFIG.BUNDLE_OPERATIONS];
+  const configs = [RATE_LIMIT_CONFIG.CONNECTION, RATE_LIMIT_CONFIG.AUTHENTICATION,
+  RATE_LIMIT_CONFIG.AUTH_PER_USER, RATE_LIMIT_CONFIG.MESSAGES,
+  RATE_LIMIT_CONFIG.BUNDLE_OPERATIONS];
 
   for (const config of configs) {
     if (!config.WINDOW_MS || config.WINDOW_MS < 1000) {
@@ -113,15 +129,15 @@ export function validateConfig() {
     if (!c.BLOCK_DURATION_MS || c.BLOCK_DURATION_MS < 1000) throw new Error(`Invalid ${key}.BLOCK_DURATION_MS`);
     if (!Number.isFinite(c.MAX_ATTEMPTS) || c.MAX_ATTEMPTS < 1) throw new Error(`Invalid ${key}.MAX_ATTEMPTS`);
   }
-  
+
   if (PORT < 0 || PORT > 65535) {
     throw new Error('Invalid PORT - must be between 0 (dynamic) and 65535');
   }
-  
+
   if (MAX_CLIENTS < 1 || MAX_CLIENTS > 100000) {
     throw new Error('Invalid MAX_CLIENTS - must be between 1 and 100000');
   }
-  
+
 }
 
 export function setServerPortForTests(port) {

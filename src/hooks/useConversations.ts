@@ -48,19 +48,29 @@ const sanitizePreviewText = (input: string | undefined | null): string => {
 const getConversationPreview = (message: Message, currentUsername: string): string => {
   const filename = sanitizePreviewText(message.filename);
   const isMe = message.sender === currentUsername;
-  const prefix = isMe ? 'You sent' : `${message.sender} sent`;
+  const prefix = isMe ? 'You' : message.sender;
+
+  const isReactionMessage = message.content?.includes('reaction-add') || message.content?.includes('reaction-remove');
+
+  if (isReactionMessage) {
+    if (isMe) {
+      return 'You reacted to a message';
+    } else {
+      return `${message.sender} reacted to your message`;
+    }
+  }
 
   if (message.type === 'file' || message.type === 'file-message' || filename) {
     if (filename && filename.match(/\.(jpg|jpeg|png|gif|bmp|webp|svg|ico|tiff)$/i)) {
-      return `${prefix} an image`;
+      return `${prefix} sent an image`;
     }
     if (filename && filename.match(/\.(mp4|webm|ogg|avi|mov|wmv|flv|mkv)$/i)) {
-      return `${prefix} a video`;
+      return `${prefix} sent a video`;
     }
     if (filename && (filename.toLowerCase().includes('voice-note') || filename.match(/\.(mp3|wav|ogg|webm|m4a|aac|flac)$/i))) {
-      return `${prefix} a voice message`;
+      return `${prefix} sent a voice message`;
     }
-    return `${prefix} a file`;
+    return `${prefix} sent a file`;
   }
 
   return sanitizePreviewText(message.content);

@@ -10,6 +10,7 @@ interface PasswordFieldProps {
   readonly onConfirmChange: (value: string) => void;
   readonly required?: boolean;
   readonly minLength?: number;
+  readonly maxLength?: number;
   readonly strengthCheck?: boolean;
   readonly warningMessage?: React.ReactNode;
   readonly disabled?: boolean;
@@ -23,6 +24,7 @@ export function PasswordField({
   onConfirmChange,
   required = false,
   minLength = 0,
+  maxLength,
   strengthCheck = false,
   warningMessage,
   disabled = false,
@@ -31,9 +33,9 @@ export function PasswordField({
   const showMismatch = useMemo(() => value && confirmValue && value !== confirmValue, [value, confirmValue]);
 
   return (
-    <>
+    <div className="space-y-4">
       <div className="space-y-2">
-        <Label htmlFor={`${label}-main`}>{label}</Label>
+        <Label htmlFor={`${label}-main`} className="text-muted-foreground font-medium">{label}</Label>
         <Input
           id={`${label}-main`}
           type="password"
@@ -42,17 +44,19 @@ export function PasswordField({
           onChange={(e) => onChange(e.target.value)}
           required={required}
           minLength={minLength}
+          maxLength={maxLength}
           disabled={disabled}
+          className="bg-background/50 border-border/50 focus:bg-background/80 transition-all duration-200"
         />
         {strengthCheck && !isStrongEnough && value.length > 0 && (
-          <p className="text-xs text-red-500">
-            {label} should be at least {minLength} characters long.
+          <p className="text-xs text-destructive font-medium animate-pulse">
+            Must be at least {minLength} characters
           </p>
         )}
       </div>
 
       <div className="space-y-2">
-        <Label htmlFor={`${label}-confirm`}>Confirm {label}</Label>
+        <Label htmlFor={`${label}-confirm`} className="text-muted-foreground font-medium">Confirm {label}</Label>
         <Input
           id={`${label}-confirm`}
           type="password"
@@ -62,14 +66,17 @@ export function PasswordField({
           required={required}
           minLength={minLength}
           disabled={disabled}
+          className="bg-background/50 border-border/50 focus:bg-background/80 transition-all duration-200"
         />
         {showMismatch && (
-          <p className="text-xs text-red-500">{label}s do not match</p>
+          <p className="text-xs text-destructive font-medium animate-pulse">Passwords do not match</p>
         )}
         {warningMessage && (
-          <p className="text-xs text-yellow-600">{warningMessage}</p>
+          <div className="text-xs text-muted-foreground bg-muted/50 p-2 rounded border border-border/50">
+            {warningMessage}
+          </div>
         )}
       </div>
-    </>
+    </div>
   );
 }

@@ -39,7 +39,7 @@ export function Sidebar({ activeTab, onTabChange, currentUser, onLogout }: Sideb
             {/* Header */}
             <div
                 className={cn(
-                    "h-18 flex items-center transition-all duration-300 justify-start p-0 pl-0 cursor-pointer hover:bg-accent/50 select-none",
+                    "h-18 flex items-center transition-all duration-300 justify-start p-0 pl-0 cursor-pointer hover:bg-accent/10 select-none",
                 )}
                 onClick={() => setIsCollapsed(!isCollapsed)}
                 title={isCollapsed ? "Expand sidebar" : "Collapse sidebar"}
@@ -73,7 +73,9 @@ export function Sidebar({ activeTab, onTabChange, currentUser, onLogout }: Sideb
                         onClick={() => onTabChange(item.id)}
                         className={cn(
                             "w-full h-12 mb-1 transition-all duration-300 ease-in-out flex items-center justify-start p-0 pl-0 select-none",
-                            activeTab === item.id ? "bg-secondary text-secondary-foreground" : "text-muted-foreground hover:bg-secondary/50 hover:text-foreground"
+                            activeTab === item.id
+                                ? "bg-secondary text-secondary-foreground"
+                                : "text-muted-foreground hover:bg-accent/10 hover:text-foreground"
                         )}
                     >
                         <div className="w-13 h-12 flex items-center justify-center shrink-0">
@@ -108,7 +110,7 @@ export function Sidebar({ activeTab, onTabChange, currentUser, onLogout }: Sideb
                     variant="ghost"
                     size="icon"
                     className={cn(
-                        "w-full h-12 transition-all duration-300 ease-in-out flex items-center justify-start p-0 pl-0 theme-toggle-btn select-none",
+                        "w-full h-12 transition-all duration-300 ease-in-out flex items-center justify-start p-0 pl-0 theme-toggle-btn select-none hover:bg-accent/10",
                     )}
                     onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}
                 >
@@ -167,7 +169,7 @@ export function Sidebar({ activeTab, onTabChange, currentUser, onLogout }: Sideb
                     <Popover>
                         <PopoverTrigger asChild>
                             <Button variant="ghost" className={cn(
-                                "w-full h-auto hover:bg-secondary/50 transition-all duration-300 ease-in-out flex items-center justify-start p-0 pl-0 select-none",
+                                "w-full h-auto hover:bg-accent/10 transition-all duration-300 ease-in-out flex items-center justify-start p-0 pl-0 select-none",
                             )}>
                                 <div className="w-13 h-14 flex items-center justify-center shrink-0">
                                     <Avatar className="!h-[25px] !w-[25px] border border-border shrink-0">
