@@ -101,13 +101,11 @@ export const Login = React.memo<LoginProps>(({
   // Reset local submitting state when rate limited or auth error
   useEffect(() => {
     const handleRateLimited = () => {
-      console.log('[Login] Rate limit event received, resetting local isSubmitting');
       toast.error('Too many attempts. Please wait before trying again.');
       setIsSubmitting(false);
       setIsRateLimited(true);
     };
     const handleAuthError = () => {
-      console.log('[Login] Auth error event received, resetting local isSubmitting');
       setIsSubmitting(false);
     };
     window.addEventListener('auth-rate-limited', handleRateLimited as any);
@@ -316,7 +314,6 @@ export const Login = React.memo<LoginProps>(({
                   variant="outline"
                   size="sm"
                   className="flex-1"
-                  size="sm"
                 >
                   Reject
                 </Button>

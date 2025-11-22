@@ -414,7 +414,7 @@ export function ConnectSetup({ onComplete, initialServerUrl = '' }: ConnectSetup
               <div className="absolute -inset-0.5 bg-gradient-to-r from-primary/50 to-primary/40 rounded-lg blur opacity-0 group-hover:opacity-50 transition duration-500" />
               <Input
                 id="server-url"
-                placeholder="wss://your-server.onion"
+                placeholder="wss://your-server"
                 value={customServerUrl}
                 onChange={(e) => setCustomServerUrl(e.target.value)}
                 className="relative h-14 font-mono text-sm bg-background/80 border-white/10 focus:border-primary/50 focus:ring-2 focus:ring-primary/20 transition-all rounded-lg shadow-sm"
