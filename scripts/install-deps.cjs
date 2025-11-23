@@ -1,8 +1,10 @@
 #!/usr/bin/env node
 /*
- * Dependency installer for server
+ * Dependency installer for server and client
  * Usage:
  *   node scripts/install-deps.cjs <component...>
+ *   node scripts/install-deps.cjs --client
+ *   node scripts/install-deps.cjs --server
  * Components:
  *   haproxy, tailscale, jq, redis, postgres, ngrok
  *   all  -> installs a reasonable set: haproxy, tailscale, jq
@@ -11,9 +13,43 @@
 const os = require('os');
 const fs = require('fs');
 const path = require('path');
-const { execFile } = require('child_process');
+const { execFile, spawn, execSync } = require('child_process');
 const { promisify } = require('util');
 const execFileAsync = promisify(execFile);
+
+const serverComponents = ['haproxy', 'tailscale', 'jq', 'redis', 'postgres', 'ngrok',
+  'python3', 'openssl', 'liboqs', 'oqs-provider', 'cmake', 'ninja'];
+
+if (process.platform === 'win32' && !process.env.WSL_DISTRO_NAME) {
+  const args = process.argv.slice(2);
+  const needsWSL = args.some(arg => {
+    const cleanArg = arg.replace(/^--/, '');
+    return cleanArg === 'server' || cleanArg === 'all' || cleanArg === 'quantum' || serverComponents.includes(cleanArg);
+  });
+
+  if (needsWSL) {
+    console.log('[INSTALL] Server components require WSL2 - forwarding...');
+
+    try {
+      execSync('wsl --status', { stdio: 'ignore' });
+    } catch {
+      console.error('[INSTALL] WSL2 not installed. Run: wsl --install -d Ubuntu');
+      process.exit(1);
+    }
+
+    const repoRoot = path.resolve(__dirname, '..');
+    const wslPath = execSync('wsl wslpath -a ' + JSON.stringify(repoRoot), { encoding: 'utf8' }).trim();
+    const scriptPath = `${wslPath}/scripts/install-deps.cjs`;
+
+    const wslProc = spawn('wsl', ['node', scriptPath, ...args], {
+      stdio: 'inherit',
+      cwd: repoRoot
+    });
+
+    wslProc.on('exit', code => process.exit(code || 0));
+    return;
+  }
+}
 
 function findInPath(bin) {
   const pathEnv = process.env.PATH || '';
@@ -24,7 +60,7 @@ function findInPath(bin) {
       try {
         const full = path.join(dir, bin + ext);
         if (fs.existsSync(full)) return full;
-      } catch {}
+      } catch { }
     }
   }
   return null;
@@ -40,7 +76,6 @@ async function tryExec(bin, args, opts = {}) {
 }
 
 async function trySudo(args, opts = {}) {
-  if (process.platform === 'win32') return false;
   if (!findInPath('sudo')) return false;
   let nonInteractive = true;
   try { await execFileAsync('sudo', ['-n', 'true']); } catch { nonInteractive = false; }
@@ -48,7 +83,6 @@ async function trySudo(args, opts = {}) {
     if (nonInteractive) {
       await execFileAsync('sudo', args, { windowsHide: true, ...opts });
     } else {
-      // Fallback to interactive sudo so user can enter password
       await execFileAsync('sudo', args, { stdio: 'inherit', ...opts });
     }
     return true;
@@ -99,7 +133,7 @@ async function installRedisTlsLocal() {
     if (fs.existsSync(redisBin) && await redisHasTlsSupport(redisBin)) {
       return true;
     }
-  } catch {}
+  } catch { }
 
   const buildOk = await installComponent('build-tools');
   if (!buildOk) {
@@ -162,7 +196,7 @@ async function installRedisTlsLocal() {
         break;
       }
     }
-  } catch {}
+  } catch { }
   if (!extractedDir) {
     console.log('[INFO] Could not locate extracted Redis source directory.');
     return false;
@@ -197,7 +231,7 @@ async function installRedisTlsLocal() {
   try {
     const envPath = path.join(repoRoot, '.env');
     let envText = '';
-    try { envText = fs.readFileSync(envPath, 'utf8'); } catch {}
+    try { envText = fs.readFileSync(envPath, 'utf8'); } catch { }
     const lines = envText ? envText.split(/\r?\n/) : [];
     const line = `TLS_REDIS_SERVER=${redisBin}`;
     const idx = lines.findIndex(l => l.trim().startsWith('TLS_REDIS_SERVER='));
@@ -219,8 +253,6 @@ async function installComponent(name) {
       if (findInPath('haproxy')) return true;
       if (plat === 'linux') return await installLinux('haproxy');
       if (plat === 'darwin' && pmHas('brew')) return await tryExec('brew', ['install', 'haproxy']);
-      if (plat === 'win32' && pmHas('choco')) return await tryExec('choco', ['install', 'haproxy', '-y']);
-      if (plat === 'win32' && pmHas('winget')) return await tryExec('winget', ['install', '--id', 'HAProxyTechnologies.HAProxy', '-e', '-h']) || await tryExec('winget', ['install', 'haproxy', '-e', '-h']);
       return false;
     }
     case 'tailscale': {
@@ -232,15 +264,12 @@ async function installComponent(name) {
         return false;
       }
       if (plat === 'darwin' && pmHas('brew')) return await tryExec('brew', ['install', 'tailscale']);
-      if (plat === 'win32' && pmHas('winget')) return await tryExec('winget', ['install', '--id', 'Tailscale.Tailscale', '-e', '-h']);
       return false;
     }
     case 'jq': {
       if (findInPath('jq')) return true;
       if (plat === 'linux') return await installLinux('jq');
       if (plat === 'darwin' && pmHas('brew')) return await tryExec('brew', ['install', 'jq']);
-      if (plat === 'win32' && pmHas('choco')) return await tryExec('choco', ['install', 'jq', '-y']);
-      if (plat === 'win32' && pmHas('winget')) return await tryExec('winget', ['install', '--id', 'jqlang.jq', '-e', '-h']);
       return false;
     }
     case 'redis': {
@@ -268,11 +297,7 @@ async function installComponent(name) {
       const tlsInstalled = await installRedisTlsLocal();
       if (tlsInstalled) return true;
 
-      if (plat === 'win32') {
-        console.log('[INFO] For Windows, run a TLS-enabled Redis in WSL and point REDIS_URL at it.');
-      } else {
-        console.log('[INFO] Install a TLS-enabled Redis manually (Redis >= 6 built with BUILD_TLS=yes) and ensure redis-server supports --tls-port.');
-      }
+      console.log('[INFO] Install a TLS-enabled Redis manually (Redis >= 6 built with BUILD_TLS=yes) and ensure redis-server supports --tls-port.');
       return false;
     }
     case 'postgres': {
@@ -282,10 +307,6 @@ async function installComponent(name) {
       }
       if (plat === 'darwin' && pmHas('brew')) {
         return await tryExec('brew', ['install', 'postgresql']);
-      }
-      if (plat === 'win32') {
-        console.log('[INFO] On Windows, install PostgreSQL via the official installer: https://www.postgresql.org/download/.');
-        return false;
       }
       return false;
     }
@@ -300,7 +321,6 @@ async function installComponent(name) {
         return false;
       }
       if (plat === 'darwin' && pmHas('brew')) return await tryExec('brew', ['install', 'ngrok/ngrok/ngrok']);
-      if (plat === 'win32' && pmHas('choco')) return await tryExec('choco', ['install', 'ngrok', '-y']);
       console.log('[INFO] Install ngrok from https://ngrok.com/download');
       return false;
     }
@@ -354,7 +374,7 @@ async function installComponent(name) {
     }
     case 'build-tools': {
       if (findInPath('gcc') && findInPath('make')) return true;
-      
+
       if (plat === 'linux') {
         if (pmHas('apt-get')) return await trySudo(['apt-get', 'install', '-y', 'build-essential', 'python3-dev']);
         if (pmHas('dnf')) return await trySudo(['dnf', 'groupinstall', '-y', 'Development Tools']) && await trySudo(['dnf', 'install', '-y', 'python3-devel']);
@@ -374,15 +394,15 @@ async function installComponent(name) {
     case 'liboqs': {
       const forceRebuild = process.env.FORCE_REBUILD === '1';
       if (!forceRebuild) {
-        const libPaths = plat === 'darwin' 
+        const libPaths = plat === 'darwin'
           ? ['/usr/local/lib/liboqs.dylib', '/opt/homebrew/lib/liboqs.dylib']
           : ['/usr/local/lib/liboqs.so', '/usr/lib/liboqs.so', '/usr/lib64/liboqs.so', '/usr/lib/x86_64-linux-gnu/liboqs.so'];
-        
+
         for (const p of libPaths) {
           if (fs.existsSync(p)) return true;
         }
       }
-      
+
       if (plat === 'linux') {
         if (!findInPath('git')) {
           console.log('[INFO] git required to build liboqs');
@@ -396,27 +416,27 @@ async function installComponent(name) {
           console.log('[INFO] ninja required to build liboqs');
           return false;
         }
-        
+
         console.log('[INFO] Building liboqs from latest source...');
         const tmpRoot = await require('fs/promises').mkdtemp(path.join(os.tmpdir(), 'liboqs-'));
         const srcDir = path.join(tmpRoot, 'src');
         try {
           // Clone latest main branch
           await execFileAsync('git', ['clone', '--depth', '1', 'https://github.com/open-quantum-safe/liboqs.git', srcDir], { stdio: 'inherit' });
-          
+
           // Build
           const buildDir = path.join(srcDir, 'build');
           await require('fs/promises').mkdir(buildDir, { recursive: true });
           await execFileAsync('cmake', ['-GNinja', '-DCMAKE_INSTALL_PREFIX=/usr/local', '-DBUILD_SHARED_LIBS=ON', '-DOQS_DIST_BUILD=ON', '..'], { cwd: buildDir, stdio: 'inherit' });
           await execFileAsync('ninja', [], { cwd: buildDir, stdio: 'inherit' });
-          
+
           // Install
           const installed = await trySudo(['ninja', 'install'], { cwd: buildDir });
           if (!installed) {
             console.log('[INFO] Run: cd', buildDir, '&& sudo ninja install');
             return false;
           }
-          
+
           // Update library cache
           await trySudo(['ldconfig']);
           return true;
@@ -436,19 +456,19 @@ async function installComponent(name) {
       if (!forceRebuild) {
         const modPaths = plat === 'darwin'
           ? ['/usr/local/lib/ossl-modules/oqsprovider.dylib', '/opt/homebrew/lib/ossl-modules/oqsprovider.dylib']
-          : ['/usr/local/lib/ossl-modules/oqsprovider.so', '/usr/local/lib64/ossl-modules/oqsprovider.so', 
-             '/usr/lib/ossl-modules/oqsprovider.so', '/usr/lib64/ossl-modules/oqsprovider.so'];
-        
+          : ['/usr/local/lib/ossl-modules/oqsprovider.so', '/usr/local/lib64/ossl-modules/oqsprovider.so',
+            '/usr/lib/ossl-modules/oqsprovider.so', '/usr/lib64/ossl-modules/oqsprovider.so'];
+
         for (const p of modPaths) {
           if (fs.existsSync(p)) {
             try {
               const { stdout } = await execFileAsync('openssl', ['list', '-providers']);
               if (/oqs/i.test(stdout || '')) return true;
-            } catch {}
+            } catch { }
           }
         }
       }
-      
+
       if (plat === 'linux') {
         if (!findInPath('git')) {
           console.log('[INFO] git required to build oqs-provider');
@@ -458,27 +478,27 @@ async function installComponent(name) {
           console.log('[INFO] cmake required to build oqs-provider');
           return false;
         }
-        
+
         console.log('[INFO] Building oqs-provider from latest source...');
         const tmpRoot = await require('fs/promises').mkdtemp(path.join(os.tmpdir(), 'oqs-provider-'));
         const srcDir = path.join(tmpRoot, 'src');
         try {
           // Clone latest main branch
           await execFileAsync('git', ['clone', '--depth', '1', 'https://github.com/open-quantum-safe/oqs-provider.git', srcDir], { stdio: 'inherit' });
-          
+
           // Build
           const buildDir = path.join(srcDir, '_build');
           await require('fs/promises').mkdir(buildDir, { recursive: true });
           await execFileAsync('cmake', ['-S', '..', '-B', '.'], { cwd: buildDir, stdio: 'inherit' });
           await execFileAsync('cmake', ['--build', '.'], { cwd: buildDir, stdio: 'inherit' });
-          
+
           // Install
           const installed = await trySudo(['cmake', '--install', '.'], { cwd: buildDir });
           if (!installed) {
             console.log('[INFO] Run: cd', buildDir, '&& sudo cmake --install .');
             return false;
           }
-          
+
           return true;
         } catch (e) {
           console.log('[INFO] Build failed:', e.message);
@@ -506,6 +526,108 @@ async function installComponent(name) {
       if (plat === 'win32' && pmHas('choco')) return await tryExec('choco', ['install', 'ninja', '-y']);
       return false;
     }
+    case 'pnpm': {
+      if (findInPath('pnpm')) return true;
+
+      const npmCmd = process.platform === 'win32' ? 'npm.cmd' : 'npm';
+
+      // Try corepack first
+      try {
+        await execFileAsync('corepack', ['enable', 'pnpm'], { stdio: 'ignore' });
+        if (findInPath('pnpm')) return true;
+      } catch { }
+
+      // Try npm install
+      try {
+        await execFileAsync(npmCmd, ['install', '-g', 'pnpm', '--no-audit', '--no-fund'], { stdio: 'inherit' });
+        if (findInPath('pnpm')) return true;
+      } catch { }
+
+      console.log('[INFO] Failed to install pnpm via corepack or npm');
+      return false;
+    }
+    case 'electron': {
+      // Check if electron is installed in the project
+      const repoRoot = path.resolve(__dirname, '..');
+      try {
+        require.resolve('electron', { paths: [repoRoot] });
+        return true;
+      } catch { }
+
+      // Install electron
+      try {
+        const pnpmBin = findInPath('pnpm');
+        if (!pnpmBin) {
+          console.log('[INFO] pnpm required to install electron');
+          return false;
+        }
+        await execFileAsync(pnpmBin, ['add', '-D', 'electron@latest'], { cwd: repoRoot, stdio: 'inherit' });
+        return true;
+      } catch {
+        return false;
+      }
+    }
+    case 'libevent': {
+      if (plat === 'win32') return true; // Skip on Windows
+
+      // Check if libevent is installed
+      if (plat === 'linux') {
+        if (pmHas('apt-get')) {
+          try {
+            await execFileAsync('dpkg', ['-l', 'libevent-2.1-7t64'], { stdio: 'ignore' });
+            return true;
+          } catch {
+            try {
+              await execFileAsync('dpkg', ['-l', 'libevent-2.1-7'], { stdio: 'ignore' });
+              return true;
+            } catch {
+              return await installLinux('libevent-2.1-7t64') || await installLinux('libevent-2.1-7');
+            }
+          }
+        }
+        return await installLinux('libevent');
+      }
+
+      if (plat === 'darwin' && pmHas('brew')) {
+        try {
+          await execFileAsync('brew', ['list', 'libevent'], { stdio: 'ignore' });
+          return true;
+        } catch {
+          return await tryExec('brew', ['install', 'libevent']);
+        }
+      }
+
+      return false;
+    }
+    case 'rust': {
+      if (findInPath('cargo')) return true;
+
+      if (plat === 'win32') {
+        console.log('[INFO] Install Rust from https://rustup.rs');
+        return false;
+      }
+
+      // Install via rustup
+      try {
+        const rustupUrl = 'https://sh.rustup.rs';
+        const tmpScript = path.join(os.tmpdir(), 'rustup.sh');
+
+        if (findInPath('curl')) {
+          await execFileAsync('curl', ['--proto', '=https', '--tlsv1.2', '-sSf', rustupUrl, '-o', tmpScript]);
+        } else if (findInPath('wget')) {
+          await execFileAsync('wget', ['-O', tmpScript, rustupUrl]);
+        } else {
+          console.log('[INFO] curl or wget required to install Rust');
+          return false;
+        }
+
+        await execFileAsync('sh', [tmpScript, '-y'], { stdio: 'inherit' });
+        return true;
+      } catch {
+        console.log('[INFO] Failed to install Rust via rustup');
+        return false;
+      }
+    }
     default:
       console.log(`[WARN] Unknown component: ${name}`);
       return false;
@@ -514,38 +636,54 @@ async function installComponent(name) {
 
 (async () => {
   const args = process.argv.slice(2);
-  if (args.length === 0) {
+
+  // Check for help flag
+  if (args.length === 0 || args.some(a => a === '-h' || a === '--help')) {
     console.log('Usage: node scripts/install-deps.cjs <component...>');
-    console.log('Components: haproxy, tailscale, jq, redis, postgres, ngrok, nodejs, curl, wget, python3, openssl, build-tools, cmake, ninja, liboqs, oqs-provider');
-    console.log('Presets: all, server, edge, quantum');
-    process.exit(1);
+    console.log('       node scripts/install-deps.cjs --client');
+    console.log('       node scripts/install-deps.cjs --server');
+    console.log('Components: haproxy, tailscale, jq, redis, postgres, ngrok, nodejs, curl, wget, python3, openssl, build-tools, cmake, ninja, liboqs, oqs-provider, pnpm, electron, libevent, rust');
+    console.log('Presets:');
+    console.log('  all      - All server and edge dependencies');
+    console.log('  server   - Server runtime dependencies');
+    console.log('  client   - Client runtime dependencies');
+    console.log('  edge     - Edge/proxy dependencies');
+    console.log('  quantum  - Quantum-safe crypto dependencies');
+    process.exit(args.length === 0 ? 1 : 0);
   }
+
   const presets = {
     all: ['git', 'nodejs', 'redis', 'postgres', 'python3', 'openssl', 'build-tools', 'cmake', 'ninja', 'liboqs', 'oqs-provider', 'haproxy', 'tailscale', 'jq', 'ngrok'],
     server: ['nodejs', 'redis', 'postgres', 'python3', 'openssl', 'build-tools'],
+    client: ['nodejs', 'git', 'curl', 'wget', 'pnpm', 'libevent', 'rust', 'build-tools', 'electron'],
     edge: ['haproxy', 'ngrok'],
     quantum: ['git', 'openssl', 'build-tools', 'cmake', 'ninja', 'liboqs', 'oqs-provider']
   };
+
   const expanded = [];
   for (const a of args) {
-    if (presets[a]) expanded.push(...presets[a]); else expanded.push(a);
+    const cleanArg = a.replace(/^--/, '');
+    if (presets[cleanArg]) {
+      expanded.push(...presets[cleanArg]);
+    } else {
+      expanded.push(a);
+    }
   }
+
   const components = expanded;
   let ok = true;
-  
+
   for (const c of components) {
     process.stdout.write(`[INSTALL] ${c} ... `);
     try {
       const res = await installComponent(c);
       console.log(res ? 'OK' : 'SKIPPED/FAILED');
       if (!res) ok = false;
-      if (c === 'redis' && res) redisInstalled = true;
-      if (c === 'postgres' && res) postgresInstalled = true;
     } catch (e) {
       console.log('ERROR');
       ok = false;
     }
   }
-  
+
   process.exit(ok ? 0 : 1);
 })();

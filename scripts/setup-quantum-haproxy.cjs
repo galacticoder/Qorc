@@ -15,7 +15,7 @@ function findInPath(bin) {
   const exts = process.platform === 'win32' ? (process.env.PATHEXT || '.EXE;.CMD;.BAT;.COM').split(';') : [''];
   for (const dir of parts) {
     for (const ext of exts) {
-      try { const p = path.join(dir, bin + ext); if (fs.existsSync(p)) return p; } catch {}
+      try { const p = path.join(dir, bin + ext); if (fs.existsSync(p)) return p; } catch { }
     }
   }
   return null;
@@ -60,7 +60,7 @@ async function hasOqsProvider(env) {
     if (envModule) {
       try {
         if (fs.existsSync(envModule)) modulePath = envModule;
-      } catch {}
+      } catch { }
     }
     if (!modulePath) {
       modulePath = modulePaths.find(p => fs.existsSync(p)) || modulePaths[0];
@@ -90,20 +90,32 @@ async function hasOqsProvider(env) {
         ].join('\n');
         await fsp.writeFile(localConf, body, 'utf8');
       }
-    } catch {}
+    } catch { }
 
     try {
       const moduleInfoPath = path.join('server', 'config', 'oqs-module-path.txt');
       await fsp.mkdir(path.dirname(moduleInfoPath), { recursive: true });
       await fsp.writeFile(moduleInfoPath, String(modulePath).trim() + '\n', 'utf8');
-    } catch {}
+    } catch { }
 
     const env = { ...process.env };
     env.OPENSSL_CONF = localConf;
     env.OQS_PROVIDER_MODULE = modulePath;
-    // Help OpenSSL find provider and liboqs
-    try { env.OPENSSL_MODULES = path.dirname(modulePath); } catch {}
-    env.LD_LIBRARY_PATH = [ '/usr/local/lib', '/usr/lib/x86_64-linux-gnu', process.env.LD_LIBRARY_PATH || '' ].filter(Boolean).join(':');
+    try { env.OPENSSL_MODULES = path.dirname(modulePath); } catch { }
+
+    if (process.platform === 'darwin') {
+      env.DYLD_LIBRARY_PATH = [
+        '/usr/local/lib',
+        '/opt/homebrew/lib',
+        process.env.DYLD_LIBRARY_PATH || ''
+      ].filter(Boolean).join(':');
+    } else {
+      env.LD_LIBRARY_PATH = [
+        '/usr/local/lib',
+        '/usr/lib/x86_64-linux-gnu',
+        process.env.LD_LIBRARY_PATH || ''
+      ].filter(Boolean).join(':');
+    }
 
     const ok = await hasOqsProvider(env);
     if (!ok) {
@@ -124,7 +136,7 @@ async function hasOqsProvider(env) {
     const requested = (process.env.OQS_SIG || '').trim();
     const tryList = [];
     if (requested) tryList.push(requested);
-    tryList.push('ml-dsa-65','ml-dsa-44','ml-dsa-87','dilithium3','dilithium2','dilithium5','falcon512','falcon1024');
+    tryList.push('ml-dsa-65', 'ml-dsa-44', 'ml-dsa-87', 'dilithium3', 'dilithium2', 'dilithium5', 'falcon512', 'falcon1024');
 
     let usedAlg = null;
     for (const name of Array.from(new Set(tryList))) {
@@ -143,7 +155,7 @@ async function hasOqsProvider(env) {
       try {
         await execFileAsync('openssl', ['req', '-new', '-x509', '-days', '365', '-key', pqKey, '-out', pqCrt, '-subj', '/CN=localhost-pqc'], { env });
         console.log(`[SETUP] PQC cert also generated: ${pqCrt} (for future use)`);
-      } catch {}
+      } catch { }
     }
 
     // Combine ECDSA cert to cert.pem

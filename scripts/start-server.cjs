@@ -1,7 +1,6 @@
 #!/usr/bin/env node
 /*
- * Server launcher with robust TUI
- * - Starts the Node server with configured environment
+ * Server launcher
  */
 
 const fs = require('fs');
@@ -12,7 +11,34 @@ const { URL } = require('url');
 
 const repoRoot = path.resolve(__dirname, '..');
 
-// Load .env. Does not override existing env vars.
+if (process.platform === 'win32' && !process.env.WSL_DISTRO_NAME) {
+  console.log('[SERVER] Detected Windows - forwarding to WSL2...');
+
+  try {
+    execSync('wsl --status', { stdio: 'ignore' });
+  } catch {
+    console.error('[SERVER] WSL2 not installed. Installing...');
+    console.error('[SERVER] Run: wsl --install -d Ubuntu');
+    console.error('[SERVER] Then restart your computer and run this script again.');
+    execSync('wsl --install -d Ubuntu', { stdio: 'inherit' });
+    process.exit(1);
+  }
+
+  const wslPath = execSync('wsl wslpath -a ' + JSON.stringify(repoRoot), { encoding: 'utf8' }).trim();
+  const scriptPath = `${wslPath}/scripts/start-server.cjs`;
+
+  const args = ['node', scriptPath, ...process.argv.slice(2)];
+
+  const wslProc = spawn('wsl', args, {
+    stdio: 'inherit',
+    cwd: repoRoot,
+    env: process.env
+  });
+
+  wslProc.on('exit', code => process.exit(code || 0));
+  return;
+}
+
 function loadDotEnv(filePath) {
   try {
     if (!fs.existsSync(filePath)) return;
@@ -31,22 +57,21 @@ function loadDotEnv(filePath) {
         process.env[key] = val;
       }
     }
-  } catch {}
+  } catch { }
 }
 
 // Read project .env before computing CONFIG
 loadDotEnv(path.join(repoRoot, '.env'));
 
-// Utility: file exists (absolute or relative to repoRoot)
 function fileExistsMaybeRelative(p) {
   if (!p) return false;
   const abs = path.isAbsolute(p) ? p : path.join(repoRoot, p);
   try { return fs.existsSync(abs); } catch { return false; }
 }
 
-// Editable defaults (override via environment)
+// Editable defaults (override using environment)
 const CONFIG = {
-  PORT: process.env.PORT || '', // Auto-allocate if empty
+  PORT: process.env.PORT || '',
   BIND_ADDRESS: process.env.BIND_ADDRESS || '127.0.0.1',
   REDIS_URL: process.env.REDIS_URL || 'rediss://127.0.0.1:6379',
   ENABLE_CLUSTERING: process.env.ENABLE_CLUSTERING || 'true',
@@ -139,32 +164,23 @@ class RateLimiter {
 function isPortInUse(port) {
   try {
     let cmd, args;
-    if (process.platform === 'win32') {
-      cmd = 'netstat';
-      args = ['-an'];
+    if (fs.existsSync('/usr/bin/ss') || fs.existsSync('/bin/ss')) {
+      cmd = 'ss';
+      args = ['-tuln'];
     } else {
-      // Try ss first (modern), fallback to netstat
-      if (fs.existsSync('/usr/bin/ss') || fs.existsSync('/bin/ss')) {
-        cmd = 'ss';
-        args = ['-tuln'];
-      } else {
-        cmd = 'netstat';
-        args = ['-tuln'];
-      }
+      cmd = 'netstat';
+      args = ['-tuln'];
     }
-    
+
     const result = execSync(`${cmd} ${args.join(' ')} 2>/dev/null || true`, { encoding: 'utf8' });
-    const portRegex = new RegExp(`:${port}[\s\]]`, 'm');
+    const portRegex = new RegExp(`:${port}[\\s\\]]`, 'm');
     if (portRegex.test(result)) return true;
-    
-    // Also check lsof if available
-    if (process.platform !== 'win32') {
-      try {
-        const lsofResult = execSync(`lsof -i :${port} 2>/dev/null | grep LISTEN || true`, { encoding: 'utf8' });
-        if (lsofResult.trim()) return true;
-      } catch {}
-    }
-    
+
+    try {
+      const lsofResult = execSync(`lsof -i :${port} 2>/dev/null | grep LISTEN || true`, { encoding: 'utf8' });
+      if (lsofResult.trim()) return true;
+    } catch { }
+
     return false;
   } catch {
     return false;
@@ -189,20 +205,20 @@ function validateTLSCertificates() {
     logErr('Generate certificates with: node scripts/generate_ts_tls.cjs');
     process.exit(1);
   }
-  
-  const certPath = path.isAbsolute(CONFIG.TLS_CERT_PATH) 
-    ? CONFIG.TLS_CERT_PATH 
+
+  const certPath = path.isAbsolute(CONFIG.TLS_CERT_PATH)
+    ? CONFIG.TLS_CERT_PATH
     : path.join(repoRoot, CONFIG.TLS_CERT_PATH);
   const keyPath = path.isAbsolute(CONFIG.TLS_KEY_PATH)
     ? CONFIG.TLS_KEY_PATH
     : path.join(repoRoot, CONFIG.TLS_KEY_PATH);
-  
+
   if (!fs.existsSync(certPath)) {
     logErr(`ERROR: TLS cert not found: ${certPath}`);
     logErr('Generate certificates with: node scripts/generate_ts_tls.cjs');
     process.exit(1);
   }
-  
+
   if (!fs.existsSync(keyPath)) {
     logErr(`ERROR: TLS key not found: ${keyPath}`);
     logErr('Generate certificates with: node scripts/generate_ts_tls.cjs');
@@ -223,7 +239,7 @@ function validateTLSCertificates() {
     logErr('Try: sudo chown $USER:$USER <key> && chmod 600 <key>');
     process.exit(1);
   }
-  
+
   // Update config with absolute paths
   CONFIG.TLS_CERT_PATH = certPath;
   CONFIG.TLS_KEY_PATH = keyPath;
@@ -232,7 +248,7 @@ function validateTLSCertificates() {
 function tryFixTlsPerms(p, mode) {
   try {
     // If file owned by root, attempt sudo chown to current user
-    const needSudo = process.platform !== 'win32' && !isWritableBySelf(p);
+    const needSudo = !isWritableBySelf(p);
     if (needSudo && findSudo()) {
       const uid = process.getuid ? process.getuid() : null;
       const gid = process.getgid ? process.getgid() : null;
@@ -243,9 +259,9 @@ function tryFixTlsPerms(p, mode) {
       const cmd = cmds.join(' && ');
       execSync(`sudo bash -lc ${JSON.stringify(cmd)}`, { stdio: 'inherit' });
     } else {
-      try { fs.chmodSync(p, mode); } catch {}
+      try { fs.chmodSync(p, mode); } catch { }
     }
-  } catch {}
+  } catch { }
 }
 
 function isWritableBySelf(p) {
@@ -274,12 +290,12 @@ function generateStrongSecret(bytes = 48) {
 async function ensureKeyEncryptionSecret() {
   const secretFile = path.join(serverDir, 'config', 'secrets', 'KEY_ENCRYPTION_SECRET');
   const secretDir = path.dirname(secretFile);
-  
+
   // If already set and strong enough, keep it
   if (CONFIG.KEY_ENCRYPTION_SECRET && CONFIG.KEY_ENCRYPTION_SECRET.length >= 32) {
     return CONFIG.KEY_ENCRYPTION_SECRET;
   }
-  
+
   // Load from persisted file if available
   try {
     if (fs.existsSync(secretFile)) {
@@ -289,12 +305,12 @@ async function ensureKeyEncryptionSecret() {
         return content;
       }
     }
-  } catch {}
-  
+  } catch { }
+
   // Generate new secret
   log('Generating KEY_ENCRYPTION_SECRET...');
   const secret = generateStrongSecret(48);
-  
+
   // Persist to file
   try {
     if (!fs.existsSync(secretDir)) {
@@ -305,7 +321,7 @@ async function ensureKeyEncryptionSecret() {
   } catch (err) {
     logErr(`Warning: Could not save secret to file: ${err.message}`);
   }
-  
+
   CONFIG.KEY_ENCRYPTION_SECRET = secret;
   return secret;
 }
@@ -329,9 +345,9 @@ async function ensureSessionStoreKey() {
         return content;
       }
     }
-  } catch {}
+  } catch { }
 
-  // Generate new secret (≥32 bytes when decoded)
+  // Generate new secret (≥
   log('Generating SESSION_STORE_KEY for PQ session storage...');
   const secret = generateStrongSecret(48);
 
@@ -358,8 +374,7 @@ async function ensureServerDeps() {
   if (!hasNm) {
     log('Installing server dependencies ...');
     await new Promise((resolve, reject) => {
-      const npmCmd = process.platform === 'win32' ? 'npm.cmd' : 'npm';
-      const child = spawn(npmCmd, ciArgs, { cwd: serverDir, stdio: 'inherit', shell: process.platform === 'win32' });
+      const child = spawn('npm', ciArgs, { cwd: serverDir, stdio: 'inherit' });
       child.on('exit', (code) => code === 0 ? resolve() : reject(new Error(`npm ${ciArgs[0]} failed: ${code}`)));
     });
   }
@@ -390,43 +405,83 @@ async function ensurePostgresBootstrap() {
     });
     return;
   } catch (err) {
-    if (err && err.code === 'ENOENT') { 
+    if (err && err.code === 'ENOENT') {
       logErr('psql not found in PATH; skipping Postgres bootstrap.');
       return;
     }
   }
 
   if (!process.stdin.isTTY) {
-    logErr('Cannot auto-create Postgres DB: no TTY available for sudo password prompt.');
+    logErr('Cannot auto-create Postgres DB: no TTY available for password prompt.');
     return;
   }
 
-  log('[DB] Postgres not reachable; attempting sudo bootstrap (you may be prompted for your password)...');
+  log('[DB] Postgres not reachable; attempting auto-bootstrap...');
 
   const safeUser = String(user).replace(/"/g, '""');
   const safeDb = String(dbName).replace(/"/g, '""');
   const safePassword = String(password).replace(/'/g, "''");
 
-  try {
-    execFileSync('sudo', [
-      '-u', 'postgres',
-      'psql',
-      '-c',
-      `CREATE USER "${safeUser}" WITH PASSWORD '${safePassword}' CREATEDB;`,
-    ], { stdio: 'inherit' });
-  } catch (err) {
-    logErr('[DB] CREATE USER via sudo psql failed (may already exist).');
-  }
+  if (process.platform === 'darwin') {
+    try {
+      const env = { ...process.env, PGPASSWORD: safePassword };
 
-  try {
-    execFileSync('sudo', [
-      '-u', 'postgres',
-      'psql',
-      '-c',
-      `CREATE DATABASE "${safeDb}" OWNER "${safeUser}";`,
-    ], { stdio: 'inherit' });
-  } catch (err) {
-    logErr('[DB] CREATE DATABASE via sudo psql failed (may already exist).');
+      try {
+        execFileSync('createuser', ['-s', '-e', safeUser], {
+          stdio: 'inherit',
+          env
+        });
+      } catch (err) {
+        if (!err.stderr || !err.stderr.includes('already exists')) {
+          logErr('[DB] CREATE USER failed (may already exist).');
+        }
+      }
+
+      try {
+        const alterPasswordSQL = `ALTER USER "${safeUser}" WITH PASSWORD '${safePassword}';`;
+        execFileSync('psql', ['-d', 'postgres', '-c', alterPasswordSQL], {
+          stdio: 'inherit',
+          env
+        });
+      } catch (err) {
+        logErr('[DB] ALTER USER password failed.');
+      }
+
+      try {
+        execFileSync('createdb', ['-O', safeUser, '-e', safeDb], {
+          stdio: 'inherit',
+          env
+        });
+      } catch (err) {
+        if (!err.stderr || !err.stderr.includes('already exists')) {
+          logErr('[DB] CREATE DATABASE failed (may already exist).');
+        }
+      }
+    } catch (err) {
+      logErr('[DB] macOS Postgres bootstrap failed. Ensure PostgreSQL is running.');
+    }
+  } else {
+    try {
+      execFileSync('sudo', [
+        '-u', 'postgres',
+        'psql',
+        '-c',
+        `CREATE USER "${safeUser}" WITH PASSWORD '${safePassword}' CREATEDB;`,
+      ], { stdio: 'inherit' });
+    } catch (err) {
+      logErr('[DB] CREATE USER via sudo psql failed (may already exist).');
+    }
+
+    try {
+      execFileSync('sudo', [
+        '-u', 'postgres',
+        'psql',
+        '-c',
+        `CREATE DATABASE "${safeDb}" OWNER "${safeUser}";`,
+      ], { stdio: 'inherit' });
+    } catch (err) {
+      logErr('[DB] CREATE DATABASE via sudo psql failed (may already exist).');
+    }
   }
 }
 
@@ -443,44 +498,44 @@ class ServerUI {
     this.selfServerId = null;
     this.tlsCache = null;
     this.lastTlsCheck = 0;
-    
+
     // Setup terminal
     this.width = process.stdout.columns || 80;
     this.height = process.stdout.rows || 24;
-    
+
     // Debounced render to prevent flickering
     this.renderDebouncer = new Debouncer(() => this._doRender(), 50);
-    
+
     // Handle terminal resize
     process.stdout.on('resize', () => {
       this.width = process.stdout.columns || 80;
       this.height = process.stdout.rows || 24;
       this.renderDebouncer.call();
     });
-    
+
     // Setup input handling
     if (process.stdin.isTTY) {
       process.stdin.setRawMode(true);
       process.stdin.setEncoding('utf8');
       process.stdin.on('data', (key) => this._handleInput(key));
     }
-    
+
     // Enter alternate screen, disable line wrap, clear, hide cursor
     process.stdout.write('\x1b[?1049h\x1b[?7l\x1b[2J\x1b[H\x1b[?25l');
   }
-  
+
   _handleInput(key) {
     const code = key.charCodeAt(0);
-    
+
     // q or Ctrl+C to quit
     if (key === 'q' || key === 'Q' || code === 3) {
       this.stop();
       return;
     }
-    
+
     const visibleLines = Math.max(1, this.height - 6);
     const maxOffset = Math.max(0, this.logBuffer.length() - visibleLines);
-    
+
     // Arrow keys and scrolling
     if (key === '\x1b[A') { // Up arrow
       this.scrollOffset = Math.min(this.scrollOffset + 1, maxOffset);
@@ -520,60 +575,44 @@ class ServerUI {
       this.renderDebouncer.call();
     }
   }
-  
+
   addLog(line) {
     this.logBuffer.push(line);
     this.renderDebouncer.call();
   }
-  
+
   async updateMetrics() {
     if (!this.metricsLimiter.canCall()) return;
-    
+
     try {
       const metrics = {};
-      
-      // CPU and memory usage
+
       try {
-        const cmd = process.platform === 'win32'
-          ? `wmic process where processid=${this.serverPid} get WorkingSetSize,UserModeTime`
-          : `ps -p ${this.serverPid} -o %cpu=,%mem=`;
+        const cmd = `ps -p ${this.serverPid} -o %cpu=,%mem=`;
         const out = execSync(cmd, { encoding: 'utf8', timeout: 500 }).trim();
-        if (process.platform === 'win32') {
-          const lines = out.split('\n').filter(l => l.trim());
-          if (lines.length > 1) {
-            const parts = lines[1].trim().split(/\s+/);
-            metrics.cpu = '?';
-            metrics.mem = parts[0] ? (parseInt(parts[0]) / 1024 / 1024).toFixed(1) : '?';
-          }
-        } else {
-          const parts = out.split(/\s+/);
-          if (parts.length >= 2) {
-            metrics.cpu = parts[0];
-            metrics.mem = parts[1];
-          }
+        const parts = out.split(/\s+/);
+        if (parts.length >= 2) {
+          metrics.cpu = parts[0];
+          metrics.mem = parts[1];
         }
-      } catch {}
-      
+      } catch { }
       // Connection count
       try {
         const port = this.config.PORT;
         let cmd;
-        if (process.platform === 'win32') {
-          cmd = `netstat -an | findstr :${port} | findstr ESTABLISHED | find /c /v \"\"`;
-        } else if (fs.existsSync('/usr/bin/ss') || fs.existsSync('/bin/ss')) {
-          // Robust ss filter across versions; suppress parser errors
+        if (fs.existsSync('/usr/bin/ss') || fs.existsSync('/bin/ss')) {
           cmd = `ss -Htan 2>/dev/null | awk -v p=":${port}$" '$1 ~ /ESTAB/ && $4 ~ p {c++} END{print c+0}'`;
         } else {
-          cmd = `netstat -tan 2>/dev/null | awk '$4 ~ /:${port}$/ && $6==\"ESTABLISHED\"' | wc -l`;
+          cmd = `netstat -tan 2>/dev/null | awk '$4 ~ /:${port}$/ && $6=="ESTABLISHED"' | wc -l`;
         }
         const out = execSync(cmd, { encoding: 'utf8', timeout: 500, shell: true }).trim();
         metrics.connections = parseInt(out) || 0;
-      } catch {}
-      
+      } catch { }
+
       // Redis cluster info
       try {
         if (!this.selfServerId) {
-          const keys = execSync(`redis-cli -u "${this.config.REDIS_URL}" hkeys cluster:servers`, 
+          const keys = execSync(`redis-cli -u "${this.config.REDIS_URL}" hkeys cluster:servers`,
             { encoding: 'utf8', timeout: 700 }).trim().split('\n');
           for (const key of keys) {
             const val = execSync(`redis-cli -u "${this.config.REDIS_URL}" hget cluster:servers "${key}"`,
@@ -584,10 +623,10 @@ class ServerUI {
                 this.selfServerId = key;
                 break;
               }
-            } catch {}
+            } catch { }
           }
         }
-        
+
         if (this.selfServerId) {
           const val = execSync(`redis-cli -u "${this.config.REDIS_URL}" hget cluster:servers "${this.selfServerId}"`,
             { encoding: 'utf8', timeout: 700 }).trim();
@@ -597,8 +636,8 @@ class ServerUI {
         } else {
           metrics.registered = false;
         }
-      } catch {}
-      
+      } catch { }
+
       // TLS info (check every 10s)
       if (Date.now() - this.lastTlsCheck > 10000) {
         this.lastTlsCheck = Date.now();
@@ -608,27 +647,27 @@ class ServerUI {
               { encoding: 'utf8', timeout: 600 }).trim();
             const end = execSync(`openssl x509 -in "${this.config.TLS_CERT_PATH}" -noout -enddate`,
               { encoding: 'utf8', timeout: 600 }).trim();
-            
+
             let cn = null;
             const cnMatch = subj.match(/CN\s*=\s*([^,/]+)/);
             if (cnMatch) cn = cnMatch[1].trim();
-            
+
             let days = null;
             const dateMatch = end.match(/notAfter=(.+)/);
             if (dateMatch) {
               const expiry = new Date(dateMatch[1]);
               days = Math.floor((expiry - Date.now()) / (1000 * 60 * 60 * 24));
             }
-            
+
             this.tlsCache = { cn, days };
           }
-        } catch {}
+        } catch { }
       }
-      
+
       this.lastMetrics = metrics;
-    } catch {}
+    } catch { }
   }
-  
+
   _truncate(str, maxLen) {
     if (!str) return 'unknown';
     str = String(str);
@@ -637,26 +676,26 @@ class ServerUI {
     const tail = maxLen - head - 1;
     return str.substring(0, head) + '…' + str.substring(str.length - tail);
   }
-  
+
   _doRender() {
     if (!this.running) return;
-    
+
     const lines = [];
     const w = this.width;
     const h = this.height;
-    
+
     // Check if server is alive
     let alive = false;
     try {
       process.kill(this.serverPid, 0);
       alive = true;
-    } catch {}
-    
+    } catch { }
+
     if (!alive && this.running) {
       this.stop();
       return;
     }
-    
+
     const m = this.lastMetrics || {};
     const cpu = m.cpu || '?';
     const mem = m.mem || '?';
@@ -699,7 +738,7 @@ class ServerUI {
         return 'postgres://unknown';
       }
     })();
-    
+
     // Format uptime
     const fmtTime = (s) => {
       const d = Math.floor(s / 86400);
@@ -711,7 +750,7 @@ class ServerUI {
       if (m) return `${m}m ${sec}s`;
       return `${sec}s`;
     };
-    
+
     // Header (cyan background like HAProxy)
     const serverId = this._truncate(this.selfServerId || this.config.SERVER_ID || 'unknown', 24);
     const host = this.config.SERVER_HOST || '127.0.0.1';
@@ -719,14 +758,14 @@ class ServerUI {
     const leftTxt = ` Server: ${serverId} `;
     const centerTxt = ` PID ${this.serverPid} | CPU ${cpu}% | MEM ${mem}% `;
     const rightTxt = ` Host: ${host}:${port} `;
-    
+
     let headerLine = '';
     const leftLen = leftTxt.length;
     const rightLen = rightTxt.length;
     const centerLen = centerTxt.length;
     const centerStart = Math.max(leftLen + 1, Math.floor((w - centerLen) / 2));
     const rightStart = Math.max(centerStart + centerLen + 1, w - rightLen);
-    
+
     headerLine += leftTxt;
     headerLine += ' '.repeat(Math.max(0, centerStart - leftLen));
     if (centerStart + centerLen < rightStart) {
@@ -739,14 +778,14 @@ class ServerUI {
     headerLine = headerLine.substring(0, w);
     headerLine += ' '.repeat(Math.max(0, w - headerLine.length));
     lines.push('\x1b[30;46;1m' + headerLine + '\x1b[0m'); // black on cyan, bold
-    
+
     // Stats line
     const uptimeTxt = `UP ${fmtTime(uptime)}`;
     const connTxt = `CONN ${conns}`;
     const hbPlain = hbAge !== null ? `HB ${hbAge}s` : 'HB ?';
     const rightStatsPlain = `${hbPlain}   ${uptimeTxt}   ${connTxt}`;
     const rightStatsStart = Math.max(1, w - rightStatsPlain.length - 1);
-    
+
     let statsLine = '';
     // Redis
     statsLine += `\x1b[36mRedis: ${this.config.REDIS_URL}\x1b[0m`;
@@ -770,7 +809,7 @@ class ServerUI {
     } else {
       statsLine += '\x1b[33mTLS none\x1b[0m';
     }
-    
+
     // Strip ANSI for length calculation
     const stripAnsi = (s) => s.replace(/\x1b\[[0-9;]+m/g, '');
     const statsPlain = stripAnsi(statsLine);
@@ -787,61 +826,61 @@ class ServerUI {
       statsLine += rightStatsColored;
     }
     lines.push(statsLine);
-    
+
     // Box top
     lines.push('┌' + '─'.repeat(w - 2) + '┐');
-    
+
     // Log content
     const logHeight = Math.max(1, h - 5); // header + stats + box borders + footer = total h lines
     const visibleLines = Math.max(1, logHeight);
     const logs = this.logBuffer.getAll();
     const maxOffset = Math.max(0, logs.length - visibleLines);
     if (this.scrollOffset > maxOffset) this.scrollOffset = maxOffset;
-    
+
     const startIdx = Math.max(0, logs.length - visibleLines - this.scrollOffset);
     const endIdx = logs.length - this.scrollOffset;
     const visibleLogs = logs.slice(startIdx, endIdx);
-    
+
     for (let i = 0; i < logHeight; i++) {
       const line = visibleLogs[i] || '';
       const truncated = line.substring(0, w - 4);
       const padded = truncated + ' '.repeat(Math.max(0, w - 4 - truncated.length));
-      const scrollbar = i === 0 && this.scrollOffset > 0 ? '▲' : 
-                        i === logHeight - 1 && this.scrollOffset < maxOffset ? '▼' : '│';
+      const scrollbar = i === 0 && this.scrollOffset > 0 ? '▲' :
+        i === logHeight - 1 && this.scrollOffset < maxOffset ? '▼' : '│';
       lines.push('│ ' + padded + ' ' + scrollbar);
     }
-    
+
     // Box bottom
     lines.push('└' + '─'.repeat(w - 2) + '┘');
-    
+
     // Footer
     const scrollIndicator = this.scrollOffset > 0 ? ' [SCROLL]' : '';
     const footerTxt = ' q: quit  Arrows PgUp/PgDn Home/End' + scrollIndicator;
     const footerPadded = footerTxt + ' '.repeat(Math.max(0, w - footerTxt.length));
     lines.push('\x1b[30;46m' + footerPadded.substring(0, w) + '\x1b[0m');
-    
+
     // Render atomically with double buffering to prevent flicker
     const output = '\x1b[?25l' + '\x1b[H' + lines.join('\n');
     try {
       process.stdout.write(output);
-    } catch {}
+    } catch { }
   }
-  
+
   render() {
     this.renderDebouncer.call();
   }
-  
+
   stop(preserve = false) {
     if (!this.running) return;
     this.running = false;
     this.renderDebouncer.flush();
-    
+
     // Stop metrics polling
     if (this.metricsInterval) {
       clearInterval(this.metricsInterval);
       this.metricsInterval = null;
     }
-    
+
     // Restore terminal
     if (process.stdin.isTTY) {
       process.stdin.setRawMode(false);
@@ -853,25 +892,25 @@ class ServerUI {
     } else {
       process.stdout.write('\x1b[?7h\x1b[?25h\x1b[?1049l');
     }
-    
+
     // Kill server if still running
     try {
       process.kill(this.serverPid, 'SIGTERM');
       setTimeout(() => {
-        try { process.kill(this.serverPid, 'SIGKILL'); } catch {}
+        try { process.kill(this.serverPid, 'SIGKILL'); } catch { }
       }, 2000);
-    } catch {}
+    } catch { }
   }
-  
+
   start() {
     // Initial render
     this.render();
-    
+
     // Update metrics periodically
     this.metricsInterval = setInterval(() => {
       this.updateMetrics().then(() => this.render());
     }, 1000);
-    
+
     // Handle signals
     process.on('SIGINT', () => this.stop());
     process.on('SIGTERM', () => this.stop());
@@ -1014,18 +1053,13 @@ async function ensureDbCaBundleEnv() {
       if (cnMatch) {
         cn = cnMatch[1].trim();
       }
-    } catch {}
+    } catch { }
 
     if (cn && /^[-A-Za-z0-9_.]+$/.test(cn)) {
-      // Use DB_TLS_SERVERNAME for certificate hostname verification; the actual
-      // TCP connect host may be a loopback address (e.g. 127.0.0.1).
       process.env.DB_TLS_SERVERNAME = cn;
       log(`[START] Using DB_TLS_SERVERNAME to match Postgres certificate CN: ${cn}`);
     }
 
-    // Remember which host was successfully probed for TLS so we can reuse it
-    // for the actual TCP connection. This may differ from the certificate
-    // hostname when Postgres only listens on loopback.
     const connectHost = usedConnectHost || dbHost;
     process.env.DB_CONNECT_HOST = connectHost;
     process.env.DB_CA_CERT_PATH = caOutPath;
@@ -1036,7 +1070,7 @@ async function ensureDbCaBundleEnv() {
       let envText = '';
       try {
         envText = fs.readFileSync(envPath, 'utf8');
-      } catch {}
+      } catch { }
       const lines = envText ? envText.split(/\r?\n/) : [];
 
       const upsert = (key, value) => {
@@ -1093,8 +1127,6 @@ async function ensureRedisTls() {
     return;
   }
 
-  // If a TLS Redis instance is already reachable at REDIS_URL, reuse it instead of
-  // auto-selecting a new port or starting a second local instance.
   try {
     const pingCmd = `redis-cli -u "${rawUrl}" PING`;
     const out = execSync(pingCmd, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 1500 }).trim();
@@ -1105,11 +1137,8 @@ async function ensureRedisTls() {
   } catch (_e) {
   }
 
-  // If using a project-local TLS Redis binary (TLS_REDIS_SERVER), trust the build
-  // performed by install-deps.cjs and skip further TLS capability checks.
   const usingLocalTlsRedis = !!process.env.TLS_REDIS_SERVER;
   if (!usingLocalTlsRedis) {
-    // Ensure system redis-server supports TLS before attempting to auto-start.
     let helpOutput = '';
     try {
       helpOutput = execSync(REDIS_SERVER_BIN + ' --help', { encoding: 'utf8' });
@@ -1182,8 +1211,6 @@ async function ensureRedisTls() {
     '--tls-port', String(port),
     '--tls-cert-file', CONFIG.TLS_CERT_PATH,
     '--tls-key-file', CONFIG.TLS_KEY_PATH,
-    // Do not require client certificates; we still rely on hostname
-    // verification on the client side for security.
     '--tls-auth-clients', 'no',
   ];
 
@@ -1198,7 +1225,7 @@ async function ensureRedisTls() {
   try {
     const envPath = path.join(repoRoot, '.env');
     let envText = '';
-    try { envText = fs.readFileSync(envPath, 'utf8'); } catch {}
+    try { envText = fs.readFileSync(envPath, 'utf8'); } catch { }
     const lines = envText ? envText.split(/\r?\n/) : [];
     const upsert = (key, value) => {
       const line = `${key}=${value}`;
@@ -1223,15 +1250,15 @@ async function main() {
     console.log('\x1b[34m║\x1b[32m           End2End Chat Server              \x1b[34m║\x1b[0m');
     console.log('\x1b[34m╚════════════════════════════════════════════╝\x1b[0m');
   }
-  
-  // Ensure TLS exists (interactive if missing), then validate
+
+  // Ensure TLS exists then validate
   await ensureTLSIfMissing();
   validateTLSCertificates();
-  
+
   // Ensure encryption secret
   await ensureKeyEncryptionSecret();
 
-  // Ensure PQ session store key (SESSION_STORE_KEY) exists for Redis-encrypted PQ sessions
+  // Ensure PQ session store key (SESSION_STORE_KEY)
   await ensureSessionStoreKey();
 
   // Ensure Postgres CA bundle is available and DB_CA_CERT_PATH is set
@@ -1239,30 +1266,24 @@ async function main() {
 
   // Ensure Postgres user/database exist before starting server (works for TUI)
   await ensurePostgresBootstrap();
-  
+
   await ensureServerDeps();
 
   // Auto-detect server host if not set
   if (!CONFIG.SERVER_HOST) {
     try {
-      if (process.platform === 'win32') {
-        const out = execSync('ipconfig', { encoding: 'utf8' });
-        const match = out.match(/IPv4[^:]+:\s*([0-9.]+)/);
-        CONFIG.SERVER_HOST = match ? match[1] : '127.0.0.1';
-      } else {
-        const out = execSync("hostname -I 2>/dev/null | awk '{print $1}' || echo '127.0.0.1'", { encoding: 'utf8', shell: true }).trim();
-        CONFIG.SERVER_HOST = out || '127.0.0.1';
-      }
+      const out = execSync("hostname -I 2>/dev/null | awk '{print $1}' || echo '127.0.0.1'", { encoding: 'utf8', shell: true }).trim();
+      CONFIG.SERVER_HOST = out || '127.0.0.1';
     } catch {
       CONFIG.SERVER_HOST = '127.0.0.1';
     }
   }
-  
+
   // Auto-generate server ID if not set
   if (!CONFIG.SERVER_ID) {
     CONFIG.SERVER_ID = `server-${os.hostname()}-${Date.now()}`;
   }
-  
+
   // Auto-allocate port if not set
   if (!CONFIG.PORT) {
     log('Auto-allocating port...');
@@ -1327,7 +1348,7 @@ async function main() {
   }
 
   log('Starting server ...');
-  
+
   if (CONFIG.NO_GUI) {
     const child = spawn(process.execPath, [serverJs], {
       cwd: repoRoot,
@@ -1341,7 +1362,7 @@ async function main() {
       if (!child || child.killed) return;
       try {
         child.kill(signal);
-      } catch {}
+      } catch { }
     };
 
     const onSigint = () => {
@@ -1351,7 +1372,7 @@ async function main() {
       } else {
         try {
           child.kill('SIGKILL');
-        } catch {}
+        } catch { }
         process.exit(130);
       }
     };
@@ -1378,21 +1399,21 @@ async function main() {
 
     return;
   }
-  
+
   // Start server with TUI
   const tmpDir = os.tmpdir();
   const logFile = path.join(tmpDir, `server-ui-${Date.now()}.log`);
   const logStream = fs.createWriteStream(logFile, { flags: 'a' });
-  
+
   const child = spawn(process.execPath, [serverJs], {
     cwd: repoRoot,
     env,
     stdio: ['ignore', 'pipe', 'pipe']
   });
-  
+
   // Setup UI
   const ui = new ServerUI(child.pid, CONFIG);
-  
+
   // Tail server output and capture last lines for error display
   const lastLines = [];
   const MAX_LAST = 80;
@@ -1410,14 +1431,14 @@ async function main() {
       }
     }
   };
-  
+
   child.stdout.on('data', processOutput);
   child.stderr.on('data', processOutput);
-  
+
   child.on('exit', (code) => {
     ui.stop(false);
     logStream.end();
-    
+
     // Show errors if server crashed
     if (code !== 0) {
       console.error(`\n[ERROR] Server exited with code ${code}`);
@@ -1428,10 +1449,10 @@ async function main() {
         console.error('[ERROR] No logs captured. Re-run with NO_GUI=true for raw output.');
       }
     }
-    
+
     setTimeout(() => process.exit(code || 0), 200);
   });
-  
+
   ui.start();
 }
 

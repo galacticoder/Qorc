@@ -5,11 +5,14 @@ Endtoend is a desktop chat client and Node.js server designed for end2end quantu
 For exact details of the Server/Client cryptography, read [`Server-Cryptography.md`](https://github.com/galacticoder/end2end-chat-site/blob/main/Server-Cryptography.md) and [`Client-Cryptography.md`](https://github.com/galacticoder/end2end-chat-site/blob/main/Client-Cryptography.md)
 
 ## Setup
-- Clone the repository and install prerequisites: `node scripts/install-deps.cjs all`.
-- Configure required environment variables; see [`ENVIRONMENT_VARIABLES.md`](https://github.com/galacticoder/end2end-chat-site/blob/main/ENVIRONMENT_VARIABLES.md) (.env file is already setup with what you need to start the server properly)
-- Generate TLS certificates: `node scripts/generate_ts_tls.cjs` (required).
-- Start the server: `node scripts/start-server.cjs`.
-- Start the desktop client: `./startClient.sh`.
+1. Clone the repository
+2. Install dependencies:
+   - **Server:** `node scripts/install-deps.cjs --server`
+   - **Client:** `node scripts/install-deps.cjs --client`
+3. Configure environment variables (see [`ENVIRONMENT_VARIABLES.md`](https://github.com/galacticoder/end2end-chat-site/blob/main/ENVIRONMENT_VARIABLES.md))
+4. Generate TLS certificates: `node scripts/generate_ts_tls.cjs` (required)
+5. Start the server: `node scripts/start-server.cjs`
+6. Start the desktop client: `node scripts/start-client.cjs`
 
 Requirements enforced by the application:
 - Certificate pinning is required for all TLS endpoints used by the desktop client; a valid certificate chain is required (self‑signed is rejected).
@@ -97,9 +100,9 @@ This is not a metadata‑free system. The service retains the minimal routing da
 
 ## Operating the system
 - Quick start
-- Certificates: `node scripts/generate_ts_tls.cjs` (required)
--  Server: `node scripts/start-server.cjs`
--  Desktop: `./startClient.sh`
+  - Certificates: `node scripts/generate_ts_tls.cjs` (required)
+  - Server: `node scripts/start-server.cjs`
+  - Desktop: `node scripts/start-client.cjs`
 - Configuration highlights (see ENVIRONMENT_VARIABLES.md for full list)
   - Database: `DB_BACKEND=sqlite|postgres`, `DATABASE_URL` (when using Postgres)
   - Rate limiting: `RATE_LIMIT_ENABLED=true`
@@ -109,8 +112,8 @@ This is not a metadata‑free system. The service retains the minimal routing da
 - Linux edge (optional): HAProxy auto‑config, soft reloads, and tunnel helpers
 
 ## Platform support
-- Desktop: Electron app runs on Linux, macOS, and Windows. The Tor bootstrapper and PQ stack are bundled in the desktop app.
-- Server: Node.js on Linux/macOS/Windows. The optional HAProxy/systemd/tunnel automation is Linux‑only and not required to run the service.
+- Desktop: Electron app runs natively on Linux, macOS, and Windows. The Tor bootstrapper and PQ stack are bundled in the desktop app.
+- Server: Node.js on Linux, macOS, and Windows (via WSL2). Full cross-platform support with automatic WSL2 forwarding on Windows. The optional HAProxy/systemd/tunnel automation targets Linux/macOS.
 
 ## Future Goals
 

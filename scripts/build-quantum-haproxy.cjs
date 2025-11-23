@@ -18,7 +18,7 @@ function findInPath(bin) {
   for (const dir of parts) {
     for (const ext of exts) {
       const p = path.join(dir, bin + ext);
-      try { if (fs.existsSync(p)) return p; } catch {}
+      try { if (fs.existsSync(p)) return p; } catch { }
     }
   }
   return null;
@@ -29,7 +29,7 @@ function download(url, dest) {
     fs.mkdirSync(path.dirname(dest), { recursive: true });
     const file = fs.createWriteStream(dest);
     const req = https.get(url, { timeout: 300000 }, (res) => {
-      if ([301,302].includes(res.statusCode || 0) && res.headers.location) {
+      if ([301, 302].includes(res.statusCode || 0) && res.headers.location) {
         const redirect = res.headers.location.startsWith('http') ? res.headers.location : new URL(res.headers.location, url).toString();
         res.resume();
         return resolve(download(redirect, dest));
@@ -38,8 +38,8 @@ function download(url, dest) {
       res.pipe(file);
       file.on('finish', () => file.close(() => resolve(dest)));
     });
-    req.on('timeout', () => { try { req.destroy(); } catch {}; reject(new Error('Download timeout')); });
-    req.on('error', (e) => { try { file.close(); } catch {}; reject(e); });
+    req.on('timeout', () => { try { req.destroy(); } catch { }; reject(new Error('Download timeout')); });
+    req.on('error', (e) => { try { file.close(); } catch { }; reject(e); });
   });
 }
 
@@ -79,7 +79,7 @@ function download(url, dest) {
     if (envModule) {
       try {
         if (fs.existsSync(envModule)) oqsModule = envModule;
-      } catch {}
+      } catch { }
     }
     if (!oqsModule) {
       oqsModule = moduleCandidates.find(p => { try { return require('fs').existsSync(p); } catch { return false; } }) || null;
@@ -110,26 +110,38 @@ function download(url, dest) {
         ].join('\n');
         await fsp.writeFile(localConf, confBody, 'utf8');
       }
-    } catch {}
+    } catch { }
 
     if (oqsModule) {
       try {
         const moduleInfoPath = require('path').join('server', 'config', 'oqs-module-path.txt');
         await fsp.mkdir(require('path').dirname(moduleInfoPath), { recursive: true });
         await fsp.writeFile(moduleInfoPath, String(oqsModule).trim() + '\n', 'utf8');
-      } catch {}
+      } catch { }
     }
 
     const localEnv = { ...process.env };
     if (oqsModule) {
       localEnv.OPENSSL_CONF = localConf;
       localEnv.OQS_PROVIDER_MODULE = oqsModule;
-      try { localEnv.OPENSSL_MODULES = require('path').dirname(oqsModule); } catch {}
+      try { localEnv.OPENSSL_MODULES = require('path').dirname(oqsModule); } catch { }
     }
-    localEnv.LD_LIBRARY_PATH = [ '/usr/local/lib', process.env.LD_LIBRARY_PATH || '' ].filter(Boolean).join(':');
+
+    if (process.platform === 'darwin') {
+      localEnv.DYLD_LIBRARY_PATH = [
+        '/usr/local/lib',
+        '/opt/homebrew/lib',
+        process.env.DYLD_LIBRARY_PATH || ''
+      ].filter(Boolean).join(':');
+    } else {
+      localEnv.LD_LIBRARY_PATH = [
+        '/usr/local/lib',
+        process.env.LD_LIBRARY_PATH || ''
+      ].filter(Boolean).join(':');
+    }
 
     const HAPROXY_VERSION = process.env.HAPROXY_VERSION || '3.2.0';
-    const mm = HAPROXY_VERSION.split('.').slice(0,2).join('.');
+    const mm = HAPROXY_VERSION.split('.').slice(0, 2).join('.');
     const url = `https://www.haproxy.org/download/${mm}/src/haproxy-${HAPROXY_VERSION}.tar.gz`;
 
     const tmp = await fsp.mkdtemp(path.join(os.tmpdir(), 'haproxy-build-'));
@@ -144,9 +156,9 @@ function download(url, dest) {
 
     console.log('[BUILD] Running make ...');
     const { execSync } = require('child_process');
-    
+
     const target = process.platform === 'darwin' ? 'osx' : 'linux-glibc';
-    
+
     let sslInc = null;
     let sslLib = null;
 
@@ -157,19 +169,24 @@ function download(url, dest) {
         for (const inc of incs) {
           if (fs.existsSync(path.join(inc, 'openssl', 'ssl.h'))) { sslInc = inc; break; }
         }
-      } catch {}
+      } catch { }
       try {
         const libs = execSync('pkg-config --libs openssl', { encoding: 'utf8' });
         const libDirs = (libs.match(/-L\S+/g) || []).map(s => s.slice(2));
         for (const lib of libDirs) {
           if (fs.existsSync(path.join(lib))) { sslLib = lib; break; }
         }
-      } catch {}
+      } catch { }
     };
     tryPkg();
 
     if (!sslInc || !sslLib) {
-      const candidates = [
+      const candidates = process.platform === 'darwin' ? [
+        { inc: '/opt/homebrew/opt/openssl@3/include', lib: '/opt/homebrew/opt/openssl@3/lib' },
+        { inc: '/usr/local/opt/openssl@3/include', lib: '/usr/local/opt/openssl@3/lib' },
+        { inc: '/opt/homebrew/opt/openssl/include', lib: '/opt/homebrew/opt/openssl/lib' },
+        { inc: '/usr/local/opt/openssl/include', lib: '/usr/local/opt/openssl/lib' },
+      ] : [
         { inc: '/usr/local/include', lib: '/usr/local/lib' },
         { inc: '/usr/include', lib: '/usr/lib/x86_64-linux-gnu' },
         { inc: '/usr/include', lib: '/usr/lib' },
@@ -185,7 +202,7 @@ function download(url, dest) {
     try {
       const providers = execSync('openssl list -providers 2>/dev/null || true', { encoding: 'utf8', env: localEnv });
       oqsOk = /oqs/i.test(providers);
-    } catch {}
+    } catch { }
     const moduleExists = !!oqsModule;
 
     if (!sslInc || !sslLib || !(oqsOk || moduleExists)) {
@@ -206,7 +223,7 @@ function download(url, dest) {
       `SSL_LIB=${sslLib}`,
       `USE_THREAD=1`,
     ];
-    
+
     try {
       execSync('pkg-config --exists zlib', { stdio: 'ignore' });
       args.push('USE_ZLIB=1');
@@ -214,7 +231,7 @@ function download(url, dest) {
     } catch {
       console.log('[BUILD] zlib not detected, building without compression support');
     }
-    
+
     try {
       execSync('pkg-config --exists libpcre2-8', { stdio: 'ignore' });
       args.push('USE_PCRE2=1');
@@ -222,7 +239,7 @@ function download(url, dest) {
     } catch {
       console.log('[BUILD] pcre2 not detected, building without regex support');
     }
-    
+
     let luaLib = null;
     try {
       for (const name of ['lua5.4', 'lua54', 'lua5.3', 'lua53', 'lua']) {
@@ -230,10 +247,10 @@ function download(url, dest) {
           execSync(`pkg-config --exists ${name}`, { stdio: 'ignore' });
           luaLib = name;
           break;
-        } catch {}
+        } catch { }
       }
-    } catch {}
-    
+    } catch { }
+
     if (luaLib) {
       console.log(`[BUILD] Detected Lua library: ${luaLib}`);
       args.push('USE_LUA=1');
@@ -268,7 +285,7 @@ function download(url, dest) {
       await fsp.mkdir(path.join('server', 'config'), { recursive: true });
       await fsp.writeFile(path.join('server', 'config', 'haproxy-build.json'), JSON.stringify(buildMeta, null, 2));
       console.log('[BUILD] Build metadata written to server/config/haproxy-build.json');
-    } catch {}
+    } catch { }
   } catch (e) {
     console.error('[BUILD] Failed:', e.message);
     process.exit(1);
