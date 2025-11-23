@@ -2,14 +2,14 @@
 
 Endtoend is a desktop chat client and Node.js server designed for end2end quantum secure messaging. It uses the Signal Protocol for forward secrecy with an additional post‑quantum (PQ) envelope including others too long to explain here.
 
-For exact details of the Server/Client cryptography, read [`Server-Cryptography.md`](https://github.com/galacticoder/end2end-chat-site/blob/main/Server-Cryptography.md) and [`Client-Cryptography.md`](https://github.com/galacticoder/end2end-chat-site/blob/main/Client-Cryptography.md)
+For exact details of the Server/Client cryptography, read [`docs/Server-Cryptography.md`](https://github.com/galacticoder/end2end-chat-site/blob/main/docs/Server-Cryptography.md) and [`docs/Client-Cryptography.md`](https://github.com/galacticoder/end2end-chat-site/blob/main/docs/Client-Cryptography.md)
 
 ## Setup
 1. Clone the repository
 2. Install dependencies:
    - **Server:** `node scripts/install-deps.cjs --server`
    - **Client:** `node scripts/install-deps.cjs --client`
-3. Configure environment variables (see [`ENVIRONMENT_VARIABLES.md`](https://github.com/galacticoder/end2end-chat-site/blob/main/ENVIRONMENT_VARIABLES.md))
+3. Configure environment variables (see [`docs/ENVIRONMENT_VARIABLES.md`](https://github.com/galacticoder/end2end-chat-site/blob/main/docs/ENVIRONMENT_VARIABLES.md))
 4. Generate TLS certificates: `node scripts/generate_ts_tls.cjs` (required)
 5. Start the server: `node scripts/start-server.cjs`
 6. Start the desktop client: `node scripts/start-client.cjs`
@@ -57,7 +57,7 @@ This is not a metadata‑free system. The service retains the minimal routing da
 
 ## Message storage and data handling
 - On the client
-  - All conversation history, username mappings, block lists, queued messages, and file metadata are stored in an encrypted IndexedDB using a PQ AEAD (AES‑GCM + XChaCha20 with BLAKE3 MAC). Ephemeral stores support TTL and automatic cleanup.
+  - All conversation history, username mappings, block lists, queued messages, and file metadata are stored in an encrypted SQLite database using a PQ AEAD (AES‑GCM + XChaCha20 with BLAKE3 MAC). Ephemeral stores support TTL and automatic cleanup.
 - On the server
   - Messages are stored only as encrypted payloads. The server never needs plaintext to route or persist messages.
   - Offline messages are queued encrypted and delivered on reconnection.
@@ -66,7 +66,7 @@ This is not a metadata‑free system. The service retains the minimal routing da
 ## Transport and delivery
 - Primary channel: WebSockets over TLS with certificate pinning enforced by the desktop.
 - P2P path: a minimal WebRTC signaling path allows peer‑to‑peer messaging when available; the app automatically falls back to the server path when P2P is unavailable.
-- Tor: the desktop bootstraps its own Tor instance, verifies a working SOCKS proxy, and routes traffic through it. Bridge transports (obfs4 or snowflake) are supported. Bundle signature verification is performed when possible (see ENVIRONMENT_VARIABLES.md for verification controls).
+- Tor: the desktop bootstraps its own Tor instance, verifies a working SOCKS proxy, and routes traffic through it. Bridge transports (obfs4 or snowflake) are supported. Bundle signature verification is performed when possible (see [`docs/ENVIRONMENT_VARIABLES.md`](https://github.com/galacticoder/end2end-chat-site/blob/main/docs/ENVIRONMENT_VARIABLES.md) for verification controls).
 
 ## Server architecture
 - WebSocket gateway: authenticates clients, distributes server public keys, relays encrypted messages, and handles chunking for large key exchanges.
@@ -95,29 +95,20 @@ This is not a metadata‑free system. The service retains the minimal routing da
 - Message harvesting for future decryption: mitigated by PQ envelope (ML‑KEM‑1024 + AES‑GCM/XChaCha20 + BLAKE3) and Signal forward secrecy.
 - Stolen refresh token: requires device‑bound proof (Ed25519); token alone is insufficient.
 - Server compromise: server stores only encrypted payloads; no plaintext message recovery. Keys are not present server‑side.
-- Local disk theft (desktop): IndexedDB contents are encrypted with PQ AEAD; plaintext exists only in memory during use.
+- Local disk theft (desktop): SQLite contents are encrypted with PQ AEAD; plaintext exists only in memory during use.
 - Network path manipulation: TLS with certificate pinning; Tor path required.
-
-## Operating the system
-- Quick start
-  - Certificates: `node scripts/generate_ts_tls.cjs` (required)
-  - Server: `node scripts/start-server.cjs`
-  - Desktop: `node scripts/start-client.cjs`
-- Configuration highlights (see ENVIRONMENT_VARIABLES.md for full list)
-  - Database: `DB_BACKEND=sqlite|postgres`, `DATABASE_URL` (when using Postgres)
-  - Rate limiting: `RATE_LIMIT_ENABLED=true`
-  - Tor controls: see variables documented in ENVIRONMENT_VARIABLES.md for bundle verification and transport settings
-- Scaling
-  - Enable Redis and the cluster manager for multi‑node delivery
-- Linux edge (optional): HAProxy auto‑config, soft reloads, and tunnel helpers
 
 ## Platform support
 - Desktop: Electron app runs natively on Linux, macOS, and Windows. The Tor bootstrapper and PQ stack are bundled in the desktop app.
-- Server: Node.js on Linux, macOS, and Windows (via WSL2). Full cross-platform support with automatic WSL2 forwarding on Windows. The optional HAProxy/systemd/tunnel automation targets Linux/macOS.
+- Server: Node.js on Linux, macOS, and Windows (via WSL2). Full cross-platform support with automatic WSL2 forwarding on Windows. The HAProxy/systemd/tunnel automation targets Linux/macOS.
 
 ## Future Goals
 
 All goals/to-dos are in the [issues tab](https://github.com/galacticoder/end2end-chat-site/issues). I am a solo developer working on making the safest app for users looking for an app where privacy and security truly matters for every small detail leaving their device. I plan on adding more user features and making huge ui improvements on my next update.
+
+## Contributing and reporting of issues
+
+Please reference the [`CONTRIBUTING.md`](https://github.com/galacticoder/end2end-chat-site/blob/main/docs/CONTRIBUTING.md) file for contributing to the project. Please reference the [`ISSUE_TEMPLATE.md`](https://github.com/galacticoder/end2end-chat-site/blob/main/docs/ISSUE_TEMPLATE.md) file for reporting issues.
 
 ## License
 [![License: qorc Non-Commercial Copyleft v1.0](https://img.shields.io/badge/License-qorc%20Non--Commercial%20Copyleft%20v1.0-6d4aff.svg)](LICENSE)
