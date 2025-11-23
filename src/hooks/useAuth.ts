@@ -92,7 +92,14 @@ export const useAuth = (_secureDB?: SecureDB) => {
   const [isSubmittingAuth, setIsSubmittingAuth] = useState(false);
   const [accountAuthenticated, setAccountAuthenticated] = useState(false);
   const [isRegistrationMode, setIsRegistrationMode] = useState(false);
-  const [tokenValidationInProgress, setTokenValidationInProgress] = useState(false);
+  const [tokenValidationInProgress, setTokenValidationInProgress] = useState(() => {
+    try {
+      const storedUsername = syncEncryptedStorage.getItem('last_authenticated_username');
+      return !!storedUsername;
+    } catch {
+      return false;
+    }
+  });
   const passphraseRef = useRef<string>("");
   const passphrasePlaintextRef = useRef<string>("");
   const aesKeyRef = useRef<CryptoKey | null>(null);
@@ -114,8 +121,6 @@ export const useAuth = (_secureDB?: SecureDB) => {
     serverHybridPublicRef.current = serverHybridPublic;
   }, [serverHybridPublic]);
 
-  // Ensure the login button always re-enables on any AUTH_ERROR signal
-  // Also handle rate limit countdown timer
   useEffect(() => {
     let countdownInterval: NodeJS.Timeout | null = null;
 
@@ -1364,7 +1369,6 @@ export const useAuth = (_secureDB?: SecureDB) => {
           userData: encryptedHybridKeys,
         });
 
-        // Notify P2P system that keys have been updated, caches should be cleared
         try {
           window.dispatchEvent(new CustomEvent('hybrid-keys-updated'));
         } catch { }
@@ -1380,13 +1384,21 @@ export const useAuth = (_secureDB?: SecureDB) => {
       try {
         const tokens = await retrieveAuthTokens();
         if (tokens?.accessToken && tokens?.refreshToken) {
+          setTokenValidationInProgress(true);
+          setAuthStatus('Verifying session...');
           const storedUsername = syncEncryptedStorage.getItem('last_authenticated_username');
           if (storedUsername) {
             loginUsernameRef.current = storedUsername;
             setUsername(storedUsername);
           }
+        } else {
+          setTokenValidationInProgress(false);
+          setAuthStatus('');
         }
-      } catch { }
+      } catch {
+        setTokenValidationInProgress(false);
+        setAuthStatus('');
+      }
     })();
   }, []);
 
@@ -1399,6 +1411,29 @@ export const useAuth = (_secureDB?: SecureDB) => {
     };
     window.addEventListener('token-validation-start', onTokenValidationStart as EventListener);
     return () => window.removeEventListener('token-validation-start', onTokenValidationStart as EventListener);
+  }, []);
+
+  useEffect(() => {
+    let timeout: NodeJS.Timeout;
+    if (tokenValidationInProgress) {
+      timeout = setTimeout(() => {
+        setTokenValidationInProgress(false);
+        setAuthStatus('');
+      }, 10000);
+    }
+    return () => clearTimeout(timeout);
+  }, [tokenValidationInProgress]);
+
+  useEffect(() => {
+    const onTokenValidationTimeout = (_ev: Event) => {
+      try {
+        setTokenValidationInProgress(false);
+        setAuthStatus('');
+        setLoginError('Session validation timed out. Please log in again.');
+      } catch { }
+    };
+    window.addEventListener('token-validation-timeout', onTokenValidationTimeout as EventListener);
+    return () => window.removeEventListener('token-validation-timeout', onTokenValidationTimeout as EventListener);
   }, []);
 
   useEffect(() => {

@@ -357,7 +357,7 @@ export const ConversationList = memo<ConversationListProps>(function Conversatio
         <div className="p-2">
           {conversations.length === 0 ? (
             <div
-              className="text-center text-xs py-8"
+              className="text-center text-xs py-8 select-none"
               style={{ color: 'var(--color-text-secondary)' }}
             >
               No conversations yet

@@ -15,10 +15,8 @@ interface SignInFormProps {
   readonly onChangePassword?: (v: string) => void;
 }
 
-const USERNAME_MIN_LENGTH = 3;
 const USERNAME_MAX_LENGTH = 32;
 const PASSWORD_MAX_LENGTH = 1000;
-const USERNAME_REGEX = /^[a-zA-Z0-9_-]+$/;
 
 export function SignInForm({
   onSubmit,
@@ -45,7 +43,7 @@ export function SignInForm({
   }, [onChangePassword]);
 
   const isFormValid = useMemo(() =>
-    username.trim().length >= USERNAME_MIN_LENGTH && password.length > 0,
+    username.trim().length > 0 && password.length > 0,
     [username, password]
   );
 
@@ -55,8 +53,7 @@ export function SignInForm({
 
     const sanitizedUsername = username.trim();
 
-    if (!USERNAME_REGEX.test(sanitizedUsername)) return;
-    if (sanitizedUsername.length < USERNAME_MIN_LENGTH || sanitizedUsername.length > USERNAME_MAX_LENGTH) return;
+    if (sanitizedUsername.length === 0 || sanitizedUsername.length > USERNAME_MAX_LENGTH) return;
     if (password.length < 1 || password.length > PASSWORD_MAX_LENGTH) return;
 
     setIsSubmitting(true);
@@ -78,7 +75,6 @@ export function SignInForm({
           onChange={(e) => handleUsernameChange(e.target.value)}
           disabled={disabled || isSubmitting}
           required
-          minLength={USERNAME_MIN_LENGTH}
           maxLength={USERNAME_MAX_LENGTH}
           autoComplete="username"
           className="bg-background/50 border-border/50 focus:bg-background/80 transition-all duration-200"

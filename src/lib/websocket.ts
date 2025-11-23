@@ -1961,6 +1961,13 @@ class WebSocketClient {
       return;
     }
     this.tokenValidationAttempted = true;
+
+    const maxRetries = 3;
+    const tokenValidationTimeout = 10000;
+    const startTime = Date.now();
+
+    let timeoutId: NodeJS.Timeout | undefined;
+
     try {
       const api = (window as any).electronAPI;
       if (!api?.secureStore) {
@@ -1986,18 +1993,63 @@ class WebSocketClient {
         try { SecureAuditLogger.warn('auth', 'token-validate', 'tokens-incomplete', { hasA: !!accessToken, hasR: !!refreshToken, source }); } catch { }
         return;
       }
+
+      timeoutId = setTimeout(() => {
+        try {
+          SecureAuditLogger.warn('auth', 'token-validate', 'timeout', { source, timeoutMs: tokenValidationTimeout });
+          window.dispatchEvent(new CustomEvent('token-validation-timeout', { detail: { source } }));
+        } catch { }
+      }, tokenValidationTimeout);
+
       try {
         window.dispatchEvent(new CustomEvent('token-validation-start', { detail: { source } }));
         SecureAuditLogger.info('auth', 'token-validate', 'sending', { source });
       } catch { }
-      await this.sendSecureControlMessage({
-        type: SignalType.TOKEN_VALIDATION,
-        accessToken,
-        refreshToken,
-      });
-      try { SecureAuditLogger.info('auth', 'token-validate', 'sent', { source }); } catch { }
+
+      let lastError: Error | null = null;
+      for (let attempt = 0; attempt < maxRetries; attempt++) {
+        if (Date.now() - startTime > tokenValidationTimeout) {
+          try { SecureAuditLogger.warn('auth', 'token-validate', 'total-timeout-exceeded', { attempt, source }); } catch { }
+          break;
+        }
+
+        try {
+          await this.sendSecureControlMessage({
+            type: SignalType.TOKEN_VALIDATION,
+            accessToken,
+            refreshToken,
+          });
+          try { SecureAuditLogger.info('auth', 'token-validate', 'sent', { source, attempt }); } catch { }
+          lastError = null;
+          break;
+        } catch (e) {
+          lastError = e instanceof Error ? e : new Error(String(e));
+          try {
+            SecureAuditLogger.warn('auth', 'token-validate', 'send-failed', {
+              source,
+              attempt: attempt + 1,
+              maxRetries,
+              error: lastError.message
+            });
+          } catch { }
+
+          if (attempt < maxRetries - 1) {
+            const backoffMs = Math.min(1000 * Math.pow(2, attempt), 3000);
+            try { SecureAuditLogger.info('auth', 'token-validate', 'retry-backoff', { attempt, backoffMs }); } catch { }
+            await new Promise(resolve => setTimeout(resolve, backoffMs));
+          }
+        }
+      }
+
+      if (lastError) {
+        throw lastError;
+      }
     } catch (e) {
       try { SecureAuditLogger.error('auth', 'token-validate', 'failed', { source, error: e instanceof Error ? e.message : String(e) }); } catch { }
+    } finally {
+      if (timeoutId) {
+        clearTimeout(timeoutId);
+      }
     }
   }
 
@@ -2078,7 +2130,7 @@ class WebSocketClient {
         return;
       }
 
-      const maxWaitTime = 10000; // 10 seconds
+      const maxWaitTime = 10000;
       const startTime = Date.now();
       while (!this.isPQSessionEstablished() && (Date.now() - startTime) < maxWaitTime) {
         await new Promise(resolve => setTimeout(resolve, 100));

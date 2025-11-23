@@ -1433,10 +1433,9 @@ const ChatApp: React.FC<ChatAppProps> = () => {
     );
   }
 
-  // While validating existing token show a loading screen instead of login
   if (Authentication.tokenValidationInProgress) {
     return (
-      <div className="flex items-center justify-center min-h-screen p-4 bg-white dark:bg-[hsl(var(--background))]">
+      <div className="flex items-center justify-center min-h-screen p-4 bg-white dark:bg-[hsl(var(--background))] select-none">
         <div className="text-center text-sm" style={{ color: 'var(--color-text-secondary)' }}>
           Validating session...
         </div>
@@ -1444,7 +1443,6 @@ const ChatApp: React.FC<ChatAppProps> = () => {
     );
   }
 
-  // Show login screen if not logged in OR if passphrase/password is needed for recovery
   if (!Authentication.isLoggedIn || Authentication.showPassphrasePrompt || Authentication.showPasswordPrompt) {
     return (
       <div className="flex items-center justify-center min-h-screen p-4 bg-white dark:bg-[hsl(var(--background))]">
@@ -1479,7 +1477,7 @@ const ChatApp: React.FC<ChatAppProps> = () => {
   // Wait for DB initialization before showing the main app
   if (!Database.dbInitialized) {
     return (
-      <div className="flex items-center justify-center min-h-screen p-4 bg-white dark:bg-[hsl(var(--background))]">
+      <div className="flex items-center justify-center min-h-screen p-4 bg-white dark:bg-[hsl(var(--background))] select-none">
         <div className="text-center text-sm" style={{ color: 'var(--color-text-secondary)' }}>
           Initializing secure storage...
         </div>

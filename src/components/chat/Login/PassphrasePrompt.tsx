@@ -42,7 +42,12 @@ export function PassphrasePrompt({
     onChangeConfirm?.(v);
   }, [onChangeConfirm]);
 
-  const isPassphraseValid = useMemo(() => passphrase.length >= PASSPHRASE_MIN_LENGTH, [passphrase]);
+  const isPassphraseValid = useMemo(() => {
+    if (mode === 'register') {
+      return passphrase.length >= PASSPHRASE_MIN_LENGTH;
+    }
+    return passphrase.length > 0;
+  }, [passphrase, mode]);
   const doPassphrasesMatch = useMemo(() => passphrase === confirmPassphrase, [passphrase, confirmPassphrase]);
 
   const handleSubmit = useCallback(async (e: React.FormEvent): Promise<void> => {
@@ -51,9 +56,13 @@ export function PassphrasePrompt({
 
     const trimmedPassphrase = passphrase.trim();
     if (!trimmedPassphrase) return;
-    if (trimmedPassphrase.length < PASSPHRASE_MIN_LENGTH) return;
+
+    if (mode === 'register') {
+      if (trimmedPassphrase.length < PASSPHRASE_MIN_LENGTH) return;
+      if (!doPassphrasesMatch) return;
+    }
+
     if (trimmedPassphrase.length > PASSPHRASE_MAX_LENGTH) return;
-    if (mode === "register" && !doPassphrasesMatch) return;
     if (!isPassphraseValid) return;
 
     setIsSubmitting(true);
@@ -77,7 +86,6 @@ export function PassphrasePrompt({
           minLength={PASSPHRASE_MIN_LENGTH}
           maxLength={PASSPHRASE_MAX_LENGTH}
           strengthCheck
-          warningMessage="This passphrase encrypts your data. Do not forget it."
           disabled={disabled || isSubmitting}
         />
       ) : (
@@ -105,8 +113,8 @@ export function PassphrasePrompt({
           disabled ||
           isSubmitting ||
           !passphrase.trim() ||
-          (mode === "register" && !doPassphrasesMatch) ||
-          !isPassphraseValid
+          (mode === "register" && (!doPassphrasesMatch || !isPassphraseValid)) ||
+          (mode === "login" && !passphrase)
         }
       >
         {isSubmitting ? (authStatus || "Processing...") : "Submit Passphrase"}

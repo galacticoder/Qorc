@@ -63,6 +63,39 @@ const truncateKey = (key: string, maxLength: number = 16): string => {
   return key.slice(0, safeLength) + '...';
 };
 
+const AnimatedHeightWrapper = ({ children, className }: { children: React.ReactNode; className?: string }) => {
+  const contentRef = React.useRef<HTMLDivElement>(null);
+  const [height, setHeight] = useState<number | undefined>(undefined);
+
+  useEffect(() => {
+    if (!contentRef.current) return;
+
+    const observer = new ResizeObserver((entries) => {
+      for (const entry of entries) {
+        setHeight(entry.target.scrollHeight);
+      }
+    });
+
+    observer.observe(contentRef.current);
+    return () => observer.disconnect();
+  }, []);
+
+  return (
+    <div
+      className={className}
+      style={{
+        height: height,
+        transition: 'height 300ms cubic-bezier(0.4, 0, 0.2, 1)',
+        overflow: 'hidden'
+      }}
+    >
+      <div ref={contentRef}>
+        {children}
+      </div>
+    </div>
+  );
+};
+
 export const Login = React.memo<LoginProps>(({
   onAccountSubmit,
   onServerPasswordSubmit,
@@ -321,74 +354,75 @@ export const Login = React.memo<LoginProps>(({
             </div>
           )}
 
-          {/* Form Content with proper animation key */}
-          <div
-            key={`${showPasswordPrompt}-${showPassphrasePrompt}-${accountAuthenticated}-${mode}`}
-            className="overflow-hidden transition-all duration-300 ease-in-out data-[state=open]:animate-in data-[state=open]:fade-in-0"
-            data-state="open"
-          >
-            {showPasswordPrompt ? (
-              <PasswordHashPrompt
-                onSubmit={async (pwd) => {
-                  try {
-                    await onPasswordHashSubmit?.(pwd);
-                  } catch (err) {
-                    if (err instanceof Error) {
-                      toast.error(err.message);
+          {/* Form Content */}
+          <AnimatedHeightWrapper className="w-full">
+            <div
+              key={`${showPasswordPrompt}-${showPassphrasePrompt}-${accountAuthenticated}-${mode}`}
+              className="animate-in fade-in-0 slide-in-from-bottom-2 duration-300 delay-100"
+            >
+              {showPasswordPrompt ? (
+                <PasswordHashPrompt
+                  onSubmit={async (pwd) => {
+                    try {
+                      await onPasswordHashSubmit?.(pwd);
+                    } catch (err) {
+                      if (err instanceof Error) {
+                        toast.error(err.message);
+                      }
                     }
-                  }
-                }}
-                disabled={isSubmitting || isGeneratingKeys || isRateLimited}
-                authStatus={authStatus}
-                initialPassword={initialPassword}
-                onChangePassword={(v) => handleInputChange('password', v)}
-              />
-            ) : showPassphrasePrompt && !recoveryActive ? (
-              <PassphrasePrompt
-                mode={mode}
-                onSubmit={handlePassphraseSubmit}
-                disabled={isSubmitting || isGeneratingKeys || isRateLimited}
-                authStatus={authStatus}
-                initialPassphrase={""}
-                initialConfirmPassphrase={""}
-                onChangePassphrase={(v) => handleInputChange('passphrase', v)}
-                onChangeConfirm={(v) => handleInputChange('passphraseConfirm', v)}
-              />
-            ) : accountAuthenticated ? (
-              <ServerPasswordForm
-                serverPassword={serverPassword}
-                setServerPassword={setServerPassword}
-                disabled={isSubmitting || isGeneratingKeys || isRateLimited}
-                authStatus={authStatus}
-                onSubmit={handleServerPasswordSubmit}
-              />
-            ) : mode === "register" ? (
-              <SignUpForm
-                onSubmit={handleAccountSubmit}
-                disabled={isSubmitting || isGeneratingKeys || !!serverTrustRequest || isRateLimited}
-                authStatus={authStatus}
-                error={error}
-                hasServerTrustRequest={!!serverTrustRequest}
-                initialUsername={initialUsername}
-                initialPassword={initialPassword}
-                onChangeUsername={(v) => handleInputChange('username', v)}
-                onChangePassword={(v) => handleInputChange('password', v)}
-                onChangeConfirmPassword={(v) => handleInputChange('confirmPassword', v)}
-              />
-            ) : (
-              <SignInForm
-                onSubmit={handleAccountSubmit}
-                disabled={isSubmitting || isGeneratingKeys || !!serverTrustRequest || isRateLimited}
-                authStatus={authStatus}
-                error={error}
-                hasServerTrustRequest={!!serverTrustRequest}
-                initialUsername={initialUsername}
-                initialPassword={initialPassword}
-                onChangeUsername={(v) => handleInputChange('username', v)}
-                onChangePassword={(v) => handleInputChange('password', v)}
-              />
-            )}
-          </div>
+                  }}
+                  disabled={isSubmitting || isGeneratingKeys || isRateLimited}
+                  authStatus={authStatus}
+                  initialPassword={initialPassword}
+                  onChangePassword={(v) => handleInputChange('password', v)}
+                />
+              ) : showPassphrasePrompt && !recoveryActive ? (
+                <PassphrasePrompt
+                  mode={mode}
+                  onSubmit={handlePassphraseSubmit}
+                  disabled={isSubmitting || isGeneratingKeys || isRateLimited}
+                  authStatus={authStatus}
+                  initialPassphrase={""}
+                  initialConfirmPassphrase={""}
+                  onChangePassphrase={(v) => handleInputChange('passphrase', v)}
+                  onChangeConfirm={(v) => handleInputChange('passphraseConfirm', v)}
+                />
+              ) : accountAuthenticated ? (
+                <ServerPasswordForm
+                  serverPassword={serverPassword}
+                  setServerPassword={setServerPassword}
+                  disabled={isSubmitting || isGeneratingKeys || isRateLimited}
+                  authStatus={authStatus}
+                  onSubmit={handleServerPasswordSubmit}
+                />
+              ) : mode === "register" ? (
+                <SignUpForm
+                  onSubmit={handleAccountSubmit}
+                  disabled={isSubmitting || isGeneratingKeys || !!serverTrustRequest || isRateLimited}
+                  authStatus={authStatus}
+                  error={error}
+                  hasServerTrustRequest={!!serverTrustRequest}
+                  initialUsername={initialUsername}
+                  initialPassword={initialPassword}
+                  onChangeUsername={(v) => handleInputChange('username', v)}
+                  onChangePassword={(v) => handleInputChange('password', v)}
+                  onChangeConfirmPassword={(v) => handleInputChange('confirmPassword', v)}
+                />
+              ) : (
+                <SignInForm
+                  onSubmit={handleAccountSubmit}
+                  disabled={isSubmitting || isGeneratingKeys || !!serverTrustRequest || isRateLimited}
+                  authStatus={authStatus}
+                  error={error}
+                  hasServerTrustRequest={!!serverTrustRequest}
+                  initialUsername={initialUsername}
+                  initialPassword={initialPassword}
+                  onChangeUsername={(v) => handleInputChange('username', v)}
+                  onChangePassword={(v) => handleInputChange('password', v)}
+                />
+              )}
+            </div>
+          </AnimatedHeightWrapper>
         </CardContent>
 
         <CardFooter className="flex flex-col gap-2 p-8 pt-0 select-none">
