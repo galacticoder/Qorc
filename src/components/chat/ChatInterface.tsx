@@ -638,7 +638,7 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
 
   const emptyMessagesUI = useMemo(() => (
     <div
-      className="flex items-center justify-center h-full min-h-[200px] text-sm"
+      className="flex items-center justify-center h-full min-h-[200px] text-sm select-none"
       style={{ color: 'var(--color-text-secondary)' }}
     >
       {selectedConversation ? "No messages yet. Start the conversation!" : "Select a conversation to view messages"}
@@ -660,20 +660,20 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
                 variant="outline"
                 onClick={handleAudioCall}
                 disabled={!!currentCall || isUserBlocked || isBlockedByUser}
-                className="flex items-center gap-2 select-none dark:border-gray-600 [&:hover]:!bg-background [&:hover]:!text-foreground dark:[&:hover]:!border-gray-600"
+                className="flex items-center justify-center select-none dark:border-gray-600 [&:hover]:!bg-background [&:hover]:!text-foreground dark:[&:hover]:!border-gray-600"
+                title="Audio call"
               >
                 <CallIcon className="w-4 h-4" />
-                <span>Call</span>
               </Button>
               <Button
                 size="sm"
                 variant="outline"
                 onClick={handleVideoCall}
                 disabled={!!currentCall || isUserBlocked || isBlockedByUser}
-                className="flex items-center gap-2 select-none dark:border-gray-600 [&:hover]:!bg-background [&:hover]:!text-foreground dark:[&:hover]:!border-gray-600"
+                className="flex items-center justify-center select-none dark:border-gray-600 [&:hover]:!bg-background [&:hover]:!text-foreground dark:[&:hover]:!border-gray-600"
+                title="Video call"
               >
                 <Video className="w-4 h-4" />
-                <span>Video</span>
               </Button>
             </>
           )}
