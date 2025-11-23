@@ -362,9 +362,9 @@ async function installComponent(name) {
     }
     case 'wget': {
       if (findInPath('wget')) return true;
+      if (plat === 'win32') return true;
       if (plat === 'linux') return await installLinux('wget');
       if (plat === 'darwin' && pmHas('brew')) return await tryExec('brew', ['install', 'wget']);
-      if (plat === 'win32' && pmHas('choco')) return await tryExec('choco', ['install', 'wget', '-y']);
       return false;
     }
     case 'python3': {
@@ -386,6 +386,25 @@ async function installComponent(name) {
       return false;
     }
     case 'build-tools': {
+      if (plat === 'win32') {
+        const hasMSBuild = findInPath('msbuild');
+        const hasPython = findInPath('python') || findInPath('python3');
+        if (hasMSBuild && hasPython) return true;
+
+        if (pmHas('winget')) {
+          let success = true;
+          if (!hasPython) {
+            success = await tryExec('winget', ['install', '--id', 'Python.Python.3', '-e', '--accept-source-agreements', '--accept-package-agreements']) && success;
+          }
+          if (!hasMSBuild) {
+            success = await tryExec('winget', ['install', '--id', 'Microsoft.VisualStudio.2022.BuildTools', '-e', '--accept-source-agreements', '--accept-package-agreements']) && success;
+          }
+          return success;
+        }
+        console.log('[INFO] Install Microsoft C++ Build Tools and Python3 for native modules.');
+        return false;
+      }
+
       if (findInPath('gcc') && findInPath('make')) return true;
 
       if (plat === 'linux') {
@@ -398,10 +417,6 @@ async function installComponent(name) {
         return false;
       }
       if (plat === 'darwin' && pmHas('brew')) return await tryExec('brew', ['install', 'gcc', 'make', 'python@3']);
-      if (plat === 'win32') {
-        console.log('[INFO] Install Microsoft C++ Build Tools (Visual Studio Build Tools) and Python3 for native modules.');
-        return false;
-      }
       return false;
     }
     case 'liboqs': {
@@ -560,11 +575,11 @@ async function installComponent(name) {
       return false;
     }
     case 'electron': {
-      // Check if electron is installed in the project
+      // Check if electron is installed
       const repoRoot = path.resolve(__dirname, '..');
       try {
-        require.resolve('electron', { paths: [repoRoot] });
-        return true;
+        const electronPath = path.join(repoRoot, 'node_modules', 'electron');
+        if (fs.existsSync(electronPath)) return true;
       } catch { }
 
       // Install electron
@@ -616,6 +631,9 @@ async function installComponent(name) {
       if (findInPath('cargo')) return true;
 
       if (plat === 'win32') {
+        if (pmHas('winget')) {
+          return await tryExec('winget', ['install', '--id', 'Rustlang.Rustup', '-e', '--accept-source-agreements', '--accept-package-agreements']);
+        }
         console.log('[INFO] Install Rust from https://rustup.rs');
         return false;
       }
