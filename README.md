@@ -5,11 +5,22 @@ Endtoend is a desktop chat client and Node.js server designed for end2end quantu
 For exact details of the Server/Client cryptography, read [`docs/Server-Cryptography.md`](https://github.com/galacticoder/end2end-chat-site/blob/main/docs/Server-Cryptography.md) and [`docs/Client-Cryptography.md`](https://github.com/galacticoder/end2end-chat-site/blob/main/docs/Client-Cryptography.md)
 
 ## Setup
+
+If you are using Windows, run this in PowerShell (Admin) **BEFORE THE SETUP**:
+
+```powershell
+wsl --install -d Ubuntu
+winget install OpenJS.NodeJS Rustlang.Rustup -e --accept-source-agreements --accept-package-agreements
+winget install Microsoft.VisualStudio.2025.BuildTools -e --accept-source-agreements --accept-package-agreements
+```
+
+*Note: If you already have these installed, you can skip them. If WSL2 was just installed, you must **restart your computer**.*
+
 1. Clone the repository
 2. Install dependencies:
    - **Server:** `node scripts/install-deps.cjs --server`
    - **Client:** `node scripts/install-deps.cjs --client`
-3. Configure environment variables (YOU DO NOT HAVE TO CONFIGURE ANYTHING TO START THE SERVER WITH ALL FEATURES! EVERYTHING IS ALREADY SETUP IN THE PROVIDED ENV FILE! See [`docs/ENVIRONMENT_VARIABLES.md`](https://github.com/galacticoder/end2end-chat-site/blob/main/docs/ENVIRONMENT_VARIABLES.md) for configuration if interested.)
+3. Configure environment variables (**YOU DO NOT HAVE TO CONFIGURE ANYTHING TO START THE SERVER WITH ALL FEATURES! EVERYTHING IS ALREADY SETUP IN THE PROVIDED ENV FILE!** See [`docs/ENVIRONMENT_VARIABLES.md`](https://github.com/galacticoder/end2end-chat-site/blob/main/docs/ENVIRONMENT_VARIABLES.md) for configuration if interested.)
 4. Generate TLS certificates: `node scripts/generate_ts_tls.cjs` (required)
 5. Start the server: `node scripts/start-server.cjs`
 6. Start the desktop client: `node scripts/start-client.cjs`
