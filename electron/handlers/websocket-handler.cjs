@@ -10,33 +10,33 @@ const { gunzipSync } = require('zlib');
 class WebSocketHandler {
   constructor(securityMiddleware) {
     this.securityMiddleware = securityMiddleware;
-    
+
     // Connection state
     this.connection = null;
     this.isConnecting = false;
     this.serverUrl = null;
     this.torReady = false;
     this.connectHostOverride = null;
-    
+
     // Reconnection state
     this.reconnectAttempts = 0;
     this.MAX_RECONNECT_ATTEMPTS = 5;
     this.RECONNECT_DELAY_BASE = 2000;
     this.reconnectTimer = null;
-    
+
     // Message queue
     this.messageQueue = [];
     this.MAX_QUEUE_SIZE = 100;
-    
+
     // Chunk reassembly for large messages
     this.chunkBuffer = new Map(); // sessionId -> { chunks: [], totalChunks: 0, receivedChunks: 0 }
-    
+
     // Connection metrics
     this.connectionEstablishedAt = null;
     this.heartbeatTimer = null;
     this.missedHeartbeats = 0;
     this.MAX_MISSED_HEARTBEATS = 8;
-    
+
     // Certificate pinning
     this.pinnedFingerprints = new Set();
 
@@ -61,7 +61,7 @@ class WebSocketHandler {
     if (!url || typeof url !== 'string') {
       return { success: false, error: 'Invalid server URL' };
     }
-    
+
     try {
       const parsed = new URL(url);
       if (!['wss:', 'ws:'].includes(parsed.protocol)) {
@@ -89,9 +89,12 @@ class WebSocketHandler {
       const u = new URL(url);
       const tlsServername = u.hostname;
       let host = u.hostname;
-      if (this.connectHostOverride && (this.connectHostOverride === '127.0.0.1' || this.connectHostOverride === 'localhost' || this.connectHostOverride === '::1')) {
+
+      const isLocalUrl = (u.hostname === 'localhost' || u.hostname === '127.0.0.1' || u.hostname === '::1');
+      if (this.connectHostOverride && isLocalUrl && (this.connectHostOverride === '127.0.0.1' || this.connectHostOverride === 'localhost' || this.connectHostOverride === '::1')) {
         host = this.connectHostOverride;
       }
+
       const address = `${u.protocol}//${host}${u.port ? ':' + u.port : ''}${u.pathname || ''}${u.search || ''}`;
       return { address, tlsServername };
     } catch {
@@ -130,7 +133,7 @@ class WebSocketHandler {
   async createConnection() {
     return new Promise((resolve, reject) => {
       try {
-const wsOptions = {
+        const wsOptions = {
           handshakeTimeout: 10000,
           perMessageDeflate: false,
           headers: this.extraHeaders || {}
@@ -145,82 +148,82 @@ const wsOptions = {
           wsOptions.checkServerIdentity = (hostname, cert) => this.validateServerCertificate(hostname, cert);
         }
         this.connection = new WebSocket(target.address, undefined, wsOptions);
-        
+
         let reqSocketMonitored = false;
         const reqMonitor = setInterval(() => {
           try {
             const conn = this.connection;
-            if (!conn) return; // connection torn down
+            if (!conn) return;
             if (conn._req && !reqSocketMonitored) {
               const rsock = conn._req && conn._req.socket ? conn._req.socket : null;
               if (rsock) {
                 reqSocketMonitored = true;
                 const sock = rsock;
-                try { sock.once && sock.once('secureConnect', () => {}); } catch {}
-                try { sock.on && sock.on('error', () => {}); } catch {}
-                try { sock.on && sock.on('close', () => {}); } catch {}
-                try { sock.on && sock.on('timeout', () => { try { sock.destroy(new Error('Socket timeout')); } catch {} }); } catch {}
-                try { sock.setTimeout && sock.setTimeout(30000); } catch {}
+                try { sock.once && sock.once('secureConnect', () => { }); } catch { }
+                try { sock.on && sock.on('error', () => { }); } catch { }
+                try { sock.on && sock.on('close', () => { }); } catch { }
+                try { sock.on && sock.on('timeout', () => { try { sock.destroy(new Error('Socket timeout')); } catch { } }); } catch { }
+                try { sock.setTimeout && sock.setTimeout(30000); } catch { }
                 setTimeout(() => {
                   try {
                     if (sock && !sock.authorized && sock.connecting) {
                     }
-                  } catch {}
+                  } catch { }
                 }, 2000);
               }
             }
-          } catch {}
+          } catch { }
         }, 5);
-        
+
         setTimeout(() => {
-          try { clearInterval(reqMonitor); } catch {}
+          try { clearInterval(reqMonitor); } catch { }
         }, 500);
-        
+
         const monitorSocket = (attempt = 1) => {
           try {
             const conn = this.connection;
             if (!conn) return; // connection torn down
             const socket = conn._socket || conn._stream;
             const reqSocket = conn._req && conn._req.socket ? conn._req.socket : null;
-            
+
             if (reqSocket && attempt === 1) {
-              try { reqSocket.once && reqSocket.once('secureConnect', () => {}); } catch {}
-              try { reqSocket.on && reqSocket.on('error', () => {}); } catch {}
-              try { reqSocket.on && reqSocket.on('timeout', () => { try { reqSocket.destroy(new Error('Request socket timeout')); } catch {} }); } catch {}
+              try { reqSocket.once && reqSocket.once('secureConnect', () => { }); } catch { }
+              try { reqSocket.on && reqSocket.on('error', () => { }); } catch { }
+              try { reqSocket.on && reqSocket.on('timeout', () => { try { reqSocket.destroy(new Error('Request socket timeout')); } catch { } }); } catch { }
             }
-            
+
             if (socket) {
-              try { socket.once && socket.once('connect', () => {}); } catch {}
-              try { socket.once && socket.once('secureConnect', () => {}); } catch {}
-              try { socket.on && socket.on('error', () => {}); } catch {}
-              try { socket.on && socket.on('close', () => {}); } catch {}
-              try { socket.on && socket.on('end', () => {}); } catch {}
+              try { socket.once && socket.once('connect', () => { }); } catch { }
+              try { socket.once && socket.once('secureConnect', () => { }); } catch { }
+              try { socket.on && socket.on('error', () => { }); } catch { }
+              try { socket.on && socket.on('close', () => { }); } catch { }
+              try { socket.on && socket.on('end', () => { }); } catch { }
             } else if (attempt < 40) {
               setTimeout(() => monitorSocket(attempt + 1), 5);
             } else {
               const c2 = this.connection;
               if (c2 && c2._req && c2._req.socket) {
                 const rs = c2._req.socket;
-                try { rs.once && rs.once('secureConnect', () => {}); } catch {}
-                try { rs.on && rs.on('error', () => {}); } catch {}
-                try { rs.on && rs.on('timeout', () => { try { rs.destroy(new Error('TLS handshake timeout')); } catch {} }); } catch {}
-                try { rs.on && rs.on('close', () => {}); } catch {}
+                try { rs.once && rs.once('secureConnect', () => { }); } catch { }
+                try { rs.on && rs.on('error', () => { }); } catch { }
+                try { rs.on && rs.on('timeout', () => { try { rs.destroy(new Error('TLS handshake timeout')); } catch { } }); } catch { }
+                try { rs.on && rs.on('close', () => { }); } catch { }
               }
             }
-          } catch {}
+          } catch { }
         };
-        
+
         monitorSocket();
-        
+
         this.connection.once('unexpected-response', (request, response) => {
           let body = '';
           response.on('data', (chunk) => {
             body += chunk.toString();
           });
-          response.on('end', () => {});
+          response.on('end', () => { });
         });
 
-        this.connection.once('upgrade', () => {});
+        this.connection.once('upgrade', () => { });
 
         // Set up event handlers
         this.connection.once('open', () => {
@@ -294,7 +297,7 @@ const wsOptions = {
 
       return await new Promise((resolve) => {
         let settled = false;
-        const finish = (result) => { if (!settled) { settled = true; try { probe.close(); } catch {} resolve(result); } };
+        const finish = (result) => { if (!settled) { settled = true; try { probe.close(); } catch { } resolve(result); } };
         const timer = setTimeout(() => finish({ success: false, error: 'Connection timeout' }), timeoutMs);
 
         probe.once('open', () => { clearTimeout(timer); finish({ success: true }); });
@@ -334,16 +337,16 @@ const wsOptions = {
         error: this.sanitizeError(error)
       });
     }
-    
+
     this.isConnecting = false;
   }
 
   handleConnectionClose(code, reason) {
-    const duration = this.connectionEstablishedAt 
-      ? Date.now() - this.connectionEstablishedAt 
+    const duration = this.connectionEstablishedAt
+      ? Date.now() - this.connectionEstablishedAt
       : 0;
 
-    
+
 
     if (this.onMessage) {
       this.onMessage({
@@ -367,7 +370,7 @@ const wsOptions = {
   handleMessage(data) {
     try {
       let messageText;
-      
+
       // Check if data is binary
       if (Buffer.isBuffer(data)) {
         try {
@@ -379,9 +382,9 @@ const wsOptions = {
       } else {
         messageText = data.toString();
       }
-      
+
       const parsed = JSON.parse(messageText);
-      
+
       // Handle chunked messages
       if (parsed.type === 'KEY_CHUNK') {
         this.handleKeyChunk(parsed);
@@ -406,11 +409,11 @@ const wsOptions = {
     } catch (err) {
     }
   }
-  
+
   handleKeyChunk(chunk) {
     try {
       const { chunkIndex, totalChunks, data } = chunk;
-      
+
       // Initialize chunk buffer if this is the first chunk
       if (!this.chunkBuffer.has('key-exchange')) {
         this.chunkBuffer.set('key-exchange', {
@@ -419,9 +422,9 @@ const wsOptions = {
           receivedChunks: 0
         });
       }
-      
+
       const buffer = this.chunkBuffer.get('key-exchange');
-      
+
       // Store this chunk
       buffer.chunks[chunkIndex] = Buffer.from(data, 'base64');
       buffer.receivedChunks++;
@@ -430,10 +433,10 @@ const wsOptions = {
         const compressedData = Buffer.concat(buffer.chunks);
         const decompressed = gunzipSync(compressedData);
         const messageText = decompressed.toString('utf8');
-        
+
         const parsed = JSON.parse(messageText);
         this.chunkBuffer.delete('key-exchange');
-        
+
         // Deliver to message handler
         if (this.onMessage) {
           this.onMessage(parsed);
@@ -559,7 +562,7 @@ const wsOptions = {
 
   validateServerCertificate(hostname, cert) {
     // certificate pinning
-    if (this.pinnedFingerprints.size === 0) { 
+    if (this.pinnedFingerprints.size === 0) {
       return tls.checkServerIdentity(hostname, cert);
     }
 
@@ -588,7 +591,7 @@ const wsOptions = {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
     }
-    
+
     this.stopHeartbeat();
 
     // Close connection
@@ -628,8 +631,8 @@ const wsOptions = {
       connecting: this.isConnecting,
       reconnectAttempts: this.reconnectAttempts,
       queueSize: this.messageQueue.length,
-      connectionDuration: this.connectionEstablishedAt 
-        ? Date.now() - this.connectionEstablishedAt 
+      connectionDuration: this.connectionEstablishedAt
+        ? Date.now() - this.connectionEstablishedAt
         : 0
     };
   }
@@ -710,7 +713,7 @@ const wsOptions = {
         signatureBase64: signature.toString('base64')
       };
       this.connection.send(JSON.stringify(response));
-    } catch (_) {}
+    } catch (_) { }
   }
 }
 

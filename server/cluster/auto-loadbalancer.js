@@ -36,7 +36,7 @@ function findInPath(binName) {
       const candidate = path.join(dir, binName + ext);
       try {
         if (existsSync(candidate)) return candidate;
-      } catch {}
+      } catch { }
     }
   }
   return null;
@@ -54,33 +54,27 @@ function httpGetJSON(url, timeoutMs = 2000) {
         });
       });
       req.on('error', () => resolve(null));
-      req.on('timeout', () => { try { req.destroy(); } catch {}; resolve(null); });
+      req.on('timeout', () => { try { req.destroy(); } catch { }; resolve(null); });
     } catch {
       resolve(null);
     }
   });
 }
 
-async function deleteNgrokTunnels() {
-  const list = await httpGetJSON('http://127.0.0.1:4040/api/tunnels', 1500);
-  const tunnels = Array.isArray(list?.tunnels) ? list.tunnels : [];
-  for (const t of tunnels) {
-    const name = t?.name;
-    if (!name) continue;
+async function deleteCloudflaredTunnels() {
+  try {
+    const pidPath = path.join(path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'scripts', 'config', 'tunnel', 'pid'));
+    if (existsSync(pidPath)) {
+      const pid = parseInt(await fs.readFile(pidPath, 'utf8'), 10);
+      try { process.kill(pid, 'SIGTERM'); } catch { }
+      await fs.unlink(pidPath).catch(() => { });
+    }
+  } catch { }
+
+  if (process.platform !== 'win32') {
     try {
-      await new Promise((resolve) => {
-        const req = http.request({
-          host: '127.0.0.1',
-          port: 4040,
-          path: `/api/tunnels/${encodeURIComponent(name)}`,
-          method: 'DELETE',
-          timeout: 1500,
-        }, (res) => { res.resume(); res.on('end', resolve); });
-        req.on('error', () => resolve(null));
-        req.on('timeout', () => { try { req.destroy(); } catch {}; resolve(null); });
-        req.end();
-      });
-    } catch {}
+      await execAsync('pkill cloudflared || true');
+    } catch { }
   }
 }
 
@@ -88,9 +82,9 @@ async function deleteNgrokTunnels() {
 const isRoot = typeof process.getuid === 'function' && process.getuid() === 0;
 const DEFAULT_HTTPS_PORT = parseInt(process.env.HAPROXY_HTTPS_PORT || (isRoot ? '443' : '8443'), 10);
 const TMPDIR = os.tmpdir();
-const HAPROXY_CONFIG_PATH = process.env.HAPROXY_CONFIG_PATH || 
+const HAPROXY_CONFIG_PATH = process.env.HAPROXY_CONFIG_PATH ||
   (isRoot && process.platform !== 'win32' ? '/etc/haproxy/haproxy-auto.cfg' : path.join(TMPDIR, 'haproxy-auto.cfg'));
-const HAPROXY_PID_FILE = process.env.HAPROXY_PID_FILE || 
+const HAPROXY_PID_FILE = process.env.HAPROXY_PID_FILE ||
   (isRoot && process.platform !== 'win32' ? '/var/run/haproxy-auto.pid' : path.join(TMPDIR, 'haproxy-auto.pid'));
 const LOADBALANCER_LOCK_FILE = process.env.LOADBALANCER_LOCK_FILE ||
   (isRoot && process.platform !== 'win32' ? '/var/run/auto-loadbalancer.pid' : path.join(TMPDIR, 'auto-loadbalancer.pid'));
@@ -102,22 +96,22 @@ class AutoLoadBalancer {
     this.haproxyPid = null;
     this.listenPort = DEFAULT_HTTPS_PORT;
     this.lastServerCount = 0;
-    this.lastServerHash = '';  
+    this.lastServerHash = '';
     this.monitorInterval = null;
     this.consecutiveFailures = 0;
     this.maxConsecutiveFailures = 3;
     this.lastTunnelCheck = 0;
-    this.tunnelCheckInterval = 1000; 
+    this.tunnelCheckInterval = 1000;
     this.lastTunnelRestart = 0;
     this.tunnelRestartFailures = 0;
     this.maxTunnelRestartFailures = 5;
     this.tunnelBackoffMs = 10000;
     this.tunnelDisabled = false;
-    this.isStopping = false; 
-    this.commandSubscriber = null; 
-    this.commandQueue = [];  
-    this.processingCommand = false; 
-    this.commandEncryptionKey = null;  
+    this.isStopping = false;
+    this.commandSubscriber = null;
+    this.commandQueue = [];
+    this.processingCommand = false;
+    this.commandEncryptionKey = null;
     const here = fileURLToPath(import.meta.url);
     const clusterDir = path.dirname(here);
     this.serverDir = path.resolve(clusterDir, '..');
@@ -220,13 +214,13 @@ class AutoLoadBalancer {
         maxconn: 10000,
       });
     }
-    
+
     if (generator.backends.length === 0 && servers.length > 0) {
       console.log(`\n[WARNING] No valid backends found - all servers have invalid ports`);
       console.log(`[WARNING] Servers need to be restarted with valid ports\n`);
       return null;
     }
-    
+
     if (generator.backends.length === 0) {
       console.log(`\n[WARNING] No servers detected - HAProxy will return 503 until servers come online\n`);
     }
@@ -253,19 +247,24 @@ class AutoLoadBalancer {
 
 
   /**
-   * Check if ngrok tunnel is running
+   * Check if cloudflared tunnel is running
    */
   async isTunnelRunning() {
     try {
-      const data = await httpGetJSON('http://127.0.0.1:4040/api/tunnels', 1000);
-      return Array.isArray(data?.tunnels) && data.tunnels.length > 0;
+      const pidPath = path.join(this.scriptsDir, 'config', 'tunnel', 'pid');
+      if (existsSync(pidPath)) {
+        const pid = parseInt(await fs.readFile(pidPath, 'utf8'), 10);
+        process.kill(pid, 0);
+        return true;
+      }
+      return false;
     } catch {
       return false;
     }
   }
 
   /**
-   * Restart ngrok tunnel using the simple-tunnel helper script
+   * Restart cloudflared tunnel
    */
   async restartTunnel() {
     try {
@@ -292,7 +291,7 @@ class AutoLoadBalancer {
       }
 
       if (tunnelUrl) {
-        try { const u = new URL(tunnelUrl); tunnelUrl = `https://${u.hostname}`; } catch {}
+        try { const u = new URL(tunnelUrl); tunnelUrl = `https://${u.hostname}`; } catch { }
         console.log(`[TUNNEL] Tunnel restarted: ${tunnelUrl}`);
         return true;
       }
@@ -307,22 +306,15 @@ class AutoLoadBalancer {
   }
 
   /**
-   * Get tunnel URL from ngrok API or log
+   * Get tunnel URL from cloudflared log
    */
   async getTunnelUrl() {
     try {
-      const data = await httpGetJSON('http://127.0.0.1:4040/api/tunnels', 1500);
-      const tunnels = Array.isArray(data?.tunnels) ? data.tunnels : [];
-      const httpsTunnel = tunnels.find(t => t.proto === 'https' && typeof t.public_url === 'string');
-      if (httpsTunnel && /^https:\/\//i.test(httpsTunnel.public_url)) {
-        const u = new URL(httpsTunnel.public_url);
-        return `https://${u.hostname}`;
-      }
-      const tlsTunnel = tunnels.find(t => t.proto === 'tls' && typeof t.public_url === 'string');
-      if (tlsTunnel) {
-        const u = new URL(String(tlsTunnel.public_url).replace('tls://', 'https://'));
-        return `https://${u.hostname}`;
-      }
+      const logPath = path.join(this.scriptsDir, 'config', 'tunnel', 'cloudflared.log');
+      if (!existsSync(logPath)) return null;
+      const content = await fs.readFile(logPath, 'utf8');
+      const match = content.match(/https:\/\/[a-zA-Z0-9-]+\.trycloudflare\.com/);
+      return match ? match[0] : null;
     } catch (_err) {
       // ignore
     }
@@ -335,7 +327,7 @@ class AutoLoadBalancer {
   async displayHAProxyStatus(pid) {
     const tunnelUrl = await this.getTunnelUrl();
     const servers = await this.getActiveServers();
-    
+
     console.log(`\n[OK] HAProxy Load Balancer Running`);
     console.log(`\tPID: ${pid}`);
     console.log(`\tActive Servers: ${servers.length}`);
@@ -368,9 +360,9 @@ class AutoLoadBalancer {
           process.kill(pid, 0);
           this.haproxyPid = pid;
           this.isRunning = true;
-          
+
           await this.displayHAProxyStatus(pid);
-          
+
           return true;
         } catch {
           await fs.unlink(HAPROXY_PID_FILE);
@@ -383,20 +375,20 @@ class AutoLoadBalancer {
       if (process.platform !== 'win32' && process.env.OPENSSL_CONF) {
         try {
           if (existsSync(process.env.OPENSSL_CONF)) openssl_conf = `OPENSSL_CONF=${process.env.OPENSSL_CONF}`;
-        } catch {}
+        } catch { }
       }
       let oqs_module = '';
       if (process.platform !== 'win32' && process.env.OQS_PROVIDER_MODULE) {
         try {
           if (existsSync(process.env.OQS_PROVIDER_MODULE)) oqs_module = `OQS_PROVIDER_MODULE=${process.env.OQS_PROVIDER_MODULE}`;
-        } catch {}
+        } catch { }
       }
       // Clean up stale stats socket if present
       try {
         const uid = (typeof process.getuid === 'function') ? String(process.getuid()) : 'nouid';
         const statsSock = process.env.HAPROXY_STATS_SOCKET || path.join(os.tmpdir(), `haproxy-admin-${uid}.sock`);
-        if (existsSync(statsSock)) { await fs.unlink(statsSock).catch(()=>{}); }
-      } catch {}
+        if (existsSync(statsSock)) { await fs.unlink(statsSock).catch(() => { }); }
+      } catch { }
       const envPrefix = [ld_lib, openssl_conf, oqs_module].filter(Boolean).join(' ');
       const cmd = `${envPrefix ? envPrefix + ' ' : ''}haproxy -f ${HAPROXY_CONFIG_PATH} -D -p ${HAPROXY_PID_FILE}`;
       await execAsync(cmd);
@@ -413,7 +405,7 @@ class AutoLoadBalancer {
     } catch (error) {
       cryptoLogger.error('[AUTO-LB] Failed to start HAProxy', error);
       console.error('[ERROR] Failed to start HAProxy:', error.message);
-      
+
       this.consecutiveFailures++;
       if (this.consecutiveFailures >= this.maxConsecutiveFailures) {
         console.error(`\n[FATAL] HAProxy failed ${this.consecutiveFailures} times consecutively.`);
@@ -421,7 +413,7 @@ class AutoLoadBalancer {
         console.error('[FATAL] Exiting to prevent endless retry loop.\n');
         process.exit(1);
       }
-      
+
       return false;
     }
   }
@@ -433,7 +425,7 @@ class AutoLoadBalancer {
     try {
       if (existsSync(HAPROXY_PID_FILE)) {
         const pid = parseInt(await fs.readFile(HAPROXY_PID_FILE, 'utf8'), 10);
-        
+
         // Try to kill the process
         try {
           process.kill(pid, 'SIGTERM');
@@ -442,7 +434,7 @@ class AutoLoadBalancer {
         } catch (_killError) {
           console.log(`[WARN] HAProxy process ${pid} not found (may have already exited)`);
         }
-        
+
         try {
           await fs.unlink(HAPROXY_PID_FILE);
         } catch (unlinkError) {
@@ -450,7 +442,7 @@ class AutoLoadBalancer {
             throw unlinkError;
           }
         }
-        
+
         this.isRunning = false;
         this.haproxyPid = null;
       } else {
@@ -492,7 +484,7 @@ class AutoLoadBalancer {
       cryptoLogger.info('[AUTO-LB] Reloaded HAProxy', { oldPid, newPid });
       console.log(`\n[RELOADED] HAProxy configuration updated`);
       console.log(`\tOld PID: ${oldPid} → New PID: ${newPid}`);
-    
+
       const tunnelUrl = await this.getTunnelUrl();
       if (tunnelUrl) {
         console.log(`\tTunnel URL: ${tunnelUrl}`);
@@ -504,19 +496,19 @@ class AutoLoadBalancer {
     } catch (error) {
       cryptoLogger.error('[AUTO-LB] Failed to reload HAProxy', error);
       console.error('[ERROR] Failed to reload HAProxy:', error.message);
-      
+
       // Log stderr if available
       if (error.stderr) {
         console.error('[ERROR] HAProxy stderr:', error.stderr);
       }
-      
+
       this.consecutiveFailures++;
       if (this.consecutiveFailures >= this.maxConsecutiveFailures) {
         console.error(`\n[FATAL] HAProxy reload failed ${this.consecutiveFailures} times consecutively.`);
         console.error('[FATAL] Configuration issues detected. Exiting.\n');
         process.exit(1);
       }
-      
+
       return false;
     }
   }
@@ -546,7 +538,7 @@ class AutoLoadBalancer {
             if (this.tunnelRestartFailures >= this.maxTunnelRestartFailures) {
               if (!this.tunnelDisabled) {
                 console.error(`\n[TUNNEL] Disabling automatic tunnel restart after ${this.tunnelRestartFailures} failed attempts.`);
-                console.error('[TUNNEL] Check ngrok installation/config (NGROK_AUTHTOKEN, connectivity) and restart the load balancer.');
+                console.error('[TUNNEL] Check cloudflared installation/config (CLOUDFLARED_TOKEN, connectivity) and restart the load balancer.');
                 this.tunnelDisabled = true;
               }
             } else if (sinceLastRestart >= this.tunnelBackoffMs) {
@@ -568,7 +560,7 @@ class AutoLoadBalancer {
           }
         }
       }
-      
+
       const servers = await this.getActiveServers();
       const serverCount = servers.length;
       const serverHash = this.generateServerHash(servers);
@@ -597,7 +589,7 @@ class AutoLoadBalancer {
       if (serverCount >= MIN_SERVERS_FOR_LB) {
         if (serversChanged) {
           const config = await this.generateHAProxyConfig(servers);
-          
+
           if (config) {
             if (!this.isRunning) {
               await this.startHAProxy();
@@ -651,12 +643,12 @@ class AutoLoadBalancer {
     try {
       if (existsSync(LOADBALANCER_LOCK_FILE)) {
         const existingPid = parseInt(await fs.readFile(LOADBALANCER_LOCK_FILE, 'utf8'), 10);
-        
+
         try {
           process.kill(existingPid, 0);
-          
+
           console.log(`\n[INFO] Auto Load Balancer already running (PID: ${existingPid})`);
-          
+
           if (existsSync(HAPROXY_PID_FILE)) {
             const haproxyPid = parseInt(await fs.readFile(HAPROXY_PID_FILE, 'utf8'), 10);
             await this.displayHAProxyStatus(haproxyPid);
@@ -668,7 +660,7 @@ class AutoLoadBalancer {
             }
             console.log();
           }
-          
+
           console.log(`[INFO] To stop the load balancer, run: kill ${existingPid}\n`);
           process.exit(0);
         } catch {
@@ -677,8 +669,8 @@ class AutoLoadBalancer {
         }
       }
 
-    // Create lock file with current PID
-    await fs.writeFile(LOADBALANCER_LOCK_FILE, process.pid.toString(), { mode: 0o600 });
+      // Create lock file with current PID
+      await fs.writeFile(LOADBALANCER_LOCK_FILE, process.pid.toString(), { mode: 0o600 });
       cryptoLogger.info('[AUTO-LB] Acquired process lock', { pid: process.pid, lockFile: LOADBALANCER_LOCK_FILE });
       return true;
     } catch (error) {
@@ -694,7 +686,7 @@ class AutoLoadBalancer {
     try {
       if (existsSync(LOADBALANCER_LOCK_FILE)) {
         const lockPid = parseInt(await fs.readFile(LOADBALANCER_LOCK_FILE, 'utf8'), 10);
-        
+
         if (lockPid === process.pid) {
           await fs.unlink(LOADBALANCER_LOCK_FILE);
           cryptoLogger.info('[AUTO-LB] Released process lock', { pid: process.pid });
@@ -712,14 +704,14 @@ class AutoLoadBalancer {
     try {
       const secureCreds = path.join(this.repoRoot, 'server', 'config', 'secure-credentials.js');
       const { unlockKeypair } = await import(`file://${secureCreds}`);
-      
+
       const username = process.env.HAPROXY_STATS_USERNAME;
       const password = process.env.HAPROXY_STATS_PASSWORD;
-      
+
       if (!username || !password) {
         throw new Error('HAProxy stats credentials not available in environment');
       }
-      
+
       this.commandKeypair = await unlockKeypair(username, password);
       cryptoLogger.info('[AUTO-LB] Initialized PQ command encryption using HAProxy stats keypair');
     } catch (error) {
@@ -736,27 +728,27 @@ class AutoLoadBalancer {
       const { ml_kem1024 } = await import('@noble/post-quantum/ml-kem.js');
       const { ml_dsa87 } = await import('@noble/post-quantum/ml-dsa.js');
       const { x25519 } = await import('@noble/curves/ed25519.js');
-      
+
       const payload = JSON.parse(encryptedData);
       if (payload.version !== 2) {
         throw new Error('Unsupported command payload version');
       }
       const encryptedPackage = payload.encrypted;
-      
+
       // Verify ML-DSA-87 signature first
       const packageBytes = Buffer.from(JSON.stringify(encryptedPackage));
       const signatureBuffer = Buffer.from(payload.signature, 'base64');
-      
+
       const isValid = ml_dsa87.verify(
         signatureBuffer,
         packageBytes,
         this.commandKeypair.dilithium.publicKey
       );
-      
+
       if (!isValid) {
         throw new Error('Command signature verification failed - data may be tampered');
       }
-      
+
       // Parse encrypted components
       const kyberCiphertext = Buffer.from(encryptedPackage.kyberCiphertext, 'base64');
       const x25519EphemeralPublic = Buffer.from(encryptedPackage.x25519EphemeralPublic, 'base64');
@@ -765,7 +757,7 @@ class AutoLoadBalancer {
       const tag = Buffer.from(encryptedPackage.tag, 'base64');
       const kyberSharedSecret = ml_kem1024.decapsulate(kyberCiphertext, this.commandKeypair.kyber.secretKey);
       const x25519SharedSecret = x25519.getSharedSecret(this.commandKeypair.x25519.secretKey, x25519EphemeralPublic);
-      
+
       const rawSecret = Buffer.concat([
         Buffer.from(kyberSharedSecret),
         Buffer.from(x25519SharedSecret),
@@ -777,7 +769,7 @@ class AutoLoadBalancer {
         info,
         32
       );
-      
+
       const aead = new CryptoUtils.PostQuantumAEAD(aeadKey);
       const aad = new TextEncoder().encode('lb-command-v2');
       let plaintext;
@@ -786,7 +778,7 @@ class AutoLoadBalancer {
       } catch (_error) {
         throw new Error('SECURITY: Command decryption failed - invalid ciphertext');
       }
-      
+
       return JSON.parse(Buffer.from(plaintext).toString('utf8'));
     } catch (error) {
       cryptoLogger.error('[AUTO-LB] Command decryption failed', error);
@@ -807,10 +799,10 @@ class AutoLoadBalancer {
     try {
       while (this.commandQueue.length > 0) {
         const cmd = this.commandQueue.shift();
-        
+
         try {
           cryptoLogger.info('[AUTO-LB] Processing queued command', { command: cmd.cmd, queueLength: this.commandQueue.length });
-          
+
           // Execute command
           if (cmd.cmd === 'restart_tunnel') {
             console.log('\n[COMMAND] Restarting tunnel (requested from TUI)...');
@@ -831,7 +823,7 @@ class AutoLoadBalancer {
               this.tunnelRestartFailures += 1;
               if (this.tunnelRestartFailures >= this.maxTunnelRestartFailures) {
                 console.error(`\n[TUNNEL] Disabling automatic tunnel restart after ${this.tunnelRestartFailures} failed attempts (manual command).`);
-                console.error('[TUNNEL] Check ngrok installation/config (NGROK_AUTHTOKEN, connectivity) and restart the load balancer.');
+                console.error('[TUNNEL] Check cloudflared installation/config (CLOUDFLARED_TOKEN, connectivity) and restart the load balancer.');
               } else {
                 console.error('[TUNNEL] Automatic tunnel restart is temporarily disabled after manual failure.');
               }
@@ -869,11 +861,11 @@ class AutoLoadBalancer {
       await this.initCommandEncryption();
       await withRedisClient(async (client) => {
         this.commandSubscriber = client.duplicate();
-        
+
         if (this.commandSubscriber.status !== 'ready' && this.commandSubscriber.status !== 'connecting') {
           await this.commandSubscriber.connect();
         }
-        
+
         if (this.commandSubscriber.status === 'connecting') {
           await new Promise((resolve, reject) => {
             const timeout = setTimeout(() => reject(new Error('Redis subscriber connection timeout')), 5000);
@@ -881,7 +873,7 @@ class AutoLoadBalancer {
             this.commandSubscriber.once('error', (err) => { clearTimeout(timeout); reject(err); });
           });
         }
-        
+
         await this.commandSubscriber.subscribe('lb:command:encrypted');
 
         this.commandSubscriber.on('message', async (channel, encryptedMessage) => {
@@ -915,7 +907,7 @@ class AutoLoadBalancer {
             }
           }
         });
-        
+
         cryptoLogger.info('[AUTO-LB] PQ-encrypted command listener setup complete');
       });
     } catch (error) {
@@ -941,7 +933,7 @@ class AutoLoadBalancer {
 
     try {
       console.log('\t[INIT] Cleaning up any existing tunnels...');
-      await deleteNgrokTunnels();
+      await deleteCloudflaredTunnels();
       console.log('\t[INIT] Existing tunnels cleaned');
     } catch (error) {
       cryptoLogger.warn('[AUTO-LB] Failed to clean tunnels on startup', error);
@@ -969,10 +961,10 @@ class AutoLoadBalancer {
         process.exit(1);
       });
     };
-    
+
     process.on('SIGINT', () => handleShutdown('SIGINT'));
     process.on('SIGTERM', () => handleShutdown('SIGTERM'));
-    
+
     process.on('beforeExit', async () => {
       await this.releaseLock();
     });
@@ -986,7 +978,7 @@ class AutoLoadBalancer {
       return;
     }
     this.isStopping = true;
-    
+
     console.log('\n[SHUTDOWN] Stopping load balancer monitor...');
     console.log(`\tMonitor PID: ${process.pid}`);
 
@@ -1003,14 +995,13 @@ class AutoLoadBalancer {
         await this.commandSubscriber.quit();
         console.log('\t[OK] Closed command listener');
       } catch {
-        // Best-effort
       }
       this.commandSubscriber = null;
     }
 
     // Clear any pending commands
     this.commandQueue = [];
-    
+
     // Wipe encryption keys from memory
     if (this.commandKeypair) {
       if (this.commandKeypair.kyber?.secretKey) {
@@ -1034,25 +1025,26 @@ class AutoLoadBalancer {
       await this.stopHAProxy();
     }
 
-    // Force kill any active ngrok tunnels
-    try {
-      console.log('\t[OK] Killing all tunnels (ngrok)...');
-      await deleteNgrokTunnels();
+    // Force kill any active cloudflared tunnels
+    if (this.isRunning) {
+      console.log('\t[OK] Killing all tunnels (cloudflared)...');
+      await deleteCloudflaredTunnels();
+
       if (process.platform !== 'win32') {
         try {
-          await execAsync('pkill -9 ngrok 2>/dev/null || true');
-        } catch {
-          // Best-effort
-        }
+          await execAsync('pkill -9 cloudflared 2>/dev/null || true');
+        } catch { }
       }
       console.log('\t[OK] All tunnels terminated');
+    }
+    try {
     } catch (error) {
       cryptoLogger.warn('[AUTO-LB] Failed to kill tunnels on shutdown', error);
     }
 
     await this.releaseLock();
     console.log('\t[OK] Released process lock\n');
-    
+
     process.exit(0);
   }
 }

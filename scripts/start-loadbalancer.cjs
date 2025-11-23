@@ -29,7 +29,7 @@ function loadDotEnv(filePath) {
       }
       if (!(key in process.env)) process.env[key] = val;
     }
-  } catch {}
+  } catch { }
 }
 
 loadDotEnv(path.join(repoRoot, '.env'));
@@ -50,16 +50,16 @@ if (!process.env.PRESENCE_REDIS_QUIET_ERRORS) {
 function log(...args) { console.log('[LB]', ...args); }
 function logErr(...args) { console.error('[LB]', ...args); }
 
-class CircularBuffer { constructor(n=1000){ this.a=[]; this.n=n;} push(x){this.a.push(x); if(this.a.length>this.n)this.a.shift();} get(){return this.a;} len(){return this.a.length;} }
-class Debouncer { constructor(fn, d=50){ this.fn=fn; this.d=d; this.t=null; this.p=false;} call(){ this.p=true; if(this.t)return; this.t=setTimeout(()=>{ if(this.p){this.fn(); this.p=false;} this.t=null;}, this.d);} flush(){ if(this.t){clearTimeout(this.t); this.t=null;} if(this.p){this.fn(); this.p=false;}}}
-class RateLimiter { constructor(ms=1000){ this.ms=ms; this.last=0;} ok(){ const now=Date.now(); if(now-this.last>=this.ms){ this.last=now; return true;} return false; } }
+class CircularBuffer { constructor(n = 1000) { this.a = []; this.n = n; } push(x) { this.a.push(x); if (this.a.length > this.n) this.a.shift(); } get() { return this.a; } len() { return this.a.length; } }
+class Debouncer { constructor(fn, d = 50) { this.fn = fn; this.d = d; this.t = null; this.p = false; } call() { this.p = true; if (this.t) return; this.t = setTimeout(() => { if (this.p) { this.fn(); this.p = false; } this.t = null; }, this.d); } flush() { if (this.t) { clearTimeout(this.t); this.t = null; } if (this.p) { this.fn(); this.p = false; } } }
+class RateLimiter { constructor(ms = 1000) { this.ms = ms; this.last = 0; } ok() { const now = Date.now(); if (now - this.last >= this.ms) { this.last = now; return true; } return false; } }
 
-async function httpGetJSON(url, timeoutMs=1500){ return new Promise((resolve)=>{ try{ const mod=url.startsWith('https:')?https:http; const req=mod.get(url,{timeout:timeoutMs},res=>{ let d=''; res.on('data',c=>d+=c); res.on('end',()=>{ try{ resolve(JSON.parse(d||'{}')); } catch { resolve(null);} });}); req.on('error',()=>resolve(null)); req.on('timeout',()=>{ try{req.destroy();}catch{}; resolve(null);}); }catch{ resolve(null);} }); }
-async function getTunnelUrl(){ const data=await httpGetJSON('http://127.0.0.1:4040/api/tunnels', 1000); const ts=Array.isArray(data?.tunnels)?data.tunnels:[]; const t=ts.find(t=>t.proto==='https' && typeof t.public_url==='string') || ts.find(t=>t.proto==='tls'); if(!t) return null; try{ const u=new URL(String(t.public_url).replace('tls://','https://')); return `https://${u.hostname}`;}catch{return null;} }
+async function httpGetJSON(url, timeoutMs = 1500) { return new Promise((resolve) => { try { const mod = url.startsWith('https:') ? https : http; const req = mod.get(url, { timeout: timeoutMs }, res => { let d = ''; res.on('data', c => d += c); res.on('end', () => { try { resolve(JSON.parse(d || '{}')); } catch { resolve(null); } }); }); req.on('error', () => resolve(null)); req.on('timeout', () => { try { req.destroy(); } catch { }; resolve(null); }); } catch { resolve(null); } }); }
+async function getTunnelUrl() { try { const logPath = path.join(repoRoot, 'scripts', 'config', 'tunnel', 'cloudflared.log'); if (!fs.existsSync(logPath)) return null; const c = fs.readFileSync(logPath, 'utf8'); const m = c.match(/https:\/\/[a-zA-Z0-9-]+\.trycloudflare\.com/); return m ? m[0] : null; } catch { return null; } }
 
-function isHAProxyInstalled(){ try{ execSync('command -v haproxy >/dev/null 2>&1'); return true;} catch { return false; } }
+function isHAProxyInstalled() { try { execSync('command -v haproxy >/dev/null 2>&1'); return true; } catch { return false; } }
 
-async function runNodeScript(scriptPath, args=[], env=process.env) {
+async function runNodeScript(scriptPath, args = [], env = process.env) {
   return new Promise((resolve, reject) => {
     const p = spawn(process.execPath, [scriptPath, ...args], { stdio: 'inherit', env });
     p.on('exit', (code) => code === 0 ? resolve() : reject(new Error(`${path.basename(scriptPath)} failed: ${code}`)));
@@ -68,16 +68,16 @@ async function runNodeScript(scriptPath, args=[], env=process.env) {
 
 async function hasOqsProvider(env) {
   return new Promise((resolve) => {
-    const p = spawn('openssl', ['list', '-providers'], { env, stdio: ['ignore','pipe','ignore'] });
-    let out='';
-    p.stdout.on('data', (d)=> out += String(d));
+    const p = spawn('openssl', ['list', '-providers'], { env, stdio: ['ignore', 'pipe', 'ignore'] });
+    let out = '';
+    p.stdout.on('data', (d) => out += String(d));
     p.on('exit', () => resolve(/oqs/i.test(out)));
   });
 }
 
 async function testHaproxyConfig(haproxyBin, cfgPath, env) {
   return new Promise((resolve) => {
-    const p = spawn(haproxyBin, ['-c', '-f', cfgPath], { env, stdio: ['ignore','ignore','ignore'] });
+    const p = spawn(haproxyBin, ['-c', '-f', cfgPath], { env, stdio: ['ignore', 'ignore', 'ignore'] });
     p.on('exit', (code) => resolve(code === 0));
   });
 }
@@ -104,7 +104,7 @@ async function ensureQuantumReady() {
   if (oqsModule) {
     env.OQS_PROVIDER_MODULE = oqsModule;
     if (process.platform !== 'win32') {
-      try { env.OPENSSL_MODULES = path.dirname(oqsModule); } catch {}
+      try { env.OPENSSL_MODULES = path.dirname(oqsModule); } catch { }
     }
   }
 
@@ -122,7 +122,7 @@ async function ensureQuantumReady() {
     if (oqsModule) {
       env.OQS_PROVIDER_MODULE = oqsModule;
       if (process.platform !== 'win32') {
-        try { env.OPENSSL_MODULES = path.dirname(oqsModule); } catch {}
+        try { env.OPENSSL_MODULES = path.dirname(oqsModule); } catch { }
       }
     }
   }
@@ -138,7 +138,7 @@ async function ensureQuantumReady() {
     if (oqsModule) {
       env.OQS_PROVIDER_MODULE = oqsModule;
       if (process.platform !== 'win32') {
-        try { env.OPENSSL_MODULES = path.dirname(oqsModule); } catch {}
+        try { env.OPENSSL_MODULES = path.dirname(oqsModule); } catch { }
       }
     }
   }
@@ -149,7 +149,7 @@ async function ensureQuantumReady() {
   if (oqsModule) {
     process.env.OQS_PROVIDER_MODULE = oqsModule;
     if (process.platform !== 'win32') {
-      try { process.env.OPENSSL_MODULES = path.dirname(oqsModule); } catch {}
+      try { process.env.OPENSSL_MODULES = path.dirname(oqsModule); } catch { }
     }
   }
 }
@@ -183,7 +183,7 @@ async function ensureHaproxyBuiltOrReady() {
         const ok3 = await testHaproxyConfig(meta.haproxy_bin, hapCfgPath, env);
         if (ok3) { process.env.LB_HAPROXY_BIN = meta.haproxy_bin; return; }
       }
-    } catch {}
+    } catch { }
   }
   logErr('Failed to prepare a HAProxy binary that validates the PQC config.');
   logErr('If you built to a temp dir, consider installing it: see server/config/haproxy-build.json');
@@ -201,7 +201,7 @@ class LBTUI {
     this.renderDeb = new Debouncer(() => this.renderFrame(), 50);
     this.metrics = new RateLimiter(1000);
     this.stats = { cpu: '?', mem: '?', servers: 0, serverList: [], url: null, lbPort: CONFIG.HAPROXY_HTTPS_PORT };
-    
+
     // Command mode state
     this.cmdMode = false;
     this.cmdInput = '';
@@ -211,34 +211,34 @@ class LBTUI {
     this.cmdSuggestions = [];
     this.cmdSuggestionIndex = 0;
     this.showInlineSuggestion = true;
-    
+
     // Available commands
     this.commands = [
       { name: '/help', desc: 'Show available commands', aliases: ['/h', '/?'] },
-      { name: '/tunnel restart', desc: 'Restart ngrok tunnel', aliases: ['/tr'] },
+      { name: '/tunnel restart', desc: 'Restart Cloudflare tunnel', aliases: ['/tr'] },
       { name: '/tunnel status', desc: 'Show tunnel status', aliases: ['/ts'] },
       { name: '/reload', desc: 'Reload HAProxy configuration', aliases: ['/r'] },
       { name: '/servers', desc: 'Show active servers', aliases: ['/s'] },
       { name: '/clear', desc: 'Clear log buffer', aliases: ['/c'] },
       { name: '/quit', desc: 'Stop load balancer and exit', aliases: ['/q'] },
     ];
-    
+
     process.stdout.on('resize', () => {
       this.w = process.stdout.columns || 80;
       this.h = process.stdout.rows || 24;
       this.renderDeb.call();
     });
-    
+
     if (process.stdin.isTTY) {
       process.stdin.setRawMode(true);
       process.stdin.setEncoding('utf8');
-      try { process.stdin.resume(); } catch {}
+      try { process.stdin.resume(); } catch { }
       process.stdin.on('data', k => this.onKey(k));
     }
-    
+
     process.stdout.write('\x1b[?1049h\x1b[?7l\x1b[2J\x1b[H\x1b[?25l');
   }
-  
+
   stop() {
     if (!this.run) return;
     this.run = false;
@@ -248,29 +248,29 @@ class LBTUI {
       this.interval = null;
     }
     if (process.stdin.isTTY) {
-      try { process.stdin.setRawMode(false); } catch {}
-      try { process.stdin.pause(); } catch {}
+      try { process.stdin.setRawMode(false); } catch { }
+      try { process.stdin.pause(); } catch { }
     }
     process.stdout.write('\x1b[?7h\x1b[?25h\x1b[?1049l');
   }
-  
+
   add(line) {
     this.buf.push(line);
     this.renderDeb.call();
   }
-  
+
   updateCmdSuggestions() {
     if (!this.cmdInput.startsWith('/')) {
       this.cmdSuggestions = [];
       return;
     }
-    
+
     const input = this.cmdInput.toLowerCase();
     this.cmdSuggestions = [];
 
     const exactMatches = [];
     const partialMatches = [];
-    
+
     for (const cmd of this.commands) {
       if (cmd.name.toLowerCase() === input) {
         exactMatches.push(cmd.name);
@@ -285,60 +285,60 @@ class LBTUI {
         }
       }
     }
-    
+
     this.cmdSuggestions = [...exactMatches, ...partialMatches];
     this.cmdSuggestionIndex = 0;
   }
-  
+
   async getKeypair() {
     if (this._keypair) return this._keypair;
-    
+
     try {
       const path = require('path');
       const secureCreds = path.join(repoRoot, 'server', 'config', 'secure-credentials.js');
       const { unlockKeypair } = await import(`file://${secureCreds}`);
-      
+
       const username = process.env.HAPROXY_STATS_USERNAME;
       const password = process.env.HAPROXY_STATS_PASSWORD;
-      
+
       if (!username || !password) {
         throw new Error('HAProxy stats credentials not available in environment');
       }
-      
+
       this._keypair = await unlockKeypair(username, password);
       return this._keypair;
     } catch (error) {
       throw new Error(`Failed to unlock keypair: ${error.message}`);
     }
   }
-  
+
   async sendEncryptedCommand(commandObj) {
     const crypto = require('crypto');
     const path = require('path');
-    
+
     try {
       const { ml_kem1024 } = await import('@noble/post-quantum/ml-kem.js');
       const { ml_dsa87 } = await import('@noble/post-quantum/ml-dsa.js');
       const { x25519 } = await import('@noble/curves/ed25519.js');
       const cryptoModule = await import(path.join(repoRoot, 'server', 'crypto', 'unified-crypto.js'));
       const { CryptoUtils } = cryptoModule;
-      
+
       // Get HAProxy stats keypair
       const keypair = await this.getKeypair();
-      
+
       // Serialize command
       const payloadBytes = Buffer.from(JSON.stringify(commandObj), 'utf8');
-      
+
       // Generate ephemeral X25519 keypair
       const ephemeralX25519Secret = crypto.randomBytes(32);
       const ephemeralX25519Public = x25519.getPublicKey(ephemeralX25519Secret);
       const x25519SharedSecret = x25519.getSharedSecret(ephemeralX25519Secret, keypair.x25519.publicKey);
-      
+
       // Encapsulate with ML-KEM-1024
       const kemEnc = ml_kem1024.encapsulate(keypair.kyber.publicKey);
       const kyberSharedSecret = kemEnc.sharedSecret;
       const kyberCiphertext = kemEnc.ciphertext || kemEnc.cipherText;
-      
+
       // Derive AEAD key using unified quantum HKDF
       const rawSecret = Buffer.concat([
         Buffer.from(kyberSharedSecret),
@@ -351,12 +351,12 @@ class LBTUI {
         info,
         32
       );
-      
+
       const aead = new CryptoUtils.PostQuantumAEAD(aeadKey);
       const nonce = CryptoUtils.Random.generateRandomBytes(36);
       const aad = new TextEncoder().encode('lb-command-v2');
       const { ciphertext, tag } = aead.encrypt(payloadBytes, nonce, aad);
-      
+
       // Prepare encrypted package
       const encryptedPackage = {
         kyberCiphertext: Buffer.from(kyberCiphertext).toString('base64'),
@@ -365,11 +365,11 @@ class LBTUI {
         ciphertext: Buffer.from(ciphertext).toString('base64'),
         tag: Buffer.from(tag).toString('base64'),
       };
-      
+
       // Sign entire encrypted package with ML-DSA-87
       const packageBytes = Buffer.from(JSON.stringify(encryptedPackage));
       const signature = ml_dsa87.sign(packageBytes, keypair.dilithium.secretKey);
-      
+
       const payload = {
         version: 2,
         encrypted: encryptedPackage,
@@ -386,40 +386,40 @@ class LBTUI {
       throw new Error(`Failed to send encrypted command: ${error.message}`);
     }
   }
-  
+
   async executeCommand(cmd) {
     cmd = cmd.trim();
     if (!cmd) return;
-    
+
     // Add to history
     if (this.cmdHistory.length === 0 || this.cmdHistory[this.cmdHistory.length - 1] !== cmd) {
       this.cmdHistory.push(cmd);
       if (this.cmdHistory.length > 100) this.cmdHistory.shift();
     }
-    
+
     this.add(`\x1b[36m> ${cmd}\x1b[0m`);
 
     const parts = cmd.split(/\s+/);
     const mainCmd = parts[0].toLowerCase();
-    
+
     // Find matching command
-    let cmdDef = this.commands.find(c => 
-      c.name.toLowerCase() === mainCmd || 
+    let cmdDef = this.commands.find(c =>
+      c.name.toLowerCase() === mainCmd ||
       (c.aliases || []).some(a => a.toLowerCase() === mainCmd)
     );
-    
+
     if (!cmdDef && parts.length > 1) {
       // Try multi-word command
       const fullCmd = `${parts[0]} ${parts[1]}`.toLowerCase();
       cmdDef = this.commands.find(c => c.name.toLowerCase() === fullCmd);
     }
-    
+
     if (!cmdDef) {
       this.add(`\x1b[31mUnknown command: ${mainCmd}\x1b[0m`);
       this.add(`Type /help for available commands`);
       return;
     }
-    
+
     try {
       // Execute command
       if (cmdDef.name === '/help') {
@@ -463,17 +463,17 @@ class LBTUI {
       } else if (cmdDef.name === '/quit') {
         this.add('Stopping load balancer...');
         this.stop();
-        try { process.kill(this.pid, 'SIGTERM'); } catch {}
+        try { process.kill(this.pid, 'SIGTERM'); } catch { }
         return;
       }
     } catch (error) {
       this.add(`\x1b[31mError executing command: ${error.message}\x1b[0m`);
     }
   }
-  
+
   onKey(k) {
     const c = k.charCodeAt(0);
-    
+
     // Command mode handling
     if (this.cmdMode) {
       if (c === 3 || k === '\x1b') { // Ctrl+C or ESC
@@ -485,7 +485,7 @@ class LBTUI {
         this.renderDeb.call();
         return;
       }
-      
+
       if (k === '\r' || k === '\n') { // Enter
         const cmd = this.cmdInput;
         this.cmdMode = false;
@@ -497,7 +497,7 @@ class LBTUI {
         if (cmd) this.executeCommand(cmd);
         return;
       }
-      
+
       if (k === '\t') { // Tab - autocomplete
         if (this.cmdSuggestions.length > 0) {
           this.cmdInput = this.cmdSuggestions[this.cmdSuggestionIndex];
@@ -508,7 +508,7 @@ class LBTUI {
         }
         return;
       }
-      
+
       if (k === '\x7f' || k === '\b') { // Backspace
         if (this.cmdCursor > 0) {
           this.cmdInput = this.cmdInput.slice(0, this.cmdCursor - 1) + this.cmdInput.slice(this.cmdCursor);
@@ -518,7 +518,7 @@ class LBTUI {
         }
         return;
       }
-      
+
       if (k === '\x1b[3~') { // Delete
         if (this.cmdCursor < this.cmdInput.length) {
           this.cmdInput = this.cmdInput.slice(0, this.cmdCursor) + this.cmdInput.slice(this.cmdCursor + 1);
@@ -527,7 +527,7 @@ class LBTUI {
         }
         return;
       }
-      
+
       if (k === '\x1b[D') { // Left arrow
         if (this.cmdCursor > 0) {
           this.cmdCursor--;
@@ -535,7 +535,7 @@ class LBTUI {
         }
         return;
       }
-      
+
       if (k === '\x1b[C') { // Right arrow
         if (this.cmdCursor < this.cmdInput.length) {
           this.cmdCursor++;
@@ -543,19 +543,19 @@ class LBTUI {
         }
         return;
       }
-      
+
       if (k === '\x1b[H' || c === 1) { // Home or Ctrl+A
         this.cmdCursor = 0;
         this.renderDeb.call();
         return;
       }
-      
+
       if (k === '\x1b[F' || c === 5) { // End or Ctrl+E
         this.cmdCursor = this.cmdInput.length;
         this.renderDeb.call();
         return;
       }
-      
+
       if (k === '\x1b[A') { // Up arrow - history
         if (this.cmdHistory.length > 0) {
           if (this.cmdHistoryIndex === -1) {
@@ -570,7 +570,7 @@ class LBTUI {
         }
         return;
       }
-      
+
       if (k === '\x1b[B') { // Down arrow - history
         if (this.cmdHistoryIndex !== -1) {
           if (this.cmdHistoryIndex < this.cmdHistory.length - 1) {
@@ -586,7 +586,7 @@ class LBTUI {
         }
         return;
       }
-      
+
       // Regular character input
       if (c >= 32 && c <= 126) {
         this.cmdInput = this.cmdInput.slice(0, this.cmdCursor) + k + this.cmdInput.slice(this.cmdCursor);
@@ -595,10 +595,10 @@ class LBTUI {
         this.renderDeb.call();
         return;
       }
-      
+
       return;
     }
-    
+
     // Normal mode handling
     if (k === '/' || k === ':') {
       this.cmdMode = true;
@@ -608,16 +608,16 @@ class LBTUI {
       this.renderDeb.call();
       return;
     }
-    
+
     if (k === 'q' || k === 'Q' || c === 3) {
       this.stop();
-      try { process.kill(this.pid, 'SIGTERM'); } catch {}
+      try { process.kill(this.pid, 'SIGTERM'); } catch { }
       return;
     }
-    
+
     const vis = Math.max(1, this.h - 7);
     const max = Math.max(0, this.buf.len() - vis);
-    
+
     if (k === '\x1b[A' || k === 'k') {
       this.scroll = Math.min(this.scroll + 1, max);
       this.renderDeb.call();
@@ -638,14 +638,15 @@ class LBTUI {
       this.renderDeb.call();
     }
   }
-  poll(){ if(!this.metrics.ok()) return; // ps cpu/mem
-    try{ const out=execSync(`ps -p ${this.pid} -o %cpu=,%mem=`,{encoding:'utf8',timeout:500}).trim().split(/\s+/); if(out.length>=2){ this.stats.cpu=out[0]; this.stats.mem=out[1]; } }catch{}
-    this.getActiveServers().then(servers=>{ this.stats.servers=servers.length; this.stats.serverList=servers; this.renderDeb.call(); }).catch(()=>{});
-    this.getLbPort().then(port=>{ if (port) this.stats.lbPort = port; this.renderDeb.call(); }).catch(()=>{});
-    getTunnelUrl().then(u=>{ this.stats.url=u; this.renderDeb.call(); }).catch(()=>{});
+  poll() {
+    if (!this.metrics.ok()) return; // ps cpu/mem
+    try { const out = execSync(`ps -p ${this.pid} -o %cpu=,%mem=`, { encoding: 'utf8', timeout: 500 }).trim().split(/\s+/); if (out.length >= 2) { this.stats.cpu = out[0]; this.stats.mem = out[1]; } } catch { }
+    this.getActiveServers().then(servers => { this.stats.servers = servers.length; this.stats.serverList = servers; this.renderDeb.call(); }).catch(() => { });
+    this.getLbPort().then(port => { if (port) this.stats.lbPort = port; this.renderDeb.call(); }).catch(() => { });
+    getTunnelUrl().then(u => { this.stats.url = u; this.renderDeb.call(); }).catch(() => { });
   }
-  async getActiveServers(){
-    try{
+  async getActiveServers() {
+    try {
       const mod = await import(path.join(repoRoot, 'server', 'presence', 'presence.js'));
       const { withRedisClient } = mod;
       return await withRedisClient(async (client) => {
@@ -658,16 +659,16 @@ class LBTUI {
             if (now - (info.lastHeartbeat || 0) < 10000) {
               active.push({ id, host: info.host || '127.0.0.1', port: info.port || '?' });
             }
-          } catch {}
+          } catch { }
         }
         return active;
       });
-    }catch(e){ 
-      return []; 
+    } catch (e) {
+      return [];
     }
   }
-  async getLbPort(){
-    try{
+  async getLbPort() {
+    try {
       const mod = await import(path.join(repoRoot, 'server', 'presence', 'presence.js'));
       const { withRedisClient } = mod;
       return await withRedisClient(async (client) => {
@@ -677,7 +678,7 @@ class LBTUI {
         if (!Number.isFinite(num) || num <= 0 || num > 65535) return String(val);
         return String(num);
       });
-    }catch(e){
+    } catch (e) {
       return null;
     }
   }
@@ -690,12 +691,12 @@ class LBTUI {
     process.on('SIGINT', () => this.stop());
     process.on('SIGTERM', () => this.stop());
   }
-  
+
   renderFrame() {
     if (!this.run) return;
     const w = this.w, h = this.h;
     const lines = [];
-    
+
     // Header
     const left = ` Load Balancer `;
     const center = ` PID ${this.pid} | CPU ${this.stats.cpu}% | MEM ${this.stats.mem}% `;
@@ -717,7 +718,7 @@ class LBTUI {
     hdr = hdr.substring(0, w);
     hdr += ' '.repeat(Math.max(0, w - hdr.length));
     lines.push('\x1b[30;46;1m' + hdr + '\x1b[0m');
-    
+
     // Stats line
     const httpsPort = this.stats.lbPort || CONFIG.HAPROXY_HTTPS_PORT;
     const statsLeft = `\x1b[36mStats: http://localhost:${CONFIG.HAPROXY_STATS_PORT}/haproxy-stats\x1b[0m  \x1b[36mHTTPS :${httpsPort}\x1b[0m`;
@@ -726,10 +727,10 @@ class LBTUI {
     const serverInfoClean = serverInfo.replace(/\x1b\[[^m]*m/g, '');
     const padding = ' '.repeat(Math.max(0, w - statsLeftClean.length - serverInfoClean.length));
     lines.push(statsLeft + padding + serverInfo);
-    
+
     // Log area
     lines.push('┌' + '─'.repeat(Math.max(0, w - 2)) + '┐');
-    const vis = Math.max(1, h - 7); 
+    const vis = Math.max(1, h - 7);
     const start = Math.max(0, this.buf.len() - vis - this.scroll);
     const end = this.buf.len() - this.scroll;
     const slice = this.buf.get().slice(start, end);
@@ -741,14 +742,14 @@ class LBTUI {
       lines.push('│ ' + pad + ' ' + sb);
     }
     lines.push('└' + '─'.repeat(Math.max(0, w - 2)) + '┘');
-    
+
     // Command area
-    if (this.cmdMode) { 
+    if (this.cmdMode) {
       const cmdPrefix = 'Command: ';
       const maxInputWidth = w - cmdPrefix.length - 2;
       const cmdDisplay = this.cmdInput.substring(0, maxInputWidth);
       const cursorPos = Math.min(this.cmdCursor, cmdDisplay.length);
-       
+
       let inlineSuggestion = '';
       if (this.cmdSuggestions.length > 0 && this.cmdInput.length > 0 && this.cmdCursor === this.cmdInput.length) {
         const firstSuggestion = this.cmdSuggestions[0];
@@ -756,20 +757,20 @@ class LBTUI {
           inlineSuggestion = firstSuggestion.substring(this.cmdInput.length);
         }
       }
-      
+
       const beforeCursor = cmdDisplay.substring(0, cursorPos);
       const atCursor = cmdDisplay[cursorPos] || (inlineSuggestion ? inlineSuggestion[0] : ' ');
       const afterCursor = cmdDisplay.substring(cursorPos + 1);
-       
+
       let cmdLine = cmdPrefix + beforeCursor + '\x1b[7m' + atCursor + '\x1b[0m\x1b[30;43m' + afterCursor;
-      if (cursorPos === this.cmdInput.length && inlineSuggestion.length > 0) { 
+      if (cursorPos === this.cmdInput.length && inlineSuggestion.length > 0) {
         cmdLine += '\x1b[90m' + inlineSuggestion.substring(cursorPos === cmdDisplay.length ? 1 : 0) + '\x1b[0m\x1b[30;43m';
       }
-      
+
       const totalLen = cmdPrefix.length + cmdDisplay.length + (inlineSuggestion.length > 0 ? inlineSuggestion.length : 0);
       const cmdLinePad = ' '.repeat(Math.max(0, w - totalLen));
       lines.push('\x1b[30;43m' + cmdLine + cmdLinePad + '\x1b[0m');
-      
+
       lines.push(' '.repeat(w));
     } else {
       const footer = ' /: command  q: quit  Arrows PgUp/PgDn Home/End';
@@ -777,11 +778,11 @@ class LBTUI {
       lines.push('\x1b[30;46m' + foot.substring(0, w) + '\x1b[0m');
       lines.push(' '.repeat(w));
     }
-    
+
     const out = '\x1b[H' + lines.join('\n');
     try {
       process.stdout.write(out);
-    } catch {}
+    } catch { }
   }
 }
 
@@ -815,24 +816,24 @@ async function ensureStatsCredentials() {
     }
 
     const readline = require('readline');
-    const askLine = (q) => new Promise((resolve)=>{ const rl = readline.createInterface({ input: process.stdin, output: process.stdout }); rl.question(q, (ans)=>{ rl.close(); resolve(ans); });});
-    const askPassword = (prompt) => new Promise((resolve)=>{
+    const askLine = (q) => new Promise((resolve) => { const rl = readline.createInterface({ input: process.stdin, output: process.stdout }); rl.question(q, (ans) => { rl.close(); resolve(ans); }); });
+    const askPassword = (prompt) => new Promise((resolve) => {
       process.stdout.write(prompt);
       const wasRaw = process.stdin.isRaw;
       process.stdin.setRawMode(true);
       process.stdin.setEncoding('utf8');
       process.stdin.resume();
-      let buf='';
-      const onData=(c)=>{
-        c=String(c);
-        if (c==='\n'||c==='\r'||c==='\u0004'){
+      let buf = '';
+      const onData = (c) => {
+        c = String(c);
+        if (c === '\n' || c === '\r' || c === '\u0004') {
           process.stdout.write('\n');
           process.stdin.removeListener('data', onData);
           process.stdin.setRawMode(wasRaw);
           resolve(buf);
           return;
         }
-        buf+=c;
+        buf += c;
       };
       process.stdin.on('data', onData);
     });
@@ -871,32 +872,32 @@ async function ensureStatsCredentials() {
     process.env.HAPROXY_STATS_PASSWORD = pass;
     try {
       execSync(`${process.execPath} ${JSON.stringify(secureCli)} save ${JSON.stringify(user)} ${JSON.stringify(pass)}`, { stdio: 'inherit' });
-    } catch {}
+    } catch { }
     return;
   }
 
   const rl2 = require('readline').createInterface({ input: process.stdin, output: process.stdout });
-  const ask2 = (q)=> new Promise((res)=> rl2.question(q, (ans)=>res(ans)));
+  const ask2 = (q) => new Promise((res) => rl2.question(q, (ans) => res(ans)));
   let user = await ask2('Enter HAProxy stats username (default: admin): ');
   if (!user) user = 'admin';
 
   process.stdout.write('Enter a strong password (leave empty to generate): ');
-  const pass1 = await new Promise((resolve)=>{
+  const pass1 = await new Promise((resolve) => {
     const wasRaw = process.stdin.isRaw;
     process.stdin.setRawMode(true);
     process.stdin.setEncoding('utf8');
     process.stdin.resume();
-    let buf='';
-    const onData=(c)=>{
-      c=String(c);
-      if (c==='\n'||c==='\r'||c==='\u0004'){
+    let buf = '';
+    const onData = (c) => {
+      c = String(c);
+      if (c === '\n' || c === '\r' || c === '\u0004') {
         process.stdout.write('\n');
         process.stdin.removeListener('data', onData);
         process.stdin.setRawMode(wasRaw);
         resolve(buf);
         return;
       }
-      buf+=c;
+      buf += c;
     };
     process.stdin.on('data', onData);
   });
@@ -906,22 +907,22 @@ async function ensureStatsCredentials() {
     console.log(`Generated password: ${password}`);
   } else {
     process.stdout.write('Confirm password: ');
-    const pass2 = await new Promise((resolve)=>{
+    const pass2 = await new Promise((resolve) => {
       const wasRaw = process.stdin.isRaw;
       process.stdin.setRawMode(true);
       process.stdin.setEncoding('utf8');
       process.stdin.resume();
-      let buf='';
-      const onData=(c)=>{
-        c=String(c);
-        if (c==='\n'||c==='\r'||c==='\u0004'){
+      let buf = '';
+      const onData = (c) => {
+        c = String(c);
+        if (c === '\n' || c === '\r' || c === '\u0004') {
           process.stdout.write('\n');
           process.stdin.removeListener('data', onData);
           process.stdin.setRawMode(wasRaw);
           resolve(buf);
           return;
         }
-        buf+=c;
+        buf += c;
       };
       process.stdin.on('data', onData);
     });
@@ -957,7 +958,7 @@ async function ensureStatsCredentials() {
 
   const hapBin = process.env.LB_HAPROXY_BIN || 'haproxy';
   process.env.LB_HAPROXY_BIN = hapBin;
-  
+
   if (!process.env.HAPROXY_CERT_PATH) {
     process.env.HAPROXY_CERT_PATH = path.join(repoRoot, 'server', 'config', 'certs');
   }
@@ -968,19 +969,19 @@ async function ensureStatsCredentials() {
 
   if (CONFIG.NO_GUI) {
     const child = spawn(process.execPath, [lbScript], { cwd: repoRoot, env, stdio: 'inherit' });
-    
+
     let exiting = false;
     const handleSignal = (signal) => {
       if (exiting) return;
       exiting = true;
       try {
         child.kill(signal);
-      } catch {}
+      } catch { }
     };
-    
+
     process.on('SIGINT', () => handleSignal('SIGINT'));
     process.on('SIGTERM', () => handleSignal('SIGTERM'));
-    
+
     child.on('exit', (code) => {
       setTimeout(() => {
         process.exit(code || 0);
@@ -989,53 +990,53 @@ async function ensureStatsCredentials() {
     return;
   }
 
-  const child = spawn(process.execPath, [lbScript], { cwd: repoRoot, env, stdio: ['ignore','pipe','pipe'] });
-  
+  const child = spawn(process.execPath, [lbScript], { cwd: repoRoot, env, stdio: ['ignore', 'pipe', 'pipe'] });
+
   let exitedImmediately = false;
   let capturedOutput = [];
   const immediateCheck = setTimeout(() => {
     exitedImmediately = false;
   }, 1000);
-  
+
   const ui = new LBTUI(child.pid);
 
-  const last=[]; const MAX=200; const push=(l)=>{ last.push(l); if(last.length>MAX) last.shift(); };
-  const onData=(d)=>{ 
-    String(d).split('\n').forEach((ln)=>{ 
-      if(ln.trim()){ 
-        ui.add(ln); 
+  const last = []; const MAX = 200; const push = (l) => { last.push(l); if (last.length > MAX) last.shift(); };
+  const onData = (d) => {
+    String(d).split('\n').forEach((ln) => {
+      if (ln.trim()) {
+        ui.add(ln);
         push(ln);
-        if(exitedImmediately) capturedOutput.push(ln);
-      } 
-    }); 
+        if (exitedImmediately) capturedOutput.push(ln);
+      }
+    });
   };
   child.stdout.on('data', onData);
   child.stderr.on('data', onData);
-  child.on('exit',(code)=>{ 
+  child.on('exit', (code) => {
     clearTimeout(immediateCheck);
-    ui.stop(); 
-     
-    if(code === 0 && exitedImmediately !== false) { 
+    ui.stop();
+
+    if (code === 0 && exitedImmediately !== false) {
       const hasExistingMsg = capturedOutput.some(l => /already running/i.test(l));
       if (hasExistingMsg) {
         // Extract existing PID
         const pidMatch = capturedOutput.join('\n').match(/PID:\s*(\d+)/);
         const existingPid = pidMatch ? parseInt(pidMatch[1], 10) : null;
-        
+
         if (existingPid) {
           // Kill existing instance and restart with TUI
           console.log(`\n[INFO] Stopping existing load balancer (PID: ${existingPid})...`);
           try {
             process.kill(existingPid, 'SIGTERM');
             setTimeout(() => {
-              console.log('[INFO] Restarting with TUI...\n'); 
-              const restartChild = spawn(process.execPath, [lbScript], { cwd: repoRoot, env, stdio: ['ignore','pipe','pipe'] });
+              console.log('[INFO] Restarting with TUI...\n');
+              const restartChild = spawn(process.execPath, [lbScript], { cwd: repoRoot, env, stdio: ['ignore', 'pipe', 'pipe'] });
               const restartUi = new LBTUI(restartChild.pid);
               const restartLast = [];
-              const restartOnData = (d) => { String(d).split('\n').forEach((ln)=>{ if(ln.trim()){ restartUi.add(ln); restartLast.push(ln); if(restartLast.length>MAX) restartLast.shift(); } }); };
+              const restartOnData = (d) => { String(d).split('\n').forEach((ln) => { if (ln.trim()) { restartUi.add(ln); restartLast.push(ln); if (restartLast.length > MAX) restartLast.shift(); } }); };
               restartChild.stdout.on('data', restartOnData);
               restartChild.stderr.on('data', restartOnData);
-              restartChild.on('exit', (c) => { restartUi.stop(); if(c!==0){ console.error(`\n[ERROR] Load balancer exited with code ${c}`); if(restartLast.length){ console.error('[ERROR] Last output:'); for(const l of restartLast) console.error('  '+l);} } process.exit(c||0);});
+              restartChild.on('exit', (c) => { restartUi.stop(); if (c !== 0) { console.error(`\n[ERROR] Load balancer exited with code ${c}`); if (restartLast.length) { console.error('[ERROR] Last output:'); for (const l of restartLast) console.error('  ' + l); } } process.exit(c || 0); });
               restartUi.start();
             }, 500);
             return;
@@ -1044,31 +1045,31 @@ async function ensureStatsCredentials() {
           }
         }
       }
-      
-      if(capturedOutput.length){ 
+
+      if (capturedOutput.length) {
         console.log();
-        for(const l of capturedOutput) console.log(l);
+        for (const l of capturedOutput) console.log(l);
         console.log();
       }
       console.log('[INFO] Press Ctrl+C to exit');
       if (process.stdin.isTTY) {
-        try { process.stdin.setRawMode(false); } catch {}
+        try { process.stdin.setRawMode(false); } catch { }
         process.stdin.pause();
       }
       const exitHandler = () => { console.log('\n'); process.exit(0); };
       process.on('SIGINT', exitHandler);
       process.on('SIGTERM', exitHandler);
-      setInterval(() => {}, 1000);
+      setInterval(() => { }, 1000);
       return;
     }
-    
-    if(code!==0){ 
-      console.error(`\n[ERROR] Load balancer exited with code ${code}`); 
-      if(last.length){ console.error('[ERROR] Last output:'); for(const l of last) console.error('  '+l);} 
-    } 
-    process.exit(code||0);
+
+    if (code !== 0) {
+      console.error(`\n[ERROR] Load balancer exited with code ${code}`);
+      if (last.length) { console.error('[ERROR] Last output:'); for (const l of last) console.error('  ' + l); }
+    }
+    process.exit(code || 0);
   });
-  
+
   exitedImmediately = true;
   ui.start();
 })();

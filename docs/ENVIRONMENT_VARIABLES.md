@@ -176,7 +176,7 @@ Several of these secrets (`KEY_ENCRYPTION_SECRET`, `TOKEN_PEPPER`, `AUTH_AUDIT_H
 | Name | Default / required | Used by | Description |
 | ---- | ------------------ | ------- | ----------- |
 | `NODE_TLS_REJECT_UNAUTHORIZED` | set to `'0'` within script | `scripts/run-artillery.cjs` | Artillery runner sets this to `0` in its own environment to allow self-signed certificates during load tests. Not used by the main server directly. |
-| `NGROK_AUTHTOKEN` | unset | `scripts/simple-tunnel.cjs` | Optional ngrok auth token. When set, written to an ngrok config so tunnels can use an authenticated account. |
+| `CLOUDFLARED_TOKEN` | unset | `scripts/simple-tunnel.cjs` | Optional Cloudflare Tunnel token. When set, creates a persistent tunnel using this token. If unset, a quick tunnel (trycloudflare.com) is created. |
 
 ---
 

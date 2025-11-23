@@ -6,7 +6,7 @@
  *   node scripts/install-deps.cjs --client
  *   node scripts/install-deps.cjs --server
  * Components:
- *   haproxy, tailscale, jq, redis, postgres, ngrok
+ *   haproxy, tailscale, jq, redis, postgres, cloudflared
  *   all  -> installs a reasonable set: haproxy, tailscale, jq
  */
 
@@ -17,7 +17,7 @@ const { execFile, spawn, execSync } = require('child_process');
 const { promisify } = require('util');
 const execFileAsync = promisify(execFile);
 
-const serverComponents = ['haproxy', 'tailscale', 'jq', 'redis', 'postgres', 'ngrok',
+const serverComponents = ['haproxy', 'tailscale', 'jq', 'redis', 'postgres', 'cloudflared',
   'python3', 'openssl', 'liboqs', 'oqs-provider', 'cmake', 'ninja'];
 
 if (process.platform === 'win32' && !process.env.WSL_DISTRO_NAME) {
@@ -165,7 +165,7 @@ async function installRedisTlsLocal() {
   const tmpRoot = await require('fs/promises').mkdtemp(path.join(os.tmpdir(), 'redis-tls-'));
   const tarPath = path.join(tmpRoot, 'redis.tar.gz');
 
-  // Pin recent Redis release with TLS support.
+  // Pin recent Redis release
   const redisUrl = process.env.REDIS_TLS_SOURCE_URL || 'https://download.redis.io/releases/redis-7.2.5.tar.gz';
   console.log('[INFO] Downloading Redis source for TLS build from', redisUrl);
 
@@ -310,18 +310,31 @@ async function installComponent(name) {
       }
       return false;
     }
-    case 'ngrok': {
-      if (findInPath('ngrok')) return true;
+    case 'cloudflared': {
+      if (findInPath('cloudflared')) return true;
       if (plat === 'linux') {
-        if (findInPath('snap')) {
-          const installed = await trySudo(['snap', 'install', 'ngrok']);
-          if (installed) return true;
+        if (pmHas('apt-get')) {
+          try {
+            await execFileAsync('curl', ['-L', 'https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb', '-o', '/tmp/cloudflared.deb']);
+            await trySudo(['dpkg', '-i', '/tmp/cloudflared.deb']);
+            return true;
+          } catch (e) { }
         }
-        console.log('[INFO] Install ngrok: curl -s https://ngrok-agent.s3.amazonaws.com/ngrok.asc | sudo tee /etc/apt/trusted.gpg.d/ngrok.asc && echo "deb https://ngrok-agent.s3.amazonaws.com buster main" | sudo tee /etc/apt/sources.list.d/ngrok.list && sudo apt update && sudo apt install ngrok');
-        return false;
+
+        const arch = os.arch() === 'arm64' ? 'arm64' : 'amd64';
+        const url = `https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${arch}`;
+        const binPath = '/usr/local/bin/cloudflared';
+        try {
+          await trySudo(['curl', '-L', url, '-o', binPath]);
+          await trySudo(['chmod', '+x', binPath]);
+          return true;
+        } catch (e) {
+          return false;
+        }
       }
-      if (plat === 'darwin' && pmHas('brew')) return await tryExec('brew', ['install', 'ngrok/ngrok/ngrok']);
-      console.log('[INFO] Install ngrok from https://ngrok.com/download');
+      if (plat === 'darwin' && pmHas('brew')) return await tryExec('brew', ['install', 'cloudflared']);
+
+      console.log('[INFO] Install cloudflared from https://developers.cloudflare.com/cloudflare-one/connections/connect-apps/install-and-setup/installation');
       return false;
     }
     case 'nodejs': {
@@ -568,7 +581,7 @@ async function installComponent(name) {
       }
     }
     case 'libevent': {
-      if (plat === 'win32') return true; // Skip on Windows
+      if (plat === 'win32') return true;
 
       // Check if libevent is installed
       if (plat === 'linux') {
@@ -642,7 +655,7 @@ async function installComponent(name) {
     console.log('Usage: node scripts/install-deps.cjs <component...>');
     console.log('       node scripts/install-deps.cjs --client');
     console.log('       node scripts/install-deps.cjs --server');
-    console.log('Components: haproxy, tailscale, jq, redis, postgres, ngrok, nodejs, curl, wget, python3, openssl, build-tools, cmake, ninja, liboqs, oqs-provider, pnpm, electron, libevent, rust');
+    console.log('Components: haproxy, tailscale, jq, redis, postgres, cloudflared, nodejs, curl, wget, python3, openssl, build-tools, cmake, ninja, liboqs, oqs-provider, pnpm, electron, libevent, rust');
     console.log('Presets:');
     console.log('  all      - All server and edge dependencies');
     console.log('  server   - Server runtime dependencies');
@@ -653,10 +666,10 @@ async function installComponent(name) {
   }
 
   const presets = {
-    all: ['git', 'nodejs', 'redis', 'postgres', 'python3', 'openssl', 'build-tools', 'cmake', 'ninja', 'liboqs', 'oqs-provider', 'haproxy', 'tailscale', 'jq', 'ngrok'],
+    all: ['git', 'nodejs', 'redis', 'postgres', 'python3', 'openssl', 'build-tools', 'cmake', 'ninja', 'liboqs', 'oqs-provider', 'haproxy', 'tailscale', 'jq', 'cloudflared'],
     server: ['nodejs', 'redis', 'postgres', 'python3', 'openssl', 'build-tools'],
     client: ['nodejs', 'git', 'curl', 'wget', 'pnpm', 'libevent', 'rust', 'build-tools', 'electron'],
-    edge: ['haproxy', 'ngrok'],
+    edge: ['haproxy', 'cloudflared'],
     quantum: ['git', 'openssl', 'build-tools', 'cmake', 'ninja', 'liboqs', 'oqs-provider']
   };
 
