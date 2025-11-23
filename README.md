@@ -9,7 +9,7 @@ For exact details of the Server/Client cryptography, read [`docs/Server-Cryptogr
 2. Install dependencies:
    - **Server:** `node scripts/install-deps.cjs --server`
    - **Client:** `node scripts/install-deps.cjs --client`
-3. Configure environment variables (see [`docs/ENVIRONMENT_VARIABLES.md`](https://github.com/galacticoder/end2end-chat-site/blob/main/docs/ENVIRONMENT_VARIABLES.md))
+3. Configure environment variables (YOU DO NOT HAVE TO. EVERYTHING IS ALREADY SETUP IN THE PROVIDED ENV FILE! See [`docs/ENVIRONMENT_VARIABLES.md`](https://github.com/galacticoder/end2end-chat-site/blob/main/docs/ENVIRONMENT_VARIABLES.md) for configuration if interested.)
 4. Generate TLS certificates: `node scripts/generate_ts_tls.cjs` (required)
 5. Start the server: `node scripts/start-server.cjs`
 6. Start the desktop client: `node scripts/start-client.cjs`
