@@ -10,7 +10,7 @@ Values shown in parentheses indicate typical defaults when the variable is unset
 
 | Name | Default / required | Used by | Description |
 | ---- | ------------------ | ------- | ----------- |
-| `PORT` | `(8443)` or `dynamic`  `0` | `server/config/config.js`, `server/server.js`, `scripts/start-server.cjs`, `server/cluster/cluster-manager.js` | HTTPS listen port. `dynamic` is treated as port `0` (kernel-assigned); when started via `scripts/start-server.cjs`, a free port is auto-selected if `PORT` is empty. |
+| `PORT` | `(8443)` or `dynamic` | `server/config/config.js`, `server/server.js`, `scripts/start-server.cjs`, `server/cluster/cluster-manager.js` | HTTPS listen port. `dynamic` is treated as port `0` (kernel-assigned); when started via `scripts/start-server.cjs`, a free port is auto-selected if `PORT` is empty. |
 | `BIND_ADDRESS` | `(127.0.0.1)` | `server/bootstrap/server-bootstrap.js`, `server/server.js`, `scripts/start-server.cjs` | IP/interface the HTTPS server binds to. Must be a loopback address (`127.0.0.1`, `::1`, or `localhost`) or startup will fail. |
 | `ALLOWED_CORS_ORIGINS` | `('http://localhost:5173,http://127.0.0.1:5173')` | `scripts/start-server.cjs`, `server/config/constants.js` | Comma-separated list of allowed CORS origins for HTTP and WebSocket requests. Parsed into `CORS_CONFIG.ALLOWED_ORIGINS`; when unset, the launcher provides localhost defaults. |
 | `SERVER_ID` | auto-generated (`server-<hostname>-<timestamp>` when using `start-server.cjs`) | `server/server.js`, `server/session/pq-session-storage.js`, `server/messaging/pq-envelope-handler.js`, `server/websocket/gateway.js`, `server/cluster/*` | Logical identifier for this server instance, used in logs, PQ envelopes, WebSocket delivery, and cluster registration. |
