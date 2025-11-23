@@ -4,7 +4,7 @@ First off, thank you for considering contributing to Endtoend! Contributions fro
 
 ## Code of Conduct
 
-This project and everyone participating in it is governed by the [Endtoend Code of Conduct](docs/CODE_OF_CONDUCT.md). By participating, you are expected to uphold this code. Please report unacceptable behavior to the project maintainer at galacticoderr@gmail.com.
+This project and everyone participating in it is governed by the [Endtoend Code of Conduct](CODE_OF_CONDUCT.md). By participating, you are expected to uphold this code. Please report unacceptable behavior to the project maintainer at galacticoderr@gmail.com.
 
 ## Getting Started
 
