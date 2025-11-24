@@ -9,14 +9,30 @@ For exact details of the Server/Client cryptography, read [`docs/Server-Cryptogr
 If you are using Windows, run this in PowerShell (Admin) **BEFORE THE SETUP**:
 
 ```powershell
-wsl --install -d Ubuntu
+# Check and install WSL Ubuntu if needed
+$wslList = wsl --list --quiet 2>&1 | Out-String
+if (-not ($wslList -match "Ubuntu")) { wsl --install -d Ubuntu --no-launch }
+
+# Install required tools
 winget install OpenJS.NodeJS Rustlang.Rustup -e --accept-source-agreements --accept-package-agreements
 winget install Microsoft.VisualStudio.2022.BuildTools -e --accept-source-agreements --accept-package-agreements
+winget install Python.Python.3.13 -e --accept-source-agreements --accept-package-agreements
+
+# Configure PATH (permanent)
+[Environment]::SetEnvironmentVariable("Path", $env:Path + ";C:\Program Files\nodejs;$env:USERPROFILE\.cargo\bin;C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\MSBuild\Current\Bin;C:\Users\$env:USERNAME\AppData\Local\Programs\Python\Python313;C:\Users\$env:USERNAME\AppData\Local\Programs\Python\Python313\Scripts", [EnvironmentVariableTarget]::Machine)
+
+# Refresh PATH for current session
+$env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
+
+# Setup package managers
+Set-ExecutionPolicy RemoteSigned -Scope LocalMachine -Force; npm install --global corepack@latest
+corepack enable pnpm
 ```
 
-*Note: If you already have these installed, you can skip them. If WSL2 was just installed, you must **restart your computer**.*
+**After running these commands, close and reopen PowerShell (if WSL was just installed, restart your computer) before continuing with the setup steps below.**
 
 1. Clone the repository
+  - `git clone https://github.com/galacticoder/end2end-chat-site.git`
 2. Install dependencies:
    - **Server:** `node scripts/install-deps.cjs --server`
    - **Client:** `node scripts/install-deps.cjs --client`

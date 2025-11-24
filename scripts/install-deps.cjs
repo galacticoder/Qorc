@@ -597,14 +597,35 @@ async function installComponent(name) {
     case 'electron': {
       // Check if electron is installed
       const repoRoot = path.resolve(__dirname, '..');
-      try {
-        const electronPath = path.join(repoRoot, 'node_modules', 'electron');
-        const electronBin = process.platform === 'win32'
-          ? path.join(electronPath, 'dist', 'electron.exe')
-          : path.join(electronPath, 'dist', 'electron');
+      const electronBin = process.platform === 'win32'
+        ? path.join(repoRoot, 'node_modules', '.pnpm', 'electron@*', 'node_modules', 'electron', 'dist', 'electron.exe')
+        : path.join(repoRoot, 'node_modules', '.pnpm', 'electron@*', 'node_modules', 'electron', 'dist', 'electron');
 
-        if (fs.existsSync(electronBin)) return true;
-      } catch { }
+      const findElectronPath = () => {
+        try {
+          const pnpmDir = path.join(repoRoot, 'node_modules', '.pnpm');
+          if (!fs.existsSync(pnpmDir)) return null;
+
+          const entries = fs.readdirSync(pnpmDir);
+          for (const entry of entries) {
+            if (entry.startsWith('electron@')) {
+              const binPath = process.platform === 'win32'
+                ? path.join(pnpmDir, entry, 'node_modules', 'electron', 'dist', 'electron.exe')
+                : path.join(pnpmDir, entry, 'node_modules', 'electron', 'dist', 'electron');
+              if (fs.existsSync(binPath)) return { version: entry, binPath };
+
+              const installScript = path.join(pnpmDir, entry, 'node_modules', 'electron', 'install.js');
+              if (fs.existsSync(installScript)) {
+                return { version: entry, binPath, installScript };
+              }
+            }
+          }
+        } catch { }
+        return null;
+      };
+
+      const existing = findElectronPath();
+      if (existing && fs.existsSync(existing.binPath)) return true;
 
       // Install electron
       try {
@@ -614,8 +635,22 @@ async function installComponent(name) {
           return false;
         }
         await execFileAsync(pnpmBin, ['add', '-D', 'electron@latest'], { cwd: repoRoot, stdio: 'inherit' });
-        return true;
-      } catch {
+
+        const installed = findElectronPath();
+        if (installed && !fs.existsSync(installed.binPath) && installed.installScript) {
+          console.log('[INFO] Running electron postinstall script...');
+          try {
+            await execFileAsync('node', [installed.installScript], { cwd: repoRoot, stdio: 'inherit' });
+          } catch (e) {
+            console.log('[INFO] Failed to run electron install script:', e.message);
+            return false;
+          }
+        }
+
+        const final = findElectronPath();
+        return final && fs.existsSync(final.binPath);
+      } catch (e) {
+        console.log('[INFO] Electron installation failed:', e.message);
         return false;
       }
     }
