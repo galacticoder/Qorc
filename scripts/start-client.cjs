@@ -45,7 +45,6 @@ if (missing.length > 0) {
 // Symlink config files
 const configFiles = [
     'package.json',
-    'pnpm-lock.yaml',
     'postcss.config.js',
     'tailwind.config.ts',
     'vite.config.ts',
@@ -58,38 +57,26 @@ for (const file of configFiles) {
     const target = path.join(repoRoot, file);
     const source = path.join(repoRoot, 'config', file);
 
+    // Remove existing file/link if present
     try {
-        const stats = fs.lstatSync(target);
-        if (!stats.isSymbolicLink()) {
-            fs.unlinkSync(target);
-            if (process.platform === 'win32') {
-                try {
-                    fs.symlinkSync(path.join('config', file), target, 'junction');
-                } catch {
-                    fs.copyFileSync(source, target);
-                }
-            } else {
-                fs.symlinkSync(path.join('config', file), target);
-            }
-        }
+        fs.unlinkSync(target);
     } catch {
+    }
+
+    try {
+        if (fs.existsSync(source)) {
+            fs.linkSync(source, target);
+        }
+    } catch (err) {
         try {
-            if (process.platform === 'win32') {
-                try {
-                    fs.symlinkSync(path.join('config', file), target, 'junction');
-                } catch {
-                    if (fs.existsSync(source)) {
-                        fs.copyFileSync(source, target);
-                    }
-                }
-            } else {
-                fs.symlinkSync(path.join('config', file), target);
-            }
-        } catch { }
+            const relativePath = path.relative(path.dirname(target), source);
+            fs.symlinkSync(relativePath, target);
+        } catch {
+            logErr(`Failed to link ${file}:`, err.message);
+        }
     }
 }
 
-// Install npm dependencies if needed
 const nodeModulesPath = path.join(repoRoot, 'node_modules');
 const pnpmLockPath = path.join(repoRoot, 'config', 'pnpm-lock.yaml');
 const modulesYamlPath = path.join(nodeModulesPath, '.modules.yaml');

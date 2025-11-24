@@ -387,7 +387,24 @@ async function installComponent(name) {
     }
     case 'build-tools': {
       if (plat === 'win32') {
-        const hasMSBuild = findInPath('msbuild');
+        let hasMSBuild = findInPath('msbuild');
+        if (!hasMSBuild) {
+          const vsPaths = [
+            'C:\\Program Files\\Microsoft Visual Studio\\2022\\BuildTools\\MSBuild\\Current\\Bin\\MSBuild.exe',
+            'C:\\Program Files\\Microsoft Visual Studio\\2022\\Community\\MSBuild\\Current\\Bin\\MSBuild.exe',
+            'C:\\Program Files\\Microsoft Visual Studio\\2022\\Professional\\MSBuild\\Current\\Bin\\MSBuild.exe',
+            'C:\\Program Files\\Microsoft Visual Studio\\2022\\Enterprise\\MSBuild\\Current\\Bin\\MSBuild.exe',
+            'C:\\Program Files (x86)\\Microsoft Visual Studio\\2022\\BuildTools\\MSBuild\\Current\\Bin\\MSBuild.exe',
+            'C:\\Program Files (x86)\\Microsoft Visual Studio\\2019\\BuildTools\\MSBuild\\Current\\Bin\\MSBuild.exe'
+          ];
+          for (const p of vsPaths) {
+            if (fs.existsSync(p)) {
+              hasMSBuild = true;
+              break;
+            }
+          }
+        }
+
         const hasPython = findInPath('python') || findInPath('python3');
         if (hasMSBuild && hasPython) return true;
 
@@ -399,9 +416,12 @@ async function installComponent(name) {
           if (!hasMSBuild) {
             success = await tryExec('winget', ['install', '--id', 'Microsoft.VisualStudio.2022.BuildTools', '-e', '--accept-source-agreements', '--accept-package-agreements']) && success;
           }
-          return success;
+          if (success) return true;
         }
-        console.log('[INFO] Install Microsoft C++ Build Tools and Python3 for native modules.');
+
+        console.log('[INFO] Build tools require admin privileges. Run these commands in PowerShell (Admin):');
+        console.log('[INFO]   winget install OpenJS.NodeJS Rustlang.Rustup -e --accept-source-agreements --accept-package-agreements');
+        console.log('[INFO]   winget install Microsoft.VisualStudio.2022.BuildTools -e --accept-source-agreements --accept-package-agreements');
         return false;
       }
 
@@ -579,7 +599,11 @@ async function installComponent(name) {
       const repoRoot = path.resolve(__dirname, '..');
       try {
         const electronPath = path.join(repoRoot, 'node_modules', 'electron');
-        if (fs.existsSync(electronPath)) return true;
+        const electronBin = process.platform === 'win32'
+          ? path.join(electronPath, 'dist', 'electron.exe')
+          : path.join(electronPath, 'dist', 'electron');
+
+        if (fs.existsSync(electronBin)) return true;
       } catch { }
 
       // Install electron
