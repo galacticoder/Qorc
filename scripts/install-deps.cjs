@@ -20,55 +20,21 @@ const execFileAsync = promisify(execFile);
 const serverComponents = ['haproxy', 'tailscale', 'jq', 'redis', 'postgres', 'cloudflared',
   'python3', 'openssl', 'liboqs', 'oqs-provider', 'cmake', 'ninja'];
 
-if (process.platform === 'win32' && !process.env.WSL_DISTRO_NAME) {
-  const args = process.argv.slice(2);
-  const needsWSL = args.some(arg => {
-    const cleanArg = arg.replace(/^--/, '');
-    return cleanArg === 'server' || cleanArg === 'all' || cleanArg === 'quantum' || serverComponents.includes(cleanArg);
-  });
-
-  if (needsWSL) {
-    console.log('[INSTALL] Server components require WSL2 - forwarding...');
-
-    try {
-      execSync('wsl --status', { stdio: 'ignore' });
-    } catch {
-      console.error('[INSTALL] WSL2 not installed. Run: wsl --install -d Ubuntu');
-      process.exit(1);
-    }
-
-    const repoRoot = path.resolve(__dirname, '..');
-    const wslPath = execSync('wsl wslpath -a ' + JSON.stringify(repoRoot), { encoding: 'utf8' }).trim();
-    const scriptPath = `${wslPath}/scripts/install-deps.cjs`;
-
-    const wslProc = spawn('wsl', ['node', scriptPath, ...args], {
-      stdio: 'inherit',
-      cwd: repoRoot
-    });
-
-    wslProc.on('exit', code => process.exit(code || 0));
-    return;
-  }
-}
-
 function findInPath(bin) {
   const pathEnv = process.env.PATH || '';
   const parts = pathEnv.split(path.delimiter).filter(Boolean);
-  const exts = process.platform === 'win32' ? (process.env.PATHEXT || '.EXE;.CMD;.BAT;.COM').split(';') : [''];
   for (const dir of parts) {
-    for (const ext of exts) {
-      try {
-        const full = path.join(dir, bin + ext);
-        if (fs.existsSync(full)) return full;
-      } catch { }
-    }
+    try {
+      const full = path.join(dir, bin);
+      if (fs.existsSync(full)) return full;
+    } catch { }
   }
   return null;
 }
 
 async function tryExec(bin, args, opts = {}) {
   try {
-    await execFileAsync(bin, args, { stdio: 'ignore', windowsHide: true, ...opts });
+    await execFileAsync(bin, args, { stdio: 'ignore', ...opts });
     return true;
   } catch {
     return false;
@@ -76,12 +42,29 @@ async function tryExec(bin, args, opts = {}) {
 }
 
 async function trySudo(args, opts = {}) {
-  if (!findInPath('sudo')) return false;
+  if (process.getuid && process.getuid() === 0) {
+    try {
+      await execFileAsync(args[0], args.slice(1), { stdio: 'inherit', ...opts });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  if (!findInPath('sudo')) {
+    try {
+      await execFileAsync(args[0], args.slice(1), { stdio: 'inherit', ...opts });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   let nonInteractive = true;
   try { await execFileAsync('sudo', ['-n', 'true']); } catch { nonInteractive = false; }
   try {
     if (nonInteractive) {
-      await execFileAsync('sudo', args, { windowsHide: true, ...opts });
+      await execFileAsync('sudo', args, { stdio: 'ignore', ...opts });
     } else {
       await execFileAsync('sudo', args, { stdio: 'inherit', ...opts });
     }
@@ -96,7 +79,7 @@ function pmHas(pm) { return !!findInPath(pm); }
 async function installLinux(pkg) {
   if (pmHas('apk')) return await (await trySudo(['apk', 'add', '--no-cache', pkg]) || pmHas('apk') && await tryExec('apk', ['add', '--no-cache', pkg]));
   if (pmHas('apt-get')) {
-    await trySudo(['apt-get', 'update']);
+    try { await trySudo(['apt-get', 'update']); } catch { }
     return await (await trySudo(['apt-get', 'install', '-y', pkg]));
   }
   if (pmHas('dnf')) return await (await trySudo(['dnf', '-y', 'install', pkg]));
@@ -260,8 +243,14 @@ async function installComponent(name) {
       if (plat === 'linux') {
         const installed = await installLinux('tailscale');
         if (installed) return true;
-        console.log('[INFO] Tailscale not in default repos. Add tailscale repo: https://tailscale.com/kb/1031/install-linux');
-        return false;
+        try {
+          const { execSync } = require('child_process');
+          execSync('curl -fsSL https://tailscale.com/install.sh | sh', { stdio: 'inherit', shell: true });
+          if (findInPath('tailscale') || findInPath('tailscaled')) return true;
+        } catch (e) {
+          console.log('[INFO] Failed to install via script. See: https://tailscale.com/kb/1031/install-linux');
+          return false;
+        }
       }
       if (plat === 'darwin' && pmHas('brew')) return await tryExec('brew', ['install', 'tailscale']);
       return false;
@@ -341,28 +330,22 @@ async function installComponent(name) {
       if (findInPath('node')) return true;
       if (plat === 'linux') return await installLinux('nodejs');
       if (plat === 'darwin' && pmHas('brew')) return await tryExec('brew', ['install', 'node']);
-      if (plat === 'win32' && pmHas('choco')) return await tryExec('choco', ['install', 'nodejs', '-y']);
-      if (plat === 'win32' && pmHas('winget')) return await tryExec('winget', ['install', '--id', 'OpenJS.NodeJS.LTS', '-e', '-h']) || await tryExec('winget', ['install', '--id', 'OpenJS.NodeJS', '-e', '-h']);
       return false;
     }
     case 'git': {
       if (findInPath('git')) return true;
       if (plat === 'linux') return await installLinux('git');
       if (plat === 'darwin' && pmHas('brew')) return await tryExec('brew', ['install', 'git']);
-      if (plat === 'win32' && pmHas('choco')) return await tryExec('choco', ['install', 'git', '-y']);
-      if (plat === 'win32' && pmHas('winget')) return await tryExec('winget', ['install', '--id', 'Git.Git', '-e', '-h']);
       return false;
     }
     case 'curl': {
       if (findInPath('curl')) return true;
       if (plat === 'linux') return await installLinux('curl');
       if (plat === 'darwin' && pmHas('brew')) return await tryExec('brew', ['install', 'curl']);
-      if (plat === 'win32' && pmHas('choco')) return await tryExec('choco', ['install', 'curl', '-y']);
       return false;
     }
     case 'wget': {
       if (findInPath('wget')) return true;
-      if (plat === 'win32') return true;
       if (plat === 'linux') return await installLinux('wget');
       if (plat === 'darwin' && pmHas('brew')) return await tryExec('brew', ['install', 'wget']);
       return false;
@@ -371,60 +354,15 @@ async function installComponent(name) {
       if (findInPath('python3')) return true;
       if (plat === 'linux') return await installLinux('python3');
       if (plat === 'darwin' && pmHas('brew')) return await tryExec('brew', ['install', 'python@3']);
-      if (plat === 'win32' && pmHas('choco')) return await tryExec('choco', ['install', 'python', '-y']);
-      if (plat === 'win32' && pmHas('winget')) return await tryExec('winget', ['install', '--id', 'Python.Python.3', '-e', '-h']);
       return false;
     }
     case 'openssl': {
       if (findInPath('openssl')) return true;
       if (plat === 'linux') return await installLinux('openssl');
       if (plat === 'darwin' && pmHas('brew')) return await tryExec('brew', ['install', 'openssl']);
-      if (plat === 'win32') {
-        console.log('[INFO] Install OpenSSL from https://slproweb.com/products/Win32OpenSSL.html or via chocolatey');
-        return false;
-      }
       return false;
     }
     case 'build-tools': {
-      if (plat === 'win32') {
-        let hasMSBuild = findInPath('msbuild');
-        if (!hasMSBuild) {
-          const vsPaths = [
-            'C:\\Program Files\\Microsoft Visual Studio\\2022\\BuildTools\\MSBuild\\Current\\Bin\\MSBuild.exe',
-            'C:\\Program Files\\Microsoft Visual Studio\\2022\\Community\\MSBuild\\Current\\Bin\\MSBuild.exe',
-            'C:\\Program Files\\Microsoft Visual Studio\\2022\\Professional\\MSBuild\\Current\\Bin\\MSBuild.exe',
-            'C:\\Program Files\\Microsoft Visual Studio\\2022\\Enterprise\\MSBuild\\Current\\Bin\\MSBuild.exe',
-            'C:\\Program Files (x86)\\Microsoft Visual Studio\\2022\\BuildTools\\MSBuild\\Current\\Bin\\MSBuild.exe',
-            'C:\\Program Files (x86)\\Microsoft Visual Studio\\2019\\BuildTools\\MSBuild\\Current\\Bin\\MSBuild.exe'
-          ];
-          for (const p of vsPaths) {
-            if (fs.existsSync(p)) {
-              hasMSBuild = true;
-              break;
-            }
-          }
-        }
-
-        const hasPython = findInPath('python') || findInPath('python3');
-        if (hasMSBuild && hasPython) return true;
-
-        if (pmHas('winget')) {
-          let success = true;
-          if (!hasPython) {
-            success = await tryExec('winget', ['install', '--id', 'Python.Python.3', '-e', '--accept-source-agreements', '--accept-package-agreements']) && success;
-          }
-          if (!hasMSBuild) {
-            success = await tryExec('winget', ['install', '--id', 'Microsoft.VisualStudio.2022.BuildTools', '-e', '--accept-source-agreements', '--accept-package-agreements']) && success;
-          }
-          if (success) return true;
-        }
-
-        console.log('[INFO] Build tools require admin privileges. Run these commands in PowerShell (Admin):');
-        console.log('[INFO]   winget install OpenJS.NodeJS Rustlang.Rustup -e --accept-source-agreements --accept-package-agreements');
-        console.log('[INFO]   winget install Microsoft.VisualStudio.2022.BuildTools -e --accept-source-agreements --accept-package-agreements');
-        return false;
-      }
-
       if (findInPath('gcc') && findInPath('make')) return true;
 
       if (plat === 'linux') {
@@ -469,23 +407,19 @@ async function installComponent(name) {
         const tmpRoot = await require('fs/promises').mkdtemp(path.join(os.tmpdir(), 'liboqs-'));
         const srcDir = path.join(tmpRoot, 'src');
         try {
-          // Clone latest main branch
           await execFileAsync('git', ['clone', '--depth', '1', 'https://github.com/open-quantum-safe/liboqs.git', srcDir], { stdio: 'inherit' });
 
-          // Build
           const buildDir = path.join(srcDir, 'build');
           await require('fs/promises').mkdir(buildDir, { recursive: true });
           await execFileAsync('cmake', ['-GNinja', '-DCMAKE_INSTALL_PREFIX=/usr/local', '-DBUILD_SHARED_LIBS=ON', '-DOQS_DIST_BUILD=ON', '..'], { cwd: buildDir, stdio: 'inherit' });
           await execFileAsync('ninja', [], { cwd: buildDir, stdio: 'inherit' });
 
-          // Install
           const installed = await trySudo(['ninja', 'install'], { cwd: buildDir });
           if (!installed) {
             console.log('[INFO] Run: cd', buildDir, '&& sudo ninja install');
             return false;
           }
 
-          // Update library cache
           await trySudo(['ldconfig']);
           return true;
         } catch (e) {
@@ -563,31 +497,24 @@ async function installComponent(name) {
       if (findInPath('cmake')) return true;
       if (plat === 'linux') return await installLinux('cmake');
       if (plat === 'darwin' && pmHas('brew')) return await tryExec('brew', ['install', 'cmake']);
-      if (plat === 'win32' && pmHas('choco')) return await tryExec('choco', ['install', 'cmake', '-y']);
-      if (plat === 'win32' && pmHas('winget')) return await tryExec('winget', ['install', '--id', 'Kitware.CMake', '-e', '-h']);
       return false;
     }
     case 'ninja': {
       if (findInPath('ninja')) return true;
       if (plat === 'linux') return await installLinux('ninja-build') || await installLinux('ninja');
       if (plat === 'darwin' && pmHas('brew')) return await tryExec('brew', ['install', 'ninja']);
-      if (plat === 'win32' && pmHas('choco')) return await tryExec('choco', ['install', 'ninja', '-y']);
       return false;
     }
     case 'pnpm': {
       if (findInPath('pnpm')) return true;
 
-      const npmCmd = process.platform === 'win32' ? 'npm.cmd' : 'npm';
-
-      // Try corepack first
       try {
         await execFileAsync('corepack', ['enable', 'pnpm'], { stdio: 'ignore' });
         if (findInPath('pnpm')) return true;
       } catch { }
 
-      // Try npm install
       try {
-        await execFileAsync(npmCmd, ['install', '-g', 'pnpm', '--no-audit', '--no-fund'], { stdio: 'inherit' });
+        await execFileAsync('npm', ['install', '-g', 'pnpm', '--no-audit', '--no-fund'], { stdio: 'inherit' });
         if (findInPath('pnpm')) return true;
       } catch { }
 
@@ -597,9 +524,6 @@ async function installComponent(name) {
     case 'electron': {
       // Check if electron is installed
       const repoRoot = path.resolve(__dirname, '..');
-      const electronBin = process.platform === 'win32'
-        ? path.join(repoRoot, 'node_modules', '.pnpm', 'electron@*', 'node_modules', 'electron', 'dist', 'electron.exe')
-        : path.join(repoRoot, 'node_modules', '.pnpm', 'electron@*', 'node_modules', 'electron', 'dist', 'electron');
 
       const findElectronPath = () => {
         try {
@@ -609,9 +533,7 @@ async function installComponent(name) {
           const entries = fs.readdirSync(pnpmDir);
           for (const entry of entries) {
             if (entry.startsWith('electron@')) {
-              const binPath = process.platform === 'win32'
-                ? path.join(pnpmDir, entry, 'node_modules', 'electron', 'dist', 'electron.exe')
-                : path.join(pnpmDir, entry, 'node_modules', 'electron', 'dist', 'electron');
+              const binPath = path.join(pnpmDir, entry, 'node_modules', 'electron', 'dist', 'electron');
               if (fs.existsSync(binPath)) return { version: entry, binPath };
 
               const installScript = path.join(pnpmDir, entry, 'node_modules', 'electron', 'install.js');
@@ -655,8 +577,6 @@ async function installComponent(name) {
       }
     }
     case 'libevent': {
-      if (plat === 'win32') return true;
-
       // Check if libevent is installed
       if (plat === 'linux') {
         if (pmHas('apt-get')) {
@@ -689,15 +609,6 @@ async function installComponent(name) {
     case 'rust': {
       if (findInPath('cargo')) return true;
 
-      if (plat === 'win32') {
-        if (pmHas('winget')) {
-          return await tryExec('winget', ['install', '--id', 'Rustlang.Rustup', '-e', '--accept-source-agreements', '--accept-package-agreements']);
-        }
-        console.log('[INFO] Install Rust from https://rustup.rs');
-        return false;
-      }
-
-      // Install via rustup
       try {
         const rustupUrl = 'https://sh.rustup.rs';
         const tmpScript = path.join(os.tmpdir(), 'rustup.sh');
@@ -727,6 +638,13 @@ async function installComponent(name) {
 (async () => {
   const args = process.argv.slice(2);
 
+  if (process.platform === 'win32') {
+    console.log('[ERROR] This script does not support Windows.');
+    console.log('[INFO] Please use the provided Docker setup for running the server on Windows.');
+    console.log('[INFO] Run: node scripts/start-docker.cjs');
+    process.exit(1);
+  }
+
   // Check for help flag
   if (args.length === 0 || args.some(a => a === '-h' || a === '--help')) {
     console.log('Usage: node scripts/install-deps.cjs <component...>');
@@ -744,7 +662,7 @@ async function installComponent(name) {
 
   const presets = {
     all: ['git', 'nodejs', 'redis', 'postgres', 'python3', 'openssl', 'build-tools', 'cmake', 'ninja', 'liboqs', 'oqs-provider', 'haproxy', 'tailscale', 'jq', 'cloudflared'],
-    server: ['nodejs', 'redis', 'postgres', 'python3', 'openssl', 'build-tools'],
+    server: ['nodejs', 'redis', 'postgres', 'python3', 'openssl', 'build-tools', 'tailscale'],
     client: ['nodejs', 'git', 'curl', 'wget', 'pnpm', 'libevent', 'rust', 'build-tools', 'electron'],
     edge: ['haproxy', 'cloudflared'],
     quantum: ['git', 'openssl', 'build-tools', 'cmake', 'ninja', 'liboqs', 'oqs-provider']

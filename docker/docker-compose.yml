@@ -1,0 +1,135 @@
+services:
+  redis:
+    profiles: ["server", "loadbalancer", "redis-standalone"]
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.redis
+    hostname: redis
+    environment:
+      - REDIS_PASSWORD=${REDIS_PASSWORD}
+      - TS_AUTHKEY=${TS_AUTHKEY}
+    ports:
+      - "${REDIS_EXTERNAL_PORT:-6379}:6379"
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    volumes:
+      - redis-data:/data
+      - redis-certs:/certs
+      - tailscale-redis:/var/lib/tailscale
+    tmpfs:
+      - /var/run/tailscale
+    networks:
+      - end2end-net
+    restart: unless-stopped
+
+  postgres:
+    profiles: ["server"]
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.postgres
+    hostname: postgres
+    env_file:
+      - ../.env
+    environment:
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - postgres-certs:/var/lib/postgresql/certs
+    ports:
+      - "${DB_PORT}:5432" 
+    networks:
+      - end2end-net
+    restart: unless-stopped
+
+  server:
+    profiles: ["server"]
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.server
+    hostname: server
+    ports:
+      - "${PORT:-3000}:3000"
+    environment:
+      - BIND_ADDRESS=0.0.0.0
+    depends_on:
+      - postgres
+      - redis
+    env_file:
+      - ../.env
+    networks:
+      - end2end-net
+    cap_add:
+      - NET_ADMIN
+      - SYS_MODULE
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    volumes:
+      - ../.env:/app/.env 
+      - ../server:/app/server:rw
+      - tailscale-data:/var/lib/tailscale
+      - redis-certs:/app/redis-certs:ro
+      - postgres-certs:/app/postgres-certs:ro
+    tmpfs:
+      - /var/run/tailscale
+    restart: unless-stopped
+
+  loadbalancer:
+    profiles: ["loadbalancer"]
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.loadbalancer
+    hostname: loadbalancer
+    ports:
+      - "${HAPROXY_HTTPS_PORT:-8443}:8443"
+      - "${HAPROXY_HTTP_PORT:-8080}:8080"
+      - "${HAPROXY_STATS_PORT:-8404}:8404"
+    env_file:
+      - ../.env
+    environment:
+      - REDIS_CA_CERT_PATH=/app/redis-certs/redis-ca.crt
+      - REDIS_CLIENT_CERT_PATH=/app/redis-certs/redis-client.crt
+      - REDIS_CLIENT_KEY_PATH=/app/redis-certs/redis-client.key
+      - REDIS_TLS_SERVERNAME=redis
+      - TS_AUTHKEY=${TS_AUTHKEY}
+    depends_on:
+      - redis
+    cap_add:
+      - NET_ADMIN
+      - SYS_MODULE
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    networks:
+      - end2end-net
+    volumes:
+      - ../.env:/app/.env
+      - ../scripts:/app/scripts:rw
+      - ../server:/app/server:rw
+      - redis-certs:/app/redis-certs:ro
+      - tailscale-loadbalancer:/var/lib/tailscale
+    tmpfs:
+      - /var/run
+    restart: unless-stopped
+
+networks:
+  end2end-net:
+    driver: bridge
+    driver_opts:
+      com.docker.network.bridge.name: end2end-br
+      com.docker.network.bridge.enable_ip_masquerade: "true"
+    ipam:
+      driver: default
+      config:
+        - subnet: 172.25.0.0/16
+
+volumes:
+  postgres-data:
+  postgres-certs:
+  tailscale-data:
+  tailscale-redis:
+  tailscale-loadbalancer:
+  redis-data:
+  redis-certs:
+

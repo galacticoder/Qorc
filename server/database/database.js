@@ -106,7 +106,7 @@ function persistGeneratedDbFieldKey(key) {
 function loadOrGeneratePepper() {
   // First check environment variable
   let pepper = process.env.PASSWORD_HASH_PEPPER;
-  
+
   if (!pepper) {
     // Try to load from file
     if (fs.existsSync(PEPPER_FILE_PATH)) {
@@ -128,18 +128,18 @@ function loadOrGeneratePepper() {
       }
     }
   }
-  
+
   if (!pepper || pepper.length < 32) {
     pepper = generateSecurePepper();
     persistGeneratedPepper(pepper);
   }
-  
+
   return pepper;
 }
 
 function loadOrGenerateUserIdSalt() {
   let salt = process.env.USER_ID_SALT;
-  
+
   if (!salt) {
     // Try to load from file
     if (fs.existsSync(USER_ID_SALT_FILE_PATH)) {
@@ -161,18 +161,18 @@ function loadOrGenerateUserIdSalt() {
       }
     }
   }
-  
+
   if (!salt || salt.length < 32) {
     salt = generateSecureUserIdSalt();
     persistGeneratedUserIdSalt(salt);
   }
-  
+
   return salt;
 }
 
 function loadOrGenerateDbFieldKey() {
   let key = process.env.DB_FIELD_KEY;
-  
+
   if (!key) {
     // Try to load from file
     if (fs.existsSync(DB_FIELD_KEY_FILE_PATH)) {
@@ -194,12 +194,12 @@ function loadOrGenerateDbFieldKey() {
       }
     }
   }
-  
+
   if (!key || key.length < 32) {
     key = generateSecureDbFieldKey();
     persistGeneratedDbFieldKey(key);
   }
-  
+
   return key;
 }
 
@@ -261,7 +261,7 @@ function decodeStoredPasswordHash(storedValue) {
         version,
         pepperedBase64: parts[1]
       };
-    } catch {}
+    } catch { }
   }
 
   return { rawHash: null, storedValue, isPeppered: false, version: 0 };
@@ -391,6 +391,65 @@ function tryCreateDatabaseWithSudo(dbName, user, password) {
   }
 }
 
+async function tryCreateDatabaseViaConnection(dbName, user, password, host, port, sslConfig) {
+  if (!dbName || !user || !password) {
+    return false;
+  }
+
+  try {
+    const { Pool } = await import('pg');
+
+    const maintenancePool = new Pool({
+      host,
+      port,
+      user,
+      password,
+      database: 'postgres',
+      max: 1,
+      connectionTimeoutMillis: 5000,
+      ssl: sslConfig,
+    });
+
+    try {
+      // Try to create the target database
+      const escapedDbName = dbName.replace(/"/g, '""');
+      cryptoLogger.info('[DB] Attempting to create database via connection', {
+        database: dbName,
+        host,
+        port,
+      });
+
+      await maintenancePool.query(`CREATE DATABASE "${escapedDbName}"`);
+      cryptoLogger.info('[DB] Database created successfully', { database: dbName });
+
+      await maintenancePool.end();
+      return true;
+    } catch (err) {
+      const msg = err?.message || String(err);
+
+      // Database already exists is OK
+      if (/already exists/i.test(msg)) {
+        cryptoLogger.info('[DB] Database already exists', { database: dbName });
+        await maintenancePool.end();
+        return true;
+      }
+
+      cryptoLogger.warn('[DB] Failed to create database via connection', {
+        database: dbName,
+        error: msg,
+      });
+
+      try { await maintenancePool.end(); } catch { }
+      return false;
+    }
+  } catch (err) {
+    cryptoLogger.error('[DB] Failed to connect to maintenance database', {
+      error: err?.message || String(err),
+    });
+    return false;
+  }
+}
+
 let pgPool = null;
 export async function getPgPool() {
   if (!USE_PG) return null;
@@ -503,7 +562,7 @@ export async function getPgPool() {
       const missingRole = /role "?.+"? does not exist/i.test(msg);
 
       if (!missingDb && !missingRole) {
-        try { await pool.end(); } catch {}
+        try { await pool.end(); } catch { }
         throw err;
       }
 
@@ -513,9 +572,17 @@ export async function getPgPool() {
         error: msg,
       });
 
-      tryCreateDatabaseWithSudo(defaultDbName, user, passwordFromEnv);
+      // First try docker
+      const created = await tryCreateDatabaseViaConnection(defaultDbName, user, passwordFromEnv, host, port, {
+        ...sslConfig,
+        servername: process.env.DB_TLS_SERVERNAME || host,
+      });
 
-      try { await pool.end(); } catch {}
+      if (!created) {
+        tryCreateDatabaseWithSudo(defaultDbName, user, passwordFromEnv);
+      }
+
+      try { await pool.end(); } catch { }
       pool = new Pool(poolConfig);
       try {
         await pool.query('SELECT 1');
@@ -534,7 +601,7 @@ export async function getPgPool() {
         });
         return pgPool;
       } catch (err2) {
-        try { await pool.end(); } catch {}
+        try { await pool.end(); } catch { }
         throw err2;
       }
     }
@@ -949,19 +1016,19 @@ export class UserDatabase {
       console.error('[DB] Invalid update data structure');
       throw new Error('Invalid update data structure');
     }
-    
+
     const { username, passwordVersion, passwordAlgorithm, passwordSalt, passwordMemoryCost, passwordTimeCost, passwordParallelism } = updateData;
-    
+
     if (!username || typeof username !== 'string' || username.length < 3 || username.length > 32) {
       console.error(`[DB] Invalid username for password params update: ${username}`);
       throw new Error('Invalid username for password params update');
     }
-    
+
     if (!/^[a-zA-Z0-9_-]+$/.test(username)) {
       console.error(`[DB] Invalid username format for password params update: ${username}`);
       throw new Error('Invalid username format for password params update');
     }
-    
+
     console.log(`[DB] Updating password parameters for user: ${username}`);
     try {
       const pool = await getPgPool();
@@ -1054,17 +1121,17 @@ export class UserDatabase {
 export class MessageDatabase {
   static async saveMessageInDB(payload, serverHybridKeyPair) {
     console.log('[DB] Starting message save to database');
-    
+
     if (!payload || typeof payload !== 'object') {
       console.error('[DB] Invalid payload structure');
       throw new Error('Invalid payload structure');
     }
-    
+
     if (!serverHybridKeyPair) {
       console.error('[DB] Server hybrid key pair not provided');
       throw new Error('Server hybrid key pair not provided');
     }
-    
+
     try {
       let messageId;
       let fromUsername;
@@ -1297,17 +1364,17 @@ export class MessageDatabase {
       console.error('[DB] Invalid toUsername parameter');
       return [];
     }
-    
+
     if (!Number.isInteger(max) || max < 1 || max > 1000) {
       console.error('[DB] Invalid max parameter - must be integer between 1 and 1000');
       return [];
     }
-    
+
     if (!/^[a-zA-Z0-9_-]+$/.test(toUsername)) {
       console.error('[DB] Invalid toUsername format');
       return [];
     }
-    
+
     try {
       if (USE_PG) {
         const pool = await getPgPool();
@@ -1347,38 +1414,38 @@ export class LibsignalBundleDB {
       console.error(`[DB] Invalid username parameter in LibsignalBundleDB.publish: ${username}`);
       throw new Error('Invalid username parameter');
     }
-    
+
     if (!/^[a-zA-Z0-9_-]+$/.test(username)) {
       console.error(`[DB] Invalid username format in LibsignalBundleDB.publish: ${username}`);
       throw new Error('Invalid username format');
     }
-    
+
     if (!bundle || typeof bundle !== 'object') {
       console.error('[DB] Invalid bundle structure in LibsignalBundleDB.publish');
       throw new Error('Invalid bundle structure');
     }
-    
-    const requiredFields = ['registrationId', 'deviceId', 'identityKeyBase64', 'signedPreKeyId', 
-                           'signedPreKeyPublicBase64', 'signedPreKeySignatureBase64', 
-                           'kyberPreKeyId', 'kyberPreKeyPublicBase64', 'kyberPreKeySignatureBase64'];
-    
+
+    const requiredFields = ['registrationId', 'deviceId', 'identityKeyBase64', 'signedPreKeyId',
+      'signedPreKeyPublicBase64', 'signedPreKeySignatureBase64',
+      'kyberPreKeyId', 'kyberPreKeyPublicBase64', 'kyberPreKeySignatureBase64'];
+
     for (const field of requiredFields) {
       if (bundle[field] === undefined || bundle[field] === null) {
         console.error(`[DB] Missing required field in bundle: ${field}`);
         throw new Error('Missing required field in bundle: [REDACTED]');
       }
     }
-    
+
     if (!Number.isInteger(bundle.registrationId) || bundle.registrationId < 0) {
       console.error('[DB] Invalid registrationId in bundle');
       throw new Error('Invalid registrationId in bundle');
     }
-    
+
     if (!Number.isInteger(bundle.deviceId) || bundle.deviceId < 0) {
       console.error('[DB] Invalid deviceId in bundle');
       throw new Error('Invalid deviceId in bundle');
     }
-    
+
     const now = Date.now();
     try {
       // Encrypt libsignal key material at rest (identity + prekeys + signatures)
@@ -1490,12 +1557,12 @@ export class LibsignalBundleDB {
       console.error(`[DB] Invalid username parameter in LibsignalBundleDB.take: ${username}`);
       return null;
     }
-    
+
     if (!/^[a-zA-Z0-9_-]+$/.test(username)) {
       console.error(`[DB] Invalid username format in LibsignalBundleDB.take: ${username}`);
       return null;
     }
-    
+
     try {
       if (USE_PG) {
         const pool = await getPgPool();
@@ -1567,30 +1634,30 @@ export class BlockingDatabase {
       console.error(`[BLOCKING] Invalid username: ${username}`);
       throw new Error('Invalid username');
     }
-    
+
     if (!encryptedBlockList || typeof encryptedBlockList !== 'string') {
       console.error('[BLOCKING] Invalid encrypted block list');
       throw new Error('Invalid encrypted block list');
     }
-    
+
     if (!blockListHash || typeof blockListHash !== 'string') {
       console.error('[BLOCKING] Invalid block list hash');
       throw new Error('Invalid block list hash');
     }
-    
+
     if (!salt || typeof salt !== 'string') {
       console.error('[BLOCKING] Invalid salt');
       throw new Error('Invalid salt');
     }
-    
+
     if (!/^[a-zA-Z0-9_-]+$/.test(username)) {
       console.error(`[BLOCKING] Invalid username format: ${username}`);
       throw new Error('Invalid username format');
     }
-    
+
     const now = lastUpdated || Date.now();
     const blockListVersion = version || 1;
-    
+
     try {
       if (USE_PG) {
         const pool = await getPgPool();
@@ -1616,14 +1683,14 @@ export class BlockingDatabase {
             version = excluded.version
         `).run(username, encryptedBlockList, blockListHash, salt, now, blockListVersion);
       }
-      
+
       console.log(`[BLOCKING] Stored encrypted block list for user: ${username}`);
     } catch (error) {
       console.error(`[BLOCKING] Error storing block list for ${username}:`, error);
       throw error;
     }
   }
-  
+
   /**
    * Retrieve encrypted block list for a user
    * @param {string} username - Username of the blocker
@@ -1634,12 +1701,12 @@ export class BlockingDatabase {
       console.error(`[BLOCKING] Invalid username: ${username}`);
       return null;
     }
-    
+
     if (!/^[a-zA-Z0-9_-]+$/.test(username)) {
       console.error(`[BLOCKING] Invalid username format: ${username}`);
       return null;
     }
-    
+
     try {
       if (USE_PG) {
         const pool = await getPgPool();
@@ -1649,7 +1716,6 @@ export class BlockingDatabase {
         );
         const row = rows[0];
         if (!row) return null;
-        // Normalize column names for callers expecting camelCase properties
         return {
           encryptedBlockList: row.encryptedblocklist ?? row.encryptedBlockList,
           blockListHash: row.blocklisthash ?? row.blockListHash,
@@ -1668,7 +1734,7 @@ export class BlockingDatabase {
       return null;
     }
   }
-  
+
   /**
    * Store block tokens for server-side filtering
    * Block tokens are cryptographic hashes that allow the server to filter messages
@@ -1695,7 +1761,7 @@ export class BlockingDatabase {
     if (!Array.isArray(blockTokens) || blockTokens.length === 0) {
       return;
     }
-    
+
     for (const token of blockTokens) {
       if (!token || typeof token !== 'object') {
         throw new Error('Invalid block token structure');
@@ -1712,23 +1778,23 @@ export class BlockingDatabase {
         throw new Error('Invalid blocked hash');
       }
     }
-    
+
     const now = Date.now();
-    
+
     const normalizedTokens = blockTokens.map(token => ({
       tokenHash: token.tokenHash.length > 64 ? token.tokenHash.substring(0, 64) : token.tokenHash,
       blockerHash: token.blockerHash,
       blockedHash: token.blockedHash,
       expiresAt: token.expiresAt
     }));
-    
+
     try {
       if (USE_PG) {
         const pool = await getPgPool();
         const client = await pool.connect();
         try {
           await client.query('BEGIN');
-          
+
           const blockerHashes = [...new Set(normalizedTokens.map(t => t.blockerHash))];
           if (blockerHashForClear && !blockerHashes.includes(blockerHashForClear)) {
             blockerHashes.push(blockerHashForClear);
@@ -1740,7 +1806,7 @@ export class BlockingDatabase {
               blockerHashes
             );
           }
-          
+
           // Insert new tokens
           for (const token of normalizedTokens) {
             await client.query(`
@@ -1748,7 +1814,7 @@ export class BlockingDatabase {
               VALUES ($1, $2, $3, $4, $5)
             `, [token.tokenHash, token.blockerHash, token.blockedHash, now, token.expiresAt || null]);
           }
-          
+
           await client.query('COMMIT');
         } catch (error) {
           await client.query('ROLLBACK');
@@ -1761,7 +1827,7 @@ export class BlockingDatabase {
           INSERT INTO block_tokens (tokenHash, blockerHash, blockedHash, createdAt, expiresAt)
           VALUES (?, ?, ?, ?, ?)
         `);
-        
+
         const transaction = db.transaction((tokens) => {
           const blockerHashes = [...new Set(tokens.map(t => t.blockerHash))];
           if (blockerHashForClear && !blockerHashes.includes(blockerHashForClear)) {
@@ -1770,29 +1836,29 @@ export class BlockingDatabase {
           for (const blockerHash of blockerHashes) {
             db.prepare('DELETE FROM block_tokens WHERE blockerHash = ?').run(blockerHash);
           }
-          
+
           // Insert new tokens
           for (const token of tokens) {
             insertStmt.run(
               token.tokenHash,
-              token.blockerHash, 
+              token.blockerHash,
               token.blockedHash,
               now,
               token.expiresAt || null
             );
           }
         });
-        
+
         transaction(normalizedTokens);
       }
-      
+
       console.log(`[BLOCKING] Stored ${blockTokens.length} block tokens`);
     } catch (error) {
       console.error('[BLOCKING] Error storing block tokens:', error);
       throw error;
     }
   }
-  
+
   /**
    * Check if a message should be blocked based on block tokens
    * @param {string} fromHash - Hash of sender username
@@ -1845,16 +1911,16 @@ export class BlockingDatabase {
       return false;
     } catch (error) {
       console.error('[BLOCKING] Error checking block status:', error);
-      return false;  
+      return false;
     }
   }
-  
+
   /**
    * Clean up expired block tokens
    */
   static async cleanupExpiredTokens() {
     const now = Date.now();
-    
+
     try {
       if (USE_PG) {
         const pool = await getPgPool();

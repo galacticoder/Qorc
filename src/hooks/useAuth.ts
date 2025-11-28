@@ -467,7 +467,6 @@ export const useAuth = (_secureDB?: SecureDB) => {
       const { SQLiteKV } = await import('../lib/sqlite-kv');
       await (SQLiteKV as any).purgeUserDb(pseudonym);
     } catch {
-      // ignore
     }
   };
 

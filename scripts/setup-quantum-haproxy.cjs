@@ -126,13 +126,12 @@ async function hasOqsProvider(env) {
       process.exit(1);
     }
 
-    console.log('[SETUP] Generating ECDSA P-384 certificate (HAProxy-compatible)...');
+    console.log('[SETUP] Generating ECDSA P-384 certificate...');
     const ecdsaKey = path.join(baseDir, 'ecdsa-p384-key.pem');
     const ecdsaCrt = path.join(baseDir, 'ecdsa-p384-cert.pem');
     await execFileAsync('openssl', ['ecparam', '-name', 'secp384r1', '-genkey', '-noout', '-out', ecdsaKey], { env });
     await execFileAsync('openssl', ['req', '-new', '-x509', '-days', '365', '-key', ecdsaKey, '-out', ecdsaCrt, '-subj', '/CN=localhost'], { env });
 
-    // generate PQC cert for future use when HAProxy supports it ill add this to use when available
     const requested = (process.env.OQS_SIG || '').trim();
     const tryList = [];
     if (requested) tryList.push(requested);

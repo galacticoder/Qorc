@@ -1,0 +1,31 @@
+FROM ubuntu:22.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Install Node.js (needed for install-deps.cjs)
+RUN apt-get update && apt-get install -y curl ca-certificates gnupg postgresql \
+    && mkdir -p /etc/apt/keyrings \
+    && curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg \
+    && echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_22.x nodistro main" | tee /etc/apt/sources.list.d/nodesource.list \
+    && apt-get update && apt-get install -y nodejs locales \
+    && rm -rf /var/lib/apt/lists/* \
+    && localedef -i en_US -c -f UTF-8 -A /usr/share/locale/locale.alias en_US.UTF-8
+
+ENV LANG en_US.utf8
+
+WORKDIR /app
+
+COPY scripts/ ./scripts/
+COPY .env .env
+
+RUN node scripts/install-deps.cjs postgres openssl
+RUN mkdir -p /var/lib/postgresql/certs && chown postgres:postgres /var/lib/postgresql/certs
+
+COPY docker/postgres-entrypoint.sh /usr/local/bin/postgres-entrypoint.sh
+RUN chmod +x /usr/local/bin/postgres-entrypoint.sh
+
+VOLUME /var/lib/postgresql/data
+
+EXPOSE 5432
+
+ENTRYPOINT ["/usr/local/bin/postgres-entrypoint.sh"]

@@ -11,33 +11,13 @@ const { URL } = require('url');
 
 const repoRoot = path.resolve(__dirname, '..');
 
-if (process.platform === 'win32' && !process.env.WSL_DISTRO_NAME) {
-  console.log('[SERVER] Detected Windows - forwarding to WSL2...');
-
-  try {
-    execSync('wsl --status', { stdio: 'ignore' });
-  } catch {
-    console.error('[SERVER] WSL2 not installed. Installing...');
-    console.error('[SERVER] Run: wsl --install -d Ubuntu');
-    console.error('[SERVER] Then restart your computer and run this script again.');
-    execSync('wsl --install -d Ubuntu', { stdio: 'inherit' });
-    process.exit(1);
-  }
-
-  const wslPath = execSync('wsl wslpath -a ' + JSON.stringify(repoRoot), { encoding: 'utf8' }).trim();
-  const scriptPath = `${wslPath}/scripts/start-server.cjs`;
-
-  const args = ['node', scriptPath, ...process.argv.slice(2)];
-
-  const wslProc = spawn('wsl', args, {
-    stdio: 'inherit',
-    cwd: repoRoot,
-    env: process.env
-  });
-
-  wslProc.on('exit', code => process.exit(code || 0));
-  return;
+if (process.platform === 'win32') {
+  console.error('[ERROR] Windows is not supported for server deployment.');
+  console.error('[ERROR] Use Docker instead:');
+  console.error('[ERROR]   node scripts\start-server.cjs server');
+  process.exit(1);
 }
+
 
 function loadDotEnv(filePath) {
   try {
@@ -91,13 +71,36 @@ const CONFIG = {
 
 const serverDir = path.join(repoRoot, 'server');
 
-// Prefer a project-local TLS-enabled Redis binary if configured.
-const REDIS_SERVER_BIN = process.env.TLS_REDIS_SERVER || process.env.REDIS_SERVER_BIN || 'redis-server';
+// Prefer a project-local TLS-enabled Redis binary if configured or present.
+const localRedisTls = path.join(repoRoot, 'server', 'bin', 'redis-server-tls');
+const REDIS_SERVER_BIN = process.env.TLS_REDIS_SERVER ||
+  (fs.existsSync(localRedisTls) ? localRedisTls : null) ||
+  process.env.REDIS_SERVER_BIN ||
+  'redis-server';
 
 function log(...args) { console.log('[START]', ...args); }
 function logErr(...args) { console.error('[START]', ...args); }
 
-// Circular buffer for logs
+function buildRedisCliCommand(redisUrl, ...args) {
+  let cmd = `redis-cli -u "${redisUrl}"`;
+  
+  if (process.env.REDIS_CA_CERT_PATH) {
+    cmd += ` --cacert "${process.env.REDIS_CA_CERT_PATH}"`;
+  }
+  if (process.env.REDIS_CLIENT_CERT_PATH) {
+    cmd += ` --cert "${process.env.REDIS_CLIENT_CERT_PATH}"`;
+  }
+  if (process.env.REDIS_CLIENT_KEY_PATH) {
+    cmd += ` --key "${process.env.REDIS_CLIENT_KEY_PATH}"`;
+  }
+  
+  if (args.length > 0) {
+    cmd += ' ' + args.join(' ');
+  }
+  
+  return cmd;
+}
+
 class CircularBuffer {
   constructor(maxSize = 1000) {
     this.buffer = [];
@@ -160,38 +163,30 @@ class RateLimiter {
   }
 }
 
-// Cross-platform port checking
-function isPortInUse(port) {
-  try {
-    let cmd, args;
-    if (fs.existsSync('/usr/bin/ss') || fs.existsSync('/bin/ss')) {
-      cmd = 'ss';
-      args = ['-tuln'];
-    } else {
-      cmd = 'netstat';
-      args = ['-tuln'];
-    }
-
-    const result = execSync(`${cmd} ${args.join(' ')} 2>/dev/null || true`, { encoding: 'utf8' });
-    const portRegex = new RegExp(`:${port}[\\s\\]]`, 'm');
-    if (portRegex.test(result)) return true;
-
-    try {
-      const lsofResult = execSync(`lsof -i :${port} 2>/dev/null | grep LISTEN || true`, { encoding: 'utf8' });
-      if (lsofResult.trim()) return true;
-    } catch { }
-
-    return false;
-  } catch {
-    return false;
-  }
+// Port checking
+async function isPortInUse(port) {
+  return new Promise((resolve) => {
+    const server = require('net').createServer();
+    server.once('error', (err) => {
+      if (err.code === 'EADDRINUSE') {
+        resolve(true);
+      } else {
+        resolve(false);
+      }
+    });
+    server.once('listening', () => {
+      server.close();
+      resolve(false);
+    });
+    server.listen(port, '0.0.0.0');
+  });
 }
 
 // Find available port starting from base
 async function findAvailablePort(basePort = 8443, maxAttempts = 100) {
   for (let i = 0; i < maxAttempts; i++) {
     const candidatePort = basePort + i;
-    if (!isPortInUse(candidatePort)) {
+    if (!(await isPortInUse(candidatePort))) {
       return candidatePort;
     }
   }
@@ -225,10 +220,9 @@ function validateTLSCertificates() {
     process.exit(1);
   }
 
-  // Ensure readable; if not, try to fix with sudo chown/chmod
   try { fs.accessSync(certPath, fs.constants.R_OK); } catch (e) { tryFixTlsPerms(certPath, 0o644); }
   try { fs.accessSync(keyPath, fs.constants.R_OK); } catch (e) { tryFixTlsPerms(keyPath, 0o600); }
-  // Re-check after fix
+
   try { fs.accessSync(certPath, fs.constants.R_OK); } catch (e) {
     logErr(`ERROR: Cannot read TLS cert: ${certPath}`);
     logErr('Try: sudo chown $USER:$USER <cert> && chmod 644 <cert>');
@@ -240,14 +234,12 @@ function validateTLSCertificates() {
     process.exit(1);
   }
 
-  // Update config with absolute paths
   CONFIG.TLS_CERT_PATH = certPath;
   CONFIG.TLS_KEY_PATH = keyPath;
 }
 
 function tryFixTlsPerms(p, mode) {
   try {
-    // If file owned by root, attempt sudo chown to current user
     const needSudo = !isWritableBySelf(p);
     if (needSudo && findSudo()) {
       const uid = process.getuid ? process.getuid() : null;
@@ -612,10 +604,10 @@ class ServerUI {
       // Redis cluster info
       try {
         if (!this.selfServerId) {
-          const keys = execSync(`redis-cli -u "${this.config.REDIS_URL}" hkeys cluster:servers`,
+          const keys = execSync(buildRedisCliCommand(this.config.REDIS_URL, 'hkeys', 'cluster:servers'),
             { encoding: 'utf8', timeout: 700 }).trim().split('\n');
           for (const key of keys) {
-            const val = execSync(`redis-cli -u "${this.config.REDIS_URL}" hget cluster:servers "${key}"`,
+            const val = execSync(buildRedisCliCommand(this.config.REDIS_URL, 'hget', 'cluster:servers', `"${key}"`),
               { encoding: 'utf8', timeout: 700 }).trim();
             try {
               const data = JSON.parse(val);
@@ -628,7 +620,7 @@ class ServerUI {
         }
 
         if (this.selfServerId) {
-          const val = execSync(`redis-cli -u "${this.config.REDIS_URL}" hget cluster:servers "${this.selfServerId}"`,
+          const val = execSync(buildRedisCliCommand(this.config.REDIS_URL, 'hget', 'cluster:servers', `"${this.selfServerId}"`),
             { encoding: 'utf8', timeout: 700 }).trim();
           const data = JSON.parse(val);
           metrics.heartbeatAge = Math.floor((Date.now() - (data.lastHeartbeat || 0)) / 1000);
@@ -637,8 +629,7 @@ class ServerUI {
           metrics.registered = false;
         }
       } catch { }
-
-      // TLS info (check every 10s)
+    
       if (Date.now() - this.lastTlsCheck > 10000) {
         this.lastTlsCheck = Date.now();
         try {
@@ -751,7 +742,7 @@ class ServerUI {
       return `${sec}s`;
     };
 
-    // Header (cyan background like HAProxy)
+    // Header
     const serverId = this._truncate(this.selfServerId || this.config.SERVER_ID || 'unknown', 24);
     const host = this.config.SERVER_HOST || '127.0.0.1';
     const port = this.config.PORT;
@@ -859,7 +850,7 @@ class ServerUI {
     const footerPadded = footerTxt + ' '.repeat(Math.max(0, w - footerTxt.length));
     lines.push('\x1b[30;46m' + footerPadded.substring(0, w) + '\x1b[0m');
 
-    // Render atomically with double buffering to prevent flicker
+
     const output = '\x1b[?25l' + '\x1b[H' + lines.join('\n');
     try {
       process.stdout.write(output);
@@ -875,25 +866,20 @@ class ServerUI {
     this.running = false;
     this.renderDebouncer.flush();
 
-    // Stop metrics polling
     if (this.metricsInterval) {
       clearInterval(this.metricsInterval);
       this.metricsInterval = null;
     }
 
-    // Restore terminal
     if (process.stdin.isTTY) {
       process.stdin.setRawMode(false);
     }
-    // Restore terminal modes and leave alt screen
     if (!preserve) {
-      // leave alt screen then clear previous buffer line
       process.stdout.write('\x1b[?7h\x1b[?25h\x1b[?1049l');
     } else {
       process.stdout.write('\x1b[?7h\x1b[?25h\x1b[?1049l');
     }
 
-    // Kill server if still running
     try {
       process.kill(this.serverPid, 'SIGTERM');
       setTimeout(() => {
@@ -903,52 +889,42 @@ class ServerUI {
   }
 
   start() {
-    // Initial render
     this.render();
-
-    // Update metrics periodically
     this.metricsInterval = setInterval(() => {
       this.updateMetrics().then(() => this.render());
     }, 1000);
-
-    // Handle signals
     process.on('SIGINT', () => this.stop());
     process.on('SIGTERM', () => this.stop());
   }
 }
 
 async function ensureTLSIfMissing() {
-  // If TLS paths not set or files missing, prompt to generate
+  // If TLS paths not set or files missing, automatically generate
   const hasCert = CONFIG.TLS_CERT_PATH && fileExistsMaybeRelative(CONFIG.TLS_CERT_PATH);
   const hasKey = CONFIG.TLS_KEY_PATH && fileExistsMaybeRelative(CONFIG.TLS_KEY_PATH);
   if (hasCert && hasKey) return;
 
-  const canPrompt = process.stdin.isTTY;
-  if (!canPrompt) {
-    logErr('TLS not configured and no TTY to prompt. Run: node scripts/generate_ts_tls.cjs');
-    process.exit(1);
+  log('TLS certificates not found. Generating new certificates...');
+
+  const child = spawn(process.execPath, [path.join(repoRoot, 'scripts', 'generate_ts_tls.cjs')], { cwd: repoRoot, stdio: 'inherit' });
+  const code = await new Promise((r) => child.on('exit', (c) => r(c || 0)));
+
+  if (code !== 0) {
+    logErr('TLS generation failed. Aborting.');
+    process.exit(code);
   }
 
-  const readline = require('readline');
-  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-  const answer = await new Promise((resolve) => {
-    rl.question('TLS cert/key not found. Generate now with Tailscale? (Y/n): ', (ans) => { rl.close(); resolve(ans); });
-  });
-  if (String(answer).trim().match(/^(|y|yes)$/i)) {
-    const child = spawn(process.execPath, [path.join(repoRoot, 'scripts', 'generate_ts_tls.cjs')], { cwd: repoRoot, stdio: 'inherit' });
-    const code = await new Promise((r) => child.on('exit', (c) => r(c || 0)));
-    if (code !== 0) {
-      logErr('TLS generation failed. Aborting.');
-      process.exit(code);
-    }
-    // Reload .env and update CONFIG
-    loadDotEnv(path.join(repoRoot, '.env'));
-    if (process.env.TLS_CERT_PATH) CONFIG.TLS_CERT_PATH = process.env.TLS_CERT_PATH;
-    if (process.env.TLS_KEY_PATH) CONFIG.TLS_KEY_PATH = process.env.TLS_KEY_PATH;
-  } else {
-    logErr('TLS is required. You can run: node scripts/generate_ts_tls.cjs');
-    process.exit(1);
+  // Reload .env and update CONFIG
+  loadDotEnv(path.join(repoRoot, '.env'));
+  if (process.env.TLS_CERT_PATH) {
+    CONFIG.TLS_CERT_PATH = process.env.TLS_CERT_PATH;
+    log(`TLS certificate: ${process.env.TLS_CERT_PATH}`);
   }
+  if (process.env.TLS_KEY_PATH) {
+    CONFIG.TLS_KEY_PATH = process.env.TLS_KEY_PATH;
+    log(`TLS key: ${process.env.TLS_KEY_PATH}`);
+  }
+  log('');
 }
 
 async function ensureDbCaBundleEnv() {
@@ -962,7 +938,6 @@ async function ensureDbCaBundleEnv() {
       }
       logErr(`[START] WARN: DB_CA_CERT_PATH/PGSSLROOTCERT points to missing file '${resolved}'; regenerating CA bundle`);
     } catch {
-      // Fall through to regeneration
     }
   }
 
@@ -975,11 +950,12 @@ async function ensureDbCaBundleEnv() {
       if (u.hostname) dbHost = u.hostname;
       if (u.port) dbPort = String(u.port);
     } else {
+      if (process.env.DB_HOST) dbHost = process.env.DB_HOST;
+      if (process.env.DB_PORT) dbPort = String(process.env.DB_PORT);
       if (process.env.PGHOST) dbHost = process.env.PGHOST;
       if (process.env.PGPORT) dbPort = String(process.env.PGPORT);
     }
   } catch {
-    // Fall back to defaults on parse errors
   }
 
   // Basic sanitization to avoid nonsense values in commands
@@ -1011,28 +987,36 @@ async function ensureDbCaBundleEnv() {
     let usedConnectHost = null;
     let lastErr = null;
 
-    for (const connectHost of connectHosts) {
-      const args = [
-        's_client',
-        '-starttls', 'postgres',
-        '-servername', serverName,
-        '-connect', `${connectHost}:${portNum}`,
-        '-showcerts'
-      ];
-      try {
-        stdout = execFileSync('openssl', args, { encoding: 'utf8' });
-        usedConnectHost = connectHost;
-        break;
-      } catch (e) {
-        lastErr = e;
+    for (let attempt = 1; attempt <= 5; attempt++) {
+      for (const connectHost of connectHosts) {
+        const args = [
+          's_client',
+          '-starttls', 'postgres',
+          '-servername', serverName,
+          '-connect', `${connectHost}:${portNum}`,
+          '-showcerts'
+        ];
+        try {
+          stdout = execFileSync('openssl', args, { encoding: 'utf8' });
+          usedConnectHost = connectHost;
+          break;
+        } catch (e) {
+          lastErr = e;
+        }
+      }
+      if (stdout) break;
+
+      if (attempt < 5) {
+        log(`[START] Waiting for Postgres to be ready (attempt ${attempt}/5)...`);
+        await new Promise(r => setTimeout(r, 2000));
       }
     }
 
     if (!stdout) {
       logErr('[START] WARN: Failed to probe Postgres TLS chain with openssl via any host; DB_CA_CERT_PATH not auto-generated: ' + (lastErr?.message || lastErr));
-      // Avoid leaving a stale, unreadable CA path in-process; fall back to system CAs.
       delete process.env.DB_CA_CERT_PATH;
       delete process.env.PGSSLROOTCERT;
+      process.env.DB_CONNECT_HOST = dbHost;
       return;
     }
 
@@ -1121,15 +1105,14 @@ async function ensureRedisTls() {
     process.exit(1);
   }
 
-  // Only auto-manage a local Redis instance; remote Redis must be provisioned externally.
+  // Only auto manage a local Redis instance
   const isLoopback = host === '127.0.0.1' || host === 'localhost';
   if (!isLoopback) {
     return;
   }
 
   try {
-    const pingCmd = `redis-cli -u "${rawUrl}" PING`;
-    const out = execSync(pingCmd, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 1500 }).trim();
+    const out = execSync(buildRedisCliCommand(rawUrl, 'PING'), { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 1500 }).trim();
     if (/PONG/i.test(out)) {
       log(`Detected existing TLS Redis at ${rawUrl}; reusing.`);
       return;
@@ -1182,7 +1165,6 @@ async function ensureRedisTls() {
       process.exit(1);
     }
   } else if (isPortInUse(port)) {
-    // For non-default ports, respect explicit REDIS_URL but avoid collision
     try {
       const altPort = await findAvailablePort(port + 1, 100);
       log(`[START] Port ${port} already in use; auto-selecting Redis TLS port ${altPort}`);
@@ -1194,11 +1176,11 @@ async function ensureRedisTls() {
   }
 
   if (!CONFIG.TLS_CERT_PATH || !CONFIG.TLS_KEY_PATH) {
-    logErr('ERROR: TLS_CERT_PATH and TLS_KEY_PATH must be set before auto-starting Redis TLS.');
+    logErr('ERROR: TLS_CERT_PATH and TLS_KEY_PATH must be set before starting Redis.');
     process.exit(1);
   }
 
-  // Ensure redis-server is available
+  // Check if redis-server is available
   try {
     execSync(`${REDIS_SERVER_BIN} --version`, { stdio: 'ignore', shell: true });
   } catch {
@@ -1217,7 +1199,6 @@ async function ensureRedisTls() {
   log('[START] Auto-starting local TLS Redis:', `${REDIS_SERVER_BIN} ${args.join(' ')}`);
   const child = spawn(REDIS_SERVER_BIN, args, { cwd: repoRoot, stdio: 'ignore' });
 
-  // Update CONFIG.REDIS_URL and process.env, and persist to .env
   const newUrl = `rediss://${host}:${port}`;
   CONFIG.REDIS_URL = newUrl;
   process.env.REDIS_URL = newUrl;
@@ -1244,30 +1225,148 @@ async function ensureRedisTls() {
 }
 
 async function main() {
-  // Show banner
-  if (!CONFIG.NO_GUI) {
-    console.log('\x1b[34m╔════════════════════════════════════════════╗\x1b[0m');
-    console.log('\x1b[34m║\x1b[32m           End2End Chat Server              \x1b[34m║\x1b[0m');
-    console.log('\x1b[34m╚════════════════════════════════════════════╝\x1b[0m');
+  // Start tailscaled if in Docker and not running
+  const isDocker = require('fs').existsSync('/.dockerenv');
+  if (process.platform === 'linux' && (isDocker || !process.stdin.isTTY)) {
+    try {
+      const { execSync, spawn } = require('child_process');
+      if (!fs.existsSync('/var/run/tailscale/tailscaled.sock')) {
+        if (fs.existsSync('/usr/sbin/tailscaled')) {
+          console.log('[START] Starting tailscaled daemon...');
+          const logFile = fs.openSync('/tmp/tailscaled.log', 'w');
+          spawn('/usr/sbin/tailscaled', [
+            '--state=/var/lib/tailscale/tailscaled.state',
+            '--socket=/var/run/tailscale/tailscaled.sock'
+          ], {
+            detached: true,
+            stdio: ['ignore', logFile, logFile]
+          }).unref();
+
+          for (let i = 0; i < 10; i++) {
+            await new Promise(r => setTimeout(r, 1000));
+            if (fs.existsSync('/var/run/tailscale/tailscaled.sock')) {
+              try {
+                execSync('tailscale status', { stdio: 'pipe', timeout: 2000 });
+                break;
+              } catch (e) {
+              }
+            }
+          }
+        }
+      }
+    } catch (e) {
+      console.log('[START] WARN: Failed to start tailscaled:', e.message);
+    }
   }
 
-  // Ensure TLS exists then validate
+  if (!CONFIG.NO_GUI) {
+    console.log("Starting Server...");
+  }
+
   await ensureTLSIfMissing();
   validateTLSCertificates();
-
-  // Ensure encryption secret
   await ensureKeyEncryptionSecret();
-
-  // Ensure PQ session store key (SESSION_STORE_KEY)
   await ensureSessionStoreKey();
-
-  // Ensure Postgres CA bundle is available and DB_CA_CERT_PATH is set
   await ensureDbCaBundleEnv();
-
-  // Ensure Postgres user/database exist before starting server (works for TUI)
   await ensurePostgresBootstrap();
-
   await ensureServerDeps();
+
+   // Auto-set Redis TLS certificate paths if not already configured
+  if (!process.env.REDIS_CA_CERT_PATH || !process.env.REDIS_CLIENT_CERT_PATH || !process.env.REDIS_CLIENT_KEY_PATH) {
+    const dockerCertsDir = '/app/redis-certs';
+    const isDocker = fs.existsSync(dockerCertsDir);
+    
+    const certsDir = isDocker ? dockerCertsDir : path.join(repoRoot, 'redis-certs');
+    
+    const redisCaCert = path.join(certsDir, 'redis-ca.crt');
+    const redisClientCert = path.join(certsDir, 'redis-client.crt');
+    const redisClientKey = path.join(certsDir, 'redis-client.key');
+    
+    if (fs.existsSync(redisCaCert) && fs.existsSync(redisClientCert) && fs.existsSync(redisClientKey)) {
+      if (!process.env.REDIS_CA_CERT_PATH) {
+        process.env.REDIS_CA_CERT_PATH = redisCaCert;
+        log(`[START] Set REDIS_CA_CERT_PATH=${redisCaCert}`);
+      }
+      if (!process.env.REDIS_CLIENT_CERT_PATH) {
+        process.env.REDIS_CLIENT_CERT_PATH = redisClientCert;
+        log(`[START] Set REDIS_CLIENT_CERT_PATH=${redisClientCert}`);
+      }
+      if (!process.env.REDIS_CLIENT_KEY_PATH) {
+        process.env.REDIS_CLIENT_KEY_PATH = redisClientKey;
+        log(`[START] Set REDIS_CLIENT_KEY_PATH=${redisClientKey}`);
+      }
+      
+      try {
+        const envPath = path.join(repoRoot, '.env');
+        let envText = '';
+        try {
+          envText = fs.readFileSync(envPath, 'utf8');
+        } catch { }
+        const lines = envText ? envText.split(/\r?\n/) : [];
+        
+        const upsert = (key, value) => {
+          const line = `${key}=${value}`;
+          const idx = lines.findIndex(l => l.trim().startsWith(key + '='));
+          if (idx >= 0) {
+            lines[idx] = line;
+          } else {
+            lines.push(line);
+          }
+        };
+        
+        upsert('REDIS_CA_CERT_PATH', redisCaCert);
+        upsert('REDIS_CLIENT_CERT_PATH', redisClientCert);
+        upsert('REDIS_CLIENT_KEY_PATH', redisClientKey);
+        
+        const newEnv = lines.filter(Boolean).join('\n') + '\n';
+        fs.writeFileSync(envPath, newEnv, 'utf8');
+        log('[START] Updated .env with Redis certificate paths');
+      } catch (e) {
+        logErr('[START] WARN: Failed to persist Redis certificate paths to .env: ' + e.message);
+      }
+    }
+  }
+
+  // Auto-set Postgres TLS certificate path if not already configured
+  if (!process.env.DB_CA_CERT_PATH) {
+    const dockerCertsDir = '/app/postgres-certs';
+    const isDocker = fs.existsSync(dockerCertsDir);
+    
+    const certsDir = isDocker ? dockerCertsDir : path.join(repoRoot, 'postgres-certs');
+    const postgresCaCert = path.join(certsDir, 'root.crt');
+    
+    if (fs.existsSync(postgresCaCert)) {
+      process.env.DB_CA_CERT_PATH = postgresCaCert;
+      log(`[START] Set DB_CA_CERT_PATH=${postgresCaCert}`);
+      
+      try {
+        const envPath = path.join(repoRoot, '.env');
+        let envText = '';
+        try {
+          envText = fs.readFileSync(envPath, 'utf8');
+        } catch { }
+        const lines = envText ? envText.split(/\r?\n/) : [];
+        
+        const upsert = (key, value) => {
+          const line = `${key}=${value}`;
+          const idx = lines.findIndex(l => l.trim().startsWith(key + '='));
+          if (idx >= 0) {
+            lines[idx] = line;
+          } else {
+            lines.push(line);
+          }
+        };
+        
+        upsert('DB_CA_CERT_PATH', postgresCaCert);
+        
+        const newEnv = lines.filter(Boolean).join('\n') + '\n';
+        fs.writeFileSync(envPath, newEnv, 'utf8');
+        log('[START] Updated .env with Postgres certificate path');
+      } catch (e) {
+        logErr('[START] WARN: Failed to persist Postgres certificate path to .env: ' + e.message);
+      }
+    }
+  }
 
   // Auto-detect server host if not set
   if (!CONFIG.SERVER_HOST) {
@@ -1295,8 +1394,7 @@ async function main() {
       process.exit(1);
     }
   } else {
-    // Validate specified port is available
-    if (isPortInUse(CONFIG.PORT)) {
+    if (await isPortInUse(CONFIG.PORT)) {
       logErr(`ERROR: Port ${CONFIG.PORT} is already in use`);
       logErr('Try specifying a different port: PORT=<number> node scripts/start-server.cjs');
       process.exit(1);
@@ -1308,10 +1406,8 @@ async function main() {
     process.exit(1);
   }
 
-  // Ensure a local TLS Redis is running (for loopback URLs)
   await ensureRedisTls();
 
-  // Print effective config
   log('Configuration:');
   log(`  Server ID: ${CONFIG.SERVER_ID}`);
   log(`  Server Host: ${CONFIG.SERVER_HOST}:${CONFIG.PORT}`);
@@ -1400,7 +1496,6 @@ async function main() {
     return;
   }
 
-  // Start server with TUI
   const tmpDir = os.tmpdir();
   const logFile = path.join(tmpDir, `server-ui-${Date.now()}.log`);
   const logStream = fs.createWriteStream(logFile, { flags: 'a' });
@@ -1414,7 +1509,6 @@ async function main() {
   // Setup UI
   const ui = new ServerUI(child.pid, CONFIG);
 
-  // Tail server output and capture last lines for error display
   const lastLines = [];
   const MAX_LAST = 80;
   const pushLast = (line) => {

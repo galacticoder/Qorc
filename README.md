@@ -1,49 +1,59 @@
 # Endtoend — End‑to‑End Encrypted Messaging/Calling
 
-Endtoend is a desktop chat client and Node.js server designed for end2end quantum secure messaging. It uses the Signal Protocol for forward secrecy with an additional post‑quantum (PQ) envelope including others too long to explain here.
+Endtoend is a desktop chat client and Node.js server designed for end2end quantum secure messaging. It uses the Signal Protocol for forward secrecy with an additional post‑quantum (PQ) envelope.
 
-For exact details of the Server/Client cryptography, read [`docs/Server-Cryptography.md`](https://github.com/galacticoder/end2end-chat-site/blob/main/docs/Server-Cryptography.md) and [`docs/Client-Cryptography.md`](https://github.com/galacticoder/end2end-chat-site/blob/main/docs/Client-Cryptography.md)
+For more details of the Server/Client cryptography, read [`docs/Server-Cryptography.md`](https://github.com/galacticoder/end2end-chat-site/blob/main/docs/Server-Cryptography.md) and [`docs/Client-Cryptography.md`](https://github.com/galacticoder/end2end-chat-site/blob/main/docs/Client-Cryptography.md)
 
 ## Setup
 
-If you are using Windows, run this in PowerShell (Admin) **BEFORE THE SETUP**:
+**Windows Users:**
+
+Run this in PowerShell (Admin):
 
 ```powershell
-# Check and install WSL Ubuntu if needed
-$wslList = wsl --list --quiet 2>&1 | Out-String
-if (-not ($wslList -match "Ubuntu")) { wsl --install -d Ubuntu --no-launch }
-
-# Install required tools
-winget install OpenJS.NodeJS Rustlang.Rustup -e --accept-source-agreements --accept-package-agreements
-winget install Microsoft.VisualStudio.2022.BuildTools -e --accept-source-agreements --accept-package-agreements
-winget install Python.Python.3.13 -e --accept-source-agreements --accept-package-agreements
-
-# Configure PATH (permanent)
-[Environment]::SetEnvironmentVariable("Path", $env:Path + ";C:\Program Files\nodejs;$env:USERPROFILE\.cargo\bin;C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\MSBuild\Current\Bin;C:\Users\$env:USERNAME\AppData\Local\Programs\Python\Python313;C:\Users\$env:USERNAME\AppData\Local\Programs\Python\Python313\Scripts", [EnvironmentVariableTarget]::Machine)
+# Install Node.js, Git, and Docker
+winget install OpenJS.NodeJS Git.Git Docker.DockerDesktop -e --accept-source-agreements --accept-package-agreements
 
 # Refresh PATH for current session
 $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
 
-# Setup package managers
-Set-ExecutionPolicy RemoteSigned -Scope LocalMachine -Force; npm install --global corepack@latest
+# Setup pnpm for client dependencies
+npm install --global corepack@latest
 corepack enable pnpm
 ```
 
-**After running these commands, close and reopen PowerShell (if WSL was just installed, restart your computer) before continuing with the setup steps below.**
+**Note:** 
+- Close and reopen PowerShell after running these commands
+- You may need to restart your computer after Docker Desktop installation
+
+### Local Setup
 
 1. Clone the repository
   - `git clone https://github.com/galacticoder/end2end-chat-site.git`
+
 2. Install dependencies:
    - **Server:** `node scripts/install-deps.cjs --server`
    - **Client:** `node scripts/install-deps.cjs --client`
-3. Configure environment variables (**YOU DO NOT HAVE TO CONFIGURE ANYTHING TO START THE SERVER WITH ALL FEATURES! EVERYTHING IS ALREADY SETUP IN THE PROVIDED ENV FILE!** See [`docs/ENVIRONMENT_VARIABLES.md`](https://github.com/galacticoder/end2end-chat-site/blob/main/docs/ENVIRONMENT_VARIABLES.md) for configuration if interested.)
-4. Generate TLS certificates: `node scripts/generate_ts_tls.cjs` (required)
-5. Start the server: `node scripts/start-server.cjs`
-6. Start the desktop client: `node scripts/start-client.cjs`
 
-Requirements enforced by the application:
-- Certificate pinning is required for all TLS endpoints used by the desktop client; a valid certificate chain is required (self‑signed is rejected).
-- All traffic is routed through a verified Tor SOCKS proxy that the desktop bootstraps and checks before use.
+3. Configure environment variables (**YOU DO NOT HAVE TO CONFIGURE ANYTHING TO START THE SERVER WITH ALL FEATURES! EVERYTHING IS ALREADY SETUP IN THE PROVIDED ENV FILE!** See [`docs/ENVIRONMENT_VARIABLES.md`](https://github.com/galacticoder/end2end-chat-site/blob/main/docs/ENVIRONMENT_VARIABLES.md) for configuration if interested.)
+
+4. Start the server: `node scripts/start-server.cjs`
+
+5. Start the desktop client: `node scripts/start-client.cjs`
+
+### Docker Deployment
+
+1. Edit `.env` and set secure passwords
+
+2. Build and start **server** (DB + Redis + Server):
+   ```bash
+   node scripts/start-docker.cjs server
+   ```
+
+3. Build and start **load balancer**:
+   ```bash
+   node scripts/start-docker.cjs loadbalancer
+   ```
 
 ## What this project is for
 - Privacy‑preserving one‑to‑one messaging with forward secrecy and PQ protection
@@ -95,22 +105,6 @@ This is not a metadata‑free system. The service retains the minimal routing da
 - P2P path: a minimal WebRTC signaling path allows peer‑to‑peer messaging when available; the app automatically falls back to the server path when P2P is unavailable.
 - Tor: the desktop bootstraps its own Tor instance, verifies a working SOCKS proxy, and routes traffic through it. Bridge transports (obfs4 or snowflake) are supported. Bundle signature verification is performed when possible (see [`docs/ENVIRONMENT_VARIABLES.md`](https://github.com/galacticoder/end2end-chat-site/blob/main/docs/ENVIRONMENT_VARIABLES.md) for verification controls).
 
-## Server architecture
-- WebSocket gateway: authenticates clients, distributes server public keys, relays encrypted messages, and handles chunking for large key exchanges.
-- Presence and session state: Redis is used to track connection state, username session ownership, and to clean up stale session mappings with TTLs.
-- Rate limiting and abuse controls: distributed limiters enforce per‑user and per‑connection policies for authentication, messaging, and connection attempts. Stats can be collected to spot abuse.
-- Database layer: SQLite and PostgreSQL supported. Tables include users, messages, offline queues, token families/blacklist, device sessions, and audit logs.
-- Clustering: optional Redis‑coordinated cluster with server approval flow, health monitoring, queue‑based leader election, and periodic key rotation for inter‑server authentication.
-- Edge tier (optional, Linux): an auto‑configurable HAProxy layer can be generated and hot‑reloaded when cluster membership changes. An optional tunnel helper can expose a public URL for development. These automation scripts target Linux.
-
-## Desktop hardening
-- Electron main process guards:
-  - Strict IPC validation and per‑channel size/rate limits
-  - CSP and security headers injected at runtime
-  - Window navigation and external link handling locked down
-- Certificate pinning enforced for WebSocket TLS endpoints
-- Secure storage handler: structured input validation, bounded sizes, and path sanitation for file operations.
-
 ## Privacy characteristics and limitations
 - The server sees: pseudonymous user identifiers, timing data, and minimal routing metadata required to deliver messages. Contents remain encrypted end‑to‑end.
 - The desktop keeps local plaintext only in memory during use. Disk persistence is encrypted.
@@ -124,14 +118,6 @@ This is not a metadata‑free system. The service retains the minimal routing da
 - Server compromise: server stores only encrypted payloads; no plaintext message recovery. Keys are not present server‑side.
 - Local disk theft (desktop): SQLite contents are encrypted with PQ AEAD; plaintext exists only in memory during use.
 - Network path manipulation: TLS with certificate pinning; Tor path required.
-
-## Platform support
-- Desktop: Electron app runs natively on Linux, macOS, and Windows. The Tor bootstrapper and PQ stack are bundled in the desktop app.
-- Server: Node.js on Linux, macOS, and Windows (via WSL2). Full cross-platform support with automatic WSL2 forwarding on Windows. The HAProxy/systemd/tunnel automation targets Linux/macOS.
-
-## Future Goals
-
-All goals/to-dos are in the [issues tab](https://github.com/galacticoder/end2end-chat-site/issues). I am a solo developer working on making the safest app for users looking for an app where privacy and security truly matters for every small detail leaving their device. I plan on adding more user features and making huge ui improvements on my next update.
 
 ## Contributing and reporting of issues
 

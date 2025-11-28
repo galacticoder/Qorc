@@ -3,6 +3,7 @@ import { RateLimiterRedis } from 'rate-limiter-flexible';
 import { RATE_LIMIT_CONFIG } from '../config/config.js';
 import crypto from 'crypto';
 import { logger as cryptoLogger } from '../crypto/crypto-logger.js';
+import fs from 'fs';
 
 function sanitizeRedisUrl(url) {
   try {
@@ -48,6 +49,25 @@ export async function createRedisClient(redisUrl) {
     throw new Error('RATE_LIMIT_REDIS_URL/REDIS_URL must use rediss:// and TLS; plaintext redis:// is not supported');
   }
 
+  const tlsOptions = {};
+  if (process.env.REDIS_TLS_SERVERNAME) {
+    tlsOptions.servername = process.env.REDIS_TLS_SERVERNAME;
+  } else {
+    tlsOptions.servername = 'redis';
+  }
+  
+  if (process.env.REDIS_CA_CERT_PATH) {
+    tlsOptions.ca = [fs.readFileSync(process.env.REDIS_CA_CERT_PATH)];
+  }
+  if (process.env.REDIS_CLIENT_CERT_PATH) {
+    tlsOptions.cert = fs.readFileSync(process.env.REDIS_CLIENT_CERT_PATH);
+  }
+  if (process.env.REDIS_CLIENT_KEY_PATH) {
+    tlsOptions.key = fs.readFileSync(process.env.REDIS_CLIENT_KEY_PATH);
+  }
+  
+  tlsOptions.rejectUnauthorized = true;
+
   const options = {
     maxRetriesPerRequest: 2,
     enableAutoPipelining: true,
@@ -59,10 +79,9 @@ export async function createRedisClient(redisUrl) {
     reconnectOnError: (err) => /READONLY|ECONNRESET/.test(err.message),
     username: process.env.REDIS_USERNAME,
     password: process.env.REDIS_PASSWORD,
-    tls: {
-      servername: process.env.REDIS_TLS_SERVERNAME || undefined,
-    }
+    tls: tlsOptions
   };
+
   const client = new Redis(redisUrl, options);
 
   client.on('error', (error) => cryptoLogger.error('Rate limit Redis error', error));
@@ -76,7 +95,7 @@ export async function createRedisClient(redisUrl) {
 export class DistributedRateLimiter {
   static async create({ redisClientFactory = createRedisClient } = {}) {
     const redisUrl = process.env.RATE_LIMIT_REDIS_URL || process.env.REDIS_URL;
-    
+
     if (!redisUrl) {
       throw new Error('RATE_LIMIT_REDIS_URL or REDIS_URL must be configured - rate limiting is required for security');
     }
@@ -246,75 +265,75 @@ export class DistributedRateLimiter {
     return addSecurityJitter(ms);
   }
 
-	async checkGlobalConnectionLimit() {
-		if (this.disableGlobal) return { allowed: true };
+  async checkGlobalConnectionLimit() {
+    if (this.disableGlobal) return { allowed: true };
     if (!this.globalConnectionLimiter) {
       cryptoLogger.warn('Global connection limiter not initialized; allowing request');
       return { allowed: true };
     }
-		try {
-			await this.globalConnectionLimiter.consume('global-conn', 1);
-			return { allowed: true };
-		} catch (res) {
-			const ms = res.msBeforeNext || 1000;
-			const safeMs = Math.max(1000, ms || 1000);
+    try {
+      await this.globalConnectionLimiter.consume('global-conn', 1);
+      return { allowed: true };
+    } catch (res) {
+      const ms = res.msBeforeNext || 1000;
+      const safeMs = Math.max(1000, ms || 1000);
       const friendly = this._formatDuration(safeMs);
 
-			return {
-				allowed: false,
-				reason: `Server connection rate limit exceeded. Try again in ${friendly}.`,
-				remainingBlockTime: Math.max(1, Math.ceil(safeMs / 1000))
-			};
-		}
-	}
+      return {
+        allowed: false,
+        reason: `Server connection rate limit exceeded. Try again in ${friendly}.`,
+        remainingBlockTime: Math.max(1, Math.ceil(safeMs / 1000))
+      };
+    }
+  }
 
-	async checkConnectionAuthLimit(ws) {
-		if (!ws._connectionId) {
-			ws._connectionId = `conn_${crypto.randomUUID()}`;
-		}
+  async checkConnectionAuthLimit(ws) {
+    if (!ws._connectionId) {
+      ws._connectionId = `conn_${crypto.randomUUID()}`;
+    }
 
-		// Check if rate limiter is initialized
+    // Check if rate limiter is initialized
     if (!this.connectionAuthLimiter) {
       cryptoLogger.warn('Connection auth limiter not initialized; allowing request');
-			return { allowed: true };
-		}
-
-		try {
-			await this.connectionAuthLimiter.consume(ws._connectionId, 1);
-			return { allowed: true };
-		} catch (res) {
-			const safeMs = Math.max(1000, res.msBeforeNext || 1000);
-      const friendly = this._formatDuration(safeMs);
-
-			return {
-				allowed: false,
-				reason: `Authentication rate limit exceeded on this connection. Try again in ${friendly}.`,
-				remainingBlockTime: Math.max(1, Math.ceil(safeMs / 1000))
-			};
-		}
-	}
-
-	async checkUserAuthLimit(username) {
-	    const key = this._getUserLimiterKey(username);
-	    if (!this.userAuthLimiter) {
       return { allowed: true };
     }
-		try {
-	      if (!key) {
-	        return { allowed: false, reason: 'Invalid user' };
-	      }
-	      await this.userAuthLimiter.consume(key, 1);
-			return { allowed: true };
-		} catch (res) {
-			const ms = res.msBeforeNext || 1000;
-	      const friendly = this._formatDuration(ms);
-			return {
-				allowed: false,
+
+    try {
+      await this.connectionAuthLimiter.consume(ws._connectionId, 1);
+      return { allowed: true };
+    } catch (res) {
+      const safeMs = Math.max(1000, res.msBeforeNext || 1000);
+      const friendly = this._formatDuration(safeMs);
+
+      return {
+        allowed: false,
+        reason: `Authentication rate limit exceeded on this connection. Try again in ${friendly}.`,
+        remainingBlockTime: Math.max(1, Math.ceil(safeMs / 1000))
+      };
+    }
+  }
+
+  async checkUserAuthLimit(username) {
+    const key = this._getUserLimiterKey(username);
+    if (!this.userAuthLimiter) {
+      return { allowed: true };
+    }
+    try {
+      if (!key) {
+        return { allowed: false, reason: 'Invalid user' };
+      }
+      await this.userAuthLimiter.consume(key, 1);
+      return { allowed: true };
+    } catch (res) {
+      const ms = res.msBeforeNext || 1000;
+      const friendly = this._formatDuration(ms);
+      return {
+        allowed: false,
         reason: friendly ? 'Too many failed authentication attempts. Please wait before retrying.' : 'Too many failed attempts.',
-				remainingBlockTime: Math.max(1, Math.ceil(ms / 1000))
-			};
-		}
-	}
+        remainingBlockTime: Math.max(1, Math.ceil(ms / 1000))
+      };
+    }
+  }
 
   // Consume a user auth attempt and return UI-relevant info
   async consumeUserAuthAttempt(username, category = 'account_password', ip) {
@@ -383,7 +402,7 @@ export class DistributedRateLimiter {
             return { allowed: false, attemptsRemaining: 0, remainingBlockTime: Math.max(1, Math.ceil((ipRes.msBeforeNext || 0) / 1000)) };
           }
         }
-      } catch {}
+      } catch { }
 
       const key = this._getAttemptKey(username);
       const lim = this._getCategoryLimiter(category);
@@ -401,289 +420,289 @@ export class DistributedRateLimiter {
     }
   }
 
-	// Non-consuming status check for per-user auth limit
-	async getUserAuthStatus(username) {
-	    const key = this._getUserLimiterKey(username);
-	    if (!this.userAuthLimiter) {
+  // Non-consuming status check for per-user auth limit
+  async getUserAuthStatus(username) {
+    const key = this._getUserLimiterKey(username);
+    if (!this.userAuthLimiter) {
       return { allowed: true };
     }
-		try {
-	      if (!key) {
-	        return { allowed: false, reason: 'Invalid user' };
-	      }
-	      const res = await this.userAuthLimiter.get(key);
-			if (!res) return { allowed: true };
-			const cfg = RATE_LIMIT_CONFIG.AUTH_PER_USER;
-			const consumed = res.consumedPoints || 0;
-			const msBeforeNext = res.msBeforeNext || 0;
-			const isBlocked = consumed >= Math.max(1, cfg.MAX_ATTEMPTS) && msBeforeNext > 0;
-			if (!isBlocked) return { allowed: true };
-			return {
-				allowed: false,
+    try {
+      if (!key) {
+        return { allowed: false, reason: 'Invalid user' };
+      }
+      const res = await this.userAuthLimiter.get(key);
+      if (!res) return { allowed: true };
+      const cfg = RATE_LIMIT_CONFIG.AUTH_PER_USER;
+      const consumed = res.consumedPoints || 0;
+      const msBeforeNext = res.msBeforeNext || 0;
+      const isBlocked = consumed >= Math.max(1, cfg.MAX_ATTEMPTS) && msBeforeNext > 0;
+      if (!isBlocked) return { allowed: true };
+      return {
+        allowed: false,
         reason: msBeforeNext ? 'Too many failed authentication attempts. Please wait before retrying.' : 'Too many failed attempts.',
-				remainingBlockTime: Math.max(1, Math.ceil(msBeforeNext / 1000))
-			};
-		} catch {
-			return { allowed: true };
-		}
-	}
-
-	async checkMessageLimit(username) {
-	    const key = this._getUserLimiterKey(username);
-	    if (!this.userMessageLimiter) {
+        remainingBlockTime: Math.max(1, Math.ceil(msBeforeNext / 1000))
+      };
+    } catch {
       return { allowed: true };
     }
-		if (!key) {
-	      return { allowed: false, reason: 'Invalid user' };
-	    }
-		try {
-	      await this.userMessageLimiter.consume(key, 1);
-			return { allowed: true };
-		} catch (res) {
-			const ms = res.msBeforeNext || 1000;
-			const friendly = this._formatDuration(ms);
-			return {
-				allowed: false,
-				reason: `Message rate limit exceeded. Try again in ${friendly}.`,
-				remainingBlockTime: Math.max(1, Math.ceil(ms / 1000))
-			};
-		}
-	}
+  }
 
-	async checkBundleLimit(username) {
-	    const key = this._getUserLimiterKey(username);
-	    if (!this.userBundleLimiter) {
+  async checkMessageLimit(username) {
+    const key = this._getUserLimiterKey(username);
+    if (!this.userMessageLimiter) {
       return { allowed: true };
     }
-		if (!key) {
-	      return { allowed: false, reason: 'Invalid user' };
-	    }
-		try {
-	      await this.userBundleLimiter.consume(key, 1);
-			return { allowed: true };
-		} catch (res) {
-			const ms = res.msBeforeNext || 1000;
-			const friendly = this._formatDuration(ms);
-			return {
-				allowed: false,
-				reason: `Bundle operation rate limit exceeded. Try again in ${friendly}.`,
-				remainingBlockTime: Math.max(1, Math.ceil(ms / 1000))
-			};
-		}
-	}
+    if (!key) {
+      return { allowed: false, reason: 'Invalid user' };
+    }
+    try {
+      await this.userMessageLimiter.consume(key, 1);
+      return { allowed: true };
+    } catch (res) {
+      const ms = res.msBeforeNext || 1000;
+      const friendly = this._formatDuration(ms);
+      return {
+        allowed: false,
+        reason: `Message rate limit exceeded. Try again in ${friendly}.`,
+        remainingBlockTime: Math.max(1, Math.ceil(ms / 1000))
+      };
+    }
+  }
 
-	async getGlobalConnectionStatus() {
+  async checkBundleLimit(username) {
+    const key = this._getUserLimiterKey(username);
+    if (!this.userBundleLimiter) {
+      return { allowed: true };
+    }
+    if (!key) {
+      return { allowed: false, reason: 'Invalid user' };
+    }
+    try {
+      await this.userBundleLimiter.consume(key, 1);
+      return { allowed: true };
+    } catch (res) {
+      const ms = res.msBeforeNext || 1000;
+      const friendly = this._formatDuration(ms);
+      return {
+        allowed: false,
+        reason: `Bundle operation rate limit exceeded. Try again in ${friendly}.`,
+        remainingBlockTime: Math.max(1, Math.ceil(ms / 1000))
+      };
+    }
+  }
+
+  async getGlobalConnectionStatus() {
     try {
       const connCfg = RATE_LIMIT_CONFIG.CONNECTION;
       const res = this.globalConnectionLimiter ? await this.globalConnectionLimiter.get('global-conn') : null;
-			const consumed = res?.consumedPoints || 0;
-			const isBlocked = res ? consumed > Math.max(1, connCfg.MAX_NEW_CONNECTIONS) : false;
-			return {
-				attempts: consumed,
-				blockedUntil: isBlocked ? Date.now() + (res.msBeforeNext || 0) : 0,
-				isBlocked,
-				maxConnections: connCfg.MAX_NEW_CONNECTIONS,
-				windowMs: connCfg.WINDOW_MS,
-			};
-		} catch {
-			return {
-				attempts: 0,
-				blockedUntil: 0,
-				isBlocked: false,
-				maxConnections: RATE_LIMIT_CONFIG.CONNECTION.MAX_NEW_CONNECTIONS,
-				windowMs: RATE_LIMIT_CONFIG.CONNECTION.WINDOW_MS,
-			};
-		}
-	}
+      const consumed = res?.consumedPoints || 0;
+      const isBlocked = res ? consumed > Math.max(1, connCfg.MAX_NEW_CONNECTIONS) : false;
+      return {
+        attempts: consumed,
+        blockedUntil: isBlocked ? Date.now() + (res.msBeforeNext || 0) : 0,
+        isBlocked,
+        maxConnections: connCfg.MAX_NEW_CONNECTIONS,
+        windowMs: connCfg.WINDOW_MS,
+      };
+    } catch {
+      return {
+        attempts: 0,
+        blockedUntil: 0,
+        isBlocked: false,
+        maxConnections: RATE_LIMIT_CONFIG.CONNECTION.MAX_NEW_CONNECTIONS,
+        windowMs: RATE_LIMIT_CONFIG.CONNECTION.WINDOW_MS,
+      };
+    }
+  }
 
-	/**
-	 * Get rate limiting statistics from Redis
-	 */
-	async getStats() {
-		const stats = {
-			timestamp: Date.now(),
-			backend: this.usingRedis ? 'redis' : 'memory',
-			redis: {
-				connected: this.redis?.status === 'ready',
-				status: this.redis?.status || 'unknown'
-			},
-			global: {},
-			users: {
-				activeLimiters: 0,
-				blocked: 0,
-				topAbusers: []
-			},
-			connections: {
-				activeLimiters: 0,
-				blocked: 0
-			}
-		};
+  /**
+   * Get rate limiting statistics from Redis
+   */
+  async getStats() {
+    const stats = {
+      timestamp: Date.now(),
+      backend: this.usingRedis ? 'redis' : 'memory',
+      redis: {
+        connected: this.redis?.status === 'ready',
+        status: this.redis?.status || 'unknown'
+      },
+      global: {},
+      users: {
+        activeLimiters: 0,
+        blocked: 0,
+        topAbusers: []
+      },
+      connections: {
+        activeLimiters: 0,
+        blocked: 0
+      }
+    };
 
-		if (!this.redis || this.redis.status !== 'ready') {
-			stats.error = 'Redis not available';
-			return stats;
-		}
+    if (!this.redis || this.redis.status !== 'ready') {
+      stats.error = 'Redis not available';
+      return stats;
+    }
 
-		try {
-			// Get global connection stats
-			const globalConn = await this.getGlobalConnectionStatus();
-			stats.global = {
-				connections: globalConn.attempts,
-				isBlocked: globalConn.isBlocked,
-				blockedUntil: globalConn.blockedUntil,
-				maxConnections: globalConn.maxConnections,
-				windowMs: globalConn.windowMs
-			};
+    try {
+      // Get global connection stats
+      const globalConn = await this.getGlobalConnectionStatus();
+      stats.global = {
+        connections: globalConn.attempts,
+        isBlocked: globalConn.isBlocked,
+        blockedUntil: globalConn.blockedUntil,
+        maxConnections: globalConn.maxConnections,
+        windowMs: globalConn.windowMs
+      };
 
-			// Scan for active user message limiters
-			const msgKeys = await this._scanKeys('rl:user:msg:*');
-			stats.users.messageLimiters = msgKeys.length;
+      // Scan for active user message limiters
+      const msgKeys = await this._scanKeys('rl:user:msg:*');
+      stats.users.messageLimiters = msgKeys.length;
 
-			// Scan for active user bundle limiters
-			const bundleKeys = await this._scanKeys('rl:user:bundle:*');
-			stats.users.bundleLimiters = bundleKeys.length;
+      // Scan for active user bundle limiters
+      const bundleKeys = await this._scanKeys('rl:user:bundle:*');
+      stats.users.bundleLimiters = bundleKeys.length;
 
-			// Scan for active user auth limiters
-			const authKeys = await this._scanKeys('rl:user:auth:*');
-			stats.users.authLimiters = authKeys.length;
+      // Scan for active user auth limiters
+      const authKeys = await this._scanKeys('rl:user:auth:*');
+      stats.users.authLimiters = authKeys.length;
 
-			stats.users.activeLimiters = msgKeys.length + bundleKeys.length + authKeys.length;
+      stats.users.activeLimiters = msgKeys.length + bundleKeys.length + authKeys.length;
 
-			// Get blocked users count and top abusers
-			const blockedUsers = await this._getBlockedUsers(msgKeys, bundleKeys, authKeys);
-			stats.users.blocked = blockedUsers.count;
-			stats.users.topAbusers = blockedUsers.top;
+      // Get blocked users count and top abusers
+      const blockedUsers = await this._getBlockedUsers(msgKeys, bundleKeys, authKeys);
+      stats.users.blocked = blockedUsers.count;
+      stats.users.topAbusers = blockedUsers.top;
 
-			// Get active connection limiters
-			const connKeys = await this._scanKeys('rl:conn:auth:*');
-			stats.connections.activeLimiters = connKeys.length;
+      // Get active connection limiters
+      const connKeys = await this._scanKeys('rl:conn:auth:*');
+      stats.connections.activeLimiters = connKeys.length;
 
-		} catch (error) {
-			cryptoLogger.error('[RATE-LIMIT-STATS] Failed to gather stats', {
-				error: error.message
-			});
-			stats.error = error.message;
-		}
+    } catch (error) {
+      cryptoLogger.error('[RATE-LIMIT-STATS] Failed to gather stats', {
+        error: error.message
+      });
+      stats.error = error.message;
+    }
 
-		return stats;
-	}
+    return stats;
+  }
 
-	/**
-	 * Scan Redis for keys matching pattern
-	 */
-	async _scanKeys(pattern, maxKeys = 1000) {
-		const keys = [];
-		let cursor = '0';
-		const startTime = Date.now();
-		const timeout = 5000;
+  /**
+   * Scan Redis for keys matching pattern
+   */
+  async _scanKeys(pattern, maxKeys = 1000) {
+    const keys = [];
+    let cursor = '0';
+    const startTime = Date.now();
+    const timeout = 5000;
 
-		try {
-			do {
-				// Check timeout to prevent long-running scans
-				if (Date.now() - startTime > timeout) {
-					cryptoLogger.warn('[RATE-LIMIT-STATS] Scan timeout reached', {
-						pattern,
-						keysFound: keys.length
-					});
-					break;
-				}
+    try {
+      do {
+        // Check timeout to prevent long-running scans
+        if (Date.now() - startTime > timeout) {
+          cryptoLogger.warn('[RATE-LIMIT-STATS] Scan timeout reached', {
+            pattern,
+            keysFound: keys.length
+          });
+          break;
+        }
 
-				const result = await this.redis.scan(
-					cursor,
-					'MATCH', pattern,
-					'COUNT', 100
-				);
+        const result = await this.redis.scan(
+          cursor,
+          'MATCH', pattern,
+          'COUNT', 100
+        );
 
-				cursor = result[0];
-				keys.push(...result[1]);
+        cursor = result[0];
+        keys.push(...result[1]);
 
-				// Limit total keys to prevent memory issues
-				if (keys.length >= maxKeys) {
-					cryptoLogger.info('[RATE-LIMIT-STATS] Max keys limit reached', {
-						pattern,
-						limit: maxKeys
-					});
-					break;
-				}
-			} while (cursor !== '0');
-		} catch (error) {
-			cryptoLogger.error('[RATE-LIMIT-STATS] Scan failed', {
-				pattern,
-				error: error.message
-			});
-		}
+        // Limit total keys to prevent memory issues
+        if (keys.length >= maxKeys) {
+          cryptoLogger.info('[RATE-LIMIT-STATS] Max keys limit reached', {
+            pattern,
+            limit: maxKeys
+          });
+          break;
+        }
+      } while (cursor !== '0');
+    } catch (error) {
+      cryptoLogger.error('[RATE-LIMIT-STATS] Scan failed', {
+        pattern,
+        error: error.message
+      });
+    }
 
-		return keys;
-	}
+    return keys;
+  }
 
-	/**
-	 * Get blocked users and top abusers from rate limiter keys
-	 */
-	async _getBlockedUsers(msgKeys, bundleKeys, authKeys) {
-		const allKeys = [...msgKeys, ...bundleKeys, ...authKeys];
-		const blocked = [];
-		const now = Date.now();
+  /**
+   * Get blocked users and top abusers from rate limiter keys
+   */
+  async _getBlockedUsers(msgKeys, bundleKeys, authKeys) {
+    const allKeys = [...msgKeys, ...bundleKeys, ...authKeys];
+    const blocked = [];
+    const now = Date.now();
 
-		// Sample up to 100 keys to find blocked users
-		const sampleSize = Math.min(100, allKeys.length);
-		const sampled = allKeys
-			.sort(() => Math.random() - 0.5)
-			.slice(0, sampleSize);
+    // Sample up to 100 keys to find blocked users
+    const sampleSize = Math.min(100, allKeys.length);
+    const sampled = allKeys
+      .sort(() => Math.random() - 0.5)
+      .slice(0, sampleSize);
 
-		try {
-			// Use pipeline for efficiency
-			const pipeline = this.redis.pipeline();
-			sampled.forEach(key => pipeline.get(key));
-			const results = await pipeline.exec();
+    try {
+      // Use pipeline for efficiency
+      const pipeline = this.redis.pipeline();
+      sampled.forEach(key => pipeline.get(key));
+      const results = await pipeline.exec();
 
-			results.forEach(([err, data], idx) => {
-				if (err || !data) return;
+      results.forEach(([err, data], idx) => {
+        if (err || !data) return;
 
-				try {
-					const parsed = JSON.parse(data);
-					const key = sampled[idx];
-					const keyType = key.includes(':msg:') ? 'message'
-						: key.includes(':bundle:') ? 'bundle'
-						: 'auth';
+        try {
+          const parsed = JSON.parse(data);
+          const key = sampled[idx];
+          const keyType = key.includes(':msg:') ? 'message'
+            : key.includes(':bundle:') ? 'bundle'
+              : 'auth';
 
-					if (parsed.msBeforeNext && parsed.msBeforeNext > 0) {
-						const blockedUntil = now + parsed.msBeforeNext;
-						blocked.push({
-							keyHash: key.split(':').pop().slice(0, 12),
-							type: keyType,
-							attempts: parsed.consumedPoints || 0,
-							blockedUntil,
-							remainingMs: parsed.msBeforeNext
-						});
-					}
-				} catch (_parseError) {
-				}
-			});
-		} catch (error) {
-			cryptoLogger.error('[RATE-LIMIT-STATS] Failed to get blocked users', {
-				error: error.message
-			});
-		}
+          if (parsed.msBeforeNext && parsed.msBeforeNext > 0) {
+            const blockedUntil = now + parsed.msBeforeNext;
+            blocked.push({
+              keyHash: key.split(':').pop().slice(0, 12),
+              type: keyType,
+              attempts: parsed.consumedPoints || 0,
+              blockedUntil,
+              remainingMs: parsed.msBeforeNext
+            });
+          }
+        } catch (_parseError) {
+        }
+      });
+    } catch (error) {
+      cryptoLogger.error('[RATE-LIMIT-STATS] Failed to get blocked users', {
+        error: error.message
+      });
+    }
 
-		blocked.sort((a, b) => b.attempts - a.attempts);
+    blocked.sort((a, b) => b.attempts - a.attempts);
 
-		return {
-			count: blocked.length,
-			top: blocked.slice(0, 10)
-		};
-	}
+    return {
+      count: blocked.length,
+      top: blocked.slice(0, 10)
+    };
+  }
 
-	// Clean up connection-specific rate limiting data
-	async cleanupConnectionLimit(ws) {
-		if (ws._connectionId && this.connectionAuthLimiter) {
-				try {
-				await this.connectionAuthLimiter.delete(ws._connectionId);
-			} catch (error) {
-				cryptoLogger.debug('[RATE-LIMIT] Error cleaning up connection limit', { error: error.message });
-			}
-			delete ws._connectionId;
-		}
-	}
+  // Clean up connection-specific rate limiting data
+  async cleanupConnectionLimit(ws) {
+    if (ws._connectionId && this.connectionAuthLimiter) {
+      try {
+        await this.connectionAuthLimiter.delete(ws._connectionId);
+      } catch (error) {
+        cryptoLogger.debug('[RATE-LIMIT] Error cleaning up connection limit', { error: error.message });
+      }
+      delete ws._connectionId;
+    }
+  }
 }
 
 let sharedLimiterPromise;

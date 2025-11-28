@@ -3,6 +3,7 @@ import { createPool } from 'generic-pool';
 import crypto from 'crypto';
 import { TTL_CONFIG } from '../config/config.js';
 import { logger as cryptoLogger } from '../crypto/crypto-logger.js';
+import fs from 'fs';
 
 const REDIS_URL = process.env.REDIS_URL;
 if (!REDIS_URL) {
@@ -45,21 +46,48 @@ const POOL_CONFIG = {
   min: clampNumber(process.env.REDIS_POOL_MIN, { min: 1, max: 100, defaultValue: 4 }),
   max: clampNumber(process.env.REDIS_POOL_MAX, { min: 10, max: 500, defaultValue: 50 }),
   acquireTimeoutMillis: clampNumber(process.env.REDIS_POOL_ACQUIRE_TIMEOUT, { min: 1000, max: 60_000, defaultValue: 15_000 }),
-  idleTimeoutMillis: clampNumber(process.env.REDIS_POOL_IDLE_TIMEOUT, { min: 10_000, max: 120_000, defaultValue: 30_000 }),
-  evictionRunIntervalMillis: clampNumber(process.env.REDIS_POOL_EVICTION_INTERVAL, { min: 10_000, max: 120_000, defaultValue: 60_000 })
+  idleTimeoutMillis: clampNumber(process.env.REDIS_POOL_IDLE_TIMEOUT, { min: 10_000, max: 600_000, defaultValue: 180_000 }),
+  evictionRunIntervalMillis: clampNumber(process.env.REDIS_POOL_EVICTION_INTERVAL, { min: 10_000, max: 600_000, defaultValue: 60_000 })
 };
 
-const REDIS_OPTIONS = {
-  maxRetriesPerRequest: 3,
-  retryDelayOnFailover: 100,
-  enableAutoPipelining: true,
-  reconnectOnError: (err) => /READONLY|ECONNRESET|ENOTFOUND|ECONNREFUSED/.test(err.message),
-  connectTimeout: clampNumber(process.env.REDIS_CONNECT_TIMEOUT, { min: 1000, max: 60_000, defaultValue: 15_000 }),
-  commandTimeout: clampNumber(process.env.REDIS_COMMAND_TIMEOUT, { min: 1000, max: 30_000, defaultValue: 10_000 }),
-  tls: {
-    servername: process.env.REDIS_TLS_SERVERNAME || undefined,
+function buildRedisOptions() {
+  const tlsOptions = {
+    servername: process.env.REDIS_TLS_SERVERNAME || 'redis',
+    rejectUnauthorized: true
+  };
+  
+  if (process.env.REDIS_CA_CERT_PATH) {
+    console.log('[PRESENCE] Reading CA cert from:', process.env.REDIS_CA_CERT_PATH);
+    tlsOptions.ca = [fs.readFileSync(process.env.REDIS_CA_CERT_PATH)];
   }
-};
+  if (process.env.REDIS_CLIENT_CERT_PATH) {
+    console.log('[PRESENCE] Reading client cert from:', process.env.REDIS_CLIENT_CERT_PATH);
+    tlsOptions.cert = fs.readFileSync(process.env.REDIS_CLIENT_CERT_PATH);
+  }
+  if (process.env.REDIS_CLIENT_KEY_PATH) {
+    console.log('[PRESENCE] Reading client key from:', process.env.REDIS_CLIENT_KEY_PATH);
+    tlsOptions.key = fs.readFileSync(process.env.REDIS_CLIENT_KEY_PATH);
+  }
+  
+  return {
+    maxRetriesPerRequest: 3,
+    retryDelayOnFailover: 100,
+    enableAutoPipelining: true,
+    reconnectOnError: (err) => /READONLY|ECONNRESET|ENOTFOUND|ECONNREFUSED/.test(err.message),
+    connectTimeout: clampNumber(process.env.REDIS_CONNECT_TIMEOUT, { min: 1000, max: 60_000, defaultValue: 15_000 }),
+    commandTimeout: clampNumber(process.env.REDIS_COMMAND_TIMEOUT, { min: 1000, max: 30_000, defaultValue: 10_000 }),
+    socket: {
+      keepAlive: clampNumber(process.env.REDIS_KEEPALIVE, { min: 0, max: 300_000, defaultValue: 30_000 }),
+      noDelay: true,
+      timeout: clampNumber(process.env.REDIS_SOCKET_TIMEOUT, { min: 30_000, max: 600_000, defaultValue: 120_000 })
+    },
+    tls: tlsOptions
+  };
+}
+
+function getRedisOptions() {
+  return buildRedisOptions();
+}
 
 function parseRedisClusterNodes(redisClusterNodes) {
   if (!redisClusterNodes) return [];
@@ -78,7 +106,7 @@ if (USING_CLUSTER) {
     const nodes = parseRedisClusterNodes(REDIS_CLUSTER_NODES);
     clusterClient = new Redis.Cluster(nodes, {
       redisOptions: {
-        ...REDIS_OPTIONS,
+        ...getRedisOptions(),
         username: process.env.REDIS_USERNAME,
         password: process.env.REDIS_PASSWORD
       }
@@ -99,7 +127,7 @@ const factory = {
     }
 
     const client = new Redis(REDIS_URL, {
-      ...REDIS_OPTIONS,
+      ...getRedisOptions(),
       username: process.env.REDIS_USERNAME,
       password: process.env.REDIS_PASSWORD
     });
@@ -205,10 +233,8 @@ const redis = {
         const cachedClient = result.value;
         duplicateConnectionPool.delete(cachedClient);
 
-        // Perform lightweight health check
         if (cachedClient && cachedClient.status === 'ready') {
           try {
-            // Quick ping to verify connection is alive
             await cachedClient.ping();
             return cachedClient;
           } catch (_error) {
@@ -236,7 +262,7 @@ const redis = {
       }
 
       const nodes = parseRedisClusterNodes(REDIS_CLUSTER_NODES);
-      const newClient = new Redis.Cluster(nodes, { redisOptions: REDIS_OPTIONS });
+      const newClient = new Redis.Cluster(nodes, { redisOptions: getRedisOptions() });
 
       const originalQuit = newClient.quit.bind(newClient);
       newClient._originalQuit = originalQuit;
@@ -273,7 +299,7 @@ const redis = {
     if (typeof REDIS_URL !== 'string' || !REDIS_URL.startsWith('rediss://')) {
       throw new Error('REDIS_URL must use rediss:// and TLS; plaintext redis:// is not allowed');
     }
-    return new Redis(REDIS_URL, REDIS_OPTIONS);
+    return new Redis(REDIS_URL, getRedisOptions());
   }
 };
 export async function createSubscriber() {
@@ -283,7 +309,7 @@ export async function createSubscriber() {
 
   // Dedicated subscriber connection (not pooled)
   const sub = new Redis(REDIS_URL, {
-    ...REDIS_OPTIONS,
+    ...getRedisOptions(),
     username: process.env.REDIS_USERNAME,
     password: process.env.REDIS_PASSWORD
   });

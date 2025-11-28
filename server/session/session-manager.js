@@ -45,9 +45,9 @@ export function safeRefreshSession(sessionId) {
   try {
     ConnectionStateManager.refreshSession(sessionId);
   } catch (error) {
-    cryptoLogger.error('[SESSION] Error refreshing session', { 
+    cryptoLogger.error('[SESSION] Error refreshing session', {
       sessionId: sessionId?.slice(0, 8) + '...',
-      error: error?.message 
+      error: error?.message
     });
   }
 }
@@ -59,17 +59,17 @@ async function processBatch() {
   if (batchProcessing) {
     return;
   }
-  
+
   batchProcessing = true;
-  
+
   try {
     const batchToProcess = await getRedisQueueBatch();
-    
+
     if (!batchToProcess || batchToProcess.length === 0) {
       batchProcessing = false;
       return;
     }
-    
+
     cryptoLogger.info('[SESSION] Processing batch of operations', { count: batchToProcess.length });
 
     // Process all batched operations
@@ -80,9 +80,9 @@ async function processBatch() {
     // Log failed operations
     const failedCount = results.filter(result => result.status === 'rejected').length;
     if (failedCount > 0) {
-      cryptoLogger.error('[SESSION] Batch operations failed', { 
-        failed: failedCount, 
-        total: batchToProcess.length 
+      cryptoLogger.error('[SESSION] Batch operations failed', {
+        failed: failedCount,
+        total: batchToProcess.length
       });
     }
 
@@ -163,9 +163,9 @@ async function addToRedisQueue(operation) {
       cryptoLogger.warn('[SESSION] Redis queue at capacity, processing immediately');
       setImmediate(processBatch);
     }
-    
+
     await client.lpush(REDIS_BATCH_QUEUE_KEY, JSON.stringify(operation));
-    
+
     if (!batchTimer) {
       batchTimer = setTimeout(processBatch, BATCH_TIMEOUT);
     }
@@ -173,19 +173,19 @@ async function addToRedisQueue(operation) {
 }
 
 /**
- * Cleanup function for graceful shutdown
+ * Cleanup function for shutdown
  */
 export async function cleanupSessionManager() {
   if (batchTimer) {
     clearTimeout(batchTimer);
     batchTimer = null;
   }
-  
+
   try {
     const queueLength = await withRedisClient(async (client) => {
       return await client.llen(REDIS_BATCH_QUEUE_KEY);
     });
-    
+
     if (queueLength > 0) {
       cryptoLogger.info(`[SESSION] Processing ${queueLength} remaining Redis queue operations...`);
       await processBatch();
@@ -193,7 +193,7 @@ export async function cleanupSessionManager() {
   } catch (error) {
     cryptoLogger.warn('[SESSION] Redis unavailable during cleanup, skipping queue processing', { error: error.message });
   }
-  
+
   cryptoLogger.info('[SESSION] Session manager cleanup complete');
 }
 

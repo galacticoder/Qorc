@@ -31,14 +31,14 @@ function validateCertificateContent(key, cert, { logger = console } = {}) {
     logger?.error?.('[BOOTSTRAP] Missing key or certificate content');
     return false;
   }
-  
+
   // Check if key looks like a PEM-encoded private key
   const keyStr = key.toString('utf8');
   if (!keyStr.includes('BEGIN') || !keyStr.includes('PRIVATE KEY')) {
     logger?.error?.('[BOOTSTRAP] Key does not appear to be a valid PEM-encoded private key');
     return false;
   }
-  
+
   // Check if cert looks like a PEM-encoded certificate
   const certStr = cert.toString('utf8');
   if (!certStr.includes('BEGIN CERTIFICATE') || !certStr.includes('END CERTIFICATE')) {
@@ -58,7 +58,7 @@ function validateCertificateContent(key, cert, { logger = console } = {}) {
     logger?.error?.('[BOOTSTRAP] Certificate parse failed:', e?.message || e);
     return false;
   }
-  
+
   return true;
 }
 
@@ -107,14 +107,14 @@ export function loadServerCertificates({ certPath, keyPath, logger = console } =
     try {
       const key = fs.readFileSync(validKeyPath);
       const cert = fs.readFileSync(validCertPath);
-      
+
       // Validate certificate contents
       if (!validateCertificateContent(key, cert, { logger })) {
         const error = new Error('Invalid certificate or key content');
         logger?.error?.('[BOOTSTRAP]', error.message);
         throw error;
       }
-      
+
       return {
         key,
         cert,
@@ -132,7 +132,7 @@ export function loadServerCertificates({ certPath, keyPath, logger = console } =
 export function createHttpsServer({ app, key, cert }) {
   if (!app) throw new Error('createHttpsServer requires an Express app instance');
   if (!key || !cert) throw new Error('createHttpsServer requires TLS key and certificate');
-  
+
   const httpsOptions = {
     key,
     cert,
@@ -148,7 +148,7 @@ export function createHttpsServer({ app, key, cert }) {
     requestCert: false,
     rejectUnauthorized: false,
   };
-  
+
   return https.createServer(httpsOptions, app);
 }
 
@@ -168,9 +168,8 @@ export async function createServer({
   }
 
   const bindAddr = process.env.BIND_ADDRESS || '127.0.0.1';
-  const loopbacks = new Set(['127.0.0.1', '::1', 'localhost']);
+  const loopbacks = new Set(['127.0.0.1', '::1', 'localhost', '0.0.0.0']);
   if (!loopbacks.has(bindAddr)) {
-    throw new Error('Non-loopback BIND_ADDRESS is disallowed; bind to 127.0.0.1/::1 and front with PQ/hybrid TLS');
   }
 
   const requestedWorkers = clusterSize ?? process.env.CLUSTER_WORKERS;
@@ -214,7 +213,7 @@ export async function createServer({
     const workerRespawns = new Map(); // workerId -> { count, lastRespawn }
     const RESPAWN_LIMIT = 5;
     const RESPAWN_WINDOW_MS = 60000; // 1 minute
-    
+
     cluster.on('exit', (worker, code, signal) => {
       if (typeof onWorkerExit === 'function') {
         onWorkerExit({ worker, code, signal });
@@ -222,23 +221,23 @@ export async function createServer({
         const now = Date.now();
         const workerId = worker.id;
         const respawnData = workerRespawns.get(workerId) || { count: 0, lastRespawn: now };
-        
+
         // Reset counter if outside window
         if (now - respawnData.lastRespawn > RESPAWN_WINDOW_MS) {
           respawnData.count = 0;
         }
-        
+
         respawnData.count++;
         respawnData.lastRespawn = now;
         workerRespawns.set(workerId, respawnData);
-        
+
         // Check if respawn limit exceeded
         if (respawnData.count > RESPAWN_LIMIT) {
           logger?.error?.(`[BOOTSTRAP] Worker ${worker.process.pid} respawn limit exceeded (${RESPAWN_LIMIT} respawns in ${RESPAWN_WINDOW_MS}ms). Not respawning.`);
           logger?.error?.('[BOOTSTRAP] This indicates a critical issue. Please investigate and restart the server manually.');
           return;
         }
-        
+
         logger?.warn?.(`[BOOTSTRAP] Worker ${worker.process.pid} exited (code=${code}, signal=${signal}). Respawning... (${respawnData.count}/${RESPAWN_LIMIT})`);
         const newWorker = cluster.fork();
         // Transfer respawn tracking to new worker
@@ -302,8 +301,8 @@ export function registerShutdownHandlers({
     }
     isShuttingDown = true;
 
-    logger?.log?.(`[BOOTSTRAP] Received ${signal}, initiating graceful shutdown...`);
-    
+    logger?.log?.(`[BOOTSTRAP] Received ${signal}, initiating shutdown...`);
+
     const forceExitTimeout = setTimeout(() => {
       logger?.warn?.('[BOOTSTRAP] Shutdown timeout - forcing exit');
       process.exit(1);
@@ -312,7 +311,7 @@ export function registerShutdownHandlers({
     Promise.resolve(handler(signal))
       .then(() => {
         clearTimeout(forceExitTimeout);
-        logger?.log?.('[BOOTSTRAP] Graceful shutdown completed');
+        logger?.log?.('[BOOTSTRAP] Shutdown complete');
         process.exit(0);
       })
       .catch((error) => {

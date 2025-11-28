@@ -1,0 +1,29 @@
+FROM ubuntu:22.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y \
+    curl \
+    ca-certificates \
+    gnupg \
+    openssl \
+    iptables \
+    iproute2 \
+    redis-server \
+    && mkdir -p /etc/apt/keyrings \
+    && curl -fsSL https://pkgs.tailscale.com/stable/ubuntu/jammy.noarmor.gpg | tee /usr/share/keyrings/tailscale-archive-keyring.gpg >/dev/null \
+    && curl -fsSL https://pkgs.tailscale.com/stable/ubuntu/jammy.tailscale-keyring.list | tee /etc/apt/sources.list.d/tailscale.list \
+    && apt-get update && apt-get install -y \
+    tailscale \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN id -u redis &>/dev/null || useradd -r -s /bin/false redis
+RUN mkdir -p /certs /data && chown redis:redis /certs /data
+ 
+COPY docker/redis-entrypoint.sh /usr/local/bin/redis-entrypoint.sh
+RUN chmod +x /usr/local/bin/redis-entrypoint.sh
+
+VOLUME /data
+EXPOSE 6379
+
+ENTRYPOINT ["/usr/local/bin/redis-entrypoint.sh"]

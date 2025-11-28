@@ -93,6 +93,9 @@ Values shown in parentheses indicate typical defaults when the variable is unset
 | `REDIS_ERROR_THROTTLE_MS` | `(5000)` ms (clamped 1000–60000) | `server/presence/presence.js` | Minimum interval before the same Redis error message is logged again when `PRESENCE_REDIS_QUIET_ERRORS` is enabled. |
 | `RATE_LIMIT_REDIS_URL` | unset → falls back to `REDIS_URL` | `server/rate-limiting/distributed-rate-limiter.js` | Redis URL override specifically for the distributed rate limiter. Must also use `rediss://`. |
 | `RATE_LIMIT_REDIS_CONNECT_TIMEOUT` | `(10000)` ms (clamped 1000–60000) | `server/rate-limiting/distributed-rate-limiter.js` | Connection timeout for the rate limiter Redis client. |
+| `REDIS_CA_CERT_PATH` | unset | `server/presence/presence.js`, `server/rate-limiting/distributed-rate-limiter.js` | Path to Redis CA certificate used to validate the Redis server's TLS certificate. When set, enables full mutual TLS for Redis connections. In Docker environments, typically `/app/redis-certs/redis-ca.crt`. |
+| `REDIS_CLIENT_CERT_PATH` | unset | same as above | Path to client certificate used for mutual TLS authentication with Redis. Required when Redis is configured with `--tls-auth-clients yes`. In Docker, typically `/app/redis-certs/redis-client.crt`. |
+| `REDIS_CLIENT_KEY_PATH` | unset | same as above | Path to client private key corresponding to `REDIS_CLIENT_CERT_PATH`. Used for mutual TLS authentication with Redis. In Docker, typically `/app/redis-certs/redis-client.key`. |
 
 **Note:** in security-sensitive code paths, `REDIS_URL` and `RATE_LIMIT_REDIS_URL` must use TLS (`rediss://`).
 

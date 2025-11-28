@@ -78,12 +78,11 @@ async function deleteCloudflaredTunnels() {
   }
 }
 
-// Use system locations on Unix root; otherwise use OS temp directory
 const isRoot = typeof process.getuid === 'function' && process.getuid() === 0;
 const DEFAULT_HTTPS_PORT = parseInt(process.env.HAPROXY_HTTPS_PORT || (isRoot ? '443' : '8443'), 10);
 const TMPDIR = os.tmpdir();
 const HAPROXY_CONFIG_PATH = process.env.HAPROXY_CONFIG_PATH ||
-  (isRoot && process.platform !== 'win32' ? '/etc/haproxy/haproxy-auto.cfg' : path.join(TMPDIR, 'haproxy-auto.cfg'));
+  path.join('/app/server/config', 'haproxy-auto.cfg');
 const HAPROXY_PID_FILE = process.env.HAPROXY_PID_FILE ||
   (isRoot && process.platform !== 'win32' ? '/var/run/haproxy-auto.pid' : path.join(TMPDIR, 'haproxy-auto.pid'));
 const LOADBALANCER_LOCK_FILE = process.env.LOADBALANCER_LOCK_FILE ||
@@ -247,18 +246,26 @@ class AutoLoadBalancer {
 
 
   /**
-   * Check if cloudflared tunnel is running
-   */
+ * Check if cloudflared tunnel is running
+ */
   async isTunnelRunning() {
     try {
       const pidPath = path.join(this.scriptsDir, 'config', 'tunnel', 'pid');
+
       if (existsSync(pidPath)) {
-        const pid = parseInt(await fs.readFile(pidPath, 'utf8'), 10);
-        process.kill(pid, 0);
-        return true;
+        const pidContent = await fs.readFile(pidPath, 'utf8');
+        const pid = parseInt(pidContent, 10);
+
+        try {
+          process.kill(pid, 0);
+          return true;
+        } catch (e) {
+          return false;
+        }
       }
+
       return false;
-    } catch {
+    } catch (err) {
       return false;
     }
   }
@@ -270,24 +277,40 @@ class AutoLoadBalancer {
     try {
       console.log('\n[TUNNEL] Restarting tunnel...');
 
-      const tunnelScript = path.join(this.scriptsDir, 'simple-tunnel.cjs');
-      const envPort = this.listenPort || DEFAULT_HTTPS_PORT;
-      const env = {
-        ...process.env,
-        HAPROXY_HTTPS_PORT: String(envPort),
-      };
-
-      try {
-        await execAsync(`${process.execPath} ${JSON.stringify(tunnelScript)} stop`, { env });
-      } catch {
+      // Stop existing tunnel
+      const pidPath = path.join(this.scriptsDir, 'config', 'tunnel', 'pid');
+      if (existsSync(pidPath)) {
+        try {
+          const pid = parseInt(await fs.readFile(pidPath, 'utf8'), 10);
+          process.kill(pid, 'SIGTERM');
+        } catch {}
+        await fs.unlink(pidPath).catch(() => {});
       }
 
-      await execAsync(`${process.execPath} ${JSON.stringify(tunnelScript)} start`, { env });
+      const logPath = path.join(this.scriptsDir, 'config', 'tunnel', 'cloudflared.log');
+      const port = this.listenPort || DEFAULT_HTTPS_PORT;
+      
+      await fs.mkdir(path.dirname(logPath), { recursive: true });
+      
+      const cloudflaredBin = findInPath('cloudflared');
+      if (!cloudflaredBin) {
+        console.error('[TUNNEL] cloudflared not found');
+        return false;
+      }
 
+      const args = ['tunnel', '--url', `https://127.0.0.1:${port}`, '--no-tls-verify'];
+      const cmd = `${cloudflaredBin} ${args.join(' ')} > ${logPath} 2>&1 & echo $! > ${pidPath}`;
+      
+      await execAsync(cmd, { shell: '/bin/sh' });
+      
+      console.log('[TUNNEL] Waiting for tunnel URL to appear in log...');
       let tunnelUrl = null;
-      for (let i = 0; i < 20 && !tunnelUrl; i += 1) {
-        await new Promise((resolve) => setTimeout(resolve, 500));
+      for (let i = 0; i < 40 && !tunnelUrl; i += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 1000));
         tunnelUrl = await this.getTunnelUrl();
+        if (i > 0 && i % 5 === 0 && !tunnelUrl) {
+          console.log(`[TUNNEL] Still waiting... (${i} seconds)`);
+        }
       }
 
       if (tunnelUrl) {
@@ -296,15 +319,15 @@ class AutoLoadBalancer {
         return true;
       }
 
-      console.log('[TUNNEL] Tunnel restart helper completed but no public URL was detected');
+      console.log('[TUNNEL] Tunnel started but no public URL was detected within 40 seconds');
       return false;
     } catch (error) {
-      cryptoLogger.error('[AUTO-LB] Failed to restart tunnel via helper', error);
-      console.error('[TUNNEL] Failed to restart via helper:', error.message);
+      cryptoLogger.error('[AUTO-LB] Failed to restart tunnel', error);
+      console.error('[TUNNEL] Failed to restart:', error.message);
       return false;
     }
   }
-
+  
   /**
    * Get tunnel URL from cloudflared log
    */
@@ -312,20 +335,25 @@ class AutoLoadBalancer {
     try {
       const logPath = path.join(this.scriptsDir, 'config', 'tunnel', 'cloudflared.log');
       if (!existsSync(logPath)) return null;
+      
       const content = await fs.readFile(logPath, 'utf8');
-      const match = content.match(/https:\/\/[a-zA-Z0-9-]+\.trycloudflare\.com/);
-      return match ? match[0] : null;
+      const lines = content.split('\n');
+      for (let i = lines.length - 1; i >= 0; i--) {
+        const match = lines[i].match(/https:\/\/[a-zA-Z0-9-]+\.trycloudflare\.com/);
+        if (match) {
+          return match[0];
+        }
+      }
+      return null;
     } catch (_err) {
-      // ignore
+      return null;
     }
-    return null;
   }
 
   /**
    * Display HAProxy status and URLs
    */
-  async displayHAProxyStatus(pid) {
-    const tunnelUrl = await this.getTunnelUrl();
+  async displayHAProxyStatus(pid, skipTunnel = false) {
     const servers = await this.getActiveServers();
 
     console.log(`\n[OK] HAProxy Load Balancer Running`);
@@ -337,8 +365,12 @@ class AutoLoadBalancer {
       });
     }
     console.log(`\tStats Dashboard: http://localhost:${process.env.HAPROXY_STATS_PORT || 8404}/haproxy-stats`);
-    if (tunnelUrl) {
-      console.log(`\tTunnel URL: ${tunnelUrl}`);
+    
+    if (!skipTunnel) {
+      const tunnelUrl = await this.getTunnelUrl();
+      if (tunnelUrl) {
+        console.log(`\tTunnel URL: ${tunnelUrl}`);
+      }
     }
     console.log();
   }
@@ -361,7 +393,7 @@ class AutoLoadBalancer {
           this.haproxyPid = pid;
           this.isRunning = true;
 
-          await this.displayHAProxyStatus(pid);
+          await this.displayHAProxyStatus(pid, true);
 
           return true;
         } catch {
@@ -398,7 +430,7 @@ class AutoLoadBalancer {
       this.isRunning = true;
 
       // Display status for newly started HAProxy
-      await this.displayHAProxyStatus(pid);
+      await this.displayHAProxyStatus(pid, true);
 
       this.consecutiveFailures = 0;
       return true;
@@ -527,45 +559,11 @@ class AutoLoadBalancer {
   async monitor() {
     try {
       const now = Date.now();
-      if (now - this.lastTunnelCheck > this.tunnelCheckInterval) {
-        this.lastTunnelCheck = now;
-
-        if (!this.tunnelDisabled) {
-          const running = await this.isTunnelRunning();
-          if (!running) {
-            const sinceLastRestart = now - (this.lastTunnelRestart || 0);
-
-            if (this.tunnelRestartFailures >= this.maxTunnelRestartFailures) {
-              if (!this.tunnelDisabled) {
-                console.error(`\n[TUNNEL] Disabling automatic tunnel restart after ${this.tunnelRestartFailures} failed attempts.`);
-                console.error('[TUNNEL] Check cloudflared installation/config (CLOUDFLARED_TOKEN, connectivity) and restart the load balancer.');
-                this.tunnelDisabled = true;
-              }
-            } else if (sinceLastRestart >= this.tunnelBackoffMs) {
-              console.log('\n[WARNING] Tunnel is not running, attempting restart...');
-              const ok = await this.restartTunnel();
-              this.lastTunnelRestart = Date.now();
-
-              if (!ok) {
-                this.tunnelRestartFailures += 1;
-                this.tunnelBackoffMs = Math.min(this.tunnelBackoffMs * 2, 5 * 60 * 1000);
-              } else {
-                this.tunnelRestartFailures = 0;
-                this.tunnelBackoffMs = 10000;
-              }
-            }
-          } else {
-            this.tunnelRestartFailures = 0;
-            this.tunnelBackoffMs = 10000;
-          }
-        }
-      }
-
       const servers = await this.getActiveServers();
       const serverCount = servers.length;
       const serverHash = this.generateServerHash(servers);
 
-      // Check if server configuration actually changed
+      // Check if server configuration changed
       const serversChanged = serverHash !== this.lastServerHash;
 
       // Log server changes when they occur
@@ -624,16 +622,50 @@ class AutoLoadBalancer {
         }
         this.lastServerHash = '';
       }
+
+      if (now - this.lastTunnelCheck > this.tunnelCheckInterval) {
+        this.lastTunnelCheck = now;
+
+        if (!this.tunnelDisabled) {
+          const running = await this.isTunnelRunning();
+
+          if (!running) {
+            const sinceLastRestart = now - (this.lastTunnelRestart || 0);
+
+            if (this.tunnelRestartFailures >= this.maxTunnelRestartFailures) {
+              if (!this.tunnelDisabled) {
+                console.error(`\n[TUNNEL] Disabling automatic tunnel restart after ${this.tunnelRestartFailures} failed attempts.`);
+                console.error('[TUNNEL] Check cloudflared installation/config (CLOUDFLARED_TOKEN, connectivity) and restart the load balancer.');
+                this.tunnelDisabled = true;
+              }
+            } else if (sinceLastRestart >= this.tunnelBackoffMs) {
+              console.log('\n[WARNING] Tunnel is not running, attempting restart...');
+              const ok = await this.restartTunnel();
+              this.lastTunnelRestart = Date.now();
+
+              if (!ok) {
+                this.tunnelRestartFailures += 1;
+                this.tunnelBackoffMs = Math.min(this.tunnelBackoffMs * 2, 5 * 60 * 1000);
+              } else {
+                this.tunnelRestartFailures = 0;
+                this.tunnelBackoffMs = 10000;
+                // Display the updated tunnel URL
+                const tunnelUrl = await this.getTunnelUrl();
+                if (tunnelUrl) {
+                  console.log(`\n[TUNNEL] Active tunnel URL: ${tunnelUrl}\n`);
+                }
+              }
+            }
+          } else {
+            this.tunnelRestartFailures = 0;
+            this.tunnelBackoffMs = 10000;
+          }
+        }
+      }
+
     } catch (error) {
       cryptoLogger.error('[AUTO-LB] Monitor cycle failed', error);
     }
-  }
-
-  /**
-   * Kill existing auto-loadbalancer instances
-   */
-  async killExistingInstances() {
-    return;
   }
 
   /**
@@ -651,7 +683,7 @@ class AutoLoadBalancer {
 
           if (existsSync(HAPROXY_PID_FILE)) {
             const haproxyPid = parseInt(await fs.readFile(HAPROXY_PID_FILE, 'utf8'), 10);
-            await this.displayHAProxyStatus(haproxyPid);
+            await this.displayHAProxyStatus(haproxyPid, true);
           } else {
             console.log(`\tStats Dashboard: http://localhost:${process.env.HAPROXY_STATS_PORT || 8404}/haproxy-stats`);
             const tunnelUrl = await this.getTunnelUrl();
@@ -935,6 +967,11 @@ class AutoLoadBalancer {
       console.log('\t[INIT] Cleaning up any existing tunnels...');
       await deleteCloudflaredTunnels();
       console.log('\t[INIT] Existing tunnels cleaned');
+      const logPath = path.join(this.scriptsDir, 'config', 'tunnel', 'cloudflared.log');
+      if (existsSync(logPath)) {
+        await fs.unlink(logPath);
+        console.log('\t[INIT] Cleared old tunnel log file');
+      }
     } catch (error) {
       cryptoLogger.warn('[AUTO-LB] Failed to clean tunnels on startup', error);
     }

@@ -1,0 +1,40 @@
+FROM ubuntu:22.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y \
+    curl \
+    ca-certificates \
+    gnupg \
+    && mkdir -p /etc/apt/keyrings \
+    && curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg \
+    && echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_22.x nodistro main" | tee /etc/apt/sources.list.d/nodesource.list \
+    && curl -fsSL https://pkgs.tailscale.com/stable/ubuntu/jammy.noarmor.gpg | tee /usr/share/keyrings/tailscale-archive-keyring.gpg >/dev/null \
+    && curl -fsSL https://pkgs.tailscale.com/stable/ubuntu/jammy.tailscale-keyring.list | tee /etc/apt/sources.list.d/tailscale.list \
+    && apt-get update && apt-get install -y \
+    nodejs \
+    build-essential \
+    git \
+    wget \
+    libssl-dev \
+    pkg-config \
+    postgresql-client \
+    openssl \
+    tailscale \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN mkdir -p /var/run/tailscale /var/lib/tailscale && \
+    chmod 755 /var/run/tailscale /var/lib/tailscale
+
+WORKDIR /app
+
+COPY scripts/ ./scripts/
+COPY server/package*.json ./server/
+
+RUN node scripts/install-deps.cjs --server
+
+COPY server/ ./server/
+
+EXPOSE 3000
+
+CMD ["node", "scripts/start-server.cjs"]
