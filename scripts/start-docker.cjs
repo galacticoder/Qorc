@@ -333,13 +333,14 @@ async function main() {
                     const runCommand = `docker compose --env-file .env -f docker/docker-compose.yml --profile ${command} up -d ${buildFlag}`;
                     execSync(runCommand, { cwd: repoRoot, stdio: 'inherit' });
                 } else {
-                    execSync(`docker compose --env-file .env -f docker/docker-compose.yml up -d postgres`, { cwd: repoRoot, stdio: 'inherit' });
+                    const sharedServices = command === 'server' ? 'postgres redis' : 'redis';
+                    execSync(`docker compose --env-file .env -f docker/docker-compose.yml up -d --no-recreate ${sharedServices}`, { cwd: repoRoot, stdio: 'inherit' });
 
                     if (buildFlag) {
                         execSync(`docker compose --env-file .env -f docker/docker-compose.yml build ${command}`, { cwd: repoRoot, stdio: 'inherit' });
                     }
 
-                    const dockerRun = spawn('docker', ['compose', '--env-file', '.env', '-f', 'docker/docker-compose.yml', 'run', '--service-ports', '-it', '--rm', command], {
+                    const dockerRun = spawn('docker', ['compose', '--env-file', '.env', '-f', 'docker/docker-compose.yml', 'run', '--no-deps', '--service-ports', '-it', '--rm', command], {
                         cwd: repoRoot,
                         stdio: 'inherit'
                     });

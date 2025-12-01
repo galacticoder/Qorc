@@ -83,7 +83,7 @@ function logErr(...args) { console.error('[START]', ...args); }
 
 function buildRedisCliCommand(redisUrl, ...args) {
   let cmd = `redis-cli -u "${redisUrl}"`;
-  
+
   if (process.env.REDIS_CA_CERT_PATH) {
     cmd += ` --cacert "${process.env.REDIS_CA_CERT_PATH}"`;
   }
@@ -93,11 +93,11 @@ function buildRedisCliCommand(redisUrl, ...args) {
   if (process.env.REDIS_CLIENT_KEY_PATH) {
     cmd += ` --key "${process.env.REDIS_CLIENT_KEY_PATH}"`;
   }
-  
+
   if (args.length > 0) {
     cmd += ' ' + args.join(' ');
   }
-  
+
   return cmd;
 }
 
@@ -629,7 +629,7 @@ class ServerUI {
           metrics.registered = false;
         }
       } catch { }
-    
+
       if (Date.now() - this.lastTlsCheck > 10000) {
         this.lastTlsCheck = Date.now();
         try {
@@ -1271,18 +1271,51 @@ async function main() {
   await ensurePostgresBootstrap();
   await ensureServerDeps();
 
-   // Auto-set Redis TLS certificate paths if not already configured
+  // Auto-set Redis TLS certificate paths if not already configured
   if (!process.env.REDIS_CA_CERT_PATH || !process.env.REDIS_CLIENT_CERT_PATH || !process.env.REDIS_CLIENT_KEY_PATH) {
     const dockerCertsDir = '/app/redis-certs';
     const isDocker = fs.existsSync(dockerCertsDir);
-    
+
     const certsDir = isDocker ? dockerCertsDir : path.join(repoRoot, 'redis-certs');
-    
+
     const redisCaCert = path.join(certsDir, 'redis-ca.crt');
     const redisClientCert = path.join(certsDir, 'redis-client.crt');
     const redisClientKey = path.join(certsDir, 'redis-client.key');
-    
-    if (fs.existsSync(redisCaCert) && fs.existsSync(redisClientCert) && fs.existsSync(redisClientKey)) {
+
+    // Wait for certificate files to exist
+    let certsExist = false;
+    const maxWaitTime = 30000;
+    const checkInterval = 500;
+    const startTime = Date.now();
+
+    if (isDocker) {
+      log('[START] Waiting for Redis SSL certificates to be ready...');
+      while (!certsExist && (Date.now() - startTime) < maxWaitTime) {
+        if (fs.existsSync(redisCaCert) && fs.existsSync(redisClientCert) && fs.existsSync(redisClientKey)) {
+          try {
+            const caCert = fs.readFileSync(redisCaCert, 'utf8');
+            const clientCert = fs.readFileSync(redisClientCert, 'utf8');
+            const clientKey = fs.readFileSync(redisClientKey, 'utf8');
+            if (caCert && caCert.includes('BEGIN CERTIFICATE') &&
+              clientCert && clientCert.includes('BEGIN CERTIFICATE') &&
+              clientKey && (clientKey.includes('BEGIN') && clientKey.includes('KEY'))) {
+              certsExist = true;
+              break;
+            }
+          } catch (e) {
+          }
+        }
+        await new Promise(resolve => setTimeout(resolve, checkInterval));
+      }
+
+      if (!certsExist) {
+        logErr(`[START] WARN: Redis certificates not found in ${certsDir} after ${maxWaitTime}ms`);
+      }
+    } else {
+      certsExist = fs.existsSync(redisCaCert) && fs.existsSync(redisClientCert) && fs.existsSync(redisClientKey);
+    }
+
+    if (certsExist) {
       if (!process.env.REDIS_CA_CERT_PATH) {
         process.env.REDIS_CA_CERT_PATH = redisCaCert;
         log(`[START] Set REDIS_CA_CERT_PATH=${redisCaCert}`);
@@ -1295,7 +1328,7 @@ async function main() {
         process.env.REDIS_CLIENT_KEY_PATH = redisClientKey;
         log(`[START] Set REDIS_CLIENT_KEY_PATH=${redisClientKey}`);
       }
-      
+
       try {
         const envPath = path.join(repoRoot, '.env');
         let envText = '';
@@ -1303,7 +1336,7 @@ async function main() {
           envText = fs.readFileSync(envPath, 'utf8');
         } catch { }
         const lines = envText ? envText.split(/\r?\n/) : [];
-        
+
         const upsert = (key, value) => {
           const line = `${key}=${value}`;
           const idx = lines.findIndex(l => l.trim().startsWith(key + '='));
@@ -1313,11 +1346,11 @@ async function main() {
             lines.push(line);
           }
         };
-        
+
         upsert('REDIS_CA_CERT_PATH', redisCaCert);
         upsert('REDIS_CLIENT_CERT_PATH', redisClientCert);
         upsert('REDIS_CLIENT_KEY_PATH', redisClientKey);
-        
+
         const newEnv = lines.filter(Boolean).join('\n') + '\n';
         fs.writeFileSync(envPath, newEnv, 'utf8');
         log('[START] Updated .env with Redis certificate paths');
@@ -1331,14 +1364,45 @@ async function main() {
   if (!process.env.DB_CA_CERT_PATH) {
     const dockerCertsDir = '/app/postgres-certs';
     const isDocker = fs.existsSync(dockerCertsDir);
-    
+
     const certsDir = isDocker ? dockerCertsDir : path.join(repoRoot, 'postgres-certs');
     const postgresCaCert = path.join(certsDir, 'root.crt');
-    
-    if (fs.existsSync(postgresCaCert)) {
+
+    // Wait for certificate file to exist
+    let certExists = false;
+    const maxWaitTime = 30000;
+    const checkInterval = 500;
+    const startTime = Date.now();
+
+    if (isDocker) {
+      log('[START] Waiting for Postgres SSL certificates to be ready...');
+      while (!certExists && (Date.now() - startTime) < maxWaitTime) {
+        if (fs.existsSync(postgresCaCert)) {
+          // Verify the file is readable and has content
+          try {
+            const content = fs.readFileSync(postgresCaCert, 'utf8');
+            if (content && content.includes('BEGIN CERTIFICATE')) {
+              certExists = true;
+              break;
+            }
+          } catch (e) {
+            // File exists but not readable yet, continue waiting
+          }
+        }
+        await new Promise(resolve => setTimeout(resolve, checkInterval));
+      }
+
+      if (!certExists) {
+        logErr(`[START] WARN: Postgres certificate not found at ${postgresCaCert} after ${maxWaitTime}ms`);
+      }
+    } else {
+      certExists = fs.existsSync(postgresCaCert);
+    }
+
+    if (certExists) {
       process.env.DB_CA_CERT_PATH = postgresCaCert;
       log(`[START] Set DB_CA_CERT_PATH=${postgresCaCert}`);
-      
+
       try {
         const envPath = path.join(repoRoot, '.env');
         let envText = '';
@@ -1346,7 +1410,7 @@ async function main() {
           envText = fs.readFileSync(envPath, 'utf8');
         } catch { }
         const lines = envText ? envText.split(/\r?\n/) : [];
-        
+
         const upsert = (key, value) => {
           const line = `${key}=${value}`;
           const idx = lines.findIndex(l => l.trim().startsWith(key + '='));
@@ -1356,9 +1420,9 @@ async function main() {
             lines.push(line);
           }
         };
-        
+
         upsert('DB_CA_CERT_PATH', postgresCaCert);
-        
+
         const newEnv = lines.filter(Boolean).join('\n') + '\n';
         fs.writeFileSync(envPath, newEnv, 'utf8');
         log('[START] Updated .env with Postgres certificate path');

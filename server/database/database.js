@@ -495,18 +495,56 @@ export async function getPgPool() {
 
     // If DATABASE_URL is provided, use it directly
     if (process.env.DATABASE_URL) {
-      pgPool = new Pool({
+      const poolConfig = {
         connectionString: process.env.DATABASE_URL,
         max: maxConnections,
         idleTimeoutMillis: idleTimeoutMs,
-        connectionTimeoutMillis: connectTimeoutMs,
+        connectionTimeoutMillis: 30000,
         ssl: {
           ...sslConfig,
-          // Allow overriding the TLS servername used for SNI / hostname verification
           servername: process.env.DB_TLS_SERVERNAME || undefined,
         },
-      });
-      return pgPool;
+      };
+
+      const maxRetries = 10;
+      const retryDelayMs = 3000;
+      let lastError = null;
+
+      for (let attempt = 1; attempt <= maxRetries; attempt++) {
+        try {
+          pgPool = new Pool(poolConfig);
+          await pgPool.query('SELECT 1');
+          cryptoLogger.info('[DB] Database connection established via DATABASE_URL', {
+            attempt,
+            url: process.env.DATABASE_URL.replace(/:([^:@]+)@/, ':****@')
+          });
+          return pgPool;
+        } catch (err) {
+          lastError = err;
+          const msg = err?.message || String(err);
+
+          if (pgPool) {
+            try { await pgPool.end(); } catch { }
+            pgPool = null;
+          }
+
+          // Don't retry on certain unrecoverable errors
+          if (/authentication failed|password|role.*does not exist/i.test(msg)) {
+            cryptoLogger.error('[DB] Authentication error, not retrying', { error: msg });
+            throw err;
+          }
+
+          if (attempt < maxRetries) {
+            cryptoLogger.warn(`[DB] Connection attempt ${attempt}/${maxRetries} failed, retrying in ${retryDelayMs}ms...`, {
+              error: msg
+            });
+            await new Promise(resolve => setTimeout(resolve, retryDelayMs));
+          }
+        }
+      }
+
+      console.error('[DB] Failed to connect to database after all retries:', lastError);
+      throw lastError;
     }
 
     // No DATABASE_URL provided: fall back to a local Postgres database and create it if needed.

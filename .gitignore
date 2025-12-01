@@ -65,18 +65,6 @@ lerna-debug.log*
 .env.production.local
 .env.*.local
 
-# OS files
-.DS_Store
-.DS_Store?
-._*
-.Spotlight-V100
-.Trashes
-ehthumbs.db
-ehthumbs_vista.db
-Thumbs.db
-Desktop.ini
-$RECYCLE.BIN/
-
 # IDE
 .vscode/
 .idea/
@@ -86,7 +74,6 @@ $RECYCLE.BIN/
 .project
 .classpath
 .settings/
-*.sublime-*
 
 # Temporary files
 *.tmp
