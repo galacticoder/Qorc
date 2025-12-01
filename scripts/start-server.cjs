@@ -493,15 +493,15 @@ class ServerUI {
 
     // Setup terminal
     this.width = process.stdout.columns || 80;
-    this.height = process.stdout.rows || 24;
+    this.height = (process.stdout.rows || 24) - 1;
 
-    // Debounced render to prevent flickering
-    this.renderDebouncer = new Debouncer(() => this._doRender(), 50);
+    // Debounced render
+    this.renderDebouncer = new Debouncer(() => this._doRender(), 100);
 
     // Handle terminal resize
     process.stdout.on('resize', () => {
       this.width = process.stdout.columns || 80;
-      this.height = process.stdout.rows || 24;
+      this.height = (process.stdout.rows || 24) - 1;
       this.renderDebouncer.call();
     });
 
@@ -849,7 +849,6 @@ class ServerUI {
     const footerTxt = ' q: quit  Arrows PgUp/PgDn Home/End' + scrollIndicator;
     const footerPadded = footerTxt + ' '.repeat(Math.max(0, w - footerTxt.length));
     lines.push('\x1b[30;46m' + footerPadded.substring(0, w) + '\x1b[0m');
-
 
     const output = '\x1b[?25l' + '\x1b[H' + lines.join('\n');
     try {
