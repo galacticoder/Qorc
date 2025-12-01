@@ -329,7 +329,7 @@ async function main() {
 
             try {
                 if (runDetached) {
-                    process.env.NO_GUI = true;
+                    process.env.NO_GUI = 'true';
                     const runCommand = `docker compose --env-file .env -f docker/docker-compose.yml --profile ${command} up -d ${buildFlag}`;
                     execSync(runCommand, { cwd: repoRoot, stdio: 'inherit' });
                 } else {

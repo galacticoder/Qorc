@@ -65,6 +65,7 @@ services:
       - "${PORT:-3000}:3000"
     environment:
       - BIND_ADDRESS=0.0.0.0
+      - NO_GUI
     depends_on:
       postgres:
         condition: service_healthy
@@ -107,6 +108,7 @@ services:
       - REDIS_CLIENT_KEY_PATH=/app/redis-certs/redis-client.key
       - REDIS_TLS_SERVERNAME=redis
       - TS_AUTHKEY=${TS_AUTHKEY}
+      - NO_GUI
     depends_on:
       redis:
         condition: service_healthy
