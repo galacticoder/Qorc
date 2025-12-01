@@ -13,12 +13,9 @@
 const os = require('os');
 const fs = require('fs');
 const path = require('path');
-const { execFile, spawn, execSync } = require('child_process');
+const { execFile } = require('child_process');
 const { promisify } = require('util');
 const execFileAsync = promisify(execFile);
-
-const serverComponents = ['haproxy', 'tailscale', 'jq', 'redis', 'postgres', 'cloudflared',
-  'python3', 'openssl', 'liboqs', 'oqs-provider', 'cmake', 'ninja'];
 
 function findInPath(bin) {
   const pathEnv = process.env.PATH || '';

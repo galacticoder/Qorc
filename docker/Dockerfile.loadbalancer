@@ -35,6 +35,7 @@ RUN node scripts/install-deps.cjs --server
 EXPOSE 8443 8080 8404
 
 COPY server/package.json /app/package.json
+RUN npm install tar
 RUN npm install
 
 CMD ["node", "scripts/start-loadbalancer.cjs"]

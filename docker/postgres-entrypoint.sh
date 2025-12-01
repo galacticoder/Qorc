@@ -75,6 +75,11 @@ if [ -z "$(ls -A "$PGDATA")" ]; then
         su - postgres -c "$PSQL -c \"ALTER USER postgres WITH PASSWORD '$POSTGRES_PASSWORD';\""
     fi
     
+    if [ -n "$POSTGRES_DB" ]; then
+        echo "Creating database $POSTGRES_DB..."
+        su - postgres -c "$PSQL -c \"CREATE DATABASE $POSTGRES_DB;\""
+    fi
+    
     echo "Stopping temporary Postgres..."
     kill $PID
     wait $PID

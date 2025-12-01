@@ -477,7 +477,7 @@ export async function getPgPool() {
 
     const dbPoolMax = Number.parseInt(process.env.DB_POOL_MAX || '20', 10);
     const dbIdleTimeout = Number.parseInt(process.env.DB_IDLE_TIMEOUT || '30000', 10);
-    const dbConnectTimeout = Number.parseInt(process.env.DB_CONNECT_TIMEOUT || '2000', 10);
+    const dbConnectTimeout = Number.parseInt(process.env.DB_CONNECT_TIMEOUT || '10000', 10);
 
     const maxConnections = Number.isNaN(dbPoolMax) ? 20 : Math.max(1, Math.min(dbPoolMax, 100));
     const idleTimeoutMs = Number.isNaN(dbIdleTimeout) ? 30000 : Math.max(1000, Math.min(dbIdleTimeout, 300000));

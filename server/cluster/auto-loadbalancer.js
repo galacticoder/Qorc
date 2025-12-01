@@ -649,11 +649,6 @@ class AutoLoadBalancer {
               } else {
                 this.tunnelRestartFailures = 0;
                 this.tunnelBackoffMs = 10000;
-                // Display the updated tunnel URL
-                const tunnelUrl = await this.getTunnelUrl();
-                if (tunnelUrl) {
-                  console.log(`\n[TUNNEL] Active tunnel URL: ${tunnelUrl}\n`);
-                }
               }
             }
           } else {

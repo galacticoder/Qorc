@@ -225,7 +225,7 @@ async function tailscaleSupportsCertFiles() {
     ];
 
     const dbTlsLines = [
-      `DB_CA_CERT_PATH=${path.join(repoRoot, 'server', 'config', 'certs', 'postgres-root-cas.pem')}`,
+      `DB_CA_CERT_PATH=/app/postgres-certs/root.crt`,
       `DB_TLS_SERVERNAME=postgres`
     ];
 
