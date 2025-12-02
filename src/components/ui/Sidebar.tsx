@@ -1,11 +1,9 @@
-import React, { useState } from 'react';
+import React, { useState, useRef } from 'react';
 import { MessageSquare, Phone, Settings, LogOut, User as UserIcon, Moon, Sun, ChevronLeft, ChevronRight } from 'lucide-react';
 import { ChatBubbleIcon, SettingsIcon, CallIcon } from '../chat/icons';
 import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
 import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar';
-import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
-import { Separator } from '@/components/ui/separator';
 import { useTheme } from 'next-themes';
 
 interface SidebarProps {
@@ -21,12 +19,44 @@ interface SidebarProps {
 export function Sidebar({ activeTab, onTabChange, currentUser, onLogout }: SidebarProps) {
     const { theme, setTheme } = useTheme();
     const [isCollapsed, setIsCollapsed] = useState(true);
+    const logoutTimerRef = useRef<NodeJS.Timeout | null>(null);
+    const [logoutProgress, setLogoutProgress] = useState(0);
+    const [isHoldingLogout, setIsHoldingLogout] = useState(false);
 
     const navItems = [
         { id: 'chats', icon: ChatBubbleIcon, label: 'Chats' },
         { id: 'calls', icon: CallIcon, label: 'Calls' },
         { id: 'settings', icon: SettingsIcon, label: 'Settings' },
     ] as const;
+
+    const handleLogoutMouseDown = () => {
+        setIsHoldingLogout(true);
+        const startTime = Date.now();
+        const duration = 2500;
+
+        const updateProgress = () => {
+            const elapsed = Date.now() - startTime;
+            const progress = Math.min((elapsed / duration) * 100, 100);
+            setLogoutProgress(progress);
+
+            if (progress < 100) {
+                logoutTimerRef.current = setTimeout(updateProgress, 16); // ~60fps
+            } else {
+                onLogout?.();
+            }
+        };
+
+        updateProgress();
+    };
+
+    const handleLogoutMouseUp = () => {
+        setIsHoldingLogout(false);
+        setLogoutProgress(0);
+        if (logoutTimerRef.current) {
+            clearTimeout(logoutTimerRef.current);
+            logoutTimerRef.current = null;
+        }
+    };
 
     return (
         <div
@@ -166,42 +196,87 @@ export function Sidebar({ activeTab, onTabChange, currentUser, onLogout }: Sideb
 
                 {/* Profile */}
                 {currentUser && (
-                    <Popover>
-                        <PopoverTrigger asChild>
-                            <Button variant="ghost" className={cn(
-                                "w-full h-auto hover:bg-accent/10 transition-all duration-300 ease-in-out flex items-center justify-start p-0 pl-0 select-none",
-                            )}>
-                                <div className="w-13 h-14 flex items-center justify-center shrink-0">
+                    <Button
+                        variant="ghost"
+                        className={cn(
+                            "w-full h-auto transition-all duration-300 ease-in-out flex items-center justify-start p-0 pl-0 select-none relative overflow-hidden",
+                            isHoldingLogout ? "bg-[#6b2c2b]" : "hover:bg-accent/10"
+                        )}
+                        onMouseDown={handleLogoutMouseDown}
+                        onMouseUp={handleLogoutMouseUp}
+                        onMouseLeave={handleLogoutMouseUp}
+                    >
+                        {/* Progress bar overlay */}
+                        <div
+                            className="absolute inset-0 bg-[#89302d] transition-all duration-75 ease-linear"
+                            style={{ width: `${logoutProgress}%` }}
+                        />
+
+                        <div className="w-13 h-14 flex items-center justify-center shrink-0 relative z-10">
+                            {/* Show logout icon when holding  */}
+                            <div className="relative w-full h-full flex items-center justify-center">
+                                {/* Avatar  */}
+                                <div className={cn(
+                                    "absolute transition-all duration-200",
+                                    isHoldingLogout ? "opacity-0 invisible translate-y-2 scale-90" : "opacity-100 visible translate-y-0 scale-100"
+                                )}>
                                     <Avatar className="!h-[25px] !w-[25px] border border-border shrink-0">
                                         <AvatarImage src={currentUser.avatarUrl} />
                                         <AvatarFallback>{currentUser.username.slice(0, 2).toUpperCase()}</AvatarFallback>
                                     </Avatar>
                                 </div>
+
+                                {/* Logout icon */}
                                 <div className={cn(
-                                    "flex flex-col items-start overflow-hidden transition-all duration-300 ease-in-out",
-                                    isCollapsed ? "w-0 ml-0 delay-150" : "w-[150px]"
+                                    "absolute transition-all duration-200",
+                                    isHoldingLogout ? "opacity-100 visible translate-y-0 scale-100" : "opacity-0 invisible -translate-y-2 scale-90"
                                 )}>
-                                    <div className={cn(
-                                        "w-full transition-opacity duration-300",
-                                        isCollapsed ? "opacity-0" : "opacity-100 delay-150"
-                                    )}>
-                                        <span className="text-sm font-medium truncate w-full text-left block whitespace-nowrap">{currentUser.username}</span>
-                                        <span className="text-xs text-muted-foreground truncate w-full text-left block whitespace-nowrap">View profile</span>
-                                    </div>
+                                    <LogOut className="h-6 w-6 text-[#e3616a]" />
                                 </div>
-                            </Button>
-                        </PopoverTrigger>
-                        <PopoverContent className="w-56 select-none" align={isCollapsed ? "center" : "start"} side={isCollapsed ? "right" : "top"} sideOffset={10}>
-                            <div className="flex flex-col space-y-1 p-2">
-                                <p className="text-sm font-medium leading-none">{currentUser.username}</p>
                             </div>
-                            <Separator className="my-2" />
-                            <Button variant="ghost" className="w-full justify-start text-destructive hover:text-destructive hover:bg-destructive/10" onClick={onLogout}>
-                                <LogOut className="mr-2 h-4 w-4" />
-                                Log out
-                            </Button>
-                        </PopoverContent>
-                    </Popover>
+                        </div>
+
+                        {/* Text section */}
+                        <div className={cn(
+                            "flex flex-col items-start overflow-hidden transition-all duration-300 ease-in-out relative z-10",
+                            isCollapsed ? "w-0 ml-0 delay-150" : "w-[150px]"
+                        )}>
+                            <div className={cn(
+                                "w-full transition-opacity duration-300",
+                                isCollapsed ? "opacity-0" : "opacity-100 delay-150"
+                            )}>
+                                {/* Top line: Username or "Logging out" */}
+                                <div className="relative h-5 mb-1">
+                                    {/* Username text */}
+                                    <span className={cn(
+                                        "text-sm font-medium truncate w-full text-left block whitespace-nowrap transition-all duration-200 absolute top-0 left-0",
+                                        isHoldingLogout ? "opacity-0 invisible translate-y-2 scale-90" : "opacity-100 visible translate-y-0 scale-100"
+                                    )}>{currentUser.username}</span>
+
+                                    {/* "Logging out" text */}
+                                    <span className={cn(
+                                        "text-sm font-medium truncate w-full text-left block whitespace-nowrap transition-all duration-200 absolute top-0 left-0 text-[#e3616a]",
+                                        isHoldingLogout ? "opacity-100 visible translate-y-0 scale-100" : "opacity-0 invisible -translate-y-2 scale-90"
+                                    )}>Logging out</span>
+                                </div>
+
+                                {/* Bottom line: Subtitle text */}
+                                <div className="relative h-4">
+                                    {/* "Hold to logout" text */}
+                                    <span className={cn(
+                                        "text-[10px] truncate w-full text-left block whitespace-nowrap transition-all duration-200 absolute top-0 left-0 text-muted-foreground opacity-70",
+                                        isHoldingLogout ? "opacity-0 invisible translate-y-2 scale-90" : "opacity-70 visible translate-y-0 scale-100"
+                                    )}>Hold to logout</span>
+
+                                    {/* "Hold to Confirm" text */}
+                                    <span className={cn(
+                                        "text-[10px] truncate w-full text-left block whitespace-nowrap transition-all duration-200 absolute top-0 left-0 text-[#e3616a]",
+                                        isHoldingLogout ? "opacity-100 visible translate-y-0 scale-100" : "opacity-0 invisible -translate-y-2 scale-90"
+                                    )}>Hold to Confirm</span>
+                                </div>
+                            </div>
+                        </div>
+                    </Button>
                 )}
             </div>
         </div>
