@@ -103,7 +103,7 @@ export const CallModal: React.FC<CallModalProps> = ({
 
       // Check if click is inside any dropdown menu or dropdown trigger
       const isInsideDropdown = target.closest('[data-dropdown-menu]') ||
-                              target.closest('[data-dropdown-trigger]');
+        target.closest('[data-dropdown-trigger]');
 
       if (!isInsideDropdown) {
         setMicMenuOpen(false);
@@ -152,7 +152,7 @@ export const CallModal: React.FC<CallModalProps> = ({
             await encryptedStorage.setItem('preferred_camera_deviceId_v1_pq', '');
           }
         }
-      } catch {}
+      } catch { }
     };
 
     loadCameraDevices();
@@ -179,7 +179,7 @@ export const CallModal: React.FC<CallModalProps> = ({
       const { encryptedStorage } = await import('../../lib/encrypted-storage');
       await encryptedStorage.setItem('preferred_camera_deviceId_v1_pq', deviceId);
       setPreferredCameraId(deviceId);
-      
+
       // Switch to selected camera
       if (localStream) {
         const videoTrack = localStream.getVideoTracks()[0];
@@ -191,19 +191,19 @@ export const CallModal: React.FC<CallModalProps> = ({
           };
           const newStream = await navigator.mediaDevices.getUserMedia(constraints);
           const newVideoTrack = newStream.getVideoTracks()[0];
-          
+
           // Replace track in local stream
           localStream.removeTrack(videoTrack);
           localStream.addTrack(newVideoTrack);
           videoTrack.stop();
-          
+
           // Update the video element
           if (localVideoRef.current) {
             localVideoRef.current.srcObject = localStream;
           }
         }
       }
-      
+
       setCameraMenuOpen(false);
     } catch (_error) {
       console.error('Failed to switch camera:', _error);
@@ -282,7 +282,8 @@ export const CallModal: React.FC<CallModalProps> = ({
     // Cleanup if no stream
     if (!localStream) {
       if (rafRef.current) cancelAnimationFrame(rafRef.current);
-      if (audioCtxRef.current) { try { audioCtxRef.current.close(); } catch {}
+      if (audioCtxRef.current) {
+        try { audioCtxRef.current.close(); } catch { }
       }
       audioCtxRef.current = null;
       analyserRef.current = null;
@@ -326,7 +327,8 @@ export const CallModal: React.FC<CallModalProps> = ({
 
     return () => {
       if (rafRef.current) cancelAnimationFrame(rafRef.current);
-      if (audioCtxRef.current) { try { audioCtxRef.current.close(); } catch {}
+      if (audioCtxRef.current) {
+        try { audioCtxRef.current.close(); } catch { }
       }
       audioCtxRef.current = null;
       analyserRef.current = null;
@@ -362,7 +364,7 @@ export const CallModal: React.FC<CallModalProps> = ({
       setTimeout(() => setIsProcessing(false), 300);
     }
   }, [isProcessing, onEndCall]);
-  
+
   const localVideoRef = useRef<HTMLVideoElement>(null);
   const remoteVideoRef = useRef<HTMLVideoElement>(null);
   const remoteScreenVideoRef = useRef<HTMLVideoElement>(null);
@@ -380,13 +382,13 @@ export const CallModal: React.FC<CallModalProps> = ({
       if (remoteStream) {
         remoteVideoRef.current.srcObject = remoteStream;
       } else {
-        try { remoteVideoRef.current.pause?.(); } catch {}
+        try { remoteVideoRef.current.pause?.(); } catch { }
         remoteVideoRef.current.srcObject = null as any;
-        try { 
+        try {
           remoteVideoRef.current.removeAttribute('src');
           (remoteVideoRef.current as any).src = '';
-          remoteVideoRef.current.load(); 
-        } catch {}
+          remoteVideoRef.current.load();
+        } catch { }
       }
     }
   }, [remoteStream]);
@@ -400,18 +402,18 @@ export const CallModal: React.FC<CallModalProps> = ({
           playPromise.catch(() => {
             if (remoteScreenVideoRef.current) {
               remoteScreenVideoRef.current.muted = true;
-              remoteScreenVideoRef.current.play().catch(() => {});
+              remoteScreenVideoRef.current.play().catch(() => { });
             }
           });
         }
       } else {
-        try { remoteScreenVideoRef.current.pause?.(); } catch {}
+        try { remoteScreenVideoRef.current.pause?.(); } catch { }
         remoteScreenVideoRef.current.srcObject = null as any;
-        try { 
+        try {
           remoteScreenVideoRef.current.removeAttribute('src');
           (remoteScreenVideoRef.current as any).src = '';
-          remoteScreenVideoRef.current.load(); 
-        } catch {}
+          remoteScreenVideoRef.current.load();
+        } catch { }
       }
     }
   }, [remoteScreenStream]);
@@ -522,16 +524,16 @@ export const CallModal: React.FC<CallModalProps> = ({
 
   return (
     <div ref={wrapperRef} style={wrapperStyle} className="sm:w-[420px]">
-      <div className="bg-gray-900/95 backdrop-blur rounded-xl shadow-[0_20px_60px_-15px_rgba(0,0,0,0.6)] border border-gray-700 overflow-hidden flex flex-col">
-        
+      <div className="backdrop-blur rounded-xl shadow-[0_20px_60px_-15px_rgba(0,0,0,0.6)] border border-gray-700 overflow-hidden flex flex-col" style={{ backgroundColor: '#151519e6' }}>
+
         {/* Header */}
         <div className="p-5 border-b border-gray-700 bg-gradient-to-r from-gray-900 to-gray-800 cursor-move select-none" onMouseDown={beginDrag}>
           <div className="flex items-center justify-between">
             <div>
               <h2 className="text-xl font-semibold text-white">
                 {isConnected ? 'In Call' :
-                 isConnecting ? 'Connecting' :
-                 isIncoming ? 'Incoming Call' : 'Calling'}
+                  isConnecting ? 'Connecting' :
+                    isIncoming ? 'Incoming Call' : 'Calling'}
               </h2>
               <p className="text-gray-300">{displayPeerName}</p>
               {isConnected && (
@@ -566,17 +568,15 @@ export const CallModal: React.FC<CallModalProps> = ({
               </div>
             </div>
             <div className="flex items-center space-x-2">
-              <span className={`px-3 py-1 rounded-full text-sm ${
-                isVideoCall ? 'bg-blue-600 text-white' : 'bg-green-600 text-white'
-              }`}>
+              <span className={`px-3 py-1 rounded-full text-sm ${isVideoCall ? 'bg-blue-600 text-white' : 'bg-green-600 text-white'
+                }`}>
                 {isVideoCall ? 'Video' : 'Audio'}
               </span>
-              <span className={`w-3 h-3 rounded-full ${
-                isConnected ? 'bg-green-500' : 
-                isRinging ? 'bg-yellow-500 animate-pulse' : 
-                isConnecting ? 'bg-blue-500 animate-pulse' :
-                'bg-red-500'
-              }`} />
+              <span className={`w-3 h-3 rounded-full ${isConnected ? 'bg-green-500' :
+                  isRinging ? 'bg-yellow-500 animate-pulse' :
+                    isConnecting ? 'bg-blue-500 animate-pulse' :
+                      'bg-red-500'
+                }`} />
             </div>
           </div>
         </div>
@@ -706,9 +706,8 @@ export const CallModal: React.FC<CallModalProps> = ({
               <div className="relative">
                 <button
                   onClick={handleToggleMute}
-                  className={`w-16 h-16 rounded-full flex items-center justify-center transition-colors relative ${
-                    isMuted ? 'bg-red-600 hover:bg-red-700' : 'bg-gray-600 hover:bg-gray-700'
-                  }`}
+                  className={`w-16 h-16 rounded-full flex items-center justify-center transition-colors relative ${isMuted ? 'bg-red-600 hover:bg-red-700' : 'bg-gray-600 hover:bg-gray-700'
+                    }`}
                   title={isMuted ? 'Unmute' : 'Mute'}
                   data-dropdown-trigger
                 >
@@ -775,11 +774,10 @@ export const CallModal: React.FC<CallModalProps> = ({
                     onClick={handleToggleVideo}
                     disabled={videoDevices.length === 0}
                     title={videoDevices.length === 0 ? 'No camera detected' : (isVideoEnabled ? 'Turn off video' : 'Turn on video')}
-                    className={`w-16 h-16 rounded-full flex items-center justify-center transition-colors relative ${
-                      videoDevices.length === 0
+                    className={`w-16 h-16 rounded-full flex items-center justify-center transition-colors relative ${videoDevices.length === 0
                         ? 'bg-gray-500 opacity-60 cursor-not-allowed'
                         : (!isVideoEnabled ? 'bg-red-600 hover:bg-red-700' : 'bg-gray-600 hover:bg-gray-700')
-                    }`}
+                      }`}
                     data-dropdown-trigger
                   >
                     {isVideoEnabled ? (
@@ -822,11 +820,10 @@ export const CallModal: React.FC<CallModalProps> = ({
                         <button
                           key={device.deviceId}
                           onClick={() => handleCameraSelect(device.deviceId)}
-                          className={`w-full text-left px-3 py-2 text-sm transition-colors ${
-                            device.deviceId === preferredCameraId
+                          className={`w-full text-left px-3 py-2 text-sm transition-colors ${device.deviceId === preferredCameraId
                               ? 'bg-blue-600 text-white'
                               : 'text-white hover:bg-gray-700'
-                          }`}
+                            }`}
                         >
                           {device.label || `Camera ${device.deviceId.slice(0, 8)}...`}
                           {device.deviceId === preferredCameraId && (
@@ -862,9 +859,8 @@ export const CallModal: React.FC<CallModalProps> = ({
                   <button
                     onClick={handleScreenShare}
                     disabled={isProcessing}
-                    className={`w-14 h-14 rounded-full flex items-center justify-center transition-colors ${
-                      isScreenSharing ? 'bg-blue-600 hover:bg-blue-700' : 'bg-gray-600 hover:bg-gray-700'
-                    }`}
+                    className={`w-14 h-14 rounded-full flex items-center justify-center transition-colors ${isScreenSharing ? 'bg-blue-600 hover:bg-blue-700' : 'bg-gray-600 hover:bg-gray-700'
+                      }`}
                     title={isScreenSharing ? 'Stop screen sharing' : 'Start screen sharing'}
                   >
                     {isScreenSharing ? (
@@ -899,7 +895,7 @@ export const CallModal: React.FC<CallModalProps> = ({
       </div>
 
       {/* Screen Source Selector */}
-<React.Suspense fallback={null}>
+      <React.Suspense fallback={null}>
         <ScreenSourceSelectorLazy
           isOpen={showScreenSourceSelector}
           onClose={() => setShowScreenSourceSelector(false)}

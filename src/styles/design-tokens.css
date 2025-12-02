@@ -14,7 +14,7 @@
   --color-disabled: #94a3b8;
 
   /* Typing Indicator */
-  --color-typing-bubble: #d1d9e3fb;
+  --color-typing-bubble: #f8fafc;
   --color-typing-dot: #8b95a3;
 
   /* Markdown Content Colors (Light mode) */
@@ -103,21 +103,21 @@
 /* Dark mode overrides */
 .dark {
   /* Dark mode colors */
-  --color-background: #0f0f23;
-  --color-surface: #1a1a2e;
-  --color-panel: #16213e;
-  --color-muted-panel: #0e1628;
+  --color-background: #151519;
+  --color-surface: #151519;
+  --color-panel: #1e1e23;
+  --color-muted-panel: #0d0d0d;
   --color-text-primary: #e2e8f0;
   --color-text-secondary: #94a3b8;
   --color-accent-primary: #3b82f6;
-  --color-accent-secondary: #6366f1;
-  --color-border: #334155;
+  --color-accent-secondary: #3f87fa;
+  --color-border: #0d0d0d;
   --color-success: #10b981;
   --color-disabled: #475569;
 
   /* Typing Indicator - Dark Mode */
-  --color-typing-bubble: rgba(30, 41, 59, 0.901);
-  --color-typing-dot: #64748b;
+  --color-typing-bubble: #1e1e23;
+  --color-typing-dot: #4c4c55;
 
   /* Dark mode markdown colors */
   --markdown-header-color: var(--color-text-primary);

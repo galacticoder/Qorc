@@ -324,7 +324,12 @@ export const ConversationList = memo<ConversationListProps>(function Conversatio
     if (minutes < 1) return "now";
     if (minutes < 60) return `${minutes}m`;
     if (hours < 24) return `${hours}h`;
-    return `${days}d`;
+    if (days < 7) return `${days}d`;
+
+    const month = (date.getMonth() + 1).toString().padStart(2, '0');
+    const day = date.getDate().toString().padStart(2, '0');
+    const year = date.getFullYear().toString().slice(-2);
+    return `${month}/${day}/${year}`;
   }, []);
 
   const displayUsername = useMemo(() => {

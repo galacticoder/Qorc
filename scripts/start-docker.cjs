@@ -280,7 +280,7 @@ async function main() {
             updates.REDIS_EXTERNAL_PORT = availableRedisPort;
         }
 
-        // 4. Load Balancer (only if profile is loadbalancer)
+        // 4. Load Balancer
         if (command === 'loadbalancer') {
             const httpPort = parseInt(env.HAPROXY_HTTP_PORT || '8080', 10);
             const availableHttpPort = await findAvailablePort(httpPort);
@@ -306,12 +306,10 @@ async function main() {
 
         if (Object.keys(updates).length > 0) {
             updateEnvFile(updates);
-            // Reload env into process.env for the current execution
             for (const [key, value] of Object.entries(updates)) {
                 process.env[key] = value;
             }
         }
-        // --------------------------------
 
         const buildFlag = flags.includes('--build') ? '--build' : '';
 

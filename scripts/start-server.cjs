@@ -1047,7 +1047,6 @@ async function ensureDbCaBundleEnv() {
     process.env.DB_CONNECT_HOST = connectHost;
     process.env.DB_CA_CERT_PATH = caOutPath;
 
-    // Persist into .env so future runs don’t need regeneration
     try {
       const envPath = path.join(repoRoot, '.env');
       let envText = '';
@@ -1223,7 +1222,72 @@ async function ensureRedisTls() {
   }
 }
 
+
+async function ensureCorrectCertificateConfig() {
+  try {
+    const { execFile } = require('child_process');
+    const { promisify } = require('util');
+    const execFileAsync = promisify(execFile);
+
+    // 1. Get current Tailscale hostname
+    let dnsName = '';
+    try {
+      const { stdout } = await execFileAsync('tailscale', ['status', '--json'], { windowsHide: true });
+      const data = JSON.parse(stdout || '{}');
+      dnsName = (data && data.Self && data.Self.DNSName) ? String(data.Self.DNSName).replace(/\.$/, '') : '';
+    } catch (e) {
+      return;
+    }
+
+    if (!dnsName) return;
+
+    // 2. Construct expected paths
+    const certDir = path.join(repoRoot, 'server', 'config', 'certs');
+    const expectedCert = path.join(certDir, `${dnsName}.crt`);
+    const expectedKey = path.join(certDir, `${dnsName}.key`);
+
+    // 3. Check if files exist
+    if (fs.existsSync(expectedCert) && fs.existsSync(expectedKey)) {
+      const currentCert = process.env.TLS_CERT_PATH;
+      const currentKey = process.env.TLS_KEY_PATH;
+
+      // 4. Update if mismatch
+      if (currentCert !== expectedCert || currentKey !== expectedKey) {
+        log(`[CONFIG] Detected hostname mismatch. Switching certs to: ${dnsName}`);
+
+        process.env.TLS_CERT_PATH = expectedCert;
+        process.env.TLS_KEY_PATH = expectedKey;
+        CONFIG.TLS_CERT_PATH = expectedCert;
+        CONFIG.TLS_KEY_PATH = expectedKey;
+
+        const envPath = path.join(repoRoot, '.env');
+        let envText = '';
+        try { envText = fs.readFileSync(envPath, 'utf8'); } catch { }
+        const lines = envText ? envText.split(/\r?\n/) : [];
+
+        const upsert = (key, value) => {
+          const line = `${key}=${value}`;
+          const idx = lines.findIndex(l => l.trim().startsWith(key + '='));
+          if (idx >= 0) lines[idx] = line; else lines.push(line);
+        };
+
+        upsert('TLS_CERT_PATH', expectedCert);
+        upsert('TLS_KEY_PATH', expectedKey);
+
+        const newEnv = lines.filter(Boolean).join('\n') + '\n';
+        fs.writeFileSync(envPath, newEnv, 'utf8');
+        log(`[CONFIG] Updated .env with new certificate paths`);
+      }
+    }
+  } catch (e) {
+    logErr(`[CONFIG] Warning: Failed to auto-configure certificates: ${e.message}`);
+  }
+}
+
 async function main() {
+  // Auto-correct certificates before anything else
+  await ensureCorrectCertificateConfig();
+
   // Start tailscaled if in Docker and not running
   const isDocker = require('fs').existsSync('/.dockerenv');
   if (process.platform === 'linux' && (isDocker || !process.stdin.isTTY)) {

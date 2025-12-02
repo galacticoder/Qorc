@@ -1153,6 +1153,80 @@ async function handleWebSocketMessage({ ws, sessionId, message, context }) {
         });
         break;
 
+      case SignalType.REGISTER: {
+        const { register, signature, publicKey } = normalizedMessage.payload || {};
+        const username = normalizedMessage.from;
+
+        if (!register || !signature || !publicKey || !username) {
+          cryptoLogger.warn('[REGISTER] Missing required fields');
+          return await sendSecureMessage(ws, { type: SignalType.ERROR, message: 'Invalid registration format' });
+        }
+
+        if (register.username !== username) {
+          cryptoLogger.warn('[REGISTER] Username mismatch');
+          return await sendSecureMessage(ws, { type: SignalType.ERROR, message: 'Username mismatch' });
+        }
+
+        // 1. Verify timestamp (5 minute window)
+        const now = Date.now();
+        if (Math.abs(now - register.timestamp) > 5 * 60 * 1000) {
+          cryptoLogger.warn('[REGISTER] Stale registration', { username });
+          return await sendSecureMessage(ws, { type: SignalType.ERROR, message: 'Registration expired' });
+        }
+
+        // 2. Fetch stored public keys for the user to verify identity
+        const { UserDatabase } = await import('./database/database.js');
+        const storedKeys = await UserDatabase.getHybridPublicKeys(username);
+
+        if (!storedKeys || !storedKeys.dilithiumPublicBase64) {
+          cryptoLogger.warn('[REGISTER] User not found or no keys', { username });
+          return await sendSecureMessage(ws, { type: SignalType.ERROR, message: 'User not found' });
+        }
+
+        // 3. Verify the provided public key matches the stored one
+        if (storedKeys.dilithiumPublicBase64 !== publicKey) {
+          cryptoLogger.warn('[REGISTER] Public key mismatch', { username });
+          return await sendSecureMessage(ws, { type: SignalType.ERROR, message: 'Invalid public key' });
+        }
+
+        // 4. Verify the signature
+        try {
+          const canonical = new TextEncoder().encode(JSON.stringify(register));
+          const signatureBytes = Buffer.from(signature, 'base64');
+          const publicKeyBytes = Buffer.from(publicKey, 'base64');
+
+          const isValid = await CryptoUtils.Dilithium.verify(signatureBytes, canonical, publicKeyBytes);
+
+          if (!isValid) {
+            cryptoLogger.warn('[REGISTER] Invalid signature', { username });
+            return await sendSecureMessage(ws, { type: SignalType.ERROR, message: 'Invalid signature' });
+          }
+        } catch (err) {
+          cryptoLogger.error('[REGISTER] Verification error', { username, error: err.message });
+          return await sendSecureMessage(ws, { type: SignalType.ERROR, message: 'Verification failed' });
+        }
+
+        // 5. Authenticate the session
+        ws._username = username;
+        ws._hasAuthenticated = true;
+
+        // Update connection state
+        await ConnectionStateManager.updateState(sessionId, {
+          username: username,
+          hasAuthenticated: true,
+          lastActivity: Date.now()
+        });
+
+        // Register for local delivery
+        if (global.gateway?.addLocalConnection) {
+          await global.gateway.addLocalConnection(username, ws);
+        }
+
+        cryptoLogger.info('[REGISTER] P2P signaling session authenticated', { username });
+        await sendSecureMessage(ws, { type: 'register-ack', success: true });
+        break;
+      }
+
       default:
         logEvent('unknown-message-type', { type: normalizedMessage.type, sessionId });
         await sendSecureMessage(ws, { type: SignalType.ERROR, message: 'Unknown message type' });
@@ -1205,7 +1279,6 @@ async function handleEncryptedMessage({ ws, sessionId, parsed, state }) {
     return await sendSecureMessage(ws, { type: SignalType.ERROR, message: 'Invalid message format' });
   }
 
-  // Reconstruct message with standard encryptedPayload field name for storage/forwarding
   const normalizedMessage = {
     type: parsed.type,
     to: toUser,

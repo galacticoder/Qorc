@@ -38,10 +38,10 @@ export async function handlePQHandshake({ ws, sessionId, parsed, serverHybridKey
     isRehandshake: !!ws._pqSessionId,
     wasAuthenticated: !!ws._authenticated
   });
-  
+
   const payload = parsed?.payload;
   if (!payload || !payload.kemCiphertext || !payload.sessionId || !payload.clientNonce || !payload.clientX25519PublicKey) {
-    cryptoLogger.warn('[PQ-HANDSHAKE] Invalid handshake payload', { 
+    cryptoLogger.warn('[PQ-HANDSHAKE] Invalid handshake payload', {
       sessionId,
       hasPayload: !!payload,
       hasKemCiphertext: !!payload?.kemCiphertext,
@@ -65,14 +65,14 @@ export async function handlePQHandshake({ ws, sessionId, parsed, serverHybridKey
     // Clear old session ID to ensure ack is sent in plaintext
     const oldSessionId = ws._pqSessionId;
     ws._pqSessionId = undefined;
-    
+
     if (oldSessionId) {
       cryptoLogger.info('[PQ-HANDSHAKE] Clearing old session for rehandshake', {
         oldSessionId: oldSessionId.slice(0, 16) + '...',
         newSessionId: payload.sessionId.slice(0, 16) + '...'
       });
     }
-    
+
     // Decapsulate Kyber KEM ciphertext to get PQ shared secret
     const kemCiphertextBytes = CryptoUtils.Hash.base64ToUint8Array(payload.kemCiphertext);
     const pqSharedSecret = await CryptoUtils.Kyber.decapsulate(
@@ -114,7 +114,7 @@ export async function handlePQHandshake({ ws, sessionId, parsed, serverHybridKey
       pqSharedSecret.fill(0);
       classicalSharedSecret.fill(0);
       combinedSecret.fill(0);
-    } catch {}
+    } catch { }
 
     // Store session in Redis
     const sessionData = {
@@ -137,13 +137,13 @@ export async function handlePQHandshake({ ws, sessionId, parsed, serverHybridKey
       wsReady: ws.readyState === 1,
       hasPqSessionId: !!ws._pqSessionId
     });
-    
+
     await sendSecureMessage(ws, {
       type: 'pq-handshake-ack',
       sessionId: payload.sessionId,
       timestamp: Date.now()
     });
-    
+
     cryptoLogger.info('[PQ-HANDSHAKE] Ack sent successfully', {
       sessionId: payload.sessionId.slice(0, 16) + '...'
     });
@@ -290,16 +290,16 @@ export async function sendPQEncryptedResponse(ws, pqSessionIdOrData, payload) {
     await updatePQSessionCounter(session.sessionId, counter);
 
     const timestamp = Date.now();
-    
+
     const innerMessage = payload?.type === 'encrypted-message'
       ? {
-          type: 'encrypted-message',
-          from: payload.from,
-          to: payload.to,
-          encryptedPayload: payload.encryptedPayload
-        }
+        type: 'encrypted-message',
+        from: payload.from,
+        to: payload.to,
+        encryptedPayload: payload.encryptedPayload
+      }
       : payload;
-    
+
     const messageType = innerMessage.type || payload.type || 'unknown';
     const aadString = `${messageType}|${messageId}|${timestamp}|${counter}`;
     const aad = new TextEncoder().encode(aadString);
@@ -366,16 +366,17 @@ export async function sendPQEncryptedResponse(ws, pqSessionIdOrData, payload) {
  */
 export async function sendSecureMessage(ws, payload) {
   const pqSessionId = ws._pqSessionId;
-  
+
   // Whitelist: Only these message types are allowed without PQ encryption
   // These are strictly for the initial handshake phase before PQ session exists
   const allowedPlaintextTypes = [
     'pq-handshake-ack',      // PQ handshake acknowledgment
     'error',                 // Generic errors (can happen before handshake)
     'server-public-key',     // Server keys must be deliverable pre-PQ handshake
-    'ERROR'                  // System errors (uppercase variant)
+    'ERROR',                 // System errors
+    'register-ack'           // P2P registration acknowledgment
   ];
-  
+
   // If PQ session exists, encryption is MANDATORY
   if (pqSessionId) {
     try {
@@ -388,7 +389,7 @@ export async function sendSecureMessage(ws, payload) {
         ws.close(1008, 'PQ session lost - security violation');
         throw new Error('PQ session not found in storage');
       }
-      
+
       await sendPQEncryptedResponse(ws, session, payload);
       return;
     } catch (error) {
@@ -401,26 +402,26 @@ export async function sendSecureMessage(ws, payload) {
       throw new Error(`PQ encryption failed: ${error.message}`);
     }
   }
-  
+
   const isAllowedPlaintext = payload?.type && allowedPlaintextTypes.includes(payload.type);
-  
+
   if (!isAllowedPlaintext) {
     cryptoLogger.error('[SECURE-MSG] SECURITY VIOLATION: Message requires PQ encryption', {
       payloadType: payload?.type,
       sessionId: ws._sessionId?.slice(0, 16) || 'unknown'
     });
-    
+
     ws.send(JSON.stringify({
       type: 'ERROR',
       code: 'PQ_SESSION_REQUIRED',
       message: 'PQ handshake required before sending secure messages',
       requiresHandshake: true
     }));
-    
+
     ws.close(1008, 'PQ session required');
     throw new Error(`Message type '${payload?.type}' requires PQ encryption`);
   }
-  
+
   const payloadString = JSON.stringify(payload);
   cryptoLogger.info('[SECURE-MSG] Sending whitelisted plaintext message', {
     payloadType: payload?.type,
@@ -429,7 +430,7 @@ export async function sendSecureMessage(ws, payload) {
     bufferedAmount: ws.bufferedAmount,
     payloadSize: payloadString.length
   });
-  
+
   try {
     ws.send(payloadString, (error) => {
       if (error) {

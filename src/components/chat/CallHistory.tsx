@@ -21,7 +21,7 @@ const formatTime = (timestamp?: number): string => {
   const date = new Date(timestamp);
   const now = new Date();
   const isToday = date.toDateString() === now.toDateString();
-  
+
   if (isToday) {
     return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
   }
@@ -30,15 +30,15 @@ const formatTime = (timestamp?: number): string => {
 
 const getCallIcon = (call: CallState): JSX.Element => {
   const iconClass = "w-4 h-4";
-  
+
   if (call.status === 'missed') {
     return <PhoneMissed className={`${iconClass} text-red-500`} />;
   }
-  
+
   if (call.direction === 'incoming') {
     return <PhoneIncoming className={`${iconClass} text-green-500`} />;
   }
-  return <PhoneOutgoing className={`${iconClass} text-blue-500`} />;
+  return <PhoneOutgoing className={`${iconClass} text-gray-500`} />;
 };
 
 const getStatusText = (call: CallState): string => {
@@ -162,7 +162,7 @@ const CallHistoryItem: React.FC<CallHistoryItemProps> = React.memo(({
           </p>
         </div>
       </div>
-      
+
       <div className="flex items-center space-x-1 opacity-0 group-hover:opacity-100 transition-opacity">
         <button
           onClick={handleAudioCall}

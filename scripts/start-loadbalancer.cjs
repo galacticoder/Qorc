@@ -786,7 +786,35 @@ class LBTUI {
   }
 }
 
+
+async function ensureHaproxyCertFile() {
+  const certPath = process.env.TLS_CERT_PATH;
+  const keyPath = process.env.TLS_KEY_PATH;
+  const haproxyCertPath = path.join(repoRoot, 'server', 'config', 'certs', 'cert.pem');
+
+  if (certPath && keyPath && fs.existsSync(certPath) && fs.existsSync(keyPath)) {
+    try {
+      const certContent = fs.readFileSync(certPath, 'utf8');
+      const keyContent = fs.readFileSync(keyPath, 'utf8');
+      const combined = certContent + '\n' + keyContent;
+
+      const certDir = path.dirname(haproxyCertPath);
+      if (!fs.existsSync(certDir)) {
+        fs.mkdirSync(certDir, { recursive: true });
+      }
+
+      fs.writeFileSync(haproxyCertPath, combined, 'utf8');
+      log(`[CERT] Updated HAProxy cert.pem from ${path.basename(certPath)}`);
+    } catch (e) {
+      logErr(`[CERT] Failed to update HAProxy cert.pem: ${e.message}`);
+    }
+  } else {
+    log(`[CERT] TLS_CERT_PATH/TLS_KEY_PATH not set or missing, skipping cert.pem update`);
+  }
+}
+
 async function ensureHaproxyCerts() {
+  await ensureHaproxyCertFile();
   await ensureQuantumReady();
   await ensureHaproxyBuiltOrReady();
 }

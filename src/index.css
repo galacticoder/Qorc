@@ -164,16 +164,16 @@
   }
 
   .dark {
-    /* Premium Dark Mode */
-    /* #070709 -> 240 13% 3% */
-    --background: 240 13% 3%;
+    /* Dark Mode */
+    /* #070709 -> dark background */
+    --background: 0 0% 3%;
     --foreground: 0 0% 100%;
 
-    /* #0C0C0E -> 240 8% 5% */
-    --card: 240 8% 10%;
+    /* Neutral dark card */
+    --card: 0 0% 9%;
     --card-foreground: 0 0% 100%;
 
-    --popover: 240 8% 10%;
+    --popover: 0 0% 9%;
     --popover-foreground: 0 0% 100%;
 
     --primary: 263 82% 74%;
@@ -182,17 +182,17 @@
     --secondary: 0 0% 7%;
     --secondary-foreground: 0 0% 100%;
 
-    --muted: 240 8% 5%;
+    --muted: 0 0% 5%;
     --muted-foreground: 0 0% 43%;
 
-    --accent: 240 8% 5%;
+    --accent: 0 0% 5%;
     --accent-foreground: 0 0% 100%;
 
     --destructive: 0 66% 57%;
     --destructive-foreground: 0 0% 100%;
 
-    --border: 240 8% 5%;
-    --input: 240 8% 5%;
+    --border: 0 0% 5%;
+    --input: 0 0% 5%;
     --ring: 264 82% 80%;
 
     /* Sidebar - Dark */
@@ -200,14 +200,15 @@
     --sidebar-foreground: 0 0% 100%;
     --sidebar-primary: 263 82% 74%;
     --sidebar-primary-foreground: 0 0% 5%;
-    --sidebar-accent: 240 8% 5%;
+    --sidebar-accent: 0 0% 5%;
     --sidebar-accent-foreground: 0 0% 100%;
-    --sidebar-border: 240 8% 5%;
+    --sidebar-border: 0 0% 5%;
     --sidebar-ring: 264 82% 80%;
 
     /* Chat Interface Specifics - Dark Mode Override */
-    --chat-background: #1C1C21;
-    --chat-header-background: #1C1C21;
+    --chat-background: #151519;
+    --chat-header-background: #151519;
+    --chat-bubble-received-bg: #1e1e23;
     --chats-section-bg: #111114;
   }
 }
@@ -245,7 +246,7 @@
   }
 }
 
-/* Hide scrollbars while keeping scroll functionality */
+/* Hide scrollbars */
 .scrollbar-hide {
   -ms-overflow-style: none;
   /* IE and Edge */
@@ -467,7 +468,7 @@
   box-shadow: var(--shadow-elevation-low) !important;
 }
 
-/* Styles for README content - generous spacing */
+/* Styles for README content */
 .markdown-readme .markdown-content {
   font-size: 1em !important;
 }

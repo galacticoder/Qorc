@@ -8,7 +8,10 @@ export const SignalType = {
   AUTH_SUCCESS: "AUTH_SUCCESS",
   AUTH_RECOVERY: "auth-recovery",
   TOKEN_VALIDATION: "token-validation",
+  AUTH_RECOVERY: "auth-recovery",
+  TOKEN_VALIDATION: "token-validation",
   TOKEN_VALIDATION_RESPONSE: "token-validation-response",
+  REGISTER: "register",
 
   //messaging
   ENCRYPTED_MESSAGE: "encrypted-message",

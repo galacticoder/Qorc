@@ -71,12 +71,12 @@ async function enforceRateLimit(key, limit = RATE_LIMIT_MAX_REQUESTS, windowMs =
     await withRedisClient(async (client) => {
       const rateLimitKey = `ratelimit:${key}`;
       const count = await client.incr(rateLimitKey);
-      
+
       // Set expiry on first request (atomic with INCR)
       if (count === 1) {
         await client.pexpire(rateLimitKey, windowMs);
       }
-      
+
       if (count > limit) {
         throw new Error('Rate limit exceeded');
       }
@@ -85,9 +85,9 @@ async function enforceRateLimit(key, limit = RATE_LIMIT_MAX_REQUESTS, windowMs =
     if (error.message === 'Rate limit exceeded') {
       throw error;
     }
-    cryptoLogger.warn('[CONNECTION-STATE] Rate limit check failed, allowing request', { 
+    cryptoLogger.warn('[CONNECTION-STATE] Rate limit check failed, allowing request', {
       key: key?.slice(0, 20),
-      error: error?.message 
+      error: error?.message
     });
   }
 }
@@ -125,7 +125,7 @@ export class ConnectionStateManager {
 
     await withRedisClient(async (client) => {
       await client.setex(CONNECTION_STATE_KEY(sessionId), SESSION_TTL, JSON.stringify(initialState));
-      
+
       if (normalizedUsername) {
         await client.setex(USER_SESSION_KEY(normalizedUsername), SESSION_TTL, sessionId);
       }
@@ -172,7 +172,7 @@ export class ConnectionStateManager {
   }
 
   /**
-   * Store authentication state for a user (persist across reconnections)
+   * Store authentication state for a user
    */
   static async storeUserAuthState(username, authState) {
     const normalizedUsername = normalizeUsername(username);
@@ -225,7 +225,7 @@ export class ConnectionStateManager {
 
         const authState = JSON.parse(authStateJson);
         authState.lastActivity = Date.now();
-        
+
         await client.setex(AUTH_STATE_KEY(normalizedUsername), AUTH_STATE_TTL, JSON.stringify(authState));
         return true;
       });
@@ -270,6 +270,10 @@ export class ConnectionStateManager {
           local oldUsername = currentState['username']
           local newUsername = updates['username']
           
+          -- Hashes passed from JS 
+          local oldUsernameHash = ARGV[5]
+          local newUsernameHash = ARGV[6]
+
           -- If username is being updated (explicitly present in updates)
           if newUsername ~= nil then
             -- Normalize empty string to nil/null logic
@@ -278,7 +282,7 @@ export class ConnectionStateManager {
             if newUsername ~= oldUsername then
               -- 1. Release old username if we owned it
               if oldUsername and oldUsername ~= cjson.null then
-                local oldUserKey = 'user_session:' .. redis.sha256hex(oldUsername)
+                local oldUserKey = 'user_session:' .. oldUsernameHash
                 local currentOwner = redis.call('GET', oldUserKey)
                 if currentOwner == sessionId then
                   redis.call('DEL', oldUserKey)
@@ -287,7 +291,7 @@ export class ConnectionStateManager {
 
               -- 2. Claim new username if specified
               if newUsername and newUsername ~= cjson.null then
-                local newUserKey = 'user_session:' .. redis.sha256hex(newUsername)
+                local newUserKey = 'user_session:' .. newUsernameHash
                 local currentOwner = redis.call('GET', newUserKey)
                 local canClaim = false
 
@@ -311,7 +315,7 @@ export class ConnectionStateManager {
             end
           elseif oldUsername and oldUsername ~= cjson.null then
              -- No username change, but refresh the TTL on the user mapping
-             local userKey = 'user_session:' .. redis.sha256hex(oldUsername)
+             local userKey = 'user_session:' .. oldUsernameHash
              local currentOwner = redis.call('GET', userKey)
              if currentOwner == sessionId then
                redis.call('EXPIRE', userKey, ttl)
@@ -324,14 +328,28 @@ export class ConnectionStateManager {
           return 1
         `;
 
+        const currentStateJson = await client.get(CONNECTION_STATE_KEY(sessionId));
+        let oldUsernameHash = '';
+        if (currentStateJson) {
+          const current = JSON.parse(currentStateJson);
+          if (current.username) {
+            oldUsernameHash = hashIdentifier(current.username);
+          }
+        }
+
+        const newUsername = updates.username;
+        const newUsernameHash = newUsername ? hashIdentifier(newUsername) : '';
+
         const result = await client.eval(
           luaScript,
-          1, // 1 Key (sessionKey), others are derived/dynamic
+          1,
           CONNECTION_STATE_KEY(sessionId),
           sessionId,
           JSON.stringify(updates),
           SESSION_TTL,
-          Date.now()
+          Date.now(),
+          oldUsernameHash,
+          newUsernameHash
         );
 
         if (result === -1) {
@@ -440,7 +458,7 @@ export class ConnectionStateManager {
         const stateJson = await client.get(CONNECTION_STATE_KEY(sessionId));
         if (stateJson) {
           const state = JSON.parse(stateJson);
-          
+
           // Remove user session mapping only if it belongs to this session
           if (state.username) {
             const currentOwner = await client.get(USER_SESSION_KEY(state.username));
@@ -455,7 +473,7 @@ export class ConnectionStateManager {
             }
           }
         }
-        
+
         await client.del(CONNECTION_STATE_KEY(sessionId));
       });
     } catch (error) {
@@ -503,7 +521,7 @@ export class ConnectionStateManager {
           totalSessions += result[1].length;
           iterations++;
         } while (cursor !== '0' && iterations < MAX_SCAN_ITERATIONS);
-        
+
         cursor = '0';
         iterations = 0;
         do {
@@ -512,7 +530,7 @@ export class ConnectionStateManager {
           authenticatedUsers += result[1].length;
           iterations++;
         } while (cursor !== '0' && iterations < MAX_SCAN_ITERATIONS);
-        
+
         return {
           totalSessions,
           authenticatedUsers,
@@ -569,9 +587,9 @@ export class ConnectionStateManager {
         const batchSize = 100;
         const now = Date.now();
         const staleThreshold = 10 * 60 * 1000;
-        
+
         cryptoLogger.info('Checking for stale sessions from server restart');
-        
+
         let currentServerStartup = serverStartupTime;
         try {
           const startupTimeStr = await client.get(SERVER_STARTUP_KEY);
@@ -584,12 +602,12 @@ export class ConnectionStateManager {
         } catch (error) {
           cryptoLogger.warn('Could not read server startup time from Redis', { error: error?.message });
         }
-        
+
         do {
           const result = await client.scan(cursor, 'MATCH', 'connection_state:*', 'COUNT', batchSize);
           cursor = result[0];
           const keys = result[1];
-          
+
           for (const key of keys) {
             try {
               const stateJson = await client.get(key);
@@ -597,12 +615,12 @@ export class ConnectionStateManager {
                 const state = JSON.parse(stateJson);
                 const sessionAge = now - state.createdAt;
                 const isStale = sessionAge > staleThreshold || state.createdAt < currentServerStartup;
-                
+
                 if (isStale) {
                   const sessionId = key.replace('connection_state:', '');
                   const reason = sessionAge > staleThreshold ? 'age' : 'pre-restart';
                   cryptoLogger.debug('Removing stale session', { sessionId, reason, ageSeconds: Math.round(sessionAge / 1000) });
-                  
+
                   if (state.username) {
                     const userKey = USER_SESSION_KEY(state.username);
                     const currentOwner = await client.get(userKey);
@@ -610,7 +628,7 @@ export class ConnectionStateManager {
                       await client.del(userKey);
                     }
                   }
-                  
+
                   await client.del(key);
                   cleanedCount++;
                 }
@@ -620,11 +638,11 @@ export class ConnectionStateManager {
             }
           }
         } while (cursor !== '0');
-        
+
         if (cleanedCount > 0) {
           cryptoLogger.info('Stale session cleanup after restart', { cleanedCount });
         }
-        
+
         return cleanedCount;
       });
     } catch (error) {
