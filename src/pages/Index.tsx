@@ -1428,7 +1428,7 @@ const ChatApp: React.FC<ChatAppProps> = () => {
         <div className="w-full max-w-2xl">
           <ConnectSetup onComplete={handleConnectSetupComplete} initialServerUrl={selectedServerUrl} />
         </div>
-        <Toaster position="top-right" theme={theme as any} richColors toastOptions={{ className: 'select-none' }} />
+        <Toaster position="top-right" theme={theme as any} richColors toastOptions={{ className: 'select-none', style: { width: 'fit-content', maxWidth: '400px', minWidth: '0px' } }} />
       </div>
     );
   }
@@ -1466,10 +1466,10 @@ const ChatApp: React.FC<ChatAppProps> = () => {
           initialUsername={Authentication.originalUsernameRef.current || ''}
           initialPassword={Authentication.passwordRef.current || ''}
           maxStepReached={Authentication.maxStepReached}
-          recoveryActive={Authentication.recoveryActive}
+
           pseudonym={Authentication.loginUsernameRef.current || ''}
         />
-        <Toaster position="top-right" theme={theme as any} richColors toastOptions={{ className: 'select-none' }} />
+        <Toaster position="top-right" theme={theme as any} richColors toastOptions={{ className: 'select-none', style: { width: 'fit-content', maxWidth: '400px', minWidth: '0px' } }} />
       </div>
     );
   }
@@ -1818,7 +1818,7 @@ const ChatApp: React.FC<ChatAppProps> = () => {
             </div>
 
             <div className={sidebarActiveTab === 'calls' ? 'h-full w-full' : 'hidden'}>
-              <CallLogs />
+              <CallLogs getDisplayUsername={stableGetDisplayUsername} />
             </div>
           </div>
 
@@ -1834,7 +1834,7 @@ const ChatApp: React.FC<ChatAppProps> = () => {
           </Dialog>
         </Layout>
       </TypingIndicatorProvider>
-      <Toaster position="top-right" theme={theme as any} richColors toastOptions={{ className: 'select-none' }} />
+      <Toaster position="top-right" theme={theme as any} richColors toastOptions={{ className: 'select-none', style: { width: 'fit-content', maxWidth: '400px', minWidth: '0px' } }} />
     </CallHistoryProvider>
   );
 };

@@ -11,8 +11,7 @@ import { useTypingIndicator } from "@/hooks/useTypingIndicator";
 import { TypingIndicator } from "./TypingIndicator";
 import { useTypingIndicatorContext } from "@/contexts/TypingIndicatorContext";
 import { resolveDisplayUsername } from "@/lib/unified-username-display";
-
-import { Phone, Video, MoreVertical, ShieldOff } from 'lucide-react';
+import { Video, MoreVertical, ShieldOff } from 'lucide-react';
 import { CallIcon } from './icons';
 import { useCalling } from "@/hooks/useCalling";
 const CallModalLazy = React.lazy(() => import('./CallModal'));
@@ -23,6 +22,7 @@ import { blockingSystem } from "@/lib/blocking-system";
 import { blockStatusCache } from "@/lib/block-status-cache";
 import { useReplyUpdates } from "@/hooks/useReplyUpdates";
 import { useCallHistory } from "@/contexts/CallHistoryContext";
+import { truncateUsername } from "@/lib/utils";
 
 
 interface HybridKeys {
@@ -59,17 +59,11 @@ interface ChatInterfaceProps {
   readonly secureDB?: any;
 }
 
-const HEX_PATTERN = /^[a-f0-9]{32,}$/i;
 const SCROLL_THRESHOLD = 200;
 const NEAR_BOTTOM_THRESHOLD = 100;
 const READ_RECEIPT_CHECK_INTERVAL = 30000;
 const MAX_BACKGROUND_MESSAGES = 1000;
 const BACKGROUND_BATCH_SIZE = 100;
-
-const truncateHash = (hash: string): string => {
-  if (typeof hash !== 'string' || hash.length === 0) return '';
-  return HEX_PATTERN.test(hash) ? `${hash.slice(0, 8)}...` : hash;
-};
 
 export const ChatInterface = React.memo<ChatInterfaceProps>(({
   onSendMessage,
@@ -152,7 +146,7 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
       if (!detail || typeof detail !== 'object') return;
       if (!selectedConversation || detail.peer !== selectedConversation) return;
 
-      const displayPeerName = await resolveDisplayUsername(detail.peer, getDisplayUsername);
+      const displayPeerName = truncateUsername(await resolveDisplayUsername(detail.peer, getDisplayUsername));
       const durationSeconds = Math.round((detail.durationMs || 0) / 1000);
 
       // Save to persistent call history
@@ -256,10 +250,10 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
 
     if (getDisplayUsername) {
       getDisplayUsername(username)
-        .then((resolved) => setDisplayConversationName(truncateHash(resolved)))
-        .catch(() => setDisplayConversationName(truncateHash(username)));
+        .then((resolved) => setDisplayConversationName(truncateUsername(resolved)))
+        .catch(() => setDisplayConversationName(truncateUsername(username)));
     } else {
-      setDisplayConversationName(truncateHash(username));
+      setDisplayConversationName(truncateUsername(username));
     }
   }, [getDisplayUsername]);
 
@@ -495,7 +489,6 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
               // Only mark as read if the window is focused
               if (document.hasFocus()) {
                 markMessageAsRead(messageId);
-                // Find sender to send receipt
                 const msg = messages.find(m => m.id === messageId);
                 if (msg) {
                   sendReadReceipt(messageId, msg.sender);
@@ -539,7 +532,6 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
             ) {
               markMessageAsRead(msg.id);
               sendReadReceipt(msg.id, msg.sender);
-              // Stop observing this one since we just handled it
               observer.unobserve(el);
             }
           }

@@ -14,6 +14,7 @@ export interface CallLogEntry {
 interface CallHistoryContextType {
     logs: CallLogEntry[];
     addCallLog: (entry: Omit<CallLogEntry, 'id'>) => void;
+    deleteLog: (id: string) => void;
     clearLogs: () => void;
     isLoading: boolean;
 }
@@ -88,13 +89,21 @@ export const CallHistoryProvider: React.FC<{ children: React.ReactNode }> = ({ c
         });
     }, [saveLogs]);
 
+    const deleteLog = useCallback((id: string) => {
+        setLogs(prev => {
+            const updated = prev.filter(log => log.id !== id);
+            saveLogs(updated);
+            return updated;
+        });
+    }, [saveLogs]);
+
     const clearLogs = useCallback(() => {
         setLogs([]);
         saveLogs([]);
     }, [saveLogs]);
 
     return (
-        <CallHistoryContext.Provider value={{ logs, addCallLog, clearLogs, isLoading }}>
+        <CallHistoryContext.Provider value={{ logs, addCallLog, deleteLog, clearLogs, isLoading }}>
             {children}
         </CallHistoryContext.Provider>
     );

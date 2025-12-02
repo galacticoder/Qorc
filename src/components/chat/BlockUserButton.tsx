@@ -4,6 +4,7 @@ import { toast } from 'sonner';
 import { BlockIcon, UnblockIcon } from './icons';
 import { blockingSystem } from '@/lib/blocking-system';
 import { blockStatusCache } from '@/lib/block-status-cache';
+import { truncateUsername } from '@/lib/utils';
 
 interface BlockUserButtonProps {
   readonly username: string;
@@ -69,13 +70,13 @@ export function BlockUserButton({
         if (typeof getDisplayUsername === 'function' && typeof username === 'string' && username) {
           const dn = await getDisplayUsername(username);
           if (!canceled && typeof dn === 'string' && dn) {
-            setResolvedName(dn);
+            setResolvedName(truncateUsername(dn));
           }
         } else {
-          setResolvedName(username);
+          setResolvedName(truncateUsername(username));
         }
       } catch {
-        setResolvedName(username);
+        setResolvedName(truncateUsername(username));
       }
     })();
     return () => { canceled = true; };

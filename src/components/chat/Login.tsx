@@ -8,7 +8,7 @@ import { SignUpForm } from "./Login/SignUp.tsx";
 import { PassphrasePrompt } from "./Login/PassphrasePrompt.tsx";
 import { PasswordHashPrompt } from "./Login/PasswordHashPrompt.tsx";
 import { ServerPasswordForm } from "./Login/ServerPassword.tsx";
-import { RecoveryPassphrase } from "./Login/RecoveryPassphrase.tsx";
+
 import { toast } from "sonner";
 
 interface ServerKeys {
@@ -32,7 +32,7 @@ interface LoginProps {
   readonly initialUsername?: string;
   readonly initialPassword?: string;
   readonly maxStepReached?: 'login' | 'passphrase' | 'server';
-  readonly recoveryActive?: boolean;
+
   readonly pseudonym?: string;
   readonly serverTrustRequest?: ServerTrustRequest | null;
   readonly onAcceptServerTrust?: () => void;
@@ -115,7 +115,6 @@ export const Login = React.memo<LoginProps>(({
   initialUsername = "",
   initialPassword = "",
   maxStepReached = 'login',
-  recoveryActive = false,
   pseudonym = "",
 }) => {
   const [serverPassword, setServerPassword] = useState<string>("");
@@ -161,50 +160,9 @@ export const Login = React.memo<LoginProps>(({
     dispatchAuthEvent('auth-ui-back', { to: 'server' });
   }, [setShowPassphrasePrompt, setShowPasswordPrompt]);
 
-  const handleRecoveryPassphraseSubmit = useCallback(async (pp: string): Promise<void> => {
-    if (isRateLimited) return;
-    setIsSubmitting(true);
-    try {
-      await onPassphraseSubmit?.(pp, 'login');
-    } catch (err) {
-      setIsSubmitting(false);
-      toast.error(err instanceof Error ? err.message : 'Authentication failed. Please log in again.');
-      resetToLogin();
-    }
-  }, [onPassphraseSubmit, isRateLimited, resetToLogin]);
 
-  const handleUseDifferentAccount = useCallback((): void => {
-    dispatchAuthEvent('auth-ui-back', { to: 'server' });
-  }, []);
 
-  if (recoveryActive && showPassphrasePrompt) {
-    return (
-      <div className="w-full max-w-md mx-auto select-none">
-        <Card className="w-full bg-card/30 border border-white/10 hover:border-primary/30 hover:bg-card/50 transition-all duration-500 backdrop-blur-md shadow-lg rounded-2xl overflow-hidden">
-          <CardHeader className="space-y-4 p-8 select-none">
-            <div className="flex-1 flex flex-col items-center gap-4">
-              <div className="w-16 h-16 rounded-full bg-primary/10 flex items-center justify-center" aria-hidden="true">
-                <LockClosedIcon className="h-8 w-8 text-primary" />
-              </div>
-              <CardTitle className="text-2xl text-center select-none">Unlock Vault</CardTitle>
-              <CardDescription className="text-center select-none">
-                Enter your passphrase
-              </CardDescription>
-            </div>
-          </CardHeader>
-          <CardContent className="p-8 pt-0 select-none">
-            <RecoveryPassphrase
-              username={displayUsername}
-              authStatus={authStatus}
-              error={error}
-              onSubmit={handleRecoveryPassphraseSubmit}
-              onUseDifferentAccount={handleUseDifferentAccount}
-            />
-          </CardContent>
-        </Card>
-      </div>
-    );
-  }
+
 
   const handleAccountSubmit = useCallback(async (username: string, password: string): Promise<void> => {
     if (isRateLimited) return;
@@ -376,7 +334,7 @@ export const Login = React.memo<LoginProps>(({
                   initialPassword={initialPassword}
                   onChangePassword={(v) => handleInputChange('password', v)}
                 />
-              ) : showPassphrasePrompt && !recoveryActive ? (
+              ) : showPassphrasePrompt ? (
                 <PassphrasePrompt
                   mode={mode}
                   onSubmit={handlePassphraseSubmit}
