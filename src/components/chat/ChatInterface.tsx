@@ -8,8 +8,7 @@ import { User } from "./UserList";
 import { SignalType } from "@/lib/signal-types.ts";
 import { MessageReply } from "./types";
 import { useTypingIndicator } from "@/hooks/useTypingIndicator";
-import { TypingIndicator } from "./TypingIndicator";
-import { useTypingIndicatorContext } from "@/contexts/TypingIndicatorContext";
+import { TypingIndicatorList } from "./TypingIndicatorList";
 import { resolveDisplayUsername } from "@/lib/unified-username-display";
 import { Video, MoreVertical, ShieldOff } from 'lucide-react';
 import { CallIcon } from './icons';
@@ -132,12 +131,7 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
 
   const { handleLocalTyping, handleConversationChange, resetTypingAfterSend } = useTypingIndicator(currentUsername, selectedConversation, onSendMessage);
 
-  const { typingUsers: allTypingUsers } = useTypingIndicatorContext();
 
-  const typingUsers = useMemo(() => {
-    if (!selectedConversation) return [];
-    return allTypingUsers.filter(username => username === selectedConversation);
-  }, [allTypingUsers, selectedConversation]);
 
   const handleCallLog = useCallback(async (e: Event) => {
     try {
@@ -556,7 +550,16 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
     if (isNearBottom) {
       scrollToBottom(scrollContainer);
     }
-  }, [messages, typingUsers, isLoadingMore, scrollToBottom]);
+  }, [messages, isLoadingMore, scrollToBottom]);
+
+  const handleTypingUpdate = useCallback(() => {
+    const scrollContainer = scrollAreaRef.current?.querySelector('[data-radix-scroll-area-viewport]');
+    if (!scrollContainer) return;
+    const isNearBottom = scrollContainer.scrollHeight - scrollContainer.scrollTop - scrollContainer.clientHeight < 100;
+    if (isNearBottom) {
+      scrollToBottom(scrollContainer);
+    }
+  }, [scrollToBottom]);
 
 
 
@@ -770,14 +773,13 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
               return (
                 <div key={uniqueKey} id={`message-${message.id}`}>
                   <ChatMessage
-                    message={{
-                      ...message,
-                      receipt: receiptToShow,
-                    }}
+                    key={message.id}
+                    message={message}
+                    smartReceipt={receiptToShow}
                     previousMessage={index > 0 ? messages[index - 1] : undefined}
-                    onReply={() => handleReply(message)}
-                    onDelete={() => handleDeleteMessage(message)}
-                    onEdit={() => handleEdit(message)}
+                    onReply={handleReply}
+                    onDelete={handleDeleteMessage}
+                    onEdit={handleEdit}
                     onReact={handleReactToMessage}
                     currentUsername={currentUsername}
                     getDisplayUsername={getDisplayUsernameStable}
@@ -789,17 +791,11 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
           )}
 
           {/* Typing Indicators */}
-          {typingUsers.length > 0 && (
-            <div className="flex flex-col gap-2 mt-2">
-              {typingUsers.map((username) => (
-                <TypingIndicator
-                  key={username}
-                  username={username}
-                  getDisplayUsername={getDisplayUsernameStable}
-                />
-              ))}
-            </div>
-          )}
+          <TypingIndicatorList
+            selectedConversation={selectedConversation}
+            getDisplayUsername={getDisplayUsernameStable}
+            onUpdate={handleTypingUpdate}
+          />
         </div>
       </ScrollArea>
 

@@ -261,6 +261,7 @@ export class TorNetworkManager {
     this.stats.averageLatency = Number.isFinite(this.stats.averageLatency)
       ? this.stats.averageLatency * 0.8 + latency * 0.2
       : latency;
+    this.notifyStatsCallbacks();
   }
 
   async initialize(): Promise<boolean> {
@@ -399,6 +400,7 @@ export class TorNetworkManager {
       if (options.body) {
         this.stats.bytesTransmitted += options.body.length;
       }
+      this.notifyStatsCallbacks();
 
       return result;
     });
@@ -428,6 +430,7 @@ export class TorNetworkManager {
       this.stats.circuitCount += 1;
       this.stats.lastCircuitRotation = now;
       this.lastManualRotation = now;
+      this.notifyStatsCallbacks();
 
       return true;
     } catch (_error) {
@@ -468,6 +471,28 @@ export class TorNetworkManager {
         callback(connected);
       } catch (_error) {
         console.error('[TOR] Error in connection callback:', _error);
+      }
+    });
+    this.notifyStatsCallbacks();
+  }
+
+  private readonly statsCallbacks = new Set<(stats: TorConnectionStats) => void>();
+
+  onStatsChange(callback: (stats: TorConnectionStats) => void): void {
+    this.statsCallbacks.add(callback);
+  }
+
+  offStatsChange(callback: (stats: TorConnectionStats) => void): void {
+    this.statsCallbacks.delete(callback);
+  }
+
+  private notifyStatsCallbacks(): void {
+    const currentStats = this.getStats();
+    this.statsCallbacks.forEach((callback) => {
+      try {
+        callback(currentStats);
+      } catch (_error) {
+        console.error('[TOR] Error in stats callback:', _error);
       }
     });
   }

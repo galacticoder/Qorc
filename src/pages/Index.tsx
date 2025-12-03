@@ -1520,9 +1520,11 @@ const ChatApp: React.FC<ChatAppProps> = () => {
                       const startWidth = conversationPanelWidth;
 
                       const handleMouseMove = (moveEvent: MouseEvent) => {
-                        const delta = moveEvent.clientX - startX;
-                        const newWidth = Math.min(600, Math.max(250, startWidth + delta));
-                        setConversationPanelWidth(newWidth);
+                        requestAnimationFrame(() => {
+                          const delta = moveEvent.clientX - startX;
+                          const newWidth = Math.min(600, Math.max(250, startWidth + delta));
+                          setConversationPanelWidth(newWidth);
+                        });
                       };
 
                       const handleMouseUp = () => {

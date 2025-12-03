@@ -71,10 +71,11 @@ export interface Message {
 
 export interface ChatMessageProps {
   message: Message;
+  smartReceipt?: MessageReceipt;
   onReply?: (message: Message) => void;
   previousMessage?: Message;
   onDelete?: (message: Message) => void;
-  onEdit?: (newContent: string) => void;
+  onEdit?: (message: Message) => void;
   onReact?: (message: Message, emoji: string) => void;
   currentUsername?: string;
   secureDB?: any;

@@ -10,32 +10,21 @@ export function TorIndicator() {
   const [isRotating, setIsRotating] = useState(false);
 
   useEffect(() => {
-    const updateStats = () => setStats(torNetworkManager.getStats());
-    updateStats();
-    const interval = setInterval(updateStats, 3000);
-    return () => clearInterval(interval);
-  }, []);
-
-  useEffect(() => {
-    const handleConnectionChange = () => setStats(torNetworkManager.getStats());
-    torNetworkManager.onConnectionChange(handleConnectionChange);
-
-    // Automatic circuit rotation
-    const rotationIntervalMs = 5 * 60 * 1000; // 5 minutes
-    const rotationInterval = setInterval(async () => {
-      if (torNetworkManager.isConnected()) {
-        setIsRotating(true);
-        await torNetworkManager.rotateCircuit();
+    const handleStatsChange = (newStats: TorConnectionStats) => {
+      setStats(newStats);
+      if (isRotating && newStats.lastCircuitRotation > stats.lastCircuitRotation) {
         setIsRotating(false);
-        setStats(torNetworkManager.getStats());
       }
-    }, rotationIntervalMs);
-
-    return () => {
-      torNetworkManager.offConnectionChange(handleConnectionChange);
-      clearInterval(rotationInterval);
     };
-  }, []);
+
+    // Initial sync
+    setStats(torNetworkManager.getStats());
+
+    torNetworkManager.onStatsChange(handleStatsChange);
+    return () => {
+      torNetworkManager.offStatsChange(handleStatsChange);
+    };
+  }, [isRotating, stats.lastCircuitRotation]);
 
   const handleRotateCircuit = async () => {
     setIsRotating(true);

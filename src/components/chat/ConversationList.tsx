@@ -283,29 +283,29 @@ export const ConversationList = memo<ConversationListProps>(function Conversatio
     }
   }, [newChatUsername, onAddConversation]);
 
-  useEffect(() => {
-    const handler = (e: Event) => {
-      try {
-        const ce = e as CustomEvent;
-        const detail = ce.detail;
-        if (!detail || typeof detail !== 'object') return;
+  const handleCallStatus = useCallback((e: Event) => {
+    try {
+      const ce = e as CustomEvent;
+      const detail = ce.detail;
+      if (!detail || typeof detail !== 'object') return;
 
-        const { peer, status } = detail as { peer?: unknown; status?: unknown };
-        if (typeof peer !== 'string' || typeof status !== 'string') return;
+      const { peer, status } = detail as { peer?: unknown; status?: unknown };
+      if (typeof peer !== 'string' || typeof status !== 'string') return;
 
-        if (status === 'ringing' || status === 'connecting' || status === 'connected') {
-          setActivePeer(peer);
-          setActiveStatus(status as CallStatus);
-        } else {
-          setActivePeer(prev => (prev === peer ? null : prev));
-          setActiveStatus(null);
-        }
-      } catch { }
-    };
-
-    window.addEventListener('ui-call-status', handler as EventListener);
-    return () => window.removeEventListener('ui-call-status', handler as EventListener);
+      if (status === 'ringing' || status === 'connecting' || status === 'connected') {
+        setActivePeer(peer);
+        setActiveStatus(status as CallStatus);
+      } else {
+        setActivePeer(prev => (prev === peer ? null : prev));
+        setActiveStatus(null);
+      }
+    } catch { }
   }, []);
+
+  useEffect(() => {
+    window.addEventListener('ui-call-status', handleCallStatus as EventListener);
+    return () => window.removeEventListener('ui-call-status', handleCallStatus as EventListener);
+  }, [handleCallStatus]);
 
   const formatTime = useCallback((date?: Date): string => {
     if (!date || !(date instanceof Date) || isNaN(date.getTime())) {

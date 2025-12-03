@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState, useCallback, useRef } from 'react';
+import { debounce } from '@/lib/debounce';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -39,6 +40,15 @@ export function ConnectSetup({ onComplete, initialServerUrl = '' }: ConnectSetup
   const [enableBridges, setEnableBridges] = useState(false);
   const [transport, setTransport] = useState<'obfs4' | 'snowflake'>('obfs4');
   const [bridgesText, setBridgesText] = useState('');
+  const bridgesTextRef = useRef('');
+
+  const debouncedSetBridges = useMemo(
+    () => debounce((value: string) => {
+      setBridgesText(value);
+      setEnableBridges(!!value.trim());
+    }, 150),
+    []
+  );
 
   // Prefill defaults on mount
   useEffect(() => {
@@ -75,9 +85,8 @@ export function ConnectSetup({ onComplete, initialServerUrl = '' }: ConnectSetup
   // Prevent background scroll when verification modal open
   useEffect(() => {
     if (!showVerification) return;
-    const prev = document.body.style.overflow;
-    document.body.style.overflow = 'hidden';
-    return () => { document.body.style.overflow = prev; };
+    document.body.classList.add('overflow-hidden');
+    return () => document.body.classList.remove('overflow-hidden');
   }, [showVerification]);
 
   const normalizeToWss = (value: string): string => {
@@ -345,7 +354,9 @@ export function ConnectSetup({ onComplete, initialServerUrl = '' }: ConnectSetup
                   {showAdvanced ? <ChevronUp className="w-3.5 h-3.5 ml-auto" /> : <ChevronDown className="w-3.5 h-3.5 ml-auto" />}
                 </Button>
               </CollapsibleTrigger>
-              <CollapsibleContent className="overflow-hidden transition-all duration-300 ease-in-out data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:animate-in data-[state=open]:fade-in-0">
+              <CollapsibleContent
+                className="overflow-hidden transition-all duration-200 ease-in-out data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:animate-in data-[state=open]:fade-in-0"
+              >
                 <div className="space-y-4 pt-4">
                   {/* Bridge Transport Selection */}
                   <div className="space-y-2">
@@ -369,16 +380,11 @@ export function ConnectSetup({ onComplete, initialServerUrl = '' }: ConnectSetup
                     <Textarea
                       id="bridges"
                       placeholder="Paste bridge lines here..."
-                      value={bridgesText}
                       onChange={(e) => {
-                        setBridgesText(e.target.value);
-                        // Auto-enable bridges when user enters bridge lines
-                        if (e.target.value.trim() && !enableBridges) {
-                          setEnableBridges(true);
-                        } else if (!e.target.value.trim() && enableBridges) {
-                          setEnableBridges(false);
-                        }
+                        bridgesTextRef.current = e.target.value;
+                        debouncedSetBridges(e.target.value);
                       }}
+                      defaultValue={bridgesText}
                       className="min-h-[100px] text-sm font-mono resize-none bg-background border-input focus:border-primary/50 focus:ring-2 focus:ring-primary/20 transition-all rounded-lg"
                     />
                   </div>

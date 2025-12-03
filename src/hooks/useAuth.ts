@@ -133,19 +133,17 @@ export const useAuth = (_secureDB?: SecureDB) => {
       setAuthStatus('');
       setIsGeneratingKeys(false);
 
-      // Start countdown timer
       const rateLimitUntil = event.detail?.rateLimitUntil;
       if (rateLimitUntil) {
-        // Clear any existing interval
         if (countdownInterval) {
           clearInterval(countdownInterval);
         }
 
-        // Update immediately and every second
         const updateCountdown = () => {
           const remaining = Math.max(0, Math.ceil((rateLimitUntil - Date.now()) / 1000));
           if (remaining > 0) {
             setLoginError(`Too many attempts. Try again in ${remaining}s.`);
+            setTimeout(updateCountdown, 1000 - (Date.now() % 1000));
           } else {
             setLoginError('');
             if (countdownInterval) {
@@ -156,7 +154,6 @@ export const useAuth = (_secureDB?: SecureDB) => {
         };
 
         updateCountdown();
-        countdownInterval = setInterval(updateCountdown, 1000);
       }
 
       console.log('[useAuth] States reset complete');
@@ -327,6 +324,8 @@ export const useAuth = (_secureDB?: SecureDB) => {
         throw new Error("Username not available");
       }
 
+      await new Promise(resolve => setTimeout(resolve, 0));
+
       if (!keyManagerRef.current || keyManagerOwnerRef.current !== currentUsername) {
         try {
           if (keyManagerRef.current) {
@@ -344,10 +343,14 @@ export const useAuth = (_secureDB?: SecureDB) => {
         }
       }
 
+      await new Promise(resolve => setTimeout(resolve, 0));
+
       let hasExistingKeys = await keyManagerRef.current.hasKeys();
 
       if (hasExistingKeys) {
         setAuthStatus("Loading keys...");
+
+        await new Promise(resolve => setTimeout(resolve, 0));
 
         let meta: { salt?: string; argon2Params?: any } | null = null;
         try {
@@ -415,7 +418,12 @@ export const useAuth = (_secureDB?: SecureDB) => {
           throw new Error('Recovery mode: no existing keys');
         }
         setAuthStatus("Generating keys...");
+
+        await new Promise(resolve => setTimeout(resolve, 0));
+
         const hybridKeyPair = await CryptoUtils.Hybrid.generateHybridKeyPair();
+
+        await new Promise(resolve => setTimeout(resolve, 0));
 
         setAuthStatus("Securing...");
         if (providedSalt && providedArgon2Params) {

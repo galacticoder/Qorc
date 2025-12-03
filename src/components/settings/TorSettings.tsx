@@ -24,23 +24,18 @@ export function TorSettings() {
   const [error, setError] = useState<string>('');
 
   useEffect(() => {
-    const updateStats = () => setStats(torNetworkManager.getStats());
-    updateStats();
-    const interval = setInterval(updateStats, 5000);
-    return () => clearInterval(interval);
-  }, []);
-
-  useEffect(() => {
-    const handleConnectionChange = (connected: boolean) => {
-      setStats(torNetworkManager.getStats());
-      if (!connected && config.enabled) {
+    const handleStatsChange = (newStats: TorConnectionStats) => {
+      setStats(newStats);
+      if (!newStats.isConnected && config.enabled) {
         setError('Lost connection to Tor network');
       } else {
         setError('');
       }
     };
-    torNetworkManager.onConnectionChange(handleConnectionChange);
-    return () => torNetworkManager.offConnectionChange(handleConnectionChange);
+
+    setStats(torNetworkManager.getStats());
+    torNetworkManager.onStatsChange(handleStatsChange);
+    return () => torNetworkManager.offStatsChange(handleStatsChange);
   }, [config.enabled]);
 
   const handleConfigChange = (key: keyof TorConfig, value: any) => setConfig(prev => ({ ...prev, [key]: value }));

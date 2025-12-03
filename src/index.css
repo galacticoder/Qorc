@@ -223,6 +223,10 @@
     color: hsl(var(--foreground));
     font-feature-settings: "rlig" 1, "calt" 1;
   }
+
+  body.overflow-hidden {
+    overflow: hidden;
+  }
 }
 
 @layer utilities {

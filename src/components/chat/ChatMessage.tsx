@@ -91,8 +91,9 @@ const formatTimestamp = (timestamp: Date): string => {
   }
 };
 
-export const ChatMessage = React.memo<ExtendedChatMessageProps>(({ message, onReply, previousMessage, onDelete, onEdit, onReact, getDisplayUsername, currentUsername, secureDB }) => {
+export const ChatMessage = React.memo<ExtendedChatMessageProps>(({ message, smartReceipt, onReply, previousMessage, onDelete, onEdit, onReact, getDisplayUsername, currentUsername, secureDB }) => {
   const { content, sender, timestamp, isCurrentUser, isSystemMessage, isDeleted, type } = message;
+  const effectiveReceipt = smartReceipt || message.receipt;
 
   const senderKey = useMemo(() => sender, [sender]);
   const { displayName: displaySender } = useUnifiedUsernameDisplay({
@@ -182,8 +183,8 @@ export const ChatMessage = React.memo<ExtendedChatMessageProps>(({ message, onRe
   }, [onDelete, message]);
 
   const handleEdit = useCallback(() => {
-    onEdit?.(message.content);
-  }, [onEdit, message.content]);
+    onEdit?.(message);
+  }, [onEdit, message]);
 
   const handleTogglePicker = useCallback((e: React.MouseEvent) => {
     e.stopPropagation();
@@ -511,7 +512,7 @@ export const ChatMessage = React.memo<ExtendedChatMessageProps>(({ message, onRe
         )}
 
         <MessageReceipt
-          receipt={message.receipt}
+          receipt={effectiveReceipt}
           isCurrentUser={safeIsCurrentUser}
           className="mt-1"
         />

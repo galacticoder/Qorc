@@ -237,12 +237,10 @@ export const useWebSocket = (
 
         // Decrypt pq-envelope using the client's session keys
         if (data.type === 'pq-envelope') {
-          await new Promise(resolve => setTimeout(resolve, 0));
           const decrypted = await websocketClient.decryptIncomingEnvelope(data);
           if (!decrypted) {
             return;
           }
-
 
           const inner = sanitizeIncomingMessage(decrypted, allowedTypes, schemas);
           if (!inner) {
@@ -266,7 +264,6 @@ export const useWebSocket = (
             return;
           }
 
-          await new Promise(resolve => setTimeout(resolve, 0));
           await routeMessage(inner);
           return;
         }
