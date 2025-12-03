@@ -32,6 +32,7 @@ function showHelp() {
     console.log('  node scripts/start-docker.cjs stop <service>      - Stop specific service (server, loadbalancer, postgres)');
     console.log('  node scripts/start-docker.cjs stop all            - Stop all services');
     console.log('  node scripts/start-docker.cjs delete <service>    - Stop, remove containers, and delete images (server, loadbalancer, redis, postgres)');
+    console.log('  node scripts/start-docker.cjs reset               - Stop all services and remove volumes');
     console.log('  node scripts/start-docker.cjs logs [service]      - View logs');
     console.log('');
     process.exit(0);
@@ -242,6 +243,18 @@ async function main() {
             const service = flags[0] || '';
             console.log(`[INFO] Viewing logs${service ? ` for ${service}` : ''}...`);
             execSync(`docker compose --env-file .env -f docker/docker-compose.yml logs -f ${service}`, { cwd: repoRoot, stdio: 'inherit' });
+            process.exit(0);
+        }
+
+        if (command === 'reset') {
+            console.log('[INFO] Stopping containers and removing volumes...');
+            try {
+                execSync('docker compose -f docker/docker-compose.yml down -v', { cwd: repoRoot, stdio: 'inherit' });
+                console.log('[SUCCESS] Reset complete.');
+            } catch (error) {
+                console.error('[ERROR] Failed to reset:', error.message);
+                process.exit(1);
+            }
             process.exit(0);
         }
 
