@@ -1403,6 +1403,9 @@ class WebSocketClient {
 
   public async performHandshake(force: boolean): Promise<void> {
     if (!force && this.handshakeInFlight) {
+      if (this.handshakePromise) {
+        await this.handshakePromise;
+      }
       return;
     }
 

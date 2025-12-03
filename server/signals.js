@@ -11,6 +11,10 @@ export const SignalType = {
   AUTH_RECOVERY: "auth-recovery",
   TOKEN_VALIDATION: "token-validation",
   TOKEN_VALIDATION_RESPONSE: "token-validation-response",
+  DEVICE_CHALLENGE_REQUEST: 'device-challenge-request',
+  DEVICE_CHALLENGE: 'device-challenge',
+  DEVICE_ATTESTATION: 'device-attestation',
+  DEVICE_ATTESTATION_ACK: 'device-attestation-ack',
   REGISTER: "register",
 
   //messaging

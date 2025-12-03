@@ -35,10 +35,20 @@ Cryptography on the server is layered as follows:
 
 1. **TLS termination (HAProxy + OpenSSL/OQS)** – TLS 1.3 with hybrid PQ key exchange.
 2. **WebSocket PQ transport** – a ML‑KEM‑1024 + X25519 hybrid handshake derives per-session AEAD keys.
-3. **Application-level hybrid envelopes** – ML‑KEM‑1024 ⊕ X25519 envelopes with Dilithium signatures, shared with the client.
-4. **Token and authentication crypto** – ML‑DSA‑87–signed tokens, Argon2id-based password and KEK derivation, device proof using Ed25519.
+3. **Application-level hybrid envelopes** – ML‑KEM‑1024 + X25519 envelopes with Dilithium signatures, shared with the client.
+4. **Token and authentication crypto** – ML‑DSA‑87–signed tokens, Argon2id-based password and KEK derivation, device proof using Ed25519, device attestation using ML-DSA-87.
 5. **Database and field-level encryption** – PostQuantumAEAD (AES‑GCM + XChaCha20‑Poly1305 + BLAKE3 MAC) with keys from BLAKE3-HKDF/QuantumHKDF.
 6. **Redis PQ session storage** – PQ AEAD-encrypted session keys using a dedicated `SESSION_STORE_KEY`.
+
+
+### 1.3 Device Attestation
+
+Account creation is limited to 2 accounts per device using ML-DSA-87 signatures:
+
+1. **Device keypair**: Generated on first use with hardware entropy, stored in machine-bound secure storage.
+2. **Challenge flow**: Server generates PostQuantumRandom nonce, client signs with ML-DSA-87 private key.
+3. **Privacy**: Server stores only BLAKE3 hash of device public key + account count. No linkage between specific accounts and device identity.
+4. **Enforcement**: Server-side verification prevents client bypass. Signature must be valid before account creation proceeds.
 
 
 ---
@@ -655,7 +665,7 @@ The OpenSSL configuration enables the Open Quantum Safe provider:
 
 Summarizing the server-side design:
 
-- All critical network paths (authentication, messaging, token issuance) use hybrid ML‑KEM‑1024 ⊕ X25519 key exchange with ML‑DSA‑87 signatures and BLAKE3 MACs.
+- All critical network paths (authentication, messaging, token issuance) use hybrid ML‑KEM‑1024 + X25519 key exchange with ML‑DSA‑87 signatures and BLAKE3 MACs.
 - Sensitive fields in Postgres (user/device identifiers, Signal identity and pre-keys) are encrypted at rest using PostQuantumAEAD with keys derived from high-entropy, installation-specific secrets.
 - Passwords and passphrases are always hashed on the client with Argon2id; the server enforces minimum parameters and never stores plaintext.
 - Token verification requires both a ML‑DSA‑87 signature and a BLAKE3 MAC over a key commitment; tokens and refresh identifiers are hashed before storage.

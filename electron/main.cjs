@@ -9,24 +9,23 @@ if (typeof global.crypto === 'undefined') {
 
 const { app, BrowserWindow, ipcMain, desktopCapturer, dialog, shell, powerSaveBlocker } = require('electron');
 
-// Ensure fatal errors are visible even without a window
 process.on('unhandledRejection', (reason) => {
-  try { console.error('[MAIN] UnhandledRejection:', reason?.message || String(reason)); } catch (_) {}
-  try { dialog.showErrorBox('Unhandled Error', String(reason?.message || reason || 'Unknown')); } catch (_) {}
-  try { app.exit(1); } catch (_) { try { process.exit(1); } catch (_) {} }
+  try { console.error('[MAIN] UnhandledRejection:', reason?.message || String(reason)); } catch (_) { }
+  try { dialog.showErrorBox('Unhandled Error', String(reason?.message || reason || 'Unknown')); } catch (_) { }
+  try { app.exit(1); } catch (_) { try { process.exit(1); } catch (_) { } }
 });
 process.on('uncaughtException', (err) => {
-  try { console.error('[MAIN] UncaughtException:', err?.message || String(err)); } catch (_) {}
-  try { dialog.showErrorBox('Uncaught Exception', String(err?.message || err || 'Unknown')); } catch (_) {}
-  try { app.exit(1); } catch (_) { try { process.exit(1); } catch (_) {} }
+  try { console.error('[MAIN] UncaughtException:', err?.message || String(err)); } catch (_) { }
+  try { dialog.showErrorBox('Uncaught Exception', String(err?.message || err || 'Unknown')); } catch (_) { }
+  try { app.exit(1); } catch (_) { try { process.exit(1); } catch (_) { } }
 });
 
 function fatalExit(message) {
   const msg = String(message || 'Fatal error');
-  try { console.error('[MAIN] FATAL:', msg); } catch (_) {}
-  try { process.stderr.write(msg + '\n'); } catch (_) {}
-  try { dialog.showErrorBox('Application Error', msg); } catch (_) {}
-  try { app.exit(1); } catch (_) { try { process.exit(1); } catch (_) {} }
+  try { console.error('[MAIN] FATAL:', msg); } catch (_) { }
+  try { process.stderr.write(msg + '\n'); } catch (_) { }
+  try { dialog.showErrorBox('Application Error', msg); } catch (_) { }
+  try { app.exit(1); } catch (_) { try { process.exit(1); } catch (_) { } }
 }
 const path = require('path');
 const fs = require('fs').promises;
@@ -34,6 +33,7 @@ const crypto = require('crypto');
 
 app.disableHardwareAcceleration();
 
+const { initDeviceCredentials } = require('./handlers/device-credentials.cjs');
 const { SecurityMiddleware } = require('./handlers/security-middleware.cjs');
 const { StorageHandler } = require('./handlers/storage-handler.cjs');
 const { WebSocketHandler } = require('./handlers/websocket-handler.cjs');
@@ -76,7 +76,7 @@ async function verifyLibsignalNativeAvailability() {
       const mod = await import('@signalapp/libsignal-client');
       native = mod?.default ?? mod;
     } finally {
-      try { if (process.cwd() !== prevCwd) process.chdir(prevCwd); } catch (_) {}
+      try { if (process.cwd() !== prevCwd) process.chdir(prevCwd); } catch (_) { }
     }
 
     if (!native || !native.IdentityKeyPair || typeof native.IdentityKeyPair.generate !== 'function') {
@@ -152,7 +152,7 @@ async function initializeHandlers() {
     }
 
     websocketHandler = new WebSocketHandler(securityMiddleware);
-    
+
     try {
       let connectHostOverride = null;
       try {
@@ -172,7 +172,7 @@ async function initializeHandlers() {
             break;
           }
         }
-      } catch (_) {}
+      } catch (_) { }
       if (connectHostOverride && (connectHostOverride === '127.0.0.1' || connectHostOverride === 'localhost' || connectHostOverride === '::1')) {
         websocketHandler.setConnectHost(connectHostOverride);
       }
@@ -189,7 +189,7 @@ async function initializeHandlers() {
           privateKeyPem: devicePrivPem,
         });
       }
-    } catch (_) {}
+    } catch (_) { }
 
     const defaultWsUrl = process.env.VITE_WS_URL || 'wss://localhost:8443';
     const wsInit = await websocketHandler.initialize({
@@ -217,11 +217,14 @@ async function initializeHandlers() {
       throw new Error('libsignal-client verification failed');
     }
 
+    const installPath = app.getPath('userData');
+    initDeviceCredentials({ logger: console, installPath });
+
     return true;
   } catch (error) {
     const msg = String(error?.message || 'Initialization failed');
     console.error('[MAIN] Critical initialization failure:', msg);
-    try { dialog.showErrorBox('Critical Initialization Failure', msg); } catch (_) {}
+    try { dialog.showErrorBox('Critical Initialization Failure', msg); } catch (_) { }
     return false;
   }
 }
@@ -239,7 +242,7 @@ async function createWindow() {
     webSecurity: true,
     webgl: false
   };
-  
+
   mainWindow = new BrowserWindow({
     width: 1200,
     height: 800,
@@ -249,36 +252,36 @@ async function createWindow() {
     show: false,
     backgroundThrottling: false
   });
-  
+
   try {
     await loadApp();
   } catch (error) {
     mainWindow.loadURL(`data:text/plain;charset=utf-8,Failed to load application`);
   }
-  
+
   const showWindow = () => {
     if (!mainWindow || mainWindow.isDestroyed()) return;
     mainWindow.show();
   };
-  
+
   mainWindow.once('ready-to-show', showWindow);
   const fallbackTimer = setTimeout(showWindow, 3000);
   mainWindow.once('show', () => clearTimeout(fallbackTimer));
-  
-  
+
+
   mainWindow.on('close', async () => {
     if (torManager?.isTorRunning()) {
       await torManager.stopTor();
     }
   });
-  
+
   mainWindow.on('closed', () => {
     mainWindow = null;
     if (process.platform !== 'darwin') {
-      try { app.quit(); } catch (_) {}
+      try { app.quit(); } catch (_) { }
     }
   });
-  
+
   setupSecurityPolicies();
 }
 
@@ -298,7 +301,7 @@ function setupSecurityPolicies() {
     contents.session.webRequest.onHeadersReceived((details, callback) => {
       const responseHeaders = details.responseHeaders;
       const nonce = crypto.randomBytes(16).toString('base64');
-      
+
       const cspPolicy = [
         "default-src 'self'; " +
         `script-src 'self' 'nonce-${nonce}'; ` +
@@ -312,7 +315,7 @@ function setupSecurityPolicies() {
         "frame-ancestors 'none'; " +
         "upgrade-insecure-requests;"
       ];
-      
+
       responseHeaders['content-security-policy'] = cspPolicy;
       responseHeaders['x-frame-options'] = ['DENY'];
       responseHeaders['x-content-type-options'] = ['nosniff'];
@@ -320,44 +323,44 @@ function setupSecurityPolicies() {
       responseHeaders['referrer-policy'] = ['strict-origin-when-cross-origin'];
       responseHeaders['strict-transport-security'] = ['max-age=31536000; includeSubDomains'];
       responseHeaders['permissions-policy'] = ['camera=(), microphone=(), geolocation=(), payment=()'];
-      
+
       callback({ responseHeaders });
     });
-    
+
     contents.session.setPermissionRequestHandler((_webContents, permission, callback) => {
       const allowed = ['media', 'microphone', 'camera', 'display-capture'];
       callback(allowed.includes(permission));
     });
-    
+
     contents.session.setPermissionCheckHandler((_webContents, permission) => {
       const allowed = ['media', 'microphone', 'camera', 'display-capture'];
       return allowed.includes(permission);
     });
-    
+
     contents.on('will-navigate', (e, targetUrl) => {
       try {
         const currentUrlStr = contents.getURL();
         const target = new URL(targetUrl);
-        
+
         if (target.protocol === 'file:' || target.protocol === 'blob:') {
           return;
         }
-        
+
         if (currentUrlStr) {
           const current = new URL(currentUrlStr);
           if (current.origin === target.origin) {
             return;
           }
         }
-        
+
         e.preventDefault();
       } catch (_) {
         e.preventDefault();
       }
     });
-    
+
     contents.setWindowOpenHandler(({ url }) => {
-      shell.openExternal(url).catch(() => {});
+      shell.openExternal(url).catch(() => { });
       return { action: 'deny' };
     });
   });
@@ -371,7 +374,7 @@ function registerIPCHandlers() {
       return null;
     }
   });
-  
+
   ipcMain.handle('system:platform', () => ({
     platform: process.platform,
     arch: process.arch,
@@ -380,32 +383,32 @@ function registerIPCHandlers() {
 
   ipcMain.handle('app:version', () => app.getVersion());
   ipcMain.handle('app:name', () => app.getName());
-  
+
   ipcMain.handle('secure:init', async () => {
     return storageHandler ? { success: true } : { success: false };
   });
-  
+
   ipcMain.handle('secure:set', async (_evt, key, value) => {
     if (!storageHandler) {
       return { success: false, error: 'Storage not initialized' };
     }
     return await storageHandler.setItem(key, value);
   });
-  
+
   ipcMain.handle('secure:get', async (_evt, key) => {
     if (!storageHandler) {
       return { success: false, error: 'Storage not initialized' };
     }
     return await storageHandler.getItem(key);
   });
-  
+
   ipcMain.handle('secure:remove', async (_evt, key) => {
     if (!storageHandler) {
       return { success: false, error: 'Storage not initialized' };
     }
     return await storageHandler.removeItem(key);
   });
-  
+
   ipcMain.handle('tor:start', async () => {
     try {
       return await torManager.startTor();
@@ -413,7 +416,7 @@ function registerIPCHandlers() {
       return { success: false, error: error.message };
     }
   });
-  
+
   ipcMain.handle('tor:stop', async () => {
     try {
       return await torManager.stopTor();
@@ -421,7 +424,7 @@ function registerIPCHandlers() {
       return { success: false, error: error.message };
     }
   });
-  
+
   ipcMain.handle('tor:status', async () => {
     try {
       return await torManager.getTorStatus();
@@ -429,7 +432,7 @@ function registerIPCHandlers() {
       return { success: false, error: error.message };
     }
   });
-  
+
   ipcMain.handle('tor:test-connection', async () => {
     try {
       return await torManager.verifyTorConnection();
@@ -437,7 +440,7 @@ function registerIPCHandlers() {
       return { success: false, error: error.message };
     }
   });
-  
+
   ipcMain.handle('tor:new-circuit', async () => {
     try {
       return await torManager.rotateCircuit();
@@ -453,7 +456,7 @@ function registerIPCHandlers() {
       return { success: false, error: error.message };
     }
   });
-  
+
   ipcMain.handle('tor:check-installation', async () => {
     try {
       return await torManager.checkTorInstallation();
@@ -461,7 +464,7 @@ function registerIPCHandlers() {
       return { isInstalled: false, error: error.message };
     }
   });
-  
+
   ipcMain.handle('tor:download', async () => {
     try {
       return await torManager.downloadTor();
@@ -469,7 +472,7 @@ function registerIPCHandlers() {
       return { success: false, error: error.message };
     }
   });
-  
+
   ipcMain.handle('tor:install', async () => {
     try {
       return await torManager.installTor();
@@ -477,7 +480,7 @@ function registerIPCHandlers() {
       return { success: false, error: error.message };
     }
   });
-  
+
   ipcMain.handle('tor:configure', async (_event, options) => {
     setImmediate(async () => {
       try {
@@ -491,10 +494,10 @@ function registerIPCHandlers() {
         }
       }
     });
-    
+
     return { success: true, pending: true };
   });
-  
+
   ipcMain.handle('tor:uninstall', async () => {
     try {
       return await torManager.uninstallTor();
@@ -502,7 +505,7 @@ function registerIPCHandlers() {
       return { success: false, error: error.message };
     }
   });
-  
+
   ipcMain.handle('tor:cleanup-corrupted', async () => {
     try {
       return await torManager.cleanupCorruptedTor();
@@ -510,7 +513,7 @@ function registerIPCHandlers() {
       return { success: false, error: error.message };
     }
   });
-  
+
   ipcMain.handle('tor:info', async () => {
     try {
       return await torManager.getTorInfo();
@@ -518,7 +521,7 @@ function registerIPCHandlers() {
       return { error: error.message };
     }
   });
-  
+
   ipcMain.handle('tor:get-info', async () => {
     try {
       return await torManager.getTorInfo();
@@ -526,14 +529,14 @@ function registerIPCHandlers() {
       return { error: error.message };
     }
   });
-  
+
   ipcMain.handle('tor:setup-complete', async () => {
     if (websocketHandler) {
       websocketHandler.setTorReady(true);
     }
     return { success: true };
   });
-  
+
   ipcMain.handle('tor:verify-connection', async () => {
     try {
       return await torManager.verifyTorConnection();
@@ -541,7 +544,7 @@ function registerIPCHandlers() {
       return { success: false, error: error.message };
     }
   });
-  
+
   ipcMain.handle('tor:get-ws-url', async (_event, url) => {
     try {
       return { success: true, url };
@@ -549,7 +552,7 @@ function registerIPCHandlers() {
       return { success: false, error: error.message };
     }
   });
-  
+
   ipcMain.handle('tor:initialize', async (_event, config) => {
     try {
       const status = await torManager.getTorStatus();
@@ -562,12 +565,12 @@ function registerIPCHandlers() {
         } catch (e) {
           try {
             console.error('[MAIN] Failed to set WebSocket Tor readiness:', e && e.message ? e.message : e);
-          } catch (_) {}
+          } catch (_) { }
         }
       }
 
-      return { 
-        success: true, 
+      return {
+        success: true,
         bootstrapped,
         socksPort: torManager.effectiveSocksPort || 9150,
         controlPort: torManager.effectiveControlPort || 9151
@@ -576,7 +579,7 @@ function registerIPCHandlers() {
       return { success: false, error: error.message };
     }
   });
-  
+
   ipcMain.handle('edge:ws-connect', async () => {
     if (!websocketHandler) return { success: false, error: 'WebSocket handler not initialized' };
     return await websocketHandler.connect();
@@ -586,7 +589,7 @@ function registerIPCHandlers() {
     if (!websocketHandler) return { success: false, error: 'WebSocket handler not initialized' };
     return await websocketHandler.disconnect();
   });
-  
+
   ipcMain.handle('edge:ws-send', async (_event, payload) => {
     if (!websocketHandler) return { success: false, error: 'WebSocket handler not initialized' };
     return await websocketHandler.send(payload);
@@ -627,7 +630,7 @@ function registerIPCHandlers() {
           });
         });
         req.on('error', reject);
-        req.on('timeout', () => { try { req.destroy(new Error('timeout')); } catch {} });
+        req.on('timeout', () => { try { req.destroy(new Error('timeout')); } catch { } });
         req.write(data);
         req.end();
       });
@@ -667,12 +670,12 @@ function registerIPCHandlers() {
       return { success: false, error: e?.message || String(e) };
     }
   });
-  
+
   ipcMain.handle('edge:set-server-url', async (_event, url) => {
     if (!websocketHandler) return { success: false, error: 'WebSocket handler not initialized' };
     return await websocketHandler.setServerUrl(url);
   });
-  
+
   ipcMain.handle('edge:get-server-url', async () => {
     if (!websocketHandler) return { success: false, serverUrl: null };
     return { success: true, serverUrl: websocketHandler.serverUrl };
@@ -682,22 +685,22 @@ function registerIPCHandlers() {
     if (!websocketHandler) return { success: false, error: 'WebSocket handler not initialized' };
     return await websocketHandler.probeConnect(url, typeof timeoutMs === 'number' ? timeoutMs : 12000);
   });
-  
+
   ipcMain.handle('signal-v2:generate-identity', async (_event, { username }) => {
     if (!signalHandlerV2) return { success: false, error: 'Signal V2 handler not initialized' };
     return await signalHandlerV2.generateIdentity(username);
   });
-  
+
   ipcMain.handle('signal-v2:generate-prekeys', async (_event, { username, startId, count }) => {
     if (!signalHandlerV2) return { success: false, error: 'Signal V2 handler not initialized' };
     return await signalHandlerV2.generatePreKeys(username, startId || 1, count || 100);
   });
-  
+
   ipcMain.handle('signal-v2:generate-signed-prekey', async (_event, { username, keyId }) => {
     if (!signalHandlerV2) return { success: false, error: 'Signal V2 handler not initialized' };
     return await signalHandlerV2.generateSignedPreKey(username, keyId || 1);
   });
-  
+
   ipcMain.handle('signal-v2:create-prekey-bundle', async (_event, args) => {
     if (!signalHandlerV2) return { success: false, error: 'Signal V2 handler not initialized' };
     const { username } = args || {};
@@ -710,17 +713,17 @@ function registerIPCHandlers() {
       return { success: false, error: error.message };
     }
   });
-  
+
   ipcMain.handle('signal-v2:process-prekey-bundle', async (_event, { selfUsername, peerUsername, bundle }) => {
     if (!signalHandlerV2) return { success: false, error: 'Signal V2 handler not initialized' };
     return await signalHandlerV2.processPreKeyBundle(selfUsername, peerUsername, bundle);
   });
-  
+
   ipcMain.handle('signal-v2:has-session', async (_event, { selfUsername, peerUsername, deviceId }) => {
     if (!signalHandlerV2) return { success: false, error: 'Signal V2 handler not initialized' };
     return await signalHandlerV2.hasSession(selfUsername, peerUsername, deviceId);
   });
-  
+
   ipcMain.handle('signal-v2:encrypt', async (_event, args) => {
     if (!signalHandlerV2) return { success: false, error: 'Signal V2 handler not initialized' };
     try {
@@ -730,22 +733,22 @@ function registerIPCHandlers() {
       return { success: false, error: e?.message || String(e) };
     }
   });
-  
+
   ipcMain.handle('signal-v2:decrypt', async (_event, { fromUsername, toUsername, encryptedData }) => {
     if (!signalHandlerV2) return { success: false, error: 'Signal V2 handler not initialized' };
     return await signalHandlerV2.decrypt(fromUsername, toUsername, encryptedData);
   });
-  
+
   ipcMain.handle('signal-v2:delete-session', async (_event, { selfUsername, peerUsername, deviceId }) => {
     if (!signalHandlerV2) return { success: false, error: 'Signal V2 handler not initialized' };
     return await signalHandlerV2.deleteSession(selfUsername, peerUsername, deviceId);
   });
-  
+
   ipcMain.handle('signal-v2:delete-all-sessions', async (_event, { selfUsername, peerUsername }) => {
     if (!signalHandlerV2) return { success: false, error: 'Signal V2 handler not initialized' };
     return await signalHandlerV2.deleteAllSessions(selfUsername, peerUsername);
   });
-  
+
   ipcMain.handle('signal-v2:set-storage-key', async (_event, { keyBase64 }) => {
     try {
       const storage = require('./handlers/signal-storage.cjs');
@@ -764,7 +767,7 @@ function registerIPCHandlers() {
       return { success: false, error: e?.message || String(e) };
     }
   });
-  
+
   ipcMain.handle('signal-v2:trust-peer-identity', async (_event, { selfUsername, peerUsername, deviceId }) => {
     if (!signalHandlerV2) return { success: false, error: 'Signal V2 handler not initialized' };
     try {
@@ -787,16 +790,16 @@ function registerIPCHandlers() {
         thumbnailSize: { width: 300, height: 300 },
         fetchWindowIcons: process.platform === 'win32'
       };
-      
+
       const sources = await desktopCapturer.getSources(options);
       const validSources = sources.filter(s => s.id && s.name !== undefined);
-      
+
       return validSources;
     } catch (error) {
       throw error;
     }
   });
-  
+
   ipcMain.handle('power:psb-start', () => {
     try {
       if (powerSaveBlockerId !== null && powerSaveBlocker.isStarted(powerSaveBlockerId)) {
@@ -808,7 +811,7 @@ function registerIPCHandlers() {
       return { success: false, error: e.message };
     }
   });
-  
+
   ipcMain.handle('power:psb-stop', () => {
     try {
       if (powerSaveBlockerId !== null && powerSaveBlocker.isStarted(powerSaveBlockerId)) {
@@ -820,100 +823,100 @@ function registerIPCHandlers() {
       return { success: false, error: e.message };
     }
   });
-  
+
   ipcMain.handle('file:save', async (_event, { filename, data, mimeType }) => {
     try {
       if (!fileHandler) {
         return { success: false, error: 'File handler not initialized' };
       }
-      
+
       if (!filename || !data) {
         throw new Error('Missing filename or data');
       }
-      
+
       const downloadPath = app.getPath('downloads');
       const savePath = path.join(downloadPath, filename);
       const buffer = Buffer.from(data, 'base64');
       const result = await fileHandler.writeFile(savePath, buffer, { encoding: null });
-      
+
       return { success: true, path: savePath };
     } catch (error) {
       return { success: false, error: error.message };
     }
   });
-  
+
   ipcMain.handle('file:get-download-settings', () => {
     return {
       downloadPath: app.getPath('downloads'),
       autoSave: true
     };
   });
-  
+
   ipcMain.handle('file:set-download-path', async (_event, newPath) => {
     try {
       if (!newPath || typeof newPath !== 'string') {
         return { success: false, error: 'Path must be a non-empty string' };
       }
-      
+
       if (!path.isAbsolute(newPath)) {
         return { success: false, error: 'Path must be absolute' };
       }
-      
+
       if (newPath.includes('\0')) {
         return { success: false, error: 'Path contains null bytes' };
       }
-      
+
       if (fileHandler) {
         await fileHandler.validatePath(newPath);
       }
-      
+
       return { success: true };
     } catch (error) {
       return { success: false, error: error.message };
     }
   });
-  
+
   ipcMain.handle('file:set-auto-save', (_event, autoSave) => {
     return { success: true };
   });
-  
+
   ipcMain.handle('file:choose-download-path', async () => {
     try {
       const result = await dialog.showOpenDialog(mainWindow, {
         properties: ['openDirectory'],
         defaultPath: app.getPath('downloads')
       });
-      
+
       if (result.canceled) {
         return { success: false, canceled: true };
       }
-      
+
       return { success: true, path: result.filePaths[0] };
     } catch (error) {
       return { success: false, error: error.message };
     }
   });
-  
+
   ipcMain.handle('link:fetch-preview', async (_event, url, options = {}) => {
     try {
       if (!url || typeof url !== 'string') {
         throw new Error('Invalid URL');
       }
-      
+
       const parsedUrl = new URL(url);
       if (!['http:', 'https:'].includes(parsedUrl.protocol)) {
         throw new Error('Only HTTP/HTTPS URLs allowed');
       }
-      
+
       const timeout = Math.min(options.timeout || 10000, 30000);
-      
+
       return await new Promise((resolve, reject) => {
         const https = require('https');
         const req = https.get(url, { timeout }, (res) => {
           if (res.statusCode !== 200) {
             return resolve({ url, error: `HTTP ${res.statusCode}` });
           }
-          
+
           let data = '';
           res.on('data', (chunk) => {
             data += chunk;
@@ -922,13 +925,13 @@ function registerIPCHandlers() {
               resolve({ url, error: 'Response too large' });
             }
           });
-          
+
           res.on('end', () => {
             const titleMatch = data.match(/<title[^>]*>([^<]+)<\/title>/i);
             const descMatch = data.match(/<meta[^>]*name=["']description["'][^>]*content=["']([^"']+)["']/i);
             const ogTitleMatch = data.match(/<meta[^>]*property=["']og:title["'][^>]*content=["']([^"']+)["']/i);
             const ogDescMatch = data.match(/<meta[^>]*property=["']og:description["'][^>]*content=["']([^"']+)["']/i);
-            
+
             resolve({
               url,
               title: ogTitleMatch?.[1] || titleMatch?.[1] || parsedUrl.hostname,
@@ -937,7 +940,7 @@ function registerIPCHandlers() {
             });
           });
         });
-        
+
         req.on('error', (error) => resolve({ url, error: error.message }));
         req.on('timeout', () => { req.destroy(); resolve({ url, error: 'Timeout' }); });
       });
@@ -945,21 +948,21 @@ function registerIPCHandlers() {
       return { url, error: error.message || 'Unknown error' };
     }
   });
-  
+
   ipcMain.handle('shell:open-external', async (_event, url) => {
     try {
       if (!url || typeof url !== 'string') {
         throw new Error('Invalid URL');
       }
-      
+
       if (!url.startsWith('http://') && !url.startsWith('https://')) {
         throw new Error('Only HTTP/HTTPS URLs are allowed');
       }
-      
+
       if (url.length > 2048) {
         throw new Error('URL too long');
       }
-      
+
       await shell.openExternal(url);
       return { success: true };
     } catch (error) {
@@ -974,13 +977,15 @@ function registerIPCHandlers() {
   // Onion P2P handlers
   try {
     const { OnionHandler } = require('./handlers/onion-handler.cjs');
-    const onionHandler = new OnionHandler({ torManager, onInboundMessage: (msg) => {
-      try {
-        if (mainWindow && !mainWindow.isDestroyed()) {
-          mainWindow.webContents.send('onion:message', msg);
-        }
-      } catch (_) {}
-    }});
+    const onionHandler = new OnionHandler({
+      torManager, onInboundMessage: (msg) => {
+        try {
+          if (mainWindow && !mainWindow.isDestroyed()) {
+            mainWindow.webContents.send('onion:message', msg);
+          }
+        } catch (_) { }
+      }
+    });
 
     ipcMain.handle('onion:create-endpoint', async (_event, args) => {
       try {
@@ -1013,11 +1018,11 @@ function registerIPCHandlers() {
       const icePolicy = process.env.ICE_TRANSPORT_POLICY || 'all';
 
       const iceServers = [];
-      
+
       if (stunServers && Array.isArray(stunServers)) {
         iceServers.push(...stunServers.map(url => ({ urls: url })));
       }
-      
+
       if (turnServers && Array.isArray(turnServers)) {
         iceServers.push(...turnServers);
       }
@@ -1041,15 +1046,15 @@ async function cleanup() {
     if (torManager && torManager.isTorRunning()) {
       await torManager.stopTor();
     }
-    
+
     if (websocketHandler) {
       await websocketHandler.disconnect();
     }
-    
+
     if (securityMiddleware) {
       securityMiddleware.cleanup();
     }
-  } catch (_) {}
+  } catch (_) { }
 }
 
 app.whenReady().then(async () => {

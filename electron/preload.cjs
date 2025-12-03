@@ -130,7 +130,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   stopTor: () => ipcRenderer.invoke('tor:stop'),
   getTorStatus: () => ipcRenderer.invoke('tor:status'),
   uninstallTor: () => ipcRenderer.invoke('tor:uninstall'),
-  
+
   onTorConfigureComplete: (callback) => {
     const listener = (_event, data) => callback(_event, data);
     ipcRenderer.once('tor:configure-complete', listener);
@@ -183,8 +183,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
     return null;
   },
   onOnionMessage: (callback) => {
-    if (typeof callback !== 'function') return () => {};
-    const listener = (_event, data) => { try { callback(_event, data); } catch (_) {} };
+    if (typeof callback !== 'function') return () => { };
+    const listener = (_event, data) => { try { callback(_event, data); } catch (_) { } };
     ipcRenderer.on('onion:message', listener);
     return () => ipcRenderer.removeListener('onion:message', listener);
   },
@@ -210,11 +210,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
     }
     return ipcRenderer.invoke('file:save', data);
   },
-  
+
   getDownloadSettings: () => {
     return ipcRenderer.invoke('file:get-download-settings');
   },
-  
+
   setDownloadPath: (path) => {
     if (!path || typeof path !== 'string') {
       return Promise.reject(new Error('Path must be a non-empty string'));
@@ -227,14 +227,14 @@ contextBridge.exposeInMainWorld('electronAPI', {
     }
     return ipcRenderer.invoke('file:set-download-path', path);
   },
-  
+
   setAutoSave: (autoSave) => {
     if (typeof autoSave !== 'boolean') {
       return Promise.reject(new Error('autoSave must be a boolean'));
     }
     return ipcRenderer.invoke('file:set-auto-save', autoSave);
   },
-  
+
   chooseDownloadPath: () => {
     return ipcRenderer.invoke('file:choose-download-path');
   },
@@ -251,11 +251,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
     } catch {
       return Promise.reject(new Error('Invalid URL format'));
     }
-    
+
     if (options && typeof options !== 'object') {
       return Promise.reject(new Error('Options must be an object'));
     }
-    
+
     const sanitizedOptions = {};
     if (options.timeout && typeof options.timeout === 'number' && options.timeout > 0 && options.timeout <= 60000) {
       sanitizedOptions.timeout = options.timeout;
@@ -270,7 +270,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     if (options.maxRedirects && typeof options.maxRedirects === 'number' && options.maxRedirects >= 0 && options.maxRedirects <= 10) {
       sanitizedOptions.maxRedirects = options.maxRedirects;
     }
-    
+
     return ipcRenderer.invoke('link:fetch-preview', url, sanitizedOptions);
   },
 
@@ -289,7 +289,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     } catch {
       return Promise.reject(new Error('Invalid URL format'));
     }
-    
+
     return ipcRenderer.invoke('shell:open-external', url);
   },
 
@@ -389,6 +389,11 @@ contextBridge.exposeInMainWorld('edgeApi', {
       const res = await ipcRenderer.invoke('secure:set', key, JSON.stringify(payload));
       return { success: !!(res && res.success) };
     } catch (e) { return { success: false, error: (e && e.message) || 'error' }; }
+  },
+
+  deviceCredentials: {
+    getCredentials: () => ipcRenderer.invoke('device:getCredentials'),
+    signChallenge: (challenge) => ipcRenderer.invoke('device:signChallenge', challenge)
   }
 });
 

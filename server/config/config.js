@@ -86,6 +86,9 @@ export const RATE_LIMIT_CONFIG = {
   }
 };
 
+export const DEVICE_MAX_ACCOUNTS = 2;
+
+
 export function setServerPassword(passwordHash) {
   if (!passwordHash || typeof passwordHash !== 'string') {
     throw new Error('Invalid password hash - must be non-empty string');

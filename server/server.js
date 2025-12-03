@@ -378,10 +378,19 @@ async function prepareWorkerContext() {
   const authHandler = new authentication.AccountAuthHandler(serverHybridKeyPair);
   const serverAuthHandler = new authentication.ServerAuthHandler(serverHybridKeyPair, null, ServerConfig);
 
+  const { DeviceAttestationService } = await import('./authentication/device-attestation.js');
+  const { getPgPool } = await import('./database/database.js');
+  const db = await getPgPool();
+  const deviceAttestationService = new DeviceAttestationService(db, {
+    maxAccounts: ServerConfig.DEVICE_MAX_ACCOUNTS
+  });
+  await deviceAttestationService.initialize();
+
   return {
     serverHybridKeyPair,
     authHandler,
     serverAuthHandler,
+    deviceAttestationService
   };
 }
 
@@ -513,10 +522,19 @@ async function handleWebSocketMessage({ ws, sessionId, message, context }) {
     switch (normalizedMessage.type) {
       case SignalType.ACCOUNT_SIGN_UP:
       case SignalType.ACCOUNT_SIGN_IN:
+        ws._deviceAttestationService = context.deviceAttestationService;
         await authHandler.processAuthRequest(ws, msgString);
         break;
       case SignalType.DEVICE_PROOF_RESPONSE:
         await authHandler.processDeviceProofResponse(ws, msgString);
+        break;
+      case SignalType.DEVICE_CHALLENGE_REQUEST:
+        ws._deviceAttestationService = context.deviceAttestationService;
+        await authHandler.processDeviceChallengeRequest(ws);
+        break;
+      case SignalType.DEVICE_ATTESTATION:
+        ws._deviceAttestationService = context.deviceAttestationService;
+        await authHandler.processDeviceAttestation(ws, msgString);
         break;
       case SignalType.TOKEN_VALIDATION:
         try {

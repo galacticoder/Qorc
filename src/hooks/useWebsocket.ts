@@ -19,14 +19,18 @@ interface BaseMessage {
 }
 
 const DEFAULT_ALLOWED_TYPES: Set<string> = new Set([
-  // Transport-level envelope (must be decrypted client-side)
+  // Transport-level envelope
   'pq-envelope',
   'pq-handshake-ack',
   // Heartbeat messages
   'pq-heartbeat-pong',
   // Client error reporting
   'client-error',
-  
+
+  // Device attestation
+  'device-challenge',
+  'device-attestation-ack',
+
   // App-level messages
   SignalType.ENCRYPTED_MESSAGE,
   SignalType.DR_SEND,
@@ -70,7 +74,7 @@ const RATE_LIMIT_MAX_MESSAGES = 500;
 const DEFAULT_ENCRYPTED_TYPES = new Set<string>([
   // Transport-level envelope treated specially (decrypted, then routed)
   'pq-envelope',
-  
+
   // App-level encrypted payloads
   SignalType.ENCRYPTED_MESSAGE,
   SignalType.DR_SEND,
@@ -117,10 +121,10 @@ const sanitizeIncomingMessage = (
   schemas: Record<string, WebSocketMessageSchema>,
 ): BaseMessage | null => {
   if (!payload || typeof payload !== 'object') return null;
-  
+
   if (!isPlainObject(payload)) return null;
   if (hasPrototypePollutionKeys(payload)) return null;
-  
+
   const type = (payload as BaseMessage).type;
   if (typeof type !== 'string' || type.length === 0 || type.length > 128) return null;
   if (/[\x00-\x1F\x7F]/.test(type)) return null;
@@ -157,7 +161,7 @@ export const useWebSocket = (
     () =>
       async (data: BaseMessage) => {
         const isEncrypted = encryptedTypes.has(data.type);
-        
+
         if (isEncrypted) {
           await handleEncryptedMessage(data);
         } else {
@@ -190,17 +194,19 @@ export const useWebSocket = (
 
         // Enforce encrypted-only mode after PQ session establishment
         const sessionEstablished = websocketClient.isPQSessionEstablished();
-        const isHandshakeMessage = data.type === SignalType.SERVER_PUBLIC_KEY || 
-                                   data.type === SignalType.SESSION_ESTABLISHED ||
-                                   data.type === 'pq-handshake-ack';
+        const isHandshakeMessage = data.type === SignalType.SERVER_PUBLIC_KEY ||
+          data.type === SignalType.SESSION_ESTABLISHED ||
+          data.type === 'pq-handshake-ack';
         const isEncryptedTransport = data.type === 'pq-envelope' || data.type === 'pq-heartbeat-pong';
         const isErrorMessage = data.type === SignalType.ERROR;
         const isSafeControl = data.type === SignalType.TOKEN_VALIDATION_RESPONSE ||
-                              data.type === SignalType.IN_ACCOUNT ||
-                              data.type === SignalType.AUTH_SUCCESS ||
-                              data.type === SignalType.AUTH_ERROR ||
-                              data.type === SignalType.PASSWORD_HASH_PARAMS;
-        
+          data.type === SignalType.IN_ACCOUNT ||
+          data.type === SignalType.AUTH_SUCCESS ||
+          data.type === SignalType.AUTH_ERROR ||
+          data.type === SignalType.PASSWORD_HASH_PARAMS ||
+          data.type === 'device-challenge' ||
+          data.type === 'device-attestation-ack';
+
         if (sessionEstablished && !isEncryptedTransport && !isHandshakeMessage && !isErrorMessage && !isSafeControl) {
           console.error('[useWebSocket] Security violation: plaintext after encryption established');
           setLoginError('Security violation: plaintext message after encryption established');
@@ -216,12 +222,16 @@ export const useWebSocket = (
         if (data.type === SignalType.P2P_PEER_CERT) {
           try {
             window.dispatchEvent(new CustomEvent('p2p-peer-cert', { detail: data }));
-          } catch {}
+          } catch { }
         }
 
         // Heartbeat pong from server
         if (data.type === 'pq-heartbeat-pong') {
           websocketClient.noteHeartbeatPong(data);
+          return;
+        }
+
+        if (data.type === 'device-challenge' || data.type === 'device-attestation-ack') {
           return;
         }
 
@@ -233,7 +243,7 @@ export const useWebSocket = (
             return;
           }
 
-          
+
           const inner = sanitizeIncomingMessage(decrypted, allowedTypes, schemas);
           if (!inner) {
             return;
@@ -248,7 +258,12 @@ export const useWebSocket = (
           if (inner.type === SignalType.P2P_PEER_CERT) {
             try {
               window.dispatchEvent(new CustomEvent('p2p-peer-cert', { detail: inner }));
-            } catch {}
+            } catch { }
+          }
+
+          if (inner.type === 'device-challenge' || inner.type === 'device-attestation-ack') {
+            window.dispatchEvent(new CustomEvent('edge:server-message', { detail: inner }));
+            return;
           }
 
           await new Promise(resolve => setTimeout(resolve, 0));
@@ -266,13 +281,13 @@ export const useWebSocket = (
     const listener = (evt: Event) => {
       try {
         const detail = (evt as CustomEvent).detail;
-        
+
         if (detail != null && typeof detail === 'object') {
           if (hasPrototypePollutionKeys(detail)) {
             return;
           }
         }
-        
+
         handler(detail ?? evt).catch((error) => {
           console.error('[useWebSocket] Handler error:', error instanceof Error ? error.message : 'Unknown error');
         });

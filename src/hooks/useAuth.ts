@@ -15,9 +15,9 @@ const secureWipeStringRef = (ref: MutableRefObject<string>) => {
     const len = ref.current?.length || 0;
     if (len > 0) {
       for (let pass = 0; pass < 2; pass++) {
-        const filler = Array(len)
-          .fill(0)
-          .map(() => String.fromCharCode(32 + Math.floor(Math.random() * 95)))
+        const randomBytes = PostQuantumUtils.randomBytes(len);
+        const filler = Array.from(randomBytes)
+          .map((byte) => String.fromCharCode(32 + (byte % 95)))
           .join("");
         ref.current = filler;
       }
@@ -582,6 +582,49 @@ export const useAuth = (_secureDB?: SecureDB) => {
 
       let passwordToSend: string;
       if (mode === "register") {
+        setAuthStatus("Attesting device...");
+
+        // 1. Request challenge
+        const challengePromise = new Promise<string>((resolve, reject) => {
+          const timeout = setTimeout(() => {
+            websocketClient.unregisterMessageHandler(SignalType.DEVICE_CHALLENGE);
+            reject(new Error('Timeout waiting for device challenge'));
+          }, 5000);
+
+          websocketClient.registerMessageHandler(SignalType.DEVICE_CHALLENGE, (message: any) => {
+            clearTimeout(timeout);
+            websocketClient.unregisterMessageHandler(SignalType.DEVICE_CHALLENGE);
+            resolve(message.challenge);
+          });
+        });
+
+        websocketClient.send(JSON.stringify({ type: SignalType.DEVICE_CHALLENGE_REQUEST }));
+        const challenge = await challengePromise;
+
+        // 2. Sign challenge
+        const { deviceCredentialManager } = await import('../lib/device-credential');
+        const attestation = await deviceCredentialManager.signChallenge(challenge);
+
+        // 3. Send attestation
+        const ackPromise = new Promise<void>((resolve, reject) => {
+          const timeout = setTimeout(() => {
+            websocketClient.unregisterMessageHandler(SignalType.DEVICE_ATTESTATION_ACK);
+            reject(new Error('Timeout waiting for attestation ack'));
+          }, 5000);
+
+          websocketClient.registerMessageHandler(SignalType.DEVICE_ATTESTATION_ACK, () => {
+            clearTimeout(timeout);
+            websocketClient.unregisterMessageHandler(SignalType.DEVICE_ATTESTATION_ACK);
+            resolve();
+          });
+        });
+
+        websocketClient.send(JSON.stringify({
+          type: SignalType.DEVICE_ATTESTATION,
+          attestation
+        }));
+        await ackPromise;
+
         setAuthStatus("Hashing...");
         passwordToSend = await CryptoUtils.Hash.hashData(password);
       } else {

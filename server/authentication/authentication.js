@@ -10,6 +10,7 @@ import { TokenService } from './token-service.js';
 import { TokenDatabase } from './token-database.js';
 import { TokenMiddleware } from './token-middleware.js';
 import { TokenSecurityManager } from './token-security.js';
+
 import { sendSecureMessage } from '../messaging/pq-envelope-handler.js';
 
 async function rejectConnection(ws, type, reason, code = 1008) {
@@ -39,7 +40,7 @@ async function sendAuthError(ws, { message, code = 'AUTH_FAILED', category = 'ge
 function ensureAttemptState(ws) {
   if (!ws.clientState) ws.clientState = {};
   if (!ws.clientState.attempts) {
-    // Randomize attempts between 5-10 for security 
+    // Randomize attempts between 5-10
     const randomAttempts = () => crypto.randomInt(5, 11);
     ws.clientState = SecureStateManager.setState(ws, {
       attempts: {
@@ -144,6 +145,56 @@ export class AccountAuthHandler {
     console.log('[AUTH] AccountAuthHandler initialized');
   }
 
+  async processDeviceChallengeRequest(ws) {
+    console.log('[AUTH] Processing device challenge request');
+    try {
+      const deviceService = ws._deviceAttestationService;
+      if (!deviceService) {
+        throw new Error('Device attestation service not initialized');
+      }
+      const challenge = deviceService.generateChallenge();
+      await sendSecureMessage(ws, {
+        type: SignalType.DEVICE_CHALLENGE,
+        challenge: challenge.nonce
+      });
+    } catch (e) {
+      console.error('[AUTH] Failed to generate device challenge:', e);
+      return rejectConnection(ws, SignalType.AUTH_ERROR, "Challenge generation failed");
+    }
+  }
+
+  async processDeviceAttestation(ws, str) {
+    console.log('[AUTH] Processing device attestation');
+    try {
+      const parsed = JSON.parse(str);
+      const { attestation } = parsed;
+
+      if (!attestation) {
+        return rejectConnection(ws, SignalType.AUTH_ERROR, "Missing attestation data");
+      }
+
+      const deviceService = ws._deviceAttestationService;
+      if (!deviceService) {
+        throw new Error('Device attestation service not initialized');
+      }
+
+      // Verify signature but do not consume challenge yet
+      deviceService.verifySignature(attestation);
+
+      // Store for later use in handleSignUp
+      ws.clientState = SecureStateManager.setState(ws, {
+        deviceAttestation: attestation
+      });
+
+      await sendSecureMessage(ws, {
+        type: SignalType.DEVICE_ATTESTATION_ACK
+      });
+      console.log('[AUTH] Device attestation verified and stored');
+    } catch (e) {
+      console.error('[AUTH] Device attestation verification failed:', e.message);
+      return rejectConnection(ws, SignalType.AUTH_ERROR, "Attestation verification failed");
+    }
+  }
 
   async processAuthRequest(ws, str) {
     console.log('[AUTH] Processing authentication request');
@@ -224,12 +275,14 @@ export class AccountAuthHandler {
         ensureAttemptState(ws);
         if (ws.clientState?.username && ws.clientState.username !== username) {
           const randomAttempts = () => crypto.randomInt(5, 11);
+          const currentAttestation = ws.clientState.deviceAttestation;
           ws.clientState = SecureStateManager.setState(ws, {
             attempts: { username: randomAttempts(), account_password: randomAttempts(), passphrase: randomAttempts(), server_password: randomAttempts() },
             accountPasswordLockedUntil: undefined,
             serverPasswordLockedUntil: undefined,
             pendingPasswordHash: false,
-            pendingPassphrase: false
+            pendingPassphrase: false,
+            deviceAttestation: currentAttestation
           });
         }
       } catch { }
@@ -352,6 +405,37 @@ export class AccountAuthHandler {
     } catch (e) {
       console.error(`[AUTH] Failed to parse password hash params for user ${username}:`, e);
       return rejectConnection(ws, SignalType.AUTH_ERROR, "Invalid password hash parameters");
+    }
+
+    const deviceAttestationData = ws.clientState?.deviceAttestation;
+    if (!deviceAttestationData || !deviceAttestationData.devicePublicKey || !deviceAttestationData.signature || !deviceAttestationData.challenge) {
+      console.error(`[AUTH] Missing device attestation for signup: ${username}`);
+      return rejectConnection(ws, SignalType.AUTH_ERROR, "Device attestation required");
+    }
+
+    let attestationResult;
+    try {
+      const deviceService = ws._deviceAttestationService;
+      if (!deviceService) {
+        throw new Error('Device attestation service not initialized');
+      }
+      attestationResult = await deviceService.verifyAttestation(deviceAttestationData);
+
+      if (!attestationResult.allowed) {
+        console.warn(`[AUTH] Device attestation denied for ${username}: ${attestationResult.reason}`);
+        return sendAuthError(ws, {
+          message: attestationResult.reason || 'Device account limit reached',
+          code: 'DEVICE_LIMIT_REACHED',
+          category: 'device',
+          limit: attestationResult.limit,
+          current: attestationResult.current
+        });
+      }
+
+      console.log(`[AUTH] Device attestation verified for ${username}, count: ${attestationResult.newCount}`);
+    } catch (e) {
+      console.error(`[AUTH] Device attestation verification failed for ${username}:`, e.message);
+      return rejectConnection(ws, SignalType.AUTH_ERROR, "Device attestation verification failed");
     }
 
     const passwordHashStored = UserDatabase.encodeStoredPasswordHash(password);
@@ -891,7 +975,6 @@ export class AccountAuthHandler {
     try {
       const storedHash = userData.passwordHashStored;
       if (storedHash && storedHash.startsWith('v') && storedHash.includes(':')) {
-        // Verify with peppered storage
         isPasswordValid = UserDatabase.verifyStoredPasswordHash(hashedPassword, storedHash);
       } else {
         isPasswordValid = false;

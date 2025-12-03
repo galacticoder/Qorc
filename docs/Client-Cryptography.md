@@ -36,6 +36,15 @@ At a high level, the client combines:
 
 Hybrid constructions are used so that confidentiality typically requires breaking both the post‑quantum and classical assumptions.
 
+### 1.1 Device Attestation
+
+Client device-bound account creation limiting:
+
+- **Keypair generation**: ML-DSA-87 keypair derived from machine entropy on first use.
+- **Secure storage**: Device keys stored in Electron machine-bound secure storage (`electron-secure-storage.cjs`).
+- **Challenge signing**: Client receives PostQuantumRandom nonce from server, signs with ML-DSA-87 private key.
+- **Client module**: `src/lib/device-credential.ts` handles credential retrieval and challenge signing via IPC.
+
 ---
 
 ## 2. `src/lib/post-quantum-crypto.ts` — core PQ primitives
