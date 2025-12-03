@@ -49,7 +49,7 @@ export function PasswordField({
           className="bg-background/50 border-border/50 focus:bg-background/80 transition-all duration-200"
         />
         {strengthCheck && !isStrongEnough && value.length > 0 && (
-          <p className="text-xs text-destructive font-medium animate-pulse">
+          <p className="text-xs text-destructive font-medium">
             Must be at least {minLength} characters
           </p>
         )}
@@ -69,7 +69,7 @@ export function PasswordField({
           className="bg-background/50 border-border/50 focus:bg-background/80 transition-all duration-200"
         />
         {showMismatch && (
-          <p className="text-xs text-destructive font-medium animate-pulse">Passwords do not match</p>
+          <p className="text-xs text-destructive font-medium">Passwords do not match</p>
         )}
         {warningMessage && (
           <div className="text-xs text-muted-foreground bg-muted/50 p-2 rounded border border-border/50">

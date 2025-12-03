@@ -108,7 +108,8 @@ export function PassphrasePrompt({
 
       <Button
         type="submit"
-        className="w-full font-semibold shadow-lg hover:shadow-xl transition-all duration-200"
+        variant="ghost"
+        className="w-full h-14 text-base font-semibold transition-all shadow-xl shadow-primary/20 hover:shadow-primary/40 hover:scale-[1.02] active:scale-[0.98] bg-primary hover:bg-primary/90 border-0"
         disabled={
           disabled ||
           isSubmitting ||
