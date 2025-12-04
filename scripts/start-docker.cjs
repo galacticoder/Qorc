@@ -25,15 +25,13 @@ function showHelp() {
     console.log('Docker Deployment Helper');
     console.log('');
     console.log('Usage:');
-    console.log('  node scripts/start-docker.cjs server              - Start server stack');
-    console.log('  node scripts/start-docker.cjs loadbalancer        - Start load balancer');
-    console.log('  node scripts/start-docker.cjs server --build      - Rebuild and start server');
-    console.log('  node scripts/start-docker.cjs loadbalancer --build - Rebuild and start loadbalancer');
+    console.log('  node scripts/start-docker.cjs <profile>              - Start profile stack');
+    console.log('  node scripts/start-docker.cjs <profile> --build      - Rebuild and start profile');
     console.log('  node scripts/start-docker.cjs stop <service>      - Stop specific service (server, loadbalancer, postgres)');
     console.log('  node scripts/start-docker.cjs stop all            - Stop all services');
-    console.log('  node scripts/start-docker.cjs delete <service>    - Stop, remove containers, and delete images (server, loadbalancer, redis, postgres)');
+    console.log('  node scripts/start-docker.cjs delete <service>    - Stop, remove containers, and delete images');
     console.log('  node scripts/start-docker.cjs reset               - Stop all services and remove volumes');
-    console.log('  node scripts/start-docker.cjs logs [service]      - View logs');
+    console.log('  node scripts/start-docker.cjs logs <service>      - View logs');
     console.log('');
     process.exit(0);
 }
@@ -126,7 +124,7 @@ async function main() {
             if (serviceToStop === 'all') {
                 // Stop all services
                 try {
-                    const psOutput = execSync('docker compose -f docker/docker-compose.yml ps --services --filter "status=running"', {
+                    const psOutput = execSync('docker compose -f docker/docker-compose.yml --profile "*" ps --services --filter "status=running"', {
                         cwd: repoRoot,
                         encoding: 'utf8'
                     });
@@ -138,18 +136,18 @@ async function main() {
                     }
 
                     console.log(`[INFO] Stopping ${runningServices.length} service(s): ${runningServices.join(', ')}`);
-                    execSync('docker compose -f docker/docker-compose.yml down', { cwd: repoRoot, stdio: 'inherit' });
+                    execSync('docker compose -f docker/docker-compose.yml --profile "*" down', { cwd: repoRoot, stdio: 'inherit' });
                     console.log(`[SUCCESS] Stopped: ${runningServices.join(', ')}`);
                 } catch (error) {
                     console.log('[INFO] Stopping all Docker services...');
-                    execSync('docker compose -f docker/docker-compose.yml down', { cwd: repoRoot, stdio: 'inherit' });
+                    execSync('docker compose -f docker/docker-compose.yml --profile "*" down', { cwd: repoRoot, stdio: 'inherit' });
                 }
                 process.exit(0);
             }
 
             // Stop specific service
             try {
-                const psOutput = execSync(`docker compose -f docker/docker-compose.yml ps --services --filter "status=running"`, {
+                const psOutput = execSync(`docker compose -f docker/docker-compose.yml --profile "*" ps --services --filter "status=running"`, {
                     cwd: repoRoot,
                     encoding: 'utf8'
                 });
@@ -161,7 +159,7 @@ async function main() {
                 }
 
                 console.log(`[INFO] Stopping service: ${serviceToStop}`);
-                execSync(`docker compose -f docker/docker-compose.yml stop ${serviceToStop}`, { cwd: repoRoot, stdio: 'inherit' });
+                execSync(`docker compose -f docker/docker-compose.yml --profile "*" stop ${serviceToStop}`, { cwd: repoRoot, stdio: 'inherit' });
                 console.log(`[SUCCESS] Stopped: ${serviceToStop}`);
             } catch (error) {
                 console.error(`[ERROR] Failed to stop service: ${serviceToStop}`);
@@ -189,7 +187,7 @@ async function main() {
             console.log('[INFO] Step 1/3: Stopping containers...');
 
             try {
-                execSync(`docker compose --env-file .env -f docker/docker-compose.yml stop ${serviceToDelete}`, {
+                execSync(`docker compose --env-file .env -f docker/docker-compose.yml --profile "*" stop ${serviceToDelete}`, {
                     cwd: repoRoot,
                     stdio: 'inherit'
                 });
@@ -200,7 +198,7 @@ async function main() {
 
             console.log('[INFO] Step 2/3: Removing containers...');
             try {
-                execSync(`docker compose --env-file .env -f docker/docker-compose.yml rm -f ${serviceToDelete}`, {
+                execSync(`docker compose --env-file .env -f docker/docker-compose.yml --profile "*" rm -f ${serviceToDelete}`, {
                     cwd: repoRoot,
                     stdio: 'inherit'
                 });
@@ -242,14 +240,14 @@ async function main() {
         if (command === 'logs') {
             const service = flags[0] || '';
             console.log(`[INFO] Viewing logs${service ? ` for ${service}` : ''}...`);
-            execSync(`docker compose --env-file .env -f docker/docker-compose.yml logs -f ${service}`, { cwd: repoRoot, stdio: 'inherit' });
+            execSync(`docker compose --env-file .env -f docker/docker-compose.yml --profile "*" logs -f ${service}`, { cwd: repoRoot, stdio: 'inherit' });
             process.exit(0);
         }
 
         if (command === 'reset') {
             console.log('[INFO] Stopping containers and removing volumes...');
             try {
-                execSync('docker compose -f docker/docker-compose.yml down -v', { cwd: repoRoot, stdio: 'inherit' });
+                execSync('docker compose -f docker/docker-compose.yml --profile "*" down -v', { cwd: repoRoot, stdio: 'inherit' });
                 console.log('[SUCCESS] Reset complete.');
             } catch (error) {
                 console.error('[ERROR] Failed to reset:', error.message);
