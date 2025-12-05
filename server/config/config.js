@@ -22,7 +22,7 @@ function getRandomizedAttempts(min = 5, max = 10) {
 
 export const PORT = parsePort(process.env.PORT);
 export const MAX_CLIENTS = 100;
-export const SERVER_ID = 'end2end-Server';
+export const SERVER_ID = 'Qor-Chat-Server';
 
 export const TTL_CONFIG = {
   SESSION_TTL: 3600,       // 1 hour - Redis session state (refreshed on activity)

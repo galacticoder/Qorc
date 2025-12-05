@@ -40,7 +40,7 @@ export function Sidebar({ activeTab, onTabChange, currentUser, onLogout }: Sideb
             setLogoutProgress(progress);
 
             if (progress < 100) {
-                logoutTimerRef.current = setTimeout(updateProgress, 16); // ~60fps
+                logoutTimerRef.current = setTimeout(updateProgress, 16);
             } else {
                 onLogout?.();
             }
@@ -62,14 +62,14 @@ export function Sidebar({ activeTab, onTabChange, currentUser, onLogout }: Sideb
         <div
             className={cn(
                 "flex flex-col h-full border-r border-border transition-all duration-300 ease-in-out relative z-20",
-                isCollapsed ? "w-13" : "w-40"
+                isCollapsed ? "w-13" : "w-35"
             )}
             style={{ backgroundColor: 'var(--chats-section-bg)' }}
         >
             {/* Header */}
             <div
                 className={cn(
-                    "h-18 flex items-center transition-all duration-300 justify-start p-0 pl-0 cursor-pointer hover:bg-accent/10 select-none",
+                    "h-18 flex items-center transition-all duration-300 justify-start p-0 pl-0 cursor-pointer hover:bg-accent/30 select-none",
                 )}
                 onClick={() => setIsCollapsed(!isCollapsed)}
                 title={isCollapsed ? "Expand sidebar" : "Collapse sidebar"}
@@ -88,109 +88,113 @@ export function Sidebar({ activeTab, onTabChange, currentUser, onLogout }: Sideb
                             "font-semibold text-lg truncate block whitespace-nowrap transition-opacity duration-300",
                             isCollapsed ? "opacity-0" : "opacity-100 delay-150"
                         )}>
-                            End2End
+                            Qor
                         </span>
                     </div>
                 </div>
             </div>
 
             {/* Navigation */}
-            <div className="flex-1 py-4 space-y-1">
+            <div className="flex-1 py-2 space-y-1">
                 {navItems.map((item) => (
                     <Button
                         key={item.id}
                         variant="ghost"
                         onClick={() => onTabChange(item.id)}
                         className={cn(
-                            "w-full h-12 mb-1 transition-all duration-300 ease-in-out flex items-center justify-start p-0 pl-0 select-none",
+                            "w-full h-12 mb-1 transition-all duration-300 ease-in-out flex items-center justify-start p-0 pl-0 select-none cursor-pointer",
                             activeTab === item.id
                                 ? "bg-secondary text-secondary-foreground"
-                                : "text-muted-foreground hover:bg-accent/10 hover:text-foreground"
+                                : "text-muted-foreground hover:bg-accent/30 hover:text-foreground"
                         )}
                     >
-                        <div className="w-13 h-12 flex items-center justify-center shrink-0">
-                            <item.icon
-                                className={cn(
-                                    "!h-[25px] !w-[25px] transition-all duration-300",
-                                    activeTab === item.id ? "fill-current" : "fill-none"
-                                )}
-                                size={25}
-                                strokeWidth={activeTab === item.id ? 2.5 : 2}
-                            />
-                        </div>
-                        <div className={cn(
-                            "overflow-hidden transition-all duration-300 ease-in-out",
-                            isCollapsed ? "w-0 ml-0 delay-150" : "w-[100px]"
-                        )}>
-                            <span className={cn(
-                                "truncate block text-left text-base whitespace-nowrap transition-opacity duration-300",
-                                isCollapsed ? "opacity-0" : "opacity-100 delay-150"
+                        <div className="flex items-center overflow-hidden">
+                            <div className="w-13 h-12 flex items-center justify-center shrink-0">
+                                <item.icon
+                                    className={cn(
+                                        "!h-[25px] !w-[25px] transition-all duration-300",
+                                        activeTab === item.id ? "fill-current" : "fill-none"
+                                    )}
+                                    size={25}
+                                    strokeWidth={activeTab === item.id ? 2.5 : 2}
+                                />
+                            </div>
+                            <div className={cn(
+                                "overflow-hidden transition-all duration-300 ease-in-out",
+                                isCollapsed ? "w-0 ml-0 delay-150" : "w-[100px]"
                             )}>
-                                {item.label}
-                            </span>
+                                <span className={cn(
+                                    "truncate block text-left text-base whitespace-nowrap transition-opacity duration-300",
+                                    isCollapsed ? "opacity-0" : "opacity-100 delay-150"
+                                )}>
+                                    {item.label}
+                                </span>
+                            </div>
                         </div>
                     </Button>
                 ))}
             </div>
 
             {/* Footer */}
-            <div className="py-2 space-y-4">
+            <div className="py-2 space-y-1">
                 {/* Theme Toggle */}
                 <Button
                     variant="ghost"
                     size="icon"
                     className={cn(
-                        "w-full h-12 transition-all duration-300 ease-in-out flex items-center justify-start p-0 pl-0 theme-toggle-btn select-none hover:bg-accent/10",
+                        "w-full h-12 transition-all duration-300 ease-in-out flex items-center justify-start p-0 pl-0 theme-toggle-btn select-none hover:bg-accent/30 cursor-pointer",
                     )}
                     onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}
                 >
-                    <div className="w-13 h-12 flex items-center justify-center shrink-0">
-                        <div className="themeToggle st-sunMoonThemeToggleBtn">
-                            <input
-                                type="checkbox"
-                                className="themeToggleInput"
-                                checked={theme === 'light'}
-                                readOnly
-                            />
-                            <svg
-                                width="18"
-                                height="18"
-                                viewBox="0 0 20 20"
-                                fill="currentColor"
-                                stroke="none"
-                            >
-                                <mask id="moon-mask">
-                                    <rect x="0" y="0" width="20" height="20" fill="white"></rect>
-                                    <circle cx="11" cy="3" r="8" fill="black"></circle>
-                                </mask>
-                                <circle
-                                    className="sunMoon"
-                                    cx="10"
-                                    cy="10"
-                                    r="8"
-                                    mask="url(#moon-mask)"
-                                ></circle>
-                                <g>
-                                    <circle className="sunRay sunRay1" cx="18" cy="10" r="1.5"></circle>
-                                    <circle className="sunRay sunRay2" cx="14" cy="16.928" r="1.5"></circle>
-                                    <circle className="sunRay sunRay3" cx="6" cy="16.928" r="1.5"></circle>
-                                    <circle className="sunRay sunRay4" cx="2" cy="10" r="1.5"></circle>
-                                    <circle className="sunRay sunRay5" cx="6" cy="3.1718" r="1.5"></circle>
-                                    <circle className="sunRay sunRay6" cx="14" cy="3.1718" r="1.5"></circle>
-                                </g>
-                            </svg>
+                    <div className="flex items-center overflow-hidden">
+                        <div className="w-13 h-12 flex items-center justify-center shrink-0">
+                            <div className="themeToggle st-sunMoonThemeToggleBtn">
+                                <input
+                                    type="checkbox"
+                                    className="themeToggleInput"
+                                    checked={theme === 'light'}
+                                    readOnly
+                                />
+                                <svg
+                                    width="18"
+                                    height="18"
+                                    viewBox="0 0 20 20"
+                                    fill="currentColor"
+                                    stroke="none"
+                                >
+                                    <mask id="moon-mask">
+                                        <rect x="0" y="0" width="20" height="20" fill="white"></rect>
+                                        <circle cx="11" cy="3" r="8" fill="black"></circle>
+                                    </mask>
+                                    <circle
+                                        className="sunMoon"
+                                        cx="10"
+                                        cy="10"
+                                        r="8"
+                                        mask="url(#moon-mask)"
+                                    ></circle>
+                                    <g>
+                                        <circle className="sunRay sunRay1" cx="18" cy="10" r="1.5"></circle>
+                                        <circle className="sunRay sunRay2" cx="14" cy="16.928" r="1.5"></circle>
+                                        <circle className="sunRay sunRay3" cx="6" cy="16.928" r="1.5"></circle>
+                                        <circle className="sunRay sunRay4" cx="2" cy="10" r="1.5"></circle>
+                                        <circle className="sunRay sunRay5" cx="6" cy="3.1718" r="1.5"></circle>
+                                        <circle className="sunRay sunRay6" cx="14" cy="3.1718" r="1.5"></circle>
+                                    </g>
+                                </svg>
+                            </div>
                         </div>
-                    </div>
-                    <div className={cn(
-                        "overflow-hidden transition-[width] duration-300 ease-in-out",
-                        isCollapsed ? "w-0 ml-0" : "w-[150px]"
-                    )}>
-                        <span className={cn(
-                            "truncate block text-left text-base whitespace-nowrap transition-opacity duration-300",
-                            isCollapsed ? "opacity-0" : "opacity-100 delay-150"
+                        <div className={cn(
+                            "overflow-hidden transition-[width] duration-300 ease-in-out",
+                            isCollapsed ? "w-0 ml-0" : "w-[150px]"
                         )}>
-                            Theme
-                        </span>
+                            <span className={cn(
+                                "truncate block text-left text-base whitespace-nowrap transition-opacity duration-300",
+                                isCollapsed ? "opacity-0" : "opacity-100 delay-150"
+                            )}>
+                                Theme
+                            </span>
+                        </div>
                     </div>
                 </Button>
 
@@ -199,8 +203,8 @@ export function Sidebar({ activeTab, onTabChange, currentUser, onLogout }: Sideb
                     <Button
                         variant="ghost"
                         className={cn(
-                            "w-full h-auto transition-all duration-300 ease-in-out flex items-center justify-start p-0 pl-0 select-none relative overflow-hidden",
-                            isHoldingLogout ? "bg-[#6b2c2b]" : "hover:bg-accent/10"
+                            "w-full h-auto transition-all duration-300 ease-in-out flex items-center justify-start p-0 pl-0 select-none relative overflow-hidden cursor-pointer",
+                            isHoldingLogout ? "bg-[#6b2c2b]" : "hover:bg-accent/30"
                         )}
                         onMouseDown={handleLogoutMouseDown}
                         onMouseUp={handleLogoutMouseUp}
@@ -212,67 +216,68 @@ export function Sidebar({ activeTab, onTabChange, currentUser, onLogout }: Sideb
                             style={{ width: `${logoutProgress}%` }}
                         />
 
-                        <div className="w-13 h-14 flex items-center justify-center shrink-0 relative z-10">
-                            {/* Show logout icon when holding  */}
-                            <div className="relative w-full h-full flex items-center justify-center">
-                                {/* Avatar  */}
-                                <div className={cn(
-                                    "absolute transition-all duration-200",
-                                    isHoldingLogout ? "opacity-0 invisible translate-y-2 scale-90" : "opacity-100 visible translate-y-0 scale-100"
-                                )}>
-                                    <Avatar className="!h-[25px] !w-[25px] border border-border shrink-0">
-                                        <AvatarImage src={currentUser.avatarUrl} />
-                                        <AvatarFallback>{currentUser.username.slice(0, 2).toUpperCase()}</AvatarFallback>
-                                    </Avatar>
-                                </div>
+                        <div className="flex items-center overflow-hidden relative z-10">
+                            <div className="w-13 h-14 flex items-center justify-center shrink-0">
+                                <div className="relative w-full h-full flex items-center justify-center">
+                                    {/* Avatar  */}
+                                    <div className={cn(
+                                        "absolute transition-all duration-200",
+                                        isHoldingLogout ? "opacity-0 invisible translate-y-2 scale-90" : "opacity-100 visible translate-y-0 scale-100"
+                                    )}>
+                                        <Avatar className="!h-[25px] !w-[25px] border border-border shrink-0">
+                                            <AvatarImage src={currentUser.avatarUrl} />
+                                            <AvatarFallback>{currentUser.username.slice(0, 2).toUpperCase()}</AvatarFallback>
+                                        </Avatar>
+                                    </div>
 
-                                {/* Logout icon */}
-                                <div className={cn(
-                                    "absolute transition-all duration-200",
-                                    isHoldingLogout ? "opacity-100 visible translate-y-0 scale-100" : "opacity-0 invisible -translate-y-2 scale-90"
-                                )}>
-                                    <LogOut className="h-6 w-6 text-[#e3616a]" />
+                                    {/* Logout icon */}
+                                    <div className={cn(
+                                        "absolute transition-all duration-200",
+                                        isHoldingLogout ? "opacity-100 visible translate-y-0 scale-100" : "opacity-0 invisible -translate-y-2 scale-90"
+                                    )}>
+                                        <LogOut className="h-6 w-6 text-[#e3616a]" />
+                                    </div>
                                 </div>
                             </div>
-                        </div>
 
-                        {/* Text section */}
-                        <div className={cn(
-                            "flex flex-col items-start overflow-hidden transition-all duration-300 ease-in-out relative z-10",
-                            isCollapsed ? "w-0 ml-0 delay-150" : "w-[150px]"
-                        )}>
+                            {/* Text section */}
                             <div className={cn(
-                                "w-full transition-opacity duration-300",
-                                isCollapsed ? "opacity-0" : "opacity-100 delay-150"
+                                "flex flex-col items-start overflow-hidden transition-all duration-300 ease-in-out",
+                                isCollapsed ? "w-0 ml-0 delay-150" : "w-[150px]"
                             )}>
-                                {/* Top line: Username or "Logging out" */}
-                                <div className="relative h-5 mb-1">
-                                    {/* Username text */}
-                                    <span className={cn(
-                                        "text-sm font-medium truncate w-full text-left block whitespace-nowrap transition-all duration-200 absolute top-0 left-0",
-                                        isHoldingLogout ? "opacity-0 invisible translate-y-2 scale-90" : "opacity-100 visible translate-y-0 scale-100"
-                                    )}>{currentUser.username}</span>
+                                <div className={cn(
+                                    "w-full transition-opacity duration-300",
+                                    isCollapsed ? "opacity-0" : "opacity-100 delay-150"
+                                )}>
+                                    {/* Top line: Username or "Logging out" */}
+                                    <div className="relative h-5 mb-1">
+                                        {/* Username text */}
+                                        <span className={cn(
+                                            "text-sm font-medium truncate w-full text-left block whitespace-nowrap transition-all duration-200 absolute top-0 left-0",
+                                            isHoldingLogout ? "opacity-0 invisible translate-y-2 scale-90" : "opacity-100 visible translate-y-0 scale-100"
+                                        )}>{currentUser.username}</span>
 
-                                    {/* "Logging out" text */}
-                                    <span className={cn(
-                                        "text-sm font-medium truncate w-full text-left block whitespace-nowrap transition-all duration-200 absolute top-0 left-0 text-[#e3616a]",
-                                        isHoldingLogout ? "opacity-100 visible translate-y-0 scale-100" : "opacity-0 invisible -translate-y-2 scale-90"
-                                    )}>Logging out</span>
-                                </div>
+                                        {/* "Logging out" text */}
+                                        <span className={cn(
+                                            "text-sm font-medium truncate w-full text-left block whitespace-nowrap transition-all duration-200 absolute top-0 left-0 text-[#e3616a]",
+                                            isHoldingLogout ? "opacity-100 visible translate-y-0 scale-100" : "opacity-0 invisible -translate-y-2 scale-90"
+                                        )}>Logging out</span>
+                                    </div>
 
-                                {/* Bottom line: Subtitle text */}
-                                <div className="relative h-4">
-                                    {/* "Hold to logout" text */}
-                                    <span className={cn(
-                                        "text-[10px] truncate w-full text-left block whitespace-nowrap transition-all duration-200 absolute top-0 left-0 text-muted-foreground opacity-70",
-                                        isHoldingLogout ? "opacity-0 invisible translate-y-2 scale-90" : "opacity-70 visible translate-y-0 scale-100"
-                                    )}>Hold to logout</span>
+                                    {/* Bottom line: Subtitle text */}
+                                    <div className="relative h-4">
+                                        {/* "Hold to logout" text */}
+                                        <span className={cn(
+                                            "text-[10px] truncate w-full text-left block whitespace-nowrap transition-all duration-200 absolute top-0 left-0 text-muted-foreground opacity-70",
+                                            isHoldingLogout ? "opacity-0 invisible translate-y-2 scale-90" : "opacity-70 visible translate-y-0 scale-100"
+                                        )}>Hold to logout</span>
 
-                                    {/* "Hold to Confirm" text */}
-                                    <span className={cn(
-                                        "text-[10px] truncate w-full text-left block whitespace-nowrap transition-all duration-200 absolute top-0 left-0 text-[#e3616a]",
-                                        isHoldingLogout ? "opacity-100 visible translate-y-0 scale-100" : "opacity-0 invisible -translate-y-2 scale-90"
-                                    )}>Hold to Confirm</span>
+                                        {/* "Hold to Confirm" text */}
+                                        <span className={cn(
+                                            "text-[10px] truncate w-full text-left block whitespace-nowrap transition-all duration-200 absolute top-0 left-0 text-[#e3616a]",
+                                            isHoldingLogout ? "opacity-100 visible translate-y-0 scale-100" : "opacity-0 invisible -translate-y-2 scale-90"
+                                        )}>Hold to Confirm</span>
+                                    </div>
                                 </div>
                             </div>
                         </div>

@@ -373,7 +373,7 @@ async function ensureServerDeps() {
 }
 
 async function ensurePostgresBootstrap() {
-  const dbName = process.env.PGDATABASE || 'endtoend';
+  const dbName = process.env.PGDATABASE || 'Qor';
   const host = process.env.DB_CONNECT_HOST || process.env.PGHOST || '127.0.0.1';
   const port = process.env.PGPORT || '5432';
   const user = process.env.DATABASE_USER || process.env.PGUSER || process.env.USER;
@@ -718,7 +718,7 @@ class ServerUI {
         if (!display) {
           const hostName = process.env.PGHOST || '127.0.0.1';
           const port = process.env.PGPORT || '5432';
-          const dbName = process.env.PGDATABASE || 'endtoend';
+          const dbName = process.env.PGDATABASE || 'Qor';
           const user = process.env.DATABASE_USER || process.env.PGUSER || '';
           const auth = user ? `${user}@` : '';
           display = `postgres://${auth}${hostName}:${port}/${dbName}`;

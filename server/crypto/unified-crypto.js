@@ -233,8 +233,8 @@ class CryptoConfig {
 
   // Advanced key derivation
   static HKDF_HASH = 'SHA-512';              // SHA-512 for HKDF
-  static HKDF_INFO = new TextEncoder().encode('endtoend-chat hybrid key v2');
-  static HKDF_INFO_CLIENT_COMPATIBLE = new TextEncoder().encode('endtoend-chat post-quantum v1');
+  static HKDF_INFO = new TextEncoder().encode('Qor-chat hybrid key v2');
+  static HKDF_INFO_CLIENT_COMPATIBLE = new TextEncoder().encode('Qor-chat post-quantum v1');
   static SCRYPT_N = 65536;
   static SCRYPT_R = 16;
   static SCRYPT_P = 2;
@@ -1009,7 +1009,7 @@ class QuantumKDFService {
     try {
       // Create context-bound info parameter
       const contextInfo = context ?
-        new TextEncoder().encode(`endtoend-chat hybrid key v2:${context}`) :
+        new TextEncoder().encode(`Qor-chat hybrid key v2:${context}`) :
         CryptoConfig.HKDF_INFO;
 
       // Use BLAKE3-HKDF for key derivation

@@ -236,7 +236,7 @@ If the worker is unavailable or fails, key generation falls back to running on t
   - `aeadTag: Uint8Array`
   - `timestamp: number` (ms since epoch)
 - Shared secret salt:
-  - A fixed 32‑byte constant corresponding to the ASCII string `"End2End-Chat-PQ-Hybrid-KEM-Key-1"`.
+  - A fixed 32‑byte constant corresponding to the ASCII string `"Qor-Chat-PQ-Hybrid-KEM-Key-1"`.
 
 Encryption (`encryptForServer`):
 

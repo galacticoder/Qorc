@@ -180,7 +180,7 @@ async function initializeHandlers() {
       websocketHandler.setExtraHeaders({
         'x-device-id': deviceId,
         'x-client-version': String(clientVersion),
-        'x-client-name': 'End2End Chat'
+        'x-client-name': 'Qor-Chat'
       });
       if (devicePubPem && devicePrivPem) {
         websocketHandler.setDeviceKeys({

@@ -22,7 +22,7 @@ services:
     tmpfs:
       - /var/run/tailscale
     networks:
-      - end2end-net
+      - Qor-Chat-net
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "redis-cli", "--tls", "--cert", "/certs/redis-client.crt", "--key", "/certs/redis-client.key", "--cacert", "/certs/redis-ca.crt", "ping"]
@@ -47,7 +47,7 @@ services:
     ports:
       - "${DB_PORT}:5432" 
     networks:
-      - end2end-net
+      - Qor-Chat-net
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres"]
@@ -74,7 +74,7 @@ services:
     env_file:
       - ../.env
     networks:
-      - end2end-net
+      - Qor-Chat-net
     cap_add:
       - NET_ADMIN
       - SYS_MODULE
@@ -118,7 +118,7 @@ services:
     devices:
       - /dev/net/tun:/dev/net/tun
     networks:
-      - end2end-net
+      - Qor-Chat-net
     volumes:
       - ../.env:/app/.env
       - ../scripts:/app/scripts:rw
@@ -130,10 +130,10 @@ services:
     restart: unless-stopped
 
 networks:
-  end2end-net:
+  Qor-Chat-net:
     driver: bridge
     driver_opts:
-      com.docker.network.bridge.name: end2end-br
+      com.docker.network.bridge.name: Qor-Chat-br
       com.docker.network.bridge.enable_ip_masquerade: "true"
     ipam:
       driver: default

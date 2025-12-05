@@ -1,5 +1,5 @@
-appId: com.end2end.chat
-productName: End2EndChat
+appId: com.Qor.chat
+productName: Qor-chat
 files:
   - dist/**
   - electron/main.cjs
@@ -70,7 +70,7 @@ linux:
       filter:
         - "**/*"
   category: Network
-  synopsis: "end2end chat"
+  synopsis: "Qor-Chat"
   description: "meant for maximum privacy and security"
 publish: null
 compression: maximum

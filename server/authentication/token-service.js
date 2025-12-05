@@ -165,9 +165,9 @@ class TokenService {
     
     // Enhanced payload with security context
     const payload = {
-      iss: 'end2end-chat-server',
+      iss: 'Qor-chat-server',
       sub: await this.hashUserId(userId),
-      aud: 'end2end-chat-client',
+      aud: 'Qor-chat-client',
       iat: now,
       exp: now + (7 * 24 * 60 * 60),
       jti: tokenId,
@@ -205,9 +205,9 @@ class TokenService {
     const familyId = family || await this.generateSecureTokenId();
     
     const payload = {
-      iss: 'end2end-chat-server',
+      iss: 'Qor-chat-server',
       sub: await this.hashUserId(userId),
-      aud: 'end2end-chat-client',
+      aud: 'Qor-chat-client',
       iat: now,
       exp: now + (7 * 24 * 60 * 60),
       jti: tokenId,
@@ -239,9 +239,9 @@ class TokenService {
 
     const now = Math.floor(Date.now() / 1000);
     const payload = {
-      iss: 'end2end-chat-server',
+      iss: 'Qor-chat-server',
       sub: await this.hashUserId(userId),
-      aud: 'end2end-chat-client',
+      aud: 'Qor-chat-client',
       iat: now,
       exp: now + (60 * 60),
       jti: await this.generateSecureTokenId(),
@@ -939,11 +939,11 @@ class TokenService {
       throw new Error('Token not yet valid');
     }
 
-    if (payload.iss !== 'end2end-chat-server') {
+    if (payload.iss !== 'Qor-chat-server') {
       throw new Error('Invalid token issuer');
     }
 
-    if (payload.aud !== 'end2end-chat-client') {
+    if (payload.aud !== 'Qor-chat-client') {
       throw new Error('Invalid token audience');
     }
 

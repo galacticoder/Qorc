@@ -2,7 +2,6 @@ import React, { useState, useCallback, useMemo, useRef, useEffect } from "react"
 import { cn } from "../../lib/utils";
 import { MessageSquare, Settings, LogOut } from "lucide-react";
 import { ComposeIcon } from "./icons";
-import { Input } from "../ui/input";
 import { Button } from "../ui/button";
 import { sanitizeTextInput } from "../../lib/sanitizers";
 
@@ -178,7 +177,7 @@ export const Sidebar = React.memo<SidebarProps>(({ className, children, currentU
               <span
                 className="font-semibold text-lg text-foreground"
               >
-                endtoend
+                
               </span>
             )}
           </div>

@@ -1332,7 +1332,7 @@ export class AccountAuthHandler {
 
       const headers = request?.headers || {};
       const userAgent = headers['user-agent'] || '';
-      const clientName = headers['x-client-name'] || 'End2End Chat';
+      const clientName = headers['x-client-name'] || 'Qor-Chat';
       const clientVersion = headers['x-client-version'] || 'unknown';
 
       if (userAgent.includes('Electron')) {
@@ -1347,7 +1347,7 @@ export class AccountAuthHandler {
       return `${clientName} Desktop`;
     } catch (error) {
       console.warn('[AUTH] Failed to extract device name:', error.message);
-      return 'End2End Chat (unknown)';
+      return 'Qor-Chat (unknown)';
     }
   }
 

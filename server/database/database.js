@@ -548,7 +548,7 @@ export async function getPgPool() {
     }
 
     // No DATABASE_URL provided: fall back to a local Postgres database and create it if needed.
-    const defaultDbName = process.env.PGDATABASE || 'endtoend';
+    const defaultDbName = process.env.PGDATABASE || 'Qor';
     const host = process.env.DB_CONNECT_HOST || process.env.PGHOST || 'localhost';
     const port = process.env.PGPORT ? Number.parseInt(process.env.PGPORT, 10) : 5432;
     const user = process.env.DATABASE_USER || process.env.PGUSER || process.env.USER || undefined;

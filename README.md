@@ -1,8 +1,8 @@
-# Endtoend — End‑to‑End Encrypted Messaging/Calling
+# Qor-Chat
 
-Endtoend is a desktop chat client and Node.js server designed for end2end quantum secure messaging. It uses the Signal Protocol for forward secrecy with an additional post‑quantum (PQ) envelope.
+Qor-Chat is a desktop chat client and Node.js server designed for end to end quantum secure messaging. It uses the Signal Protocol for forward secrecy with an additional post‑quantum (PQ) envelope.
 
-For more details of the Server/Client cryptography, read [`docs/Server-Cryptography.md`](https://github.com/galacticoder/end2end-chat-site/blob/main/docs/Server-Cryptography.md) and [`docs/Client-Cryptography.md`](https://github.com/galacticoder/end2end-chat-site/blob/main/docs/Client-Cryptography.md)
+For more details of the Server/Client cryptography, read [`docs/Server-Cryptography.md`](https://github.com/galacticoder/Qor-Chat/blob/main/docs/Server-Cryptography.md) and [`docs/Client-Cryptography.md`](https://github.com/galacticoder/Qor-Chat/blob/main/docs/Client-Cryptography.md)
 
 ## Setup
 
@@ -29,13 +29,13 @@ corepack enable pnpm
 ### Local Setup
 
 1. Clone the repository
-  - `git clone https://github.com/galacticoder/end2end-chat-site.git`
+  - `git clone https://github.com/galacticoder/Qor-Chat.git`
 
 2. Install dependencies:
    - **Server:** `node scripts/install-deps.cjs --server`
    - **Client:** `node scripts/install-deps.cjs --client`
 
-3. Configure environment variables (**YOU DO NOT HAVE TO CONFIGURE ANYTHING TO START THE SERVER WITH ALL FEATURES! EVERYTHING IS ALREADY SETUP IN THE PROVIDED ENV FILE!** See [`docs/ENVIRONMENT_VARIABLES.md`](https://github.com/galacticoder/end2end-chat-site/blob/main/docs/ENVIRONMENT_VARIABLES.md) for configuration if interested.)
+3. Configure environment variables (**YOU DO NOT HAVE TO CONFIGURE ANYTHING TO START THE SERVER WITH ALL FEATURES! EVERYTHING IS ALREADY SETUP IN THE PROVIDED ENV FILE!** See [`docs/ENVIRONMENT_VARIABLES.md`](https://github.com/galacticoder/Qor-Chat/blob/main/docs/ENVIRONMENT_VARIABLES.md) for configuration if interested.)
 
 4. Start the server: `node scripts/start-server.cjs`
 
@@ -103,7 +103,7 @@ This is not a metadata‑free system. The service retains the minimal routing da
 ## Transport and delivery
 - Primary channel: WebSockets over TLS with certificate pinning enforced by the desktop.
 - P2P path: a minimal WebRTC signaling path allows peer‑to‑peer messaging when available; the app automatically falls back to the server path when P2P is unavailable.
-- Tor: the desktop bootstraps its own Tor instance, verifies a working SOCKS proxy, and routes traffic through it. Bridge transports (obfs4 or snowflake) are supported. Bundle signature verification is performed when possible (see [`docs/ENVIRONMENT_VARIABLES.md`](https://github.com/galacticoder/end2end-chat-site/blob/main/docs/ENVIRONMENT_VARIABLES.md) for verification controls).
+- Tor: the desktop bootstraps its own Tor instance, verifies a working SOCKS proxy, and routes traffic through it. Bridge transports (obfs4 or snowflake) are supported. Bundle signature verification is performed when possible (see [`docs/ENVIRONMENT_VARIABLES.md`](https://github.com/galacticoder/Qor-Chat/blob/main/docs/ENVIRONMENT_VARIABLES.md) for verification controls).
 
 ## Privacy characteristics and limitations
 - The server sees: pseudonymous user identifiers, timing data, and minimal routing metadata required to deliver messages. Contents remain encrypted end‑to‑end.
@@ -121,7 +121,7 @@ This is not a metadata‑free system. The service retains the minimal routing da
 
 ## Contributing and reporting of issues
 
-Please reference the [`CONTRIBUTING.md`](https://github.com/galacticoder/end2end-chat-site/blob/main/docs/CONTRIBUTING.md) file for contributing to the project. Please reference the [`ISSUE_TEMPLATE.md`](https://github.com/galacticoder/end2end-chat-site/blob/main/docs/ISSUE_TEMPLATE.md) file for reporting issues.
+Please reference the [`CONTRIBUTING.md`](https://github.com/galacticoder/Qor-Chat/blob/main/docs/CONTRIBUTING.md) file for contributing to the project. Please reference the [`ISSUE_TEMPLATE.md`](https://github.com/galacticoder/Qor-Chat/blob/main/docs/ISSUE_TEMPLATE.md) file for reporting issues.
 
 ## License
 [![License: qorc Non-Commercial Copyleft v1.0](https://img.shields.io/badge/License-qorc%20Non--Commercial%20Copyleft%20v1.0-6d4aff.svg)](LICENSE)

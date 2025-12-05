@@ -69,7 +69,7 @@ async function ensureLoggedIn() {
   let dns = await getTailscaleDNS();
   if (dns) return dns;
 
-  const host = process.env.TAILSCALE_HOSTNAME || `endtoend-${Math.random().toString(16).slice(2, 10)}`;
+  const host = process.env.TAILSCALE_HOSTNAME || `Qor-${Math.random().toString(16).slice(2, 10)}`;
   const args = ['up', '--hostname', host, '--accept-dns=true'];
 
   const needsSudo = process.platform !== 'win32' && process.getuid && process.getuid() !== 0;

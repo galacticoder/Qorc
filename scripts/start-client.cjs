@@ -15,7 +15,7 @@ function log(...args) { console.log('[CLIENT]', ...args); }
 function logErr(...args) { console.error('[CLIENT]', ...args); }
 
 if (process.argv.slice(2).some(arg => arg === '-h' || arg === '--help')) {
-    console.log('Usage: node start-client.cjs - Starts end2end chat client');
+    console.log('Usage: node start-client.cjs - Starts Qor-Chat client');
     console.log('');
     console.log('Prerequisites: Run `node scripts/install-deps.cjs --client` first');
     process.exit(0);

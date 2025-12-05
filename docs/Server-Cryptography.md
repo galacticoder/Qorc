@@ -83,7 +83,7 @@ CryptoUtils = {
     - `ARGON2_TIME` – env `ARGON2_TIME`, clamped to [3, 10], default 4.
     - `ARGON2_MEMORY` – env `ARGON2_MEMORY`, clamped to [128 MiB, 1 GiB], default 256 MiB.
     - `ARGON2_PARALLELISM` – env `ARGON2_PARALLELISM`, clamped to [1, 16], default 2.
-  - HKDF contexts for AES/session keys: `HKDF_INFO = "endtoend-chat hybrid key v2"`, `HKDF_INFO_CLIENT_COMPATIBLE = "endtoend-chat post-quantum v1"`.
+  - HKDF contexts for AES/session keys: `HKDF_INFO = "Qor-chat hybrid key v2"`, `HKDF_INFO_CLIENT_COMPATIBLE = "Qor-chat post-quantum v1"`.
 
 These values are shared by password hashing, KEK derivation, and some session keys.
 
@@ -140,7 +140,7 @@ The design always relies on the OS CSPRNG and treats timing entropy as optional 
   - Uses SHAKE256(salt) as HKDF salt and `"username-password-kek-v1"` as info.
   - Final KEK: 32 bytes; returns `{ kek, salt }`.
 - **`deriveAesKeyFromIkm(ikm, salt, context)`**:
-  - Uses `QuantumHashService.blake3Hkdf` with context string `"endtoend-chat hybrid key v2:<context>"` to derive a 32‑byte AES key.
+  - Uses `QuantumHashService.blake3Hkdf` with context string `"Qor-chat hybrid key v2:<context>"` to derive a 32‑byte AES key.
 - **`deriveSessionKey(ikm, salt, sessionContext)`**:
   - Uses BLAKE3-HKDF with info `"session-key-v2:<sessionContext>"` to derive 32‑byte keys.
 - **`deriveKey` / `deriveMultipleKeys`** – convenience wrappers around `PostQuantumHash.deriveKey`.

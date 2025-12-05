@@ -30,7 +30,7 @@ class CryptoConfig {
   static IV_LENGTH = 12;
   static AUTH_TAG_LENGTH = 16;
   static HKDF_HASH = "SHA-256";
-  static HKDF_INFO = new TextEncoder().encode("endtoend-chat hybrid key v2");
+  static HKDF_INFO = new TextEncoder().encode("Qor-chat hybrid key v2");
   static X25519_DERIVE_BITS = 256;
 }
 

@@ -1,10 +1,10 @@
-# Contributing to Endtoend
+# Contributing to Qor-Chat
 
-First off, thank you for considering contributing to Endtoend! Contributions from everyone are welcome.
+First off, thank you for considering contributing to Qor-Chat! Contributions from everyone are welcome.
 
 ## Code of Conduct
 
-This project and everyone participating in it is governed by the [Endtoend Code of Conduct](CODE_OF_CONDUCT.md). By participating, you are expected to uphold this code. Please report unacceptable behavior to the project maintainer at galacticoderr@gmail.com.
+This project and everyone participating in it is governed by the [Qor Code of Conduct](CODE_OF_CONDUCT.md). By participating, you are expected to uphold this code. Please report unacceptable behavior to the project maintainer at galacticoderr@gmail.com.
 
 ## Getting Started
 
@@ -17,8 +17,8 @@ This project and everyone participating in it is governed by the [Endtoend Code 
 
 1.  **Clone the repository:**
     ```bash
-    git clone https://github.com/galacticoder/end2end-chat-site.git
-    cd end2end-chat-site
+    git clone https://github.com/galacticoder/Qor-Chat.git
+    cd Qor-Chat
     ```
 
 2.  **Install dependencies:**

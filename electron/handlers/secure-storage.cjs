@@ -18,7 +18,7 @@ const os = require('os');
 const { ensureDir, atomicWrite, readFile, removeFile, listFiles, toSafeFileName, fromSafeFileName } = require('./secure-file.cjs');
 const { getMachineContext } = require('./machine-entropy.cjs');
 
-const CONFIG_DIR = path.join(os.homedir(), '.config', 'end2end-chat-client');
+const CONFIG_DIR = path.join(os.homedir(), '.config', 'Qor-chat-client');
 const STORE_DIR = path.join(CONFIG_DIR, 'secure-store');
 const MASTER_KEY_FILE = path.join(CONFIG_DIR, 'master.key');
 

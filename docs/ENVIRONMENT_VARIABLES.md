@@ -56,7 +56,7 @@ Values shown in parentheses indicate typical defaults when the variable is unset
 | `DATABASE_URL` | unset | `server/database/database.js`, `scripts/start-server.cjs` | Primary Postgres connection string. When set, all other DB connection parameters are ignored and this URL is used directly. |
 | `PGHOST` | `(localhost)` | `server/database/database.js`, `scripts/start-server.cjs` | Host for Postgres when `DATABASE_URL` is not set. |
 | `PGPORT` | `(5432)` | same as above | Port for Postgres when `DATABASE_URL` is not set. |
-| `PGDATABASE` | `(endtoend)` | `server/database/database.js`, `scripts/start-server.cjs` | Database name in fallback/local mode; also used when auto-creating a database via `sudo -u postgres`. |
+| `PGDATABASE` | `(Qor)` | `server/database/database.js`, `scripts/start-server.cjs` | Database name in fallback/local mode; also used when auto-creating a database via `sudo -u postgres`. |
 | `PGUSER` | current OS user | `server/database/database.js`, `scripts/start-server.cjs` | Fallback Postgres user when `DATABASE_USER` is not set. |
 | `PGPASSWORD` | unset | `server/database/database.js`, `scripts/start-server.cjs` | Fallback Postgres password when `DATABASE_PASSWORD` is not set. |
 | `DATABASE_USER` | unset | `server/database/database.js`, `scripts/start-server.cjs` | Preferred Postgres user for local/fallback connections when `DATABASE_URL` is not set. |
@@ -187,7 +187,7 @@ Several of these secrets (`KEY_ENCRYPTION_SECRET`, `TOKEN_PEPPER`, `AUTH_AUDIT_H
 
 | Name | Default / required | Used by | Description |
 | ---- | ------------------ | ------- | ----------- |
-| `TAILSCALE_HOSTNAME` | `('endtoend-chat')` (JSON-encoded in `.env`) | `scripts/generate_ts_tls.cjs` | Device name requested from Tailscale when issuing a TLS certificate. |
+| `TAILSCALE_HOSTNAME` | `('Qor-chat')` (JSON-encoded in `.env`) | `scripts/generate_ts_tls.cjs` | Device name requested from Tailscale when issuing a TLS certificate. |
 | `TS_AUTHKEY` | **required** for Tailscale certificate generation | `scripts/generate_ts_tls.cjs` | Tailscale auth key used to authenticate the node when requesting TLS certificates via `tailscale cert`. |
 | `TOR_VERSION` | `(15.0a4)` | `electron/prepare-tor-bundles.cjs` | Tor Browser expert bundle version to download for Electron packaging. |
 | `TOR_BASE_URL` | `https://dist.torproject.org/torbrowser/${TOR_VERSION}` | `electron/prepare-tor-bundles.cjs` | Base URL for Tor bundle and checksum downloads. |

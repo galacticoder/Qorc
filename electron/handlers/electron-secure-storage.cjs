@@ -7,7 +7,7 @@
 const qss = require('./secure-storage.cjs');
 
 class ElectronSecureStorage {
-  constructor(serviceName = 'end2end-chat-app') {
+  constructor(serviceName = 'Qor-Chat-chat-app') {
     this.serviceName = serviceName;
     this.initialized = false;
   }

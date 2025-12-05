@@ -1,5 +1,5 @@
 {
-  "name": "end2end-chat-client",
+  "name": "-chat-client",
   "private": true,
   "version": "0.0.0",
   "description": "meant for maximum privacy and security",
@@ -97,8 +97,8 @@
     }
   },
   "build": {
-    "appId": "com.example.end2endchat",
-    "productName": "end2end chat",
+    "appId": "com.example.Qor-chat",
+    "productName": "Qor-Chat",
     "directories": {
       "output": "dist-electron"
     },
