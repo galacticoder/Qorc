@@ -1,4 +1,5 @@
 import React, { useEffect, useCallback, useMemo } from "react";
+import { createPortal } from "react-dom";
 import { Avatar, AvatarFallback } from "../../ui/avatar";
 import { format } from "date-fns";
 import { cn } from "../../../lib/utils";
@@ -101,15 +102,19 @@ export const FileContent: React.FC<FileContentProps> = ({ message, isCurrentUser
   const [imageError, setImageError] = React.useState(false);
   const [videoError, setVideoError] = React.useState(false);
   const [audioError, setAudioError] = React.useState(false);
+  const [lightboxOpen, setLightboxOpen] = React.useState(false);
 
   const { url: resolvedFileUrl, loading: fileLoading, error: fileError } = useFileUrl({
     secureDB: secureDB || null,
     fileId: message.id,
     mimeType: mimeType || 'application/octet-stream',
     initialUrl: typeof content === 'string' ? content : '',
+    originalBase64Data: originalBase64Data || null,
   });
 
-  const effectiveFileUrl = resolvedFileUrl || (typeof content === 'string' ? content : '');
+  // Don't use blob URLs as fallback - they are session-specific and invalid after restart
+  const contentUrl = typeof content === 'string' && !content.startsWith('blob:') ? content : '';
+  const effectiveFileUrl = resolvedFileUrl || contentUrl;
 
   useEffect(() => {
     if (effectiveFileUrl) {
@@ -175,28 +180,61 @@ export const FileContent: React.FC<FileContentProps> = ({ message, isCurrentUser
     <>
       {/* Images */}
       {hasExtension(filename || "", IMAGE_EXTENSIONS) && (
-        <div className="relative">
-          {!imageError ? (
-            <img
-              src={effectiveFileUrl}
-              alt={filename}
-              className="rounded-md"
-              style={{ maxWidth: '400px', maxHeight: '300px', objectFit: 'contain' }}
-              onError={() => setImageError(true)}
-            />
-          ) : (
+        <>
+          <div
+            className="relative cursor-pointer group"
+            onClick={() => setLightboxOpen(true)}
+            title="Click to expand"
+          >
+            {!imageError ? (
+              <div
+                className="rounded-xl overflow-hidden"
+                style={{
+                  width: '280px',
+                  height: '200px',
+                  backgroundColor: 'var(--color-surface)'
+                }}
+              >
+                <img
+                  src={effectiveFileUrl}
+                  alt={filename}
+                  className="w-full h-full object-cover select-none"
+                  draggable={false}
+                  onError={() => setImageError(true)}
+                />
+              </div>
+            ) : (
+              <div
+                className="px-3 py-2 rounded-lg text-sm italic select-none"
+                style={{
+                  backgroundColor: 'var(--color-surface)',
+                  color: 'var(--color-text-secondary)',
+                  border: '1px dashed var(--color-border)'
+                }}
+              >
+                Image cannot be loaded
+              </div>
+            )}
+          </div>
+
+          {/* Lightbox Modal */}
+          {lightboxOpen && effectiveFileUrl && createPortal(
             <div
-              className="px-3 py-2 rounded-lg text-sm italic select-none"
-              style={{
-                backgroundColor: 'var(--color-surface)',
-                color: 'var(--color-text-secondary)',
-                border: '1px dashed var(--color-border)'
-              }}
+              className="fixed inset-0 flex items-center justify-center bg-black/70"
+              style={{ zIndex: 9999 }}
+              onClick={() => setLightboxOpen(false)}
+              onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); }}
             >
-              Image cannot be loaded
-            </div>
+              <img
+                src={effectiveFileUrl}
+                alt={filename}
+                className="max-w-[90vw] max-h-[90vh] object-contain select-none pointer-events-none"
+                draggable={false}
+              />
+            </div>,
+            document.body
           )}
-        </div>
+        </>
       )}
 
       {/* Videos */}
@@ -321,7 +359,7 @@ export const FileContent: React.FC<FileContentProps> = ({ message, isCurrentUser
   );
 }
 
-export function FileMessage({ message, isCurrentUser, onReply, onDelete }: FileMessageProps) {
+export function FileMessage({ message, isCurrentUser, onReply, onDelete, secureDB }: FileMessageProps) {
   const { content, sender, timestamp, filename, fileSize, mimeType, originalBase64Data } = message;
 
   useEffect(() => {
@@ -378,91 +416,8 @@ export function FileMessage({ message, isCurrentUser, onReply, onDelete }: FileM
           <span className="text-xs text-muted-foreground">{format(timestamp, "h:mm a")}</span>
         </div>
 
-        {hasExtension(filename || "", IMAGE_EXTENSIONS) && (
-          <div className="relative">
-            <img
-              src={content}
-              alt={filename}
-              className="rounded-md"
-              style={{ maxWidth: '400px', maxHeight: '300px', objectFit: 'contain' }}
-            />
-          </div>
-        )}
-
-        {hasExtension(filename || "", VIDEO_EXTENSIONS) && (
-          <div
-            className={cn(
-              "rounded-lg text-sm max-w-[60%] break-words",
-              isCurrentUser ? "bg-primary text-primary-foreground" : "bg-muted"
-            )}
-          >
-            <div className="flex flex-col gap-2">
-              <video controls className="max-w-full rounded-md">
-                <source src={content} />
-                Your browser does not support the video tag.
-              </video>
-
-              <div className="flex items-center gap-2 text-sm">
-                <span className="font-medium break-all ml-1 mb-1">{filename}</span>
-                <span className="text-xs text-muted-foreground">({formatFileSize(fileSize ?? 0)})</span>
-              </div>
-            </div>
-          </div>
-        )}
-
-        {hasExtension(filename || "", AUDIO_EXTENSIONS) && (
-          <div
-            className={cn(
-              "rounded-lg mr-1 py-0 text-sm max-w-[75%] break-words",
-              isCurrentUser ? "bg-primary text-primary-foreground" : "bg-muted"
-            )}
-          >
-            <div className="flex flex-col gap-1">
-              <audio controls className="w-full rounded-md">
-                <source src={content} />
-                Your browser does not support the audio element.
-              </audio>
-
-              <div className={cn(
-                "flex items-center gap-1 text-sm",
-                isCurrentUser ? "text-white" : "text-blue-500"
-              )}>
-                <span className="truncate max-w-[250px] ml-1" title={filename}>
-                  {filename}
-                </span>
-              </div>
-
-              <span className="text-xs text-muted-foreground">({formatFileSize(fileSize ?? 0)})</span>
-            </div>
-          </div>
-        )}
-
-        {!hasExtension(filename || "", [...IMAGE_EXTENSIONS, ...VIDEO_EXTENSIONS, ...AUDIO_EXTENSIONS]) && (
-          <div
-            className={cn(
-              "rounded-lg px-1 py-1 text-sm max-w-[60%] break-words",
-              isCurrentUser ? "bg-primary text-primary-foreground" : "bg-muted"
-            )}
-          >
-            <div className={cn(
-              "flex items-start gap-2 w-full",
-              isCurrentUser ? "text-white" : "text-blue-500"
-            )}>
-              <PaperclipIcon className="h-5 w-5 shrink-0 mt-1" />
-              <div className="flex flex-col min-w-0">
-                <div className="flex items-center gap-2">
-                  <span className="text-sm truncate max-w-[250px] w-full" title={filename}>
-                    {filename}
-                  </span>
-                </div>
-                <span className={cn(
-                  "text-xs leading-tight",
-                  isCurrentUser ? "text-white/80" : "text-muted-foreground"
-                )}>({formatFileSize(fileSize ?? 0)})</span>
-              </div>
-            </div>
-          </div>
-        )}
+        {/* Use FileContent for all file types */}
+        <FileContent message={message} isCurrentUser={isCurrentUser || false} secureDB={secureDB} />
 
         <div
           className={cn(

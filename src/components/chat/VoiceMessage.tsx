@@ -33,6 +33,7 @@ export function VoiceMessage({
     fileId: messageId,
     mimeType: mimeType || 'audio/webm',
     initialUrl: audioUrl,
+    originalBase64Data: originalBase64Data || null,
   });
 
   const [isPlaying, setIsPlaying] = useState(false);
@@ -46,8 +47,8 @@ export function VoiceMessage({
   const peaksRef = useRef<number[] | null>(null);
   const drawRafRef = useRef<number | null>(null);
 
-  // Use the resolved URL or fall back to the original audioUrl
-  const effectiveAudioUrl = resolvedUrl || audioUrl;
+  const safeAudioUrl = audioUrl && !audioUrl.startsWith('blob:') ? audioUrl : '';
+  const effectiveAudioUrl = resolvedUrl || safeAudioUrl;
 
   const handleLoadedMetadata = useCallback(() => {
     if (!audioRef.current) return;

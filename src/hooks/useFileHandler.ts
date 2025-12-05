@@ -1,6 +1,7 @@
 import { useRef, useCallback, useEffect } from "react";
 import { v4 as uuidv4 } from "uuid";
 import * as pako from "pako";
+import { toast } from "sonner";
 import { SignalType } from "@/lib/signal-types";
 import { IncomingFileChunks } from "@/pages/types";
 import { Message } from '@/components/chat/types';
@@ -8,9 +9,9 @@ import { CryptoUtils } from "@/lib/unified-crypto";
 import { sanitizeTextInput } from "@/lib/sanitizers";
 
 const MAX_FILE_SIZE_BYTES = 50 * 1024 * 1024;
-const INACTIVITY_TIMEOUT_MS = 120 * 1000; 
+const INACTIVITY_TIMEOUT_MS = 120 * 1000;
 const MAX_TOTAL_CHUNKS = 10_000;
-const MAX_CHUNK_SIZE_BYTES = 384 * 1024; 
+const MAX_CHUNK_SIZE_BYTES = 384 * 1024;
 const MAX_CONCURRENT_TRANSFERS = 16;
 const MAX_BASE64_CHARS = MAX_CHUNK_SIZE_BYTES * 2;
 const MAX_FILENAME_LENGTH = 256;
@@ -74,21 +75,21 @@ function dispatchProgressEvent(detail: Record<string, unknown>) {
   try {
     const evt = new CustomEvent('file-transfer-progress', { detail: sanitizeEventDetail(detail) });
     window.dispatchEvent(evt);
-  } catch {}
+  } catch { }
 }
 
 function dispatchCompleteEvent(detail: Record<string, unknown>) {
   try {
     const evt = new CustomEvent('file-transfer-complete', { detail: sanitizeEventDetail(detail) });
     window.dispatchEvent(evt);
-  } catch {}
+  } catch { }
 }
 
 function dispatchCanceledEvent(detail: Record<string, unknown>) {
   try {
     const evt = new CustomEvent('file-transfer-canceled', { detail: sanitizeEventDetail(detail) });
     window.dispatchEvent(evt);
-  } catch {}
+  } catch { }
 }
 
 const sanitizeFilename = (value: string | undefined) => {
@@ -159,7 +160,7 @@ const createBlobCache = () => {
     if (entries.length > MAX_TOTAL_CHUNKS) {
       const stale = entries.shift();
       if (stale) {
-        try { URL.revokeObjectURL(stale.url); } catch {}
+        try { URL.revokeObjectURL(stale.url); } catch { }
       }
     }
   };
@@ -167,7 +168,7 @@ const createBlobCache = () => {
     while (entries.length) {
       const stale = entries.shift();
       if (stale) {
-        try { URL.revokeObjectURL(stale.url); } catch {}
+        try { URL.revokeObjectURL(stale.url); } catch { }
       }
     }
   };
@@ -185,7 +186,8 @@ const releaseFileEntry = (entry?: ExtendedFileState) => {
 export function useFileHandler(
   getKeysOnDemand: () => Promise<{ x25519: { private: any; publicKeyBase64: string }; kyber: { publicKeyBase64: string; secretKey: Uint8Array } } | null>,
   onNewMessage: (message: Message) => void,
-  setLoginError: (err: string) => void
+  setLoginError: (err: string) => void,
+  secureDBRef?: React.MutableRefObject<any | null>
 ) {
   const incomingFileChunksRef = useRef<IncomingFileChunks>({});
   const macStateRef = useRef<Map<string, { macKey: Uint8Array; fileSize: number }>>(new Map());
@@ -195,7 +197,7 @@ export function useFileHandler(
   const cleanup = useCallback(() => {
     // Clear all inactivity timers
     for (const [, t] of cleanupTimersRef.current) {
-      try { clearTimeout(t); } catch {}
+      try { clearTimeout(t); } catch { }
     }
     cleanupTimersRef.current.clear();
     macStateRef.current.clear();
@@ -341,7 +343,7 @@ export function useFileHandler(
         if (!encryptedBytes) {
           return;
         }
-        
+
         let parsed;
         try {
           parsed = CryptoUtils.Decrypt.deserializeEncryptedDataFromUint8Array(encryptedBytes);
@@ -356,12 +358,12 @@ export function useFileHandler(
           dispatchCanceledEvent({ from, filename: safeFilename, reason: 'deserialize-failed' });
           return;
         }
-        
+
         const iv = parsed?.iv as Uint8Array | undefined;
         const authTag = parsed?.authTag as Uint8Array | undefined;
         const encrypted = parsed?.encrypted as Uint8Array | undefined;
         if (!(iv instanceof Uint8Array && authTag instanceof Uint8Array && encrypted instanceof Uint8Array) ||
-            iv.length === 0 || authTag.length === 0 || encrypted.length === 0) {
+          iv.length === 0 || authTag.length === 0 || encrypted.length === 0) {
           console.error('[useFileHandler] Invalid chunk wrapper (missing fields)', { from, filename: safeFilename, chunkIndex });
           releaseFileEntry(fileEntry);
           delete (incomingFileChunksRef.current as any)[fileKey];
@@ -380,7 +382,7 @@ export function useFileHandler(
           }
 
           try {
-          } catch {}
+          } catch { }
 
           if (!envelope || !validateEnvelope(envelope)) {
             // Missing or invalid envelope => reject transfer
@@ -532,7 +534,7 @@ export function useFileHandler(
           fileEntry.receivedCount++;
           fileEntry.bytesReceivedApprox = (fileEntry.bytesReceivedApprox || 0) + decompressedChunk.length;
           if ((fileEntry.fileSize && fileEntry.bytesReceivedApprox > fileEntry.fileSize + MAX_CHUNK_SIZE_BYTES) ||
-              fileEntry.bytesReceivedApprox > MAX_FILE_SIZE_BYTES) {
+            fileEntry.bytesReceivedApprox > MAX_FILE_SIZE_BYTES) {
             releaseFileEntry(fileEntry);
             delete (incomingFileChunksRef.current as any)[fileKey];
             macStateRef.current.delete(fileKey);
@@ -562,11 +564,11 @@ export function useFileHandler(
           }
 
           if (!hasAllChunks) {
-            console.error('[useFileHandler] Transfer incomplete - missing chunks despite count match', { 
-              from, 
+            console.error('[useFileHandler] Transfer incomplete - missing chunks despite count match', {
+              from,
               filename: safeFilename,
               receivedCount: fileEntry.receivedCount,
-              totalChunks: fileEntry.totalChunks 
+              totalChunks: fileEntry.totalChunks
             });
             releaseFileEntry(fileEntry);
             delete (incomingFileChunksRef.current as any)[fileKey];
@@ -601,6 +603,35 @@ export function useFileHandler(
           const fileUrl = URL.createObjectURL(fileBlob);
           blobCacheRef.current.enqueue(fileUrl, safeFilename);
 
+          // Save file to SecureDB for persistence across restarts
+          const messageId = fileEntry.messageId || uuidv4();
+          if (secureDBRef?.current) {
+            try {
+              const saveResult = await secureDBRef.current.saveFile(messageId, fileBlob);
+              if (!saveResult.success && saveResult.quotaExceeded) {
+                toast.warning('Storage limit reached. This file will not persist after restart.', {
+                  duration: 5000
+                });
+              }
+            } catch (saveErr) {
+              console.error('[useFileHandler] Failed to save file to SecureDB:', saveErr);
+            }
+          }
+
+          // Convert blob to base64 for recovery/fallback
+          let originalBase64Data: string | undefined;
+          try {
+            const buffer = await fileBlob.arrayBuffer();
+            const bytes = new Uint8Array(buffer);
+            let binary = '';
+            for (let i = 0; i < bytes.byteLength; i++) {
+              binary += String.fromCharCode(bytes[i]);
+            }
+            originalBase64Data = btoa(binary);
+          } catch (e) {
+            console.error('[useFileHandler] Failed to convert blob to base64:', e);
+          }
+
           onNewMessage({
             id: fileEntry.messageId || uuidv4(),
             content: fileUrl,
@@ -616,7 +647,8 @@ export function useFileHandler(
             encrypted: true,
             transport: 'websocket',
             version: '1.0',
-            receipt: { delivered: false, read: false }
+            receipt: { delivered: false, read: false },
+            originalBase64Data,
           });
 
           dispatchCompleteEvent({ from, filename: safeFilename, size: fileBlob.size, mimeType: detectedMime, messageId: fileEntry.messageId || '' });
@@ -633,7 +665,7 @@ export function useFileHandler(
         };
         try {
           console.error('[useFileHandler] Error handling FILE_MESSAGE_CHUNK', details);
-        } catch {}
+        } catch { }
         try {
           console.error('[useFileHandler] FILE_MESSAGE_CHUNK payload summary', {
             hasEnvelope: !!(payload as any)?.envelope,
@@ -644,7 +676,7 @@ export function useFileHandler(
             chunkSize: (payload as any)?.chunkSize,
             fileSize: (payload as any)?.fileSize,
           });
-        } catch {}
+        } catch { }
         setLoginError('Failed to process file chunk');
       }
     },

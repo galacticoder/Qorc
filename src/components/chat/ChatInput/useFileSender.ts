@@ -20,8 +20,9 @@ const TOR_ENABLED_KEY = 'tor_enabled';
 import { syncEncryptedStorage } from '@/lib/encrypted-storage';
 
 interface HybridPublicKeys {
-  readonly x25519PublicBase64: string;
+  readonly x25519PublicBase64?: string;
   readonly kyberPublicBase64: string;
+  readonly dilithiumPublicBase64?: string;
 }
 
 interface User {
@@ -73,7 +74,8 @@ export function useFileSender(
   targetUsername: string | undefined,
   users: readonly User[],
   p2pConnector?: P2PConnector,
-  getKeysOnDemand?: () => Promise<LocalKeys>
+  getKeysOnDemand?: () => Promise<LocalKeys>,
+  getPeerHybridKeys?: (peerUsername: string) => Promise<HybridPublicKeys | null>
 ) {
   const [progress, setProgress] = useState(0);
   const [isSendingFile, setIsSendingFile] = useState(false);
@@ -152,7 +154,7 @@ export function useFileSender(
     try {
       const flag = syncEncryptedStorage.getItem(TOR_ENABLED_KEY);
       if (typeof flag === 'string') return flag !== 'false';
-    } catch {}
+    } catch { }
     return true;
   }, []);
 
@@ -182,7 +184,7 @@ export function useFileSender(
             }
             await new Promise(res => setTimeout(res, P2P_POLL_MS));
           }
-        } catch {}
+        } catch { }
         return opened;
       })();
 
@@ -229,7 +231,7 @@ export function useFileSender(
           const signature = CryptoUtils.Base64.arrayBufferToBase64(sigRaw);
           await websocketClient.sendSecureControlMessage({ ...req, signature });
         }
-      } catch {}
+      } catch { }
 
       // Wait briefly for session establishment notification
       const MAX_WAIT_MS = 8000;
@@ -244,7 +246,7 @@ export function useFileSender(
               window.removeEventListener('libsignal-session-ready', onReady as EventListener);
               resolve(true);
             }
-          } catch {}
+          } catch { }
         };
         window.addEventListener('libsignal-session-ready', onReady as EventListener);
       });
@@ -317,12 +319,12 @@ export function useFileSender(
           messageId: state.fileId,
           chunkMac
         };
-        
+
         const recipient = users.find(u => u.username === uk.username);
         if (!recipient?.hybridPublicKeys) {
           continue;
         }
-        
+
         let encryptedMetadata: EncryptedMetadataResult | null = null;
         const attemptEncrypt = async (): Promise<EncryptedMetadataResult | null> => {
           return await (window as any).edgeApi.encrypt({
@@ -338,7 +340,7 @@ export function useFileSender(
         } catch (e) {
           console.error('[FILE-SENDER] Metadata encryption error', { index: nextIndex, user: uk.username, error: (e as Error)?.message });
         }
-        
+
         if (!encryptedMetadata?.success || !encryptedMetadata?.encryptedPayload) {
           // Retry up to 2 times after re-establishing session
           const maxRetries = 2;
@@ -348,7 +350,7 @@ export function useFileSender(
             if (!sessionLikely) break;
             const ok = await ensureSignalSession();
             if (ok) {
-              try { encryptedMetadata = await attemptEncrypt(); } catch {}
+              try { encryptedMetadata = await attemptEncrypt(); } catch { }
             } else {
               break;
             }
@@ -359,9 +361,9 @@ export function useFileSender(
           console.error('[FILE-SENDER] Metadata encryption failed', { index: nextIndex, user: uk.username });
           throw new Error('File chunk metadata encryption failed');
         }
-        
+
         const chunkDataBase64 = CryptoUtils.Encrypt.serializeEncryptedData(iv, authTag, encrypted);
-        
+
         const fullChunkMessage = {
           type: SignalType.ENCRYPTED_MESSAGE,
           to: uk.username,
@@ -370,7 +372,7 @@ export function useFileSender(
             chunkData: chunkDataBase64
           }
         };
-        
+
         websocketClient.send(JSON.stringify(fullChunkMessage));
       }
 
@@ -392,7 +394,7 @@ export function useFileSender(
         clearTimeout(state.inactivityTimer);
         state.inactivityTimer = undefined;
       }
-    } catch {}
+    } catch { }
     setProgress(1);
   }, [computeChunkMacAsync, currentUsername, scheduleInactivityTimer, users]);
 
@@ -450,13 +452,35 @@ export function useFileSender(
         32
       );
       const macKeyBase64 = CryptoUtils.Base64.arrayBufferToBase64(currentMacKeyRef.current);
-      try { rawAesBytes.fill(0); } catch {}
+      try { rawAesBytes.fill(0); } catch { }
 
-      const filteredUsers = users.filter((user) =>
+      let filteredUsers = users.filter((user) =>
         user.username === targetUsername &&
         user.username !== currentUsername &&
         user.hybridPublicKeys
       );
+
+      // If recipient's keys not found, try to fetch them on-demand
+      if (filteredUsers.length === 0 && getPeerHybridKeys && targetUsername) {
+        console.log('[FILE-SENDER] Recipient keys not found, attempting to fetch...');
+        try {
+          const fetchedKeys = await getPeerHybridKeys(targetUsername);
+          if (fetchedKeys && fetchedKeys.kyberPublicBase64 && fetchedKeys.dilithiumPublicBase64) {
+            // Create a synthetic user entry with fetched keys
+            filteredUsers = [{
+              username: targetUsername,
+              hybridPublicKeys: {
+                x25519PublicBase64: fetchedKeys.x25519PublicBase64 || '',
+                kyberPublicBase64: fetchedKeys.kyberPublicBase64,
+                dilithiumPublicBase64: fetchedKeys.dilithiumPublicBase64
+              }
+            }] as any;
+            console.log('[FILE-SENDER] Successfully fetched recipient keys');
+          }
+        } catch (fetchError) {
+          console.error('[FILE-SENDER] Failed to fetch recipient keys:', fetchError);
+        }
+      }
 
       if (filteredUsers.length === 0) {
         console.error('[FILE-SENDER] Missing recipient keys', { to: targetUsername });
@@ -501,7 +525,7 @@ export function useFileSender(
       );
 
       if (!torEnabled && online) {
-        try { await attemptP2P(); } catch {}
+        try { await attemptP2P(); } catch { }
       }
 
       const fileBlob = new Blob([rawBytes], { type: file.type || 'application/octet-stream' });
@@ -545,7 +569,7 @@ export function useFileSender(
         if (st?.inactivityTimer) {
           clearTimeout(st.inactivityTimer);
         }
-      } catch {}
+      } catch { }
       currentTransferRef.current = null;
       currentRawBytesRef.current = null;
       currentAesKeyRef.current = null;

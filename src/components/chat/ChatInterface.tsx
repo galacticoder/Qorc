@@ -48,6 +48,7 @@ interface ChatInterfaceProps {
   readonly callingAuthContext?: ReturnType<typeof useAuth>;
   readonly getDisplayUsername?: (username: string) => Promise<string>;
   readonly getKeysOnDemand?: () => Promise<HybridKeys | null>;
+  readonly getPeerHybridKeys?: (peerUsername: string) => Promise<{ kyberPublicBase64: string; dilithiumPublicBase64: string; x25519PublicBase64?: string } | null>;
   readonly p2pConnected?: boolean;
   readonly selectedDisplayName?: string;
   readonly loadMoreMessages?: (peerUsername: string, currentOffset: number, limit?: number) => Promise<Message[]>;
@@ -77,6 +78,7 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
   callingAuthContext,
   getDisplayUsername,
   getKeysOnDemand,
+  getPeerHybridKeys,
   p2pConnected = false,
   selectedDisplayName,
   loadMoreMessages,
@@ -822,6 +824,7 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
           getDisplayUsername={getDisplayUsernameStable}
           disabled={isUserBlocked || isBlockedByUser}
           getKeysOnDemand={getKeysOnDemand}
+          getPeerHybridKeys={getPeerHybridKeys}
         />
       </div>
 

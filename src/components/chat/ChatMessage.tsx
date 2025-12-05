@@ -93,7 +93,7 @@ const formatTimestamp = (timestamp: Date): string => {
 
 export const ChatMessage = React.memo<ExtendedChatMessageProps>(({ message, smartReceipt, onReply, previousMessage, onDelete, onEdit, onReact, getDisplayUsername, currentUsername, secureDB }) => {
   const { content, sender, timestamp, isCurrentUser, isSystemMessage, isDeleted, type } = message;
-  const effectiveReceipt = smartReceipt || message.receipt;
+  const effectiveReceipt = smartReceipt;
 
   const senderKey = useMemo(() => sender, [sender]);
   const { displayName: displaySender } = useUnifiedUsernameDisplay({

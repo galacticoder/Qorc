@@ -492,7 +492,8 @@ export class SecureDB {
 
   async clearStore(storeName: string): Promise<number> { return (await this.kv()).clearStore(storeName); }
 
-  private static readonly MAX_FILE_SIZE = 50 * 1024 * 1024; // 50 MB
+  private static readonly MAX_FILE_SIZE = 50 * 1024 * 1024; // 50 MB per file
+  private static readonly MAX_TOTAL_FILE_STORAGE = 10 * 1024 * 1024 * 1024; // 10 GB total
   private static readonly BLOCKED_MIME_TYPES = [
     'application/x-msdownload',
     'application/x-msdos-program',
@@ -526,19 +527,58 @@ export class SecureDB {
     }
   }
 
-  async saveFile(fileId: string, data: ArrayBuffer | Blob): Promise<void> {
+  /**
+   * Get total storage used by all files in bytes
+   */
+  async getFilesStorageUsage(): Promise<{ used: number; limit: number; available: number }> {
+    try {
+      const kv = await this.kv();
+      const entries = await kv.entriesForStore('files');
+      let totalSize = 0;
+      for (const { value } of entries) {
+        if (value instanceof Uint8Array) {
+          totalSize += value.byteLength;
+        }
+      }
+      return {
+        used: totalSize,
+        limit: SecureDB.MAX_TOTAL_FILE_STORAGE,
+        available: Math.max(0, SecureDB.MAX_TOTAL_FILE_STORAGE - totalSize)
+      };
+    } catch (err) {
+      SecureAuditLogger.error('securedb', 'storage-usage', 'failed', { error: (err as Error).message });
+      return { used: 0, limit: SecureDB.MAX_TOTAL_FILE_STORAGE, available: SecureDB.MAX_TOTAL_FILE_STORAGE };
+    }
+  }
+
+  async saveFile(fileId: string, data: ArrayBuffer | Blob): Promise<{ success: boolean; quotaExceeded?: boolean }> {
     if (!this.encryptionKey) throw new Error('Encryption key not initialized');
 
     this.validateFileData(data, fileId);
 
     const arrayBuffer = data instanceof Blob ? await data.arrayBuffer() : data;
     const uint8Array = new Uint8Array(arrayBuffer);
+    const fileSize = uint8Array.byteLength;
+
+    // Check if adding this file would exceed the total storage limit
+    const { available } = await this.getFilesStorageUsage();
+    const estimatedEncryptedSize = Math.ceil(fileSize * 1.1);
+
+    if (estimatedEncryptedSize > available) {
+      SecureAuditLogger.warn('securedb', 'file-save', 'quota-exceeded', {
+        fileSize,
+        available,
+        limit: SecureDB.MAX_TOTAL_FILE_STORAGE
+      });
+      return { success: false, quotaExceeded: true };
+    }
 
     // Encrypt the file data
     const encrypted = await this.encryptData(uint8Array);
 
     // Store in the 'files' store using fileId as key
     await (await this.kv()).setBinary('files', fileId, encrypted);
+    return { success: true };
   }
 
   async getFile(fileId: string): Promise<Blob | null> {

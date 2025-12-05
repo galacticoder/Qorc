@@ -363,7 +363,6 @@ export function useMessageSender(
   const defaultResolvePeerHybridKeys = useCallback(async (peerUsername: string): Promise<{ kyberPublicBase64: string; dilithiumPublicBase64: string; x25519PublicBase64?: string } | null> => {
     if (!peerUsername) return null;
 
-    // If already have in directory, return
     const existing = recipientDirectory.get(peerUsername)?.hybridPublicKeys;
     if (existing && existing.kyberPublicBase64 && existing.dilithiumPublicBase64) {
       return existing;
@@ -412,7 +411,6 @@ export function useMessageSender(
     });
 
     if (hybrid && hybrid.kyberPublicBase64 && hybrid.dilithiumPublicBase64) return hybrid;
-    // Final attempt: read from latest directory after possible state update
     const refreshed = recipientDirectory.get(peerUsername)?.hybridPublicKeys || null;
     return refreshed || null;
   }, [recipientDirectory, getKeysOnDemand, loginUsernameRef]);
@@ -427,7 +425,6 @@ export function useMessageSender(
   // Session prefetch deduplication and throttling
   const sessionPrefetchMap = useRef<Map<string, Promise<void>>>(new Map());
   const lastSessionBundleReqTsRef = useRef<Map<string, number>>(new Map());
-  // Queue for messages that failed due to session issues and should be retried
   const pendingRetryMessagesRef = useRef<Map<string, {
     user: { username: string; hybridPublicKeys: { kyberPublicBase64: string; dilithiumPublicBase64: string; x25519PublicBase64?: string } };
     content: string;
@@ -438,11 +435,9 @@ export function useMessageSender(
     editMessageId?: string;
     retryCount: number;
   }>>(new Map());
-  // Track recent session resets to add delay before sending
+
   const recentSessionResetsRef = useRef<Map<string, number>>(new Map());
-  // Track if peer can decrypt our messages (they've processed our bundle and sent SESSION_ESTABLISHED)
   const peerCanDecryptRef = useRef<Map<string, boolean>>(new Map());
-  // Track consecutive PreKey failures to avoid infinite loops
   const preKeyFailureCountRef = useRef<Map<string, number>>(new Map());
 
   useEffect(() => {

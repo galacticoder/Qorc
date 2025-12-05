@@ -56,6 +56,7 @@ interface ChatInputProps {
   disabled?: boolean;
   p2pConnector?: P2PConnector;
   getKeysOnDemand?: () => Promise<HybridKeys | null>;
+  getPeerHybridKeys?: (peerUsername: string) => Promise<{ kyberPublicBase64: string; dilithiumPublicBase64: string; x25519PublicBase64?: string } | null>;
 }
 
 export function ChatInput({
@@ -74,6 +75,7 @@ export function ChatInput({
   disabled = false,
   p2pConnector,
   getKeysOnDemand,
+  getPeerHybridKeys,
 }: ChatInputProps) {
   const [message, setMessage] = useState("");
   const [isSending, setIsSending] = useState(false);
@@ -87,6 +89,7 @@ export function ChatInput({
     users,
     p2pConnector,
     getKeysOnDemand,
+    getPeerHybridKeys,
   );
 
   useEffect(() => {

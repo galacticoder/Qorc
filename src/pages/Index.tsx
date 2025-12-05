@@ -122,8 +122,11 @@ const ChatApp: React.FC<ChatAppProps> = () => {
   const fileHandler = useFileHandler(
     Authentication.getKeysOnDemand,
     handleIncomingFileMessage,
-    Authentication.setLoginError
+    Authentication.setLoginError,
+    Database.secureDBRef
   );
+
+  const getPeerHybridKeysRef = useRef<((peerUsername: string) => Promise<{ kyberPublicBase64: string; dilithiumPublicBase64: string; x25519PublicBase64?: string } | null>) | null>(null);
 
   const messageSender = useMessageSender(
     Database.users,
@@ -151,91 +154,100 @@ const ChatApp: React.FC<ChatAppProps> = () => {
     },
     Database.secureDBRef,
     async (peerUsername: string) => {
-      // 1. Check if we already have keys in Database.users
-      const existingUser = Database.users.find(u => u.username === peerUsername);
-      if (existingUser?.hybridPublicKeys?.kyberPublicBase64 && existingUser?.hybridPublicKeys?.dilithiumPublicBase64) {
-        return existingUser.hybridPublicKeys;
+      if (getPeerHybridKeysRef.current) {
+        return getPeerHybridKeysRef.current(peerUsername);
       }
-
-      // 2. If not, request them via websocket
-      try {
-        // Send both requests to ensure we get the data
-        await websocketClient.sendSecureControlMessage({
-          type: SignalType.P2P_FETCH_PEER_CERT,
-          username: peerUsername
-        });
-        await websocketClient.sendSecureControlMessage({
-          type: SignalType.CHECK_USER_EXISTS,
-          username: peerUsername
-        });
-      } catch (e) {
-        console.error('[Index] Failed to send key requests:', e);
-        toast.error('Could not resolve recipient keys. P2P messaging may be unavailable.', {
-          duration: 5000
-        });
-        return null;
-      }
-
-      // 3. Wait for either p2p-peer-cert or user-exists-response (with keys)
-      return new Promise((resolve) => {
-        let settled = false;
-        const timeout = setTimeout(() => {
-          if (!settled) {
-            console.warn('[Index] Key resolution timed out for:', peerUsername);
-            settled = true;
-            cleanup();
-            resolve(null);
-          }
-        }, 5000);
-
-        const cleanup = () => {
-          window.removeEventListener('user-exists-response', onUserExists as EventListener);
-          window.removeEventListener('p2p-peer-cert', onPeerCert as EventListener);
-        };
-
-        const handleCert = (pc: any) => {
-          if (pc && pc.kyberPublicKey && pc.dilithiumPublicKey) {
-            if (!settled) {
-              settled = true;
-              clearTimeout(timeout);
-              cleanup();
-
-              const keys = {
-                kyberPublicBase64: pc.kyberPublicKey,
-                dilithiumPublicBase64: pc.dilithiumPublicKey,
-                x25519PublicBase64: pc.x25519PublicKey
-              };
-
-              // Opportunistically update Database.users
-              if (Database.secureDBRef.current) {
-                storeUsernameMapping(peerUsername, Database.secureDBRef.current).catch(() => { });
-              }
-
-              resolve(keys);
-            }
-          }
-        };
-
-        const onUserExists = (e: Event) => {
-          const d = (e as CustomEvent).detail || {};
-          if (d?.username === peerUsername) {
-            const pc = d?.peerCertificate || d?.p2pCertificate || d?.cert || null;
-            if (pc) handleCert(pc);
-          }
-        };
-
-        const onPeerCert = (e: Event) => {
-          const d = (e as CustomEvent).detail || {};
-          if (d?.username === peerUsername) {
-            handleCert(d);
-          }
-        };
-
-        window.addEventListener('user-exists-response', onUserExists as EventListener);
-        window.addEventListener('p2p-peer-cert', onPeerCert as EventListener);
-      });
+      return null;
     }
   );
+
+  const getPeerHybridKeys = useCallback(async (peerUsername: string) => {
+    // 1. Check if we already have keys in Database.users
+    const existingUser = Database.users.find(u => u.username === peerUsername);
+    if (existingUser?.hybridPublicKeys?.kyberPublicBase64 && existingUser?.hybridPublicKeys?.dilithiumPublicBase64) {
+      return existingUser.hybridPublicKeys;
+    }
+
+    // 2. If not, request them via websocket
+    try {
+      // Send both requests to ensure we get the data
+      await websocketClient.sendSecureControlMessage({
+        type: SignalType.P2P_FETCH_PEER_CERT,
+        username: peerUsername
+      });
+      await websocketClient.sendSecureControlMessage({
+        type: SignalType.CHECK_USER_EXISTS,
+        username: peerUsername
+      });
+    } catch (e) {
+      console.error('[Index] Failed to send key requests:', e);
+      toast.error('Could not resolve recipient keys. P2P messaging may be unavailable.', {
+        duration: 5000
+      });
+      return null;
+    }
+
+    // 3. Wait for either p2p-peer-cert or user-exists-response (with keys)
+    return new Promise<{ kyberPublicBase64: string; dilithiumPublicBase64: string; x25519PublicBase64?: string } | null>((resolve) => {
+      let settled = false;
+      const timeout = setTimeout(() => {
+        if (!settled) {
+          console.warn('[Index] Key resolution timed out for:', peerUsername);
+          settled = true;
+          cleanup();
+          resolve(null);
+        }
+      }, 5000);
+
+      const cleanup = () => {
+        window.removeEventListener('user-exists-response', onUserExists as EventListener);
+        window.removeEventListener('p2p-peer-cert', onPeerCert as EventListener);
+      };
+
+      const handleCert = (pc: any) => {
+        if (pc && pc.kyberPublicKey && pc.dilithiumPublicKey) {
+          if (!settled) {
+            settled = true;
+            clearTimeout(timeout);
+            cleanup();
+
+            const keys = {
+              kyberPublicBase64: pc.kyberPublicKey,
+              dilithiumPublicBase64: pc.dilithiumPublicKey,
+              x25519PublicBase64: pc.x25519PublicKey
+            };
+
+            // Opportunistically update Database.users
+            if (Database.secureDBRef.current) {
+              storeUsernameMapping(peerUsername, Database.secureDBRef.current).catch(() => { });
+            }
+
+            resolve(keys);
+          }
+        }
+      };
+
+      const onUserExists = (e: Event) => {
+        const d = (e as CustomEvent).detail || {};
+        if (d?.username === peerUsername) {
+          const pc = d?.peerCertificate || d?.p2pCertificate || d?.cert || null;
+          if (pc) handleCert(pc);
+        }
+      };
+
+      const onPeerCert = (e: Event) => {
+        const d = (e as CustomEvent).detail || {};
+        if (d?.username === peerUsername) {
+          handleCert(d);
+        }
+      };
+
+      window.addEventListener('user-exists-response', onUserExists as EventListener);
+      window.addEventListener('p2p-peer-cert', onPeerCert as EventListener);
+    });
+  }, [Database.users, Database.secureDBRef]);
+
+  getPeerHybridKeysRef.current = getPeerHybridKeys;
 
   const encryptedHandler = useEncryptedMessageHandler(
     Authentication.loginUsernameRef,
@@ -245,7 +257,8 @@ const ChatApp: React.FC<ChatAppProps> = () => {
     Authentication.getKeysOnDemand,
     usersRef,
     undefined,
-    fileHandler.handleFileMessageChunk
+    fileHandler.handleFileMessageChunk,
+    Database.secureDBRef
   );
 
   const {
@@ -1332,7 +1345,12 @@ const ChatApp: React.FC<ChatAppProps> = () => {
           const blob = new Blob([bytes], { type: fileMessage.mimeType || 'application/octet-stream' });
 
           // Save to SecureDB using message ID as file ID
-          await Database.secureDBRef.current.saveFile(fileMessage.id, blob);
+          const saveResult = await Database.secureDBRef.current.saveFile(fileMessage.id, blob);
+          if (!saveResult.success && saveResult.quotaExceeded) {
+            toast.warning('Storage limit reached. This file will not persist after restart.', {
+              duration: 5000
+            });
+          }
         }
       } catch (err) {
         console.error('[Index] Failed to save file to SecureDB:', err);
@@ -1582,6 +1600,7 @@ const ChatApp: React.FC<ChatAppProps> = () => {
                         currentUsername={Authentication.loginUsernameRef.current || ''}
                         getDisplayUsername={stableGetDisplayUsername}
                         getKeysOnDemand={Authentication.getKeysOnDemand}
+                        getPeerHybridKeys={getPeerHybridKeys}
                         p2pConnected={p2pConnectedStatus}
                         selectedDisplayName={selectedDisplayName}
                         loadMoreMessages={loadMoreConversationMessages}

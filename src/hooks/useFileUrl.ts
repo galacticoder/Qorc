@@ -12,13 +12,15 @@ interface UseFileUrlOptions {
     fileId: string | undefined;
     mimeType?: string;
     initialUrl?: string;
+    originalBase64Data?: string | null; // For recovery if SecureDB doesn't have the file
 }
 
 /**
  * Hook to resolve file URLs from SecureDB storage.
  * Creates and manages Blob URLs for files stored in the encrypted database.
+ * Falls back to originalBase64Data if file not found in SecureDB.
  * 
- * @param options - Object containing secureDB instance, fileId, mimeType, and initialUrl
+ * @param options - Object containing secureDB instance, fileId, mimeType, initialUrl, and originalBase64Data
  * @returns Object containing the resolved URL, loading state, and error state
  */
 export function useFileUrl({
@@ -26,9 +28,11 @@ export function useFileUrl({
     fileId,
     mimeType = 'application/octet-stream',
     initialUrl,
+    originalBase64Data,
 }: UseFileUrlOptions): UseFileUrlReturn {
-    const [url, setUrl] = useState<string | null>(initialUrl || null);
-    const [loading, setLoading] = useState<boolean>(false);
+    const safeInitialUrl = initialUrl && !initialUrl.startsWith('blob:') ? initialUrl : null;
+    const [url, setUrl] = useState<string | null>(safeInitialUrl);
+    const [loading, setLoading] = useState<boolean>(!safeInitialUrl);
     const [error, setError] = useState<string | null>(null);
     const urlRef = useRef<string | null>(null);
 
@@ -53,6 +57,24 @@ export function useFileUrl({
         }
 
         if (!secureDB) {
+            if (originalBase64Data) {
+                try {
+                    let cleanBase64 = originalBase64Data.trim();
+                    const inlinePrefixIndex = cleanBase64.indexOf(',');
+                    if (inlinePrefixIndex > 0 && inlinePrefixIndex < 128) {
+                        cleanBase64 = cleanBase64.slice(inlinePrefixIndex + 1);
+                    }
+                    const binary = Uint8Array.from(atob(cleanBase64), char => char.charCodeAt(0));
+                    const blob = new Blob([binary], { type: mimeType });
+                    const blobUrl = URL.createObjectURL(blob);
+                    urlRef.current = blobUrl;
+                    setUrl(blobUrl);
+                    setLoading(false);
+                    return;
+                } catch (e) {
+                }
+            }
+
             if (initialUrl && !initialUrl.startsWith('blob:')) {
                 setUrl(initialUrl);
                 setLoading(false);
@@ -71,6 +93,38 @@ export function useFileUrl({
                 const blob = await secureDB.getFile(fileId);
 
                 if (!blob) {
+                    // Try to recover from originalBase64Data
+                    if (originalBase64Data) {
+                        try {
+                            let cleanBase64 = originalBase64Data.trim();
+                            const inlinePrefixIndex = cleanBase64.indexOf(',');
+                            if (inlinePrefixIndex > 0 && inlinePrefixIndex < 128) {
+                                cleanBase64 = cleanBase64.slice(inlinePrefixIndex + 1);
+                            }
+                            const binary = Uint8Array.from(atob(cleanBase64), char => char.charCodeAt(0));
+                            const recoveredBlob = new Blob([binary], { type: mimeType });
+
+                            try {
+                                await secureDB.saveFile(fileId, recoveredBlob);
+                            } catch (saveErr) {
+                                console.error('[useFileUrl] Failed to save recovered file to SecureDB:', saveErr);
+                            }
+
+                            const blobUrl = URL.createObjectURL(recoveredBlob);
+                            if (urlRef.current && urlRef.current.startsWith('blob:')) {
+                                try {
+                                    URL.revokeObjectURL(urlRef.current);
+                                } catch (e) { }
+                            }
+                            urlRef.current = blobUrl;
+                            setUrl(blobUrl);
+                            setLoading(false);
+                            return;
+                        } catch (e) {
+                            console.error('[useFileUrl] Failed to recover from originalBase64Data:', e);
+                        }
+                    }
+
                     if (initialUrl && !initialUrl.startsWith('blob:')) {
                         setUrl(initialUrl);
                         setLoading(false);
@@ -101,7 +155,7 @@ export function useFileUrl({
         };
 
         loadFile();
-    }, [fileId, mimeType, initialUrl, secureDB]);
+    }, [fileId, mimeType, initialUrl, secureDB, originalBase64Data]);
 
     return { url, loading, error };
 }
