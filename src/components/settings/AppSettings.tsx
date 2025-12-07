@@ -14,8 +14,6 @@ import { screenSharingSettings } from '../../lib/screen-sharing-settings';
 import { format } from 'date-fns';
 import { toast } from 'sonner';
 import { User, Palette, Bell, Volume2, Monitor, Download, Shield, Trash2, ShieldCheck, Camera, X, Eye, EyeOff } from 'lucide-react';
-import { getAvatarColor } from '../../lib/avatar-utils';
-import { generateDefaultAvatar } from '../../lib/utils';
 
 interface AppSettingsProps {
   passphraseRef?: React.MutableRefObject<string>;
@@ -602,12 +600,6 @@ export const AppSettings = React.memo(function AppSettings({
                         {truncatedHash}
                       </div>
                     )}
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginTop: '8px' }}>
-                      <ShieldCheck size={14} style={{ color: 'hsl(142 76% 36%)' }} />
-                      <span style={{ fontSize: '12px', color: 'hsl(142 76% 36%)', fontWeight: 500 }}>
-                        Quantum-secured
-                      </span>
-                    </div>
                   </div>
                 </div>
 
@@ -658,8 +650,8 @@ export const AppSettings = React.memo(function AppSettings({
                     <div>
                       <div className="settings-label">End-to-End Encrypted</div>
                       <div className="settings-description">
-                        Your messages are protected with post-quantum cryptography (ML-KEM/Kyber).
-                        Only you and your recipients can read them.
+                        Your messages are guaranteed protected with hybrid post-quantum cryptography.
+                        Only you and your recipients can ever read them.
                       </div>
                     </div>
                   </div>

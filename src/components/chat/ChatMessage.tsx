@@ -1,7 +1,6 @@
 import React, { useRef, useMemo, useCallback, useState } from "react";
 import { cn } from "../../lib/utils";
 import { format, isSameMinute, isToday, isYesterday, isThisYear } from "date-fns";
-import { TrashIcon, Pencil1Icon, DownloadIcon } from "./icons.tsx";
 import { EmojiPicker } from "../ui/EmojiPicker";
 import { useEmojiPicker } from "../../contexts/EmojiPickerContext";
 import { ChatMessageProps } from "./types.ts";

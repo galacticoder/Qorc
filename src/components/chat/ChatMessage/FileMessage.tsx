@@ -3,7 +3,7 @@ import { createPortal } from "react-dom";
 import { Avatar, AvatarFallback } from "../../ui/avatar";
 import { format } from "date-fns";
 import { cn } from "../../../lib/utils";
-import { DownloadIcon, PaperclipIcon } from "../icons.tsx";
+import { PaperclipIcon } from "../icons.tsx";
 import { Message } from "../types.ts";
 import { MessageReceipt } from "../MessageReceipt.tsx";
 import { VoiceMessage } from "../VoiceMessage";
@@ -112,7 +112,6 @@ export const FileContent: React.FC<FileContentProps> = ({ message, isCurrentUser
     originalBase64Data: originalBase64Data || null,
   });
 
-  // Don't use blob URLs as fallback - they are session-specific and invalid after restart
   const contentUrl = typeof content === 'string' && !content.startsWith('blob:') ? content : '';
   const effectiveFileUrl = resolvedFileUrl || contentUrl;
 
@@ -141,12 +140,10 @@ export const FileContent: React.FC<FileContentProps> = ({ message, isCurrentUser
         if (originalBase64Data) {
           base64Data = extractBase64Data(originalBase64Data);
         } else if (secureDB) {
-          // Try to load from SecureDB
           const blob = await secureDB.getFile(message.id);
           if (blob) {
             const buffer = await blob.arrayBuffer();
             const bytes = new Uint8Array(buffer);
-            // Convert to base64
             let binary = '';
             for (let i = 0; i < bytes.byteLength; i++) {
               binary += String.fromCharCode(bytes[i]);
