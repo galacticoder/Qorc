@@ -68,7 +68,6 @@ class PseudonymizationMonitor {
 
     const threshold = PseudonymizationConfiguration.get().slowOperationThreshold;
     if (duration > threshold) {
-      // Slow operation detected - logged via performance monitoring only
     }
   }
 
@@ -132,7 +131,6 @@ class PseudonymizationAuditLogger {
     }
 
     if (!success) {
-      // Failed pseudonymization logged internally only - no console output
     }
   }
 
@@ -260,7 +258,7 @@ function logPseudonymization(operation: string, original: string, pseudonym: str
   PseudonymizationAuditLogger.log(operation, original, pseudonym, method, success, duration);
 }
 
-// Deterministic, memory-hard pseudonymization using Argon2id
+// Deterministic pseudonymization Argon2id
 export async function pseudonymizeUsername(original: string, memoryCost?: number): Promise<string> {
   const overallStart = Date.now();
   const sanitized = sanitizeOriginalUsername(original);
@@ -353,7 +351,7 @@ export async function pseudonymizeUsernameWithCache(original: string, secureDB?:
       const pseudonym = await pseudonymizeUsername(sanitized);
       PSEUDONYM_CACHE.set(sanitized, { value: pseudonym, timestamp: Date.now() });
       evictCacheIfNeeded();
-      
+
       if (secureDB) {
         try {
           await secureDB.cacheUsernameHash(sanitized, pseudonym);
@@ -361,7 +359,7 @@ export async function pseudonymizeUsernameWithCache(original: string, secureDB?:
         } catch (_e) {
         }
       }
-      
+
       PseudonymizationMonitor.record('cache-miss', Date.now() - startTime, true);
       logPseudonymization('cache-miss', sanitized, pseudonym, 'calculated', Date.now() - startTime, true);
       return pseudonym;

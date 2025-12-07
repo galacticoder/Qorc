@@ -3,7 +3,7 @@ import { MessageSquare, Phone, Settings, LogOut, User as UserIcon, Moon, Sun, Ch
 import { ChatBubbleIcon, SettingsIcon, CallIcon } from '../chat/icons';
 import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
-import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar';
+import { UserAvatar } from './UserAvatar';
 import { useTheme } from 'next-themes';
 
 interface SidebarProps {
@@ -224,10 +224,11 @@ export function Sidebar({ activeTab, onTabChange, currentUser, onLogout }: Sideb
                                         "absolute transition-all duration-200",
                                         isHoldingLogout ? "opacity-0 invisible translate-y-2 scale-90" : "opacity-100 visible translate-y-0 scale-100"
                                     )}>
-                                        <Avatar className="!h-[25px] !w-[25px] border border-border shrink-0">
-                                            <AvatarImage src={currentUser.avatarUrl} />
-                                            <AvatarFallback>{currentUser.username.slice(0, 2).toUpperCase()}</AvatarFallback>
-                                        </Avatar>
+                                        <UserAvatar
+                                            username={currentUser.username}
+                                            isCurrentUser={true}
+                                            size="sm"
+                                        />
                                     </div>
 
                                     {/* Logout icon */}
@@ -257,7 +258,6 @@ export function Sidebar({ activeTab, onTabChange, currentUser, onLogout }: Sideb
                                             isHoldingLogout ? "opacity-0 invisible translate-y-2 scale-90" : "opacity-100 visible translate-y-0 scale-100"
                                         )}>{currentUser.username}</span>
 
-                                        {/* "Logging out" text */}
                                         <span className={cn(
                                             "text-sm font-medium truncate w-full text-left block whitespace-nowrap transition-all duration-200 absolute top-0 left-0 text-[#e3616a]",
                                             isHoldingLogout ? "opacity-100 visible translate-y-0 scale-100" : "opacity-0 invisible -translate-y-2 scale-90"
@@ -266,13 +266,11 @@ export function Sidebar({ activeTab, onTabChange, currentUser, onLogout }: Sideb
 
                                     {/* Bottom line: Subtitle text */}
                                     <div className="relative h-4">
-                                        {/* "Hold to logout" text */}
                                         <span className={cn(
                                             "text-[10px] truncate w-full text-left block whitespace-nowrap transition-all duration-200 absolute top-0 left-0 text-muted-foreground opacity-70",
                                             isHoldingLogout ? "opacity-0 invisible translate-y-2 scale-90" : "opacity-70 visible translate-y-0 scale-100"
                                         )}>Hold to logout</span>
 
-                                        {/* "Hold to Confirm" text */}
                                         <span className={cn(
                                             "text-[10px] truncate w-full text-left block whitespace-nowrap transition-all duration-200 absolute top-0 left-0 text-[#e3616a]",
                                             isHoldingLogout ? "opacity-100 visible translate-y-0 scale-100" : "opacity-0 invisible -translate-y-2 scale-90"

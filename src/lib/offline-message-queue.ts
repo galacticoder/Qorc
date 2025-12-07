@@ -6,6 +6,7 @@
 import { PostQuantumRandom } from './post-quantum-crypto';
 import { SecureAuditLogger } from './secure-error-handler';
 import { SecureDB } from './secureDB';
+import { encryptLongTerm, decryptLongTerm, LongTermEnvelope, isLongTermEnvelope } from './long-term-encryption';
 
 const hasPrototypePollutionKeys = (obj: unknown): boolean => {
   if (obj == null || typeof obj !== 'object') return false;
@@ -44,9 +45,12 @@ interface QueuedMessage {
 }
 
 interface OfflineMessage {
-  encryptedPayload: EncryptedPayload;
+  encryptedPayload?: EncryptedPayload;
+  longTermEnvelope?: LongTermEnvelope;
+  version?: string;
   messageId?: string;
   to?: string;
+  from?: string;
   expiresAt?: number;
   maxRetries?: number;
 }
@@ -148,9 +152,9 @@ function _getDeviceId(): string {
     if (existing && typeof existing === 'string') {
       return existing;
     }
-  } catch {}
+  } catch { }
   const deviceId = PostQuantumRandom.randomUUID();
-  try { syncEncryptedStorage.setItem(DEVICE_ID_KEY, deviceId); } catch {}
+  try { syncEncryptedStorage.setItem(DEVICE_ID_KEY, deviceId); } catch { }
   return deviceId;
 }
 
@@ -164,7 +168,7 @@ async function securePersist<T>(key: string, payload: T): Promise<void> {
   if (!globalSecureDB) return;
   try {
     await globalSecureDB.store('offline_queue', key, { version: ENVELOPE_VERSION, payload });
-  } catch {}
+  } catch { }
 }
 
 async function secureLoad<T>(key: string): Promise<T | null> {
@@ -174,7 +178,7 @@ async function secureLoad<T>(key: string): Promise<T | null> {
     if (!stored || typeof stored !== 'object' || !isPlainObject(stored) || hasPrototypePollutionKeys(stored)) {
       return null;
     }
-    
+
     const envelope = stored as { version?: string; payload?: T };
     if (envelope.version !== ENVELOPE_VERSION || typeof envelope.payload === 'undefined') {
       return null;
@@ -284,6 +288,14 @@ export class OfflineMessageQueue {
   private readonly maxRetries = DEFAULT_MAX_RETRIES;
   private readonly messageExpiry = DEFAULT_MESSAGE_EXPIRY;
   private readonly fallbackRetryInterval = DEFAULT_RETRY_INTERVAL;
+  private ownKyberSecretKey: Uint8Array | null = null;
+
+  /**
+   * Set the user's Kyber secret key for decrypting long-term encrypted messages.
+   */
+  setDecryptionKey(kyberSecretKey: Uint8Array): void {
+    this.ownKyberSecretKey = kyberSecretKey;
+  }
 
   constructor(sendCallback?: SendCallback) {
     this.sendCallback = sendCallback;
@@ -300,6 +312,17 @@ export class OfflineMessageQueue {
     window.addEventListener(
       'offline-messages-response',
       this.handleOfflineMessagesResponse as EventListener,
+      { signal: this.abortController.signal }
+    );
+
+    window.addEventListener(
+      'pq-session-established',
+      (event: Event) => {
+        const detail = (event as CustomEvent).detail || {};
+        setTimeout(() => {
+          this._retrieveOfflineMessagesFromServer();
+        }, 500);
+      },
       { signal: this.abortController.signal }
     );
   }
@@ -321,6 +344,7 @@ export class OfflineMessageQueue {
     messageId?: string;
     expiresAt?: number;
     maxRetries?: number;
+    recipientKyberPublicKey?: string;
   }): string {
     if (!rateLimiter.checkLimit(to)) {
       throw new Error('Rate limit exceeded');
@@ -368,7 +392,7 @@ export class OfflineMessageQueue {
     this.monitor.recordQueued();
 
     if (!options?.skipServerStore) {
-      this.storeMessageOnServer(messageId, to, encryptedPayload);
+      this.storeMessageOnServer(messageId, to, encryptedPayload, options?.recipientKyberPublicKey);
     }
 
     void this.saveToStorage();
@@ -377,23 +401,48 @@ export class OfflineMessageQueue {
     return messageId;
   }
 
-  private storeMessageOnServer(messageId: string, to: string, encryptedPayload: EncryptedPayload): void {
+  /**
+   * Store message on server using long-term encryption.
+   */
+  private storeMessageOnServer(
+    messageId: string,
+    to: string,
+    encryptedPayload: EncryptedPayload,
+    recipientKyberPublicKey?: string
+  ): void {
+    if (!recipientKyberPublicKey) {
+      return;
+    }
+
     void import('./websocket')
       .then(async ({ default: websocketClient }) => {
-        if (websocketClient?.isConnectedToServer() && websocketClient?.isPQSessionEstablished()) {
-          try {
-            await websocketClient.sendSecureControlMessage({
-              type: 'store-offline-message',
-              messageId,
-              to,
-              encryptedPayload
-            });
-          } catch (error) {
-            console.error('[OfflineMessageQueue] Failed to store message on server:', error);
-          }
+        if (!websocketClient?.isConnectedToServer() || !websocketClient?.isPQSessionEstablished()) {
+          return;
+        }
+
+        try {
+          const messageData = JSON.stringify({
+            messageId,
+            encryptedPayload,
+            timestamp: Date.now()
+          });
+
+          const longTermEnvelope = await encryptLongTerm(
+            messageData,
+            recipientKyberPublicKey
+          );
+
+          await websocketClient.sendSecureControlMessage({
+            type: 'store-offline-message',
+            messageId,
+            to,
+            longTermEnvelope,
+            version: 'lt-v1'
+          });
+        } catch (error) {
         }
       })
-      .catch(() => {});
+      .catch(() => { });
   }
 
   public retrieveOfflineMessagesFromServer(): void {
@@ -403,15 +452,18 @@ export class OfflineMessageQueue {
   private _retrieveOfflineMessagesFromServer(): void {
     void import('./websocket')
       .then(async ({ default: websocketClient }) => {
-        if (websocketClient?.isConnectedToServer() && websocketClient?.isPQSessionEstablished()) {
+        const isConnected = websocketClient?.isConnectedToServer();
+        const isPQReady = websocketClient?.isPQSessionEstablished();
+
+        if (isConnected && isPQReady) {
           try {
             await websocketClient.sendSecureControlMessage({ type: 'retrieve-offline-messages' });
           } catch (error) {
-            console.error('[OfflineMessageQueue] Failed to retrieve offline messages:', error);
           }
+        } else {
         }
       })
-      .catch(() => {});
+      .catch(() => { });
   }
 
   handleOfflineMessagesFromServer(messages: OfflineMessage[]): void {
@@ -427,19 +479,33 @@ export class OfflineMessageQueue {
 
     for (let i = 0; i < messages.length; i += CHUNK_SIZE) {
       const chunk = messages.slice(i, i + CHUNK_SIZE);
-      
+
       for (const message of chunk) {
         try {
-          if (!message.encryptedPayload) {
-            throw new Error('Missing encrypted payload');
-          }
-          const sanitizedPayload = sanitizePayload(message.encryptedPayload);
-          const to = sanitizeString((sanitizedPayload?.to as string) ?? message.to) ?? '';
-          if (!to) {
+          if (message.version !== 'lt-v1' || !message.longTermEnvelope) {
             continue;
           }
 
-          const messageId = sanitizeString(message.messageId ?? (sanitizedPayload?.sessionId as string)) ?? PostQuantumRandom.randomUUID();
+          if (!this.ownKyberSecretKey) {
+            SecureAuditLogger.warn(AUDIT_CHANNEL, 'offline-message-queue', 'no-decryption-key', {});
+            continue;
+          }
+
+          const decrypted = await decryptLongTerm(message.longTermEnvelope, this.ownKyberSecretKey);
+          if (!decrypted.json || typeof decrypted.json !== 'object') {
+            continue;
+          }
+
+          const parsed = decrypted.json as { messageId?: string; encryptedPayload?: EncryptedPayload };
+          const encryptedPayload = parsed.encryptedPayload;
+          const to = sanitizeString(message.to) ?? '';
+
+          if (!encryptedPayload || !to) {
+            continue;
+          }
+
+          const sanitizedPayload = sanitizePayload(encryptedPayload);
+          const messageId = sanitizeString(message.messageId ?? parsed.messageId) ?? PostQuantumRandom.randomUUID();
           const expiresAt = Math.min(
             message.expiresAt ?? (Date.now() + this.messageExpiry),
             Date.now() + this.messageExpiry
@@ -463,7 +529,6 @@ export class OfflineMessageQueue {
         }
       }
 
-      // Yield to UI thread after each chunk
       if (i + CHUNK_SIZE < messages.length) {
         await new Promise(resolve => setTimeout(resolve, 0));
       }
@@ -669,16 +734,19 @@ export class OfflineMessageQueue {
     try {
       const customEvent = event as OfflineMessagesEvent;
       const detail = customEvent.detail;
-      
+
       if (!isPlainObject(detail) || hasPrototypePollutionKeys(detail)) {
         return;
       }
-      
+
       const { messages } = detail ?? {};
+
       if (Array.isArray(messages)) {
         this.handleOfflineMessagesFromServer(messages);
+      } else {
       }
-    } catch {}
+    } catch (err) {
+    }
   };
 
   private trackProcessedMessageId(messageId: string): void {

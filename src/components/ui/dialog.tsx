@@ -58,13 +58,14 @@ export const DialogContent: React.FC<{ children: ReactNode; className?: string }
 
   if (!context) throw new Error('DialogContent must be used within Dialog');
 
-  // Handle closing with animation
   const handleClose = React.useCallback(() => {
     setIsAnimatingOut(true);
     setTimeout(() => {
-      context.setIsOpen(false);
       setIsAnimatingOut(false);
-    }, 200); // Match animation duration
+      requestAnimationFrame(() => {
+        context.setIsOpen(false);
+      });
+    }, 200);
   }, [context]);
 
   // Reset animation state when opening
@@ -100,22 +101,22 @@ export const DialogContent: React.FC<{ children: ReactNode; className?: string }
         @keyframes dialogContentShow {
           from {
             opacity: 0;
-            transform: translate(-50%, -48%) scale(0.96);
+            transform: scale(0.96);
           }
           to {
             opacity: 1;
-            transform: translate(-50%, -50%) scale(1);
+            transform: scale(1);
           }
         }
         
         @keyframes dialogContentHide {
           from {
             opacity: 1;
-            transform: translate(-50%, -50%) scale(1);
+            transform: scale(1);
           }
           to {
             opacity: 0;
-            transform: translate(-50%, -48%) scale(0.96);
+            transform: scale(0.96);
           }
         }
         
@@ -124,7 +125,7 @@ export const DialogContent: React.FC<{ children: ReactNode; className?: string }
         }
         
         .dialog-overlay.closing {
-          animation: dialogOverlayHide 200ms cubic-bezier(0.16, 1, 0.3, 1);
+          animation: dialogOverlayHide 200ms cubic-bezier(0.16, 1, 0.3, 1) forwards;
         }
         
         .dialog-content {
@@ -132,7 +133,7 @@ export const DialogContent: React.FC<{ children: ReactNode; className?: string }
         }
         
         .dialog-content.closing {
-          animation: dialogContentHide 200ms cubic-bezier(0.16, 1, 0.3, 1);
+          animation: dialogContentHide 200ms cubic-bezier(0.16, 1, 0.3, 1) forwards;
         }
       `}</style>
       <div className="fixed inset-0 z-50 flex items-center justify-center">
@@ -142,15 +143,14 @@ export const DialogContent: React.FC<{ children: ReactNode; className?: string }
         />
         <div
           className={cn(
-            "dialog-content relative rounded-lg shadow-lg max-w-md w-full mx-4 p-6",
-            "left-1/2 top-1/2 fixed",
+            "dialog-content relative rounded-lg shadow-lg max-w-md w-full mx-4 p-6 select-none",
             isAnimatingOut ? 'closing' : '',
             className
           )}
           style={{
             backgroundColor: 'hsl(var(--card))',
             color: 'hsl(var(--card-foreground))',
-            transform: 'translate(-50%, -50%)'
+            ...props.style
           }}
           onClick={(e) => e.stopPropagation()}
           {...props}

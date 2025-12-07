@@ -856,6 +856,19 @@ export async function initDatabase() {
   await pool.query('CREATE INDEX IF NOT EXISTS idx_device_sessions_user ON device_sessions(userId)');
   await pool.query('CREATE INDEX IF NOT EXISTS idx_device_sessions_lastSeen ON device_sessions(lastSeen)');
 
+  // Encrypted avatar storage
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS user_avatars (
+      username TEXT PRIMARY KEY,
+      encryptedEnvelope TEXT NOT NULL,
+      shareWithOthers INTEGER NOT NULL DEFAULT 0,
+      publicData TEXT,
+      updatedAt BIGINT NOT NULL
+    )
+  `);
+
+  await pool.query('CREATE INDEX IF NOT EXISTS idx_user_avatars_share ON user_avatars(shareWithOthers) WHERE shareWithOthers = 1');
+
   console.log('[DB] Database tables initialized');
 }
 
@@ -1804,7 +1817,7 @@ export class BlockingDatabase {
       if (!token || typeof token !== 'object') {
         throw new Error('Invalid block token structure');
       }
-      // Accept 32/64/128 hex strings for hashes (client v2 uses 32-hex pseudonyms)
+
       const validLen = (s) => typeof s === 'string' && /^[a-f0-9]+$/i.test(s) && (s.length === 32 || s.length === 64 || s.length === 128);
       if (!validLen(token.tokenHash)) {
         throw new Error('Invalid token hash');
@@ -1979,6 +1992,143 @@ export class BlockingDatabase {
       }
     } catch (error) {
       console.error('[BLOCKING] Error cleaning up expired tokens:', error);
+    }
+  }
+}
+
+/**
+ * Avatar storage - stores encrypted avatar envelopes
+ */
+export class AvatarDatabase {
+  /**
+   * Store or update an encrypted avatar
+   * @param {string} username - Username
+   * @param {string} encryptedEnvelope - JSON-stringified encrypted envelope
+   * @param {boolean} shareWithOthers - Whether avatar is shared publicly
+   * @param {string|null} publicData - Optional public avatar data (if shareWithOthers=true)
+   */
+  static async storeAvatar(username, encryptedEnvelope, shareWithOthers = false, publicData = null) {
+    if (!username || typeof username !== 'string') {
+      throw new Error('Invalid username');
+    }
+    if (!encryptedEnvelope || typeof encryptedEnvelope !== 'string') {
+      throw new Error('Invalid encrypted envelope');
+    }
+
+    const now = Date.now();
+
+    try {
+      if (USE_PG) {
+        const pool = await getPgPool();
+        await pool.query(`
+          INSERT INTO user_avatars (username, encryptedEnvelope, shareWithOthers, publicData, updatedAt)
+          VALUES ($1, $2, $3, $4, $5)
+          ON CONFLICT (username) DO UPDATE SET
+            encryptedEnvelope = EXCLUDED.encryptedEnvelope,
+            shareWithOthers = EXCLUDED.shareWithOthers,
+            publicData = EXCLUDED.publicData,
+            updatedAt = EXCLUDED.updatedAt
+        `, [username, encryptedEnvelope, shareWithOthers ? 1 : 0, publicData, now]);
+      }
+      cryptoLogger.info('[AVATAR] Stored avatar', {
+        username: username.slice(0, 8) + '...',
+        shareWithOthers
+      });
+    } catch (error) {
+      cryptoLogger.error('[AVATAR] Failed to store avatar', {
+        username: username.slice(0, 8) + '...',
+        error: error.message
+      });
+      throw error;
+    }
+  }
+
+  /**
+   * Get own encrypted avatar (returns full encrypted envelope)
+   * @param {string} username - Username
+   */
+  static async getOwnAvatar(username) {
+    if (!username || typeof username !== 'string') {
+      return null;
+    }
+
+    try {
+      if (USE_PG) {
+        const pool = await getPgPool();
+        const { rows } = await pool.query(
+          'SELECT encryptedEnvelope, updatedAt FROM user_avatars WHERE username = $1',
+          [username]
+        );
+        if (rows.length === 0) return null;
+        return {
+          encryptedEnvelope: rows[0].encryptedenvelope,
+          updatedAt: rows[0].updatedat
+        };
+      }
+      return null;
+    } catch (error) {
+      cryptoLogger.error('[AVATAR] Failed to get own avatar', {
+        username: username.slice(0, 8) + '...',
+        error: error.message
+      });
+      return null;
+    }
+  }
+
+  /**
+   * Get a peer's public avatar
+   * @param {string} username - Username of the peer
+   */
+  static async getPeerAvatar(username) {
+    if (!username || typeof username !== 'string') {
+      return null;
+    }
+
+    try {
+      if (USE_PG) {
+        const pool = await getPgPool();
+        const { rows } = await pool.query(
+          'SELECT publicData, updatedAt FROM user_avatars WHERE username = $1 AND shareWithOthers = 1',
+          [username]
+        );
+        if (rows.length === 0 || !rows[0].publicdata) return null;
+        return {
+          publicData: rows[0].publicdata,
+          updatedAt: rows[0].updatedat
+        };
+      }
+      return null;
+    } catch (error) {
+      cryptoLogger.error('[AVATAR] Failed to get peer avatar', {
+        username: username.slice(0, 8) + '...',
+        error: error.message
+      });
+      return null;
+    }
+  }
+
+  /**
+   * Delete avatar
+   * @param {string} username - Username
+   */
+  static async deleteAvatar(username) {
+    if (!username || typeof username !== 'string') {
+      return;
+    }
+
+    try {
+      if (USE_PG) {
+        const pool = await getPgPool();
+        await pool.query('DELETE FROM user_avatars WHERE username = $1', [username]);
+      }
+      cryptoLogger.info('[AVATAR] Deleted avatar', {
+        username: username.slice(0, 8) + '...'
+      });
+    } catch (error) {
+      cryptoLogger.error('[AVATAR] Failed to delete avatar', {
+        username: username.slice(0, 8) + '...',
+        error: error.message
+      });
     }
   }
 }

@@ -175,7 +175,10 @@ class SyncEncryptedStorageAdapter {
     const syncAccessKeys = [
       'last_authenticated_username',
       'securechat_server_pin_v2',
-      'call_history_v1'
+      'call_history_v1',
+      'app_settings_v1',
+      'offlineQueueDeviceId',
+      'tor_enabled'
     ];
 
     for (const key of syncAccessKeys) {

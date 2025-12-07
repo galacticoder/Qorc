@@ -6,6 +6,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, Di
 import { Trash2, Search } from "lucide-react";
 import { Input } from "../ui/input";
 import { toast } from "sonner";
+import { UserAvatar } from "../ui/UserAvatar";
 
 export interface Conversation {
   readonly id: string;
@@ -42,14 +43,6 @@ const anonymize = (value: string): string => {
   }
 };
 
-const getAvatarColor = (username: string): string => {
-  if (typeof username !== 'string' || username.length === 0) {
-    return 'hsl(0, 65%, 55%)';
-  }
-  const hash = username.split('').reduce((acc, char) => acc + char.charCodeAt(0), 0);
-  const hue = Math.abs(hash) % 360;
-  return `hsl(${hue}, 65%, 55%)`;
-};
 
 interface ConversationItemProps {
   readonly conversation: Conversation;
@@ -72,7 +65,6 @@ const ConversationItem = memo<ConversationItemProps>(({
 }) => {
   const [resolvedName, setResolvedName] = useState<string | null>(null);
 
-  // Stabilize the resolver function to avoid effect churn when parent re-renders
   const resolverRef = React.useRef(getDisplayUsername);
   useEffect(() => { resolverRef.current = getDisplayUsername; }, [getDisplayUsername]);
 
@@ -103,11 +95,6 @@ const ConversationItem = memo<ConversationItemProps>(({
     }
     return anonymize(conversation.username);
   }, [conversation.displayName, conversation.username, resolvedName]);
-
-  const avatarColor = useMemo(() =>
-    isSelected ? 'rgba(255, 255, 255, 0.2)' : getAvatarColor(conversation.username),
-    [isSelected, conversation.username]
-  );
 
   const handleClick = useCallback(() => {
     onSelect(conversation.username);
@@ -152,16 +139,11 @@ const ConversationItem = memo<ConversationItemProps>(({
       aria-label={`Conversation with ${displayName}`}
       aria-selected={isSelected}
     >
-      <div
-        className="w-10 h-10 rounded-full flex items-center justify-center font-medium text-sm flex-shrink-0 select-none"
-        style={{
-          backgroundColor: avatarColor,
-          color: 'white'
-        }}
-        aria-hidden="true"
-      >
-        {displayName.trim().charAt(0).toUpperCase()}
-      </div>
+      <UserAvatar
+        username={conversation.username}
+        size="md"
+        className={isSelected ? 'opacity-80' : ''}
+      />
 
       <div className="flex-1 min-w-0 w-0">
         <div className="flex items-center gap-2 mb-1 min-w-0 w-full">
@@ -307,6 +289,8 @@ export const ConversationList = memo<ConversationListProps>(function Conversatio
     return () => window.removeEventListener('ui-call-status', handleCallStatus as EventListener);
   }, [handleCallStatus]);
 
+  const [refreshTick, setRefreshTick] = useState(0);
+
   const formatTime = useCallback((date?: Date): string => {
     if (!date || !(date instanceof Date) || isNaN(date.getTime())) {
       return "";
@@ -330,7 +314,42 @@ export const ConversationList = memo<ConversationListProps>(function Conversatio
     const day = date.getDate().toString().padStart(2, '0');
     const year = date.getFullYear().toString().slice(-2);
     return `${month}/${day}/${year}`;
-  }, []);
+  }, [refreshTick]);
+
+  useEffect(() => {
+    const getRefreshInterval = (): number => {
+      const now = Date.now();
+      let minAgeMs = Infinity;
+
+      for (const conv of conversations) {
+        if (conv.lastMessageTime) {
+          const age = now - conv.lastMessageTime.getTime();
+          if (age < minAgeMs) minAgeMs = age;
+        }
+      }
+
+      // If all messages are older than a week, no need to refresh
+      if (minAgeMs >= 7 * 24 * 60 * 60 * 1000) return 0;
+
+      // If newest message is days old, refresh every hour
+      if (minAgeMs >= 24 * 60 * 60 * 1000) return 60 * 60 * 1000;
+
+      // If newest message is hours old, refresh every 5 minutes
+      if (minAgeMs >= 60 * 60 * 1000) return 5 * 60 * 1000;
+
+      // For recent messages (< 1 hour), refresh every minute
+      return 60 * 1000;
+    };
+
+    const interval = getRefreshInterval();
+    if (interval === 0) return;
+
+    const timer = setInterval(() => {
+      setRefreshTick(t => t + 1);
+    }, interval);
+
+    return () => clearInterval(timer);
+  }, [conversations]);
 
   const displayUsername = useMemo(() => {
     if (!conversationToDelete) return 'User';

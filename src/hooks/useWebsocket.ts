@@ -31,6 +31,10 @@ const DEFAULT_ALLOWED_TYPES: Set<string> = new Set([
   'device-challenge',
   'device-attestation-ack',
 
+  // Profile picture system
+  'avatar-fetch-response',
+  'avatar-upload-response',
+
   // App-level messages
   SignalType.ENCRYPTED_MESSAGE,
   SignalType.DR_SEND,

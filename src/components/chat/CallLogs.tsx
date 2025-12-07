@@ -4,7 +4,7 @@ import { Popover, PopoverContent, PopoverTrigger } from '../ui/popover';
 import { Input } from '../ui/input';
 import { Button } from '../ui/button';
 import { ScrollArea } from '../ui/scroll-area';
-import { Avatar, AvatarFallback, AvatarImage } from '../ui/avatar';
+import { UserAvatar } from '../ui/UserAvatar';
 import { useCallHistory, type CallLogEntry } from '../../contexts/CallHistoryContext';
 import { useUnifiedUsernameDisplay } from '../../hooks/useUnifiedUsernameDisplay';
 import { blockStatusCache } from '../../lib/block-status-cache';
@@ -59,11 +59,10 @@ const CallLogItem: React.FC<CallLogItemProps> = React.memo(({
     return (
         <React.Fragment>
             <div className="p-3 flex items-center gap-3 hover:bg-accent/50 rounded-lg transition-colors select-none">
-                <Avatar className="h-10 w-10 border-2 border-background shadow-sm">
-                    <AvatarFallback className="bg-primary/10 text-primary font-bold">
-                        {displayName.slice(0, 2).toUpperCase()}
-                    </AvatarFallback>
-                </Avatar>
+                <UserAvatar
+                    username={log.peerUsername}
+                    size="md"
+                />
 
                 <div className="flex-1 min-w-0">
                     <div className="flex items-center justify-between mb-1">

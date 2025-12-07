@@ -17,6 +17,7 @@ import { MarkdownRenderer } from "../ui/MarkdownRenderer";
 import { isMarkdownMessage } from "../../lib/markdown-parser";
 import { copyTextToClipboard } from "../../lib/clipboard";
 import { MessageContextMenu } from "./MessageContextMenu";
+import { UserAvatar } from "../ui/UserAvatar";
 
 interface ExtendedChatMessageProps extends ChatMessageProps {
   readonly getDisplayUsername?: (username: string) => Promise<string>;
@@ -157,7 +158,6 @@ export const ChatMessage = React.memo<ExtendedChatMessageProps>(({ message, smar
   }, [isFileMessageType, message.filename]);
 
   const timestampDisplay = useMemo(() => formatTimestamp(timestamp), [timestamp]);
-  const avatarLetter = useMemo(() => displaySender.charAt(0).toUpperCase(), [displaySender]);
 
   const handlePickEmoji = useCallback((emoji: string) => {
     if (currentUsername && message.reactions) {
@@ -276,16 +276,11 @@ export const ChatMessage = React.memo<ExtendedChatMessageProps>(({ message, smar
     >
       <div className="flex-shrink-0 w-10">
         {!isGrouped && (
-          <div
-            className="w-10 h-10 rounded-full flex items-center justify-center font-medium text-sm select-none"
-            style={{
-              backgroundColor: safeIsCurrentUser ? 'var(--color-accent-primary)' : 'var(--color-accent-secondary)',
-              color: 'white'
-            }}
-            aria-hidden="true"
-          >
-            {avatarLetter}
-          </div>
+          <UserAvatar
+            username={sender}
+            isCurrentUser={safeIsCurrentUser}
+            size="md"
+          />
         )}
       </div>
 

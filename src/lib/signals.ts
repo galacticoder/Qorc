@@ -5,6 +5,7 @@ import { sanitizeHybridKeys } from './validators';
 import { SecureAuditLogger } from './secure-error-handler';
 import { clusterKeyManager } from './cluster-key-manager';
 import { SignalType } from './signal-types';
+import { profilePictureSystem } from './profile-picture-system';
 
 const __userExistsDebounce = new Map<string, number>();
 
@@ -306,14 +307,12 @@ export async function handleSignalMessages(data: any, handlers: SignalHandlers) 
 
         if (data.valid) {
           if (typeof data.username === 'string' && data.username) {
-            // Persist and set username early
             if (loginUsernameRef) loginUsernameRef.current = data.username;
             try { (await import('./encrypted-storage')).syncEncryptedStorage.setItem('last_authenticated_username', data.username); } catch { }
             Authentication?.setUsername?.(data.username);
           }
           try { setLoginError?.(''); } catch { }
 
-          // Load or create device-bound vault key (but DO NOT use it as DB key)
           let vaultKey: CryptoKey | null = null;
           try {
             const { loadVaultKeyRaw, ensureVaultKeyCryptoKey } = await import('./vault-key');
@@ -337,13 +336,12 @@ export async function handleSignalMessages(data: any, handlers: SignalHandlers) 
             }
           }
 
-          // If we recovered the master key, set it everywhere (DB + SKM); otherwise require passphrase
           if (masterKeyBytes && masterKeyBytes.length === 32) {
             try {
               const { AES } = await import('./unified-crypto');
               const masterKey = await AES.importAesKey(masterKeyBytes);
               if (aesKeyRef) {
-                aesKeyRef.current = masterKey; // SecureDB will use this
+                aesKeyRef.current = masterKey;
               }
 
               // Initialize SecureKeyManager with the same master key
@@ -353,7 +351,7 @@ export async function handleSignalMessages(data: any, handlers: SignalHandlers) 
                 Authentication.keyManagerRef.current = new SKM(loginUsernameRef!.current);
               }
               try { await Authentication.keyManagerRef.current!.initializeWithMasterKey(masterKeyBytes); } catch { }
-              // Ensure local PQ keypair exists; generate and store if missing
+
               try {
                 const existingKeys = await Authentication.keyManagerRef.current!.getKeys().catch(() => null);
                 if (!existingKeys) {
@@ -371,7 +369,7 @@ export async function handleSignalMessages(data: any, handlers: SignalHandlers) 
 
           try {
             if (Authentication?.keyManagerRef?.current && serverHybridPublic) {
-              // Ensure keys exist prior to publishing
+              // Make sure keys exist before to publishing
               try {
                 const maybeKeys = await Authentication.keyManagerRef.current.getKeys().catch(() => null);
                 if (!maybeKeys) {
@@ -403,7 +401,7 @@ export async function handleSignalMessages(data: any, handlers: SignalHandlers) 
             }
           } catch { }
 
-          // Configure Signal storage key using PQ-only material (Kyber secret preferred, passphrase fallback)
+          // Configure Signal storage key
           try {
             if (loginUsernameRef?.current && (window as any).edgeApi?.setSignalStorageKey) {
               const label = new TextEncoder().encode('signal-storage-key-v1');
@@ -607,7 +605,7 @@ export async function handleSignalMessages(data: any, handlers: SignalHandlers) 
 
       case SignalType.PASSPHRASE_SUCCESS: {
         try {
-          // Passphrase verified by server. Ensure we persist a wrapped copy of the master key.
+          // Passphrase verified by server save a wrapped copy of the master key.
           const user = loginUsernameRef?.current || '';
           if (user && aesKeyRef?.current) {
             try {
@@ -857,7 +855,6 @@ export async function handleSignalMessages(data: any, handlers: SignalHandlers) 
         const attemptsRemaining = typeof data?.attemptsRemaining === 'number' ? data.attemptsRemaining : undefined;
         const locked = Boolean(data?.locked);
         const cooldownSeconds = typeof data?.cooldownSeconds === 'number' ? data.cooldownSeconds : undefined;
-        const logout = Boolean(data?.logout);
         const category = typeof data?.category === 'string' ? data.category : undefined;
 
         let errorMessage = message ?? 'Authentication failed';
@@ -922,7 +919,6 @@ export async function handleSignalMessages(data: any, handlers: SignalHandlers) 
       }
 
       case SignalType.SESSION_ESTABLISHED: {
-        // Peer has successfully established their session and is ready to receive messages
         const peerUsername = data?.from || data?.username;
 
         if (!peerUsername) {
@@ -965,17 +961,39 @@ export async function handleSignalMessages(data: any, handlers: SignalHandlers) 
         break;
       }
 
-      default:
+      case 'avatar-fetch-response': {
+        try {
+          if (data && typeof data.target === 'string') {
+            profilePictureSystem.handleServerAvatarResponse({
+              target: data.target,
+              envelope: data.envelope,
+              found: !!data.found
+            }).catch(() => { });
+          }
+        } catch (error) {
+          SecureAuditLogger.error('signals', 'avatar-fetch', 'handler-failed', {
+            error: error instanceof Error ? error.message : 'unknown'
+          });
+        }
+        break;
+      }
+
+      default: {
+        if (type && websocketClient) {
+          (websocketClient as any).handleMessage(data).catch(() => { });
+        }
+
         SecureAuditLogger.warn('signals', 'unhandled', 'unknown-signal-type', {
           type: type,
           hasMessage: !!message,
           messagePreview: message ? String(message).substring(0, 100) : ''
         });
+        break;
+      }
     }
   } catch (_error) {
     SecureAuditLogger.error('signals', 'handler', 'signal-processing-error', { error: (_error as Error).message });
     setLoginError?.('Error processing server message');
   }
 }
-
 

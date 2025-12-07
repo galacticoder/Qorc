@@ -4,6 +4,7 @@ import { MessageSquare, Settings, LogOut } from "lucide-react";
 import { ComposeIcon } from "./icons";
 import { Button } from "../ui/button";
 import { sanitizeTextInput } from "../../lib/sanitizers";
+import { UserAvatar } from "../ui/UserAvatar";
 
 export interface User {
   readonly id: string;
@@ -177,7 +178,7 @@ export const Sidebar = React.memo<SidebarProps>(({ className, children, currentU
               <span
                 className="font-semibold text-lg text-foreground"
               >
-                
+
               </span>
             )}
           </div>
@@ -247,12 +248,12 @@ export const Sidebar = React.memo<SidebarProps>(({ className, children, currentU
             className="w-full flex items-center gap-3 px-3 py-3 rounded-lg transition-all duration-200 hover:bg-destructive/10 text-foreground h-[var(--sidebar-item-height)]"
             aria-label="Logout"
           >
-            <div
-              className="w-8 h-8 rounded-full flex items-center justify-center text-secondary-foreground font-medium text-sm bg-secondary"
-              aria-hidden="true"
-            >
-              {userInitial}
-            </div>
+            <UserAvatar
+              username={currentUsername || 'User'}
+              isCurrentUser={true}
+              size="sm"
+              className="w-8 h-8"
+            />
             {!isCollapsed && (
               <div className="flex-1 text-left min-w-0 mr-2">
                 <div

@@ -138,6 +138,16 @@ class WebSocketClient {
   private sessionTransitionTime?: number;
   private sessionNonceCounter = 0;
   private expectedRemoteNonceCounter = 0;
+  private _username?: string;
+
+  public setUsername(username: string) {
+    this._username = username;
+  }
+
+  public getUsername(): string | undefined {
+    return this._username;
+  }
+
   private metrics: ConnectionMetrics = {
     lastConnectedAt: null,
     totalReconnects: 0,
@@ -1544,6 +1554,12 @@ class WebSocketClient {
               sessionId: sessionId.slice(0, 16)
             });
 
+            try {
+              window.dispatchEvent(new CustomEvent('pq-session-established', {
+                detail: { timestamp: Date.now(), sessionId: sessionId.slice(0, 16) }
+              }));
+            } catch { }
+
             resolve();
           } else {
             SecureAuditLogger.warn('ws', 'handshake', 'ack-session-mismatch', {
@@ -1937,22 +1953,11 @@ class WebSocketClient {
         }
 
         const handler = this.messageHandlers.get(message.type);
-        if (handler) {
-          try {
-            handler(message);
-          } catch (handlerError) {
-
-          }
-          return;
-        }
+        handler(message);
       }
 
       const rawHandler = this.messageHandlers.get('raw');
-      if (rawHandler) {
-        try {
-          rawHandler(message);
-        } catch (handlerError) { }
-      }
+      rawHandler(message);
     } catch (_error) {
 
     }

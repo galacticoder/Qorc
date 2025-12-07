@@ -405,7 +405,7 @@ export const useAuth = (_secureDB?: SecureDB) => {
             throw new Error('Key decryption failed');
           } else {
             try {
-              await websocketClient.sendMessage({ type: 'client-error', error: _error instanceof Error ? _error.message : 'Unknown error' });
+              websocketClient.send({ type: 'client-error', error: _error instanceof Error ? _error.message : 'Unknown error' });
             } catch { }
             throw _error;
           }
@@ -525,6 +525,8 @@ export const useAuth = (_secureDB?: SecureDB) => {
 
     loginUsernameRef.current = pseudonym;
     setUsername(pseudonym);
+    websocketClient.setUsername(pseudonym);
+
     passwordRef.current = password;
     passphraseRef.current = passphrase || "";
 

@@ -1,6 +1,7 @@
 import React from "react";
 import { cn } from "@/lib/utils";
 import { format } from "date-fns";
+import { UserAvatar } from "../../ui/UserAvatar";
 
 interface DeletedMessageProps {
   sender: string;
@@ -15,15 +16,11 @@ export function DeletedMessage({ sender, timestamp, isCurrentUser }: DeletedMess
     <div className={cn("flex gap-3 mb-4 group", safeIsCurrentUser ? "flex-row-reverse" : "flex-row")} style={{ marginBottom: 'var(--spacing-md)' }}>
       {/* Avatar*/}
       <div className="flex-shrink-0 w-10">
-        <div
-          className="w-10 h-10 rounded-full flex items-center justify-center font-medium text-sm"
-          style={{
-            backgroundColor: safeIsCurrentUser ? 'var(--color-accent-primary)' : 'var(--color-accent-secondary)',
-            color: 'white'
-          }}
-        >
-          {sender.charAt(0).toUpperCase()}
-        </div>
+        <UserAvatar
+          username={sender}
+          isCurrentUser={safeIsCurrentUser}
+          size="md"
+        />
       </div>
 
       {/* Message Content */}

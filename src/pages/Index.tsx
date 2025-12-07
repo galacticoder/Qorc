@@ -38,7 +38,6 @@ import { SecurityAuditLogger } from "../lib/post-quantum-crypto";
 import { toast, Toaster } from 'sonner';
 import { TorIndicator } from '@/components/ui/TorIndicator';
 import { Button } from "../components/ui/button";
-import { Pencil } from "lucide-react";
 import { ComposeIcon } from "../components/chat/icons";
 
 const getReplyContent = (message: Message): string => {
@@ -170,7 +169,6 @@ const ChatApp: React.FC<ChatAppProps> = () => {
 
     // 2. If not, request them via websocket
     try {
-      // Send both requests to ensure we get the data
       await websocketClient.sendSecureControlMessage({
         type: SignalType.P2P_FETCH_PEER_CERT,
         username: peerUsername
@@ -187,7 +185,7 @@ const ChatApp: React.FC<ChatAppProps> = () => {
       return null;
     }
 
-    // 3. Wait for either p2p-peer-cert or user-exists-response (with keys)
+    // 3. Wait for either p2p-peer-cert or user-exists-response
     return new Promise<{ kyberPublicBase64: string; dilithiumPublicBase64: string; x25519PublicBase64?: string } | null>((resolve) => {
       let settled = false;
       const timeout = setTimeout(() => {
@@ -217,7 +215,6 @@ const ChatApp: React.FC<ChatAppProps> = () => {
               x25519PublicBase64: pc.x25519PublicKey
             };
 
-            // Opportunistically update Database.users
             if (Database.secureDBRef.current) {
               storeUsernameMapping(peerUsername, Database.secureDBRef.current).catch(() => { });
             }
@@ -368,7 +365,6 @@ const ChatApp: React.FC<ChatAppProps> = () => {
 
   const fetchPeerCertificates = useCallback(async (peerUsername: string): Promise<PeerCertificateBundle | null> => {
     try {
-      // Request cert through both channels: dedicated cert fetch + check-user-exists hint
       return await new Promise<PeerCertificateBundle | null>(async (resolve) => {
         let settled = false;
 
@@ -556,6 +552,31 @@ const ChatApp: React.FC<ChatAppProps> = () => {
       initMessageQueue();
     }
   }, [Database.secureDBRef.current, Authentication.loginUsernameRef.current]);
+
+  // Initialize profile picture system when SecureDB is ready
+  useEffect(() => {
+    if (Database.secureDBRef.current) {
+      Promise.all([
+        import('../lib/profile-picture-system'),
+        import('../lib/websocket')
+      ]).then(([{ profilePictureSystem }, { default: websocketClient }]) => {
+        profilePictureSystem.setSecureDB(Database.secureDBRef.current);
+        profilePictureSystem.initialize().catch(e => { });
+      }).catch(() => { });
+    }
+  }, [Database.secureDBRef.current]);
+
+  // Set keys for profile picture system
+  useEffect(() => {
+    if (Authentication.hybridKeysRef.current?.kyber?.publicKeyBase64 && Authentication.hybridKeysRef.current?.kyber?.secretKey) {
+      import('../lib/profile-picture-system').then(({ profilePictureSystem }) => {
+        profilePictureSystem.setKeys(
+          Authentication.hybridKeysRef.current!.kyber!.publicKeyBase64,
+          Authentication.hybridKeysRef.current!.kyber!.secretKey
+        );
+      });
+    }
+  }, [Authentication.hybridKeysRef.current]);
 
   // Bridge P2P file chunks into file handler
   useEffect(() => {
@@ -1586,6 +1607,7 @@ const ChatApp: React.FC<ChatAppProps> = () => {
                       onAddConversation={async (username) => { await addConversation(username); }}
                       getDisplayUsername={stableGetDisplayUsername}
                       showNewChatInput={showNewChatInput}
+                      onRemoveConversation={removeConversation}
                     />
                   </div>
                 </div>
@@ -1845,11 +1867,13 @@ const ChatApp: React.FC<ChatAppProps> = () => {
 
           {/* Settings Modal */}
           <Dialog open={showSettings} onOpenChange={setShowSettings}>
-            <DialogContent className="max-w-2xl max-h-[85vh] overflow-hidden p-0">
+            <DialogContent className="max-w-4xl max-h-[90vh] overflow-hidden p-0">
               <AppSettings
                 passphraseRef={Authentication.passphrasePlaintextRef}
                 kyberSecretRef={kyberSecretRefForSettings as any}
                 getDisplayUsername={stableGetDisplayUsername}
+                currentUsername={Authentication.loginUsernameRef.current || ''}
+                currentDisplayName={currentDisplayName || Authentication.originalUsernameRef.current || ''}
               />
             </DialogContent>
           </Dialog>

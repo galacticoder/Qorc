@@ -339,11 +339,19 @@ async function main() {
             try {
                 if (runDetached) {
                     process.env.NO_GUI = 'true';
-                    const runCommand = `docker compose --env-file .env -f docker/docker-compose.yml --profile ${command} up -d ${buildFlag}`;
+                    const sharedServices = command === 'server' ? 'postgres redis' : 'redis';
+
+                    execSync(`docker compose --env-file .env -f docker/docker-compose.yml up -d --remove-orphans --no-recreate ${sharedServices}`, { cwd: repoRoot, stdio: 'inherit' });
+
+                    if (buildFlag) {
+                        execSync(`docker compose --env-file .env -f docker/docker-compose.yml build ${command}`, { cwd: repoRoot, stdio: 'inherit' });
+                    }
+
+                    const runCommand = `docker compose --env-file .env -f docker/docker-compose.yml --profile ${command} up -d --remove-orphans ${command}`;
                     execSync(runCommand, { cwd: repoRoot, stdio: 'inherit' });
                 } else {
                     const sharedServices = command === 'server' ? 'postgres redis' : 'redis';
-                    execSync(`docker compose --env-file .env -f docker/docker-compose.yml up -d --no-recreate ${sharedServices}`, { cwd: repoRoot, stdio: 'inherit' });
+                    execSync(`docker compose --env-file .env -f docker/docker-compose.yml up -d --remove-orphans --no-recreate ${sharedServices}`, { cwd: repoRoot, stdio: 'inherit' });
 
                     if (buildFlag) {
                         execSync(`docker compose --env-file .env -f docker/docker-compose.yml build ${command}`, { cwd: repoRoot, stdio: 'inherit' });

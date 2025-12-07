@@ -3,13 +3,12 @@ if (!global.crypto) {
   global.crypto = nodeCrypto.webcrypto;
 }
 import express from 'express';
-import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { WebSocketServer } from 'ws';
 import { SignalType } from './signals.js';
 import { CryptoUtils } from './crypto/unified-crypto.js';
-import { MessageDatabase, UserDatabase, BlockingDatabase, initDatabase } from './database/database.js';
+import { MessageDatabase, UserDatabase, BlockingDatabase, AvatarDatabase, initDatabase } from './database/database.js';
 import * as ServerConfig from './config/config.js';
 import * as authentication from './authentication/authentication.js';
 import { setServerPasswordOnInput } from './authentication/auth-utils.js';
@@ -258,7 +257,12 @@ async function createWebSocketServer({ server: httpsServer }) {
               }
               if (isAuthed) {
                 // Use cross-instance delivery
-                const recipientPqSessionId = client._pqSessionId;
+                let recipientPqSessionId = client._pqSessionId;
+                if (!recipientPqSessionId && recipientState?.pqSessionId) {
+                  recipientPqSessionId = recipientState.pqSessionId;
+                  client._pqSessionId = recipientPqSessionId;
+                }
+
                 if (recipientPqSessionId) {
                   const recipientPqSession = await getPQSession(recipientPqSessionId);
                   if (recipientPqSession) {
@@ -921,13 +925,17 @@ async function handleWebSocketMessage({ ws, sessionId, message, context }) {
         });
 
         try {
+          const senderDilithiumPublicKey = normalizedMessage.userData?.metadata?.sender?.dilithiumPublicKey;
+
           // Decrypt the user data payload to extract hybrid keys
           const userPayload = await CryptoUtils.Hybrid.decryptIncoming(
             normalizedMessage.userData,
             {
               kyberSecretKey: serverHybridKeyPair.kyber.secretKey,
+              kyberPublicKey: serverHybridKeyPair.kyber.publicKey,
               x25519SecretKey: serverHybridKeyPair.x25519.secretKey
-            }
+            },
+            { senderDilithiumPublicKey }
           );
 
           // Parse the decrypted payload to extract public keys
@@ -1245,6 +1253,131 @@ async function handleWebSocketMessage({ ws, sessionId, message, context }) {
         break;
       }
 
+      case 'avatar-upload': {
+        if (!state?.hasAuthenticated || !state?.username) {
+          return await sendSecureMessage(ws, { type: 'avatar-upload-response', success: false, error: 'Authentication required' });
+        }
+
+        try {
+          const { envelope, shareWithOthers, publicData } = normalizedMessage;
+          if (!envelope || typeof envelope !== 'object') {
+            return await sendSecureMessage(ws, { type: 'avatar-upload-response', success: false, error: 'Invalid envelope' });
+          }
+
+          if (envelope.version !== 'lt-v1') {
+            cryptoLogger.warn('[AVATAR] Rejected upload with invalid/missing version', { version: envelope.version });
+            return await sendSecureMessage(ws, { type: 'avatar-upload-response', success: false, error: 'Unsupported envelope version' });
+          }
+
+          // Store encrypted envelope
+          const envelopeStr = JSON.stringify(envelope);
+          if (envelopeStr.length > 1024 * 1024) { // 1MB limit
+            return await sendSecureMessage(ws, { type: 'avatar-upload-response', success: false, error: 'Avatar too large' });
+          }
+
+          // If sharing publicly, also store the unencrypted public data
+          let publicDataStr = null;
+          if (shareWithOthers && publicData) {
+            publicDataStr = typeof publicData === 'string' ? publicData : JSON.stringify(publicData);
+          }
+
+          await AvatarDatabase.storeAvatar(state.username, envelopeStr, !!shareWithOthers, publicDataStr);
+
+          await sendSecureMessage(ws, { type: 'avatar-upload-response', success: true });
+        } catch (error) {
+          cryptoLogger.error('[AVATAR] Upload failed', { error: error.message });
+          await sendSecureMessage(ws, { type: 'avatar-upload-response', success: false, error: 'Upload failed' });
+        }
+        break;
+      }
+
+      case 'avatar-fetch': {
+        cryptoLogger.info('[AVATAR:DEBUG] avatar-fetch received', {
+          hasAuth: !!state?.hasAuthenticated,
+          requester: state?.username?.slice(0, 8),
+          target: normalizedMessage.target
+        });
+
+        if (!state?.hasAuthenticated || !state?.username) {
+          cryptoLogger.warn('[AVATAR:DEBUG] Rejected - not authenticated');
+          return await sendSecureMessage(ws, { type: 'avatar-fetch-response', found: false, error: 'Authentication required' });
+        }
+
+        try {
+          const { target } = normalizedMessage;
+
+          if (target === 'own') {
+            const result = await AvatarDatabase.getOwnAvatar(state.username);
+
+            let envelope = null;
+            if (result) {
+              try {
+                envelope = JSON.parse(result.encryptedEnvelope);
+                if (!envelope || envelope.version !== 'lt-v1') {
+                  cryptoLogger.warn('[AVATAR:WARN] Stored own avatar envelope has invalid version/missing, ignoring.', {
+                    username: state.username,
+                    version: envelope?.version
+                  });
+                  envelope = null;
+                }
+              } catch (e) {
+                cryptoLogger.error('[AVATAR:ERROR] Failed to parse own avatar envelope', e);
+                envelope = null;
+              }
+            }
+
+            if (envelope) {
+              await sendSecureMessage(ws, {
+                type: 'avatar-fetch-response',
+                target: 'own',
+                found: true,
+                envelope: envelope,
+                isDefault: false
+              });
+            } else {
+              await sendSecureMessage(ws, {
+                type: 'avatar-fetch-response',
+                target: 'own',
+                found: false
+              });
+            }
+          } else if (typeof target === 'string' && target.length > 0) {
+            const result = await AvatarDatabase.getPeerAvatar(target);
+
+            if (result) {
+              let publicData;
+              try {
+                publicData = JSON.parse(result.publicData);
+              } catch (parseErr) {
+                publicData = result.publicData;
+              }
+
+              await sendSecureMessage(ws, {
+                type: 'avatar-fetch-response',
+                target,
+                found: true,
+                envelope: publicData
+              });
+            } else {
+              await sendSecureMessage(ws, {
+                type: 'avatar-fetch-response',
+                target,
+                found: false
+              });
+            }
+          } else {
+            await sendSecureMessage(ws, { type: 'avatar-fetch-response', found: false, error: 'Invalid target' });
+          }
+        } catch (error) {
+          await sendSecureMessage(ws, { type: 'avatar-fetch-response', found: false, error: 'Fetch failed' });
+        }
+        break;
+      }
+
+      case 'ping':
+        await sendSecureMessage(ws, { type: 'pong', timestamp: Date.now() });
+        break;
+
       default:
         logEvent('unknown-message-type', { type: normalizedMessage.type, sessionId });
         await sendSecureMessage(ws, { type: SignalType.ERROR, message: 'Unknown message type' });
@@ -1259,7 +1392,6 @@ async function handleWebSocketMessage({ ws, sessionId, message, context }) {
 }
 
 async function handleEncryptedMessage({ ws, sessionId, parsed, state }) {
-  // Strict authentication validation
   if (!state?.hasAuthenticated) {
     cryptoLogger.warn('[MESSAGE-FORWARD] Rejected message from unauthenticated session', {
       sessionId: sessionId?.slice(0, 8) + '...',
@@ -1354,7 +1486,12 @@ async function handleEncryptedMessage({ ws, sessionId, parsed, state }) {
           }
 
           if (isAuthed) {
-            const recipientPqSessionId = client._pqSessionId;
+            let recipientPqSessionId = client._pqSessionId;
+            if (!recipientPqSessionId && recipientState?.pqSessionId) {
+              recipientPqSessionId = recipientState.pqSessionId;
+              client._pqSessionId = recipientPqSessionId;
+            }
+
             if (recipientPqSessionId) {
               const recipientPqSession = await getPQSession(recipientPqSessionId);
 
@@ -1495,7 +1632,12 @@ async function handleSessionResetRequest({ ws, sessionId, parsed, state }) {
             isAuthed = !!userAuth?.hasAuthenticated;
           }
           if (isAuthed) {
-            const recipientPqSessionId = client._pqSessionId;
+            let recipientPqSessionId = client._pqSessionId;
+            if (!recipientPqSessionId && recipientState?.pqSessionId) {
+              recipientPqSessionId = recipientState.pqSessionId;
+              client._pqSessionId = recipientPqSessionId;
+            }
+
             if (recipientPqSessionId) {
               const recipientPqSession = await getPQSession(recipientPqSessionId);
               if (recipientPqSession) {
@@ -1508,7 +1650,6 @@ async function handleSessionResetRequest({ ws, sessionId, parsed, state }) {
                     error: err.message
                   });
                 }
-              } else {
               }
             }
           }
@@ -1582,7 +1723,12 @@ async function handleSessionEstablished({ ws, sessionId, parsed, state }) {
             isAuthed = !!userAuth?.hasAuthenticated;
           }
           if (isAuthed) {
-            const recipientPqSessionId = client._pqSessionId;
+            let recipientPqSessionId = client._pqSessionId;
+            if (!recipientPqSessionId && recipientState?.pqSessionId) {
+              recipientPqSessionId = recipientState.pqSessionId;
+              client._pqSessionId = recipientPqSessionId;
+            }
+
             if (recipientPqSessionId) {
               const recipientPqSession = await getPQSession(recipientPqSessionId);
               if (recipientPqSession) {
@@ -1595,7 +1741,7 @@ async function handleSessionEstablished({ ws, sessionId, parsed, state }) {
                     error: err.message
                   });
                 }
-              } else { }
+              }
             }
           }
         }
@@ -1618,9 +1764,14 @@ async function handleStoreOfflineMessage({ ws, parsed, state }) {
     return await sendSecureMessage(ws, { type: SignalType.ERROR, message: 'Authentication required' });
   }
 
-  const { messageId, to, encryptedPayload } = parsed;
-  if (!messageId || !to || !encryptedPayload) {
+  const { messageId, to, longTermEnvelope, version } = parsed;
+  if (!messageId || !to) {
     return await sendSecureMessage(ws, { type: SignalType.ERROR, message: 'Invalid message data' });
+  }
+
+  // Require long-term encryption
+  if (version !== 'lt-v1' || !longTermEnvelope) {
+    return await sendSecureMessage(ws, { type: SignalType.ERROR, message: 'Long-term encryption required' });
   }
 
   const senderBlockedByRecipient = await checkBlocking(state.username, to);
@@ -1639,7 +1790,9 @@ async function handleStoreOfflineMessage({ ws, parsed, state }) {
     const offlineMessage = {
       type: SignalType.ENCRYPTED_MESSAGE,
       to,
-      encryptedPayload,
+      longTermEnvelope,
+      version: 'lt-v1',
+      from: state.username
     };
 
     const success = await MessageDatabase.queueOfflineMessage(to, offlineMessage);
@@ -1656,7 +1809,13 @@ async function handleStoreOfflineMessage({ ws, parsed, state }) {
 }
 
 async function handleRetrieveOfflineMessages({ ws, state }) {
+  cryptoLogger.info('[OFFLINE:DEBUG] handleRetrieveOfflineMessages called', {
+    hasAuth: !!state?.hasAuthenticated,
+    username: state?.username?.slice(0, 8)
+  });
+
   if (!state?.hasAuthenticated) {
+    cryptoLogger.warn('[OFFLINE:DEBUG] Not authenticated, rejecting');
     return await sendSecureMessage(ws, { type: SignalType.ERROR, message: 'Authentication required' });
   }
 
@@ -1664,8 +1823,10 @@ async function handleRetrieveOfflineMessages({ ws, state }) {
     const offlineMessages = await MessageDatabase.takeOfflineMessages(state.username, 50);
 
     const pqSessionId = ws._pqSessionId;
+
     if (pqSessionId) {
       const session = await getPQSession(pqSessionId);
+
       if (session) {
         const responsePayload = {
           type: SignalType.OFFLINE_MESSAGES_RESPONSE,
@@ -1679,11 +1840,9 @@ async function handleRetrieveOfflineMessages({ ws, state }) {
           pqEncrypted: true
         });
       } else {
-        cryptoLogger.error('[OFFLINE-MESSAGES] No PQ session');
         throw new Error('PQ session required');
       }
     } else {
-      cryptoLogger.error('[OFFLINE-MESSAGES] No PQ session ID');
       throw new Error('PQ session required');
     }
   } catch (error) {
@@ -1835,7 +1994,6 @@ async function handleCheckUserExists({ ws, parsed, state, context }) {
     let sanitizedKeys = null;
     if (user && user.hybridPublicKeys) {
       try {
-        // Parse and sanitize the keys before returning
         const parsedKeys = typeof user.hybridPublicKeys === 'string'
           ? JSON.parse(user.hybridPublicKeys)
           : user.hybridPublicKeys;

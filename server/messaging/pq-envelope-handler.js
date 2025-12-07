@@ -150,6 +150,20 @@ export async function handlePQHandshake({ ws, sessionId, parsed, serverHybridKey
 
     ws._pqSessionId = payload.sessionId;
 
+    // Update ConnectionStateManager with pqSessionId
+    if (ws._sessionId) {
+      const { ConnectionStateManager } = await import('../presence/connection-state.js');
+      try {
+        await ConnectionStateManager.updateState(ws._sessionId, {
+          pqSessionId: payload.sessionId
+        });
+      } catch (stateError) {
+        cryptoLogger.warn('[PQ-HANDSHAKE] Failed to update connection state', {
+          error: stateError?.message
+        });
+      }
+    }
+
     setTimeout(async () => {
       try {
         await sendSecureMessage(ws, {

@@ -1,21 +1,28 @@
-import React, { useState, useEffect } from 'react';
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../ui/card';
-import { Label } from '../ui/label';
+import React, { useState, useEffect, useRef } from 'react';
 import { AnimatedSwitch } from '../ui/AnimatedSwitch';
 import { Button } from '../ui/button';
-import { Separator } from '../ui/separator';
 import { useTheme } from 'next-themes';
-import { ScreenSharingSettings } from './ScreenSharingSettings';
 import { syncEncryptedStorage } from '../../lib/encrypted-storage';
-import { BlockedUsersSettings } from './BlockedUsersSettings';
-import { Bell, Monitor, Volume2, Download, Shield, Database } from 'lucide-react';
-import ThemeToggle from './ThemeToggle';
-import { ScrollArea } from '../ui/scroll-area';
+import { blockingSystem, BlockedUser } from '../../lib/blocking-system';
+import { profilePictureSystem } from '../../lib/profile-picture-system';
+import {
+  ScreenSharingSettings as ScreenSharingSettingsType,
+  SCREEN_SHARING_RESOLUTIONS,
+  SCREEN_SHARING_FRAMERATES
+} from '../../lib/screen-sharing-consts';
+import { screenSharingSettings } from '../../lib/screen-sharing-settings';
+import { format } from 'date-fns';
+import { toast } from 'sonner';
+import { User, Palette, Bell, Volume2, Monitor, Download, Shield, Trash2, ShieldCheck, Camera, X, Eye, EyeOff } from 'lucide-react';
+import { getAvatarColor } from '../../lib/avatar-utils';
+import { generateDefaultAvatar } from '../../lib/utils';
 
 interface AppSettingsProps {
   passphraseRef?: React.MutableRefObject<string>;
   kyberSecretRef?: React.MutableRefObject<Uint8Array | null>;
   getDisplayUsername?: (username: string) => Promise<string>;
+  currentUsername?: string;
+  currentDisplayName?: string;
 }
 
 interface NotificationSettings {
@@ -28,14 +35,41 @@ interface AudioSettings {
   echoCancellation: boolean;
 }
 
-export const AppSettings = React.memo(function AppSettings({ passphraseRef, kyberSecretRef, getDisplayUsername }: AppSettingsProps = {}) {
+type SectionId = 'account' | 'appearance' | 'notifications' | 'audio' | 'voice-video' | 'downloads' | 'privacy' | 'data';
 
+const QUALITY_OPTIONS = ['low', 'medium', 'high'] as const;
+const QUALITY_LABELS: Record<string, string> = { low: 'Low', medium: 'Medium', high: 'High' };
+
+export const AppSettings = React.memo(function AppSettings({
+  passphraseRef,
+  kyberSecretRef,
+  getDisplayUsername,
+  currentUsername = '',
+  currentDisplayName = ''
+}: AppSettingsProps) {
   const { theme, setTheme } = useTheme();
+  const [mounted, setMounted] = useState(false);
   const [downloadSettings, setDownloadSettings] = useState<{ downloadPath: string; autoSave: boolean } | null>(null);
   const [isChoosingPath, setIsChoosingPath] = useState(false);
   const [isClearingData, setIsClearingData] = useState(false);
   const [notifications, setNotifications] = useState<NotificationSettings>({ desktop: true, sound: true });
   const [audioSettings, setAudioSettings] = useState<AudioSettings>({ noiseSuppression: true, echoCancellation: true });
+  const [activeSection, setActiveSection] = useState<SectionId>('account');
+
+  const [blockedUsers, setBlockedUsers] = useState<BlockedUser[]>([]);
+  const [blockedLoading, setBlockedLoading] = useState(false);
+  const [displayMap, setDisplayMap] = useState<Record<string, string>>({});
+
+  const [screenSettings, setScreenSettings] = useState<ScreenSharingSettingsType | null>(null);
+
+  const [avatarUrl, setAvatarUrl] = useState<string | null>(null);
+  const [shareWithOthers, setShareWithOthers] = useState(false);
+  const [isUploadingAvatar, setIsUploadingAvatar] = useState(false);
+  const avatarInputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    setMounted(true);
+  }, []);
 
   useEffect(() => {
     const initDownloadSettings = async () => {
@@ -44,9 +78,7 @@ export const AppSettings = React.memo(function AppSettings({ passphraseRef, kybe
       try {
         const settings = await api.getDownloadSettings();
         setDownloadSettings(settings);
-      } catch (_error) {
-        console.error('Failed to get download settings:', _error);
-      }
+      } catch { }
     };
     initDownloadSettings();
 
@@ -58,6 +90,90 @@ export const AppSettings = React.memo(function AppSettings({ passphraseRef, kybe
         if (parsed.audioSettings) setAudioSettings(parsed.audioSettings);
       }
     } catch { }
+
+    // Initialize profile picture system
+    const initProfilePicture = async () => {
+      try {
+        await profilePictureSystem.initialize();
+        const ownAvatar = profilePictureSystem.getOwnAvatar();
+        setAvatarUrl(ownAvatar);
+        setShareWithOthers(profilePictureSystem.getShareWithOthers());
+      } catch (e) {
+        console.error('[AppSettings] Failed to init profile picture:', e);
+      }
+    };
+    initProfilePicture();
+
+    const handleAvatarUpdate = (e: CustomEvent) => {
+      const { type } = e.detail || {};
+      if (type === 'own') {
+        setAvatarUrl(profilePictureSystem.getOwnAvatar());
+      }
+    };
+
+    window.addEventListener('profile-picture-updated', handleAvatarUpdate as EventListener);
+    return () => window.removeEventListener('profile-picture-updated', handleAvatarUpdate as EventListener);
+  }, []);
+
+  useEffect(() => {
+    const loadBlockedUsers = async () => {
+      const passphrase = passphraseRef?.current;
+      const kyberSecret = kyberSecretRef?.current || null;
+      if (!passphrase && !kyberSecret) return;
+
+      setBlockedLoading(true);
+      try {
+        const key = passphrase ? passphrase : { kyberSecret: kyberSecret! } as any;
+        const users = await blockingSystem.getBlockedUsers(key);
+        setBlockedUsers(users);
+      } catch {
+        setBlockedUsers([]);
+      } finally {
+        setBlockedLoading(false);
+      }
+    };
+    loadBlockedUsers();
+  }, [passphraseRef, kyberSecretRef]);
+
+  useEffect(() => {
+    let canceled = false;
+    (async () => {
+      if (!blockedUsers.length || !getDisplayUsername) {
+        setDisplayMap({});
+        return;
+      }
+      const entries = await Promise.all(
+        blockedUsers.map(async (u) => {
+          try {
+            const dn = await getDisplayUsername(u.username);
+            return [u.username, dn] as const;
+          } catch {
+            return [u.username, u.username] as const;
+          }
+        })
+      );
+      if (!canceled) {
+        const next: Record<string, string> = {};
+        for (const [k, v] of entries) next[k] = v;
+        setDisplayMap(next);
+      }
+    })();
+    return () => { canceled = true; };
+  }, [blockedUsers, getDisplayUsername]);
+
+  useEffect(() => {
+    let mounted = true;
+    const loadScreenSettings = async () => {
+      try {
+        const current = await screenSharingSettings.getSettings();
+        if (mounted) setScreenSettings(current);
+      } catch { }
+    };
+    loadScreenSettings();
+    const unsubscribe = screenSharingSettings.subscribe((newSettings) => {
+      if (mounted) setScreenSettings(newSettings);
+    });
+    return () => { mounted = false; unsubscribe(); };
   }, []);
 
   const handleChooseDownloadPath = async () => {
@@ -70,16 +186,9 @@ export const AppSettings = React.memo(function AppSettings({ passphraseRef, kybe
         const updateResult = await api.setDownloadPath(result.path);
         if (updateResult.success) {
           setDownloadSettings(prev => prev ? { ...prev, downloadPath: result.path! } : null);
-        } else {
-          alert(`Failed to set download path: ${updateResult.error || 'Unknown error'}`);
         }
-      } else if (!result.canceled) {
-        alert(`Failed to choose download path: ${result.error || 'Unknown error'}`);
       }
-    } catch (_error) {
-      console.error('Failed to choose download path:', _error);
-      alert('Failed to choose download path. Please try again.');
-    } finally {
+    } catch { } finally {
       setIsChoosingPath(false);
     }
   };
@@ -91,333 +200,817 @@ export const AppSettings = React.memo(function AppSettings({ passphraseRef, kybe
       const result = await api.setAutoSave(autoSave);
       if (result.success) {
         setDownloadSettings(prev => prev ? { ...prev, autoSave } : null);
-      } else {
-        alert(`Failed to update auto-save setting: ${result.error || 'Unknown error'}`);
       }
-    } catch (_error) {
-      console.error('Failed to update auto-save setting:', _error);
-      alert('Failed to update auto-save setting. Please try again.');
+    } catch { }
+  };
+
+  const saveSettings = (updates: Partial<{ notifications: NotificationSettings; audioSettings: AudioSettings; avatarUrl: string | null }>) => {
+    try {
+      const stored = syncEncryptedStorage.getItem('app_settings_v1');
+      const parsed = stored ? JSON.parse(stored) : {};
+      syncEncryptedStorage.setItem('app_settings_v1', JSON.stringify({ ...parsed, ...updates }));
+    } catch { }
+  };
+
+  const handleUnblockUser = async (username: string) => {
+    const passphrase = passphraseRef?.current;
+    const kyberSecret = kyberSecretRef?.current || null;
+    if (!passphrase && !kyberSecret) return;
+
+    setBlockedLoading(true);
+    try {
+      const key = passphrase ? passphrase : { kyberSecret: kyberSecret! } as any;
+      await blockingSystem.unblockUser(username, key);
+      setBlockedUsers(prev => prev.filter(u => u.username !== username));
+    } catch { } finally {
+      setBlockedLoading(false);
     }
-  };
-
-  const handleNotificationChange = (key: keyof NotificationSettings, value: boolean) => {
-    const updated = { ...notifications, [key]: value };
-    setNotifications(updated);
-    try {
-      const stored = syncEncryptedStorage.getItem('app_settings_v1');
-      const parsed = stored ? JSON.parse(stored) : {};
-      syncEncryptedStorage.setItem('app_settings_v1', JSON.stringify({ ...parsed, notifications: updated }));
-      window.dispatchEvent(new CustomEvent('settings-changed', { detail: { notifications: updated } }));
-    } catch { }
-  };
-
-  const handleAudioSettingChange = (key: keyof AudioSettings, value: boolean) => {
-    const updated = { ...audioSettings, [key]: value };
-    setAudioSettings(updated);
-    try {
-      const stored = syncEncryptedStorage.getItem('app_settings_v1');
-      const parsed = stored ? JSON.parse(stored) : {};
-      syncEncryptedStorage.setItem('app_settings_v1', JSON.stringify({ ...parsed, audioSettings: updated }));
-      window.dispatchEvent(new CustomEvent('settings-changed', { detail: { audioSettings: updated } }));
-    } catch { }
   };
 
   const handleClearData = async () => {
     if (isClearingData) return;
     if (confirm('Clear all local data? This will log you out and remove all stored messages.')) {
       setIsClearingData(true);
-      try { const { encryptedStorage } = await import('../../lib/encrypted-storage'); await encryptedStorage.setItem('app_settings_v1', ''); } catch { }
+      try {
+        const { encryptedStorage } = await import('../../lib/encrypted-storage');
+        await encryptedStorage.setItem('app_settings_v1', '');
+      } catch { }
       window.location.reload();
     }
   };
 
-  const [activeSection, setActiveSection] = useState<'appearance' | 'notifications' | 'audio' | 'screen-sharing' | 'downloads' | 'privacy' | 'data'>('appearance');
+  const handleAvatarChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file || isUploadingAvatar) return;
 
-  const sections = [
-    { id: 'appearance' as const, label: 'Appearance', icon: Monitor },
-    { id: 'notifications' as const, label: 'Notifications', icon: Bell },
-    { id: 'audio' as const, label: 'Audio', icon: Volume2 },
-    { id: 'screen-sharing' as const, label: 'Screen Sharing', icon: Monitor },
-    { id: 'downloads' as const, label: 'Downloads', icon: Download },
-    { id: 'privacy' as const, label: 'Privacy', icon: Shield },
-    { id: 'data' as const, label: 'Data', icon: Database },
+    e.target.value = '';
+
+    if (file.size > 5 * 1024 * 1024) {
+      toast.error('Image too large (max 5MB)');
+      return;
+    }
+
+    setIsUploadingAvatar(true);
+
+    const reader = new FileReader();
+    reader.onloadend = async () => {
+      try {
+        const result = reader.result as string;
+        const uploadResult = await profilePictureSystem.setOwnAvatar(result);
+
+        if (uploadResult.success) {
+          setAvatarUrl(profilePictureSystem.getOwnAvatar());
+          toast.success('Profile picture updated');
+        } else {
+          toast.error(uploadResult.error || 'Failed to upload avatar');
+        }
+      } catch (error) {
+        toast.error('Failed to process image');
+      } finally {
+        setIsUploadingAvatar(false);
+      }
+    };
+    reader.onerror = () => {
+      toast.error('Failed to read image file');
+      setIsUploadingAvatar(false);
+    };
+    reader.readAsDataURL(file);
+  };
+
+  const handleRemoveAvatar = async () => {
+    await profilePictureSystem.removeOwnAvatar(currentUsername);
+    toast.success('Profile picture removed');
+  };
+
+  const handleShareToggle = async (share: boolean) => {
+    await profilePictureSystem.setShareWithOthers(share);
+    setShareWithOthers(share);
+  };
+
+  const displayUsername = currentDisplayName || currentUsername || 'User';
+  const truncatedHash = currentUsername?.length > 20 ? `${currentUsername.slice(0, 8)}...${currentUsername.slice(-8)}` : currentUsername;
+
+  const sections: { category: string; items: { id: SectionId; label: string; icon: React.ElementType }[] }[] = [
+    {
+      category: 'USER SETTINGS',
+      items: [
+        { id: 'account', label: 'My Account', icon: User },
+      ]
+    },
+    {
+      category: 'APP SETTINGS',
+      items: [
+        { id: 'appearance', label: 'Appearance', icon: Palette },
+        { id: 'notifications', label: 'Notifications', icon: Bell },
+      ]
+    },
+    {
+      category: 'CALLING',
+      items: [
+        { id: 'audio', label: 'Audio', icon: Volume2 },
+        { id: 'voice-video', label: 'Voice & Video', icon: Monitor },
+      ]
+    },
+    {
+      category: 'DATA',
+      items: [
+        { id: 'downloads', label: 'Downloads', icon: Download },
+        { id: 'privacy', label: 'Privacy & Safety', icon: Shield },
+        { id: 'data', label: 'Data Management', icon: Trash2 },
+      ]
+    }
   ];
+
+  if (!mounted) return null;
 
   return (
     <>
       <style>{`
-        .settings-scroll-container {
+        .settings-layout {
+          display: flex;
+          height: 80vh;
+          width: 100%;
+          overflow: hidden;
+        }
+        .settings-sidebar {
+          width: 220px;
+          flex-shrink: 0;
+          background: hsl(var(--secondary) / 0.3);
+          overflow-y: auto;
           scrollbar-width: thin;
-          scrollbar-color: hsl(var(--muted-foreground) / 0.3) transparent;
+          scrollbar-color: hsl(var(--muted-foreground) / 0.2) transparent;
         }
-        
-        .settings-scroll-container::-webkit-scrollbar {
-          width: 8px;
+        .settings-sidebar::-webkit-scrollbar { width: 4px; }
+        .settings-sidebar::-webkit-scrollbar-track { background: transparent; }
+        .settings-sidebar::-webkit-scrollbar-thumb { 
+          background: hsl(var(--muted-foreground) / 0.2); 
+          border-radius: 2px;
         }
-        
-        .settings-scroll-container::-webkit-scrollbar-track {
-          background: transparent;
+        .settings-content {
+          flex: 1;
+          overflow-y: auto;
+          padding: 40px;
+          scrollbar-width: thin;
+          scrollbar-color: hsl(var(--muted-foreground) / 0.2) transparent;
         }
-        
-        .settings-scroll-container::-webkit-scrollbar-thumb {
-          background-color: hsl(var(--muted-foreground) / 0.3);
+        .settings-content::-webkit-scrollbar { width: 8px; }
+        .settings-content::-webkit-scrollbar-track { background: transparent; }
+        .settings-content::-webkit-scrollbar-thumb { 
+          background: hsl(var(--muted-foreground) / 0.2); 
           border-radius: 4px;
-          transition: background-color 0.2s ease;
         }
-        
-        .settings-scroll-container::-webkit-scrollbar-thumb:hover {
-          background-color: hsl(var(--muted-foreground) / 0.5);
+        .settings-nav-item {
+          display: flex;
+          align-items: center;
+          gap: 10px;
+          width: 100%;
+          padding: 8px 12px;
+          margin: 2px 8px;
+          border-radius: 4px;
+          font-size: 14px;
+          font-weight: 500;
+          color: hsl(var(--muted-foreground));
+          background: transparent;
+          border: none;
+          cursor: pointer;
+          transition: all 0.1s ease;
+          text-align: left;
         }
-        
-        .settings-scroll-container::-webkit-scrollbar-button {
-          display: none;
-          width: 0;
-          height: 0;
+        .settings-nav-item:hover {
+          background: hsl(var(--secondary) / 0.8);
+          color: hsl(var(--foreground));
         }
-        
-        .settings-scroll-container::-webkit-scrollbar-button:vertical:start:decrement,
-        .settings-scroll-container::-webkit-scrollbar-button:vertical:end:increment {
-          display: none;
+        .settings-nav-item.active {
+          background: hsl(var(--secondary));
+          color: hsl(var(--foreground));
+        }
+        .settings-category {
+          font-size: 11px;
+          font-weight: 700;
+          letter-spacing: 0.02em;
+          text-transform: uppercase;
+          color: hsl(var(--muted-foreground));
+          padding: 16px 20px 8px;
+        }
+        .settings-row {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          padding: 16px 0;
+          border-bottom: 1px solid hsl(var(--border) / 0.5);
+        }
+        .settings-row:last-child {
+          border-bottom: none;
+        }
+        .settings-label {
+          font-size: 15px;
+          font-weight: 500;
+          color: hsl(var(--foreground));
+          margin-bottom: 4px;
+        }
+        .settings-description {
+          font-size: 13px;
+          color: hsl(var(--muted-foreground));
+          line-height: 1.4;
+        }
+        .settings-section-title {
+          font-size: 20px;
+          font-weight: 600;
+          color: hsl(var(--foreground));
+          margin-bottom: 20px;
+        }
+        .settings-group {
+          margin-bottom: 32px;
+        }
+        .settings-group-title {
+          font-size: 12px;
+          font-weight: 600;
+          letter-spacing: 0.02em;
+          text-transform: uppercase;
+          color: hsl(var(--muted-foreground));
+          margin-bottom: 12px;
+        }
+        .avatar-container {
+          position: relative;
+          width: 80px;
+          height: 80px;
+          border-radius: 50%;
+          overflow: hidden;
+          cursor: pointer;
+          background: linear-gradient(135deg, #5865F2 0%, #4752C4 100%);
+        }
+        .avatar-container:hover .avatar-overlay {
+          opacity: 1;
+        }
+        .avatar-overlay {
+          position: absolute;
+          inset: 0;
+          display: flex;
+          flex-direction: column;
+          align-items: center;
+          justify-content: center;
+          background: rgba(0, 0, 0, 0.6);
+          opacity: 0;
+          transition: opacity 0.2s ease;
+        }
+        .avatar-image {
+          width: 100%;
+          height: 100%;
+          object-fit: cover;
+        }
+        .avatar-placeholder {
+          width: 100%;
+          height: 100%;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          font-size: 32px;
+          font-weight: 600;
+          color: white;
+        }
+        .account-card {
+          background: hsl(var(--secondary) / 0.5);
+          border-radius: 8px;
+          padding: 20px;
+          margin-bottom: 24px;
+        }
+        .theme-option {
+          display: flex;
+          flex-direction: column;
+          align-items: center;
+          justify-content: center;
+          padding: 16px;
+          border-radius: 8px;
+          border: 2px solid transparent;
+          cursor: pointer;
+          transition: all 0.2s ease;
+          background: hsl(var(--secondary) / 0.3);
+          min-width: 80px;
+        }
+        .theme-option:hover {
+          background: hsl(var(--secondary) / 0.6);
+        }
+        .theme-option.active {
+          border-color: #5865F2;
+          background: hsl(var(--secondary) / 0.8);
+        }
+        .theme-icon {
+          width: 40px;
+          height: 40px;
+          margin-bottom: 8px;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+        }
+        .custom-select {
+          width: 100%;
+          padding: 10px 12px;
+          border-radius: 4px;
+          border: 1px solid hsl(var(--border));
+          background: hsl(var(--background));
+          color: hsl(var(--foreground));
+          font-size: 14px;
+          cursor: pointer;
+          outline: none;
+          transition: border-color 0.2s ease;
+        }
+        .custom-select:hover {
+          border-color: rgba(88, 101, 242, 0.5);
+        }
+        .custom-select:focus {
+          border-color: #5865F2;
+        }
+        .blocked-user-item {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          padding: 12px 16px;
+          background: hsl(var(--secondary) / 0.3);
+          border-radius: 6px;
+          margin-bottom: 8px;
+        }
+        .danger-zone {
+          background: hsl(0 70% 50% / 0.1);
+          border: 1px solid hsl(0 70% 50% / 0.3);
+          border-radius: 8px;
+          padding: 20px;
         }
       `}</style>
-      <div className="flex h-[85vh] w-full">
-        {/* Sidebar Navigation */}
-        <div className="w-48 border-r border-border flex-shrink-0">
-          <div className="p-4 border-b border-border">
-            <h2 className="text-lg font-semibold">Settings</h2>
+
+      <div className="settings-layout select-none">
+        <div className="settings-sidebar">
+          <div style={{ padding: '8px 0' }}>
+            {sections.map((section, idx) => (
+              <div key={idx}>
+                <div className="settings-category">{section.category}</div>
+                {section.items.map((item) => {
+                  const Icon = item.icon;
+                  return (
+                    <button
+                      key={item.id}
+                      onClick={() => setActiveSection(item.id)}
+                      className={`settings-nav-item ${activeSection === item.id ? 'active' : ''}`}
+                      style={{ width: 'calc(100% - 16px)' }}
+                    >
+                      <Icon size={18} />
+                      <span>{item.label}</span>
+                    </button>
+                  );
+                })}
+                {idx < sections.length - 1 && (
+                  <div style={{ margin: '8px 20px', borderBottom: '1px solid hsl(var(--border) / 0.3)' }} />
+                )}
+              </div>
+            ))}
           </div>
-          <nav className="p-2">
-            {sections.map((section) => {
-              const Icon = section.icon;
-              return (
-                <button
-                  key={section.id}
-                  onClick={() => setActiveSection(section.id)}
-                  className={`w-full flex items-center gap-3 px-3 py-2 rounded-md text-sm transition-colors ${activeSection === section.id
-                    ? 'bg-secondary text-secondary-foreground font-medium'
-                    : 'text-muted-foreground hover:bg-secondary/50 hover:text-foreground'
-                    }`}
-                >
-                  <Icon className="h-4 w-4 flex-shrink-0" />
-                  <span>{section.label}</span>
-                </button>
-              );
-            })}
-          </nav>
         </div>
 
-        {/* Content Area */}
-        <div className="flex-1 flex flex-col overflow-hidden">
-          <div className="settings-scroll-container flex-1 overflow-y-auto p-6">
-            {activeSection === 'appearance' && (
-              <div className="space-y-4">
-                <div>
-                  <h3 className="text-xl font-semibold mb-1">Appearance</h3>
-                  <p className="text-xs text-muted-foreground">Customize how the app looks</p>
+        <div className="settings-content">
+          {activeSection === 'account' && (
+            <div>
+              <h2 className="settings-section-title">My Account</h2>
+
+              <div className="account-card">
+                <div style={{ display: 'flex', alignItems: 'center', gap: '20px' }}>
+                  <div
+                    className="avatar-container"
+                    onClick={() => avatarInputRef.current?.click()}
+                  >
+                    {avatarUrl ? (
+                      <img src={avatarUrl} alt="Avatar" className="avatar-image" />
+                    ) : (
+                      <div className="avatar-placeholder animate-pulse" style={{ backgroundColor: 'var(--color-secondary)' }} />
+                    )}
+                    <div className="avatar-overlay">
+                      <Camera size={20} color="white" />
+                      <span style={{ fontSize: '10px', color: 'white', marginTop: '4px' }}>CHANGE</span>
+                    </div>
+                  </div>
+                  <input
+                    ref={avatarInputRef}
+                    type="file"
+                    accept="image/*"
+                    onChange={handleAvatarChange}
+                    style={{ display: 'none' }}
+                  />
+                  <div>
+                    <div style={{ fontSize: '20px', fontWeight: 600, color: 'hsl(var(--foreground))' }}>
+                      {displayUsername}
+                    </div>
+                    {currentUsername && currentUsername !== displayUsername && (
+                      <div style={{ fontSize: '13px', color: 'hsl(var(--muted-foreground))', marginTop: '4px' }}>
+                        {truncatedHash}
+                      </div>
+                    )}
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginTop: '8px' }}>
+                      <ShieldCheck size={14} style={{ color: 'hsl(142 76% 36%)' }} />
+                      <span style={{ fontSize: '12px', color: 'hsl(142 76% 36%)', fontWeight: 500 }}>
+                        Quantum-secured
+                      </span>
+                    </div>
+                  </div>
                 </div>
-                <div className="space-y-2">
-                  <Label>Theme</Label>
-                  <ThemeToggle />
+
+                {avatarUrl && !profilePictureSystem.isOwnAvatarDefault() && (
+                  <button
+                    onClick={handleRemoveAvatar}
+                    style={{
+                      marginTop: '16px',
+                      padding: '8px 16px',
+                      fontSize: '13px',
+                      color: 'hsl(var(--muted-foreground))',
+                      background: 'transparent',
+                      border: '1px solid hsl(var(--border))',
+                      borderRadius: '4px',
+                      cursor: 'pointer',
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: '6px'
+                    }}
+                  >
+                    <X size={14} />
+                    Remove Avatar
+                  </button>
+                )}
+              </div>
+
+              <div className="settings-group">
+                <div className="settings-group-title">Profile Picture</div>
+                <div className="settings-row">
+                  <div>
+                    <div className="settings-label">Share with Others</div>
+                    <div className="settings-description">
+                      Allow other users to see your profile picture. When disabled, they'll see a default avatar.
+                    </div>
+                  </div>
+                  <AnimatedSwitch
+                    checked={shareWithOthers}
+                    onCheckedChange={handleShareToggle}
+                  />
                 </div>
               </div>
-            )}
 
-            {activeSection === 'notifications' && (
-              <div className="space-y-4">
-                <div>
-                  <h3 className="text-xl font-semibold mb-1">Notifications</h3>
-                  <p className="text-xs text-muted-foreground">Configure notification preferences</p>
+              <div className="settings-group">
+                <div className="settings-group-title">Security</div>
+                <div style={{ background: 'hsl(var(--secondary) / 0.3)', borderRadius: '8px', padding: '16px' }}>
+                  <div style={{ display: 'flex', alignItems: 'flex-start', gap: '12px' }}>
+                    <Shield size={24} style={{ color: '#5865F2', flexShrink: 0, marginTop: '2px' }} />
+                    <div>
+                      <div className="settings-label">End-to-End Encrypted</div>
+                      <div className="settings-description">
+                        Your messages are protected with post-quantum cryptography (ML-KEM/Kyber).
+                        Only you and your recipients can read them.
+                      </div>
+                    </div>
+                  </div>
                 </div>
-                <Card>
-                  <CardContent className="pt-6 space-y-4">
-                    <div className="flex items-center justify-between">
-                      <div className="space-y-0.5">
-                        <Label>Desktop Notifications</Label>
-                        <p className="text-xs text-muted-foreground">Show notifications on your desktop</p>
-                      </div>
-                      <AnimatedSwitch
-                        checked={notifications.desktop}
-                        onCheckedChange={(checked) => {
-                          setNotifications(prev => ({ ...prev, desktop: checked }));
-                          try {
-                            syncEncryptedStorage.setItem('app_settings_v1', JSON.stringify({
-                              notifications: { ...notifications, desktop: checked },
-                              audioSettings
-                            }));
-                          } catch { }
-                        }}
-                      />
-                    </div>
-                    <Separator />
-                    <div className="flex items-center justify-between">
-                      <div className="space-y-0.5">
-                        <Label>Sound Notifications</Label>
-                        <p className="text-xs text-muted-foreground">Play sound for new messages</p>
-                      </div>
-                      <AnimatedSwitch
-                        checked={notifications.sound}
-                        onCheckedChange={(checked) => {
-                          setNotifications(prev => ({ ...prev, sound: checked }));
-                          try {
-                            syncEncryptedStorage.setItem('app_settings_v1', JSON.stringify({
-                              notifications: { ...notifications, sound: checked },
-                              audioSettings
-                            }));
-                          } catch { }
-                        }}
-                      />
-                    </div>
-                  </CardContent>
-                </Card>
               </div>
-            )}
+            </div>
+          )}
 
-            {activeSection === 'audio' && (
-              <div className="space-y-4">
-                <div>
-                  <h3 className="text-xl font-semibold mb-1">Audio</h3>
-                  <p className="text-xs text-muted-foreground">Configure audio call settings</p>
+          {activeSection === 'appearance' && (
+            <div>
+              <h2 className="settings-section-title">Appearance</h2>
+
+              <div className="settings-group">
+                <div className="settings-group-title">Theme</div>
+                <div className="settings-description" style={{ marginBottom: '16px' }}>
+                  Choose how the app looks to you. Select a theme or sync with your system settings.
                 </div>
-                <Card>
-                  <CardContent className="pt-6 space-y-4">
-                    <div className="flex items-center justify-between">
-                      <div className="space-y-0.5">
-                        <Label>Noise Suppression</Label>
-                        <p className="text-xs text-muted-foreground">Filter out background noise during calls</p>
-                      </div>
-                      <AnimatedSwitch
-                        checked={audioSettings.noiseSuppression}
-                        onCheckedChange={(checked) => {
-                          setAudioSettings(prev => ({ ...prev, noiseSuppression: checked }));
-                          try {
-                            syncEncryptedStorage.setItem('app_settings_v1', JSON.stringify({
-                              notifications,
-                              audioSettings: { ...audioSettings, noiseSuppression: checked }
-                            }));
-                          } catch { }
-                        }}
-                      />
+                <div style={{ display: 'flex', gap: '12px' }}>
+                  <button
+                    className={`theme-option ${theme === 'light' ? 'active' : ''}`}
+                    onClick={() => setTheme('light')}
+                  >
+                    <div className="theme-icon">
+                      <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                        <circle cx="12" cy="12" r="5" />
+                        <path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42" />
+                      </svg>
                     </div>
-                    <Separator />
-                    <div className="flex items-center justify-between">
-                      <div className="space-y-0.5">
-                        <Label>Echo Cancellation</Label>
-                        <p className="text-xs text-muted-foreground">Reduce echo during calls</p>
-                      </div>
-                      <AnimatedSwitch
-                        checked={audioSettings.echoCancellation}
-                        onCheckedChange={(checked) => {
-                          setAudioSettings(prev => ({ ...prev, echoCancellation: checked }));
-                          try {
-                            syncEncryptedStorage.setItem('app_settings_v1', JSON.stringify({
-                              notifications,
-                              audioSettings: { ...audioSettings, echoCancellation: checked }
-                            }));
-                          } catch { }
-                        }}
-                      />
+                    <span style={{ fontSize: '13px', fontWeight: 500 }}>Light</span>
+                  </button>
+                  <button
+                    className={`theme-option ${theme === 'dark' ? 'active' : ''}`}
+                    onClick={() => setTheme('dark')}
+                  >
+                    <div className="theme-icon">
+                      <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                        <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
+                      </svg>
                     </div>
-                  </CardContent>
-                </Card>
+                    <span style={{ fontSize: '13px', fontWeight: 500 }}>Dark</span>
+                  </button>
+                  <button
+                    className={`theme-option ${theme === 'system' ? 'active' : ''}`}
+                    onClick={() => setTheme('system')}
+                  >
+                    <div className="theme-icon">
+                      <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                        <rect x="2" y="3" width="20" height="14" rx="2" ry="2" />
+                        <path d="M8 21h8M12 17v4" />
+                      </svg>
+                    </div>
+                    <span style={{ fontSize: '13px', fontWeight: 500 }}>System</span>
+                  </button>
+                </div>
               </div>
-            )}
+            </div>
+          )}
 
-            {activeSection === 'screen-sharing' && (
-              <div className="space-y-4">
-                <div>
-                  <h3 className="text-xl font-semibold mb-1">Screen Sharing</h3>
-                  <p className="text-xs text-muted-foreground">Configure screen sharing preferences</p>
-                </div>
-                <ScreenSharingSettings />
-              </div>
-            )}
+          {activeSection === 'notifications' && (
+            <div>
+              <h2 className="settings-section-title">Notifications</h2>
 
-            {activeSection === 'downloads' && downloadSettings && (
-              <div className="space-y-4">
-                <div>
-                  <h3 className="text-xl font-semibold mb-1">Downloads</h3>
-                  <p className="text-xs text-muted-foreground">Manage download preferences</p>
-                </div>
-                <Card>
-                  <CardContent className="pt-6 space-y-4">
-                    <div className="space-y-2">
-                      <Label>Download Location</Label>
-                      <div className="flex gap-2">
-                        <input
-                          type="text"
-                          readOnly
-                          value={downloadSettings.downloadPath || ''}
-                          className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background file:border-0 file:bg-transparent file:text-sm file:font-medium placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
-                        />
-                        <Button
-                          onClick={handleChooseDownloadPath}
-                          variant="outline"
-                          disabled={isChoosingPath}
-                        >
-                          {isChoosingPath ? 'Choosing...' : 'Browse'}
-                        </Button>
-                      </div>
+              <div className="settings-group">
+                <div className="settings-row">
+                  <div>
+                    <div className="settings-label">Desktop Notifications</div>
+                    <div className="settings-description">
+                      Show a notification popup when you receive a new message
                     </div>
-                    <Separator />
-                    <div className="flex items-center justify-between">
-                      <div className="space-y-0.5">
-                        <Label>Auto-save Files</Label>
-                        <p className="text-xs text-muted-foreground">Automatically save files to download location</p>
-                      </div>
-                      <AnimatedSwitch
-                        checked={downloadSettings.autoSave || false}
-                        onCheckedChange={handleAutoSaveToggle}
-                      />
-                    </div>
-                  </CardContent>
-                </Card>
-              </div>
-            )}
-
-            {activeSection === 'privacy' && (
-              <div className="space-y-4">
-                <div>
-                  <h3 className="text-xl font-semibold mb-1">Privacy</h3>
-                  <p className="text-xs text-muted-foreground">Manage your privacy settings</p>
+                  </div>
+                  <AnimatedSwitch
+                    checked={notifications.desktop}
+                    onCheckedChange={(checked) => {
+                      setNotifications(prev => ({ ...prev, desktop: checked }));
+                      saveSettings({ notifications: { ...notifications, desktop: checked } });
+                    }}
+                  />
                 </div>
-                <Card>
-                  <CardContent className="pt-6">
-                    <BlockedUsersSettings
-                      passphraseRef={passphraseRef}
-                      kyberSecretRef={kyberSecretRef}
-                      getDisplayUsername={getDisplayUsername}
+
+                <div className="settings-row">
+                  <div>
+                    <div className="settings-label">Sound Notifications</div>
+                    <div className="settings-description">
+                      Play a sound when you receive a new message
+                    </div>
+                  </div>
+                  <AnimatedSwitch
+                    checked={notifications.sound}
+                    onCheckedChange={(checked) => {
+                      setNotifications(prev => ({ ...prev, sound: checked }));
+                      saveSettings({ notifications: { ...notifications, sound: checked } });
+                    }}
+                  />
+                </div>
+              </div>
+            </div>
+          )}
+
+          {activeSection === 'audio' && (
+            <div>
+              <h2 className="settings-section-title">Audio</h2>
+
+              <div className="settings-group">
+                <div className="settings-group-title">Voice Processing</div>
+
+                <div className="settings-row">
+                  <div>
+                    <div className="settings-label">Noise Suppression</div>
+                    <div className="settings-description">
+                      Filter out background noise during calls for clearer audio
+                    </div>
+                  </div>
+                  <AnimatedSwitch
+                    checked={audioSettings.noiseSuppression}
+                    onCheckedChange={(checked) => {
+                      setAudioSettings(prev => ({ ...prev, noiseSuppression: checked }));
+                      saveSettings({ audioSettings: { ...audioSettings, noiseSuppression: checked } });
+                    }}
+                  />
+                </div>
+
+                <div className="settings-row">
+                  <div>
+                    <div className="settings-label">Echo Cancellation</div>
+                    <div className="settings-description">
+                      Reduce echo and feedback during voice calls
+                    </div>
+                  </div>
+                  <AnimatedSwitch
+                    checked={audioSettings.echoCancellation}
+                    onCheckedChange={(checked) => {
+                      setAudioSettings(prev => ({ ...prev, echoCancellation: checked }));
+                      saveSettings({ audioSettings: { ...audioSettings, echoCancellation: checked } });
+                    }}
+                  />
+                </div>
+              </div>
+            </div>
+          )}
+
+          {activeSection === 'voice-video' && screenSettings && (
+            <div>
+              <h2 className="settings-section-title">Voice & Video</h2>
+
+              <div className="settings-group">
+                <div className="settings-group-title">Screen Sharing</div>
+
+                <div className="settings-row" style={{ flexDirection: 'column', alignItems: 'flex-start', gap: '12px' }}>
+                  <div>
+                    <div className="settings-label">Resolution</div>
+                    <div className="settings-description">
+                      {screenSettings.resolution.isNative
+                        ? 'Uses your display\'s native resolution'
+                        : `Fixed resolution: ${screenSettings.resolution.width} × ${screenSettings.resolution.height}`}
+                    </div>
+                  </div>
+                  <select
+                    className="custom-select"
+                    value={screenSettings.resolution.id}
+                    onChange={(e) => {
+                      const resolution = SCREEN_SHARING_RESOLUTIONS.find(r => r.id === e.target.value);
+                      if (resolution) screenSharingSettings.setResolution(resolution);
+                    }}
+                  >
+                    {SCREEN_SHARING_RESOLUTIONS.map((res) => (
+                      <option key={res.id} value={res.id}>{res.name}</option>
+                    ))}
+                  </select>
+                </div>
+
+                <div className="settings-row" style={{ flexDirection: 'column', alignItems: 'flex-start', gap: '12px' }}>
+                  <div>
+                    <div className="settings-label">Frame Rate</div>
+                    <div className="settings-description">
+                      Higher frame rates provide smoother video but use more bandwidth
+                    </div>
+                  </div>
+                  <select
+                    className="custom-select"
+                    value={screenSettings.frameRate.toString()}
+                    onChange={(e) => {
+                      const frameRate = Number.parseInt(e.target.value, 10);
+                      if (SCREEN_SHARING_FRAMERATES.includes(frameRate as any)) {
+                        screenSharingSettings.setFrameRate(frameRate);
+                      }
+                    }}
+                  >
+                    {SCREEN_SHARING_FRAMERATES.map((fps) => (
+                      <option key={fps} value={fps.toString()}>{fps} FPS</option>
+                    ))}
+                  </select>
+                </div>
+
+                <div className="settings-row" style={{ flexDirection: 'column', alignItems: 'flex-start', gap: '12px' }}>
+                  <div>
+                    <div className="settings-label">Quality</div>
+                    <div className="settings-description">
+                      Balance between video quality and bandwidth usage
+                    </div>
+                  </div>
+                  <select
+                    className="custom-select"
+                    value={screenSettings.quality}
+                    onChange={(e) => {
+                      const quality = e.target.value as 'low' | 'medium' | 'high';
+                      screenSharingSettings.setQuality(quality);
+                    }}
+                  >
+                    {QUALITY_OPTIONS.map((q) => (
+                      <option key={q} value={q}>{QUALITY_LABELS[q]}</option>
+                    ))}
+                  </select>
+                </div>
+
+                <div style={{ paddingTop: '16px' }}>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => screenSharingSettings.resetToDefaults()}
+                  >
+                    Reset to Defaults
+                  </Button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {activeSection === 'downloads' && downloadSettings && (
+            <div>
+              <h2 className="settings-section-title">Downloads</h2>
+
+              <div className="settings-group">
+                <div className="settings-row" style={{ flexDirection: 'column', alignItems: 'flex-start', gap: '12px' }}>
+                  <div>
+                    <div className="settings-label">Download Location</div>
+                    <div className="settings-description">
+                      Choose where files are saved when you download them
+                    </div>
+                  </div>
+                  <div style={{ display: 'flex', gap: '12px', width: '100%' }}>
+                    <input
+                      type="text"
+                      readOnly
+                      value={downloadSettings.downloadPath || ''}
+                      className="custom-select"
+                      style={{ flex: 1 }}
                     />
-                  </CardContent>
-                </Card>
-              </div>
-            )}
-
-            {activeSection === 'data' && (
-              <div className="space-y-4">
-                <div>
-                  <h3 className="text-xl font-semibold mb-1">Data Management</h3>
-                  <p className="text-xs text-muted-foreground">Manage your app data</p>
+                    <Button
+                      onClick={handleChooseDownloadPath}
+                      variant="outline"
+                      disabled={isChoosingPath}
+                    >
+                      {isChoosingPath ? 'Choosing...' : 'Browse'}
+                    </Button>
+                  </div>
                 </div>
-                <Card>
-                  <CardContent className="pt-6">
-                    <div className="space-y-2">
-                      <Label>Clear All Data</Label>
-                      <p className="text-xs text-muted-foreground mb-2">
-                        This will delete all your messages, conversations, and settings. This action cannot be undone.
-                      </p>
-                      <Button
-                        variant="destructive"
-                        onClick={handleClearData}
-                        disabled={isClearingData}
-                      >
-                        {isClearingData ? 'Clearing...' : 'Clear All Data'}
-                      </Button>
+
+                <div className="settings-row">
+                  <div>
+                    <div className="settings-label">Auto-save Files</div>
+                    <div className="settings-description">
+                      Automatically save received files to your download location
                     </div>
-                  </CardContent>
-                </Card>
+                  </div>
+                  <AnimatedSwitch
+                    checked={downloadSettings.autoSave || false}
+                    onCheckedChange={handleAutoSaveToggle}
+                  />
+                </div>
               </div>
-            )}
-          </div>
+            </div>
+          )}
+
+          {activeSection === 'privacy' && (
+            <div>
+              <h2 className="settings-section-title">Privacy & Safety</h2>
+
+              <div className="settings-group">
+                <div className="settings-group-title">Blocked Users</div>
+                <div className="settings-description" style={{ marginBottom: '16px' }}>
+                  Users you've blocked can't send you messages or call you.
+                </div>
+
+                {blockedLoading ? (
+                  <div style={{ color: 'hsl(var(--muted-foreground))', padding: '16px 0' }}>
+                    Loading...
+                  </div>
+                ) : blockedUsers.length === 0 ? (
+                  <div style={{
+                    color: 'hsl(var(--muted-foreground))',
+                    padding: '24px',
+                    textAlign: 'center',
+                    background: 'hsl(var(--secondary) / 0.3)',
+                    borderRadius: '8px'
+                  }}>
+                    <div style={{ marginBottom: '4px' }}>No blocked users</div>
+                    <div style={{ fontSize: '13px' }}>Users you block will appear here</div>
+                  </div>
+                ) : (
+                  <div>
+                    {blockedUsers.map((user) => {
+                      const dn = displayMap[user.username] || user.username;
+                      return (
+                        <div key={user.username} className="blocked-user-item">
+                          <div>
+                            <div style={{ fontWeight: 500, color: 'hsl(var(--foreground))' }}>{dn}</div>
+                            <div style={{ fontSize: '12px', color: 'hsl(var(--muted-foreground))' }}>
+                              Blocked {format(new Date(user.blockedAt), "MMM d, yyyy")}
+                            </div>
+                          </div>
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            onClick={() => handleUnblockUser(user.username)}
+                            disabled={blockedLoading}
+                          >
+                            Unblock
+                          </Button>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {activeSection === 'data' && (
+            <div>
+              <h2 className="settings-section-title">Data Management</h2>
+
+              <div className="settings-group">
+                <div className="danger-zone">
+                  <div className="settings-label" style={{ color: 'hsl(0 70% 50%)' }}>
+                    Clear All Data
+                  </div>
+                  <div className="settings-description" style={{ marginBottom: '16px' }}>
+                    This will permanently delete all your messages, conversations, and settings.
+                    You will be logged out and this action cannot be undone.
+                  </div>
+                  <Button
+                    variant="destructive"
+                    onClick={handleClearData}
+                    disabled={isClearingData}
+                  >
+                    {isClearingData ? 'Clearing...' : 'Clear All Data'}
+                  </Button>
+                </div>
+              </div>
+            </div>
+          )}
         </div>
       </div>
     </>
