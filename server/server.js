@@ -2,6 +2,7 @@ import nodeCrypto from 'crypto';
 if (!global.crypto) {
   global.crypto = nodeCrypto.webcrypto;
 }
+import fs from 'fs';
 import express from 'express';
 import path from 'path';
 import { fileURLToPath } from 'url';
