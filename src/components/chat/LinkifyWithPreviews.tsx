@@ -25,13 +25,26 @@ const cleanupCache = (): void => {
   }
 };
 
+const IPV4_REGEX = /^(?:\d{1,3}\.){3}\d{1,3}$/;
+const IPV6_REGEX = /^\[?[A-F0-9:]+\]?$/i;
+const isPrivateOrLocalHost = (hostname: string): boolean => {
+  const lower = hostname.toLowerCase();
+  if (lower === 'localhost' || lower.endsWith('.local')) return true;
+  if (IPV4_REGEX.test(lower)) return true;
+  if (IPV6_REGEX.test(lower)) return true;
+  return false;
+};
+
 const isValidUrl = (urlString: string): boolean => {
   if (typeof urlString !== 'string' || urlString.length === 0 || urlString.length > MAX_URL_LENGTH) {
     return false;
   }
   try {
     const url = new URL(urlString);
-    return ALLOWED_PROTOCOLS.has(url.protocol);
+    if (!ALLOWED_PROTOCOLS.has(url.protocol)) return false;
+    const hostname = url.hostname || '';
+    if (isPrivateOrLocalHost(hostname)) return false;
+    return true;
   } catch {
     return false;
   }
@@ -147,7 +160,7 @@ const CustomLinkPreview = React.memo(({ url, isCurrentUser, showFallbackLink }: 
         <div
           className="rounded-lg border overflow-hidden w-full"
           style={{
-            borderColor: 'var(--color-border)',
+            borderColor: 'rgba(255,255,255,0.22)',
             backgroundColor: 'var(--color-surface)',
             width: '100%',
             maxWidth: 'min(var(--message-bubble-max-width), 320px)',
@@ -181,7 +194,7 @@ const CustomLinkPreview = React.memo(({ url, isCurrentUser, showFallbackLink }: 
       <div
         className="animate-pulse rounded-lg border overflow-hidden w-full"
         style={{
-          borderColor: 'var(--color-border)',
+          borderColor: 'rgba(255,255,255,0.22)',
           backgroundColor: 'var(--color-surface)',
           width: '100%',
           maxWidth: 'min(var(--message-bubble-max-width), 320px)',
@@ -189,7 +202,7 @@ const CustomLinkPreview = React.memo(({ url, isCurrentUser, showFallbackLink }: 
           userSelect: 'none'
         }}
       >
-        <div className="w-full h-32 md:h-40 bg-muted/20 border-b" style={{ borderColor: 'var(--color-border)' }} />
+        <div className="w-full h-32 md:h-40 bg-muted/20 border-b" style={{ borderColor: 'rgba(255,255,255,0.22)' }} />
         <div className="p-3 flex flex-col gap-1">
           <div className="h-4 bg-muted/20 rounded w-3/4" />
           <div className="h-3 bg-muted/20 rounded w-full" />
@@ -209,7 +222,7 @@ const CustomLinkPreview = React.memo(({ url, isCurrentUser, showFallbackLink }: 
       onClick={handleClick}
       className="group cursor-pointer rounded-lg border overflow-hidden transition-all hover:bg-muted/10 w-full"
       style={{
-        borderColor: 'var(--color-border)',
+        borderColor: 'rgba(255,255,255,0.22)',
         backgroundColor: 'var(--color-surface)',
         width: '100%',
         maxWidth: 'min(var(--message-bubble-max-width), 320px)',
@@ -222,7 +235,7 @@ const CustomLinkPreview = React.memo(({ url, isCurrentUser, showFallbackLink }: 
           className="w-full h-32 md:h-40 bg-cover bg-center bg-no-repeat relative border-b"
           style={{
             backgroundImage: `url('${image}')`,
-            borderColor: 'var(--color-border)'
+            borderColor: 'rgba(255,255,255,0.22)'
           }}
         />
       )}
@@ -268,6 +281,10 @@ const LinkifyWithPreviewsComponent: React.FC<LinkifyWithPreviewsProps> = ({
       .filter(isValidUrl);
   }, [children, providedUrls]);
 
+  const orderedUrls = useMemo(() => {
+    return [...urls].reverse();
+  }, [urls]);
+
   const isUrlOnly = useMemo(() => LinkExtractor.isUrlOnlyMessage(children), [children]);
 
   const handleLinkClick = useCallback((url: string, e: React.MouseEvent) => {
@@ -306,7 +323,7 @@ const LinkifyWithPreviewsComponent: React.FC<LinkifyWithPreviewsProps> = ({
     return (
       <div className={className} style={style}>
         <div className="space-y-3">
-          {urls.slice(0, 3).map(url => (
+          {orderedUrls.slice(0, 3).map(url => (
             <CustomLinkPreview key={url} url={url} isCurrentUser={!!isCurrentUser} showFallbackLink={true} />
           ))}
         </div>
@@ -318,7 +335,7 @@ const LinkifyWithPreviewsComponent: React.FC<LinkifyWithPreviewsProps> = ({
     return (
       <div className={className} style={style}>
         <div className="space-y-3">
-          {urls.map(url => (
+          {orderedUrls.map(url => (
             <CustomLinkPreview key={url} url={url} isCurrentUser={!!isCurrentUser} showFallbackLink={true} />
           ))}
         </div>
@@ -335,7 +352,7 @@ const LinkifyWithPreviewsComponent: React.FC<LinkifyWithPreviewsProps> = ({
           </Linkify>
         </div>
         <div className="mt-2 space-y-3">
-          {urls.slice(0, 3).map(url => (
+          {orderedUrls.slice(0, 3).map(url => (
             <CustomLinkPreview key={url} url={url} isCurrentUser={!!isCurrentUser} />
           ))}
         </div>

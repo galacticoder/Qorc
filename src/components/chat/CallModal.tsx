@@ -174,8 +174,6 @@ export const CallModal: React.FC<CallModalProps> = memo(({
   isScreenSharing = false,
   getDisplayUsername
 }) => {
-  // --- State ---
-  // Default to minimized for ALL calls as requested ("minimized by default")
   const [isMinimized, setIsMinimized] = useState(true);
   const [isMuted, setIsMuted] = useState(false);
   const [isVideoEnabled, setIsVideoEnabled] = useState(true);
@@ -232,7 +230,6 @@ export const CallModal: React.FC<CallModalProps> = memo(({
   const initialPosRef = useRef<{ x: number, bottom: number } | null>(null);
   const hasDraggedRef = useRef(false);
 
-  // --- Derived State ---
   const { displayName: displayPeerName } = useUnifiedUsernameDisplay({
     username: call?.peer || '',
     getDisplayUsername,
@@ -244,16 +241,12 @@ export const CallModal: React.FC<CallModalProps> = memo(({
   const isRinging = call?.status === 'ringing';
   const isVideoCall = call?.type === 'video';
 
-  // --- Effects ---
-
-  // 0. Auto-collapse expanded view if screen sharing stops
   useEffect(() => {
     if (isExpandedScreenShare && !remoteScreenStream && !isScreenSharing) {
       setIsExpandedScreenShare(false);
     }
   }, [isExpandedScreenShare, remoteScreenStream, isScreenSharing]);
 
-  // 1. Device Enumeration
   useEffect(() => {
     const loadDevices = async () => {
       try {
@@ -276,7 +269,6 @@ export const CallModal: React.FC<CallModalProps> = memo(({
     return () => navigator.mediaDevices.removeEventListener('devicechange', loadDevices);
   }, []);
 
-  // 1.5 Sync State with Local Stream
   useEffect(() => {
     if (localStream) {
       const videoTrack = localStream.getVideoTracks()[0];
@@ -284,7 +276,6 @@ export const CallModal: React.FC<CallModalProps> = memo(({
 
       if (videoTrack) {
         setIsVideoEnabled(videoTrack.enabled);
-        // Listen for 'ended' or 'mute' events if needed, though usually we control this via state
         videoTrack.onended = () => setIsVideoEnabled(false);
       } else {
         setIsVideoEnabled(false);
@@ -296,7 +287,6 @@ export const CallModal: React.FC<CallModalProps> = memo(({
     }
   }, [localStream]);
 
-  // 2. Mic Level Analysis
   useEffect(() => {
     if (!localStream) { setMicLevel(0); return; }
     let audioCtx: AudioContext | null = null;
@@ -315,7 +305,7 @@ export const CallModal: React.FC<CallModalProps> = memo(({
         const loop = () => {
           analyser.getByteFrequencyData(data);
           const avg = data.reduce((a, b) => a + b, 0) / data.length;
-          setMicLevel(avg / 128); // Normalize 0-1 (approx)
+          setMicLevel(avg / 128);
           rafId = requestAnimationFrame(loop);
         };
         loop();
@@ -329,7 +319,6 @@ export const CallModal: React.FC<CallModalProps> = memo(({
     };
   }, [localStream]);
 
-  // 3. Duration Timer
   useEffect(() => {
     if (isConnected && call?.startTime) {
       const interval = setInterval(() => {
@@ -339,8 +328,6 @@ export const CallModal: React.FC<CallModalProps> = memo(({
     }
     setCallDuration(0);
   }, [isConnected, call?.startTime]);
-
-  // --- Handlers ---
 
   const handleDragStart = (e: React.MouseEvent) => {
     setIsDragging(true);
@@ -355,14 +342,10 @@ export const CallModal: React.FC<CallModalProps> = memo(({
       const dx = e.clientX - dragStartRef.current.x;
       const dy = e.clientY - dragStartRef.current.y;
 
-      // If moved more than 10px, consider it a "drag" not a click
       if (Math.abs(dx) > 10 || Math.abs(dy) > 10) {
         hasDraggedRef.current = true;
       }
 
-      // Update position:
-      // x: simple addition
-      // bottom: subtraction (moving mouse DOWN increases Y, which means reducing Bottom distance)
       setPosition({
         x: Math.max(0, Math.min(window.innerWidth - 320, initialPosRef.current.x + dx)),
         bottom: Math.max(0, Math.min(window.innerHeight - 80, initialPosRef.current.bottom - dy))
@@ -426,9 +409,6 @@ export const CallModal: React.FC<CallModalProps> = memo(({
 
   if (!call) return null;
 
-  // --- UI Renders ---
-
-  // 1. Minimized View (Card)
   if (isMinimized) {
     return (
       <div
@@ -449,14 +429,12 @@ export const CallModal: React.FC<CallModalProps> = memo(({
             {isIncoming && isRinging ? `Incoming ${isVideoCall ? 'video' : 'audio'} call...` : isConnected ? formatTime(callDuration) : 'Calling...'}
           </div>
         </div>
-        <div className="flex items-center gap-1" onMouseDown={(e) => e.stopPropagation() /* Prevent dragging when clicking buttons */}>
-          {/* Case A: Incoming Call (Ringing) */}
+        <div className="flex items-center gap-1" onMouseDown={(e) => e.stopPropagation() }>
           {isIncoming && isRinging ? (
             <>
               <button
                 onClick={() => {
                   onAnswer();
-                  // Keep minimized or expand? User said "minimized by default", so maybe keep it small.
                 }}
                 className="p-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-md transition-colors"
                 title="Answer"
@@ -472,12 +450,10 @@ export const CallModal: React.FC<CallModalProps> = memo(({
               </button>
             </>
           ) : !isConnected ? (
-            /* Case B: Outgoing Call (Connecting/Ringing) */
             <button onClick={onEndCall} className="p-1.5 bg-red-600 hover:bg-red-700 text-white rounded-md transition-colors" title="Cancel">
               <PhoneOff className="w-4 h-4" />
             </button>
           ) : (
-            /* Case C: Connected Call */
             <>
               <button
                 onClick={() => {
@@ -503,7 +479,9 @@ export const CallModal: React.FC<CallModalProps> = memo(({
 
               )}
               {/* Separator */}
-              {isVideoCall && <div className="h-4 w-[1px] bg-gradient-to-b from-transparent via-[hsl(var(--border))] to-transparent mx-1 opacity-70" />}
+              {isVideoCall && (
+                <div className="h-4 w-[1px] bg-gradient-to-b from-transparent via-black/60 to-transparent dark:via-white/80 mx-1 opacity-90" />
+              )}
 
               <button onClick={() => setIsMinimized(false)} className="p-1.5 hover:bg-secondary rounded-md transition-colors" title="Maximize">
                 <Maximize2 className="w-4 h-4" />
@@ -518,7 +496,6 @@ export const CallModal: React.FC<CallModalProps> = memo(({
     );
   }
 
-  // 2. Full View
   return (
     <>
       <div
@@ -526,7 +503,6 @@ export const CallModal: React.FC<CallModalProps> = memo(({
         className={cn(
           "fixed z-50 flex flex-col bg-background/95 backdrop-blur-lg border border-border shadow-xl rounded-2xl overflow-hidden cubic-bezier(0.4, 0, 0.2, 1)",
           !isDragging && "transition-all duration-300",
-          // Reduced width from 400/500 to 350/420 as requested ("expanded mode needs to be a little smaller")
           isExpandedScreenShare ? "w-[90vw] h-[90vh] left-[5vw] top-[5vh]" : "w-[350px] sm:w-[420px]"
         )}
         style={!isExpandedScreenShare ? { left: position.x, bottom: position.bottom } : undefined}
@@ -543,7 +519,6 @@ export const CallModal: React.FC<CallModalProps> = memo(({
             </div>
           </div>
           <div className="flex items-center gap-1">
-            {/* Allow expanding if remote OR local screen sharing is active */}
             {(remoteScreenStream || isScreenSharing) && (
               <button
                 onClick={() => setIsExpandedScreenShare(prev => !prev)}
@@ -567,47 +542,30 @@ export const CallModal: React.FC<CallModalProps> = memo(({
         {/* Main Stage */}
         <div className="flex-1 bg-black relative overflow-hidden group" ref={mainStageRef}>
           {(() => {
-            // Identify available videos
             const hasRemoteScreen = remoteScreenStream && remoteScreenStream.getVideoTracks().length > 0;
             const hasRemoteVideo = remoteStream && remoteStream.getVideoTracks().length > 0;
             const hasLocalVideo = localStream && (isVideoEnabled || isScreenSharing) && localStream.getVideoTracks().length > 0;
 
-            // Define stream types for cleaner logic
             type StreamType = 'remote-screen' | 'remote-cam' | 'local';
             const availableStreams: StreamType[] = [];
             if (hasRemoteScreen) availableStreams.push('remote-screen');
             if (hasRemoteVideo) availableStreams.push('remote-cam');
             if (hasLocalVideo) availableStreams.push('local');
-            // If local screen sharing is active, treat it as a priority view if user wants to expand it
-            // Actually, 'local' covers both camera and screen share in current logic (localStream tracks replaced)
-            // But we might want to distinguish if we want to show camera AND screen share separately?
-            // For now, 'local' stream usually contains the screen share track if sharing.
 
-            // Determine Main View
-            let mainView: StreamType = 'local'; // fallback
+            let mainView: StreamType = 'local'; 
 
-            // 1. Try to use focused view
             if (focusedView && availableStreams.includes(focusedView)) {
               mainView = focusedView;
             } else {
-              // 2. Default priorities
               if (hasRemoteScreen) mainView = 'remote-screen';
-
-              // If we are sharing screen, we might want to see ourselves main? 
-              // Usually calls center on remote. 
-              // But consistent with "Expand my screen share", if I expand, I expect to see the screen share.
-              // If focusedView is not set, we stick to remote.
+              
               else if (hasRemoteVideo) mainView = 'remote-cam';
               else if (hasLocalVideo) mainView = 'local';
               else mainView = 'local';
             }
 
-            // Identify PIP views (everything else)
-            // Implicitly, the mapping to "Slot 0", "Slot 1" is determined by array order here.
-            // This achieves the "Swap" effect: If I swap A (Main) and B (Slot 0), B becomes Main, A becomes Slot 0.
             const pipViews = availableStreams.filter(s => s !== mainView);
 
-            // Helpers to render specific stream types
             const renderStream = (type: StreamType, isMain: boolean) => {
               if (type === 'remote-screen') {
                 return <VideoStreamDisplay stream={remoteScreenStream} objectFit="contain" className="w-full h-full" />;
@@ -621,7 +579,6 @@ export const CallModal: React.FC<CallModalProps> = memo(({
               return null;
             };
 
-            // Main Component
             let MainComponent = null;
             if (availableStreams.length === 0) {
               MainComponent = (
@@ -643,12 +600,11 @@ export const CallModal: React.FC<CallModalProps> = memo(({
 
                 {/* Draggable Slots */}
                 {pipViews.map((type, index) => {
-                  // Get position for this slot index, fallback if not initialized
                   const pos = pipPositions[index] || { x: 20, y: 20 + (index * 130) };
 
                   return (
                     <DraggablePip
-                      key={`slot-${index}`} // Key by slot index to maintain position stability!
+                      key={`slot-${index}`}
                       id={`slot-${index}`}
                       initialPosition={pos}
                       onPositionChange={(id, newPos) => updatePipPosition(index, newPos)}
@@ -792,7 +748,7 @@ export const CallModal: React.FC<CallModalProps> = memo(({
         </div>
       </div>
 
-      {/* Screen Source Selector (Rendered outside to avoid clipping) */}
+      {/* Screen Source Selector */}
       {(showScreenSourceSelector || hasOpenedScreenShare) && onGetAvailableScreenSources && (
         <React.Suspense fallback={null}>
           <ScreenSourceSelectorLazy

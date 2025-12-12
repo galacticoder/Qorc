@@ -48,7 +48,7 @@ export function DeletedMessage({ senderUsername, displayName, timestamp, isCurre
             backgroundColor: 'var(--color-surface)',
             color: 'var(--color-text-secondary)',
             borderRadius: 'var(--message-bubble-radius)',
-            border: '1px dashed var(--color-border)',
+            border: '1px dashed var(--color-border-strong, rgba(255,255,255,0.22))',
             minWidth: '3rem',
             userSelect: 'none'
           }}

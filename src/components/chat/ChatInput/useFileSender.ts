@@ -104,7 +104,6 @@ export function useFileSender(
         const detail = (event as CustomEvent).detail || {};
         const peerUsername = detail.peerUsername || detail.peer || detail.from;
         if (typeof peerUsername === 'string' && peerUsername) {
-          console.log('[FILE-SENDER] Session reset received for peer:', peerUsername);
           peersNeedingSessionRefresh.current.add(peerUsername);
           sessionEstablishedAt.current.delete(peerUsername);
         }

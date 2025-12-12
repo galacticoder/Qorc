@@ -157,11 +157,14 @@ class TokenService {
   /**
    * Generate access token (7-day lifetime, same as refresh tokens)
    */
-  async generateAccessToken(userId, _deviceId = null, scopes = ['chat:read', 'chat:write'], _securityContext = {}, tlsBinding = null) {
+  async generateAccessToken(userId, deviceId = null, scopes = ['chat:read', 'chat:write'], securityContext = {}, tlsBinding = null) {
     if (!this.initialized) await this.initialize();
 
     const now = Math.floor(Date.now() / 1000);
     const tokenId = await this.generateSecureTokenId();
+    
+    // Calculate risk score from security context
+    const riskScore = this.calculateRiskScore(securityContext);
     
     // Enhanced payload with security context
     const payload = {
@@ -180,12 +183,21 @@ class TokenService {
       auth_time: now,
       nonce: await this.generateNonce(),
       
+      // Security metadata
+      sec: {
+        risk: riskScore,
+        ctx: this.buildSecurityContext(securityContext)
+      },
       
       // Anti-replay protection
       cnf: {
         jkt: await this.generateJWKThumbprint()
       }
     };
+
+    if (deviceId && typeof deviceId === 'string') {
+      payload.did = await this.createDeviceBinding(deviceId, securityContext);
+    }
 
     if (tlsBinding && typeof tlsBinding === 'string') {
       payload.tlsBinding = tlsBinding;
@@ -197,12 +209,15 @@ class TokenService {
   /**
    * Generate refresh token (long-lived, 7 days)
    */
-  async generateRefreshToken(userId, _deviceId = null, family = null, _securityContext = {}, tlsBinding = null) {
+  async generateRefreshToken(userId, deviceId = null, family = null, securityContext = {}, tlsBinding = null) {
     if (!this.initialized) await this.initialize();
 
     const now = Math.floor(Date.now() / 1000);
     const tokenId = await this.generateSecureTokenId();
     const familyId = family || await this.generateSecureTokenId();
+    
+    // Calculate risk score from security context
+    const riskScore = this.calculateRiskScore(securityContext);
     
     const payload = {
       iss: 'Qor-chat-server',
@@ -220,8 +235,16 @@ class TokenService {
       nonce: await this.generateNonce(),
       
       // Rotation tracking
-      generation: 1
+      generation: 1,
+      
+      sec: {
+        risk: riskScore
+      }
     };
+
+    if (deviceId && typeof deviceId === 'string') {
+      payload.did = await this.createDeviceBinding(deviceId, securityContext);
+    }
 
     if (tlsBinding && typeof tlsBinding === 'string') {
       payload.tlsBinding = tlsBinding;
@@ -564,8 +587,16 @@ class TokenService {
   /**
    * Build security context for tokens
    */
-  buildSecurityContext(_context) {
-    return { risk: 'low' };
+  buildSecurityContext(context) {
+    if (!context || typeof context !== 'object') {
+      return { risk: 'low' };
+    }
+    
+    return {
+      risk: this.calculateRiskScore(context),
+      newDevice: !!context.newDevice,
+      userAgentHash: context.userAgent ? this.hashUserAgent(context.userAgent) : undefined
+    };
   }
 
   /**

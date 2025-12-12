@@ -45,14 +45,13 @@ const isValidCallState = (entry: unknown): entry is CallState => {
   }
   if (e.duration !== undefined && (typeof e.duration !== 'number' || e.duration < 0)) return false;
   
-  // Ensure timestamps are reasonable
-  const minTime = Date.now();
-  const maxTime = Date.now() + 60000;
+  const oneYearAgo = Date.now() - (365 * 24 * 60 * 60 * 1000);
+  const maxFutureTime = Date.now() + 60000;
   if (e.startTime !== undefined && typeof e.startTime === 'number') {
-    if (e.startTime < minTime || e.startTime > maxTime) return false;
+    if (e.startTime < oneYearAgo || e.startTime > maxFutureTime) return false;
   }
   if (e.endTime !== undefined && typeof e.endTime === 'number') {
-    if (e.endTime < minTime || e.endTime > maxTime) return false;
+    if (e.endTime < oneYearAgo || e.endTime > maxFutureTime) return false;
   }
   
   return true;

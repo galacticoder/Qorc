@@ -479,9 +479,6 @@ async function handleWebSocketMessage({ ws, sessionId, message, context }) {
     const msgString = message.toString().trim();
     if (msgString.length === 0) { return await sendSecureMessage(ws, { type: SignalType.ERROR, message: 'Empty message' }); }
 
-    if (msgString.includes('check-user-exists')) {
-    }
-
     let testParse;
     try {
       testParse = JSON.parse(msgString);

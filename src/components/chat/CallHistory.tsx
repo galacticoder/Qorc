@@ -1,7 +1,8 @@
 import React, { useMemo, useCallback, useState } from 'react';
-import { Phone, PhoneIncoming, PhoneOutgoing, PhoneMissed, Video } from 'lucide-react';
+import type { JSX } from 'react';
+import { Phone, PhoneIncoming, PhoneOutgoing, PhoneMissed, Video, VideoOff } from 'lucide-react';
 import { CallState } from '../../lib/webrtc-calling';
-import { useUnifiedUsernameDisplay } from '@/hooks/useUnifiedUsernameDisplay';
+import { useUnifiedUsernameDisplay } from '../../hooks/useUnifiedUsernameDisplay';
 
 interface CallHistoryProps {
   readonly calls: readonly CallState[];
@@ -30,15 +31,23 @@ const formatTime = (timestamp?: number): string => {
 
 const getCallIcon = (call: CallState): JSX.Element => {
   const iconClass = "w-4 h-4";
+  const isVideo = call.type === 'video';
 
   if (call.status === 'missed') {
-    return <PhoneMissed className={`${iconClass} text-red-500`} />;
+    return isVideo
+      ? <VideoOff className={`${iconClass} text-red-500`} />
+      : <PhoneMissed className={`${iconClass} text-red-500`} />;
   }
 
   if (call.direction === 'incoming') {
-    return <PhoneIncoming className={`${iconClass} text-green-500`} />;
+    return isVideo
+      ? <Video className={`${iconClass} text-green-500`} />
+      : <PhoneIncoming className={`${iconClass} text-green-500`} />;
   }
-  return <PhoneOutgoing className={`${iconClass} text-gray-500`} />;
+
+  return isVideo
+    ? <Video className={`${iconClass} text-gray-500`} />
+    : <PhoneOutgoing className={`${iconClass} text-gray-500`} />;
 };
 
 const getStatusText = (call: CallState): string => {
@@ -151,9 +160,6 @@ const CallHistoryItem: React.FC<CallHistoryItemProps> = React.memo(({
       <div className="flex items-center space-x-3">
         <div className="flex items-center space-x-2">
           {getCallIcon(call)}
-          {call.type === 'video' && (
-            <Video className="w-3 h-3 text-gray-400" />
-          )}
         </div>
         <div>
           <p className="font-medium text-sm">{displayName}</p>

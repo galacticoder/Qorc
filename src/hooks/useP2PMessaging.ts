@@ -1464,6 +1464,18 @@ export function useP2PMessaging(
         if (processedReadReceiptsRef.current.size > 5000) {
           processedReadReceiptsRef.current.clear();
         }
+
+        const rateLimitCutoff = Date.now() - RATE_LIMIT_WINDOW_MS * 2;
+        for (const [peer, bucket] of rateLimitRef.current.entries()) {
+          if (bucket.windowStart < rateLimitCutoff) {
+            rateLimitRef.current.delete(peer);
+          }
+        }
+        
+        if (channelSequenceRef.current.size > 256) {
+          const entries = [...channelSequenceRef.current.entries()];
+          entries.slice(0, entries.length - 256).forEach(([key]) => channelSequenceRef.current.delete(key));
+        }
       } catch { }
     }, RECEIPT_RETENTION_MS);
     return () => { try { clearInterval(interval); } catch { } };

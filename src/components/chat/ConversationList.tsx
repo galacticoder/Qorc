@@ -3,7 +3,7 @@ import { cn } from "../../lib/utils";
 import { ScrollArea } from "../ui/scroll-area";
 import { Button } from "../ui/button";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from "../ui/dialog";
-import { Trash2, Search } from "lucide-react";
+import { Trash2, Search, Phone, Video, Loader2 } from "lucide-react";
 import { Input } from "../ui/input";
 import { toast } from "sonner";
 import { UserAvatar } from "../ui/UserAvatar";
@@ -28,7 +28,7 @@ interface ConversationListProps {
   readonly showNewChatInput?: boolean;
 }
 
-type CallStatus = 'ringing' | 'connecting' | 'connected' | null;
+type CallStatus = { status: 'ringing' | 'connecting' | 'connected'; isVideo: boolean } | null;
 
 const anonymize = (value: string): string => {
   if (typeof value !== 'string' || value.length === 0) {
@@ -175,43 +175,51 @@ const ConversationItem = memo<ConversationItemProps>(({
         )}
       </div>
 
-      {callStatus && (
-        <div
-          className={cn(
-            "text-xs px-2 py-1 rounded-full font-medium flex-shrink-0",
-            callStatus === 'ringing' && "bg-yellow-100 text-yellow-800",
-            callStatus === 'connecting' && "bg-blue-100 text-blue-800",
-            callStatus === 'connected' && "bg-green-100 text-green-800"
+      {(callStatus || onRemove) && (
+        <div className="absolute bottom-1 right-1 flex items-center gap-1">
+          {callStatus && (
+            <div
+              className={cn(
+                "text-xs px-2 py-1 rounded-full font-medium flex-shrink-0 flex items-center justify-center",
+                callStatus.status === 'ringing' && "bg-yellow-100 text-yellow-800",
+                callStatus.status === 'connecting' && "bg-blue-100 text-blue-800",
+                callStatus.status === 'connected' && "bg-green-100 text-green-800"
+              )}
+              role="status"
+              aria-label={`Call status: ${callStatus.status}${callStatus.isVideo ? ' video' : ' audio'}`}
+            >
+              {callStatus.status === 'connecting' ? (
+                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+              ) : callStatus.isVideo ? (
+                <Video className="w-3.5 h-3.5" />
+              ) : (
+                <Phone className="w-3.5 h-3.5" />
+              )}
+            </div>
           )}
-          role="status"
-          aria-label={`Call status: ${callStatus}`}
-        >
-          {callStatus === 'ringing' && "📞"}
-          {callStatus === 'connecting' && "🔄"}
-          {callStatus === 'connected' && "📞"}
-        </div>
-      )}
 
-      {onRemove && (
-        <Button
-          variant="ghost"
-          size="sm"
-          onClick={handleRemove}
-          className="absolute bottom-1 right-1 opacity-0 group-hover:opacity-100 transition-opacity p-1 h-6 w-6"
-          style={{
-            backgroundColor: 'transparent',
-            color: 'var(--color-error)'
-          }}
-          onMouseEnter={(e) => {
-            e.currentTarget.style.backgroundColor = 'rgba(239, 68, 68, 0.1)';
-          }}
-          onMouseLeave={(e) => {
-            e.currentTarget.style.backgroundColor = 'transparent';
-          }}
-          aria-label={`Remove conversation with ${displayName}`}
-        >
-          <Trash2 className="h-3 w-3" />
-        </Button>
+          {onRemove && (
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={handleRemove}
+              className="opacity-0 group-hover:opacity-100 transition-opacity p-1 h-6 w-6"
+              style={{
+                backgroundColor: 'transparent',
+                color: 'var(--color-error)'
+              }}
+              onMouseEnter={(e) => {
+                e.currentTarget.style.backgroundColor = 'rgba(239, 68, 68, 0.1)';
+              }}
+              onMouseLeave={(e) => {
+                e.currentTarget.style.backgroundColor = 'transparent';
+              }}
+              aria-label={`Remove conversation with ${displayName}`}
+            >
+              <Trash2 className="h-3 w-3" />
+            </Button>
+          )}
+        </div>
       )}
     </div>
   );
@@ -274,9 +282,11 @@ export const ConversationList = memo<ConversationListProps>(function Conversatio
       const { peer, status } = detail as { peer?: unknown; status?: unknown };
       if (typeof peer !== 'string' || typeof status !== 'string') return;
 
+      const isVideo = detail && typeof (detail as any).type === 'string' ? (detail as any).type === 'video' : false;
+
       if (status === 'ringing' || status === 'connecting' || status === 'connected') {
         setActivePeer(peer);
-        setActiveStatus(status as CallStatus);
+        setActiveStatus({ status: status as CallStatus['status'], isVideo });
       } else {
         setActivePeer(prev => (prev === peer ? null : prev));
         setActiveStatus(null);

@@ -32,6 +32,8 @@ import { torNetworkManager } from "../lib/tor-network";
 import { ConnectSetup } from '@/components/setup/ConnectSetup';
 import { SignalType } from "../lib/signal-types";
 import { blockingSystem } from "../lib/blocking-system";
+import { retrieveAuthTokens } from "../lib/signals";
+import { syncEncryptedStorage } from "../lib/encrypted-storage";
 import { secureMessageQueue } from "../lib/secure-message-queue";
 import { isValidKyberPublicKeyBase64, sanitizeHybridKeys } from "../lib/validators";
 import { SecurityAuditLogger } from "../lib/post-quantum-crypto";
@@ -302,9 +304,6 @@ const ChatApp: React.FC<ChatAppProps> = () => {
     removeConversation,
     getConversationMessages,
   } = useConversations(Authentication.username || Authentication.loginUsernameRef.current || '', Database.users, messages, Database.secureDBRef.current);
-
-  useEffect(() => {
-  }, [Authentication.username]);
 
   // Prefetch libsignal session for the selected conversation to minimize send latency
   useEffect(() => {
@@ -1220,6 +1219,16 @@ const ChatApp: React.FC<ChatAppProps> = () => {
   const handleConnectSetupComplete = async (serverUrl: string) => {
     try {
       SecurityAuditLogger.log('info', 'connect-setup-completed', {});
+      
+      // Check for existing session before setting setupComplete
+      const storedUsername = syncEncryptedStorage.getItem('last_authenticated_username');
+      const tokens = await retrieveAuthTokens();
+      const hasExistingSession = !!(storedUsername || (tokens?.accessToken && tokens?.refreshToken));
+      
+      if (hasExistingSession) {
+        Authentication.setTokenValidationInProgress(true);
+      }
+      
       setSelectedServerUrl(serverUrl);
       await (window as any).edgeApi?.wsConnect?.();
       setSetupComplete(true);
@@ -1253,10 +1262,16 @@ const ChatApp: React.FC<ChatAppProps> = () => {
           attemptedRecoveryRef.current = true;
           SecurityAuditLogger.log('info', 'auth-recovery-attempt', {});
           try {
-            await Authentication.attemptAuthRecovery();
+            const recovered = await Authentication.attemptAuthRecovery();
+            if (!recovered) {
+              Authentication.setTokenValidationInProgress(false);
+            }
           } catch (_e) {
             SecurityAuditLogger.log('warn', 'auth-recovery-failed', { error: (_e as any)?.message || 'unknown' });
+            Authentication.setTokenValidationInProgress(false);
           }
+        } else if (!canRecover && Authentication.tokenValidationInProgress && !Authentication.isLoggedIn) {
+          Authentication.setTokenValidationInProgress(false);
         }
       } catch (_error) {
         SecurityAuditLogger.log('error', 'connection-init-failed', { error: _error instanceof Error ? _error.message : 'unknown' });
@@ -1264,7 +1279,7 @@ const ChatApp: React.FC<ChatAppProps> = () => {
     };
 
     void initializeConnection();
-  }, [setupComplete, selectedServerUrl, Authentication.isLoggedIn, Authentication.isRegistrationMode, Authentication.showPassphrasePrompt, Authentication.showPasswordPrompt, Authentication.isSubmittingAuth, Authentication.accountAuthenticated, Authentication.recoveryActive, Database.dbInitialized]);
+  }, [setupComplete, selectedServerUrl, Authentication.isLoggedIn, Authentication.isRegistrationMode, Authentication.showPassphrasePrompt, Authentication.showPasswordPrompt, Authentication.isSubmittingAuth, Authentication.accountAuthenticated, Authentication.recoveryActive, Authentication.tokenValidationInProgress, Database.dbInitialized]);
 
   useWebSocket(signalHandler, encryptedHandler, Authentication.setLoginError);
 

@@ -507,8 +507,6 @@ export const useAuth = (_secureDB?: SecureDB) => {
     originalUsernameRef.current = trimmedUsername;
     const pseudonym = await pseudonymizeUsername(trimmedUsername);
 
-    setIsSubmittingAuth(true);
-
     const prevUser = loginUsernameRef.current;
     if (prevUser && prevUser !== pseudonym) {
       await clearSecureDBForUser(prevUser);
@@ -1208,8 +1206,6 @@ export const useAuth = (_secureDB?: SecureDB) => {
     setLoginError(loginErrorMessage);
     setAccountAuthenticated(false);
     setIsRegistrationMode(false);
-    setAccountAuthenticated(false);
-    setIsRegistrationMode(false);
     setIsSubmittingAuth(false);
     setUsername("");
 
@@ -1442,12 +1438,21 @@ export const useAuth = (_secureDB?: SecureDB) => {
             setUsername(storedUsername);
           }
         } else {
+          // Don't set tokenValidationInProgress(false) here - let auth recovery flow handle it
+          // This prevents flickering the login form before recovery is attempted
+          const storedUsername = syncEncryptedStorage.getItem('last_authenticated_username');
+          if (!storedUsername) {
+            // Only clear validation state if there's no stored username at all
+            setTokenValidationInProgress(false);
+            setAuthStatus('');
+          }
+        }
+      } catch {
+        const storedUsername = syncEncryptedStorage.getItem('last_authenticated_username');
+        if (!storedUsername) {
           setTokenValidationInProgress(false);
           setAuthStatus('');
         }
-      } catch {
-        setTokenValidationInProgress(false);
-        setAuthStatus('');
       }
     })();
   }, []);

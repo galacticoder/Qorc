@@ -541,7 +541,7 @@ export const ChatMessage = React.memo<ExtendedChatMessageProps>(({ message, smar
                   )}
                   style={{
                     backgroundColor: hasReacted ? 'var(--color-accent-primary)' : 'var(--color-surface)',
-                    borderColor: hasReacted ? 'var(--color-accent-primary)' : 'var(--color-border)',
+                    borderColor: hasReacted ? 'var(--color-accent-primary)' : 'rgba(255,255,255,0.22)',
                     color: hasReacted ? 'var(--color-on-accent)' : 'var(--color-text-primary)',
                     userSelect: 'none'
                   }}

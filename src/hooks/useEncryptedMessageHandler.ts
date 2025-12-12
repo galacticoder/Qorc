@@ -12,7 +12,6 @@ const textEncoder = new TextEncoder();
 const MAX_MESSAGE_JSON_BYTES = 64 * 1024; // 64 KB
 const MAX_FILE_JSON_BYTES = 256 * 1024; // 256 KB
 const MAX_CALL_SIGNAL_BYTES = 256 * 1024; // 256 KB
-const _MAX_MESSAGE_CONTENT_CHARS = 16000; // Prevent UI overload
 const MAX_INLINE_FILE_BYTES = 5 * 1024 * 1024; // 5 MB inline payloads
 const MAX_BLOB_URLS = 32;
 const BLOB_URL_TTL_MS = 15 * 60 * 1000; // 15 minutes
@@ -242,7 +241,6 @@ export function useEncryptedMessageHandler(
 
   // Limit retry attempts to prevent resource exhaustion
   const MAX_RETRY_ATTEMPTS = 3;
-  const _PQ_KEY_ROTATION_WAIT_MS = 1000;
   const PENDING_QUEUE_TTL_MS = 120_000;
   const PENDING_QUEUE_MAX_PER_PEER = 50;
   const MAX_GLOBAL_PENDING_MESSAGES = 1000;
@@ -254,6 +252,89 @@ export function useEncryptedMessageHandler(
     if (attempts === 1) return 3000;
     return 8000;
   };
+
+  // Resolve sender's PQ Kyber key
+  const resolveSenderHybridKeys = useCallback(async (
+    senderUsername: string
+  ): Promise<{ kyber: string | null; hybrid: any | null; retried: boolean }> => {
+    const user = usersRef?.current?.find?.((u: any) => u.username === senderUsername);
+    let kyber = user?.hybridPublicKeys?.kyberPublicBase64 || null;
+    let retried = false;
+
+    if (!kyber) {
+      const now = Date.now();
+      const lastReq = keyRequestCacheRef.current.get(senderUsername);
+      if (!lastReq || (now - lastReq) > KEY_REQUEST_CACHE_DURATION) {
+        keyRequestCacheRef.current.set(senderUsername, now);
+        try {
+          await websocketClient.sendSecureControlMessage({
+            type: SignalType.CHECK_USER_EXISTS,
+            username: senderUsername
+          });
+        } catch { }
+        try {
+          const keys = await getKeysOnDemand?.();
+          if (keys?.dilithium?.secretKey && keys?.dilithium?.publicKeyBase64) {
+            const requestBase = {
+              type: SignalType.LIBSIGNAL_REQUEST_BUNDLE,
+              username: senderUsername,
+              from: loginUsernameRef.current,
+              timestamp: Date.now(),
+              challenge: btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(32)))),
+              senderDilithium: keys.dilithium.publicKeyBase64,
+            } as const;
+            const canonical = new TextEncoder().encode(JSON.stringify(requestBase));
+            let signature: string | undefined;
+            try {
+              const sigRaw = await (window as any).CryptoUtils?.Dilithium?.sign(keys.dilithium.secretKey, canonical);
+              signature = (window as any).CryptoUtils?.Base64?.arrayBufferToBase64
+                ? (window as any).CryptoUtils.Base64.arrayBufferToBase64(sigRaw)
+                : btoa(String.fromCharCode(...new Uint8Array(sigRaw)));
+            } catch { }
+            await websocketClient.sendSecureControlMessage({ ...requestBase, signature });
+          }
+        } catch { }
+        retried = true;
+
+        await new Promise<void>((resolve) => {
+          let settled = false;
+          const timeout = setTimeout(() => { if (!settled) { settled = true; resolve(); } }, 2000);
+          const handler = (event: Event) => {
+            const d = (event as CustomEvent).detail;
+            if (d?.username === senderUsername && d?.hybridKeys) {
+              window.removeEventListener('user-keys-available', handler as EventListener);
+              if (!settled) { settled = true; clearTimeout(timeout); resolve(); }
+            }
+          };
+          window.addEventListener('user-keys-available', handler as EventListener, { once: true });
+        });
+        const refreshed = usersRef?.current?.find?.((u: any) => u.username === senderUsername);
+        kyber = refreshed?.hybridPublicKeys?.kyberPublicBase64 || null;
+      }
+    }
+
+    // Re-read hybrid keys to include latest non-Kyber parts
+    let refreshedUser = usersRef?.current?.find?.((u: any) => u.username === senderUsername);
+    let hybrid = refreshedUser?.hybridPublicKeys ? { ...refreshedUser.hybridPublicKeys, kyberPublicBase64: kyber ?? refreshedUser.hybridPublicKeys?.kyberPublicBase64 } : null;
+    const hasFullHybrid = (obj: any) => obj && typeof obj.dilithiumPublicBase64 === 'string' && (typeof obj.x25519PublicBase64 === 'string' || obj.x25519PublicBase64 === undefined);
+    if (!hasFullHybrid(hybrid)) {
+      await new Promise<void>((resolve) => {
+        let settled = false;
+        const timeout = setTimeout(() => { if (!settled) { settled = true; resolve(); } }, 1200);
+        const handler = (event: Event) => {
+          const d = (event as CustomEvent).detail;
+          if (d?.username === senderUsername && d?.hybridKeys) {
+            window.removeEventListener('user-keys-available', handler as EventListener);
+            if (!settled) { settled = true; clearTimeout(timeout); resolve(); }
+          }
+        };
+        window.addEventListener('user-keys-available', handler as EventListener, { once: true });
+      });
+      refreshedUser = usersRef?.current?.find?.((u: any) => u.username === senderUsername);
+      hybrid = refreshedUser?.hybridPublicKeys ? { ...refreshedUser.hybridPublicKeys, kyberPublicBase64: kyber ?? refreshedUser.hybridPublicKeys?.kyberPublicBase64 } : null;
+    }
+    return { kyber, hybrid, retried };
+  }, [getKeysOnDemand, loginUsernameRef, usersRef]);
 
   // Ref to store the callback function for retry logic
   const callbackRef = useRef<((msg: any) => Promise<void>) | null>(null);
@@ -1758,88 +1839,8 @@ export function useEncryptedMessageHandler(
                   type: 'delivery-receipt'
                 };
 
-                // Resolve sender's PQ Kyber key; if missing, request bundle once and wait briefly
-                const resolveSenderKyber = async (): Promise<{ kyber: string | null, hybrid: any | null, retried: boolean }> => {
-                  const user = usersRef?.current?.find?.((u: any) => u.username === senderUsername);
-                  let kyber = user?.hybridPublicKeys?.kyberPublicBase64 || null;
-                  let retried = false;
-
-                  if (!kyber) {
-                    const now = Date.now();
-                    const lastReq = keyRequestCacheRef.current.get(senderUsername);
-                    if (!lastReq || (now - lastReq) > KEY_REQUEST_CACHE_DURATION) {
-                      keyRequestCacheRef.current.set(senderUsername, now);
-                      try {
-                        await websocketClient.sendSecureControlMessage({
-                          type: SignalType.CHECK_USER_EXISTS,
-                          username: senderUsername
-                        });
-                      } catch { }
-                      try {
-                        const keys = await getKeysOnDemand?.();
-                        if (keys?.dilithium?.secretKey && keys?.dilithium?.publicKeyBase64) {
-                          const requestBase = {
-                            type: SignalType.LIBSIGNAL_REQUEST_BUNDLE,
-                            username: senderUsername,
-                            from: loginUsernameRef.current,
-                            timestamp: Date.now(),
-                            challenge: btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(32)))),
-                            senderDilithium: keys.dilithium.publicKeyBase64,
-                          } as const;
-                          const canonical = new TextEncoder().encode(JSON.stringify(requestBase));
-                          let signature: string | undefined;
-                          try {
-                            const sigRaw = await (window as any).CryptoUtils?.Dilithium?.sign(keys.dilithium.secretKey, canonical);
-                            signature = (window as any).CryptoUtils?.Base64?.arrayBufferToBase64
-                              ? (window as any).CryptoUtils.Base64.arrayBufferToBase64(sigRaw)
-                              : btoa(String.fromCharCode(...new Uint8Array(sigRaw)));
-                          } catch { }
-                          await websocketClient.sendSecureControlMessage({ ...requestBase, signature });
-                        }
-                      } catch { }
-                      retried = true;
-
-                      await new Promise<void>((resolve) => {
-                        let settled = false;
-                        const timeout = setTimeout(() => { if (!settled) { settled = true; resolve(); } }, 2000);
-                        const handler = (event: Event) => {
-                          const d = (event as CustomEvent).detail;
-                          if (d?.username === senderUsername && d?.hybridKeys) {
-                            window.removeEventListener('user-keys-available', handler as EventListener);
-                            if (!settled) { settled = true; clearTimeout(timeout); resolve(); }
-                          }
-                        };
-                        window.addEventListener('user-keys-available', handler as EventListener, { once: true });
-                      });
-                      const refreshed = usersRef?.current?.find?.((u: any) => u.username === senderUsername);
-                      kyber = refreshed?.hybridPublicKeys?.kyberPublicBase64 || null;
-                    }
-                  }
-
-                  // Re-read hybrid keys to include latest non-Kyber parts
-                  let refreshedUser = usersRef?.current?.find?.((u: any) => u.username === senderUsername);
-                  let hybrid = refreshedUser?.hybridPublicKeys ? { ...refreshedUser.hybridPublicKeys, kyberPublicBase64: kyber ?? refreshedUser.hybridPublicKeys?.kyberPublicBase64 } : null;
-                  const hasFullHybrid = (obj: any) => obj && typeof obj.dilithiumPublicBase64 === 'string' && (typeof obj.x25519PublicBase64 === 'string' || obj.x25519PublicBase64 === undefined);
-                  if (!hasFullHybrid(hybrid)) {
-                    await new Promise<void>((resolve) => {
-                      let settled = false;
-                      const timeout = setTimeout(() => { if (!settled) { settled = true; resolve(); } }, 1200);
-                      const handler = (event: Event) => {
-                        const d = (event as CustomEvent).detail;
-                        if (d?.username === senderUsername && d?.hybridKeys) {
-                          window.removeEventListener('user-keys-available', handler as EventListener);
-                          if (!settled) { settled = true; clearTimeout(timeout); resolve(); }
-                        }
-                      };
-                      window.addEventListener('user-keys-available', handler as EventListener, { once: true });
-                    });
-                    refreshedUser = usersRef?.current?.find?.((u: any) => u.username === senderUsername);
-                    hybrid = refreshedUser?.hybridPublicKeys ? { ...refreshedUser.hybridPublicKeys, kyberPublicBase64: kyber ?? refreshedUser.hybridPublicKeys?.kyberPublicBase64 } : null;
-                  }
-                  return { kyber, hybrid, retried };
-                };
-
-                const { kyber, hybrid, retried: _retried } = await resolveSenderKyber();
+                // Use shared helper to resolve sender's PQ Kyber key
+                const { kyber, hybrid } = await resolveSenderHybridKeys(senderUsername);
                 if (!hybrid || !hybrid.dilithiumPublicBase64) {
                   return;
                 }
@@ -2121,88 +2122,8 @@ export function useEncryptedMessageHandler(
                   type: 'delivery-receipt'
                 };
 
-                // Resolve sender's PQ Kyber key; if missing, request bundle once and wait briefly
-                const resolveSenderKyberFile = async (): Promise<{ kyber: string | null, hybrid: any | null, retried: boolean }> => {
-                  const user = usersRef?.current?.find?.((u: any) => u.username === senderUsername);
-                  let kyber = user?.hybridPublicKeys?.kyberPublicBase64 || null;
-                  let retried = false;
-
-                  if (!kyber) {
-                    // Debounce duplicate requests
-                    const now = Date.now();
-                    const lastReq = keyRequestCacheRef.current.get(senderUsername);
-                    if (!lastReq || (now - lastReq) > KEY_REQUEST_CACHE_DURATION) {
-                      keyRequestCacheRef.current.set(senderUsername, now);
-                      try {
-                        await websocketClient.sendSecureControlMessage({
-                          type: SignalType.CHECK_USER_EXISTS,
-                          username: senderUsername
-                        });
-                      } catch { }
-                      try {
-                        const keys = await getKeysOnDemand?.();
-                        if (keys?.dilithium?.secretKey && keys?.dilithium?.publicKeyBase64) {
-                          const requestBase = {
-                            type: SignalType.LIBSIGNAL_REQUEST_BUNDLE,
-                            username: senderUsername,
-                            from: loginUsernameRef.current,
-                            timestamp: Date.now(),
-                            challenge: btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(32)))),
-                            senderDilithium: keys.dilithium.publicKeyBase64,
-                          } as const;
-                          const canonical = new TextEncoder().encode(JSON.stringify(requestBase));
-                          let signature: string | undefined;
-                          try {
-                            const sigRaw = await (window as any).CryptoUtils?.Dilithium?.sign(keys.dilithium.secretKey, canonical);
-                            signature = (window as any).CryptoUtils?.Base64?.arrayBufferToBase64
-                              ? (window as any).CryptoUtils.Base64.arrayBufferToBase64(sigRaw)
-                              : btoa(String.fromCharCode(...new Uint8Array(sigRaw)));
-                          } catch { }
-                          await websocketClient.sendSecureControlMessage({ ...requestBase, signature });
-                        }
-                      } catch { }
-                      retried = true;
-
-                      await new Promise<void>((resolve) => {
-                        let settled = false;
-                        const timeout = setTimeout(() => { if (!settled) { settled = true; resolve(); } }, 2000);
-                        const handler = (event: Event) => {
-                          const d = (event as CustomEvent).detail;
-                          if (d?.username === senderUsername && d?.hybridKeys) {
-                            window.removeEventListener('user-keys-available', handler as EventListener);
-                            if (!settled) { settled = true; clearTimeout(timeout); resolve(); }
-                          }
-                        };
-                        window.addEventListener('user-keys-available', handler as EventListener, { once: true });
-                      });
-                      const refreshed = usersRef?.current?.find?.((u: any) => u.username === senderUsername);
-                      kyber = refreshed?.hybridPublicKeys?.kyberPublicBase64 || null;
-                    }
-                  }
-
-                  let refreshedUser = usersRef?.current?.find?.((u: any) => u.username === senderUsername);
-                  let hybrid = refreshedUser?.hybridPublicKeys ? { ...refreshedUser.hybridPublicKeys, kyberPublicBase64: kyber ?? refreshedUser.hybridPublicKeys?.kyberPublicBase64 } : null;
-                  const hasFullHybrid = (obj: any) => obj && typeof obj.dilithiumPublicBase64 === 'string' && (typeof obj.x25519PublicBase64 === 'string' || obj.x25519PublicBase64 === undefined);
-                  if (!hasFullHybrid(hybrid)) {
-                    await new Promise<void>((resolve) => {
-                      let settled = false;
-                      const timeout = setTimeout(() => { if (!settled) { settled = true; resolve(); } }, 1200);
-                      const handler = (event: Event) => {
-                        const d = (event as CustomEvent).detail;
-                        if (d?.username === senderUsername && d?.hybridKeys) {
-                          window.removeEventListener('user-keys-available', handler as EventListener);
-                          if (!settled) { settled = true; clearTimeout(timeout); resolve(); }
-                        }
-                      };
-                      window.addEventListener('user-keys-available', handler as EventListener, { once: true });
-                    });
-                    refreshedUser = usersRef?.current?.find?.((u: any) => u.username === senderUsername);
-                    hybrid = refreshedUser?.hybridPublicKeys ? { ...refreshedUser.hybridPublicKeys, kyberPublicBase64: kyber ?? refreshedUser.hybridPublicKeys?.kyberPublicBase64 } : null;
-                  }
-                  return { kyber, hybrid, retried };
-                };
-
-                const { kyber: kyberFile, hybrid: hybridFile, retried: _retriedFile } = await resolveSenderKyberFile();
+                // Use shared helper to resolve sender's PQ Kyber key
+                const { kyber: kyberFile, hybrid: hybridFile } = await resolveSenderHybridKeys(senderUsername);
                 if (!hybridFile || !hybridFile.dilithiumPublicBase64) {
                   return;
                 }

@@ -1,4 +1,5 @@
 import React, { useEffect, useRef, useState, useCallback, useMemo } from "react";
+import { createPortal } from "react-dom";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Button } from "@/components/ui/button";
 import { ChatMessage } from "./ChatMessage";
@@ -469,10 +470,24 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
     prevMessagesLengthRef.current = currentMessagesLength;
   }, [messages, currentUsername]);
 
-  // IntersectionObserver for read receipts
+  // Message lookup map
+  const messageMapRef = useRef<Map<string, Message>>(new Map());
+  useEffect(() => {
+    const map = new Map<string, Message>();
+    for (const msg of messages) {
+      map.set(msg.id, msg);
+    }
+    messageMapRef.current = map;
+  }, [messages]);
+
+  const observedMessagesRef = useRef<Set<string>>(new Set());
+  const readReceiptObserverRef = useRef<IntersectionObserver | null>(null);
+
   useEffect(() => {
     const scrollContainer = scrollAreaRef.current?.querySelector('[data-radix-scroll-area-viewport]');
     if (!scrollContainer || !window.IntersectionObserver) return;
+
+    observedMessagesRef.current.clear();
 
     const observer = new IntersectionObserver(
       (entries) => {
@@ -482,11 +497,12 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
             if (messageId) {
               if (document.hasFocus()) {
                 markMessageAsRead(messageId);
-                const msg = messages.find(m => m.id === messageId);
+                const msg = messageMapRef.current.get(messageId);
                 if (msg) {
                   sendReadReceipt(messageId, msg.sender);
                 }
                 observer.unobserve(entry.target);
+                observedMessagesRef.current.delete(messageId);
               }
             }
           }
@@ -498,22 +514,13 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
       }
     );
 
-    // Observe unread messages from others
-    messages.forEach((msg) => {
-      if (msg.sender !== currentUsername && !msg.receipt?.read) {
-        const el = document.getElementById(`message-${msg.id}`);
-        if (el) {
-          el.setAttribute('data-message-id', msg.id);
-          observer.observe(el);
-        }
-      }
-    });
+    readReceiptObserverRef.current = observer;
 
-    // Handle window focus to check for visible messages that were skipped
     const handleFocus = () => {
-      messages.forEach((msg) => {
+      const currentMessages = messageMapRef.current;
+      for (const [msgId, msg] of currentMessages) {
         if (msg.sender !== currentUsername && !msg.receipt?.read) {
-          const el = document.getElementById(`message-${msg.id}`);
+          const el = document.getElementById(`message-${msgId}`);
           if (el) {
             const rect = el.getBoundingClientRect();
             const containerRect = scrollContainer.getBoundingClientRect();
@@ -522,22 +529,41 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
               rect.top < containerRect.bottom &&
               rect.bottom > containerRect.top
             ) {
-              markMessageAsRead(msg.id);
-              sendReadReceipt(msg.id, msg.sender);
+              markMessageAsRead(msgId);
+              sendReadReceipt(msgId, msg.sender);
               observer.unobserve(el);
+              observedMessagesRef.current.delete(msgId);
             }
           }
         }
-      });
+      }
     };
 
     window.addEventListener('focus', handleFocus);
 
     return () => {
       observer.disconnect();
+      readReceiptObserverRef.current = null;
       window.removeEventListener('focus', handleFocus);
+      observedMessagesRef.current.clear();
     };
-  }, [messages, currentUsername, markMessageAsRead, sendReadReceipt]);
+  }, [selectedConversation, currentUsername, markMessageAsRead, sendReadReceipt]);
+
+  useEffect(() => {
+    const observer = readReceiptObserverRef.current;
+    if (!observer) return;
+    
+    for (const msg of messages) {
+      if (msg.sender !== currentUsername && !msg.receipt?.read && !observedMessagesRef.current.has(msg.id)) {
+        const el = document.getElementById(`message-${msg.id}`);
+        if (el) {
+          el.setAttribute('data-message-id', msg.id);
+          observer.observe(el);
+          observedMessagesRef.current.add(msg.id);
+        }
+      }
+    }
+  }, [messages, currentUsername]);
 
   useEffect(() => {
     const scrollContainer = scrollAreaRef.current?.querySelector('[data-radix-scroll-area-viewport]');
@@ -651,6 +677,29 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
       setTimeout(() => el.classList.remove('bg-secondary/20'), 1500);
     }
   }, []);
+
+  const callModal = currentCall ? (
+    <React.Suspense fallback={null}>
+      <CallModalLazy
+        call={currentCall}
+        localStream={localStream}
+        remoteStream={remoteStream}
+        remoteScreenStream={remoteScreenStream}
+        onAnswer={handleCallModalAnswer}
+        onDecline={handleCallModalDecline}
+        onEndCall={endCall}
+        onToggleMute={toggleMute}
+        onToggleVideo={toggleVideo}
+        onSwitchCamera={switchCamera}
+        onSwitchMicrophone={switchMicrophone}
+        onStartScreenShare={startScreenShare}
+        onStopScreenShare={stopScreenShare}
+        onGetAvailableScreenSources={getAvailableScreenSources}
+        isScreenSharing={isScreenSharing}
+        getDisplayUsername={getDisplayUsernameStable}
+      />
+    </React.Suspense>
+  ) : null;
 
   return (
     <div className="flex flex-col h-full relative" style={{ backgroundColor: 'var(--chat-background)' }}>
@@ -842,28 +891,7 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
       </div>
 
       {/* Call Modal */}
-      {currentCall && (
-        <React.Suspense fallback={null}>
-          <CallModalLazy
-            call={currentCall}
-            localStream={localStream}
-            remoteStream={remoteStream}
-            remoteScreenStream={remoteScreenStream}
-            onAnswer={handleCallModalAnswer}
-            onDecline={handleCallModalDecline}
-            onEndCall={endCall}
-            onToggleMute={toggleMute}
-            onToggleVideo={toggleVideo}
-            onSwitchCamera={switchCamera}
-            onSwitchMicrophone={switchMicrophone}
-            onStartScreenShare={startScreenShare}
-            onStopScreenShare={stopScreenShare}
-            onGetAvailableScreenSources={getAvailableScreenSources}
-            isScreenSharing={isScreenSharing}
-            getDisplayUsername={getDisplayUsernameStable}
-          />
-        </React.Suspense>
-      )}
+      {callModal && typeof document !== 'undefined' && createPortal(callModal, document.body)}
     </div>
   );
 }, (prevProps, nextProps) => {

@@ -45,58 +45,43 @@ const validateHybridKeys = (keys: any): boolean => {
 const buildSmartStatusMap = (messages: Message[], currentUsername: string) => {
   const map = new Map<string, Message['receipt']>();
 
-  // Group messages by conversation (recipient/peer)
-  const conversationGroups = new Map<string, Array<{ id: string; timestamp: number; receipt: Message['receipt']; recipient: string }>>();
+  // Track latest read and delivered per peer
+  const latestReadPerPeer = new Map<string, { id: string; timestamp: number; receipt: Message['receipt'] }>();
+  const latestDeliveredPerPeer = new Map<string, { id: string; timestamp: number; receipt: Message['receipt'] }>();
 
   for (const msg of messages) {
     if (msg.sender !== currentUsername || !msg.receipt) continue;
     const peer = msg.recipient || '';
     if (!peer) continue;
 
-    if (!conversationGroups.has(peer)) {
-      conversationGroups.set(peer, []);
+    const timestamp = msg.timestamp instanceof Date ? msg.timestamp.getTime() : new Date(msg.timestamp).getTime();
+    if (isNaN(timestamp)) continue;
+
+    // Track latest read message per peer
+    if (msg.receipt.read) {
+      const existing = latestReadPerPeer.get(peer);
+      if (!existing || timestamp > existing.timestamp) {
+        latestReadPerPeer.set(peer, { id: msg.id, timestamp, receipt: msg.receipt });
+      }
     }
-    conversationGroups.get(peer)!.push({
-      id: msg.id,
-      timestamp: new Date(msg.timestamp).getTime(),
-      receipt: msg.receipt,
-      recipient: peer,
-    });
+
+    // Track latest delivered message per peer
+    if (msg.receipt.delivered && !msg.receipt.read) {
+      const existing = latestDeliveredPerPeer.get(peer);
+      if (!existing || timestamp > existing.timestamp) {
+        latestDeliveredPerPeer.set(peer, { id: msg.id, timestamp, receipt: msg.receipt });
+      }
+    }
   }
 
-  // For each conversation, find latest read and latest delivered
-  for (const [peer, msgs] of conversationGroups.entries()) {
-    const sorted = msgs.sort((a, b) => {
-      const tA = new Date(a.timestamp).getTime();
-      const tB = new Date(b.timestamp).getTime();
-      return (isNaN(tB) ? 0 : tB) - (isNaN(tA) ? 0 : tA);
-    });
+  for (const [peer, readInfo] of latestReadPerPeer) {
+    map.set(readInfo.id, { ...readInfo.receipt, read: true });
+  }
 
-    let latestRead: Message | null = null;
-    let latestDelivered: Message | null = null;
-
-    // Find latest read message for this conversation
-    const latestReadMsg = sorted.find((item) => item.receipt.read);
-    if (latestReadMsg) {
-      latestRead = { ...latestReadMsg, receipt: latestReadMsg.receipt } as any;
-    }
-
-    const latestReadTime = latestReadMsg ? latestReadMsg.timestamp : 0;
-
-    // Find latest delivered for this conversation
-    const latestDeliveredMsg = sorted.find(
-      (item) => item.receipt.delivered && !item.receipt.read && item.timestamp > latestReadTime,
-    );
-
-    if (latestDeliveredMsg) {
-      latestDelivered = { ...latestDeliveredMsg, receipt: latestDeliveredMsg.receipt } as any;
-    }
-
-    if (latestReadMsg) {
-      map.set(latestReadMsg.id, { ...latestReadMsg.receipt, read: true });
-    }
-    if (latestDeliveredMsg) {
-      map.set(latestDeliveredMsg.id, { ...latestDeliveredMsg.receipt, delivered: true });
+  for (const [peer, deliveredInfo] of latestDeliveredPerPeer) {
+    const readInfo = latestReadPerPeer.get(peer);
+    if (!readInfo || deliveredInfo.timestamp > readInfo.timestamp) {
+      map.set(deliveredInfo.id, { ...deliveredInfo.receipt, delivered: true });
     }
   }
 
@@ -466,8 +451,6 @@ export function useMessageReceipts(
         return;
       }
 
-      const index = messageIndexRef.current.get(safeMessageId);
-
       const updated = await updateMessageReceipt(
         messageIndexRef,
         setMessages,
@@ -516,8 +499,6 @@ export function useMessageReceipts(
       if (!safeMessageId) {
         return;
       }
-
-      const index = messageIndexRef.current.get(safeMessageId);
 
       const updated = await updateMessageReceipt(
         messageIndexRef,

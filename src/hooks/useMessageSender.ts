@@ -13,6 +13,8 @@ const SESSION_POLL_BASE_MS = 200;
 const SESSION_POLL_MAX_MS = 1_500;
 const ID_CACHE_TTL_MS = 5 * 60 * 1000;
 const MAX_ID_CACHE_SIZE = 4_096;
+const MAX_FILEDATA_LENGTH = 10 * 1024 * 1024; // 10MB
+const BASE64_SAFE_REGEX = /^[A-Za-z0-9+/=_-]+$/;
 const KYBER_PUBLIC_KEY_LENGTH = 1_568;
 const DILITHIUM_PUBLIC_KEY_LENGTH = 2_592;
 const X25519_PUBLIC_KEY_LENGTH = 32;
@@ -57,6 +59,29 @@ const sanitizeContent = (value: string | undefined) => {
   if (!trimmed) return undefined;
   const normalized = trimmed.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, '');
   return normalized.slice(0, MAX_CONTENT_LENGTH);
+};
+
+const validateFileData = (value: string | undefined): string | undefined => {
+  if (typeof value !== 'string') return undefined;
+  const trimmed = value.trim();
+  if (!trimmed) return undefined;
+
+  const inlinePrefixIndex = trimmed.indexOf(',');
+  const base64Payload = inlinePrefixIndex > 0 ? trimmed.slice(inlinePrefixIndex + 1) : trimmed;
+
+  if (base64Payload.length > MAX_FILEDATA_LENGTH * 1.4) {
+    return undefined;
+  }
+  if (!BASE64_SAFE_REGEX.test(base64Payload.replace(/=+$/, ''))) {
+    return undefined;
+  }
+
+  const estimatedBytes = Math.floor((base64Payload.length * 3) / 4) - (base64Payload.endsWith('==') ? 2 : base64Payload.endsWith('=') ? 1 : 0);
+  if (estimatedBytes <= 0 || estimatedBytes > MAX_FILEDATA_LENGTH) {
+    return undefined;
+  }
+
+  return trimmed;
 };
 
 const sanitizeReply = (reply: string | { id: string; sender?: string; content?: string } | undefined) => {
@@ -496,6 +521,12 @@ export function useMessageSender(
         return;
       }
 
+      const fileDataToSend = fileData ? validateFileData(fileData) : undefined;
+      if (fileData && !fileDataToSend) {
+        logError('FILEDATA-INVALID');
+        return;
+      }
+
       const currentUser = sanitizeUsername(currentUsername || loginUsernameRef.current);
       if (!currentUser) {
         console.error('[MessageSender] Missing current user', { currentUsername, ref: loginUsernameRef.current });
@@ -513,7 +544,7 @@ export function useMessageSender(
       // Pre-compute sanitized content and reply info for potential queuing
       const sanitizedContent = sanitizeContent(content);
       const replyToData = sanitizeReply(replyTo);
-      const messageType = mapSignalType('message', messageSignalType, fileData);
+      const messageType = mapSignalType('message', messageSignalType, fileDataToSend);
 
       let recipient = recipientDirectory.get(recipientUsername);
       if (!recipient?.hybridPublicKeys) {
@@ -536,7 +567,7 @@ export function useMessageSender(
       if (!recipient?.hybridPublicKeys || !recipient.hybridPublicKeys.kyberPublicBase64 || !isValidKyberPublicKeyBase64(recipient.hybridPublicKeys.kyberPublicBase64)) {
         if (originalMessageId) {
           // Proactively request keys in background for next retry
-          resolvePeerHybridKeys(recipientUsername).catch(() => { });
+          resolvePeerHybridKeysToUse(recipientUsername).catch(() => { });
           logError('INVALID-KEYS-RETRY');
           return;
         }
@@ -561,7 +592,7 @@ export function useMessageSender(
               sanitizedContent ?? '',
               timestamp,
               replyToData,
-              fileData,
+              fileDataToSend,
             );
             (localMessage as any).pending = true;
             onNewMessage(localMessage);
@@ -580,14 +611,14 @@ export function useMessageSender(
           await secureMessageQueue.queueMessage(recipientUsername, sanitizedContent ?? '', {
             messageId,
             replyTo: replyToData,
-            fileData,
+            fileData: fileDataToSend,
             messageSignalType,
             originalMessageId: messageId,
             editMessageId,
           });
 
-          // Proactively request keys/bundle in background (no await)
-          resolvePeerHybridKeys(recipientUsername).catch(() => { });
+          // Request keys/bundle in background
+          resolvePeerHybridKeysToUse(recipientUsername).catch(() => { });
           return;
         } catch (_err) {
           logError('QUEUE', _err);

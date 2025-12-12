@@ -415,7 +415,7 @@ export function useFileHandler(
             const macKeyBytes = CryptoUtils.Base64.base64ToUint8Array(aesPayload.macKey);
             macStateRef.current.set(fileKey, { macKey: macKeyBytes, fileSize: fileEntry.fileSize || 0 });
           } catch (_e) {
-            console.error('[useFileHandler] Failed to decrypt file key envelope', { error: e, from, filename: safeFilename });
+            console.error('[useFileHandler] Failed to decrypt file key envelope', { error: _e, from, filename: safeFilename });
             releaseFileEntry(fileEntry);
             delete (incomingFileChunksRef.current as any)[fileKey];
             macStateRef.current.delete(fileKey);

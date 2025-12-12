@@ -353,7 +353,7 @@ if (import.meta.url === `file://${process.argv[1]}`) {
           console.log('');
           console.log('Credentials:');
           console.log('\tUsername:', creds.username);
-          console.log('\tPassword:', creds.password);
+          console.log('\tPassword:', '********');
           console.log('\tStored:', new Date(creds.timestamp).toISOString());
         } else {
           console.log('No credentials found');

@@ -15,6 +15,34 @@ interface UseFileUrlOptions {
     originalBase64Data?: string | null; // For recovery if SecureDB doesn't have the file
 }
 
+const MAX_INLINE_BYTES = 10 * 1024 * 1024; // 10 MB 
+const BASE64_SAFE_REGEX = /^[A-Za-z0-9+/=_-]+$/;
+
+const validateAndDecodeBase64 = (input: string | null | undefined): Uint8Array | null => {
+    if (!input || typeof input !== 'string') return null;
+    let cleanBase64 = input.trim();
+
+    const inlinePrefixIndex = cleanBase64.indexOf(',');
+    if (inlinePrefixIndex > 0 && inlinePrefixIndex < 128) {
+        cleanBase64 = cleanBase64.slice(inlinePrefixIndex + 1);
+    }
+
+    if (!BASE64_SAFE_REGEX.test(cleanBase64.replace(/=+$/, ''))) {
+        return null;
+    }
+
+    const estimatedBytes = Math.floor((cleanBase64.length * 3) / 4) - (cleanBase64.endsWith('==') ? 2 : cleanBase64.endsWith('=') ? 1 : 0);
+    if (estimatedBytes <= 0 || estimatedBytes > MAX_INLINE_BYTES) {
+        return null;
+    }
+
+    try {
+        return Uint8Array.from(atob(cleanBase64), char => char.charCodeAt(0));
+    } catch {
+        return null;
+    }
+};
+
 /**
  * Hook to resolve file URLs from SecureDB storage.
  * Creates and manages Blob URLs for files stored in the encrypted database.
@@ -58,20 +86,20 @@ export function useFileUrl({
 
         if (!secureDB) {
             if (originalBase64Data) {
-                try {
-                    let cleanBase64 = originalBase64Data.trim();
-                    const inlinePrefixIndex = cleanBase64.indexOf(',');
-                    if (inlinePrefixIndex > 0 && inlinePrefixIndex < 128) {
-                        cleanBase64 = cleanBase64.slice(inlinePrefixIndex + 1);
+                const decoded = validateAndDecodeBase64(originalBase64Data);
+                if (decoded) {
+                    try {
+                        const buffer = new ArrayBuffer(decoded.length);
+                        const copy = new Uint8Array(buffer);
+                        copy.set(decoded);
+                        const blob = new Blob([buffer], { type: mimeType });
+                        const blobUrl = URL.createObjectURL(blob);
+                        urlRef.current = blobUrl;
+                        setUrl(blobUrl);
+                        setLoading(false);
+                        return;
+                    } catch (e) {
                     }
-                    const binary = Uint8Array.from(atob(cleanBase64), char => char.charCodeAt(0));
-                    const blob = new Blob([binary], { type: mimeType });
-                    const blobUrl = URL.createObjectURL(blob);
-                    urlRef.current = blobUrl;
-                    setUrl(blobUrl);
-                    setLoading(false);
-                    return;
-                } catch (e) {
                 }
             }
 
@@ -95,33 +123,33 @@ export function useFileUrl({
                 if (!blob) {
                     // Try to recover from originalBase64Data
                     if (originalBase64Data) {
-                        try {
-                            let cleanBase64 = originalBase64Data.trim();
-                            const inlinePrefixIndex = cleanBase64.indexOf(',');
-                            if (inlinePrefixIndex > 0 && inlinePrefixIndex < 128) {
-                                cleanBase64 = cleanBase64.slice(inlinePrefixIndex + 1);
-                            }
-                            const binary = Uint8Array.from(atob(cleanBase64), char => char.charCodeAt(0));
-                            const recoveredBlob = new Blob([binary], { type: mimeType });
-
+                        const decoded = validateAndDecodeBase64(originalBase64Data);
+                        if (decoded) {
                             try {
-                                await secureDB.saveFile(fileId, recoveredBlob);
-                            } catch (saveErr) {
-                                console.error('[useFileUrl] Failed to save recovered file to SecureDB:', saveErr);
-                            }
+                                const buffer = new ArrayBuffer(decoded.length);
+                                const copy = new Uint8Array(buffer);
+                                copy.set(decoded);
+                                const recoveredBlob = new Blob([buffer], { type: mimeType });
 
-                            const blobUrl = URL.createObjectURL(recoveredBlob);
-                            if (urlRef.current && urlRef.current.startsWith('blob:')) {
                                 try {
-                                    URL.revokeObjectURL(urlRef.current);
-                                } catch (e) { }
+                                    await secureDB.saveFile(fileId, recoveredBlob);
+                                } catch (saveErr) {
+                                    console.error('[useFileUrl] Failed to save recovered file to SecureDB:', saveErr);
+                                }
+
+                                const blobUrl = URL.createObjectURL(recoveredBlob);
+                                if (urlRef.current && urlRef.current.startsWith('blob:')) {
+                                    try {
+                                        URL.revokeObjectURL(urlRef.current);
+                                    } catch (e) { }
+                                }
+                                urlRef.current = blobUrl;
+                                setUrl(blobUrl);
+                                setLoading(false);
+                                return;
+                            } catch (e) {
+                                console.error('[useFileUrl] Failed to recover from originalBase64Data:', e);
                             }
-                            urlRef.current = blobUrl;
-                            setUrl(blobUrl);
-                            setLoading(false);
-                            return;
-                        } catch (e) {
-                            console.error('[useFileUrl] Failed to recover from originalBase64Data:', e);
                         }
                     }
 

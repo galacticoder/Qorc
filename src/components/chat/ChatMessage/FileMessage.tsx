@@ -7,8 +7,8 @@ import { PaperclipIcon } from "../icons.tsx";
 import { Message } from "../types.ts";
 import { MessageReceipt } from "../MessageReceipt.tsx";
 import { VoiceMessage } from "../VoiceMessage";
-import { copyTextToClipboard } from "@/lib/clipboard";
-import { sanitizeFilename } from "@/lib/sanitizers";
+import { copyTextToClipboard } from "../../../lib/clipboard";
+import { sanitizeFilename } from "../../../lib/sanitizers";
 import { useFileUrl } from "../../../hooks/useFileUrl";
 
 interface ElectronSaveFileData {
@@ -26,10 +26,7 @@ interface ElectronSaveFileResult {
 
 declare global {
   interface Window {
-    electronAPI?: {
-      readonly isElectron: boolean;
-      saveFile: (data: ElectronSaveFileData) => Promise<ElectronSaveFileResult>;
-    };
+    electronAPI?: any;
   }
 }
 
@@ -97,6 +94,20 @@ const createDownloadLink = (href: string, filename: string): void => {
   document.body.removeChild(link);
 };
 
+const isSafeFileUrl = (url: string | null | undefined): string | null => {
+  if (!url || typeof url !== 'string') return null;
+  try {
+    const parsed = new URL(url, 'http://localhost');
+    const protocol = parsed.protocol.toLowerCase();
+    if (protocol === 'blob:' || protocol === 'http:' || protocol === 'https:') {
+      return url;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+};
+
 export const FileContent: React.FC<FileContentProps> = ({ message, isCurrentUser, secureDB }) => {
   const { content, filename, fileSize, mimeType, originalBase64Data } = message;
   const [imageError, setImageError] = React.useState(false);
@@ -114,8 +125,9 @@ export const FileContent: React.FC<FileContentProps> = ({ message, isCurrentUser
     originalBase64Data: originalBase64Data || null,
   });
 
-  const contentUrl = typeof content === 'string' && !content.startsWith('blob:') ? content : '';
-  const effectiveFileUrl = resolvedFileUrl || contentUrl;
+  const rawContentUrl = typeof content === 'string' ? content : '';
+  const safeContentUrl = isSafeFileUrl(rawContentUrl);
+  const effectiveFileUrl = resolvedFileUrl || safeContentUrl;
 
   useEffect(() => {
     if (effectiveFileUrl) {
@@ -126,11 +138,12 @@ export const FileContent: React.FC<FileContentProps> = ({ message, isCurrentUser
   }, [effectiveFileUrl]);
 
   const fallbackDownload = useCallback((): void => {
-    if (!content) return;
+    const safeUrl = isSafeFileUrl(rawContentUrl);
+    if (!safeUrl) return;
     try {
-      createDownloadLink(content, filename || 'download');
+      createDownloadLink(safeUrl, filename || 'download');
     } catch { }
-  }, [content, filename]);
+  }, [rawContentUrl, filename]);
 
   const handleDownload = useCallback(async (e: React.MouseEvent): Promise<void> => {
     e.preventDefault();
@@ -222,7 +235,7 @@ export const FileContent: React.FC<FileContentProps> = ({ message, isCurrentUser
                 style={{
                   backgroundColor: 'var(--color-surface)',
                   color: 'var(--color-text-secondary)',
-                  border: '1px dashed var(--color-border)'
+                  border: '1px dashed rgba(255,255,255,0.22)'
                 }}
               >
                 Image cannot be loaded

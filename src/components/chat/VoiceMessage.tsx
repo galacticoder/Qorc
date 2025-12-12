@@ -341,10 +341,10 @@ export function VoiceMessage({
         style={{
           backgroundColor: 'var(--color-surface)',
           color: 'var(--color-text-secondary)',
-          border: '1px dashed var(--color-border)'
+          border: '1px dashed rgba(255,255,255,0.22)'
         }}
       >
-        Voice message cannot be loaded
+        {urlError || error || 'Failed to load audio'}
       </div>
     );
   }

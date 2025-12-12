@@ -533,45 +533,4 @@ export const useSecureDB = ({ Authentication, setMessages }: UseSecureDBProps) =
 	return { users, setUsers, dbInitialized, secureDBRef, saveMessageToLocalDB, loadMoreConversationMessages };
 };
 
-export class ServerDatabase {
-	static async sendDataToServerDb(args: {
-		content: string;
-		messageId: string;
-		serverHybridKeys: { x25519PublicBase64: string; kyberPublicBase64: string; dilithiumPublicBase64: string },
-		fromUsername: string;
-		toUsername?: string;
-		timestamp: number;
-		typeInside: string;
-		aesKey: CryptoKey | null;
-		replyTo?: { id: string; sender: string; content?: string } | null;
-	}) {
-		try {
-			if (!args.aesKey) throw new Error("AES key is required to encrypt data");
-
-			let replyContent = "";
-			const { iv, authTag, encrypted } = await CryptoUtils.Encrypt.encryptBinaryWithAES(
-				new TextEncoder().encode(args.content),
-				args.aesKey
-			);
-			const serializedCiphertext = CryptoUtils.Encrypt.serializeEncryptedData(iv, authTag, encrypted);
-
-			if (args.replyTo) {
-				const replyContentCiphertext = await CryptoUtils.Encrypt.encryptBinaryWithAES(
-					new TextEncoder().encode(args.replyTo.content ?? args.content),
-					args.aesKey
-				);
-				replyContent = CryptoUtils.Encrypt.serializeEncryptedData(
-					replyContentCiphertext.iv,
-					replyContentCiphertext.authTag,
-					replyContentCiphertext.encrypted
-				);
-			}
-
-			return;
-		} catch (err) {
-			console.error("[useSecureDB] Failed to prepare encrypted server update", err);
-		}
-	}
-}
-
 export default useSecureDB;
