@@ -151,7 +151,7 @@ async function initializeHandlers() {
       }
     }
 
-    websocketHandler = new WebSocketHandler(securityMiddleware);
+    websocketHandler = new WebSocketHandler(securityMiddleware, storageHandler);
 
     try {
       let connectHostOverride = null;
@@ -191,7 +191,9 @@ async function initializeHandlers() {
       }
     } catch (_) { }
 
-    const defaultWsUrl = process.env.VITE_WS_URL || 'wss://localhost:8443';
+    // Try to load persisted server URL first fall back to env/default
+    const storedServerUrl = await websocketHandler.loadStoredServerUrl();
+    const defaultWsUrl = storedServerUrl || process.env.VITE_WS_URL || 'wss://localhost:8443';
     const wsInit = await websocketHandler.initialize({
       defaultUrl: defaultWsUrl,
       reconnectAttempts: 5,
@@ -683,8 +685,11 @@ function registerIPCHandlers() {
   });
 
   ipcMain.handle('edge:get-server-url', async () => {
-    if (!websocketHandler) return { success: false, serverUrl: null };
-    return { success: true, serverUrl: websocketHandler.serverUrl };
+    if (!websocketHandler) return { success: false, serverUrl: '' };
+    if (!websocketHandler.serverUrl) {
+      await websocketHandler.loadStoredServerUrl();
+    }
+    return { success: true, serverUrl: websocketHandler.serverUrl || '' };
   });
 
   ipcMain.handle('edge:ws-probe-connect', async (_event, url, timeoutMs) => {

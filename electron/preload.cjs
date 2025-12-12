@@ -363,6 +363,17 @@ contextBridge.exposeInMainWorld('edgeApi', {
     if (url.length > MAX_URL_LENGTH) {
       return Promise.reject(new Error('URL too long'));
     }
+    try {
+      const parsed = new URL(url);
+      if (parsed.protocol !== 'wss:') {
+        return Promise.reject(new Error('Only secure WebSocket (wss://) allowed'));
+      }
+      if (parsed.username || parsed.password) {
+        return Promise.reject(new Error('Credentials in URL not allowed'));
+      }
+    } catch (e) {
+      return Promise.reject(new Error('Invalid URL format'));
+    }
     return ipcRenderer.invoke('edge:ws-probe-connect', url, timeoutMs);
   },
   setServerUrl: (url) => {
@@ -371,6 +382,18 @@ contextBridge.exposeInMainWorld('edgeApi', {
     }
     if (url.length > MAX_URL_LENGTH) {
       return Promise.reject(new Error('URL too long'));
+    }
+    // Enforce wss:// at preload level
+    try {
+      const parsed = new URL(url);
+      if (parsed.protocol !== 'wss:') {
+        return Promise.reject(new Error('Only secure WebSocket (wss://) allowed'));
+      }
+      if (parsed.username || parsed.password) {
+        return Promise.reject(new Error('Credentials in URL not allowed'));
+      }
+    } catch (e) {
+      return Promise.reject(new Error('Invalid URL format'));
     }
     return ipcRenderer.invoke('edge:set-server-url', url);
   },

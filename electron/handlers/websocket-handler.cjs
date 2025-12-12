@@ -14,8 +14,9 @@ try {
 }
 
 class WebSocketHandler {
-  constructor(securityMiddleware) {
+  constructor(securityMiddleware, storageHandler = null) {
     this.securityMiddleware = securityMiddleware;
+    this.storageHandler = storageHandler;
 
     // Connection state
     this.connection = null;
@@ -63,22 +64,57 @@ class WebSocketHandler {
     return { success: true };
   }
 
-  setServerUrl(url) {
-    // Validate URL
-    if (!url || typeof url !== 'string') {
+  async setServerUrl(url) {
+    if (!url || typeof url !== 'string' || url.length > 2048) {
       return { success: false, error: 'Invalid server URL' };
     }
 
     try {
       const parsed = new URL(url);
-      if (!['wss:', 'ws:'].includes(parsed.protocol)) {
-        return { success: false, error: 'Only WebSocket protocols allowed' };
+      
+      // Require wss:// only
+      if (parsed.protocol !== 'wss:') {
+        return { success: false, error: 'Only secure WebSocket (wss://) allowed' };
       }
-      this.serverUrl = url;
-      return { success: true, serverUrl: url };
+      
+      // Validate hostname
+      if (!parsed.hostname || parsed.hostname.length > 253) {
+        return { success: false, error: 'Invalid hostname' };
+      }
+      
+      if (parsed.username || parsed.password) {
+        return { success: false, error: 'Credentials in URL not allowed' };
+      }
+      
+      const normalized = parsed.toString();
+      this.serverUrl = normalized;
+      
+      if (this.storageHandler) {
+        try {
+          await this.storageHandler.persistServerUrl(normalized);
+        } catch (e) {
+          console.warn('[WS] Failed to persist server URL:', e.message);
+        }
+      }
+      
+      return { success: true };
     } catch (e) {
       return { success: false, error: 'Invalid URL format' };
     }
+  }
+
+  async loadStoredServerUrl() {
+    if (!this.storageHandler) return null;
+    try {
+      const stored = await this.storageHandler.loadServerUrl();
+      if (stored && typeof stored === 'string') {
+        this.serverUrl = stored;
+        return stored;
+      }
+    } catch (e) {
+      console.warn('[WS] Failed to load stored server URL:', e.message);
+    }
+    return null;
   }
 
   setTorReady(ready) {
