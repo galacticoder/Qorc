@@ -5,6 +5,7 @@ import { EmojiPicker } from "../ui/EmojiPicker";
 import { useEmojiPicker } from "../../contexts/EmojiPickerContext";
 import { ChatMessageProps } from "./types.ts";
 import { SystemMessage } from "./ChatMessage/SystemMessage.tsx";
+import { recordEmojiUsage } from "../../lib/system-emoji";
 import { DeletedMessage } from "./ChatMessage/DeletedMessage.tsx";
 import { FileContent } from "./ChatMessage/FileMessage.tsx";
 import { VoiceMessage } from "./VoiceMessage";
@@ -13,7 +14,7 @@ import { useUnifiedUsernameDisplay } from "../../hooks/useUnifiedUsernameDisplay
 import { LinkifyWithPreviews } from "./LinkifyWithPreviews.tsx";
 import { LinkExtractor } from "../../lib/link-extraction.ts";
 import { MarkdownRenderer } from "../ui/MarkdownRenderer";
-import { isMarkdownMessage } from "../../lib/markdown-parser";
+import { isMarkdownMessage, extractMarkdownContent } from "../../lib/markdown-parser";
 import { copyTextToClipboard } from "../../lib/clipboard";
 import { MessageContextMenu } from "./MessageContextMenu";
 import { UserAvatar } from "../ui/UserAvatar";
@@ -33,7 +34,7 @@ const isValidJson = (str: string): boolean => {
   return trimmed.startsWith('{') || trimmed.startsWith('[');
 };
 
-const parseSystemMessage = (content: string, message: any): { label: string; actions?: SystemAction[] } => {
+const parseSystemMessage = (content: string, message: any): { label: string; actions?: SystemAction[]; isError?: boolean } => {
   if (!isValidJson(content)) {
     return { label: content };
   }
@@ -45,11 +46,12 @@ const parseSystemMessage = (content: string, message: any): { label: string; act
     }
 
     const label = typeof parsed.label === 'string' ? parsed.label : content;
+    let actions: SystemAction[] | undefined;
 
     if (parsed.actionsType === 'callback' && message) {
       const peer = message.sender === 'System' ? (message.recipient || '') : message.sender;
       if (typeof peer === 'string' && peer.length > 0) {
-        const actions: SystemAction[] = [{
+        actions = [{
           label: 'Call back',
           onClick: () => {
             try {
@@ -57,11 +59,11 @@ const parseSystemMessage = (content: string, message: any): { label: string; act
             } catch { }
           }
         }];
-        return { label, actions };
+        return { label, actions, isError: parsed.isError };
       }
     }
 
-    return { label };
+    return { label, actions, isError: parsed.isError };
   } catch {
     return { label: content };
   }
@@ -91,7 +93,7 @@ const formatTimestamp = (timestamp: Date): string => {
   }
 };
 
-export const ChatMessage = React.memo<ExtendedChatMessageProps>(({ message, smartReceipt, onReply, previousMessage, onDelete, onEdit, onReact, getDisplayUsername, currentUsername, secureDB }) => {
+export const ChatMessage = React.memo<ExtendedChatMessageProps>(({ message, smartReceipt, onReply, previousMessage, onDelete, onEdit, onReact, onReplyClick, getDisplayUsername, currentUsername, secureDB }) => {
   const { content, sender, timestamp, isCurrentUser, isSystemMessage, isDeleted, type } = message;
   const effectiveReceipt = smartReceipt;
 
@@ -133,10 +135,25 @@ export const ChatMessage = React.memo<ExtendedChatMessageProps>(({ message, smar
 
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null);
 
+  const { isUrlOnly, urls, isMarkdown, markdownContent } = useMemo(() => {
+    const urlOnly = LinkExtractor.isUrlOnlyMessage(content);
+    const extractedUrls = LinkExtractor.extractUrlStrings(content);
+    const hasMarkdown = isMarkdownMessage(content);
+    const mdContent = hasMarkdown ? extractMarkdownContent(content) : '';
 
-  const isUrlOnly = useMemo(() => LinkExtractor.isUrlOnlyMessage(content), [content]);
-  const urls = useMemo(() => LinkExtractor.extractUrlStrings(content), [content]);
-  const isMarkdown = useMemo(() => isMarkdownMessage(content), [content]);
+    return {
+      isUrlOnly: urlOnly,
+      urls: extractedUrls,
+      isMarkdown: hasMarkdown,
+      markdownContent: mdContent
+    };
+  }, [content]);
+
+  const { systemLabel, systemActions, systemIsError } = useMemo(() => {
+    if (!isSystemMessage) return { systemLabel: '', systemActions: undefined, systemIsError: undefined };
+    const { label, actions, isError } = parseSystemMessage(content, message);
+    return { systemLabel: label, systemActions: actions, systemIsError: isError };
+  }, [isSystemMessage, content, message]);
 
   const isFileMessageType =
     type === "FILE_MESSAGE" ||
@@ -149,16 +166,10 @@ export const ChatMessage = React.memo<ExtendedChatMessageProps>(({ message, smar
     return name.includes('voice-note');
   }, [isFileMessageType, message.filename]);
 
-  const isImage = useMemo(() => {
-    if (!isFileMessageType) return false;
-    const name = (message.filename || '').toLowerCase();
-    const imageExtensions = ['jpg', 'jpeg', 'png', 'gif', 'webp'];
-    return imageExtensions.some(ext => name.endsWith('.' + ext));
-  }, [isFileMessageType, message.filename]);
-
   const timestampDisplay = useMemo(() => formatTimestamp(timestamp), [timestamp]);
 
   const handlePickEmoji = useCallback((emoji: string) => {
+    recordEmojiUsage(emoji, secureDB);
     if (currentUsername && message.reactions) {
       for (const [e, users] of Object.entries(message.reactions)) {
         if (users.includes(currentUsername) && e !== emoji) {
@@ -167,7 +178,7 @@ export const ChatMessage = React.memo<ExtendedChatMessageProps>(({ message, smar
       }
     }
     onReact?.(message, emoji);
-  }, [currentUsername, message, onReact]);
+  }, [currentUsername, message, onReact, secureDB]);
 
   const handleCopyMessage = useCallback(() => {
     void copyTextToClipboard(content);
@@ -234,10 +245,22 @@ export const ChatMessage = React.memo<ExtendedChatMessageProps>(({ message, smar
       document.body.appendChild(link);
       link.click();
       document.body.removeChild(link);
-    } catch (_error) {
-      alert('Failed to download file.');
+    } catch (error) {
+      console.error('Failed to download file:', error);
+      alert('Failed to download file');
     }
   }, [message, content, timestamp]);
+
+  const handleContextMenu = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+
+    const rect = e.currentTarget.getBoundingClientRect();
+    const x = safeIsCurrentUser ? rect.right : rect.left;
+    const y = rect.bottom + 5;
+
+    setContextMenu({ x, y });
+  }, [safeIsCurrentUser]);
 
   const isDownloadable = useMemo(() => {
     if (!isFileMessageType) return false;
@@ -248,19 +271,21 @@ export const ChatMessage = React.memo<ExtendedChatMessageProps>(({ message, smar
     return true;
   }, [isFileMessageType, message, content]);
 
-  const handleContextMenu = useCallback((e: React.MouseEvent) => {
-    e.preventDefault();
-    e.stopPropagation();
-    setContextMenu({ x: e.clientX, y: e.clientY });
-  }, []);
+
 
   if (isSystemMessage) {
-    const { label, actions } = parseSystemMessage(content, message);
-    return <SystemMessage content={label} actions={actions} />;
+    return <SystemMessage content={systemLabel} actions={systemActions} isError={systemIsError} />;
   }
 
   if (isDeleted) {
-    return <DeletedMessage sender={displaySender} timestamp={timestamp} isCurrentUser={safeIsCurrentUser} />;
+    return (
+      <DeletedMessage
+        senderUsername={sender}
+        displayName={displaySender}
+        timestamp={timestamp}
+        isCurrentUser={safeIsCurrentUser}
+      />
+    );
   }
 
   return (
@@ -319,22 +344,19 @@ export const ChatMessage = React.memo<ExtendedChatMessageProps>(({ message, smar
 
         {message.replyTo && (
           <div
-            className="mb-2 p-3 rounded-lg text-sm max-w-full"
+            className="mb-1 p-3 rounded text-sm max-w-full select-none cursor-pointer hover:opacity-90 transition-opacity relative overflow-hidden"
             style={{
-              backgroundColor: 'var(--color-muted-panel)',
-              borderLeft: '3px solid var(--color-accent-primary)',
-              color: 'var(--color-text-secondary)'
+              backgroundColor: 'hsl(var(--secondary))',
+              borderLeft: `4px solid ${safeIsCurrentUser ? 'hsl(var(--primary-foreground))' : 'hsl(var(--primary))'}`,
             }}
             role="note"
             aria-label={`Reply to ${displayReplyToSender}`}
+            onClick={() => onReplyClick?.(message.replyTo!.id)}
           >
-            <div className="flex items-center gap-2 mb-1">
-              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 10h10a8 8 0 018 8v2M3 10l6 6m-6-6l6-6" />
-              </svg>
-              <span className="font-semibold">{displayReplyToSender}</span>
+            <div className="flex items-center gap-2 mb-0.5">
+              <span className="font-medium text-xs text-foreground/80">{displayReplyToSender}</span>
             </div>
-            <div className="text-xs" style={{ color: 'var(--color-text-secondary)' }}>
+            <div className="text-xs text-muted-foreground truncate opacity-90">
               {message.replyTo.content}
             </div>
           </div>
@@ -372,12 +394,22 @@ export const ChatMessage = React.memo<ExtendedChatMessageProps>(({ message, smar
         )}
 
         {!isUrlOnly && !isSystemMessage && !isDeleted && urls.length > 0 && type !== "FILE_MESSAGE" && type !== "file" && type !== "file-message" && (
-          <div className="mb-3">
+          <div
+            className="mb-3 w-full flex self-stretch"
+            style={{
+              justifyContent: safeIsCurrentUser ? 'flex-end' : 'flex-start',
+              alignSelf: safeIsCurrentUser ? 'flex-end' : 'flex-start',
+              maxWidth: 'min(var(--message-bubble-max-width), 320px)',
+              width: '100%',
+              flex: '0 1 auto'
+            }}
+          >
             <LinkifyWithPreviews
               options={{ rel: "noopener noreferrer" }}
               showPreviews={true}
               isCurrentUser={safeIsCurrentUser}
               previewsOnly={true}
+              urls={urls}
             >
               {content}
             </LinkifyWithPreviews>
@@ -408,13 +440,24 @@ export const ChatMessage = React.memo<ExtendedChatMessageProps>(({ message, smar
             const showPreviews = !isSystemMessage && !isDeleted;
 
             if (isUrlOnly && showPreviews) {
-              // For URL-only messages, render LinkifyWithPreviews without bubble styling
               return (
-                <div className="max-w-[80%] relative" ref={bubbleRef} onContextMenu={handleContextMenu}>
+                <div
+                  className="relative self-start w-full flex"
+                  style={{
+                    alignSelf: safeIsCurrentUser ? 'flex-end' : 'flex-start',
+                    maxWidth: 'min(var(--message-bubble-max-width), 320px)',
+                    width: '100%',
+                    flex: '0 1 auto',
+                    justifyContent: safeIsCurrentUser ? 'flex-end' : 'flex-start'
+                  }}
+                  ref={bubbleRef}
+                  onContextMenu={handleContextMenu}
+                >
                   <LinkifyWithPreviews
                     options={{ rel: "noopener noreferrer" }}
                     showPreviews={true}
                     isCurrentUser={safeIsCurrentUser}
+                    urls={urls}
                   >
                     {content}
                   </LinkifyWithPreviews>
@@ -444,12 +487,14 @@ export const ChatMessage = React.memo<ExtendedChatMessageProps>(({ message, smar
                       content={content}
                       isCurrentUser={safeIsCurrentUser}
                       className="compact"
+                      preCalculatedContent={markdownContent}
                     />
                   ) : (
                     <LinkifyWithPreviews
                       options={{ rel: "noopener noreferrer" }}
                       showPreviews={false}
                       isCurrentUser={safeIsCurrentUser}
+                      urls={urls}
                     >
                       {content}
                     </LinkifyWithPreviews>
@@ -485,23 +530,29 @@ export const ChatMessage = React.memo<ExtendedChatMessageProps>(({ message, smar
             aria-label="Message reactions"
             style={{ userSelect: 'none' }}
           >
-            {Object.entries(message.reactions).map(([emoji, users]) => (
-              <button
-                key={emoji}
-                className="px-2 py-0.5 rounded-full text-xs border"
-                style={{
-                  backgroundColor: 'var(--color-surface)',
-                  borderColor: 'var(--color-border)',
-                  color: 'var(--color-text-primary)',
-                  userSelect: 'none'
-                }}
-                onClick={() => onReact?.(message, emoji)}
-                aria-label={`${emoji} reaction, ${users.length} user${users.length !== 1 ? 's' : ''}`}
-              >
-                <span className="mr-1" aria-hidden="true">{emoji}</span>
-                <span>{users.length}</span>
-              </button>
-            ))}
+            {Object.entries(message.reactions).map(([emoji, users]) => {
+              const hasReacted = currentUsername ? users.includes(currentUsername) : false;
+              return (
+                <button
+                  key={emoji}
+                  className={cn(
+                    "px-2 py-0.5 rounded-full text-xs border",
+                    hasReacted && "font-semibold"
+                  )}
+                  style={{
+                    backgroundColor: hasReacted ? 'var(--color-accent-primary)' : 'var(--color-surface)',
+                    borderColor: hasReacted ? 'var(--color-accent-primary)' : 'var(--color-border)',
+                    color: hasReacted ? 'var(--color-on-accent)' : 'var(--color-text-primary)',
+                    userSelect: 'none'
+                  }}
+                  onClick={() => onReact?.(message, emoji)}
+                  aria-label={`${emoji} reaction, ${users.length} user${users.length !== 1 ? 's' : ''}`}
+                >
+                  <span className="mr-1" aria-hidden="true">{emoji}</span>
+                  <span>{users.length}</span>
+                </button>
+              );
+            })}
           </div>
         )}
 
@@ -518,6 +569,7 @@ export const ChatMessage = React.memo<ExtendedChatMessageProps>(({ message, smar
           onClose={closePicker}
           triggerId={messageTriggerId}
           isCurrentUser={safeIsCurrentUser}
+          secureDB={secureDB}
         />
       )}
 
@@ -530,6 +582,7 @@ export const ChatMessage = React.memo<ExtendedChatMessageProps>(({ message, smar
           onReply={handleReply}
           onDelete={safeIsCurrentUser ? handleDelete : undefined}
           onReact={() => openPicker(messageTriggerId)}
+          onReactionSelect={handlePickEmoji}
           onDownload={isDownloadable ? handleDownload : undefined}
           canEdit={!isFileMessageType && safeIsCurrentUser}
           canDelete={safeIsCurrentUser}

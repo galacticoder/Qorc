@@ -735,6 +735,7 @@ export interface HybridEncryptOptions {
   metadata?: HybridEnvelopeMetadata;
   includeSharedSecretInInner?: boolean;
   senderDilithiumSecretKey?: Uint8Array | string;
+  senderDilithiumPublicKey?: Uint8Array | string;
 }
 
 export interface EnvelopeDecryptKeys {
@@ -1123,6 +1124,7 @@ class Hybrid {
       from: "client",
       type: "server",
       senderDilithiumSecretKey: options?.senderDilithiumSecretKey ?? "",
+      senderDilithiumPublicKey: options?.senderDilithiumPublicKey,
       timestamp: Date.now()
     } as any;
     if (!routing.senderDilithiumSecretKey) {

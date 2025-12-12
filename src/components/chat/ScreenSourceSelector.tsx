@@ -1,6 +1,8 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { Monitor, Square, X } from 'lucide-react';
 import { sanitizeTextInput } from '../../lib/sanitizers';
+import { cn } from '../../lib/utils';
+import { Dialog, DialogContent } from '../ui/dialog';
 
 interface ScreenSource {
   readonly id: string;
@@ -14,19 +16,19 @@ interface ScreenSourceSelectorProps {
   readonly onClose: () => void;
   readonly onSelect: (source: ScreenSource) => void;
   readonly onCancel: () => void;
-  readonly onGetAvailableScreenSources?: () => Promise<ReadonlyArray<{ 
-    readonly id: string; 
-    readonly name: string; 
-    readonly type: 'screen' | 'window' 
+  readonly onGetAvailableScreenSources?: () => Promise<ReadonlyArray<{
+    readonly id: string;
+    readonly name: string;
+    readonly type: 'screen' | 'window'
   }>>;
 }
 
-export const ScreenSourceSelector = React.memo<ScreenSourceSelectorProps>(({ 
-  isOpen, 
-  onClose, 
-  onSelect, 
+export const ScreenSourceSelector = React.memo<ScreenSourceSelectorProps>(({
+  isOpen,
+  onClose,
+  onSelect,
   onCancel,
-  onGetAvailableScreenSources 
+  onGetAvailableScreenSources
 }) => {
   const [sources, setSources] = useState<ReadonlyArray<ScreenSource>>([]);
   const [loading, setLoading] = useState<boolean>(false);
@@ -98,31 +100,33 @@ export const ScreenSourceSelector = React.memo<ScreenSourceSelectorProps>(({
           const formattedSources: ScreenSource[] = rawSources.map((source: any) => {
             let thumbnail: string | undefined;
 
-            if (source.thumbnail && typeof source.thumbnail.toDataURL === 'function') {
-              try {
-                thumbnail = source.thumbnail.toDataURL();
-              } catch {
-                thumbnail = undefined;
+            if (source.thumbnail) {
+              if (typeof source.thumbnail === 'string') {
+                thumbnail = source.thumbnail;
+              } else if (typeof source.thumbnail.toDataURL === 'function') {
+                try {
+                  thumbnail = source.thumbnail.toDataURL();
+                } catch {
+                  thumbnail = undefined;
+                }
               }
             }
 
             const isScreen = typeof source.id === 'string' && source.id.startsWith('screen:');
             const originalName = typeof source.name === 'string' ? source.name : '';
             let displayName = originalName || source.id;
-            
+
             if (isScreen) {
               if (!displayName || displayName.trim() === '') {
                 const screenNum = source.id.split(':')[1] || '0';
                 const num = parseInt(screenNum, 10);
-                displayName = `Entire Screen ${Number.isFinite(num) ? num + 1 : 1}`;
+                displayName = `Screen ${Number.isFinite(num) ? num + 1 : 1}`;
               } else {
                 displayName = `Screen: ${displayName}`;
               }
             } else {
               if (!displayName || displayName.trim() === '') {
-                displayName = `Application Window ${source.id.split(':')[1] || ''}`;
-              } else {
-                displayName = `Window: ${displayName}`;
+                displayName = `Window`;
               }
             }
 
@@ -144,13 +148,13 @@ export const ScreenSourceSelector = React.memo<ScreenSourceSelectorProps>(({
             setSources(formattedSources);
           }
         } else {
-          throw new Error('Screen source selection not available in this environment');
+          throw new Error('Screen sharing not available');
         }
       }
     } catch (_err) {
       if (_err instanceof Error && _err.name === 'AbortError') return;
       if (isMountedRef.current && !signal.aborted) {
-        setError(_err instanceof Error ? _err.message : 'Failed to load screen sources');
+        setError(_err instanceof Error ? _err.message : 'Failed to load screens');
       }
     } finally {
       if (isMountedRef.current && !signal.aborted) {
@@ -172,114 +176,90 @@ export const ScreenSourceSelector = React.memo<ScreenSourceSelectorProps>(({
 
   const sortedSources = useMemo(() => sources, [sources]);
 
-  if (!isOpen) {
-    return null;
-  }
-
   return (
-    <div 
-      className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50"
-      onClick={handleCancel}
-      role="dialog"
-      aria-modal="true"
-      aria-labelledby="screen-share-title"
-    >
-      <div 
-        className="bg-white rounded-lg shadow-xl max-w-4xl w-full mx-4 max-h-[80vh] overflow-hidden"
-        onClick={(e) => e.stopPropagation()}
-      >
-        <div className="flex items-center justify-between p-4 border-b">
-          <h2 id="screen-share-title" className="text-lg font-semibold text-gray-900">
-            Choose what to share
+    <Dialog open={isOpen} onOpenChange={(open) => !open && handleCancel()}>
+      <DialogContent className="max-w-3xl max-h-[85vh] p-0 gap-0 overflow-hidden flex flex-col border-border bg-background text-card-foreground">
+        <div className="flex items-center justify-between px-5 py-4 border-b border-border bg-background z-10 relative">
+          <h2 className="text-sm font-semibold text-foreground tracking-wide">
+            Share Screen
           </h2>
           <button
             onClick={handleCancel}
-            className="p-1 hover:bg-gray-100 rounded-full transition-colors"
-            aria-label="Close dialog"
+            className="p-1.5 hover:bg-muted rounded-md transition-colors text-muted-foreground hover:text-foreground"
+            aria-label="Close"
           >
-            <X className="w-5 h-5 text-gray-500" />
+            <X className="w-4 h-4" />
           </button>
         </div>
 
-        <div className="p-4">
+        <div className="p-5 overflow-y-auto custom-scrollbar bg-background flex-1">
           {loading && (
-            <div className="flex items-center justify-center py-8" role="status">
-              <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600" aria-hidden="true"></div>
-              <span className="ml-3 text-gray-600">Loading screen sources...</span>
+            <div className="flex flex-col items-center justify-center py-12 gap-3">
+              <div className="w-5 h-5 border-2 border-primary border-t-transparent rounded-full animate-spin"></div>
+              <span className="text-xs text-muted-foreground">Loading sources...</span>
             </div>
           )}
 
           {error && (
-            <div className="text-center py-8" role="alert">
-              <div className="text-red-600 mb-4">{error}</div>
+            <div className="flex flex-col items-center justify-center py-8 gap-4">
+              <div className="text-destructive text-xs">{error}</div>
               <button
                 onClick={loadScreenSources}
-                className="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700 transition-colors"
-                aria-label="Retry loading screen sources"
+                className="px-3 py-1.5 bg-secondary hover:bg-muted text-secondary-foreground text-xs rounded transition-colors"
               >
-                Try Again
+                Retry
               </button>
             </div>
           )}
 
           {!loading && !error && sortedSources.length > 0 && (
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 max-h-96 overflow-y-auto">
+            <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
               {sortedSources.map((source) => (
                 <button
                   key={source.id}
                   onClick={() => handleSelect(source)}
-                  className="border rounded-lg p-3 hover:border-blue-500 hover:bg-blue-50 cursor-pointer transition-colors text-left"
-                  aria-label={`Select ${source.name}`}
+                  className="group flex flex-col gap-2 p-2 rounded-lg border border-transparent hover:border-border hover:bg-card transition-all text-left outline-none focus:ring-1 focus:ring-primary/50"
+                  title={source.name}
                 >
-                  <div className="aspect-video bg-gray-100 rounded mb-2 flex items-center justify-center overflow-hidden">
+                  <div className="relative aspect-video bg-muted rounded overflow-hidden border border-border group-hover:border-primary/50 transition-colors flex items-center justify-center">
                     {source.thumbnail ? (
                       <img
                         src={source.thumbnail}
                         alt=""
-                        className="w-full h-full object-cover"
+                        className="w-full h-full object-contain"
                         loading="lazy"
                       />
                     ) : (
-                      <div className="text-gray-400" aria-hidden="true">
-                        {source.type === 'screen' ? (
-                          <Monitor className="w-8 h-8" />
-                        ) : (
-                          <Square className="w-8 h-8" />
-                        )}
+                      <div className="text-muted-foreground group-hover:text-foreground transition-colors">
+                        {source.type === 'screen' ? <Monitor className="w-8 h-8" /> : <Square className="w-8 h-8" />}
                       </div>
                     )}
+                    {/* Hover overlay */}
+                    <div className="absolute inset-0 bg-primary/0 group-hover:bg-primary/5 transition-colors" />
                   </div>
 
-                  <div className="flex items-center space-x-2">
+                  <div className="flex items-center gap-2 px-1">
                     {source.type === 'screen' ? (
-                      <Monitor className="w-4 h-4 text-gray-500 flex-shrink-0" aria-hidden="true" />
+                      <Monitor className="w-3 h-3 text-muted-foreground" />
                     ) : (
-                      <Square className="w-4 h-4 text-gray-500 flex-shrink-0" aria-hidden="true" />
+                      <Square className="w-3 h-3 text-muted-foreground" />
                     )}
-                    <span className="text-sm font-medium text-gray-900 truncate">
+                    <span className="text-xs text-foreground truncate font-medium">
                       {source.name}
                     </span>
-                  </div>
-                  
-                  <div className="text-xs text-gray-500 mt-1 capitalize">
-                    {source.type === 'screen' ? 'Entire Screen' : 'Application Window'}
                   </div>
                 </button>
               ))}
             </div>
           )}
-        </div>
 
-        <div className="flex justify-end space-x-3 p-4 border-t bg-gray-50">
-          <button
-            onClick={handleCancel}
-            className="px-4 py-2 text-gray-700 border border-gray-300 rounded hover:bg-gray-100 transition-colors"
-            aria-label="Cancel"
-          >
-            Cancel
-          </button>
+          {!loading && !error && sortedSources.length === 0 && (
+            <div className="text-center py-12 text-muted-foreground text-sm">
+              No screens found
+            </div>
+          )}
         </div>
-      </div>
-    </div>
+      </DialogContent>
+    </Dialog>
   );
 });

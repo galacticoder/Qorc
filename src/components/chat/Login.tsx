@@ -64,32 +64,16 @@ const truncateKey = (key: string, maxLength: number = 16): string => {
 };
 
 const AnimatedHeightWrapper = ({ children, className }: { children: React.ReactNode; className?: string }) => {
-  const contentRef = React.useRef<HTMLDivElement>(null);
-  const [height, setHeight] = useState<number | undefined>(undefined);
-
-  useEffect(() => {
-    if (!contentRef.current) return;
-
-    const observer = new ResizeObserver((entries) => {
-      for (const entry of entries) {
-        setHeight(entry.target.scrollHeight);
-      }
-    });
-
-    observer.observe(contentRef.current);
-    return () => observer.disconnect();
-  }, []);
-
   return (
     <div
       className={className}
       style={{
-        height: height,
-        transition: 'height 300ms cubic-bezier(0.4, 0, 0.2, 1)',
-        overflow: 'hidden'
+        display: 'grid',
+        gridTemplateRows: '1fr',
+        transition: 'grid-template-rows 300ms cubic-bezier(0.4, 0, 0.2, 1)',
       }}
     >
-      <div ref={contentRef}>
+      <div style={{ overflow: 'hidden' }}>
         {children}
       </div>
     </div>
@@ -122,7 +106,6 @@ export const Login = React.memo<LoginProps>(({
   const [mode, setMode] = useState<"login" | "register">("login");
   const [isRateLimited, setIsRateLimited] = useState<boolean>(false);
 
-  // Show error as toast notification
   useEffect(() => {
     if (error) {
       toast.error(error);
@@ -130,7 +113,6 @@ export const Login = React.memo<LoginProps>(({
     }
   }, [error]);
 
-  // Reset local submitting state when rate limited or auth error
   useEffect(() => {
     const handleRateLimited = () => {
       toast.error('Too many attempts. Please wait before trying again.');
@@ -148,8 +130,6 @@ export const Login = React.memo<LoginProps>(({
     };
   }, []);
 
-  const displayUsername = useMemo(() => pseudonym || initialUsername || '', [pseudonym, initialUsername]);
-
   const resetToLogin = useCallback((): void => {
     setIsSubmitting(false);
     setIsRateLimited(false);
@@ -159,10 +139,6 @@ export const Login = React.memo<LoginProps>(({
     }
     dispatchAuthEvent('auth-ui-back', { to: 'server' });
   }, [setShowPassphrasePrompt, setShowPasswordPrompt]);
-
-
-
-
 
   const handleAccountSubmit = useCallback(async (username: string, password: string): Promise<void> => {
     if (isRateLimited) return;

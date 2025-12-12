@@ -40,7 +40,7 @@ interface SignalingMeta {
 }
 
 interface SignalingMessage {
-  type: 'offer' | 'answer' | 'ice-candidate' | 'onion-offer' | 'onion-answer';
+  type: 'offer' | 'answer' | 'ice-candidate' | 'onion-offer' | 'onion-answer' | 'error';
   from: string;
   to: string;
   payload: any;
@@ -55,6 +55,7 @@ export class WebRTCP2PService {
   private onMessageCallback: ((message: P2PMessage) => void) | null = null;
   private onPeerConnectedCallback: ((username: string) => void) | null = null;
   private onPeerDisconnectedCallback: ((username: string) => void) | null = null;
+  private onionMessageUnsubscribe: (() => void) | null = null;
   private dummyTrafficInterval: ReturnType<typeof setInterval> | null = null;
   private heartbeatInterval: ReturnType<typeof setInterval> | null = null;
   private dilithiumKeys: { publicKey: Uint8Array; secretKey: Uint8Array } | null = null;
@@ -85,7 +86,6 @@ export class WebRTCP2PService {
   private readonly MAX_NONCES_PER_PEER = 2048;
   private readonly SESSION_REKEY_INTERVAL_MS = 60 * 60 * 1000;
 
-  // WebRTC configuration
   private rtcConfig: RTCConfiguration = {
     iceServers: [],
     iceCandidatePoolSize: 0,
@@ -96,8 +96,7 @@ export class WebRTCP2PService {
 
   constructor(username: string) {
     this.localUsername = username;
-    
-    // Listen for block events to disconnect P2P connections
+
     if (typeof window !== 'undefined') {
       window.addEventListener('user-blocked', (event: Event) => {
         const customEvent = event as CustomEvent;
@@ -110,7 +109,7 @@ export class WebRTCP2PService {
   }
 
   /**
-   * Load ICE configuration from the Electron bridge when available
+   * Load ICE configuration from the Electron bridge
    */
   private async hydrateRtcConfigFromElectron(signalingServerUrl?: string): Promise<void> {
     try {
@@ -136,7 +135,7 @@ export class WebRTCP2PService {
           if (Array.isArray(list) && list.length > 0) parsed.push({ urls: list });
         }
         if (parsed.length > 0) next.iceServers = parsed;
-      } catch {}
+      } catch { }
 
       // 1) Prefer Electron-provided ICE if env not provided
       try {
@@ -152,68 +151,67 @@ export class WebRTCP2PService {
             }
           }
         }
-      } catch {}
+      } catch { }
 
       // 2) Try self-host ICE from server endpoint if still empty
       try {
         if (!next.iceServers || next.iceServers.length === 0) {
-        // Derive base HTTP URL
-        let baseHttp = '';
-        try {
-          const envUrl = (import.meta as any).env?.VITE_WS_URL as string | undefined;
-          if (envUrl && typeof envUrl === 'string') {
-            const u = new URL(envUrl.replace('ws://','http://').replace('wss://','https://'));
-            baseHttp = `${u.protocol}//${u.host}`;
-          }
-        } catch {}
-
-        try {
-          if (!baseHttp && typeof signalingServerUrl === 'string' && signalingServerUrl) {
-            const u2 = new URL(signalingServerUrl.replace('ws://','http://').replace('wss://','https://'));
-            baseHttp = `${u2.protocol}//${u2.host}`;
-          }
-        } catch {}
-
-        try {
-          if (!baseHttp && typeof window !== 'undefined' && window.location?.origin) {
-            const { protocol, origin } = window.location as Location;
-            if (protocol === 'http:' || protocol === 'https:') {
-              baseHttp = origin;
+          let baseHttp = '';
+          try {
+            const envUrl = (import.meta as any).env?.VITE_WS_URL as string | undefined;
+            if (envUrl && typeof envUrl === 'string') {
+              const u = new URL(envUrl.replace('ws://', 'http://').replace('wss://', 'https://'));
+              baseHttp = `${u.protocol}//${u.host}`;
             }
-          }
-        } catch {}
+          } catch { }
 
-        if (baseHttp && (baseHttp.startsWith('http://') || baseHttp.startsWith('https://'))) {
-          const resp = await fetch(`${baseHttp}/api/ice/config`, { method: 'GET', credentials: 'omit' });
-          if (resp.ok) {
-            const ice = await resp.json();
-            if (ice && Array.isArray(ice.iceServers) && ice.iceServers.length > 0 && (!next.iceServers || next.iceServers.length === 0)) {
-              next.iceServers = ice.iceServers;
-              if (ice.iceTransportPolicy === 'relay' || ice.iceTransportPolicy === 'all') {
-                next.iceTransportPolicy = ice.iceTransportPolicy;
+          try {
+            if (!baseHttp && typeof signalingServerUrl === 'string' && signalingServerUrl) {
+              const u2 = new URL(signalingServerUrl.replace('ws://', 'http://').replace('wss://', 'https://'));
+              baseHttp = `${u2.protocol}//${u2.host}`;
+            }
+          } catch { }
+
+          try {
+            if (!baseHttp && typeof window !== 'undefined' && window.location?.origin) {
+              const { protocol, origin } = window.location as Location;
+              if (protocol === 'http:' || protocol === 'https:') {
+                baseHttp = origin;
+              }
+            }
+          } catch { }
+
+          if (baseHttp && (baseHttp.startsWith('http://') || baseHttp.startsWith('https://'))) {
+            const resp = await fetch(`${baseHttp}/api/ice/config`, { method: 'GET', credentials: 'omit' });
+            if (resp.ok) {
+              const ice = await resp.json();
+              if (ice && Array.isArray(ice.iceServers) && ice.iceServers.length > 0 && (!next.iceServers || next.iceServers.length === 0)) {
+                next.iceServers = ice.iceServers;
+                if (ice.iceTransportPolicy === 'relay' || ice.iceTransportPolicy === 'all') {
+                  next.iceTransportPolicy = ice.iceTransportPolicy;
+                }
               }
             }
           }
         }
-        }
-      } catch {}
+      } catch { }
 
       const sanitized: any[] = [];
       for (const srv of (next.iceServers || [])) {
         const urls = Array.isArray(srv.urls) ? srv.urls : [srv.urls];
         const isTurn = urls.some((u: any) => typeof u === 'string' && (u.startsWith('turn:') || u.startsWith('turns:')));
         const isStun = urls.some((u: any) => typeof u === 'string' && u.startsWith('stun:'));
-        
+
         if (isTurn && (!srv.username || !srv.credential)) {
           continue;
         }
-        
+
         if (isStun || (isTurn && srv.username && srv.credential)) {
           sanitized.push(srv);
         }
       }
       next.iceServers = sanitized;
-      
+
       const hasTurn = sanitized.some((srv: any) => {
         const urls = Array.isArray(srv.urls) ? srv.urls : [srv.urls];
         return urls.some((u: any) => typeof u === 'string' && (u.startsWith('turn:') || u.startsWith('turns:')));
@@ -231,8 +229,8 @@ export class WebRTCP2PService {
           iceServers: (next.iceServers || []).length,
           policy: next.iceTransportPolicy
         });
-      } catch {}
-    } catch {}
+      } catch { }
+    } catch { }
   }
 
   /**
@@ -259,13 +257,13 @@ export class WebRTCP2PService {
   }): Promise<void> {
     try {
       await this.hydrateRtcConfigFromElectron(signalingServerUrl);
-      try { this.auditLogger.log('info', 'p2p-init-start', { server: signalingServerUrl || '' }); } catch {}
+      try { this.auditLogger.log('info', 'p2p-init-start', { server: signalingServerUrl || '' }); } catch { }
       this.signalingChannel = new WebSocket(signalingServerUrl);
 
       this.signalingChannel.onopen = () => {
         this.logAuditEvent('signaling-connected', 'server');
-        try { this.auditLogger.log('info', 'p2p-signaling-open', {}); } catch {}
-this.sendSignalingMessage({
+        try { this.auditLogger.log('info', 'p2p-signaling-open', {}); } catch { }
+        this.sendSignalingMessage({
           type: 'register',
           from: this.localUsername,
           payload: {
@@ -276,20 +274,20 @@ this.sendSignalingMessage({
         });
       };
 
-this.signalingChannel.onmessage = (event) => {
+      this.signalingChannel.onmessage = (event) => {
         try {
           const message = JSON.parse(event.data);
-          try { this.auditLogger.log('info', 'p2p-signaling-msg', { type: message?.type, from: message?.from, to: message?.to }); } catch {}
+          try { this.auditLogger.log('info', 'p2p-signaling-msg', { type: message?.type, from: message?.from, to: message?.to }); } catch { }
           this.handleSignalingMessage(message as any);
         } catch (_error) {
           handleP2PError(_error as Error, { context: 'signaling_message_parse' });
-          try { this.auditLogger.log('warn', 'p2p-signaling-parse-error', {}); } catch {}
+          try { this.auditLogger.log('warn', 'p2p-signaling-parse-error', {}); } catch { }
         }
       };
 
       this.signalingChannel.onclose = () => {
         this.logAuditEvent('signaling-disconnect', 'server');
-        try { this.auditLogger.log('info', 'p2p-signaling-close', {}); } catch {}
+        try { this.auditLogger.log('info', 'p2p-signaling-close', {}); } catch { }
         if (this.signalingChannel?.readyState === WebSocket.CLOSED) {
           this.signalingChannel = null;
           setTimeout(() => {
@@ -309,11 +307,16 @@ this.signalingChannel.onmessage = (event) => {
       try {
         const api: any = (window as any).electronAPI || (window as any).edgeApi || null;
         if (api && typeof api.onOnionMessage === 'function') {
-          api.onOnionMessage((_evt: any, data: any) => {
-            try { this.handleP2PMessage(data); } catch {}
+          if (this.onionMessageUnsubscribe) {
+            this.onionMessageUnsubscribe();
+            this.onionMessageUnsubscribe = null;
+          }
+
+          this.onionMessageUnsubscribe = api.onOnionMessage((_evt: any, data: any) => {
+            try { this.handleP2PMessage(data); } catch { }
           });
         }
-      } catch {}
+      } catch { }
     } catch (_error) {
       handleP2PError(_error as Error, { context: 'p2p_initialization' });
       throw _error;
@@ -327,8 +330,8 @@ this.signalingChannel.onmessage = (event) => {
     peerCertificate?: { dilithiumPublicKey: string; kyberPublicKey: string; x25519PublicKey?: string };
     routeProof?: { payload: any; signature: string };
   }): Promise<void> {
-    try { this.auditLogger.log('info', 'p2p-connect-attempt', { peer: username }); } catch {}
-    
+    try { this.auditLogger.log('info', 'p2p-connect-attempt', { peer: username }); } catch { }
+
     // Check if user is blocked before allowing P2P connection
     try {
       const { blockStatusCache } = await import('./block-status-cache');
@@ -341,7 +344,7 @@ this.signalingChannel.onmessage = (event) => {
         throw _error;
       }
     }
-    
+
     // Check if peer already exists
     if (this.peers.has(username)) {
       const existing = this.peers.get(username);
@@ -362,8 +365,8 @@ this.signalingChannel.onmessage = (event) => {
 
     const peerId = this.generatePeerId();
     const connection = new RTCPeerConnection(this.rtcConfig);
-    try { this.auditLogger.log('info', 'p2p-pc-created', { peer: username, iceServers: (this.rtcConfig.iceServers || []).length, policy: this.rtcConfig.iceTransportPolicy }); } catch {}
-    
+    try { this.auditLogger.log('info', 'p2p-pc-created', { peer: username, iceServers: (this.rtcConfig.iceServers || []).length, policy: this.rtcConfig.iceTransportPolicy }); } catch { }
+
     const peer: PeerConnection = {
       id: peerId,
       username,
@@ -376,22 +379,21 @@ this.signalingChannel.onmessage = (event) => {
     };
 
     this.peers.set(username, peer);
-    
-    // Set timeout to detect if offer was never received by peer
+
     const connectionTimeout = setTimeout(() => {
       const currentPeer = this.peers.get(username);
-      if (currentPeer && currentPeer.state === 'connecting' && 
-          currentPeer.connection.signalingState === 'have-local-offer' &&
-          !currentPeer.connection.remoteDescription) {
-        try { this.auditLogger.log('warn', 'p2p-connection-timeout', { peer: username }); } catch {}
+      if (currentPeer && currentPeer.state === 'connecting' &&
+        currentPeer.connection.signalingState === 'have-local-offer' &&
+        !currentPeer.connection.remoteDescription) {
+        try { this.auditLogger.log('warn', 'p2p-connection-timeout', { peer: username }); } catch { }
         try {
           currentPeer.connection.close();
           if (currentPeer.dataChannel) currentPeer.dataChannel.close();
-        } catch {}
+        } catch { }
         this.peers.delete(username);
       }
     }, 15000);
-    
+
     const originalOnOpen = () => {
       clearTimeout(connectionTimeout);
       peer.state = 'connected';
@@ -401,7 +403,7 @@ this.signalingChannel.onmessage = (event) => {
         this.initiatePostQuantumKeyExchange(username);
       }
       this.startSessionRekey(username);
-      try { this.auditLogger.log('info', 'p2p-dc-open', { peer: username }); } catch {}
+      try { this.auditLogger.log('info', 'p2p-dc-open', { peer: username }); } catch { }
       this.onPeerConnectedCallback?.(username);
     };
 
@@ -414,14 +416,12 @@ this.signalingChannel.onmessage = (event) => {
     peer.dataChannel = dataChannel;
 
     this.setupBackpressureHandlers(dataChannel, username);
-
-    // Set up data channel handlers
     dataChannel.onopen = originalOnOpen;
 
     dataChannel.onmessage = (event) => {
       try {
         const message = JSON.parse(event.data);
-        try { this.auditLogger.log('info', 'p2p-dc-in', { peer: username, type: message?.type }); } catch {}
+        try { this.auditLogger.log('info', 'p2p-dc-in', { peer: username, type: message?.type }); } catch { }
         this.handleP2PMessage(message);
       } catch (_error) {
         this.logAuditEvent('message-parse-failed', username);
@@ -431,7 +431,7 @@ this.signalingChannel.onmessage = (event) => {
     dataChannel.onclose = () => {
       peer.state = 'disconnected';
       this.logAuditEvent('p2p-disconnected', username);
-      try { this.auditLogger.log('info', 'p2p-dc-close', { peer: username }); } catch {}
+      try { this.auditLogger.log('info', 'p2p-dc-close', { peer: username }); } catch { }
       this.onPeerDisconnectedCallback?.(username);
       this.cleanupPeer(username);
     };
@@ -444,7 +444,7 @@ this.signalingChannel.onmessage = (event) => {
       onionFallbackScheduled = true;
       setTimeout(() => {
         if (peer.state !== 'connected') {
-          this.fallbackToOnion(username).catch(() => {});
+          this.fallbackToOnion(username).catch(() => { });
         }
       }, 12000);
     };
@@ -452,8 +452,8 @@ this.signalingChannel.onmessage = (event) => {
     connection.onicecandidate = (event) => {
       if (event.candidate) {
         iceCount++;
-        try { this.auditLogger.log('info', 'p2p-ice-candidate', { peer: username, count: iceCount }); } catch {}
-this.sendSignalingMessage({
+        try { this.auditLogger.log('info', 'p2p-ice-candidate', { peer: username, count: iceCount }); } catch { }
+        this.sendSignalingMessage({
           type: 'ice-candidate',
           from: this.localUsername,
           to: username,
@@ -470,12 +470,12 @@ this.sendSignalingMessage({
         }
       };
       scheduleOnionFallback();
-    } catch {}
+    } catch { }
 
     // Create offer
     const offer = await connection.createOffer();
     await connection.setLocalDescription(offer);
-    try { this.auditLogger.log('info', 'p2p-offer-created', { peer: username }); } catch {}
+    try { this.auditLogger.log('info', 'p2p-offer-created', { peer: username }); } catch { }
 
     this.sendSignalingMessage({
       type: 'offer',
@@ -499,17 +499,17 @@ this.sendSignalingMessage({
   ): Promise<void> {
     const peer = this.peers.get(to);
     if (!peer || peer.state !== 'connected') {
-      try { this.auditLogger.log('warn', 'p2p-send-no-connection', { peer: to, type: messageType }); } catch {}
+      try { this.auditLogger.log('warn', 'p2p-send-no-connection', { peer: to, type: messageType }); } catch { }
       throw new Error(`No active P2P connection to ${to}`);
     }
 
     const isHandshakeMessage = messageType === 'signal' && (message?.kind?.startsWith('pq-key') || message?.kind?.startsWith('session-'));
-    
+
     if (!isHandshakeMessage) {
       const session = this.pqSessions.get(to);
       if (!session || !session.established || !session.sendKey || !session.receiveKey) {
         console.error('[P2P] SECURITY: Cannot send message - no PQ session established', { peer: to, type: messageType });
-        try { this.auditLogger.log('error', 'p2p-send-no-session', { peer: to, type: messageType }); } catch {}
+        try { this.auditLogger.log('error', 'p2p-send-no-session', { peer: to, type: messageType }); } catch { }
         throw new Error(`SECURITY: Cannot send ${messageType} message without established PQ session`);
       }
     }
@@ -525,7 +525,7 @@ this.sendSignalingMessage({
       timestamp: Date.now(),
       payload
     };
-    try { this.auditLogger.log('info', 'p2p-send', { peer: to, type: messageType, size: JSON.stringify(p2pMessage).length }); } catch {}
+    try { this.auditLogger.log('info', 'p2p-send', { peer: to, type: messageType, size: JSON.stringify(p2pMessage).length }); } catch { }
 
     try {
       if (this.dilithiumKeys) {
@@ -543,7 +543,17 @@ this.sendSignalingMessage({
     if (peer.transport === 'onion' && peer.onionSocket && peer.onionSocket.readyState === 1) {
       peer.onionSocket.send(JSON.stringify(p2pMessage));
     } else if (peer.dataChannel && peer.dataChannel.readyState === 'open') {
-      peer.dataChannel.send(JSON.stringify(p2pMessage));
+      try {
+        peer.dataChannel.send(JSON.stringify(p2pMessage));
+      } catch (err: any) {
+        if (err.name === 'InvalidStateError') {
+          console.warn('[P2P] DataChannel send failed (InvalidStateError), closing channel', { peer: to });
+          try { peer.dataChannel.close(); } catch { }
+          peer.state = 'disconnected';
+          this.onPeerDisconnectedCallback?.(to);
+        }
+        throw err;
+      }
     } else {
       throw new Error('No active transport');
     }
@@ -555,7 +565,7 @@ this.sendSignalingMessage({
    * Handle incoming P2P messages
    */
   private async handleP2PMessage(message: P2PMessage): Promise<void> {
-    try { this.auditLogger.log('info', 'p2p-recv', { from: message?.from || '', type: message?.type }); } catch {}
+    try { this.auditLogger.log('info', 'p2p-recv', { from: message?.from || '', type: message?.type }); } catch { }
     // Validate message size
     const messageStr = JSON.stringify(message);
     if (messageStr.length > this.MAX_MESSAGE_SIZE) {
@@ -581,23 +591,23 @@ this.sendSignalingMessage({
           const isValid = await CryptoUtils.Dilithium.verify(signature, messageBytes, peerPublicKey);
           if (!isValid) {
             this.logAuditEvent('signature-verification-failed', message.from);
-            try { this.auditLogger.log('warn', 'p2p-sig-invalid', { from: message.from }); } catch {}
-            return; // Reject message with invalid signature
+            try { this.auditLogger.log('warn', 'p2p-sig-invalid', { from: message.from }); } catch { }
+            return;
           }
           this.logAuditEvent('message-verified', message.from);
-          try { this.auditLogger.log('info', 'p2p-sig-ok', { from: message.from }); } catch {}
+          try { this.auditLogger.log('info', 'p2p-sig-ok', { from: message.from }); } catch { }
         } else {
           this.logAuditEvent('missing-peer-key', message.from);
         }
       } catch (error) {
         this.logAuditEvent('signature-verification-error', message.from);
-        return; // Reject message on verification error
+        return;
       }
     }
 
     if (!this.validateMessageFreshness(message)) {
       this.logAuditEvent('message-stale', message.from);
-      try { this.auditLogger.log('warn', 'p2p-stale', { from: message.from }); } catch {}
+      try { this.auditLogger.log('warn', 'p2p-stale', { from: message.from }); } catch { }
       return;
     }
 
@@ -611,7 +621,7 @@ this.sendSignalingMessage({
     switch (message.type) {
       case 'signal': {
         const kind = message.payload?.kind;
-        try { this.auditLogger.log('info', 'p2p-signal', { from: message.from, kind }); } catch {}
+        try { this.auditLogger.log('warn', 'p2p-file-error', { from: message.from, error: 'unknown-file-error' }); } catch { }
         if (kind === 'pq-key-exchange-init') {
           await this.handlePQKeyExchangeInit(message.from, message.payload);
         } else if (kind === 'pq-key-exchange-response') {
@@ -619,27 +629,26 @@ this.sendSignalingMessage({
         } else if (kind === 'pq-key-exchange-finalize') {
           this.handlePQKeyExchangeFinalize(message.from);
         } else if (kind === 'session-reset-request') {
-          // Clear local session state and acknowledge. Initiator will re-initiate.
           try {
             const evt = new CustomEvent('p2p-session-reset-request', { detail: { from: message.from, reason: message?.payload?.reason } });
             window.dispatchEvent(evt);
-          } catch {}
+          } catch { }
           try {
             this.resetPqSession(message.from);
-          } catch {}
-          try { await this.sendMessage(message.from, { kind: 'session-reset-ack' }, 'signal'); } catch {}
-          try { if (this.isLocalInitiator(message.from)) { this.initiatePostQuantumKeyExchange(message.from); } } catch {}
+          } catch { }
+          try { await this.sendMessage(message.from, { kind: 'session-reset-ack' }, 'signal'); } catch { }
+          try { if (this.isLocalInitiator(message.from)) { this.initiatePostQuantumKeyExchange(message.from); } } catch { }
         } else if (kind === 'session-reset-ack') {
           try {
             const evt = new CustomEvent('p2p-session-reset-ack', { detail: { from: message.from } });
             window.dispatchEvent(evt);
-          } catch {}
+          } catch { }
           try {
             const s = this.pqSessions.get(message.from);
             if (this.isLocalInitiator(message.from) && (!s || !s.inProgress)) {
               this.initiatePostQuantumKeyExchange(message.from);
             }
-          } catch {}
+          } catch { }
         } else {
           this.onMessageCallback?.(message);
         }
@@ -654,28 +663,28 @@ this.sendSignalingMessage({
         const session = this.pqSessions.get(message.from);
         if (!session || !session.established || !session.sendKey || !session.receiveKey) {
           console.error('[P2P] SECURITY: Rejecting message - no PQ session established', { from: message.from, type: message.type });
-          try { this.auditLogger.log('error', 'p2p-no-session-reject', { from: message.from, type: message.type }); } catch {}
+          try { this.auditLogger.log('error', 'p2p-no-session-reject', { from: message.from, type: message.type }); } catch { }
           try {
             if (this.shouldInitiateHandshake(message.from)) {
               this.initiatePostQuantumKeyExchange(message.from);
             }
-          } catch {}
+          } catch { }
           return;
         }
-        
+
         if (!message.payload || message.payload.version !== 'pq-aead-v1') {
           console.error('[P2P] SECURITY: Rejecting unencrypted payload', { from: message.from, type: message.type });
-          try { this.auditLogger.log('error', 'p2p-unencrypted-reject', { from: message.from, type: message.type }); } catch {}
+          try { this.auditLogger.log('error', 'p2p-unencrypted-reject', { from: message.from, type: message.type }); } catch { }
           return;
         }
-        
+
         try {
           const decrypted = await this.decryptPayload(message.from, message.payload);
           message.payload = decrypted;
-          try { this.auditLogger.log('info', 'p2p-decrypt-ok', { from: message.from }); } catch {}
+          try { this.auditLogger.log('info', 'p2p-decrypt-ok', { from: message.from }); } catch { }
         } catch (_error) {
           console.error('[P2P] Failed to decrypt PQ payload:', (_error as any)?.message || _error);
-          try { this.auditLogger.log('error', 'p2p-decrypt-failed', { from: message.from }); } catch {}
+          try { this.auditLogger.log('error', 'p2p-decrypt-failed', { from: message.from }); } catch { }
           try {
             const last = this.lastPqRekeyAttempt.get(message.from) || 0;
             const now = Date.now();
@@ -686,11 +695,10 @@ this.sendSignalingMessage({
                   this.initiatePostQuantumKeyExchange(message.from);
                 }
               } else {
-                // Ask initiator to reset session
-                try { await this.sendMessage(message.from, { kind: 'session-reset-request', reason: 'decrypt-failed' }, 'signal'); } catch {}
+                try { await this.sendMessage(message.from, { kind: 'session-reset-request', reason: 'decrypt-failed' }, 'signal'); } catch { }
               }
             }
-          } catch {}
+          } catch { }
           return;
         }
 
@@ -703,7 +711,7 @@ this.sendSignalingMessage({
             const evt = new CustomEvent('p2p-file-ack', { detail: { from: message.from, to: message.to, payload: message.payload } });
             window.dispatchEvent(evt);
           }
-        } catch (_e) {}
+        } catch (_e) { }
         this.onMessageCallback?.(message);
         break;
       }
@@ -712,24 +720,24 @@ this.sendSignalingMessage({
         const session = this.pqSessions.get(message.from);
         if (!session || !session.established || !session.sendKey || !session.receiveKey) {
           console.error('[P2P] SECURITY: Rejecting receipt - no PQ session established', { from: message.from, type: message.type });
-          try { this.auditLogger.log('error', 'p2p-no-session-reject', { from: message.from, type: message.type }); } catch {}
+          try { this.auditLogger.log('error', 'p2p-no-session-reject', { from: message.from, type: message.type }); } catch { }
           return;
         }
-        
+
         if (!message.payload || message.payload.version !== 'pq-aead-v1') {
           console.error('[P2P] SECURITY: Rejecting unencrypted receipt', { from: message.from, type: message.type });
-          try { this.auditLogger.log('error', 'p2p-unencrypted-reject', { from: message.from, type: message.type }); } catch {}
+          try { this.auditLogger.log('error', 'p2p-unencrypted-reject', { from: message.from, type: message.type }); } catch { }
           return;
         }
-        
+
         // Decrypt PQ AEAD layer to get the hybrid envelope
         try {
           const decrypted = await this.decryptPayload(message.from, message.payload);
           message.payload = decrypted;
-          try { this.auditLogger.log('info', 'p2p-receipt-decrypt-ok', { from: message.from, type: message.type }); } catch {}
+          try { this.auditLogger.log('info', 'p2p-receipt-decrypt-ok', { from: message.from, type: message.type }); } catch { }
         } catch (_error) {
           console.error('[P2P] Failed to decrypt PQ receipt payload:', (_error as any)?.message || _error);
-          try { this.auditLogger.log('error', 'p2p-receipt-decrypt-failed', { from: message.from, type: message.type }); } catch {}
+          try { this.auditLogger.log('error', 'p2p-receipt-decrypt-failed', { from: message.from, type: message.type }); } catch { }
           return;
         }
         this.onMessageCallback?.(message);
@@ -759,7 +767,7 @@ this.sendSignalingMessage({
   }
 
   private async initiatePostQuantumKeyExchange(peerUsername: string): Promise<void> {
-    try { this.auditLogger.log('info', 'p2p-pq-init', { peer: peerUsername }); } catch {}
+    try { this.auditLogger.log('info', 'p2p-pq-init', { peer: peerUsername }); } catch { }
     const peer = this.peers.get(peerUsername);
     if (!peer || !peer.dataChannel) {
       return;
@@ -799,7 +807,7 @@ this.sendSignalingMessage({
     if (!peer || !peer.dataChannel) return;
 
     if (this.isLocalInitiator(from)) {
-      try { this.auditLogger.log('info', 'p2p-pq-init-ignored-collision', { peer: from }); } catch {}
+      try { this.auditLogger.log('info', 'p2p-pq-init-ignored-collision', { peer: from }); } catch { }
       return;
     }
 
@@ -826,7 +834,7 @@ this.sendSignalingMessage({
           kyberCiphertext: PostQuantumUtils.uint8ArrayToBase64(ciphertext)
         }
       };
-      try { this.auditLogger.log('info', 'p2p-pq-response', { peer: from }); } catch {}
+      try { this.auditLogger.log('info', 'p2p-pq-response', { peer: from }); } catch { }
 
       peer.dataChannel.send(JSON.stringify(response));
       this.logAuditEvent('pq-key-response', from);
@@ -852,10 +860,10 @@ this.sendSignalingMessage({
       session.established = true;
       session.inProgress = false;
       this.pqSessions.set(from, session);
-      
+
       this.logAuditEvent('pq-key-established', from);
-      try { this.auditLogger.log('info', 'p2p-pq-established', { peer: from }); } catch {}
-      try { window.dispatchEvent(new CustomEvent('p2p-pq-established', { detail: { peer: from } })); } catch {}
+      try { this.auditLogger.log('info', 'p2p-pq-established', { peer: from }); } catch { }
+      try { window.dispatchEvent(new CustomEvent('p2p-pq-established', { detail: { peer: from } })); } catch { }
 
       const finalize = {
         type: 'signal',
@@ -866,7 +874,7 @@ this.sendSignalingMessage({
           kind: 'pq-key-exchange-finalize'
         }
       };
-      try { this.auditLogger.log('info', 'p2p-pq-finalize', { peer: from }); } catch {}
+      try { this.auditLogger.log('info', 'p2p-pq-finalize', { peer: from }); } catch { }
 
       peer.dataChannel.send(JSON.stringify(finalize));
       this.logAuditEvent('pq-key-finalize', from);
@@ -883,8 +891,8 @@ this.sendSignalingMessage({
         session.inProgress = false;
         this.pqSessions.set(from, session);
         this.logAuditEvent('pq-key-established', from);
-        try { this.auditLogger.log('info', 'p2p-pq-established', { peer: from }); } catch {}
-        try { window.dispatchEvent(new CustomEvent('p2p-pq-established', { detail: { peer: from } })); } catch {}
+        try { this.auditLogger.log('info', 'p2p-pq-established', { peer: from }); } catch { }
+        try { window.dispatchEvent(new CustomEvent('p2p-pq-established', { detail: { peer: from } })); } catch { }
       }
     }
   }
@@ -995,7 +1003,7 @@ this.sendSignalingMessage({
     }
 
     nonces.set(nonce, now);
-    
+
     if (nonces.size > this.MAX_NONCES_PER_PEER) {
       const entries = Array.from(nonces.entries());
       const validEntries = entries.filter(([_, timestamp]) => now - timestamp <= this.REPLAY_WINDOW_MS);
@@ -1003,7 +1011,7 @@ this.sendSignalingMessage({
     } else {
       this.messageNonces.set(message.from, nonces);
     }
-    
+
     return true;
   }
 
@@ -1013,7 +1021,7 @@ this.sendSignalingMessage({
         peer,
         ...details
       });
-    } catch {}
+    } catch { }
   }
 
   private async encryptPayload(to: string, payload: any): Promise<any> {
@@ -1055,7 +1063,7 @@ this.sendSignalingMessage({
   /**
    * Handle signaling messages for WebRTC negotiation
    */
-private async handleSignalingMessage(message: SignalingMessage & { meta?: any }): Promise<void> {
+  private async handleSignalingMessage(message: SignalingMessage & { meta?: any }): Promise<void> {
     const { type, from, to, payload, meta } = message;
 
     if (to !== this.localUsername) return;
@@ -1066,10 +1074,10 @@ private async handleSignalingMessage(message: SignalingMessage & { meta?: any })
       if (isBlocked === true) {
         return;
       }
-    } catch {}
+    } catch { }
 
     let peer = this.peers.get(from);
-    
+
     switch (type) {
       case 'offer':
         if (peer && peer.state === 'connecting') {
@@ -1088,14 +1096,14 @@ private async handleSignalingMessage(message: SignalingMessage & { meta?: any })
               peer.connection.onicecandidate = null;
               peer.connection.ondatachannel = null;
               peer.connection.close();
-            } catch {}
+            } catch { }
             this.peers.delete(from);
             peer = undefined;
           } else {
             return;
           }
         }
-        
+
         // Reconnection case: peer reconnects after disconnect that we didn't detect
         if (peer && peer.state === 'connected') {
           try {
@@ -1111,16 +1119,16 @@ private async handleSignalingMessage(message: SignalingMessage & { meta?: any })
             peer.connection.onicecandidate = null;
             peer.connection.ondatachannel = null;
             peer.connection.close();
-          } catch {}
+          } catch { }
           this.cleanupPeer(from);
           peer = undefined;
         }
-        
+
         if (!peer) {
           // Create new peer connection for incoming offer
           const peerId = this.generatePeerId();
           const connection = new RTCPeerConnection(this.rtcConfig);
-          
+
           peer = {
             id: peerId,
             username: from,
@@ -1149,13 +1157,13 @@ private async handleSignalingMessage(message: SignalingMessage & { meta?: any })
             const channel = event.channel;
             peer!.dataChannel = channel;
             this.setupBackpressureHandlers(channel, from);
-            
+
             channel.onopen = () => {
               peer!.state = 'connected';
               peer!.transport = 'webrtc';
               try {
                 window.dispatchEvent(new CustomEvent('p2p-fetch-peer-cert', { detail: { peer: from } }));
-              } catch {}
+              } catch { }
               if (this.shouldInitiateHandshake(from)) {
                 this.initiatePostQuantumKeyExchange(from);
               }
@@ -1183,7 +1191,7 @@ private async handleSignalingMessage(message: SignalingMessage & { meta?: any })
         const queued = this.pendingIceCandidates.get(from);
         if (queued && queued.length) {
           for (const c of queued) {
-            try { await peer.connection.addIceCandidate(c); } catch (_e) {}
+            try { await peer.connection.addIceCandidate(c); } catch (_e) { }
           }
           this.pendingIceCandidates.delete(from);
         }
@@ -1207,9 +1215,9 @@ private async handleSignalingMessage(message: SignalingMessage & { meta?: any })
           const token = message.payload?.token;
           if (typeof wsUrl === 'string' && wsUrl.startsWith('ws')) {
             await this.connectOnionSocket(from, wsUrl, token);
-            try { await this.sendOnionAnswer(from); } catch {}
+            try { await this.sendOnionAnswer(from); } catch { }
           }
-        } catch {}
+        } catch { }
         break;
       }
 
@@ -1220,7 +1228,7 @@ private async handleSignalingMessage(message: SignalingMessage & { meta?: any })
           if (typeof wsUrl === 'string' && wsUrl.startsWith('ws')) {
             await this.connectOnionSocket(from, wsUrl, token);
           }
-        } catch {}
+        } catch { }
         break;
       }
 
@@ -1230,7 +1238,7 @@ private async handleSignalingMessage(message: SignalingMessage & { meta?: any })
           const queuedAns = this.pendingIceCandidates.get(from);
           if (queuedAns && queuedAns.length) {
             for (const c of queuedAns) {
-              try { await peer.connection.addIceCandidate(c); } catch (_e) {}
+              try { await peer.connection.addIceCandidate(c); } catch (_e) { }
             }
             this.pendingIceCandidates.delete(from);
           }
@@ -1248,9 +1256,9 @@ private async handleSignalingMessage(message: SignalingMessage & { meta?: any })
           }
         }
         break;
-      
+
       case 'error':
-        try { this.auditLogger.log('warn', 'p2p-signaling-error', { from, to, messageType: message?.type }); } catch {}
+        try { this.auditLogger.log('warn', 'p2p-signaling-error', { from, to, messageType: message?.type }); } catch { }
         console.error('[P2P] Signaling error', {
           from,
           to,
@@ -1431,7 +1439,7 @@ private async handleSignalingMessage(message: SignalingMessage & { meta?: any })
   setBufferedAmountLowThreshold(username: string, threshold: number): void {
     const peer = this.peers.get(username);
     if (peer?.dataChannel) {
-      try { peer.dataChannel.bufferedAmountLowThreshold = threshold; } catch {}
+      try { peer.dataChannel.bufferedAmountLowThreshold = threshold; } catch { }
     }
   }
 
@@ -1458,9 +1466,9 @@ private async handleSignalingMessage(message: SignalingMessage & { meta?: any })
   disconnectPeer(username: string): void {
     const peer = this.peers.get(username);
     if (peer) {
-      try { peer.connection.close(); } catch {}
+      try { peer.connection.close(); } catch { }
       if (peer.dataChannel && peer.dataChannel.readyState === 'open') {
-        try { peer.dataChannel.close(); } catch {}
+        try { peer.dataChannel.close(); } catch { }
       }
       this.cleanupPeer(username);
       this.onPeerDisconnectedCallback?.(username);
@@ -1540,7 +1548,7 @@ private async handleSignalingMessage(message: SignalingMessage & { meta?: any })
     if (this.signalingChannel) {
       try {
         if (this.signalingChannel.readyState === WebSocket.OPEN ||
-            this.signalingChannel.readyState === WebSocket.CONNECTING) {
+          this.signalingChannel.readyState === WebSocket.CONNECTING) {
           this.signalingChannel.close();
         }
       } catch (_error) {
@@ -1577,9 +1585,9 @@ private async handleSignalingMessage(message: SignalingMessage & { meta?: any })
   private resetPqSession(username: string): void {
     const s = this.pqSessions.get(username);
     if (s) {
-      try { if (s.sharedSecret) s.sharedSecret.fill(0); } catch {}
-      try { if (s.sendKey) s.sendKey.fill(0); } catch {}
-      try { if (s.receiveKey) s.receiveKey.fill(0); } catch {}
+      try { if (s.sharedSecret) s.sharedSecret.fill(0); } catch { }
+      try { if (s.sendKey) s.sendKey.fill(0); } catch { }
+      try { if (s.receiveKey) s.receiveKey.fill(0); } catch { }
     }
     this.pqSessions.set(username, {
       kyberKeyPair: s?.kyberKeyPair,
@@ -1604,13 +1612,12 @@ private async handleSignalingMessage(message: SignalingMessage & { meta?: any })
       const peer = this.peers.get(username);
       if (!peer || peer.state === 'connected' || peer.transport === 'onion') return;
 
-      // Require Tor to be available
       if (!torNetworkManager.isSupported() || !torNetworkManager.isConnected()) {
         return;
       }
 
       await this.advertiseOnionEndpoint(username);
-    } catch {}
+    } catch { }
   }
 
   private async advertiseOnionEndpoint(toUser: string): Promise<void> {
@@ -1629,7 +1636,7 @@ private async handleSignalingMessage(message: SignalingMessage & { meta?: any })
         to: toUser,
         payload: { wsUrl: endpoint.wsUrl, token: endpoint.token || null }
       });
-    } catch {}
+    } catch { }
   }
 
   private async sendOnionAnswer(toUser: string): Promise<void> {
@@ -1646,7 +1653,7 @@ private async handleSignalingMessage(message: SignalingMessage & { meta?: any })
         to: toUser,
         payload: { wsUrl: endpoint.wsUrl, token: endpoint.token || null }
       });
-    } catch {}
+    } catch { }
   }
 
   private async connectOnionSocket(fromUser: string, wsUrl: string, token?: string): Promise<void> {
@@ -1669,7 +1676,7 @@ private async handleSignalingMessage(message: SignalingMessage & { meta?: any })
       }
 
       let socket: WebSocket | null = null;
-      // Prefer Electron-provided connector
+      
       const api: any = (window as any).electronAPI || (window as any).edgeApi || null;
       if (api && typeof api.connectOnionWebSocket === 'function') {
         socket = await api.connectOnionWebSocket({ wsUrl, token });
@@ -1694,7 +1701,7 @@ private async handleSignalingMessage(message: SignalingMessage & { meta?: any })
         try {
           const msg: P2PMessage = JSON.parse(String(event.data));
           this.handleP2PMessage(msg);
-        } catch {}
+        } catch { }
       };
       socket.onclose = () => {
         if (existing.transport === 'onion') {
@@ -1704,15 +1711,15 @@ private async handleSignalingMessage(message: SignalingMessage & { meta?: any })
       };
       socket.onerror = () => {
       };
-    } catch {}
+    } catch { }
   }
 
   private setupBackpressureHandlers(channel: RTCDataChannel, username: string): void {
     try {
       channel.bufferedAmountLowThreshold = 262144;
-      try { this.auditLogger.log('info', 'p2p-dc-buffer-threshold', { peer: username, value: 262144 }); } catch {}
-    } catch {}
-    
+      try { this.auditLogger.log('info', 'p2p-dc-buffer-threshold', { peer: username, value: 262144 }); } catch { }
+    } catch { }
+
     channel.onbufferedamountlow = () => {
       const handlers = this.bufferedLowHandlers.get(username);
       if (handlers) {

@@ -275,6 +275,7 @@ export const Sidebar = React.memo<SidebarProps>(({ className, children, currentU
       {/* Conversations panel */}
       {activeTab === "messages" && (
         <div
+          id="chat-conversations-panel"
           className={cn(
             "fixed top-0 h-full transition-all duration-300 z-30 bg-card border-r border-border shadow-sm",
             isCollapsed ? "left-16 w-80" : "left-60 w-80"

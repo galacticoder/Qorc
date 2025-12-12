@@ -1,10 +1,13 @@
-import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
-import { Phone, PhoneOff, Video, VideoOff, Mic, MicOff, Monitor, MonitorOff, Settings } from 'lucide-react';
+import React, { useState, useEffect, useRef, useCallback, useMemo, memo } from 'react';
+import { Phone, PhoneOff, Video, VideoOff, Mic, MicOff, Monitor, MonitorOff, Settings, Minimize2, Maximize2, MoreVertical, ChevronDown, Move } from 'lucide-react';
 import type { CallState } from '../../lib/webrtc-calling';
-// Lazy-load heavy subcomponents to avoid potential import cycles
+import { useUnifiedUsernameDisplay } from '../../hooks/useUnifiedUsernameDisplay';
+import { UserAvatar } from '../ui/UserAvatar';
+import { Popover, PopoverContent, PopoverTrigger } from '../ui/popover';
+import { cn } from '@/lib/utils';
+
 const ScreenSourceSelectorLazy = React.lazy(() => import('./ScreenSourceSelector').then(m => ({ default: m.ScreenSourceSelector || m.default })));
 const ScreenSharingSettingsLazy = React.lazy(() => import('../settings/ScreenSharingSettings').then(m => ({ default: m.ScreenSharingSettings || m.default })));
-import { useUnifiedUsernameDisplay } from '../../hooks/useUnifiedUsernameDisplay';
 
 interface ScreenSource {
   readonly id: string;
@@ -17,13 +20,13 @@ interface CallModalProps {
   readonly localStream: MediaStream | null;
   readonly remoteStream: MediaStream | null;
   readonly remoteScreenStream?: MediaStream | null;
-  readonly peerConnection?: RTCPeerConnection | null;
   readonly onAnswer: () => void;
   readonly onDecline: () => void;
   readonly onEndCall: () => void;
   readonly onToggleMute: () => boolean;
   readonly onToggleVideo: () => boolean;
-  readonly onSwitchCamera: () => void;
+  readonly onSwitchCamera: (deviceId: string) => Promise<void>;
+  readonly onSwitchMicrophone: (deviceId: string) => Promise<void>;
   readonly onStartScreenShare?: (selectedSource?: { id: string; name: string }) => Promise<void>;
   readonly onStopScreenShare?: () => Promise<void>;
   readonly onGetAvailableScreenSources?: () => Promise<readonly ScreenSource[]>;
@@ -31,7 +34,129 @@ interface CallModalProps {
   readonly getDisplayUsername?: (username: string) => Promise<string>;
 }
 
-export const CallModal: React.FC<CallModalProps> = ({
+const VideoStreamDisplay = memo(({
+  stream,
+  muted = false,
+  className,
+  objectFit = 'cover',
+  mirror = false
+}: {
+  stream: MediaStream | null;
+  muted?: boolean;
+  className?: string;
+  objectFit?: 'cover' | 'contain';
+  mirror?: boolean;
+}) => {
+  const videoRef = useRef<HTMLVideoElement>(null);
+
+  useEffect(() => {
+    if (videoRef.current && stream) {
+      videoRef.current.srcObject = stream;
+    } else if (videoRef.current) {
+      videoRef.current.srcObject = null;
+    }
+  }, [stream]);
+
+  if (!stream) return null;
+
+  return (
+    <video
+      ref={videoRef}
+      autoPlay
+      playsInline
+      muted={muted}
+      className={cn("w-full h-full pointer-events-none", className, mirror && "scale-x-[-1]")}
+      style={{ objectFit }}
+    />
+  );
+});
+VideoStreamDisplay.displayName = 'VideoStreamDisplay';
+
+// PIP Component
+const DraggablePip = ({
+  id,
+  children,
+  initialPosition,
+  onPositionChange,
+  onClick
+}: {
+  id: string;
+  children: React.ReactNode;
+  initialPosition: { x: number; y: number };
+  onPositionChange?: (id: string, pos: { x: number; y: number }) => void;
+  onClick?: () => void;
+}) => {
+  const [position, setPosition] = useState(initialPosition);
+  const [isDragging, setIsDragging] = useState(false);
+  const dragStartRef = useRef<{ x: number, y: number } | null>(null);
+  const initialPosRef = useRef<{ x: number, y: number } | null>(null);
+  const hasMovedRef = useRef(false);
+
+  useEffect(() => {
+    setPosition(initialPosition);
+  }, [initialPosition.x, initialPosition.y]);
+
+  const handleMouseDown = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    e.preventDefault();
+    setIsDragging(true);
+    hasMovedRef.current = false;
+    dragStartRef.current = { x: e.clientX, y: e.clientY };
+    initialPosRef.current = { x: position.x, y: position.y };
+  };
+
+  useEffect(() => {
+    const handleMouseMove = (e: MouseEvent) => {
+      if (!isDragging || !dragStartRef.current || !initialPosRef.current) return;
+
+      const dx = e.clientX - dragStartRef.current.x;
+      const dy = e.clientY - dragStartRef.current.y;
+
+      if (Math.abs(dx) > 3 || Math.abs(dy) > 3) hasMovedRef.current = true;
+
+      const newPos = {
+        x: initialPosRef.current.x + dx,
+        y: initialPosRef.current.y + dy
+      };
+
+      setPosition(newPos);
+      onPositionChange?.(id, newPos);
+    };
+
+    const handleMouseUp = () => {
+      setIsDragging(false);
+    };
+
+    if (isDragging) {
+      window.addEventListener('mousemove', handleMouseMove);
+      window.addEventListener('mouseup', handleMouseUp);
+    }
+    return () => {
+      window.removeEventListener('mousemove', handleMouseMove);
+      window.removeEventListener('mouseup', handleMouseUp);
+    };
+  }, [isDragging, id, onPositionChange]);
+
+  return (
+    <div
+      className={cn(
+        "absolute w-40 aspect-video bg-card rounded-lg overflow-hidden border border-border shadow-lg transition-transform hover:scale-105 z-20 cursor-move",
+        isDragging && "scale-105 shadow-xl ring-2 ring-primary/50"
+      )}
+      style={{ left: position.x, top: position.y }}
+      onMouseDown={handleMouseDown}
+      onClick={(e) => {
+        e.stopPropagation();
+        if (!hasMovedRef.current && onClick) onClick();
+      }}
+      title="Drag to move, click to maximize"
+    >
+      {children}
+    </div>
+  );
+};
+
+export const CallModal: React.FC<CallModalProps> = memo(({
   call,
   localStream,
   remoteStream,
@@ -42,900 +167,651 @@ export const CallModal: React.FC<CallModalProps> = ({
   onToggleMute,
   onToggleVideo,
   onSwitchCamera,
+  onSwitchMicrophone,
   onStartScreenShare,
   onStopScreenShare,
   onGetAvailableScreenSources,
   isScreenSharing = false,
   getDisplayUsername
 }) => {
-  // Use unified username display for the call peer
+  // --- State ---
+  // Default to minimized for ALL calls as requested ("minimized by default")
+  const [isMinimized, setIsMinimized] = useState(true);
+  const [isMuted, setIsMuted] = useState(false);
+  const [isVideoEnabled, setIsVideoEnabled] = useState(true);
+  const [micLevel, setMicLevel] = useState(0);
+  const [callDuration, setCallDuration] = useState(0);
+  const [isExpandedScreenShare, setIsExpandedScreenShare] = useState(false);
+  const [focusedView, setFocusedView] = useState<'remote-screen' | 'remote-cam' | 'local' | null>(null);
+
+  const [pipPositions, setPipPositions] = useState<{ [key: number]: { x: number, y: number, isInitialized?: boolean } }>({
+    0: { x: 20, y: 20, isInitialized: false },
+    1: { x: 20, y: 140, isInitialized: false }
+  });
+
+  const mainStageRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (mainStageRef.current && !pipPositions[0].isInitialized) {
+      const { clientWidth, clientHeight } = mainStageRef.current;
+      setPipPositions({
+        0: { x: clientWidth - 180, y: clientHeight - 110, isInitialized: true },
+        1: { x: clientWidth - 180, y: 20, isInitialized: true }
+      });
+    }
+  }, [mainStageRef.current, pipPositions]);
+
+  const updatePipPosition = useCallback((slotIndex: number | string, pos: { x: number, y: number }) => {
+    setPipPositions(prev => ({
+      ...prev,
+      [slotIndex]: { ...pos, isInitialized: true }
+    }));
+  }, []);
+
+  const [micDevices, setMicDevices] = useState<MediaDeviceInfo[]>([]);
+  const [videoDevices, setVideoDevices] = useState<MediaDeviceInfo[]>([]);
+  const [preferredCameraId, setPreferredCameraId] = useState<string | null>(null);
+  const [showScreenSourceSelector, setShowScreenSourceSelector] = useState(false);
+  const [hasOpenedScreenShare, setHasOpenedScreenShare] = useState(false);
+
+  useEffect(() => {
+    if (showScreenSourceSelector) {
+      setHasOpenedScreenShare(true);
+    }
+  }, [showScreenSourceSelector]);
+
+  const wrapperRef = useRef<HTMLDivElement>(null);
+
+  const [position, setPosition] = useState<{ x: number, bottom: number }>({
+    x: 20,
+    bottom: 20
+  });
+
+  const [isDragging, setIsDragging] = useState(false);
+  const dragStartRef = useRef<{ x: number, y: number } | null>(null);
+  const initialPosRef = useRef<{ x: number, bottom: number } | null>(null);
+  const hasDraggedRef = useRef(false);
+
+  // --- Derived State ---
   const { displayName: displayPeerName } = useUnifiedUsernameDisplay({
     username: call?.peer || '',
     getDisplayUsername,
     fallbackToOriginal: true
   });
 
-  const [isMuted, setIsMuted] = useState(false);
-  const [isVideoEnabled, setIsVideoEnabled] = useState(true);
-  const [callDuration, setCallDuration] = useState(0);
-  const [isProcessing, setIsProcessing] = useState(false);
+  const isConnected = call?.status === 'connected';
+  const isIncoming = call?.direction === 'incoming';
+  const isRinging = call?.status === 'ringing';
+  const isVideoCall = call?.type === 'video';
 
+  // --- Effects ---
 
+  // 0. Auto-collapse expanded view if screen sharing stops
+  useEffect(() => {
+    if (isExpandedScreenShare && !remoteScreenStream && !isScreenSharing) {
+      setIsExpandedScreenShare(false);
+    }
+  }, [isExpandedScreenShare, remoteScreenStream, isScreenSharing]);
 
-  // State declarations
-  const [micLevel, setMicLevel] = useState(0);
-  const [showScreenSourceSelector, setShowScreenSourceSelector] = useState(false);
-  const [showScreenSharingSettings, setShowScreenSharingSettings] = useState(false);
-  const [micMenuOpen, setMicMenuOpen] = useState(false);
-  const [videoMenuOpen, setVideoMenuOpen] = useState(false);
-  const [micDevices, setMicDevices] = useState<MediaDeviceInfo[]>([]);
-  const [videoDevices, setVideoDevices] = useState<MediaDeviceInfo[]>([]);
-  // Camera devices & dropdown state (declare early to avoid TDZ in effects)
-  const [cameraDevices, setCameraDevices] = useState<MediaDeviceInfo[]>([]);
-  const [cameraMenuOpen, setCameraMenuOpen] = useState(false);
-  const [preferredCameraId, setPreferredCameraId] = useState<string | null>(null);
-
-  // Load available devices
+  // 1. Device Enumeration
   useEffect(() => {
     const loadDevices = async () => {
       try {
         const devices = await navigator.mediaDevices.enumerateDevices();
-        setMicDevices(devices.filter(device => device.kind === 'audioinput'));
-        setVideoDevices(devices.filter(device => device.kind === 'videoinput'));
-      } catch {
-        // Device enumeration failure - graceful degradation
+        setMicDevices(devices.filter(d => d.kind === 'audioinput'));
+        setVideoDevices(devices.filter(d => d.kind === 'videoinput'));
+
+        // Load preferred camera
+        try {
+          const { encryptedStorage } = await import('../../lib/encrypted-storage');
+          const saved = await encryptedStorage.getItem('preferred_camera_deviceId_v1_pq');
+          if (saved && typeof saved === 'string') setPreferredCameraId(saved);
+        } catch { }
+      } catch (e) {
+        console.error("Device enumeration failed", e);
       }
     };
-
     loadDevices();
-
-    // Listen for device changes
     navigator.mediaDevices.addEventListener('devicechange', loadDevices);
-    return () => {
-      navigator.mediaDevices.removeEventListener('devicechange', loadDevices);
-    };
+    return () => navigator.mediaDevices.removeEventListener('devicechange', loadDevices);
   }, []);
 
-  // Close dropdowns when clicking outside
+  // 1.5 Sync State with Local Stream
   useEffect(() => {
-    const handleClickOutside = (event: MouseEvent) => {
-      const target = event.target as Element;
+    if (localStream) {
+      const videoTrack = localStream.getVideoTracks()[0];
+      const audioTrack = localStream.getAudioTracks()[0];
 
-      // Check if click is inside any dropdown menu or dropdown trigger
-      const isInsideDropdown = target.closest('[data-dropdown-menu]') ||
-        target.closest('[data-dropdown-trigger]');
-
-      if (!isInsideDropdown) {
-        setMicMenuOpen(false);
-        setVideoMenuOpen(false);
-        setCameraMenuOpen(false);
+      if (videoTrack) {
+        setIsVideoEnabled(videoTrack.enabled);
+        // Listen for 'ended' or 'mute' events if needed, though usually we control this via state
+        videoTrack.onended = () => setIsVideoEnabled(false);
+      } else {
+        setIsVideoEnabled(false);
       }
-    };
 
-    if (micMenuOpen || videoMenuOpen || cameraMenuOpen) {
-      document.addEventListener('mousedown', handleClickOutside);
-      return () => document.removeEventListener('mousedown', handleClickOutside);
+      if (audioTrack) {
+        setIsMuted(!audioTrack.enabled);
+      }
     }
-  }, [micMenuOpen, videoMenuOpen, cameraMenuOpen]);
-  const audioCtxRef = useRef<AudioContext | null>(null);
-  const analyserRef = useRef<AnalyserNode | null>(null);
-  const rafRef = useRef<number | null>(null);
-  const wrapperRef = useRef<HTMLDivElement | null>(null);
-  const [dragging, setDragging] = useState(false);
-  const dragStartRef = useRef<{ x: number; y: number; left: number; top: number; width: number; height: number } | null>(null);
-  const [freePos, setFreePos] = useState<{ left: number; top: number } | null>(null);
-  const [anchorCorner, setAnchorCorner] = useState<'tl' | 'tr' | 'bl' | 'br'>('br');
-  const [anchorOffset, setAnchorOffset] = useState<{ x: number; y: number }>({ x: 16, y: 16 });
+  }, [localStream]);
 
-
+  // 2. Mic Level Analysis
   useEffect(() => {
-    let mounted = true;
+    if (!localStream) { setMicLevel(0); return; }
+    let audioCtx: AudioContext | null = null;
+    let rafId: number;
 
-    const loadCameraDevices = async () => {
-      const all = await navigator.mediaDevices.enumerateDevices();
-      const devs = all.filter(d => d.kind === 'videoinput');
-      if (!mounted) return;
-
-      setCameraDevices(devs);
-
-      // Load preferred camera and validate it still exists
+    const analyze = () => {
       try {
-        const { encryptedStorage } = await import('../../lib/encrypted-storage');
-        const enc = await encryptedStorage.getItem('preferred_camera_deviceId_v1_pq');
-        const saved = typeof enc === 'string' ? enc : '';
-        if (saved && saved.length < 512) {
-          const exists = devs.some(dev => dev.deviceId === saved);
-          if (exists) {
-            setPreferredCameraId(saved);
-          } else {
-            setPreferredCameraId(null);
-            await encryptedStorage.setItem('preferred_camera_deviceId_v1_pq', '');
-          }
-        }
-      } catch { }
+        const AudioCtx = (window as any).AudioContext || (window as any).webkitAudioContext;
+        audioCtx = new AudioCtx();
+        const analyser = audioCtx.createAnalyser();
+        analyser.fftSize = 256;
+        const source = audioCtx.createMediaStreamSource(localStream);
+        source.connect(analyser);
+        const data = new Uint8Array(analyser.frequencyBinCount);
+
+        const loop = () => {
+          analyser.getByteFrequencyData(data);
+          const avg = data.reduce((a, b) => a + b, 0) / data.length;
+          setMicLevel(avg / 128); // Normalize 0-1 (approx)
+          rafId = requestAnimationFrame(loop);
+        };
+        loop();
+      } catch { setMicLevel(0); }
     };
-
-    loadCameraDevices();
-
-    // Listen for device changes (cameras plugged/unplugged)
-    const handleDeviceChange = () => {
-      if (mounted) {
-        loadCameraDevices();
-      }
-    };
-
-    navigator.mediaDevices.addEventListener('devicechange', handleDeviceChange);
+    analyze();
 
     return () => {
-      mounted = false;
-      navigator.mediaDevices.removeEventListener('devicechange', handleDeviceChange);
+      if (rafId) cancelAnimationFrame(rafId);
+      audioCtx?.close().catch(() => { });
     };
-  }, []);
+  }, [localStream]);
 
-  // Camera selection handler
-  const handleCameraSelect = useCallback(async (deviceId: string) => {
+  // 3. Duration Timer
+  useEffect(() => {
+    if (isConnected && call?.startTime) {
+      const interval = setInterval(() => {
+        setCallDuration(Math.floor((Date.now() - call.startTime!) / 1000));
+      }, 1000);
+      return () => clearInterval(interval);
+    }
+    setCallDuration(0);
+  }, [isConnected, call?.startTime]);
+
+  // --- Handlers ---
+
+  const handleDragStart = (e: React.MouseEvent) => {
+    setIsDragging(true);
+    hasDraggedRef.current = false;
+    dragStartRef.current = { x: e.clientX, y: e.clientY };
+    initialPosRef.current = { x: position.x, bottom: position.bottom };
+  };
+
+  useEffect(() => {
+    const handleMouseMove = (e: MouseEvent) => {
+      if (!isDragging || !dragStartRef.current || !initialPosRef.current) return;
+      const dx = e.clientX - dragStartRef.current.x;
+      const dy = e.clientY - dragStartRef.current.y;
+
+      // If moved more than 10px, consider it a "drag" not a click
+      if (Math.abs(dx) > 10 || Math.abs(dy) > 10) {
+        hasDraggedRef.current = true;
+      }
+
+      // Update position:
+      // x: simple addition
+      // bottom: subtraction (moving mouse DOWN increases Y, which means reducing Bottom distance)
+      setPosition({
+        x: Math.max(0, Math.min(window.innerWidth - 320, initialPosRef.current.x + dx)),
+        bottom: Math.max(0, Math.min(window.innerHeight - 80, initialPosRef.current.bottom - dy))
+      });
+    };
+    const handleMouseUp = () => {
+      setIsDragging(false);
+    };
+
+    if (isDragging) {
+      window.addEventListener('mousemove', handleMouseMove);
+      window.addEventListener('mouseup', handleMouseUp);
+    }
+    return () => {
+      window.removeEventListener('mousemove', handleMouseMove);
+      window.removeEventListener('mouseup', handleMouseUp);
+    };
+  }, [isDragging]);
+
+  const handleCameraChange = async (deviceId: string) => {
     try {
-      // Save preferred camera
       const { encryptedStorage } = await import('../../lib/encrypted-storage');
       await encryptedStorage.setItem('preferred_camera_deviceId_v1_pq', deviceId);
       setPreferredCameraId(deviceId);
-
-      // Switch to selected camera
-      if (localStream) {
-        const videoTrack = localStream.getVideoTracks()[0];
-        if (videoTrack) {
-          // Get new stream with selected camera
-          const constraints = {
-            video: { deviceId: { exact: deviceId } },
-            audio: false
-          };
-          const newStream = await navigator.mediaDevices.getUserMedia(constraints);
-          const newVideoTrack = newStream.getVideoTracks()[0];
-
-          // Replace track in local stream
-          localStream.removeTrack(videoTrack);
-          localStream.addTrack(newVideoTrack);
-          videoTrack.stop();
-
-          // Update the video element
-          if (localVideoRef.current) {
-            localVideoRef.current.srcObject = localStream;
-          }
-        }
-      }
-
-      setCameraMenuOpen(false);
-    } catch (_error) {
-      console.error('Failed to switch camera:', _error);
+      await onSwitchCamera(deviceId);
+    } catch (err) {
+      console.error("Failed to switch camera", err);
     }
-  }, [localStream]);
-
-  // Drag handling
-  useEffect(() => {
-    const onMouseMove = (e: MouseEvent) => {
-      if (!dragging || !dragStartRef.current) return;
-      const dx = e.clientX - dragStartRef.current.x;
-      const dy = e.clientY - dragStartRef.current.y;
-      let left = dragStartRef.current.left + dx;
-      let top = dragStartRef.current.top + dy;
-      // Constrain to viewport with 8px margin
-      const margin = 8;
-      const vw = window.innerWidth;
-      const vh = window.innerHeight;
-      const w = dragStartRef.current.width;
-      const h = dragStartRef.current.height;
-      left = Math.max(margin, Math.min(left, vw - w - margin));
-      top = Math.max(margin, Math.min(top, vh - h - margin));
-      setFreePos({ left, top });
-    };
-    const onMouseUp = () => {
-      if (!dragging || !dragStartRef.current || !wrapperRef.current || !freePos) {
-        setDragging(false);
-        document.body.style.userSelect = '';
-        return;
-      }
-      // Snap to nearest corner
-      const rect = { left: freePos.left, top: freePos.top, width: dragStartRef.current.width, height: dragStartRef.current.height };
-      const vw = window.innerWidth;
-      const vh = window.innerHeight;
-      const distances = [
-        { corner: 'tl' as const, d: rect.left + rect.top },
-        { corner: 'tr' as const, d: (vw - (rect.left + rect.width)) + rect.top },
-        { corner: 'bl' as const, d: rect.left + (vh - (rect.top + rect.height)) },
-        { corner: 'br' as const, d: (vw - (rect.left + rect.width)) + (vh - (rect.top + rect.height)) }
-      ];
-      distances.sort((a, b) => a.d - b.d);
-      const nearest = distances[0].corner;
-      setAnchorCorner(nearest);
-      // Compute offset from that corner (8px min)
-      let offX = 16, offY = 16;
-      if (nearest === 'tl') { offX = rect.left; offY = rect.top; }
-      if (nearest === 'tr') { offX = vw - (rect.left + rect.width); offY = rect.top; }
-      if (nearest === 'bl') { offX = rect.left; offY = vh - (rect.top + rect.height); }
-      if (nearest === 'br') { offX = vw - (rect.left + rect.width); offY = vh - (rect.top + rect.height); }
-      setAnchorOffset({ x: Math.max(8, Math.round(offX)), y: Math.max(8, Math.round(offY)) });
-      setFreePos(null);
-      setDragging(false);
-      document.body.style.userSelect = '';
-    };
-    if (dragging) {
-      window.addEventListener('mousemove', onMouseMove);
-      window.addEventListener('mouseup', onMouseUp);
-    }
-    return () => {
-      window.removeEventListener('mousemove', onMouseMove);
-      window.removeEventListener('mouseup', onMouseUp);
-    };
-  }, [dragging, freePos]);
-
-  const beginDrag = (e: React.MouseEvent) => {
-    if (!wrapperRef.current) return;
-    const rect = wrapperRef.current.getBoundingClientRect();
-    dragStartRef.current = { x: e.clientX, y: e.clientY, left: rect.left, top: rect.top, width: rect.width, height: rect.height };
-    setDragging(true);
-    setFreePos({ left: rect.left, top: rect.top });
-    document.body.style.userSelect = 'none';
   };
 
-  // Mic level analyser from local stream
-  useEffect(() => {
-    // Cleanup if no stream
-    if (!localStream) {
-      if (rafRef.current) cancelAnimationFrame(rafRef.current);
-      if (audioCtxRef.current) {
-        try { audioCtxRef.current.close(); } catch { }
-      }
-      audioCtxRef.current = null;
-      analyserRef.current = null;
-      setMicLevel(0);
-      return;
-    }
-
-    const audioTracks = localStream.getAudioTracks();
-    if (audioTracks.length === 0) {
-      setMicLevel(0);
-      return;
-    }
-
+  const handleMicrophoneChange = async (deviceId: string) => {
     try {
-      const AudioCtx: typeof AudioContext = (window as any).AudioContext || (window as any).webkitAudioContext;
-      const audioCtx = new AudioCtx();
-      const analyser = audioCtx.createAnalyser();
-      analyser.fftSize = 1024;
-      const source = audioCtx.createMediaStreamSource(localStream);
-      source.connect(analyser);
-      audioCtxRef.current = audioCtx;
-      analyserRef.current = analyser;
-      const data = new Uint8Array(analyser.frequencyBinCount);
-
-      const tick = () => {
-        analyser.getByteTimeDomainData(data);
-        let min = 128, max = 128;
-        for (let i = 0; i < data.length; i++) {
-          const v = data[i];
-          if (v < min) min = v;
-          if (v > max) max = v;
-        }
-        const amp = Math.min(1, (max - min) / 128);
-        setMicLevel(prev => prev * 0.8 + amp * 0.2); // smooth
-        rafRef.current = requestAnimationFrame(tick);
-      };
-      rafRef.current = requestAnimationFrame(tick);
-    } catch {
-      setMicLevel(0);
+      await onSwitchMicrophone(deviceId);
+    } catch (err) {
+      console.error("Failed to switch microphone", err);
     }
+  };
 
-    return () => {
-      if (rafRef.current) cancelAnimationFrame(rafRef.current);
-      if (audioCtxRef.current) {
-        try { audioCtxRef.current.close(); } catch { }
-      }
-      audioCtxRef.current = null;
-      analyserRef.current = null;
-    };
-  }, [localStream]);
-
-  const handleAnswerClick = useCallback(async () => {
-    if (isProcessing) return;
-    setIsProcessing(true);
+  const toggleScreenShare = async () => {
     try {
-      await onAnswer();
-    } finally {
-      setTimeout(() => setIsProcessing(false), 300);
-    }
-  }, [isProcessing, onAnswer]);
-
-  const handleDeclineClick = useCallback(async () => {
-    if (isProcessing) return;
-    setIsProcessing(true);
-    try {
-      await onDecline();
-    } finally {
-      setTimeout(() => setIsProcessing(false), 300);
-    }
-  }, [isProcessing, onDecline]);
-
-  const handleEndClick = useCallback(async () => {
-    if (isProcessing) return;
-    setIsProcessing(true);
-    try {
-      await Promise.resolve(onEndCall());
-    } finally {
-      setTimeout(() => setIsProcessing(false), 300);
-    }
-  }, [isProcessing, onEndCall]);
-
-  const localVideoRef = useRef<HTMLVideoElement>(null);
-  const remoteVideoRef = useRef<HTMLVideoElement>(null);
-  const remoteScreenVideoRef = useRef<HTMLVideoElement>(null);
-  const durationIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
-
-  // Update video streams
-  useEffect(() => {
-    if (localVideoRef.current && localStream) {
-      localVideoRef.current.srcObject = localStream;
-    }
-  }, [localStream]);
-
-  useEffect(() => {
-    if (remoteVideoRef.current) {
-      if (remoteStream) {
-        remoteVideoRef.current.srcObject = remoteStream;
-      } else {
-        try { remoteVideoRef.current.pause?.(); } catch { }
-        remoteVideoRef.current.srcObject = null as any;
-        try {
-          remoteVideoRef.current.removeAttribute('src');
-          (remoteVideoRef.current as any).src = '';
-          remoteVideoRef.current.load();
-        } catch { }
-      }
-    }
-  }, [remoteStream]);
-
-  useEffect(() => {
-    if (remoteScreenVideoRef.current) {
-      if (remoteScreenStream) {
-        remoteScreenVideoRef.current.srcObject = remoteScreenStream;
-        const playPromise = remoteScreenVideoRef.current.play();
-        if (playPromise) {
-          playPromise.catch(() => {
-            if (remoteScreenVideoRef.current) {
-              remoteScreenVideoRef.current.muted = true;
-              remoteScreenVideoRef.current.play().catch(() => { });
-            }
-          });
-        }
-      } else {
-        try { remoteScreenVideoRef.current.pause?.(); } catch { }
-        remoteScreenVideoRef.current.srcObject = null as any;
-        try {
-          remoteScreenVideoRef.current.removeAttribute('src');
-          (remoteScreenVideoRef.current as any).src = '';
-          remoteScreenVideoRef.current.load();
-        } catch { }
-      }
-    }
-  }, [remoteScreenStream]);
-
-  // Track call duration
-  useEffect(() => {
-    if (call?.status === 'connected') {
-      durationIntervalRef.current = setInterval(() => {
-        if (call.startTime) {
-          setCallDuration(Math.floor((Date.now() - call.startTime) / 1000));
-        }
-      }, 1000);
-    } else {
-      if (durationIntervalRef.current) {
-        clearInterval(durationIntervalRef.current);
-        durationIntervalRef.current = null;
-      }
-      setCallDuration(0);
-    }
-
-    return () => {
-      if (durationIntervalRef.current) {
-        clearInterval(durationIntervalRef.current);
-      }
-    };
-  }, [call?.status, call?.startTime]);
-
-  const handleToggleMute = useCallback(() => {
-    const muted = onToggleMute();
-    setIsMuted(muted);
-  }, [onToggleMute]);
-
-  const handleToggleVideo = useCallback(async () => {
-    const enabled = await onToggleVideo();
-    setIsVideoEnabled(enabled);
-  }, [onToggleVideo]);
-
-  const handleScreenShare = useCallback(async () => {
-    if (isProcessing) return;
-
-    if (isScreenSharing) {
-      setIsProcessing(true);
-      try {
+      if (isScreenSharing) {
         await onStopScreenShare?.();
-      } catch (_error) {
-        alert('Failed to stop screen sharing: ' + (_error as Error).message);
-      } finally {
-        setIsProcessing(false);
-      }
-    } else {
-      if (onGetAvailableScreenSources) {
-        setShowScreenSourceSelector(true);
       } else {
-        setIsProcessing(true);
-        try {
+        if (onGetAvailableScreenSources) {
+          setShowScreenSourceSelector(true);
+        } else {
           await onStartScreenShare?.();
-        } catch (_error) {
-          alert('Failed to start screen sharing: ' + (_error as Error).message);
-        } finally {
-          setIsProcessing(false);
         }
       }
+    } catch (error: any) {
+      console.error('Screen share toggle failed:', error);
+      alert(`Screen share error: ${error.message || 'Unknown error'}`);
     }
-  }, [isProcessing, isScreenSharing, onStopScreenShare, onStartScreenShare, onGetAvailableScreenSources]);
+  };
 
-  const handleScreenSourceSelect = useCallback(async (source: ScreenSource) => {
-    setIsProcessing(true);
-    try {
-      await onStartScreenShare?.(source);
-    } catch (_error) {
-      alert('Failed to start screen sharing: ' + (_error as Error).message);
-    } finally {
-      setIsProcessing(false);
-      setShowScreenSourceSelector(false);
-    }
-  }, [onStartScreenShare]);
-
-  const handleScreenSourceCancel = useCallback(() => {
-    setShowScreenSourceSelector(false);
-  }, []);
-
-  const formatDuration = useCallback((seconds: number): string => {
-    const mins = Math.floor(seconds / 60);
-    const secs = seconds % 60;
-    return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
-  }, []);
+  const formatTime = (secs: number) => {
+    const m = Math.floor(secs / 60);
+    const s = secs % 60;
+    return `${m}:${s.toString().padStart(2, '0')}`;
+  };
 
   if (!call) return null;
 
-  const isVideoCall = useMemo(() => call.type === 'video', [call.type]);
-  const isIncoming = useMemo(() => call.direction === 'incoming', [call.direction]);
-  const isConnected = useMemo(() => call.status === 'connected', [call.status]);
-  const isRinging = useMemo(() => call.status === 'ringing', [call.status]);
-  const isConnecting = useMemo(() => call.status === 'connecting', [call.status]);
+  // --- UI Renders ---
 
-  const wrapperStyle = useMemo((): React.CSSProperties => {
-    if (freePos) {
-      return { position: 'fixed', left: Math.round(freePos.left), top: Math.round(freePos.top), zIndex: 50, width: '380px' };
-    }
-    const base = { position: 'fixed' as const, zIndex: 50, width: '380px' };
-    switch (anchorCorner) {
-      case 'tl': return { ...base, left: anchorOffset.x, top: anchorOffset.y };
-      case 'tr': return { ...base, right: anchorOffset.x, top: anchorOffset.y };
-      case 'bl': return { ...base, left: anchorOffset.x, bottom: anchorOffset.y };
-      default: return { ...base, right: anchorOffset.x, bottom: anchorOffset.y };
-    }
-  }, [freePos, anchorCorner, anchorOffset]);
+  // 1. Minimized View (Card)
+  if (isMinimized) {
+    return (
+      <div
+        className="fixed z-50 bg-background border border-border rounded-lg shadow-xl p-3 flex items-center gap-3 select-none cursor-move"
+        style={{
+          left: position.x,
+          bottom: position.bottom,
+          width: 320
+        }}
+        onMouseDown={handleDragStart}
+      >
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-2">
+            <UserAvatar username={call.peer || ''} size="xs" />
+            <span className="font-medium truncate text-sm">{displayPeerName}</span>
+          </div>
+          <div className="text-xs text-muted-foreground mt-0.5">
+            {isIncoming && isRinging ? `Incoming ${isVideoCall ? 'video' : 'audio'} call...` : isConnected ? formatTime(callDuration) : 'Calling...'}
+          </div>
+        </div>
+        <div className="flex items-center gap-1" onMouseDown={(e) => e.stopPropagation() /* Prevent dragging when clicking buttons */}>
+          {/* Case A: Incoming Call (Ringing) */}
+          {isIncoming && isRinging ? (
+            <>
+              <button
+                onClick={() => {
+                  onAnswer();
+                  // Keep minimized or expand? User said "minimized by default", so maybe keep it small.
+                }}
+                className="p-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-md transition-colors"
+                title="Answer"
+              >
+                <Phone className="w-4 h-4" />
+              </button>
+              <button
+                onClick={onDecline}
+                className="p-1.5 bg-red-600 hover:bg-red-700 text-white rounded-md transition-colors"
+                title="Decline"
+              >
+                <PhoneOff className="w-4 h-4" />
+              </button>
+            </>
+          ) : !isConnected ? (
+            /* Case B: Outgoing Call (Connecting/Ringing) */
+            <button onClick={onEndCall} className="p-1.5 bg-red-600 hover:bg-red-700 text-white rounded-md transition-colors" title="Cancel">
+              <PhoneOff className="w-4 h-4" />
+            </button>
+          ) : (
+            /* Case C: Connected Call */
+            <>
+              <button
+                onClick={() => {
+                  const newState = onToggleMute();
+                  setIsMuted(newState);
+                }}
+                className={cn("p-1.5 hover:bg-secondary rounded-md transition-colors", isMuted && "text-destructive bg-destructive/10")}
+                title={isMuted ? "Unmute" : "Mute"}
+              >
+                {isMuted ? <MicOff className="w-4 h-4" /> : <Mic className="w-4 h-4" />}
+              </button>
+              {isVideoCall && (
+                <button
+                  onClick={async () => {
+                    const enabled = await onToggleVideo();
+                    setIsVideoEnabled(enabled);
+                  }}
+                  className={cn("p-1.5 hover:bg-secondary rounded-md transition-colors", !isVideoEnabled && "text-destructive bg-destructive/10")}
+                  title={isVideoEnabled ? "Turn Off Video" : "Turn On Video"}
+                >
+                  {!isVideoEnabled ? <VideoOff className="w-4 h-4" /> : <Video className="w-4 h-4" />}
+                </button>
 
+              )}
+              {/* Separator */}
+              {isVideoCall && <div className="h-4 w-[1px] bg-gradient-to-b from-transparent via-[hsl(var(--border))] to-transparent mx-1 opacity-70" />}
+
+              <button onClick={() => setIsMinimized(false)} className="p-1.5 hover:bg-secondary rounded-md transition-colors" title="Maximize">
+                <Maximize2 className="w-4 h-4" />
+              </button>
+              <button onClick={onEndCall} className="p-1.5 bg-red-600 hover:bg-red-700 text-white rounded-md transition-colors" title="End Call">
+                <PhoneOff className="w-4 h-4" />
+              </button>
+            </>
+          )}
+        </div>
+      </div >
+    );
+  }
+
+  // 2. Full View
   return (
-    <div ref={wrapperRef} style={wrapperStyle} className="sm:w-[420px]">
-      <div className="backdrop-blur rounded-xl shadow-[0_20px_60px_-15px_rgba(0,0,0,0.6)] border border-gray-700 overflow-hidden flex flex-col" style={{ backgroundColor: '#151519e6' }}>
-
+    <>
+      <div
+        ref={wrapperRef}
+        className={cn(
+          "fixed z-50 flex flex-col bg-background/95 backdrop-blur-lg border border-border shadow-xl rounded-2xl overflow-hidden cubic-bezier(0.4, 0, 0.2, 1)",
+          !isDragging && "transition-all duration-300",
+          // Reduced width from 400/500 to 350/420 as requested ("expanded mode needs to be a little smaller")
+          isExpandedScreenShare ? "w-[90vw] h-[90vh] left-[5vw] top-[5vh]" : "w-[350px] sm:w-[420px]"
+        )}
+        style={!isExpandedScreenShare ? { left: position.x, bottom: position.bottom } : undefined}
+      >
         {/* Header */}
-        <div className="p-5 border-b border-gray-700 bg-gradient-to-r from-gray-900 to-gray-800 cursor-move select-none" onMouseDown={beginDrag}>
-          <div className="flex items-center justify-between">
-            <div>
-              <h2 className="text-xl font-semibold text-white">
-                {isConnected ? 'In Call' :
-                  isConnecting ? 'Connecting' :
-                    isIncoming ? 'Incoming Call' : 'Calling'}
-              </h2>
-              <p className="text-gray-300">{displayPeerName}</p>
-              {isConnected && (
-                <p className="text-sm text-green-400">{formatDuration(callDuration)}</p>
-              )}
-              {isConnecting && (
-                <p className="text-sm text-blue-400">Connecting...</p>
-              )}
-              {isRinging && (
-                <p className="text-sm text-yellow-400">
-                  {isIncoming ? 'Ringing...' : 'Calling...'}
-                </p>
-              )}
-              {/* Mic indicator */}
-              <div className="mt-2">
-                <div className="flex items-center gap-2 text-xs text-gray-300 mb-1">
-                  <span className="inline-flex items-center gap-1">
-                    {isMuted ? (
-                      <MicOff className="w-3.5 h-3.5 text-red-400" />
-                    ) : (
-                      <Mic className="w-3.5 h-3.5 text-emerald-400" />
-                    )}
-                    <span>Mic</span>
-                  </span>
-                </div>
-                <div className="h-2 w-40 bg-gray-700 rounded-full overflow-hidden">
-                  <div
-                    className={`h-full ${isMuted ? 'bg-red-500' : 'bg-emerald-400'}`}
-                    style={{ width: `${Math.min(100, Math.round(micLevel * 100))}%` }}
-                  />
-                </div>
-              </div>
-            </div>
-            <div className="flex items-center space-x-2">
-              <span className={`px-3 py-1 rounded-full text-sm ${isVideoCall ? 'bg-blue-600 text-white' : 'bg-green-600 text-white'
-                }`}>
-                {isVideoCall ? 'Video' : 'Audio'}
+        <div className="h-14 bg-card/80 backdrop-blur-md border-b border-border flex items-center justify-between px-5 select-none relative" onMouseDown={!isExpandedScreenShare ? handleDragStart : undefined}>
+          <div className={cn("flex items-center gap-2", !isExpandedScreenShare && "cursor-move")}>
+            <UserAvatar username={call.peer || ''} size="xs" />
+            <div className="flex flex-col">
+              <span className="text-sm font-semibold text-foreground leading-none">{displayPeerName}</span>
+              <span className="text-[10px] text-muted-foreground font-mono mt-0.5">
+                {isIncoming && isRinging ? `Incoming ${isVideoCall ? 'video' : 'audio'} call...` : isConnected ? formatTime(callDuration) : 'Calling...'}
               </span>
-              <span className={`w-3 h-3 rounded-full ${isConnected ? 'bg-green-500' :
-                  isRinging ? 'bg-yellow-500 animate-pulse' :
-                    isConnecting ? 'bg-blue-500 animate-pulse' :
-                      'bg-red-500'
-                }`} />
             </div>
+          </div>
+          <div className="flex items-center gap-1">
+            {/* Allow expanding if remote OR local screen sharing is active */}
+            {(remoteScreenStream || isScreenSharing) && (
+              <button
+                onClick={() => setIsExpandedScreenShare(prev => !prev)}
+                className="p-1.5 text-muted-foreground hover:text-foreground hover:bg-muted rounded-md transition-colors"
+                title={isExpandedScreenShare ? "Collapse" : "Expand"}
+              >
+                {isExpandedScreenShare ? <Minimize2 className="w-4 h-4" /> : <Maximize2 className="w-4 h-4" />}
+              </button>
+            )}
+            {!isExpandedScreenShare && (
+              <button
+                onClick={() => setIsMinimized(true)}
+                className="p-1.5 text-muted-foreground hover:text-foreground hover:bg-muted rounded-md transition-colors"
+              >
+                <Minimize2 className="w-4 h-4" />
+              </button>
+            )}
           </div>
         </div>
 
-        {/* Video Area - Show for video calls OR if there's a remote screen/video stream */}
-        {(isVideoCall || remoteStream || remoteScreenStream) && (
-          <div className="space-y-3">
-            {/* Main Video Display */}
-            <div className="relative bg-black h-56">
-              {/* Dedicated remote screen share video (shown only when available) */}
-              <video
-                ref={remoteScreenVideoRef}
-                autoPlay
-                playsInline
-                className={`w-full h-full object-cover ${remoteScreenStream ? '' : 'hidden'}`}
-              />
+        {/* Main Stage */}
+        <div className="flex-1 bg-black relative overflow-hidden group" ref={mainStageRef}>
+          {(() => {
+            // Identify available videos
+            const hasRemoteScreen = remoteScreenStream && remoteScreenStream.getVideoTracks().length > 0;
+            const hasRemoteVideo = remoteStream && remoteStream.getVideoTracks().length > 0;
+            const hasLocalVideo = localStream && (isVideoEnabled || isScreenSharing) && localStream.getVideoTracks().length > 0;
 
-              {/* Dedicated remote camera video (hidden when screen share is active) */}
-              <video
-                ref={remoteVideoRef}
-                autoPlay
-                playsInline
-                className={`w-full h-full object-cover ${remoteScreenStream ? 'hidden' : ''}`}
-              />
+            // Define stream types for cleaner logic
+            type StreamType = 'remote-screen' | 'remote-cam' | 'local';
+            const availableStreams: StreamType[] = [];
+            if (hasRemoteScreen) availableStreams.push('remote-screen');
+            if (hasRemoteVideo) availableStreams.push('remote-cam');
+            if (hasLocalVideo) availableStreams.push('local');
+            // If local screen sharing is active, treat it as a priority view if user wants to expand it
+            // Actually, 'local' covers both camera and screen share in current logic (localStream tracks replaced)
+            // But we might want to distinguish if we want to show camera AND screen share separately?
+            // For now, 'local' stream usually contains the screen share track if sharing.
 
-              {/* Local Video (Picture-in-Picture) */}
-              <div className="absolute top-3 right-3 w-28 h-20 bg-gray-800 rounded-md overflow-hidden border border-gray-600 shadow-md">
-                <video
-                  ref={localVideoRef}
-                  autoPlay
-                  playsInline
-                  muted
-                  className="w-full h-full object-cover"
-                />
-              </div>
+            // Determine Main View
+            let mainView: StreamType = 'local'; // fallback
 
-              {/* Stream Type Indicator */}
-              {remoteScreenStream && (
-                <div className="absolute top-3 left-3 bg-blue-600 text-white px-2 py-1 rounded text-xs font-medium">
-                  Screen Share
+            // 1. Try to use focused view
+            if (focusedView && availableStreams.includes(focusedView)) {
+              mainView = focusedView;
+            } else {
+              // 2. Default priorities
+              if (hasRemoteScreen) mainView = 'remote-screen';
+
+              // If we are sharing screen, we might want to see ourselves main? 
+              // Usually calls center on remote. 
+              // But consistent with "Expand my screen share", if I expand, I expect to see the screen share.
+              // If focusedView is not set, we stick to remote.
+              else if (hasRemoteVideo) mainView = 'remote-cam';
+              else if (hasLocalVideo) mainView = 'local';
+              else mainView = 'local';
+            }
+
+            // Identify PIP views (everything else)
+            // Implicitly, the mapping to "Slot 0", "Slot 1" is determined by array order here.
+            // This achieves the "Swap" effect: If I swap A (Main) and B (Slot 0), B becomes Main, A becomes Slot 0.
+            const pipViews = availableStreams.filter(s => s !== mainView);
+
+            // Helpers to render specific stream types
+            const renderStream = (type: StreamType, isMain: boolean) => {
+              if (type === 'remote-screen') {
+                return <VideoStreamDisplay stream={remoteScreenStream} objectFit="contain" className="w-full h-full" />;
+              }
+              if (type === 'remote-cam') {
+                return <VideoStreamDisplay stream={remoteStream} className="w-full h-full" />;
+              }
+              if (type === 'local') {
+                return <VideoStreamDisplay stream={localStream} mirror={!isScreenSharing} muted className="w-full h-full" />;
+              }
+              return null;
+            };
+
+            // Main Component
+            let MainComponent = null;
+            if (availableStreams.length === 0) {
+              MainComponent = (
+                <div className="absolute inset-0 flex flex-col items-center justify-center text-muted-foreground">
+                  <UserAvatar username={call.peer || ''} size="xl" className="mb-4 opacity-50" />
+                  <p className="text-sm font-medium">
+                    {isRinging ? 'Waiting for answer...' : 'Waiting for video...'}
+                  </p>
                 </div>
-              )}
+              );
+            } else {
+              MainComponent = renderStream(mainView, true);
+            }
 
-              {!remoteStream && !remoteScreenStream && (
-                <div className="absolute inset-0 flex items-center justify-center">
-                  <div className="text-center text-gray-400">
-                    <div className="w-24 h-24 bg-gray-700 rounded-full flex items-center justify-center mx-auto mb-4">
-                      <span className="text-2xl font-bold">
-                        {displayPeerName.charAt(0).toUpperCase()}
-                      </span>
-                    </div>
-                    <p>Waiting for video...</p>
-                  </div>
-                </div>
-              )}
-            </div>
+            return (
+              <>
+                {/* Main Video */}
+                {MainComponent}
 
-            {/* Secondary Video (Camera when screen sharing) */}
-            {remoteScreenStream && remoteStream && (
-              <div className="relative bg-black h-32 rounded-md overflow-hidden">
-                <video
-                  ref={remoteVideoRef}
-                  autoPlay
-                  playsInline
-                  className="w-full h-full object-cover"
-                />
-                <div className="absolute top-2 left-2 bg-gray-800 text-white px-2 py-1 rounded text-xs">
-                  Camera
-                </div>
-              </div>
-            )}
+                {/* Draggable Slots */}
+                {pipViews.map((type, index) => {
+                  // Get position for this slot index, fallback if not initialized
+                  const pos = pipPositions[index] || { x: 20, y: 20 + (index * 130) };
 
-          </div>
-        )}
+                  return (
+                    <DraggablePip
+                      key={`slot-${index}`} // Key by slot index to maintain position stability!
+                      id={`slot-${index}`}
+                      initialPosition={pos}
+                      onPositionChange={(id, newPos) => updatePipPosition(index, newPos)}
+                      onClick={() => setFocusedView(type)}
+                    >
+                      {renderStream(type, false)}
+                    </DraggablePip>
+                  );
+                })}
+              </>
+            );
+          })()}
+        </div>
 
-        {/* Audio Only View - Only show if no video/screen streams */}
-        {!isVideoCall && !remoteStream && !remoteScreenStream && (
-          <div className="py-6 flex items-center justify-center bg-gradient-to-br from-gray-800 to-gray-900">
-            <div className="text-center text-white">
-              <div className="w-32 h-32 bg-gray-700 rounded-full flex items-center justify-center mx-auto mb-6">
-                <span className="text-4xl font-bold">
-                  {displayPeerName.charAt(0).toUpperCase()}
-                </span>
-              </div>
-              <h3 className="text-2xl font-semibold mb-2">{displayPeerName}</h3>
-              {isConnected && (
-                <p className="text-lg text-green-400">{formatDuration(callDuration)}</p>
-              )}
-              {isConnecting && (
-                <p className="text-lg text-blue-400">Connecting...</p>
-              )}
-              {isRinging && (
-                <p className="text-lg text-yellow-400">
-                  {isIncoming ? 'Incoming call...' : 'Calling...'}
-                </p>
-              )}
-            </div>
-          </div>
-        )}
+        {/* Controls Bar */}
+        <div className="bg-card/80 backdrop-blur-md border-t border-border p-5 flex items-center justify-center gap-6">
 
-        {/* Controls */}
-        <div className="p-6 border-t border-gray-700">
-          {/* Incoming Call Controls */}
-          {isIncoming && isRinging && (
-            <div className="flex justify-center space-x-8">
+          {/* Accept/Decline (Incoming) */}
+          {isIncoming && isRinging ? (
+            <>
               <button
-                onClick={handleDeclineClick}
-                disabled={isProcessing}
-                className="w-16 h-16 bg-red-600 hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed rounded-full flex items-center justify-center transition-colors"
+                onClick={onDecline}
+                className="h-14 w-14 rounded-full bg-destructive hover:bg-destructive/90 flex items-center justify-center text-destructive-foreground transition-all hover:scale-110 shadow-lg shadow-red-900/20"
               >
-                <PhoneOff className="w-8 h-8 text-white" />
+                <PhoneOff className="w-6 h-6" />
               </button>
               <button
-                onClick={handleAnswerClick}
-                disabled={isProcessing}
-                className="w-16 h-16 bg-green-600 hover:bg-green-700 disabled:opacity-50 disabled:cursor-not-allowed rounded-full flex items-center justify-center transition-colors"
+                onClick={() => {
+                  onAnswer();
+                  setIsMinimized(true);
+                }}
+                className="h-14 w-14 rounded-full bg-emerald-600 hover:bg-emerald-700 flex items-center justify-center text-white transition-all hover:scale-110 shadow-lg shadow-green-900/20"
               >
-                <Phone className="w-8 h-8 text-white" />
+                <Phone className="w-6 h-6" />
               </button>
-            </div>
-          )}
-
-          {/* In-Call Controls */}
-          {(isConnected || isConnecting || (!isIncoming && isRinging)) && (
-            <div className="flex justify-center items-center space-x-6">
-              {/* Mute Button with Integrated Dropdown */}
-              <div className="relative">
-                <button
-                  onClick={handleToggleMute}
-                  className={`w-16 h-16 rounded-full flex items-center justify-center transition-colors relative ${isMuted ? 'bg-red-600 hover:bg-red-700' : 'bg-gray-600 hover:bg-gray-700'
-                    }`}
-                  title={isMuted ? 'Unmute' : 'Mute'}
-                  data-dropdown-trigger
-                >
-                  {isMuted ? (
-                    <MicOff className="w-7 h-7 text-white" />
-                  ) : (
-                    <Mic className="w-7 h-7 text-white" />
-                  )}
-                  {/* Integrated dropdown arrow */}
-                  <div
-                    className="absolute bottom-1 right-1 w-4 h-4 bg-black bg-opacity-30 rounded-full flex items-center justify-center cursor-pointer hover:bg-opacity-50 transition-colors"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      setMicMenuOpen(v => !v);
-                    }}
-                    title="Select microphone"
-                    data-dropdown-trigger
-                  >
-                    <span className="text-white text-xs">▾</span>
-                  </div>
-                </button>
-
-                {/* Microphone dropdown menu */}
-                {micMenuOpen && (
-                  <div
-                    className="fixed bg-gray-800 border border-gray-600 rounded-lg shadow-xl py-2 min-w-[200px]"
-                    style={{
-                      zIndex: 9999,
-                      bottom: '100px',
-                      left: '50%',
-                      transform: 'translateX(-50%)',
-                      maxHeight: '200px',
-                      overflowY: 'auto'
-                    }}
-                    data-dropdown-menu
-                  >
-                    <div className="px-3 py-1 text-xs text-gray-400 border-b border-gray-600 mb-1">
-                      Select Microphone
-                    </div>
-                    {micDevices.map((device) => (
-                      <button
-                        key={device.deviceId}
-                        onClick={() => {
-                          setMicMenuOpen(false);
-                        }}
-                        className="w-full text-left px-3 py-2 text-sm text-white hover:bg-gray-700 transition-colors"
-                      >
-                        {device.label || `Microphone ${device.deviceId.slice(0, 8)}...`}
-                      </button>
-                    ))}
-                    {micDevices.length === 0 && (
-                      <div className="px-3 py-2 text-sm text-gray-400">
-                        No microphones detected
-                      </div>
-                    )}
-                  </div>
-                )}
-              </div>
-
-              {/* Video Toggle with Integrated Dropdown (for video calls) */}
-              {isVideoCall && (
-                <div className="relative">
+            </>
+          ) : (
+            /* Active Call Controls */
+            <>
+              {/* Mic Control */}
+              <div className="flex flex-col items-center gap-1">
+                <div className="flex items-center bg-secondary/50 rounded-full border border-border">
                   <button
-                    onClick={handleToggleVideo}
-                    disabled={videoDevices.length === 0}
-                    title={videoDevices.length === 0 ? 'No camera detected' : (isVideoEnabled ? 'Turn off video' : 'Turn on video')}
-                    className={`w-16 h-16 rounded-full flex items-center justify-center transition-colors relative ${videoDevices.length === 0
-                        ? 'bg-gray-500 opacity-60 cursor-not-allowed'
-                        : (!isVideoEnabled ? 'bg-red-600 hover:bg-red-700' : 'bg-gray-600 hover:bg-gray-700')
-                      }`}
-                    data-dropdown-trigger
-                  >
-                    {isVideoEnabled ? (
-                      <Video className="w-7 h-7 text-white" />
-                    ) : (
-                      <VideoOff className="w-7 h-7 text-white" />
+                    onClick={() => {
+                      const newState = onToggleMute();
+                      setIsMuted(newState);
+                    }}
+                    className={cn(
+                      "w-12 h-12 rounded-l-full flex items-center justify-center transition-colors",
+                      isMuted ? "bg-destructive/10 text-destructive hover:bg-destructive/20" : "hover:bg-muted text-foreground"
                     )}
-                    {/* Integrated dropdown arrow */}
-                    <div
-                      className="absolute bottom-1 right-1 w-4 h-4 bg-black bg-opacity-30 rounded-full flex items-center justify-center cursor-pointer hover:bg-opacity-50 transition-colors"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        setVideoMenuOpen(v => !v);
-                      }}
-                      title="Select camera"
-                      data-dropdown-trigger
-                    >
-                      <span className="text-white text-xs">▾</span>
-                    </div>
+                  >
+                    {isMuted ? <MicOff className="w-5 h-5" /> : <Mic className="w-5 h-5" />}
                   </button>
+                  <div className="w-[1px] h-6 bg-border" />
+                  <Popover>
+                    <PopoverTrigger asChild>
+                      <button className="w-8 h-12 rounded-r-full flex items-center justify-center hover:bg-muted text-muted-foreground hover:text-foreground transition-colors">
+                        <ChevronDown className="w-3.5 h-3.5" />
+                      </button>
+                    </PopoverTrigger>
+                    <PopoverContent side="top" align="center" className="bg-popover border-border text-popover-foreground w-64 p-1">
+                      <div className="px-2 py-1.5 text-xs font-semibold text-muted-foreground uppercase tracking-wider">Microphone</div>
+                      {micDevices.map(d => <button
+                        key={d.deviceId}
+                        className="w-full text-left px-2 py-2 text-sm rounded hover:bg-muted truncate"
+                        onClick={() => handleMicrophoneChange(d.deviceId)}
+                      >
+                        {d.label || `Mic ${d.deviceId.slice(0, 5)}`}
+                      </button>
+                      )}
+                    </PopoverContent>
+                  </Popover>
+                </div>
+              </div>
 
-                  {/* Video dropdown menu */}
-                  {videoMenuOpen && (
-                    <div
-                      className="fixed bg-gray-800 border border-gray-600 rounded-lg shadow-xl py-2 min-w-[200px]"
-                      style={{
-                        zIndex: 9999,
-                        bottom: '100px',
-                        left: '50%',
-                        transform: 'translateX(-50%)',
-                        maxHeight: '250px',
-                        overflowY: 'auto'
-                      }}
-                      data-dropdown-menu
-                    >
-                      <div className="px-3 py-1 text-xs text-gray-400 border-b border-gray-600 mb-1">
-                        Select Camera
-                      </div>
-                      {cameraDevices.map((device) => (
+              {/* Video Control */}
+              {isVideoCall && (
+                <div className={cn("flex items-center bg-secondary/50 rounded-full border border-border transition-opacity", videoDevices.length === 0 && "opacity-50 grayscale cursor-not-allowed")}>
+                  <button
+                    onClick={async () => {
+                      const enabled = await onToggleVideo();
+                      setIsVideoEnabled(enabled);
+                    }}
+                    className={cn(
+                      "w-12 h-12 rounded-l-full flex items-center justify-center transition-colors",
+                      !isVideoEnabled ? "bg-destructive/10 text-destructive hover:bg-destructive/20" : "hover:bg-muted text-foreground",
+                      videoDevices.length === 0 && "pointer-events-none text-muted-foreground"
+                    )}
+                    disabled={videoDevices.length === 0}
+                  >
+                    {!isVideoEnabled ? <VideoOff className="w-5 h-5" /> : <Video className="w-5 h-5" />}
+                  </button>
+                  <div className="w-[1px] h-6 bg-border" />
+                  <Popover>
+                    <PopoverTrigger asChild disabled={videoDevices.length === 0}>
+                      <button className="w-8 h-12 rounded-r-full flex items-center justify-center hover:bg-muted text-muted-foreground hover:text-foreground transition-colors">
+                        <ChevronDown className="w-3.5 h-3.5" />
+                      </button>
+                    </PopoverTrigger>
+                    <PopoverContent side="top" align="center" className="bg-popover border-border text-popover-foreground w-64 p-1">
+                      <div className="px-2 py-1.5 text-xs font-semibold text-muted-foreground uppercase tracking-wider">Camera</div>
+                      {videoDevices.map(d => (
                         <button
-                          key={device.deviceId}
-                          onClick={() => handleCameraSelect(device.deviceId)}
-                          className={`w-full text-left px-3 py-2 text-sm transition-colors ${device.deviceId === preferredCameraId
-                              ? 'bg-blue-600 text-white'
-                              : 'text-white hover:bg-gray-700'
-                            }`}
-                        >
-                          {device.label || `Camera ${device.deviceId.slice(0, 8)}...`}
-                          {device.deviceId === preferredCameraId && (
-                            <span className="ml-2 text-xs">✓</span>
+                          key={d.deviceId}
+                          className={cn(
+                            "w-full text-left px-2 py-2 text-sm rounded hover:bg-muted truncate",
+                            d.deviceId === preferredCameraId && "text-primary bg-primary/10"
                           )}
+                          onClick={() => handleCameraChange(d.deviceId)}
+                        >
+                          {d.label || `Camera ${d.deviceId.slice(0, 5)}`}
                         </button>
                       ))}
-                      {cameraDevices.length === 0 && (
-                        <div className="px-3 py-2 text-sm text-gray-400">
-                          No cameras detected
-                        </div>
-                      )}
-                      <div className="border-t border-gray-600 mt-1 pt-1">
-                        <button
-                          onClick={() => {
-                            onSwitchCamera();
-                            setVideoMenuOpen(false);
-                          }}
-                          disabled={cameraDevices.length <= 1}
-                          className="w-full text-left px-3 py-2 text-sm text-white hover:bg-gray-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-                        >
-                          Switch Camera
-                        </button>
-                      </div>
-                    </div>
-                  )}
+                    </PopoverContent>
+                  </Popover>
                 </div>
               )}
 
-              {/* Screen Share Button (only for video calls) */}
-              {isVideoCall && onStartScreenShare && onStopScreenShare && (
-                <div className="flex items-center gap-1">
-                  <button
-                    onClick={handleScreenShare}
-                    disabled={isProcessing}
-                    className={`w-14 h-14 rounded-full flex items-center justify-center transition-colors ${isScreenSharing ? 'bg-blue-600 hover:bg-blue-700' : 'bg-gray-600 hover:bg-gray-700'
-                      }`}
-                    title={isScreenSharing ? 'Stop screen sharing' : 'Start screen sharing'}
-                  >
-                    {isScreenSharing ? (
-                      <MonitorOff className="w-6 h-6 text-white" />
-                    ) : (
-                      <Monitor className="w-6 h-6 text-white" />
-                    )}
-                  </button>
-                  <button
-                    onClick={() => setShowScreenSharingSettings(true)}
-                    disabled={isProcessing}
-                    className="ml-2 w-10 h-10 rounded-full bg-gray-700 hover:bg-gray-600 flex items-center justify-center transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-                    title="Screen sharing settings"
-                  >
-                    <Settings className="w-4 h-4 text-white" />
-                  </button>
-                </div>
-              )}
-
-              {/* End Call Button */}
+              {/* Screen Share */}
               <button
-                onClick={handleEndClick}
-                disabled={isProcessing}
-                className="w-18 h-18 min-w-[72px] min-h-[72px] bg-red-600 hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed rounded-full flex items-center justify-center transition-colors shrink-0"
-                title="End call"
+                onClick={toggleScreenShare}
+                className={cn(
+                  "h-12 w-12 rounded-full border border-border flex items-center justify-center transition-colors",
+                  isScreenSharing ? "bg-primary text-primary-foreground border-primary" : "bg-secondary/50 text-foreground hover:bg-muted"
+                )}
+                title="Share Screen"
               >
-                <PhoneOff className="w-9 h-9 text-white" />
+                {isScreenSharing ? <MonitorOff className="w-5 h-5" /> : <Monitor className="w-5 h-5" />}
               </button>
-            </div>
+
+              {/* End Call */}
+              <button
+                onClick={onEndCall}
+                className="h-14 w-14 rounded-full bg-red-600 hover:bg-red-700 flex items-center justify-center text-white transition-all hover:scale-105 shadow-lg shadow-red-900/20"
+              >
+                <PhoneOff className="w-6 h-6" />
+              </button>
+            </>
           )}
         </div>
       </div>
 
-      {/* Screen Source Selector */}
-      <React.Suspense fallback={null}>
-        <ScreenSourceSelectorLazy
-          isOpen={showScreenSourceSelector}
-          onClose={() => setShowScreenSourceSelector(false)}
-          onSelect={handleScreenSourceSelect}
-          onCancel={handleScreenSourceCancel}
-          onGetAvailableScreenSources={onGetAvailableScreenSources}
-        />
-      </React.Suspense>
-
-      {/* Screen Sharing Settings Modal */}
-      {showScreenSharingSettings && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-          <div className="bg-white dark:bg-gray-800 rounded-lg p-6 max-w-md w-full mx-4 max-h-[80vh] overflow-y-auto">
-            <div className="flex justify-between items-center mb-4">
-              <h3 className="text-lg font-semibold">Screen Sharing Settings</h3>
-              <button
-                onClick={() => setShowScreenSharingSettings(false)}
-                disabled={isProcessing}
-                className="text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200 disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                ✕
-              </button>
-            </div>
-            <React.Suspense fallback={null}>
-              <ScreenSharingSettingsLazy />
-            </React.Suspense>
-            <div className="mt-4 flex justify-end">
-              <button
-                onClick={() => setShowScreenSharingSettings(false)}
-                disabled={isProcessing}
-                className="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                Done
-              </button>
-            </div>
-          </div>
-        </div>
+      {/* Screen Source Selector (Rendered outside to avoid clipping) */}
+      {(showScreenSourceSelector || hasOpenedScreenShare) && onGetAvailableScreenSources && (
+        <React.Suspense fallback={null}>
+          <ScreenSourceSelectorLazy
+            isOpen={showScreenSourceSelector}
+            onSelect={async (source: any) => {
+              if (onStartScreenShare) {
+                await onStartScreenShare(source);
+                setShowScreenSourceSelector(false);
+              }
+            }}
+            onClose={() => setShowScreenSourceSelector(false)}
+            onCancel={() => setShowScreenSourceSelector(false)}
+            onGetAvailableScreenSources={onGetAvailableScreenSources}
+          />
+        </React.Suspense>
       )}
-    </div>
+    </>
   );
-};
+});
 
+CallModal.displayName = 'CallModal';
 export default CallModal;

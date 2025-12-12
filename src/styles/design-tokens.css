@@ -9,6 +9,7 @@
   --color-text-secondary: #475569;
   --color-accent-primary: #3b82f6;
   --color-accent-secondary: #6366f1;
+  --color-on-accent: #ffffff;
   --color-border: #cbd5e1;
   --color-success: #10b981;
   --color-disabled: #94a3b8;
@@ -45,17 +46,11 @@
   /* Spacing */
   --spacing-base: 4px;
   --spacing-xxs: calc(var(--spacing-base) * 1);
-  /* 4px */
   --spacing-xs: calc(var(--spacing-base) * 2);
-  /* 8px */
   --spacing-sm: calc(var(--spacing-base) * 3);
-  /* 12px */
   --spacing-md: calc(var(--spacing-base) * 4);
-  /* 16px */
   --spacing-lg: calc(var(--spacing-base) * 6);
-  /* 24px */
   --spacing-xl: calc(var(--spacing-base) * 8);
-  /* 32px */
 
   /* Radius */
   --radius-small: 6px;
@@ -111,6 +106,7 @@
   --color-text-secondary: #94a3b8;
   --color-accent-primary: #3b82f6;
   --color-accent-secondary: #3f87fa;
+  --color-on-accent: #e2e8f0;
   --color-border: #0d0d0d;
   --color-success: #10b981;
   --color-disabled: #475569;
@@ -128,7 +124,7 @@
   --markdown-inline-code-bg: rgba(110, 118, 129, 0.4);
 }
 
-/* Custom Scrollbar Styling */
+/* Scrollbar Styling */
 ::-webkit-scrollbar {
   width: 8px;
   height: 8px;

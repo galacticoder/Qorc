@@ -10,27 +10,36 @@ export function TorIndicator() {
   const [isRotating, setIsRotating] = useState(false);
 
   useEffect(() => {
+    let mounted = true;
+
     const handleStatsChange = (newStats: TorConnectionStats) => {
+      if (!mounted) return;
       setStats(newStats);
-      if (isRotating && newStats.lastCircuitRotation > stats.lastCircuitRotation) {
+      if (newStats.lastCircuitRotation > stats.lastCircuitRotation) {
         setIsRotating(false);
       }
     };
-
-    // Initial sync
     setStats(torNetworkManager.getStats());
 
     torNetworkManager.onStatsChange(handleStatsChange);
     return () => {
+      mounted = false;
       torNetworkManager.offStatsChange(handleStatsChange);
     };
-  }, [isRotating, stats.lastCircuitRotation]);
+  }, [stats.lastCircuitRotation]);
 
   const handleRotateCircuit = async () => {
     setIsRotating(true);
-    await torNetworkManager.rotateCircuit();
-    setIsRotating(false);
-    setStats(torNetworkManager.getStats());
+    setTimeout(async () => {
+      try {
+        await torNetworkManager.rotateCircuit();
+      } catch {
+        setIsRotating(false);
+      }
+      setStats(torNetworkManager.getStats());
+      if (torNetworkManager.getStats().lastCircuitRotation === stats.lastCircuitRotation) {
+      }
+    }, 0);
   };
 
   const formatTime = (timestamp: number) => {

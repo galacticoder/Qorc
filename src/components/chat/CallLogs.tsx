@@ -66,8 +66,18 @@ const CallLogItem: React.FC<CallLogItemProps> = React.memo(({
 
                 <div className="flex-1 min-w-0">
                     <div className="flex items-center justify-between mb-1">
-                        <h3 className="font-semibold truncate text-foreground max-w-[180px]">{displayName}</h3>
-                        <span className="text-xs text-muted-foreground font-medium">
+                        <div className="flex items-center gap-2 overflow-hidden">
+                            <h3 className="font-semibold truncate text-foreground max-w-[180px]">{displayName}</h3>
+                            {isBlocked && (
+                                <div className="flex items-center gap-1 px-2 py-0.5 rounded-full bg-red-900/20 shrink-0">
+                                    <ShieldOff className="w-3 h-3 text-red-600 dark:text-red-400" />
+                                    <span className="text-xs font-medium text-red-600 dark:text-red-400">
+                                        Blocked
+                                    </span>
+                                </div>
+                            )}
+                        </div>
+                        <span className="text-xs text-muted-foreground font-medium shrink-0 ml-2">
                             {formatTime(log.startTime)}
                         </span>
                     </div>
@@ -75,34 +85,21 @@ const CallLogItem: React.FC<CallLogItemProps> = React.memo(({
                     <div className="flex items-center gap-3 text-sm text-muted-foreground">
                         <div className="flex items-center gap-1.5">
                             {log.type === 'video' ? (
-                                <Video className={`w-4 h-4 ${log.status === 'missed' ? 'text-destructive' : 'text-gray-500'}`} />
+                                <Video className={`w-4 h-4 ${log.status === 'missed' ? 'text-red-500' : 'text-gray-500'}`} />
                             ) : (
-                                <Phone className={`w-4 h-4 ${log.status === 'missed' ? 'text-destructive' : 'text-gray-500'}`} />
+                                <Phone className={`w-4 h-4 ${log.status === 'missed' ? 'text-red-500' : 'text-gray-500'}`} />
                             )}
-                            <span className={log.status === 'missed' ? 'text-destructive font-medium' : ''}>
+                            <span className={log.status === 'missed' ? 'text-red-500 font-medium' : ''}>
                                 {log.status === 'missed' ? 'Missed Call' : (log.direction === 'outgoing' ? 'Outgoing' : 'Incoming')}
                             </span>
                         </div>
 
-                        {log.duration && (
+                        {log.duration !== undefined && log.duration > 0 && (
                             <>
-                                <span className="w-1 h-1 rounded-full bg-border" />
+                                <span className="w-1 h-1 rounded-full bg-zinc-200" />
                                 <span>
                                     {formatDuration(log.duration)}
                                 </span>
-                            </>
-                        )}
-
-                        {/* Blocked Status Indicator */}
-                        {isBlocked && (
-                            <>
-                                <span className="w-1 h-1 rounded-full bg-border" />
-                                <div className="flex items-center gap-1 px-2 py-0.5 rounded-full bg-red-100 dark:bg-red-900/20">
-                                    <ShieldOff className="w-3 h-3 text-red-600 dark:text-red-400" />
-                                    <span className="text-xs font-medium text-red-600 dark:text-red-400">
-                                        Blocked
-                                    </span>
-                                </div>
                             </>
                         )}
                     </div>
@@ -217,17 +214,17 @@ export const CallLogs = React.memo<CallLogsProps>(({ getDisplayUsername }) => {
     }, []);
 
     return (
-        <div className="h-full flex flex-col bg-background select-none">
-            <div className="p-6 space-y-4">
+        <div className="flex flex-col h-full relative" style={{ backgroundColor: 'var(--chat-background)' }}>
+            <div className="absolute top-0 left-0 right-0 z-10 p-6 space-y-4 bg-gradient-to-b from-background via-background/80 to-transparent">
                 <div className="flex items-center gap-2">
                     <div className="relative flex-1">
-                        <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
                         <Input
                             placeholder="Search call history..."
-                            className="pl-9 bg-background border-border dark:border-gray-600 focus:border-primary"
+                            className="pl-9 bg-background/50 border-border dark:border-gray-600 focus:border-primary backdrop-blur-sm"
                             value={searchQuery}
                             onChange={(e) => setSearchQuery(e.target.value)}
                         />
+                        <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground pointer-events-none" />
                     </div>
 
                     {/* Options Menu */}
@@ -236,7 +233,7 @@ export const CallLogs = React.memo<CallLogsProps>(({ getDisplayUsername }) => {
                             <Button
                                 size="sm"
                                 variant="outline"
-                                className="flex items-center justify-center select-none dark:border-gray-600 [&:hover]:!bg-background [&:hover]:!text-foreground dark:[&:hover]:!border-gray-600"
+                                className="flex items-center justify-center select-none dark:border-gray-600 [&:hover]:!bg-background [&:hover]:!text-foreground dark:[&:hover]:!border-gray-600 bg-background/50 backdrop-blur-sm"
                             >
                                 <MoreVertical className="w-4 h-4" />
                             </Button>
@@ -262,8 +259,8 @@ export const CallLogs = React.memo<CallLogsProps>(({ getDisplayUsername }) => {
                 </div>
             </div>
 
-            <ScrollArea className="flex-1 px-6 pb-4">
-                <div className="space-y-2">
+            <ScrollArea className="absolute inset-0 z-0 h-full w-full">
+                <div className="space-y-2 px-6 pb-4 pt-24">
                     {filteredLogs.length === 0 ? (
                         <div className="text-center py-12 text-muted-foreground select-none">
                             <Clock className="w-12 h-12 mx-auto mb-4 opacity-20" />

@@ -66,7 +66,6 @@ const buildSmartStatusMap = (messages: Message[], currentUsername: string) => {
 
   // For each conversation, find latest read and latest delivered
   for (const [peer, msgs] of conversationGroups.entries()) {
-    // Sort by timestamp (newest first), handling invalid dates safely
     const sorted = msgs.sort((a, b) => {
       const tA = new Date(a.timestamp).getTime();
       const tB = new Date(b.timestamp).getTime();
@@ -84,7 +83,7 @@ const buildSmartStatusMap = (messages: Message[], currentUsername: string) => {
 
     const latestReadTime = latestReadMsg ? latestReadMsg.timestamp : 0;
 
-    // Find latest delivered (must be newer than latest read) for this conversation
+    // Find latest delivered for this conversation
     const latestDeliveredMsg = sorted.find(
       (item) => item.receipt.delivered && !item.receipt.read && item.timestamp > latestReadTime,
     );
@@ -134,31 +133,36 @@ const updateMessageReceipt = async (
   setMessages: React.Dispatch<React.SetStateAction<Message[]>>,
   messageId: string,
   updater: (receipt: Message['receipt'] | undefined) => Message['receipt'] | undefined,
+  messagesRef: React.MutableRefObject<Message[]>,
   dbReceiptQueueRef?: React.MutableRefObject<Map<string, (receipt: Message['receipt'] | undefined) => Message['receipt'] | undefined>>,
   dbFlushTimeoutRef?: React.MutableRefObject<ReturnType<typeof setTimeout> | null>,
   flushDBReceiptsRef?: React.MutableRefObject<(() => Promise<void>) | null>,
 ): Promise<Message | null> => {
-  // First, update in-memory state if message is in current view
   const index = messageIndexRef.current.get(messageId);
   let updatedMessage: Message | null = null;
 
   if (index !== undefined) {
-    setMessages((prev) => {
-      if (index < 0 || index >= prev.length) {
-        return prev;
-      }
-      const target = prev[index];
+    const currentMessages = messagesRef.current;
+    if (index >= 0 && index < currentMessages.length) {
+      const target = currentMessages[index];
       const nextReceipt = updater(target.receipt);
-      if (nextReceipt === target.receipt) {
-        return prev;
+      if (nextReceipt !== target.receipt) {
+        updatedMessage = { ...target, receipt: nextReceipt };
       }
-      updatedMessage = { ...target, receipt: nextReceipt };
-      const next = [...prev];
-      next[index] = updatedMessage;
-      return next;
-    });
+    }
+
+    if (updatedMessage) {
+      const msgToSet = updatedMessage;
+      setMessages((prev) => {
+        if (index < 0 || index >= prev.length) {
+          return prev;
+        }
+        const next = [...prev];
+        next[index] = msgToSet;
+        return next;
+      });
+    }
   } else {
-    // Message not in current view - queue for batched DB update
     if (dbReceiptQueueRef && dbFlushTimeoutRef && flushDBReceiptsRef) {
       dbReceiptQueueRef.current.set(messageId, updater);
 
@@ -191,13 +195,17 @@ export function useMessageReceipts(
 ) {
   const sentReceiptsRef = useRef<Map<string, number>>(new Map());
   const messageIndexRef = useRef<Map<string, number>>(new Map());
+  const messagesRef = useRef<Message[]>(messages);
   const rateLimitRef = useRef<{ windowStart: number; count: number }>({ windowStart: Date.now(), count: 0 });
   const pendingReceiptsRef = useRef<Map<string, { kind: 'delivered' | 'read'; addedAt: number; attempts: number }>>(new Map());
   const dbReceiptQueueRef = useRef<Map<string, (receipt: Message['receipt'] | undefined) => Message['receipt'] | undefined>>(new Map());
   const dbFlushTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const flushDBReceiptsRef = useRef<(() => Promise<void>) | null>(null);
 
-  // Batched DB receipt flusher - only loads messages once and applies all queued receipts
+  useEffect(() => {
+    messagesRef.current = messages;
+  }, [messages]);
+
   useEffect(() => {
     const flushDBReceipts = async () => {
       if (!secureDBRef?.current || dbReceiptQueueRef.current.size === 0) return;
@@ -209,7 +217,6 @@ export function useMessageReceipts(
         const allMessages = await secureDBRef.current.loadMessages().catch(() => []);
         let hasChanges = false;
 
-        // Apply all queued receipt updates in one pass
         const unappliedUpdates = new Map<string, (receipt: Message['receipt'] | undefined) => Message['receipt'] | undefined>();
 
         for (const [messageId, updater] of queue.entries()) {
@@ -226,7 +233,6 @@ export function useMessageReceipts(
           }
         }
 
-        // Restore unapplied updates to the main queue
         if (unappliedUpdates.size > 0) {
           for (const [id, updater] of unappliedUpdates.entries()) {
             dbReceiptQueueRef.current.set(id, updater);
@@ -251,7 +257,6 @@ export function useMessageReceipts(
     });
     messageIndexRef.current = indexMap;
 
-    // Attempt to flush any pending receipts once messages index is refreshed
     if (pendingReceiptsRef.current.size > 0) {
       const entries = Array.from(pendingReceiptsRef.current.entries());
       for (const [rawId, meta] of entries) {
@@ -270,6 +275,7 @@ export function useMessageReceipts(
               if (receipt?.read) return receipt;
               return { ...receipt, read: true, readAt: new Date() };
             },
+            messagesRef,
             dbReceiptQueueRef,
             dbFlushTimeoutRef,
             flushDBReceiptsRef,
@@ -351,7 +357,6 @@ export function useMessageReceipts(
         });
 
         if (!sessionCheck?.hasSession) {
-          // Request bundle and wait briefly for session establishment, then proceed
           try {
             await websocketClient.sendSecureControlMessage({
               type: SignalType.LIBSIGNAL_REQUEST_BUNDLE,
@@ -430,6 +435,7 @@ export function useMessageReceipts(
             readAt: new Date(),
           };
         },
+        messagesRef,
         dbReceiptQueueRef,
         dbFlushTimeoutRef,
         flushDBReceiptsRef,
@@ -476,6 +482,7 @@ export function useMessageReceipts(
             deliveredAt: new Date(),
           };
         },
+        messagesRef,
         dbReceiptQueueRef,
         dbFlushTimeoutRef,
         flushDBReceiptsRef,
@@ -526,6 +533,7 @@ export function useMessageReceipts(
             readAt: new Date(),
           };
         },
+        messagesRef,
         dbReceiptQueueRef,
         dbFlushTimeoutRef,
         flushDBReceiptsRef,

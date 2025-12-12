@@ -5,25 +5,21 @@ import rehypeHighlight from 'rehype-highlight';
 import { isMarkdownMessage, extractMarkdownContent, hasMixedContent, parseMixedContent } from '../../lib/markdown-parser';
 
 /**
- * Check if markdown content should be rendered inline (no line breaks)
- * Returns true for simple single-line content like headers, bold, italic, links
+ * Check if markdown content should be rendered inline
  */
 function shouldRenderInline(content: string): boolean {
-  // If content has multiple lines, always render as block
   if (content.includes('\n')) return false;
-  
-  // Check for block-level elements that require block rendering
+
   const hasCodeBlock = /```/.test(content);
   const hasCodeFence = /~~~/.test(content);
   const hasList = /(^|\s)[-*+]\s/.test(content) || /(^|\s)\d+\.\s/.test(content);
   const hasBlockquote = /(^|\s)>\s/.test(content);
   const hasTable = /\|.*\|/.test(content);
-  
+
   if (hasCodeBlock || hasCodeFence || hasList || hasBlockquote || hasTable) {
     return false;
   }
-  
-  // For single line content without block elements, render inline
+
   return true;
 }
 
@@ -31,37 +27,34 @@ interface MarkdownRendererProps {
   content: string;
   className?: string;
   isCurrentUser?: boolean;
+  preCalculatedContent?: string;
 }
 
-export function MarkdownRenderer({ content, className = '', isCurrentUser = false }: MarkdownRendererProps) {
-  // Check if content has mixed content (both text and markdown segments)
-  if (hasMixedContent(content)) {
+export function MarkdownRenderer({ content, className = '', isCurrentUser = false, preCalculatedContent }: MarkdownRendererProps) {
+  if (!preCalculatedContent && hasMixedContent(content)) {
     const segments = parseMixedContent(content);
-    
+
     return (
       <div className={`mixed-content ${className}`}>
         {segments.map((segment, index) => {
           if (segment.type === 'text') {
-            // Render plain text segments normally
             return <span key={index}>{segment.content}</span>;
           } else {
-            // Render markdown segments with ReactMarkdown
-            const isLargeContent = segment.content.length > 500 || 
-                                  segment.content.split('\n').length > 10 ||
-                                  segment.content.includes('```') ||
-                                  (segment.content.match(/^#{1,3}\s/gm) || []).length > 2;
-            
+            const isLargeContent = segment.content.length > 500 ||
+              segment.content.split('\n').length > 10 ||
+              segment.content.includes('```') ||
+              (segment.content.match(/^#{1,3}\s/gm) || []).length > 2;
+
             const isInlineContent = shouldRenderInline(segment.content) && !segment.hasOriginalNewlines;
-            const contentClassName = isLargeContent 
-              ? 'markdown-content markdown-readme' 
+            const contentClassName = isLargeContent
+              ? 'markdown-content markdown-readme'
               : 'markdown-content';
             const useCurrentUserColors = !isLargeContent && isCurrentUser;
-            
-            // Use span for inline content, div for block content
+
             const WrapperElement = isInlineContent ? 'span' : 'div';
-            
+
             return (
-              <WrapperElement 
+              <WrapperElement
                 key={index}
                 className={contentClassName}
                 style={useCurrentUserColors ? {
@@ -72,34 +65,31 @@ export function MarkdownRenderer({ content, className = '', isCurrentUser = fals
                   remarkPlugins={[remarkGfm]}
                   rehypePlugins={[rehypeHighlight]}
                   components={{
-                    // For inline content, render headers as spans
-                    h1: ({ children, ...props }) => isInlineContent ? 
+                    h1: ({ children, ...props }) => isInlineContent ?
                       <span style={{ fontWeight: 600, fontSize: '1.5em' }} {...props}>{children}</span> :
                       <h1 {...props}>{children}</h1>,
-                    h2: ({ children, ...props }) => isInlineContent ? 
+                    h2: ({ children, ...props }) => isInlineContent ?
                       <span style={{ fontWeight: 600, fontSize: '1.3em' }} {...props}>{children}</span> :
                       <h2 {...props}>{children}</h2>,
-                    h3: ({ children, ...props }) => isInlineContent ? 
+                    h3: ({ children, ...props }) => isInlineContent ?
                       <span style={{ fontWeight: 600, fontSize: '1.2em' }} {...props}>{children}</span> :
                       <h3 {...props}>{children}</h3>,
-                    h4: ({ children, ...props }) => isInlineContent ? 
+                    h4: ({ children, ...props }) => isInlineContent ?
                       <span style={{ fontWeight: 600, fontSize: '1.1em' }} {...props}>{children}</span> :
                       <h4 {...props}>{children}</h4>,
-                    h5: ({ children, ...props }) => isInlineContent ? 
+                    h5: ({ children, ...props }) => isInlineContent ?
                       <span style={{ fontWeight: 600, fontSize: '1em' }} {...props}>{children}</span> :
                       <h5 {...props}>{children}</h5>,
-                    h6: ({ children, ...props }) => isInlineContent ? 
+                    h6: ({ children, ...props }) => isInlineContent ?
                       <span style={{ fontWeight: 600, fontSize: '0.9em' }} {...props}>{children}</span> :
                       <h6 {...props}>{children}</h6>,
-                    // For inline content, render paragraphs as spans
-                    p: ({ children, ...props }) => isInlineContent ? 
+                    p: ({ children, ...props }) => isInlineContent ?
                       <span {...props}>{children}</span> :
                       <p {...props}>{children}</p>,
-                    // Custom component styling for links
                     a: ({ href, children, ...props }) => (
-                      <a 
-                        href={href} 
-                        target="_blank" 
+                      <a
+                        href={href}
+                        target="_blank"
                         rel="noopener noreferrer"
                         style={{ color: 'var(--markdown-link-color)' }}
                         {...props}
@@ -107,11 +97,10 @@ export function MarkdownRenderer({ content, className = '', isCurrentUser = fals
                         {children}
                       </a>
                     ),
-                    // Custom component styling for code blocks
                     code: ({ children, className, ...props }) => {
                       const isInline = !className;
                       return (
-                        <code 
+                        <code
                           className={className}
                           style={{
                             backgroundColor: isInline ? 'var(--markdown-inline-code-bg)' : 'transparent',
@@ -138,30 +127,25 @@ export function MarkdownRenderer({ content, className = '', isCurrentUser = fals
       </div>
     );
   }
-  
-  if (!isMarkdownMessage(content)) {
-    // Return plain text for non-markdown messages
+
+  if (!preCalculatedContent && !isMarkdownMessage(content)) {
     return <span className={className}>{content}</span>;
   }
-  
-  const markdownContent = extractMarkdownContent(content);
-  
-  // Detect if this is large README-style content
-  const isLargeContent = markdownContent.length > 500 || 
-                        markdownContent.split('\n').length > 10 ||
-                        markdownContent.includes('```') ||
-                        (markdownContent.match(/^#{1,3}\s/gm) || []).length > 2;
-  
-  // For large content, don't use compact styling and apply proper README styling
-  // For small content, use compact styling with message bubble appearance  
-  const contentClassName = isLargeContent 
-    ? 'markdown-content markdown-readme' 
+
+  const markdownContent = preCalculatedContent || extractMarkdownContent(content);
+
+  const isLargeContent = markdownContent.length > 500 ||
+    markdownContent.split('\n').length > 10 ||
+    markdownContent.includes('```') ||
+    (markdownContent.match(/^#{1,3}\s/gm) || []).length > 2;
+
+  const contentClassName = isLargeContent
+    ? 'markdown-content markdown-readme'
     : `markdown-content ${className || ''} markdown-message`.trim();
   const useCurrentUserColors = !isLargeContent && isCurrentUser;
-  
-  // Render markdown content with appropriate styling
+
   return (
-    <div 
+    <div
       className={contentClassName}
       style={useCurrentUserColors ? {
         color: 'white',
@@ -171,11 +155,10 @@ export function MarkdownRenderer({ content, className = '', isCurrentUser = fals
         remarkPlugins={[remarkGfm]}
         rehypePlugins={[rehypeHighlight]}
         components={{
-          // Custom component styling for links
           a: ({ href, children, ...props }) => (
-            <a 
-              href={href} 
-              target="_blank" 
+            <a
+              href={href}
+              target="_blank"
               rel="noopener noreferrer"
               style={{ color: 'var(--markdown-link-color)' }}
               {...props}
@@ -183,11 +166,10 @@ export function MarkdownRenderer({ content, className = '', isCurrentUser = fals
               {children}
             </a>
           ),
-          // Custom component styling for code blocks
           code: ({ children, className, ...props }) => {
             const isInline = !className;
             return (
-              <code 
+              <code
                 className={className}
                 style={{
                   backgroundColor: isInline ? 'var(--markdown-inline-code-bg)' : 'transparent',
@@ -211,7 +193,6 @@ export function MarkdownRenderer({ content, className = '', isCurrentUser = fals
   );
 }
 
-// CSS styles to be added to global styles or component
 export const markdownStyles = `
 .markdown-content {
   font-family: inherit;

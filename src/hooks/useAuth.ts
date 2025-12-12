@@ -1176,9 +1176,6 @@ export const useAuth = (_secureDB?: SecureDB) => {
     } catch { }
 
     if (secureDBRef?.current) {
-      try {
-        await secureDBRef.current.clearDatabase();
-      } catch { }
       secureDBRef.current = null;
     }
 
@@ -1191,7 +1188,6 @@ export const useAuth = (_secureDB?: SecureDB) => {
         try { await (window as any).electronAPI.secureStore.remove(`pph:${pseudonym}`); } catch { }
         try { await (window as any).electronAPI.secureStore.remove(`tok:${(window as any).electronAPI?.instanceId || '1'}`); } catch { }
       }
-      try { const { removeVaultKey } = await import('../lib/vault-key'); if (pseudonym) await removeVaultKey(pseudonym); } catch { }
     } catch { }
 
 
@@ -1202,7 +1198,6 @@ export const useAuth = (_secureDB?: SecureDB) => {
     if (keyManagerRef.current) {
       try {
         keyManagerRef.current.clearKeys();
-        await keyManagerRef.current.deleteDatabase();
         keyManagerRef.current = null;
       } catch { }
     }
@@ -1213,6 +1208,9 @@ export const useAuth = (_secureDB?: SecureDB) => {
     setLoginError(loginErrorMessage);
     setAccountAuthenticated(false);
     setIsRegistrationMode(false);
+    setAccountAuthenticated(false);
+    setIsRegistrationMode(false);
+    setIsSubmittingAuth(false);
     setUsername("");
 
   };
@@ -1499,10 +1497,6 @@ export const useAuth = (_secureDB?: SecureDB) => {
       setPasswordHashParams(params);
 
       try { lastPasswordParamsForRef.current = loginUsernameRef.current || ''; } catch { }
-
-      if (accountAuthenticated && !showPassphrasePrompt) {
-        setShowPassphrasePrompt(true);
-      }
 
       const existingPassword = passwordRef.current || "";
       if (existingPassword) {

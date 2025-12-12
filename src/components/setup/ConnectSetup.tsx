@@ -128,20 +128,18 @@ export function ConnectSetup({ onComplete, initialServerUrl = '' }: ConnectSetup
         }
       });
       if (success) {
-        // Refresh status to get version and full Tor info
         const refreshed = await getTorAutoSetup().refreshStatus();
         setStatus(refreshed);
         console.log('[ConnectSetup] Tor setup complete, version:', refreshed.version);
 
-        // Initialize the network manager so the app knows Tor is ready
         torNetworkManager.updateConfig({
           enabled: true,
           socksPort: refreshed.socksPort,
           controlPort: refreshed.controlPort
         });
         await torNetworkManager.initialize();
+        (window as any).__TOR_MODE__ = true;
 
-        // Notify Electron that Tor setup is complete
         try {
           await (window as any).electronAPI?.torSetupComplete?.();
         } catch (e) {
@@ -172,17 +170,14 @@ export function ConnectSetup({ onComplete, initialServerUrl = '' }: ConnectSetup
 
   const ensureTorInitialized = async (): Promise<boolean> => {
     try {
-      // Get current status to find the correct ports
       const currentStatus = await getTorAutoSetup().refreshStatus();
 
-      // Configure the network manager with correct ports
       torNetworkManager.updateConfig({
         enabled: true,
         socksPort: currentStatus.socksPort || 9150,
         controlPort: currentStatus.controlPort || 9151
       });
 
-      // Initialize the network manager
       const ok = await torNetworkManager.initialize();
 
       if (ok) {

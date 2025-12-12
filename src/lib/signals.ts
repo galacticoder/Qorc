@@ -291,6 +291,8 @@ export async function handleSignalMessages(data: any, handlers: SignalHandlers) 
             refreshToken: String(data.tokens.refreshToken)
           }).catch((error) => SecureAuditLogger.error('signals', 'auth-success', 'persist-tokens-failed', { error: error.message }));
           setAccountAuthenticated?.(true);
+          setIsSubmittingAuth?.(false);
+          try { window.dispatchEvent(new CustomEvent('secure-chat:auth-success')); } catch { }
         }
 
         handleAuthSuccess?.(recoveredUser || usernameFromServer || '', Boolean(data?.recovered));
@@ -344,7 +346,6 @@ export async function handleSignalMessages(data: any, handlers: SignalHandlers) 
                 aesKeyRef.current = masterKey;
               }
 
-              // Initialize SecureKeyManager with the same master key
               if (!Authentication?.keyManagerRef?.current) {
                 const mod = await import('./secure-key-manager');
                 const SKM = (mod as any).SecureKeyManager || (mod as any).default;
@@ -369,7 +370,6 @@ export async function handleSignalMessages(data: any, handlers: SignalHandlers) 
 
           try {
             if (Authentication?.keyManagerRef?.current && serverHybridPublic) {
-              // Make sure keys exist before to publishing
               try {
                 const maybeKeys = await Authentication.keyManagerRef.current.getKeys().catch(() => null);
                 if (!maybeKeys) {
@@ -387,11 +387,13 @@ export async function handleSignalMessages(data: any, handlers: SignalHandlers) 
                 };
                 const payload = JSON.stringify(keysToSend);
                 try {
+                  const keys = await Authentication.getKeysOnDemand?.();
                   const encryptedHybridKeys = await CryptoUtils.Hybrid.encryptForServer(
                     payload,
                     serverHybridPublic,
                     {
-                      senderDilithiumSecretKey: (await Authentication.getKeysOnDemand?.())?.dilithium?.secretKey,
+                      senderDilithiumSecretKey: keys?.dilithium?.secretKey,
+                      senderDilithiumPublicKey: keys?.dilithium?.publicKey,
                       metadata: { context: 'hybrid-keys-update' }
                     }
                   );
@@ -444,8 +446,8 @@ export async function handleSignalMessages(data: any, handlers: SignalHandlers) 
             }
           } catch { }
 
-          // Mark authenticated/logged-in
           setAccountAuthenticated?.(true);
+          try { window.dispatchEvent(new CustomEvent('secure-chat:auth-success')); } catch { }
           setIsLoggedIn?.(true);
           Authentication?.setMaxStepReached?.('passphrase');
           try { Authentication?.setTokenValidationInProgress?.(false); } catch { }

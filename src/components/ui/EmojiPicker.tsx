@@ -1,5 +1,6 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
-import { getEmojiCategories, type EmojiCategory } from '../../lib/system-emoji';
+import { getSystemEmojis, searchEmojis, recordEmojiUsage } from '../../lib/system-emoji';
+import type { SecureDB } from '../../lib/secureDB';
 
 interface EmojiPickerProps {
   onEmojiSelect: (emoji: string) => void;
@@ -7,43 +8,64 @@ interface EmojiPickerProps {
   className?: string;
   triggerId?: string;
   isCurrentUser?: boolean;
+  secureDB?: SecureDB;
 }
 
-export function EmojiPicker({ onEmojiSelect, onClose, className = '', triggerId, isCurrentUser = false }: EmojiPickerProps) {
-  const [categories, setCategories] = useState<EmojiCategory[]>([]);
-  const [activeCategory, setActiveCategory] = useState(0);
-  const [position, setPosition] = useState({ top: -9999, left: -9999 }); // Start off-screen to prevent flash
+export function EmojiPicker({ onEmojiSelect, onClose, className = '', triggerId, isCurrentUser = false, secureDB }: EmojiPickerProps) {
+  const [allEmojis, setAllEmojis] = useState<string[]>([]);
+  const [filteredEmojis, setFilteredEmojis] = useState<string[]>([]);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [position, setPosition] = useState({ top: -9999, left: -9999 });
   const [isPositioned, setIsPositioned] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const pickerRef = useRef<HTMLDivElement>(null);
-  
-  // Load emoji categories asynchronously
+  const searchInputRef = useRef<HTMLInputElement>(null);
+
   useEffect(() => {
     let mounted = true;
-    getEmojiCategories().then(cats => {
+    getSystemEmojis(secureDB).then(emojis => {
       if (mounted) {
-        setCategories(cats);
+        setAllEmojis(emojis);
+        setFilteredEmojis(emojis);
       }
     }).catch(error => {
-      console.error('[EmojiPicker] Failed to load emoji categories:', error);
-      // Set a minimal fallback
+      console.error('[EmojiPicker] Failed to load emojis:', error);
       if (mounted) {
-        setCategories([{ name: 'Smileys', emojis: ['😀', '😃', '😄', '😁', '😅', '😂', '🤣', '😊', '😍', '😎'] }]);
+        const fallback = ['😀', '😃', '😄', '😁', '😅', '😂', '🤣', '😊', '😍', '😎', '👍', '👎', '❤️', '✅', '❌'];
+        setAllEmojis(fallback);
+        setFilteredEmojis(fallback);
       }
     });
     return () => { mounted = false; };
-  }, []);
+  }, [secureDB]);
 
-  // Function to calculate and set position
+  useEffect(() => {
+    if (!searchQuery.trim()) {
+      setFilteredEmojis(allEmojis);
+    } else {
+      try {
+        const results = searchEmojis(searchQuery, allEmojis);
+        setFilteredEmojis(results);
+      } catch {
+        setFilteredEmojis(allEmojis);
+      }
+    }
+  }, [searchQuery, allEmojis]);
+
+  useEffect(() => {
+    if (isPositioned && searchInputRef.current) {
+      searchInputRef.current.focus();
+    }
+  }, [isPositioned]);
+
   const calculatePosition = useCallback(() => {
     const trigger = triggerId
       ? document.querySelector(`[data-emoji-trigger="${triggerId}"]`) as HTMLElement
       : document.querySelector('[data-emoji-add-button]') as HTMLElement;
-    
+
     if (!trigger) {
-      // Fallback positioning - center the picker on screen
       const pickerWidth = 280;
-      const pickerHeight = 320;
+      const pickerHeight = 360;
       const left = (window.innerWidth - pickerWidth) / 2;
       const top = (window.innerHeight - pickerHeight) / 2;
       setPosition({ top, left });
@@ -53,65 +75,53 @@ export function EmojiPicker({ onEmojiSelect, onClose, className = '', triggerId,
 
     const triggerRect = trigger.getBoundingClientRect();
     const pickerWidth = 280;
-    const pickerHeight = 320;
+    const pickerHeight = 360;
 
-    // Use the isCurrentUser prop for better detection
     const isCurrentUserMessage = isCurrentUser;
-    
+
     let left: number;
     let top: number;
-    
-    // Position the picker relative to the trigger button
-    top = triggerRect.top - 10; // Position just slightly above the trigger button
-    
+
+    top = triggerRect.top - 10;
+
     if (isCurrentUserMessage) {
-      // For current user (right side): position to the left of the button
       left = triggerRect.left - pickerWidth - 8;
     } else {
-      // For other users (left side): position to the right of the button
       left = triggerRect.right + 8;
     }
 
-    // Ensure the picker stays within screen bounds
-    // Adjust horizontal position if going off screen
     if (left < 16) {
-      left = 16; // Minimum left margin
+      left = 16;
     }
     if (left + pickerWidth > window.innerWidth - 16) {
-      left = window.innerWidth - pickerWidth - 16; // Maximum right position
+      left = window.innerWidth - pickerWidth - 16;
     }
 
-    // Adjust vertical position if going off screen
     if (top < 16) {
-      top = triggerRect.bottom + 8; // Position below button if too high
+      top = triggerRect.bottom + 8;
     }
     if (top + pickerHeight > window.innerHeight - 16) {
-      top = window.innerHeight - pickerHeight - 16; // Position above if too low
+      top = window.innerHeight - pickerHeight - 16;
     }
     setPosition({ top, left });
     setIsPositioned(true);
   }, [triggerId, isCurrentUser]);
 
-  // Position the picker relative to the trigger button
   useEffect(() => {
-    // Add a small delay to ensure the button is rendered and visible
     const timer = setTimeout(() => {
       calculatePosition();
     }, 10);
-    
     return () => clearTimeout(timer);
   }, [calculatePosition]);
 
-  // Recalculate position on scroll and resize
   useEffect(() => {
     let scrollTimeout: ReturnType<typeof setTimeout>;
-    
+
     const handleScroll = () => {
-      // Debounce scroll events to prevent excessive recalculations
       clearTimeout(scrollTimeout);
       scrollTimeout = setTimeout(() => {
         calculatePosition();
-      }, 16); // ~60fps
+      }, 16);
     };
 
     const handleResize = () => {
@@ -120,7 +130,7 @@ export function EmojiPicker({ onEmojiSelect, onClose, className = '', triggerId,
 
     window.addEventListener('scroll', handleScroll, true);
     window.addEventListener('resize', handleResize);
-    
+
     return () => {
       clearTimeout(scrollTimeout);
       window.removeEventListener('scroll', handleScroll, true);
@@ -128,11 +138,9 @@ export function EmojiPicker({ onEmojiSelect, onClose, className = '', triggerId,
     };
   }, [calculatePosition]);
 
-  // Close on outside click
   useEffect(() => {
     function handleClickOutside(event: MouseEvent) {
       if (pickerRef.current && !pickerRef.current.contains(event.target as Node)) {
-        // Add a small delay to prevent immediate closing when button is clicked
         setTimeout(() => {
           onClose();
         }, 100);
@@ -143,7 +151,6 @@ export function EmojiPicker({ onEmojiSelect, onClose, className = '', triggerId,
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, [onClose]);
 
-  // Close on escape key
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
       if (event.key === 'Escape') {
@@ -160,8 +167,7 @@ export function EmojiPicker({ onEmojiSelect, onClose, className = '', triggerId,
     onClose();
   };
 
-  // Don't render until positioned and categories are loaded to prevent flash
-  if (!isPositioned || categories.length === 0) {
+  if (!isPositioned || allEmojis.length === 0) {
     return null;
   }
 
@@ -174,7 +180,7 @@ export function EmojiPicker({ onEmojiSelect, onClose, className = '', triggerId,
         top: position.top,
         left: position.left,
         width: '280px',
-        height: '320px',
+        height: '360px',
         backgroundColor: 'var(--color-surface)',
         border: '1px solid var(--color-border)',
         borderRadius: '8px',
@@ -185,44 +191,37 @@ export function EmojiPicker({ onEmojiSelect, onClose, className = '', triggerId,
         overflow: 'hidden'
       }}
     >
-      {/* Category tabs */}
+      {/* Search input */}
       <div
         style={{
-          display: 'flex',
+          padding: '8px',
           borderBottom: '1px solid var(--color-border)',
           backgroundColor: 'var(--color-muted-panel)'
         }}
       >
-        {categories.map((category, index) => (
-          <button
-            key={category.name}
-            onClick={() => setActiveCategory(index)}
-            style={{
-              flex: 1,
-              padding: '8px 4px',
-              border: 'none',
-              backgroundColor: activeCategory === index ? 'var(--color-surface)' : 'transparent',
-              color: activeCategory === index ? 'var(--color-text-primary)' : 'var(--color-text-secondary)',
-              fontSize: '11px',
-              fontWeight: activeCategory === index ? '600' : '400',
-              cursor: 'pointer',
-              borderBottom: activeCategory === index ? '2px solid var(--color-accent-primary)' : '2px solid transparent',
-              transition: 'all 0.2s ease'
-            }}
-            onMouseEnter={(e) => {
-              if (activeCategory !== index) {
-                e.currentTarget.style.backgroundColor = 'var(--color-hover)';
-              }
-            }}
-            onMouseLeave={(e) => {
-              if (activeCategory !== index) {
-                e.currentTarget.style.backgroundColor = 'transparent';
-              }
-            }}
-          >
-            {category.name}
-          </button>
-        ))}
+        <input
+          ref={searchInputRef}
+          type="text"
+          placeholder="Search emoji..."
+          value={searchQuery}
+          onChange={(e) => setSearchQuery(e.target.value)}
+          style={{
+            width: '100%',
+            padding: '8px 12px',
+            border: '1px solid var(--color-border)',
+            borderRadius: '6px',
+            backgroundColor: 'var(--color-surface)',
+            color: 'var(--color-text-primary)',
+            fontSize: '14px',
+            outline: 'none'
+          }}
+          onFocus={(e) => {
+            e.currentTarget.style.borderColor = 'var(--color-accent-primary)';
+          }}
+          onBlur={(e) => {
+            e.currentTarget.style.borderColor = 'var(--color-border)';
+          }}
+        />
       </div>
 
       {/* Emoji grid */}
@@ -235,42 +234,55 @@ export function EmojiPicker({ onEmojiSelect, onClose, className = '', triggerId,
           overflowX: 'hidden'
         }}
       >
-        <div
-          style={{
-            display: 'grid',
-            gridTemplateColumns: 'repeat(8, 1fr)',
-            gap: '4px'
-          }}
-        >
-          {categories[activeCategory]?.emojis.map((emoji, index) => (
-            <button
-              key={`${emoji}-${index}`}
-              onClick={() => handleEmojiClick(emoji)}
-              style={{
-                width: '28px',
-                height: '28px',
-                border: 'none',
-                backgroundColor: 'transparent',
-                borderRadius: '4px',
-                cursor: 'pointer',
-                fontSize: '18px',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                transition: 'background-color 0.2s ease'
-              }}
-              onMouseEnter={(e) => {
-                e.currentTarget.style.backgroundColor = 'var(--color-hover)';
-              }}
-              onMouseLeave={(e) => {
-                e.currentTarget.style.backgroundColor = 'transparent';
-              }}
-              title={`React with ${emoji}`}
-            >
-              {emoji}
-            </button>
-          ))}
-        </div>
+        {filteredEmojis.length === 0 ? (
+          <div
+            style={{
+              textAlign: 'center',
+              color: 'var(--color-text-secondary)',
+              padding: '20px',
+              fontSize: '14px'
+            }}
+          >
+            No emojis found
+          </div>
+        ) : (
+          <div
+            style={{
+              display: 'grid',
+              gridTemplateColumns: 'repeat(8, 1fr)',
+              gap: '4px'
+            }}
+          >
+            {filteredEmojis.map((emoji, index) => (
+              <button
+                key={`${emoji}-${index}`}
+                onClick={() => handleEmojiClick(emoji)}
+                style={{
+                  width: '28px',
+                  height: '28px',
+                  border: 'none',
+                  backgroundColor: 'transparent',
+                  borderRadius: '4px',
+                  cursor: 'pointer',
+                  fontSize: '18px',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  transition: 'background-color 0.2s ease'
+                }}
+                onMouseEnter={(e) => {
+                  e.currentTarget.style.backgroundColor = 'var(--color-hover)';
+                }}
+                onMouseLeave={(e) => {
+                  e.currentTarget.style.backgroundColor = 'transparent';
+                }}
+                title={`React with ${emoji}`}
+              >
+                {emoji}
+              </button>
+            ))}
+          </div>
+        )}
       </div>
     </div>
   );

@@ -2,7 +2,6 @@ import React, { useState, useRef, useEffect, useCallback } from "react";
 import { User } from "./UserList";
 import { SignalType } from "../../lib/signal-types";
 import { Message } from "./types";
-
 import { useFileSender } from "./ChatInput/useFileSender";
 import { ProgressBar } from "./ChatInput/ProgressBar";
 import { EditingBanner } from "./ChatInput/EditingBanner";
@@ -39,13 +38,13 @@ interface FileData {
 }
 
 interface ChatInputProps {
-  onSendMessage: (messageId: string, content: string, messageSignalType: string, replyTo?: MessageReply | null) => void;
+  onSendMessage: (messageId: string, content: string, messageSignalType: string, replyTo?: Message | MessageReply | null) => void;
   onSendFile: (fileData: FileData) => void;
   isEncrypted: boolean;
 
   currentUsername: string;
   users: User[];
-  replyTo?: MessageReply | null;
+  replyTo?: Message | null;
   onCancelReply?: () => void;
   editingMessage?: Message | null;
   onCancelEdit?: () => void;
@@ -220,7 +219,6 @@ export function ChatInput({
         return;
       }
 
-      // Use sendFile from useFileSender to handle chunking, encryption, and local saving
       await sendFile(file);
 
       setShowVoiceRecorder(false);
@@ -247,9 +245,6 @@ export function ChatInput({
 
   return (
     <>
-      {editingMessage && <EditingBanner onCancelEdit={onCancelEdit} />}
-      {replyTo && <ReplyBanner replyTo={replyTo} onCancelReply={onCancelReply} getDisplayUsername={getDisplayUsername} />}
-
       {progress > 0 && progress < 1 && (
         <div className="px-4 pt-2">
           <ProgressBar progress={progress} />
@@ -257,6 +252,9 @@ export function ChatInput({
       )}
 
       <div className="px-4 py-3">
+        {editingMessage && <EditingBanner onCancelEdit={onCancelEdit} />}
+        {replyTo && <ReplyBanner replyTo={replyTo} onCancelReply={onCancelReply} getDisplayUsername={getDisplayUsername} />}
+
         {showVoiceRecorder ? (
           <VoiceRecorder
             onSendVoiceNote={handleSendVoiceNote}
@@ -274,8 +272,9 @@ export function ChatInput({
               gap: '8px',
               backgroundColor: "var(--chat-background)",
               padding: '0 15px',
-              borderRadius: '10px',
+              borderRadius: editingMessage || replyTo ? '0 0 10px 10px' : '10px',
               border: '1px solid hsl(var(--border))',
+              borderTop: editingMessage || replyTo ? 'none' : '1px solid hsl(var(--border))',
               minWidth: 0,
               userSelect: 'none',
             }}
@@ -303,7 +302,7 @@ export function ChatInput({
                   xmlns="http://www.w3.org/2000/svg"
                   fill="none"
                   viewBox="0 0 337 337"
-                  style={{ height: '18px', width: '18px' }}
+                  style={{ height: '18px', width: '20px' }}
                 >
                   <circle
                     strokeWidth={20}
@@ -348,7 +347,6 @@ export function ChatInput({
             {/* Message Input */}
             <input
               ref={messageInputRef}
-              required
               placeholder="Message..."
               type="text"
               id="messageInput"

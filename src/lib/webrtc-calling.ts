@@ -79,6 +79,7 @@ export class WebRTCCallingService {
   private ringStartAt: number | null = null;
   private localUsername: string = '';
   private preferredCameraDeviceId: string | null = null;
+  private preferredMicrophoneDeviceId: string | null = null;
   private pqDeviceKeyPair: { publicKey: Uint8Array; privateKey: Uint8Array } | null = null;
   private pqCallSigningKey: { publicKey: Uint8Array; privateKey: Uint8Array } | null = null;
   private pqSessionKeys: { send: Uint8Array; receive: Uint8Array } | null = null;
@@ -485,7 +486,6 @@ export class WebRTCCallingService {
       if (this.localStream) {
         this.localStream.getTracks().forEach(track => {
           const sender = this.peerConnection!.addTrack(track, this.localStream!);
-          // Apply E2EE to local senders
           const ctx = track.kind === 'audio' ? 'audio' : 'camera';
           try { this.enablePqE2eeForSender(sender, ctx as any, targetUser); } catch { }
         });
@@ -505,7 +505,7 @@ export class WebRTCCallingService {
         callId,
         from: this.localUsername,
         to: targetUser,
-        data: offer,
+        data: { sdp: offer, callType },
         timestamp: Date.now()
       });
 
@@ -640,6 +640,22 @@ export class WebRTCCallingService {
     this.cleanup();
   }
 
+  private async replaceOrAddVideoTrack(newVideo: MediaStreamTrack): Promise<void> {
+    if (this.peerConnection) {
+      const sender = this.peerConnection.getSenders().find(s => s.track && s.track.kind === 'video');
+      if (sender) {
+        await sender.replaceTrack(newVideo);
+      } else {
+        this.peerConnection.addTrack(newVideo, new MediaStream([newVideo]));
+        await this.renegotiateConnection();
+      }
+    }
+    if (!this.localStream) this.localStream = new MediaStream();
+    this.localStream.addTrack(newVideo);
+    this.onLocalStreamCallback?.(this.localStream);
+  }
+
+
   toggleMute(): boolean {
     if (!this.localStream) return false;
 
@@ -657,32 +673,35 @@ export class WebRTCCallingService {
     let videoTrack = this.localStream.getVideoTracks()[0];
 
     // If no video track reacquire one when enabling
-    if (!videoTrack) {
+    if (!videoTrack || videoTrack.readyState === 'ended') {
       try {
-        const preferredConstraints = this.preferredCameraDeviceId
-          ? { video: { deviceId: { ideal: this.preferredCameraDeviceId } }, audio: false }
-          : { video: true, audio: false };
-        let newStream: MediaStream;
-        try {
-          newStream = await navigator.mediaDevices.getUserMedia(preferredConstraints as MediaStreamConstraints);
-        } catch {
-          newStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
-        }
-        const newVideo = newStream.getVideoTracks()[0];
-        if (newVideo) {
-          if (this.peerConnection) {
-            const sender = this.peerConnection.getSenders().find(s => s.track && s.track.kind === 'video');
-            if (sender) {
-              await sender.replaceTrack(newVideo);
-            } else {
-              this.peerConnection.addTrack(newVideo, new MediaStream([newVideo]));
-              await this.renegotiateConnection();
+        // Strict: If we have a preference, try EXACTLY that. If it fails -> failure (no fallback).
+        // If no preference, try generic video.
+        if (this.preferredCameraDeviceId) {
+          const constraints = {
+            video: { deviceId: { exact: this.preferredCameraDeviceId } },
+            audio: false
+          };
+          try {
+            const newStream = await navigator.mediaDevices.getUserMedia(constraints);
+            const newVideo = newStream.getVideoTracks()[0];
+            if (newVideo) {
+              await this.replaceOrAddVideoTrack(newVideo);
+              videoTrack = newVideo;
             }
+          } catch (err) {
+            console.error('[Calling] Preferred camera failed to start. strictly aborting.', err);
+            // Do NOT fallback to random camera. User must fix their device or selection.
+            return false;
           }
-          if (!this.localStream) this.localStream = new MediaStream();
-          this.localStream.addTrack(newVideo);
-          this.onLocalStreamCallback?.(this.localStream);
-          videoTrack = newVideo;
+        } else {
+          // No preference? Try any camera.
+          const newStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+          const newVideo = newStream.getVideoTracks()[0];
+          if (newVideo) {
+            await this.replaceOrAddVideoTrack(newVideo);
+            videoTrack = newVideo;
+          }
         }
       } catch (_e) {
         console.error('[Calling] Failed to reacquire camera track on toggle:', _e);
@@ -694,20 +713,29 @@ export class WebRTCCallingService {
     return videoTrack.enabled;
   }
 
-  async switchCamera(): Promise<void> {
+  async switchCamera(deviceId?: string): Promise<void> {
     if (!this.localStream) return;
 
     const videoTrack = this.localStream.getVideoTracks()[0];
     if (!videoTrack) return;
 
     try {
-      const constraints = videoTrack.getConstraints();
-      const newFacingMode = constraints.facingMode === 'user' ? 'environment' : 'user';
-      videoTrack.stop();
-      const newStream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: newFacingMode },
-        audio: false
-      });
+      let newStream: MediaStream;
+
+      if (deviceId) {
+        newStream = await navigator.mediaDevices.getUserMedia({
+          video: { deviceId: { exact: deviceId } },
+          audio: false
+        });
+      } else {
+        const constraints = videoTrack.getConstraints();
+        const newFacingMode = constraints.facingMode === 'user' ? 'environment' : 'user';
+        newStream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: newFacingMode },
+          audio: false
+        });
+      }
+
       const newVideoTrack = newStream.getVideoTracks()[0];
       if (this.peerConnection) {
         const sender = this.peerConnection.getSenders().find(s => s.track && s.track.kind === 'video');
@@ -721,6 +749,38 @@ export class WebRTCCallingService {
 
     } catch (_error) {
       console.error('[Calling] Failed to switch camera:', _error);
+    }
+  }
+
+  async switchMicrophone(deviceId: string): Promise<void> {
+    if (!this.localStream) return;
+
+    const audioTrack = this.localStream.getAudioTracks()[0];
+    if (!audioTrack) return;
+
+    try {
+      const newStream = await navigator.mediaDevices.getUserMedia({
+        audio: { deviceId: { exact: deviceId } },
+        video: false
+      });
+      const newAudioTrack = newStream.getAudioTracks()[0];
+
+      if (this.peerConnection) {
+        const sender = this.peerConnection.getSenders().find(s => s.track && s.track.kind === 'audio');
+        if (sender) {
+          await sender.replaceTrack(newAudioTrack);
+        }
+      }
+
+      newAudioTrack.enabled = audioTrack.enabled;
+      this.localStream.removeTrack(audioTrack);
+      this.localStream.addTrack(newAudioTrack);
+      audioTrack.stop();
+
+      this.onLocalStreamCallback?.(this.localStream);
+    } catch (_error) {
+      console.error('[Calling] Failed to switch microphone:', _error);
+      throw _error;
     }
   }
 
@@ -763,55 +823,21 @@ export class WebRTCCallingService {
         });
       } else {
         try {
-          const sources = await getScreenSourcesFn();
+          let screenSource: any = selectedSource;
 
-          if (!sources || sources.length === 0) {
-            throw new Error('No screen sources available');
-          }
-
-          let screenSource: any;
-          if (selectedSource && selectedSource.id) {
-            screenSource = sources.find((source: any) => source.id === selectedSource.id);
-            if (!screenSource) {
-              const selectedIsScreen = selectedSource.id.startsWith('screen:') || selectedSource.type === 'screen';
-              const selectedIsWindow = selectedSource.id.startsWith('window:') || selectedSource.type === 'window';
-
-              if (selectedIsScreen) {
-                screenSource = sources.find((s: any) => s.id.startsWith('screen:'));
-                if (!screenSource && sources.length === 1) {
-                  screenSource = sources[0];
-                } else if (!screenSource) {
-                  throw new Error(`Selected screen source "${selectedSource.id}" is no longer available`);
-                }
-              } else if (selectedIsWindow) {
-                if (selectedSource.name && selectedSource.name.trim().length > 0) {
-                  screenSource = sources.find((s: any) => s.name === selectedSource.name);
-                }
-
-                if (!screenSource && (!selectedSource.name || selectedSource.name.trim().length === 0)) {
-                  const windowSources = sources.filter((s: any) => s.id.startsWith('window:'));
-                  if (windowSources.length === 1) {
-                    screenSource = windowSources[0];
-                  }
-                }
-
-                if (!screenSource) {
-                  throw new Error(`Selected window "${selectedSource.name || selectedSource.id}" is no longer available`);
-                }
-              } else {
-                throw new Error(`Selected source "${selectedSource.id}" is no longer available`);
-              }
+          if (!screenSource || !screenSource.id) {
+            const sources = await getScreenSourcesFn();
+            if (!sources || sources.length === 0) {
+              throw new Error('No screen sources available');
             }
-          }
 
-          if (!screenSource) {
             screenSource = sources.find((source: any) => source.id.startsWith('screen:'));
             if (!screenSource && sources.length > 0) {
               screenSource = sources[0];
             }
           }
 
-          if (!screenSource) {
+          if (!screenSource || !screenSource.id) {
             throw new Error('No screen sources available');
           }
 
@@ -1008,23 +1034,21 @@ export class WebRTCCallingService {
   }
 
   private async ensurePqSecureMediaReady(peer: string): Promise<void> {
-    // 1) Require insertable streams API
     if (!this.hasInsertableStreamsSupport()) {
       throw new Error('Secure media unavailable: insertable streams not supported');
     }
-    // 2) Require P2P PQ session established for this peer
+
     const svc: any = (window as any).p2pService || null;
     if (!svc) {
       throw new Error('Secure media unavailable: P2P transport not initialized');
     }
-    // Attempt connection if not connected
+
     try {
       const peers: string[] = typeof svc.getConnectedPeers === 'function' ? svc.getConnectedPeers() : [];
       if (!peers.includes(peer) && typeof svc.connectToPeer === 'function') {
         try { await svc.connectToPeer(peer); } catch { }
       }
     } catch { }
-    // Waitfor PQ session establishment event
     const hasSession = (): boolean => {
       try {
         const status = typeof svc.getSessionStatus === 'function' ? svc.getSessionStatus(peer) : null;
@@ -1124,7 +1148,6 @@ export class WebRTCCallingService {
       // @ts-ignore
       readable.pipeThrough(transformer).pipeTo(writable).catch(() => { });
 
-      // Apply audio bitrate clamp (CBR-ish) via sender parameters
       if (context === 'audio' && typeof sender.getParameters === 'function' && typeof sender.setParameters === 'function') {
         try {
           const params: RTCRtpSendParameters = sender.getParameters();
@@ -1298,13 +1321,14 @@ export class WebRTCCallingService {
           facingMode: 'user'
         };
         if (this.preferredCameraDeviceId) {
-          (base as any).deviceId = { ideal: this.preferredCameraDeviceId };
+          (base as any).deviceId = { exact: this.preferredCameraDeviceId };
         }
         video = base;
       }
 
       let echoCancellation = true;
       let noiseSuppression = true;
+      let preferredMicId: string | null = null;
       try {
         const stored = syncEncryptedStorage.getItem('app_settings_v1');
         if (stored) {
@@ -1313,17 +1337,33 @@ export class WebRTCCallingService {
             echoCancellation = parsed.audioSettings.echoCancellation ?? true;
             noiseSuppression = parsed.audioSettings.noiseSuppression ?? true;
           }
+          // Load default mic from settings
+          if (parsed.preferredMicId) {
+            preferredMicId = parsed.preferredMicId;
+            try {
+              const devices = await navigator.mediaDevices.enumerateDevices();
+              const micAvailable = devices.some(d => d.kind === 'audioinput' && d.deviceId === preferredMicId);
+              if (!micAvailable) {
+                preferredMicId = null;
+              }
+            } catch { }
+          }
         }
       } catch { }
 
+      const audioConstraints: MediaTrackConstraints = {
+        echoCancellation,
+        noiseSuppression,
+        autoGainControl: true,
+        sampleRate: 48000,
+        channelCount: 1
+      };
+      if (preferredMicId) {
+        audioConstraints.deviceId = { ideal: preferredMicId };
+      }
+
       const constraints: MediaStreamConstraints = {
-        audio: {
-          echoCancellation,
-          noiseSuppression,
-          autoGainControl: true,
-          sampleRate: 48000,
-          channelCount: 1
-        },
+        audio: audioConstraints,
         video
       };
 
@@ -1635,7 +1675,7 @@ export class WebRTCCallingService {
                 window.removeEventListener('p2p-call-signal-result', onResult as EventListener);
                 resolve(!!d.success);
               }
-            } catch { /* noop */ }
+            } catch { }
           };
           try { window.addEventListener('p2p-call-signal-result', onResult as EventListener); } catch { }
           try {
@@ -1658,11 +1698,9 @@ export class WebRTCCallingService {
         type: 'call-signal'
       };
 
-      // Ensure we have a libsignal session with the peer
       try {
         const has = await (window as any).edgeApi?.hasSession?.({ selfUsername: this.localUsername, peerUsername: signal.to, deviceId: 1 });
         if (!has?.hasSession) {
-          // Request bundle and wait briefly for session ready
           const reqBase = {
             type: SignalType.LIBSIGNAL_REQUEST_BUNDLE,
             username: signal.to,
@@ -1748,7 +1786,7 @@ export class WebRTCCallingService {
             };
             window.addEventListener('libsignal-session-ready', handler as EventListener, { once: true });
           });
-          // Re-resolve recipient keys after session establishment
+
           const reResolved = await this.resolveRecipientHybridKeys(signal.to);
           if (reResolved?.hybrid) {
             recipientResolved = reResolved;
@@ -1861,7 +1899,6 @@ export class WebRTCCallingService {
 
   private mungeOpusForCBR(sdp: string): string {
     try {
-      // Normalize to \n for processing
       const norm = sdp.replace(/\r\n/g, '\n');
       const lines = norm.split('\n');
 
@@ -2016,7 +2053,7 @@ export class WebRTCCallingService {
       }
     } catch { }
 
-    // Sanitize ICE servers: remove TURN without credentials; validate all entries
+    // Sanitize ICE servers: remove TURN without credentials validate all entries
     const sanitized: RTCIceServer[] = [];
     for (const server of (config.iceServers || [])) {
       const urls = Array.isArray(server.urls) ? server.urls : [server.urls];
@@ -2137,7 +2174,7 @@ export class WebRTCCallingService {
         return;
       }
 
-      // Already in a call with different ID, decline automatically // to do soon: make it show the call ring other user
+      // Already in a call with different ID, decline automatically // to do soon: make it show the call ring other user instead of declining automatically
       await this.sendCallSignal({
         type: 'decline-call',
         callId: signal.callId,
@@ -2149,9 +2186,15 @@ export class WebRTCCallingService {
       return;
     }
 
-    const sdp = signal.data as RTCSessionDescriptionInit;
-    const hasVideo = sdp.sdp?.includes('m=video') || false;
-    const callType = hasVideo ? 'video' : 'audio';
+    const offerData = signal.data as { sdp: RTCSessionDescriptionInit; callType?: 'audio' | 'video' };
+
+    if (!offerData.callType || (offerData.callType !== 'audio' && offerData.callType !== 'video')) {
+      console.warn('[Calling] Rejecting legacy/invalid call offer without explicit type');
+      return;
+    }
+
+    const sdp = offerData.sdp;
+    const callType = offerData.callType;
 
     await this.resolveRecipientHybridKeys(signal.from);
 

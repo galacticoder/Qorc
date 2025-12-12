@@ -160,14 +160,12 @@ const ChatApp: React.FC<ChatAppProps> = () => {
     }
   );
 
-  const getPeerHybridKeys = useCallback(async (peerUsername: string) => {
-    // 1. Check if we already have keys in Database.users
+  const getPeerHybridKeys = useCallback(async (peerUsername: string) => { 
     const existingUser = Database.users.find(u => u.username === peerUsername);
     if (existingUser?.hybridPublicKeys?.kyberPublicBase64 && existingUser?.hybridPublicKeys?.dilithiumPublicBase64) {
       return existingUser.hybridPublicKeys;
     }
 
-    // 2. If not, request them via websocket
     try {
       await websocketClient.sendSecureControlMessage({
         type: SignalType.P2P_FETCH_PEER_CERT,
@@ -185,7 +183,6 @@ const ChatApp: React.FC<ChatAppProps> = () => {
       return null;
     }
 
-    // 3. Wait for either p2p-peer-cert or user-exists-response
     return new Promise<{ kyberPublicBase64: string; dilithiumPublicBase64: string; x25519PublicBase64?: string } | null>((resolve) => {
       let settled = false;
       const timeout = setTimeout(() => {
@@ -218,6 +215,12 @@ const ChatApp: React.FC<ChatAppProps> = () => {
             if (Database.secureDBRef.current) {
               storeUsernameMapping(peerUsername, Database.secureDBRef.current).catch(() => { });
             }
+
+            try {
+              window.dispatchEvent(new CustomEvent('user-keys-available', {
+                detail: { username: peerUsername, hybridKeys: keys }
+              }));
+            } catch { }
 
             resolve(keys);
           }
@@ -923,7 +926,6 @@ const ChatApp: React.FC<ChatAppProps> = () => {
   }, []);
 
   useEffect(() => {
-    // Detect if this is a new user-initiated selection
     if (selectedConversation !== lastSelectedConversationRef.current) {
       if (lastSelectedConversationRef.current !== null) {
         userInitiatedSelectionRef.current = true;
@@ -944,7 +946,6 @@ const ChatApp: React.FC<ChatAppProps> = () => {
     const connected = p2p.isPeerConnected(selectedConversation);
 
     if (!connected) {
-      // Check if a connection is already in progress or recently attempted
       const now = Date.now();
       const attemptInfo = connectionAttemptsRef.current.get(selectedConversation);
 
@@ -1086,7 +1087,6 @@ const ChatApp: React.FC<ChatAppProps> = () => {
       }
 
       if (sentIds.length) {
-        // Batch-update UI once for all sent messages
         setMessages(prev => prev.map(msg => (
           sentIds.includes(msg.id)
             ? { ...msg, pending: false, receipt: { delivered: true, read: false } }
@@ -1482,7 +1482,8 @@ const ChatApp: React.FC<ChatAppProps> = () => {
     );
   }
 
-  if (!Authentication.isLoggedIn || Authentication.showPassphrasePrompt || Authentication.showPasswordPrompt) {
+  const isFullyAuthenticated = Authentication.isLoggedIn && Authentication.accountAuthenticated;
+  if (!Authentication.isLoggedIn || (!isFullyAuthenticated && (Authentication.showPassphrasePrompt || Authentication.showPasswordPrompt))) {
     return (
       <div className="flex items-center justify-center min-h-screen p-4 bg-white dark:bg-[hsl(var(--background))]">
         <Login
@@ -1678,7 +1679,6 @@ const ChatApp: React.FC<ChatAppProps> = () => {
                                 );
 
                                 if (result.status === 'sent') {
-                                  // Dispatch local update immediately
                                   window.dispatchEvent(new CustomEvent('local-reaction-update', {
                                     detail: {
                                       messageId,
@@ -1789,7 +1789,6 @@ const ChatApp: React.FC<ChatAppProps> = () => {
 
                                 if (targetUser && targetUser.hybridPublicKeys) {
                                   try {
-                                    // Send file metadata via P2P
                                     const result = await p2pMessaging.sendP2PMessage(
                                       selectedConversation,
                                       JSON.stringify({
@@ -1828,7 +1827,6 @@ const ChatApp: React.FC<ChatAppProps> = () => {
                               }
                             }
 
-                            // Fallback: Always save to local DB if P2P didn't return early
                             await Database.saveMessageToLocalDB(dataToSave);
 
                           } catch (error) {

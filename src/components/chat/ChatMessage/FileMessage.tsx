@@ -103,6 +103,8 @@ export const FileContent: React.FC<FileContentProps> = ({ message, isCurrentUser
   const [videoError, setVideoError] = React.useState(false);
   const [audioError, setAudioError] = React.useState(false);
   const [lightboxOpen, setLightboxOpen] = React.useState(false);
+  const [imageDimensions, setImageDimensions] = React.useState<{ width: number; height: number } | null>(null);
+  const [imageLoaded, setImageLoaded] = React.useState(false);
 
   const { url: resolvedFileUrl, loading: fileLoading, error: fileError } = useFileUrl({
     secureDB: secureDB || null,
@@ -185,19 +187,33 @@ export const FileContent: React.FC<FileContentProps> = ({ message, isCurrentUser
           >
             {!imageError ? (
               <div
-                className="rounded-xl overflow-hidden"
+                className="rounded-xl overflow-hidden relative"
                 style={{
                   width: '280px',
                   height: '200px',
                   backgroundColor: 'var(--color-surface)'
                 }}
               >
+                {!imageLoaded && (
+                  <div
+                    className="absolute inset-0 w-full h-full animate-pulse"
+                    style={{ backgroundColor: 'var(--color-secondary)' }}
+                  />
+                )}
                 <img
                   src={effectiveFileUrl}
                   alt={filename}
-                  className="w-full h-full object-cover select-none"
+                  className={`w-full h-full object-cover select-none transition-opacity duration-200 ${imageLoaded ? 'opacity-100' : 'opacity-0'}`}
                   draggable={false}
-                  onError={() => setImageError(true)}
+                  onLoad={(e) => {
+                    const img = e.target as HTMLImageElement;
+                    setImageDimensions({ width: img.naturalWidth, height: img.naturalHeight });
+                    setImageLoaded(true);
+                  }}
+                  onError={() => {
+                    setImageError(true);
+                    setImageLoaded(true);
+                  }}
                 />
               </div>
             ) : (
@@ -225,7 +241,11 @@ export const FileContent: React.FC<FileContentProps> = ({ message, isCurrentUser
               <img
                 src={effectiveFileUrl}
                 alt={filename}
-                className="max-w-[90vw] max-h-[90vh] object-contain select-none pointer-events-none"
+                className="object-contain select-none pointer-events-none"
+                style={{
+                  maxWidth: '90vw',
+                  maxHeight: '90vh'
+                }}
                 draggable={false}
               />
             </div>,

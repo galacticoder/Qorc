@@ -28,6 +28,13 @@ interface StoredUser {
   [key: string]: unknown;
 }
 
+interface ConversationMetadata {
+  peerUsername: string;
+  lastMessage: StoredMessage;
+  unreadCount: number;
+  lastReadTimestamp: number;
+}
+
 type PostQuantumAEADLike = {
   encrypt(plaintext: Uint8Array, key: Uint8Array, aad?: Uint8Array, nonce?: Uint8Array): {
     ciphertext: Uint8Array;
@@ -38,7 +45,7 @@ type PostQuantumAEADLike = {
 };
 
 export class SecureDB {
-  private static readonly MAX_VALUE_SIZE = 10 * 1024 * 1024; // 10 MB
+  private static readonly MAX_VALUE_SIZE = 100 * 1024 * 1024; // 100 MB
   private static readonly encoder = new TextEncoder();
   private static readonly decoder = new TextDecoder();
 
@@ -181,6 +188,49 @@ export class SecureDB {
     await this.saveMessages([...existingMessages, message]);
   }
 
+  async saveConversationMetadata(metadata: ConversationMetadata[]): Promise<void> {
+    if (!this.encryptionKey) throw new Error('Encryption key not initialized');
+    const encrypted = await this.encryptData(metadata);
+    await (await this.kv()).setBinary('data', 'conversations_metadata', encrypted);
+  }
+
+  async loadConversationMetadata(): Promise<ConversationMetadata[]> {
+    return this.loadEncryptedArray<ConversationMetadata>('conversations_metadata', 'load-metadata');
+  }
+
+  async rebuildConversationMetadata(): Promise<ConversationMetadata[]> {
+    const allMessages = await this.loadMessages();
+    const map = new Map<string, StoredMessage[]>();
+    const currentUser = this.username;
+
+    for (const msg of allMessages) {
+      if (!(msg as any)?.sender || !(msg as any)?.recipient) continue;
+      const peer = currentUser ? ((msg as any).sender === currentUser ? (msg as any).recipient : (msg as any).sender) : (msg as any).sender;
+      if (!map.has(peer)) map.set(peer, []);
+      map.get(peer)!.push(msg);
+    }
+
+    const metadata: ConversationMetadata[] = [];
+    for (const [peer, msgs] of map.entries()) {
+      const sorted = msgs.sort((a, b) => new Date(b.timestamp as any).getTime() - new Date(a.timestamp as any).getTime());
+      const lastMsg = sorted[0];
+      if (lastMsg) {
+        const lastMsgLight = { ...lastMsg };
+        delete (lastMsgLight as any).originalBase64Data;
+
+        metadata.push({
+          peerUsername: peer,
+          lastMessage: lastMsgLight,
+          unreadCount: 0,
+          lastReadTimestamp: 0
+        });
+      }
+    }
+
+    await this.saveConversationMetadata(metadata);
+    return metadata;
+  }
+
   async saveMessages(messages: StoredMessage[], activeConversationPeer?: string): Promise<void> {
     if (!this.encryptionKey) throw new Error('Encryption key not initialized');
 
@@ -207,15 +257,18 @@ export class SecureDB {
     }
 
     const capped: StoredMessage[] = [];
-    // Process each conversation to enforce limits
+    const metadataUpdates = new Map<string, StoredMessage>();
+
     for (const [peer, msgs] of conversationMap.entries()) {
-      // Sort by timestamp (oldest to newest)
       msgs.sort((a, b) => new Date(a.timestamp as any).getTime() - new Date(b.timestamp as any).getTime());
+
+      if (msgs.length > 0) {
+        metadataUpdates.set(peer, msgs[msgs.length - 1]);
+      }
 
       const limit = peer === activeConversationPeer ? 1000 : 500;
 
       if (msgs.length > limit) {
-        // Keep only the most recent 'limit' messages
         const start = msgs.length - limit;
         for (let i = start; i < msgs.length; i++) {
           capped.push(msgs[i]);
@@ -227,8 +280,53 @@ export class SecureDB {
       }
     }
 
-    const encrypted = await this.encryptData(capped);
+    const lightweightMessages = capped.map(msg => {
+      if ((msg as any).originalBase64Data) {
+        const copy = { ...msg };
+        delete (copy as any).originalBase64Data;
+        return copy;
+      }
+      return msg;
+    });
+
+    const encrypted = await this.encryptData(lightweightMessages);
     await (await this.kv()).setBinary('data', 'messages', encrypted);
+
+    // Update Metadata Index
+    try {
+      let metadata = await this.loadConversationMetadata();
+      if (!metadata || metadata.length === 0) {
+        this.rebuildConversationMetadata().catch(e => console.error(e));
+      } else {
+        let changed = false;
+        for (const [peer, lastMsg] of metadataUpdates.entries()) {
+          const idx = metadata.findIndex(m => m.peerUsername === peer);
+
+          const lastMsgLight = { ...lastMsg };
+          delete (lastMsgLight as any).originalBase64Data;
+
+          if (idx !== -1) {
+            if (new Date(lastMsgLight.timestamp as any).getTime() >= new Date(metadata[idx].lastMessage.timestamp as any).getTime()) {
+              metadata[idx].lastMessage = lastMsgLight;
+              changed = true;
+            }
+          } else {
+            metadata.push({
+              peerUsername: peer,
+              lastMessage: lastMsgLight,
+              unreadCount: 0,
+              lastReadTimestamp: 0
+            });
+            changed = true;
+          }
+        }
+        if (changed) {
+          await this.saveConversationMetadata(metadata);
+        }
+      }
+    } catch (err) {
+      console.error('[SecureDB] Failed to update metadata index', err);
+    }
   }
 
   async loadMessages(): Promise<StoredMessage[]> {
@@ -269,11 +367,45 @@ export class SecureDB {
     return all.filter(m => ((m as any).sender === peerUsername && (m as any).recipient === currentUsername) || ((m as any).sender === currentUsername && (m as any).recipient === peerUsername)).length;
   }
 
-  async loadRecentMessagesByConversation(messagesPerConversation = 50, currentUsername?: string): Promise<StoredMessage[]> {
+  async loadRecentMessagesByConversation(messagesPerConversation = 50, currentUsername: string): Promise<StoredMessage[]> {
+    try {
+      const metadata = await this.loadConversationMetadata();
+      if (metadata && metadata.length > 0) {
+        const result: StoredMessage[] = [];
+        for (const meta of metadata) {
+          result.push(meta.lastMessage);
+        }
+        return result.sort((a, b) => new Date(b.timestamp as any).getTime() - new Date(a.timestamp as any).getTime());
+      } else {
+        const rebuilt = await this.rebuildConversationMetadata();
+        if (rebuilt.length > 0) {
+          return rebuilt.map(m => m.lastMessage).sort((a, b) => new Date(b.timestamp as any).getTime() - new Date(a.timestamp as any).getTime());
+        }
+      }
+    } catch (err) {
+      console.warn('[SecureDB] Metadata load failed, falling back to full scan', err);
+    }
+
+    if (!currentUsername) return [];
     const encrypted = await (await this.kv()).getBinary('data', 'messages');
     if (!encrypted) return [];
-    const allMessages = await this.decryptDataWithYield(encrypted);
+
+    let allMessages: any[];
+    try {
+      allMessages = await this.decryptDataWithYield(encrypted);
+    } catch (err: any) {
+      const msg = err?.message || String(err);
+      if (/(decrypt|MAC|BLAKE3)/i.test(msg)) {
+        SecureAuditLogger.warn('securedb', 'load-recent-messages', 'decryption-failed', {});
+        return [];
+      }
+      throw err;
+    }
+
     if (!Array.isArray(allMessages)) return [];
+
+    setTimeout(() => this.rebuildConversationMetadata().catch(e => console.error(e)), 100);
+
     const map = new Map<string, StoredMessage[]>();
     const CHUNK = 100;
     for (let i = 0; i < allMessages.length; i += CHUNK) {
@@ -481,12 +613,16 @@ export class SecureDB {
   }
 
   async clearDatabase(): Promise<void> {
-    if (this.cleanupInterval) { clearInterval(this.cleanupInterval); this.cleanupInterval = null; }
+    if (this.cleanupInterval) {
+      clearInterval(this.cleanupInterval); this.cleanupInterval = null;
+    }
     await SQLiteKV.purgeUserDb(this.username);
   }
 
   async destroy(): Promise<void> {
-    if (this.cleanupInterval) { clearInterval(this.cleanupInterval); this.cleanupInterval = null; }
+    if (this.cleanupInterval) {
+      clearInterval(this.cleanupInterval); this.cleanupInterval = null;
+    }
     this.encryptionKey = null; this.postQuantumAEAD = null;
   }
 
@@ -518,7 +654,6 @@ export class SecureDB {
       throw new Error('Invalid file ID');
     }
 
-    // Check MIME type if it's a Blob
     if (data instanceof Blob && data.type) {
       const mimeType = data.type.toLowerCase();
       if (SecureDB.BLOCKED_MIME_TYPES.some(blocked => mimeType.includes(blocked))) {
@@ -573,10 +708,7 @@ export class SecureDB {
       return { success: false, quotaExceeded: true };
     }
 
-    // Encrypt the file data
     const encrypted = await this.encryptData(uint8Array);
-
-    // Store in the 'files' store using fileId as key
     await (await this.kv()).setBinary('files', fileId, encrypted);
     return { success: true };
   }
@@ -592,7 +724,6 @@ export class SecureDB {
     try {
       const decrypted = await this.decryptData(encrypted);
 
-      // The decrypted data should be a Uint8Array (stored from saveFile)
       if (decrypted instanceof Uint8Array) {
         const regularBuffer = new ArrayBuffer(decrypted.byteLength);
         const regularArray = new Uint8Array(regularBuffer);
@@ -600,7 +731,6 @@ export class SecureDB {
         return new Blob([regularArray]);
       }
 
-      // Fallback: if it's an array-like object convert it
       if (Array.isArray(decrypted) || (decrypted && typeof decrypted === 'object' && 'length' in decrypted)) {
         const arr = new Uint8Array(decrypted as any);
         const regularBuffer = new ArrayBuffer(arr.byteLength);

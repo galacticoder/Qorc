@@ -634,6 +634,16 @@ LibSignal bundle handling is tightly coupled to `LibsignalBundleDB` and uses the
 
 The server never sees plaintext Signal session state; it only stores and forwards encrypted identity and pre-key material.
 
+### 9.2 User Avatar Storage
+
+The server acts as a blinded storage provider for user avatars, supporting the client-side privacy model:
+
+- **Private Synchronization**: The server stores an opaque "Long-Term Envelope" (`lt-v1`) provided by the client. This payload contains the user's avatar encrypted with their own ML-KEM-1024 public key. The server cannot decrypt this file; it stores and returns it to the user's authenticated devices for synchronization.
+
+- **Public Distribution**: If the user elects to share their avatar, the client provides a separate plaintext block (`publicData`). The server stores this alongside the encrypted envelope and serves it to other authenticated users who request that specific username's avatar.
+
+- **Access Control**: Avatar fetch requests are authenticated using the PQ control channel. The server enforces rate limits (`SERVER_FETCH_DEBOUNCE` logic logic mirrors the client) to prevent harvesting.
+
 ---
 
 ## 10. TLS and Open Quantum Safe

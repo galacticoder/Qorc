@@ -6,6 +6,12 @@ const WebSocket = require('ws');
 const crypto = require('crypto');
 const tls = require('tls');
 const { gunzipSync } = require('zlib');
+let SocksProxyAgent;
+try {
+  SocksProxyAgent = require('socks-proxy-agent').SocksProxyAgent;
+} catch (e) {
+  console.warn('[WS] socks-proxy-agent not found');
+}
 
 class WebSocketHandler {
   constructor(securityMiddleware) {
@@ -16,6 +22,7 @@ class WebSocketHandler {
     this.isConnecting = false;
     this.serverUrl = null;
     this.torReady = false;
+    this.torSocksPort = 9150;
     this.connectHostOverride = null;
 
     // Reconnection state
@@ -78,6 +85,12 @@ class WebSocketHandler {
     this.torReady = Boolean(ready);
   }
 
+  updateTorConfig(config) {
+    if (config && config.socksPort) {
+      this.torSocksPort = config.socksPort;
+    }
+  }
+
   setConnectHost(host) {
     if (typeof host === 'string' && host.length && (host === '127.0.0.1' || host === 'localhost' || host === '::1')) {
       this.connectHostOverride = host;
@@ -138,6 +151,11 @@ class WebSocketHandler {
           perMessageDeflate: false,
           headers: this.extraHeaders || {}
         };
+
+        if (this.torReady && SocksProxyAgent) {
+          const agent = new SocksProxyAgent(`socks5h://127.0.0.1:${this.torSocksPort}`);
+          wsOptions.agent = agent;
+        }
 
         const target = this.buildConnectTarget(this.serverUrl);
         if (target.tlsServername) {
@@ -288,6 +306,11 @@ class WebSocketHandler {
         headers: this.extraHeaders || {},
       };
 
+      if (this.torReady && SocksProxyAgent) {
+        const agent = new SocksProxyAgent(`socks5h://127.0.0.1:${this.torSocksPort}`);
+        wsOptions.agent = agent;
+      }
+
       const target = this.buildConnectTarget(url);
       if (target.tlsServername) {
         wsOptions.servername = target.tlsServername;
@@ -302,7 +325,7 @@ class WebSocketHandler {
 
         probe.once('open', () => { clearTimeout(timer); finish({ success: true }); });
         probe.once('error', (err) => { clearTimeout(timer); finish({ success: false, error: err?.message || 'Connection failed' }); });
-        probe.once('close', () => { /* ignore; timer or handlers will resolve */ });
+        probe.once('close', () => { });
       });
     } catch (e) {
       return { success: false, error: e?.message || 'Probe failed' };

@@ -14,7 +14,16 @@ const VIDEO_EXTENSIONS = ['mp4', 'webm', 'ogg', 'avi', 'mov', 'wmv', 'flv', 'mkv
 const AUDIO_EXTENSIONS = ['mp3', 'wav', 'ogg', 'webm', 'm4a', 'aac', 'flac'] as const;
 const HEX_PATTERN = /^[a-f0-9]{32,}$/i;
 
-const hasExtension = (filename: string, extensions: readonly string[]): boolean => {
+export interface ReplyMessage {
+  sender: string;
+  content: string;
+  filename?: string;
+  mimeType?: string;
+  type?: string;
+  id?: string;
+}
+
+const hasExtension = (filename: string | undefined, extensions: readonly string[]): boolean => {
   if (!filename) return false;
   const ext = filename.toLowerCase().split('.').pop();
   return ext ? extensions.includes(ext) : false;
@@ -67,10 +76,12 @@ export function ReplyBanner({ replyTo, onCancelReply, getDisplayUsername }: Repl
       : replyTo.content;
   }, [replyTo.content]);
   return (
-    <div className="px-4 py-2">
-      <div
-        className="flex items-center gap-2 px-3 py-1.5 rounded-md bg-muted/30 text-muted-foreground"
-      >
+    <div
+      className="flex items-center gap-2 px-4 py-2 text-muted-foreground border-b border-border/50 rounded-t-xl relative select-none"
+      style={{ backgroundColor: 'hsl(var(--secondary))' }}
+    >
+      <div className="absolute inset-0 bg-muted/40 pointer-events-none rounded-t-xl" />
+      <div className="relative flex items-center gap-2 flex-1 min-w-0">
         <svg
           className="w-3.5 h-3.5 flex-shrink-0"
           fill="none"
@@ -115,15 +126,14 @@ export function ReplyBanner({ replyTo, onCancelReply, getDisplayUsername }: Repl
             <span className="text-xs truncate">{contentPreview}</span>
           )}
         </div>
-
-        <button
-          className="flex-shrink-0 w-5 h-5 rounded hover:bg-muted/50 flex items-center justify-center transition-colors"
-          onClick={onCancelReply}
-          aria-label="Cancel reply"
-        >
-          <Cross2Icon className="h-3 w-3" />
-        </button>
       </div>
+      <button
+        className="flex-shrink-0 w-5 h-5 rounded hover:bg-muted/50 flex items-center justify-center transition-colors relative z-10"
+        onClick={onCancelReply}
+        aria-label="Cancel reply"
+      >
+        <Cross2Icon className="h-3 w-3" />
+      </button>
     </div>
   );
 }

@@ -316,9 +316,8 @@ export class OfflineMessageQueue {
     );
 
     window.addEventListener(
-      'pq-session-established',
-      (event: Event) => {
-        const detail = (event as CustomEvent).detail || {};
+      'secure-chat:auth-success',
+      () => {
         setTimeout(() => {
           this._retrieveOfflineMessagesFromServer();
         }, 500);
@@ -816,7 +815,7 @@ export class OfflineMessageQueue {
         this.userStatuses.set(username, { ...status, isOnline: false });
       }
 
-      SecureAuditLogger.info(AUDIT_CHANNEL, 'offline-message-queue', 'restore-complete', this.getStats());
+      SecureAuditLogger.info(AUDIT_CHANNEL, 'offline-message-queue', 'restore-complete', this.getStats() as any);
     } catch (error) {
       SecureAuditLogger.error(AUDIT_CHANNEL, 'offline-message-queue', 'load-storage-failed', {
         error: (error as Error)?.message

@@ -10,6 +10,7 @@ interface MessageContextMenuProps {
     onReply?: () => void;
     onDelete?: () => void;
     onReact?: () => void;
+    onReactionSelect?: (emoji: string) => void;
     onDownload?: () => void;
     canEdit: boolean;
     canDelete: boolean;
@@ -24,6 +25,7 @@ export const MessageContextMenu: React.FC<MessageContextMenuProps> = ({
     onReply,
     onDelete,
     onReact,
+    onReactionSelect,
     onDownload,
     canEdit,
     canDelete,
@@ -31,6 +33,8 @@ export const MessageContextMenu: React.FC<MessageContextMenuProps> = ({
 }) => {
     const menuRef = useRef<HTMLDivElement>(null);
     const [position, setPosition] = useState({ top: y, left: x });
+
+    const QUICK_REACTIONS = ['👍', '👎', '❤️', '😂', '😮', '😢'];
 
     useLayoutEffect(() => {
         const handleClickOutside = (event: MouseEvent) => {
@@ -80,79 +84,91 @@ export const MessageContextMenu: React.FC<MessageContextMenuProps> = ({
     return createPortal(
         <div
             ref={menuRef}
-            className="fixed z-50 min-w-[180px] rounded-xl overflow-hidden shadow-xl border text-card-foreground"
+            className="fixed z-50 min-w-[200px] rounded-xl overflow-hidden shadow-xl border text-card-foreground flex flex-col"
             style={{
                 top: position.top,
                 left: position.left,
                 backgroundColor: 'hsl(var(--card))',
                 borderColor: 'hsl(var(--border))',
+                animation: 'in 0.1s ease-out'
             }}
         >
-            <div className="p-1.5 flex flex-col gap-1">
-                {canEdit && (
+            {/* Reaction Strip */}
+            <div className="flex items-center justify-between p-2 bg-muted/30 border-b border-border/50 gap-1">
+                {QUICK_REACTIONS.map((emoji) => (
                     <button
+                        key={emoji}
                         onClick={(e) => {
                             e.stopPropagation();
-                            onEdit?.();
+                            onReactionSelect?.(emoji);
                             onClose();
                         }}
-                        className="flex items-center gap-3 px-3 py-2 text-sm font-medium text-gray-600 dark:text-gray-300 hover:bg-indigo-50 dark:hover:bg-[#5353ff] hover:text-indigo-600 dark:hover:text-white rounded-lg transition-all duration-200 group w-full text-left"
+                        className="p-1.5 hover:bg-background rounded-full transition-transform hover:scale-125 focus:outline-none text-lg leading-none"
                     >
-                        <Pencil className="w-4 h-4 transition-colors group-hover:text-indigo-600 dark:group-hover:text-white" />
-                        Edit
+                        {emoji}
                     </button>
-                )}
-
+                ))}
+                <div className="w-px h-6 bg-gray-300 mx-1" />
                 <button
                     onClick={(e) => {
                         e.stopPropagation();
                         onReact?.();
                         onClose();
                     }}
-                    className="flex items-center gap-3 px-3 py-2 text-sm font-medium text-gray-600 dark:text-gray-300 hover:bg-indigo-50 dark:hover:bg-[#5353ff] hover:text-indigo-600 dark:hover:text-white rounded-lg transition-all duration-200 group w-full text-left"
+                    className="p-1.5 hover:bg-background rounded-full transition-colors text-muted-foreground hover:text-foreground"
+                    title="Add Reaction"
                 >
-                    <SmilePlus className="w-4 h-4 transition-colors group-hover:text-indigo-600 dark:group-hover:text-white" />
-                    Reaction
+                    <SmilePlus className="w-5 h-5" />
+                </button>
+            </div>
+
+            {/* Action Bar */}
+            <div className="flex items-center justify-around p-2">
+                <button
+                    onClick={(e) => { e.stopPropagation(); onReply?.(); onClose(); }}
+                    className="p-2 hover:bg-muted rounded-lg transition-colors text-muted-foreground hover:text-foreground group"
+                    title="Reply"
+                >
+                    <Reply className="w-5 h-5 group-hover:text-indigo-500" />
                 </button>
 
-                <button
-                    onClick={(e) => {
-                        e.stopPropagation();
-                        onReply?.();
-                        onClose();
-                    }}
-                    className="flex items-center gap-3 px-3 py-2 text-sm font-medium text-gray-600 dark:text-gray-300 hover:bg-indigo-50 dark:hover:bg-[#5353ff] hover:text-indigo-600 dark:hover:text-white rounded-lg transition-all duration-200 group w-full text-left"
-                >
-                    <Reply className="w-4 h-4 transition-colors group-hover:text-indigo-600 dark:group-hover:text-white" />
-                    Reply
-                </button>
+                {canEdit && (
+                    <>
+                        <div className="w-px h-5 bg-gray-300" />
+                        <button
+                            onClick={(e) => { e.stopPropagation(); onEdit?.(); onClose(); }}
+                            className="p-2 hover:bg-muted rounded-lg transition-colors text-muted-foreground hover:text-foreground group"
+                            title="Edit"
+                        >
+                            <Pencil className="w-5 h-5 group-hover:text-indigo-500" />
+                        </button>
+                    </>
+                )}
 
                 {isFile && (
-                    <button
-                        onClick={(e) => {
-                            e.stopPropagation();
-                            onDownload?.();
-                            onClose();
-                        }}
-                        className="flex items-center gap-3 px-3 py-2 text-sm font-medium text-gray-600 dark:text-gray-300 hover:bg-indigo-50 dark:hover:bg-[#5353ff] hover:text-indigo-600 dark:hover:text-white rounded-lg transition-all duration-200 group w-full text-left"
-                    >
-                        <Download className="w-4 h-4 transition-colors group-hover:text-indigo-600 dark:group-hover:text-white" />
-                        Download
-                    </button>
+                    <>
+                        <div className="w-px h-5 bg-gray-300" />
+                        <button
+                            onClick={(e) => { e.stopPropagation(); onDownload?.(); onClose(); }}
+                            className="p-2 hover:bg-muted rounded-lg transition-colors text-muted-foreground hover:text-foreground group"
+                            title="Download"
+                        >
+                            <Download className="w-5 h-5 group-hover:text-indigo-500" />
+                        </button>
+                    </>
                 )}
 
                 {canDelete && (
-                    <button
-                        onClick={(e) => {
-                            e.stopPropagation();
-                            onDelete?.();
-                            onClose();
-                        }}
-                        className="flex items-center gap-3 px-3 py-2 text-sm font-medium text-gray-600 dark:text-gray-300 hover:bg-red-50 dark:hover:bg-[#8e2a2a] hover:text-red-600 dark:hover:text-white rounded-lg transition-all duration-200 group w-full text-left"
-                    >
-                        <Trash2 className="w-4 h-4 transition-colors group-hover:text-red-600 dark:group-hover:text-white" />
-                        Delete
-                    </button>
+                    <>
+                        <div className="w-px h-5 bg-gray-300" />
+                        <button
+                            onClick={(e) => { e.stopPropagation(); onDelete?.(); onClose(); }}
+                            className="p-2 hover:bg-muted rounded-lg transition-colors text-muted-foreground hover:text-foreground group"
+                            title="Delete"
+                        >
+                            <Trash2 className="w-5 h-5 group-hover:text-red-600" />
+                        </button>
+                    </>
                 )}
             </div>
         </div>,

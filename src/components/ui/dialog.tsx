@@ -55,27 +55,30 @@ export const DialogTrigger: React.FC<{ children: ReactNode; asChild?: boolean }>
 export const DialogContent: React.FC<{ children: ReactNode; className?: string } & React.HTMLAttributes<HTMLDivElement>> = ({ children, className, ...props }) => {
   const context = useContext(DialogContext);
   const [isAnimatingOut, setIsAnimatingOut] = React.useState(false);
+  const [isVisible, setIsVisible] = React.useState(false);
 
   if (!context) throw new Error('DialogContent must be used within Dialog');
 
   const handleClose = React.useCallback(() => {
-    setIsAnimatingOut(true);
-    setTimeout(() => {
-      setIsAnimatingOut(false);
-      requestAnimationFrame(() => {
-        context.setIsOpen(false);
-      });
-    }, 200);
+    // Just trigger close, the effect handles the animation
+    context.setIsOpen(false);
   }, [context]);
 
-  // Reset animation state when opening
   React.useEffect(() => {
     if (context.isOpen) {
+      setIsVisible(true);
       setIsAnimatingOut(false);
+    } else if (isVisible) {
+      setIsAnimatingOut(true);
+      const timer = setTimeout(() => {
+        setIsVisible(false);
+        setIsAnimatingOut(false);
+      }, 200);
+      return () => clearTimeout(timer);
     }
-  }, [context.isOpen]);
+  }, [context.isOpen, isVisible]);
 
-  if (!context.isOpen && !isAnimatingOut) return null;
+  if (!isVisible) return null;
 
   return createPortal(
     <>

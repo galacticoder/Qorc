@@ -603,7 +603,45 @@ The WebRTC P2P layer builds PQ authentication and channel binding on top of WebR
 
 P2P messages are authenticated by PQ signatures and MACs; WebRTC’s classical crypto remains as the underlying transport and is not the only security layer.
 
-### 6.2 `src/lib/webrtc-calling.ts` — media sessions, device IDs, and call signals
+### 6.3 `src/lib/profile-picture-system.ts` — User Avatar Security
+
+The `ProfilePictureSystem` manages user avatars using "Long-Term Encryption" scheme.
+
+#### 6.3.1 Privacy States and Storage
+
+- **Local Storage**: All avatars (own and cached peer avatars) are stored in `SecureDB` ('profile_avatars'), ensuring they are protected by the device-local PQ AEAD at rest.
+- **Privacy Toggle**: A user setting `shareWithOthers` controls visibility.
+  - **Private Mode (Default)**: The avatar is encrypted client-side using the user's *own* ML-KEM-1024 public key. The server stores this blob but cannot decrypt it. This allows the user to sync their avatar across their own devices (which possess the matching private key) without exposing it to the server or peers.
+  - **Public Mode**: The client uploads both the encrypted private blob (for self-sync) AND a plaintext copy (`publicData`) that the server is permitted to distribute to other peers.
+
+#### 6.3.2 Long-Term Encryption (`src/lib/long-term-encryption.ts`)
+
+This module implements a KEM+AEAD scheme designed for data that must remain readable by the user's identity keys indefinitely, independent of ephemeral session keys.
+
+- **Primitive**: ML-KEM-1024 + PostQuantumAEAD.
+- **Envelope Format** (`lt-v1`):
+  - `kemCiphertext` (Base64).
+  - `nonce`, `ciphertext`, `tag` (Base64).
+  - `timestamp`.
+- **Encryption Process** (`encryptLongTerm`):
+  1. **Encapsulation**: `PostQuantumKEM.encapsulate(recipientPublicKey)` generates `sharedSecret` and `kemCiphertext`.
+  2. **Key Derivation**: AEAD key derived via `PostQuantumHash.deriveKey(sharedSecret, salt, info, 32)`.
+     - Salt: `"long-term-encryption-v1"`.
+     - Info: `"long-term-aead-key-v1"`.
+  3. **Encryption**: `PostQuantumAEAD.encrypt(data, aeadKey, aad, nonce)`.
+     - AAD: `"lt-v1:<timestamp>"`.
+  4. **Zeroization**: Shared secret and derived keys are cleared immediately.
+
+This guarantees that even if the server is compromised, private avatars remain inaccessible without the user's private keys.
+
+#### 6.3.3 Image Validation and Sanitization
+
+- **Input Hygiene**: All incoming images (from disk or network) undergo strict validation:
+  - **Magic Bytes**: Header inspection for JPEG, PNG, WebP, SVG signatures.
+  - **MIME Type**: Must match the detected signature.
+  - **Canvas Re-encoding**: Images are drawn to a bounded canvas (max 512px) and re-exported as WebP. This strips metadata (EXIF) and neutralizes potential steganographic or malformed payloads before encryption or storage.
+
+### 6.4 `src/lib/webrtc-calling.ts` — media sessions, device IDs, and call signals
 
 This module implements end‑to‑end protections for call setup, media streams (audio, camera, screen), and device identifiers on top of WebRTC. It uses:
 

@@ -1,6 +1,5 @@
-import React, { useMemo, useCallback } from 'react';
+import React, { useMemo, useCallback, useState, useEffect } from 'react';
 import Linkify from 'linkify-react';
-import { LinkPreview } from '@dhaiwat10/react-link-preview';
 import { LinkExtractor } from '../../lib/link-extraction';
 
 interface CachedPreview {
@@ -9,6 +8,7 @@ interface CachedPreview {
   readonly image: string | null;
   readonly siteName: string | null;
   readonly hostname: string | null;
+  readonly url: string;
 }
 
 const linkPreviewCache = new Map<string, CachedPreview>();
@@ -52,8 +52,203 @@ interface LinkifyWithPreviewsProps {
   readonly showPreviews?: boolean;
   readonly isCurrentUser?: boolean;
   readonly className?: string;
+  readonly style?: React.CSSProperties;
   readonly previewsOnly?: boolean;
+  readonly urls?: string[];
 }
+
+const CustomLinkPreview = React.memo(({ url, isCurrentUser, showFallbackLink }: { url: string; isCurrentUser: boolean; showFallbackLink?: boolean }) => {
+  const [data, setData] = useState<CachedPreview | null>(linkPreviewCache.get(url) || null);
+  const [loading, setLoading] = useState(!data);
+  const [error, setError] = useState(false);
+
+  useEffect(() => {
+    if (data || !isValidUrl(url)) return;
+
+    let mounted = true;
+
+    if (linkPreviewCache.has(url)) {
+      setData(linkPreviewCache.get(url)!);
+      setLoading(false);
+      return;
+    }
+
+    const fetchWithRedirects = async (targetUrl: string, attempt: number = 0): Promise<any> => {
+      if (attempt >= 5) throw new Error('Too many redirects');
+
+      if (typeof window === 'undefined' || typeof (window as any).electronAPI?.fetchLinkPreview !== 'function') {
+        throw new Error('API unavailable');
+      }
+
+      const result = await (window as any).electronAPI.fetchLinkPreview(targetUrl, {
+        timeout: 25000,
+        maxRedirects: 5
+      });
+
+      if (result?.needsRedirect && result.redirectTo) {
+        try {
+          const nextUrl = new URL(result.redirectTo, targetUrl).href;
+          return fetchWithRedirects(nextUrl, attempt + 1);
+        } catch (e) {
+          throw new Error('Invalid redirect URL');
+        }
+      }
+
+      if (result?.error) throw new Error(result.error);
+
+      return { ...result, originalUrl: url };
+    };
+
+    const fetchPreview = async () => {
+      try {
+        const result = await fetchWithRedirects(url);
+
+        const preview: CachedPreview = {
+          title: result.title || null,
+          description: result.description || null,
+          image: result.image || null,
+          siteName: result.siteName || null,
+          hostname: getHostname(result.url || url),
+          url: url
+        };
+
+        if (mounted) {
+          linkPreviewCache.set(url, preview);
+          cleanupCache();
+          setData(preview);
+          setLoading(false);
+        }
+      } catch (err) {
+        if (mounted) {
+          setError(true);
+          setLoading(false);
+        }
+      }
+    };
+
+    fetchPreview();
+
+    return () => { mounted = false; };
+  }, [url, data]);
+
+  const handleClick = (e: React.MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if ((window as any).electronAPI?.openExternal) {
+      (window as any).electronAPI.openExternal(url);
+    } else {
+      window.open(url, '_blank', 'noopener,noreferrer');
+    }
+  };
+
+  if (error || (!loading && !data)) {
+    if (showFallbackLink) {
+      return (
+        <div
+          className="rounded-lg border overflow-hidden w-full"
+          style={{
+            borderColor: 'var(--color-border)',
+            backgroundColor: 'var(--color-surface)',
+            width: '100%',
+            maxWidth: 'min(var(--message-bubble-max-width), 320px)',
+            minWidth: '240px',
+            userSelect: 'none'
+          }}
+        >
+          <div className="p-3 flex flex-col gap-1">
+            <a
+              href={url}
+              onClick={handleClick}
+              className="underline decoration-1 underline-offset-2 transition-colors break-all cursor-pointer text-sm"
+              style={{
+                color: 'var(--color-accent-primary)'
+              }}
+            >
+              {url}
+            </a>
+            <span className="text-[10px] uppercase tracking-wider text-muted-foreground/70 font-medium">
+              {getHostname(url) ?? url}
+            </span>
+          </div>
+        </div>
+      );
+    }
+    return null;
+  }
+
+  if (loading) {
+    return (
+      <div
+        className="animate-pulse rounded-lg border overflow-hidden w-full"
+        style={{
+          borderColor: 'var(--color-border)',
+          backgroundColor: 'var(--color-surface)',
+          width: '100%',
+          maxWidth: 'min(var(--message-bubble-max-width), 320px)',
+          minWidth: '240px',
+          userSelect: 'none'
+        }}
+      >
+        <div className="w-full h-32 md:h-40 bg-muted/20 border-b" style={{ borderColor: 'var(--color-border)' }} />
+        <div className="p-3 flex flex-col gap-1">
+          <div className="h-4 bg-muted/20 rounded w-3/4" />
+          <div className="h-3 bg-muted/20 rounded w-full" />
+          <div className="h-3 bg-muted/20 rounded w-1/2" />
+          <div className="flex items-center gap-2 mt-1">
+            <div className="h-2.5 bg-muted/20 rounded w-24" />
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  const { title, description, image, hostname } = data!;
+
+  return (
+    <div
+      onClick={handleClick}
+      className="group cursor-pointer rounded-lg border overflow-hidden transition-all hover:bg-muted/10 w-full"
+      style={{
+        borderColor: 'var(--color-border)',
+        backgroundColor: 'var(--color-surface)',
+        width: '100%',
+        maxWidth: 'min(var(--message-bubble-max-width), 320px)',
+        minWidth: '240px',
+        userSelect: 'none'
+      }}
+    >
+      {image && (
+        <div
+          className="w-full h-32 md:h-40 bg-cover bg-center bg-no-repeat relative border-b"
+          style={{
+            backgroundImage: `url('${image}')`,
+            borderColor: 'var(--color-border)'
+          }}
+        />
+      )}
+      <div className="p-3 flex flex-col gap-1">
+        {title && (
+          <h3 className="font-semibold text-sm leading-tight text-foreground">
+            {title}
+          </h3>
+        )}
+        {description && (
+          <p className="text-xs text-muted-foreground leading-relaxed">
+            {description}
+          </p>
+        )}
+        <div className="flex items-center gap-2 mt-1">
+          {image && !title && !description && (
+            <span className="text-xs text-muted-foreground break-all">{url}</span>
+          )}
+          <span className="text-[10px] uppercase tracking-wider text-muted-foreground/70 font-medium">
+            {hostname}
+          </span>
+        </div>
+      </div>
+    </div>
+  );
+});
 
 const LinkifyWithPreviewsComponent: React.FC<LinkifyWithPreviewsProps> = ({
   children,
@@ -61,67 +256,27 @@ const LinkifyWithPreviewsComponent: React.FC<LinkifyWithPreviewsProps> = ({
   showPreviews = true,
   isCurrentUser = false,
   className,
-  previewsOnly = false
+  style,
+  previewsOnly = false,
+  urls: providedUrls
 }) => {
+  /* Restore URL decoding */
   const urls = useMemo(() => {
-    const extracted = LinkExtractor.extractUrlStrings(children);
-    return extracted.filter(isValidUrl);
-  }, [children]);
+    const baseUrls = providedUrls ?? LinkExtractor.extractUrlStrings(children);
+    return baseUrls
+      .map(url => url.replace(/&amp;/g, '&'))
+      .filter(isValidUrl);
+  }, [children, providedUrls]);
 
   const isUrlOnly = useMemo(() => LinkExtractor.isUrlOnlyMessage(children), [children]);
 
-  const customFetcher = useCallback(async (url: string): Promise<CachedPreview | null> => {
-    if (!isValidUrl(url)) {
-      return null;
-    }
-
-    if (linkPreviewCache.has(url)) {
-      return linkPreviewCache.get(url) ?? null;
-    }
-
-    if (typeof window === 'undefined' || typeof (window as any).electronAPI?.fetchLinkPreview !== 'function') {
-      return null;
-    }
-
-    try {
-      const result = await (window as any).electronAPI.fetchLinkPreview(url, {
-        timeout: 15000,
-        maxRedirects: 5
-      });
-
-      if (result?.error) {
-        return null;
-      }
-
-      const preview: CachedPreview = {
-        title: typeof result?.title === 'string' ? result.title : null,
-        description: typeof result?.description === 'string' ? result.description : null,
-        image: typeof result?.image === 'string' ? result.image : null,
-        siteName: typeof result?.siteName === 'string' ? result.siteName : null,
-        hostname: getHostname(url)
-      };
-
-      linkPreviewCache.set(url, preview);
-      cleanupCache();
-
-      return preview;
-    } catch {
-      return null;
-    }
-  }, []);
-
-  const handleLinkClick = useCallback(async (url: string, e: React.MouseEvent): Promise<void> => {
+  const handleLinkClick = useCallback((url: string, e: React.MouseEvent) => {
     e.preventDefault();
     e.stopPropagation();
-
-    if (!isValidUrl(url)) {
-      return;
-    }
-
-    try {
-      await (window as any).electronAPI.openExternal(url);
-    } catch {
-      // In Electron-only mode, ignore if openExternal fails
+    if ((window as any).electronAPI?.openExternal) {
+      (window as any).electronAPI.openExternal(url);
+    } else {
+      window.open(url, '_blank', 'noopener,noreferrer');
     }
   }, []);
 
@@ -129,28 +284,16 @@ const LinkifyWithPreviewsComponent: React.FC<LinkifyWithPreviewsProps> = ({
     rel: "noopener noreferrer",
     ...options,
     render: {
-      url: ({ attributes, content }: { attributes: { href: string }; content: string }) => {
-        const url = attributes.href;
-
+      url: ({ attributes, content }: any) => {
         return (
           <a
-            href="#"
-            onClick={(e) => handleLinkClick(url, e)}
-            onAuxClick={(e) => {
-              e.preventDefault();
-              e.stopPropagation();
-            }}
-            onContextMenu={(e) => {
-              e.preventDefault();
-            }}
+            href={attributes.href}
+            onClick={(e) => handleLinkClick(attributes.href, e)}
             className="underline decoration-1 underline-offset-2 transition-colors cursor-pointer"
             style={{
               color: isCurrentUser ? '#ffffff' : 'var(--color-accent-primary)',
               textDecorationColor: isCurrentUser ? '#ffffff' : 'var(--color-accent-primary)',
             }}
-            role="link"
-            tabIndex={0}
-            aria-label={`Open link: ${url}`}
           >
             {content}
           </a>
@@ -159,118 +302,25 @@ const LinkifyWithPreviewsComponent: React.FC<LinkifyWithPreviewsProps> = ({
     }
   }), [options, handleLinkClick, isCurrentUser]);
 
-  const renderLinkPreview = useCallback((url: string, size: 'large' | 'small' = 'large') => {
-    const hostname = getHostname(url);
-    const width = size === 'large' ? '400px' : '320px';
-    const imageHeight = size === 'large' ? '160px' : '120px';
-    const descriptionLength = size === 'large' ? 120 : 80;
-    const borderRadius = size === 'large' ? '12px' : '8px';
-
+  if (previewsOnly && showPreviews && urls.length > 0) {
     return (
-      <div
-        key={url}
-        onClick={(e) => handleLinkClick(url, e)}
-        className="cursor-pointer link-preview-container"
-        style={{ position: 'relative' }}
-        role="button"
-        tabIndex={0}
-        onKeyDown={(e) => {
-          if (e.key === 'Enter' || e.key === ' ') {
-            handleLinkClick(url, e as any);
-          }
-        }}
-        aria-label={`Open link: ${url}`}
-      >
-        <div style={{ pointerEvents: 'none' }}>
-          <LinkPreview
-            url={url}
-            width={width}
-            height="auto"
-            borderRadius={borderRadius}
-            backgroundColor={isCurrentUser ? '#1c1c1e' : 'transparent'}
-            primaryTextColor={isCurrentUser ? '#ffffff' : 'inherit'}
-            secondaryTextColor={isCurrentUser ? '#d1d5db' : 'inherit'}
-            borderColor={isCurrentUser ? '#38383a' : 'transparent'}
-            showLoader={true}
-            openInNewTab={false}
-            fetcher={customFetcher}
-            descriptionLength={descriptionLength}
-            imageHeight={imageHeight}
-            showPlaceholderIfNoImage={true}
-            placeholderImageSrc="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='100' height='100' viewBox='0 0 24 24' fill='none' stroke='%23666' stroke-width='1' stroke-linecap='round' stroke-linejoin='round'%3E%3Crect x='3' y='3' width='18' height='18' rx='2' ry='2'/%3E%3Ccircle cx='8.5' cy='8.5' r='1.5'/%3E%3Cpolyline points='21,15 16,10 5,21'/%3E%3C/svg%3E"
-            fallback={
-              <div
-                className={`rounded-${size === 'large' ? 'xl' : 'lg'} overflow-hidden max-w-${size === 'large' ? 'md' : 'sm'} cursor-pointer hover:scale-[1.01] transition-all duration-200`}
-                style={{
-                  backgroundColor: isCurrentUser ? '#1c1c1e' : 'var(--color-surface)',
-                  border: `1px solid ${isCurrentUser ? '#38383a' : 'var(--color-border)'}`,
-                  boxShadow: size === 'large' ? '0 4px 16px rgba(0, 0, 0, 0.1)' : '0 2px 8px rgba(0, 0, 0, 0.1)'
-                }}
-                onClick={(e) => handleLinkClick(url, e)}
-              >
-                <div className={`p-${size === 'large' ? '3' : '2'}`}>
-                  <div className="flex items-center space-x-${size === 'large' ? '3' : '2'}">
-                    <div
-                      className={`w-${size === 'large' ? '8' : '6'} h-${size === 'large' ? '8' : '6'} rounded${size === 'large' ? '-lg' : ''} flex items-center justify-center flex-shrink-0`}
-                      style={{ backgroundColor: isCurrentUser ? '#374151' : 'var(--color-panel)' }}
-                      aria-hidden="true"
-                    >
-                      <svg
-                        className={`w-${size === 'large' ? '4' : '3'} h-${size === 'large' ? '4' : '3'}`}
-                        style={{ color: isCurrentUser ? '#9ca3af' : 'var(--color-text-secondary)' }}
-                        fill="none"
-                        stroke="currentColor"
-                        viewBox="0 0 24 24"
-                      >
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1" />
-                      </svg>
-                    </div>
-                    <div className="flex-1 min-w-0">
-                      <div
-                        className={`font-medium text-${size === 'large' ? 'sm' : 'xs'} truncate`}
-                        style={{ color: isCurrentUser ? '#ffffff' : 'var(--color-text-primary)' }}
-                      >
-                        {url}
-                      </div>
-                      {hostname && (
-                        <div
-                          className="text-xs truncate mt-0.5"
-                          style={{ color: isCurrentUser ? '#d1d5db' : 'var(--color-text-secondary)' }}
-                        >
-                          {hostname}
-                        </div>
-                      )}
-                    </div>
-                  </div>
-                </div>
-              </div>
-            }
-          />
+      <div className={className} style={style}>
+        <div className="space-y-3">
+          {urls.slice(0, 3).map(url => (
+            <CustomLinkPreview key={url} url={url} isCurrentUser={!!isCurrentUser} showFallbackLink={true} />
+          ))}
         </div>
-      </div>
-    );
-  }, [isCurrentUser, customFetcher, handleLinkClick]);
-
-  const previewComponents = useMemo(() => {
-    if (!isUrlOnly || !showPreviews || urls.length === 0) {
-      return null;
-    }
-    return urls.slice(0, 3).map((url) => renderLinkPreview(url, 'large'));
-  }, [urls, isUrlOnly, showPreviews, renderLinkPreview]);
-
-  if (previewComponents) {
-    return (
-      <div className="space-y-3">
-        {previewComponents}
       </div>
     );
   }
 
-  if (previewsOnly && showPreviews && urls.length > 0) {
+  if (isUrlOnly && showPreviews && urls.length > 0) {
     return (
-      <div className={className}>
-        <div className="space-y-2">
-          {urls.slice(0, 2).map((url) => renderLinkPreview(url, 'small'))}
+      <div className={className} style={style}>
+        <div className="space-y-3">
+          {urls.map(url => (
+            <CustomLinkPreview key={url} url={url} isCurrentUser={!!isCurrentUser} showFallbackLink={true} />
+          ))}
         </div>
       </div>
     );
@@ -278,22 +328,23 @@ const LinkifyWithPreviewsComponent: React.FC<LinkifyWithPreviewsProps> = ({
 
   if (showPreviews && urls.length > 0) {
     return (
-      <div className={className}>
-        <div className="space-y-2 mb-3">
-          {urls.slice(0, 2).map((url) => renderLinkPreview(url, 'small'))}
-        </div>
-        <div>
+      <div className={className} style={style}>
+        <div className="break-words whitespace-pre-wrap">
           <Linkify options={enhancedOptions}>
             {children}
           </Linkify>
+        </div>
+        <div className="mt-2 space-y-3">
+          {urls.slice(0, 3).map(url => (
+            <CustomLinkPreview key={url} url={url} isCurrentUser={!!isCurrentUser} />
+          ))}
         </div>
       </div>
     );
   }
 
-  // For messages without links or when previews are disabled
   return (
-    <div className={className}>
+    <div className={className} style={style}>
       <Linkify options={enhancedOptions}>
         {children}
       </Linkify>
@@ -301,13 +352,4 @@ const LinkifyWithPreviewsComponent: React.FC<LinkifyWithPreviewsProps> = ({
   );
 };
 
-export const LinkifyWithPreviews = React.memo(LinkifyWithPreviewsComponent, (prevProps, nextProps) => {
-  return (
-    prevProps.children === nextProps.children &&
-    prevProps.showPreviews === nextProps.showPreviews &&
-    prevProps.isCurrentUser === nextProps.isCurrentUser &&
-    prevProps.className === nextProps.className &&
-    prevProps.previewsOnly === nextProps.previewsOnly &&
-    JSON.stringify(prevProps.options) === JSON.stringify(nextProps.options)
-  );
-});
+export const LinkifyWithPreviews = React.memo(LinkifyWithPreviewsComponent);

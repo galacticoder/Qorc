@@ -616,11 +616,28 @@ class ElectronTorManager {
 
   startHealthMonitor() {
     if (this.healthInterval) clearInterval(this.healthInterval);
+
+    let consecutiveFailures = 0;
+    const MAX_FAILURES = 3;
+
     this.healthInterval = setInterval(async () => {
       if (!this.isTorRunning()) return;
+
       const result = await this.verifyTorConnection();
+
       if (!result.success) {
-        await this.restartTor();
+        consecutiveFailures++;
+        console.warn(`[TOR] Health check failed (${consecutiveFailures}/${MAX_FAILURES}): ${result.error}`);
+
+        if (consecutiveFailures >= MAX_FAILURES) {
+          console.error('[TOR] Max health check failures reached. Restarting Tor...');
+          consecutiveFailures = 0;
+          await this.restartTor();
+        }
+      } else {
+        if (consecutiveFailures > 0) {
+          consecutiveFailures = 0;
+        }
       }
     }, HEALTH_CHECK_INTERVAL);
   }
@@ -655,17 +672,13 @@ class ElectronTorManager {
 
         proc.once('exit', exitHandler);
 
-        // Force kill after 5 seconds if SIGTERM doesn't work
         const killTimeout = setTimeout(() => {
           if (proc && !proc.killed) {
             proc.kill('SIGKILL');
           }
         }, 5000);
 
-        // Clear the timeout if process exits normally
         proc.once('exit', () => clearTimeout(killTimeout));
-
-        // Send SIGTERM
         proc.kill('SIGTERM');
       });
     }
@@ -837,7 +850,6 @@ class ElectronTorManager {
         return torCheckResult;
       }
 
-      // If bridges are configured, verify they're actually being used
       if (bridgesConfigured) {
         const bridgesInUse = await this.verifyBridgesInUse();
         if (!bridgesInUse) {
@@ -903,7 +915,6 @@ class ElectronTorManager {
         if (/^250/.test(response) && !authenticated) {
           authenticated = true;
           response = '';
-          // Get entry guard information
           socket.write('GETINFO entry-guards\r\n');
         } else if (authenticated && /^250/.test(response)) {
           socket.end();
@@ -911,7 +922,6 @@ class ElectronTorManager {
           const entryGuardMatches = response.matchAll(/\$([A-F0-9]{40})/gi);
           const activeGuards = Array.from(entryGuardMatches).map(m => m[1].toUpperCase());
 
-          // Check if any active guard matches a configured bridge
           const bridgeInUse = activeGuards.some(guard =>
             bridgeFingerprints.includes(guard)
           );

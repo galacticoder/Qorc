@@ -68,33 +68,76 @@ class ProfilePictureSystem {
 
         try {
             this.ensureHandlerRegistered();
-            const storedAvatar = await this.secureDB.retrieve(AVATAR_STORE_KEY, 'own');
-            if (storedAvatar && this.isValidAvatarData(storedAvatar)) {
-                this.ownAvatar = storedAvatar as AvatarData;
-            }
 
-            const storedSettings = await this.secureDB.retrieve(SETTINGS_KEY, 'profile');
-            if (storedSettings && typeof storedSettings === 'object') {
-                const s = storedSettings as any;
-                if (typeof s.shareWithOthers === 'boolean') {
-                    this.settings = {
-                        shareWithOthers: s.shareWithOthers,
-                        lastUpdated: s.lastUpdated || Date.now()
-                    };
+            try {
+                const storedAvatar = await this.secureDB.retrieve(AVATAR_STORE_KEY, 'own');
+                if (storedAvatar && this.isValidAvatarData(storedAvatar)) {
+                    this.ownAvatar = storedAvatar as AvatarData;
+                }
+            } catch (avatarError: any) {
+                if (/decrypt|BLAKE3|MAC/i.test(avatarError?.message)) {
+                    console.warn('[ProfilePictureSystem] Clearing corrupted avatar data');
+                    await this.secureDB.clearStore(AVATAR_STORE_KEY).catch(() => { });
                 }
             }
 
-            const cachedAvatars = await this.secureDB.retrieve(AVATAR_STORE_KEY, 'cache');
-            if (cachedAvatars && typeof cachedAvatars === 'object') {
-                const cache = cachedAvatars as Record<string, CachedAvatar>;
-                const now = Date.now();
-                for (const [username, avatar] of Object.entries(cache)) {
-                    const recalculatedExpiresAt = avatar.cachedAt + AVATAR_CACHE_TTL;
-                    if (recalculatedExpiresAt > now && this.isValidCachedAvatar(avatar)) {
-                        avatar.expiresAt = recalculatedExpiresAt;
-                        this.avatarCache.set(username, avatar);
+            if (!this.ownAvatar) {
+                const username = websocketClient?.getUsername() || '';
+                if (username) {
+                    const defaultAvatarUrl = generateDefaultAvatar(username);
+                    const hash = await this.hashData(defaultAvatarUrl);
+                    this.ownAvatar = {
+                        data: defaultAvatarUrl,
+                        mimeType: 'image/svg+xml',
+                        hash,
+                        updatedAt: Date.now(),
+                        isDefault: true
+                    };
+                    await this.secureDB.store(AVATAR_STORE_KEY, 'own', this.ownAvatar).catch(() => { });
+                    window.dispatchEvent(new CustomEvent('profile-picture-updated', {
+                        detail: { type: 'own' }
+                    }));
+                }
+            }
+
+            // Load settings
+            try {
+                const storedSettings = await this.secureDB.retrieve(SETTINGS_KEY, 'profile');
+                if (storedSettings && typeof storedSettings === 'object') {
+                    const s = storedSettings as any;
+                    if (typeof s.shareWithOthers === 'boolean') {
+                        this.settings = {
+                            shareWithOthers: s.shareWithOthers,
+                            lastUpdated: s.lastUpdated || Date.now()
+                        };
                     }
                 }
+            } catch (settingsError: any) {
+                if (/decrypt|BLAKE3|MAC/i.test(settingsError?.message)) {
+                    console.warn('[ProfilePictureSystem] Clearing corrupted settings data');
+                    await this.secureDB.clearStore(SETTINGS_KEY).catch(() => { });
+                }
+            }
+
+            // Load cached avatars
+            try {
+                const cachedAvatars = await this.secureDB.retrieve(AVATAR_STORE_KEY, 'cache');
+                if (cachedAvatars && typeof cachedAvatars === 'object') {
+                    const cache = cachedAvatars as Record<string, CachedAvatar>;
+                    const now = Date.now();
+                    for (const [username, avatar] of Object.entries(cache)) {
+                        const recalculatedExpiresAt = avatar.cachedAt + AVATAR_CACHE_TTL;
+                        if (recalculatedExpiresAt > now && this.isValidCachedAvatar(avatar)) {
+                            avatar.expiresAt = recalculatedExpiresAt;
+                            this.avatarCache.set(username, avatar);
+                        }
+                    }
+                }
+            } catch (cacheError: any) {
+                if (/decrypt|BLAKE3|MAC/i.test(cacheError?.message)) {
+                    console.warn('[ProfilePictureSystem] Clearing corrupted avatar cache');
+                }
+                this.avatarCache.clear();
             }
 
             this.initialized = true;
@@ -175,8 +218,6 @@ class ProfilePictureSystem {
             const isPng = header[0] === 0x89 && header[1] === 0x50 && header[2] === 0x4E && header[3] === 0x47;
             const isWebp = header[0] === 0x52 && header[1] === 0x49 && header[2] === 0x46 && header[3] === 0x46 &&
                 header[8] === 0x57 && header[9] === 0x45 && header[10] === 0x42 && header[11] === 0x50;
-
-            // SVG detection
             const isSvg = mimeType === 'image/svg+xml' && (binaryString.includes('<svg') || binaryString.includes('<?xml'));
 
             if (!isJpeg && !isPng && !isWebp && !isSvg) {
@@ -354,14 +395,14 @@ class ProfilePictureSystem {
             return;
         }
 
-        // Check for a valid cached avatar
+        // Check for cached avatar
         const cached = this.avatarCache.get(username);
 
         if (cached && cached.expiresAt > Date.now()) {
             return;
         }
 
-        // Remove expired entry if present
+        // Remove expired entry
         if (cached) {
             this.avatarCache.delete(username);
         }
@@ -493,7 +534,6 @@ class ProfilePictureSystem {
         }
 
         try {
-            // Encrypt avatar data with own public key
             const envelope = await encryptLongTerm(
                 JSON.stringify({
                     data: this.ownAvatar.data,

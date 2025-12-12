@@ -33,6 +33,8 @@ COPY server/package*.json ./server/
 
 RUN node scripts/install-deps.cjs --server
 
+RUN cd server && npm install
+
 COPY server/ ./server/
 
 EXPOSE 3000

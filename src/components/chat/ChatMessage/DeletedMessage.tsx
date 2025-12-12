@@ -1,23 +1,25 @@
 import React from "react";
-import { cn } from "@/lib/utils";
+import { cn } from "../../../lib/utils";
 import { format } from "date-fns";
 import { UserAvatar } from "../../ui/UserAvatar";
 
 interface DeletedMessageProps {
-  sender: string;
+  senderUsername: string;
+  displayName?: string;
   timestamp: Date;
   isCurrentUser?: boolean;
 }
 
-export function DeletedMessage({ sender, timestamp, isCurrentUser }: DeletedMessageProps) {
+export function DeletedMessage({ senderUsername, displayName, timestamp, isCurrentUser }: DeletedMessageProps) {
   const safeIsCurrentUser = isCurrentUser || false;
+  const nameToShow = displayName || senderUsername;
 
   return (
     <div className={cn("flex gap-3 mb-4 group", safeIsCurrentUser ? "flex-row-reverse" : "flex-row")} style={{ marginBottom: 'var(--spacing-md)' }}>
       {/* Avatar*/}
       <div className="flex-shrink-0 w-10">
         <UserAvatar
-          username={sender}
+          username={senderUsername}
           isCurrentUser={safeIsCurrentUser}
           size="md"
         />
@@ -30,7 +32,7 @@ export function DeletedMessage({ sender, timestamp, isCurrentUser }: DeletedMess
             className="text-sm font-medium"
             style={{ color: 'var(--color-text-primary)' }}
           >
-            {sender}
+            {nameToShow}
           </span>
           <span
             className="text-xs"

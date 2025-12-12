@@ -77,6 +77,7 @@ export interface ChatMessageProps {
   onDelete?: (message: Message) => void;
   onEdit?: (message: Message) => void;
   onReact?: (message: Message, emoji: string) => void;
+  onReplyClick?: (replyId: string) => void;
   currentUsername?: string;
   secureDB?: any;
 }

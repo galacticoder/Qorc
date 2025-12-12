@@ -121,16 +121,15 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
     toggleMute,
     toggleVideo,
     switchCamera,
+    switchMicrophone,
     startScreenShare,
     stopScreenShare,
     getAvailableScreenSources,
     isScreenSharing
   } = callingHook;
 
-  // Track which messages have been processed in the current scroll event to prevent duplicates
   const processedInScrollRef = useRef<Set<string>>(new Set());
   const lastScrollTimeRef = useRef<number>(0);
-
   const { handleLocalTyping, handleConversationChange, resetTypingAfterSend } = useTypingIndicator(currentUsername, selectedConversation, onSendMessage);
 
 
@@ -145,7 +144,7 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
       const displayPeerName = truncateUsername(await resolveDisplayUsername(detail.peer, getDisplayUsername));
       const durationSeconds = Math.round((detail.durationMs || 0) / 1000);
 
-      // Save to persistent call history
+      // Save to call history
       if (['ended', 'missed', 'declined'].includes(detail.type)) {
         const direction = detail.isOutgoing ? 'outgoing' : 'incoming';
         const status = detail.type === 'missed' ? 'missed' : detail.type === 'declined' ? 'declined' : 'completed';
@@ -156,16 +155,16 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
           direction,
           status,
           startTime: detail.at || Date.now(),
-          duration: durationSeconds
+          ...(status === 'completed' && durationSeconds > 0 ? { duration: durationSeconds } : {})
         });
       }
 
       const label = detail.type === 'incoming' ? `Incoming call from ${displayPeerName}`
         : detail.type === 'connected' ? `Call connected with ${displayPeerName}`
           : detail.type === 'started' ? `Calling ${displayPeerName}...`
-            : detail.type === 'ended' ? `Call with ${displayPeerName} ended (${durationSeconds}s)`
+            : detail.type === 'ended' ? (durationSeconds > 0 ? `Call with ${displayPeerName} ended (${durationSeconds}s)` : `Call with ${displayPeerName} ended`)
               : detail.type === 'declined' ? `${displayPeerName} declined the call`
-                : detail.type === 'missed' ? `Missed call from ${displayPeerName}`
+                : detail.type === 'missed' ? `Missed`
                   : detail.type === 'not-answered' ? `${displayPeerName} did not answer`
                     : `Call event: ${detail.type}`;
 
@@ -176,7 +175,7 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
 
       setMessages((prev) => [...prev, {
         id: `call-log-${detail.callId || crypto.randomUUID()}-${detail.type}-${detail.at || Date.now()}`,
-        content: JSON.stringify({ label, actionsType: actions ? 'callback' : undefined }),
+        content: JSON.stringify({ label, actionsType: actions ? 'callback' : undefined, isError: detail.type === 'missed' }),
         sender: 'System',
         timestamp: new Date(),
         isCurrentUser: false,
@@ -372,7 +371,7 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
         if (passphrase && typeof passphrase === 'string' && passphrase.length > 0) {
           keyArg = passphrase;
         } else {
-          // Prefer Kyber secret when passphrase is not available (token-login)
+          // Prefer Kyber secret when passphrase is not available
           let kyberSecret: Uint8Array | undefined = callingAuthContext?.hybridKeysRef?.current?.kyber?.secretKey;
           if (!kyberSecret && typeof callingAuthContext?.getKeysOnDemand === 'function') {
             try {
@@ -467,7 +466,6 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
       lastMessageIdRef.current = latestMessage.id;
     }
 
-    // Update the previous length
     prevMessagesLengthRef.current = currentMessagesLength;
   }, [messages, currentUsername]);
 
@@ -482,7 +480,6 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
           if (entry.isIntersecting) {
             const messageId = entry.target.getAttribute('data-message-id');
             if (messageId) {
-              // Only mark as read if the window is focused
               if (document.hasFocus()) {
                 markMessageAsRead(messageId);
                 const msg = messages.find(m => m.id === messageId);
@@ -521,7 +518,6 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
             const rect = el.getBoundingClientRect();
             const containerRect = scrollContainer.getBoundingClientRect();
 
-            // Check if currently visible
             if (
               rect.top < containerRect.bottom &&
               rect.bottom > containerRect.top
@@ -616,8 +612,14 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
 
   const handleCancelReply = useCallback(() => setReplyTo(null), []);
   const handleCancelEdit = useCallback(() => setEditingMessage(null), []);
-  const handleReply = useCallback((message: Message) => setReplyTo(message), []);
-  const handleEdit = useCallback((message: Message) => setEditingMessage(message), []);
+  const handleReply = useCallback((message: Message) => {
+    setEditingMessage(null);
+    setReplyTo(message);
+  }, []);
+  const handleEdit = useCallback((message: Message) => {
+    setReplyTo(null);
+    setEditingMessage(message);
+  }, []);
 
   const handleBlockStatusChangeInline = useCallback((username: string, isBlocked: boolean) => {
     if (username === selectedConversation) {
@@ -641,6 +643,15 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
       {selectedConversation ? "No messages yet. Start the conversation!" : "Select a conversation to view messages"}
     </div>
   ), [selectedConversation]);
+  const handleReplyClick = useCallback((replyId: string) => {
+    const el = document.getElementById(`message-${replyId}`);
+    if (el) {
+      el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      el.classList.add('bg-secondary/20');
+      setTimeout(() => el.classList.remove('bg-secondary/20'), 1500);
+    }
+  }, []);
+
   return (
     <div className="flex flex-col h-full relative" style={{ backgroundColor: 'var(--chat-background)' }}>
       <div
@@ -650,6 +661,16 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
         }}
       >
         <div className="flex items-center gap-2">
+          {/* Block Status Indicator */}
+          {(isUserBlocked || isBlockedByUser) && (
+            <div className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-red-900/20 select-none">
+              <ShieldOff className="w-4 h-4 text-red-600 dark:text-red-400" />
+              <span className="text-xs font-medium text-red-600 dark:text-red-400">
+                {isUserBlocked ? 'Blocked' : 'Blocked You'}
+              </span>
+            </div>
+          )}
+
           {selectedConversation && (
             <>
               <Button
@@ -743,15 +764,6 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
             </div>
           )} */}
 
-          {/* Block Status Indicator */}
-          {(isUserBlocked || isBlockedByUser) && (
-            <div className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-red-100 dark:bg-red-900/20 select-none">
-              <ShieldOff className="w-4 h-4 text-red-600 dark:text-red-400" />
-              <span className="text-xs font-medium text-red-600 dark:text-red-400">
-                {isUserBlocked ? 'Blocked' : 'Blocked You'}
-              </span>
-            </div>
-          )}
         </div>
       </div>
       <ScrollArea
@@ -783,6 +795,7 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
                     onDelete={handleDeleteMessage}
                     onEdit={handleEdit}
                     onReact={handleReactToMessage}
+                    onReplyClick={handleReplyClick}
                     currentUsername={currentUsername}
                     getDisplayUsername={getDisplayUsernameStable}
                     secureDB={secureDB}
@@ -836,13 +849,13 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
             localStream={localStream}
             remoteStream={remoteStream}
             remoteScreenStream={remoteScreenStream}
-            peerConnection={peerConnection}
             onAnswer={handleCallModalAnswer}
             onDecline={handleCallModalDecline}
             onEndCall={endCall}
             onToggleMute={toggleMute}
             onToggleVideo={toggleVideo}
             onSwitchCamera={switchCamera}
+            onSwitchMicrophone={switchMicrophone}
             onStartScreenShare={startScreenShare}
             onStopScreenShare={stopScreenShare}
             onGetAvailableScreenSources={getAvailableScreenSources}

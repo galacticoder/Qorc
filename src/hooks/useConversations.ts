@@ -109,7 +109,6 @@ export const useConversations = (currentUsername: string, users: User[], message
   const eventCleanupRef = useRef<Map<string, () => void>>(new Map());
 
   const addConversation = useCallback(async (username: string, autoSelect: boolean = true): Promise<Conversation | null> => {
-    // Require SecureDB for operations 
     if (!secureDB) {
       throw new Error('[useConversations] SecureDB is required - cannot add conversation');
     }
@@ -124,14 +123,12 @@ export const useConversations = (currentUsername: string, users: User[], message
       throw new Error('[useConversations] Invalid username format (2-64 chars, alphanumeric/._- only)');
     }
 
-    // Prevent adding too many conversations
     if (conversations.length >= MAX_CONVERSATIONS) {
       throw new Error('[useConversations] Maximum conversation limit reached');
     }
 
     const pseudonym = looksLikePseudonym ? trimmed.toLowerCase() : await pseudonymizeUsernameWithCache(trimmed, secureDB || undefined);
 
-    // Prevent self-conversation
     if (pseudonym === currentUsername) {
       throw new Error('[useConversations] Cannot create conversation with yourself');
     }
@@ -141,7 +138,6 @@ export const useConversations = (currentUsername: string, users: User[], message
       return pendingMap.get(pseudonym)!;
     }
 
-    // Rate limiting to prevent DoS
     const now = Date.now();
     const rateState = rateStateRef.current;
     if (now - rateState.windowStart > CONVERSATION_RATE_LIMIT_WINDOW_MS) {
@@ -155,7 +151,6 @@ export const useConversations = (currentUsername: string, users: User[], message
 
     const operation = (async (): Promise<Conversation | null> => {
       try {
-        // Store username mapping in encrypted database
         if (!looksLikePseudonym && trimmed !== pseudonym) {
           try {
             await secureDB.storeUsernameMapping(pseudonym, trimmed);
@@ -166,7 +161,6 @@ export const useConversations = (currentUsername: string, users: User[], message
           }
         }
 
-        // Restore conversation if it was removed
         if (removedConversations.has(pseudonym)) {
           setRemovedConversations(prev => {
             const newSet = new Set(prev);
@@ -183,12 +177,10 @@ export const useConversations = (currentUsername: string, users: User[], message
           return existingConversation;
         }
 
-        // Validate user existence with server
         return await new Promise<Conversation | null>((resolve, reject) => {
           let timeoutId: number | null = null;
           let resolved = false;
 
-          // Cleanup function to prevent memory leaks
           const cleanup = () => {
             if (timeoutId !== null) {
               clearTimeout(timeoutId);
@@ -205,7 +197,6 @@ export const useConversations = (currentUsername: string, users: User[], message
             const detail = typeof customEvent.detail === 'object' && customEvent.detail !== null ? customEvent.detail : {};
             const { username: responseUsername, exists, error, hybridPublicKeys } = detail as { username?: string; exists?: boolean; error?: string; hybridPublicKeys?: any };
 
-            // Case-insensitive username comparison
             if ((responseUsername || '').toLowerCase() !== pseudonym.toLowerCase()) {
               return;
             }
@@ -213,7 +204,6 @@ export const useConversations = (currentUsername: string, users: User[], message
             resolved = true;
             cleanup();
 
-            // Handle errors
             if (error) {
               reject(new Error(`User validation failed: ${error}`));
               return;
@@ -224,7 +214,6 @@ export const useConversations = (currentUsername: string, users: User[], message
               return;
             }
 
-            // Dispatch key availability event
             if (hybridPublicKeys) {
               try {
                 dispatchSafeEvent('user-keys-available', { username: pseudonym, hybridKeys: hybridPublicKeys }, ['username', 'hybridKeys']);
@@ -245,10 +234,8 @@ export const useConversations = (currentUsername: string, users: User[], message
             resolve(newConversation);
           };
 
-          // Register event listener
           window.addEventListener('user-exists-response', handleUserExistsResponse as EventListener);
 
-          // Send validation request
           try {
             websocketClient.send(
               JSON.stringify({
@@ -264,7 +251,6 @@ export const useConversations = (currentUsername: string, users: User[], message
             return;
           }
 
-          // Timeout for validation
           timeoutId = window.setTimeout(() => {
             if (resolved) return;
             resolved = true;
@@ -287,8 +273,7 @@ export const useConversations = (currentUsername: string, users: User[], message
     return wrapped;
   }, [conversations, currentUsername, removedConversations, selectedConversation, users, secureDB]);
 
-  const selectConversation = useCallback((username: string) => {
-    // Validate username
+  const selectConversation = useCallback((username: string) => {  
     if (!username || typeof username !== 'string') {
       return;
     }
@@ -301,16 +286,13 @@ export const useConversations = (currentUsername: string, users: User[], message
     }
   }, [selectedConversation]);
 
-  // Cleanup event listeners on unmount
   useEffect(() => {
     return () => {
-      // Clean up all pending event listeners
       eventCleanupRef.current.forEach(cleanup => cleanup());
       eventCleanupRef.current.clear();
     };
   }, []);
 
-  // Get messages for the selected conversation
   const getConversationMessages = useCallback((conversationUsername?: string) => {
     if (!conversationUsername) return [];
 
@@ -346,17 +328,14 @@ export const useConversations = (currentUsername: string, users: User[], message
   }, [userLookup]);
 
   useEffect(() => {
-    if (!messages || messages.length === 0) {
+    if (!messages || messages.length === 0 || !currentUsername) {
       return;
     }
 
     const convMap = new Map<string, Conversation>();
 
-    // Optimization: Iterate backwards to find latest messages first
-    // This avoids updating the 'lastMessage' repeatedly for every message in the history
     for (let i = messages.length - 1; i >= 0; i--) {
       const msg = messages[i];
-      // Validate message structure
       if (!msg.sender || !msg.recipient) continue;
 
       const content = msg.content;
@@ -367,15 +346,15 @@ export const useConversations = (currentUsername: string, users: User[], message
       }
 
       const other = msg.sender === currentUsername ? msg.recipient : msg.sender;
+      if (!other || other === currentUsername) continue;
       const isOnline = userLookup.get(other) ?? false;
       const msgTime = new Date(msg.timestamp);
       const unreadIncrement = (msg.sender !== currentUsername && (!msg.receipt || !msg.receipt.read)) ? 1 : 0;
 
       let conv = convMap.get(other);
       if (!conv) {
-        // First time seeing this peer (scanning from newest), so this is the latest message
         conv = {
-          id: crypto.randomUUID(), // Will be overwritten by existing ID in merge step
+          id: crypto.randomUUID(),
           username: other,
           isOnline,
           lastMessage: getConversationPreview(msg, currentUsername),
@@ -384,7 +363,6 @@ export const useConversations = (currentUsername: string, users: User[], message
         };
         convMap.set(other, conv);
       } else {
-        // Already have the latest message, just update unread count
         if (unreadIncrement > 0) {
           convMap.set(other, {
             ...conv,
@@ -394,7 +372,6 @@ export const useConversations = (currentUsername: string, users: User[], message
       }
     }
 
-    // Determine which removed conversations should be restored based on new activity
     const toRestore: string[] = [];
     for (const username of convMap.keys()) {
       if (removedConversations.has(username)) {
@@ -402,7 +379,6 @@ export const useConversations = (currentUsername: string, users: User[], message
       }
     }
 
-    // First, restore removed conversations
     if (toRestore.length > 0) {
       setRemovedConversations(prevRemoved => {
         const newSet = new Set(prevRemoved);
@@ -414,7 +390,9 @@ export const useConversations = (currentUsername: string, users: User[], message
     setConversations(prev => {
       const merged = new Map<string, Conversation>();
       for (const c of prev) {
-        merged.set(c.username, c);
+        if (c.username !== currentUsername) {
+          merged.set(c.username, c);
+        }
       }
 
       for (const [username, conv] of convMap.entries()) {
@@ -506,7 +484,6 @@ export const useConversations = (currentUsername: string, users: User[], message
     }
   }, [conversations, selectedConversation]);
 
-  // Remove conversation with validation
   const removeConversation = useCallback((username: string, clearMessages: boolean = true) => {
     if (!username || typeof username !== 'string') {
       return;
@@ -519,7 +496,6 @@ export const useConversations = (currentUsername: string, users: User[], message
       setSelectedConversation(null);
     }
 
-    // Clear messages from UI
     if (clearMessages) {
       dispatchSafeEvent('clear-conversation-messages', { username }, ['username']);
     }

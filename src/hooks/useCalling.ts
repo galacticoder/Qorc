@@ -1,12 +1,8 @@
 /**
  * React Hook for WebRTC Calling Integration
- * - Strict username validation
- * - Post-quantum crypto handled by WebRTCCallingService
- * - Secure event sanitization
- * - Memory cleanup on unmount
  */
 
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { unstable_batchedUpdates } from 'react-dom';
 import { WebRTCCallingService, CallState } from '../lib/webrtc-calling';
 import type { useAuth } from './useAuth';
@@ -36,7 +32,7 @@ const stopMediaStream = (stream: MediaStream | null) => {
 const MAX_USERNAME_LENGTH = 120;
 const MAX_CALL_ID_LENGTH = 256;
 
-const EVENT_ALLOWED_PAYLOAD_KEYS = new Set(['type', 'peer', 'at', 'callId', 'status', 'startTime', 'endTime', 'durationMs', 'direction']);
+const EVENT_ALLOWED_PAYLOAD_KEYS = new Set(['type', 'peer', 'at', 'callId', 'status', 'startTime', 'endTime', 'durationMs', 'direction', 'isVideo', 'isOutgoing']);
 
 const isValidUsername = (username: string): boolean => {
   if (!username || typeof username !== 'string') return false;
@@ -188,10 +184,9 @@ export const useCalling = (authContext: ReturnType<typeof useAuth>) => {
     const service = new WebRTCCallingService(currentUsername);
     serviceRef.current = service;
 
-    // Set up callbacks
     service.onIncomingCall((call) => {
       setCurrentCall({ ...call });
-      eventDebouncer.current.enqueue('ui-call-log', { type: 'incoming', peer: call.peer, at: Date.now(), callId: call.id });
+      eventDebouncer.current.enqueue('ui-call-log', { type: 'incoming', peer: call.peer, at: Date.now(), callId: call.id, isVideo: call.type === 'video', isOutgoing: call.direction === 'outgoing' });
     });
 
     service.onCallStateChange((call) => {
@@ -206,20 +201,40 @@ export const useCalling = (authContext: ReturnType<typeof useAuth>) => {
       const statusNeedsImmediateDispatch = call.status === 'ended' || call.status === 'declined' || call.status === 'missed';
       eventDebouncer.current.enqueue('ui-call-status', statusDetail, statusNeedsImmediateDispatch);
 
+      const wasConnected = everConnectedRef.current.has(call.id);
+
       if (call.status === 'connecting') {
         try { (window as any).edgeApi?.powerSaveBlockerStart?.(); } catch { }
-        eventDebouncer.current.enqueue('ui-call-log', { type: 'started', peer: call.peer, at: Date.now(), callId: call.id });
+        eventDebouncer.current.enqueue('ui-call-log', { type: 'started', peer: call.peer, at: Date.now(), callId: call.id, isVideo: call.type === 'video', isOutgoing: call.direction === 'outgoing' });
       } else if (call.status === 'connected') {
         try { everConnectedRef.current.add(call.id); } catch { }
         try { (window as any).edgeApi?.powerSaveBlockerStart?.(); } catch { }
-        eventDebouncer.current.enqueue('ui-call-log', { type: 'connected', peer: call.peer, at: Date.now(), callId: call.id });
+        eventDebouncer.current.enqueue('ui-call-log', { type: 'connected', peer: call.peer, at: Date.now(), callId: call.id, isVideo: call.type === 'video', isOutgoing: call.direction === 'outgoing' });
       }
       if (call.status === 'ended' || call.status === 'declined' || call.status === 'missed') {
         try { (window as any).edgeApi?.powerSaveBlockerStop?.(); } catch { }
         if (call.status === 'ended') {
-          const wasConnected = everConnectedRef.current.has(call.id);
-          if (!wasConnected && call.direction === 'outgoing') {
-            eventDebouncer.current.enqueue('ui-call-log', { type: 'not-answered', peer: call.peer, at: Date.now(), callId: call.id });
+          if (!wasConnected) {
+            if (call.direction === 'incoming') {
+              eventDebouncer.current.enqueue('ui-call-log', {
+                type: 'missed',
+                peer: call.peer,
+                at: Date.now(),
+                callId: call.id,
+                isVideo: call.type === 'video',
+                isOutgoing: call.direction === 'outgoing'
+              });
+            } else {
+              eventDebouncer.current.enqueue('ui-call-log', {
+                type: 'ended',
+                peer: call.peer,
+                at: Date.now(),
+                callId: call.id,
+                durationMs: 0,
+                isVideo: call.type === 'video',
+                isOutgoing: call.direction === 'outgoing'
+              });
+            }
           } else {
             const durationMs = call.startTime && call.endTime ? (call.endTime - call.startTime) : 0;
             eventDebouncer.current.enqueue('ui-call-ended', {
@@ -229,14 +244,14 @@ export const useCalling = (authContext: ReturnType<typeof useAuth>) => {
               endTime: call.endTime,
               durationMs
             });
-            eventDebouncer.current.enqueue('ui-call-log', { type: 'ended', peer: call.peer, at: Date.now(), callId: call.id, durationMs });
+            eventDebouncer.current.enqueue('ui-call-log', { type: 'ended', peer: call.peer, at: Date.now(), callId: call.id, durationMs, isVideo: call.type === 'video', isOutgoing: call.direction === 'outgoing' });
           }
         }
         if (call.status === 'declined') {
-          eventDebouncer.current.enqueue('ui-call-log', { type: 'declined', peer: call.peer, at: Date.now(), callId: call.id });
+          eventDebouncer.current.enqueue('ui-call-log', { type: 'declined', peer: call.peer, at: Date.now(), callId: call.id, isVideo: call.type === 'video', isOutgoing: call.direction === 'outgoing' });
         }
         if (call.status === 'missed') {
-          eventDebouncer.current.enqueue('ui-call-log', { type: 'missed', peer: call.peer, at: Date.now(), callId: call.id });
+          eventDebouncer.current.enqueue('ui-call-log', { type: 'missed', peer: call.peer, at: Date.now(), callId: call.id, isVideo: call.type === 'video', isOutgoing: call.direction === 'outgoing' });
         }
         unstable_batchedUpdates(() => {
           setCurrentCall(null);
@@ -341,7 +356,7 @@ export const useCalling = (authContext: ReturnType<typeof useAuth>) => {
     }
   }, [currentUsername]);
 
-  // Answer a call with validation
+  // Answer a call
   const answerCall = useCallback(async (callId: string) => {
     if (!serviceRef.current) {
       throw new Error('[useCalling] Calling service not initialized');
@@ -359,7 +374,7 @@ export const useCalling = (authContext: ReturnType<typeof useAuth>) => {
     }
   }, []);
 
-  // Decline a call with validation
+  // Decline a call
   const declineCall = useCallback(async (callId: string) => {
     if (!serviceRef.current) {
       throw new Error('[useCalling] Calling service not initialized');
@@ -412,15 +427,28 @@ export const useCalling = (authContext: ReturnType<typeof useAuth>) => {
   }, []);
 
   // Switch camera
-  const switchCamera = useCallback(async () => {
+  const switchCamera = useCallback(async (deviceId: string) => {
     if (!serviceRef.current) {
       return;
     }
 
     try {
-      await serviceRef.current.switchCamera();
+      await serviceRef.current.switchCamera(deviceId);
     } catch (_error) {
       console.error('[useCalling] Failed to switch camera:', _error);
+    }
+  }, []);
+
+  // Switch microphone
+  const switchMicrophone = useCallback(async (deviceId: string) => {
+    if (!serviceRef.current) {
+      return;
+    }
+
+    try {
+      await serviceRef.current.switchMicrophone(deviceId);
+    } catch (_error) {
+      console.error('[useCalling] Failed to switch microphone:', _error);
     }
   }, []);
 
@@ -448,17 +476,25 @@ export const useCalling = (authContext: ReturnType<typeof useAuth>) => {
   }, []);
 
   // Get available screen sources
-  const getAvailableScreenSources = useCallback(async () => {
-    if (!serviceRef.current) {
-      throw new Error('[useCalling] Calling service not initialized');
-    }
+  const getAvailableScreenSources = useMemo(() => {
+    const electronApi = (window as any).electronAPI;
+    const edgeApi = (window as any).edgeApi;
+    const isElectron = !!(electronApi || edgeApi);
 
-    try {
-      return await serviceRef.current.getAvailableScreenSources();
-    } catch (_error) {
-      console.error('[useCalling] Failed to get screen sources:', _error);
-      throw _error;
-    }
+    if (!isElectron) return undefined;
+
+    return async () => {
+      if (!serviceRef.current) {
+        throw new Error('[useCalling] Calling service not initialized');
+      }
+
+      try {
+        return await serviceRef.current.getAvailableScreenSources();
+      } catch (_error) {
+        console.error('[useCalling] Failed to get screen sources:', _error);
+        throw _error;
+      }
+    };
   }, []);
 
   // Stop screen sharing
@@ -478,7 +514,6 @@ export const useCalling = (authContext: ReturnType<typeof useAuth>) => {
   const isScreenSharing = callingService?.getScreenSharingStatus() || false;
 
   return {
-    // State
     currentCall,
     localStream,
     remoteStream,
@@ -487,14 +522,15 @@ export const useCalling = (authContext: ReturnType<typeof useAuth>) => {
     isInitialized,
     isScreenSharing,
 
-    // Actions
     startCall,
     answerCall,
     declineCall,
     endCall,
     toggleMute,
     toggleVideo,
+
     switchCamera,
+    switchMicrophone,
     startScreenShare,
     stopScreenShare,
     getAvailableScreenSources,

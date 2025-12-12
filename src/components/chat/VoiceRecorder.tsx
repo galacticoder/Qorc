@@ -124,13 +124,34 @@ export function VoiceRecorder({ onSendVoiceNote, onCancel, disabled }: VoiceReco
       if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
         throw new Error('Media devices not supported');
       }
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true,
+
+      // Load set microphone from settings
+      let micDeviceId: string | undefined;
+      try {
+        const { syncEncryptedStorage } = await import('../../lib/encrypted-storage');
+        const stored = syncEncryptedStorage.getItem('app_settings_v1');
+        if (stored) {
+          const parsed = JSON.parse(stored);
+          if (parsed.preferredMicId) {
+            const devices = await navigator.mediaDevices.enumerateDevices();
+            const micAvailable = devices.some(d => d.kind === 'audioinput' && d.deviceId === parsed.preferredMicId);
+            if (micAvailable) {
+              micDeviceId = parsed.preferredMicId;
+            }
+          }
         }
-      });
+      } catch { }
+
+      const audioConstraints: MediaTrackConstraints = {
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true,
+      };
+      if (micDeviceId) {
+        audioConstraints.deviceId = { ideal: micDeviceId };
+      }
+
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: audioConstraints });
       streamRef.current = stream;
 
       const AudioCtx: typeof AudioContext = (window as any).AudioContext || (window as any).webkitAudioContext;

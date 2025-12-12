@@ -1,4 +1,4 @@
-import { useRef, useState, useCallback } from "react";
+import { useRef, useState, useCallback, useEffect } from "react";
 import * as pako from "pako";
 import { CryptoUtils } from "@/lib/unified-crypto";
 import websocketClient from "@/lib/websocket";
@@ -86,6 +86,52 @@ export function useFileSender(
   const currentMacKeyRef = useRef<Uint8Array | null>(null);
   const rateTokensRef = useRef<number>(MAX_CHUNKS_PER_SECOND);
   const lastRefillRef = useRef<number>(Date.now());
+
+  const SESSION_WAIT_MS = 12_000;
+  const SESSION_POLL_BASE_MS = 200;
+  const SESSION_POLL_MAX_MS = 1_500;
+  const BUNDLE_REQUEST_COOLDOWN_MS = 5000;
+  const SESSION_FRESH_COOLDOWN_MS = 10_000;
+
+  const bundleRequestTracker = useRef<Map<string, number>>(new Map());
+  const sessionEstablishedAt = useRef<Map<string, number>>(new Map());
+  const peersNeedingSessionRefresh = useRef<Set<string>>(new Set());
+
+  // Listen for session reset events
+  useEffect(() => {
+    const handleSessionReset = (event: Event) => {
+      try {
+        const detail = (event as CustomEvent).detail || {};
+        const peerUsername = detail.peerUsername || detail.peer || detail.from;
+        if (typeof peerUsername === 'string' && peerUsername) {
+          console.log('[FILE-SENDER] Session reset received for peer:', peerUsername);
+          peersNeedingSessionRefresh.current.add(peerUsername);
+          sessionEstablishedAt.current.delete(peerUsername);
+        }
+      } catch { }
+    };
+
+    const handleSessionEstablished = (event: Event) => {
+      try {
+        const detail = (event as CustomEvent).detail || {};
+        const peerUsername = detail.peer || detail.peerUsername || detail.fromPeer;
+        if (typeof peerUsername === 'string' && peerUsername) {
+          peersNeedingSessionRefresh.current.delete(peerUsername);
+          sessionEstablishedAt.current.set(peerUsername, Date.now());
+        }
+      } catch { }
+    };
+
+    window.addEventListener('session-reset-received', handleSessionReset as EventListener);
+    window.addEventListener('libsignal-session-ready', handleSessionEstablished as EventListener);
+    window.addEventListener('session-established-received', handleSessionEstablished as EventListener);
+
+    return () => {
+      window.removeEventListener('session-reset-received', handleSessionReset as EventListener);
+      window.removeEventListener('libsignal-session-ready', handleSessionEstablished as EventListener);
+      window.removeEventListener('session-established-received', handleSessionEstablished as EventListener);
+    };
+  }, []);
 
   const refillTokens = useCallback((): void => {
     const now = Date.now();
@@ -204,56 +250,196 @@ export function useFileSender(
     }
   }, []);
 
-  // Ensure a libsignal session exists with the recipient before encrypting chunk metadata
-  const ensureSignalSession = useCallback(async (): Promise<boolean> => {
+  const getSessionApi = useCallback(() => {
+    const edgeApi = (globalThis as any)?.edgeApi ?? null;
+    return {
+      async hasSession(args: { selfUsername: string; peerUsername: string; deviceId: number }) {
+        if (typeof edgeApi?.hasSession !== 'function') {
+          return { hasSession: false };
+        }
+        try {
+          const promise = edgeApi.hasSession(args);
+          const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), 5000));
+          return await Promise.race([promise, timeout]) as any;
+        } catch {
+          return { hasSession: false };
+        }
+      },
+    };
+  }, []);
+
+  const ensureSignalSession = useCallback(async (forceReestablish: boolean = false): Promise<boolean> => {
     try {
       if (!targetUsername || !getKeysOnDemand) return false;
-      const edgeApi: any = (window as any).edgeApi;
-      if (!edgeApi?.hasSession) return false;
 
-      const has = await edgeApi.hasSession({ selfUsername: currentUsername, peerUsername: targetUsername, deviceId: 1 });
-      if (has?.hasSession) return true;
+      const sessionApi = getSessionApi();
+      const edgeApi: any = (window as any).edgeApi;
+      const needsRefresh = forceReestablish || peersNeedingSessionRefresh.current.has(targetUsername);
+
+      const initial = await sessionApi.hasSession({
+        selfUsername: currentUsername,
+        peerUsername: targetUsername,
+        deviceId: 1,
+      });
+
+      // If session exists and peer doesn't need refresh, trust it
+      if (initial?.hasSession && !needsRefresh) {
+        return true;
+      }
+
+      const lastEstablished = sessionEstablishedAt.current.get(targetUsername) || 0;
+      const sessionIsFresh = (Date.now() - lastEstablished) < SESSION_FRESH_COOLDOWN_MS;
+
+      if (initial?.hasSession && needsRefresh && sessionIsFresh && !forceReestablish) {
+        peersNeedingSessionRefresh.current.delete(targetUsername);
+        return true;
+      }
+
+      // If session needs refresh and is stale, delete it
+      if (needsRefresh && initial?.hasSession && !sessionIsFresh) {
+        try {
+          const deletePromise = edgeApi?.deleteSession?.({
+            selfUsername: currentUsername,
+            peerUsername: targetUsername,
+            deviceId: 1
+          });
+          if (deletePromise) {
+            const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), 5000));
+            await Promise.race([deletePromise, timeout]);
+          }
+          peersNeedingSessionRefresh.current.delete(targetUsername);
+        } catch (e) {
+          console.warn('[FILE-SENDER] Failed to delete stale session:', e);
+        }
+      }
+
+      const deadline = Date.now() + SESSION_WAIT_MS;
+      let delay = SESSION_POLL_BASE_MS;
+      const MAX_REQUESTS = 2;
+      let requestCount = 0;
+
+      let sessionReadyFlag = false;
+      const readyHandler = (event: Event) => {
+        const customEvent = event as CustomEvent;
+        const detail = customEvent.detail || {};
+        if (detail.peer === targetUsername || detail.peerUsername === targetUsername) {
+          sessionReadyFlag = true;
+        }
+      };
+      window.addEventListener('libsignal-session-ready', readyHandler as EventListener);
 
       try {
-        const keys = await getKeysOnDemand();
-        if (keys?.dilithium?.secretKey && keys?.dilithium?.publicKeyBase64) {
-          const req = {
-            type: SignalType.LIBSIGNAL_REQUEST_BUNDLE,
-            username: targetUsername,
-            from: currentUsername,
-            timestamp: Date.now(),
-            challenge: CryptoUtils.Base64.arrayBufferToBase64(globalThis.crypto.getRandomValues(new Uint8Array(32))),
-            senderDilithium: keys.dilithium.publicKeyBase64,
-            reason: 'file-transfer',
-          } as const;
-          const canonical = new TextEncoder().encode(JSON.stringify(req));
-          const sigRaw = await CryptoUtils.Dilithium.sign(keys.dilithium.secretKey, canonical);
-          const signature = CryptoUtils.Base64.arrayBufferToBase64(sigRaw);
-          await websocketClient.sendSecureControlMessage({ ...req, signature });
-        }
-      } catch { }
+        let lastRequestAt = 0;
 
-      // Wait briefly for session establishment notification
-      const MAX_WAIT_MS = 8000;
-      return await new Promise<boolean>((resolve) => {
-        let settled = false;
-        const timer = setTimeout(() => { if (!settled) { settled = true; resolve(false); } }, MAX_WAIT_MS);
-        const onReady = (e: Event) => {
-          try {
-            const d = (e as CustomEvent).detail || {};
-            if (d?.peer === targetUsername) {
-              settled = true; clearTimeout(timer);
-              window.removeEventListener('libsignal-session-ready', onReady as EventListener);
-              resolve(true);
+        const firstCheck = await sessionApi.hasSession({
+          selfUsername: currentUsername,
+          peerUsername: targetUsername,
+          deviceId: 1,
+        });
+        if (firstCheck?.hasSession) {
+          sessionEstablishedAt.current.set(targetUsername, Date.now());
+          return true;
+        }
+
+        while (Date.now() < deadline) {
+          const nowTs = Date.now();
+          const lastBundleRequest = bundleRequestTracker.current.get(targetUsername) || 0;
+          const canRequestBundle = (nowTs - lastBundleRequest) >= BUNDLE_REQUEST_COOLDOWN_MS;
+
+          if (canRequestBundle) {
+            try {
+              const keys = await getKeysOnDemand();
+              if (keys?.dilithium?.secretKey && keys?.dilithium?.publicKeyBase64) {
+                requestCount++;
+                const requestBase = {
+                  type: SignalType.LIBSIGNAL_REQUEST_BUNDLE,
+                  username: targetUsername,
+                  from: currentUsername,
+                  timestamp: nowTs,
+                  challenge: CryptoUtils.Base64.arrayBufferToBase64(
+                    globalThis.crypto.getRandomValues(new Uint8Array(32)),
+                  ),
+                  senderDilithium: keys.dilithium.publicKeyBase64,
+                  reason: 'file-transfer',
+                } as const;
+                const canonical = new TextEncoder().encode(JSON.stringify(requestBase));
+                const signatureRaw = await CryptoUtils.Dilithium.sign(keys.dilithium.secretKey, canonical);
+                const signature = CryptoUtils.Base64.arrayBufferToBase64(signatureRaw);
+                await websocketClient.sendSecureControlMessage({ ...requestBase, signature });
+                lastRequestAt = nowTs;
+                bundleRequestTracker.current.set(targetUsername, nowTs);
+              }
+            } catch (e) {
+              console.error('[FILE-SENDER] Failed to send initial bundle request:', e);
             }
-          } catch { }
-        };
-        window.addEventListener('libsignal-session-ready', onReady as EventListener);
-      });
+          }
+
+          while (Date.now() < deadline) {
+            await new Promise((r) => setTimeout(r, delay));
+
+            if (sessionReadyFlag) {
+              sessionEstablishedAt.current.set(targetUsername, Date.now());
+              return true;
+            }
+
+            const check = await sessionApi.hasSession({
+              selfUsername: currentUsername,
+              peerUsername: targetUsername,
+              deviceId: 1,
+            });
+            if (check?.hasSession) {
+              console.log('[FILE-SENDER] Session found via polling');
+              sessionEstablishedAt.current.set(targetUsername, Date.now());
+              return true;
+            }
+
+            if (requestCount < MAX_REQUESTS && Date.now() - lastRequestAt >= 3000) {
+              const nowTs = Date.now();
+              const lastBundleRequest = bundleRequestTracker.current.get(targetUsername) || 0;
+              const canRetryBundle = (nowTs - lastBundleRequest) >= BUNDLE_REQUEST_COOLDOWN_MS;
+
+              if (canRetryBundle) {
+                try {
+                  const keys = await getKeysOnDemand();
+                  if (keys?.dilithium?.secretKey && keys?.dilithium?.publicKeyBase64) {
+                    requestCount++;
+                    const requestBase = {
+                      type: SignalType.LIBSIGNAL_REQUEST_BUNDLE,
+                      username: targetUsername,
+                      from: currentUsername,
+                      timestamp: nowTs,
+                      challenge: CryptoUtils.Base64.arrayBufferToBase64(
+                        globalThis.crypto.getRandomValues(new Uint8Array(32)),
+                      ),
+                      senderDilithium: keys.dilithium.publicKeyBase64,
+                      reason: 'file-transfer-retry',
+                    } as const;
+                    const canonical = new TextEncoder().encode(JSON.stringify(requestBase));
+                    const signatureRaw = await CryptoUtils.Dilithium.sign(keys.dilithium.secretKey, canonical);
+                    const signature = CryptoUtils.Base64.arrayBufferToBase64(signatureRaw);
+                    await websocketClient.sendSecureControlMessage({ ...requestBase, signature });
+                    lastRequestAt = nowTs;
+                    bundleRequestTracker.current.set(targetUsername, nowTs);
+                  }
+                } catch (e) {
+                  console.error('[FILE-SENDER] Failed to send retry bundle request:', e);
+                }
+              }
+            }
+
+            const randomSource = globalThis.crypto.getRandomValues(new Uint32Array(1))[0] / 0xffffffff;
+            const poisson = -Math.log(Math.max(1 - randomSource, 1e-6));
+            delay = Math.min(delay + poisson * SESSION_POLL_BASE_MS, SESSION_POLL_MAX_MS);
+          }
+        }
+      } finally {
+        try { window.removeEventListener('libsignal-session-ready', readyHandler as EventListener); } catch { }
+      }
+      return false;
     } catch {
       return false;
     }
-  }, [currentUsername, targetUsername, getKeysOnDemand]);
+  }, [getKeysOnDemand, targetUsername, currentUsername]);
 
   const sendChunksServer = useCallback(async (
     state: TransferState,
@@ -265,137 +451,206 @@ export function useFileSender(
 
     const totalChunks = state.totalChunks;
     const chunkSize = state.chunkSize;
-    while (state.lastSentIndex < totalChunks - 1) {
-      if (state.canceled) {
-        return;
-      }
-      if (state.paused) {
-        await new Promise(res => setTimeout(res, PAUSE_POLL_MS));
-        continue;
-      }
+    const MAX_RESTARTS = 2;
 
-      // Rate limiting
-      if (!takeToken()) {
-        await new Promise(res => setTimeout(res, RATE_LIMITER_SLEEP_MS));
-        continue;
-      }
+    for (let restartAttempt = 0; restartAttempt <= MAX_RESTARTS; restartAttempt++) {
+      console.log(`[FILE-SENDER] sendChunksServer loop start. Attempt: ${restartAttempt}, Target: ${targetUsername}, Pending:`, Array.from(peersNeedingSessionRefresh.current));
 
-      const nextIndex = state.lastSentIndex + 1;
-      const start = nextIndex * chunkSize;
-      const end = Math.min(start + chunkSize, rawBytes.length);
-      const chunk = rawBytes.slice(start, end);
-
-      const compressedChunk = pako.deflate(chunk);
-
-      const { iv, authTag, encrypted } = await CryptoUtils.Encrypt.encryptBinaryWithAES(
-        compressedChunk,
-        aesKey
-      );
-
-      const chunkMac = await computeChunkMacAsync(
-        new Uint8Array(iv),
-        new Uint8Array(authTag),
-        new Uint8Array(encrypted),
-        macKey,
-        nextIndex,
-        totalChunks,
-        state.fileId,
-        state.fileName
-      );
-
-      for (const uk of userKeys) {
-        const chunkMetadata = {
-          type: SignalType.FILE_MESSAGE_CHUNK,
-          from: currentUsername,
-          to: uk.username,
-          envelope: uk.envelope,
-          chunkIndex: nextIndex,
-          totalChunks,
-          filename: sanitizeFilename(state.fileName),
-          isLastChunk: nextIndex === totalChunks - 1,
-          fileSize: state.fileSize,
-          chunkSize,
-          fileId: state.fileId,
-          messageId: state.fileId,
-          chunkMac
-        };
-
-        const recipient = users.find(u => u.username === uk.username);
-        if (!recipient?.hybridPublicKeys) {
-          continue;
-        }
-
-        let encryptedMetadata: EncryptedMetadataResult | null = null;
-        const attemptEncrypt = async (): Promise<EncryptedMetadataResult | null> => {
-          return await (window as any).edgeApi.encrypt({
-            fromUsername: currentUsername,
-            toUsername: uk.username,
-            plaintext: JSON.stringify(chunkMetadata),
-            recipientKyberPublicKey: recipient.hybridPublicKeys.kyberPublicBase64,
-            recipientHybridKeys: recipient.hybridPublicKeys
-          }) as EncryptedMetadataResult;
-        };
+      let resetDetected = false;
+      const resetHandler = (event: Event) => {
         try {
-          encryptedMetadata = await attemptEncrypt();
-        } catch (e) {
-          console.error('[FILE-SENDER] Metadata encryption error', { index: nextIndex, user: uk.username, error: (e as Error)?.message });
+          const detail = (event as CustomEvent).detail || {};
+          const peer = detail.peer || detail.peerUsername || detail.from;
+          const target = userKeys[0]?.username;
+          if (peer === target) {
+            resetDetected = true;
+          }
+        } catch { }
+      };
+      window.addEventListener('session-reset-received', resetHandler as EventListener);
+
+      try {
+        const hasPendingReset = targetUsername && peersNeedingSessionRefresh.current.has(targetUsername);
+        if (restartAttempt > 0 || hasPendingReset) {
+          console.log(`[FILE-SENDER] Ensuring session (attempt ${restartAttempt}, pendingReset=${hasPendingReset})`);
+          if (restartAttempt > 0) {
+            state.lastSentIndex = -1;
+            await ensureSignalSession(true);
+          } else {
+            await ensureSignalSession(false);
+          }
         }
 
-        if (!encryptedMetadata?.success || !encryptedMetadata?.encryptedPayload) {
-          // Retry up to 2 times after re-establishing session
-          const maxRetries = 2;
-          for (let attempt = 0; attempt < maxRetries && (!encryptedMetadata?.success || !encryptedMetadata?.encryptedPayload); attempt++) {
-            const errText = String((encryptedMetadata as any)?.error || '');
-            const sessionLikely = /session|whisper|no valid sessions|invalid whisper message|decryption failed/i.test(errText);
-            if (!sessionLikely) break;
-            const ok = await ensureSignalSession();
-            if (ok) {
-              try { encryptedMetadata = await attemptEncrypt(); } catch { }
-            } else {
+        while (state.lastSentIndex < totalChunks - 1) {
+          if (resetDetected || (targetUsername && peersNeedingSessionRefresh.current.has(targetUsername))) {
+            resetDetected = true;
+            break;
+          }
+
+          if (state.canceled) {
+            return;
+          }
+          if (state.paused) {
+            await new Promise(res => setTimeout(res, PAUSE_POLL_MS));
+            continue;
+          }
+
+          if (!takeToken()) {
+            await new Promise(res => setTimeout(res, RATE_LIMITER_SLEEP_MS));
+            continue;
+          }
+
+          if (resetDetected || (targetUsername && peersNeedingSessionRefresh.current.has(targetUsername))) {
+            resetDetected = true;
+            break;
+          }
+
+          const nextIndex = state.lastSentIndex + 1;
+          const start = nextIndex * chunkSize;
+          const end = Math.min(start + chunkSize, rawBytes.length);
+          const chunk = rawBytes.slice(start, end);
+          const compressedChunk = pako.deflate(chunk);
+
+          const { iv, authTag, encrypted } = await CryptoUtils.Encrypt.encryptBinaryWithAES(
+            compressedChunk,
+            aesKey
+          );
+
+          const chunkMac = await computeChunkMacAsync(
+            new Uint8Array(iv),
+            new Uint8Array(authTag),
+            new Uint8Array(encrypted),
+            macKey,
+            nextIndex,
+            totalChunks,
+            state.fileId,
+            state.fileName
+          );
+
+          for (const uk of userKeys) {
+            const chunkMetadata = {
+              type: SignalType.FILE_MESSAGE_CHUNK,
+              from: currentUsername,
+              to: uk.username,
+              envelope: uk.envelope,
+              chunkIndex: nextIndex,
+              totalChunks,
+              filename: sanitizeFilename(state.fileName),
+              isLastChunk: nextIndex === totalChunks - 1,
+              fileSize: state.fileSize,
+              chunkSize,
+              fileId: state.fileId,
+              messageId: state.fileId,
+              chunkMac
+            };
+
+            const recipient = users.find(u => u.username === uk.username);
+            if (!recipient?.hybridPublicKeys) {
+              continue;
+            }
+
+            let encryptedMetadata: EncryptedMetadataResult | null = null;
+            const attemptEncrypt = async (): Promise<EncryptedMetadataResult | null> => {
+              const ENCRYPTION_TIMEOUT_MS = 15000;
+              const encryptPromise = (window as any).edgeApi.encrypt({
+                fromUsername: currentUsername,
+                toUsername: uk.username,
+                plaintext: JSON.stringify(chunkMetadata),
+                recipientKyberPublicKey: recipient.hybridPublicKeys.kyberPublicBase64,
+                recipientHybridKeys: recipient.hybridPublicKeys
+              }) as Promise<EncryptedMetadataResult>;
+
+              const timeoutPromise = new Promise<EncryptedMetadataResult>((_, reject) => {
+                setTimeout(() => reject(new Error('Encryption timed out')), ENCRYPTION_TIMEOUT_MS);
+              });
+
+              return await Promise.race([encryptPromise, timeoutPromise]);
+            };
+            try {
+              encryptedMetadata = await attemptEncrypt();
+            } catch (e) {
+              console.error('[FILE-SENDER] Metadata encryption error', { index: nextIndex, user: uk.username, error: (e as Error)?.message });
+              encryptedMetadata = { success: false, error: (e as Error)?.message } as any;
+            }
+
+            if (!encryptedMetadata?.success || !encryptedMetadata?.encryptedPayload) {
+              // Retry up to 2 times after re-establishing session
+              const maxRetries = 2;
+              for (let attempt = 0; attempt < maxRetries && (!encryptedMetadata?.success || !encryptedMetadata?.encryptedPayload); attempt++) {
+                const errText = String((encryptedMetadata as any)?.error || '');
+                const sessionLikely = /session|whisper|no valid sessions|invalid whisper message|decryption failed|timed out/i.test(errText);
+                const hasPendingReset = peersNeedingSessionRefresh.current.has(uk.username);
+
+                if (!sessionLikely && !hasPendingReset) break;
+
+                const ok = await ensureSignalSession(true);
+                if (ok) {
+                  try { encryptedMetadata = await attemptEncrypt(); } catch (e) {
+                    encryptedMetadata = { success: false, error: (e as Error)?.message } as any;
+                  }
+                } else {
+                  break;
+                }
+              }
+            }
+
+            if (!encryptedMetadata?.success || !encryptedMetadata?.encryptedPayload) {
+              resetDetected = true;
               break;
             }
+
+            const chunkDataBase64 = CryptoUtils.Encrypt.serializeEncryptedData(iv, authTag, encrypted);
+
+            const fullChunkMessage = {
+              type: SignalType.ENCRYPTED_MESSAGE,
+              to: uk.username,
+              encryptedPayload: {
+                ...encryptedMetadata.encryptedPayload,
+                chunkData: chunkDataBase64
+              }
+            };
+
+            websocketClient.send(JSON.stringify(fullChunkMessage));
+          }
+
+          state.lastSentIndex = nextIndex;
+          state.lastActivity = Date.now();
+          scheduleInactivityTimer(state);
+
+          const pct = (state.lastSentIndex + 1) / totalChunks;
+          setProgress(pct);
+
+          if ((nextIndex & (YIELD_INTERVAL - 1)) === 0) {
+            await new Promise(res => setTimeout(res, 0));
           }
         }
 
-        if (!encryptedMetadata?.success || !encryptedMetadata?.encryptedPayload) {
-          console.error('[FILE-SENDER] Metadata encryption failed', { index: nextIndex, user: uk.username });
-          throw new Error('File chunk metadata encryption failed');
+        if (!resetDetected && targetUsername && peersNeedingSessionRefresh.current.has(targetUsername)) {
+          resetDetected = true;
         }
 
-        const chunkDataBase64 = CryptoUtils.Encrypt.serializeEncryptedData(iv, authTag, encrypted);
-
-        const fullChunkMessage = {
-          type: SignalType.ENCRYPTED_MESSAGE,
-          to: uk.username,
-          encryptedPayload: {
-            ...encryptedMetadata.encryptedPayload,
-            chunkData: chunkDataBase64
+        if (resetDetected) {
+          if (restartAttempt < MAX_RESTARTS) {
+            await new Promise(r => setTimeout(r, 1000));
+            continue;
+          } else {
+            break;
           }
-        };
+        }
 
-        websocketClient.send(JSON.stringify(fullChunkMessage));
-      }
+        try {
+          if (state.inactivityTimer) {
+            clearTimeout(state.inactivityTimer);
+            state.inactivityTimer = undefined;
+          }
+        } catch { }
+        setProgress(1);
+        return;
 
-      state.lastSentIndex = nextIndex;
-      state.lastActivity = Date.now();
-      scheduleInactivityTimer(state);
-
-      const pct = (state.lastSentIndex + 1) / totalChunks;
-      setProgress(pct);
-
-      if ((nextIndex & (YIELD_INTERVAL - 1)) === 0) {
-        await new Promise(res => setTimeout(res, 0));
+      } finally {
+        window.removeEventListener('session-reset-received', resetHandler as EventListener);
       }
     }
-
-    // Clear inactivity timer upon successful completion
-    try {
-      if (state.inactivityTimer) {
-        clearTimeout(state.inactivityTimer);
-        state.inactivityTimer = undefined;
-      }
-    } catch { }
-    setProgress(1);
   }, [computeChunkMacAsync, currentUsername, scheduleInactivityTimer, users]);
 
   const sendFile = useCallback(async (file: File): Promise<void> => {
@@ -403,7 +658,6 @@ export function useFileSender(
       throw new Error('No target username specified');
     }
 
-    // Ensure transport and session readiness
     await ensureWsReady();
 
     const torEnabled = isTorEnabled();
@@ -438,7 +692,7 @@ export function useFileSender(
       currentTransferRef.current = state;
       scheduleInactivityTimer(state);
 
-      // Generate raw symmetric key bytes (avoid exporting from CryptoKey)
+      // Generate raw symmetric key bytes
       const rawAesBytes = crypto.getRandomValues(new Uint8Array(32));
       const aesKey = await CryptoUtils.Keys.importRawAesKey(rawAesBytes);
       currentAesKeyRef.current = aesKey;
@@ -462,11 +716,9 @@ export function useFileSender(
 
       // If recipient's keys not found, try to fetch them on-demand
       if (filteredUsers.length === 0 && getPeerHybridKeys && targetUsername) {
-        console.log('[FILE-SENDER] Recipient keys not found, attempting to fetch...');
         try {
           const fetchedKeys = await getPeerHybridKeys(targetUsername);
           if (fetchedKeys && fetchedKeys.kyberPublicBase64 && fetchedKeys.dilithiumPublicBase64) {
-            // Create a synthetic user entry with fetched keys
             filteredUsers = [{
               username: targetUsername,
               hybridPublicKeys: {
@@ -475,7 +727,6 @@ export function useFileSender(
                 dilithiumPublicBase64: fetchedKeys.dilithiumPublicBase64
               }
             }] as any;
-            console.log('[FILE-SENDER] Successfully fetched recipient keys');
           }
         } catch (fetchError) {
           console.error('[FILE-SENDER] Failed to fetch recipient keys:', fetchError);

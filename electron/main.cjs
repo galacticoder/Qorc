@@ -532,6 +532,10 @@ function registerIPCHandlers() {
 
   ipcMain.handle('tor:setup-complete', async () => {
     if (websocketHandler) {
+      const status = await torManager.getTorStatus();
+      if (status) {
+        websocketHandler.updateTorConfig({ socksPort: status.socksPort });
+      }
       websocketHandler.setTorReady(true);
     }
     return { success: true };
@@ -558,9 +562,11 @@ function registerIPCHandlers() {
       const status = await torManager.getTorStatus();
       const bootstrapped = status.bootstrapped || false;
 
-      // If Tor is up, mark WebSocket handler as Tor-ready so probes and connections are allowed
       if (websocketHandler && bootstrapped) {
         try {
+          websocketHandler.updateTorConfig({
+            socksPort: torManager.effectiveSocksPort || 9150
+          });
           websocketHandler.setTorReady(true);
         } catch (e) {
           try {
@@ -899,6 +905,10 @@ function registerIPCHandlers() {
 
   ipcMain.handle('link:fetch-preview', async (_event, url, options = {}) => {
     try {
+      if (!torManager || !torManager.isTorRunning() || !torManager.bootstrapped) {
+        return { url, error: 'Tor not available' };
+      }
+
       if (!url || typeof url !== 'string') {
         throw new Error('Invalid URL');
       }
@@ -908,41 +918,90 @@ function registerIPCHandlers() {
         throw new Error('Only HTTP/HTTPS URLs allowed');
       }
 
-      const timeout = Math.min(options.timeout || 10000, 30000);
+      const timeout = Math.min(options.timeout || 15000, 30000);
+      const MAX_PREVIEW_BYTES = 2 * 1024 * 1024; // 2MB cap
+      const TOR_STANDARD_UA = 'Mozilla/5.0 (Windows NT 10.0; rv:102.0) Gecko/20100101 Firefox/102.0';
 
-      return await new Promise((resolve, reject) => {
+      const { SocksProxyAgent } = await import('socks-proxy-agent');
+      const proxyAgent = new SocksProxyAgent(`socks5h://127.0.0.1:${torManager.effectiveSocksPort}`);
+
+      const buildPreview = (html) => {
+        const titleMatch = html.match(/<title[^>]*>([^<]+)<\/title>/i);
+        const descMatch = html.match(/<meta[^>]*name=["']description["'][^>]*content=["']([^"']+)["']/i);
+        const ogTitleMatch = html.match(/<meta[^>]*property=["']og:title["'][^>]*content=["']([^"']+)["']/i);
+        const ogDescMatch = html.match(/<meta[^>]*property=["']og:description["'][^>]*content=["']([^"']+)["']/i);
+        const ogImageMatch = html.match(/<meta[^>]*property=["']og:image["'][^>]*content=["']([^"']+)["']/i);
+        const siteNameMatch = html.match(/<meta[^>]*property=["']og:site_name["'][^>]*content=["']([^"']+)["']/i);
+
+        return {
+          url,
+          title: ogTitleMatch?.[1] || titleMatch?.[1] || parsedUrl.hostname,
+          description: ogDescMatch?.[1] || descMatch?.[1] || '',
+          image: ogImageMatch?.[1] || null,
+          siteName: siteNameMatch?.[1] || null,
+          success: true
+        };
+      };
+
+      return await new Promise((resolve) => {
         const https = require('https');
-        const req = https.get(url, { timeout }, (res) => {
-          if (res.statusCode !== 200) {
-            return resolve({ url, error: `HTTP ${res.statusCode}` });
+        const http = require('http');
+        const requestModule = parsedUrl.protocol === 'https:' ? https : http;
+        let resolved = false;
+        const safeResolve = (payload) => {
+          if (resolved) return;
+          resolved = true;
+          resolve(payload);
+        };
+
+        const req = requestModule.request({
+          hostname: parsedUrl.hostname,
+          port: parsedUrl.port || (parsedUrl.protocol === 'https:' ? 443 : 80),
+          path: parsedUrl.pathname + parsedUrl.search,
+          method: 'GET',
+          agent: proxyAgent,
+          timeout,
+          headers: {
+            'User-Agent': TOR_STANDARD_UA,
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.5',
+            'Accept-Encoding': 'identity',
+            'Connection': 'close'
+          }
+        }, (res) => {
+          if ([301, 302, 303, 307, 308].includes(res.statusCode) && res.headers.location) {
+            req.destroy();
+            return safeResolve({ url, redirectTo: res.headers.location, needsRedirect: true });
           }
 
           let data = '';
           res.on('data', (chunk) => {
+            if (resolved) return;
             data += chunk;
-            if (data.length > 1048576) {
+            if (data.length > MAX_PREVIEW_BYTES) {
               req.destroy();
-              resolve({ url, error: 'Response too large' });
+              if (typeof res.destroy === 'function') res.destroy();
+              const preview = buildPreview(data.slice(0, MAX_PREVIEW_BYTES));
+              return safeResolve({ ...preview, truncated: true, statusCode: res.statusCode });
             }
           });
 
           res.on('end', () => {
-            const titleMatch = data.match(/<title[^>]*>([^<]+)<\/title>/i);
-            const descMatch = data.match(/<meta[^>]*name=["']description["'][^>]*content=["']([^"']+)["']/i);
-            const ogTitleMatch = data.match(/<meta[^>]*property=["']og:title["'][^>]*content=["']([^"']+)["']/i);
-            const ogDescMatch = data.match(/<meta[^>]*property=["']og:description["'][^>]*content=["']([^"']+)["']/i);
-
-            resolve({
-              url,
-              title: ogTitleMatch?.[1] || titleMatch?.[1] || parsedUrl.hostname,
-              description: ogDescMatch?.[1] || descMatch?.[1] || '',
-              success: true
-            });
+            if (resolved) return;
+            if (data.length === 0) {
+              return safeResolve({ url, error: `HTTP ${res.statusCode}` });
+            }
+            const preview = buildPreview(data);
+            if (res.statusCode !== 200 && !preview.title && !preview.description && !preview.image) {
+              return safeResolve({ url, error: `HTTP ${res.statusCode}` });
+            }
+            safeResolve({ ...preview, statusCode: res.statusCode });
           });
         });
 
-        req.on('error', (error) => resolve({ url, error: error.message }));
-        req.on('timeout', () => { req.destroy(); resolve({ url, error: 'Timeout' }); });
+        req.on('error', (error) => safeResolve({ url, error: error.message }));
+        req.on('timeout', () => { req.destroy(); safeResolve({ url, error: 'Timeout' }); });
+        req.end();
       });
     } catch (error) {
       return { url, error: error.message || 'Unknown error' };

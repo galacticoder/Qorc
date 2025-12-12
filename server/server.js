@@ -213,11 +213,6 @@ async function createWebSocketServer({ server: httpsServer }) {
         return;
       }
 
-      cryptoLogger.debug('[CROSS-INSTANCE] Received message for delivery', {
-        recipient: recipientUser.slice(0, 8) + '...',
-        sender: senderUser?.slice(0, 8) + '...'
-      });
-
       const senderBlockedByRecipient = await checkBlocking(senderUser, recipientUser);
       const recipientBlockedBySender = await checkBlocking(recipientUser, senderUser);
 
@@ -226,11 +221,6 @@ async function createWebSocketServer({ server: httpsServer }) {
           senderUser,
           recipientUser,
           reason: senderBlockedByRecipient ? 'sender-blocked-by-recipient' : 'recipient-blocked-by-sender'
-        });
-        cryptoLogger.debug('[CROSS-INSTANCE] Message blocked', {
-          sender: senderUser?.slice(0, 8) + '...',
-          recipient: recipientUser.slice(0, 8) + '...',
-          reason: senderBlockedByRecipient ? 'sender-blocked' : 'recipient-blocked'
         });
         return;
       }
@@ -270,10 +260,6 @@ async function createWebSocketServer({ server: httpsServer }) {
                     try {
                       await sendPQEncryptedResponse(client, recipientPqSession, parsedMessage);
                       deliveredCount++;
-                      cryptoLogger.debug('[CROSS-INSTANCE] Delivered via PQ envelope', {
-                        recipient: recipientUser.slice(0, 8) + '...',
-                        session: recipientSessionId.slice(0, 8) + '...'
-                      });
                     } catch (err) {
                       cryptoLogger.error('[CROSS-INSTANCE] PQ envelope failed', {
                         recipient: recipientUser.slice(0, 8) + '...',
@@ -303,19 +289,10 @@ async function createWebSocketServer({ server: httpsServer }) {
             count: deliveredCount
           });
         } else {
-          // No local connections found - message will be handled by offline queue at origin
-          cryptoLogger.debug('[CROSS-INSTANCE] No local connections found', {
-            recipient: recipientUser.slice(0, 8) + '...',
-            localSetSize: localSet?.size || 0,
-            sender: senderUser?.slice(0, 8) + '...'
-          });
+          // No local connections found message will be handled by offline queue
         }
       } else {
-        // User not found locally message may be delivered by another server
-        cryptoLogger.debug('[CROSS-INSTANCE] No local connections for user', {
-          recipient: recipientUser.slice(0, 8) + '...',
-          sender: senderUser?.slice(0, 8) + '...'
-        });
+        // User not found locally so message will be delivered by another server 
       }
     });
   } catch (error) {
@@ -503,9 +480,6 @@ async function handleWebSocketMessage({ ws, sessionId, message, context }) {
     if (msgString.length === 0) { return await sendSecureMessage(ws, { type: SignalType.ERROR, message: 'Empty message' }); }
 
     if (msgString.includes('check-user-exists')) {
-      cryptoLogger.debug('[AUTH] Received check-user-exists message', {
-        sessionId: sessionId?.slice(0, 8) + '...'
-      });
     }
 
     let testParse;
@@ -926,7 +900,19 @@ async function handleWebSocketMessage({ ws, sessionId, message, context }) {
         });
 
         try {
-          const senderDilithiumPublicKey = normalizedMessage.userData?.metadata?.sender?.dilithiumPublicKey;
+          let senderDilithiumPublicKey = normalizedMessage.userData?.metadata?.sender?.dilithiumPublicKey;
+
+          if (!senderDilithiumPublicKey) {
+            const { UserDatabase: UDB } = await import('./database/database.js');
+            const existingKeys = await UDB.getHybridPublicKeys(state.username);
+            if (existingKeys?.dilithiumPublicBase64) {
+              senderDilithiumPublicKey = existingKeys.dilithiumPublicBase64;
+            }
+          }
+
+          if (!senderDilithiumPublicKey) {
+            throw new Error('Sender Dilithium public key required for verification');
+          }
 
           // Decrypt the user data payload to extract hybrid keys
           const userPayload = await CryptoUtils.Hybrid.decryptIncoming(
@@ -955,12 +941,6 @@ async function handleWebSocketMessage({ ws, sessionId, message, context }) {
             x25519PublicBase64: parsedKeys.x25519PublicBase64 || ''
           };
           const hybridPublicKeys = sanitizeHybridKeysServer(extracted);
-
-          cryptoLogger.debug('[AUTH] Sanitized hybrid keys', {
-            hasKyber: !!hybridPublicKeys.kyberPublicBase64,
-            hasDilithium: !!hybridPublicKeys.dilithiumPublicBase64,
-            hasX25519: !!hybridPublicKeys.x25519PublicBase64
-          });
 
           // Store keys in the users table via Postgres
           const { UserDatabase } = await import('./database/database.js');
@@ -1293,14 +1273,8 @@ async function handleWebSocketMessage({ ws, sessionId, message, context }) {
       }
 
       case 'avatar-fetch': {
-        cryptoLogger.info('[AVATAR:DEBUG] avatar-fetch received', {
-          hasAuth: !!state?.hasAuthenticated,
-          requester: state?.username?.slice(0, 8),
-          target: normalizedMessage.target
-        });
 
         if (!state?.hasAuthenticated || !state?.username) {
-          cryptoLogger.warn('[AVATAR:DEBUG] Rejected - not authenticated');
           return await sendSecureMessage(ws, { type: 'avatar-fetch-response', found: false, error: 'Authentication required' });
         }
 
@@ -1456,12 +1430,6 @@ async function handleEncryptedMessage({ ws, sessionId, parsed, state }) {
     logError(error, { operation: 'save-message' });
   }
 
-  cryptoLogger.debug('[MESSAGE-FORWARD] Forwarding message', {
-    from: state.username.slice(0, 8) + '...',
-    to: toUser.slice(0, 8) + '...'
-  });
-
-
   let localSet = global.gateway?.getLocalConnections?.(toUser);
   let localDeliveryAttempted = false;
 
@@ -1500,9 +1468,6 @@ async function handleEncryptedMessage({ ws, sessionId, parsed, state }) {
                 try {
                   await sendPQEncryptedResponse(client, recipientPqSession, normalizedMessage);
                   deliveredCount++;
-                  cryptoLogger.debug('[MESSAGE-FORWARD] Delivered via PQ envelope', {
-                    session: recipientSessionId.slice(0, 8) + '...'
-                  });
                 } catch (err) {
                   cryptoLogger.error('[MESSAGE-FORWARD] PQ envelope failed', {
                     session: recipientSessionId.slice(0, 8) + '...',
@@ -1537,12 +1502,6 @@ async function handleEncryptedMessage({ ws, sessionId, parsed, state }) {
   }
 
   if (isOnline) {
-    cryptoLogger.debug('[MESSAGE-FORWARD] User online but not local, trying cross-instance', {
-      from: state.username.slice(0, 8) + '...',
-      to: toUser.slice(0, 8) + '...',
-      localDeliveryAttempted
-    });
-
     try {
       await presenceService.publishToUser(toUser, JSON.stringify(normalizedMessage));
       await sendSecureMessage(ws, { type: 'ok', message: 'relayed' });
@@ -1554,14 +1513,6 @@ async function handleEncryptedMessage({ ws, sessionId, parsed, state }) {
       return;
     }
   }
-
-  // User is offline, queue the message
-  cryptoLogger.debug('[MESSAGE-FORWARD] User offline, queueing message', {
-    from: state.username.slice(0, 8) + '...',
-    to: toUser.slice(0, 8) + '...',
-    localDeliveryAttempted,
-    isOnline
-  });
 
   // Queue for offline delivery
   try {
@@ -1810,13 +1761,7 @@ async function handleStoreOfflineMessage({ ws, parsed, state }) {
 }
 
 async function handleRetrieveOfflineMessages({ ws, state }) {
-  cryptoLogger.info('[OFFLINE:DEBUG] handleRetrieveOfflineMessages called', {
-    hasAuth: !!state?.hasAuthenticated,
-    username: state?.username?.slice(0, 8)
-  });
-
   if (!state?.hasAuthenticated) {
-    cryptoLogger.warn('[OFFLINE:DEBUG] Not authenticated, rejecting');
     return await sendSecureMessage(ws, { type: SignalType.ERROR, message: 'Authentication required' });
   }
 
@@ -2039,13 +1984,6 @@ async function handleCheckUserExists({ ws, parsed, state, context }) {
     }
 
     await sendResponse(response);
-
-    cryptoLogger.debug('[USER-CHECK] User existence check completed', {
-      requester: state?.username?.slice(0, 8) + '...',
-      target: username.slice(0, 8) + '...',
-      exists: !!user,
-      hasKeys: !!user?.hybridPublicKeys
-    });
   } catch (error) {
     logError(error, { operation: 'check-user-exists', username });
     await sendResponse({

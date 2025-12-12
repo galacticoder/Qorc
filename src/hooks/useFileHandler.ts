@@ -195,7 +195,6 @@ export function useFileHandler(
   const blobCacheRef = useRef(createBlobCache());
 
   const cleanup = useCallback(() => {
-    // Clear all inactivity timers
     for (const [, t] of cleanupTimersRef.current) {
       try { clearTimeout(t); } catch { }
     }
@@ -207,7 +206,6 @@ export function useFileHandler(
     }
   }, []);
 
-  // Auto-cleanup on unmount as a safety net
   useEffect(() => {
     return () => cleanup();
   }, [cleanup]);
@@ -253,7 +251,6 @@ export function useFileHandler(
         const fileKey = `${from}-${safeFilename}`;
         let fileEntry = (incomingFileChunksRef.current as any)[fileKey] as ExtendedFileState | undefined;
 
-        // Initialize state for first chunk
         if (!fileEntry) {
           if (!enforceConcurrentLimit(incomingFileChunksRef.current)) {
             setLoginError('Too many simultaneous file transfers');
@@ -310,7 +307,6 @@ export function useFileHandler(
           (incomingFileChunksRef.current as any)[fileKey] = fileEntry;
           scheduleInactivityTimer(fileKey, from, safeFilename);
         } else {
-          // Validate immutables for consistency
           if (fileEntry.totalChunks !== totalChunks) {
             console.error('[useFileHandler] totalChunks changed mid-transfer - abort:', { filename: safeFilename });
             releaseFileEntry(fileEntry);
@@ -464,7 +460,6 @@ export function useFileHandler(
 
         let decryptedBytes: Uint8Array;
         try {
-          // Get raw bytes directly; file chunks are binary
           decryptedBytes = await CryptoUtils.AES.decryptBinaryWithAES(
             new Uint8Array(iv),
             new Uint8Array(authTag),
@@ -483,7 +478,6 @@ export function useFileHandler(
           return;
         }
 
-        // Validate decrypted bytes before decompression
         if (!(decryptedBytes instanceof Uint8Array) || decryptedBytes.length === 0) {
           console.error('[useFileHandler] Decryption returned empty/invalid buffer', { from, filename: safeFilename, chunkIndex });
           releaseFileEntry(fileEntry);
@@ -603,7 +597,6 @@ export function useFileHandler(
           const fileUrl = URL.createObjectURL(fileBlob);
           blobCacheRef.current.enqueue(fileUrl, safeFilename);
 
-          // Save file to SecureDB for persistence across restarts
           const messageId = fileEntry.messageId || uuidv4();
           if (secureDBRef?.current) {
             try {
@@ -618,16 +611,18 @@ export function useFileHandler(
             }
           }
 
-          // Convert blob to base64 for recovery/fallback
           let originalBase64Data: string | undefined;
           try {
-            const buffer = await fileBlob.arrayBuffer();
-            const bytes = new Uint8Array(buffer);
-            let binary = '';
-            for (let i = 0; i < bytes.byteLength; i++) {
-              binary += String.fromCharCode(bytes[i]);
-            }
-            originalBase64Data = btoa(binary);
+            originalBase64Data = await new Promise<string>((resolve, reject) => {
+              const reader = new FileReader();
+              reader.onloadend = () => {
+                const result = reader.result as string;
+                const base64 = result.split(',')[1];
+                resolve(base64);
+              };
+              reader.onerror = reject;
+              reader.readAsDataURL(fileBlob);
+            });
           } catch (e) {
             console.error('[useFileHandler] Failed to convert blob to base64:', e);
           }
@@ -683,7 +678,7 @@ export function useFileHandler(
     [getKeysOnDemand, onNewMessage, setLoginError, scheduleInactivityTimer, clearTimer]
   );
 
-  // Cancel a specific incoming transfer
+  // Cancel a incoming transfer
   const cancelIncomingFile = useCallback((from: string, filename: string) => {
     const fileKey = `${from}-${filename}`;
     if ((incomingFileChunksRef.current as any)[fileKey]) {
@@ -694,7 +689,7 @@ export function useFileHandler(
     }
   }, [clearTimer]);
 
-  // Pause receiving (ignores chunks but keeps timer refreshed)
+  // Pause receiving
   const pauseIncomingFile = useCallback((from: string, filename: string) => {
     const fileKey = `${from}-${filename}`;
     const entry = (incomingFileChunksRef.current as any)[fileKey] as ExtendedFileState | undefined;

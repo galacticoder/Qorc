@@ -7,6 +7,7 @@ import {
   SCREEN_SHARING_FRAMERATES
 } from './screen-sharing-consts';
 import { CryptoUtils } from './unified-crypto';
+import { encryptedStorage } from './encrypted-storage';
 import { SecureAuditLogger } from './secure-error-handler';
 import { PostQuantumRandom } from './post-quantum-crypto';
 import { SecureMemory } from './secure-memory';
@@ -89,7 +90,7 @@ export class ScreenSharingSettingsManager {
   private readonly isTransient = isTorMode();
   private deviceKey: Uint8Array | null = null;
 
-  private constructor() {}
+  private constructor() { }
 
   public static getInstance(): ScreenSharingSettingsManager {
     if (!ScreenSharingSettingsManager.instance) {
@@ -106,8 +107,8 @@ export class ScreenSharingSettingsManager {
       return this.deviceKey;
     }
     try {
-      const stored = await CryptoUtils.SecureStorage.retrieve<string>(DEVICE_KEY_STORAGE);
-      if (stored) {
+      const stored = await encryptedStorage.getItem(DEVICE_KEY_STORAGE);
+      if (stored && typeof stored === 'string') {
         this.deviceKey = CryptoUtils.Base64.base64ToUint8Array(stored);
         return this.deviceKey;
       }
@@ -116,7 +117,7 @@ export class ScreenSharingSettingsManager {
     }
     const generated = PostQuantumRandom.randomBytes(32);
     try {
-      await CryptoUtils.SecureStorage.store(DEVICE_KEY_STORAGE, CryptoUtils.Base64.arrayBufferToBase64(generated));
+      await encryptedStorage.setItem(DEVICE_KEY_STORAGE, CryptoUtils.Base64.arrayBufferToBase64(generated));
       this.deviceKey = generated;
       return this.deviceKey;
     } catch (_error) {
@@ -205,8 +206,8 @@ export class ScreenSharingSettingsManager {
       };
     }
     try {
-      const stored = await CryptoUtils.SecureStorage.retrieve<string>(STORAGE_KEY);
-      if (!stored) {
+      const stored = await encryptedStorage.getItem(STORAGE_KEY);
+      if (!stored || typeof stored !== 'string') {
         return {
           resolution: buildDefaultResolution(),
           frameRate: 30,
@@ -220,7 +221,6 @@ export class ScreenSharingSettingsManager {
         return decrypted;
       }
     } catch (_error) {
-      // If settings cannot be loaded, fall back to safe defaults.
     }
     return {
       resolution: buildDefaultResolution(),
@@ -236,7 +236,7 @@ export class ScreenSharingSettingsManager {
     }
     try {
       const envelope = await this.encryptSettings(this.settings);
-      await CryptoUtils.SecureStorage.store(STORAGE_KEY, JSON.stringify(envelope));
+      await encryptedStorage.setItem(STORAGE_KEY, JSON.stringify(envelope));
     } catch (_error) {
       SecureAuditLogger.error(AUDIT_CHANNEL, 'screen-sharing', 'save-failed', { error: (_error as Error).message });
     }

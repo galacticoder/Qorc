@@ -26,17 +26,16 @@ export const UserAvatar = memo(function UserAvatar({
 }: UserAvatarProps) {
     const [avatarUrl, setAvatarUrl] = useState<string | null>(null);
     const [requested, setRequested] = useState(false);
+    const [isLoaded, setIsLoaded] = useState(false);
     const currentUrlRef = React.useRef<string | null>(null);
 
     const loadAvatar = useCallback(() => {
         if (isCurrentUser) {
             const own = profilePictureSystem.getOwnAvatar();
-
-
-            // Only update if the URL is actually different
             if (own !== currentUrlRef.current) {
                 currentUrlRef.current = own;
                 setAvatarUrl(own);
+                setIsLoaded(false);
             }
 
             if (!own && !requested) {
@@ -44,16 +43,15 @@ export const UserAvatar = memo(function UserAvatar({
                 profilePictureSystem.fetchOwnFromServer().catch(() => { });
             }
 
-
         } else {
             const peer = profilePictureSystem.getPeerAvatar(username);
 
-            // Only update if the URL is actually different
             if (peer !== currentUrlRef.current) {
                 if (peer === null && currentUrlRef.current !== null) {
                 } else {
                     currentUrlRef.current = peer;
                     setAvatarUrl(peer);
+                    setIsLoaded(false);
                 }
             }
 
@@ -114,22 +112,29 @@ export const UserAvatar = memo(function UserAvatar({
                 minHeight: pixelSize,
                 maxWidth: pixelSize,
                 maxHeight: pixelSize,
-                backgroundColor: avatarUrl ? 'transparent' : skeletonColor
+                backgroundColor: 'transparent'
             }}
         >
-            {avatarUrl ? (
+            {avatarUrl && (
                 <img
                     src={avatarUrl}
                     alt=""
-                    className="w-full h-full object-cover"
+                    className={`w-full h-full object-cover transition-opacity duration-200 ${isLoaded ? 'opacity-100' : 'opacity-0'}`}
                     loading="lazy"
-                    onError={() => setAvatarUrl(null)}
+                    onLoad={() => setIsLoaded(true)}
+                    onError={() => {
+                        setAvatarUrl(null);
+                        setIsLoaded(true);
+                    }}
                     draggable={false}
                     onDragStart={(e) => e.preventDefault()}
                 />
-            ) : (
+            )}
+
+            {/* Show skeleton if no URL or not yet loaded */}
+            {(!avatarUrl || !isLoaded) && (
                 <div
-                    className="w-full h-full animate-pulse"
+                    className="absolute inset-0 w-full h-full animate-pulse"
                     style={{ backgroundColor: skeletonColor }}
                     aria-hidden="true"
                 />

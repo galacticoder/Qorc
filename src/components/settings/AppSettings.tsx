@@ -65,6 +65,14 @@ export const AppSettings = React.memo(function AppSettings({
   const [isUploadingAvatar, setIsUploadingAvatar] = useState(false);
   const avatarInputRef = useRef<HTMLInputElement>(null);
 
+  // Device selection state
+  const [micDevices, setMicDevices] = useState<MediaDeviceInfo[]>([]);
+  const [speakerDevices, setSpeakerDevices] = useState<MediaDeviceInfo[]>([]);
+  const [cameraDevices, setCameraDevices] = useState<MediaDeviceInfo[]>([]);
+  const [preferredMicId, setPreferredMicId] = useState<string>('');
+  const [preferredSpeakerId, setPreferredSpeakerId] = useState<string>('');
+  const [preferredCameraId, setPreferredCameraId] = useState<string>('');
+
   useEffect(() => {
     setMounted(true);
   }, []);
@@ -86,8 +94,29 @@ export const AppSettings = React.memo(function AppSettings({
         const parsed = JSON.parse(stored);
         if (parsed.notifications) setNotifications(parsed.notifications);
         if (parsed.audioSettings) setAudioSettings(parsed.audioSettings);
+        // Load device preferences
+        if (parsed.preferredMicId) setPreferredMicId(parsed.preferredMicId);
+        if (parsed.preferredSpeakerId) setPreferredSpeakerId(parsed.preferredSpeakerId);
+        if (parsed.preferredCameraId) setPreferredCameraId(parsed.preferredCameraId);
       }
     } catch { }
+
+    const loadDevices = async () => {
+      try {
+        try {
+          const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: true });
+          stream.getTracks().forEach(t => t.stop());
+        } catch { }
+
+        const devices = await navigator.mediaDevices.enumerateDevices();
+        setMicDevices(devices.filter(d => d.kind === 'audioinput'));
+        setSpeakerDevices(devices.filter(d => d.kind === 'audiooutput'));
+        setCameraDevices(devices.filter(d => d.kind === 'videoinput'));
+      } catch (e) {
+        console.error('[AppSettings] Failed to enumerate devices:', e);
+      }
+    };
+    loadDevices();
 
     // Initialize profile picture system
     const initProfilePicture = async () => {
@@ -202,7 +231,7 @@ export const AppSettings = React.memo(function AppSettings({
     } catch { }
   };
 
-  const saveSettings = (updates: Partial<{ notifications: NotificationSettings; audioSettings: AudioSettings; avatarUrl: string | null }>) => {
+  const saveSettings = (updates: Partial<{ notifications: NotificationSettings; audioSettings: AudioSettings; avatarUrl: string | null; preferredMicId: string; preferredSpeakerId: string; preferredCameraId: string }>) => {
     try {
       const stored = syncEncryptedStorage.getItem('app_settings_v1');
       const parsed = stored ? JSON.parse(stored) : {};
@@ -787,6 +816,76 @@ export const AppSettings = React.memo(function AppSettings({
                       saveSettings({ audioSettings: { ...audioSettings, echoCancellation: checked } });
                     }}
                   />
+                </div>
+              </div>
+
+              <div className="settings-group">
+                <div className="settings-group-title">Device Selection</div>
+
+                <div className="settings-row" style={{ flexDirection: 'column', alignItems: 'stretch', gap: '8px' }}>
+                  <div>
+                    <div className="settings-label">Microphone</div>
+                    <div className="settings-description">Default microphone for calls and voice messages</div>
+                  </div>
+                  <select
+                    value={preferredMicId}
+                    onChange={(e) => {
+                      setPreferredMicId(e.target.value);
+                      saveSettings({ preferredMicId: e.target.value });
+                    }}
+                    className="settings-select"
+                  >
+                    <option value="">System Default</option>
+                    {micDevices.map(d => (
+                      <option key={d.deviceId} value={d.deviceId}>
+                        {d.label || `Microphone ${d.deviceId.slice(0, 8)}`}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div className="settings-row" style={{ flexDirection: 'column', alignItems: 'stretch', gap: '8px' }}>
+                  <div>
+                    <div className="settings-label">Speaker</div>
+                    <div className="settings-description">Default speaker for call audio output</div>
+                  </div>
+                  <select
+                    value={preferredSpeakerId}
+                    onChange={(e) => {
+                      setPreferredSpeakerId(e.target.value);
+                      saveSettings({ preferredSpeakerId: e.target.value });
+                    }}
+                    className="settings-select"
+                  >
+                    <option value="">System Default</option>
+                    {speakerDevices.map(d => (
+                      <option key={d.deviceId} value={d.deviceId}>
+                        {d.label || `Speaker ${d.deviceId.slice(0, 8)}`}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div className="settings-row" style={{ flexDirection: 'column', alignItems: 'stretch', gap: '8px' }}>
+                  <div>
+                    <div className="settings-label">Camera</div>
+                    <div className="settings-description">Default camera for video calls</div>
+                  </div>
+                  <select
+                    value={preferredCameraId}
+                    onChange={(e) => {
+                      setPreferredCameraId(e.target.value);
+                      saveSettings({ preferredCameraId: e.target.value });
+                    }}
+                    className="settings-select"
+                  >
+                    <option value="">System Default</option>
+                    {cameraDevices.map(d => (
+                      <option key={d.deviceId} value={d.deviceId}>
+                        {d.label || `Camera ${d.deviceId.slice(0, 8)}`}
+                      </option>
+                    ))}
+                  </select>
                 </div>
               </div>
             </div>
