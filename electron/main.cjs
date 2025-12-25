@@ -602,6 +602,12 @@ async function createWindow() {
   };
 
   mainWindow.once('ready-to-show', showWindow);
+  setTimeout(() => {
+    if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.isVisible()) {
+      showWindow();
+    }
+  }, 3000);
+
   mainWindow.on('show', () => {
     isWindowDestroyed = false;
     backgroundMessageCount = 0;
