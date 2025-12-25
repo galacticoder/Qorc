@@ -1,8 +1,3 @@
-/**
- * Post-Quantum Cryptography Implementation
- * Uses NIST-approved ML-KEM-1024 and ML-DSA-87 algorithms
- */
-
 import { ml_kem1024 } from '@noble/post-quantum/ml-kem.js';
 import { ml_dsa87 } from '@noble/post-quantum/ml-dsa.js';
 import { blake3 } from '@noble/hashes/blake3.js';
@@ -20,14 +15,100 @@ type WorkerRequestMessage = {
   params?: any;
 };
 
-type WorkerResponseMessage =
-  | { id: string; success: true; result: { publicKey: Uint8Array; secretKey: Uint8Array; keyId: string } }
-  | { id: string; success: true; result: { destroyed: true } }
-  | { id: string; success: true; result: { hash: any; encoded: any } }
-  | { id: string; success: true; result: { verified: boolean } }
-  | { id: string; success: false; error: string }
-  | { type: 'auth-token-init'; token: string; timestamp: number }
-  | { type: 'auth-token-rotated'; token: string; timestamp: number };
+const isPlainObject = (value: unknown): value is Record<string, unknown> => {
+  if (typeof value !== 'object' || value === null) return false;
+  const proto = Object.getPrototypeOf(value);
+  return proto === Object.prototype || proto === null;
+};
+
+const hasPrototypePollutionKeys = (obj: Record<string, unknown>): boolean => {
+  return ['__proto__', 'prototype', 'constructor'].some((key) => Object.prototype.hasOwnProperty.call(obj, key));
+};
+
+const isHexString = (value: unknown, expectedBytes: number): value is string => {
+  if (typeof value !== 'string') return false;
+  if (value.length !== expectedBytes * 2) return false;
+  return /^[0-9a-fA-F]+$/.test(value);
+};
+
+const parseAuthTokenHex = (value: string): Uint8Array | null => {
+  if (!isHexString(value, 32)) return null;
+  const tokenBytes = new Uint8Array(32);
+  for (let i = 0; i < 32; i++) {
+    tokenBytes[i] = parseInt(value.slice(i * 2, i * 2 + 2), 16);
+  }
+  return tokenBytes;
+};
+
+const isWorkerAuthTokenMessage = (
+  data: Record<string, unknown>
+): data is { type: 'auth-token-init' | 'auth-token-rotated'; token: string; timestamp: number } => {
+  if (data.type !== 'auth-token-init' && data.type !== 'auth-token-rotated') return false;
+  if (typeof data.token !== 'string') return false;
+  if (typeof data.timestamp !== 'number' || !Number.isFinite(data.timestamp)) return false;
+  return true;
+};
+
+const isWorkerResponseFailureMessage = (data: Record<string, unknown>): data is { id: string; success: false; error: string } => {
+  return (
+    typeof data.id === 'string' &&
+    data.id.length > 0 &&
+    data.id.length <= 256 &&
+    data.success === false &&
+    typeof data.error === 'string'
+  );
+};
+
+const isWorkerResponseSuccessMessage = (data: Record<string, unknown>): data is { id: string; success: true; result: unknown } => {
+  return (
+    typeof data.id === 'string' &&
+    data.id.length > 0 &&
+    data.id.length <= 256 &&
+    data.success === true &&
+    Object.prototype.hasOwnProperty.call(data, 'result')
+  );
+};
+
+const isKemKeyPairResult = (result: unknown): result is { publicKey: Uint8Array; secretKey: Uint8Array; keyId: string } => {
+  if (!isPlainObject(result) || hasPrototypePollutionKeys(result)) return false;
+  if (!(result.publicKey instanceof Uint8Array)) return false;
+  if (!(result.secretKey instanceof Uint8Array)) return false;
+  if (typeof result.keyId !== 'string' || result.keyId.length === 0 || result.keyId.length > 256) return false;
+  if (result.keyId === '__proto__' || result.keyId === 'prototype' || result.keyId === 'constructor') return false;
+  return true;
+};
+
+const isDestroyKeyResult = (result: unknown): result is { destroyed: true } => {
+  if (!isPlainObject(result) || hasPrototypePollutionKeys(result)) return false;
+  return (result as Record<string, unknown>).destroyed === true;
+};
+
+const isArgon2HashResult = (result: unknown): result is { hash: Uint8Array; encoded: string } => {
+  if (!isPlainObject(result) || hasPrototypePollutionKeys(result)) return false;
+  if (!(result.hash instanceof Uint8Array)) return false;
+  if (typeof result.encoded !== 'string' || result.encoded.length === 0 || result.encoded.length > 8192) return false;
+  return true;
+};
+
+const isArgon2VerifyResult = (result: unknown): result is { verified: boolean } => {
+  if (!isPlainObject(result) || hasPrototypePollutionKeys(result)) return false;
+  return typeof result.verified === 'boolean';
+};
+
+const validateWorkerResult = (expectedType: WorkerRequestMessage['type'], result: unknown): boolean => {
+  switch (expectedType) {
+    case 'kem.generateKeyPair':
+      return isKemKeyPairResult(result);
+    case 'kem.destroyKey':
+      return isDestroyKeyResult(result);
+    case 'argon2.hash':
+      return isArgon2HashResult(result);
+    case 'argon2.verify':
+      return isArgon2VerifyResult(result);
+    default:
+      return false;
+  }
+};
 
 /**
  * Security audit logger for tracking security events across the application.
@@ -557,7 +638,7 @@ export class PostQuantumUtils {
         bytes[i] = binary.charCodeAt(i);
       }
       return bytes;
-    } catch (_error) {
+    } catch {
       throw new Error('Failed to decode base64');
     }
   }
@@ -675,8 +756,9 @@ export class PostQuantumSession {
 export class PostQuantumWorker {
   private static worker: Worker | null = null;
   private static pending = new Map<string, {
-    resolve: (value: { publicKey: Uint8Array; secretKey: Uint8Array; keyId: string }) => void;
+    resolve: (value: unknown) => void;
     reject: (reason: unknown) => void;
+    expectedType: WorkerRequestMessage['type'];
   }>();
   private static readonly trackedKeys = new Map<string, string>();
   private static restartAttempts = 0;
@@ -694,57 +776,65 @@ export class PostQuantumWorker {
     }
 
     let workerUrl: URL;
-    if (typeof import.meta !== 'undefined' && typeof (import.meta as any).url === 'string') {
+    try {
       workerUrl = new URL('./post-quantum-worker.ts', (import.meta as any).url);
-    } else {
-      const base = typeof document !== 'undefined' ? document.currentScript?.src ?? window.location.href : self.location.href;
+    } catch {
+      const base = typeof window !== 'undefined' && typeof window.location?.href === 'string' ? window.location.href : '';
+      if (!base) {
+        throw new Error('Unable to resolve post-quantum worker URL');
+      }
       workerUrl = new URL('./post-quantum-worker.ts', base);
     }
 
     const worker = new Worker(workerUrl, { type: 'module' });
-    worker.addEventListener('message', (event: MessageEvent<WorkerResponseMessage>) => {
-      // Handle auth token initialization
-      if ('type' in event.data && event.data.type === 'auth-token-init') {
-        const tokenBytes = new Uint8Array(32);
-        const tokenHex = event.data.token;
-        for (let i = 0; i < 32; i++) {
-          tokenBytes[i] = parseInt(tokenHex.slice(i * 2, i * 2 + 2), 16);
+    worker.addEventListener('message', (event: MessageEvent<unknown>) => {
+      try {
+        const data = event.data;
+        if (!isPlainObject(data) || hasPrototypePollutionKeys(data)) {
+          return;
         }
-        PostQuantumWorker.authToken = tokenBytes;
-        return;
-      }
 
-      // Handle auth token rotation
-      if ('type' in event.data && event.data.type === 'auth-token-rotated') {
-        const tokenBytes = new Uint8Array(32);
-        const tokenHex = event.data.token;
-        for (let i = 0; i < 32; i++) {
-          tokenBytes[i] = parseInt(tokenHex.slice(i * 2, i * 2 + 2), 16);
+        if (isWorkerAuthTokenMessage(data)) {
+          const tokenBytes = parseAuthTokenHex(data.token);
+          if (!tokenBytes) {
+            return;
+          }
+          PostQuantumWorker.authToken = tokenBytes;
+          return;
         }
-        PostQuantumWorker.authToken = tokenBytes;
-        return;
-      }
 
-      const { id } = event.data;
-      const pending = PostQuantumWorker.pending.get(id);
-      if (!pending) {
-        return;
-      }
-      PostQuantumWorker.pending.delete(id);
-      if (!event.data.success) {
-        pending.reject(new Error(event.data.error));
-        return;
-      }
+        if (isWorkerResponseFailureMessage(data)) {
+          const pending = PostQuantumWorker.pending.get(data.id);
+          if (!pending) {
+            return;
+          }
+          PostQuantumWorker.pending.delete(data.id);
+          const errorText = data.error.length > 2000 ? data.error.slice(0, 2000) : data.error;
+          pending.reject(new Error(errorText));
+          return;
+        }
 
-      if ('destroyed' in event.data.result) {
-        pending.resolve(event.data.result as any);
+        if (!isWorkerResponseSuccessMessage(data)) {
+          return;
+        }
+
+        const pending = PostQuantumWorker.pending.get(data.id);
+        if (!pending) {
+          return;
+        }
+        PostQuantumWorker.pending.delete(data.id);
+
+        if (!validateWorkerResult(pending.expectedType, data.result)) {
+          pending.reject(new Error('Invalid worker response'));
+          return;
+        }
+
+        if (pending.expectedType === 'kem.generateKeyPair' && isKemKeyPairResult(data.result)) {
+          PostQuantumWorker.trackedKeys.set(data.result.keyId, data.result.keyId);
+        }
+        pending.resolve(data.result);
+      } catch {
         return;
-      }
-
-      pending.resolve(event.data.result);
-
-      if (event.data.result?.keyId) {
-        PostQuantumWorker.trackedKeys.set(event.data.result.keyId, event.data.result.keyId);
       }
     });
     worker.addEventListener('error', (error) => {
@@ -764,6 +854,8 @@ export class PostQuantumWorker {
       PostQuantumWorker.pending.delete(id);
     }
     PostQuantumWorker.worker = null;
+    PostQuantumWorker.authToken = null;
+    PostQuantumWorker.trackedKeys.clear();
     if (!PostQuantumWorker.restarting) {
       PostQuantumWorker.restarting = true;
       PostQuantumWorker.scheduleRestart();
@@ -804,7 +896,7 @@ export class PostQuantumWorker {
     try {
       try {
         PostQuantumWorker.ensureWorker();
-      } catch (_error) {
+      } catch {
         return PostQuantumKEM.generateKeyPair();
       }
       if (!PostQuantumWorker.worker) {
@@ -819,7 +911,7 @@ export class PostQuantumWorker {
       };
 
       return await new Promise((resolve, reject) => {
-        PostQuantumWorker.pending.set(id, { resolve, reject });
+        PostQuantumWorker.pending.set(id, { resolve, reject, expectedType: request.type });
         try {
           PostQuantumWorker.worker!.postMessage(request);
         } catch (error) {
@@ -827,7 +919,7 @@ export class PostQuantumWorker {
           reject(error);
         }
       });
-    } catch (_error) {
+    } catch {
       return PostQuantumKEM.generateKeyPair();
     }
   }
@@ -851,12 +943,13 @@ export class PostQuantumWorker {
       },
       reject: () => {
         PostQuantumWorker.trackedKeys.delete(keyId);
-      }
+      },
+      expectedType: request.type
     });
 
     try {
       PostQuantumWorker.worker.postMessage(request);
-    } catch (_error) {
+    } catch (error) {
       PostQuantumWorker.pending.delete(id);
       PostQuantumWorker.trackedKeys.delete(keyId);
       throw error;
@@ -878,7 +971,8 @@ export class PostQuantumWorker {
           clearTimeout(timeout);
           PostQuantumWorker.trackedKeys.delete(keyId);
           resolve();
-        }
+        },
+        expectedType: request.type
       });
     });
   }
@@ -905,7 +999,7 @@ export class PostQuantumWorker {
       };
 
       return await new Promise((resolve, reject) => {
-        PostQuantumWorker.pending.set(id, { resolve, reject });
+        PostQuantumWorker.pending.set(id, { resolve, reject, expectedType: request.type });
         try {
           PostQuantumWorker.worker!.postMessage(request);
         } catch (error) {
@@ -913,7 +1007,7 @@ export class PostQuantumWorker {
           reject(error);
         }
       });
-    } catch (error) {
+    } catch {
       const result = await argon2.hash(params);
       return { hash: result.hash, encoded: result.encoded };
     }
@@ -943,7 +1037,7 @@ export class PostQuantumWorker {
       };
 
       const response = await new Promise<{ verified: boolean }>((resolve, reject) => {
-        PostQuantumWorker.pending.set(id, { resolve, reject });
+        PostQuantumWorker.pending.set(id, { resolve, reject, expectedType: request.type });
         try {
           PostQuantumWorker.worker!.postMessage(request);
         } catch (error) {
@@ -952,7 +1046,7 @@ export class PostQuantumWorker {
         }
       });
       return response.verified;
-    } catch (error) {
+    } catch {
       const result = await argon2.verify(params);
       // @ts-ignore
       return result.verified === true;

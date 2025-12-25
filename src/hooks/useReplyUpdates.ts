@@ -53,17 +53,16 @@ const trimOriginMap = (map: Map<string, Set<string>>): void => {
 };
 
 /**
- * Hook for managing efficient reply field updates when messages are edited
- * Maintains a reverse mapping of messageId -> [replyingMessageIds] for O(1) lookups
+ * Hook for managing reply field updates when messages are edited
  */
 export const useReplyUpdates = (
-  messages: Message[],
+  messages: readonly Message[],
   onMessagesUpdate: React.Dispatch<React.SetStateAction<Message[]>>,
   persistMessage?: (msg: Message) => Promise<void>
 ) => {
-// Reverse mapping: original message ID -> set of message IDs that reply to it
-const replyMappingRef = useRef<Map<string, Set<string>>>(new Map());
-  
+  // Reverse mapping: original message ID -> set of message IDs that reply to it
+  const replyMappingRef = useRef<Map<string, Set<string>>>(new Map());
+
   // Index of messages by ID for fast lookup
   const messageIndexRef = useRef<Map<string, number>>(new Map());
 
@@ -100,7 +99,7 @@ const replyMappingRef = useRef<Map<string, Set<string>>>(new Map());
   // Function to update reply fields when a message is edited
   const updateReplyFields = useCallback((editedMessageId: string, newContent: string) => {
     const replyingMessageIds = replyMappingRef.current.get(editedMessageId);
-    
+
     if (!replyingMessageIds || replyingMessageIds.size === 0) {
       return;
     }
@@ -139,14 +138,14 @@ const replyMappingRef = useRef<Map<string, Set<string>>>(new Map());
       (async () => {
         try {
           await Promise.allSettled(toPersist.map(m => persistMessage(m)));
-        } catch {}
+        } catch { }
       })();
     }
   }, [onMessagesUpdate, persistMessage]);
 
   const handleMessageDeleted = useCallback((deletedMessageId: string) => {
     const replyingMessageIds = replyMappingRef.current.get(deletedMessageId);
-    
+
     if (!replyingMessageIds || replyingMessageIds.size === 0) {
       return;
     }
@@ -179,7 +178,7 @@ const replyMappingRef = useRef<Map<string, Set<string>>>(new Map());
       (async () => {
         try {
           await Promise.allSettled(toPersist.map(m => persistMessage(m)));
-        } catch {}
+        } catch { }
       })();
     }
   }, [onMessagesUpdate, persistMessage]);

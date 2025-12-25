@@ -1,13 +1,12 @@
-import React, { useState, useEffect, useRef, useCallback, useMemo, memo } from 'react';
-import { Phone, PhoneOff, Video, VideoOff, Mic, MicOff, Monitor, MonitorOff, Settings, Minimize2, Maximize2, MoreVertical, ChevronDown, Move } from 'lucide-react';
+import React, { useState, useEffect, useRef, useCallback, memo } from 'react';
+import { Phone, PhoneOff, Video, VideoOff, Mic, MicOff, Monitor, MonitorOff, Minimize2, Maximize2, ChevronDown } from 'lucide-react';
 import type { CallState } from '../../lib/webrtc-calling';
 import { useUnifiedUsernameDisplay } from '../../hooks/useUnifiedUsernameDisplay';
 import { UserAvatar } from '../ui/UserAvatar';
 import { Popover, PopoverContent, PopoverTrigger } from '../ui/popover';
 import { cn } from '@/lib/utils';
 
-const ScreenSourceSelectorLazy = React.lazy(() => import('./ScreenSourceSelector').then(m => ({ default: m.ScreenSourceSelector || m.default })));
-const ScreenSharingSettingsLazy = React.lazy(() => import('../settings/ScreenSharingSettings').then(m => ({ default: m.ScreenSharingSettings || m.default })));
+const ScreenSourceSelectorLazy = React.lazy(() => import('./ScreenSourceSelector').then(m => ({ default: m.ScreenSourceSelector })));
 
 interface ScreenSource {
   readonly id: string;
@@ -23,8 +22,8 @@ interface CallModalProps {
   readonly onAnswer: () => void;
   readonly onDecline: () => void;
   readonly onEndCall: () => void;
-  readonly onToggleMute: () => boolean;
-  readonly onToggleVideo: () => boolean;
+  readonly onToggleMute: () => boolean | Promise<boolean>;
+  readonly onToggleVideo: () => boolean | Promise<boolean>;
   readonly onSwitchCamera: (deviceId: string) => Promise<void>;
   readonly onSwitchMicrophone: (deviceId: string) => Promise<void>;
   readonly onStartScreenShare?: (selectedSource?: { id: string; name: string }) => Promise<void>;
@@ -456,8 +455,8 @@ export const CallModal: React.FC<CallModalProps> = memo(({
           ) : (
             <>
               <button
-                onClick={() => {
-                  const newState = onToggleMute();
+                onClick={async () => {
+                  const newState = await onToggleMute();
                   setIsMuted(newState);
                 }}
                 className={cn("p-1.5 hover:bg-secondary rounded-md transition-colors", isMuted && "text-destructive bg-destructive/10")}
@@ -566,7 +565,7 @@ export const CallModal: React.FC<CallModalProps> = memo(({
 
             const pipViews = availableStreams.filter(s => s !== mainView);
 
-            const renderStream = (type: StreamType, isMain: boolean) => {
+            const renderStream = (type: StreamType, _isMain: boolean) => {
               if (type === 'remote-screen') {
                 return <VideoStreamDisplay stream={remoteScreenStream} objectFit="contain" className="w-full h-full" />;
               }
@@ -648,8 +647,8 @@ export const CallModal: React.FC<CallModalProps> = memo(({
               <div className="flex flex-col items-center gap-1">
                 <div className="flex items-center bg-secondary/50 rounded-full border border-border">
                   <button
-                    onClick={() => {
-                      const newState = onToggleMute();
+                    onClick={async () => {
+                      const newState = await onToggleMute();
                       setIsMuted(newState);
                     }}
                     className={cn(
@@ -678,6 +677,12 @@ export const CallModal: React.FC<CallModalProps> = memo(({
                       )}
                     </PopoverContent>
                   </Popover>
+                </div>
+                <div className="mt-1 h-1 w-20 bg-muted/40 rounded-full overflow-hidden">
+                  <div
+                    className="h-full bg-primary"
+                    style={{ width: `${Math.max(0, Math.min(1, micLevel / 2)) * 100}%` }}
+                  />
                 </div>
               </div>
 

@@ -39,6 +39,12 @@ const { StorageHandler } = require('./handlers/storage-handler.cjs');
 const { WebSocketHandler } = require('./handlers/websocket-handler.cjs');
 const { QuantumResistantSignalHandler } = require('./handlers/signal-handler-v2.cjs');
 const { FileHandler } = require('./handlers/file-handler.cjs');
+const { TrayHandler } = require('./handlers/tray-handler.cjs');
+const { NotificationHandler } = require('./handlers/notification-handler.cjs');
+const { P2PSignalingHandler } = require('./handlers/p2p-signaling-handler.cjs');
+const WebSocket = require('ws');
+const { SocksProxyAgent } = require('socks-proxy-agent');
+const { decryptEnvelope, encryptEnvelope } = require('./handlers/pq-crypto-handler.cjs');
 
 const ElectronTorManager = require('./tor-manager.cjs');
 const torManager = new ElectronTorManager({ appInstance: app });
@@ -57,6 +63,185 @@ let websocketHandler = null;
 let signalHandlerV2 = null;
 let fileHandler = null;
 let powerSaveBlockerId = null;
+let trayHandler = null;
+let notificationHandler = null;
+let p2pSignalingHandler = null;
+let isWindowDestroyed = false;
+let pendingP2PMessages = [];
+let pendingSignalingMessages = [];
+let pendingServerMessages = [];
+let backgroundSessionState = null;
+const PENDING_MESSAGES_KEY = 'pending-server-messages';
+
+// Rate limiting for background notifications
+let lastBackgroundNotificationTime = 0;
+const BACKGROUND_NOTIFICATION_COOLDOWN_MS = 5000;
+let backgroundMessageCount = 0;
+let backgroundCallNotifiedFrom = new Set();
+
+async function persistPendingMessages() {
+  if (!storageHandler) {
+    return;
+  }
+  if (pendingServerMessages.length === 0) {
+    return;
+  }
+  try {
+    const data = JSON.stringify(pendingServerMessages);
+    await storageHandler.setItem(PENDING_MESSAGES_KEY, data);
+  } catch (e) {
+    console.error('[MAIN] Failed to persist pending messages:', e?.message || e);
+  }
+}
+
+async function loadPersistedMessages() {
+  if (!storageHandler) {
+    return [];
+  }
+  try {
+    const result = await storageHandler.getItem(PENDING_MESSAGES_KEY);
+    if (result?.success && result.value) {
+      const parsed = JSON.parse(result.value);
+      if (Array.isArray(parsed)) {
+        return parsed;
+      }
+    }
+  } catch (e) {
+    console.error('[MAIN] Failed to load persisted messages:', e?.message || e);
+  }
+  return [];
+}
+
+// Clear persisted messages after delivery
+async function clearPersistedMessages() {
+  if (!storageHandler) return;
+  try {
+    await storageHandler.removeItem(PENDING_MESSAGES_KEY);
+  } catch (e) {
+    console.error('[MAIN] Failed to clear persisted messages:', e?.message || e);
+  }
+}
+
+// Send delivery receipt in background mode
+async function sendBackgroundDeliveryReceipt(senderUsername, messageId, myUsername) {
+  if (!signalHandlerV2 || !websocketHandler || !senderUsername || !myUsername) {
+    return;
+  }
+
+  const pqKeys = backgroundSessionState?.pqSessionKeys;
+  if (!pqKeys?.sendKey || !pqKeys?.sessionId) {
+    return;
+  }
+
+  try {
+    let hasKey = false;
+    try {
+      hasKey = signalHandlerV2.hasPeerKyberPublicKey?.(senderUsername) === true;
+    } catch (keyCheckErr) {
+      return;
+    }
+
+    if (!hasKey) {
+      const userRequest = {
+        type: 'check-user-exists',
+        username: senderUsername,
+        timestamp: Date.now()
+      };
+
+      const counter = Date.now();
+      const pqEnvelope = await encryptEnvelope(userRequest, pqKeys.sendKey, pqKeys.sessionId, counter, pqKeys.fingerprint);
+
+      if (pqEnvelope) {
+        websocketHandler.send(JSON.stringify(pqEnvelope));
+      }
+
+      await new Promise(resolve => setTimeout(resolve, 2000));
+
+      if (!signalHandlerV2.hasPeerKyberPublicKey(senderUsername)) {
+        return;
+      }
+    }
+
+    const deliveryReceiptData = {
+      messageId: `delivery-receipt-${messageId || Date.now()}`,
+      from: myUsername,
+      to: senderUsername,
+      content: 'delivery-receipt',
+      timestamp: Date.now(),
+      messageType: 'signal-protocol',
+      signalType: 'signal-protocol',
+      protocolType: 'signal',
+      type: 'delivery-receipt'
+    };
+
+    const plaintext = JSON.stringify(deliveryReceiptData);
+
+    const encryptResult = await signalHandlerV2.encrypt(myUsername, senderUsername, plaintext, {});
+
+    if (encryptResult?.success && encryptResult?.encryptedPayload) {
+      const deliveryPayload = {
+        type: 'ENCRYPTED_MESSAGE',
+        to: senderUsername,
+        from: myUsername,
+        encryptedPayload: encryptResult.encryptedPayload
+      };
+
+      const counter = Date.now();
+      const pqEnvelope = await encryptEnvelope(deliveryPayload, pqKeys.sendKey, pqKeys.sessionId, counter, pqKeys.fingerprint);
+
+      if (pqEnvelope) {
+        websocketHandler.send(JSON.stringify(pqEnvelope));
+      }
+    }
+  } catch (e) {
+  }
+}
+
+async function deliverQueuedMessages() {
+  try {
+    if (!mainWindow || mainWindow.isDestroyed() || !mainWindow.webContents || mainWindow.webContents.isDestroyed()) {
+      return;
+    }
+
+    const p2pCount = pendingP2PMessages.length;
+    if (p2pCount > 0) {
+      const messages = pendingP2PMessages.splice(0, pendingP2PMessages.length);
+    }
+
+    const sigCount = pendingSignalingMessages.length;
+    if (sigCount > 0) {
+      const messages = pendingSignalingMessages.splice(0, pendingSignalingMessages.length);
+      for (const { msg } of messages) {
+        try {
+          mainWindow.webContents.send('p2p:signaling-message', msg);
+        } catch (e) { }
+      }
+    }
+
+    const persistedMessages = await loadPersistedMessages();
+    if (persistedMessages.length > 0) {
+      pendingServerMessages = [...persistedMessages, ...pendingServerMessages];
+    }
+
+    const serverCount = pendingServerMessages.length;
+    if (serverCount > 0) {
+      const messages = pendingServerMessages.splice(0, pendingServerMessages.length);
+      let deliveredCount = 0;
+      for (const { message } of messages) {
+        try {
+          const msgType = message?.type || (typeof message === 'object' ? message.type : 'unknown');
+          mainWindow.webContents.send('edge:server-message', message);
+          deliveredCount++;
+        } catch (e) {
+          console.error('[MAIN] Failed to deliver queued message:', e?.message);
+        }
+      }
+      await clearPersistedMessages();
+    }
+  } catch (e) {
+    console.error('[MAIN] Error delivering queued messages:', e?.message || e);
+  }
+}
 
 async function setupSecureLogging() {
   process.on('uncaughtException', (err) => {
@@ -112,7 +297,7 @@ async function initializeHandlers() {
       throw new Error('File handler initialization failed');
     }
 
-    // Ensure a stable device ID persisted on this machine 
+    // Make sure a stable device ID persisted on machine 
     let deviceId;
 
     const existing = await storageHandler.getItem('device-id');
@@ -126,7 +311,7 @@ async function initializeHandlers() {
       }
     }
 
-    // Ensure per-install Ed25519 device keypair (PEM 
+    // Ensure per-install Ed25519 device keypair
     let devicePubPem;
     let devicePrivPem;
 
@@ -203,13 +388,163 @@ async function initializeHandlers() {
       throw new Error('WebSocket handler initialization failed');
     }
 
-    websocketHandler.onMessage = (message) => {
-      if (mainWindow && !mainWindow.isDestroyed() && mainWindow.webContents && !mainWindow.webContents.isDestroyed()) {
+    websocketHandler.onMessage = async (message) => {
+      const msgType = message?.type || (typeof message === 'string' ? JSON.parse(message)?.type : 'unknown');
+
+      const hasWindow = mainWindow && !mainWindow.isDestroyed() && mainWindow.webContents && !mainWindow.webContents.isDestroyed();
+
+      if (hasWindow) {
         try {
           mainWindow.webContents.send('edge:server-message', message);
         } catch (error) {
           console.error('[MAIN] Failed to send message to renderer:', error.message);
         }
+      } else if (isWindowDestroyed) {
+        try {
+          const parsed = typeof message === 'string' ? JSON.parse(message) : message;
+
+          if (parsed && parsed.type === 'pq-envelope' && parsed.ciphertext) {
+            const recvKey = backgroundSessionState?.pqSessionKeys?.recvKey;
+            const pqDecrypted = recvKey ? await decryptEnvelope(parsed, recvKey) : null;
+
+            if (pqDecrypted && !pqDecrypted.encryptedPayload) {
+              const pqType = pqDecrypted.type || '';
+              if (pqType.startsWith('pq-heartbeat') || pqType === 'pq-heartbeat-ping' || pqType === 'pq-heartbeat-pong') {
+                return;
+              }
+
+              if (pqType === 'user-exists-response' && pqDecrypted?.username) {
+                const peerUsername = pqDecrypted.username;
+                const hybridKeys = pqDecrypted.hybridKeys || pqDecrypted.hybridPublicKeys;
+                const kyberKey = hybridKeys?.kyberPublicBase64;
+                if (kyberKey && signalHandlerV2) {
+                  signalHandlerV2.setPeerKyberPublicKey(peerUsername, kyberKey);
+                }
+                return;
+              }
+            }
+
+            if (pqDecrypted && pqDecrypted.encryptedPayload && signalHandlerV2) {
+              const myUsername = backgroundSessionState?.username;
+              const fromUser = pqDecrypted.from;
+
+              if (myUsername && fromUser) {
+                try {
+                  const signalResult = await signalHandlerV2.decrypt(fromUser, myUsername, pqDecrypted.encryptedPayload);
+
+                  if (signalResult?.success && signalResult?.plaintext) {
+                    const innerPayload = JSON.parse(signalResult.plaintext);
+                    const innerType = innerPayload?.type || innerPayload?.signalType || '';
+
+                    if (innerType === 'libsignal-deliver-bundle' && innerPayload?.bundle && innerPayload?.username) {
+                      const bundle = innerPayload.bundle;
+                      const peerUsername = innerPayload.username;
+                      try {
+                        await signalHandlerV2.processPreKeyBundle(myUsername, peerUsername, bundle);
+                      } catch (bundleErr) {
+                      }
+                      return;
+                    }
+
+                    const ignoreTypes = [
+                      'typing-start', 'typing-stop', 'typing-indicator',
+                      'presence', 'status-update',
+                      'pq-heartbeat-ping', 'pq-heartbeat-pong',
+                      'session-reset-request', 'session-reset-ack',
+                      'libsignal-request-bundle', 'libsignal-bundle-response'
+                    ];
+
+                    if (ignoreTypes.some(t => innerType === t || innerPayload?.signalType === t)) {
+                      return;
+                    }
+
+                    const silentQueueTypes = [
+                      'delivery-receipt', 'read-receipt',
+                      'message-read', 'message-delivered'
+                    ];
+
+                    const isSilentQueue = silentQueueTypes.some(t => innerType === t || innerPayload?.signalType === t);
+
+                    if (isSilentQueue) {
+                      const receiptMessage = {
+                        type: innerPayload.type || innerType,
+                        ...innerPayload,
+                        _decryptedInBackground: true,
+                        _originalFrom: fromUser,
+                        _timestamp: Date.now()
+                      };
+                      pendingServerMessages.push({ message: receiptMessage, timestamp: Date.now() });
+                      persistPendingMessages();
+                      return;
+                    }
+
+                    // Only notify for messages and calls
+                    const isActualMessage = ['message', 'text', 'file-message'].includes(innerType) ||
+                      (innerPayload?.content && typeof innerPayload.content === 'string' && innerPayload.content.trim().length > 0);
+                    const isCallSignal = innerType?.startsWith?.('call-');
+
+                    if (!isActualMessage && !isCallSignal) {
+                      return;
+                    }
+
+                    const senderUsername = innerPayload?.from || fromUser;
+                    if (isCallSignal) {
+                      if (backgroundCallNotifiedFrom.has(senderUsername)) {
+                        return;
+                      }
+                      backgroundCallNotifiedFrom.add(senderUsername);
+                    }
+
+                    const decryptedMessage = {
+                      type: innerPayload.type || 'encrypted-message',
+                      ...innerPayload,
+                      _decryptedInBackground: true,
+                      _originalFrom: fromUser,
+                      _timestamp: Date.now()
+                    };
+                    pendingServerMessages.push({ message: decryptedMessage, timestamp: Date.now() });
+                    persistPendingMessages();
+
+                    // Show notification
+                    backgroundMessageCount++;
+                    const now = Date.now();
+                    const timeSinceLast = now - lastBackgroundNotificationTime;
+                    if (timeSinceLast >= BACKGROUND_NOTIFICATION_COOLDOWN_MS && notificationHandler) {
+                      lastBackgroundNotificationTime = now;
+                      let title, preview;
+                      if (isCallSignal) {
+                        title = 'Incoming Call';
+                        preview = 'A user is calling you';
+                      } else if (backgroundMessageCount > 1) {
+                        title = 'New Messages';
+                        preview = `You have ${backgroundMessageCount} new messages`;
+                      } else {
+                        title = 'New Message';
+                        preview = 'You have a new message';
+                      }
+                      notificationHandler.show({ title, body: preview, silent: false });
+                    }
+                    if (trayHandler) trayHandler.incrementUnread();
+
+                    // Send delivery receipt for actual messages while in background
+                    if (isActualMessage && !isCallSignal) {
+                      const messageId = innerPayload?.messageId || innerPayload?.id || `bg-${Date.now()}`;
+                      sendBackgroundDeliveryReceipt(senderUsername, messageId, myUsername).catch(() => { });
+                    }
+                  }
+                } catch (_) { }
+              }
+            } else if (!pqDecrypted) {
+              try {
+                const aadStr = parsed.aad ? Buffer.from(parsed.aad, 'base64').toString('utf8') : '';
+                if (aadStr.startsWith('pq-heartbeat-') || aadStr.includes('typing-')) {
+                  return;
+                }
+              } catch (_) { }
+            }
+
+          }
+        } catch (_) { }
       }
     };
 
@@ -267,21 +602,54 @@ async function createWindow() {
   };
 
   mainWindow.once('ready-to-show', showWindow);
-  const fallbackTimer = setTimeout(showWindow, 3000);
-  mainWindow.once('show', () => clearTimeout(fallbackTimer));
+  mainWindow.on('show', () => {
+    isWindowDestroyed = false;
+    backgroundMessageCount = 0;
+    backgroundCallNotifiedFrom.clear();
+    if (notificationHandler) notificationHandler.clearBadge();
+    if (trayHandler) trayHandler.clearUnread();
+    if (websocketHandler) websocketHandler.setBackgroundMode(false);
+    if (p2pSignalingHandler) p2pSignalingHandler.setBackgroundMode(false);
+  });
 
+  mainWindow.on('close', (e) => {
+    if (trayHandler?.getIsQuitting()) {
+      return;
+    }
 
-  mainWindow.on('close', async () => {
-    if (torManager?.isTorRunning()) {
-      await torManager.stopTor();
+    e.preventDefault();
+
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.hide();
+      isWindowDestroyed = true;
+
+      // Store session state
+      backgroundSessionState = {
+        isBackgroundMode: true,
+        timestamp: Date.now(),
+        wsConnected: websocketHandler?.isConnected?.() || false,
+        sessionId: websocketHandler?.sessionId || null
+      };
+
+      if (websocketHandler) websocketHandler.setBackgroundMode(true);
+      if (p2pSignalingHandler) p2pSignalingHandler.setBackgroundMode(true);
+
+      const windowToDestroy = mainWindow;
+      if (windowToDestroy && !windowToDestroy.isDestroyed() && windowToDestroy.webContents && !windowToDestroy.webContents.isDestroyed()) {
+        windowToDestroy.webContents.send('app:entering-background');
+      }
+      mainWindow = null;
+
+      setTimeout(() => {
+        if (windowToDestroy && !windowToDestroy.isDestroyed()) {
+          windowToDestroy.destroy();
+        }
+      }, 500);
     }
   });
 
   mainWindow.on('closed', () => {
     mainWindow = null;
-    if (process.platform !== 'darwin') {
-      try { app.quit(); } catch (_) { }
-    }
   });
 
   setupSecurityPolicies();
@@ -306,8 +674,10 @@ function setupSecurityPolicies() {
 
       const cspPolicy = [
         "default-src 'self'; " +
-        `script-src 'self' 'nonce-${nonce}'; ` +
-        `style-src 'self' 'nonce-${nonce}' 'unsafe-inline'; ` +
+        `script-src 'self' 'nonce-${nonce}' 'wasm-unsafe-eval'; ` +
+        "style-src 'self' 'unsafe-inline'; " +
+        "style-src-elem 'self' 'unsafe-inline'; " +
+        "style-src-attr 'unsafe-inline'; " +
         "img-src 'self' data: blob: https:; " +
         "media-src 'self' blob: data:; " +
         "connect-src 'self' wss: ws: https: blob:; " +
@@ -324,7 +694,7 @@ function setupSecurityPolicies() {
       responseHeaders['x-xss-protection'] = ['1; mode=block'];
       responseHeaders['referrer-policy'] = ['strict-origin-when-cross-origin'];
       responseHeaders['strict-transport-security'] = ['max-age=31536000; includeSubDomains'];
-      responseHeaders['permissions-policy'] = ['camera=(), microphone=(), geolocation=(), payment=()'];
+      responseHeaders['permissions-policy'] = ['camera=(self), microphone=(self), geolocation=(), payment=()'];
 
       callback({ responseHeaders });
     });
@@ -369,6 +739,60 @@ function setupSecurityPolicies() {
 }
 
 function registerIPCHandlers() {
+  ipcMain.handle('session:get-background-state', () => {
+    const wsConnected = websocketHandler?.isConnected?.() || false;
+
+    if (backgroundSessionState && backgroundSessionState.isBackgroundMode) {
+      const state = { ...backgroundSessionState };
+      state.wsConnected = wsConnected;
+      state.p2pSignalingConnected = p2pSignalingHandler?.isConnected?.() || false;
+      return state;
+    }
+    return null;
+  });
+
+  ipcMain.handle('session:clear-background-state', () => {
+    backgroundSessionState = null;
+    return { success: true };
+  });
+
+  ipcMain.handle('session:set-background-username', (_evt, username) => {
+    if (backgroundSessionState) {
+      backgroundSessionState.username = username;
+    }
+    return { success: true };
+  });
+
+  // Store PQ session keys before renderer destruction
+  ipcMain.handle('session:store-pq-keys', (_evt, { sessionId, sendKey, recvKey, fingerprint, establishedAt }) => {
+    if (!backgroundSessionState) {
+      backgroundSessionState = { isBackgroundMode: false, timestamp: Date.now() };
+    }
+    backgroundSessionState.pqSessionKeys = {
+      sessionId,
+      sendKey,
+      recvKey,
+      fingerprint,
+      establishedAt
+    };
+    return { success: true };
+  });
+
+  // Retrieve stored PQ session keys for renderer restoring
+  ipcMain.handle('session:get-pq-keys', () => {
+    if (backgroundSessionState?.pqSessionKeys) {
+      return { success: true, keys: backgroundSessionState.pqSessionKeys };
+    }
+    return { success: false, error: 'No stored PQ session keys' };
+  });
+
+  ipcMain.handle('session:clear-pq-keys', () => {
+    if (backgroundSessionState) {
+      delete backgroundSessionState.pqSessionKeys;
+    }
+    return { success: true };
+  });
+
   ipcMain.handle('get-user-data-path', async () => {
     try {
       return app.getPath('userData');
@@ -533,12 +957,18 @@ function registerIPCHandlers() {
   });
 
   ipcMain.handle('tor:setup-complete', async () => {
+    const status = await torManager.getTorStatus();
     if (websocketHandler) {
-      const status = await torManager.getTorStatus();
       if (status) {
         websocketHandler.updateTorConfig({ socksPort: status.socksPort });
       }
       websocketHandler.setTorReady(true);
+    }
+    if (p2pSignalingHandler) {
+      if (status) {
+        p2pSignalingHandler.updateTorConfig({ socksPort: status.socksPort });
+      }
+      p2pSignalingHandler.setTorReady(true);
     }
     return { success: true };
   });
@@ -559,29 +989,39 @@ function registerIPCHandlers() {
     }
   });
 
+
   ipcMain.handle('tor:initialize', async (_event, config) => {
     try {
       const status = await torManager.getTorStatus();
       const bootstrapped = status.bootstrapped || false;
 
-      if (websocketHandler && bootstrapped) {
-        try {
-          websocketHandler.updateTorConfig({
-            socksPort: torManager.effectiveSocksPort || 9150
-          });
-          websocketHandler.setTorReady(true);
-        } catch (e) {
+      if (bootstrapped) {
+        const socksPort = torManager.getSocksPort?.() || torManager.effectiveSocksPort || 9150;
+
+        if (websocketHandler) {
           try {
-            console.error('[MAIN] Failed to set WebSocket Tor readiness:', e && e.message ? e.message : e);
-          } catch (_) { }
+            websocketHandler.updateTorConfig({ socksPort });
+            websocketHandler.setTorReady(true);
+          } catch (e) {
+            console.error('[MAIN] Failed to set WebSocket Tor readiness:', e?.message || e);
+          }
+        }
+
+        if (p2pSignalingHandler) {
+          try {
+            p2pSignalingHandler.updateTorConfig({ socksPort });
+            p2pSignalingHandler.setTorReady(true);
+          } catch (e) {
+            console.error('[MAIN] Failed to set P2P signaling Tor readiness:', e?.message || e);
+          }
         }
       }
 
       return {
         success: true,
         bootstrapped,
-        socksPort: torManager.effectiveSocksPort || 9150,
-        controlPort: torManager.effectiveControlPort || 9151
+        socksPort: torManager.getSocksPort?.() || torManager.effectiveSocksPort || 9150,
+        controlPort: torManager.getControlPort?.() || torManager.effectiveControlPort || 9151
       };
     } catch (error) {
       return { success: false, error: error.message };
@@ -697,6 +1137,32 @@ function registerIPCHandlers() {
     return await websocketHandler.probeConnect(url, typeof timeoutMs === 'number' ? timeoutMs : 12000);
   });
 
+  ipcMain.handle('notification:show', async (_event, { title, body, silent, data }) => {
+    if (!notificationHandler) return { success: false, error: 'Notification handler not initialized' };
+    return notificationHandler.show({ title, body, silent, data });
+  });
+
+  ipcMain.handle('notification:set-enabled', async (_event, enabled) => {
+    if (!notificationHandler) return { success: false };
+    notificationHandler.setEnabled(enabled);
+    return { success: true };
+  });
+
+  ipcMain.handle('notification:set-badge', async (_event, count) => {
+    if (!notificationHandler) return { success: false };
+    if (typeof count === 'number' && count >= 0) {
+      notificationHandler.setBadgeCount(count);
+      if (trayHandler) trayHandler.setUnreadCount(count);
+    }
+    return { success: true };
+  });
+
+  ipcMain.handle('notification:clear-badge', async () => {
+    if (notificationHandler) notificationHandler.clearBadge();
+    if (trayHandler) trayHandler.clearUnread();
+    return { success: true };
+  });
+
   ipcMain.handle('signal-v2:generate-identity', async (_event, { username }) => {
     if (!signalHandlerV2) return { success: false, error: 'Signal V2 handler not initialized' };
     return await signalHandlerV2.generateIdentity(username);
@@ -753,6 +1219,16 @@ function registerIPCHandlers() {
   ipcMain.handle('signal-v2:delete-session', async (_event, { selfUsername, peerUsername, deviceId }) => {
     if (!signalHandlerV2) return { success: false, error: 'Signal V2 handler not initialized' };
     return await signalHandlerV2.deleteSession(selfUsername, peerUsername, deviceId);
+  });
+
+  ipcMain.handle('signal-v2:set-peer-kyber-key', async (_event, { peerUsername, kyberPublicKeyBase64 }) => {
+    if (!signalHandlerV2) return { success: false, error: 'Signal V2 handler not initialized' };
+    return signalHandlerV2.setPeerKyberPublicKey(peerUsername, kyberPublicKeyBase64);
+  });
+
+  ipcMain.handle('signal-v2:has-peer-kyber-key', async (_event, { peerUsername }) => {
+    if (!signalHandlerV2) return { success: false, hasKey: false };
+    return { success: true, hasKey: signalHandlerV2.hasPeerKyberPublicKey(peerUsername) };
   });
 
   ipcMain.handle('signal-v2:delete-all-sessions', async (_event, { selfUsername, peerUsername }) => {
@@ -1035,70 +1511,113 @@ function registerIPCHandlers() {
   });
 
   ipcMain.handle('renderer:ready', async () => {
+    if (websocketHandler?.isConnected?.() && mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('edge:server-message', { type: '__ws_connection_opened' });
+    }
     return { success: true };
   });
 
-  // Onion P2P handlers
+  ipcMain.handle('session:request-pending-messages', async () => {
+    await deliverQueuedMessages();
+    return { success: true, delivered: pendingServerMessages.length === 0 };
+  });
+
+  // P2P Signaling handlers
   try {
-    const { OnionHandler } = require('./handlers/onion-handler.cjs');
-    const onionHandler = new OnionHandler({
-      torManager, onInboundMessage: (msg) => {
-        try {
-          if (mainWindow && !mainWindow.isDestroyed()) {
-            mainWindow.webContents.send('onion:message', msg);
-          }
-        } catch (_) { }
-      }
-    });
-
-    ipcMain.handle('onion:create-endpoint', async (_event, args) => {
+    p2pSignalingHandler = new P2PSignalingHandler();
+    p2pSignalingHandler.setTorReady(torManager.isTorRunning());
+    p2pSignalingHandler.updateTorConfig({ socksPort: torManager.getSocksPort?.() || 9150 });
+    p2pSignalingHandler.onMessage = (msg) => {
       try {
-        const ttlSeconds = (args && typeof args.ttlSeconds === 'number') ? args.ttlSeconds : 600;
-        return await onionHandler.createEndpoint({ ttlSeconds });
-      } catch (e) {
-        return { success: false, error: e?.message || String(e) };
-      }
+        if (mainWindow && !mainWindow.isDestroyed() && mainWindow.webContents && !mainWindow.webContents.isDestroyed()) {
+          mainWindow.webContents.send('p2p:signaling-message', msg);
+        } else if (isWindowDestroyed) {
+          pendingSignalingMessages.push({ msg, timestamp: Date.now() });
+        }
+      } catch (e) { }
+    };
+
+    ipcMain.handle('p2p:signaling-connect', async (_event, serverUrl, options) => {
+      if (!p2pSignalingHandler) return { success: false, error: 'P2P signaling handler not initialized' };
+      p2pSignalingHandler.setTorReady(torManager.isTorRunning());
+      p2pSignalingHandler.updateTorConfig({ socksPort: torManager.getSocksPort?.() || 9150 });
+      const result = await p2pSignalingHandler.connect(serverUrl, options);
+      return result;
     });
 
-    ipcMain.handle('onion:send', async (_event, toUsername, payload) => {
-      try {
-        return await onionHandler.send(String(toUsername || ''), payload);
-      } catch (e) {
-        return { success: false, error: e?.message || String(e) };
-      }
+    ipcMain.handle('p2p:signaling-disconnect', async () => {
+      if (!p2pSignalingHandler) return { success: false, error: 'P2P signaling handler not initialized' };
+      return p2pSignalingHandler.disconnect();
     });
 
-    ipcMain.handle('onion:close', async () => {
-      try { return await onionHandler.deleteEndpoint(); } catch (e) { return { success: false, error: e?.message || String(e) }; }
+    ipcMain.handle('p2p:signaling-send', async (_event, message) => {
+      if (!p2pSignalingHandler) return { success: false, error: 'P2P signaling handler not initialized' };
+      return p2pSignalingHandler.send(message);
+    });
+
+    ipcMain.handle('p2p:signaling-status', async () => {
+      if (!p2pSignalingHandler) return { connected: false };
+      return { connected: p2pSignalingHandler.isConnected() };
     });
   } catch (e) {
-    console.error('[MAIN] Onion handler init failed:', e?.message || e);
+    console.error('[MAIN] P2P signaling handler init failed:', e?.message || e);
   }
 
   ipcMain.handle('webrtc:get-ice-config', async () => {
     try {
-      const turnServers = process.env.TURN_SERVERS ? JSON.parse(process.env.TURN_SERVERS) : null;
-      const stunServers = process.env.STUN_SERVERS ? JSON.parse(process.env.STUN_SERVERS) : null;
-      const icePolicy = process.env.ICE_TRANSPORT_POLICY || 'all';
-
-      const iceServers = [];
-
-      if (stunServers && Array.isArray(stunServers)) {
-        iceServers.push(...stunServers.map(url => ({ urls: url })));
-      }
-
-      if (turnServers && Array.isArray(turnServers)) {
-        iceServers.push(...turnServers);
-      }
-
-      if (iceServers.length === 0) {
+      // Get server URL from websocket handler if available
+      let serverUrl = websocketHandler?.serverUrl || '';
+      if (!serverUrl) {
         return null;
       }
 
-      return {
-        iceServers,
-        iceTransportPolicy: icePolicy
-      };
+      // Convert WebSocket URL to HTTP
+      const wsUrl = new URL(serverUrl);
+      const httpProto = wsUrl.protocol === 'wss:' ? 'https:' : 'http:';
+      const baseUrl = `${httpProto}//${wsUrl.host}`;
+
+      // Fetch ICE config from server
+      const https = require('https');
+      const http = require('http');
+
+      return await new Promise((resolve) => {
+        const url = new URL(`${baseUrl}/api/ice/config`);
+        const requestModule = url.protocol === 'https:' ? https : http;
+
+        const req = requestModule.request({
+          hostname: url.hostname,
+          port: url.port || (url.protocol === 'https:' ? 443 : 80),
+          path: url.pathname,
+          method: 'GET',
+          timeout: 10000,
+          headers: { 'Accept': 'application/json' }
+        }, (res) => {
+          let data = '';
+          res.on('data', (chunk) => { data += chunk; });
+          res.on('end', () => {
+            try {
+              if (res.statusCode !== 200) {
+                return resolve(null);
+              }
+              const ice = JSON.parse(data);
+              if (ice && Array.isArray(ice.iceServers) && ice.iceServers.length > 0) {
+                resolve({
+                  iceServers: ice.iceServers,
+                  iceTransportPolicy: ice.iceTransportPolicy || 'all'
+                });
+              } else {
+                resolve(null);
+              }
+            } catch {
+              resolve(null);
+            }
+          });
+        });
+
+        req.on('error', () => resolve(null));
+        req.on('timeout', () => { req.destroy(); resolve(null); });
+        req.end();
+      });
     } catch (error) {
       return null;
     }
@@ -1107,6 +1626,10 @@ function registerIPCHandlers() {
 
 async function cleanup() {
   try {
+    if (pendingServerMessages.length > 0) {
+      await persistPendingMessages();
+    }
+
     if (torManager && torManager.isTorRunning()) {
       await torManager.stopTor();
     }
@@ -1121,6 +1644,48 @@ async function cleanup() {
   } catch (_) { }
 }
 
+async function showWindowFromTray() {
+  if (websocketHandler) websocketHandler.setBackgroundMode(false);
+  if (p2pSignalingHandler) p2pSignalingHandler.setBackgroundMode(false);
+
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.show();
+    mainWindow.focus();
+  } else {
+    await createWindow();
+  }
+  isWindowDestroyed = false;
+}
+
+async function quitApp() {
+  if (trayHandler) {
+    trayHandler.setIsQuitting(true);
+  }
+  await cleanup();
+  app.quit();
+}
+
+function initializeTrayAndNotifications() {
+  trayHandler = new TrayHandler();
+  const trayResult = trayHandler.initialize({
+    iconPath: path.join(__dirname, '../public/icon.png'),
+    onShowWindow: showWindowFromTray,
+    onQuit: quitApp
+  });
+
+  if (!trayResult.success) {
+    console.warn('[Main] Tray initialization failed:', trayResult.error);
+  }
+
+  // Initialize notifications
+  notificationHandler = new NotificationHandler();
+  notificationHandler.initialize({
+    onNotificationClick: (data) => {
+      showWindowFromTray();
+    }
+  });
+}
+
 app.whenReady().then(async () => {
   try {
     await setupSecureLogging();
@@ -1131,6 +1696,8 @@ app.whenReady().then(async () => {
     if (!handlersReady) {
       return fatalExit('Failed to initialize required services');
     }
+
+    initializeTrayAndNotifications();
 
     await createWindow();
 
@@ -1143,17 +1710,32 @@ app.whenReady().then(async () => {
 });
 
 app.on('activate', () => {
-  if (BrowserWindow.getAllWindows().length === 0) {
-    createWindow();
-  }
+  showWindowFromTray();
 });
 
 app.on('window-all-closed', () => {
-  if (process.platform !== 'darwin') {
-    app.quit();
+  if (trayHandler && typeof trayHandler.getIsQuitting === 'function' && !trayHandler.getIsQuitting()) {
+    return;
   }
+  app.quit();
 });
 
-app.on('before-quit', async () => {
-  await cleanup();
+let isQuitting = false;
+app.on('before-quit', (event) => {
+  if (isQuitting) return;
+
+  event.preventDefault();
+  isQuitting = true;
+
+  (async () => {
+    try {
+      if (trayHandler) {
+        trayHandler.setIsQuitting(true);
+        trayHandler.destroy();
+      }
+      await cleanup();
+    } finally {
+      app.quit();
+    }
+  })();
 });

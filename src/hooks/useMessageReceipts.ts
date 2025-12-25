@@ -1,5 +1,6 @@
 import { useEffect, useCallback, useMemo, useRef } from 'react';
-import { Message, User } from '@/components/chat/types';
+import { Message } from '@/components/chat/types';
+import type { User } from '@/components/chat/UserList';
 import { SignalType } from '@/lib/signal-types';
 import { sanitizeTextInput } from '@/lib/sanitizers';
 
@@ -74,7 +75,7 @@ const buildSmartStatusMap = (messages: Message[], currentUsername: string) => {
     }
   }
 
-  for (const [peer, readInfo] of latestReadPerPeer) {
+  for (const [, readInfo] of latestReadPerPeer) {
     map.set(readInfo.id, { ...readInfo.receipt, read: true });
   }
 
@@ -169,7 +170,7 @@ export function useMessageReceipts(
   setMessages: React.Dispatch<React.SetStateAction<Message[]>>,
   currentUsername: string,
   saveMessageToLocalDB: (msg: Message) => Promise<void>,
-  websocketClient: { send: (payload: string) => void },
+  websocketClient: { send: (payload: string) => void; sendSecureControlMessage?: (msg: any) => Promise<void> },
   users: User[],
   getKeysOnDemand?: () => Promise<{
     x25519: { private: Uint8Array; publicKeyBase64: string };
@@ -343,7 +344,7 @@ export function useMessageReceipts(
 
         if (!sessionCheck?.hasSession) {
           try {
-            await websocketClient.sendSecureControlMessage({
+            await websocketClient.sendSecureControlMessage?.({
               type: SignalType.LIBSIGNAL_REQUEST_BUNDLE,
               username: safeSender,
               from: currentUsername,
@@ -395,8 +396,7 @@ export function useMessageReceipts(
         websocketClient.send(JSON.stringify(readReceiptPayload));
 
         markReceiptSent(sentReceiptsRef.current, safeMessageId);
-      } catch (error) {
-      }
+      } catch { }
     },
     [currentUsername, websocketClient, users, getKeysOnDemand],
   );
@@ -429,8 +429,7 @@ export function useMessageReceipts(
       if (updated) {
         try {
           await saveMessageToLocalDB(updated);
-        } catch (error) {
-        }
+        } catch { }
       }
     },
     [setMessages, saveMessageToLocalDB],
@@ -474,8 +473,7 @@ export function useMessageReceipts(
       if (updated) {
         try {
           await saveMessageToLocalDB(updated);
-        } catch (error) {
-        }
+        } catch { }
       } else {
         pendingReceiptsRef.current.set(safeMessageId, { kind: 'delivered', addedAt: Date.now(), attempts: 1 });
       }
@@ -523,8 +521,7 @@ export function useMessageReceipts(
       if (updated) {
         try {
           await saveMessageToLocalDB(updated);
-        } catch (error) {
-        }
+        } catch { }
       } else {
         pendingReceiptsRef.current.set(safeMessageId, { kind: 'read', addedAt: Date.now(), attempts: 1 });
       }

@@ -18,7 +18,7 @@ function resolveCrypto(): Crypto {
     return cachedCrypto;
   }
 
-  const candidate = (globalScope as Partial<Window> & { crypto?: Crypto }).crypto;
+  const candidate = (globalScope as unknown as Partial<Window> & { crypto?: Crypto }).crypto;
   if (candidate && typeof candidate.getRandomValues === 'function') {
     cachedCrypto = candidate;
     return cachedCrypto;

@@ -15,8 +15,7 @@ import {
     AEAD as PostQuantumAEAD,
     Hash as PostQuantumHash,
     Random as PostQuantumRandom,
-    Utils as PostQuantumUtils,
-    PostQuantumWorker
+    Utils as PostQuantumUtils
 } from './post-quantum-crypto';
 
 const ENVELOPE_VERSION = 'lt-v1';

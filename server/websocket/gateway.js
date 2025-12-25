@@ -87,6 +87,114 @@ export function attachGateway({
   const REDIS_DELIVERY_KEY_PREFIX = 'ws:delivery:';
   const REDIS_CONNECTION_TTL = 3600; // 1 hour TTL
 
+  const SESSION_REFRESH_MIN_INTERVAL_MS = 60_000;
+  const DELIVERY_STALE_THRESHOLD_MS = 5 * 60_000;
+
+  const safeJsonParse = (raw) => {
+    if (typeof raw !== 'string') return null;
+    try {
+      const parsed = JSON.parse(raw);
+      return parsed && typeof parsed === 'object' ? parsed : null;
+    } catch {
+      return null;
+    }
+  };
+
+  const maybeRefreshSession = (ws, reason) => {
+    try {
+      const sid = ws?._sessionId;
+      if (!sid) return;
+      const now = Date.now();
+      const last = Number(ws._lastSessionRefreshAt || 0);
+      if (now - last < SESSION_REFRESH_MIN_INTERVAL_MS) return;
+      ws._lastSessionRefreshAt = now;
+
+      void refreshSession(sid).catch((error) => {
+        logger.warn('[WS] Session refresh failed', {
+          reason,
+          sessionId: sid?.slice(0, 8) + '...',
+          error: error?.message || String(error)
+        });
+      });
+
+      const username = ws?._username;
+      const field = ws?._redisDeliveryField;
+      if (!username || !field) return;
+
+      void withRedisClient(async (client) => {
+        const key = `${REDIS_DELIVERY_KEY_PREFIX}${username}`;
+        const serverId = process.env.SERVER_ID || 'default';
+        const connectedAt = Number(ws?._connectedAt || now) || now;
+        const value = JSON.stringify({ serverId, sessionId: sid, connectedAt, lastSeen: now });
+        await client.hset(key, field, value);
+        await client.expire(key, REDIS_CONNECTION_TTL);
+      }).catch((error) => {
+        logger.warn('[WS] Failed to touch Redis delivery entry', {
+          reason,
+          username,
+          error: error?.message || String(error)
+        });
+      });
+    } catch {
+    }
+  };
+
+  let cachedPublicKeyChunks = null;
+  let cachedPublicKeyLogInfo = null;
+
+  const getCachedPublicKeyChunks = () => {
+    if (cachedPublicKeyChunks) {
+      return { chunks: cachedPublicKeyChunks, logInfo: cachedPublicKeyLogInfo };
+    }
+
+    if (!serverHybridKeyPair ||
+        !serverHybridKeyPair.kyber?.publicKey ||
+        !serverHybridKeyPair.dilithium?.publicKey ||
+        !serverHybridKeyPair.x25519?.publicKey) {
+      throw new Error('Server hybrid key pair not properly initialized');
+    }
+
+    const dilithiumPublicBase64 = CryptoUtils.Hybrid.exportDilithiumPublicBase64(serverHybridKeyPair.dilithium.publicKey);
+    const kyberPublicBase64 = CryptoUtils.Hybrid.exportKyberPublicBase64(serverHybridKeyPair.kyber.publicKey);
+    const x25519PublicBase64 = CryptoUtils.Hybrid.exportX25519PublicBase64(serverHybridKeyPair.x25519.publicKey);
+
+    const keyMessage = JSON.stringify({
+      type: SignalType.SERVER_PUBLIC_KEY,
+      serverId: serverId || 'default',
+      hybridKeys: {
+        kyberPublicBase64,
+        dilithiumPublicBase64,
+        x25519PublicBase64
+      }
+    });
+
+    const compressedMessage = gzipSync(Buffer.from(keyMessage, 'utf8'));
+    const compressionRatio = ((1 - compressedMessage.length / keyMessage.length) * 100).toFixed(1);
+
+    const CHUNK_SIZE = 2048;
+    const totalChunks = Math.ceil(compressedMessage.length / CHUNK_SIZE);
+    const chunks = [];
+    for (let i = 0; i < totalChunks; i++) {
+      const start = i * CHUNK_SIZE;
+      const end = Math.min(start + CHUNK_SIZE, compressedMessage.length);
+      chunks.push(compressedMessage.slice(start, end).toString('base64'));
+    }
+
+    cachedPublicKeyChunks = { totalChunks, chunkSize: CHUNK_SIZE, chunks };
+    cachedPublicKeyLogInfo = {
+      serverId: serverId || 'default',
+      dilithiumPublicKeyLength: Buffer.from(dilithiumPublicBase64, 'base64').length,
+      kyberPublicKeyLength: serverHybridKeyPair.kyber.publicKey.length,
+      originalSize: keyMessage.length,
+      compressedSize: compressedMessage.length,
+      compressionRatio: compressionRatio + '%',
+      totalChunks,
+      chunkSize: CHUNK_SIZE,
+    };
+
+    return { chunks: cachedPublicKeyChunks, logInfo: cachedPublicKeyLogInfo };
+  };
+
   /**
    * Add local WebSocket connection to delivery map
    */
@@ -113,41 +221,16 @@ export function attachGateway({
           const key = `${REDIS_DELIVERY_KEY_PREFIX}${username}`;
           const serverId = process.env.SERVER_ID || 'default';
           const nowTimestamp = Date.now();
+          const connectedAt = Number(ws?._connectedAt || nowTimestamp) || nowTimestamp;
+          const field = `${serverId}:${ws._sessionId}`;
           const connectionData = JSON.stringify({
             serverId,
             sessionId: ws._sessionId,
-            connectedAt: nowTimestamp
+            connectedAt,
+            lastSeen: nowTimestamp
           });
-          
-          
-          const existingConnections = await client.smembers(key);
-          const staleConnectionsToRemove = [];
-          
-          for (const connStr of existingConnections) {
-            try {
-              const conn = JSON.parse(connStr);
-              const isSameSession = conn.sessionId === ws._sessionId;
-              const isSameServerDifferentSession = conn.serverId === serverId && conn.sessionId !== ws._sessionId;
-              const isVeryOld = (nowTimestamp - (conn.connectedAt || 0) > 300000);
-              const isRecentButDifferentServer = conn.serverId !== serverId && (nowTimestamp - (conn.connectedAt || 0) > 30000);
-              
-              if (isSameSession || isSameServerDifferentSession || isVeryOld || isRecentButDifferentServer) {
-                staleConnectionsToRemove.push(connStr);
-              }
-            } catch (_e) {
-              staleConnectionsToRemove.push(connStr);
-            }
-          }
-          
-          if (staleConnectionsToRemove.length > 0) {
-            await client.srem(key, ...staleConnectionsToRemove);
-            logger.debug('[WS] Cleaned up stale connections', { 
-              username: username.slice(0, 8) + '...', 
-              count: staleConnectionsToRemove.length 
-            });
-          }
-          
-          await client.sadd(key, connectionData);
+          ws._redisDeliveryField = field;
+          await client.hset(key, field, connectionData);
           await client.expire(key, REDIS_CONNECTION_TTL);
         });
       } catch (error) {
@@ -180,12 +263,8 @@ export function attachGateway({
         await withRedisClient(async (client) => {
           const key = `${REDIS_DELIVERY_KEY_PREFIX}${username}`;
           const serverId = process.env.SERVER_ID || 'default';
-          const connectionData = JSON.stringify({
-            serverId,
-            sessionId: ws._sessionId,
-            connectedAt: ws._connectedAt || Date.now()
-          });
-          await client.srem(key, connectionData);
+          const field = ws._redisDeliveryField || `${serverId}:${ws._sessionId}`;
+          await client.hdel(key, field);
         });
       } catch (error) {
         logger.warn('[WS] Failed to remove connection from Redis', { username, error: error.message });
@@ -211,14 +290,13 @@ export function attachGateway({
     try {
       return await withRedisClient(async (client) => {
         const key = `${REDIS_DELIVERY_KEY_PREFIX}${username}`;
-        const connections = await client.smembers(key);
-        return connections.map(conn => {
-          try {
-            return JSON.parse(conn);
-          } catch {
-            return null;
-          }
-        }).filter(Boolean);
+        const values = await client.hvals(key);
+        const out = [];
+        for (const raw of values || []) {
+          const parsed = safeJsonParse(raw);
+          if (parsed) out.push(parsed);
+        }
+        return out;
       });
     } catch (error) {
       logger.warn('[WS] Failed to get distributed connections from Redis', { username, error: error.message });
@@ -247,102 +325,105 @@ export function attachGateway({
   const heartbeatInterval = setInterval(() => {
     for (const ws of wss.clients) {
       try {
-        if (ws._sessionId) {
-          refreshSession(ws._sessionId);
+        if (ws.isAlive === false) {
+          try { ws.terminate?.(); } catch { }
+          continue;
         }
+        ws.isAlive = false;
+        try {
+          ws.ping(() => {});
+        } catch { }
+        maybeRefreshSession(ws, 'heartbeat');
       } catch (error) {
-        logger.error('[WS] Error refreshing session during heartbeat:', error);
+        logger.error('[WS] Error during heartbeat:', error);
       }
-      try {
-        ws.ping(() => {});
-      } catch {}
     }
   }, heartbeatIntervalMs);
 
+  let staleCleanupCursor = '0';
+  const staleFieldCleanupCursors = new Map();
+  const STALE_FIELD_SCAN_PAGES_PER_KEY = 5;
   const staleConnectionCleanupInterval = setInterval(async () => {
     try {
       await withRedisClient(async (client) => {
-        const deliveryKeys = [];
-        let cursor = '0';
-        
-        do {
-          const [newCursor, keys] = await client.scan(
-            cursor,
-            'MATCH',
-            `${REDIS_DELIVERY_KEY_PREFIX}*`,
-            'COUNT',
-            100
-          );
-          cursor = newCursor;
-          deliveryKeys.push(...keys);
-        } while (cursor !== '0' && deliveryKeys.length < 1000);
-        
-        let totalCleaned = 0;
         const nowTimestamp = Date.now();
-        const aggressiveThreshold = 20000; // 20 seconds
-        
-        // Get list of active servers from cluster
-        let activeServers = new Set();
-        try {
-          const clusterServers = await client.smembers('cluster:servers');
-          for (const serverStr of clusterServers) {
-            try {
-              const server = JSON.parse(serverStr);
-              if (server.serverId) {
-                activeServers.add(server.serverId);
-              }
-            } catch {}
-          }
-        } catch {}
-        
-        for (const key of deliveryKeys) {
+        const [newCursor, keys] = await client.scan(
+          staleCleanupCursor,
+          'MATCH',
+          `${REDIS_DELIVERY_KEY_PREFIX}*`,
+          'COUNT',
+          50
+        );
+        staleCleanupCursor = newCursor;
+
+        let totalCleaned = 0;
+
+        for (const key of keys) {
           try {
-            const connections = await client.smembers(key);
-            const staleConnections = [];
-            
-            for (const connStr of connections) {
-              try {
-                const conn = JSON.parse(connStr);
-                const age = nowTimestamp - (conn.connectedAt || 0);
-                const isFromInactiveServer = activeServers.size > 0 && !activeServers.has(conn.serverId);
-                
-                if (age > aggressiveThreshold || isFromInactiveServer) {
-                  staleConnections.push(connStr);
+            let fieldCursor = staleFieldCleanupCursors.get(key) || '0';
+            let pages = 0;
+            let keyFinished = false;
+
+            do {
+              const [nextFieldCursor, entries] = await client.hscan(key, fieldCursor, 'COUNT', 200);
+              fieldCursor = nextFieldCursor;
+              pages += 1;
+
+              const toDelete = [];
+              for (let i = 0; i < (entries?.length || 0); i += 2) {
+                const field = entries[i];
+                const raw = entries[i + 1];
+                const parsed = safeJsonParse(raw);
+                const lastSeen = Number(parsed?.lastSeen || parsed?.connectedAt || 0);
+                if (!parsed || !lastSeen || (nowTimestamp - lastSeen) > DELIVERY_STALE_THRESHOLD_MS) {
+                  toDelete.push(field);
                 }
-              } catch (_e) {
-                staleConnections.push(connStr);
               }
-            }
-            
-            if (staleConnections.length > 0) {
-              await client.srem(key, ...staleConnections);
-              totalCleaned += staleConnections.length;
-            }
-            
-            const remainingCount = await client.scard(key);
-            if (remainingCount === 0) {
-              await client.del(key);
+
+              if (toDelete.length > 0) {
+                await client.hdel(key, ...toDelete);
+                totalCleaned += toDelete.length;
+              }
+
+              if (fieldCursor === '0') {
+                keyFinished = true;
+                break;
+              }
+            } while (pages < STALE_FIELD_SCAN_PAGES_PER_KEY);
+
+            if (keyFinished) {
+              staleFieldCleanupCursors.delete(key);
+              const remaining = await client.hlen(key);
+              if (remaining === 0) {
+                await client.del(key);
+              }
+            } else {
+              staleFieldCleanupCursors.set(key, fieldCursor);
             }
           } catch (err) {
             logger.warn('[WS] Error cleaning up delivery key', { key, error: err.message });
           }
         }
-        
+
         if (totalCleaned > 0) {
-          logger.info('[WS] Cleaned up stale connections across cluster', { 
-            totalCleaned, 
-            keysScanned: deliveryKeys.length,
-            activeServersCount: activeServers.size
+          logger.info('[WS] Cleaned up stale connections across cluster', {
+            totalCleaned,
+            keysScanned: keys.length,
           });
         }
       });
     } catch (error) {
       logger.warn('[WS] Error during stale connection cleanup', { error: error.message });
     }
-  }, 15000);
+  }, 60_000);
 
   wss.on('connection', async (ws, req) => {
-    // Expose request/headers for downstream auth handlers
+    const isP2PSignaling = req?.url?.startsWith('/p2p-signaling');
+    if (isP2PSignaling) {
+      ws._isP2PSignaling = true;
+      return;
+    }
+
     try {
       ws.upgradeReq = req;
       ws.headers = req?.headers || {};
@@ -387,16 +468,6 @@ export function attachGateway({
     ws.isAlive = true;
     ws.on('pong', () => {
       ws.isAlive = true;
-      if (sessionId) {
-        try {
-          refreshSession(sessionId);
-        } catch (error) {
-          logger.warn('[WS] Session refresh failed on pong', { 
-            sessionId: sessionId?.slice(0, 8) + '...',
-            error: error.message 
-          });
-        }
-      }
     });
 
     ws.on('ping', () => {
@@ -406,36 +477,12 @@ export function attachGateway({
       } catch (error) {
         logger.warn('[WS] Pong failed', { error: error.message });
       }
-      if (sessionId) {
-        try {
-          refreshSession(sessionId);
-        } catch (error) {
-          logger.warn('[WS] Session refresh failed on ping', { 
-            sessionId: sessionId?.slice(0, 8) + '...',
-            error: error.message 
-          });
-        }
-      }
     });
 
     ws._username = null;
 
     try {
-      // Validate key structure before attempting to export
-      if (!serverHybridKeyPair || 
-          !serverHybridKeyPair.kyber?.publicKey || 
-          !serverHybridKeyPair.dilithium?.publicKey || 
-          !serverHybridKeyPair.x25519?.publicKey) {
-        logger.error('[WS] Server hybrid key pair not properly initialized', {
-          sessionId: sessionId?.slice(0, 8) + '...',
-          hasKeyPair: !!serverHybridKeyPair,
-          hasKyber: !!serverHybridKeyPair?.kyber,
-          hasDilithium: !!serverHybridKeyPair?.dilithium,
-          hasX25519: !!serverHybridKeyPair?.x25519
-        });
-        ws.close(1011, 'Server configuration error');
-        return;
-      }
+      const { chunks: cachedChunks, logInfo } = getCachedPublicKeyChunks();
       
       // Check if connection is still open before sending
       if (ws.readyState !== 1) {
@@ -445,68 +492,30 @@ export function attachGateway({
         });
         return;
       }
-      
-      const dilithiumPublicBase64 = CryptoUtils.Hybrid.exportDilithiumPublicBase64(serverHybridKeyPair.dilithium.publicKey);
-      const kyberPublicBase64 = CryptoUtils.Hybrid.exportKyberPublicBase64(serverHybridKeyPair.kyber.publicKey);
-      const x25519PublicBase64 = CryptoUtils.Hybrid.exportX25519PublicBase64(serverHybridKeyPair.x25519.publicKey);
-      
-      const keyMessage = JSON.stringify({
-        type: SignalType.SERVER_PUBLIC_KEY,
-        serverId: serverId || 'default',
-        hybridKeys: {
-          kyberPublicBase64,
-          dilithiumPublicBase64,
-          x25519PublicBase64
-        }
-      });
-      
-      // Compress the message to reduce size for tunnel proxies
-      const compressedMessage = gzipSync(Buffer.from(keyMessage, 'utf8'));
-      const compressionRatio = ((1 - compressedMessage.length / keyMessage.length) * 100).toFixed(1);
-      
-      const CHUNK_SIZE = 2048;
-      const totalChunks = Math.ceil(compressedMessage.length / CHUNK_SIZE);
-      
+
       logger.info('[WS] Preparing chunked compressed server public keys', {
         sessionId: sessionId?.slice(0, 8) + '...',
-        serverId: serverId || 'default',
-        dilithiumPublicKeyLength: Buffer.from(dilithiumPublicBase64, 'base64').length,
-        kyberPublicKeyLength: serverHybridKeyPair.kyber.publicKey.length,
-        originalSize: keyMessage.length,
-        compressedSize: compressedMessage.length,
-        compressionRatio: compressionRatio + '%',
-        totalChunks,
-        chunkSize: CHUNK_SIZE,
+        ...logInfo,
         readyState: ws.readyState,
         bufferedAmount: ws.bufferedAmount
       });
       
       // Send chunks
-      for (let i = 0; i < totalChunks; i++) {
-        const start = i * CHUNK_SIZE;
-        const end = Math.min(start + CHUNK_SIZE, compressedMessage.length);
-        const chunk = compressedMessage.slice(start, end);
+      for (let i = 0; i < cachedChunks.totalChunks; i++) {
+        const chunkBase64 = cachedChunks.chunks[i];
         const chunkEnvelope = JSON.stringify({
           type: 'KEY_CHUNK',
           chunkIndex: i,
-          totalChunks,
-          data: chunk.toString('base64')
+          totalChunks: cachedChunks.totalChunks,
+          data: chunkBase64
         });
         ws.send(chunkEnvelope, (error) => {
           if (error) {
             logger.error('[WS] Failed to send key chunk', {
               sessionId: sessionId?.slice(0, 8) + '...',
               chunkIndex: i,
-              totalChunks,
+              totalChunks: cachedChunks.totalChunks,
               error: error.message,
-              readyState: ws.readyState
-            });
-          } else {
-            logger.info('[WS] Key chunk sent successfully', {
-              sessionId: sessionId?.slice(0, 8) + '...',
-              chunkIndex: i,
-              totalChunks,
-              chunkSize: chunk.length,
               readyState: ws.readyState
             });
           }
@@ -525,8 +534,21 @@ export function attachGateway({
 
     ws.on('message', async (messageBuffer) => {
       const now = Date.now();
-      if (now - connectionOpenedAt > bandwidthWindowMs) {
+      if (!ws._bandwidthWindowStart) {
+        ws._bandwidthWindowStart = connectionOpenedAt;
+      }
+      if (!ws._messageWindowStart) {
+        ws._messageWindowStart = connectionOpenedAt;
+      }
+
+      if (now - ws._bandwidthWindowStart > bandwidthWindowMs) {
+        ws._bandwidthWindowStart = now;
         bandwidthUsed = 0;
+      }
+
+      if (now - ws._messageWindowStart > 60_000) {
+        ws._messageWindowStart = now;
+        messageCount = 0;
       }
 
       if (bandwidthUsed + messageBuffer.length > bandwidthQuota) {
@@ -550,7 +572,7 @@ export function attachGateway({
 
       bandwidthUsed += messageBuffer.length;
 
-      if (messageCount > messageHardLimitPerMinute) {
+      if (messageCount >= messageHardLimitPerMinute) {
         const state = await getSessionState(sessionId);
         stats.rateLimitExceeded++;
         if (isTestEnv) {
@@ -609,8 +631,10 @@ export function attachGateway({
         }
 
         const parsed = messageResult.data;
+        const raw = typeof messageResult.raw === 'string' ? messageResult.raw : messageString;
         stats.totalMessages++;
-        await handleMessage({ ws, sessionId, message: JSON.stringify(parsed), parsed });
+        await handleMessage({ ws, sessionId, message: raw, parsed });
+        maybeRefreshSession(ws, 'message');
       } catch (error) {
         logger.error('[WS] Message processing error', {
           sessionId: sessionId?.slice(0, 8) + '...',

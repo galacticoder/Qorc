@@ -1,6 +1,5 @@
 /**
  * Electron Preload Script 
- * Secure bridge between renderer and main process with full input validation
  */
 
 const { contextBridge, ipcRenderer } = require('electron');
@@ -92,7 +91,6 @@ function validateTorOptions(options) {
 contextBridge.exposeInMainWorld('electronAPI', {
   platform: process.platform,
   arch: process.arch,
-  // Instance ID to allow per-instance isolation of secrets for multiple accounts on device just leaving it this way for now will change later
   instanceId: process.env.ELECTRON_INSTANCE_ID || process.env.INSTANCE_ID || '1',
 
   secureStore: {
@@ -172,24 +170,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   getIceConfiguration: () => {
     return ipcRenderer.invoke('webrtc:get-ice-config');
-  },
-
-  // Onion transport APIs
-  createOnionEndpoint: (options = {}) => {
-    const ttl = typeof options.ttlSeconds === 'number' && options.ttlSeconds > 0 && options.ttlSeconds <= 3600 ? options.ttlSeconds : 600;
-    return ipcRenderer.invoke('onion:create-endpoint', { ttlSeconds: ttl });
-  },
-  connectOnionWebSocket: async (_opts) => {
-    return null;
-  },
-  onOnionMessage: (callback) => {
-    if (typeof callback !== 'function') return () => { };
-    const listener = (_event, data) => { try { callback(_event, data); } catch (_) { } };
-    ipcRenderer.on('onion:message', listener);
-    return () => ipcRenderer.removeListener('onion:message', listener);
-  },
-  sendOnionMessage: (toUsername, payload) => {
-    return ipcRenderer.invoke('onion:send', toUsername, payload);
   },
 
   saveFile: (data) => {
@@ -344,6 +324,12 @@ contextBridge.exposeInMainWorld('edgeApi', {
   deleteAllSessions(args) {
     try { return ipcRenderer.invoke('signal-v2:delete-all-sessions', validateSignalArgs('deleteAllSessions', args)); } catch (error) { return Promise.reject(error); }
   },
+  setPeerKyberKey(args) {
+    try { return ipcRenderer.invoke('signal-v2:set-peer-kyber-key', validateSignalArgs('setPeerKyberKey', args)); } catch (error) { return Promise.reject(error); }
+  },
+  hasPeerKyberKey(args) {
+    try { return ipcRenderer.invoke('signal-v2:has-peer-kyber-key', validateSignalArgs('hasPeerKyberKey', args)); } catch (error) { return Promise.reject(error); }
+  },
 
   trustPeerIdentity(args) {
     try { return ipcRenderer.invoke('signal-v2:trust-peer-identity', validateSignalArgs('trustPeerIdentity', args)); } catch (error) { return Promise.reject(error); }
@@ -383,7 +369,7 @@ contextBridge.exposeInMainWorld('edgeApi', {
     if (url.length > MAX_URL_LENGTH) {
       return Promise.reject(new Error('URL too long'));
     }
-    // Enforce wss:// at preload level
+
     try {
       const parsed = new URL(url);
       if (parsed.protocol !== 'wss:') {
@@ -399,9 +385,37 @@ contextBridge.exposeInMainWorld('edgeApi', {
   },
   getServerUrl: () => ipcRenderer.invoke('edge:get-server-url'),
   rendererReady: () => ipcRenderer.invoke('renderer:ready'),
+  getBackgroundSessionState: () => ipcRenderer.invoke('session:get-background-state'),
+  clearBackgroundSessionState: () => ipcRenderer.invoke('session:clear-background-state'),
+  setBackgroundUsername: (username) => ipcRenderer.invoke('session:set-background-username', username),
+  requestPendingMessages: () => ipcRenderer.invoke('session:request-pending-messages'),
+  storePQSessionKeys: (keys) => ipcRenderer.invoke('session:store-pq-keys', keys),
+  getPQSessionKeys: () => ipcRenderer.invoke('session:get-pq-keys'),
+  clearPQSessionKeys: () => ipcRenderer.invoke('session:clear-pq-keys'),
   torSetupComplete: () => ipcRenderer.invoke('tor:setup-complete'),
   powerSaveBlockerStart: () => ipcRenderer.invoke('power:psb-start'),
   powerSaveBlockerStop: () => ipcRenderer.invoke('power:psb-stop'),
+
+  // Notification APIs
+  showNotification: ({ title, body, silent, data }) => {
+    if (typeof title !== 'string' || title.length > 128) {
+      return Promise.reject(new Error('Invalid title'));
+    }
+    if (body && (typeof body !== 'string' || body.length > 512)) {
+      return Promise.reject(new Error('Invalid body'));
+    }
+    return ipcRenderer.invoke('notification:show', { title, body, silent, data });
+  },
+  setNotificationsEnabled: (enabled) => {
+    return ipcRenderer.invoke('notification:set-enabled', Boolean(enabled));
+  },
+  setBadgeCount: (count) => {
+    if (typeof count !== 'number' || count < 0 || count > 99999) {
+      return Promise.reject(new Error('Invalid count'));
+    }
+    return ipcRenderer.invoke('notification:set-badge', count);
+  },
+  clearBadge: () => ipcRenderer.invoke('notification:clear-badge'),
   refreshTokens: (args) => ipcRenderer.invoke('auth:refresh', args),
   storePQKeys: async ({ username, kyberPublicKey, dilithiumPublicKey, x25519PublicKey }) => {
     try {
@@ -417,6 +431,33 @@ contextBridge.exposeInMainWorld('edgeApi', {
   deviceCredentials: {
     getCredentials: () => ipcRenderer.invoke('device:getCredentials'),
     signChallenge: (challenge) => ipcRenderer.invoke('device:signChallenge', challenge)
+  },
+
+  // P2P Signaling APIs
+  p2pSignalingConnect: (serverUrl, options) => {
+    if (!serverUrl || typeof serverUrl !== 'string') {
+      return Promise.reject(new Error('Invalid server URL'));
+    }
+    if (serverUrl.length > MAX_URL_LENGTH) {
+      return Promise.reject(new Error('Server URL too long'));
+    }
+    return ipcRenderer.invoke('p2p:signaling-connect', serverUrl, options || {});
+  },
+  p2pSignalingDisconnect: () => ipcRenderer.invoke('p2p:signaling-disconnect'),
+  p2pSignalingSend: (message) => {
+    if (!message || typeof message !== 'object') {
+      return Promise.reject(new Error('Invalid message'));
+    }
+    return ipcRenderer.invoke('p2p:signaling-send', message);
+  },
+  p2pSignalingStatus: () => ipcRenderer.invoke('p2p:signaling-status'),
+  onP2PSignalingMessage: (callback) => {
+    ipcRenderer.removeAllListeners('p2p:signaling-message');
+    const handler = (_event, data) => {
+      try { callback(data); } catch (e) { }
+    };
+    ipcRenderer.on('p2p:signaling-message', handler);
+    return () => ipcRenderer.removeAllListeners('p2p:signaling-message');
   }
 });
 
@@ -426,4 +467,10 @@ ipcRenderer.on('edge:server-message', (_event, data) => {
   } catch (error) {
     console.error('[PRELOAD] Failed to dispatch server message:', error);
   }
+});
+
+ipcRenderer.on('app:entering-background', () => {
+  try {
+    window.dispatchEvent(new CustomEvent('app:entering-background'));
+  } catch (e) { }
 });

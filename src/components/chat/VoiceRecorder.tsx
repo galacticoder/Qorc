@@ -1,7 +1,6 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { Button } from '../ui/button';
-import { Square, Play, Pause, Trash2, Send, Mic } from 'lucide-react';
-import { cn } from '../../lib/utils';
+import { Square, Play, Pause, Trash2, Send } from 'lucide-react';
 
 interface VoiceRecorderProps {
   onSendVoiceNote: (audioBlob: Blob) => void;
@@ -309,7 +308,7 @@ export function VoiceRecorder({ onSendVoiceNote, onCancel, disabled }: VoiceReco
         // Recording State
         <>
           <div className="flex items-center gap-2 text-destructive animate-pulse font-mono text-sm min-w-[3rem]">
-            <div className="w-2 h-2 rounded-full bg-destructive" />
+            <div className="w-2 h-2 rounded-full bg-destructive" style={{ opacity: Math.max(0.25, Math.min(1, 0.25 + audioLevel)) }} />
             {formatTime(duration)}
           </div>
 

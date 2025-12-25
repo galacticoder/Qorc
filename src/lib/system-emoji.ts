@@ -282,7 +282,7 @@ class CircuitBreaker {
     } catch (_error) {
       this.failureCount += 1;
       this.lastFailureTime = Date.now();
-      throw error;
+      throw _error;
     }
   }
 }

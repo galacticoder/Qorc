@@ -236,9 +236,9 @@ export class RateLimitMiddleware {
 	async getStats() {
 		const limiter = await this.#limiter();
 		const baseStats = await limiter.getStats();
-		
-		const securityHealth = await this.getSecurityHealth();
-		
+
+		const securityHealth = await this.getSecurityHealth(baseStats);
+
 		return {
 			...baseStats,
 			securityHealth,
@@ -249,10 +249,9 @@ export class RateLimitMiddleware {
 	/**
 	 * Get real-time security health status from Redis
 	 */
-	async getSecurityHealth() {
+	async getSecurityHealth(precomputedStats = null) {
 		try {
-			const limiter = await this.#limiter();
-			const stats = await limiter.getStats();
+			const stats = precomputedStats || (await (await this.#limiter()).getStats());
 			
 			const health = {
 				status: 'operational',

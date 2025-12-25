@@ -43,7 +43,7 @@ interface ChatInputProps {
   isEncrypted: boolean;
 
   currentUsername: string;
-  users: User[];
+  users: ReadonlyArray<User>;
   replyTo?: Message | null;
   onCancelReply?: () => void;
   editingMessage?: Message | null;
@@ -60,7 +60,7 @@ interface ChatInputProps {
 
 export function ChatInput({
   onSendMessage,
-  onSendFile,
+  onSendFile: _onSendFile,
   currentUsername,
   users,
   replyTo,
@@ -157,21 +157,6 @@ export function ChatInput({
       return 'File is too large. Maximum size is 50MB.';
     }
     return null;
-  }, []);
-
-  const blobToBase64 = useCallback((blob: Blob): Promise<string> => {
-    return new Promise((resolve, reject) => {
-      const reader = new FileReader();
-      reader.onloadend = () => {
-        if (typeof reader.result === 'string') {
-          resolve(reader.result);
-        } else {
-          reject(new Error('Failed to convert blob to base64'));
-        }
-      };
-      reader.onerror = () => reject(new Error('FileReader error'));
-      reader.readAsDataURL(blob);
-    });
   }, []);
 
   const handleFileChange = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {

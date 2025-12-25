@@ -23,6 +23,33 @@ const CHUNK_RATE_WINDOW_MS = 5000;
 const MAX_CHUNKS_PER_WINDOW = 200;
 const BASE64_PADDING_REGEX = /=+$/;
 
+let cachedWithRedisClient = null;
+const getWithRedisClient = async () => {
+  if (cachedWithRedisClient) return cachedWithRedisClient;
+  const mod = await import('../presence/presence.js');
+  cachedWithRedisClient = mod.withRedisClient;
+  return cachedWithRedisClient;
+};
+
+const CHUNK_RATE_LIMIT_LUA = `
+local key = KEYS[1]
+local windowStart = tonumber(ARGV[1])
+local now = tonumber(ARGV[2])
+local maxCount = tonumber(ARGV[3])
+local member = ARGV[4]
+local ttlSeconds = tonumber(ARGV[5])
+
+redis.call('ZREMRANGEBYSCORE', key, 0, windowStart)
+local count = redis.call('ZCARD', key)
+if count >= maxCount then
+  return -1
+end
+
+redis.call('ZADD', key, now, member)
+redis.call('EXPIRE', key, ttlSeconds)
+return count + 1
+`;
+
 /**
  * Chunked message manager for handling large messages
  */
@@ -53,7 +80,7 @@ class ChunkedMessageManager {
       const senderVerifier = verifySender || this.verifyChunkSender;
       const { messageId, chunkIndex, totalChunks, checksum, chunkBuffer, senderId, signature } = this.parseChunkData(chunkData);
 
-      this.enforceRateLimit(normalizedConnectionId);
+      await this.enforceRateLimit(normalizedConnectionId);
 
       // Initialize chunked message if first chunk
       if (!this.activeChunks.has(normalizedConnectionId)) {
@@ -447,21 +474,26 @@ class ChunkedMessageManager {
     const now = Date.now();
     
     try {
-      const { withRedisClient } = await import('../presence/presence.js');
+      const withRedisClient = await getWithRedisClient();
       await withRedisClient(async (client) => {
         const windowStart = now - CHUNK_RATE_WINDOW_MS;
-        
-        await client.zremrangebyscore(key, 0, windowStart);
-        
-        const count = await client.zcard(key);
-        
-        if (count >= MAX_CHUNKS_PER_WINDOW) {
+        const ttlSeconds = Math.ceil(CHUNK_RATE_WINDOW_MS / 1000) + 10;
+        const member = `${now}:${Math.random()}`;
+
+        const result = await client.eval(
+          CHUNK_RATE_LIMIT_LUA,
+          1,
+          key,
+          String(windowStart),
+          String(now),
+          String(MAX_CHUNKS_PER_WINDOW),
+          member,
+          String(ttlSeconds)
+        );
+
+        if (result === -1) {
           throw new Error('Chunk rate limit exceeded');
         }
-        
-        await client.zadd(key, now, `${now}:${Math.random()}`);
-        
-        await client.expire(key, Math.ceil(CHUNK_RATE_WINDOW_MS / 1000) + 10);
       });
     } catch (error) {
       if (error.message === 'Chunk rate limit exceeded') {
@@ -585,10 +617,12 @@ export async function processWebSocketMessage(connectionId, rawMessage, options 
       const result = await chunkedMessageManager.processChunk(connectionId, message.chunkData, options.verifySender);
       
       if (result.complete) {
+        const rawComplete = JSON.stringify(result.data);
         return {
           type: 'complete',
           data: result.data,
-          messageId: result.messageId
+          messageId: result.messageId,
+          raw: rawComplete
         };
       } else {
         return {
@@ -608,7 +642,8 @@ export async function processWebSocketMessage(connectionId, rawMessage, options 
     return {
       type: 'complete',
       data: message,
-      messageId: null
+      messageId: null,
+      raw: rawMessage
     };
 
   } catch (error) {

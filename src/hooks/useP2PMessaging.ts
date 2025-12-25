@@ -95,6 +95,19 @@ const RATE_LIMIT_WINDOW_MS = 60_000;
 const RATE_LIMIT_MAX_MESSAGES = 200;
 const CERT_CLOCK_SKEW_MS = 2 * 60 * 1000;
 
+const isPlainObject = (value: unknown): value is Record<string, unknown> => {
+  if (typeof value !== 'object' || value === null) {
+    return false;
+  }
+  const proto = Object.getPrototypeOf(value);
+  return proto === Object.prototype || proto === null;
+};
+
+const hasPrototypePollutionKeys = (obj: Record<string, unknown>): boolean => {
+  return ['__proto__', 'prototype', 'constructor'].some((key) => Object.prototype.hasOwnProperty.call(obj, key));
+};
+
+
 const createP2PError = (code: string) => {
   const error = new Error(code);
   error.name = 'P2PError';
@@ -333,7 +346,7 @@ export function useP2PMessaging(
 
   const sentP2PReceiptsRef = useRef<Map<string, number>>(new Map());
   const processedReadReceiptsRef = useRef<Set<string>>(new Set());
-  const RECEIPT_RETENTION_MS = 24 * 60 * 60 * 1000; // 24h
+  const RECEIPT_RETENTION_MS = 24 * 60 * 60 * 1000;
 
   type QueuedItem = { to: string; envelope: any; type: 'text' | 'typing' | 'reaction' | 'file'; enqueuedAt: number; ttlMs: number };
   const outboundQueueRef = useRef(new Map<string, QueuedItem[]>());
@@ -364,8 +377,7 @@ export function useP2PMessaging(
     if (p2pServiceRef.current) {
       try {
         p2pServiceRef.current.destroy();
-      } catch (_error) {
-      }
+      } catch { }
       options?.onServiceReady?.(null);
       p2pServiceRef.current = null;
     }
@@ -533,12 +545,10 @@ export function useP2PMessaging(
         if (p2pServiceRef.current) {
           try {
             p2pServiceRef.current.destroy();
-          } catch (_error) {
-          }
+          } catch { }
           options?.onServiceReady?.(null);
           p2pServiceRef.current = null;
         }
-        // Clear caches and queues
         routeProofCacheRef.current.clear();
         peerCertificateCacheRef.current.clear();
         peerAuthCacheRef.current = buildAuthenticator();
@@ -574,7 +584,6 @@ export function useP2PMessaging(
             ...prev,
             connectedPeers: [...new Set([...prev.connectedPeers, peerUsername])],
           }));
-          // Resolve any pending waiters for this peer
           try {
             const set = peerWaitersRef.current.get(peerUsername);
             if (set) {
@@ -674,7 +683,6 @@ export function useP2PMessaging(
       });
 
       try {
-        // Provide peer's Dilithium public key to transport for signature verification
         try {
           const pk = toUint8(cert.dilithiumPublicKey);
           if (pk) p2pServiceRef.current.addPeerDilithiumKey(peerUsername, pk);
@@ -731,7 +739,7 @@ export function useP2PMessaging(
       try {
         service.sendMessage(peer, item.envelope, item.type === 'text' ? 'chat' : (item.type as any));
         try { item.envelope = null; } catch { }
-      } catch (_e) {
+      } catch {
         remaining.push(item);
       }
     }
@@ -986,7 +994,7 @@ export function useP2PMessaging(
             },
           });
           // Queue for flush
-          enqueueOutbound(to, encryptedEnvelope, (options?.messageType === 'typing' ? 'typing' : (options?.messageType === 'reaction' ? 'reaction' : 'chat')) as any, 60000);
+          enqueueOutbound(to, encryptedEnvelope, (options?.messageType === 'typing' ? 'typing' : (options?.messageType === 'reaction' ? 'reaction' : 'chat')) as any, ttl);
         } catch { }
         setLastError(_error);
         return {
@@ -1005,20 +1013,55 @@ export function useP2PMessaging(
       try {
         if (message.type === 'signal') {
           try {
-            const service: any = p2pServiceRef.current as any;
-            if (!service || typeof service.decryptPayload !== 'function') {
-              throw createP2PError('SERVICE_UNAVAILABLE');
-            }
-            const decryptedRaw = await service.decryptPayload(message.from, message.payload);
-            const obj = typeof decryptedRaw === 'string' ? JSON.parse(decryptedRaw) : decryptedRaw;
-            if (obj && obj.kind === 'call-signal' && obj.signal) {
+            const payload = message.payload;
+            let parsed: any = null;
+
+            if (payload && typeof payload === 'object' && payload.kind === 'call-signal') {
+              parsed = payload;
+            } else if (payload && typeof payload === 'string') {
               try {
-                const callSignal = obj.signal;
-                window.dispatchEvent(new CustomEvent('call-signal', { detail: callSignal }));
+                const temp = JSON.parse(payload);
+                if (temp && typeof temp === 'object' && temp.kind === 'call-signal') {
+                  parsed = temp;
+                }
               } catch { }
+            }
+
+            if (!parsed) {
+              const service: any = p2pServiceRef.current as any;
+              if (service && typeof service.decryptPayload === 'function' && payload?.version === 'pq-aead-v1') {
+                try {
+                  const decryptedRaw = await service.decryptPayload(message.from, payload);
+                  if (typeof decryptedRaw === 'string') {
+                    parsed = JSON.parse(decryptedRaw);
+                  } else {
+                    parsed = decryptedRaw;
+                  }
+                } catch (e) {
+                  console.warn('[P2P] Failed to decrypt signal in hook:', e);
+                }
+              }
+            }
+
+            if (!parsed || !isPlainObject(parsed) || hasPrototypePollutionKeys(parsed)) {
               return;
             }
-          } catch (_err) {
+
+            if (parsed.kind !== 'call-signal') {
+              return;
+            }
+
+            const callSignal = parsed.signal;
+            if (!isPlainObject(callSignal) || hasPrototypePollutionKeys(callSignal)) {
+              return;
+            }
+
+            try {
+              window.dispatchEvent(new CustomEvent('call-signal', { detail: callSignal }));
+            } catch { }
+            return;
+          } catch (err) {
+            console.error('[P2P] Error processing signal message:', err);
           }
         }
 
@@ -1295,8 +1338,7 @@ export function useP2PMessaging(
 
             await p2pServiceRef.current?.sendMessage(message.from, encryptedAck, 'delivery-ack');
             try { SecurityAuditLogger.log('info', 'p2p-delivery-ack-sent', { to: message.from, messageId: encryptedMessage.id }); } catch { }
-          } catch (_error) {
-          }
+          } catch { }
         }
       } catch (_error) {
         try {
@@ -1427,7 +1469,6 @@ export function useP2PMessaging(
           timestamp: Date.now(),
         };
 
-        // Encrypt the read receipt
         const encryptedReceipt = await CryptoUtils.Hybrid.encryptForClient(
           readReceiptPayload,
           {
@@ -1448,8 +1489,7 @@ export function useP2PMessaging(
         await p2pServiceRef.current.sendMessage(recipient, encryptedReceipt, 'read-receipt');
         try { sentP2PReceiptsRef.current.set(messageId, Date.now()); } catch { }
         try { SecurityAuditLogger.log('info', 'p2p-read-receipt-sent', { to: recipient, messageId }); } catch { }
-      } catch (_error) {
-      }
+      } catch { }
     },
     [isPeerConnected, hybridKeys?.dilithium, getPeerCertificate],
   );
@@ -1471,7 +1511,7 @@ export function useP2PMessaging(
             rateLimitRef.current.delete(peer);
           }
         }
-        
+
         if (channelSequenceRef.current.size > 256) {
           const entries = [...channelSequenceRef.current.entries()];
           entries.slice(0, entries.length - 256).forEach(([key]) => channelSequenceRef.current.delete(key));
@@ -1481,7 +1521,6 @@ export function useP2PMessaging(
     return () => { try { clearInterval(interval); } catch { } };
   }, []);
 
-  // Refresh peer certificate on new connection (keys may have rotated)
   useEffect(() => {
     const onPeerConnected = (evt: Event) => {
       try {
@@ -1510,7 +1549,6 @@ export function useP2PMessaging(
     };
   }, [getPeerCertificate, invalidatePeerCert]);
 
-  // Listen for certificate fetch requests from answerer side
   useEffect(() => {
     const onFetchPeerCert = (evt: Event) => {
       try {
@@ -1539,7 +1577,6 @@ export function useP2PMessaging(
     };
   }, [getPeerCertificate]);
 
-  // Listen for hybrid keys update event and clear caches
   useEffect(() => {
     const onKeysUpdated = () => {
       peerCertificateCacheRef.current.clear();

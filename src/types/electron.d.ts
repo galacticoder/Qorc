@@ -31,12 +31,6 @@ interface ElectronAPI {
   verifyTorConnection: () => Promise<any>;
   rotateTorCircuit: () => Promise<any>;
 
-  // Onion P2P
-  createOnionEndpoint: (options: { purpose?: 'p2p'; ttlSeconds?: number }) => Promise<{ success: boolean; wsUrl?: string; token?: string; serviceId?: string; error?: string }>;
-  connectOnionWebSocket: (options: { wsUrl: string; token?: string }) => Promise<any> | null;
-  onOnionMessage: (callback: (event: any, data: any) => void) => () => void;
-  sendOnionMessage: (toUsername: string, payload: any) => Promise<{ success: boolean; error?: string }>;
-  
   // Event listeners
   onTorStatusChange: (callback: (event: any, data: any) => void) => () => void;
   onTorProgress: (callback: (event: any, data: any) => void) => () => void;
@@ -69,6 +63,19 @@ interface ElectronAPI {
   
   // Renderer
   rendererReady: () => Promise<void>;
+  
+  // Notifications
+  showNotification: (options: { title: string; body?: string; silent?: boolean; data?: any }) => Promise<{ success: boolean; reason?: string; error?: string }>;
+  setNotificationsEnabled: (enabled: boolean) => Promise<{ success: boolean }>;
+  setBadgeCount: (count: number) => Promise<{ success: boolean }>;
+  clearBadge: () => Promise<{ success: boolean }>;
+  
+  // P2P Signaling
+  p2pSignalingConnect: (serverUrl: string, options?: { username?: string; registrationPayload?: any }) => Promise<{ success: boolean; alreadyConnected?: boolean; error?: string }>;
+  p2pSignalingDisconnect: () => Promise<{ success: boolean }>;
+  p2pSignalingSend: (message: any) => Promise<{ success: boolean; error?: string }>;
+  p2pSignalingStatus: () => Promise<{ connected: boolean }>;
+  onP2PSignalingMessage: (callback: (data: any) => void) => () => void;
 }
 
 declare global {

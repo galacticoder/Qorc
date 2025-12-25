@@ -35,10 +35,14 @@ export const CallHistoryProvider: React.FC<{ children: React.ReactNode }> = ({ c
     const [logs, setLogs] = useState<CallLogEntry[]>([]);
     const [isLoading, setIsLoading] = useState(true);
 
-    // Load logs on mount
     useEffect(() => {
-        const loadLogs = () => {
+        let mounted = true;
+
+        const init = async () => {
             try {
+                await syncEncryptedStorage.waitForInitialization();
+                if (!mounted) return;
+
                 const stored = syncEncryptedStorage.getItem(STORAGE_KEY);
                 if (stored) {
                     const parsed = JSON.parse(stored);
@@ -49,24 +53,14 @@ export const CallHistoryProvider: React.FC<{ children: React.ReactNode }> = ({ c
             } catch (error) {
                 console.error('Failed to load call history:', error);
             } finally {
-                setIsLoading(false);
+                if (mounted) {
+                    setIsLoading(false);
+                }
             }
         };
 
-        // Check if storage is ready, otherwise poll briefly or wait for event
-        // Since syncEncryptedStorage depends on SecureDB, it might not be ready immediately.
-        // We can retry a few times.
-        let retries = 0;
-        const checkStorage = setInterval(() => {
-            const stored = syncEncryptedStorage.getItem(STORAGE_KEY);
-            if (stored !== null || retries > 10) {
-                loadLogs();
-                clearInterval(checkStorage);
-            }
-            retries++;
-        }, 500);
-
-        return () => clearInterval(checkStorage);
+        void init();
+        return () => { mounted = false; };
     }, []);
 
     const saveLogs = useCallback((newLogs: CallLogEntry[]) => {

@@ -155,8 +155,6 @@ export const useAuth = (_secureDB?: SecureDB) => {
 
         updateCountdown();
       }
-
-      console.log('[useAuth] States reset complete');
     };
 
     try { window.addEventListener('auth-error', onAuthError as any); } catch { }
@@ -1097,7 +1095,11 @@ export const useAuth = (_secureDB?: SecureDB) => {
       return false;
     }
 
-    setAuthStatus("Recovering...");
+    const alreadyAuthenticated = accountAuthenticated && isLoggedIn;
+    if (!alreadyAuthenticated) {
+      try { setTokenValidationInProgress(true); } catch { }
+      setAuthStatus("Recovering...");
+    }
 
     try {
       if (!websocketClient.isConnectedToServer()) {
@@ -1114,11 +1116,14 @@ export const useAuth = (_secureDB?: SecureDB) => {
       }));
 
       return true;
-    } catch (_error) {
-      setAuthStatus('');
+    } catch {
+      if (!alreadyAuthenticated) {
+        setAuthStatus('');
+        try { setTokenValidationInProgress(false); } catch { }
+      }
       return false;
     }
-  }, []);
+  }, [accountAuthenticated, isLoggedIn]);
 
   const storeAuthenticationState = useCallback((username: string) => {
     try {
@@ -1155,7 +1160,6 @@ export const useAuth = (_secureDB?: SecureDB) => {
         } catch { }
       }
       try { websocketClient.close(); } catch { }
-      try { setTimeout(() => { try { void websocketClient.connect(); } catch { } }, 0); } catch { }
     } catch { }
 
     clearAuthenticationState();
@@ -1418,8 +1422,7 @@ export const useAuth = (_secureDB?: SecureDB) => {
         try {
           window.dispatchEvent(new CustomEvent('hybrid-keys-updated'));
         } catch { }
-      } catch (_err) {
-      }
+      } catch { }
     };
 
     uploadKeys();
@@ -1438,11 +1441,8 @@ export const useAuth = (_secureDB?: SecureDB) => {
             setUsername(storedUsername);
           }
         } else {
-          // Don't set tokenValidationInProgress(false) here - let auth recovery flow handle it
-          // This prevents flickering the login form before recovery is attempted
           const storedUsername = syncEncryptedStorage.getItem('last_authenticated_username');
           if (!storedUsername) {
-            // Only clear validation state if there's no stored username at all
             setTokenValidationInProgress(false);
             setAuthStatus('');
           }
@@ -1515,7 +1515,7 @@ export const useAuth = (_secureDB?: SecureDB) => {
             }));
             setShowPasswordPrompt(false);
             setAuthStatus("Verifying...");
-          } catch (_error) {
+          } catch {
             setShowPasswordPrompt(true);
             setAuthStatus("Password required");
           }
@@ -1553,6 +1553,7 @@ export const useAuth = (_secureDB?: SecureDB) => {
 
   return {
     username,
+    setUsername,
     tokenValidationInProgress,
     setTokenValidationInProgress,
     serverHybridPublic,
@@ -1598,7 +1599,7 @@ export const useAuth = (_secureDB?: SecureDB) => {
         if (!passwordHashParams) throw new Error('Missing password params');
         const passwordHash = await CryptoUtils.Hash.hashDataUsingInfo(password, passwordHashParams);
         websocketClient.send(JSON.stringify({ type: SignalType.PASSWORD_HASH_RESPONSE, passwordHash }));
-      } catch (_e) {
+      } catch {
         setLoginError('Password processing failed');
       }
     },

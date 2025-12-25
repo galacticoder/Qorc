@@ -448,7 +448,7 @@ export class BlockingSystem {
 
       this.resetCircuitBreaker();
       return blockList;
-    } catch (_error) {
+    } catch {
       this.recordCircuitFailure();
       throw new Error('Failed to decrypt block list: invalid passphrase or corrupted data');
     }
@@ -486,9 +486,9 @@ export class BlockingSystem {
       this.log('loadBlockList.success', { count: blockList.length });
       this.resetCircuitBreaker();
       return blockList;
-    } catch (_error) {
+    } catch (error) {
       // On decryption failure, prefer last known cache to avoid UI flicker
-      const msg = _error instanceof Error ? _error.message : String(_error);
+      const msg = error instanceof Error ? error.message : String(error);
       this.log('loadBlockList.error', { error: msg });
       if (this.cachedBlockList !== null) {
         return this.cachedBlockList;
@@ -497,7 +497,7 @@ export class BlockingSystem {
         this.cachedBlockList = [];
         return [];
       }
-      throw _error;
+      throw error;
     }
   }
 
@@ -520,9 +520,9 @@ export class BlockingSystem {
       await this.updateBlockTokens(blockList);
       await this.persistQueue();
       this.resetCircuitBreaker();
-    } catch (error) {
-      this.log('save.error', { error: error instanceof Error ? error.message : String(error) });
-      throw error;
+    } catch {
+      this.log('save.error', { error: 'Failed to save block list' });
+      throw new Error('Failed to save block list');
     }
   }
 
@@ -552,8 +552,8 @@ export class BlockingSystem {
       });
 
       this.log('updateBlockTokens.sent', { count: tokens.length });
-    } catch (error) {
-      this.log('updateBlockTokens.error', { error: error instanceof Error ? error.message : String(error) });
+    } catch {
+      this.log('updateBlockTokens.error', { error: 'Failed to update block tokens' });
     }
   }
 
@@ -577,8 +577,8 @@ export class BlockingSystem {
         } catch { }
       }
       return null;
-    } catch (error) {
-      this.log('getCurrentAuthenticatedUser.error', { error: error instanceof Error ? error.message : String(error) });
+    } catch {
+      this.log('getCurrentAuthenticatedUser.error', { error: 'Failed to get current authenticated user' });
       return null;
     }
   }
@@ -612,8 +612,8 @@ export class BlockingSystem {
       }
 
       return parsed;
-    } catch (error) {
-      this.log('queue.decrypt.error', { error: error instanceof Error ? error.message : String(error) });
+    } catch {
+      this.log('queue.decrypt.error', { error: 'Failed to decrypt queued message' });
       return null;
     }
   }
@@ -663,8 +663,8 @@ export class BlockingSystem {
           );
         }
       }
-    } catch (error) {
-      this.log('queue.load.error', { error: error instanceof Error ? error.message : String(error) });
+    } catch {
+      this.log('queue.load.error', { error: 'Failed to load queue from storage' });
       this.queuedMessages = [];
     } finally {
       this.queueLoaded = true;
@@ -680,8 +680,7 @@ export class BlockingSystem {
       }
       void this.persistQueue();
       return;
-    } catch (_e) {
-    }
+    } catch { }
 
     await this.queueMessage(message);
   }

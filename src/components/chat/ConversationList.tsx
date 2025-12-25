@@ -8,6 +8,32 @@ import { Input } from "../ui/input";
 import { toast } from "sonner";
 import { UserAvatar } from "../ui/UserAvatar";
 
+const UI_CALL_STATUS_RATE_WINDOW_MS = 10_000;
+const UI_CALL_STATUS_RATE_MAX = 500;
+const MAX_UI_CALL_STATUS_PEER_LENGTH = 256;
+const MAX_UI_CALL_STATUS_VALUE_LENGTH = 64;
+
+const isPlainObject = (value: unknown): value is Record<string, unknown> => {
+  if (typeof value !== 'object' || value === null) return false;
+  const proto = Object.getPrototypeOf(value);
+  return proto === Object.prototype || proto === null;
+};
+
+const hasPrototypePollutionKeys = (obj: unknown): boolean => {
+  if (obj == null || typeof obj !== 'object') return false;
+  const keys = Object.keys(obj as Record<string, unknown>);
+  return keys.some((key) => key === '__proto__' || key === 'constructor' || key === 'prototype');
+};
+
+const sanitizeUiText = (value: unknown, maxLen: number): string | null => {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  const cleaned = trimmed.replace(/[\x00-\x1F\x7F]/g, '');
+  if (!cleaned) return null;
+  return cleaned.slice(0, maxLen);
+};
+
 export interface Conversation {
   readonly id: string;
   readonly username: string;
@@ -273,16 +299,33 @@ export const ConversationList = memo<ConversationListProps>(function Conversatio
     }
   }, [newChatUsername, onAddConversation]);
 
+  const callStatusRateRef = React.useRef<{ windowStart: number; count: number }>({ windowStart: Date.now(), count: 0 });
+
   const handleCallStatus = useCallback((e: Event) => {
     try {
-      const ce = e as CustomEvent;
-      const detail = ce.detail;
-      if (!detail || typeof detail !== 'object') return;
+      const now = Date.now();
+      const bucket = callStatusRateRef.current;
+      if (now - bucket.windowStart > UI_CALL_STATUS_RATE_WINDOW_MS) {
+        bucket.windowStart = now;
+        bucket.count = 0;
+      }
+      bucket.count += 1;
+      if (bucket.count > UI_CALL_STATUS_RATE_MAX) {
+        return;
+      }
 
-      const { peer, status } = detail as { peer?: unknown; status?: unknown };
-      if (typeof peer !== 'string' || typeof status !== 'string') return;
+      if (!(e instanceof CustomEvent)) return;
+      const detail = e.detail;
+      if (!isPlainObject(detail) || hasPrototypePollutionKeys(detail)) return;
 
-      const isVideo = detail && typeof (detail as any).type === 'string' ? (detail as any).type === 'video' : false;
+      const peer = sanitizeUiText((detail as any).peer, MAX_UI_CALL_STATUS_PEER_LENGTH);
+      if (!peer) return;
+
+      const status = sanitizeUiText((detail as any).status, MAX_UI_CALL_STATUS_VALUE_LENGTH);
+      if (!status) return;
+
+      const type = sanitizeUiText((detail as any).type, MAX_UI_CALL_STATUS_VALUE_LENGTH);
+      const isVideo = type === 'video';
 
       if (status === 'ringing' || status === 'connecting' || status === 'connected') {
         setActivePeer(peer);
@@ -373,12 +416,13 @@ export const ConversationList = memo<ConversationListProps>(function Conversatio
           <div className="relative">
             <Search className="absolute left-2 top-2.5 h-4 w-4 text-muted-foreground" />
             <Input
-              placeholder="Username"
+              placeholder="Username..."
               value={newChatUsername}
               onChange={(e) => setNewChatUsername(e.target.value)}
               className="pl-8 select-none"
+              disabled={isAdding}
               onKeyDown={(e) => {
-                if (e.key === 'Enter') {
+                if (e.key === 'Enter' && !isAdding) {
                   handleAddChat();
                 }
               }}

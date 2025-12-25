@@ -102,7 +102,7 @@ This is not a metadata‑free system. The service retains the minimal routing da
 
 ## Transport and delivery
 - Primary channel: WebSockets over TLS with certificate pinning enforced by the desktop.
-- P2P path: a minimal WebRTC signaling path allows peer‑to‑peer messaging when available; the app automatically falls back to the server path when P2P is unavailable.
+- P2P path: a minimal WebRTC signaling path allows peer‑to‑peer messaging when available; the app automatically falls back to the server path when P2P is unavailable. If a TURN server is configured (via `TURN_EXTERNAL_IP`, `TURN_USERNAME`, `TURN_PASSWORD` in `.env`), it will be automatically provided to clients for reliable P2P across NATs.
 - Tor: the desktop bootstraps its own Tor instance, verifies a working SOCKS proxy, and routes traffic through it. Bridge transports (obfs4 or snowflake) are supported. Bundle signature verification is performed when possible (see [`docs/ENVIRONMENT_VARIABLES.md`](https://github.com/galacticoder/Qor-Chat/blob/main/docs/ENVIRONMENT_VARIABLES.md) for verification controls).
 
 ## Privacy characteristics and limitations

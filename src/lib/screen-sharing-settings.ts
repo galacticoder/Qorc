@@ -220,8 +220,7 @@ export class ScreenSharingSettingsManager {
       if (decrypted) {
         return decrypted;
       }
-    } catch (_error) {
-    }
+    } catch { }
     return {
       resolution: buildDefaultResolution(),
       frameRate: 30,

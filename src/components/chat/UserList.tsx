@@ -12,7 +12,7 @@ export interface User {
   readonly isOnline: boolean;
   readonly isTyping?: boolean;
   readonly hybridPublicKeys?: {
-    readonly x25519PublicBase64: string;
+    readonly x25519PublicBase64?: string;
     readonly kyberPublicBase64: string;
     readonly dilithiumPublicBase64: string;
   };
@@ -151,7 +151,7 @@ export const Sidebar = React.memo<SidebarProps>(({ className, children, currentU
     onLogout?.();
   }, [onActiveTabChange, onLogout]);
 
-  const userInitial = useMemo(() =>
+  const _userInitial = useMemo(() =>
     currentUsername?.charAt(0).toUpperCase() || "U",
     [currentUsername]
   );
@@ -178,7 +178,7 @@ export const Sidebar = React.memo<SidebarProps>(({ className, children, currentU
               <span
                 className="font-semibold text-lg text-foreground"
               >
-
+                Qor
               </span>
             )}
           </div>
@@ -308,6 +308,53 @@ export const Sidebar = React.memo<SidebarProps>(({ className, children, currentU
             </div>
             <div className="flex-1 overflow-hidden">
               {children}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showAddUser && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/50"
+          onClick={handleCloseModal}
+          role="dialog"
+          aria-modal="true"
+        >
+          <div
+            className="w-full max-w-sm rounded-lg border bg-card p-4 shadow-lg"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between mb-3">
+              <div className="font-medium">Start new chat</div>
+              <Button variant="ghost" size="sm" onClick={handleCloseModal}>
+                Close
+              </Button>
+            </div>
+
+            <input
+              ref={inputRef}
+              value={newUsername}
+              onChange={handleInputChange}
+              onKeyDown={handleKeyPress}
+              placeholder="Username"
+              className="w-full h-10 rounded-md border bg-background px-3 text-sm"
+              disabled={isValidating}
+              autoComplete="off"
+            />
+
+            {validationError && (
+              <div className="mt-2 text-xs text-red-600 dark:text-red-400">
+                {validationError}
+              </div>
+            )}
+
+            <div className="mt-4 flex justify-end gap-2">
+              <Button variant="outline" onClick={handleCloseModal} disabled={isValidating}>
+                Cancel
+              </Button>
+              <Button onClick={handleAddUser} disabled={isValidating || !newUsername.trim()}>
+                {isValidating ? 'Adding…' : 'Add'}
+              </Button>
             </div>
           </div>
         </div>

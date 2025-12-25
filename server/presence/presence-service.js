@@ -77,6 +77,8 @@ export class PresenceService {
 
     try {
       let remaining = 0;
+      let deliveryCount = 0;
+      let shouldSetOffline = false;
       await withRedisClient(async (client) => {
         const key = this.onlineSessionsKey(username);
         await client.srem(key, sessionId);
@@ -84,17 +86,44 @@ export class PresenceService {
         
         if (remaining === 0) {
           await client.del(key);
-          await setOffline(username);
+          try {
+            deliveryCount = await client.hlen(`ws:delivery:${username}`);
+          } catch {
+            deliveryCount = 0;
+          }
+          if (!deliveryCount) {
+            try {
+              await client.del(`ws:delivery:${username}`);
+            } catch {
+            }
+            shouldSetOffline = true;
+          }
         } else {
           await client.expire(key, 300);
         }
       });
-      
-      this.logger.log('[PRESENCE] User set offline:', {
-        username: this.anonymize(username),
-        sessionId: this.anonymize(sessionId),
-        remainingSessions: remaining
-      });
+
+      if (shouldSetOffline) {
+        await setOffline(username);
+        this.logger.log('[PRESENCE] User set offline:', {
+          username: this.anonymize(username),
+          sessionId: this.anonymize(sessionId),
+          remainingSessions: 0
+        });
+      } else if (remaining === 0 && deliveryCount > 0) {
+        await setOnline(username);
+        this.logger.log('[PRESENCE] Session removed, keeping online for pending deliveries:', {
+          username: this.anonymize(username),
+          sessionId: this.anonymize(sessionId),
+          pendingDeliveries: deliveryCount
+        });
+      } else {
+        this.logger.log('[PRESENCE] Session removed:', {
+          username: this.anonymize(username),
+          sessionId: this.anonymize(sessionId),
+          remainingSessions: remaining
+        });
+      }
     } catch (error) {
       this.logger.error('[PRESENCE] Failed to set user offline:', {
         username: this.anonymize(username),
@@ -145,12 +174,14 @@ export class PresenceService {
     }
 
     try {
-      await publishToUser(username, message);
+      const receivers = await publishToUser(username, message);
       this.logger.log('[PRESENCE] Message published to user:', { 
         username: this.anonymize(username), 
         messageLength: message.length,
+        receivers,
         ...metadata 
       });
+      return receivers;
     } catch (error) {
       this.logger.error('[PRESENCE] Failed to publish message to user:', { 
         username: this.anonymize(username), 
@@ -183,23 +214,16 @@ export class PresenceService {
             this.logger.warn('[PRESENCE] Invalid channel format received', { channel: this.anonymize(channel) });
             return;
           }
-          
-          const username = channel.slice('deliver:'.length);
-          
-          if (!this.normalizeUsername(username)) {
-            this.logger.warn('[PRESENCE] Invalid username in channel', { channel: this.anonymize(channel) });
-            return;
-          }
-          
+
           if (!message || typeof message !== 'string' || message.length === 0 || message.length > 1048576) {
-            this.logger.warn('[PRESENCE] Invalid message received', { username: this.anonymize(username) });
+            this.logger.warn('[PRESENCE] Invalid message received', { channel: this.anonymize(channel) });
             return;
           }
           
           await messageHandler({
             pattern: matchedPattern,
             channel,
-            username,
+            username: null,
             message,
             timestamp: Date.now()
           });

@@ -70,7 +70,7 @@ interface LinkifyWithPreviewsProps {
   readonly urls?: string[];
 }
 
-const CustomLinkPreview = React.memo(({ url, isCurrentUser, showFallbackLink }: { url: string; isCurrentUser: boolean; showFallbackLink?: boolean }) => {
+const CustomLinkPreview = React.memo(({ url, isCurrentUser: _isCurrentUser, showFallbackLink }: { url: string; isCurrentUser: boolean; showFallbackLink?: boolean }) => {
   const [data, setData] = useState<CachedPreview | null>(linkPreviewCache.get(url) || null);
   const [loading, setLoading] = useState(!data);
   const [error, setError] = useState(false);
@@ -102,7 +102,7 @@ const CustomLinkPreview = React.memo(({ url, isCurrentUser, showFallbackLink }: 
         try {
           const nextUrl = new URL(result.redirectTo, targetUrl).href;
           return fetchWithRedirects(nextUrl, attempt + 1);
-        } catch (e) {
+        } catch {
           throw new Error('Invalid redirect URL');
         }
       }
@@ -131,7 +131,7 @@ const CustomLinkPreview = React.memo(({ url, isCurrentUser, showFallbackLink }: 
           setData(preview);
           setLoading(false);
         }
-      } catch (err) {
+      } catch {
         if (mounted) {
           setError(true);
           setLoading(false);

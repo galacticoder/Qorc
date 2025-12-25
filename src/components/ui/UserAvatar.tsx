@@ -1,6 +1,32 @@
 import React, { useState, useEffect, useCallback, memo } from 'react';
 import { profilePictureSystem } from '../../lib/profile-picture-system';
 
+const PROFILE_PICTURE_EVENT_RATE_WINDOW_MS = 10_000;
+const PROFILE_PICTURE_EVENT_RATE_MAX = 200;
+const MAX_PROFILE_PICTURE_EVENT_TYPE_LENGTH = 32;
+const MAX_PROFILE_PICTURE_EVENT_USERNAME_LENGTH = 256;
+
+const isPlainObject = (value: unknown): value is Record<string, unknown> => {
+    if (typeof value !== 'object' || value === null) return false;
+    const proto = Object.getPrototypeOf(value);
+    return proto === Object.prototype || proto === null;
+};
+
+const hasPrototypePollutionKeys = (obj: unknown): boolean => {
+    if (obj == null || typeof obj !== 'object') return false;
+    const keys = Object.keys(obj as Record<string, unknown>);
+    return keys.some((key) => key === '__proto__' || key === 'constructor' || key === 'prototype');
+};
+
+const sanitizeEventText = (value: unknown, maxLen: number): string | null => {
+    if (typeof value !== 'string') return null;
+    const trimmed = value.trim();
+    if (!trimmed) return null;
+    const cleaned = trimmed.replace(/[\x00-\x1F\x7F]/g, '');
+    if (!cleaned) return null;
+    return cleaned.slice(0, maxLen);
+};
+
 interface UserAvatarProps {
     username: string;
     isCurrentUser?: boolean;
@@ -28,6 +54,7 @@ export const UserAvatar = memo(function UserAvatar({
     const [requested, setRequested] = useState(false);
     const [isLoaded, setIsLoaded] = useState(false);
     const currentUrlRef = React.useRef<string | null>(null);
+    const profilePictureEventRateRef = React.useRef<{ windowStart: number; count: number }>({ windowStart: Date.now(), count: 0 });
 
     const loadAvatar = useCallback(() => {
         if (isCurrentUser) {
@@ -45,7 +72,6 @@ export const UserAvatar = memo(function UserAvatar({
 
         } else {
             const peer = profilePictureSystem.getPeerAvatar(username);
-
             if (peer !== currentUrlRef.current) {
                 if (peer === null && currentUrlRef.current !== null) {
                 } else {
@@ -55,9 +81,12 @@ export const UserAvatar = memo(function UserAvatar({
                 }
             }
 
-            if (!peer && !requested) {
-                setRequested(true);
-                profilePictureSystem.requestPeerAvatar(username);
+            if (!requested) {
+                const isStale = profilePictureSystem.isPeerAvatarStale(username);
+                if (isStale) {
+                    setRequested(true);
+                    profilePictureSystem.requestPeerAvatar(username);
+                }
             }
         }
     }, [username, isCurrentUser, requested]);
@@ -65,18 +94,47 @@ export const UserAvatar = memo(function UserAvatar({
     useEffect(() => {
         loadAvatar();
 
-        const handleUpdate = (e: CustomEvent) => {
-            const { type, username: updatedUser, notFound } = e.detail || {};
-
-            if (type === 'own' && isCurrentUser) {
-                loadAvatar();
-            } else if (type === 'peer' && updatedUser === username) {
-                if (notFound) {
-                    setTimeout(() => setRequested(false), 5000);
-                } else {
-                    loadAvatar();
+        const handleUpdate = (event: Event) => {
+            try {
+                const now = Date.now();
+                const bucket = profilePictureEventRateRef.current;
+                if (now - bucket.windowStart > PROFILE_PICTURE_EVENT_RATE_WINDOW_MS) {
+                    bucket.windowStart = now;
+                    bucket.count = 0;
                 }
-            }
+                bucket.count += 1;
+                if (bucket.count > PROFILE_PICTURE_EVENT_RATE_MAX) {
+                    return;
+                }
+
+                if (!(event instanceof CustomEvent)) return;
+                const detail = event.detail;
+                if (!isPlainObject(detail) || hasPrototypePollutionKeys(detail)) return;
+
+                const type = sanitizeEventText((detail as any).type, MAX_PROFILE_PICTURE_EVENT_TYPE_LENGTH);
+                if (!type) return;
+
+                if (type === 'own') {
+                    if (isCurrentUser) {
+                        loadAvatar();
+                    }
+                    return;
+                }
+
+                if (type === 'peer') {
+                    const updatedUser = sanitizeEventText((detail as any).username, MAX_PROFILE_PICTURE_EVENT_USERNAME_LENGTH);
+                    if (!updatedUser) return;
+                    const notFound = (detail as any).notFound === true;
+
+                    if (updatedUser === username) {
+                        if (notFound) {
+                            setTimeout(() => setRequested(false), 5000);
+                        } else {
+                            loadAvatar();
+                        }
+                    }
+                }
+            } catch { }
         };
 
         window.addEventListener('profile-picture-updated', handleUpdate as EventListener);
@@ -132,7 +190,7 @@ export const UserAvatar = memo(function UserAvatar({
             )}
 
             {/* Show skeleton if no URL or not yet loaded */}
-            {(!avatarUrl || !isLoaded) && (
+            {showFallback && (!avatarUrl || !isLoaded) && (
                 <div
                     className="absolute inset-0 w-full h-full animate-pulse"
                     style={{ backgroundColor: skeletonColor }}

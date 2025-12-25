@@ -6,6 +6,7 @@ import websocketClient from '../lib/websocket';
 import { isValidKyberPublicKeyBase64 } from '../lib/validators';
 import type { SecureDB } from '../lib/secureDB';
 import { secureMessageQueue } from '../lib/secure-message-queue';
+import { encryptLongTerm } from '../lib/long-term-encryption';
 
 const MAX_CONTENT_LENGTH = 16 * 1024;
 const SESSION_WAIT_MS = 12_000;
@@ -29,6 +30,9 @@ const SIGNAL_TYPE_MAP: Record<string, string> = {
 };
 
 const TEXT_ENCODER = new TextEncoder();
+const globalEncryptedPayloadCache = new Map<string, { encryptedPayload: any; to: string; messageId: string }>();
+const globalLongTermStoreAttempted = new Set<string>();
+const MAX_CACHE_SIZE = 2000;
 
 const getSessionApi = () => {
   const edgeApi = (globalThis as any)?.edgeApi ?? null;
@@ -39,7 +43,7 @@ const getSessionApi = () => {
       }
       try {
         return await edgeApi.hasSession(args);
-      } catch (_error) {
+      } catch {
         return { hasSession: false };
       }
     },
@@ -355,7 +359,7 @@ const recipientKeyValidator = () => {
 };
 
 export function useMessageSender(
-  users: { username: string; hybridPublicKeys: { kyberPublicBase64: string; dilithiumPublicBase64: string; x25519PublicBase64?: string } }[],
+  users: { username: string; hybridPublicKeys?: { kyberPublicBase64: string; dilithiumPublicBase64: string; x25519PublicBase64?: string } }[],
   loginUsernameRef: React.MutableRefObject<string>,
   currentUsername: string,
   originalUsernameRef: React.MutableRefObject<string>,
@@ -375,7 +379,7 @@ export function useMessageSender(
   resolvePeerHybridKeys?: (peerUsername: string) => Promise<{ kyberPublicBase64: string; dilithiumPublicBase64: string; x25519PublicBase64?: string } | null>
 ) {
   const recipientDirectory = useMemo(() => {
-    const map = new Map<string, { username: string; hybridPublicKeys: { kyberPublicBase64: string; dilithiumPublicBase64: string; x25519PublicBase64?: string } }>();
+    const map = new Map<string, { username: string; hybridPublicKeys?: { kyberPublicBase64: string; dilithiumPublicBase64: string; x25519PublicBase64?: string } }>();
     users.forEach((user) => {
       if (user.username) {
         map.set(user.username, user);
@@ -384,7 +388,6 @@ export function useMessageSender(
     return map;
   }, [users]);
 
-  // Attempt to resolve a peer's hybrid keys on-demand, waiting briefly for server response
   const defaultResolvePeerHybridKeys = useCallback(async (peerUsername: string): Promise<{ kyberPublicBase64: string; dilithiumPublicBase64: string; x25519PublicBase64?: string } | null> => {
     if (!peerUsername) return null;
 
@@ -442,6 +445,60 @@ export function useMessageSender(
 
   const resolvePeerHybridKeysToUse = resolvePeerHybridKeys || defaultResolvePeerHybridKeys;
 
+  useEffect(() => {
+    const handler = async (event: Event) => {
+      const detail = (event as CustomEvent).detail || {};
+      const to = typeof detail.to === 'string' ? detail.to : '';
+      const messageId = typeof detail.messageId === 'string' ? detail.messageId : '';
+      
+      if (!to || !messageId) {
+        return;
+      }
+
+      const attemptKey = `${to}|${messageId}`;
+      if (globalLongTermStoreAttempted.has(attemptKey)) {
+        return;
+      }
+      globalLongTermStoreAttempted.add(attemptKey);
+
+      const cached = globalEncryptedPayloadCache.get(attemptKey);
+      if (!cached?.encryptedPayload) {
+        return;
+      }
+
+      let recipientKyberKey: string | null = recipientDirectory.get(to)?.hybridPublicKeys?.kyberPublicBase64 ?? null;
+      if (!recipientKyberKey) {
+        try {
+          const resolved = await resolvePeerHybridKeysToUse(to);
+          recipientKyberKey = resolved?.kyberPublicBase64 ?? null;
+        } catch { }
+      }
+
+      if (!recipientKyberKey || !isValidKyberPublicKeyBase64(recipientKyberKey)) {
+        return;
+      }
+
+      try {
+        const messageData = JSON.stringify({
+          messageId,
+          encryptedPayload: cached.encryptedPayload,
+          timestamp: Date.now()
+        });
+        const longTermEnvelope = await encryptLongTerm(messageData, recipientKyberKey);
+        await websocketClient.sendSecureControlMessage({
+          type: SignalType.STORE_OFFLINE_MESSAGE,
+          messageId,
+          to,
+          longTermEnvelope,
+          version: 'lt-v1'
+        });
+      } catch { }
+    };
+
+    window.addEventListener('offline-longterm-required', handler as EventListener);
+    return () => window.removeEventListener('offline-longterm-required', handler as EventListener);
+  }, [recipientDirectory, resolvePeerHybridKeysToUse]);
+
   const sessionLocksRef = useRef(new WeakMap<object, Map<string, Promise<boolean>>>());
   const idCacheRef = useRef(getIdCache());
   const validatorRef = useRef(recipientKeyValidator());
@@ -451,7 +508,7 @@ export function useMessageSender(
   const sessionPrefetchMap = useRef<Map<string, Promise<void>>>(new Map());
   const lastSessionBundleReqTsRef = useRef<Map<string, number>>(new Map());
   const pendingRetryMessagesRef = useRef<Map<string, {
-    user: { username: string; hybridPublicKeys: { kyberPublicBase64: string; dilithiumPublicBase64: string; x25519PublicBase64?: string } };
+    user: { username: string; hybridPublicKeys?: { kyberPublicBase64: string; dilithiumPublicBase64: string; x25519PublicBase64?: string } };
     content: string;
     replyTo?: string | { id: string; sender?: string; content?: string };
     fileData?: string;
@@ -508,7 +565,7 @@ export function useMessageSender(
 
   const handleSendMessage = useCallback(
     async (
-      user: { username: string; hybridPublicKeys: { kyberPublicBase64: string; dilithiumPublicBase64: string; x25519PublicBase64?: string } },
+      user: { username: string; hybridPublicKeys?: { kyberPublicBase64: string; dilithiumPublicBase64: string; x25519PublicBase64?: string } },
       content: string,
       replyTo?: string | { id: string; sender?: string; content?: string },
       fileData?: string,
@@ -783,10 +840,26 @@ export function useMessageSender(
 
         const encryptedPayload = encrypted.encryptedPayload;
 
+        try {
+          const cacheKey = `${recipientUsername}|${wireMessageId}`;
+          globalEncryptedPayloadCache.set(cacheKey, {
+            encryptedPayload,
+            to: recipientUsername,
+            messageId: wireMessageId
+          });
+          if (globalEncryptedPayloadCache.size > MAX_CACHE_SIZE) {
+            const firstKey = globalEncryptedPayloadCache.keys().next().value;
+            if (firstKey) {
+              globalEncryptedPayloadCache.delete(firstKey);
+            }
+          }
+        } catch { }
+
         websocketClient.send(
           JSON.stringify({
             type: SignalType.ENCRYPTED_MESSAGE,
             to: recipientUsername,
+            messageId: wireMessageId,
             encryptedPayload
           }),
         );

@@ -50,12 +50,18 @@ const POOL_CONFIG = {
   evictionRunIntervalMillis: clampNumber(process.env.REDIS_POOL_EVICTION_INTERVAL, { min: 10_000, max: 600_000, defaultValue: 60_000 })
 };
 
-function buildRedisOptions() {
+let cachedTlsOptions = null;
+
+function getTlsOptions() {
+  if (cachedTlsOptions) {
+    return cachedTlsOptions;
+  }
+
   const tlsOptions = {
     servername: process.env.REDIS_TLS_SERVERNAME || 'redis',
     rejectUnauthorized: true
   };
-  
+
   if (process.env.REDIS_CA_CERT_PATH) {
     console.log('[PRESENCE] Reading CA cert from:', process.env.REDIS_CA_CERT_PATH);
     tlsOptions.ca = [fs.readFileSync(process.env.REDIS_CA_CERT_PATH)];
@@ -68,7 +74,12 @@ function buildRedisOptions() {
     console.log('[PRESENCE] Reading client key from:', process.env.REDIS_CLIENT_KEY_PATH);
     tlsOptions.key = fs.readFileSync(process.env.REDIS_CLIENT_KEY_PATH);
   }
-  
+
+  cachedTlsOptions = tlsOptions;
+  return tlsOptions;
+}
+
+function getRedisOptions() {
   return {
     maxRetriesPerRequest: 3,
     retryDelayOnFailover: 100,
@@ -81,12 +92,8 @@ function buildRedisOptions() {
       noDelay: true,
       timeout: clampNumber(process.env.REDIS_SOCKET_TIMEOUT, { min: 30_000, max: 600_000, defaultValue: 120_000 })
     },
-    tls: tlsOptions
+    tls: getTlsOptions()
   };
-}
-
-function getRedisOptions() {
-  return buildRedisOptions();
 }
 
 function parseRedisClusterNodes(redisClusterNodes) {
@@ -131,48 +138,48 @@ const factory = {
       username: process.env.REDIS_USERNAME,
       password: process.env.REDIS_PASSWORD
     });
-    
+
     client.on('error', (error) => logRedisError('Redis client error', error));
     client.on('connect', () => cryptoLogger.debug('Redis pool client connected'));
     client.on('ready', () => cryptoLogger.debug('Redis pool client ready'));
     client.on('close', () => cryptoLogger.warn('Redis client closed'));
     client.on('reconnecting', () => cryptoLogger.warn('Redis client reconnecting'));
-    
+
     await new Promise((resolve, reject) => {
       if (client.status === 'ready') {
         resolve();
         return;
       }
-      
+
       let timeout;
       let readyHandler;
       let errorHandler;
-      
+
       const cleanup = () => {
         if (timeout) clearTimeout(timeout);
         if (readyHandler) client.off('ready', readyHandler);
         if (errorHandler) client.off('error', errorHandler);
       };
-      
+
       readyHandler = () => {
         cleanup();
         resolve();
       };
-      
+
       errorHandler = (error) => {
         cleanup();
         reject(error);
       };
-      
+
       timeout = setTimeout(() => {
         cleanup();
         reject(new Error('Redis client connection timeout - neither ready nor error event received within 15 seconds'));
       }, 15000);
-      
+
       client.once('ready', readyHandler);
       client.once('error', errorHandler);
     });
-    
+
     return client;
   },
   destroy: async (client) => {
@@ -195,11 +202,11 @@ export async function withRedisClient(operation) {
   if (USING_CLUSTER && clusterClient) {
     return operation(clusterClient);
   }
-  
+
   if (!redisPool) {
     throw new Error('Redis pool not available');
   }
-  
+
   try {
     const client = await redisPool.acquire();
     try {
@@ -313,42 +320,42 @@ export async function createSubscriber() {
     username: process.env.REDIS_USERNAME,
     password: process.env.REDIS_PASSWORD
   });
-  
+
   sub.on('error', (error) => logRedisError('Redis subscriber error', error));
   sub.on('ready', () => cryptoLogger.debug('Redis subscriber ready for user notifications'));
   sub.on('close', () => cryptoLogger.warn('Redis subscriber closed'));
-  
+
   await new Promise((resolve, reject) => {
     if (sub.status === 'ready') {
       resolve();
       return;
     }
-    
+
     let timeout;
     let readyHandler;
     let errorHandler;
-    
+
     const cleanup = () => {
       if (timeout) clearTimeout(timeout);
       if (readyHandler) sub.off('ready', readyHandler);
       if (errorHandler) sub.off('error', errorHandler);
     };
-    
+
     readyHandler = () => {
       cleanup();
       resolve();
     };
-    
+
     errorHandler = (error) => {
       cleanup();
       reject(error);
     };
-    
+
     timeout = setTimeout(() => {
       cleanup();
       reject(new Error('Redis subscriber connection timeout - neither ready nor error event received within 15 seconds'));
     }, 15000);
-    
+
     sub.once('ready', readyHandler);
     sub.once('error', errorHandler);
   });
@@ -363,7 +370,7 @@ export async function closeSubscriber(subscriber) {
         await subscriber.quit();
       }
     } catch (error) {
-    cryptoLogger.error('Error closing subscriber', error);
+      cryptoLogger.error('Error closing subscriber', error);
     }
   }
 }
@@ -439,11 +446,11 @@ async function enforceRateLimit(key) {
     await withRedisClient(async (client) => {
       const rateLimitKey = `ratelimit:${key}`;
       const count = await client.incr(rateLimitKey);
-      
+
       if (count === 1) {
         await client.pexpire(rateLimitKey, RATE_LIMIT_WINDOW_MS);
       }
-      
+
       if (count > RATE_LIMIT_MAX_ACTIONS) {
         throw new Error('Rate limit exceeded');
       }
@@ -452,9 +459,9 @@ async function enforceRateLimit(key) {
     if (error.message === 'Rate limit exceeded') {
       throw error;
     }
-    cryptoLogger.warn('[PRESENCE] Rate limit check failed, allowing request', { 
+    cryptoLogger.warn('[PRESENCE] Rate limit check failed, allowing request', {
       key: key?.slice(0, 20),
-      error: error?.message 
+      error: error?.message
     });
   }
 }
@@ -483,7 +490,7 @@ export async function bumpOnline(username, ttlSeconds = TTL_CONFIG.PRESENCE_TTL)
   if (!normalizedUsername) {
     throw new Error('Invalid username');
   }
-  
+
   try {
     enforceRateLimit(`presence:bump:${normalizedUsername}`);
     const safeTtl = clampNumber(ttlSeconds, { min: 10, max: 86_400, defaultValue: TTL_CONFIG.PRESENCE_TTL || 300 });
@@ -513,7 +520,7 @@ export async function isOnline(username) {
   if (!normalizedUsername) {
     throw new Error('Invalid username');
   }
-  
+
   try {
     const ex = await redis.exists(ONLINE_KEY(normalizedUsername));
     return ex === 1;
@@ -528,19 +535,20 @@ export async function publishToUser(username, payloadObj) {
   if (!normalizedUsername) {
     throw new Error('Invalid username');
   }
-  
+
   if (payloadObj === null || payloadObj === undefined) {
     throw new Error('Payload cannot be null or undefined');
   }
-  
+
   try {
     enforceRateLimit(`presence:publish:${normalizedUsername}`);
     const msg = typeof payloadObj === 'string' ? payloadObj : JSON.stringify(payloadObj);
     if (Buffer.byteLength(msg) > MAX_PAYLOAD_BYTES) {
       throw new Error(`Payload too large: ${Buffer.byteLength(msg)} bytes (max: ${MAX_PAYLOAD_BYTES})`);
     }
-    await redis.publish(DELIVER_CH(normalizedUsername), msg);
+    const receivers = await redis.publish(DELIVER_CH(normalizedUsername), msg);
     cryptoLogger.debug('Message published to user', { username: normalizedUsername, size: Buffer.byteLength(msg) });
+    return receivers;
   } catch (error) {
     cryptoLogger.error('Error publishing message to user', error, { username });
     throw error;
@@ -558,9 +566,9 @@ export async function subscribeUserChannel(subscriber, username, onMessage) {
   if (typeof onMessage !== 'function') {
     throw new Error('onMessage must be a function');
   }
-  
+
   await subscriber.subscribe(DELIVER_CH(normalizedUsername));
-  
+
   const handler = (channel, message) => {
     try {
       if (channel === DELIVER_CH(normalizedUsername)) {
@@ -574,9 +582,9 @@ export async function subscribeUserChannel(subscriber, username, onMessage) {
       cryptoLogger.error('Error handling subscriber message', error, { username });
     }
   };
-  
+
   subscriber.on('message', handler);
-  
+
   return async () => {
     try {
       subscriber.off('message', handler);

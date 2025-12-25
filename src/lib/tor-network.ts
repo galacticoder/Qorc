@@ -36,13 +36,7 @@ interface TorElectronNetworkAPI {
     body?: string;
     timeout: number;
   }): Promise<TorRequestResult>;
-  getTorWebSocketUrl(url: string): Promise<string>;
-}
-
-declare global {
-  interface Window {
-    electronAPI?: any;
-  }
+  getTorWebSocketUrl(url: string): Promise<string | { success?: boolean; url?: string; error?: string }>;
 }
 
 const REQUIRED_ELECTRON_METHODS: Array<keyof TorElectronNetworkAPI> = [
@@ -74,6 +68,7 @@ export interface TorConnectionStats {
   averageLatency: number;
   lastHealthCheck: number;
   circuitHealth: TorCircuitHealth;
+  isBootstrapped?: boolean;
 }
 
 const DEFAULT_MONITOR_INTERVAL_MS = 30_000;
@@ -104,6 +99,7 @@ export class TorNetworkManager {
 
     this.stats = {
       isConnected: false,
+      isBootstrapped: false,
       circuitCount: 0,
       lastCircuitRotation: 0,
       connectionAttempts: 0,
@@ -212,6 +208,8 @@ export class TorNetworkManager {
     this.connectionMonitorTimer = timer;
   }
 
+  private isInitializing = false;
+
   private scheduleReinitialization(): void {
     if (this.monitorBackoffMs === 0) {
       this.monitorBackoffMs = 1000;
@@ -220,9 +218,14 @@ export class TorNetworkManager {
     }
 
     setTimeout(async () => {
-      if (!this.isInitialized) {
+      if (this.isInitialized && this.stats.isConnected) {
         return;
       }
+
+      if (this.isInitializing) {
+        return;
+      }
+
       const success = await this.initialize();
       if (success) {
         this.monitorBackoffMs = 0;
@@ -269,6 +272,11 @@ export class TorNetworkManager {
       return false;
     }
 
+    if (this.isInitializing) {
+      return false;
+    }
+
+    this.isInitializing = true;
     const api = this.validateElectronAPI();
 
     try {
@@ -278,7 +286,6 @@ export class TorNetworkManager {
         throw new Error(result.error ?? 'Failed to initialize Tor');
       }
 
-      // Update config with actual ports assigned by Tor
       if (result.socksPort) {
         this.config.socksPort = result.socksPort;
       }
@@ -286,27 +293,26 @@ export class TorNetworkManager {
         this.config.controlPort = result.controlPort;
       }
 
-      // Verify connectivity before marking initialized
-      const verified = await this.testTorConnection();
-      if (!verified) {
-        console.error('[TOR] Verification failed after initialization');
-        this.stats.isConnected = false;
-        this.isInitialized = false;
-        this.stats.failedConnections += 1;
-        this.stopAllTimers();
-        this.notifyConnectionCallbacks(false);
-        return false;
-      }
-
-      this.stats.isConnected = true;
       this.isInitialized = true;
+      this.stats.isConnected = false;
       this.stats.failedConnections = 0;
 
       this.startCircuitRotation();
       this.startConnectionMonitoring();
-      await this.checkCircuitHealth();
 
-      this.notifyConnectionCallbacks(true);
+      this.testTorConnection().then(verified => {
+        if (!verified) {
+          this.stats.isConnected = false;
+          this.stats.isBootstrapped = false;
+          this.notifyConnectionCallbacks(false);
+        } else {
+          this.stats.isConnected = true;
+          this.stats.isBootstrapped = true;
+          this.notifyConnectionCallbacks(true);
+          this.checkCircuitHealth();
+        }
+      });
+
       return true;
     } catch (_error) {
       console.error('[TOR] Failed to initialize Tor connection:', _error);
@@ -314,6 +320,8 @@ export class TorNetworkManager {
       handleNetworkError(_error as Error, { context: 'tor_initialization' });
       this.notifyConnectionCallbacks(false);
       return false;
+    } finally {
+      this.isInitializing = false;
     }
   }
 
@@ -342,7 +350,24 @@ export class TorNetworkManager {
 
     try {
       const result = await api.getTorWebSocketUrl(url);
-      let torUrl = typeof result === 'string' ? result : (result?.url || url);
+      let torUrl: string | null = null;
+      if (typeof result === 'string') {
+        torUrl = result;
+      } else if (result && typeof result === 'object') {
+        const candidate = (result as { url?: unknown }).url;
+        if (typeof candidate === 'string' && candidate) {
+          torUrl = candidate;
+        } else {
+          const error = (result as { error?: unknown }).error;
+          if (typeof error === 'string' && error) {
+            throw new Error(error);
+          }
+        }
+      }
+
+      if (!torUrl) {
+        throw new Error('Invalid Tor WebSocket URL result');
+      }
 
       if (!torUrl || typeof torUrl !== 'string') {
         throw new Error('Invalid Tor WebSocket URL: empty or non-string');
@@ -353,6 +378,7 @@ export class TorNetworkManager {
         throw new Error(`Invalid Tor WebSocket URL scheme: ${torUrl.split(':')[0]}. Only ws:// or wss:// allowed.`);
       }
 
+      // Browser WebSocket cannot set SOCKS; main process handles Tor proxying.
       return new WebSocket(torUrl);
     } catch (_error) {
       console.error('[TOR] Failed to create Tor WebSocket:', _error);
@@ -442,6 +468,10 @@ export class TorNetworkManager {
 
   getStats(): TorConnectionStats {
     return { ...this.stats };
+  }
+
+  isBootstrapped(): boolean {
+    return this.stats.isBootstrapped || false;
   }
 
   isConnected(): boolean {

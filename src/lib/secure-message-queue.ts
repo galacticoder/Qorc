@@ -53,6 +53,71 @@ interface QueuedMessage {
   expiresAt: number;
 }
 
+const normalizeQueuedMessage = (value: unknown, username: string): QueuedMessage | null => {
+  if (!isPlainObject(value)) return null;
+  if (hasPrototypePollutionKeys(value)) return null;
+
+  const record = value as Record<string, unknown>;
+
+  const id = typeof record.id === 'string' ? record.id : null;
+  if (!id) return null;
+
+  try {
+    validateUsername(username);
+  } catch {
+    return null;
+  }
+
+  if (typeof record.content !== 'string') return null;
+  let content: string;
+  try {
+    content = sanitizeContent(record.content);
+  } catch {
+    return null;
+  }
+
+  if (typeof record.timestamp !== 'number' || !Number.isFinite(record.timestamp)) return null;
+  const timestamp = record.timestamp;
+
+  const expiresAt =
+    typeof record.expiresAt === 'number' && Number.isFinite(record.expiresAt)
+      ? record.expiresAt
+      : timestamp + MESSAGE_EXPIRY;
+
+  let replyTo: { id: string; sender?: string; content?: string } | undefined;
+  if (record.replyTo != null) {
+    if (!isPlainObject(record.replyTo) || hasPrototypePollutionKeys(record.replyTo)) return null;
+    const replyRec = record.replyTo as Record<string, unknown>;
+    if (typeof replyRec.id !== 'string' || !replyRec.id) return null;
+
+    const sender = typeof replyRec.sender === 'string' ? replyRec.sender : undefined;
+    const replyContent = typeof replyRec.content === 'string' ? replyRec.content : undefined;
+    replyTo = {
+      id: replyRec.id,
+      ...(sender ? { sender } : {}),
+      ...(replyContent ? { content: replyContent } : {}),
+    };
+  }
+
+  const fileData = typeof record.fileData === 'string' ? record.fileData : undefined;
+  const messageSignalType = typeof record.messageSignalType === 'string' ? record.messageSignalType : undefined;
+  const originalMessageId = typeof record.originalMessageId === 'string' ? record.originalMessageId : undefined;
+  const editMessageId = typeof record.editMessageId === 'string' ? record.editMessageId : undefined;
+
+  return {
+    id,
+    to: username,
+    content,
+    timestamp,
+    expiresAt,
+    ...(replyTo ? { replyTo } : {}),
+    ...(fileData ? { fileData } : {}),
+    ...(messageSignalType ? { messageSignalType } : {}),
+    ...(originalMessageId ? { originalMessageId } : {}),
+    ...(editMessageId ? { editMessageId } : {}),
+  };
+};
+
 const STORAGE_KEY = 'secure_message_queue_v1';
 const MESSAGE_EXPIRY = 7 * 24 * 60 * 60 * 1000;
 const MAX_MESSAGES_PER_USER = 100;
@@ -310,17 +375,12 @@ class SecureMessageQueue {
 
     this.loadPromise = (async () => {
       try {
-        const stored = await this.secureDB!.retrieveEphemeral<{
-          queue: [string, QueuedMessage[]][];
-          processedIds: string[];
-          version: string;
-          timestamp: number;
-        }>(STORAGE_KEY);
-        
+        const stored = await this.secureDB!.retrieveEphemeral(STORAGE_KEY);
+
         if (!stored) {
           return;
         }
-        
+
         if (!isPlainObject(stored)) {
           console.error('[SecureMessageQueue] Invalid storage structure');
           return;
@@ -330,13 +390,62 @@ class SecureMessageQueue {
           return;
         }
 
-        if (stored.version !== 'v1') {
+        const storedRecord = stored as Record<string, unknown>;
+
+        if (storedRecord.version !== 'v1') {
           console.error('[SecureMessageQueue] Unsupported storage version');
           return;
         }
 
-        this.queue = new Map(stored.queue ?? []);
-        this.processedIds = new Set(stored.processedIds ?? []);
+        const queueRaw = storedRecord.queue;
+        const processedIdsRaw = storedRecord.processedIds;
+
+        const nextQueue = new Map<string, QueuedMessage[]>();
+        if (Array.isArray(queueRaw)) {
+          for (const entry of queueRaw) {
+            if (!Array.isArray(entry) || entry.length !== 2) continue;
+            const username = entry[0];
+            const messagesRaw = entry[1];
+            if (typeof username !== 'string') continue;
+            try {
+              validateUsername(username);
+            } catch {
+              continue;
+            }
+            if (!Array.isArray(messagesRaw)) continue;
+
+            const sanitizedMessages: QueuedMessage[] = [];
+            for (const msg of messagesRaw) {
+              const normalized = normalizeQueuedMessage(msg, username);
+              if (normalized) {
+                sanitizedMessages.push(normalized);
+              }
+              if (sanitizedMessages.length >= MAX_MESSAGES_PER_USER) {
+                break;
+              }
+            }
+
+            if (sanitizedMessages.length > 0) {
+              nextQueue.set(username, sanitizedMessages);
+            }
+          }
+        }
+        this.queue = nextQueue;
+
+        const nextProcessedIds = new Set<string>();
+        if (Array.isArray(processedIdsRaw)) {
+          const ids: string[] = [];
+          for (const id of processedIdsRaw) {
+            if (typeof id === 'string' && id) {
+              ids.push(id);
+            }
+          }
+          const start = Math.max(0, ids.length - MAX_PROCESSED_IDS);
+          for (let i = start; i < ids.length; i++) {
+            nextProcessedIds.add(ids[i]);
+          }
+        }
+        this.processedIds = nextProcessedIds;
 
         await this.cleanupExpired();
       } catch (_error) {

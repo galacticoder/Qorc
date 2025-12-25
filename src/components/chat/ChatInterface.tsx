@@ -1,28 +1,23 @@
 import React, { useEffect, useRef, useState, useCallback, useMemo } from "react";
-import { createPortal } from "react-dom";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Button } from "@/components/ui/button";
 import { ChatMessage } from "./ChatMessage";
 import { Message } from "./types";
 import { ChatInput } from "./ChatInput.tsx";
 import { User } from "./UserList";
-import { SignalType } from "@/lib/signal-types.ts";
+import { SignalType } from "@/lib/signal-types";
 import { MessageReply } from "./types";
 import { useTypingIndicator } from "@/hooks/useTypingIndicator";
 import { TypingIndicatorList } from "./TypingIndicatorList";
-import { resolveDisplayUsername } from "@/lib/unified-username-display";
 import { Video, MoreVertical, ShieldOff } from 'lucide-react';
 import { CallIcon } from './icons';
-import { useCalling } from "@/hooks/useCalling";
-const CallModalLazy = React.lazy(() => import('./CallModal'));
+import type { CallState } from "../../lib/webrtc-calling";
 import type { useAuth } from "@/hooks/useAuth";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { BlockUserButton } from "./BlockUserButton";
 import { blockingSystem } from "@/lib/blocking-system";
 import { blockStatusCache } from "@/lib/block-status-cache";
 import { useReplyUpdates } from "@/hooks/useReplyUpdates";
-import { useCallHistory } from "@/contexts/CallHistoryContext";
-import { truncateUsername } from "@/lib/utils";
 
 
 interface HybridKeys {
@@ -51,20 +46,47 @@ interface ChatInterfaceProps {
   readonly getKeysOnDemand?: () => Promise<HybridKeys | null>;
   readonly getPeerHybridKeys?: (peerUsername: string) => Promise<{ kyberPublicBase64: string; dilithiumPublicBase64: string; x25519PublicBase64?: string } | null>;
   readonly p2pConnected?: boolean;
-  readonly selectedDisplayName?: string;
   readonly loadMoreMessages?: (peerUsername: string, currentOffset: number, limit?: number) => Promise<Message[]>;
   readonly sendP2PReadReceipt?: (messageId: string, recipient: string) => Promise<void>;
   readonly sendServerReadReceipt: (messageId: string, sender: string) => Promise<void>;
   readonly markMessageAsRead: (messageId: string) => Promise<void>;
   readonly getSmartReceiptStatus: (message: Message) => Message['receipt'] | undefined;
   readonly secureDB?: any;
+  readonly currentCall?: CallState | null;
+  readonly startCall: (targetUser: string, callType?: 'audio' | 'video') => Promise<string>;
 }
 
 const SCROLL_THRESHOLD = 200;
 const NEAR_BOTTOM_THRESHOLD = 100;
-const READ_RECEIPT_CHECK_INTERVAL = 30000;
 const MAX_BACKGROUND_MESSAGES = 1000;
 const BACKGROUND_BATCH_SIZE = 100;
+
+const UI_EVENT_RATE_WINDOW_MS = 10_000;
+const UI_EVENT_RATE_MAX = 500;
+const MAX_UI_USERNAME_LENGTH = 256;
+
+const isPlainObject = (value: unknown): value is Record<string, unknown> => {
+  if (typeof value !== 'object' || value === null) {
+    return false;
+  }
+  const proto = Object.getPrototypeOf(value);
+  return proto === Object.prototype || proto === null;
+};
+
+const hasPrototypePollutionKeys = (obj: unknown): boolean => {
+  if (obj == null || typeof obj !== 'object') return false;
+  const keys = Object.keys(obj as Record<string, unknown>);
+  return keys.some((key) => key === '__proto__' || key === 'constructor' || key === 'prototype');
+};
+
+const sanitizeUiText = (value: unknown, maxLen: number): string | null => {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  const cleaned = trimmed.replace(/[\x00-\x1F\x7F]/g, '');
+  if (!cleaned) return null;
+  return cleaned.slice(0, maxLen);
+};
 
 export const ChatInterface = React.memo<ChatInterfaceProps>(({
   onSendMessage,
@@ -80,17 +102,19 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
   getDisplayUsername,
   getKeysOnDemand,
   getPeerHybridKeys,
-  p2pConnected = false,
-  selectedDisplayName,
+  p2pConnected: _p2pConnected = false,
   loadMoreMessages,
   sendP2PReadReceipt,
   sendServerReadReceipt,
   markMessageAsRead,
   getSmartReceiptStatus,
   secureDB,
+  currentCall,
+  startCall,
 }) => {
   const scrollAreaRef = useRef<HTMLDivElement>(null);
-  const { addCallLog } = useCallHistory();
+
+  const uiEventRateRef = useRef<{ windowStart: number; count: number }>({ windowStart: Date.now(), count: 0 });
 
   const displayResolverRef = useRef(getDisplayUsername);
   useEffect(() => { displayResolverRef.current = getDisplayUsername; }, [getDisplayUsername]);
@@ -100,7 +124,6 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
   }, []);
   const [replyTo, setReplyTo] = useState<Message | null>(null);
   const [editingMessage, setEditingMessage] = useState<Message | null>(null);
-  const [displayConversationName, setDisplayConversationName] = useState<string>("");
   const [isUserBlocked, setIsUserBlocked] = useState<boolean>(false);
   const [isBlockedByUser, setIsBlockedByUser] = useState<boolean>(false);
   const [isLoadingMore, setIsLoadingMore] = useState<boolean>(false);
@@ -108,109 +131,18 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
   const loadedMessagesCountRef = useRef<Map<string, number>>(new Map());
   const backgroundLoadConversationRef = useRef<string | null>(null);
 
-  const callingHook = useCalling(callingAuthContext);
-  const {
-    currentCall,
-    localStream,
-    remoteStream,
-    remoteScreenStream,
-    peerConnection,
-    startCall,
-    answerCall,
-    declineCall,
-    endCall,
-    toggleMute,
-    toggleVideo,
-    switchCamera,
-    switchMicrophone,
-    startScreenShare,
-    stopScreenShare,
-    getAvailableScreenSources,
-    isScreenSharing
-  } = callingHook;
-
   const processedInScrollRef = useRef<Set<string>>(new Set());
   const lastScrollTimeRef = useRef<number>(0);
   const { handleLocalTyping, handleConversationChange, resetTypingAfterSend } = useTypingIndicator(currentUsername, selectedConversation, onSendMessage);
+  const initialScrollDoneRef = useRef<Map<string, boolean>>(new Map());
 
-
-
-  const handleCallLog = useCallback(async (e: Event) => {
-    try {
-      const customEvent = e as CustomEvent;
-      const detail = customEvent.detail;
-      if (!detail || typeof detail !== 'object') return;
-      if (!selectedConversation || detail.peer !== selectedConversation) return;
-
-      const displayPeerName = truncateUsername(await resolveDisplayUsername(detail.peer, getDisplayUsername));
-      const durationSeconds = Math.round((detail.durationMs || 0) / 1000);
-
-      // Save to call history
-      if (['ended', 'missed', 'declined'].includes(detail.type)) {
-        const direction = detail.isOutgoing ? 'outgoing' : 'incoming';
-        const status = detail.type === 'missed' ? 'missed' : detail.type === 'declined' ? 'declined' : 'completed';
-
-        addCallLog({
-          peerUsername: detail.peer,
-          type: detail.isVideo ? 'video' : 'audio',
-          direction,
-          status,
-          startTime: detail.at || Date.now(),
-          ...(status === 'completed' && durationSeconds > 0 ? { duration: durationSeconds } : {})
-        });
-      }
-
-      const label = detail.type === 'incoming' ? `Incoming call from ${displayPeerName}`
-        : detail.type === 'connected' ? `Call connected with ${displayPeerName}`
-          : detail.type === 'started' ? `Calling ${displayPeerName}...`
-            : detail.type === 'ended' ? (durationSeconds > 0 ? `Call with ${displayPeerName} ended (${durationSeconds}s)` : `Call with ${displayPeerName} ended`)
-              : detail.type === 'declined' ? `${displayPeerName} declined the call`
-                : detail.type === 'missed' ? `Missed`
-                  : detail.type === 'not-answered' ? `${displayPeerName} did not answer`
-                    : `Call event: ${detail.type}`;
-
-      const shouldHaveActions = ['missed', 'not-answered', 'ended', 'declined'].includes(detail.type);
-      const actions = shouldHaveActions
-        ? [{ label: 'Call back', onClick: () => startCall(detail.peer, 'audio').catch(() => { }) }]
-        : undefined;
-
-      setMessages((prev) => [...prev, {
-        id: `call-log-${detail.callId || crypto.randomUUID()}-${detail.type}-${detail.at || Date.now()}`,
-        content: JSON.stringify({ label, actionsType: actions ? 'callback' : undefined, isError: detail.type === 'missed' }),
-        sender: 'System',
-        timestamp: new Date(),
-        isCurrentUser: false,
-        isSystemMessage: true,
-        type: 'system'
-      } as Message]);
-    } catch { }
-  }, [setMessages, selectedConversation, getDisplayUsername, startCall, addCallLog]);
-
-  useEffect(() => {
-    window.addEventListener('ui-call-log', handleCallLog as EventListener);
-    return () => window.removeEventListener('ui-call-log', handleCallLog as EventListener);
-  }, [handleCallLog]);
-
-  const handleCallRequest = useCallback((e: Event) => {
-    try {
-      const customEvent = e as CustomEvent;
-      const detail = customEvent.detail;
-      if (!detail || typeof detail !== 'object' || !detail.peer) return;
-      const callType = detail.type === 'video' ? 'video' : 'audio';
-      startCall(detail.peer, callType).catch(() => { });
-    } catch { }
-  }, [startCall]);
-
-  useEffect(() => {
-    window.addEventListener('ui-call-request', handleCallRequest as EventListener);
-    return () => window.removeEventListener('ui-call-request', handleCallRequest as EventListener);
-  }, [handleCallRequest]);
-
-  // Handle conversation changes to stop typing indicators
   useEffect(() => {
     handleConversationChange();
     processedInScrollRef.current.clear();
     lastScrollTimeRef.current = 0;
+    if (selectedConversation) {
+      initialScrollDoneRef.current.delete(selectedConversation);
+    }
   }, [selectedConversation, handleConversationChange]);
 
   const scrollToBottom = useCallback((container: Element) => {
@@ -233,48 +165,16 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
   }, [selectedConversation, scrollToBottom]);
 
   useEffect(() => {
-    if (selectedDisplayName && typeof selectedDisplayName === 'string') {
-      setDisplayConversationName(selectedDisplayName);
-    }
-  }, [selectedDisplayName]);
+    if (!selectedConversation) return;
+    const alreadyScrolled = initialScrollDoneRef.current.get(selectedConversation);
+    if (alreadyScrolled) return;
 
-  const resolveAndSetDisplayName = useCallback((username: string) => {
-    if (!username) {
-      setDisplayConversationName("");
-      return;
-    }
+    const scrollContainer = scrollAreaRef.current?.querySelector('[data-radix-scroll-area-viewport]');
+    if (!scrollContainer) return;
 
-    if (getDisplayUsername) {
-      getDisplayUsername(username)
-        .then((resolved) => setDisplayConversationName(truncateUsername(resolved)))
-        .catch(() => setDisplayConversationName(truncateUsername(username)));
-    } else {
-      setDisplayConversationName(truncateUsername(username));
-    }
-  }, [getDisplayUsername]);
-
-  useEffect(() => {
-    if (selectedConversation) {
-      resolveAndSetDisplayName(selectedConversation);
-    } else {
-      setDisplayConversationName("");
-    }
-  }, [selectedConversation, resolveAndSetDisplayName]);
-
-  const handleUsernameMappingUpdate = useCallback(() => {
-    if (selectedConversation) {
-      resolveAndSetDisplayName(selectedConversation);
-    }
-  }, [selectedConversation, resolveAndSetDisplayName]);
-
-  useEffect(() => {
-    window.addEventListener('username-mapping-updated', handleUsernameMappingUpdate);
-    window.addEventListener('username-mapping-received', handleUsernameMappingUpdate);
-    return () => {
-      window.removeEventListener('username-mapping-updated', handleUsernameMappingUpdate);
-      window.removeEventListener('username-mapping-received', handleUsernameMappingUpdate);
-    };
-  }, [handleUsernameMappingUpdate]);
+    scrollToBottom(scrollContainer);
+    initialScrollDoneRef.current.set(selectedConversation, true);
+  }, [messages, selectedConversation, scrollToBottom]);
 
   useEffect(() => {
     if (selectedConversation) {
@@ -397,7 +297,7 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
         blockStatusCache.set(selectedConversation, blocked);
 
         setIsBlockedByUser(false);
-      } catch (_error) {
+      } catch {
         setIsUserBlocked(blockStatusCache.get(selectedConversation) ?? false);
         setIsBlockedByUser(false);
       }
@@ -406,11 +306,31 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
     checkBlockingStatus();
   }, [selectedConversation, callingAuthContext?.passphrasePlaintextRef?.current, callingAuthContext?.hybridKeysRef?.current]);
 
-  const handleBlockStatusChange = useCallback((event: CustomEvent) => {
-    const { username, isBlocked } = event.detail;
-    if (username === selectedConversation) {
-      setIsUserBlocked(isBlocked);
-    }
+  const handleBlockStatusChange = useCallback((event: Event) => {
+    try {
+      const now = Date.now();
+      const bucket = uiEventRateRef.current;
+      if (now - bucket.windowStart > UI_EVENT_RATE_WINDOW_MS) {
+        bucket.windowStart = now;
+        bucket.count = 0;
+      }
+      bucket.count += 1;
+      if (bucket.count > UI_EVENT_RATE_MAX) {
+        return;
+      }
+
+      if (!(event instanceof CustomEvent)) return;
+      const detail = event.detail;
+      if (!isPlainObject(detail) || hasPrototypePollutionKeys(detail)) return;
+
+      const username = sanitizeUiText((detail as any).username, MAX_UI_USERNAME_LENGTH);
+      if (!username) return;
+      const isBlocked = (detail as any).isBlocked === true;
+
+      if (username === selectedConversation) {
+        setIsUserBlocked(isBlocked);
+      }
+    } catch { }
   }, [selectedConversation]);
 
   useEffect(() => {
@@ -418,15 +338,13 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
     return () => window.removeEventListener('block-status-changed', handleBlockStatusChange as EventListener);
   }, [handleBlockStatusChange]);
 
-  // Unified read receipt function that handles both P2P and server messages
   const sendReadReceipt = useCallback(async (messageId: string, sender: string) => {
     const message = messages.find(m => m.id === messageId);
 
     if (message?.p2p === true && sendP2PReadReceipt) {
       try {
         await sendP2PReadReceipt(messageId, sender);
-      } catch (_error) {
-      }
+      } catch { }
     } else {
       await sendServerReadReceipt(messageId, sender);
     }
@@ -552,7 +470,7 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
   useEffect(() => {
     const observer = readReceiptObserverRef.current;
     if (!observer) return;
-    
+
     for (const msg of messages) {
       if (msg.sender !== currentUsername && !msg.receipt?.read && !observedMessagesRef.current.has(msg.id)) {
         const el = document.getElementById(`message-${msg.id}`);
@@ -653,14 +571,6 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
     }
   }, [selectedConversation]);
 
-  const handleCallModalAnswer = useCallback(() => {
-    if (currentCall) answerCall(currentCall.id);
-  }, [currentCall, answerCall]);
-
-  const handleCallModalDecline = useCallback(() => {
-    if (currentCall) declineCall(currentCall.id);
-  }, [currentCall, declineCall]);
-
   const emptyMessagesUI = useMemo(() => (
     <div
       className="flex items-center justify-center h-full min-h-[200px] text-sm select-none"
@@ -678,37 +588,16 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
     }
   }, []);
 
-  const callModal = currentCall ? (
-    <React.Suspense fallback={null}>
-      <CallModalLazy
-        call={currentCall}
-        localStream={localStream}
-        remoteStream={remoteStream}
-        remoteScreenStream={remoteScreenStream}
-        onAnswer={handleCallModalAnswer}
-        onDecline={handleCallModalDecline}
-        onEndCall={endCall}
-        onToggleMute={toggleMute}
-        onToggleVideo={toggleVideo}
-        onSwitchCamera={switchCamera}
-        onSwitchMicrophone={switchMicrophone}
-        onStartScreenShare={startScreenShare}
-        onStopScreenShare={stopScreenShare}
-        onGetAvailableScreenSources={getAvailableScreenSources}
-        isScreenSharing={isScreenSharing}
-        getDisplayUsername={getDisplayUsernameStable}
-      />
-    </React.Suspense>
-  ) : null;
 
   return (
     <div className="flex flex-col h-full relative" style={{ backgroundColor: 'var(--chat-background)' }}>
       <div
-        className="p-4 flex items-center justify-end absolute top-0 left-0 right-0 z-10"
+        className="p-4 flex items-center justify-between absolute top-0 left-0 right-0 z-10"
         style={{
           border: 'none'
         }}
       >
+        <div className="min-w-0 flex-1 pr-3" />
         <div className="flex items-center gap-2">
           {/* Block Status Indicator */}
           {(isUserBlocked || isBlockedByUser) && (
@@ -783,35 +672,6 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
               </PopoverContent>
             </Popover>
           )}
-
-
-          {/* P2P Connection Indicator */}
-          {/* {p2pConnected && (
-            <div
-              className="flex items-center gap-1 px-2 py-1 rounded text-xs font-medium"
-              style={{
-                backgroundColor: 'var(--color-success-background, rgba(34, 197, 94, 0.1))',
-                color: 'var(--color-success, #22c55e)',
-                border: '1px solid var(--color-success, #22c55e)'
-              }}
-              title="Direct peer-to-peer connection active"
-            >
-              <svg
-                className="w-3 h-3"
-                fill="none"
-                stroke="currentColor"
-                viewBox="0 0 24 24"
-              >
-                <path
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  strokeWidth={2}
-                  d="M13 10V3L4 14h7v7l9-11h-7z"
-                />
-              </svg>
-              <span className="select-none">P2P</span>
-            </div>
-          )} */}
 
         </div>
       </div>
@@ -889,9 +749,6 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
           getPeerHybridKeys={getPeerHybridKeys}
         />
       </div>
-
-      {/* Call Modal */}
-      {callModal && typeof document !== 'undefined' && createPortal(callModal, document.body)}
     </div>
   );
 }, (prevProps, nextProps) => {
@@ -900,9 +757,9 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
     prevProps.selectedConversation === nextProps.selectedConversation &&
     prevProps.currentUsername === nextProps.currentUsername &&
     prevProps.p2pConnected === nextProps.p2pConnected &&
-    prevProps.selectedDisplayName === nextProps.selectedDisplayName &&
     prevProps.isEncrypted === nextProps.isEncrypted &&
-    prevProps.users === nextProps.users
+    prevProps.users === nextProps.users &&
+    prevProps.currentCall === nextProps.currentCall
   );
 });
 

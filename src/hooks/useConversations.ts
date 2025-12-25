@@ -46,6 +46,16 @@ const sanitizePreviewText = (input: string | undefined | null): string => {
 
 // Generate safe preview text from message
 const getConversationPreview = (message: Message, currentUsername: string): string => {
+  if (message.type === 'system' || message.isSystemMessage) {
+    try {
+      const parsed = JSON.parse(message.content);
+      if (parsed?.label && typeof parsed.label === 'string') {
+        return sanitizePreviewText(parsed.label);
+      }
+    } catch { }
+    return 'System message';
+  }
+
   const filename = sanitizePreviewText(message.filename);
   const isMe = message.sender === currentUsername;
   const prefix = isMe ? 'You' : message.sender;
@@ -273,7 +283,7 @@ export const useConversations = (currentUsername: string, users: User[], message
     return wrapped;
   }, [conversations, currentUsername, removedConversations, selectedConversation, users, secureDB]);
 
-  const selectConversation = useCallback((username: string) => {  
+  const selectConversation = useCallback((username: string) => {
     if (!username || typeof username !== 'string') {
       return;
     }
@@ -346,7 +356,7 @@ export const useConversations = (currentUsername: string, users: User[], message
       }
 
       const other = msg.sender === currentUsername ? msg.recipient : msg.sender;
-      if (!other || other === currentUsername) continue;
+      if (!other || other === currentUsername || other === 'System') continue;
       const isOnline = userLookup.get(other) ?? false;
       const msgTime = new Date(msg.timestamp);
       const unreadIncrement = (msg.sender !== currentUsername && (!msg.receipt || !msg.receipt.read)) ? 1 : 0;

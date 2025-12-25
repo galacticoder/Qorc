@@ -73,6 +73,24 @@ Values shown in parentheses indicate typical defaults when the variable is unset
 
 ---
 
+## TURN Server (coturn)
+
+| Name | Default / required | Used by | Description |
+| ---- | ------------------ | ------- | ----------- |
+| `TURN_EXTERNAL_IP` | auto-detected | `docker/coturn-entrypoint.sh`, `server/server.js` | Public IP address of the TURN server. The entrypoint script attempts to auto-detect this if not set. |
+| `TURN_PORT` | `(3478)` | `docker/coturn-entrypoint.sh`, `server/server.js` | UDP/TCP listening port for plain TURN/STUN. |
+| `TURNS_PORT` | `(5349)` | `docker/coturn-entrypoint.sh` | TCP listening port for TURN over TLS (TURNS). |
+| `TURN_TLS_CERT` | unset | `docker/coturn-entrypoint.sh` | Path to the TLS certificate file for TURNS. If set, this file path (inside the container) is added to the turnserver configuration. |
+| `TURN_TLS_KEY` | unset | `docker/coturn-entrypoint.sh` | Path to the TLS private key file for TURNS. |
+| `TURN_REALM` | `(turn.local)` | `docker/coturn-entrypoint.sh` | Authentication realm for the TURN server. |
+| `TURN_USERNAME` | `(turnuser)` | `docker/coturn-entrypoint.sh`, `server/server.js` | Username for the static TURN credentials. |
+| `TURN_PASSWORD` | `(turnpassword)` | `docker/coturn-entrypoint.sh`, `server/server.js` | Password for the static TURN credentials. |
+| `TURN_MIN_PORT` | `(49152)` | `docker/coturn-entrypoint.sh` | Start of the UDP relay port range. |
+| `TURN_MAX_PORT` | `(65535)` | `docker/coturn-entrypoint.sh` | End of the UDP relay port range. |
+| `TURN_HEALTHCHECK_HOST` | unset | `server/server.js` | Hostname or IP to use when the main server checks TURN server connectivity. Useful if `coturn` is unreachable via `TURN_EXTERNAL_IP`. |
+
+---
+
 ## Redis, presence, and rate limiting
 
 | Name | Default / required | Used by | Description |
@@ -199,9 +217,7 @@ Several of these secrets (`KEY_ENCRYPTION_SECRET`, `TOKEN_PEPPER`, `AUTH_AUDIT_H
 | Name | Default / required | Used by | Description |
 | ---- | ------------------ | ------- | ----------- |
 | `VITE_WS_URL` | unset | `src/components/setup/ConnectSetup.tsx`, `src/lib/cluster-key-manager.ts`, Electron main | Base WebSocket URL for the web client (e.g. `wss://localhost:8443`). Used both in browser and Electron contexts. |
-| `VITE_TURN_SERVERS` | unset | `src/lib/webrtc-calling.ts`, `src/lib/webrtc-p2p.ts` | JSON-encoded array of TURN server objects (same format as `RTCIceServer[]`) used as the primary source for media TURN servers when present. |
-| `VITE_STUN_SERVERS` | unset | same as above | JSON-encoded array (or comma-separated list) of STUN URLs used as the primary source for media STUN servers when present. |
-| `VITE_PORT` | `(5173)` | `startClient.sh` | Port on which the Vite dev server listens during local development. |
+| `VITE_PORT` | `(5173)` | `start-client.cjs` | Port on which the Vite dev server listens during local development. |
 
 ---
 
@@ -211,18 +227,15 @@ Several of these secrets (`KEY_ENCRYPTION_SECRET`, `TOKEN_PEPPER`, `AUTH_AUDIT_H
 | ---- | ------------------ | ------- | ----------- |
 | `ELECTRON_INSTANCE_ID` | unset → `'1'` | `electron/main.cjs`, `electron/preload.cjs` | When set, each instance uses a separate `userData` directory (`<base>-instance-<id>`) and is exposed to the renderer as `electronAPI.instanceId`. |
 | `INSTANCE_ID` | unset → `'1'` in preload | `electron/preload.cjs`, `server/authentication/token-security.js` | Generic instance identifier used by Electron and embedded in distributed security events; the preload script falls back to this when `ELECTRON_INSTANCE_ID` is not set. |
-| `TURN_SERVERS` | unset | `electron/main.cjs`, `src/lib/webrtc-calling.ts`, `src/lib/webrtc-p2p.ts` | JSON array of TURN server definitions. Electron main parses this and exposes it via `webrtc:get-ice-config`; web code treats it as a fallback when `VITE_TURN_SERVERS` is not set. |
-| `STUN_SERVERS` | unset | same as above | JSON array of STUN server URLs. Electron main converts this to `RTCIceServer[]` and web code uses it as a fallback when `VITE_STUN_SERVERS` is not set. |
-| `ICE_TRANSPORT_POLICY` | `('all')` | `electron/main.cjs` | ICE transport policy (`'all'` or `'relay'`) returned by `webrtc:get-ice-config` to the renderer. |
 
 ---
 
-## Client launcher (startClient.sh)
+## Client launcher (start-client.cjs)
 
 | Name | Default / required | Used by | Description |
 | ---- | ------------------ | ------- | ----------- |
-| `START_ELECTRON` | `(1)` | `startClient.sh` | When set to `0`, runs only the Vite dev server without starting Electron. |
-| `FORCE_ELECTRON_REBUILD` | unset | `startClient.sh` | When set (any non-empty value), forces `@electron/rebuild` to rebuild native modules for the current Electron version even if a cache marker exists. |
+| `START_ELECTRON` | `(1)` | `start-client.cjs` | When set to `0`, runs only the Vite dev server without starting Electron. |
+| `FORCE_ELECTRON_REBUILD` | unset | `start-client.cjs` | When set (any non-empty value), forces `@electron/rebuild` to rebuild native modules for the current Electron version even if a cache marker exists. |
 
 ---
 

@@ -2,13 +2,37 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import fs from 'fs';
 import { randomBytes, createHmac, timingSafeEqual } from 'crypto';
-import { execSync } from 'node:child_process';
+import { execFileSync } from 'node:child_process';
 import { logger as cryptoLogger } from '../crypto/crypto-logger.js';
 import { CryptoUtils } from '../crypto/unified-crypto.js';
 import { PostQuantumHash } from '../crypto/post-quantum-hash.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+
+const RESERVED_JSON_KEYS = new Set(['__proto__', 'prototype', 'constructor']);
+
+function sanitizeParsedJson(value) {
+  if (!value || typeof value !== 'object') return value;
+  if (Array.isArray(value)) return value.map(sanitizeParsedJson);
+  const out = Object.create(null);
+  for (const [key, v] of Object.entries(value)) {
+    if (RESERVED_JSON_KEYS.has(key)) continue;
+    out[key] = sanitizeParsedJson(v);
+  }
+  return out;
+}
+
+function safeJsonParseObject(raw) {
+  if (typeof raw !== 'string' || raw.length === 0) return null;
+  try {
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+    return sanitizeParsedJson(parsed);
+  } catch {
+    return null;
+  }
+}
 
 const PEPPER_FILE_PATH = process.env.PASSWORD_HASH_PEPPER_FILE
   ? path.resolve(process.env.PASSWORD_HASH_PEPPER_FILE)
@@ -362,10 +386,13 @@ function tryCreateDatabaseWithSudo(dbName, user, password) {
 
   try {
     cryptoLogger.info('[DB] Attempting to create Postgres user via sudo psql', { user: safeUser });
-    execSync(
-      `sudo -u postgres psql -c "CREATE USER \"${safeUser}\" WITH PASSWORD '${safePassword}' CREATEDB;"`,
-      options
-    );
+    execFileSync('sudo', [
+      '-u',
+      'postgres',
+      'psql',
+      '-c',
+      `CREATE USER "${safeUser}" WITH PASSWORD '${safePassword}' CREATEDB;`
+    ], options);
   } catch (err) {
     cryptoLogger.warn('[DB] CREATE USER via sudo psql failed (may already exist)', {
       user: safeUser,
@@ -378,10 +405,13 @@ function tryCreateDatabaseWithSudo(dbName, user, password) {
       database: safeDb,
       owner: safeUser
     });
-    execSync(
-      `sudo -u postgres psql -c "CREATE DATABASE \"${safeDb}\" OWNER \"${safeUser}\";"`,
-      options
-    );
+    execFileSync('sudo', [
+      '-u',
+      'postgres',
+      'psql',
+      '-c',
+      `CREATE DATABASE "${safeDb}" OWNER "${safeUser}";`
+    ], options);
   } catch (err) {
     cryptoLogger.warn('[DB] CREATE DATABASE via sudo psql failed (may already exist)', {
       database: safeDb,
@@ -1155,13 +1185,12 @@ export class UserDatabase {
       if (!row) return null;
       const raw = row.hybridpublickeys ?? row.hybridPublicKeys;
       if (!raw || typeof raw !== 'string') return null;
-      try {
-        const parsed = JSON.parse(raw);
-        return parsed && typeof parsed === 'object' ? parsed : null;
-      } catch {
+      const parsed = safeJsonParseObject(raw);
+      if (!parsed) {
         console.warn('[DB] Failed to parse hybridPublicKeys JSON for user:', username);
         return null;
       }
+      return parsed;
     } catch (error) {
       console.error(`[DB] Error loading hybrid keys for ${username}:`, error);
       return null;
@@ -1334,7 +1363,7 @@ export class MessageDatabase {
 
       return rows.map(row => {
         try {
-          const payload = JSON.parse(row.payload);
+          const payload = safeJsonParseObject(row.payload);
           if (!payload || typeof payload !== 'object') {
             console.warn('[DB] Invalid message payload structure, skipping');
             return null;
@@ -1433,7 +1462,7 @@ export class MessageDatabase {
         const rows = res.rows || [];
         if (rows.length === 0) return [];
         const ids = rows.map(r => Number(r.id)).filter(n => Number.isInteger(n) && n > 0);
-        const messages = rows.map(r => { try { const p = JSON.parse(r.payload); return (p && typeof p === 'object') ? p : null; } catch { return null; } }).filter(Boolean);
+        const messages = rows.map(r => safeJsonParseObject(r.payload)).filter(Boolean);
         if (ids.length > 0) {
           await pool.query('DELETE FROM offline_messages WHERE id = ANY($1::int[])', [ids]);
         }
@@ -1443,7 +1472,7 @@ export class MessageDatabase {
         if (!rows || rows.length === 0) return [];
         const ids = rows.map(r => r.id);
         if (!ids.every(id => Number.isInteger(id) && id > 0)) return [];
-        const messages = rows.map(r => { try { const p = JSON.parse(r.payload); return (p && typeof p === 'object') ? p : null; } catch { return null; } }).filter(Boolean);
+        const messages = rows.map(r => safeJsonParseObject(r.payload)).filter(Boolean);
         if (ids.length > 0) {
           const placeholders = ids.map(() => '?').join(',');
           const deleteStmt = db.prepare(`DELETE FROM offline_messages WHERE id IN (${placeholders})`);

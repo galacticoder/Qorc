@@ -2,14 +2,9 @@ import { useRef, useEffect, useCallback, useState } from "react";
 import { SecureDB } from "@/lib/secureDB";
 import { Message } from "@/components/chat/types";
 import { User } from "@/components/chat/UserList";
-import { CryptoUtils } from "@/lib/unified-crypto";
-import { SignalType } from "@/lib/signal-types";
 import { encryptedStorage, syncEncryptedStorage } from "@/lib/encrypted-storage";
 import { prewarmUsernameCache } from "@/hooks/useUnifiedUsernameDisplay";
 import { blockingSystem } from "@/lib/blocking-system";
-
-
-import websocketClient from "@/lib/websocket";
 
 const MAX_PENDING_MESSAGES = 500;
 const MAX_PENDING_MAPPINGS = 1000;
@@ -62,9 +57,11 @@ export const useSecureDB = ({ Authentication, setMessages }: UseSecureDBProps) =
 	const pendingMappingsRef = useRef<Array<{ hashed: string; original: string }>>([]);
 	const debouncedSaveRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 	const pendingSavesRef = useRef<Set<string>>(new Set());
+	const pendingSaveMessagesRef = useRef<Map<string, Message>>(new Map());
 	const messageMapRef = useRef<Map<string, Message>>(new Map());
 	const inflightDbOpRef = useRef<Promise<void>>(Promise.resolve());
 	const eventRateLimitRef = useRef<{ windowStart: number; count: number }>({ windowStart: Date.now(), count: 0 });
+	const keysEventRateLimitRef = useRef<{ windowStart: number; count: number }>({ windowStart: Date.now(), count: 0 });
 
 	useEffect(() => {
 		if (!Authentication?.isLoggedIn) {
@@ -147,8 +144,7 @@ export const useSecureDB = ({ Authentication, setMessages }: UseSecureDBProps) =
 							try { window.dispatchEvent(new CustomEvent('username-mapping-updated', { detail: { username: currentHashed, original: existingOriginal } })); } catch { }
 						}
 					}
-				} catch (_err) {
-				}
+				} catch { }
 
 				if (Authentication.originalUsernameRef?.current && Authentication.loginUsernameRef.current) {
 					try {
@@ -204,8 +200,7 @@ export const useSecureDB = ({ Authentication, setMessages }: UseSecureDBProps) =
 					if (Array.isArray(mappings) && mappings.length > 0) {
 						prewarmUsernameCache(mappings);
 					}
-				} catch (_err) {
-				}
+				} catch { }
 			})();
 
 			const currentUser = Authentication?.loginUsernameRef?.current;
@@ -226,9 +221,25 @@ export const useSecureDB = ({ Authentication, setMessages }: UseSecureDBProps) =
 						}));
 
 						setMessages(prevMessages => {
-							const existingIds = new Set(prevMessages.map(msg => msg.id));
-							const newMessages = processedMessages.filter(msg => !existingIds.has(msg.id));
-							const merged = [...prevMessages, ...newMessages];
+							const existingMap = new Map(prevMessages.map(msg => [msg.id, msg]));
+							const merged: Message[] = [];
+
+							for (const dbMsg of processedMessages) {
+								const existing = existingMap.get(dbMsg.id);
+								if (existing) {
+									const mergedReceipt = {
+										delivered: existing.receipt?.delivered || dbMsg.receipt?.delivered || false,
+										read: existing.receipt?.read || dbMsg.receipt?.read || false,
+										deliveredAt: existing.receipt?.deliveredAt || dbMsg.receipt?.deliveredAt,
+										readAt: existing.receipt?.readAt || dbMsg.receipt?.readAt,
+									};
+									existingMap.set(dbMsg.id, { ...existing, receipt: mergedReceipt });
+								} else {
+									existingMap.set(dbMsg.id, dbMsg);
+								}
+							}
+
+							merged.push(...existingMap.values());
 							merged.sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
 							return merged;
 						});
@@ -253,11 +264,34 @@ export const useSecureDB = ({ Authentication, setMessages }: UseSecureDBProps) =
 								}));
 
 								setMessages(prevMessages => {
-									const existingIds = new Set(prevMessages.map(msg => msg.id));
-									const newMessages = processedAll.filter(msg => !existingIds.has(msg.id));
-									if (newMessages.length === 0) return prevMessages;
+									const existingMap = new Map(prevMessages.map(msg => [msg.id, msg]));
+									let hasChanges = false;
 
-									const merged = [...prevMessages, ...newMessages];
+									for (const dbMsg of processedAll) {
+										const existing = existingMap.get(dbMsg.id);
+										if (existing) {
+											const mergedReceipt = {
+												delivered: existing.receipt?.delivered || dbMsg.receipt?.delivered || false,
+												read: existing.receipt?.read || dbMsg.receipt?.read || false,
+												deliveredAt: existing.receipt?.deliveredAt || dbMsg.receipt?.deliveredAt,
+												readAt: existing.receipt?.readAt || dbMsg.receipt?.readAt,
+											};
+											const receiptChanged =
+												mergedReceipt.delivered !== (existing.receipt?.delivered || false) ||
+												mergedReceipt.read !== (existing.receipt?.read || false);
+											if (receiptChanged) {
+												existingMap.set(dbMsg.id, { ...existing, receipt: mergedReceipt });
+												hasChanges = true;
+											}
+										} else {
+											existingMap.set(dbMsg.id, dbMsg);
+											hasChanges = true;
+										}
+									}
+
+									if (!hasChanges) return prevMessages;
+
+									const merged = Array.from(existingMap.values());
 									merged.sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
 									return merged;
 								});
@@ -272,7 +306,15 @@ export const useSecureDB = ({ Authentication, setMessages }: UseSecureDBProps) =
 			secureDBRef.current.loadUsers()
 				.then(savedUsers => {
 					if (savedUsers && savedUsers.length > 0) {
-						setUsers(savedUsers);
+						// Convert StoredUser[] to User[] by adding required UI fields
+						const usersWithDefaults: User[] = savedUsers.map((su: any) => ({
+							id: su.id || '',
+							username: su.username || '',
+							isOnline: su.isOnline ?? false,
+							isTyping: su.isTyping,
+							hybridPublicKeys: su.hybridPublicKeys,
+						}));
+						setUsers(usersWithDefaults);
 					}
 				})
 				.catch(err => {
@@ -310,23 +352,45 @@ export const useSecureDB = ({ Authentication, setMessages }: UseSecureDBProps) =
 		};
 
 		const keysListener = (e: Event) => {
-			const detail = (e as CustomEvent).detail;
-			if (!detail || !detail.username || !detail.hybridKeys) return;
+			try {
+				const now = Date.now();
+				const bucket = keysEventRateLimitRef.current;
+				if (now - bucket.windowStart > RATE_LIMIT_WINDOW_MS) {
+					bucket.windowStart = now;
+					bucket.count = 0;
+				}
+				bucket.count += 1;
+				if (bucket.count > RATE_LIMIT_MAX_EVENTS) {
+					return;
+				}
 
-			setUsers(prev => {
-				const idx = prev.findIndex(u => u.username === detail.username);
-				if (idx !== -1) {
-					const updatedUser = { ...prev[idx], hybridPublicKeys: detail.hybridKeys };
-					if (JSON.stringify(prev[idx].hybridPublicKeys) === JSON.stringify(detail.hybridKeys)) {
+				const detail = (e as CustomEvent).detail;
+				if (!validateEventDetail(detail)) return;
+
+				const username = sanitizeUsername((detail as any).username);
+				if (!username) return;
+
+				const hybridKeys = (detail as any).hybridKeys;
+				if (!isPlainObject(hybridKeys) || hasPrototypePollutionKeys(hybridKeys)) return;
+				if (typeof (hybridKeys as any).kyberPublicBase64 !== 'string' || typeof (hybridKeys as any).dilithiumPublicBase64 !== 'string') {
+					return;
+				}
+
+				setUsers(prev => {
+					const idx = prev.findIndex(u => u.username === username);
+					if (idx !== -1) {
+						const updatedUser = { ...prev[idx], hybridPublicKeys: hybridKeys as User['hybridPublicKeys'] };
+						if (JSON.stringify(prev[idx].hybridPublicKeys) === JSON.stringify(hybridKeys)) {
+							return prev;
+						}
+						const newUsers = [...prev];
+						newUsers[idx] = updatedUser;
+						return newUsers;
+					} else {
 						return prev;
 					}
-					const newUsers = [...prev];
-					newUsers[idx] = updatedUser;
-					return newUsers;
-				} else {
-					return prev;
-				}
-			});
+				});
+			} catch { }
 		};
 
 		window.addEventListener('username-mapping-received', mappingListener as EventListener);
@@ -387,8 +451,13 @@ export const useSecureDB = ({ Authentication, setMessages }: UseSecureDBProps) =
 					mergedMap.set(msg.id!, msg);
 				});
 				const limited = Array.from(mergedMap.values()).slice(-MAX_DB_MESSAGES);
+				// Convert Message[] to StoredMessage[] (Date -> number for timestamp)
+				const storedMessages = limited.map(m => ({
+					...m,
+					timestamp: m.timestamp instanceof Date ? m.timestamp.getTime() : m.timestamp,
+				}));
 				await inflightDbOpRef.current;
-				inflightDbOpRef.current = secureDBRef.current!.saveMessages(limited).catch((err) => {
+				inflightDbOpRef.current = secureDBRef.current!.saveMessages(storedMessages as any).catch((err) => {
 					console.error('[useSecureDB] Failed to flush pending messages', err);
 					pendingMessagesRef.current.push(...limited);
 				});
@@ -405,7 +474,8 @@ export const useSecureDB = ({ Authentication, setMessages }: UseSecureDBProps) =
 	useEffect(() => {
 		if (!Authentication?.isLoggedIn || !dbInitialized || !secureDBRef.current || users.length === 0) return;
 
-		secureDBRef.current.saveUsers(users).catch((err) => console.error("[useSecureDB] saveUsers error:", err));
+		const storedUsers = users.map(u => ({ ...u } as any));
+		secureDBRef.current.saveUsers(storedUsers).catch((err) => console.error("[useSecureDB] saveUsers error:", err));
 	}, [users, Authentication?.isLoggedIn, dbInitialized]);
 
 	const saveMessageToLocalDB = useCallback(
@@ -445,10 +515,12 @@ export const useSecureDB = ({ Authentication, setMessages }: UseSecureDBProps) =
 			}
 
 			if (pendingSavesRef.current.has(message.id)) {
+				pendingSaveMessagesRef.current.set(message.id, message);
 				return;
 			}
 
 			pendingSavesRef.current.add(message.id);
+			pendingSaveMessagesRef.current.set(message.id, message);
 
 			if (debouncedSaveRef.current) {
 				clearTimeout(debouncedSaveRef.current);
@@ -460,20 +532,21 @@ export const useSecureDB = ({ Authentication, setMessages }: UseSecureDBProps) =
 
 					const msgs = (await secureDBRef.current!.loadMessages().catch(() => [])) || [];
 
-					const idx = msgs.findIndex((m: Message) => m.id === message.id);
-
-					if (idx !== -1) {
-						msgs[idx] = message;
-					} else {
-						msgs.push(message);
+					for (const [msgId, pendingMsg] of pendingSaveMessagesRef.current.entries()) {
+						const idx = msgs.findIndex((m: Message) => m.id === msgId);
+						if (idx !== -1) {
+							msgs[idx] = pendingMsg;
+						} else {
+							msgs.push(pendingMsg);
+						}
 					}
 
-					// Let saveMessages handle per-conversation limits (500/1000)
 					await secureDBRef.current!.saveMessages(msgs, activeConversationPeer).catch(saveToPending);
-					pendingSavesRef.current.delete(message.id);
+					pendingSavesRef.current.clear();
+					pendingSaveMessagesRef.current.clear();
 				} catch (_err) {
 					console.error("[useSecureDB] DB save failed", _err);
-					pendingSavesRef.current.delete(message.id);
+					pendingSavesRef.current.clear();
 					saveToPending();
 				}
 			}, 100);
@@ -530,7 +603,53 @@ export const useSecureDB = ({ Authentication, setMessages }: UseSecureDBProps) =
 		[Authentication?.loginUsernameRef?.current, secureDBRef, setMessages]
 	);
 
-	return { users, setUsers, dbInitialized, secureDBRef, saveMessageToLocalDB, loadMoreConversationMessages };
+	const flushPendingSaves = useCallback(async () => {
+		if (!secureDBRef.current) return;
+
+		if (debouncedSaveRef.current) {
+			clearTimeout(debouncedSaveRef.current);
+			debouncedSaveRef.current = null;
+		}
+
+		if (pendingSaveMessagesRef.current.size > 0 || pendingMessagesRef.current.length > 0) {
+			try {
+				const msgs = (await secureDBRef.current.loadMessages().catch(() => [])) || [];
+				let hasChanges = false;
+
+				for (const [msgId, pendingMsg] of pendingSaveMessagesRef.current.entries()) {
+					const idx = msgs.findIndex((m: Message) => m.id === msgId);
+					if (idx !== -1) {
+						msgs[idx] = pendingMsg;
+					} else {
+						msgs.push(pendingMsg);
+					}
+					hasChanges = true;
+				}
+
+				for (const pendingMsg of pendingMessagesRef.current) {
+					const idx = msgs.findIndex((m: Message) => m.id === pendingMsg.id);
+					if (idx !== -1) {
+						msgs[idx] = pendingMsg;
+					} else {
+						msgs.push(pendingMsg);
+					}
+					hasChanges = true;
+				}
+
+				if (hasChanges) {
+					await secureDBRef.current.saveMessages(msgs);
+				}
+
+				pendingSavesRef.current.clear();
+				pendingSaveMessagesRef.current.clear();
+				pendingMessagesRef.current = [];
+			} catch (err) {
+				console.error('[useSecureDB] Failed to flush pending saves:', err);
+			}
+		}
+	}, []);
+
+	return { users, setUsers, dbInitialized, secureDBRef, saveMessageToLocalDB, loadMoreConversationMessages, flushPendingSaves };
 };
 
 export default useSecureDB;

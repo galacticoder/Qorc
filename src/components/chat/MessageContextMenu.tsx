@@ -1,11 +1,12 @@
 import React, { useLayoutEffect, useRef, useState } from 'react';
-import { Pencil, Reply, Trash2, Download, SmilePlus } from 'lucide-react';
+import { Pencil, Reply, Trash2, Download, SmilePlus, Copy } from 'lucide-react';
 import { createPortal } from 'react-dom';
 
 interface MessageContextMenuProps {
     x: number;
     y: number;
     onClose: () => void;
+    onCopy?: () => void;
     onEdit?: () => void;
     onReply?: () => void;
     onDelete?: () => void;
@@ -21,6 +22,7 @@ export const MessageContextMenu: React.FC<MessageContextMenuProps> = ({
     x,
     y,
     onClose,
+    onCopy,
     onEdit,
     onReply,
     onDelete,
@@ -131,6 +133,19 @@ export const MessageContextMenu: React.FC<MessageContextMenuProps> = ({
                 >
                     <Reply className="w-5 h-5 group-hover:text-indigo-500" />
                 </button>
+
+                {onCopy && (
+                    <>
+                        <div className="w-px h-5 bg-gray-300" />
+                        <button
+                            onClick={(e) => { e.stopPropagation(); onCopy?.(); onClose(); }}
+                            className="p-2 hover:bg-muted rounded-lg transition-colors text-muted-foreground hover:text-foreground group"
+                            title="Copy"
+                        >
+                            <Copy className="w-5 h-5 group-hover:text-indigo-500" />
+                        </button>
+                    </>
+                )}
 
                 {canEdit && (
                     <>

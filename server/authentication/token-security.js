@@ -29,10 +29,20 @@ const SECURITY_CONFIG = {
   }
 };
 
+function safeJsonParse(raw) {
+  if (typeof raw !== 'string') return null;
+  try {
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * token security manager
  * Handles revocation, blacklisting, suspicious activity detection,
- * and more security feautures
+ * and more
  */
 class TokenSecurityManager {
   static async revokeToken(tokenId, reason = 'manual_revoke', revokedBy = 'system', revokeFamily = false) {
@@ -496,19 +506,29 @@ class TokenSecurityManager {
     
     try {
       const { withRedisClient } = await import('../presence/presence.js');
-      
+
+      let attempt = 0;
       // Try to acquire lock with retries
       while (Date.now() < deadline) {
         const acquired = await withRedisClient(async (client) => {
           const result = await client.set(lockKey, lockId, 'NX', 'EX', ttlSeconds);
           return result === 'OK';
         });
-        
+
         if (acquired) {
           return lockId;
         }
 
-        await new Promise(r => setTimeout(r, 10));
+        attempt += 1;
+        const remaining = deadline - Date.now();
+        if (remaining <= 0) break;
+        
+        const base = Math.min(250, 10 * Math.pow(1.5, Math.min(attempt, 10)));
+        const jitter = crypto.randomInt(0, Math.max(1, Math.floor(base * 0.2)));
+        const sleepMs = Math.min(remaining, Math.floor(base + jitter));
+        if (sleepMs > 0) {
+          await new Promise((r) => setTimeout(r, sleepMs));
+        }
       }
       
       return null;
@@ -614,7 +634,8 @@ class TokenSecurityManager {
       });
       
       if (!data) return false;
-      const token = JSON.parse(data);
+      const token = safeJsonParse(data);
+      if (!token) return true;
       return token.revoked || false;
     } catch (error) {
       console.error('[TOKEN-SEC] Failed to check token revocation from Redis:', error);
@@ -631,7 +652,8 @@ class TokenSecurityManager {
         const data = await client.get(key);
         if (!data) return false;
         
-        const token = JSON.parse(data);
+        const token = safeJsonParse(data);
+        if (!token) return false;
         token.revoked = true;
         
         const ttl = await client.ttl(key);

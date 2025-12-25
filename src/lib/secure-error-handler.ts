@@ -41,7 +41,7 @@ export class SecureErrorHandler {
   private readonly MIN_ALERT_INTERVAL_MS = 5000;
   private lastAlertSentAt = 0;
 
-  private constructor() {}
+  private constructor() { }
 
   static getInstance(): SecureErrorHandler {
     if (!SecureErrorHandler.instance) {
@@ -61,10 +61,10 @@ export class SecureErrorHandler {
   ): SecureError {
     const errorId = this.generateErrorId();
     const timestamp = Date.now();
-    
+
     const internalMessage = error instanceof Error ? error.message : error;
     const userMessage = this.generateUserSafeMessage(category, severity);
-    
+
     const secureError: SecureError = {
       id: errorId,
       category,
@@ -162,11 +162,11 @@ export class SecureErrorHandler {
     ];
 
     const sanitized: Record<string, any> = {};
-    
+
     for (const [key, value] of Object.entries(context)) {
       const keyLower = key.toLowerCase();
       const isSensitive = sensitiveKeys.some(sensitive => keyLower.includes(sensitive));
-      
+
       if (isSensitive) {
         sanitized[key] = '[REDACTED]';
       } else if (typeof value === 'string' && value.length > 100) {
@@ -194,7 +194,7 @@ export class SecureErrorHandler {
     };
 
     console.error('[SecureErrorHandler]', logData);
-    
+
     // Log internal details only for critical/high severity
     if (secureError.severity === ErrorSeverity.CRITICAL || secureError.severity === ErrorSeverity.HIGH) {
       console.error('[SecureErrorHandler-Internal]', {
@@ -249,8 +249,8 @@ export class SecureErrorHandler {
             credentials: 'omit',
             cache: 'no-store',
             mode: 'same-origin'
-          }).catch(() => {});
-        } catch {}
+          }).catch(() => { });
+        } catch { }
       }
     } finally {
       this.persistCriticalMeta(error);
@@ -270,7 +270,7 @@ export class SecureErrorHandler {
         };
         window.dispatchEvent(new CustomEvent('secure-critical-error', { detail: payload }));
       }
-    } catch {}
+    } catch { }
   }
 
   private persistCriticalMeta(error: SecureError): void {
@@ -288,9 +288,9 @@ export class SecureErrorHandler {
             list = list.slice(list.length - this.MAX_LOCAL_CRITICAL);
           }
           await encryptedStorage.setItem(this.CRITICAL_LOCAL_KEY, JSON.stringify(list));
-        } catch {}
+        } catch { }
       })();
-    } catch {}
+    } catch { }
   }
 
   /**
@@ -325,12 +325,72 @@ export class SecureAuditLogger {
   private static readonly CHANNEL = 'secure-audit';
 
   static info(namespace: string, event: string, action: string, details?: Record<string, unknown>): void {
+    try {
+      const payload = {
+        channel: SecureAuditLogger.CHANNEL,
+        level: 'info',
+        namespace,
+        event,
+        action,
+        details: SecureAuditLogger.sanitize(details),
+        timestamp: Date.now(),
+      };
+      try {
+        const w = (globalThis as any)?.window;
+        if (w && typeof w.dispatchEvent === 'function' && typeof (globalThis as any).CustomEvent === 'function') {
+          w.dispatchEvent(new CustomEvent(SecureAuditLogger.CHANNEL, { detail: payload }));
+          return;
+        }
+      } catch { }
+    } catch { }
   }
 
   static warn(namespace: string, event: string, action: string, details?: Record<string, unknown>): void {
+    try {
+      const payload = {
+        channel: SecureAuditLogger.CHANNEL,
+        level: 'warn',
+        namespace,
+        event,
+        action,
+        details: SecureAuditLogger.sanitize(details),
+        timestamp: Date.now(),
+      };
+      try {
+        const w = (globalThis as any)?.window;
+        if (w && typeof w.dispatchEvent === 'function' && typeof (globalThis as any).CustomEvent === 'function') {
+          w.dispatchEvent(new CustomEvent(SecureAuditLogger.CHANNEL, { detail: payload }));
+          return;
+        }
+      } catch { }
+      try {
+        console.warn('[SecureAudit]', payload);
+      } catch { }
+    } catch { }
   }
 
   static error(namespace: string, event: string, action: string, details?: Record<string, unknown>): void {
+    try {
+      const payload = {
+        channel: SecureAuditLogger.CHANNEL,
+        level: 'error',
+        namespace,
+        event,
+        action,
+        details: SecureAuditLogger.sanitize(details),
+        timestamp: Date.now(),
+      };
+      try {
+        const w = (globalThis as any)?.window;
+        if (w && typeof w.dispatchEvent === 'function' && typeof (globalThis as any).CustomEvent === 'function') {
+          w.dispatchEvent(new CustomEvent(SecureAuditLogger.CHANNEL, { detail: payload }));
+          return;
+        }
+      } catch { }
+      try {
+        console.error('[SecureAudit]', payload);
+      } catch { }
+    } catch { }
   }
 
   private static sanitize(details?: Record<string, unknown>): Record<string, unknown> | undefined {

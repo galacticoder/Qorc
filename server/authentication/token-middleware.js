@@ -85,8 +85,6 @@ class TokenMiddleware {
    * HTTP request token authentication middleware
    */
   static async authenticateHTTP(req, res, next) {
-    const startTime = Date.now();
-    
     try {
       // Set security headers
       this.setSecurityHeaders(res);
@@ -134,8 +132,6 @@ class TokenMiddleware {
       req.deviceId = authResult.deviceId;
 
       await this.logAuthSuccess(authResult, req, 'http_auth');
-      
-      console.log(`[TOKEN-MW] HTTP authenticated: user=${authResult.userId}, duration=${Date.now() - startTime}ms`);
       next();
       
     } catch (error) {

@@ -37,7 +37,7 @@ class WebSocketHandler {
     this.MAX_QUEUE_SIZE = 100;
 
     // Chunk reassembly for large messages
-    this.chunkBuffer = new Map(); // sessionId -> { chunks: [], totalChunks: 0, receivedChunks: 0 }
+    this.chunkBuffer = new Map();
 
     // Connection metrics
     this.connectionEstablishedAt = null;
@@ -45,13 +45,19 @@ class WebSocketHandler {
     this.missedHeartbeats = 0;
     this.MAX_MISSED_HEARTBEATS = 8;
 
+    // Application-level heartbeat
+    this.appHeartbeatTimer = null;
+    this.appHeartbeatInterval = 35000;
+    this.sessionId = null;
+    this.isBackgroundMode = false;
+
     // Certificate pinning
     this.pinnedFingerprints = new Set();
 
-    // Extra headers to send on WS handshake (e.g., stable device id)
+    // Extra headers to send on WS handshake
     this.extraHeaders = {};
 
-    // Device proof material (Ed25519)
+    // Device proof material
     this.deviceId = null;
     this.devicePublicKeyPem = null;
     this.devicePrivateKeyPem = null;
@@ -72,12 +78,10 @@ class WebSocketHandler {
     try {
       const parsed = new URL(url);
       
-      // Require wss:// only
       if (parsed.protocol !== 'wss:') {
         return { success: false, error: 'Only secure WebSocket (wss://) allowed' };
       }
       
-      // Validate hostname
       if (!parsed.hostname || parsed.hostname.length > 253) {
         return { success: false, error: 'Invalid hostname' };
       }
@@ -236,7 +240,7 @@ class WebSocketHandler {
         const monitorSocket = (attempt = 1) => {
           try {
             const conn = this.connection;
-            if (!conn) return; // connection torn down
+            if (!conn) return;
             const socket = conn._socket || conn._stream;
             const reqSocket = conn._req && conn._req.socket ? conn._req.socket : null;
 
@@ -279,7 +283,6 @@ class WebSocketHandler {
 
         this.connection.once('upgrade', () => { });
 
-        // Set up event handlers
         this.connection.once('open', () => {
           this.handleConnectionOpen();
           resolve();
@@ -307,7 +310,6 @@ class WebSocketHandler {
           this.missedHeartbeats = 0;
         });
 
-        // Connection timeout
         const timeout = setTimeout(() => {
           if (this.connection.readyState !== WebSocket.OPEN) {
             this.connection.terminate();
@@ -325,7 +327,7 @@ class WebSocketHandler {
   }
 
   /**
-   * Probe a server URL without touching the primary connection state.
+   * Probe server URL
    */
   async probeConnect(url, timeoutMs = 12000) {
     try {
@@ -405,8 +407,6 @@ class WebSocketHandler {
       ? Date.now() - this.connectionEstablishedAt
       : 0;
 
-
-
     if (this.onMessage) {
       this.onMessage({
         type: '__ws_connection_closed',
@@ -417,9 +417,11 @@ class WebSocketHandler {
     }
 
     this.stopHeartbeat();
+    this.stopAppHeartbeat();
     this.connection = null;
     this.isConnecting = false;
     this.connectionEstablishedAt = null;
+    this.sessionId = null;
 
     if (this.torReady && this.reconnectAttempts < this.MAX_RECONNECT_ATTEMPTS) {
       this.scheduleReconnect();
@@ -430,7 +432,6 @@ class WebSocketHandler {
     try {
       let messageText;
 
-      // Check if data is binary
       if (Buffer.isBuffer(data)) {
         try {
           const decompressed = gunzipSync(data);
@@ -444,22 +445,33 @@ class WebSocketHandler {
 
       const parsed = JSON.parse(messageText);
 
-      // Handle chunked messages
       if (parsed.type === 'KEY_CHUNK') {
         this.handleKeyChunk(parsed);
         return;
       }
 
-      // Device proof challenge -> sign and respond
+      // Device proof challenge
       if (parsed.type === 'device-proof-challenge') {
         this.handleDeviceProofChallenge(parsed);
         return;
       }
 
-      // Handle heartbeat responses
       if (parsed.type === 'pong' || parsed.type === 'heartbeat-response' || parsed.type === 'pq-heartbeat-pong') {
         this.missedHeartbeats = 0;
         return;
+      }
+
+      // Extract session ID from PQ session messages
+      if (parsed.sessionId && !this.sessionId) {
+        this.sessionId = parsed.sessionId;
+      }
+      if (parsed.type === 'pq-handshake-ack' && parsed.sessionId) {
+        this.sessionId = parsed.sessionId;
+      }
+      if (parsed.type === 'pq-session-established' || parsed.type === 'PQ_SESSION_ESTABLISHED') {
+        if (parsed.sessionId) {
+          this.sessionId = parsed.sessionId;
+        }
       }
 
       if (this.onMessage) {
@@ -473,7 +485,6 @@ class WebSocketHandler {
     try {
       const { chunkIndex, totalChunks, data } = chunk;
 
-      // Initialize chunk buffer if this is the first chunk
       if (!this.chunkBuffer.has('key-exchange')) {
         this.chunkBuffer.set('key-exchange', {
           chunks: new Array(totalChunks),
@@ -484,7 +495,6 @@ class WebSocketHandler {
 
       const buffer = this.chunkBuffer.get('key-exchange');
 
-      // Store this chunk
       buffer.chunks[chunkIndex] = Buffer.from(data, 'base64');
       buffer.receivedChunks++;
 
@@ -496,7 +506,6 @@ class WebSocketHandler {
         const parsed = JSON.parse(messageText);
         this.chunkBuffer.delete('key-exchange');
 
-        // Deliver to message handler
         if (this.onMessage) {
           this.onMessage(parsed);
         }
@@ -606,6 +615,58 @@ class WebSocketHandler {
     }
   }
 
+  /**
+   * Enable background mode
+   */
+  setBackgroundMode(enabled) {
+    this.isBackgroundMode = enabled;
+    if (enabled) {
+      this.startAppHeartbeat();
+    } else {
+      this.stopAppHeartbeat();
+    }
+  }
+
+  /**
+   * Start application-level heartbeat
+   */
+  startAppHeartbeat() {
+    this.stopAppHeartbeat();
+
+    if (!this.sessionId) {
+      return;
+    }
+
+    this.appHeartbeatTimer = setInterval(() => {
+      if (!this.connection || this.connection.readyState !== WebSocket.OPEN) {
+        this.stopAppHeartbeat();
+        return;
+      }
+
+      if (!this.isBackgroundMode) {
+        return;
+      }
+
+      try {
+        const heartbeatMessage = JSON.stringify({
+          type: 'pq-heartbeat-ping',
+          timestamp: Date.now(),
+          sessionId: this.sessionId
+        });
+        this.connection.send(heartbeatMessage);
+      } catch (error) {
+        console.error('[WS] App heartbeat failed:', error.message);
+      }
+    }, this.appHeartbeatInterval);
+  }
+
+  stopAppHeartbeat() {
+    if (this.appHeartbeatTimer) {
+      clearInterval(this.appHeartbeatTimer);
+      this.appHeartbeatTimer = null;
+    }
+  }
+
   scheduleReconnect() {
     this.reconnectAttempts++;
     const delay = this.RECONNECT_DELAY_BASE * this.reconnectAttempts;
@@ -620,12 +681,10 @@ class WebSocketHandler {
   }
 
   validateServerCertificate(hostname, cert) {
-    // certificate pinning
     if (this.pinnedFingerprints.size === 0) {
       return tls.checkServerIdentity(hostname, cert);
     }
 
-    // Calculate certificate fingerprint
     const fingerprint = crypto
       .createHash('sha256')
       .update(cert.raw)
@@ -652,6 +711,7 @@ class WebSocketHandler {
     }
 
     this.stopHeartbeat();
+    this.stopAppHeartbeat();
 
     // Close connection
     if (this.connection) {
@@ -664,6 +724,8 @@ class WebSocketHandler {
 
     // Clear state
     this.messageQueue = [];
+    this.sessionId = null;
+    this.isBackgroundMode = false;
     this.isConnecting = false;
     this.connectionEstablishedAt = null;
     this.reconnectAttempts = 0;

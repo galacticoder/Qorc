@@ -230,7 +230,7 @@ class ProfilePictureSystem {
                 (mimeType === 'image/svg+xml' && !isSvg)) {
                 return { valid: false, mimeType, error: 'MIME type mismatch with file content' };
             }
-        } catch (e) {
+        } catch {
             return { valid: false, mimeType, error: 'Invalid base64 encoding' };
         }
 
@@ -334,8 +334,7 @@ class ProfilePictureSystem {
             const defaultAvatarUrl = generateDefaultAvatar(username);
 
             await this.setOwnAvatar(defaultAvatarUrl, true);
-        } catch (error) {
-        }
+        } catch { }
     }
 
     getOwnAvatar(): string | null {
@@ -366,8 +365,7 @@ class ProfilePictureSystem {
             if (this.ownAvatar && previousState !== share) {
                 await this.uploadToServer();
             }
-        } catch (error) {
-        }
+        } catch { }
     }
 
     getShareWithOthers(): boolean {
@@ -376,7 +374,7 @@ class ProfilePictureSystem {
 
     getPeerAvatar(username: string): string | null {
         const cached = this.avatarCache.get(username);
-        if (cached && cached.expiresAt > Date.now()) {
+        if (cached) {
             return cached.data;
         }
         return null;
@@ -384,10 +382,18 @@ class ProfilePictureSystem {
 
     getPeerAvatarHash(username: string): string | null {
         const cached = this.avatarCache.get(username);
-        if (cached && cached.expiresAt > Date.now()) {
+        if (cached) {
             return cached.hash;
         }
         return null;
+    }
+
+    isPeerAvatarStale(username: string): boolean {
+        const cached = this.avatarCache.get(username);
+        if (!cached) {
+            return true;
+        }
+        return cached.expiresAt <= Date.now();
     }
 
     async requestPeerAvatar(username: string): Promise<void> {
@@ -398,13 +404,9 @@ class ProfilePictureSystem {
         // Check for cached avatar
         const cached = this.avatarCache.get(username);
 
+        // If cached and not stale, don't fetch
         if (cached && cached.expiresAt > Date.now()) {
             return;
-        }
-
-        // Remove expired entry
-        if (cached) {
-            this.avatarCache.delete(username);
         }
 
         this.pendingRequests.add(username);
@@ -500,8 +502,7 @@ class ProfilePictureSystem {
             }
 
             await this.secureDB.store(AVATAR_STORE_KEY, 'cache', cacheObj);
-        } catch (error) {
-        }
+        } catch { }
     }
 
     clearPeerCache(username?: string): void {
@@ -582,14 +583,12 @@ class ProfilePictureSystem {
                         envelope: msg.envelope,
                         found: !!msg.found,
                         isDefault: !!msg.isDefault
-                    }).catch(e => {
-                    });
+                    }).catch(() => { });
                 }
             });
 
             this.handlerRegistered = true;
-        } catch (error) {
-        }
+        } catch { }
     }
 
     private ownAvatarFetchTimestamp = 0;
@@ -650,8 +649,7 @@ class ProfilePictureSystem {
                 type: 'avatar-fetch',
                 target: username
             });
-        } catch (error) {
-        }
+        } catch { }
     }
 
     /**
@@ -761,7 +759,7 @@ class ProfilePictureSystem {
                             detail: { type: 'peer', username: response.target, fromServer: false, isDefault: true }
                         }));
 
-                    } catch (e) {
+                    } catch {
                         window.dispatchEvent(new CustomEvent('profile-picture-updated', {
                             detail: { type: 'peer', username: response.target, notFound: true }
                         }));
@@ -770,7 +768,7 @@ class ProfilePictureSystem {
             } else {
             }
 
-        } catch (error) {
+        } catch {
             if (response.envelope) {
             }
         }

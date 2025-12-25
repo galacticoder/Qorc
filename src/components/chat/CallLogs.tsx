@@ -9,6 +9,30 @@ import { useCallHistory, type CallLogEntry } from '../../contexts/CallHistoryCon
 import { useUnifiedUsernameDisplay } from '../../hooks/useUnifiedUsernameDisplay';
 import { blockStatusCache } from '../../lib/block-status-cache';
 
+const BLOCK_STATUS_EVENT_RATE_WINDOW_MS = 10_000;
+const BLOCK_STATUS_EVENT_RATE_MAX = 200;
+const MAX_BLOCK_STATUS_USERNAME_LENGTH = 256;
+
+const isPlainObject = (value: unknown): value is Record<string, unknown> => {
+    if (typeof value !== 'object' || value === null) return false;
+    const proto = Object.getPrototypeOf(value);
+    return proto === Object.prototype || proto === null;
+};
+
+const hasPrototypePollutionKeys = (obj: unknown): boolean => {
+    if (obj == null || typeof obj !== 'object') return false;
+    const keys = Object.keys(obj as Record<string, unknown>);
+    return keys.some((key) => key === '__proto__' || key === 'constructor' || key === 'prototype');
+};
+
+const sanitizeUsername = (value: unknown): string | null => {
+    if (typeof value !== 'string') return null;
+    const trimmed = value.trim();
+    if (!trimmed || trimmed.length > MAX_BLOCK_STATUS_USERNAME_LENGTH) return null;
+    if (/[^\x20-\x7E]/.test(trimmed)) return null;
+    return trimmed;
+};
+
 interface CallLogItemProps {
     readonly log: CallLogEntry;
     readonly index: number;
@@ -45,11 +69,32 @@ const CallLogItem: React.FC<CallLogItemProps> = React.memo(({
 
         checkBlockedStatus();
 
+        const rateState = { windowStart: Date.now(), count: 0 };
+
         const handleBlockStatusChange = (event: Event) => {
-            const { username, isBlocked: newBlockedState } = (event as CustomEvent).detail;
-            if (username === log.peerUsername) {
-                setIsBlocked(newBlockedState);
-            }
+            try {
+                const now = Date.now();
+                if (now - rateState.windowStart > BLOCK_STATUS_EVENT_RATE_WINDOW_MS) {
+                    rateState.windowStart = now;
+                    rateState.count = 0;
+                }
+                rateState.count += 1;
+                if (rateState.count > BLOCK_STATUS_EVENT_RATE_MAX) {
+                    return;
+                }
+
+                if (!(event instanceof CustomEvent)) return;
+                const detail = event.detail;
+                if (!isPlainObject(detail) || hasPrototypePollutionKeys(detail)) return;
+
+                const username = sanitizeUsername((detail as any).username);
+                if (!username) return;
+                const newBlockedState = (detail as any).isBlocked === true;
+
+                if (username === log.peerUsername) {
+                    setIsBlocked(newBlockedState);
+                }
+            } catch { }
         };
 
         window.addEventListener('block-status-changed', handleBlockStatusChange as EventListener);

@@ -15,15 +15,15 @@ export const sanitizeTextInput = (input: string, options: TextSanitizeOptions = 
 
   let sanitized = input.normalize('NFKC');
   sanitized = sanitized.replace(CONTROL_CHARS_REGEX, '');
-  
+
   if (!allowNewlines) {
     sanitized = sanitized.replace(NEWLINE_REGEX, ' ');
   }
-  
+
   if (sanitized.length > maxLength) {
     sanitized = sanitized.slice(0, maxLength);
   }
-  
+
   return sanitized;
 };
 
@@ -56,15 +56,37 @@ const WHITESPACE_COLLAPSE_REGEX = /\s+/g;
 
 export const sanitizeFilename = (name: string, maxLength: number = 128): string => {
   if (typeof name !== 'string') return 'file';
-  
+
   let out = name.normalize('NFKC');
   out = out.replace(UNSAFE_FILENAME_CHARS_REGEX, '_');
   out = out.replace(WHITESPACE_COLLAPSE_REGEX, ' ').trim();
-  
+
   if (!out) out = 'file';
   if (out.length > maxLength) out = out.slice(0, maxLength);
-  
+
   return out;
+};
+
+export const isPlainObject = (value: unknown): value is Record<string, unknown> => {
+  if (typeof value !== 'object' || value === null) return false;
+  const proto = Object.getPrototypeOf(value);
+  return proto === Object.prototype || proto === null;
+};
+
+export const hasPrototypePollutionKeys = (obj: unknown): boolean => {
+  if (obj == null || typeof obj !== 'object') return false;
+  const keys = Object.keys(obj as Record<string, unknown>);
+  return keys.some((key) => key === '__proto__' || key === 'constructor' || key === 'prototype');
+};
+
+export const isUnsafeObjectKey = (value: string): boolean => {
+  return value === '__proto__' || value === 'constructor' || value === 'prototype';
+};
+
+export const sanitizeNonEmptyText = (value: unknown, maxLength: number, allowNewlines: boolean): string | null => {
+  if (typeof value !== 'string') return null;
+  const cleaned = sanitizeTextInput(value, { maxLength, allowNewlines }).trim();
+  return cleaned.length ? cleaned : null;
 };
 
 export type { TextSanitizeOptions, AllowedKey };

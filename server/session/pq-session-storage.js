@@ -7,6 +7,58 @@ import { CryptoUtils } from '../crypto/unified-crypto.js';
 
 const REDIS_PQ_SESSION_PREFIX = 'pq:session:';
 const REDIS_PQ_SESSION_TTL = 3600; // 1 hour TTL
+const REDIS_PQ_COUNTER_PREFIX = 'pq:counter:';
+
+function clampInt(value, { min, max, defaultValue }) {
+  const parsed = Number.parseInt(value ?? defaultValue, 10);
+  if (!Number.isFinite(parsed)) return defaultValue;
+  return Math.min(Math.max(parsed, min), max);
+}
+
+const PQ_SESSION_CACHE_MAX = clampInt(process.env.PQ_SESSION_CACHE_MAX, {
+  min: 0,
+  max: 50_000,
+  defaultValue: 5000,
+});
+
+const PQ_SESSION_CACHE_TTL_MS = clampInt(process.env.PQ_SESSION_CACHE_TTL_MS, {
+  min: 1000,
+  max: 3_600_000,
+  defaultValue: 300_000,
+});
+
+const pqSessionCache = new Map();
+
+function getCachedSession(sessionId) {
+  if (!PQ_SESSION_CACHE_MAX) return null;
+  const entry = pqSessionCache.get(sessionId);
+  if (!entry) return null;
+  if (entry.expiresAt <= Date.now()) {
+    pqSessionCache.delete(sessionId);
+    return null;
+  }
+  pqSessionCache.delete(sessionId);
+  pqSessionCache.set(sessionId, entry);
+  return entry.session;
+}
+
+function setCachedSession(sessionId, session) {
+  if (!PQ_SESSION_CACHE_MAX) return;
+  const entry = { session, expiresAt: Date.now() + PQ_SESSION_CACHE_TTL_MS };
+  if (pqSessionCache.has(sessionId)) {
+    pqSessionCache.delete(sessionId);
+  }
+  pqSessionCache.set(sessionId, entry);
+  while (pqSessionCache.size > PQ_SESSION_CACHE_MAX) {
+    const oldestKey = pqSessionCache.keys().next().value;
+    if (!oldestKey) break;
+    pqSessionCache.delete(oldestKey);
+  }
+}
+
+function deleteCachedSession(sessionId) {
+  pqSessionCache.delete(sessionId);
+}
 
 // Session key encryption configuration
 const SESSION_STORE_INFO = new TextEncoder().encode('pq-session-store-key-v1');
@@ -122,7 +174,21 @@ export async function storePQSession(sessionId, sessionData) {
       counter: sessionData.counter || 0
     });
     await client.setex(key, REDIS_PQ_SESSION_TTL, serialized);
+    const counterKey = `${REDIS_PQ_COUNTER_PREFIX}${sessionId}`;
+    await client.setex(counterKey, REDIS_PQ_SESSION_TTL, String(sessionData.counter || 0));
   });
+
+  try {
+    setCachedSession(sessionId, {
+      sessionId: sessionData.sessionId,
+      recvKey: sessionData.recvKey,
+      sendKey: sessionData.sendKey,
+      fingerprint: sessionData.fingerprint,
+      establishedAt: sessionData.establishedAt,
+      counter: sessionData.counter || 0
+    });
+  } catch {
+  }
 
   cryptoLogger.info('[PQ-SESSION] Stored in Redis (encrypted)', {
     sessionId: sessionId.slice(0, 16) + '...',
@@ -140,6 +206,11 @@ export async function getPQSession(sessionId) {
     return null;
   }
 
+  const cached = getCachedSession(sessionId);
+  if (cached) {
+    return cached;
+  }
+
   return await withRedisClient(async (client) => {
     const key = `${REDIS_PQ_SESSION_PREFIX}${sessionId}`;
     const data = await client.get(key);
@@ -152,12 +223,20 @@ export async function getPQSession(sessionId) {
       return null;
     }
 
-    const parsed = JSON.parse(data);
+    let parsed;
+    try {
+      parsed = JSON.parse(data);
+      if (!parsed || typeof parsed !== 'object') {
+        return null;
+      }
+    } catch {
+      return null;
+    }
 
     const recvKey = await decryptSessionKey(parsed.recvKey, parsed.sessionId, 'recv');
     const sendKey = await decryptSessionKey(parsed.sendKey, parsed.sessionId, 'send');
 
-    return {
+    const session = {
       sessionId: parsed.sessionId,
       recvKey,
       sendKey,
@@ -165,6 +244,9 @@ export async function getPQSession(sessionId) {
       establishedAt: parsed.establishedAt,
       counter: parsed.counter || 0
     };
+
+    setCachedSession(sessionId, session);
+    return session;
   });
 }
 
@@ -178,11 +260,60 @@ export async function updatePQSessionCounter(sessionId, counter) {
     return;
   }
 
-  const session = await getPQSession(sessionId);
-  if (session) {
-    session.counter = counter;
-    await storePQSession(sessionId, session);
+  try {
+    const cached = getCachedSession(sessionId);
+    if (cached) {
+      cached.counter = counter;
+      setCachedSession(sessionId, cached);
+    }
+  } catch {
   }
+
+  try {
+    await withRedisClient(async (client) => {
+      const counterKey = `${REDIS_PQ_COUNTER_PREFIX}${sessionId}`;
+      await client.setex(counterKey, REDIS_PQ_SESSION_TTL, String(counter));
+    });
+  } catch {
+  }
+}
+
+export async function incrementPQSessionCounter(sessionId) {
+  if (!sessionId) {
+    return 0;
+  }
+
+  let nextCounter = 0;
+  try {
+    nextCounter = await withRedisClient(async (client) => {
+      const counterKey = `${REDIS_PQ_COUNTER_PREFIX}${sessionId}`;
+      const pipeline = client.pipeline();
+      pipeline.incr(counterKey);
+      pipeline.expire(counterKey, REDIS_PQ_SESSION_TTL);
+      const results = await pipeline.exec();
+      const value = results?.[0]?.[1];
+      const parsed = Number.parseInt(String(value ?? '0'), 10);
+      return Number.isFinite(parsed) ? parsed : 0;
+    });
+  } catch {
+    nextCounter = 0;
+  }
+
+  try {
+    const cached = getCachedSession(sessionId);
+    if (cached) {
+      if (nextCounter > 0) {
+        cached.counter = nextCounter;
+      } else {
+        cached.counter = (cached.counter || 0) + 1;
+        nextCounter = cached.counter;
+      }
+      setCachedSession(sessionId, cached);
+    }
+  } catch {
+  }
+
+  return nextCounter;
 }
 
 /**
@@ -194,9 +325,13 @@ export async function deletePQSession(sessionId) {
     return;
   }
 
+  deleteCachedSession(sessionId);
+
   await withRedisClient(async (client) => {
     const key = `${REDIS_PQ_SESSION_PREFIX}${sessionId}`;
     await client.del(key);
+    const counterKey = `${REDIS_PQ_COUNTER_PREFIX}${sessionId}`;
+    await client.del(counterKey);
   });
 
   cryptoLogger.info('[PQ-SESSION] Deleted from Redis', {
@@ -210,8 +345,19 @@ export async function deletePQSession(sessionId) {
  */
 export async function getAllPQSessionKeys() {
   return await withRedisClient(async (client) => {
-    const keys = await client.keys(`${REDIS_PQ_SESSION_PREFIX}*`);
-    return keys.map(key => key.replace(REDIS_PQ_SESSION_PREFIX, ''));
+    const pattern = `${REDIS_PQ_SESSION_PREFIX}*`;
+    let cursor = '0';
+    const out = [];
+
+    do {
+      const [nextCursor, keys] = await client.scan(cursor, 'MATCH', pattern, 'COUNT', 200);
+      cursor = nextCursor;
+      for (const key of keys || []) {
+        out.push(key.replace(REDIS_PQ_SESSION_PREFIX, ''));
+      }
+    } while (cursor !== '0' && out.length < 100_000);
+
+    return out;
   });
 }
 

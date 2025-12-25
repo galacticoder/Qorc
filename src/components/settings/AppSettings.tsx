@@ -13,7 +13,21 @@ import {
 import { screenSharingSettings } from '../../lib/screen-sharing-settings';
 import { format } from 'date-fns';
 import { toast } from 'sonner';
-import { User, Palette, Bell, Volume2, Monitor, Download, Shield, Trash2, ShieldCheck, Camera, X, Eye, EyeOff } from 'lucide-react';
+import { User, Palette, Bell, Volume2, Monitor, Download, Shield, Trash2, Camera, X } from 'lucide-react';
+import { isPlainObject, hasPrototypePollutionKeys } from '../../lib/sanitizers';
+
+const PROFILE_PICTURE_EVENT_RATE_WINDOW_MS = 10_000;
+const PROFILE_PICTURE_EVENT_RATE_MAX = 200;
+const MAX_PROFILE_PICTURE_EVENT_TYPE_LENGTH = 32;
+
+const sanitizeEventText = (value: unknown, maxLen: number): string | null => {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  const cleaned = trimmed.replace(/[\x00-\x1F\x7F]/g, '');
+  if (!cleaned) return null;
+  return cleaned.slice(0, maxLen);
+};
 
 interface AppSettingsProps {
   passphraseRef?: React.MutableRefObject<string>;
@@ -73,6 +87,8 @@ export const AppSettings = React.memo(function AppSettings({
   const [preferredSpeakerId, setPreferredSpeakerId] = useState<string>('');
   const [preferredCameraId, setPreferredCameraId] = useState<string>('');
 
+  const profilePictureEventRateRef = useRef<{ windowStart: number; count: number }>({ windowStart: Date.now(), count: 0 });
+
   useEffect(() => {
     setMounted(true);
   }, []);
@@ -92,9 +108,11 @@ export const AppSettings = React.memo(function AppSettings({
       const stored = syncEncryptedStorage.getItem('app_settings_v1');
       if (stored) {
         const parsed = JSON.parse(stored);
-        if (parsed.notifications) setNotifications(parsed.notifications);
+        if (parsed.notifications) {
+          setNotifications(parsed.notifications);
+          (window as any).edgeApi?.setNotificationsEnabled?.(parsed.notifications.desktop !== false).catch(() => { });
+        }
         if (parsed.audioSettings) setAudioSettings(parsed.audioSettings);
-        // Load device preferences
         if (parsed.preferredMicId) setPreferredMicId(parsed.preferredMicId);
         if (parsed.preferredSpeakerId) setPreferredSpeakerId(parsed.preferredSpeakerId);
         if (parsed.preferredCameraId) setPreferredCameraId(parsed.preferredCameraId);
@@ -131,11 +149,28 @@ export const AppSettings = React.memo(function AppSettings({
     };
     initProfilePicture();
 
-    const handleAvatarUpdate = (e: CustomEvent) => {
-      const { type } = e.detail || {};
-      if (type === 'own') {
+    const handleAvatarUpdate = (event: Event) => {
+      try {
+        const now = Date.now();
+        const bucket = profilePictureEventRateRef.current;
+        if (now - bucket.windowStart > PROFILE_PICTURE_EVENT_RATE_WINDOW_MS) {
+          bucket.windowStart = now;
+          bucket.count = 0;
+        }
+        bucket.count += 1;
+        if (bucket.count > PROFILE_PICTURE_EVENT_RATE_MAX) {
+          return;
+        }
+
+        if (!(event instanceof CustomEvent)) return;
+        const detail = event.detail;
+        if (!isPlainObject(detail) || hasPrototypePollutionKeys(detail)) return;
+
+        const type = sanitizeEventText((detail as any).type, MAX_PROFILE_PICTURE_EVENT_TYPE_LENGTH);
+        if (type !== 'own') return;
+
         setAvatarUrl(profilePictureSystem.getOwnAvatar());
-      }
+      } catch { }
     };
 
     window.addEventListener('profile-picture-updated', handleAvatarUpdate as EventListener);
@@ -291,7 +326,7 @@ export const AppSettings = React.memo(function AppSettings({
         } else {
           toast.error(uploadResult.error || 'Failed to upload avatar');
         }
-      } catch (error) {
+      } catch {
         toast.error('Failed to process image');
       } finally {
         setIsUploadingAvatar(false);
@@ -756,6 +791,7 @@ export const AppSettings = React.memo(function AppSettings({
                     onCheckedChange={(checked) => {
                       setNotifications(prev => ({ ...prev, desktop: checked }));
                       saveSettings({ notifications: { ...notifications, desktop: checked } });
+                      (window as any).edgeApi?.setNotificationsEnabled?.(checked).catch(() => { });
                     }}
                   />
                 </div>

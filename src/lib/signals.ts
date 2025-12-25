@@ -295,7 +295,107 @@ export async function handleSignalMessages(data: any, handlers: SignalHandlers) 
           try { window.dispatchEvent(new CustomEvent('secure-chat:auth-success')); } catch { }
         }
 
+        if (data?.recovered && recoveredUser) {
+          let vaultKeyUnwrapSuccess = false;
+          try {
+            let vaultKey: CryptoKey | null = null;
+            const { loadVaultKeyRaw, ensureVaultKeyCryptoKey } = await import('./vault-key');
+            const raw = await loadVaultKeyRaw(recoveredUser);
+            if (raw && raw.length === 32) {
+              const { AES } = await import('./unified-crypto');
+              vaultKey = await AES.importAesKey(raw);
+            } else {
+              vaultKey = await ensureVaultKeyCryptoKey(recoveredUser);
+            }
+
+            if (vaultKey) {
+              const { loadWrappedMasterKey } = await import('./vault-key');
+              const masterKeyBytes = await loadWrappedMasterKey(recoveredUser, vaultKey);
+
+              if (masterKeyBytes && masterKeyBytes.length === 32) {
+                const { AES } = await import('./unified-crypto');
+                const masterKey = await AES.importAesKey(masterKeyBytes);
+                if (aesKeyRef) {
+                  aesKeyRef.current = masterKey;
+                }
+
+                if (!Authentication?.keyManagerRef?.current) {
+                  const mod = await import('./secure-key-manager');
+                  const SKM = (mod as any).SecureKeyManager || (mod as any).default;
+                  Authentication.keyManagerRef.current = new SKM(recoveredUser);
+                }
+                try { await Authentication.keyManagerRef.current!.initializeWithMasterKey(masterKeyBytes); } catch { }
+                try { masterKeyBytes.fill(0); } catch { }
+
+                try {
+                  if (Authentication?.keyManagerRef?.current && serverHybridPublic) {
+                    const maybeKeys = await Authentication.keyManagerRef.current.getKeys().catch(() => null);
+                    if (!maybeKeys) {
+                      const pair = await CryptoUtils.Hybrid.generateHybridKeyPair();
+                      await Authentication.keyManagerRef.current.storeKeys(pair);
+                    }
+                    const publicKeys = await Authentication.keyManagerRef.current.getPublicKeys();
+                    if (publicKeys) {
+                      const keysToSend = {
+                        kyberPublicBase64: publicKeys.kyberPublicBase64 || '',
+                        dilithiumPublicBase64: publicKeys.dilithiumPublicBase64 || '',
+                        x25519PublicBase64: publicKeys.x25519PublicBase64 || ''
+                      };
+                      const payload = JSON.stringify(keysToSend);
+                      try {
+                        const keys = await Authentication.getKeysOnDemand?.();
+                        const encryptedHybridKeys = await CryptoUtils.Hybrid.encryptForServer(
+                          payload,
+                          serverHybridPublic,
+                          {
+                            senderDilithiumSecretKey: keys?.dilithium?.secretKey,
+                            senderDilithiumPublicKey: keys?.dilithium?.publicKey,
+                            metadata: { context: 'hybrid-keys-update' }
+                          }
+                        );
+                        websocketClient.send(JSON.stringify({ type: SignalType.HYBRID_KEYS_UPDATE, userData: encryptedHybridKeys }));
+                      } catch { }
+                    }
+                  }
+                } catch { }
+
+                try {
+                  if ((window as any).edgeApi?.setSignalStorageKey) {
+                    const label = new TextEncoder().encode('signal-storage-key-v1');
+                    let derived: Uint8Array | null = null;
+                    const keys = await Authentication.getKeysOnDemand?.();
+                    const kyberSecret: Uint8Array | undefined = keys?.kyber?.secretKey || Authentication?.hybridKeysRef?.current?.kyber?.secretKey;
+                    if (kyberSecret && kyberSecret instanceof Uint8Array && kyberSecret.length > 0) {
+                      derived = await (CryptoUtils as any).Hash.generateBlake3Mac(label, kyberSecret);
+                    }
+                    if (derived) {
+                      const keyB64 = (CryptoUtils as any).Base64.arrayBufferToBase64(derived);
+                      await (window as any).edgeApi.setSignalStorageKey({ keyBase64: keyB64 });
+                      try { if ((derived as any)?.fill) (derived as any).fill(0); } catch { }
+                    }
+                  }
+                } catch { }
+
+                setAccountAuthenticated?.(true);
+                setIsLoggedIn?.(true);
+                setShowPassphrasePrompt?.(false);
+                Authentication?.setUsername?.(recoveredUser);
+                Authentication?.setMaxStepReached?.('server');
+                Authentication?.setRecoveryActive?.(false);
+                try { window.dispatchEvent(new CustomEvent('secure-chat:auth-success')); } catch { }
+                vaultKeyUnwrapSuccess = true;
+              }
+            }
+          } catch { }
+
+          if (vaultKeyUnwrapSuccess) {
+            break;
+          }
+        }
+
         handleAuthSuccess?.(recoveredUser || usernameFromServer || '', Boolean(data?.recovered));
+        try { Authentication?.setTokenValidationInProgress?.(false); } catch { }
+        try { setAuthStatus?.(''); } catch { }
         break;
       }
 
@@ -325,17 +425,14 @@ export async function handleSignalMessages(data: any, handlers: SignalHandlers) 
             } else if (loginUsernameRef?.current) {
               vaultKey = await ensureVaultKeyCryptoKey(loginUsernameRef.current);
             }
-          } catch (_e) {
-          }
+          } catch { }
 
-          // Attempt to unwrap master key from secure store using the vault key
           let masterKeyBytes: Uint8Array | null = null;
           if (vaultKey && loginUsernameRef?.current) {
             try {
               const { loadWrappedMasterKey } = await import('./vault-key');
               masterKeyBytes = await loadWrappedMasterKey(loginUsernameRef.current, vaultKey);
-            } catch (_e) {
-            }
+            } catch { }
           }
 
           if (masterKeyBytes && masterKeyBytes.length === 32) {
@@ -378,6 +475,8 @@ export async function handleSignalMessages(data: any, handlers: SignalHandlers) 
                   await Authentication.keyManagerRef.current.storeKeys(pair);
                 }
               } catch { }
+              
+              try { await Authentication.getKeysOnDemand?.(); } catch { }
               const publicKeys = await Authentication.keyManagerRef.current.getPublicKeys();
               if (publicKeys) {
                 const keysToSend = {
@@ -616,8 +715,7 @@ export async function handleSignalMessages(data: any, handlers: SignalHandlers) 
               const raw = new Uint8Array(await (globalThis as any).crypto?.subtle?.exportKey('raw', aesKeyRef.current as CryptoKey));
               await saveWrappedMasterKey(user, raw, vaultKey);
               raw.fill(0);
-            } catch (_e) {
-            }
+            } catch { }
           }
         } catch (_error) {
           SecureAuditLogger.error('signals', 'password-hash', 'derive-key-failed', { error: (_error as Error).message });
@@ -745,29 +843,42 @@ export async function handleSignalMessages(data: any, handlers: SignalHandlers) 
           SecureAuditLogger.error('signals', 'user-exists', 'dispatch-failed', { error: (_error as Error).message });
         }
         try {
-          if (data?.exists && data?.username && data?.hybridPublicKeys && handlers?.Database?.setUsers) {
-            setTimeout(() => {
-              try {
-                handlers.Database.setUsers((prev: any[]) => {
-                  const found = prev.find((u) => u.username === data.username);
-                  if (!found) {
-                    return [
-                      ...prev,
-                      {
-                        id: crypto.randomUUID?.() || String(Date.now()),
-                        username: data.username,
-                        isOnline: true,
-                        hybridPublicKeys: data.hybridPublicKeys
-                      }
-                    ];
-                  }
-                  if (!found.hybridPublicKeys && data.hybridPublicKeys) {
-                    return prev.map((u) => (u.username === data.username ? { ...u, hybridPublicKeys: data.hybridPublicKeys, isOnline: true } : u));
-                  }
-                  return prev;
-                });
-              } catch { }
-            }, 0);
+          if (data?.exists && data?.username && data?.hybridPublicKeys) {
+            const sanitized = sanitizeHybridKeys(data.hybridPublicKeys);
+            if (sanitized) {
+              setTimeout(() => {
+                try {
+                  window.dispatchEvent(new CustomEvent('user-keys-available', {
+                    detail: { username: data.username, hybridKeys: sanitized }
+                  }));
+                } catch { }
+              }, 0);
+            }
+            
+            if (handlers?.Database?.setUsers) {
+              setTimeout(() => {
+                try {
+                  handlers.Database.setUsers((prev: any[]) => {
+                    const found = prev.find((u) => u.username === data.username);
+                    if (!found) {
+                      return [
+                        ...prev,
+                        {
+                          id: crypto.randomUUID?.() || String(Date.now()),
+                          username: data.username,
+                          isOnline: true,
+                          hybridPublicKeys: sanitized || data.hybridPublicKeys
+                        }
+                      ];
+                    }
+                    if (!found.hybridPublicKeys && data.hybridPublicKeys) {
+                      return prev.map((u) => (u.username === data.username ? { ...u, hybridPublicKeys: sanitized || data.hybridPublicKeys, isOnline: true } : u));
+                    }
+                    return prev;
+                  });
+                } catch { }
+              }, 0);
+            }
           }
         } catch { }
         break;
@@ -940,6 +1051,13 @@ export async function handleSignalMessages(data: any, handlers: SignalHandlers) 
 
         try { setIsSubmittingAuth?.(false); } catch { }
 
+        if ((data as any)?.code === 'OFFLINE_LONGTERM_REQUIRED') {
+          try {
+            window.dispatchEvent(new CustomEvent('offline-longterm-required', { detail: data }));
+          } catch { }
+          break;
+        }
+
         if (errorMsg.includes('Unknown PQ session') || errorMsg.includes('PQ session')) {
           SecureAuditLogger.warn('signals', 'session-error', 'unknown-session', {
             message: errorMsg,
@@ -981,10 +1099,6 @@ export async function handleSignalMessages(data: any, handlers: SignalHandlers) 
       }
 
       default: {
-        if (type && websocketClient) {
-          (websocketClient as any).handleMessage(data).catch(() => { });
-        }
-
         SecureAuditLogger.warn('signals', 'unhandled', 'unknown-signal-type', {
           type: type,
           hasMessage: !!message,

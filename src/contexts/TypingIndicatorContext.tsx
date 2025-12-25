@@ -1,6 +1,6 @@
 import React, { createContext, useContext, useState, useCallback, ReactNode, useEffect, useRef, useMemo } from 'react';
-import { CryptoUtils } from '@/lib/unified-crypto';
-import { SecureMemory } from '@/lib/secure-memory';
+import { CryptoUtils } from '../lib/unified-crypto';
+import { SecureMemory } from '../lib/secure-memory';
 
 type TypingAction = 'start' | 'stop';
 
@@ -34,6 +34,18 @@ const MAX_EVENT_QUEUE = 500;
 const DEFAULT_MAX_TYPING_USERS = 200;
 const DEFAULT_TYPING_TIMEOUT_MS = 5500;
 const DEFAULT_RATE_LIMIT_PER_MINUTE = 240;
+
+const isPlainObject = (value: unknown): value is Record<string, unknown> => {
+	if (typeof value !== 'object' || value === null) {
+		return false;
+	}
+	const proto = Object.getPrototypeOf(value);
+	return proto === Object.prototype || proto === null;
+};
+
+const hasPrototypePollutionKeys = (obj: Record<string, unknown>): boolean => {
+	return ['__proto__', 'prototype', 'constructor'].some((key) => Object.prototype.hasOwnProperty.call(obj, key));
+};
 
 class BoundedMap<K, V> extends Map<K, V> {
 	constructor(private readonly maxSize: number) {
@@ -97,7 +109,11 @@ async function validateAndVerifyEvent(
 			return null;
 		}
 
-		const detail = event.detail as SecureEventDetail;
+		if (!isPlainObject(event.detail) || hasPrototypePollutionKeys(event.detail)) {
+			return null;
+		}
+
+		const detail = event.detail as unknown as SecureEventDetail;
 		if (!detail.signature || typeof detail.signature !== 'string' || detail.signature.length < 32) {
 			return null;
 		}
@@ -124,6 +140,9 @@ async function validateAndVerifyEvent(
 		}
 
 		if (!detail.payload || typeof detail.payload !== 'object') {
+			return null;
+		}
+		if (!isPlainObject(detail.payload) || hasPrototypePollutionKeys(detail.payload)) {
 			return null;
 		}
 
@@ -258,20 +277,31 @@ export function TypingIndicatorProvider({
 
 		secureChannel.port1.onmessage = listener;
 
-		const windowListener = (event: CustomEvent) => {
-			secureChannel.port2.postMessage({ 
-				type: 'typing-indicator', 
-				detail: event.detail 
-			});
+		const windowListener = (event: Event) => {
+			try {
+				if (!(event instanceof CustomEvent)) {
+					return;
+				}
+				secureChannel.port2.postMessage({
+					type: 'typing-indicator',
+					detail: event.detail
+				});
+			} catch {
+				return;
+			}
 		};
 
 		window.addEventListener('typing-indicator', windowListener as EventListener);
 
 		const handleP2PTypingIndicator = (event: Event) => {
 			if (!(event instanceof CustomEvent)) return;
-			const { from, content } = event.detail || {};
+			const detail = event.detail;
+			if (!isPlainObject(detail) || hasPrototypePollutionKeys(detail)) return;
+			const from = detail.from;
+			const content = detail.content;
 			if (!from || typeof from !== 'string' || !VALID_USERNAME.test(from)) return;
 			if (currentUsername && from === currentUsername) return;
+			if (!rateLimiterRef.current.tryConsume(`p2p:${from}`)) return;
 
 			const action = content === 'typing-start' ? 'start' : content === 'typing-stop' ? 'stop' : null;
 			if (!action) return;

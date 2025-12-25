@@ -76,10 +76,7 @@ const RATE_LIMIT_WINDOW_MS = 1_000;
 const RATE_LIMIT_MAX_MESSAGES = 500;
 
 const DEFAULT_ENCRYPTED_TYPES = new Set<string>([
-  // Transport-level envelope treated specially (decrypted, then routed)
   'pq-envelope',
-
-  // App-level encrypted payloads
   SignalType.ENCRYPTED_MESSAGE,
   SignalType.DR_SEND,
 ]);
@@ -191,6 +188,12 @@ export const useWebSocket = (
           return;
         }
 
+        if (raw && typeof raw === 'object' && (raw as any)._decryptedInBackground === true) {
+          const bgData = raw as BaseMessage;
+          await handleEncryptedMessage(bgData);
+          return;
+        }
+
         const data = sanitizeIncomingMessage(raw, allowedTypes, schemas);
         if (!data) {
           return;
@@ -264,7 +267,10 @@ export const useWebSocket = (
           }
 
           if (inner.type === 'device-challenge' || inner.type === 'device-attestation-ack') {
-            window.dispatchEvent(new CustomEvent('edge:server-message', { detail: inner }));
+            try {
+              websocketClient.handleEdgeServerMessage(inner);
+            } catch {
+            }
             return;
           }
 
@@ -287,6 +293,16 @@ export const useWebSocket = (
           if (hasPrototypePollutionKeys(detail)) {
             return;
           }
+        }
+
+        let consumed = false;
+        try {
+          consumed = websocketClient.handleEdgeServerMessage(detail);
+        } catch {
+        }
+
+        if (consumed) {
+          return;
         }
 
         handler(detail ?? evt).catch((error) => {

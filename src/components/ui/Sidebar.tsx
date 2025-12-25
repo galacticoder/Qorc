@@ -1,5 +1,5 @@
 import React, { useState, useRef } from 'react';
-import { MessageSquare, Phone, Settings, LogOut, User as UserIcon, Moon, Sun, ChevronLeft, ChevronRight } from 'lucide-react';
+import { LogOut } from 'lucide-react';
 import { ChatBubbleIcon, SettingsIcon, CallIcon } from '../chat/icons';
 import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
@@ -115,7 +115,8 @@ export function Sidebar({ activeTab, onTabChange, currentUser, onLogout }: Sideb
                                         "!h-[25px] !w-[25px] transition-all duration-300",
                                         activeTab === item.id ? "fill-current" : "fill-none"
                                     )}
-                                    size={25}
+                                    width={25}
+                                    height={25}
                                     strokeWidth={activeTab === item.id ? 2.5 : 2}
                                 />
                             </div>

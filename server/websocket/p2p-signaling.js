@@ -12,6 +12,8 @@ export function attachP2PSignaling(wss, logger = console) {
       return;
     }
 
+    logger.info('[P2P Signaling] New connection established', { url: req.url });
+
     let currentUsername = null;
 
     ws.on('message', async (data) => {
@@ -27,6 +29,8 @@ export function attachP2PSignaling(wss, logger = console) {
           }
           peerConnections.get(from).add(ws);
           
+          logger.info('[P2P Signaling] User registered', { username: from?.slice(0, 8) + '...', totalPeers: peerConnections.size });
+          
           ws.send(JSON.stringify({
             type: 'registered',
             username: from,
@@ -34,8 +38,8 @@ export function attachP2PSignaling(wss, logger = console) {
           return;
         }
 
-        // Relay signaling messages (WebRTC and Onion)
-        if (type === 'offer' || type === 'answer' || type === 'ice-candidate' || type === 'onion-offer' || type === 'onion-answer') {
+        // Relay signaling messages
+        if (type === 'offer' || type === 'answer' || type === 'ice-candidate') {
           try {
             const senderBlockedByRecipient = await checkBlocking(from, to);
             const recipientBlockedBySender = await checkBlocking(to, from);
@@ -105,6 +109,7 @@ export function attachP2PSignaling(wss, logger = console) {
     });
 
     ws.on('close', () => {
+      logger.info('[P2P Signaling] Connection closed', { username: currentUsername?.slice(0, 8) + '...' || 'unknown' });
       if (currentUsername) {
         const sockets = peerConnections.get(currentUsername);
         if (sockets) {

@@ -58,6 +58,62 @@ function sanitizeHybridKeysServer(keys) {
 
 let server, wss, serverHybridKeyPair, blockTokenCleanupInterval, statusLogInterval;
 
+/**
+ * Verify TURN server is reachable before starting
+ */
+async function verifyTurnServer() {
+  const turnUsername = process.env.TURN_USERNAME;
+  const turnPassword = process.env.TURN_PASSWORD;
+
+  if (!turnUsername || !turnPassword) {
+    throw new Error('TURN server credentials not configured. Set TURN_USERNAME and TURN_PASSWORD in .env');
+  }
+
+  const turnPort = process.env.TURN_PORT || '3478';
+  const candidates = [];
+  if (process.env.TURN_HEALTHCHECK_HOST) candidates.push(process.env.TURN_HEALTHCHECK_HOST);
+  if (process.env.TURN_EXTERNAL_IP && process.env.TURN_EXTERNAL_IP.trim() !== '') {
+    candidates.push(process.env.TURN_EXTERNAL_IP.trim());
+  }
+  candidates.push('coturn');
+  candidates.push('127.0.0.1');
+
+  // Test TCP connectivity to TURN server using first reachable candidate
+  const net = await import('net');
+
+  for (const host of candidates) {
+    const target = host;
+    try {
+      await new Promise((resolve, reject) => {
+        const socket = new net.default.Socket();
+        const timeout = setTimeout(() => {
+          socket.destroy();
+          reject(new Error(`timeout`));
+        }, 5000);
+
+        socket.connect(parseInt(turnPort, 10), target, () => {
+          clearTimeout(timeout);
+          socket.destroy();
+          resolve(true);
+        });
+
+        socket.on('error', (err) => {
+          clearTimeout(timeout);
+          socket.destroy();
+          reject(err);
+        });
+      });
+
+      cryptoLogger.info('[TURN] TURN server connectivity verified', { host: target, port: turnPort });
+      return { ip: target, port: turnPort };
+    } catch (err) {
+      cryptoLogger.warn('[TURN] TURN connectivity attempt failed', { host, port: turnPort, error: err?.message });
+    }
+  }
+
+  throw new Error(`TURN server not reachable on any candidate host. Tried: ${candidates.join(', ')}. Check if coturn container is running and set TURN_HEALTHCHECK_HOST or TURN_EXTERNAL_IP appropriately.`);
+}
+
 async function createExpressApp() {
   const app = express();
   app.set('trust proxy', true);
@@ -116,7 +172,32 @@ async function createExpressApp() {
     }
   });
 
-  app.get('/api/ice/config', (req, res) => {
+  let cachedPublicIp = null;
+  let lastIpFetchTime = 0;
+
+  async function getPublicIp() {
+    const now = Date.now();
+    // Cache for 1 hour
+    if (cachedPublicIp && (now - lastIpFetchTime < 3600000)) {
+      return cachedPublicIp;
+    }
+    try {
+      const resp = await fetch('https://api.ipify.org?format=json');
+      if (resp.ok) {
+        const data = await resp.json();
+        if (data.ip) {
+          cachedPublicIp = data.ip;
+          lastIpFetchTime = now;
+          return cachedPublicIp;
+        }
+      }
+    } catch (err) {
+      cryptoLogger.warn('[ICE-CONFIG] Failed to auto-detect public IP', { error: err.message });
+    }
+    return process.env.PUBLIC_IP || null;
+  }
+
+  app.get('/api/ice/config', async (req, res) => {
     try {
       const turnRaw = process.env.TURN_SERVERS || '';
       const stunRaw = process.env.STUN_SERVERS || '';
@@ -135,6 +216,8 @@ async function createExpressApp() {
         } catch { }
       }
       const iceServers = [];
+
+      // Add STUN servers
       if (stunServers && Array.isArray(stunServers)) {
         for (const url of stunServers) {
           if (typeof url === 'string' && url.startsWith('stun:')) {
@@ -142,6 +225,8 @@ async function createExpressApp() {
           }
         }
       }
+
+      // Add TURN servers from TURN_SERVERS env
       if (turnServers && Array.isArray(turnServers)) {
         for (const entry of turnServers) {
           if (!entry) continue;
@@ -152,6 +237,55 @@ async function createExpressApp() {
           iceServers.push(entry);
         }
       }
+
+      // Auto-detect Docker TURN if configured
+      const turnUsername = process.env.TURN_USERNAME;
+      const turnPassword = process.env.TURN_PASSWORD;
+
+      if (turnUsername && turnPassword) {
+        let turnExternalIp = process.env.TURN_EXTERNAL_IP;
+        if (!turnExternalIp || turnExternalIp.trim() === '') {
+          turnExternalIp = await getPublicIp();
+        }
+
+        if (turnExternalIp) {
+          const turnPort = process.env.TURN_PORT || '3478';
+          const turnsPort = process.env.TURNS_PORT || '5349';
+          const turnUrl = `turn:${turnExternalIp}:${turnPort}`;
+
+          const alreadyExists = iceServers.some(s => {
+            const urls = Array.isArray(s.urls) ? s.urls : [s.urls];
+            return urls.some(u => typeof u === 'string' && u.startsWith(turnUrl));
+          });
+
+          if (!alreadyExists) {
+            iceServers.push({
+              urls: [
+                `turn:${turnExternalIp}:${turnPort}`,
+                `turns:${turnExternalIp}:${turnsPort}`
+              ],
+              username: turnUsername,
+              credential: turnPassword
+            });
+            cryptoLogger.info('[ICE-CONFIG] Included Docker TURN server in ICE config', {
+              ip: turnExternalIp,
+              turnPort,
+              turnsPort,
+              autoDetected: !process.env.TURN_EXTERNAL_IP
+            });
+          }
+        }
+      }
+
+      // Fallback to public STUN if empty
+      if (iceServers.length === 0) {
+        iceServers.push(
+          { urls: 'stun:stun.l.google.com:19302' },
+          { urls: 'stun:stun1.l.google.com:19302' },
+          { urls: 'stun:stun2.l.google.com:19302' }
+        );
+      }
+
       const iceTransportPolicy = process.env.ICE_TRANSPORT_POLICY === 'relay' ? 'relay' : 'all';
       res.json({ iceServers, iceTransportPolicy });
     } catch (error) {
@@ -160,7 +294,6 @@ async function createExpressApp() {
     }
   });
 
-  // Serve static frontend files
   const __filename = fileURLToPath(import.meta.url);
   const __dirname = path.dirname(__filename);
   const distPath = path.join(__dirname, '../dist');
@@ -201,7 +334,16 @@ async function createWebSocketServer({ server: httpsServer }) {
   // Set up pattern subscriber for cross-instance delivery
   try {
     await presenceService.createPatternSubscriber(async ({ message }) => {
-      const parsedMessage = JSON.parse(message);
+      let parsedMessage;
+      try {
+        const raw = typeof message === 'string' ? message : String(message);
+        parsedMessage = JSON.parse(raw);
+      } catch (error) {
+        cryptoLogger.warn('[CROSS-INSTANCE] Invalid message payload', {
+          error: error?.message || String(error)
+        });
+        return;
+      }
       const senderUser = parsedMessage.encryptedPayload?.from || parsedMessage.from;
       const recipientUser = parsedMessage.to || parsedMessage.encryptedPayload?.to;
 
@@ -228,58 +370,41 @@ async function createWebSocketServer({ server: httpsServer }) {
       // Deliver to local connections
       let localSet = global.gateway?.getLocalConnections?.(recipientUser);
 
-      // If no local connections found wait for connection registration
-      if (!localSet || localSet.size === 0) {
-        await new Promise(r => setTimeout(r, 100));
-        localSet = global.gateway?.getLocalConnections?.(recipientUser);
-      }
-
       if (localSet && localSet.size) {
         let deliveredCount = 0;
         for (const client of localSet) {
           if (client && client.readyState === 1) {
             const recipientSessionId = client._sessionId;
-            if (recipientSessionId) {
-              const recipientState = await ConnectionStateManager.getState(recipientSessionId);
-              let isAuthed = !!recipientState?.hasAuthenticated;
-              if (!isAuthed) {
-                const userAuth = await ConnectionStateManager.getUserAuthState(recipientUser);
-                isAuthed = !!userAuth?.hasAuthenticated;
-              }
-              if (isAuthed) {
-                // Use cross-instance delivery
-                let recipientPqSessionId = client._pqSessionId;
-                if (!recipientPqSessionId && recipientState?.pqSessionId) {
+            if (!recipientSessionId) continue;
+
+            const isAuthed = !!(client._authenticated || client?.clientState?.hasAuthenticated);
+            if (!isAuthed) continue;
+
+            let recipientPqSessionId = client._pqSessionId;
+            if (!recipientPqSessionId) {
+              try {
+                const recipientState = await ConnectionStateManager.getState(recipientSessionId);
+                if (recipientState?.pqSessionId) {
                   recipientPqSessionId = recipientState.pqSessionId;
                   client._pqSessionId = recipientPqSessionId;
                 }
-
-                if (recipientPqSessionId) {
-                  const recipientPqSession = await getPQSession(recipientPqSessionId);
-                  if (recipientPqSession) {
-                    try {
-                      await sendPQEncryptedResponse(client, recipientPqSession, parsedMessage);
-                      deliveredCount++;
-                    } catch (err) {
-                      cryptoLogger.error('[CROSS-INSTANCE] PQ envelope failed', {
-                        recipient: recipientUser.slice(0, 8) + '...',
-                        session: recipientSessionId.slice(0, 8) + '...',
-                        error: err.message
-                      });
-                    }
-                  } else {
-                    cryptoLogger.warn('[CROSS-INSTANCE] No PQ session', {
-                      recipient: recipientUser.slice(0, 8) + '...',
-                      session: recipientSessionId.slice(0, 8) + '...'
-                    });
-                  }
-                } else {
-                  cryptoLogger.warn('[CROSS-INSTANCE] No PQ session ID', {
-                    recipient: recipientUser.slice(0, 8) + '...',
-                    session: recipientSessionId.slice(0, 8) + '...'
-                  });
-                }
+              } catch {
               }
+            }
+            if (!recipientPqSessionId) continue;
+
+            const recipientPqSession = await getPQSession(recipientPqSessionId);
+            if (!recipientPqSession) continue;
+
+            try {
+              await sendPQEncryptedResponse(client, recipientPqSession, parsedMessage);
+              deliveredCount++;
+            } catch (err) {
+              cryptoLogger.error('[CROSS-INSTANCE] PQ envelope failed', {
+                recipient: recipientUser.slice(0, 8) + '...',
+                session: recipientSessionId.slice(0, 8) + '...',
+                error: err.message
+              });
             }
           }
         }
@@ -462,8 +587,8 @@ async function onServerReady({ server: httpsServer, wss: wsServer, context, work
       messageHardLimitPerMinute: SERVER_CONSTANTS.MESSAGE_HARD_LIMIT_PER_MINUTE,
       heartbeatIntervalMs: SERVER_CONSTANTS.HEARTBEAT_INTERVAL,
     },
-    onMessage: async ({ ws, sessionId, message }) => {
-      await handleWebSocketMessage({ ws, sessionId, message, context });
+    onMessage: async ({ ws, sessionId, message, parsed }) => {
+      await handleWebSocketMessage({ ws, sessionId, message, parsed, context });
     },
   });
 
@@ -472,23 +597,27 @@ async function onServerReady({ server: httpsServer, wss: wsServer, context, work
   attachP2PSignaling(wss, cryptoLogger);
 }
 
-async function handleWebSocketMessage({ ws, sessionId, message, context }) {
+async function handleWebSocketMessage({ ws, sessionId, message, parsed, context }) {
   const { authHandler, serverAuthHandler } = context;
 
   try {
-    const msgString = message.toString().trim();
-    if (msgString.length === 0) { return await sendSecureMessage(ws, { type: SignalType.ERROR, message: 'Empty message' }); }
-
-    let testParse;
-    try {
-      testParse = JSON.parse(msgString);
-    } catch (_parseError) {
-      return await sendSecureMessage(ws, { type: SignalType.ERROR, message: 'Invalid JSON format' });
+    const msgString = (typeof message === 'string' ? message : String(message)).trim();
+    if (msgString.length === 0) {
+      return await sendSecureMessage(ws, { type: SignalType.ERROR, message: 'Empty message' });
     }
 
-    if (typeof testParse !== 'object' || testParse === null) { return await sendSecureMessage(ws, { type: SignalType.ERROR, message: 'Invalid message format - expected object' }); }
+    let normalizedMessage = null;
+    if (parsed && typeof parsed === 'object') {
+      normalizedMessage = parsed;
+    } else {
+      try {
+        normalizedMessage = JSON.parse(msgString);
+      } catch (_parseError) {
+        return await sendSecureMessage(ws, { type: SignalType.ERROR, message: 'Invalid JSON format' });
+      }
+    }
 
-    const normalizedMessage = testParse;
+    if (typeof normalizedMessage !== 'object' || normalizedMessage === null) { return await sendSecureMessage(ws, { type: SignalType.ERROR, message: 'Invalid message format - expected object' }); }
     const state = await ConnectionStateManager.getState(sessionId);
 
     if (!state) {
@@ -650,6 +779,7 @@ async function handleWebSocketMessage({ ws, sessionId, message, context }) {
 
           // Restore authentication to WebSocket session
           ws._username = username;
+          ws._authenticated = true;
           ws._hasAuthenticated = true;
 
           // Update connection state in Redis with authenticated status
@@ -744,6 +874,7 @@ async function handleWebSocketMessage({ ws, sessionId, message, context }) {
 
           // Restore authentication to WebSocket session
           ws._username = username;
+          ws._authenticated = true;
           ws._hasAuthenticated = true;
 
           // Update connection state in Redis with authenticated status
@@ -1212,6 +1343,7 @@ async function handleWebSocketMessage({ ws, sessionId, message, context }) {
 
         // 5. Authenticate the session
         ws._username = username;
+        ws._authenticated = true;
         ws._hasAuthenticated = true;
 
         // Update connection state
@@ -1320,7 +1452,7 @@ async function handleWebSocketMessage({ ws, sessionId, message, context }) {
               let publicData;
               try {
                 publicData = JSON.parse(result.publicData);
-              } catch (parseErr) {
+              } catch {
                 publicData = result.publicData;
               }
 
@@ -1340,11 +1472,17 @@ async function handleWebSocketMessage({ ws, sessionId, message, context }) {
           } else {
             await sendSecureMessage(ws, { type: 'avatar-fetch-response', found: false, error: 'Invalid target' });
           }
-        } catch (error) {
+        } catch {
           await sendSecureMessage(ws, { type: 'avatar-fetch-response', found: false, error: 'Fetch failed' });
         }
         break;
       }
+
+      case 'offer':
+      case 'answer':
+      case 'ice-candidate':
+        await handleP2PSignalingRelay({ ws, sessionId, parsed: normalizedMessage, state });
+        break;
 
       case 'ping':
         await sendSecureMessage(ws, { type: 'pong', timestamp: Date.now() });
@@ -1392,7 +1530,7 @@ async function handleEncryptedMessage({ ws, sessionId, parsed, state }) {
     return await sendSecureMessage(ws, { type: SignalType.ERROR, message: 'Session mismatch' });
   }
 
-  const { to: toUser, encryptedPayload } = parsed;
+  const { to: toUser, encryptedPayload, messageId } = parsed;
   if (!toUser || !encryptedPayload) {
     cryptoLogger.error('[MESSAGE-FORWARD] Invalid message format', {
       hasTo: !!toUser,
@@ -1428,60 +1566,43 @@ async function handleEncryptedMessage({ ws, sessionId, parsed, state }) {
   }
 
   let localSet = global.gateway?.getLocalConnections?.(toUser);
-  let localDeliveryAttempted = false;
-
-  if ((!localSet || localSet.size === 0)) {
-    await new Promise(r => setTimeout(r, 150));
-    localSet = global.gateway?.getLocalConnections?.(toUser);
-  }
 
   if (localSet && localSet.size) {
-    localDeliveryAttempted = true;
     let deliveredCount = 0;
 
     for (const client of localSet) {
       if (client && client.readyState === 1) {
         const recipientSessionId = client._sessionId;
 
-        if (recipientSessionId) {
-          const recipientState = await ConnectionStateManager.getState(recipientSessionId);
-          let isAuthed = !!recipientState?.hasAuthenticated;
-          if (!isAuthed) {
-            const userAuth = await ConnectionStateManager.getUserAuthState(toUser);
-            isAuthed = !!userAuth?.hasAuthenticated;
-          }
+        if (!recipientSessionId) continue;
 
-          if (isAuthed) {
-            let recipientPqSessionId = client._pqSessionId;
-            if (!recipientPqSessionId && recipientState?.pqSessionId) {
+        const isAuthed = !!(client._authenticated || client?.clientState?.hasAuthenticated);
+        if (!isAuthed) continue;
+
+        let recipientPqSessionId = client._pqSessionId;
+        if (!recipientPqSessionId) {
+          try {
+            const recipientState = await ConnectionStateManager.getState(recipientSessionId);
+            if (recipientState?.pqSessionId) {
               recipientPqSessionId = recipientState.pqSessionId;
               client._pqSessionId = recipientPqSessionId;
             }
-
-            if (recipientPqSessionId) {
-              const recipientPqSession = await getPQSession(recipientPqSessionId);
-
-              if (recipientPqSession) {
-                try {
-                  await sendPQEncryptedResponse(client, recipientPqSession, normalizedMessage);
-                  deliveredCount++;
-                } catch (err) {
-                  cryptoLogger.error('[MESSAGE-FORWARD] PQ envelope failed', {
-                    session: recipientSessionId.slice(0, 8) + '...',
-                    error: err.message
-                  });
-                }
-              } else {
-                cryptoLogger.warn('[MESSAGE-FORWARD] No PQ session', {
-                  session: recipientSessionId.slice(0, 8) + '...'
-                });
-              }
-            } else {
-              cryptoLogger.warn('[MESSAGE-FORWARD] No PQ session ID', {
-                session: recipientSessionId.slice(0, 8) + '...'
-              });
-            }
+          } catch {
           }
+        }
+        if (!recipientPqSessionId) continue;
+
+        const recipientPqSession = await getPQSession(recipientPqSessionId);
+        if (!recipientPqSession) continue;
+
+        try {
+          await sendPQEncryptedResponse(client, recipientPqSession, normalizedMessage);
+          deliveredCount++;
+        } catch (err) {
+          cryptoLogger.error('[MESSAGE-FORWARD] PQ envelope failed', {
+            session: recipientSessionId.slice(0, 8) + '...',
+            error: err.message
+          });
         }
       }
     }
@@ -1492,17 +1613,21 @@ async function handleEncryptedMessage({ ws, sessionId, parsed, state }) {
     }
   }
 
-  let isOnline = await presenceService.isUserOnline(toUser);
-  if (!isOnline) {
-    await new Promise(r => setTimeout(r, 100));
-    isOnline = await presenceService.isUserOnline(toUser);
+  const localServerId = process.env.SERVER_ID || 'default';
+  let remoteTargets = [];
+  try {
+    const distributed = await global.gateway?.getDistributedConnectionServers?.(toUser);
+    if (Array.isArray(distributed)) {
+      remoteTargets = distributed.filter((t) => t && t.serverId && t.serverId !== localServerId);
+    }
+  } catch {
   }
 
-  if (isOnline) {
+  if (remoteTargets.length > 0) {
     try {
-      await presenceService.publishToUser(toUser, JSON.stringify(normalizedMessage));
+      const receivers = await presenceService.publishToUser(toUser, JSON.stringify(normalizedMessage));
       await sendSecureMessage(ws, { type: 'ok', message: 'relayed' });
-      logDeliveryEvent('cross-instance-published', { to: toUser });
+      logDeliveryEvent('cross-instance-published', { to: toUser, receivers, remoteTargets: remoteTargets.length });
       return;
     } catch (error) {
       logError(error, { operation: 'cross-instance-delivery' });
@@ -1511,18 +1636,18 @@ async function handleEncryptedMessage({ ws, sessionId, parsed, state }) {
     }
   }
 
-  // Queue for offline delivery
+  // Offline recipients must use long-term offline storage
   try {
-    const success = await MessageDatabase.queueOfflineMessage(toUser, normalizedMessage);
-    if (success) {
-      await sendSecureMessage(ws, { type: 'ok', message: 'queued' });
-      logDeliveryEvent('offline-queued', { to: toUser });
-    } else {
-      await sendSecureMessage(ws, { type: SignalType.ERROR, message: 'Failed to queue message' });
-    }
+    await sendSecureMessage(ws, {
+      type: SignalType.ERROR,
+      message: 'Offline recipient requires long-term storage',
+      code: 'OFFLINE_LONGTERM_REQUIRED',
+      to: toUser,
+      messageId: messageId || null
+    });
+    logDeliveryEvent('offline-longterm-required', { to: toUser });
   } catch (error) {
-    logError(error, { operation: 'offline-queue' });
-    await sendSecureMessage(ws, { type: SignalType.ERROR, message: 'Failed to queue message' });
+    logError(error, { operation: 'offline-longterm-required' });
   }
 }
 
@@ -1563,45 +1688,40 @@ async function handleSessionResetRequest({ ws, sessionId, parsed, state }) {
   // Try local delivery
   let localSet = global.gateway?.getLocalConnections?.(targetUsername);
 
-  if ((!localSet || localSet.size === 0)) {
-    await new Promise(r => setTimeout(r, 150));
-    localSet = global.gateway?.getLocalConnections?.(targetUsername);
-  }
-
   if (localSet && localSet.size) {
     let deliveredCount = 0;
     for (const client of localSet) {
       if (client && client.readyState === 1) {
         const recipientSessionId = client._sessionId;
-        if (recipientSessionId) {
-          const recipientState = await ConnectionStateManager.getState(recipientSessionId);
-          let isAuthed = !!recipientState?.hasAuthenticated;
-          if (!isAuthed) {
-            const userAuth = await ConnectionStateManager.getUserAuthState(targetUsername);
-            isAuthed = !!userAuth?.hasAuthenticated;
-          }
-          if (isAuthed) {
-            let recipientPqSessionId = client._pqSessionId;
-            if (!recipientPqSessionId && recipientState?.pqSessionId) {
+        if (!recipientSessionId) continue;
+
+        const isAuthed = !!(client._authenticated || client?.clientState?.hasAuthenticated);
+        if (!isAuthed) continue;
+
+        let recipientPqSessionId = client._pqSessionId;
+        if (!recipientPqSessionId) {
+          try {
+            const recipientState = await ConnectionStateManager.getState(recipientSessionId);
+            if (recipientState?.pqSessionId) {
               recipientPqSessionId = recipientState.pqSessionId;
               client._pqSessionId = recipientPqSessionId;
             }
-
-            if (recipientPqSessionId) {
-              const recipientPqSession = await getPQSession(recipientPqSessionId);
-              if (recipientPqSession) {
-                try {
-                  await sendPQEncryptedResponse(client, recipientPqSession, resetNotification);
-                  deliveredCount++;
-                } catch (err) {
-                  cryptoLogger.error('[SESSION-RESET] Delivery failed', {
-                    session: recipientSessionId.slice(0, 8) + '...',
-                    error: err.message
-                  });
-                }
-              }
-            }
+          } catch {
           }
+        }
+        if (!recipientPqSessionId) continue;
+
+        const recipientPqSession = await getPQSession(recipientPqSessionId);
+        if (!recipientPqSession) continue;
+
+        try {
+          await sendPQEncryptedResponse(client, recipientPqSession, resetNotification);
+          deliveredCount++;
+        } catch (err) {
+          cryptoLogger.error('[SESSION-RESET] Delivery failed', {
+            session: recipientSessionId.slice(0, 8) + '...',
+            error: err.message
+          });
         }
       }
     }
@@ -1654,45 +1774,40 @@ async function handleSessionEstablished({ ws, sessionId, parsed, state }) {
   // Try local delivery
   let localSet = global.gateway?.getLocalConnections?.(targetUsername);
 
-  if ((!localSet || localSet.size === 0)) {
-    await new Promise(r => setTimeout(r, 50));
-    localSet = global.gateway?.getLocalConnections?.(targetUsername);
-  }
-
   if (localSet && localSet.size) {
     let deliveredCount = 0;
     for (const client of localSet) {
       if (client && client.readyState === 1) {
         const recipientSessionId = client._sessionId;
-        if (recipientSessionId) {
-          const recipientState = await ConnectionStateManager.getState(recipientSessionId);
-          let isAuthed = !!recipientState?.hasAuthenticated;
-          if (!isAuthed) {
-            const userAuth = await ConnectionStateManager.getUserAuthState(targetUsername);
-            isAuthed = !!userAuth?.hasAuthenticated;
-          }
-          if (isAuthed) {
-            let recipientPqSessionId = client._pqSessionId;
-            if (!recipientPqSessionId && recipientState?.pqSessionId) {
+        if (!recipientSessionId) continue;
+
+        const isAuthed = !!(client._authenticated || client?.clientState?.hasAuthenticated);
+        if (!isAuthed) continue;
+
+        let recipientPqSessionId = client._pqSessionId;
+        if (!recipientPqSessionId) {
+          try {
+            const recipientState = await ConnectionStateManager.getState(recipientSessionId);
+            if (recipientState?.pqSessionId) {
               recipientPqSessionId = recipientState.pqSessionId;
               client._pqSessionId = recipientPqSessionId;
             }
-
-            if (recipientPqSessionId) {
-              const recipientPqSession = await getPQSession(recipientPqSessionId);
-              if (recipientPqSession) {
-                try {
-                  await sendPQEncryptedResponse(client, recipientPqSession, sessionEstablishedNotification);
-                  deliveredCount++;
-                } catch (err) {
-                  cryptoLogger.error('[SESSION-ESTABLISHED] Delivery failed', {
-                    session: recipientSessionId.slice(0, 8) + '...',
-                    error: err.message
-                  });
-                }
-              }
-            }
+          } catch {
           }
+        }
+        if (!recipientPqSessionId) continue;
+
+        const recipientPqSession = await getPQSession(recipientPqSessionId);
+        if (!recipientPqSession) continue;
+
+        try {
+          await sendPQEncryptedResponse(client, recipientPqSession, sessionEstablishedNotification);
+          deliveredCount++;
+        } catch (err) {
+          cryptoLogger.error('[SESSION-ESTABLISHED] Delivery failed', {
+            session: recipientSessionId.slice(0, 8) + '...',
+            error: err.message
+          });
         }
       }
     }
@@ -1708,18 +1823,118 @@ async function handleSessionEstablished({ ws, sessionId, parsed, state }) {
   await sendSecureMessage(ws, { type: 'ok', message: 'session-established-sent' });
 }
 
+async function handleP2PSignalingRelay({ ws, sessionId: _sessionId, parsed, state }) {
+  if (!state?.hasAuthenticated) {
+    return await sendSecureMessage(ws, { type: SignalType.ERROR, message: 'Authentication required' });
+  }
+  if (!state.username || typeof state.username !== 'string') {
+    return await sendSecureMessage(ws, { type: SignalType.ERROR, message: 'Invalid session state' });
+  }
+
+  const type = parsed?.type;
+  const to = typeof parsed?.to === 'string' ? parsed.to.trim() : '';
+  if (!to) {
+    return await sendSecureMessage(ws, { type: SignalType.ERROR, message: 'Invalid signaling target' });
+  }
+
+  const relayMessage = {
+    type,
+    from: state.username,
+    to,
+    payload: parsed?.payload,
+    ...(parsed?.meta ? { meta: parsed.meta } : {})
+  };
+
+  try {
+    const senderBlockedByRecipient = await checkBlocking(state.username, to);
+    const recipientBlockedBySender = await checkBlocking(to, state.username);
+    if (senderBlockedByRecipient || recipientBlockedBySender) {
+      return await sendSecureMessage(ws, { type: 'ok', message: 'blocked' });
+    }
+  } catch (_e) {
+  }
+
+  let localSet = global.gateway?.getLocalConnections?.(to);
+
+  if (localSet && localSet.size) {
+    let deliveredCount = 0;
+    for (const client of localSet) {
+      if (client && client.readyState === 1) {
+        const recipientSessionId = client._sessionId;
+        if (!recipientSessionId) continue;
+
+        const isAuthed = !!(client._authenticated || client?.clientState?.hasAuthenticated);
+        if (!isAuthed) continue;
+
+        let recipientPqSessionId = client._pqSessionId;
+        if (!recipientPqSessionId) {
+          try {
+            const recipientState = await ConnectionStateManager.getState(recipientSessionId);
+            if (recipientState?.pqSessionId) {
+              recipientPqSessionId = recipientState.pqSessionId;
+              client._pqSessionId = recipientPqSessionId;
+            }
+          } catch {
+          }
+        }
+        if (!recipientPqSessionId) continue;
+
+        const recipientPqSession = await getPQSession(recipientPqSessionId);
+        if (!recipientPqSession) continue;
+
+        try {
+          await sendPQEncryptedResponse(client, recipientPqSession, relayMessage);
+          deliveredCount++;
+        } catch {
+        }
+      }
+    }
+    if (deliveredCount > 0) {
+      await sendSecureMessage(ws, { type: 'ok', message: 'relayed' });
+      return;
+    }
+  }
+
+  const localServerId = process.env.SERVER_ID || 'default';
+  let remoteTargets = [];
+  try {
+    const distributed = await global.gateway?.getDistributedConnectionServers?.(to);
+    if (Array.isArray(distributed)) {
+      remoteTargets = distributed.filter((t) => t && t.serverId && t.serverId !== localServerId);
+    }
+  } catch {
+  }
+
+  if (remoteTargets.length > 0) {
+    try {
+      await presenceService.publishToUser(to, JSON.stringify(relayMessage));
+      await sendSecureMessage(ws, { type: 'ok', message: 'relayed' });
+      return;
+    } catch {
+    }
+  }
+
+  await sendSecureMessage(ws, {
+    type: SignalType.ERROR,
+    message: 'Peer offline'
+  });
+}
+
 async function handleStoreOfflineMessage({ ws, parsed, state }) {
   if (!state?.hasAuthenticated) {
+    cryptoLogger.warn('[OFFLINE-STORE] Rejected - not authenticated');
     return await sendSecureMessage(ws, { type: SignalType.ERROR, message: 'Authentication required' });
   }
 
   const { messageId, to, longTermEnvelope, version } = parsed;
   if (!messageId || !to) {
+    cryptoLogger.warn('[OFFLINE-STORE] Rejected - missing messageId or to');
     return await sendSecureMessage(ws, { type: SignalType.ERROR, message: 'Invalid message data' });
   }
 
   // Require long-term encryption
   if (version !== 'lt-v1' || !longTermEnvelope) {
+    cryptoLogger.warn('[OFFLINE-STORE] Rejected - missing lt-v1 or envelope');
     return await sendSecureMessage(ws, { type: SignalType.ERROR, message: 'Long-term encryption required' });
   }
 
@@ -1746,24 +1961,43 @@ async function handleStoreOfflineMessage({ ws, parsed, state }) {
 
     const success = await MessageDatabase.queueOfflineMessage(to, offlineMessage);
     if (success) {
+      cryptoLogger.info('[OFFLINE-STORE] Message stored successfully', {
+        from: state.username?.slice(0, 8) + '...',
+        to: to?.slice(0, 8) + '...',
+        messageId: messageId?.slice(0, 16) + '...'
+      });
       await sendSecureMessage(ws, { type: 'ok', message: 'Offline message stored' });
       logEvent('offline-message-stored', { username: state.username });
     } else {
+      cryptoLogger.error('[OFFLINE-STORE] Database queueOfflineMessage returned false');
       await sendSecureMessage(ws, { type: SignalType.ERROR, message: 'Failed to store offline message' });
     }
   } catch (error) {
+    cryptoLogger.error('[OFFLINE-STORE] Exception', { error: error?.message });
     logError(error, { operation: 'store-offline-message' });
     await sendSecureMessage(ws, { type: SignalType.ERROR, message: 'Error storing offline message' });
   }
 }
 
 async function handleRetrieveOfflineMessages({ ws, state }) {
+  cryptoLogger.info('[OFFLINE-RETRIEVE] Handler called', {
+    hasState: !!state,
+    hasAuthenticated: state?.hasAuthenticated,
+    username: state?.username?.slice(0, 8) + '...',
+    hasPqSessionId: !!ws._pqSessionId
+  });
+
   if (!state?.hasAuthenticated) {
+    cryptoLogger.warn('[OFFLINE-RETRIEVE] Rejected - not authenticated');
     return await sendSecureMessage(ws, { type: SignalType.ERROR, message: 'Authentication required' });
   }
 
   try {
     const offlineMessages = await MessageDatabase.takeOfflineMessages(state.username, 50);
+    cryptoLogger.info('[OFFLINE-RETRIEVE] Retrieved messages from DB', {
+      username: state.username?.slice(0, 8) + '...',
+      count: offlineMessages?.length ?? 0
+    });
 
     const pqSessionId = ws._pqSessionId;
 
@@ -1776,19 +2010,30 @@ async function handleRetrieveOfflineMessages({ ws, state }) {
           messages: offlineMessages,
           count: offlineMessages.length,
         };
+        cryptoLogger.info('[OFFLINE-RETRIEVE] Sending response', {
+          username: state.username?.slice(0, 8) + '...',
+          messageCount: offlineMessages.length,
+          responseType: responsePayload.type
+        });
         await sendPQEncryptedResponse(ws, session, responsePayload);
+        cryptoLogger.info('[OFFLINE-RETRIEVE] Response sent successfully');
         logEvent('offline-messages-retrieved', {
           username: state.username,
           count: offlineMessages.length,
           pqEncrypted: true
         });
       } else {
+        cryptoLogger.error('[OFFLINE-RETRIEVE] PQ session not found in storage', {
+          pqSessionId: pqSessionId?.slice(0, 16) + '...'
+        });
         throw new Error('PQ session required');
       }
     } else {
+      cryptoLogger.error('[OFFLINE-RETRIEVE] No PQ session ID on websocket');
       throw new Error('PQ session required');
     }
   } catch (error) {
+    cryptoLogger.error('[OFFLINE-RETRIEVE] Error', { error: error?.message });
     logError(error, { operation: 'retrieve-offline-messages' });
     await sendSecureMessage(ws, { type: SignalType.ERROR, message: 'Error retrieving offline messages' });
   }
@@ -1892,7 +2137,7 @@ async function handleMessageHistory({ ws, sessionId, parsed, state }) {
   }
 }
 
-async function handleCheckUserExists({ ws, parsed, state, context }) {
+async function handleCheckUserExists({ ws, parsed, state: _state, context }) {
   const { username } = parsed;
 
   const sendResponse = async (responseData) => {
@@ -1924,7 +2169,6 @@ async function handleCheckUserExists({ ws, parsed, state, context }) {
   }
 
   try {
-    // Check if user exists in database
     const user = await UserDatabase.loadUser(username);
 
     const response = {
@@ -1933,13 +2177,13 @@ async function handleCheckUserExists({ ws, parsed, state, context }) {
       username: username,
     };
 
-    // Include hybrid public keys if user exists
     let sanitizedKeys = null;
-    if (user && user.hybridPublicKeys) {
+    const userHybridKeys = user?.hybridPublicKeys ?? user?.hybridpublickeys;
+    if (user && userHybridKeys) {
       try {
-        const parsedKeys = typeof user.hybridPublicKeys === 'string'
-          ? JSON.parse(user.hybridPublicKeys)
-          : user.hybridPublicKeys;
+        const parsedKeys = typeof userHybridKeys === 'string'
+          ? JSON.parse(userHybridKeys)
+          : userHybridKeys;
         sanitizedKeys = sanitizeHybridKeysServer(parsedKeys);
         response.hybridPublicKeys = sanitizedKeys;
       } catch (parseError) {
@@ -2131,6 +2375,9 @@ async function startServer() {
       handler: gracefulShutdown,
     });
 
+    cryptoLogger.info('[TURN] Verifying TURN server connectivity...');
+    await verifyTurnServer();
+
     await setServerPasswordOnInput();
     await initDatabase();
 
@@ -2146,7 +2393,6 @@ async function startServer() {
       rateLimiterBackend: rateLimitMiddleware.getStats().backend
     });
 
-    // Create server using bootstrap module
     const result = await createBootstrapServer({
       createApp: createExpressApp,
       createWebSocketServer,

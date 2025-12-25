@@ -1,14 +1,14 @@
-import { useEffect, useMemo, useState, useCallback, useRef } from 'react';
-import { debounce } from '@/lib/debounce';
-import { Button } from '@/components/ui/button';
-import { Input } from '@/components/ui/input';
-import { Label } from '@/components/ui/label';
-import { Textarea } from '@/components/ui/textarea';
+import { useEffect, useMemo, useState, useRef } from 'react';
+import { debounce } from '../../lib/debounce';
+import { Button } from '../ui/button';
+import { Input } from '../ui/input';
+import { Label } from '../ui/label';
+import { Textarea } from '../ui/textarea';
 import { TorVerification } from './TorVerification';
-import { getTorAutoSetup, TorSetupStatus } from '@/lib/tor-auto-setup';
-import { torNetworkManager } from '@/lib/tor-network';
-import { ShieldCheck, Server, Settings, ChevronDown, ChevronUp, RefreshCw, Loader2, Zap } from 'lucide-react';
-import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
+import { getTorAutoSetup, TorSetupStatus } from '../../lib/tor-auto-setup';
+import { torNetworkManager } from '../../lib/tor-network';
+import { ShieldCheck, Server, Settings, ChevronDown, ChevronUp, RefreshCw, Loader2 } from 'lucide-react';
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '../ui/collapsible';
 import { toast } from 'sonner';
 
 interface ConnectSetupProps {
@@ -17,7 +17,6 @@ interface ConnectSetupProps {
 }
 
 export function ConnectSetup({ onComplete, initialServerUrl = '' }: ConnectSetupProps) {
-  // Tor setup state
   const [status, setStatus] = useState<TorSetupStatus>({
     isInstalled: false,
     isConfigured: false,
@@ -82,7 +81,6 @@ export function ConnectSetup({ onComplete, initialServerUrl = '' }: ConnectSetup
     })();
   }, [initialServerUrl]);
 
-  // Prevent background scroll when verification modal open
   useEffect(() => {
     if (!showVerification) return;
     document.body.classList.add('overflow-hidden');
@@ -130,7 +128,6 @@ export function ConnectSetup({ onComplete, initialServerUrl = '' }: ConnectSetup
       if (success) {
         const refreshed = await getTorAutoSetup().refreshStatus();
         setStatus(refreshed);
-        console.log('[ConnectSetup] Tor setup complete, version:', refreshed.version);
 
         torNetworkManager.updateConfig({
           enabled: true,
@@ -156,7 +153,7 @@ export function ConnectSetup({ onComplete, initialServerUrl = '' }: ConnectSetup
     }
   };
 
-  const testConnection = async (url: string, timeoutMs = 5000): Promise<void> => {
+  const testConnection = async (url: string, timeoutMs = 15000): Promise<void> => {
     const edgeApi: any = (window as any).edgeApi;
     if (!edgeApi?.wsProbeConnect) {
       console.error('[ConnectSetup] wsProbeConnect not available on edgeApi');
@@ -424,6 +421,17 @@ export function ConnectSetup({ onComplete, initialServerUrl = '' }: ConnectSetup
             </div>
             {!status.isRunning && (
               <p className="text-xs text-muted-foreground ml-1 opacity-70">Initialize Tor to connect to a server.</p>
+            )}
+
+            {(testStatus || testError) && (
+              <div className="text-xs ml-1 space-y-1">
+                {testStatus && (
+                  <div className="text-muted-foreground">{testStatus}</div>
+                )}
+                {testError && (
+                  <div className="text-red-600 dark:text-red-400">{testError}</div>
+                )}
+              </div>
             )}
           </div>
 

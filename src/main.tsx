@@ -31,12 +31,21 @@ function bootstrap() {
     box.style.color = '#e5e7eb';
     box.style.boxShadow = '0 10px 30px rgba(0,0,0,0.3)';
     box.style.fontFamily = 'system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, Noto Sans, sans-serif';
-    box.innerHTML = `
-      <div style="font-size:16px; font-weight:600; margin-bottom:6px;">Desktop app required</div>
-      <div style="font-size:14px; line-height:1.45; opacity:0.9;">
-        This application runs as a desktop app (Electron). Please use the packaged app instead of opening it directly in a web browser.
-      </div>
-    `;
+
+    const title = document.createElement('div');
+    title.textContent = 'Desktop app required';
+    title.style.fontSize = '16px';
+    title.style.fontWeight = '600';
+    title.style.marginBottom = '6px';
+
+    const description = document.createElement('div');
+    description.textContent = 'This application runs as a desktop app (Electron). Please use the packaged app instead of opening it directly in a web browser.';
+    description.style.fontSize = '14px';
+    description.style.lineHeight = '1.45';
+    description.style.opacity = '0.9';
+
+    box.appendChild(title);
+    box.appendChild(description);
     container.appendChild(box);
 
     const close = document.createElement('button');

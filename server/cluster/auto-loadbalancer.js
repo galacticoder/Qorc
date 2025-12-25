@@ -13,19 +13,17 @@ import { withRedisClient } from '../presence/presence.js';
 import { HAProxyConfigGenerator } from './haproxy-config-generator.js';
 import { logger as cryptoLogger } from '../crypto/crypto-logger.js';
 import { CryptoUtils } from '../crypto/unified-crypto.js';
-import { exec } from 'child_process';
+import { execFile, spawn } from 'child_process';
 import { promisify } from 'util';
 import fs from 'fs/promises';
 import { existsSync } from 'fs';
 import path from 'path';
 import os from 'os';
 import crypto from 'crypto';
-import * as http from 'http';
-import * as https from 'https';
 import net from 'net';
 import { fileURLToPath } from 'url';
 
-const execAsync = promisify(exec);
+const execFileAsync = promisify(execFile);
 
 function findInPath(binName) {
   const pathEnv = process.env.PATH || '';
@@ -42,25 +40,6 @@ function findInPath(binName) {
   return null;
 }
 
-function httpGetJSON(url, timeoutMs = 2000) {
-  return new Promise((resolve) => {
-    try {
-      const mod = url.startsWith('https:') ? https : http;
-      const req = mod.get(url, { timeout: timeoutMs }, (res) => {
-        let data = '';
-        res.on('data', (chunk) => { data += chunk; });
-        res.on('end', () => {
-          try { resolve(JSON.parse(data || '{}')); } catch { resolve(null); }
-        });
-      });
-      req.on('error', () => resolve(null));
-      req.on('timeout', () => { try { req.destroy(); } catch { }; resolve(null); });
-    } catch {
-      resolve(null);
-    }
-  });
-}
-
 async function deleteCloudflaredTunnels() {
   try {
     const pidPath = path.join(path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'scripts', 'config', 'tunnel', 'pid'));
@@ -73,9 +52,13 @@ async function deleteCloudflaredTunnels() {
 
   if (process.platform !== 'win32') {
     try {
-      await execAsync('pkill cloudflared || true');
+      await execFileAsync('pkill', ['cloudflared']);
     } catch { }
   }
+}
+
+async function sleep(ms) {
+  await new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 const isRoot = typeof process.getuid === 'function' && process.getuid() === 0;
@@ -259,13 +242,13 @@ class AutoLoadBalancer {
         try {
           process.kill(pid, 0);
           return true;
-        } catch (e) {
+        } catch {
           return false;
         }
       }
 
       return false;
-    } catch (err) {
+    } catch {
       return false;
     }
   }
@@ -290,24 +273,50 @@ class AutoLoadBalancer {
       const logPath = path.join(this.scriptsDir, 'config', 'tunnel', 'cloudflared.log');
       const port = this.listenPort || DEFAULT_HTTPS_PORT;
       
-      await fs.mkdir(path.dirname(logPath), { recursive: true });
-      
+      await fs.mkdir(path.dirname(logPath), { recursive: true, mode: 0o700 });
+      await fs.mkdir(path.dirname(pidPath), { recursive: true, mode: 0o700 });
+
       const cloudflaredBin = findInPath('cloudflared');
       if (!cloudflaredBin) {
         console.error('[TUNNEL] cloudflared not found');
         return false;
       }
 
+      try {
+        await fs.writeFile(logPath, '', { mode: 0o600 });
+      } catch {
+      }
+
       const args = ['tunnel', '--url', `https://127.0.0.1:${port}`, '--no-tls-verify'];
-      const cmd = `${cloudflaredBin} ${args.join(' ')} > ${logPath} 2>&1 & echo $! > ${pidPath}`;
-      
-      await execAsync(cmd, { shell: '/bin/sh' });
+
+      let logFile;
+      try {
+        logFile = await fs.open(logPath, 'a', 0o600);
+      } catch {
+        logFile = null;
+      }
+
+      const child = spawn(cloudflaredBin, args, {
+        detached: true,
+        stdio: ['ignore', logFile ? logFile.fd : 'ignore', logFile ? logFile.fd : 'ignore'],
+        env: { ...process.env }
+      });
+      child.unref();
+      if (logFile) {
+        try { await logFile.close(); } catch { }
+      }
+      await fs.writeFile(pidPath, String(child.pid), { mode: 0o600 });
       
       console.log('[TUNNEL] Waiting for tunnel URL to appear in log...');
       let tunnelUrl = null;
       for (let i = 0; i < 40 && !tunnelUrl; i += 1) {
-        await new Promise((resolve) => setTimeout(resolve, 1000));
+        await sleep(1000);
         tunnelUrl = await this.getTunnelUrl();
+        try {
+          process.kill(child.pid, 0);
+        } catch {
+          break;
+        }
         if (i > 0 && i % 5 === 0 && !tunnelUrl) {
           console.log(`[TUNNEL] Still waiting... (${i} seconds)`);
         }
@@ -320,6 +329,19 @@ class AutoLoadBalancer {
       }
 
       console.log('[TUNNEL] Tunnel started but no public URL was detected within 40 seconds');
+
+      try {
+        const content = await fs.readFile(logPath, 'utf8');
+        const lines = content.split('\n').filter(Boolean);
+        const tail = lines.slice(Math.max(0, lines.length - 30));
+        if (tail.length > 0) {
+          console.log('[TUNNEL] cloudflared log tail:');
+          for (const line of tail) {
+            console.log(`  ${line.slice(0, 500)}`);
+          }
+        }
+      } catch {
+      }
       return false;
     } catch (error) {
       cryptoLogger.error('[AUTO-LB] Failed to restart tunnel', error);
@@ -339,9 +361,9 @@ class AutoLoadBalancer {
       const content = await fs.readFile(logPath, 'utf8');
       const lines = content.split('\n');
       for (let i = lines.length - 1; i >= 0; i--) {
-        const match = lines[i].match(/https:\/\/[a-zA-Z0-9-]+\.trycloudflare\.com/);
+        const match = lines[i].match(/https?:\/\/[a-zA-Z0-9-]+\.trycloudflare\.com(?:\/)?/);
         if (match) {
-          return match[0];
+          return match[0].replace(/\/$/, '');
         }
       }
       return null;
@@ -402,18 +424,28 @@ class AutoLoadBalancer {
       }
 
       // Start HAProxy
-      const ld_lib = process.platform !== 'win32' && process.env.LD_LIBRARY_PATH ? `LD_LIBRARY_PATH=${process.env.LD_LIBRARY_PATH}` : '';
+      const env = { ...process.env };
+      if (process.platform !== 'win32' && process.env.LD_LIBRARY_PATH) {
+        env.LD_LIBRARY_PATH = process.env.LD_LIBRARY_PATH;
+      }
       let openssl_conf = '';
       if (process.platform !== 'win32' && process.env.OPENSSL_CONF) {
         try {
-          if (existsSync(process.env.OPENSSL_CONF)) openssl_conf = `OPENSSL_CONF=${process.env.OPENSSL_CONF}`;
+          if (existsSync(process.env.OPENSSL_CONF)) openssl_conf = process.env.OPENSSL_CONF;
         } catch { }
       }
+      if (openssl_conf) {
+        env.OPENSSL_CONF = openssl_conf;
+      }
+
       let oqs_module = '';
       if (process.platform !== 'win32' && process.env.OQS_PROVIDER_MODULE) {
         try {
-          if (existsSync(process.env.OQS_PROVIDER_MODULE)) oqs_module = `OQS_PROVIDER_MODULE=${process.env.OQS_PROVIDER_MODULE}`;
+          if (existsSync(process.env.OQS_PROVIDER_MODULE)) oqs_module = process.env.OQS_PROVIDER_MODULE;
         } catch { }
+      }
+      if (oqs_module) {
+        env.OQS_PROVIDER_MODULE = oqs_module;
       }
       // Clean up stale stats socket if present
       try {
@@ -421,9 +453,7 @@ class AutoLoadBalancer {
         const statsSock = process.env.HAPROXY_STATS_SOCKET || path.join(os.tmpdir(), `haproxy-admin-${uid}.sock`);
         if (existsSync(statsSock)) { await fs.unlink(statsSock).catch(() => { }); }
       } catch { }
-      const envPrefix = [ld_lib, openssl_conf, oqs_module].filter(Boolean).join(' ');
-      const cmd = `${envPrefix ? envPrefix + ' ' : ''}haproxy -f ${HAPROXY_CONFIG_PATH} -D -p ${HAPROXY_PID_FILE}`;
-      await execAsync(cmd);
+      await execFileAsync('haproxy', ['-f', HAPROXY_CONFIG_PATH, '-D', '-p', HAPROXY_PID_FILE], { env });
 
       const pid = parseInt(await fs.readFile(HAPROXY_PID_FILE, 'utf8'), 10);
       this.haproxyPid = pid;
@@ -496,19 +526,25 @@ class AutoLoadBalancer {
 
     try {
       // Validate config first
-      const ld_lib = process.platform !== 'win32' ? (process.env.LD_LIBRARY_PATH ? `LD_LIBRARY_PATH=${process.env.LD_LIBRARY_PATH}` : 'LD_LIBRARY_PATH=/usr/local/lib') : '';
-      const openssl_conf = process.platform !== 'win32' ? (process.env.OPENSSL_CONF ? `OPENSSL_CONF=${process.env.OPENSSL_CONF}` : 'OPENSSL_CONF=/etc/ssl/openssl-oqs.cnf') : '';
-      const oqs_module = process.platform !== 'win32' && process.env.OQS_PROVIDER_MODULE
-        ? `OQS_PROVIDER_MODULE=${process.env.OQS_PROVIDER_MODULE}`
-        : '';
-      const envPrefix = [ld_lib, openssl_conf, oqs_module].filter(Boolean).join(' ');
-      const { stdout: validationOutput } = await execAsync(`${envPrefix ? envPrefix + ' ' : ''}haproxy -f ${HAPROXY_CONFIG_PATH} -c`);
+      const env = { ...process.env };
+      if (process.platform !== 'win32') {
+        if (process.env.LD_LIBRARY_PATH) {
+          env.LD_LIBRARY_PATH = process.env.LD_LIBRARY_PATH;
+        }
+        if (process.env.OPENSSL_CONF) {
+          env.OPENSSL_CONF = process.env.OPENSSL_CONF;
+        }
+        if (process.env.OQS_PROVIDER_MODULE) {
+          env.OQS_PROVIDER_MODULE = process.env.OQS_PROVIDER_MODULE;
+        }
+      }
+
+      const { stdout: validationOutput } = await execFileAsync('haproxy', ['-f', HAPROXY_CONFIG_PATH, '-c'], { env });
       cryptoLogger.info('[AUTO-LB] HAProxy config validated', { output: validationOutput.trim() });
 
       // Soft reload 
       const oldPid = parseInt(await fs.readFile(HAPROXY_PID_FILE, 'utf8'), 10);
-      const cmd = `${envPrefix ? envPrefix + ' ' : ''}haproxy -f ${HAPROXY_CONFIG_PATH} -D -p ${HAPROXY_PID_FILE} -sf ${oldPid}`;
-      await execAsync(cmd);
+      await execFileAsync('haproxy', ['-f', HAPROXY_CONFIG_PATH, '-D', '-p', HAPROXY_PID_FILE, '-sf', String(oldPid)], { env });
 
       const newPid = parseInt(await fs.readFile(HAPROXY_PID_FILE, 'utf8'), 10);
       this.haproxyPid = newPid;
@@ -1064,7 +1100,7 @@ class AutoLoadBalancer {
 
       if (process.platform !== 'win32') {
         try {
-          await execAsync('pkill -9 cloudflared 2>/dev/null || true');
+          await execFileAsync('pkill', ['-9', 'cloudflared']);
         } catch { }
       }
       console.log('\t[OK] All tunnels terminated');

@@ -89,6 +89,8 @@ services:
     tmpfs:
       - /var/run/tailscale
     restart: unless-stopped
+    extra_hosts:
+      - "coturn:host-gateway"
 
   loadbalancer:
     profiles: ["loadbalancer"]
@@ -129,6 +131,31 @@ services:
       - /var/run
     restart: unless-stopped
 
+  coturn:
+    profiles: ["server", "turn"]
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.coturn
+    hostname: coturn
+    network_mode: host
+    env_file:
+      - ../.env
+    environment:
+      - TURN_EXTERNAL_IP=${TURN_EXTERNAL_IP:-}
+      - TURN_PORT=${TURN_PORT:-3478}
+      - TURNS_PORT=${TURNS_PORT:-5349}
+      - TURN_REALM=${TURN_REALM:-turn.local}
+      - TURN_USERNAME=${TURN_USERNAME:-turnuser}
+      - TURN_PASSWORD=${TURN_PASSWORD:-}
+      - TURN_MIN_PORT=${TURN_MIN_PORT:-49152}
+      - TURN_MAX_PORT=${TURN_MAX_PORT:-65535}
+      - TURN_TLS_CERT=${TURN_TLS_CERT:-}
+      - TURN_TLS_KEY=${TURN_TLS_KEY:-}
+    volumes:
+      - coturn-logs:/var/log/turnserver
+      - ../server/config/certs:/app/certs:ro
+    restart: unless-stopped
+
 networks:
   Qor-Chat-net:
     driver: bridge
@@ -148,4 +175,4 @@ volumes:
   tailscale-loadbalancer:
   redis-data:
   redis-certs:
-
+  coturn-logs:

@@ -8,11 +8,10 @@ const net = require('net');
 const path = require('path');
 const os = require('os');
 const https = require('https');
+const { resolveTorDownloadInfo, expertBundleFileName } = require('./tor-download-info.cjs');
 
 const DEFAULT_SOCKS_PORT = 9050;
 const DEFAULT_CONTROL_PORT = 9051;
-const TOR_VERSION = '15.0a4';
-const TOR_BASE_URL = `https://dist.torproject.org/torbrowser/${TOR_VERSION}`;
 const PORT_SCAN_RANGE = 100;
 const MAX_CONFIG_SIZE = 50000;
 const BOOTSTRAP_TIMEOUT = 120000;
@@ -52,6 +51,16 @@ class ElectronTorManager {
     this.app.on('before-quit', () => this.cleanupOnExit());
     process.on('SIGINT', () => this.cleanupOnExit());
     process.on('SIGTERM', () => this.cleanupOnExit());
+  }
+
+  getSocksPort() {
+    const p = this.effectiveSocksPort || this.configuredSocksPort || DEFAULT_SOCKS_PORT;
+    return this.isValidPort(p) ? p : DEFAULT_SOCKS_PORT;
+  }
+
+  getControlPort() {
+    const p = this.effectiveControlPort || this.configuredControlPort || DEFAULT_CONTROL_PORT;
+    return this.isValidPort(p) ? p : DEFAULT_CONTROL_PORT;
   }
 
   setupPaths() {
@@ -205,7 +214,25 @@ class ElectronTorManager {
     }
   }
 
-  getTorDownloadUrl() {
+  async getTorInfo() {
+    try {
+      let version = 'unknown';
+      try {
+        version = await this.getTorVersion();
+      } catch { }
+
+      return {
+        version,
+        socksPort: this.getSocksPort(),
+        controlPort: this.getControlPort(),
+        bootstrapped: this.bootstrapped
+      };
+    } catch (error) {
+      return { error: error?.message || String(error) };
+    }
+  }
+
+  async getTorDownloadUrl() {
     const archMap = {
       linux: { x64: 'linux-x86_64', arm64: 'linux-aarch64' },
       darwin: { x64: 'macos-x86_64', arm64: 'macos-aarch64' },
@@ -213,7 +240,9 @@ class ElectronTorManager {
     };
     const arch = archMap[this.platform]?.[this.arch];
     if (!arch) throw new Error(`Unsupported platform: ${this.platform}/${this.arch}`);
-    return `${TOR_BASE_URL}/tor-expert-bundle-${arch}-${TOR_VERSION}.tar.gz`;
+    const { version, baseUrl } = await resolveTorDownloadInfo();
+    const archiveFile = expertBundleFileName(arch, version);
+    return `${baseUrl}/${archiveFile}`;
   }
 
   async getTorVersion() {
@@ -238,7 +267,7 @@ class ElectronTorManager {
       }
     } catch { }
 
-    const downloadUrl = this.getTorDownloadUrl();
+    const downloadUrl = await this.getTorDownloadUrl();
     const archiveFilename = path.basename(new URL(downloadUrl).pathname);
     const archivePath = path.join(this.torDir, archiveFilename);
     const signaturePath = `${archivePath}.asc`;
@@ -248,9 +277,10 @@ class ElectronTorManager {
     await this.downloadFile(downloadUrl, archivePath);
     await this.downloadFile(`${downloadUrl}.asc`, signaturePath);
 
-    // Download checksums file (try unsigned first, then signed)
-    const unsignedChecksums = `${TOR_BASE_URL}/sha256sums-unsigned-build.txt`;
-    const signedChecksums = `${TOR_BASE_URL}/sha256sums-signed-build.txt`;
+    // Download checksums file
+    const { baseUrl } = await resolveTorDownloadInfo();
+    const unsignedChecksums = `${baseUrl}/sha256sums-unsigned-build.txt`;
+    const signedChecksums = `${baseUrl}/sha256sums-signed-build.txt`;
     try {
       await this.downloadFile(unsignedChecksums, checksumPath);
     } catch (_) {
@@ -303,7 +333,6 @@ class ElectronTorManager {
     const escaped = filename.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     let match = checksumContent.match(new RegExp(`^([a-fA-F0-9]{64})\\s+\\*?${escaped}$`, 'm'));
 
-    // Try BSD shasum format: "SHA256 (<filename>) = <hash>"
     if (!match) {
       const alt = new RegExp(`^SHA256 \\(${escaped}\\) = ([a-fA-F0-9]{64})$`, 'm');
       const m2 = checksumContent.match(alt);
@@ -342,11 +371,9 @@ class ElectronTorManager {
     if (this.platform !== 'win32') {
       const binaries = ['tor', 'obfs4proxy', 'snowflake-client', 'conjure-client', 'lyrebird'];
       for (const bin of binaries) {
-        // Check root dir
         let binPath = path.join(this.torDir, bin);
         await fs.chmod(binPath, 0o755).catch(() => { });
 
-        // Check pluggable_transports dir
         binPath = path.join(this.torDir, 'pluggable_transports', bin);
         await fs.chmod(binPath, 0o755).catch(() => { });
       }
@@ -601,6 +628,10 @@ class ElectronTorManager {
     return { success: true, starting: true };
   }
 
+  isTorBootstrapped() {
+    return this.bootstrapped;
+  }
+
   async waitUntilBootstrapped(timeoutMs = 30000) {
     const start = Date.now();
     while (Date.now() - start < timeoutMs) {
@@ -620,24 +651,54 @@ class ElectronTorManager {
     let consecutiveFailures = 0;
     const MAX_FAILURES = 3;
 
+    let checkInProgress = false;
+    let restartInProgress = false;
+    let lastRestartAt = 0;
+    const MIN_RESTART_INTERVAL_MS = 60000;
+
     this.healthInterval = setInterval(async () => {
       if (!this.isTorRunning()) return;
 
-      const result = await this.verifyTorConnection();
+      if (checkInProgress) return;
+      checkInProgress = true;
 
-      if (!result.success) {
+      try {
+        const result = await this.verifyTorConnection({ mode: 'health' });
+
+        if (!result.success) {
+          consecutiveFailures++;
+          console.warn(`[TOR] Health check failed (${consecutiveFailures}/${MAX_FAILURES}): ${result.error}`);
+
+          if (consecutiveFailures >= MAX_FAILURES) {
+            const now = Date.now();
+            if (restartInProgress) return;
+
+            if (lastRestartAt && (now - lastRestartAt) < MIN_RESTART_INTERVAL_MS) {
+              console.warn('[TOR] Suppressing Tor restart due to restart rate limit');
+              consecutiveFailures = 0;
+              return;
+            }
+
+            console.error('[TOR] Max health check failures reached. Restarting Tor...');
+            consecutiveFailures = 0;
+            restartInProgress = true;
+            lastRestartAt = now;
+            try {
+              await this.restartTor();
+            } finally {
+              restartInProgress = false;
+            }
+          }
+        } else {
+          if (consecutiveFailures > 0) {
+            consecutiveFailures = 0;
+          }
+        }
+      } catch (e) {
         consecutiveFailures++;
-        console.warn(`[TOR] Health check failed (${consecutiveFailures}/${MAX_FAILURES}): ${result.error}`);
-
-        if (consecutiveFailures >= MAX_FAILURES) {
-          console.error('[TOR] Max health check failures reached. Restarting Tor...');
-          consecutiveFailures = 0;
-          await this.restartTor();
-        }
-      } else {
-        if (consecutiveFailures > 0) {
-          consecutiveFailures = 0;
-        }
+        console.warn(`[TOR] Health check failed (${consecutiveFailures}/${MAX_FAILURES}): ${e?.message || e}`);
+      } finally {
+        checkInProgress = false;
       }
     }, HEALTH_CHECK_INTERVAL);
   }
@@ -699,8 +760,8 @@ class ElectronTorManager {
     return {
       isRunning: this.isTorRunning(),
       processId: this.torProcess?.pid,
-      socksPort: this.effectiveSocksPort,
-      controlPort: this.effectiveControlPort,
+      socksPort: this.getSocksPort(),
+      controlPort: this.getControlPort(),
       bootstrapped: this.bootstrapped
     };
   }
@@ -798,8 +859,10 @@ class ElectronTorManager {
     }
   }
 
-  async verifyTorConnection() {
+  async verifyTorConnection(options = {}) {
     try {
+      const mode = (options && typeof options === 'object' && options.mode) ? options.mode : null;
+
       const socksWorking = await new Promise((resolve) => {
         const socket = net.createConnection(this.effectiveSocksPort, '127.0.0.1');
         const timeout = setTimeout(() => { socket.destroy(); resolve(false); }, 3000);
@@ -811,40 +874,59 @@ class ElectronTorManager {
         return { success: false, error: 'SOCKS proxy not responding' };
       }
 
+      if (mode === 'health') {
+        return { success: true, isTor: true };
+      }
+
       // Check if bridges are configured
       const bridgesConfigured = await this.areBridgesConfigured();
 
       const { SocksProxyAgent } = await import('socks-proxy-agent');
       const proxyAgent = new SocksProxyAgent(`socks5h://127.0.0.1:${this.effectiveSocksPort}`);
 
-      const torCheckResult = await new Promise((resolve) => {
+      const requestJson = ({ hostname, path, timeoutMs }) => new Promise((resolve) => {
         const req = https.request({
-          hostname: 'check.torproject.org',
-          path: '/api/ip',
+          hostname,
+          path,
           method: 'GET',
           agent: proxyAgent,
-          timeout: 30000
+          timeout: timeoutMs
         }, (res) => {
           let data = '';
           res.on('data', (chunk) => data += chunk);
           res.on('end', () => {
             try {
-              const result = JSON.parse(data);
-              resolve({ success: true, isTor: result.IsTor === true, ip: result.IP });
+              resolve({ ok: true, data: JSON.parse(data) });
             } catch {
-              resolve({ success: false, error: 'Invalid response' });
+              resolve({ ok: false, error: 'Invalid response' });
             }
           });
         });
         req.on('error', (err) => {
-          resolve({ success: false, error: 'Connection failed' });
+          console.warn('[TOR] Health check request error:', { code: err?.code, message: err?.message });
+          resolve({ ok: false, error: `Connection failed: ${err.message || 'Unknown error'}` });
         });
         req.on('timeout', () => {
+          console.warn('[TOR] Health check request timeout');
           req.destroy();
-          resolve({ success: false, error: 'Timeout' });
+          resolve({ ok: false, error: 'Timeout' });
         });
         req.end();
       });
+
+      let torCheckResult = null;
+      const torApi = await requestJson({ hostname: 'check.torproject.org', path: '/api/ip', timeoutMs: 30000 });
+      if (torApi.ok && torApi.data) {
+        torCheckResult = { success: true, isTor: torApi.data.IsTor === true, ip: torApi.data.IP };
+      } else {
+        const ipApi = await requestJson({ hostname: 'httpbin.org', path: '/ip', timeoutMs: 20000 });
+        if (ipApi.ok && ipApi.data) {
+          const origin = typeof ipApi.data.origin === 'string' ? ipApi.data.origin.split(',')[0].trim() : undefined;
+          torCheckResult = { success: true, isTor: true, ip: origin };
+        } else {
+          torCheckResult = { success: false, error: torApi.error || ipApi.error || 'Connection failed' };
+        }
+      }
 
       if (!torCheckResult.success || !torCheckResult.isTor) {
         return torCheckResult;

@@ -1,6 +1,7 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../../components/ui/card';
 import { Button } from '../../components/ui/button';
+import { Input } from '../../components/ui/input';
 import { Label } from '../../components/ui/label';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger } from '../../components/ui/dialog';
 import { blockingSystem, BlockedUser } from '../../lib/blocking-system';
@@ -14,6 +15,31 @@ interface BlockedUsersSettingsProps {
 
 const USERNAME_REGEX = /^[a-zA-Z0-9_-]{3,32}$/;
 
+const BLOCK_STATUS_EVENT_RATE_WINDOW_MS = 10_000;
+const BLOCK_STATUS_EVENT_RATE_MAX = 200;
+const MAX_BLOCK_STATUS_EVENT_USERNAME_LENGTH = 256;
+
+const isPlainObject = (value: unknown): value is Record<string, unknown> => {
+  if (typeof value !== 'object' || value === null) return false;
+  const proto = Object.getPrototypeOf(value);
+  return proto === Object.prototype || proto === null;
+};
+
+const hasPrototypePollutionKeys = (obj: unknown): boolean => {
+  if (obj == null || typeof obj !== 'object') return false;
+  const keys = Object.keys(obj as Record<string, unknown>);
+  return keys.some((key) => key === '__proto__' || key === 'constructor' || key === 'prototype');
+};
+
+const sanitizeEventUsername = (value: unknown): string | null => {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  if (!trimmed || trimmed.length > MAX_BLOCK_STATUS_EVENT_USERNAME_LENGTH) return null;
+  const cleaned = trimmed.replace(/[\x00-\x1F\x7F]/g, '');
+  if (!cleaned) return null;
+  return cleaned.slice(0, MAX_BLOCK_STATUS_EVENT_USERNAME_LENGTH);
+};
+
 const validateUsername = (username: string): boolean => USERNAME_REGEX.test(username);
 
 export function BlockedUsersSettings({ passphraseRef, kyberSecretRef, getDisplayUsername }: BlockedUsersSettingsProps) {
@@ -23,6 +49,8 @@ export function BlockedUsersSettings({ passphraseRef, kyberSecretRef, getDisplay
   const [newBlockUsername, setNewBlockUsername] = useState('');
   const [showBlockDialog, setShowBlockDialog] = useState(false);
   const [displayMap, setDisplayMap] = useState<Record<string, string>>({});
+
+  const blockStatusEventRateRef = useRef<{ windowStart: number; count: number }>({ windowStart: Date.now(), count: 0 });
 
   const loadBlockedUsers = useCallback(async () => {
     const passphrase = passphraseRef?.current;
@@ -95,10 +123,30 @@ export function BlockedUsersSettings({ passphraseRef, kyberSecretRef, getDisplay
       }
     };
 
-    const handleBlockStatusChange = () => {
-      if (passphraseRef?.current || kyberSecretRef?.current) {
-        loadBlockedUsers();
-      }
+    const handleBlockStatusChange = (event: Event) => {
+      try {
+        const now = Date.now();
+        const bucket = blockStatusEventRateRef.current;
+        if (now - bucket.windowStart > BLOCK_STATUS_EVENT_RATE_WINDOW_MS) {
+          bucket.windowStart = now;
+          bucket.count = 0;
+        }
+        bucket.count += 1;
+        if (bucket.count > BLOCK_STATUS_EVENT_RATE_MAX) {
+          return;
+        }
+
+        if (!(event instanceof CustomEvent)) return;
+        const detail = event.detail;
+        if (!isPlainObject(detail) || hasPrototypePollutionKeys(detail)) return;
+
+        const username = sanitizeEventUsername((detail as any).username);
+        if (!username) return;
+
+        if (passphraseRef?.current || kyberSecretRef?.current) {
+          loadBlockedUsers();
+        }
+      } catch { }
     };
 
     document.addEventListener('visibilitychange', handleVisibilityChange);
@@ -201,6 +249,48 @@ export function BlockedUsersSettings({ passphraseRef, kyberSecretRef, getDisplay
             {error}
           </div>
         )}
+
+        <Dialog open={showBlockDialog} onOpenChange={setShowBlockDialog}>
+          <DialogTrigger asChild>
+            <Button variant="outline" size="sm" disabled={loading}>Block user</Button>
+          </DialogTrigger>
+          <DialogContent>
+            <DialogHeader>
+              <DialogTitle>Block User</DialogTitle>
+              <DialogDescription>Block a username to prevent messages from them.</DialogDescription>
+            </DialogHeader>
+
+            <div className="space-y-2">
+              <Label htmlFor="block-username" className="text-sm font-medium">Username</Label>
+              <Input
+                id="block-username"
+                value={newBlockUsername}
+                onChange={(e) => setNewBlockUsername(e.target.value)}
+                placeholder="username"
+                autoComplete="off"
+              />
+              {newBlockUsername && !isValidUsername && (
+                <div className="text-xs text-muted-foreground">Username must be 3-32 characters; letters, numbers, underscore or hyphen only.</div>
+              )}
+            </div>
+
+            <DialogFooter>
+              <Button
+                variant="outline"
+                onClick={() => setShowBlockDialog(false)}
+                disabled={loading}
+              >
+                Cancel
+              </Button>
+              <Button
+                onClick={handleBlockUser}
+                disabled={loading || !isValidUsername}
+              >
+                Block
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
 
         <div className="space-y-3">
           <div className="flex items-center justify-between">

@@ -1,9 +1,10 @@
 import { useRef, useState, useCallback, useEffect } from "react";
 import * as pako from "pako";
-import { CryptoUtils } from "@/lib/unified-crypto";
-import websocketClient from "@/lib/websocket";
-import { SignalType } from "@/lib/signal-types";
-import { sanitizeFilename } from "@/lib/sanitizers";
+import { CryptoUtils } from "../../../lib/unified-crypto";
+import websocketClient from "../../../lib/websocket";
+import { SignalType } from "../../../lib/signal-types";
+import { sanitizeFilename } from "../../../lib/sanitizers";
+import { syncEncryptedStorage } from "../../../lib/encrypted-storage";
 
 const DEFAULT_CHUNK_SIZE_SMALL = 192 * 1024;
 const DEFAULT_CHUNK_SIZE_LARGE = 384 * 1024;
@@ -17,7 +18,6 @@ const P2P_POLL_MS = 100;
 const YIELD_INTERVAL = 8;
 const MAC_SALT = new TextEncoder().encode('ft-mac-salt-v1');
 const TOR_ENABLED_KEY = 'tor_enabled';
-import { syncEncryptedStorage } from '@/lib/encrypted-storage';
 
 interface HybridPublicKeys {
   readonly x25519PublicBase64?: string;
@@ -65,7 +65,7 @@ interface UserKeyEnvelope {
 
 interface EncryptedMetadataResult {
   readonly success: boolean;
-  readonly encryptedPayload?: unknown;
+  readonly encryptedPayload?: Record<string, unknown>;
   readonly error?: string;
 }
 
@@ -387,7 +387,6 @@ export function useFileSender(
               deviceId: 1,
             });
             if (check?.hasSession) {
-              console.log('[FILE-SENDER] Session found via polling');
               sessionEstablishedAt.current.set(targetUsername, Date.now());
               return true;
             }
@@ -453,8 +452,6 @@ export function useFileSender(
     const MAX_RESTARTS = 2;
 
     for (let restartAttempt = 0; restartAttempt <= MAX_RESTARTS; restartAttempt++) {
-      console.log(`[FILE-SENDER] sendChunksServer loop start. Attempt: ${restartAttempt}, Target: ${targetUsername}, Pending:`, Array.from(peersNeedingSessionRefresh.current));
-
       let resetDetected = false;
       const resetHandler = (event: Event) => {
         try {
@@ -471,7 +468,6 @@ export function useFileSender(
       try {
         const hasPendingReset = targetUsername && peersNeedingSessionRefresh.current.has(targetUsername);
         if (restartAttempt > 0 || hasPendingReset) {
-          console.log(`[FILE-SENDER] Ensuring session (attempt ${restartAttempt}, pendingReset=${hasPendingReset})`);
           if (restartAttempt > 0) {
             state.lastSentIndex = -1;
             await ensureSignalSession(true);

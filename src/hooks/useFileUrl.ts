@@ -70,8 +70,7 @@ export function useFileUrl({
             if (urlRef.current && urlRef.current.startsWith('blob:')) {
                 try {
                     URL.revokeObjectURL(urlRef.current);
-                } catch (e) {
-                }
+                } catch { }
             }
         };
     }, []);
@@ -98,8 +97,7 @@ export function useFileUrl({
                         setUrl(blobUrl);
                         setLoading(false);
                         return;
-                    } catch (e) {
-                    }
+                    } catch { }
                 }
             }
 
@@ -141,7 +139,7 @@ export function useFileUrl({
                                 if (urlRef.current && urlRef.current.startsWith('blob:')) {
                                     try {
                                         URL.revokeObjectURL(urlRef.current);
-                                    } catch (e) { }
+                                    } catch { }
                                 }
                                 urlRef.current = blobUrl;
                                 setUrl(blobUrl);
@@ -169,7 +167,7 @@ export function useFileUrl({
                 if (urlRef.current && urlRef.current.startsWith('blob:')) {
                     try {
                         URL.revokeObjectURL(urlRef.current);
-                    } catch (e) { }
+                    } catch { }
                 }
 
                 urlRef.current = blobUrl;

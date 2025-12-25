@@ -210,8 +210,7 @@ export class ClusterKeyManager {
             keys: entries,
             lastFetch: this.lastFetchTime,
           }));
-        } catch (_e) {
-        }
+        } catch { }
       })();
     } catch (error) {
       console.error('[ClusterKeyManager] Failed to save keys:', error);

@@ -32,6 +32,19 @@ const CRYPTO_CONFIG = {
   POST_QUANTUM_SECURITY_BITS: 256,
 };
 
+function parseJsonOrThrow(raw, errorMessage) {
+  try {
+    const text = typeof raw === 'string' ? raw : Buffer.from(raw).toString('utf8');
+    const parsed = JSON.parse(text);
+    if (!parsed || typeof parsed !== 'object') {
+      throw new Error('Invalid JSON');
+    }
+    return parsed;
+  } catch {
+    throw new Error(errorMessage);
+  }
+}
+
 class TokenService {
   constructor() {
     this.mldsaPrivateKey = null;
@@ -50,22 +63,22 @@ class TokenService {
   async initialize() {
     // If already initialized, return immediately
     if (this.initialized) return;
-    
+
     // If initialization is already in progress, wait for it to complete
     if (this.initializationPromise) {
       return await this.initializationPromise;
     }
-    
+
     // Create the initialization promise to prevent concurrent initialization
     this.initializationPromise = this.doInitialize();
-    
+
     try {
       await this.initializationPromise;
     } finally {
       this.initializationPromise = null;
     }
   }
-  
+
   async doInitialize() {
     if (this.initialized) return;
 
@@ -73,12 +86,12 @@ class TokenService {
     try {
       // Re-check initialization status after acquiring lock
       if (this.initialized) return;
-      
+
       // Initialize unified key encryption system
       this.keyEncryption = new UnifiedKeyEncryption(this.keyPairPath);
       const kek = await this.deriveKeyEncryptionKey();
       await this.keyEncryption.initialize(kek);
-      
+
       await this.loadOrGenerateAllKeys();
 
       this.kek = kek;
@@ -87,10 +100,10 @@ class TokenService {
     } finally {
       await this.releaseLock(lock);
     }
-    
+
     console.log(`[TOKEN] TokenService initialized`);
   }
-  
+
   /**
    * Load or generate all cryptographic keys
    */
@@ -162,10 +175,10 @@ class TokenService {
 
     const now = Math.floor(Date.now() / 1000);
     const tokenId = await this.generateSecureTokenId();
-    
+
     // Calculate risk score from security context
     const riskScore = this.calculateRiskScore(securityContext);
-    
+
     // Enhanced payload with security context
     const payload = {
       iss: 'Qor-chat-server',
@@ -174,21 +187,21 @@ class TokenService {
       iat: now,
       exp: now + (7 * 24 * 60 * 60),
       jti: tokenId,
-      
+
       // Custom claims
       type: 'access',
       scopes: this.validateScopes(scopes),
-      
+
       nbf: now,
       auth_time: now,
       nonce: await this.generateNonce(),
-      
+
       // Security metadata
       sec: {
         risk: riskScore,
         ctx: this.buildSecurityContext(securityContext)
       },
-      
+
       // Anti-replay protection
       cnf: {
         jkt: await this.generateJWKThumbprint()
@@ -215,10 +228,10 @@ class TokenService {
     const now = Math.floor(Date.now() / 1000);
     const tokenId = await this.generateSecureTokenId();
     const familyId = family || await this.generateSecureTokenId();
-    
+
     // Calculate risk score from security context
     const riskScore = this.calculateRiskScore(securityContext);
-    
+
     const payload = {
       iss: 'Qor-chat-server',
       sub: await this.hashUserId(userId),
@@ -226,17 +239,17 @@ class TokenService {
       iat: now,
       exp: now + (7 * 24 * 60 * 60),
       jti: tokenId,
-      
+
       // Custom claims
       type: 'refresh',
       family: familyId,
-      
+
       nbf: now,
       nonce: await this.generateNonce(),
-      
+
       // Rotation tracking
       generation: 1,
-      
+
       sec: {
         risk: riskScore
       }
@@ -268,12 +281,12 @@ class TokenService {
       iat: now,
       exp: now + (60 * 60),
       jti: await this.generateSecureTokenId(),
-      
+
       type: 'device',
       deviceId: deviceId,
       deviceFingerprint: deviceFingerprint,
       scopes: ['chat:reconnect'],
-      
+
       nbf: now
     };
 
@@ -298,13 +311,13 @@ class TokenService {
       kid: await this.getMLDSAKeyId(),
       cty: 'JWT',
       crit: ['kid', 'pq_alg'],
-      
+
       pq_alg: {
         post_quantum: ['ML-DSA-87'],
         mac: ['BLAKE3-HKDF'],
         hybrid: 'PQ+MAC'
       },
-      
+
       x5t: await this.getCertThumbprint(),
       'x5t#S256': await this.getCertThumbprintSHA256(),
       quantum_resistant: true,
@@ -370,7 +383,7 @@ class TokenService {
    */
   async createTokenPair(userId, deviceId = null, tlsBinding = null, existingFamily = null) {
     const family = existingFamily || await this.generateSecureTokenId();
-    
+
     const [accessToken, refreshToken] = await Promise.all([
       // Do not bind any user metadata; privacy-first tokens
       this.generateAccessToken(userId, deviceId, undefined, {}, tlsBinding),
@@ -402,7 +415,7 @@ class TokenService {
    */
   async refreshAccessToken(refreshToken) {
     const payload = await this.verifyToken(refreshToken, 'refresh');
-    
+
     const newAccessToken = await this.generateAccessToken(
       payload.sub,
       payload.deviceId,
@@ -433,7 +446,7 @@ class TokenService {
    */
   async rotateRefreshToken(refreshToken) {
     const payload = await this.verifyToken(refreshToken, 'refresh');
-    
+
     const newRefreshToken = await this.generateRefreshToken(
       payload.sub,
       payload.deviceId,
@@ -452,20 +465,17 @@ class TokenService {
     const timingEntropy = await this.generateQuantumTimingEntropy();
     const systemEntropy = await this.generateSystemEntropy();
     const cryptoEntropy = crypto.randomBytes(32);
-    
+
     const entropyInputs = Buffer.concat([
       classicalEntropy,
       Buffer.from(timingEntropy),
       Buffer.from(systemEntropy),
       cryptoEntropy
     ]);
-    
-    // Use SHAKE256 for quantum-resistant pseudo-random extraction
+
     const quantumResistantId = shake256(entropyInputs, CRYPTO_CONFIG.TOKEN_ENTROPY_BYTES);
-    
-    // Additional BLAKE3 layer for speed and security
     const finalHash = blake3(quantumResistantId);
-    
+
     return Buffer.from(finalHash).toString('hex');
   }
 
@@ -474,34 +484,35 @@ class TokenService {
    */
   async generateQuantumTimingEntropy() {
     const measurements = [];
-    
+
     // Multiple timing measurements for quantum resistance
     for (let round = 0; round < 5; round++) {
       const start = process.hrtime.bigint();
-      
+
       const iterBytes = crypto.randomBytes(4);
       const iterFraction = iterBytes.readUInt32BE(0) / 0xffffffff;
       const iterations = Math.floor(iterFraction * 2000) + 500;
+      const roundOffset = round * iterations;
+      const data = Buffer.allocUnsafe(8);
       for (let i = 0; i < iterations; i++) {
-        const data = Buffer.from(String(i + round * iterations));
+        data.writeBigUInt64BE(BigInt(i + roundOffset), 0);
         if (i % 3 === 0) blake3(data);
         else if (i % 3 === 1) sha3_512(data);
         else crypto.createHash('sha256').update(data).digest();
       }
-      
+
       const end = process.hrtime.bigint();
       measurements.push(end - start);
-      
+
       const sleepBytes = crypto.randomBytes(4);
       const sleepFraction = sleepBytes.readUInt32BE(0) / 0xffffffff;
       const sleepMs = Math.floor(sleepFraction * 5);
       await new Promise(resolve => setTimeout(resolve, sleepMs));
     }
-    
+
     // Combine all timing measurements
     const timingData = Buffer.from(measurements.map(m => m.toString(16)).join(''));
-    
-    // Use SHAKE256 for quantum-resistant extraction
+
     return shake256(timingData, 32);
   }
 
@@ -510,29 +521,29 @@ class TokenService {
    */
   async generateSystemEntropy() {
     const sources = [];
-    
+
     // System state entropy
     sources.push(Buffer.from(process.pid.toString()));
     sources.push(Buffer.from(process.uptime().toString()));
     sources.push(Buffer.from(Date.now().toString()));
     sources.push(Buffer.from(process.hrtime.bigint().toString()));
-    
+
     // Memory usage entropy
     const memUsage = process.memoryUsage();
     sources.push(Buffer.from(JSON.stringify(memUsage)));
-    
+
     // CPU usage entropy
     try {
       const cpuUsage = process.cpuUsage();
       sources.push(Buffer.from(JSON.stringify(cpuUsage)));
-    } catch {}
-    
+    } catch { }
+
     // Additional crypto random
     sources.push(crypto.randomBytes(16));
-    
+
     // Combine all sources
     const combined = Buffer.concat(sources);
-    
+
     // Hash with BLAKE3 for speed and security
     return blake3(combined).slice(0, 24);
   }
@@ -552,11 +563,11 @@ class TokenService {
    */
   async hashUserId(userId) {
     const salt = process.env.USER_ID_SALT;
-    
+
     if (!salt || salt.length < 32) {
       throw new Error('USER_ID_SALT not properly initialized - database initialization may have failed');
     }
-    
+
     const kekHex = await this.deriveKeyEncryptionKey();
     const kekBytes = Buffer.from(kekHex, 'hex');
     const userIdKey = hkdf(blake3, kekBytes, Buffer.from('user-id-hashing-v1'), Buffer.from('user-id-key'), 32);
@@ -572,14 +583,14 @@ class TokenService {
       'chat:read', 'chat:write', 'chat:delete', 'chat:reconnect',
       'user:profile', 'user:settings', 'admin:users', 'admin:server'
     ];
-    
+
     if (!Array.isArray(scopes)) {
       return ['chat:read', 'chat:write'];
     }
-    
-    return scopes.filter(scope => 
-      typeof scope === 'string' && 
-      allowedScopes.includes(scope) && 
+
+    return scopes.filter(scope =>
+      typeof scope === 'string' &&
+      allowedScopes.includes(scope) &&
       scope.length <= 50
     );
   }
@@ -591,7 +602,7 @@ class TokenService {
     if (!context || typeof context !== 'object') {
       return { risk: 'low' };
     }
-    
+
     return {
       risk: this.calculateRiskScore(context),
       newDevice: !!context.newDevice,
@@ -604,11 +615,11 @@ class TokenService {
    */
   calculateRiskScore(context) {
     let score = 0;
-    
+
     if (context.newDevice) score += 3;
     if (context.rapidRequests) score += 5;
     if (context.vpnDetected) score += 1;
-    
+
     if (score <= 2) return 'low';
     if (score <= 5) return 'medium';
     return 'high';
@@ -627,14 +638,14 @@ class TokenService {
    */
   async createDeviceBinding(deviceId, context) {
     if (!deviceId) return null;
-    
+
     const bindingData = {
       deviceId,
       fingerprint: context.deviceFingerprint,
       timestamp: Date.now(),
       nonce: await this.generateNonce()
     };
-    
+
     const bindingKey = await this.deriveDeviceBindingKey(deviceId);
     return blake3(Buffer.from(JSON.stringify(bindingData)), { key: bindingKey })
       .slice(0, 16).toString('hex');
@@ -647,7 +658,7 @@ class TokenService {
     if (!this.mldsaPublicKey) return null;
     const jwk = await this.publicKeyToJWK();
     const canonicalJwk = JSON.stringify(jwk, Object.keys(jwk).sort());
-    
+
     return blake3(Buffer.from(canonicalJwk)).slice(0, 16).toString('hex');
   }
 
@@ -676,7 +687,7 @@ class TokenService {
   async calculatePayloadChecksum(payload) {
     const payloadCopy = { ...payload };
     delete payloadCopy._integrity;
-    
+
     const canonical = JSON.stringify(payloadCopy, Object.keys(payloadCopy).sort());
     return blake3(Buffer.from(canonical)).slice(0, 16).toString('hex');
   }
@@ -712,15 +723,15 @@ class TokenService {
     if (!secret) {
       throw new Error('KEY_ENCRYPTION_SECRET is required');
     }
-    
+
     if (secret.length < 32) {
       throw new Error('KEY_ENCRYPTION_SECRET must be at least 32 characters');
     }
-    
+
     // Generate and persist a strong random salt per installation if not exists
     const saltPath = path.join(this.keyPairPath, 'kek.salt');
     let salt;
-    
+
     try {
       salt = await fs.readFile(saltPath);
     } catch (_error) {
@@ -743,7 +754,7 @@ class TokenService {
         }
       }
     }
-    
+
     // Use Argon2id for key derivation
     try {
       const derived = await argon2.hash(secret, {
@@ -767,7 +778,7 @@ class TokenService {
    */
   async deriveDeviceBindingKey(deviceId) {
     const salt = blake3(Buffer.concat([Buffer.from(deviceId), Buffer.from('device-binding')])).slice(0, 32);
-    
+
     return new Promise((resolve, reject) => {
       scrypt(Buffer.from(deviceId), salt, 32, (err, key) => {
         if (err) reject(err);
@@ -796,17 +807,17 @@ class TokenService {
   async deriveQuantumIntegrityKey(domain = 'default') {
     const mldsaKeyMaterial = this.mldsaPublicKey ? Buffer.from(this.mldsaPublicKey).slice(0, 64) : Buffer.alloc(64);
     const mlkemKeyMaterial = this.mlkemPublicKey ? Buffer.from(this.mlkemPublicKey).slice(0, 64) : Buffer.alloc(64);
-    
+
     const combinedKeyMaterial = Buffer.concat([
       mldsaKeyMaterial,
       mlkemKeyMaterial
     ]);
-    
+
     const serverSecretHex = this.kek || await this.deriveKeyEncryptionKey();
     const serverSecret = Buffer.from(serverSecretHex, 'hex');
     const salt = blake3(Buffer.concat([serverSecret, Buffer.from('quantum-integrity-salt')]));
     const info = Buffer.from(`token-signing-key:${domain}:v2`);
-    
+
     return hkdf(blake3, combinedKeyMaterial, salt, info, 64);
   }
 
@@ -816,18 +827,18 @@ class TokenService {
   async calculateQuantumChecksum(payload) {
     const payloadCopy = { ...payload };
     delete payloadCopy._integrity;
-    
+
     const canonical = JSON.stringify(payloadCopy, Object.keys(payloadCopy).sort());
     const data = Buffer.from(canonical);
-    
+
     // Use multiple hash functions 
     const blake3Hash = blake3(data);
     const sha3Hash = sha3_512(data);
     const shakeHash = shake256(data, 32);
-    
+
     // Combine all hashes
     const combined = Buffer.concat([blake3Hash, sha3Hash, shakeHash]);
-    
+
     // Final hash with BLAKE3
     return blake3(combined).slice(0, 24).toString('hex');
   }
@@ -869,19 +880,26 @@ class TokenService {
     }
 
     const [encodedHeader, encodedPayload, encodedSignature] = parts;
-    const header = JSON.parse(this.base64UrlDecode(encodedHeader).toString());
-    
+
+    const header = parseJsonOrThrow(
+      this.base64UrlDecode(encodedHeader),
+      'Invalid token header'
+    );
+
     if (header.alg !== 'HYBRID-QR') {
       throw new Error('Incorrect algorithm in token');
     }
 
     const signingInput = `${encodedHeader}.${encodedPayload}`;
     const signingBuffer = Buffer.from(signingInput);
-    
+
     // Decode signature bundle
-    const signatureBundle = JSON.parse(this.base64UrlDecode(encodedSignature).toString());
-    
-    
+    const signatureBundle = parseJsonOrThrow(
+      this.base64UrlDecode(encodedSignature),
+      'Invalid token signature bundle'
+    );
+
+
     if (signatureBundle.version !== '3.0-pq-only') {
       throw new Error('Unsupported signature version');
     }
@@ -917,7 +935,10 @@ class TokenService {
     }
 
     // Decode and validate payload
-    const payload = JSON.parse(this.base64UrlDecode(encodedPayload).toString());
+    const payload = parseJsonOrThrow(
+      this.base64UrlDecode(encodedPayload),
+      'Invalid token payload'
+    );
     const now = Math.floor(Date.now() / 1000);
 
     // increased quantum-resistant validation
@@ -1005,26 +1026,26 @@ class TokenService {
    */
   constantTimeCompare(a, b) {
     if (!a || !b) return false;
-    
+
     // Convert to Buffers if needed
     const bufferA = Buffer.isBuffer(a) ? a : Buffer.from(a);
     const bufferB = Buffer.isBuffer(b) ? b : Buffer.from(b);
-    
+
     if (bufferA.length !== bufferB.length) {
       const maxLen = Math.max(bufferA.length, bufferB.length);
       const paddedA = Buffer.alloc(maxLen);
       const paddedB = Buffer.alloc(maxLen);
-      
+
       bufferA.copy(paddedA, 0);
       bufferB.copy(paddedB, 0);
-      
+
       try {
         return crypto.timingSafeEqual(paddedA, paddedB);
       } catch {
         return false;
       }
     }
-    
+
     try {
       return crypto.timingSafeEqual(bufferA, bufferB);
     } catch {
@@ -1094,12 +1115,12 @@ class TokenService {
   async acquireLock(timeoutMs = 15000) {
     const maxRetries = 3;
     const staleThreshold = 30000;
-    
+
     for (let retry = 0; retry < maxRetries; retry++) {
       const start = Date.now();
       await fs.mkdir(this.keyPairPath, { recursive: true });
       let attempt = 0;
-      
+
       while (true) {
         try {
           const fh = await fs.open(this.lockPath, 'wx');
@@ -1109,27 +1130,27 @@ class TokenService {
           if (e && e.code === 'EEXIST') {
             attempt++;
             const elapsed = Date.now() - start;
-            
+
             if (elapsed > timeoutMs) {
               try {
                 const stats = await fs.stat(this.lockPath);
                 const age = Date.now() - stats.mtime.getTime();
-                
+
                 if (age > staleThreshold) {
                   console.warn(`[TOKEN] Removing potentially stale lock file (age: ${age}ms, retry ${retry + 1}/${maxRetries})`);
                   await fs.unlink(this.lockPath);
-                  continue; 
-              }
-            } catch (_cleanupError) {}
-    
+                  continue;
+                }
+              } catch (_cleanupError) { }
+
               if (retry < maxRetries - 1) {
                 console.warn(`[TOKEN] Lock timeout after ${elapsed}ms (retry ${retry + 1}/${maxRetries}), retrying...`);
                 break;
               }
-              
+
               throw new Error(`Timeout acquiring key initialization lock after ${elapsed}ms (${maxRetries} retries, ${attempt} attempts)`);
             }
-            
+
             const baseBackoff = Math.min(1000, 100 * Math.pow(1.5, Math.min(attempt, 8)));
             const jitterBytes = crypto.randomBytes(2);
             const jitterFraction = jitterBytes.readUInt16BE(0) / 0xffff;
@@ -1141,7 +1162,7 @@ class TokenService {
           throw e;
         }
       }
-      
+
       if (retry < maxRetries - 1) {
         const retryBackoff = Math.min(5000, 1000 * Math.pow(2, retry));
         console.log(`[TOKEN] Waiting ${retryBackoff}ms before retry ${retry + 2}/${maxRetries}`);
@@ -1151,8 +1172,8 @@ class TokenService {
   }
 
   async releaseLock(fileHandle) {
-    try { if (fileHandle) await fileHandle.close(); } catch {}
-    try { await fs.unlink(this.lockPath); } catch {}
+    try { if (fileHandle) await fileHandle.close(); } catch { }
+    try { await fs.unlink(this.lockPath); } catch { }
   }
 
 
@@ -1170,7 +1191,7 @@ class TokenService {
         secret = (raw || '').trim();
         if (secret && secret.length >= 32) return secret;
       }
-    } catch {}
+    } catch { }
     // Generate new secret
     const bytes = crypto.randomBytes(Math.max(32, minBytes));
     secret = bytes.toString('hex');
@@ -1200,26 +1221,26 @@ class TokenService {
     try {
       // Ensure service is initialized
       await this.initialize();
-      
+
       const accessPayload = await this.verifyToken(accessToken, 'access', true);
       if (!accessPayload) {
         console.log(`[TOKEN] Access token validation failed for user: ${username}`);
         return false;
       }
-      
+
       const refreshPayload = await this.verifyToken(refreshToken, 'refresh', true);
       if (!refreshPayload) {
         console.log(`[TOKEN] Refresh token validation failed for user: ${username}`);
         return false;
       }
-      
+
       const hashedUsername = await this.hashUserId(username);
       if (accessPayload.sub !== hashedUsername || refreshPayload.sub !== hashedUsername) {
         console.log(`[TOKEN] Token username mismatch for user: ${username}`);
         console.log(`[TOKEN] Expected sub: ${hashedUsername}, Access sub: ${accessPayload.sub}, Refresh sub: ${refreshPayload.sub}`);
         return false;
       }
-      
+
       const now = Math.floor(Date.now() / 1000);
       if (accessPayload.exp < now || refreshPayload.exp < now) {
         console.log(`[TOKEN] Tokens expired for user: ${username}`);
@@ -1238,7 +1259,7 @@ class TokenService {
         console.error('[TOKEN] Failed to verify account existence:', error?.message || error);
         return false;
       }
-      
+
       // Check if tokens are not blacklisted (fail closed for security)
       try {
         const { TokenDatabase } = await import('./token-database.js');
@@ -1246,7 +1267,7 @@ class TokenService {
           console.error('[TOKEN] TokenDatabase or isTokenBlacklisted method not available - failing closed');
           return false;
         }
-        
+
         if (await TokenDatabase.isTokenBlacklisted(accessPayload.jti) || await TokenDatabase.isTokenBlacklisted(refreshPayload.jti)) {
           console.log(`[TOKEN] Tokens blacklisted for user: ${username}`);
           return false;
@@ -1256,10 +1277,10 @@ class TokenService {
         console.error('[TOKEN] Rejecting token due to blacklist verification failure');
         return false;
       }
-      
+
       console.log(`[TOKEN] Token validation successful for user: ${username}`);
       return true;
-      
+
     } catch (error) {
       console.error(`[TOKEN] Error validating tokens for user ${username}:`, error);
       return false;

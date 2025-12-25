@@ -95,7 +95,7 @@ const rateLimitMiddleware = {
  */
 router.post('/login', rateLimitMiddleware.checkAuthRateLimit, async (req, res) => {
   try {
-  const { username, password, deviceInfo: _deviceInfo } = req.body || {};
+  const { username, password, deviceInfo } = req.body || {};
     if (!(req.socket && req.socket.encrypted)) {
       return res.status(403).json({ error: 'TLS is required', code: 'TLS_REQUIRED' });
     }

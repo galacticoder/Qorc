@@ -38,6 +38,16 @@ const CONFIG = {
   KEY_ROTATION_INTERVAL: 86400000,               // 24 hours
 };
 
+function safeJsonParse(raw, fallback = null) {
+  try {
+    const parsed = JSON.parse(typeof raw === 'string' ? raw : String(raw));
+    if (!parsed || typeof parsed !== 'object') return fallback;
+    return parsed;
+  } catch {
+    return fallback;
+  }
+}
+
 export class ClusterManager extends EventEmitter {
   constructor({ serverId, serverKeys, isPrimary = false, autoApprove = false }) {
     super();
@@ -89,10 +99,10 @@ export class ClusterManager extends EventEmitter {
     if (!portValue) return DEFAULT_PORT;
     if (typeof portValue === 'string') {
       const lower = portValue.toLowerCase();
-      if (lower === 'dynamic' || lower === '0') return DEFAULT_PORT;
+      if (lower === 'dynamic' || lower === '0') return 0;
     }
     const parsed = parseInt(portValue, 10);
-    if (!Number.isFinite(parsed) || parsed <= 0) return DEFAULT_PORT;
+    if (!Number.isFinite(parsed) || parsed < 0) return DEFAULT_PORT;
     return parsed;
   }
 
@@ -353,7 +363,10 @@ export class ClusterManager extends EventEmitter {
           throw new Error(`Server ${targetServerId} not found in pending list`);
         }
 
-        const pendingInfo = JSON.parse(pendingData);
+        const pendingInfo = safeJsonParse(pendingData, null);
+        if (!pendingInfo) {
+          throw new Error(`Server ${targetServerId} has corrupted pending data`);
+        }
 
         // Verify server count limit
         const serverCount = await client.hlen(CLUSTER_KEYS.SERVERS);
@@ -457,10 +470,13 @@ export class ClusterManager extends EventEmitter {
   async getPendingServers() {
     return await withRedisClient(async (client) => {
       const pending = await client.hgetall(CLUSTER_KEYS.PENDING);
-      return Object.entries(pending).map(([serverId, data]) => ({
-        serverId,
-        ...JSON.parse(data)
-      }));
+      return Object.entries(pending)
+        .map(([serverId, data]) => {
+          const parsed = safeJsonParse(data, null);
+          if (!parsed) return null;
+          return { serverId, ...parsed };
+        })
+        .filter(Boolean);
     });
   }
 
@@ -483,13 +499,13 @@ export class ClusterManager extends EventEmitter {
         // Get server info before removal for audit logging
         const serverData = await client.hget(CLUSTER_KEYS.SERVERS, targetServerId);
         if (serverData) {
-          serverInfo = JSON.parse(serverData);
+          serverInfo = safeJsonParse(serverData, { serverId: targetServerId });
         }
 
         // Also check pending servers
         const pendingData = await client.hget(CLUSTER_KEYS.PENDING, targetServerId);
         if (pendingData && !serverInfo) {
-          serverInfo = JSON.parse(pendingData);
+          serverInfo = safeJsonParse(pendingData, { serverId: targetServerId });
           serverInfo.status = 'pending';
         }
 
@@ -564,7 +580,11 @@ export class ClusterManager extends EventEmitter {
       await withRedisClient(async (client) => {
         const serverData = await client.hget(CLUSTER_KEYS.SERVERS, this.serverId);
         if (serverData) {
-          const info = JSON.parse(serverData);
+          const info = safeJsonParse(serverData, null);
+          if (!info) {
+            cryptoLogger.warn('[CLUSTER] Server entry is corrupted, cannot update port', { serverId: this.serverId });
+            return;
+          }
           const oldPort = info.port;
           info.port = actualPort;
           info.host = process.env.SERVER_HOST || process.env.HOST || '127.0.0.1';
@@ -596,7 +616,14 @@ export class ClusterManager extends EventEmitter {
           return;
         }
 
-        const info = JSON.parse(serverInfo);
+        const info = safeJsonParse(serverInfo, null);
+        if (!info) {
+          cryptoLogger.warn('[CLUSTER] Server entry is corrupted, re-registering', { serverId: this.serverId });
+          if (this.isPrimary) {
+            await this.initializePrimaryServer();
+          }
+          return;
+        }
         info.lastHeartbeat = Date.now();
 
         await client.hset(CLUSTER_KEYS.SERVERS, this.serverId, JSON.stringify(info));
@@ -628,31 +655,56 @@ export class ClusterManager extends EventEmitter {
   async checkClusterHealth() {
     try {
       await withRedisClient(async (client) => {
-        const servers = await client.hgetall(CLUSTER_KEYS.SERVERS);
         const now = Date.now();
+        let cursor = '0';
+        const batchCount = 200;
 
-        for (const [serverId, data] of Object.entries(servers)) {
-          const serverInfo = JSON.parse(data);
-          const timeSinceHeartbeat = now - serverInfo.lastHeartbeat;
+        do {
+          const [nextCursor, entries] = await client.hscan(CLUSTER_KEYS.SERVERS, cursor, 'COUNT', batchCount);
+          cursor = nextCursor;
+          if (entries && entries.length) {
+            const pipe = client.pipeline();
+            let hasCommands = false;
 
-          if (timeSinceHeartbeat > CONFIG.SERVER_TIMEOUT) {
-            // Server is dead
-            await this.handleDeadServer(serverId, serverInfo);
-          } else {
-            // Update local cache
-            this.clusterServers.set(serverId, serverInfo);
+            for (let i = 0; i < entries.length; i += 2) {
+              const serverId = entries[i];
+              const data = entries[i + 1];
+              const serverInfo = safeJsonParse(data, null);
 
-            // Update health status
-            const health = {
-              status: 'healthy',
-              lastCheck: now,
-              uptime: now - serverInfo.joinedAt,
-              lastHeartbeat: serverInfo.lastHeartbeat,
-            };
-            await client.hset(CLUSTER_KEYS.HEALTH, serverId, JSON.stringify(health));
-            this.serverHealth.set(serverId, health);
+              if (!serverInfo) {
+                cryptoLogger.warn('[CLUSTER] Removing corrupted server entry during health check', { serverId });
+                pipe.hdel(CLUSTER_KEYS.SERVERS, serverId);
+                hasCommands = true;
+                continue;
+              }
+
+              const timeSinceHeartbeat = now - serverInfo.lastHeartbeat;
+
+              if (timeSinceHeartbeat > CONFIG.SERVER_TIMEOUT) {
+                // Server is dead
+                await this.handleDeadServer(serverId, serverInfo);
+              } else {
+                // Update local cache
+                this.clusterServers.set(serverId, serverInfo);
+
+                // Update health status
+                const health = {
+                  status: 'healthy',
+                  lastCheck: now,
+                  uptime: now - serverInfo.joinedAt,
+                  lastHeartbeat: serverInfo.lastHeartbeat,
+                };
+                pipe.hset(CLUSTER_KEYS.HEALTH, serverId, JSON.stringify(health));
+                hasCommands = true;
+                this.serverHealth.set(serverId, health);
+              }
+            }
+
+            if (hasCommands) {
+              await pipe.exec();
+            }
           }
-        }
+        } while (cursor !== '0');
       });
     } catch (error) {
       cryptoLogger.error('[CLUSTER] Failed to check cluster health', error);
@@ -666,46 +718,62 @@ export class ClusterManager extends EventEmitter {
   async cleanupStaleServers() {
     try {
       await withRedisClient(async (client) => {
-        const servers = await client.hgetall(CLUSTER_KEYS.SERVERS);
         const now = Date.now();
         let cleanedCount = 0;
+        let cursor = '0';
+        const batchCount = 200;
 
-        for (const [serverId, data] of Object.entries(servers)) {
-          try {
-            const serverInfo = JSON.parse(data);
-            const timeSinceHeartbeat = now - (serverInfo.lastHeartbeat || 0);
+        do {
+          const [nextCursor, entries] = await client.hscan(CLUSTER_KEYS.SERVERS, cursor, 'COUNT', batchCount);
+          cursor = nextCursor;
+          if (entries && entries.length) {
+            const pipeline = client.pipeline();
+            let hasCommands = false;
 
-            if (timeSinceHeartbeat > CONFIG.SERVER_TIMEOUT * 2) {
-              cryptoLogger.warn('[CLUSTER] Removing stale server entry', {
-                serverId,
-                timeSinceHeartbeat: Math.round(timeSinceHeartbeat / 1000) + 's',
-                lastHeartbeat: new Date(serverInfo.lastHeartbeat).toISOString()
-              });
+            for (let i = 0; i < entries.length; i += 2) {
+              const serverId = entries[i];
+              const data = entries[i + 1];
+              try {
+                const serverInfo = JSON.parse(data);
+                const timeSinceHeartbeat = now - (serverInfo.lastHeartbeat || 0);
 
-              const pipeline = client.pipeline();
-              pipeline.hdel(CLUSTER_KEYS.SERVERS, serverId);
-              pipeline.hdel(CLUSTER_KEYS.HEALTH, serverId);
-              pipeline.hdel(CLUSTER_KEYS.KEYS, serverId);
-              pipeline.hdel(CLUSTER_KEYS.TOKENS, serverId);
+                if (timeSinceHeartbeat > CONFIG.SERVER_TIMEOUT * 2) {
+                  cryptoLogger.warn('[CLUSTER] Removing stale server entry', {
+                    serverId,
+                    timeSinceHeartbeat: Math.round(timeSinceHeartbeat / 1000) + 's',
+                    lastHeartbeat: new Date(serverInfo.lastHeartbeat).toISOString()
+                  });
 
-              // If the stale server was primary, clear master key
-              if (serverInfo.isPrimary) {
-                const currentMaster = await client.get(CLUSTER_KEYS.MASTER);
-                if (currentMaster === serverId) {
-                  cryptoLogger.warn('[CLUSTER] Removing stale primary server master key', { serverId });
-                  pipeline.del(CLUSTER_KEYS.MASTER);
+                  pipeline.hdel(CLUSTER_KEYS.SERVERS, serverId);
+                  pipeline.hdel(CLUSTER_KEYS.HEALTH, serverId);
+                  pipeline.hdel(CLUSTER_KEYS.KEYS, serverId);
+                  pipeline.hdel(CLUSTER_KEYS.TOKENS, serverId);
+
+                  // If the stale server was primary, clear master key
+                  if (serverInfo.isPrimary) {
+                    const currentMaster = await client.get(CLUSTER_KEYS.MASTER);
+                    if (currentMaster === serverId) {
+                      cryptoLogger.warn('[CLUSTER] Removing stale primary server master key', { serverId });
+                      pipeline.del(CLUSTER_KEYS.MASTER);
+                    }
+                  }
+
+                  hasCommands = true;
+                  cleanedCount++;
                 }
+              } catch (_parseError) {
+                cryptoLogger.warn('[CLUSTER] Removing corrupted server entry', { serverId });
+                pipeline.hdel(CLUSTER_KEYS.SERVERS, serverId);
+                hasCommands = true;
+                cleanedCount++;
               }
-
-              await pipeline.exec();
-              cleanedCount++;
             }
-          } catch (_parseError) {
-            cryptoLogger.warn('[CLUSTER] Removing corrupted server entry', { serverId });
-            await client.hdel(CLUSTER_KEYS.SERVERS, serverId);
-            cleanedCount++;
+
+            if (hasCommands) {
+              await pipeline.exec();
+            }
           }
-        }
+        } while (cursor !== '0');
 
         if (cleanedCount > 0) {
           cryptoLogger.info('[CLUSTER] Stale server cleanup completed', {
@@ -783,7 +851,8 @@ export class ClusterManager extends EventEmitter {
 
         // Find the oldest server (earliest joinedAt timestamp) = next in queue
         for (const [serverId, data] of Object.entries(servers)) {
-          const info = JSON.parse(data);
+          const info = safeJsonParse(data, null);
+          if (!info) continue;
           if (info.joinedAt < oldestTime) {
             oldestTime = info.joinedAt;
             oldestServer = { serverId, info };
@@ -927,7 +996,8 @@ export class ClusterManager extends EventEmitter {
       await withRedisClient(async (client) => {
         const keysData = await client.hget(CLUSTER_KEYS.KEYS, this.serverId);
         if (keysData) {
-          const keys = JSON.parse(keysData);
+          const keys = safeJsonParse(keysData, null);
+          if (!keys) return;
           keys.clusterPublicKey = Buffer.from(this.clusterPublicKey).toString('base64');
           await client.hset(CLUSTER_KEYS.KEYS, this.serverId, JSON.stringify(keys));
         }
@@ -965,7 +1035,10 @@ export class ClusterManager extends EventEmitter {
       const keys = {};
 
       for (const [serverId, data] of Object.entries(keysData)) {
-        keys[serverId] = JSON.parse(data);
+        const parsed = safeJsonParse(data, null);
+        if (parsed) {
+          keys[serverId] = parsed;
+        }
       }
 
       return keys;
@@ -988,15 +1061,21 @@ export class ClusterManager extends EventEmitter {
         master,
         serverCount: Object.keys(servers).length,
         pendingCount: Object.keys(pending).length,
-        servers: Object.entries(servers).map(([id, data]) => ({
-          serverId: id,
-          ...JSON.parse(data),
-          health: health[id] ? JSON.parse(health[id]) : null,
-        })),
-        pending: Object.entries(pending).map(([id, data]) => ({
-          serverId: id,
-          ...JSON.parse(data),
-        })),
+        servers: Object.entries(servers)
+          .map(([id, data]) => {
+            const info = safeJsonParse(data, null);
+            if (!info) return null;
+            const healthInfo = health[id] ? safeJsonParse(health[id], null) : null;
+            return { serverId: id, ...info, health: healthInfo };
+          })
+          .filter(Boolean),
+        pending: Object.entries(pending)
+          .map(([id, data]) => {
+            const info = safeJsonParse(data, null);
+            if (!info) return null;
+            return { serverId: id, ...info };
+          })
+          .filter(Boolean),
       };
     });
   }

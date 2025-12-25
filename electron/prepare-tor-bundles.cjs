@@ -1,9 +1,6 @@
 #!/usr/bin/env node
 /*
  * Tor expert bundles preparer for Electron packaging
- * - Downloads Tor expert bundle
- * - Verifies SHA256 checksum using Tor's published checksum list
- * - Extracts into tor-bundles/<platform>/ with proper permissions
  */
 
 const fs = require('fs');
@@ -14,8 +11,7 @@ const https = require('https');
 const crypto = require('crypto');
 const { extract } = require('tar');
 
-const TOR_VERSION = process.env.TOR_VERSION || '15.0a4';
-const TOR_BASE_URL = process.env.TOR_BASE_URL || `https://dist.torproject.org/torbrowser/${TOR_VERSION}`;
+const { resolveTorDownloadInfo, expertBundleFileName } = require('./tor-download-info.cjs');
 const OUT_DIR = path.resolve(process.cwd(), 'tor-bundles');
 
 function log(...args) { console.log('[prepare-tor]', ...args); }
@@ -54,17 +50,18 @@ function download(url, dest) {
       res.pipe(file);
       file.on('finish', () => file.close(() => resolve(dest)));
     });
-    req.on('timeout', () => { try { req.destroy(); } catch {} reject(new Error('Download timeout')); });
-    req.on('error', (err) => { try { file.close(); } catch {} reject(err); });
+    req.on('timeout', () => { try { req.destroy(); } catch { } reject(new Error('Download timeout')); });
+    req.on('error', (err) => { try { file.close(); } catch { } reject(err); });
   });
 }
 
 async function readSha256List() {
-  const unsigned = `${TOR_BASE_URL}/sha256sums-unsigned-build.txt`;
-  const signed = `${TOR_BASE_URL}/sha256sums-signed-build.txt`;
+  const { baseUrl } = await resolveTorDownloadInfo();
+  const unsigned = `${baseUrl}/sha256sums-unsigned-build.txt`;
+  const signed = `${baseUrl}/sha256sums-signed-build.txt`;
   const tmp = path.join(os.tmpdir(), `tor_sha256_${Date.now()}.txt`);
   try { await download(unsigned, tmp); return await fsp.readFile(tmp, 'utf8'); }
-  catch (_) {}
+  catch (_) { }
   await download(signed, tmp);
   return await fsp.readFile(tmp, 'utf8');
 }
@@ -89,8 +86,9 @@ async function sha256File(filePath) {
 }
 
 async function ensureBundle(token) {
-  const archFile = `tor-expert-bundle-${token}-${TOR_VERSION}.tar.gz`;
-  const url = `${TOR_BASE_URL}/${archFile}`;
+  const { version, baseUrl } = await resolveTorDownloadInfo();
+  const archFile = expertBundleFileName(token, version);
+  const url = `${baseUrl}/${archFile}`;
   const tmpArchive = path.join(os.tmpdir(), archFile);
   const targetDir = path.join(OUT_DIR, platformToDir(token));
 
@@ -112,18 +110,17 @@ async function ensureBundle(token) {
   log('Extracting ...');
   await extract({ file: tmpArchive, cwd: targetDir, strip: 1 });
 
-  // Set execute permissions for known binaries on non-Windows
   if (process.platform !== 'win32') {
     const bins = ['tor', 'obfs4proxy', 'snowflake-client', 'conjure-client', 'lyrebird'];
     for (const b of bins) {
       const p = path.join(targetDir, b);
       try {
         await fsp.chmod(p, 0o755);
-      } catch (_) {}
+      } catch (_) { }
       const pt = path.join(targetDir, 'pluggable_transports', b);
       try {
         await fsp.chmod(pt, 0o755);
-      } catch (_) {}
+      } catch (_) { }
     }
   }
 
@@ -182,11 +179,10 @@ async function ensureBundle(token) {
     const { execSync } = require('child_process');
     let size = 'unknown';
     try {
-      // Estimate size
       if (process.platform !== 'win32') {
         size = execSync(`du -sh ${OUT_DIR} | cut -f1`, { stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim();
       }
-    } catch {}
+    } catch { }
     log(`All bundles prepared! Size: ${size}`);
   } catch (e) {
     logErr('Failed:', e.message);

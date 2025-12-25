@@ -46,6 +46,15 @@ function hashIdentifier(value) {
   return crypto.createHash('sha256').update(value).digest('hex');
 }
 
+function safeJsonParse(raw) {
+  if (typeof raw !== 'string') return null;
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+}
+
 function CONNECTION_STATE_KEY(sessionId) {
   return `connection_state:${sessionId}`;
 }
@@ -144,7 +153,7 @@ export class ConnectionStateManager {
       return await withRedisClient(async (client) => {
         const stateJson = await client.get(CONNECTION_STATE_KEY(sessionId));
         if (!stateJson || stateJson.length > MAX_STATE_JSON_SIZE) return null;
-        return JSON.parse(stateJson);
+        return safeJsonParse(stateJson);
       });
     } catch (error) {
       cryptoLogger.error('Failed to get session state', error, { sessionId });
@@ -163,7 +172,7 @@ export class ConnectionStateManager {
       return await withRedisClient(async (client) => {
         const authStateJson = await client.get(AUTH_STATE_KEY(normalizedUsername));
         if (!authStateJson || authStateJson.length > MAX_STATE_JSON_SIZE) return null;
-        return JSON.parse(authStateJson);
+        return safeJsonParse(authStateJson);
       });
     } catch (error) {
       cryptoLogger.error('Failed to get user auth state', error, { username: normalizedUsername });
@@ -223,7 +232,8 @@ export class ConnectionStateManager {
         const authStateJson = await client.get(AUTH_STATE_KEY(normalizedUsername));
         if (!authStateJson) return false;
 
-        const authState = JSON.parse(authStateJson);
+        const authState = safeJsonParse(authStateJson);
+        if (!authState) return false;
         authState.lastActivity = Date.now();
 
         await client.setex(AUTH_STATE_KEY(normalizedUsername), AUTH_STATE_TTL, JSON.stringify(authState));
@@ -240,9 +250,8 @@ export class ConnectionStateManager {
    */
   static async updateState(sessionId, updates) {
     if (!isValidSessionId(sessionId)) return false;
-    enforceRateLimit(`session:update:${sessionId}`, 500);
-
     try {
+      await enforceRateLimit(`session:update:${sessionId}`, 500);
       return await withRedisClient(async (client) => {
         // Prepare the Lua script
         const luaScript = `
@@ -331,7 +340,7 @@ export class ConnectionStateManager {
         const currentStateJson = await client.get(CONNECTION_STATE_KEY(sessionId));
         let oldUsernameHash = '';
         if (currentStateJson) {
-          const current = JSON.parse(currentStateJson);
+          const current = safeJsonParse(currentStateJson);
           if (current.username) {
             oldUsernameHash = hashIdentifier(current.username);
           }
@@ -359,6 +368,7 @@ export class ConnectionStateManager {
         return result === 1;
       });
     } catch (error) {
+      if (error?.message === 'Rate limit exceeded') return false;
       cryptoLogger.error('Failed to update connection state', error, { sessionId });
       return false;
     }
@@ -377,7 +387,11 @@ export class ConnectionStateManager {
           return false;
         }
 
-        const state = JSON.parse(stateJson);
+        const state = safeJsonParse(stateJson);
+        if (!state) {
+          await client.del(CONNECTION_STATE_KEY(sessionId));
+          return true;
+        }
         const pipeline = client.pipeline();
         pipeline.del(CONNECTION_STATE_KEY(sessionId));
 
@@ -413,14 +427,14 @@ export class ConnectionStateManager {
    */
   static async refreshSession(sessionId) {
     if (!isValidSessionId(sessionId)) return false;
-    enforceRateLimit(`session:refresh:${sessionId}`, 1000);
-
     try {
+      await enforceRateLimit(`session:refresh:${sessionId}`, 1000);
       return await withRedisClient(async (client) => {
         const stateJson = await client.get(CONNECTION_STATE_KEY(sessionId));
         if (!stateJson) return false;
 
-        const state = JSON.parse(stateJson);
+        const state = safeJsonParse(stateJson);
+        if (!state) return false;
         state.lastActivity = Date.now();
 
         const pipeline = client.pipeline();
@@ -442,6 +456,7 @@ export class ConnectionStateManager {
         return true;
       });
     } catch (error) {
+      if (error?.message === 'Rate limit exceeded') return false;
       cryptoLogger.error('Failed to refresh session', error, { sessionId });
       return false;
     }
@@ -457,7 +472,11 @@ export class ConnectionStateManager {
       await withRedisClient(async (client) => {
         const stateJson = await client.get(CONNECTION_STATE_KEY(sessionId));
         if (stateJson) {
-          const state = JSON.parse(stateJson);
+          const state = safeJsonParse(stateJson);
+          if (!state) {
+            await client.del(CONNECTION_STATE_KEY(sessionId));
+            return;
+          }
 
           // Remove user session mapping only if it belongs to this session
           if (state.username) {
@@ -487,9 +506,8 @@ export class ConnectionStateManager {
   static async getUserActiveSession(username) {
     const normalizedUsername = normalizeUsername(username);
     if (!normalizedUsername) return null;
-    enforceRateLimit(`user:getActive:${normalizedUsername}`, 300);
-
     try {
+      await enforceRateLimit(`user:getActive:${normalizedUsername}`, 300);
       return await withRedisClient(async (client) => {
         const sessionId = await client.get(USER_SESSION_KEY(normalizedUsername));
         if (!sessionId) return null;
@@ -498,6 +516,7 @@ export class ConnectionStateManager {
         return stateJson ? sessionId : null;
       });
     } catch (error) {
+      if (error?.message === 'Rate limit exceeded') return null;
       cryptoLogger.error('Failed to get active session for user', error, { username: normalizedUsername });
       return null;
     }
@@ -558,11 +577,22 @@ export class ConnectionStateManager {
           cursor = result[0];
           const keys = result[1];
 
-          for (const key of keys) {
-            const ttl = await client.ttl(key);
-            if (ttl === -1 || ttl === -2) {
-              await client.del(key);
-              cleanedCount++;
+          if (keys.length > 0) {
+            const pipeline = client.pipeline();
+            for (const key of keys) {
+              pipeline.ttl(key);
+            }
+            const ttlResults = await pipeline.exec();
+            const toDelete = [];
+            for (let i = 0; i < keys.length; i += 1) {
+              const ttl = ttlResults?.[i]?.[1];
+              if (ttl === -1 || ttl === -2) {
+                toDelete.push(keys[i]);
+              }
+            }
+            if (toDelete.length > 0) {
+              await client.del(...toDelete);
+              cleanedCount += toDelete.length;
             }
           }
         } while (cursor !== '0');
@@ -608,33 +638,74 @@ export class ConnectionStateManager {
           cursor = result[0];
           const keys = result[1];
 
-          for (const key of keys) {
-            try {
-              const stateJson = await client.get(key);
-              if (stateJson) {
-                const state = JSON.parse(stateJson);
-                const sessionAge = now - state.createdAt;
-                const isStale = sessionAge > staleThreshold || state.createdAt < currentServerStartup;
+          if (keys.length > 0) {
+            const getPipe = client.pipeline();
+            for (const key of keys) {
+              getPipe.get(key);
+            }
+            const stateResults = await getPipe.exec();
 
-                if (isStale) {
-                  const sessionId = key.replace('connection_state:', '');
-                  const reason = sessionAge > staleThreshold ? 'age' : 'pre-restart';
-                  cryptoLogger.debug('Removing stale session', { sessionId, reason, ageSeconds: Math.round(sessionAge / 1000) });
+            const stale = [];
+            const invalidKeys = [];
 
-                  if (state.username) {
-                    const userKey = USER_SESSION_KEY(state.username);
-                    const currentOwner = await client.get(userKey);
-                    if (currentOwner === sessionId) {
-                      await client.del(userKey);
-                    }
-                  }
+            for (let i = 0; i < keys.length; i += 1) {
+              const key = keys[i];
+              const stateJson = stateResults?.[i]?.[1];
+              if (!stateJson) continue;
 
-                  await client.del(key);
-                  cleanedCount++;
+              const state = safeJsonParse(stateJson);
+              if (!state) {
+                invalidKeys.push(key);
+                continue;
+              }
+
+              const createdAt = Number(state.createdAt || 0);
+              const sessionAge = now - createdAt;
+              const isStale = sessionAge > staleThreshold || createdAt < currentServerStartup;
+              if (!isStale) continue;
+
+              const sessionId = key.replace('connection_state:', '');
+              const reason = sessionAge > staleThreshold ? 'age' : 'pre-restart';
+              cryptoLogger.debug('Removing stale session', { sessionId, reason, ageSeconds: Math.round(sessionAge / 1000) });
+              stale.push({ key, sessionId, username: state.username || null });
+            }
+
+            if (invalidKeys.length > 0) {
+              try {
+                await client.del(...invalidKeys);
+                cleanedCount += invalidKeys.length;
+              } catch {
+              }
+            }
+
+            if (stale.length > 0) {
+              const ownerPipe = client.pipeline();
+              const ownerLookups = [];
+              for (const item of stale) {
+                if (item.username) {
+                  const userKey = USER_SESSION_KEY(item.username);
+                  ownerLookups.push({ userKey, sessionId: item.sessionId });
+                  ownerPipe.get(userKey);
                 }
               }
-            } catch (error) {
-              console.warn(`[CONNECTION-STATE] Error processing session ${key}:`, error);
+              const ownerResults = ownerLookups.length > 0 ? await ownerPipe.exec() : [];
+
+              const userKeysToDelete = [];
+              for (let i = 0; i < ownerLookups.length; i += 1) {
+                const currentOwner = ownerResults?.[i]?.[1];
+                if (currentOwner === ownerLookups[i].sessionId) {
+                  userKeysToDelete.push(ownerLookups[i].userKey);
+                }
+              }
+
+              const toDelete = stale.map(s => s.key);
+              const delPipe = client.pipeline();
+              if (userKeysToDelete.length > 0) {
+                delPipe.del(...userKeysToDelete);
+              }
+              delPipe.del(...toDelete);
+              await delPipe.exec();
+              cleanedCount += toDelete.length;
             }
           }
         } while (cursor !== '0');
@@ -657,9 +728,8 @@ export class ConnectionStateManager {
   static async forceCleanupUserSessions(username) {
     const normalizedUsername = normalizeUsername(username);
     if (!normalizedUsername) return;
-    enforceRateLimit(`user:forceCleanup:${normalizedUsername}`, 10, 60_000);
-
     try {
+      await enforceRateLimit(`user:forceCleanup:${normalizedUsername}`, 10, 60_000);
       return await withRedisClient(async (client) => {
         cryptoLogger.info('Force cleaning up user sessions', { username: normalizedUsername });
 
@@ -682,6 +752,7 @@ export class ConnectionStateManager {
         return true;
       });
     } catch (error) {
+      if (error?.message === 'Rate limit exceeded') return false;
       cryptoLogger.error('Error during force user session cleanup', error, { username: normalizedUsername });
       return false;
     }
@@ -703,23 +774,46 @@ export class ConnectionStateManager {
           cursor = result[0];
           const keys = result[1];
 
-          for (const key of keys) {
-            try {
-              const sessionId = await client.get(key);
-              if (sessionId) {
-                const sessionExists = await client.exists(CONNECTION_STATE_KEY(sessionId));
-                if (!sessionExists) {
-                  await client.del(key);
-                  cleanedCount++;
-                }
+          if (keys.length > 0) {
+            const getPipe = client.pipeline();
+            for (const key of keys) {
+              getPipe.get(key);
+            }
+            const getResults = await getPipe.exec();
+
+            const toDelete = [];
+            const toCheck = [];
+
+            for (let i = 0; i < keys.length; i += 1) {
+              const key = keys[i];
+              const sessionId = getResults?.[i]?.[1];
+              if (!sessionId) {
+                toDelete.push(key);
               } else {
-                await client.del(key);
-                cleanedCount++;
+                toCheck.push({ key, sessionId });
               }
-            } catch (mappingError) {
-              cryptoLogger.warn('Failed to clean stale username mapping', { key, error: mappingError?.message });
+            }
+
+            if (toCheck.length > 0) {
+              const existsPipe = client.pipeline();
+              for (const item of toCheck) {
+                existsPipe.exists(CONNECTION_STATE_KEY(item.sessionId));
+              }
+              const existsResults = await existsPipe.exec();
+              for (let i = 0; i < toCheck.length; i += 1) {
+                const exists = existsResults?.[i]?.[1];
+                if (!exists) {
+                  toDelete.push(toCheck[i].key);
+                }
+              }
+            }
+
+            if (toDelete.length > 0) {
+              await client.del(...toDelete);
+              cleanedCount += toDelete.length;
             }
           }
+
           iterations++;
         } while (cursor !== '0' && iterations < MAX_SCAN_ITERATIONS);
 

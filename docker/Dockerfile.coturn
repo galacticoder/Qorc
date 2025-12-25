@@ -1,0 +1,24 @@
+FROM ubuntu:22.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+    coturn \
+    ca-certificates \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN mkdir -p /etc/turnserver /var/log/turnserver
+
+COPY docker/coturn-entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+# Expose TURN ports
+EXPOSE 3478/udp 3478/tcp 5349/tcp 49152-65535/udp
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD curl -sf http://localhost:3478 || exit 0
+
+ENTRYPOINT ["/entrypoint.sh"]

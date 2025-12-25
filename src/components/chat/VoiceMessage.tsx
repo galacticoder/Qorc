@@ -1,8 +1,7 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { cn } from '../../lib/utils';
 import { Button } from '../ui/button';
-import { Play, Pause, Download } from 'lucide-react';
-import { format } from 'date-fns';
+import { Play, Pause } from 'lucide-react';
 import { useFileUrl } from '../../hooks/useFileUrl';
 import type { SecureDB } from '../../lib/secureDB';
 
@@ -19,16 +18,16 @@ interface VoiceMessageProps {
 
 export function VoiceMessage({
   audioUrl,
-  timestamp,
+  timestamp: _timestamp,
   isCurrentUser,
-  filename,
+  filename: _filename,
   originalBase64Data,
   mimeType,
   messageId,
   secureDB,
 }: VoiceMessageProps) {
   // Use useFileUrl to resolve the audio source from SecureDB if needed
-  const { url: resolvedUrl, loading: urlLoading, error: urlError } = useFileUrl({
+  const { url: resolvedUrl, loading: _urlLoading, error: urlError } = useFileUrl({
     secureDB: secureDB || null,
     fileId: messageId,
     mimeType: mimeType || 'audio/webm',
@@ -131,7 +130,7 @@ export function VoiceMessage({
       await audioRef.current.play();
       setIsPlaying(true);
       setIsLoading(false);
-    } catch (_err) {
+    } catch {
       setError('Failed to play audio');
       setIsLoading(false);
       setIsPlaying(false);
@@ -278,7 +277,6 @@ export function VoiceMessage({
           setDuration(audioBuffer.duration);
         }
 
-        const canvas = canvasRef.current;
         const targetWidth = 120;
         const channelData = audioBuffer.getChannelData(0);
         const samplesPerPixel = Math.max(1, Math.floor(channelData.length / targetWidth));
@@ -313,7 +311,7 @@ export function VoiceMessage({
         try {
           audioCtx.close();
         } catch { }
-      } catch (_e) {
+      } catch {
         peaksRef.current = null;
         setError('Failed to load audio');
         drawWaveform();

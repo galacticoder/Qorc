@@ -11,25 +11,6 @@ import { copyTextToClipboard } from "../../../lib/clipboard";
 import { sanitizeFilename } from "../../../lib/sanitizers";
 import { useFileUrl } from "../../../hooks/useFileUrl";
 
-interface ElectronSaveFileData {
-  readonly filename: string;
-  readonly data: string;
-  readonly mimeType: string;
-}
-
-interface ElectronSaveFileResult {
-  readonly success: boolean;
-  readonly path?: string;
-  readonly error?: string;
-  readonly canceled?: boolean;
-}
-
-declare global {
-  interface Window {
-    electronAPI?: any;
-  }
-}
-
 interface FileMessageProps {
   readonly message: Message;
   readonly isCurrentUser?: boolean;
@@ -77,12 +58,6 @@ export const formatFileSize = (bytes: number): string => {
   return `${value.toFixed(1)} ${FILE_SIZE_UNITS[i]}`;
 };
 
-const extractBase64Data = (dataUrl: string): string => {
-  if (!dataUrl.startsWith('data:')) return dataUrl;
-  const commaIndex = dataUrl.indexOf(',');
-  return commaIndex !== -1 ? dataUrl.substring(commaIndex + 1) : dataUrl;
-};
-
 const createDownloadLink = (href: string, filename: string): void => {
   const link = document.createElement('a');
   link.href = href;
@@ -114,10 +89,9 @@ export const FileContent: React.FC<FileContentProps> = ({ message, isCurrentUser
   const [videoError, setVideoError] = React.useState(false);
   const [audioError, setAudioError] = React.useState(false);
   const [lightboxOpen, setLightboxOpen] = React.useState(false);
-  const [imageDimensions, setImageDimensions] = React.useState<{ width: number; height: number } | null>(null);
   const [imageLoaded, setImageLoaded] = React.useState(false);
 
-  const { url: resolvedFileUrl, loading: fileLoading, error: fileError } = useFileUrl({
+  const { url: resolvedFileUrl, loading: _fileLoading, error: _fileError } = useFileUrl({
     secureDB: secureDB || null,
     fileId: message.id,
     mimeType: mimeType || 'application/octet-stream',
@@ -136,57 +110,6 @@ export const FileContent: React.FC<FileContentProps> = ({ message, isCurrentUser
       setAudioError(false);
     }
   }, [effectiveFileUrl]);
-
-  const fallbackDownload = useCallback((): void => {
-    const safeUrl = isSafeFileUrl(rawContentUrl);
-    if (!safeUrl) return;
-    try {
-      createDownloadLink(safeUrl, filename || 'download');
-    } catch { }
-  }, [rawContentUrl, filename]);
-
-  const handleDownload = useCallback(async (e: React.MouseEvent): Promise<void> => {
-    e.preventDefault();
-
-    if (window.electronAPI?.isElectron && filename) {
-      try {
-        let base64Data = '';
-
-        if (originalBase64Data) {
-          base64Data = extractBase64Data(originalBase64Data);
-        } else if (secureDB) {
-          const blob = await secureDB.getFile(message.id);
-          if (blob) {
-            const buffer = await blob.arrayBuffer();
-            const bytes = new Uint8Array(buffer);
-            let binary = '';
-            for (let i = 0; i < bytes.byteLength; i++) {
-              binary += String.fromCharCode(bytes[i]);
-            }
-            base64Data = btoa(binary);
-          }
-        }
-
-        if (base64Data) {
-          const result = await window.electronAPI.saveFile({
-            filename,
-            data: base64Data,
-            mimeType: mimeType || 'application/octet-stream'
-          });
-
-          if (!result.success && !result.canceled) {
-            fallbackDownload();
-          }
-        } else {
-          fallbackDownload();
-        }
-      } catch {
-        fallbackDownload();
-      }
-    } else {
-      fallbackDownload();
-    }
-  }, [originalBase64Data, filename, mimeType, fallbackDownload, secureDB, message.id]);
 
   return (
     <>
@@ -219,8 +142,7 @@ export const FileContent: React.FC<FileContentProps> = ({ message, isCurrentUser
                   className={`w-full h-full object-cover select-none transition-opacity duration-200 ${imageLoaded ? 'opacity-100' : 'opacity-0'}`}
                   draggable={false}
                   onLoad={(e) => {
-                    const img = e.target as HTMLImageElement;
-                    setImageDimensions({ width: img.naturalWidth, height: img.naturalHeight });
+                    void e;
                     setImageLoaded(true);
                   }}
                   onError={() => {
@@ -361,6 +283,11 @@ export const FileContent: React.FC<FileContentProps> = ({ message, isCurrentUser
             backgroundColor: isCurrentUser ? 'var(--color-accent-primary)' : 'var(--chat-bubble-received-bg)',
             borderRadius: 'var(--message-bubble-radius)'
           }}
+          onClick={() => {
+            if (effectiveFileUrl) {
+              createDownloadLink(effectiveFileUrl, filename || 'download');
+            }
+          }}
         >
           <div
             className="flex items-start gap-2 w-full"
@@ -390,7 +317,7 @@ export const FileContent: React.FC<FileContentProps> = ({ message, isCurrentUser
 }
 
 export function FileMessage({ message, isCurrentUser, onReply, onDelete, secureDB }: FileMessageProps) {
-  const { content, sender, timestamp, filename, fileSize, mimeType, originalBase64Data } = message;
+  const { content, sender, timestamp, filename, fileSize: _fileSize, mimeType, originalBase64Data } = message;
 
   useEffect(() => {
     if (typeof content === 'string' && content.startsWith('blob:')) {
@@ -401,21 +328,42 @@ export function FileMessage({ message, isCurrentUser, onReply, onDelete, secureD
     return undefined;
   }, [content]);
 
-  const fallbackDownload = useCallback((): void => {
-    if (!content) return;
-    try {
-      createDownloadLink(content, filename || 'download');
-    } catch {
-      try {
-        window.open(content, '_blank', 'noopener,noreferrer');
-      } catch { }
-    }
-  }, [content, filename]);
-
   const isVoiceNote = useMemo(() => {
     const name = (filename || '').toLowerCase();
     return name.includes('voice-note');
   }, [filename]);
+
+  const handleCopyFilename = useCallback((): void => {
+    void copyTextToClipboard(filename || 'File');
+  }, [filename]);
+
+  const handleReply = useCallback((): void => {
+    onReply?.(message);
+  }, [onReply, message]);
+
+  const handleDelete = useCallback((): void => {
+    onDelete?.(message);
+  }, [onDelete, message]);
+
+  const handleActionMouseEnter = useCallback((e: React.MouseEvent<HTMLButtonElement>): void => {
+    e.currentTarget.style.backgroundColor = 'var(--color-accent-primary)';
+    e.currentTarget.style.color = 'white';
+  }, []);
+
+  const handleActionMouseLeave = useCallback((e: React.MouseEvent<HTMLButtonElement>): void => {
+    e.currentTarget.style.backgroundColor = 'transparent';
+    e.currentTarget.style.color = 'var(--color-text-secondary)';
+  }, []);
+
+  const handleDeleteMouseEnter = useCallback((e: React.MouseEvent<HTMLButtonElement>): void => {
+    e.currentTarget.style.backgroundColor = '#ef4444';
+    e.currentTarget.style.color = 'white';
+  }, []);
+
+  const handleDeleteMouseLeave = useCallback((e: React.MouseEvent<HTMLButtonElement>): void => {
+    e.currentTarget.style.backgroundColor = 'transparent';
+    e.currentTarget.style.color = 'var(--color-text-secondary)';
+  }, []);
 
   if (isVoiceNote) {
     return (
@@ -456,18 +404,12 @@ export function FileMessage({ message, isCurrentUser, onReply, onDelete, secureD
           )}
         >
           <button
-            onClick={useCallback(() => { void copyTextToClipboard(filename || 'File'); }, [filename])}
+            onClick={handleCopyFilename}
             aria-label="Copy filename"
             className="p-1 rounded hover:bg-opacity-80 transition-colors"
             style={{ color: 'var(--color-text-secondary)' }}
-            onMouseEnter={useCallback((e: React.MouseEvent<HTMLButtonElement>) => {
-              e.currentTarget.style.backgroundColor = 'var(--color-accent-primary)';
-              e.currentTarget.style.color = 'white';
-            }, [])}
-            onMouseLeave={useCallback((e: React.MouseEvent<HTMLButtonElement>) => {
-              e.currentTarget.style.backgroundColor = 'transparent';
-              e.currentTarget.style.color = 'var(--color-text-secondary)';
-            }, [])}
+            onMouseEnter={handleActionMouseEnter}
+            onMouseLeave={handleActionMouseLeave}
           >
             <svg
               width="15"
@@ -486,18 +428,12 @@ export function FileMessage({ message, isCurrentUser, onReply, onDelete, secureD
           </button>
 
           <button
-            onClick={useCallback(() => onReply?.(message), [onReply, message])}
+            onClick={handleReply}
             aria-label="Reply to file"
             className="p-1 rounded hover:bg-opacity-80 transition-colors"
             style={{ color: 'var(--color-text-secondary)' }}
-            onMouseEnter={useCallback((e: React.MouseEvent<HTMLButtonElement>) => {
-              e.currentTarget.style.backgroundColor = 'var(--color-accent-primary)';
-              e.currentTarget.style.color = 'white';
-            }, [])}
-            onMouseLeave={useCallback((e: React.MouseEvent<HTMLButtonElement>) => {
-              e.currentTarget.style.backgroundColor = 'transparent';
-              e.currentTarget.style.color = 'var(--color-text-secondary)';
-            }, [])}
+            onMouseEnter={handleActionMouseEnter}
+            onMouseLeave={handleActionMouseLeave}
           >
             <svg
               xmlns="http://www.w3.org/2000/svg"
@@ -513,18 +449,12 @@ export function FileMessage({ message, isCurrentUser, onReply, onDelete, secureD
 
           {isCurrentUser && (
             <button
-              onClick={useCallback(() => onDelete?.(message), [onDelete, message])}
+              onClick={handleDelete}
               aria-label="Delete file"
               className="p-1 rounded hover:bg-opacity-80 transition-colors"
               style={{ color: 'var(--color-text-secondary)' }}
-              onMouseEnter={useCallback((e: React.MouseEvent<HTMLButtonElement>) => {
-                e.currentTarget.style.backgroundColor = '#ef4444';
-                e.currentTarget.style.color = 'white';
-              }, [])}
-              onMouseLeave={useCallback((e: React.MouseEvent<HTMLButtonElement>) => {
-                e.currentTarget.style.backgroundColor = 'transparent';
-                e.currentTarget.style.color = 'var(--color-text-secondary)';
-              }, [])}
+              onMouseEnter={handleDeleteMouseEnter}
+              onMouseLeave={handleDeleteMouseLeave}
             >
               <svg
                 xmlns="http://www.w3.org/2000/svg"

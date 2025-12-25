@@ -1391,7 +1391,16 @@ export class ServerAuthHandler {
 
     console.log(`[AUTH] Handling server authentication for user: ${username}`);
 
-    const parsed = JSON.parse(str);
+    let parsed;
+    try {
+      parsed = typeof str === 'string' ? JSON.parse(str) : str;
+    } catch (error) {
+      console.error('[AUTH] Invalid server authentication payload (JSON parse failed)', {
+        user: username,
+        error: error?.message || String(error)
+      });
+      return rejectConnection(ws, SignalType.AUTH_ERROR, 'Invalid request format');
+    }
 
     if (parsed.type !== SignalType.SERVER_LOGIN) {
       console.error(`[AUTH] Expected SERVER_LOGIN but got: ${parsed.type}`);
@@ -1465,14 +1474,14 @@ export class ServerAuthHandler {
       ws.clientState = SecureStateManager.setState(ws, { hasAuthenticated: true, serverAuthTime: Date.now(), finalizedBy: 'ServerAuthHandler' });
 
       // Map this authenticated connection for local delivery and mark presence online
-      try { ws._username = username; } catch { }
-      try { global.gateway?.addLocalConnection?.(username, ws); } catch (e) { console.warn('[AUTH] addLocalConnection failed:', e?.message || e); }
-      try { await presenceService.setUserOnline(username, ws._sessionId || ''); } catch (e) { console.warn('[AUTH] setUserOnline failed:', e?.message || e); }
-
+      try { ws._username = username; ws._authenticated = true; } catch { }
+      try { await global.gateway?.addLocalConnection?.(username, ws); } catch (e) { console.warn('[AUTH] addLocalConnection failed:', e?.message || e); }
       if (!ws._sessionId) {
         console.error('[AUTH] No session ID available for state update');
         return rejectConnection(ws, SignalType.AUTH_ERROR, "Session state error");
       }
+
+      try { await presenceService.setUserOnline(username, ws._sessionId); } catch (e) { console.warn('[AUTH] setUserOnline failed:', e?.message || e); }
 
       const { ConnectionStateManager: StateManager } = await import('../presence/connection-state.js');
       const stateUpdateSuccess = await StateManager.updateState(ws._sessionId, {

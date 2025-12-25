@@ -17,6 +17,7 @@ import {
   SCREEN_SHARING_FRAMERATES,
   ScreenSharingFrameRate,
 } from './screen-sharing-consts';
+import { torNetworkManager } from './tor-network';
 
 export interface CallState {
   id: string;
@@ -61,6 +62,82 @@ export interface CallSignal {
   };
 }
 
+const isPlainObject = (value: unknown): value is Record<string, unknown> => {
+  if (typeof value !== 'object' || value === null) return false;
+  const proto = Object.getPrototypeOf(value);
+  return proto === Object.prototype || proto === null;
+};
+
+const hasPrototypePollutionKeys = (obj: Record<string, unknown>): boolean => {
+  return ['__proto__', 'prototype', 'constructor'].some((key) => Object.prototype.hasOwnProperty.call(obj, key));
+};
+
+const CALL_SIGNAL_RATE_WINDOW_MS = 10_000;
+const CALL_SIGNAL_RATE_MAX = 2500;
+const MAX_CALL_ID_LENGTH = 256;
+const MAX_CALL_USERNAME_LENGTH = 256;
+const MAX_CALL_SIG_BASE64_LENGTH = 40_000;
+const MAX_CALL_SDP_LENGTH = 2_000_000;
+const MAX_CALL_CANDIDATE_LENGTH = 16_384;
+const CALL_SIGNAL_MAX_SKEW_MS = 30 * 60 * 1000;
+
+const validateCallSignal = (detail: unknown): CallSignal | null => {
+  if (!isPlainObject(detail) || hasPrototypePollutionKeys(detail)) return null;
+
+  const type = (detail as any).type;
+  const callId = (detail as any).callId;
+  const from = (detail as any).from;
+  const to = (detail as any).to;
+  const timestamp = (detail as any).timestamp;
+
+  if (
+    type !== 'offer' &&
+    type !== 'answer' &&
+    type !== 'ice-candidate' &&
+    type !== 'end-call' &&
+    type !== 'decline-call' &&
+    type !== 'connected'
+  ) {
+    return null;
+  }
+  if (typeof callId !== 'string' || callId.length === 0 || callId.length > MAX_CALL_ID_LENGTH) return null;
+  if (typeof from !== 'string' || from.length === 0 || from.length > MAX_CALL_USERNAME_LENGTH) return null;
+  if (typeof to !== 'string' || to.length === 0 || to.length > MAX_CALL_USERNAME_LENGTH) return null;
+  if (!Number.isFinite(timestamp)) return null;
+  const skew = Math.abs(Date.now() - timestamp);
+  if (skew > CALL_SIGNAL_MAX_SKEW_MS) return null;
+
+  const pqSignature = (detail as any).pqSignature;
+  if (!isPlainObject(pqSignature) || hasPrototypePollutionKeys(pqSignature)) return null;
+  if (typeof (pqSignature as any).signature !== 'string' || (pqSignature as any).signature.length > MAX_CALL_SIG_BASE64_LENGTH) return null;
+  if (typeof (pqSignature as any).publicKey !== 'string' || (pqSignature as any).publicKey.length > MAX_CALL_SIG_BASE64_LENGTH) return null;
+
+  const data = (detail as any).data;
+  if (type === 'offer' || type === 'answer') {
+    if (!isPlainObject(data) || hasPrototypePollutionKeys(data)) return null;
+    const sdpObj = (data as any).sdp;
+    if (typeof sdpObj === 'string') {
+      if (sdpObj.length === 0 || sdpObj.length > MAX_CALL_SDP_LENGTH) return null;
+    } else if (isPlainObject(sdpObj)) {
+      if (hasPrototypePollutionKeys(sdpObj)) return null;
+      if (typeof sdpObj.type !== 'string' || sdpObj.type !== type) return null;
+      if (typeof sdpObj.sdp !== 'string' || sdpObj.sdp.length === 0 || sdpObj.sdp.length > MAX_CALL_SDP_LENGTH) return null;
+    } else {
+      return null;
+    }
+  }
+  if (type === 'ice-candidate') {
+    if (!isPlainObject(data) || hasPrototypePollutionKeys(data)) return null;
+    if (typeof (data as any).candidate !== 'string' || (data as any).candidate.length === 0 || (data as any).candidate.length > MAX_CALL_CANDIDATE_LENGTH) return null;
+    const sdpMLineIndex = (data as any).sdpMLineIndex;
+    const sdpMid = (data as any).sdpMid;
+    if (sdpMLineIndex != null && !Number.isFinite(sdpMLineIndex)) return null;
+    if (sdpMid != null && typeof sdpMid !== 'string') return null;
+  }
+
+  return detail as unknown as CallSignal;
+};
+
 export class WebRTCCallingService {
   private localStream: MediaStream | null = null;
   private remoteStream: MediaStream | null = null;
@@ -79,7 +156,6 @@ export class WebRTCCallingService {
   private ringStartAt: number | null = null;
   private localUsername: string = '';
   private preferredCameraDeviceId: string | null = null;
-  private preferredMicrophoneDeviceId: string | null = null;
   private pqDeviceKeyPair: { publicKey: Uint8Array; privateKey: Uint8Array } | null = null;
   private pqCallSigningKey: { publicKey: Uint8Array; privateKey: Uint8Array } | null = null;
   private pqSessionKeys: { send: Uint8Array; receive: Uint8Array } | null = null;
@@ -90,7 +166,7 @@ export class WebRTCCallingService {
   private kyberRefreshTimestamps = new Map<string, number>();
   private peerHybridKeysCache = new Map<string, { keys: any; updatedAt: number }>();
   private readonly MEDIA_SESSION_KEY_TTL_MS = 5 * 60 * 1000;
-  private readonly KYBER_CACHE_TTL_MS = 10 * 60 * 1000; // 10 minutes
+  private readonly KYBER_CACHE_TTL_MS = 10 * 60 * 1000;
   private readonly KYBER_REFRESH_BACKOFF_MS = 5_000; // min gap between refresh attempts per peer
 
   private onIncomingCallCallback: ((call: CallState) => void) | null = null;
@@ -104,6 +180,10 @@ export class WebRTCCallingService {
   private readonly RING_TIMEOUT = 60000;
   private callTimeoutId: ReturnType<typeof setTimeout> | null = null;
   private auditLogger = SecurityAuditLogger;
+  private pendingIceCandidates: RTCIceCandidate[] = [];
+  private callSignalHandler: EventListener | null = null;
+  private userKeysAvailableHandler: EventListener | null = null;
+  private windowCloseHandler: EventListener | null = null;
 
   private async getOrGenerateSessionKeyPair(): Promise<{ publicKey: Uint8Array; privateKey: Uint8Array }> {
     const now = Date.now();
@@ -222,7 +302,6 @@ export class WebRTCCallingService {
   private markConnectedIfConnecting(source: string): void {
     if (this.currentCall && this.currentCall.status === 'connecting') {
       this.currentCall.status = 'connected';
-      // Record the local detection timestamp (when media actually flowed/PC connected)
       const now = Date.now();
       this.connectedDetectedAtLocal = now;
       if (!this.currentCall.startTime) {
@@ -241,7 +320,6 @@ export class WebRTCCallingService {
       this.logAuditEvent('call-connected', this.currentCall.id, this.currentCall.peer, details);
       this.ringStartAt = null;
       this.onCallStateChangeCallback?.(this.currentCall);
-      // Inform peer with a signed, encrypted 'connected' control signal so timers sync
       try {
         this.sendCallSignal({
           type: 'connected',
@@ -283,14 +361,13 @@ export class WebRTCCallingService {
       const publicKey = PostQuantumUtils.base64ToUint8Array(signal.pqSignature.publicKey);
       this.peerSignatureKeys.set(signal.from, publicKey);
       return PostQuantumSignature.verify(signature, message, publicKey);
-    } catch (_error) {
+    } catch {
       this.logAuditEvent('signature-verify-failed', signal.callId, signal.from, { type: signal.type });
       return false;
     }
   }
 
   private generatePQDeviceKey(): { publicKey: Uint8Array; privateKey: Uint8Array } {
-    // Generate a proper ML-KEM-1024 key pair for device-level encryption
     const { publicKey, secretKey } = PostQuantumKEM.generateKeyPair();
     return { publicKey, privateKey: secretKey };
   }
@@ -335,8 +412,7 @@ export class WebRTCCallingService {
         ...base,
         ...(auditPayload ? { auditPayload } : {})
       });
-    } catch (_error) {
-      // Silently fail - audit logging should not break call flow
+    } catch {
     }
   }
   constructor(username: string) {
@@ -354,7 +430,6 @@ export class WebRTCCallingService {
               try {
                 const publicKey = PostQuantumUtils.hexToBytes(parsed.publicKey);
                 const privateKey = PostQuantumUtils.hexToBytes(parsed.privateKey);
-                // Accept only proper ML-KEM-1024 keypairs; treat legacy ad-hoc keys as missing
                 if (
                   publicKey.length === PostQuantumKEM.SIZES.publicKey &&
                   privateKey.length === PostQuantumKEM.SIZES.secretKey
@@ -415,8 +490,9 @@ export class WebRTCCallingService {
         this.endCall('shutdown').catch(() => { });
       }
     };
-    window.addEventListener('beforeunload', handleWindowClose);
-    window.addEventListener('pagehide', handleWindowClose);
+    this.windowCloseHandler = handleWindowClose as EventListener;
+    window.addEventListener('beforeunload', this.windowCloseHandler);
+    window.addEventListener('pagehide', this.windowCloseHandler);
 
     try {
       const handlerHybrid = (event: Event) => {
@@ -427,7 +503,8 @@ export class WebRTCCallingService {
           }
         } catch { }
       };
-      window.addEventListener('user-keys-available', handlerHybrid as EventListener);
+      this.userKeysAvailableHandler = handlerHybrid as EventListener;
+      window.addEventListener('user-keys-available', this.userKeysAvailableHandler);
     } catch { }
 
     if (!this.pqDeviceKeyPair) {
@@ -477,11 +554,23 @@ export class WebRTCCallingService {
     this.onCallStateChangeCallback?.(this.currentCall);
 
     try {
-      // Enforce PQ media prerequisites before starting
       await this.ensurePqSecureMediaReady(targetUser);
 
+      if (!this.currentCall || this.currentCall.id !== callId) {
+        throw new Error('Call was cancelled');
+      }
+
       await this.setupLocalMedia(callType);
+
+      if (!this.currentCall || this.currentCall.id !== callId) {
+        throw new Error('Call was cancelled');
+      }
+
       await this.createPeerConnection();
+
+      if (!this.currentCall || this.currentCall.id !== callId) {
+        throw new Error('Call was cancelled');
+      }
 
       if (this.localStream) {
         this.localStream.getTracks().forEach(track => {
@@ -500,6 +589,10 @@ export class WebRTCCallingService {
       offer = { ...offer, sdp: this.mungeOpusForCBR(offer.sdp || '') };
       await this.peerConnection!.setLocalDescription(offer);
 
+      if (!this.currentCall || this.currentCall.id !== callId) {
+        throw new Error('Call was cancelled before sending offer');
+      }
+
       await this.sendCallSignal({
         type: 'offer',
         callId,
@@ -509,20 +602,25 @@ export class WebRTCCallingService {
         timestamp: Date.now()
       });
 
-      this.currentCall.status = 'ringing';
-      this.onCallStateChangeCallback?.(this.currentCall);
+      if (this.currentCall && this.currentCall.id === callId) {
+        this.currentCall.status = 'ringing';
+        this.onCallStateChangeCallback?.(this.currentCall);
 
-      this.callTimeoutId = setTimeout(() => {
-        if (this.currentCall?.status === 'ringing') {
-          this.endCall('timeout');
-        }
-      }, this.CALL_TIMEOUT);
+        this.callTimeoutId = setTimeout(() => {
+          if (this.currentCall?.status === 'ringing') {
+            this.endCall('timeout');
+          }
+        }, this.CALL_TIMEOUT);
+      }
 
       return callId;
 
     } catch (_error) {
       console.error('[Calling] Failed to start call:', _error);
-      this.endCall('failed');
+      // Only call endCall if we still have a valid currentCall for this callId
+      if (this.currentCall && this.currentCall.id === callId) {
+        this.endCall('failed');
+      }
       throw _error;
     }
   }
@@ -541,7 +639,6 @@ export class WebRTCCallingService {
     }
 
     try {
-      // Enforce PQ media prerequisites before answering
       await this.ensurePqSecureMediaReady(this.currentCall.peer);
 
       await this.setupLocalMedia(this.currentCall.type);
@@ -592,13 +689,17 @@ export class WebRTCCallingService {
     if (!this.currentCall || this.currentCall.id !== callId) {
       return;
     }
-    await this.sendCallSignal({
-      type: 'decline-call',
-      callId,
-      from: this.localUsername,
-      to: this.currentCall.peer,
-      timestamp: Date.now()
-    });
+    try {
+      await this.sendCallSignal({
+        type: 'decline-call',
+        callId,
+        from: this.localUsername,
+        to: this.currentCall.peer,
+        timestamp: Date.now()
+      });
+    } catch (err) {
+      console.warn('[Calling] Failed to send decline-call signal:', err);
+    }
 
     const now = Date.now();
     this.currentCall.status = 'declined';
@@ -616,22 +717,37 @@ export class WebRTCCallingService {
       return;
     }
     if (this.currentCall.status !== 'ended') {
-      await this.sendCallSignal({
-        type: 'end-call',
-        callId: this.currentCall.id,
-        from: this.localUsername,
-        to: this.currentCall.peer,
-        data: { reason },
-        timestamp: Date.now()
-      });
+      try {
+        const endTime = Date.now();
+        let duration = 0;
+        if (this.currentCall.startTime) {
+          duration = endTime - this.currentCall.startTime;
+        }
+
+        await this.sendCallSignal({
+          type: 'end-call',
+          callId: this.currentCall.id,
+          from: this.localUsername,
+          to: this.currentCall.peer,
+          data: { reason, duration },
+          timestamp: Date.now()
+        });
+
+        this.currentCall.endTime = endTime;
+        this.currentCall.duration = duration;
+      } catch (err) {
+        console.warn('[Calling] Failed to send end-call signal:', err);
+      }
     }
 
-    // Update call status
     this.currentCall.status = 'ended';
-    this.currentCall.endTime = Date.now();
-    if (this.currentCall.startTime) {
-      this.currentCall.duration = this.currentCall.endTime - this.currentCall.startTime;
+    if (!this.currentCall.endTime) {
+      this.currentCall.endTime = Date.now();
+      if (this.currentCall.startTime) {
+        this.currentCall.duration = this.currentCall.endTime - this.currentCall.startTime;
+      }
     }
+
     if (this.currentCall) {
       this.currentCall.endReason = reason as CallState['endReason'];
     }
@@ -672,11 +788,8 @@ export class WebRTCCallingService {
 
     let videoTrack = this.localStream.getVideoTracks()[0];
 
-    // If no video track reacquire one when enabling
     if (!videoTrack || videoTrack.readyState === 'ended') {
       try {
-        // Strict: If we have a preference, try EXACTLY that. If it fails -> failure (no fallback).
-        // If no preference, try generic video.
         if (this.preferredCameraDeviceId) {
           const constraints = {
             video: { deviceId: { exact: this.preferredCameraDeviceId } },
@@ -1033,42 +1146,96 @@ export class WebRTCCallingService {
     } catch { return false; }
   }
 
+  private async waitForP2PService(timeoutMs: number): Promise<any | null> {
+    const start = Date.now();
+    const pollMs = 100;
+    while ((Date.now() - start) < timeoutMs) {
+      const svc: any = (window as any).p2pService || null;
+      if (svc) {
+        return svc;
+      }
+      await new Promise(resolve => setTimeout(resolve, pollMs));
+    }
+    return null;
+  }
+
   private async ensurePqSecureMediaReady(peer: string): Promise<void> {
     if (!this.hasInsertableStreamsSupport()) {
       throw new Error('Secure media unavailable: insertable streams not supported');
     }
 
-    const svc: any = (window as any).p2pService || null;
+    let svc: any = (window as any).p2pService || null;
+    if (!svc) {
+      try { window.dispatchEvent(new CustomEvent('p2p-init-required', { detail: { source: 'calling', peer } })); } catch { }
+      svc = await this.waitForP2PService(15000);
+    }
     if (!svc) {
       throw new Error('Secure media unavailable: P2P transport not initialized');
     }
 
-    try {
-      const peers: string[] = typeof svc.getConnectedPeers === 'function' ? svc.getConnectedPeers() : [];
-      if (!peers.includes(peer) && typeof svc.connectToPeer === 'function') {
-        try { await svc.connectToPeer(peer); } catch { }
-      }
-    } catch { }
     const hasSession = (): boolean => {
       try {
         const status = typeof svc.getSessionStatus === 'function' ? svc.getSessionStatus(peer) : null;
-        return !!(status && status.established && status.sendKey && status.receiveKey);
+        const result = !!(status && status.established && status.sendKey && status.receiveKey);
+        return result;
       } catch { return false; }
     };
-    if (!hasSession()) {
-      await new Promise<void>((resolve) => {
-        let settled = false;
-        const t = setTimeout(() => { if (!settled) { settled = true; resolve(); } }, 2000);
-        const on = (e: Event) => {
-          const d: any = (e as CustomEvent).detail || {};
-          if (d?.peer === peer) {
-            if (!settled) { settled = true; clearTimeout(t); }
-            resolve();
-          }
-        };
-        try { window.addEventListener('p2p-pq-established', on as EventListener, { once: true }); } catch { resolve(); }
-      });
+
+    // Ensure peer connection exists before we wait for PQ keys
+    const peers: string[] = typeof svc.getConnectedPeers === 'function' ? svc.getConnectedPeers() : [];
+    if (!peers.includes(peer) && typeof svc.connectToPeer === 'function') {
+      await svc.connectToPeer(peer);
     }
+
+    if (hasSession()) {
+      return;
+    }
+
+    // Wait for PQ session to establish
+    await new Promise<void>((resolve, reject) => {
+      let settled = false;
+      const timeoutMs = 90_000;
+      const pollIntervalMs = 500;
+
+      const finish = (err?: Error) => {
+        if (settled) return;
+        settled = true;
+        try { clearTimeout(timer); } catch { }
+        try { clearInterval(poller); } catch { }
+        try { window.removeEventListener('p2p-pq-established', on as EventListener); } catch { }
+        if (err) return reject(err);
+        resolve();
+      };
+
+      let pollCount = 0;
+      const poller = setInterval(() => {
+        pollCount++;
+        if (pollCount % 10 === 0) {
+        }
+        if (hasSession()) {
+          finish();
+        }
+      }, pollIntervalMs);
+
+      const timer = setTimeout(() => {
+        const stats = torNetworkManager.getStats();
+        finish(new Error(`Secure media unavailable: PQ session not established (timeout). Tor: ${stats.isConnected ? 'Connected' : 'Disconnected'}, Bootstrapped: ${stats.isBootstrapped ? 'Yes' : 'No'}`));
+      }, timeoutMs);
+
+      const on = (e: Event) => {
+        const d: any = (e as CustomEvent).detail || {};
+        if (d?.peer === peer) {
+          finish();
+        }
+      };
+
+      try {
+        window.addEventListener('p2p-pq-established', on as EventListener);
+      } catch {
+      }
+    });
+
+
     if (!hasSession()) {
       throw new Error('Secure media unavailable: PQ session not established');
     }
@@ -1974,45 +2141,8 @@ export class WebRTCCallingService {
       iceTransportPolicy: 'all'
     };
 
-    // 0) Env-provided public STUN/TURN
-    try {
-      const env: any = (import.meta as any).env || {};
-      const turnRaw = env.VITE_TURN_SERVERS || env.TURN_SERVERS || '';
-      const stunRaw = env.VITE_STUN_SERVERS || env.STUN_SERVERS || '';
-      const parsed: any[] = [];
-      if (turnRaw) {
-        const val = typeof turnRaw === 'string' ? JSON.parse(turnRaw) : turnRaw;
-        if (Array.isArray(val)) parsed.push(...val);
-      }
-      if (stunRaw) {
-        let list: any = [];
-        if (typeof stunRaw === 'string') {
-          list = stunRaw.trim().startsWith('[') ? JSON.parse(stunRaw) : stunRaw.split(',').map((s: string) => s.trim()).filter(Boolean);
-        } else {
-          list = stunRaw;
-        }
-        if (Array.isArray(list) && list.length > 0) parsed.push({ urls: list });
-      }
-      if (parsed.length > 0) config.iceServers = parsed;
-    } catch { }
-
-    // Prefer Electron-provided ICE if env not provided
-    try {
-      if (config.iceServers.length === 0) {
-        const electronApi = (window as any).electronAPI || (window as any).edgeApi;
-        if (electronApi?.getIceConfiguration && typeof electronApi.getIceConfiguration === 'function') {
-          const secureConfig = electronApi.getIceConfiguration();
-          if (secureConfig && Array.isArray(secureConfig.iceServers) && secureConfig.iceServers.length > 0) {
-            config.iceServers = secureConfig.iceServers;
-            if (secureConfig.iceTransportPolicy) {
-              config.iceTransportPolicy = secureConfig.iceTransportPolicy;
-            }
-          }
-        }
-      }
-    } catch { }
-
-    // Try self-host ICE endpoint if still empty
+    // Fetch ICE config from server API asynchronously
+    // This will update rtcConfig when the response arrives
     try {
       let baseHttp = '';
       try {
@@ -2031,21 +2161,33 @@ export class WebRTCCallingService {
         }
       } catch { }
 
-      if (config.iceServers.length === 0 && (baseHttp && (baseHttp.startsWith('http://') || baseHttp.startsWith('https://')))) {
+      if (baseHttp && (baseHttp.startsWith('http://') || baseHttp.startsWith('https://'))) {
         fetch(`${baseHttp}/api/ice/config`, { method: 'GET', credentials: 'omit' })
           .then(async (resp) => {
             if (!resp.ok) return;
             const ice = await resp.json();
-            if (ice && Array.isArray(ice.iceServers) && ice.iceServers.length > 0 && this.rtcConfig?.iceServers?.length === 0) {
+            if (ice && Array.isArray(ice.iceServers) && ice.iceServers.length > 0) {
+              // Sanitize ICE servers
+              const sanitized: RTCIceServer[] = [];
+              for (const server of ice.iceServers) {
+                const urls = Array.isArray(server.urls) ? server.urls : [server.urls];
+                const isTurn = urls.some((url: string) => typeof url === 'string' && (url.startsWith('turn:') || url.startsWith('turns:')));
+                const isStun = urls.some((url: string) => typeof url === 'string' && url.startsWith('stun:'));
+                if (isTurn && (!server.username || !server.credential)) continue;
+                if (isStun || (isTurn && server.username && server.credential)) {
+                  sanitized.push(server);
+                }
+              }
+
               this.rtcConfig = {
-                iceServers: ice.iceServers,
+                iceServers: sanitized,
                 iceCandidatePoolSize: 0,
                 bundlePolicy: 'max-bundle',
                 rtcpMuxPolicy: 'require',
                 iceTransportPolicy: (ice.iceTransportPolicy === 'relay' || ice.iceTransportPolicy === 'all') ? ice.iceTransportPolicy : 'all'
               };
               SecurityAuditLogger.log('info', 'ice-config-updated-from-server', {
-                iceServers: ice.iceServers.length,
+                iceServers: sanitized.length,
                 iceTransportPolicy: this.rtcConfig.iceTransportPolicy
               });
             }
@@ -2095,15 +2237,46 @@ export class WebRTCCallingService {
   }
 
   private setupSignalHandlers(): void {
-    window.addEventListener('call-signal', ((event: CustomEvent) => {
-      const signal = event.detail as CallSignal;
-      this.handleCallSignal(signal);
-    }) as EventListener);
+    let windowStart = Date.now();
+    let count = 0;
+
+    const handler = (event: Event) => {
+      try {
+        const now = Date.now();
+        if (now - windowStart > CALL_SIGNAL_RATE_WINDOW_MS) {
+          windowStart = now;
+          count = 0;
+        }
+        count += 1;
+        if (count > CALL_SIGNAL_RATE_MAX) {
+          console.warn('[Calling] Rate limit exceeded for call signals');
+          return;
+        }
+
+        if (!(event instanceof CustomEvent)) {
+          return;
+        }
+
+        const signal = validateCallSignal(event.detail);
+        if (!signal) {
+          console.warn('[Calling] Call signal validation failed:', event.detail);
+          return;
+        }
+
+        void this.handleCallSignal(signal);
+      } catch {
+        return;
+      }
+    };
+
+    this.callSignalHandler = handler as EventListener;
+    window.addEventListener('call-signal', this.callSignalHandler);
   }
 
   private async handleCallSignal(signal: CallSignal): Promise<void> {
     const isSignatureValid = await this.verifySignalSignature(signal);
     if (!isSignatureValid) {
+      console.error('[Calling] Call signal signature invalid:', signal);
       return;
     }
 
@@ -2129,6 +2302,8 @@ export class WebRTCCallingService {
         case 'connected':
           this.handlePeerConnectedSignal(signal);
           break;
+        default:
+          console.warn('[Calling] Unknown signal type:', (signal as any).type);
       }
     } catch (_error) {
       console.error('[Calling] Error handling call signal:', (_error as any)?.message || _error);
@@ -2155,6 +2330,7 @@ export class WebRTCCallingService {
           }
 
           await this.peerConnection.setRemoteDescription(signal.data);
+          await this.processPendingIceCandidates();
 
           let answer = await this.peerConnection.createAnswer();
           answer = { ...answer, sdp: this.mungeOpusForCBR(answer.sdp || '') };
@@ -2209,9 +2385,16 @@ export class WebRTCCallingService {
     this.ringStartAt = Date.now();
 
     await this.createPeerConnection();
-    this.logAuditEvent('call-offer-received', signal.callId, signal.from, { type: callType });
 
-    await this.peerConnection!.setRemoteDescription(sdp);
+    this.logAuditEvent('call-offer-received', signal.callId, signal.from, { type: callType });
+    if (!this.peerConnection) {
+      console.error('[Calling] PeerConnection lost during handleCallOffer setup');
+      this.cleanup();
+      return;
+    }
+    await this.peerConnection.setRemoteDescription(sdp);
+
+    await this.processPendingIceCandidates();
 
     this.onIncomingCallCallback?.(this.currentCall);
     this.onCallStateChangeCallback?.(this.currentCall);
@@ -2248,6 +2431,7 @@ export class WebRTCCallingService {
         try {
           const sdp = signal.data as RTCSessionDescriptionInit;
           await this.peerConnection.setRemoteDescription(sdp);
+          await this.processPendingIceCandidates();
           this.isRenegotiating = false;
           if (this.renegotiationTimeoutId) {
             clearTimeout(this.renegotiationTimeoutId);
@@ -2274,6 +2458,7 @@ export class WebRTCCallingService {
       }
 
       await this.peerConnection.setRemoteDescription(answerData.sdp);
+      await this.processPendingIceCandidates();
 
       if (this.peerConnection && this.currentCall && this.currentCall.status === 'connecting') {
         try {
@@ -2301,7 +2486,34 @@ export class WebRTCCallingService {
     }
 
     const candidate = signal.data as RTCIceCandidate;
-    await this.peerConnection.addIceCandidate(candidate);
+
+    if (!this.peerConnection.remoteDescription) {
+      this.pendingIceCandidates.push(candidate);
+      return;
+    }
+
+    try {
+      await this.peerConnection.addIceCandidate(candidate);
+    } catch (e) {
+      console.warn('[Calling] Failed to add ICE candidate:', e);
+    }
+  }
+
+  private async processPendingIceCandidates(): Promise<void> {
+    if (!this.peerConnection || this.pendingIceCandidates.length === 0) {
+      return;
+    }
+
+    const candidates = [...this.pendingIceCandidates];
+    this.pendingIceCandidates = [];
+
+    for (const candidate of candidates) {
+      try {
+        await this.peerConnection.addIceCandidate(candidate);
+      } catch (e) {
+        console.warn('[Calling] Failed to add queued ICE candidate:', e);
+      }
+    }
   }
 
   private handleCallDeclined(signal: CallSignal): void {
@@ -2351,9 +2563,13 @@ export class WebRTCCallingService {
 
     this.currentCall.status = 'ended';
     this.currentCall.endTime = Date.now();
-    if (this.currentCall.startTime) {
+
+    if (signal.data?.duration && typeof signal.data.duration === 'number') {
+      this.currentCall.duration = signal.data.duration;
+    } else if (this.currentCall.startTime) {
       this.currentCall.duration = this.currentCall.endTime - this.currentCall.startTime;
     }
+
     this.onCallStateChangeCallback?.(this.currentCall);
     this.cleanup();
   }
@@ -2361,6 +2577,36 @@ export class WebRTCCallingService {
   private generateCallId(): string {
     const bytes = PostQuantumRandom.randomBytes(16);
     return 'call_' + Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join('');
+  }
+
+  public destroy(): void {
+    if (this.currentCall && this.currentCall.status !== 'ended' && this.currentCall.status !== 'declined' && this.currentCall.status !== 'missed') {
+      void this.endCall('shutdown');
+    }
+    this.cleanup();
+
+    // Remote all window event listeners
+    if (this.windowCloseHandler) {
+      window.removeEventListener('beforeunload', this.windowCloseHandler);
+      window.removeEventListener('pagehide', this.windowCloseHandler);
+      this.windowCloseHandler = null;
+    }
+
+    if (this.userKeysAvailableHandler) {
+      window.removeEventListener('user-keys-available', this.userKeysAvailableHandler);
+      this.userKeysAvailableHandler = null;
+    }
+
+    if (this.callSignalHandler) {
+      window.removeEventListener('call-signal', this.callSignalHandler);
+      this.callSignalHandler = null;
+    }
+
+    this.onIncomingCallCallback = null;
+    this.onCallStateChangeCallback = null;
+    this.onRemoteStreamCallback = null;
+    this.onRemoteScreenStreamCallback = null;
+    this.onLocalStreamCallback = null;
   }
 
   private cleanup(): void {
@@ -2412,6 +2658,8 @@ export class WebRTCCallingService {
       this.peerConnection.close();
       this.peerConnection = null;
     }
+
+    this.pendingIceCandidates = [];
 
     if (this.remoteStream) {
       if ((this.remoteStream as any)._pqSessionKey) {
@@ -2503,12 +2751,5 @@ export class WebRTCCallingService {
         console.error('[Calling] Failed to apply selected camera:', _e);
       }
     }
-  }
-
-  destroy(): void {
-    if (this.currentCall) {
-      this.endCall('shutdown');
-    }
-    this.cleanup();
   }
 }

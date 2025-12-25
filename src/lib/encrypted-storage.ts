@@ -26,12 +26,22 @@ class EncryptedStorageManager {
   private secureDB: SecureDB | null = null;
   private preInitQueue: Array<{ operation: 'set' | 'remove', key: string, value?: any }> = [];
   private initialized = false;
+  private initializationPromise: Promise<void>;
+  private resolveInitialization: () => void = () => { };
   private rateLimitWindowStart = 0;
   private rateLimitCount = 0;
+
+  constructor() {
+    this.initializationPromise = new Promise((resolve) => {
+      this.resolveInitialization = resolve;
+    });
+  }
+
 
   async initialize(secureDB: SecureDB): Promise<void> {
     this.secureDB = secureDB;
     this.initialized = true;
+    this.resolveInitialization();
 
     // Process queued operations
     const queue = this.preInitQueue.slice(0, MAX_QUEUE_SIZE);
@@ -142,6 +152,9 @@ class EncryptedStorageManager {
   reset(): void {
     this.secureDB = null;
     this.initialized = false;
+    this.initializationPromise = new Promise((resolve) => {
+      this.resolveInitialization = resolve;
+    });
     this.preInitQueue = [];
     this.rateLimitWindowStart = 0;
     this.rateLimitCount = 0;
@@ -159,6 +172,11 @@ class EncryptedStorageManager {
       throw new Error('Storage operation rate limit exceeded');
     }
   }
+
+  async waitForInitialization(): Promise<void> {
+    if (this.initialized) return;
+    return this.initializationPromise;
+  }
 }
 
 export const encryptedStorage = new EncryptedStorageManager();
@@ -166,6 +184,15 @@ export const encryptedStorage = new EncryptedStorageManager();
 class SyncEncryptedStorageAdapter {
   private memoryCache = new Map<string, any>();
   private pendingGets = new Map<string, Promise<any>>();
+  private selfInitialized = false;
+  private selfInitializationPromise: Promise<void>;
+  private resolveSelfInitialization: () => void = () => { };
+
+  constructor() {
+    this.selfInitializationPromise = new Promise((resolve) => {
+      this.resolveSelfInitialization = resolve;
+    });
+  }
 
   async initialize(): Promise<void> {
     if (!encryptedStorage.isInitialized()) {
@@ -191,6 +218,9 @@ class SyncEncryptedStorageAdapter {
         console.error('[SyncEncryptedStorage] Failed to pre-load key:', _error);
       }
     }
+
+    this.selfInitialized = true;
+    this.resolveSelfInitialization();
   }
 
   getItem(key: string): string | null {
@@ -237,6 +267,16 @@ class SyncEncryptedStorageAdapter {
   reset(): void {
     this.memoryCache.clear();
     this.pendingGets.clear();
+    this.selfInitialized = false;
+    this.selfInitializationPromise = new Promise((resolve) => {
+      this.resolveSelfInitialization = resolve;
+    });
+  }
+
+  async waitForInitialization(): Promise<void> {
+    await encryptedStorage.waitForInitialization();
+    if (this.selfInitialized) return;
+    return this.selfInitializationPromise;
   }
 }
 

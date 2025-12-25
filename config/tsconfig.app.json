@@ -20,7 +20,7 @@
     "noFallthroughCasesInSwitch": false,
     "skipLibCheck": true,
 
-    "baseUrl": "../",
+    "baseUrl": ".",
     "paths": {
       "@/*": ["./src/*"],
       "lucide-react": ["lucide-react/dist/esm/icons/index"]

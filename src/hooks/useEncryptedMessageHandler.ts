@@ -1,11 +1,12 @@
 import { v4 as uuidv4 } from 'uuid';
 import { useCallback, useEffect, useRef } from "react";
 import { toast } from "sonner";
-import { SignalType } from "@/lib/signal-types";
-import { Message, User } from "@/components/chat/types";
-import websocketClient from "@/lib/websocket";
-import { blockingSystem } from "@/lib/blocking-system";
-import { CryptoUtils } from "@/lib/unified-crypto";
+import { SignalType } from "../lib/signal-types";
+import { Message } from "../components/chat/types";
+import type { User } from "../components/chat/UserList";
+import websocketClient from "../lib/websocket";
+import { blockingSystem } from "../lib/blocking-system";
+import { CryptoUtils } from "../lib/unified-crypto";
 
 const textEncoder = new TextEncoder();
 
@@ -136,7 +137,7 @@ function createBlobUrlFromBase64(
     const url = URL.createObjectURL(blob);
     blobCache.enqueue(url);
     return url;
-  } catch (_error) {
+  } catch {
     return null;
   }
 }
@@ -429,8 +430,12 @@ export function useEncryptedMessageHandler(
     };
 
     const handleSessionReady = (event: Event) => {
-      const { peer } = (event as CustomEvent).detail || {};
+      const detail = (event as CustomEvent).detail || {};
+      const peer = typeof detail.peer === 'string'
+        ? detail.peer
+        : (typeof detail.peerUsername === 'string' ? detail.peerUsername : undefined);
       if (typeof peer !== 'string') return;
+      _retryForPeer(peer);
     };
 
     window.addEventListener('libsignal-session-ready', handleSessionReady as EventListener);
@@ -484,8 +489,7 @@ export function useEncryptedMessageHandler(
             username: peer
           });
         } catch { }
-      } catch (err) {
-      }
+      } catch { }
     };
 
     window.addEventListener('p2p-peer-reconnected', handlePeerReconnection as EventListener);
@@ -676,7 +680,7 @@ export function useEncryptedMessageHandler(
           prev.attempts = (prev.attempts || 0) + 1;
           failedDeliveryReceiptsRef.current.set(key, prev);
         }
-      } catch (_err) {
+      } catch {
         // Non-fatal
       }
     };
@@ -713,8 +717,7 @@ export function useEncryptedMessageHandler(
       // Ensure new prekeys are generated before fetching bundle
       try {
         await (window as any).edgeApi?.generatePreKeys?.({ username: loginUsernameRef.current, count: 50 });
-      } catch (_genErr) {
-      }
+      } catch { }
 
       // Generate fresh Signal Protocol bundle locally with new one-time prekey
       const bundle = await (window as any).edgeApi?.getPreKeyBundle?.({
@@ -857,13 +860,13 @@ export function useEncryptedMessageHandler(
       const isOfflineMessage = encryptedMessage?.offline === true;
       const isSignalProtocolMessage = encryptedMessage?.type === SignalType.ENCRYPTED_MESSAGE;
       const isBundleMessage = encryptedMessage?.type === SignalType.LIBSIGNAL_DELIVER_BUNDLE;
+      const isBackgroundMessage = encryptedMessage?._decryptedInBackground === true;
 
-      if (!isAuthenticated && !isP2PMessage && !isOfflineMessage && !isSignalProtocolMessage && !isBundleMessage) {
+      if (!isAuthenticated && !isP2PMessage && !isOfflineMessage && !isSignalProtocolMessage && !isBundleMessage && !isBackgroundMessage) {
         return;
       }
 
       try {
-        // Comprehensive type validation to prevent type confusion attacks
         if (typeof encryptedMessage !== "object" ||
           encryptedMessage === null ||
           Array.isArray(encryptedMessage) ||
@@ -874,7 +877,6 @@ export function useEncryptedMessageHandler(
           return;
         }
 
-        // Prevent prototype pollution through message object
         if (encryptedMessage.hasOwnProperty('__proto__') ||
           encryptedMessage.hasOwnProperty('constructor') ||
           encryptedMessage.hasOwnProperty('prototype')) {
@@ -884,10 +886,17 @@ export function useEncryptedMessageHandler(
 
         let payload: any;
 
-        // Handle P2P encrypted messages (highest priority)
-        if (encryptedMessage?.p2p === true && encryptedMessage?.encrypted === true) {
+        // Handle pre-decrypted background messages (already decrypted by main process)
+        if (encryptedMessage?._decryptedInBackground === true) {
+          const { _decryptedInBackground, _originalFrom, _timestamp, ...rest } = encryptedMessage;
+          payload = rest;
+          if (!payload.from && _originalFrom) {
+            payload.from = _originalFrom;
+          }
+        }
+        // Handle P2P encrypted messages
+        else if (encryptedMessage?.p2p === true && encryptedMessage?.encrypted === true) {
           try {
-            // Validate P2P message structure and content with strict type checking
             if (!encryptedMessage.from || !encryptedMessage.to || !encryptedMessage.id ||
               typeof encryptedMessage.from !== 'string' ||
               typeof encryptedMessage.to !== 'string' ||
@@ -896,27 +905,23 @@ export function useEncryptedMessageHandler(
               return;
             }
 
-            // Validate username format to prevent injection attacks
             const usernameRegex = /^[a-zA-Z0-9_-]{1,32}$/;
             if (!usernameRegex.test(encryptedMessage.from) || !usernameRegex.test(encryptedMessage.to)) {
               console.error('[EncryptedMessageHandler] Invalid username format in P2P message');
               return;
             }
 
-            // Validate message ID format (UUID)
             const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
             if (!uuidRegex.test(encryptedMessage.id)) {
               console.error('[EncryptedMessageHandler] Invalid message ID format');
               return;
             }
 
-            // Validate message is intended for current user
             if (encryptedMessage.to !== loginUsernameRef.current) {
               console.error('[EncryptedMessageHandler] P2P message not intended for current user');
               return;
             }
 
-            // Validate content length, type, and sanitize for XSS prevention
             if (typeof encryptedMessage.content !== 'string' ||
               encryptedMessage.content.length === 0 ||
               encryptedMessage.content.length > 10000) {
@@ -924,7 +929,6 @@ export function useEncryptedMessageHandler(
               return;
             }
 
-            // Check for potential XSS and injection attacks in content
             const dangerousPatterns = [
               /<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi,
               /javascript:/gi,
@@ -944,13 +948,11 @@ export function useEncryptedMessageHandler(
               return;
             }
 
-            // Check for null bytes and control characters
             if (/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/.test(encryptedMessage.content)) {
               console.error('[EncryptedMessageHandler] Invalid control characters in P2P message content');
               return;
             }
 
-            // Validate timestamp is reasonable (not too old or future)
             const now = Date.now();
             const messageTime = new Date(encryptedMessage.timestamp).getTime();
             const maxAge = 24 * 60 * 60 * 1000; // 24 hours
@@ -989,7 +991,8 @@ export function useEncryptedMessageHandler(
               const kemCiphertext = (envelope as any)?.kemCiphertext;
               if (typeof kemCiphertext === 'string' && kemCiphertext.length > 0) {
                 const dedupKey = `${encryptedMessage.from || 'unknown'}:${kemCiphertext}`;
-                if (processedPreKeyMessagesRef.current.has(dedupKey)) {
+                const retryCount = (encryptedMessage as any)?.__retryCount || 0;
+                if (retryCount <= 0 && processedPreKeyMessagesRef.current.has(dedupKey)) {
                   return;
                 }
                 processedPreKeyMessagesRef.current.set(dedupKey, Date.now());
@@ -1014,9 +1017,6 @@ export function useEncryptedMessageHandler(
                 toUsername: currentUser,
                 encryptedData: cleanedEnvelope
               });
-
-              if (decrypted?.sessionInfo) {
-              }
 
               (encryptedMessage as any).__attachedChunkData = attachedChunkData;
               if (!decrypted?.success || typeof decrypted?.plaintext !== 'string') {
@@ -1278,9 +1278,6 @@ export function useEncryptedMessageHandler(
                 if (!payload) return;
               }
 
-              if (decrypted?.sessionInfo) {
-              }
-
               payload = safeJsonParseForMessages(decrypted.plaintext) || { content: decrypted.plaintext, type: 'message' };
               if (!payload || typeof payload !== 'object') {
                 console.error('[EncryptedMessageHandler] Decrypted payload invalid');
@@ -1330,8 +1327,6 @@ export function useEncryptedMessageHandler(
                 if (attachedChunkData && typeof attachedChunkData === 'string') {
                   (payload as any).chunkData = attachedChunkData;
                 } else {
-                  try {
-                  } catch { }
                 }
               }
             } else {
@@ -1430,8 +1425,7 @@ export function useEncryptedMessageHandler(
                     const signature = btoa(String.fromCharCode(...new Uint8Array(signatureRaw)));
                     await websocketClient.sendSecureControlMessage({ ...requestBase, signature });
                   }
-                } catch (_bundleErr) {
-                }
+                } catch { }
               }
             }
           }
@@ -1540,10 +1534,15 @@ export function useEncryptedMessageHandler(
             return;
           }
 
-          const isActualMessage = (payload.type === 'message' || payload.type === 'text' || !payload.type) &&
+          const isTextMessage = (payload.type === 'message' || payload.type === 'text' || !payload.type) &&
             payload.content &&
             typeof payload.content === 'string' &&
             payload.content.trim().length > 0;
+          const isFileMessage = payload.type === 'file-message' && payload.fileName;
+          const isActualMessage = isTextMessage || isFileMessage;
+
+          const isCallSignal = payload.type?.startsWith?.('call-') ||
+            ['call-offer', 'call-answer', 'call-ice', 'call-signal', 'call-end', 'call-reject'].includes(payload.type);
 
           if (isActualMessage) {
             try {
@@ -1552,6 +1551,29 @@ export function useEncryptedMessageHandler(
               });
               window.dispatchEvent(typingClearEvent);
             } catch { }
+          }
+
+          // Show notification when window is unfocused
+          if ((isActualMessage || isCallSignal) && payload.from !== loginUsernameRef.current) {
+            try {
+              const isFocused = document.hasFocus();
+              if (!isFocused && (window as any).electronAPI?.showNotification) {
+                const senderName = payload.from || 'Someone';
+                const title = isCallSignal ? 'Incoming Call' : (isFileMessage ? 'New File' : 'New Message');
+                const body = isCallSignal
+                  ? `${senderName} is calling you`
+                  : isFileMessage
+                    ? `${senderName} sent a file: ${payload.fileName}`
+                    : `${senderName}: ${(payload.content || '').slice(0, 50)}${(payload.content?.length || 0) > 50 ? '...' : ''}`;
+
+                (window as any).electronAPI.showNotification({
+                  title,
+                  body,
+                  silent: false,
+                  data: { from: payload.from, type: isCallSignal ? 'call' : 'message' }
+                }).catch((e: Error) => console.error('[EncryptedMessageHandler] Notification failed:', e));
+              }
+            } catch (e) { console.error('[EncryptedMessageHandler] Notification error:', e); }
           }
 
           // Handle message deletion first
@@ -1762,6 +1784,7 @@ export function useEncryptedMessageHandler(
                   timestamp: new Date(payload.timestamp || Date.now()),
                   type: 'text',
                   isCurrentUser: false,
+                  version: payload.version || '1.0',
                   ...(replyToForSave && { replyTo: replyToForSave })
                 });
               } catch (dbError) {
@@ -1997,6 +2020,7 @@ export function useEncryptedMessageHandler(
                 mimeType: fileType,
                 fileSize: fileSize,
                 originalBase64Data: dataBase64,
+                version: payload.version || '1.0',
                 fileInfo: {
                   name: fileName || 'File',
                   type: fileType,
@@ -2022,6 +2046,7 @@ export function useEncryptedMessageHandler(
                 mimeType: fileType,
                 fileSize: fileSize,
                 originalBase64Data: dataBase64,
+                version: payload.version || '1.0',
                 fileInfo: {
                   name: fileName || 'File',
                   type: fileType,

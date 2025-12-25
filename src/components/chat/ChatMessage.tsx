@@ -196,17 +196,6 @@ export const ChatMessage = React.memo<ExtendedChatMessageProps>(({ message, smar
     onEdit?.(message);
   }, [onEdit, message]);
 
-  const handleTogglePicker = useCallback((e: React.MouseEvent) => {
-    e.stopPropagation();
-    if (pickerOpen) {
-      closePicker();
-    } else {
-      openPicker(messageTriggerId);
-    }
-  }, [pickerOpen, closePicker, openPicker, messageTriggerId]);
-
-
-
   const handleDownload = useCallback(async () => {
     try {
       const { originalBase64Data, mimeType, filename } = message;
@@ -229,8 +218,7 @@ export const ChatMessage = React.memo<ExtendedChatMessageProps>(({ message, smar
           document.body.removeChild(link);
           setTimeout(() => URL.revokeObjectURL(downloadUrl), 1000);
           return;
-        } catch (_base64Error) {
-        }
+        } catch { }
       }
 
       if (!audioUrl || audioUrl === 'File' || audioUrl === 'voice-note') {
@@ -578,6 +566,7 @@ export const ChatMessage = React.memo<ExtendedChatMessageProps>(({ message, smar
           x={contextMenu.x}
           y={contextMenu.y}
           onClose={() => setContextMenu(null)}
+          onCopy={handleCopyMessage}
           onEdit={!isFileMessageType && safeIsCurrentUser ? handleEdit : undefined}
           onReply={handleReply}
           onDelete={safeIsCurrentUser ? handleDelete : undefined}

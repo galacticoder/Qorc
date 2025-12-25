@@ -8,20 +8,15 @@ interface ElectronTorSetupAPI {
   checkTorInstallation: () => Promise<{ isInstalled: boolean; version?: string; bundled?: boolean }>;
   downloadTor: () => Promise<{ success: boolean; error?: string }>;
   installTor: () => Promise<{ success: boolean; error?: string }>;
-  configureTor: (config: { config: string }) => Promise<{ success: boolean; error?: string }>;
+  configureTor: (config: { config: string }) => Promise<{ success: boolean; pending?: boolean; error?: string }>;
   startTor: () => Promise<{ success: boolean; error?: string }>;
   stopTor: () => Promise<{ success: boolean; error?: string }>;
   uninstallTor: () => Promise<{ success: boolean; error?: string }>;
   verifyTorConnection: () => Promise<{ success: boolean; isTor?: boolean; error?: string }>;
   getTorStatus: () => Promise<{ isRunning: boolean }>;
   getTorInfo: () => Promise<{ version?: string; systemTorVersion?: string; socksPort?: number; controlPort?: number }>;
+  onTorConfigureComplete?: (callback: (event: unknown, data: unknown) => void) => () => void;
   platform?: string;
-}
-
-declare global {
-  interface Window {
-    electronAPI?: any;
-  }
 }
 
 export interface TorSetupStatus {
@@ -248,13 +243,8 @@ export class TorAutoSetup {
         };
 
         const listener = (_event: any, data: any) => finish(data);
+        const unsubscribe = typeof api.onTorConfigureComplete === 'function' ? api.onTorConfigureComplete(listener) : null;
 
-        // Subscribe to completion event
-        const unsubscribe = window.electronAPI?.onTorConfigureComplete
-          ? window.electronAPI.onTorConfigureComplete(listener)
-          : null;
-
-        // Fire configure request
         api.configureTor({ config }).then((initialResult) => {
           if (!initialResult.pending) {
             finish(initialResult);
@@ -315,7 +305,7 @@ export class TorAutoSetup {
         await new Promise((res) => setTimeout(res, waitMs));
       }
       return false;
-    } catch (_error) {
+    } catch {
       return false;
     }
   }
@@ -408,13 +398,8 @@ export class TorAutoSetup {
   }
 
   private isValidBridgeLine(line: string): boolean {
-    // More strict validation: requires transport type, address:port, and fingerprint for obfs4/vanilla
-    // Format: "obfs4 IP:PORT FINGERPRINT" or "Bridge obfs4 IP:PORT FINGERPRINT"
     const startsWithBridge = line.startsWith('Bridge ') ? line : `Bridge ${line}`;
-
-    // obfs4 or vanilla bridges require: transport, IP:port, and fingerprint
     const obfs4Pattern = /^Bridge\s+(obfs4|vanilla)\s+[\d.]+:\d+\s+[A-F0-9]{40}(\s+.+)?$/i;
-    // snowflake can be just "Bridge snowflake"
     const snowflakePattern = /^Bridge\s+snowflake(\s+.+)?$/i;
 
     return obfs4Pattern.test(startsWithBridge) || snowflakePattern.test(startsWithBridge);
@@ -464,7 +449,6 @@ export class TorAutoSetup {
         newVersion = this.status.version;
       }
 
-      // If still unknown, try checking installation directly
       if ((!newVersion || newVersion === 'unknown') && this.status.isRunning) {
         try {
           const check = await this.checkBundledTor();

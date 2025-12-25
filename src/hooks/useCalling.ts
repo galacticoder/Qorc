@@ -22,11 +22,9 @@ const stopMediaStream = (stream: MediaStream | null) => {
         if (track.readyState !== 'ended') {
           track.stop();
         }
-      } catch (_error) {
-      }
+      } catch { }
     });
-  } catch (_error) {
-  }
+  } catch { }
 };
 
 const MAX_USERNAME_LENGTH = 120;
@@ -101,8 +99,7 @@ const debounceEventDispatcher = () => {
         }
         try {
           window.dispatchEvent(new CustomEvent(name, { detail: sanitizeEventDetail(detail) }));
-        } catch (_error) {
-        }
+        } catch { }
       });
     });
   };
@@ -111,8 +108,7 @@ const debounceEventDispatcher = () => {
     if (immediate) {
       try {
         window.dispatchEvent(new CustomEvent(name, { detail: sanitizeEventDetail(detail) }));
-      } catch (_error) {
-      }
+      } catch { }
       return;
     }
 
@@ -222,7 +218,7 @@ export const useCalling = (authContext: ReturnType<typeof useAuth>) => {
                 at: Date.now(),
                 callId: call.id,
                 isVideo: call.type === 'video',
-                isOutgoing: call.direction === 'outgoing'
+                isOutgoing: false
               });
             } else {
               eventDebouncer.current.enqueue('ui-call-log', {
@@ -232,7 +228,7 @@ export const useCalling = (authContext: ReturnType<typeof useAuth>) => {
                 callId: call.id,
                 durationMs: 0,
                 isVideo: call.type === 'video',
-                isOutgoing: call.direction === 'outgoing'
+                isOutgoing: true
               });
             }
           } else {
@@ -319,6 +315,10 @@ export const useCalling = (authContext: ReturnType<typeof useAuth>) => {
         console.error('[useCalling] Failed to initialize calling service:', _error);
         serviceRef.current = null;
         setCallingService(null);
+        setCurrentCall(null);
+        setLocalStream(null);
+        setRemoteStream(null);
+        setRemoteScreenStream(null);
         setIsInitialized(false);
         hasBeenAuthenticatedRef.current = false;
         authenticatedUsernameRef.current = '';
@@ -326,9 +326,27 @@ export const useCalling = (authContext: ReturnType<typeof useAuth>) => {
     };
 
     initializeService();
+
+    return () => {
+      if (serviceRef.current) {
+        serviceRef.current.destroy();
+        serviceRef.current = null;
+      }
+      setCallingService(null);
+      setCurrentCall(null);
+      stopMediaStream(localStreamRef.current);
+      stopMediaStream(remoteStreamRef.current);
+      stopMediaStream(remoteScreenStreamRef.current);
+      localStreamRef.current = null;
+      remoteStreamRef.current = null;
+      remoteScreenStreamRef.current = null;
+      setLocalStream(null);
+      setRemoteStream(null);
+      setRemoteScreenStream(null);
+      setIsInitialized(false);
+    };
   }, [currentUsername, isFullyAuthenticated]);
 
-  // Start a call with strict validation
   const startCall = useCallback(async (targetUser: string, callType: 'audio' | 'video' = 'audio') => {
     if (!serviceRef.current) {
       throw new Error('[useCalling] Calling service not initialized');
@@ -352,11 +370,22 @@ export const useCalling = (authContext: ReturnType<typeof useAuth>) => {
       return callId;
     } catch (_error) {
       console.error('[useCalling] Failed to start call:', _error);
+      unstable_batchedUpdates(() => {
+        setCurrentCall(null);
+        stopMediaStream(localStreamRef.current);
+        stopMediaStream(remoteStreamRef.current);
+        stopMediaStream(remoteScreenStreamRef.current);
+        localStreamRef.current = null;
+        remoteStreamRef.current = null;
+        remoteScreenStreamRef.current = null;
+        setLocalStream(null);
+        setRemoteStream(null);
+        setRemoteScreenStream(null);
+      });
       throw _error;
     }
   }, [currentUsername]);
 
-  // Answer a call
   const answerCall = useCallback(async (callId: string) => {
     if (!serviceRef.current) {
       throw new Error('[useCalling] Calling service not initialized');
@@ -374,7 +403,6 @@ export const useCalling = (authContext: ReturnType<typeof useAuth>) => {
     }
   }, []);
 
-  // Decline a call
   const declineCall = useCallback(async (callId: string) => {
     if (!serviceRef.current) {
       throw new Error('[useCalling] Calling service not initialized');
@@ -392,7 +420,6 @@ export const useCalling = (authContext: ReturnType<typeof useAuth>) => {
     }
   }, []);
 
-  // End a call
   const endCall = useCallback(async () => {
     if (!serviceRef.current) {
       throw new Error('[useCalling] Calling service not initialized');
@@ -406,7 +433,6 @@ export const useCalling = (authContext: ReturnType<typeof useAuth>) => {
     }
   }, []);
 
-  // Toggle mute
   const toggleMute = useCallback(() => {
     if (!serviceRef.current) {
       return false;
@@ -416,7 +442,6 @@ export const useCalling = (authContext: ReturnType<typeof useAuth>) => {
     return isMuted;
   }, []);
 
-  // Toggle video
   const toggleVideo = useCallback(async () => {
     if (!serviceRef.current) {
       return false;
@@ -426,7 +451,6 @@ export const useCalling = (authContext: ReturnType<typeof useAuth>) => {
     return isEnabled;
   }, []);
 
-  // Switch camera
   const switchCamera = useCallback(async (deviceId: string) => {
     if (!serviceRef.current) {
       return;
@@ -439,7 +463,6 @@ export const useCalling = (authContext: ReturnType<typeof useAuth>) => {
     }
   }, []);
 
-  // Switch microphone
   const switchMicrophone = useCallback(async (deviceId: string) => {
     if (!serviceRef.current) {
       return;
@@ -452,7 +475,6 @@ export const useCalling = (authContext: ReturnType<typeof useAuth>) => {
     }
   }, []);
 
-  // Start screen sharing with validation
   const startScreenShare = useCallback(async (selectedSource?: { id: string; name: string; type: 'screen' | 'window' }) => {
     if (!serviceRef.current) {
       throw new Error('[useCalling] Calling service not initialized');
@@ -475,7 +497,6 @@ export const useCalling = (authContext: ReturnType<typeof useAuth>) => {
     }
   }, []);
 
-  // Get available screen sources
   const getAvailableScreenSources = useMemo(() => {
     const electronApi = (window as any).electronAPI;
     const edgeApi = (window as any).edgeApi;
@@ -497,7 +518,6 @@ export const useCalling = (authContext: ReturnType<typeof useAuth>) => {
     };
   }, []);
 
-  // Stop screen sharing
   const stopScreenShare = useCallback(async () => {
     if (!serviceRef.current) {
       return;
@@ -510,7 +530,6 @@ export const useCalling = (authContext: ReturnType<typeof useAuth>) => {
     }
   }, []);
 
-  // Get screen sharing status
   const isScreenSharing = callingService?.getScreenSharingStatus() || false;
 
   return {

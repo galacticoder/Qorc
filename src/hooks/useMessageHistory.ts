@@ -284,7 +284,7 @@ export function useMessageHistory(
       if (!safeSince) {
         hasRequestedHistory.current = true;
       }
-    } catch (_error) {
+    } catch {
       console.error('[MessageHistory] Failed to request message history');
     }
   }, [isLoggedIn, currentUsername, isFullyAuthenticated]);

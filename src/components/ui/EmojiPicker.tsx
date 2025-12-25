@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
-import { getSystemEmojis, searchEmojis, recordEmojiUsage } from '../../lib/system-emoji';
+import { getSystemEmojis, searchEmojis } from '../../lib/system-emoji';
 import type { SecureDB } from '../../lib/secureDB';
 
 interface EmojiPickerProps {

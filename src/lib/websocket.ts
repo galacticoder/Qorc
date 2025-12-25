@@ -110,6 +110,33 @@ const TIMESTAMP_SKEW_TOLERANCE_MS = 5_000;
 
 const SESSION_FAILOVER_GRACE_PERIOD_MS = 10_000;
 
+const MAX_INCOMING_WS_STRING_CHARS = 10_000_000;
+const MAX_PQ_ENVELOPE_CIPHERTEXT_BYTES = 12 * 1024 * 1024;
+const MAX_PQ_ENVELOPE_NONCE_BYTES = 1024;
+const MAX_PQ_ENVELOPE_TAG_BYTES = 1024;
+const MAX_PQ_ENVELOPE_AAD_BYTES = 1024;
+
+const isPlainObject = (value: unknown): value is Record<string, unknown> => {
+  if (typeof value !== 'object' || value === null) {
+    return false;
+  }
+  const proto = Object.getPrototypeOf(value);
+  return proto === Object.prototype || proto === null;
+};
+
+const hasPrototypePollutionKeys = (obj: unknown): boolean => {
+  if (obj == null || typeof obj !== 'object') return false;
+  const keys = Object.keys(obj);
+  return keys.some((key) => key === '__proto__' || key === 'constructor' || key === 'prototype');
+};
+
+const estimateBase64DecodedBytes = (value: string): number => {
+  const trimmed = value.trim();
+  if (!trimmed) return 0;
+  const pad = trimmed.endsWith('==') ? 2 : trimmed.endsWith('=') ? 1 : 0;
+  return Math.floor((trimmed.length * 3) / 4) - pad;
+};
+
 interface MessageHandler {
   (message: unknown): void;
 }
@@ -208,49 +235,74 @@ class WebSocketClient {
 
   constructor() {
     void this.initializeSigningKeys();
-    this.setupMessageListener();
   }
 
-  private setupMessageListener(): void {
-    window.addEventListener('edge:server-message', ((event: CustomEvent) => {
-      const message = event.detail;
-      const messageType = message?.type;
+  public handleEdgeServerMessage(message: any): boolean {
+    if (!isPlainObject(message) || hasPrototypePollutionKeys(message)) {
+      return false;
+    }
 
-      if (messageType === '__ws_connection_closed') {
-        SecureAuditLogger.info('ws', 'connection', 'closed-by-electron', {
-          code: message.code,
-          reason: message.reason,
-          duration: message.duration
-        });
-        this.resetSessionKeys(false);
-        this.lifecycleState = 'disconnected';
-        return;
-      }
+    const messageType = typeof message.type === 'string' ? message.type : '';
 
-      if (messageType === '__ws_connection_error') {
-        SecureAuditLogger.error('ws', 'connection', 'error-from-electron', {
-          error: message.error
-        });
-        this.resetSessionKeys(false);
-        this.lifecycleState = 'error';
-        return;
-      }
+    if (messageType === '__ws_connection_closed') {
+      SecureAuditLogger.info('ws', 'connection', 'closed-by-electron', {
+        code: message.code,
+        reason: message.reason,
+        duration: message.duration
+      });
+      this.resetSessionKeys(false);
+      this.lifecycleState = 'disconnected';
+      return true;
+    }
 
-      if (messageType === '__ws_connection_opened') {
-        SecureAuditLogger.info('ws', 'connection', 'opened-by-electron', {
-          previousState: this.lifecycleState
-        });
-        const wasConnectedBefore = this.lifecycleState !== 'idle' || this.sessionKeyMaterial != null;
+    if (messageType === '__ws_connection_error') {
+      SecureAuditLogger.error('ws', 'connection', 'error-from-electron', {
+        error: message.error
+      });
+      this.resetSessionKeys(false);
+      this.lifecycleState = 'error';
+      return true;
+    }
 
-        if (this.lifecycleState === 'disconnected' || this.lifecycleState === 'error' || this.lifecycleState === 'idle') {
+    if (messageType === '__ws_connection_opened') {
+      SecureAuditLogger.info('ws', 'connection', 'opened-by-electron', {
+        previousState: this.lifecycleState
+      });
+      const wasConnectedBefore = this.lifecycleState !== 'idle' || this.sessionKeyMaterial != null;
+
+      if (this.lifecycleState === 'disconnected' || this.lifecycleState === 'error' || this.lifecycleState === 'idle') {
+        (async () => {
+          try {
+            const api = (window as any).edgeApi;
+            const pqKeysResult = await api?.getPQSessionKeys?.();
+            if (pqKeysResult?.success && pqKeysResult.keys) {
+              const restored = this.importSessionKeys(pqKeysResult.keys);
+              if (restored) {
+                await api?.clearPQSessionKeys?.();
+
+                this.startHeartbeat();
+                void this.flushPendingQueue();
+
+                window.dispatchEvent(new CustomEvent('ws-reconnected', {
+                  detail: { timestamp: Date.now(), restoredFromBackground: true }
+                }));
+                return;
+              }
+            }
+          } catch { }
+
           this.lifecycleState = 'handshaking';
           this.performHandshake(false)
-            .then(() => {
+            .then(async () => {
               this.lifecycleState = 'connected';
               SecureAuditLogger.info('ws', 'reconnect', 'handshake-success', {});
 
               this.startHeartbeat();
               void this.flushPendingQueue();
+
+              try {
+                await (window as any).edgeApi?.requestPendingMessages?.();
+              } catch { }
 
               if (wasConnectedBefore) {
                 window.dispatchEvent(new CustomEvent('ws-reconnected', {
@@ -265,14 +317,22 @@ class WebSocketClient {
 
               this.lifecycleState = 'error';
             });
-        }
-        return;
+        })();
       }
+      return true;
+    }
 
-      if (typeof messageType === 'string' && this.messageHandlers.has(messageType)) {
-        void this.handleMessage(message);
-      }
-    }) as EventListener);
+    if (messageType === 'pq-heartbeat-pong') {
+      void this.handleMessage(message);
+      return true;
+    }
+
+    if (messageType && this.messageHandlers.has(messageType)) {
+      void this.handleMessage(message);
+      return true;
+    }
+
+    return false;
   }
 
   private async initializeSigningKeys(): Promise<void> {
@@ -634,7 +694,7 @@ class WebSocketClient {
       const message = new TextEncoder().encode(payload);
       const signature = PostQuantumSignature.sign(message, this.signingKeyPair.privateKey);
       return PostQuantumUtils.uint8ArrayToBase64(signature);
-    } catch (_error) {
+    } catch {
       SecurityAuditLogger.log('error', 'ws-message-signing-failed', {});
       return undefined;
     }
@@ -673,7 +733,7 @@ class WebSocketClient {
       }
 
       return valid;
-    } catch (_error) {
+    } catch {
       this.metrics.securityEvents.signatureFailures += 1;
       return false;
     }
@@ -735,7 +795,7 @@ class WebSocketClient {
       SecurityAuditLogger.log('info', 'ws-heartbeat-sent', {
         timestamp: this.lastHeartbeatSent
       });
-    } catch (_error) {
+    } catch {
       SecureAuditLogger.warn('ws', 'heartbeat', 'send-failed');
       this.handleMissedHeartbeat();
     }
@@ -889,9 +949,7 @@ class WebSocketClient {
     for (const callback of Array.from(this.connectionStateCallbacks)) {
       try {
         callback(health);
-      } catch (_error) {
-
-      }
+      } catch { }
     }
   }
 
@@ -942,9 +1000,7 @@ class WebSocketClient {
           }
           this.lastTorCircuitRotation = stats.lastCircuitRotation;
         }
-      } catch (_error) {
-
-      }
+      } catch { }
     };
 
     this.torCircuitListener = checkCircuitRotation;
@@ -1019,7 +1075,7 @@ class WebSocketClient {
       });
 
       return adapted;
-    } catch (_error) {
+    } catch {
       return baseTimeout;
     }
   }
@@ -1048,7 +1104,7 @@ class WebSocketClient {
       }
 
       return true;
-    } catch (_error) {
+    } catch {
       return false;
     }
   }
@@ -1147,15 +1203,12 @@ class WebSocketClient {
   }
 
   public send(data: unknown): void {
-    const msgType = typeof data === 'string' ? (JSON.parse(data).type || 'unknown') : (data as any)?.type || 'unknown';
     void this.dispatchPayload(data, true).catch((error) => {
       SecureAuditLogger.error('ws', 'send', 'failed', { error: error instanceof Error ? error.message : String(error) });
     });
   }
 
   private async dispatchPayload(data: unknown, allowQueue: boolean): Promise<void> {
-    const msgType = typeof data === 'string' ? (JSON.parse(data).type || 'unknown') : (data as any)?.type || 'unknown';
-
     const needsBypassEncryption = this.shouldBypassEncryption(data);
 
     if (needsBypassEncryption) {
@@ -1230,7 +1283,6 @@ class WebSocketClient {
       if (isAuthMessage) {
         // Block auth messages client-side to prevent server spam
         // Dispatch event with countdown info for live timer
-        console.log('[WS] Blocking auth message - rate limited');
         try {
           const event = new CustomEvent('auth-rate-limited', {
             detail: {
@@ -1458,7 +1510,6 @@ class WebSocketClient {
       const timestamp = Date.now();
       const { ciphertext: kemCiphertext, sharedSecret: pqSharedSecret } = PostQuantumKEM.encapsulate(serverMaterial.kyberPublicKey);
 
-      // Generate ephemeral X25519 keypair for classical ECDH
       if (!serverMaterial.x25519PublicKey) {
         throw new Error('Server X25519 public key not available for hybrid WS handshake');
       }
@@ -1473,7 +1524,6 @@ class WebSocketClient {
         const sendSalt = encoder.encode(`${baseInfo}:send-${timestamp}`);
         const recvSalt = encoder.encode(`${baseInfo}:recv-${timestamp}`);
 
-        // XOR pqSharedSecret with classicalShared
         const combined = new Uint8Array(pqSharedSecret.length);
         for (let i = 0; i < pqSharedSecret.length; i++) {
           combined[i] = pqSharedSecret[i] ^ classicalShared[i % classicalShared.length];
@@ -1706,7 +1756,8 @@ class WebSocketClient {
     if (isEncryptedMessage && canonical.body.to && canonical.body.encryptedPayload) {
       payloadToEncrypt = {
         to: canonical.body.to,
-        encryptedPayload: canonical.body.encryptedPayload
+        encryptedPayload: canonical.body.encryptedPayload,
+        messageId: canonical.body.messageId
       };
     } else {
       payloadToEncrypt = canonical.body;
@@ -1756,6 +1807,45 @@ class WebSocketClient {
     if (!this.sessionKeyMaterial) {
       SecureAuditLogger.warn('ws', 'decrypt', 'no-session');
       return null;
+    }
+
+    if (!isPlainObject(envelope) || hasPrototypePollutionKeys(envelope)) {
+      return null;
+    }
+
+    if (typeof envelope.sessionFingerprint !== 'string' || envelope.sessionFingerprint.length > 512) {
+      return null;
+    }
+    if (typeof envelope.messageId !== 'string' || envelope.messageId.length === 0 || envelope.messageId.length > 512) {
+      return null;
+    }
+    if (typeof envelope.timestamp !== 'number' || !Number.isFinite(envelope.timestamp)) {
+      return null;
+    }
+    if (typeof envelope.nonce !== 'string' || typeof envelope.ciphertext !== 'string' || typeof envelope.tag !== 'string') {
+      return null;
+    }
+    if (envelope.aad != null && typeof envelope.aad !== 'string') {
+      return null;
+    }
+
+    const ciphertextBytes = estimateBase64DecodedBytes(envelope.ciphertext);
+    if (ciphertextBytes <= 0 || ciphertextBytes > MAX_PQ_ENVELOPE_CIPHERTEXT_BYTES) {
+      return null;
+    }
+    const nonceBytes = estimateBase64DecodedBytes(envelope.nonce);
+    if (nonceBytes <= 0 || nonceBytes > MAX_PQ_ENVELOPE_NONCE_BYTES) {
+      return null;
+    }
+    const tagBytes = estimateBase64DecodedBytes(envelope.tag);
+    if (tagBytes <= 0 || tagBytes > MAX_PQ_ENVELOPE_TAG_BYTES) {
+      return null;
+    }
+    if (typeof envelope.aad === 'string') {
+      const aadBytesEstimate = estimateBase64DecodedBytes(envelope.aad);
+      if (aadBytesEstimate < 0 || aadBytesEstimate > MAX_PQ_ENVELOPE_AAD_BYTES) {
+        return null;
+      }
     }
 
     const currentFingerprint = this.sessionKeyMaterial.fingerprint;
@@ -1818,7 +1908,7 @@ class WebSocketClient {
       const nonce = PostQuantumUtils.base64ToUint8Array(envelope.nonce);
       const ciphertext = PostQuantumUtils.base64ToUint8Array(envelope.ciphertext);
       const tag = PostQuantumUtils.base64ToUint8Array(envelope.tag);
-      const aadBytes = envelope.aad ? PostQuantumUtils.base64ToUint8Array(envelope.aad) : new Uint8Array();
+      const aadBytes = typeof envelope.aad === 'string' ? PostQuantumUtils.base64ToUint8Array(envelope.aad) : new Uint8Array();
 
       const decrypted = PostQuantumAEAD.decrypt(
         ciphertext,
@@ -1836,7 +1926,7 @@ class WebSocketClient {
         if (innerType === SignalType.ENCRYPTED_MESSAGE || innerType === 'encrypted-message') {
           const env: any = (canonical as any)?.encryptedPayload || {};
           const hasChunk = typeof env?.chunkData === 'string' && env.chunkData.length > 0;
-          const len = hasChunk ? env.chunkData.length : 0;
+          void hasChunk;
         }
       } catch { }
 
@@ -1923,11 +2013,18 @@ class WebSocketClient {
         message = data;
       } else {
         const dataString = String(data);
+        if (dataString.length > MAX_INCOMING_WS_STRING_CHARS) {
+          return;
+        }
         try {
           message = JSON.parse(dataString);
         } catch {
           message = { type: 'raw', data: dataString };
         }
+      }
+
+      if (!isPlainObject(message) || hasPrototypePollutionKeys(message)) {
+        return;
       }
 
       if (typeof message === 'object' && message?.type === 'pq-heartbeat-pong') {
@@ -1943,7 +2040,7 @@ class WebSocketClient {
         message = decrypted;
       }
 
-      if (typeof message !== 'object' || message === null) {
+      if (!isPlainObject(message) || hasPrototypePollutionKeys(message)) {
         return;
       }
 
@@ -1953,14 +2050,16 @@ class WebSocketClient {
         }
 
         const handler = this.messageHandlers.get(message.type);
-        handler(message);
+        if (handler) {
+          handler(message);
+        }
       }
 
       const rawHandler = this.messageHandlers.get('raw');
-      rawHandler(message);
-    } catch (_error) {
-
-    }
+      if (rawHandler) {
+        rawHandler(message);
+      }
+    } catch { }
   }
 
   public async attemptTokenValidationOnce(source: string = 'auto'): Promise<void> {
@@ -2118,7 +2217,42 @@ class WebSocketClient {
   }
 
   /**
-   * Send a control message securely through PQ envelope
+   * Export PQ session keys
+   */
+  public exportSessionKeys(): { sessionId: string; sendKey: string; recvKey: string; fingerprint: string; establishedAt: number } | null {
+    if (!this.sessionKeyMaterial) {
+      return null;
+    }
+    return {
+      sessionId: this.sessionKeyMaterial.sessionId,
+      sendKey: PostQuantumUtils.uint8ArrayToBase64(this.sessionKeyMaterial.sendKey),
+      recvKey: PostQuantumUtils.uint8ArrayToBase64(this.sessionKeyMaterial.recvKey),
+      fingerprint: this.sessionKeyMaterial.fingerprint,
+      establishedAt: this.sessionKeyMaterial.establishedAt
+    };
+  }
+
+  /**
+   * Import PQ session keys
+   */
+  public importSessionKeys(keys: { sessionId: string; sendKey: string; recvKey: string; fingerprint: string; establishedAt: number }): boolean {
+    try {
+      this.sessionKeyMaterial = {
+        sessionId: keys.sessionId,
+        sendKey: PostQuantumUtils.base64ToUint8Array(keys.sendKey),
+        recvKey: PostQuantumUtils.base64ToUint8Array(keys.recvKey),
+        fingerprint: keys.fingerprint,
+        establishedAt: keys.establishedAt
+      };
+      this.lifecycleState = 'connected';
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Send a control message
    */
   public async sendSecureControlMessage(message: any): Promise<void> {
     if (!this.isPQSessionEstablished()) {
@@ -2149,14 +2283,12 @@ class WebSocketClient {
       }
     }
 
-    // Ensure message is properly formatted
     const payload = typeof message === 'string' ? message : JSON.stringify(message);
 
     SecureAuditLogger.info('ws', 'control-message', 'sending-pq-encrypted', {
       messageType: message?.type || 'unknown'
     });
 
-    // Send via PQ envelope
     await this.dispatchPayload(payload, true);
   }
 

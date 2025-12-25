@@ -272,12 +272,12 @@ export async function pseudonymizeUsername(original: string, memoryCost?: number
     const result = await pseudonymArgon2id(sanitized, memoryCost);
     logPseudonymization('pseudonymize', sanitized, result, 'argon2id', Date.now() - overallStart, true);
     return result;
-  } catch (_argonError) {
+  } catch {
     try {
       const result = await pseudonymBlake3(sanitized);
       logPseudonymization('pseudonymize', sanitized, result, 'blake3', Date.now() - overallStart, true);
       return result;
-    } catch (_blakeError) {
+    } catch {
       try {
         const result = await pseudonymSha512(sanitized);
         logPseudonymization('pseudonymize', sanitized, result, 'sha512', Date.now() - overallStart, true);
@@ -338,8 +338,7 @@ export async function pseudonymizeUsernameWithCache(original: string, secureDB?:
         logPseudonymization('db-cache-hit', sanitized, dbCached, 'indexeddb', Date.now() - startTime, true);
         return dbCached;
       }
-    } catch (_e) {
-    }
+    } catch { }
   }
 
   if (PSEUDONYM_PENDING.has(sanitized)) {
@@ -356,8 +355,7 @@ export async function pseudonymizeUsernameWithCache(original: string, secureDB?:
         try {
           await secureDB.cacheUsernameHash(sanitized, pseudonym);
           await secureDB.storeUsernameMapping(pseudonym, sanitized);
-        } catch (_e) {
-        }
+        } catch { }
       }
 
       PseudonymizationMonitor.record('cache-miss', Date.now() - startTime, true);

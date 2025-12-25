@@ -64,6 +64,16 @@ export class HAProxyConfigGenerator {
     if (!name) {
       throw new Error('Backend name is required');
     }
+
+    if (typeof name !== 'string' || !/^[A-Za-z0-9_-]{1,64}$/.test(name)) {
+      cryptoLogger.error('[HAPROXY] Invalid backend name', { name });
+      return;
+    }
+
+    if (typeof host !== 'string' || host.length > 255 || !/^[A-Za-z0-9._-]+$/.test(host)) {
+      cryptoLogger.error('[HAPROXY] Invalid backend host', { name, host });
+      return;
+    }
     
     // Validate port is a valid number
     const portNum = parseInt(port, 10);

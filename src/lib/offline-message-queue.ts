@@ -6,7 +6,8 @@
 import { PostQuantumRandom } from './post-quantum-crypto';
 import { SecureAuditLogger } from './secure-error-handler';
 import { SecureDB } from './secureDB';
-import { encryptLongTerm, decryptLongTerm, LongTermEnvelope, isLongTermEnvelope } from './long-term-encryption';
+import { encryptLongTerm, decryptLongTerm, LongTermEnvelope } from './long-term-encryption';
+import { SignalType } from './signal-types';
 
 const hasPrototypePollutionKeys = (obj: unknown): boolean => {
   if (obj == null || typeof obj !== 'object') return false;
@@ -76,6 +77,7 @@ interface QueueMetrics {
 }
 
 type SendCallback = (payload: EncryptedPayload) => Promise<boolean>;
+type IncomingOfflineEncryptedMessageCallback = (message: any) => void | Promise<void>;
 type OfflineMessagesEvent = CustomEvent<{ messages: OfflineMessage[] }>;
 
 const STORAGE_KEY = 'offlineMessageQueue';
@@ -281,6 +283,11 @@ export class OfflineMessageQueue {
   private processedMessageIds: Set<string> = new Set();
   private processedMessageOrder: string[] = [];
   private sendCallback?: SendCallback;
+  private incomingOfflineEncryptedMessageCallback?: IncomingOfflineEncryptedMessageCallback;
+  private pendingServerOfflineMessages: OfflineMessage[] | null = null;
+  private processingPendingServerOfflineMessages = false;
+  private lastRetrieveAttemptAt = 0;
+  private pendingRetrieveAfterAuth = false;
   private retryTimer?: number;
   private readonly monitor = new QueueMonitor();
   private readonly abortController = new AbortController();
@@ -295,6 +302,7 @@ export class OfflineMessageQueue {
    */
   setDecryptionKey(kyberSecretKey: Uint8Array): void {
     this.ownKyberSecretKey = kyberSecretKey;
+    void this.tryProcessPendingServerOfflineMessages();
   }
 
   constructor(sendCallback?: SendCallback) {
@@ -308,6 +316,26 @@ export class OfflineMessageQueue {
     this.sendCallback = callback;
   }
 
+  setIncomingOfflineEncryptedMessageCallback(callback: IncomingOfflineEncryptedMessageCallback): void {
+    this.incomingOfflineEncryptedMessageCallback = callback;
+    void this.tryProcessPendingServerOfflineMessages();
+  }
+
+  private async tryProcessPendingServerOfflineMessages(): Promise<void> {
+    if (this.processingPendingServerOfflineMessages) return;
+    if (!this.pendingServerOfflineMessages || this.pendingServerOfflineMessages.length === 0) return;
+    if (!this.incomingOfflineEncryptedMessageCallback) return;
+
+    this.processingPendingServerOfflineMessages = true;
+    const pending = this.pendingServerOfflineMessages;
+    this.pendingServerOfflineMessages = null;
+    try {
+      await this.processOfflineMessagesChunked(pending);
+    } finally {
+      this.processingPendingServerOfflineMessages = false;
+    }
+  }
+
   private setupEventListeners(): void {
     window.addEventListener(
       'offline-messages-response',
@@ -318,9 +346,36 @@ export class OfflineMessageQueue {
     window.addEventListener(
       'secure-chat:auth-success',
       () => {
+        this.pendingRetrieveAfterAuth = true;
         setTimeout(() => {
-          this._retrieveOfflineMessagesFromServer();
+          this._retrieveOfflineMessagesFromServer(true);
         }, 500);
+      },
+      { signal: this.abortController.signal }
+    );
+
+    window.addEventListener(
+      'pq-session-established',
+      () => {
+        if (!this.pendingRetrieveAfterAuth) {
+          return;
+        }
+        setTimeout(() => {
+          this._retrieveOfflineMessagesFromServer(true);
+        }, 250);
+      },
+      { signal: this.abortController.signal }
+    );
+
+    window.addEventListener(
+      'ws-reconnected',
+      () => {
+        if (!this.pendingRetrieveAfterAuth) {
+          return;
+        }
+        setTimeout(() => {
+          this._retrieveOfflineMessagesFromServer(true);
+        }, 250);
       },
       { signal: this.abortController.signal }
     );
@@ -438,8 +493,7 @@ export class OfflineMessageQueue {
             longTermEnvelope,
             version: 'lt-v1'
           });
-        } catch (error) {
-        }
+        } catch { }
       })
       .catch(() => { });
   }
@@ -448,25 +502,62 @@ export class OfflineMessageQueue {
     this._retrieveOfflineMessagesFromServer();
   }
 
-  private _retrieveOfflineMessagesFromServer(): void {
+  private _retrieveOfflineMessagesFromServer(fromAuthSuccess = false): void {
+    const now = Date.now();
+    if (now - this.lastRetrieveAttemptAt < 1500) {
+      return;
+    }
+    this.lastRetrieveAttemptAt = now;
+
     void import('./websocket')
       .then(async ({ default: websocketClient }) => {
         const isConnected = websocketClient?.isConnectedToServer();
         const isPQReady = websocketClient?.isPQSessionEstablished();
 
+        if (!fromAuthSuccess && (!isConnected || !isPQReady)) {
+          return;
+        }
+
         if (isConnected && isPQReady) {
           try {
             await websocketClient.sendSecureControlMessage({ type: 'retrieve-offline-messages' });
-          } catch (error) {
-          }
-        } else {
+            if (fromAuthSuccess) {
+              this.pendingRetrieveAfterAuth = false;
+            }
+          } catch { }
         }
       })
       .catch(() => { });
   }
 
   handleOfflineMessagesFromServer(messages: OfflineMessage[]): void {
-    this.processOfflineMessagesChunked(messages).catch(error => {
+    if (!Array.isArray(messages) || messages.length === 0) {
+      return;
+    }
+
+    const ltOnly = messages.filter((m) => (m as any)?.version === 'lt-v1' && !!(m as any)?.longTermEnvelope);
+
+    if (ltOnly.length === 0) {
+      return;
+    }
+
+    if (!this.incomingOfflineEncryptedMessageCallback) {
+      const existing = this.pendingServerOfflineMessages ?? [];
+      const combined = existing.concat(ltOnly);
+      this.pendingServerOfflineMessages = combined.length > 200 ? combined.slice(combined.length - 200) : combined;
+      void this.tryProcessPendingServerOfflineMessages();
+      return;
+    }
+
+    if (!this.ownKyberSecretKey) {
+      const existing = this.pendingServerOfflineMessages ?? [];
+      const combined = existing.concat(ltOnly);
+      this.pendingServerOfflineMessages = combined.length > 200 ? combined.slice(combined.length - 200) : combined;
+      void this.tryProcessPendingServerOfflineMessages();
+      return;
+    }
+
+    this.processOfflineMessagesChunked(ltOnly).catch(error => {
       SecureAuditLogger.error(AUDIT_CHANNEL, 'offline-message-queue', 'chunked-processing-failed', {
         error: (error as Error)?.message
       });
@@ -474,7 +565,7 @@ export class OfflineMessageQueue {
   }
 
   private async processOfflineMessagesChunked(messages: OfflineMessage[]): Promise<void> {
-    const CHUNK_SIZE = 10; // Process 10 messages at a time
+    const CHUNK_SIZE = 10;
 
     for (let i = 0; i < messages.length; i += CHUNK_SIZE) {
       const chunk = messages.slice(i, i + CHUNK_SIZE);
@@ -503,7 +594,6 @@ export class OfflineMessageQueue {
             continue;
           }
 
-          const sanitizedPayload = sanitizePayload(encryptedPayload);
           const messageId = sanitizeString(message.messageId ?? parsed.messageId) ?? PostQuantumRandom.randomUUID();
           const expiresAt = Math.min(
             message.expiresAt ?? (Date.now() + this.messageExpiry),
@@ -511,12 +601,21 @@ export class OfflineMessageQueue {
           );
           const maxRetries = message.maxRetries ?? this.maxRetries;
 
-          this.queueMessage(to, sanitizedPayload, {
-            skipServerStore: true,
+          const from = sanitizeString(message.from) ?? '';
+          const incoming = {
+            type: SignalType.ENCRYPTED_MESSAGE,
+            from,
+            to,
+            encryptedPayload,
+            offline: true,
             messageId,
             expiresAt,
             maxRetries
-          });
+          };
+
+          if (this.incomingOfflineEncryptedMessageCallback) {
+            await this.incomingOfflineEncryptedMessageCallback(incoming);
+          }
         } catch (error) {
           SecureAuditLogger.error(AUDIT_CHANNEL, 'offline-message-queue', 'queue-server-message-failed', {
             error: (error as Error)?.message,
@@ -742,10 +841,8 @@ export class OfflineMessageQueue {
 
       if (Array.isArray(messages)) {
         this.handleOfflineMessagesFromServer(messages);
-      } else {
       }
-    } catch (err) {
-    }
+    } catch { }
   };
 
   private trackProcessedMessageId(messageId: string): void {

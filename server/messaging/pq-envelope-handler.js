@@ -9,7 +9,7 @@ import { CryptoUtils } from '../crypto/unified-crypto.js';
 import { PostQuantumHash } from '../crypto/post-quantum-hash.js';
 import { logger as cryptoLogger } from '../crypto/crypto-logger.js';
 import { SignalType } from '../signals.js';
-import { storePQSession, getPQSession, updatePQSessionCounter } from '../session/pq-session-storage.js';
+import { storePQSession, getPQSession, incrementPQSessionCounter } from '../session/pq-session-storage.js';
 
 // Server signing key for envelope authentication
 let serverDilithiumSigningKey = null;
@@ -250,7 +250,8 @@ export async function handlePQEnvelope({ ws, sessionId, envelope, context, handl
       innerPayload = {
         type: 'encrypted-message',
         to: decrypted.to,
-        encryptedPayload: decrypted.encryptedPayload
+        encryptedPayload: decrypted.encryptedPayload,
+        messageId: decrypted.messageId || envelope.messageId
       };
     } else {
       innerPayload = decrypted;
@@ -298,10 +299,10 @@ export async function sendPQEncryptedResponse(ws, pqSessionIdOrData, payload) {
     }
 
     const messageId = `${Date.now()}-${Math.random().toString(36).slice(2, 11)}`;
-    const counter = (session.counter || 0) + 1;
-
-    // Update counter in storage
-    await updatePQSessionCounter(session.sessionId, counter);
+    const counter = await incrementPQSessionCounter(session.sessionId);
+    if (!counter) {
+      throw new Error('Failed to update PQ session counter');
+    }
 
     const timestamp = Date.now();
 

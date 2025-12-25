@@ -1,7 +1,7 @@
-import React, { useState, useEffect, useCallback, useMemo } from "react";
+import React, { useState, useEffect, useCallback } from "react";
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "../ui/card";
 import { Button } from "../ui/button";
-import { EncryptionIcon, LockClosedIcon } from "./icons";
+import { EncryptionIcon } from "./icons";
 import { TorIndicator } from "../ui/TorIndicator";
 import { SignInForm } from "./Login/SignIn.tsx";
 import { SignUpForm } from "./Login/SignUp.tsx";
@@ -98,8 +98,8 @@ export const Login = React.memo<LoginProps>(({
   setShowPassphrasePrompt,
   initialUsername = "",
   initialPassword = "",
-  maxStepReached = 'login',
-  pseudonym = "",
+  maxStepReached: _maxStepReached = 'login',
+  pseudonym: _pseudonym = "",
 }) => {
   const [serverPassword, setServerPassword] = useState<string>("");
   const [isSubmitting, setIsSubmitting] = useState<boolean>(false);

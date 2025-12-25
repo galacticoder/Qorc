@@ -1,4 +1,3 @@
-import * as argon2 from "argon2-wasm";
 import { blake3 as nobleBlake3 } from "@noble/hashes/blake3.js";
 import { x25519 } from "@noble/curves/ed25519.js";
 import {
@@ -485,7 +484,7 @@ class KDF {
         input.set(info, t.length);
         input[input.length - 1] = i;
 
-        const newT = await HashingService.generateBlake3Mac(input, prk);
+        const newT = new Uint8Array(await HashingService.generateBlake3Mac(input, prk));
 
         // Securely zero old t before replacing
         if (t.length > 0) {
@@ -940,7 +939,7 @@ function generateEphemeralX25519() {
     const clamped = clampX25519Scalar(raw);
     const publicKey = x25519.getPublicKey(clamped);
     return { secretKey: clamped, publicKey: new Uint8Array(publicKey) };
-  } catch (_e) {
+  } catch {
     try {
       const ephemeralPrivate = x25519.utils.randomSecretKey();
       const publicKey = x25519.getPublicKey(ephemeralPrivate);
@@ -1216,7 +1215,7 @@ class Hybrid {
           if (innerLayer.payloadType === "json") {
             try {
               payloadJson = JSON.parse(payloadText);
-            } catch (_error) {
+            } catch {
               throw new Error("Invalid JSON payload format");
             }
           }

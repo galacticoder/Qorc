@@ -1,7 +1,16 @@
 import { ml_kem1024 } from '@noble/post-quantum/ml-kem.js';
 import * as argon2 from "argon2-wasm";
 
+declare const self: DedicatedWorkerGlobalScope;
+interface DedicatedWorkerGlobalScope {
+  postMessage(message: any, transfer?: Transferable[]): void;
+  addEventListener(type: string, listener: EventListenerOrEventListenerObject): void;
+}
+
 const kyber = ml_kem1024;
+
+const KEM_PUBLIC_KEY_BYTES = 1568;
+const KEM_SECRET_KEY_BYTES = 3168;
 
 const MAX_KEYS = 256;
 const RATE_LIMIT_CONFIG = {
@@ -20,8 +29,7 @@ crypto.getRandomValues(AUTH_TOKEN);
 let authTokenTimestamp = Date.now();
 const AUTH_TOKEN_LIFETIME = 60 * 60 * 1000;
 
-// Send initial auth token to main thread
-(self as WorkerContext).postMessage({
+self.postMessage({
   type: 'auth-token-init',
   token: Array.from(AUTH_TOKEN, (b) => b.toString(16).padStart(2, '0')).join(''),
   timestamp: Date.now()
@@ -100,7 +108,7 @@ function rotateAuthTokenIfNeeded(): void {
   AUTH_TOKEN.set(newBytes);
   authTokenTimestamp = now;
 
-  (self as WorkerContext).postMessage({
+  self.postMessage({
     type: 'auth-token-rotated',
     token: Array.from(AUTH_TOKEN, (b) => b.toString(16).padStart(2, '0')).join(''),
     timestamp: now
@@ -190,9 +198,8 @@ type WorkerResponse =
   | { id: string; success: true; result: { verified: boolean } }
   | { id: string; success: false; error: string };
 
-type WorkerContext = DedicatedWorkerGlobalScope;
 
-self.addEventListener('message', (event: MessageEvent<WorkerRequest>) => {
+self.addEventListener('message', async (event: MessageEvent<WorkerRequest>) => {
   try {
     // Validate event.data for prototype pollution
     if (!isPlainObject(event.data)) {
@@ -211,7 +218,7 @@ self.addEventListener('message', (event: MessageEvent<WorkerRequest>) => {
     switch (type) {
       case 'kem.generateKeyPair': {
         const keyPair = kyber.keygen();
-        if (keyPair.publicKey.length !== kyber.publicKeyBytes || keyPair.secretKey.length !== kyber.secretKeyBytes) {
+        if (keyPair.publicKey.length !== KEM_PUBLIC_KEY_BYTES || keyPair.secretKey.length !== KEM_SECRET_KEY_BYTES) {
           throw new Error('Invalid key pair generated');
         }
         const keyId = secureRandomId();
@@ -225,7 +232,7 @@ self.addEventListener('message', (event: MessageEvent<WorkerRequest>) => {
             keyId
           }
         };
-        (self as WorkerContext).postMessage(response, [
+        self.postMessage(response, [
           keyPair.publicKey.buffer,
           keyPair.secretKey.buffer
         ]);
@@ -253,7 +260,7 @@ self.addEventListener('message', (event: MessageEvent<WorkerRequest>) => {
           success: true,
           result: { destroyed: true }
         };
-        (self as WorkerContext).postMessage(response);
+        self.postMessage(response);
         break;
       }
       case 'argon2.hash': {
@@ -265,7 +272,7 @@ self.addEventListener('message', (event: MessageEvent<WorkerRequest>) => {
             success: true,
             result: { hash: result.hash, encoded: result.encoded }
           };
-          (self as WorkerContext).postMessage(response);
+          self.postMessage(response);
         } catch (err) {
           throw new Error(`Argon2 hash failed: ${(err as Error).message}`);
         }
@@ -274,13 +281,6 @@ self.addEventListener('message', (event: MessageEvent<WorkerRequest>) => {
       case 'argon2.verify': {
         const { params } = event.data;
         try {
-          await argon2.verify(params); // argon2-wasm verify throws on failure or returns nothing/object? 
-          // Actually argon2-wasm verify returns Promise<void> and throws if invalid? Or returns object?
-          // Let's check unified-crypto.ts usage: const result = await argon2.verify({ pass: data, encoded }); return result.verified; 
-          // Wait, I need to double check argon2-wasm API. 
-          // In unified-crypto.ts: const result = await argon2.verify({ pass: data, encoded }); return result.verified;
-          // So it returns an object with .verified property.
-          
           const result = await argon2.verify(params);
           // @ts-ignore
           const verified = result?.verified === true; 
@@ -290,11 +290,8 @@ self.addEventListener('message', (event: MessageEvent<WorkerRequest>) => {
             success: true,
             result: { verified }
           };
-          (self as WorkerContext).postMessage(response);
+          self.postMessage(response);
         } catch (err) {
-           // verify might throw if params are bad, but also if verification fails? 
-           // usually verify returns false or throws.
-           // Assuming it throws on error, but returns object on success/fail check.
            throw new Error(`Argon2 verify failed: ${(err as Error).message}`);
         }
         break;
@@ -309,6 +306,6 @@ self.addEventListener('message', (event: MessageEvent<WorkerRequest>) => {
       success: false,
       error: error instanceof Error ? error.message : String(error)
     };
-    (self as WorkerContext).postMessage(errorResponse);
+    self.postMessage(errorResponse);
   }
 });

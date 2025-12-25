@@ -142,7 +142,7 @@ export function useUnifiedUsernameDisplay({
         const resolved = await existingRequest;
         setDisplayName(resolved);
         setError(null);
-      } catch (_err) {
+      } catch {
         const fallbackName = fallbackToOriginal ? sanitizedUsername : anonymizeUsername(sanitizedUsername);
         setDisplayName(fallbackName);
         setCachedDisplayName(sanitizedUsername, fallbackName);
@@ -180,7 +180,7 @@ export function useUnifiedUsernameDisplay({
     try {
       const resolved = await requestPromise;
       setDisplayName(resolved);
-    } catch (_err) {
+    } catch {
       const fallbackName = fallbackToOriginal ? sanitizedUsername : anonymizeUsername(sanitizedUsername);
       setDisplayName(fallbackName);
       setCachedDisplayName(sanitizedUsername, fallbackName);

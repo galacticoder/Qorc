@@ -37,9 +37,10 @@ export const DialogTrigger: React.FC<{ children: ReactNode; asChild?: boolean }>
   if (!context) throw new Error('DialogTrigger must be used within Dialog');
 
   if (asChild && React.isValidElement(children)) {
+    const childProps = children.props as { onClick?: (e: React.MouseEvent) => void };
     return React.cloneElement(children, {
       onClick: (e: React.MouseEvent) => {
-        children.props.onClick?.(e);
+        childProps.onClick?.(e);
         context.setIsOpen(true);
       }
     } as any);
