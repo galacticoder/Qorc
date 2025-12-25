@@ -50,10 +50,16 @@ export const UserAvatar = memo(function UserAvatar({
     className = '',
     showFallback = true
 }: UserAvatarProps) {
-    const [avatarUrl, setAvatarUrl] = useState<string | null>(null);
+    const [avatarUrl, setAvatarUrl] = useState<string | null>(() => {
+        if (isCurrentUser) {
+            return profilePictureSystem.getOwnAvatar();
+        } else {
+            return profilePictureSystem.getPeerAvatar(username);
+        }
+    });
     const [requested, setRequested] = useState(false);
     const [isLoaded, setIsLoaded] = useState(false);
-    const currentUrlRef = React.useRef<string | null>(null);
+    const currentUrlRef = React.useRef<string | null>(avatarUrl);
     const profilePictureEventRateRef = React.useRef<{ windowStart: number; count: number }>({ windowStart: Date.now(), count: 0 });
 
     const loadAvatar = useCallback(() => {
@@ -96,6 +102,12 @@ export const UserAvatar = memo(function UserAvatar({
 
         const handleUpdate = (event: Event) => {
             try {
+                // Handle system initialization event
+                if (event.type === 'profile-picture-system-initialized') {
+                    loadAvatar();
+                    return;
+                }
+
                 const now = Date.now();
                 const bucket = profilePictureEventRateRef.current;
                 if (now - bucket.windowStart > PROFILE_PICTURE_EVENT_RATE_WINDOW_MS) {
@@ -138,8 +150,10 @@ export const UserAvatar = memo(function UserAvatar({
         };
 
         window.addEventListener('profile-picture-updated', handleUpdate as EventListener);
+        window.addEventListener('profile-picture-system-initialized', handleUpdate as EventListener);
         return () => {
             window.removeEventListener('profile-picture-updated', handleUpdate as EventListener);
+            window.removeEventListener('profile-picture-system-initialized', handleUpdate as EventListener);
         };
     }, [loadAvatar, username, isCurrentUser]);
 

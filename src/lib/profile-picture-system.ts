@@ -141,6 +141,7 @@ class ProfilePictureSystem {
             }
 
             this.initialized = true;
+            window.dispatchEvent(new CustomEvent('profile-picture-system-initialized'));
         } catch (error) {
             console.error('[ProfilePictureSystem] Initialize failed:', error);
         }

@@ -633,7 +633,9 @@ async function createWindow() {
       isWindowDestroyed = true;
 
       // Store session state
+      // Store session state
       backgroundSessionState = {
+        ...backgroundSessionState,
         isBackgroundMode: true,
         timestamp: Date.now(),
         wsConnected: websocketHandler?.isConnected?.() || false,
