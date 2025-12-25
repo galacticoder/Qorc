@@ -405,6 +405,9 @@ async function initializeHandlers() {
 
           if (parsed && parsed.type === 'pq-envelope' && parsed.ciphertext) {
             const recvKey = backgroundSessionState?.pqSessionKeys?.recvKey;
+            if (!recvKey) {
+              console.log('[MAIN] Background decryption skipped: no recvKey available in backgroundSessionState');
+            }
             const pqDecrypted = recvKey ? await decryptEnvelope(parsed, recvKey) : null;
 
             if (pqDecrypted && !pqDecrypted.encryptedPayload) {
@@ -650,7 +653,7 @@ async function createWindow() {
         if (windowToDestroy && !windowToDestroy.isDestroyed()) {
           windowToDestroy.destroy();
         }
-      }, 500);
+      }, 1500);
     }
   });
 

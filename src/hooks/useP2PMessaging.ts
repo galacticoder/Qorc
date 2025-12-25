@@ -1156,10 +1156,15 @@ export function useP2PMessaging(
           throw createP2PError('LOCAL_DECRYPTION_KEYS_MISSING');
         }
 
-        const peerCert = await getPeerCertificate(message.from);
+        let peerCert = await getPeerCertificate(message.from);
         if (!peerCert) {
-          console.error('[P2P] Peer certificate missing for:', message.from);
-          throw createP2PError('PEER_CERT_MISSING');
+          // Try to fetch certificate with cache bypass before failing
+          console.log('[P2P] Peer certificate not cached, attempting fresh fetch for:', message.from);
+          peerCert = await getPeerCertificate(message.from, true);
+          if (!peerCert) {
+            console.error('[P2P] Peer certificate unavailable after fetch attempt for:', message.from);
+            throw createP2PError('PEER_CERT_MISSING');
+          }
         }
 
         const routeProof = message.payload?.routing?.extras?.routeProof || message.payload?.metadata?.extras?.routeProof || message.payload?.metadata?.routeProof;

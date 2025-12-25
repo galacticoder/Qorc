@@ -999,6 +999,41 @@ const ChatApp: React.FC = () => {
     }
   }, [Database.secureDBRef.current, Authentication.originalUsernameRef.current]);
 
+  // Restore original username from SecureDB after auth recovery (when username appears hashed)
+  useEffect(() => {
+    const restoreOriginalUsername = async () => {
+      const db = Database.secureDBRef.current;
+      const hashedUsername = Authentication.loginUsernameRef.current;
+      const currentOriginal = Authentication.originalUsernameRef.current;
+
+      // Skip if DB not ready or not logged in
+      if (!db || !hashedUsername || !Authentication.isLoggedIn) {
+        return;
+      }
+
+      // Skip if we already have a valid original username (different from hashed)
+      if (currentOriginal && currentOriginal !== hashedUsername) {
+        return;
+      }
+
+      try {
+        const original = await db.getOriginalUsername(hashedUsername);
+        if (original && original !== hashedUsername) {
+          Authentication.originalUsernameRef.current = original;
+          // Trigger re-render for components using the username
+          window.dispatchEvent(new CustomEvent('username-mapping-updated', { 
+            detail: { username: hashedUsername, original } 
+          }));
+          SecurityAuditLogger.log('info', 'original-username-restored', {});
+        }
+      } catch {
+        SecurityAuditLogger.log('warn', 'original-username-restore-failed', {});
+      }
+    };
+
+    restoreOriginalUsername();
+  }, [Database.secureDBRef.current, Authentication.isLoggedIn, Authentication.loginUsernameRef.current]);
+
   // Initialize secure message queue when SecureDB is ready
   useEffect(() => {
     if (Database.secureDBRef.current && Authentication.loginUsernameRef.current) {

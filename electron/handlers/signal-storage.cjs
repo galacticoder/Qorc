@@ -28,13 +28,18 @@ function setStorageKey(opts) {
     if (raw.length !== 32) throw new Error('storage key must be 32 bytes');
     STORAGE_KEY = Buffer.from(raw);
     try {
-      // Flush any in-memory data after encryption available
       for (const inst of STORE_INSTANCES) {
-        try { inst._saveSessions(); } catch {}
-        try { inst._saveTrusted(); } catch {}
-        try { inst._saveIdentities(); } catch {}
+        try { inst._loadSessions(); } catch { }
+        try { inst._loadTrusted(); } catch { }
+        try { inst._loadIdentities(); } catch { }
       }
-    } catch {}
+
+      for (const inst of STORE_INSTANCES) {
+        try { inst._saveSessions(); } catch { }
+        try { inst._saveTrusted(); } catch { }
+        try { inst._saveIdentities(); } catch { }
+      }
+    } catch { }
     return { success: true };
   } catch (e) {
     return { success: false, error: e?.message || String(e) };
@@ -76,12 +81,12 @@ function _decryptJSON(wrapper, label) {
 
 function _atomicWriteJSON(filePath, dataObj) {
   const dir = path.dirname(filePath);
-  try { fs.mkdirSync(dir, { recursive: true, mode: 0o700 }); } catch {}
+  try { fs.mkdirSync(dir, { recursive: true, mode: 0o700 }); } catch { }
   const tmp = filePath + '.tmp';
   const buf = Buffer.from(JSON.stringify(dataObj, null, 2), 'utf8');
   fs.writeFileSync(tmp, buf, { mode: 0o600 });
   try { fs.renameSync(tmp, filePath); } finally {
-    try { fs.unlinkSync(tmp); } catch {}
+    try { fs.unlinkSync(tmp); } catch { }
   }
 }
 
@@ -134,14 +139,14 @@ class SignalProtocolStore {
     this._ensureStoreDir();
     const key = `${username}:${address}`;
     this.trustedIdentities.set(key, Buffer.from(identityKey));
-    try { this._saveTrusted(); } catch {}
+    try { this._saveTrusted(); } catch { }
     return true;
   }
-  
+
   async isTrustedIdentity(username, address, identityKey, direction) {
     const key = `${username}:${address}`;
     const trusted = this.trustedIdentities.get(key);
-    
+
     if (!trusted) {
       await this.saveIdentity(username, address, identityKey);
       return true;
@@ -149,11 +154,11 @@ class SignalProtocolStore {
 
     const incomingBytes = Buffer.from(identityKey);
     const matches = incomingBytes.equals(trusted);
-    
+
     if (!matches) {
       return false;
     }
-    
+
     return true;
   }
 
@@ -166,7 +171,7 @@ class SignalProtocolStore {
     this._ensureStoreDir();
     const key = `${username}:${address}`;
     this.trustedIdentities.delete(key);
-    try { this._saveTrusted(); } catch {}
+    try { this._saveTrusted(); } catch { }
     return true;
   }
 
@@ -174,7 +179,7 @@ class SignalProtocolStore {
     this._ensureStoreDir();
     const key = `${username}:${address}`;
     this.trustedIdentities.delete(key);
-    try { this._saveTrusted(); } catch {}
+    try { this._saveTrusted(); } catch { }
     return true;
   }
 
@@ -185,7 +190,7 @@ class SignalProtocolStore {
       privateKey: Buffer.from(keyPair.privKey),
       registrationId
     });
-    try { this._saveIdentities(); } catch {}
+    try { this._saveIdentities(); } catch { }
   }
 
   // PreKey Store
@@ -269,13 +274,13 @@ class SignalProtocolStore {
     this._ensureStoreDir();
     const key = `${username}:${address}`;
     this.sessions.set(key, Buffer.from(sessionRecord));
-    try { this._saveSessions(); } catch {}
+    try { this._saveSessions(); } catch { }
   }
 
   async getSubDeviceSessions(username, name) {
     const prefix = `${username}:${name}.`;
     const sessions = [];
-    
+
     for (const [key, session] of this.sessions.entries()) {
       if (key.startsWith(prefix)) {
         const deviceId = parseInt(key.split('.').pop(), 10);
@@ -284,7 +289,7 @@ class SignalProtocolStore {
         }
       }
     }
-    
+
     return sessions;
   }
 
@@ -292,24 +297,24 @@ class SignalProtocolStore {
     this._ensureStoreDir();
     const key = `${username}:${address}`;
     this.sessions.delete(key);
-    try { this._saveSessions(); } catch {}
+    try { this._saveSessions(); } catch { }
   }
 
   async deleteAllSessions(username, name) {
     this._ensureStoreDir();
     const prefix = `${username}:${name}`;
     const keysToDelete = [];
-    
+
     for (const key of this.sessions.keys()) {
       if (key.startsWith(prefix)) {
         keysToDelete.push(key);
       }
     }
-    
+
     for (const key of keysToDelete) {
       this.sessions.delete(key);
     }
-    try { this._saveSessions(); } catch {}
+    try { this._saveSessions(); } catch { }
   }
 
   // Sender Key Store
@@ -333,8 +338,8 @@ class SignalProtocolStore {
     this.senderKeys.clear();
     this.trustedIdentities.clear();
     this.kyberPreKeys.clear();
-    try { this._saveSessions(); } catch {}
-    try { this._saveTrusted(); } catch {}
+    try { this._saveSessions(); } catch { }
+    try { this._saveTrusted(); } catch { }
   }
 
   hasSession(username, address) {
@@ -391,7 +396,7 @@ class SignalProtocolStore {
   }
 
   _ensureStoreDir() {
-    try { fs.mkdirSync(this._storeDir, { recursive: true }); } catch {}
+    try { fs.mkdirSync(this._storeDir, { recursive: true }); } catch { }
   }
 
   _saveSessions() {
@@ -424,7 +429,7 @@ class SignalProtocolStore {
 
   _saveTrusted() {
     if (!STORAGE_KEY) {
-      return; 
+      return;
     }
     const obj = {};
     for (const [key, value] of this.trustedIdentities.entries()) {

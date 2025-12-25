@@ -1610,6 +1610,24 @@ class WebSocketClient {
               }));
             } catch { }
 
+            // Proactively store session keys in main process for background mode
+            try {
+              const api = (window as any).edgeApi;
+              if (api?.storePQSessionKeys) {
+                const keysToStore = {
+                  sessionId: pendingSession.sessionId,
+                  sendKey: PostQuantumUtils.uint8ArrayToBase64(pendingSession.sendKey),
+                  recvKey: PostQuantumUtils.uint8ArrayToBase64(pendingSession.recvKey),
+                  fingerprint: pendingSession.fingerprint,
+                  establishedAt: pendingSession.establishedAt
+                };
+                api.storePQSessionKeys(keysToStore).catch(() => { });
+                SecureAuditLogger.info('ws', 'handshake', 'session-keys-stored-for-background', {
+                  sessionId: sessionId.slice(0, 16)
+                });
+              }
+            } catch { }
+
             resolve();
           } else {
             SecureAuditLogger.warn('ws', 'handshake', 'ack-session-mismatch', {

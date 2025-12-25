@@ -351,6 +351,10 @@ export function useEncryptedMessageHandler(
   const processedPreKeyMessagesRef = useRef<Map<string, number>>(new Map());
   // Cooldown to avoid session-reset thrash per peer
   const resetCooldownRef = useRef<Map<string, number>>(new Map());
+  // Counter to limit total session resets per peer (resets after 1 minute)
+  const resetCounterRef = useRef<Map<string, { count: number; windowStart: number }>>(new Map());
+  const MAX_RESETS_PER_PEER = 5;
+  const RESET_WINDOW_MS = 60_000;
 
   useEffect(() => {
     const interval = setInterval(() => blobCacheRef.current.flush(), BLOB_URL_TTL_MS / 2);
@@ -1055,6 +1059,26 @@ export function useEncryptedMessageHandler(
                   if (nowTsCooldown - _lastReset < 3000) {
                     return;
                   }
+
+                  // Check reset counter to prevent infinite reset loops
+                  const counterEntry = resetCounterRef.current.get(senderUsername);
+                  if (counterEntry) {
+                    // Reset the counter if the window has expired
+                    if (nowTsCooldown - counterEntry.windowStart > RESET_WINDOW_MS) {
+                      resetCounterRef.current.set(senderUsername, { count: 1, windowStart: nowTsCooldown });
+                    } else if (counterEntry.count >= MAX_RESETS_PER_PEER) {
+                      // Exceeded max resets for this peer in this window
+                      console.warn(`[EncryptedMessageHandler] Max session resets (${MAX_RESETS_PER_PEER}) reached for ${senderUsername}, waiting for window to expire`);
+                      return;
+                    } else {
+                      // Increment the counter
+                      counterEntry.count += 1;
+                    }
+                  } else {
+                    // First reset for this peer
+                    resetCounterRef.current.set(senderUsername, { count: 1, windowStart: nowTsCooldown });
+                  }
+
                   resetCooldownRef.current.set(senderUsername, nowTsCooldown);
                   try {
                     // Delete the broken session immediately
