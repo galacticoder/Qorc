@@ -460,6 +460,10 @@ const ChatApp: React.FC = () => {
         try {
           offlineMessageQueue.setDecryptionKey(kyberSecret);
         } catch { }
+      } else {
+        try {
+          offlineMessageQueue.clearDecryptionKey();
+        } catch { }
       }
     };
 
@@ -474,7 +478,7 @@ const ChatApp: React.FC = () => {
         window.removeEventListener('hybrid-keys-updated', onKeysUpdated as EventListener);
       } catch { }
     };
-  }, [Authentication.hybridKeysRef]);
+  }, [Authentication.hybridKeysRef.current]);
 
   const {
     sendReadReceipt: sendServerReadReceipt,
@@ -1021,8 +1025,8 @@ const ChatApp: React.FC = () => {
         if (original && original !== hashedUsername) {
           Authentication.originalUsernameRef.current = original;
           // Trigger re-render for components using the username
-          window.dispatchEvent(new CustomEvent('username-mapping-updated', { 
-            detail: { username: hashedUsername, original } 
+          window.dispatchEvent(new CustomEvent('username-mapping-updated', {
+            detail: { username: hashedUsername, original }
           }));
           SecurityAuditLogger.log('info', 'original-username-restored', {});
         }
@@ -2526,7 +2530,10 @@ const ChatApp: React.FC = () => {
                     conversations={conversations}
                     selectedConversation={selectedConversation || undefined}
                     onSelectConversation={selectConversation}
-                    onAddConversation={async (username) => { await addConversation(username); }}
+                    onAddConversation={async (username) => {
+                      await addConversation(username);
+                      setShowNewChatInput(false);
+                    }}
                     getDisplayUsername={stableGetDisplayUsername}
                     showNewChatInput={showNewChatInput}
                     onRemoveConversation={removeConversation}

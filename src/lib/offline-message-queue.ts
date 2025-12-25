@@ -305,6 +305,10 @@ export class OfflineMessageQueue {
     void this.tryProcessPendingServerOfflineMessages();
   }
 
+  clearDecryptionKey(): void {
+    this.ownKyberSecretKey = null;
+  }
+
   constructor(sendCallback?: SendCallback) {
     this.sendCallback = sendCallback;
     void this.loadFromStorage();

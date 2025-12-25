@@ -414,7 +414,11 @@ export const ConversationList = memo<ConversationListProps>(function Conversatio
       {showNewChatInput && (
         <div className="p-4 space-y-4">
           <div className="relative">
-            <Search className="absolute left-2 top-2.5 h-4 w-4 text-muted-foreground" />
+            {isAdding ? (
+              <Loader2 className="absolute left-2 top-2.5 h-4 w-4 text-muted-foreground animate-spin" />
+            ) : (
+              <Search className="absolute left-2 top-2.5 h-4 w-4 text-muted-foreground" />
+            )}
             <Input
               placeholder="Username..."
               value={newChatUsername}
