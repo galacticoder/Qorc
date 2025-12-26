@@ -1,5 +1,6 @@
 import { v4 as uuidv4 } from 'uuid';
 import { SignalType } from './signal-types';
+import { EventType } from './event-types';
 import { torNetworkManager } from './tor-network';
 import {
   PostQuantumAEAD,
@@ -12,134 +13,49 @@ import {
 } from './post-quantum-crypto';
 import { x25519 } from '@noble/curves/ed25519.js';
 import { SecureAuditLogger, handleNetworkError, handleCriticalError } from './secure-error-handler';
-
-type WebSocketLifecycleState =
-  | 'idle'
-  | 'tor-check'
-  | 'connecting'
-  | 'handshaking'
-  | 'connected'
-  | 'disconnected'
-  | 'paused'
-  | 'error';
-
-interface PendingSend {
-  id: string;
-  payload: unknown;
-  createdAt: number;
-  attempt: number;
-  flushAfter: number;
-  highPriority?: boolean;
-}
-
-interface ServerKeyMaterial {
-  kyberPublicKey: Uint8Array;
-  dilithiumPublicKey?: Uint8Array;
-  x25519PublicKey?: Uint8Array;
-  fingerprint: string;
-  serverId?: string;
-}
-
-interface ConnectionMetrics {
-  lastConnectedAt: number | null;
-  totalReconnects: number;
-  consecutiveFailures: number;
-  lastFailureAt: number | null;
-  lastRateLimitAt: number | null;
-  messagesSent: number;
-  messagesReceived: number;
-  bytesSent: number;
-  bytesReceived: number;
-  averageLatencyMs: number;
-  lastLatencyMs: number | null;
-  securityEvents: {
-    replayAttempts: number;
-    signatureFailures: number;
-    rateLimitHits: number;
-    fingerprintMismatches: number;
-  };
-}
-
-interface RateLimitState {
-  messageTimestamps: number[];
-  lastResetTime: number;
-  violationCount: number;
-}
-
-interface ConnectionHealth {
-  state: WebSocketLifecycleState;
-  isHealthy: boolean;
-  metrics: ConnectionMetrics;
-  queueDepth: number;
-  sessionAge: number | null;
-  torStatus: {
-    ready: boolean;
-    circuitHealth: 'unknown' | 'good' | 'degraded' | 'poor';
-  };
-  lastHeartbeat: number | null;
-  quality: 'excellent' | 'good' | 'fair' | 'poor' | 'unknown';
-}
-
-
-const MAX_PENDING_QUEUE = 500;
-const MAX_REPLAY_WINDOW_MS = 5 * 60 * 1000;
-const REPLAY_CACHE_LIMIT = 10_000;
-const INITIAL_RECONNECT_DELAY_MS = 1_000;
-const MAX_RECONNECT_DELAY_MS = 60_000;
-const RATE_LIMIT_BACKOFF_MS = 5_000;
-const MAX_HANDSHAKE_ATTEMPTS = 3;
-const MAX_MESSAGE_AAD_LENGTH = 256;
-const SESSION_REKEY_INTERVAL_MS = 60 * 60 * 1000;
-const KEY_ROTATION_WARNING_MS = 45 * 60 * 1000;
-const QUEUE_FLUSH_INTERVAL_MS = 1_000;
-
-const MAX_MESSAGES_PER_MINUTE = 120;
-const RATE_LIMIT_WINDOW_MS = 60_000;
-const MAX_BURST_MESSAGES = 20;
-const RATE_LIMIT_VIOLATION_THRESHOLD = 3;
-
-const HEARTBEAT_INTERVAL_MS = 35_000;
-const HEARTBEAT_TIMEOUT_MS = 90_000;
-const MAX_MISSED_HEARTBEATS = 4;
-const LATENCY_SAMPLE_WEIGHT = 0.2;
-const CIRCUIT_BREAKER_THRESHOLD = 5;
-const CIRCUIT_BREAKER_TIMEOUT_MS = 60_000;
-
-const MAX_NONCE_SEQUENCE_GAP = 1000;
-const TIMESTAMP_SKEW_TOLERANCE_MS = 5_000;
-
-const SESSION_FAILOVER_GRACE_PERIOD_MS = 10_000;
-
-const MAX_INCOMING_WS_STRING_CHARS = 10_000_000;
-const MAX_PQ_ENVELOPE_CIPHERTEXT_BYTES = 12 * 1024 * 1024;
-const MAX_PQ_ENVELOPE_NONCE_BYTES = 1024;
-const MAX_PQ_ENVELOPE_TAG_BYTES = 1024;
-const MAX_PQ_ENVELOPE_AAD_BYTES = 1024;
-
-const isPlainObject = (value: unknown): value is Record<string, unknown> => {
-  if (typeof value !== 'object' || value === null) {
-    return false;
-  }
-  const proto = Object.getPrototypeOf(value);
-  return proto === Object.prototype || proto === null;
-};
-
-const hasPrototypePollutionKeys = (obj: unknown): boolean => {
-  if (obj == null || typeof obj !== 'object') return false;
-  const keys = Object.keys(obj);
-  return keys.some((key) => key === '__proto__' || key === 'constructor' || key === 'prototype');
-};
-
-const estimateBase64DecodedBytes = (value: string): number => {
-  const trimmed = value.trim();
-  if (!trimmed) return 0;
-  const pad = trimmed.endsWith('==') ? 2 : trimmed.endsWith('=') ? 1 : 0;
-  return Math.floor((trimmed.length * 3) / 4) - pad;
-};
-
-interface MessageHandler {
-  (message: unknown): void;
-}
+import {
+  type WebSocketLifecycleState,
+  type PendingSend,
+  type ServerKeyMaterial,
+  type ConnectionMetrics,
+  type RateLimitState,
+  type ConnectionHealth,
+  type MessageHandler,
+  MAX_PENDING_QUEUE,
+  MAX_REPLAY_WINDOW_MS,
+  REPLAY_CACHE_LIMIT,
+  INITIAL_RECONNECT_DELAY_MS,
+  MAX_RECONNECT_DELAY_MS,
+  RATE_LIMIT_BACKOFF_MS,
+  MAX_HANDSHAKE_ATTEMPTS,
+  MAX_MESSAGE_AAD_LENGTH,
+  SESSION_REKEY_INTERVAL_MS,
+  KEY_ROTATION_WARNING_MS,
+  QUEUE_FLUSH_INTERVAL_MS,
+  MAX_MESSAGES_PER_MINUTE,
+  RATE_LIMIT_WINDOW_MS,
+  MAX_BURST_MESSAGES,
+  RATE_LIMIT_VIOLATION_THRESHOLD,
+  HEARTBEAT_INTERVAL_MS,
+  HEARTBEAT_TIMEOUT_MS,
+  MAX_MISSED_HEARTBEATS,
+  LATENCY_SAMPLE_WEIGHT,
+  CIRCUIT_BREAKER_THRESHOLD,
+  CIRCUIT_BREAKER_TIMEOUT_MS,
+  MAX_NONCE_SEQUENCE_GAP,
+  TIMESTAMP_SKEW_TOLERANCE_MS,
+  SESSION_FAILOVER_GRACE_PERIOD_MS,
+  MAX_INCOMING_WS_STRING_CHARS,
+  MAX_PQ_ENVELOPE_CIPHERTEXT_BYTES,
+  MAX_PQ_ENVELOPE_NONCE_BYTES,
+  MAX_PQ_ENVELOPE_TAG_BYTES,
+  MAX_PQ_ENVELOPE_AAD_BYTES,
+  isPlainObject,
+  hasPrototypePollutionKeys,
+  estimateBase64DecodedBytes,
+  createDefaultMetrics,
+  createDefaultRateLimitState,
+} from './websocket-types';
 
 class WebSocketClient {
   private lifecycleState: WebSocketLifecycleState = 'idle';
@@ -283,7 +199,7 @@ class WebSocketClient {
                 this.startHeartbeat();
                 void this.flushPendingQueue();
 
-                window.dispatchEvent(new CustomEvent('ws-reconnected', {
+                window.dispatchEvent(new CustomEvent(EventType.WS_RECONNECTED, {
                   detail: { timestamp: Date.now(), restoredFromBackground: true }
                 }));
                 return;
@@ -305,7 +221,7 @@ class WebSocketClient {
               } catch { }
 
               if (wasConnectedBefore) {
-                window.dispatchEvent(new CustomEvent('ws-reconnected', {
+                window.dispatchEvent(new CustomEvent(EventType.WS_RECONNECTED, {
                   detail: { timestamp: Date.now() }
                 }));
               }
@@ -1284,7 +1200,7 @@ class WebSocketClient {
         // Block auth messages client-side to prevent server spam
         // Dispatch event with countdown info for live timer
         try {
-          const event = new CustomEvent('auth-rate-limited', {
+          const event = new CustomEvent(EventType.AUTH_RATE_LIMITED, {
             detail: {
               remainingSeconds,
               rateLimitUntil: this.globalRateLimitUntil
@@ -1605,7 +1521,7 @@ class WebSocketClient {
             });
 
             try {
-              window.dispatchEvent(new CustomEvent('pq-session-established', {
+              window.dispatchEvent(new CustomEvent(EventType.PQ_SESSION_ESTABLISHED, {
                 detail: { timestamp: Date.now(), sessionId: sessionId.slice(0, 16) }
               }));
             } catch { }
@@ -2122,12 +2038,12 @@ class WebSocketClient {
       timeoutId = setTimeout(() => {
         try {
           SecureAuditLogger.warn('auth', 'token-validate', 'timeout', { source, timeoutMs: tokenValidationTimeout });
-          window.dispatchEvent(new CustomEvent('token-validation-timeout', { detail: { source } }));
+          window.dispatchEvent(new CustomEvent(EventType.TOKEN_VALIDATION_TIMEOUT, { detail: { source } }));
         } catch { }
       }, tokenValidationTimeout);
 
       try {
-        window.dispatchEvent(new CustomEvent('token-validation-start', { detail: { source } }));
+        window.dispatchEvent(new CustomEvent(EventType.TOKEN_VALIDATION_START, { detail: { source } }));
         SecureAuditLogger.info('auth', 'token-validate', 'sending', { source });
       } catch { }
 

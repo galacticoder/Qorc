@@ -41,6 +41,11 @@ import { isValidKyberPublicKeyBase64, sanitizeHybridKeys } from "../lib/validato
 import { SecurityAuditLogger } from "../lib/post-quantum-crypto";
 import { sanitizeFilename, isPlainObject, hasPrototypePollutionKeys, isUnsafeObjectKey, sanitizeNonEmptyText } from "../lib/sanitizers";
 import { useRateLimiter } from "../hooks/useRateLimiter";
+import { useLocalMessageHandlers } from "../hooks/useLocalMessageHandlers";
+import { useP2PMessageHandlers } from "../hooks/useP2PMessageHandlers";
+import { useP2PConnectionManager } from "../hooks/useP2PConnectionManager";
+import { useP2PSignalHandlers } from "../hooks/useP2PSignalHandlers";
+import { useEventHandlers } from "../hooks/useEventHandlers";
 import { toast, Toaster } from 'sonner';
 import { TorIndicator } from "../components/ui/TorIndicator";
 import { Button } from "../components/ui/button";
@@ -369,7 +374,7 @@ const ChatApp: React.FC = () => {
             }
 
             try {
-              window.dispatchEvent(new CustomEvent('user-keys-available', {
+              window.dispatchEvent(new CustomEvent(EventType.USER_KEYS_AVAILABLE, {
                 detail: { username: peerUsername, hybridKeys: keys }
               }));
             } catch { }
@@ -394,8 +399,8 @@ const ChatApp: React.FC = () => {
         }
       };
 
-      window.addEventListener('user-exists-response', onUserExists as EventListener);
-      window.addEventListener('p2p-peer-cert', onPeerCert as EventListener);
+      window.addEventListener(EventType.USER_EXISTS_RESPONSE, onUserExists as EventListener);
+      window.addEventListener(EventType.P2P_PEER_CERT, onPeerCert as EventListener);
     });
   }, [Database.users, Database.secureDBRef]);
 
@@ -471,11 +476,11 @@ const ChatApp: React.FC = () => {
 
     const onKeysUpdated = () => applyKey();
     try {
-      window.addEventListener('hybrid-keys-updated', onKeysUpdated as EventListener);
+      window.addEventListener(EventType.HYBRID_KEYS_UPDATED, onKeysUpdated as EventListener);
     } catch { }
     return () => {
       try {
-        window.removeEventListener('hybrid-keys-updated', onKeysUpdated as EventListener);
+        window.removeEventListener(EventType.HYBRID_KEYS_UPDATED, onKeysUpdated as EventListener);
       } catch { }
     };
   }, [Authentication.hybridKeysRef.current]);
@@ -552,11 +557,11 @@ const ChatApp: React.FC = () => {
   const [p2pKeysVersion, setP2pKeysVersion] = useState(0);
   useEffect(() => {
     const bump = () => setP2pKeysVersion((v) => v + 1);
-    window.addEventListener('hybrid-keys-updated', bump as EventListener);
-    window.addEventListener('secure-chat:auth-success', bump as EventListener);
+    window.addEventListener(EventType.HYBRID_KEYS_UPDATED, bump as EventListener);
+    window.addEventListener(EventType.SECURE_CHAT_AUTH_SUCCESS, bump as EventListener);
     return () => {
-      window.removeEventListener('hybrid-keys-updated', bump as EventListener);
-      window.removeEventListener('secure-chat:auth-success', bump as EventListener);
+      window.removeEventListener(EventType.HYBRID_KEYS_UPDATED, bump as EventListener);
+      window.removeEventListener(EventType.SECURE_CHAT_AUTH_SUCCESS, bump as EventListener);
     };
   }, []);
 
@@ -614,7 +619,7 @@ const ChatApp: React.FC = () => {
                 dilithiumPublicBase64: bundle.dilithiumPublicKey,
                 x25519PublicBase64: bundle.x25519PublicKey,
               };
-              window.dispatchEvent(new CustomEvent('user-keys-available', {
+              window.dispatchEvent(new CustomEvent(EventType.USER_KEYS_AVAILABLE, {
                 detail: { username: bundle.username, hybridKeys },
               }));
             } catch { }
@@ -657,7 +662,7 @@ const ChatApp: React.FC = () => {
                 dilithiumPublicBase64: bundle.dilithiumPublicKey,
                 x25519PublicBase64: bundle.x25519PublicKey,
               };
-              window.dispatchEvent(new CustomEvent('user-keys-available', {
+              window.dispatchEvent(new CustomEvent(EventType.USER_KEYS_AVAILABLE, {
                 detail: { username: bundle.username, hybridKeys },
               }));
             } catch { }
@@ -667,8 +672,8 @@ const ChatApp: React.FC = () => {
           } catch { }
         };
 
-        try { window.addEventListener('p2p-peer-cert', wsHandler as EventListener); } catch { }
-        try { window.addEventListener('user-exists-response', userExistsHandler as EventListener); } catch { }
+        try { window.addEventListener(EventType.P2P_PEER_CERT, wsHandler as EventListener); } catch { }
+        try { window.addEventListener(EventType.USER_EXISTS_RESPONSE, userExistsHandler as EventListener); } catch { }
 
         try {
           await websocketClient.sendSecureControlMessage({ type: SignalType.P2P_FETCH_PEER_CERT, username: peerUsername });
@@ -735,6 +740,41 @@ const ChatApp: React.FC = () => {
   );
   const saveMessageWithContextRef = useRef(saveMessageWithContext);
   useEffect(() => { saveMessageWithContextRef.current = saveMessageWithContext; }, [saveMessageWithContext]);
+
+  // Use extracted hooks for event handling
+  useLocalMessageHandlers({
+    setMessages,
+    saveMessageWithContext,
+    secureDBRef: Database.secureDBRef,
+    allowEvent,
+  });
+
+  useP2PMessageHandlers({
+    p2pMessaging,
+    setMessages,
+    saveMessageWithContext,
+    loginUsernameRef: Authentication.loginUsernameRef,
+  });
+
+  useP2PConnectionManager({
+    isLoggedIn: Authentication.isLoggedIn,
+    selectedServerUrl,
+    p2pHybridKeys,
+    selectedConversation,
+    p2pMessaging,
+  });
+
+  useP2PSignalHandlers({ p2pMessaging });
+
+  useEventHandlers({
+    allowEvent,
+    users: Database.users,
+    setUsers: Database.setUsers,
+    setMessages,
+    messageSender,
+    Authentication,
+    Database,
+  });
 
   const onSendMessage = useCallback(async (
     messageId: string,
@@ -944,8 +984,8 @@ const ChatApp: React.FC = () => {
   }, [stableGetDisplayUsername, setMessages, selectedConversation, Database.saveMessageToLocalDB, callingHook.startCall, callHistory]);
 
   useEffect(() => {
-    window.addEventListener('ui-call-log', handleCallLog as EventListener);
-    return () => window.removeEventListener('ui-call-log', handleCallLog as EventListener);
+    window.addEventListener(EventType.UI_CALL_LOG, handleCallLog as EventListener);
+    return () => window.removeEventListener(EventType.UI_CALL_LOG, handleCallLog as EventListener);
   }, [handleCallLog]);
 
   const handleCallRequest = useCallback((e: Event) => {
@@ -976,8 +1016,8 @@ const ChatApp: React.FC = () => {
   }, [callingHook.startCall]);
 
   useEffect(() => {
-    window.addEventListener('ui-call-request', handleCallRequest as EventListener);
-    return () => window.removeEventListener('ui-call-request', handleCallRequest as EventListener);
+    window.addEventListener(EventType.UI_CALL_REQUEST, handleCallRequest as EventListener);
+    return () => window.removeEventListener(EventType.UI_CALL_REQUEST, handleCallRequest as EventListener);
   }, [handleCallRequest]);
 
   // Store username mapping for current user only when SecureDB is available
@@ -1016,7 +1056,7 @@ const ChatApp: React.FC = () => {
         if (original && original !== hashedUsername) {
           Authentication.originalUsernameRef.current = original;
           // Trigger re-render for components using the username
-          window.dispatchEvent(new CustomEvent('username-mapping-updated', {
+          window.dispatchEvent(new CustomEvent(EventType.USERNAME_MAPPING_UPDATED, {
             detail: { username: hashedUsername, original }
           }));
           SecurityAuditLogger.log('info', 'original-username-restored', {});
@@ -1082,136 +1122,10 @@ const ChatApp: React.FC = () => {
         }
       } catch { }
     };
-    window.addEventListener('p2p-file-chunk', onP2PChunk as EventListener);
-    return () => window.removeEventListener('p2p-file-chunk', onP2PChunk as EventListener);
+    window.addEventListener(EventType.P2P_FILE_CHUNK, onP2PChunk as EventListener);
+    return () => window.removeEventListener(EventType.P2P_FILE_CHUNK, onP2PChunk as EventListener);
   }, [fileHandler]);
 
-  // Handle P2P reactions
-  useEffect(() => {
-    const rateRef = { windowStart: Date.now(), count: 0 };
-    const onP2PReaction = (e: Event) => {
-      try {
-        const now = Date.now();
-        if (now - rateRef.windowStart > LOCAL_EVENT_RATE_LIMIT_WINDOW_MS) {
-          rateRef.windowStart = now;
-          rateRef.count = 0;
-        }
-        rateRef.count += 1;
-        if (rateRef.count > LOCAL_EVENT_RATE_LIMIT_MAX_EVENTS) {
-          return;
-        }
-
-        const detail = (e as CustomEvent).detail;
-        if (!isPlainObject(detail) || hasPrototypePollutionKeys(detail)) return;
-        const messageId = sanitizeNonEmptyText(detail.messageId, MAX_LOCAL_MESSAGE_ID_LENGTH, false);
-        const reaction = sanitizeNonEmptyText(detail.reaction, MAX_LOCAL_EMOJI_LENGTH, false);
-        const sender = sanitizeNonEmptyText(detail.sender, MAX_LOCAL_USERNAME_LENGTH, false);
-        const action = typeof detail.action === 'string' ? detail.action : '';
-        if (!messageId || !reaction || !sender) return;
-        if (isUnsafeObjectKey(reaction)) return;
-        if (action !== 'add' && action !== 'remove') return;
-
-        setMessages(prev => prev.map(msg => {
-          if (msg.id !== messageId) return msg;
-
-          const reactions: Record<string, string[]> = Object.create(null);
-          if (msg.reactions && typeof msg.reactions === 'object') {
-            for (const [k, v] of Object.entries(msg.reactions as Record<string, unknown>)) {
-              if (typeof k !== 'string' || isUnsafeObjectKey(k)) continue;
-              if (!Array.isArray(v)) continue;
-              const safeUsers: string[] = [];
-              const seen = new Set<string>();
-              for (const candidate of v as unknown[]) {
-                if (safeUsers.length >= 250) break;
-                const cleaned = sanitizeNonEmptyText(candidate, MAX_LOCAL_USERNAME_LENGTH, false);
-                if (!cleaned) continue;
-                if (seen.has(cleaned)) continue;
-                seen.add(cleaned);
-                safeUsers.push(cleaned);
-              }
-              if (safeUsers.length > 0) {
-                reactions[k] = safeUsers;
-              }
-            }
-          }
-
-          // Remove sender from any previous reactions
-          for (const key of Object.keys(reactions)) {
-            reactions[key] = reactions[key].filter(u => u !== sender);
-            if (reactions[key].length === 0) {
-              delete reactions[key];
-            }
-          }
-
-          if (action === 'add') {
-            const arr = Array.isArray(reactions[reaction]) ? [...reactions[reaction]] : [];
-            if (!arr.includes(sender) && arr.length < 250) {
-              arr.push(sender);
-            }
-            if (arr.length > 0) {
-              reactions[reaction] = arr;
-            }
-          }
-
-          return { ...msg, reactions };
-        }));
-      } catch {
-        console.error('[P2P] Failed to handle reaction');
-      }
-    };
-
-    window.addEventListener('message-reaction', onP2PReaction as EventListener);
-    return () => window.removeEventListener('message-reaction', onP2PReaction as EventListener);
-  }, []);
-
-  // Initialize P2P after login with bounded retries even if status doesn't change
-  const p2pInitAttemptRef = useRef(0);
-  useEffect(() => {
-    let cancelled = false;
-    let retryTimer: ReturnType<typeof setTimeout> | null = null;
-
-    if (!Authentication.isLoggedIn || !selectedServerUrl || !p2pHybridKeys) {
-      p2pInitAttemptRef.current = 0;
-      return () => {
-        if (retryTimer) clearTimeout(retryTimer);
-      };
-    }
-
-    const tryInit = () => {
-      if (cancelled) return;
-      if (p2pMessaging.p2pStatus?.isInitialized && p2pMessaging.p2pStatus?.signalingConnected) {
-        p2pInitAttemptRef.current = 0;
-        return;
-      }
-      if (p2pInitAttemptRef.current >= 5) return;
-
-      p2pInitAttemptRef.current += 1;
-      const attempt = p2pInitAttemptRef.current;
-      const signalingUrl = getSignalingServerUrl(selectedServerUrl);
-
-      p2pMessaging.initializeP2P(signalingUrl).catch(() => {
-        SecurityAuditLogger.log('warn', 'p2p-init-retry-failed', { attempt });
-      }).finally(() => {
-        if (cancelled) return;
-        if (p2pMessaging.p2pStatus?.isInitialized && p2pMessaging.p2pStatus?.signalingConnected) {
-          p2pInitAttemptRef.current = 0;
-          return;
-        }
-        const backoff = Math.min(2000 * attempt, 10000);
-        retryTimer = setTimeout(tryInit, backoff);
-      });
-    };
-
-    tryInit();
-
-    return () => {
-      cancelled = true;
-      if (retryTimer) {
-        clearTimeout(retryTimer);
-        retryTimer = null;
-      }
-    };
-  }, [Authentication.isLoggedIn, selectedServerUrl, p2pHybridKeys]);
 
   // Ensure token-based auth recovery is attempted when validation is in progress
   const tokenRecoveryAttemptedRef = useRef(false);
@@ -1287,332 +1201,8 @@ const ChatApp: React.FC = () => {
     };
   }, [Authentication.tokenValidationInProgress, Authentication.isLoggedIn, Authentication.accountAuthenticated, setupComplete, selectedServerUrl]);
 
-  // Handle outgoing P2P control sends (session reset) requested by other subsystems
-  useEffect(() => {
-    const handler = async (evt: Event) => {
-      try {
-        const d: any = (evt as CustomEvent).detail || {};
-        const to: string = d?.to;
-        const reason: string | undefined = d?.reason;
-        if (!to) return;
-        try {
-          if (!p2pMessaging.isPeerConnected(to)) {
-            try { await p2pMessaging.connectToPeer(to); } catch { }
-            await (p2pMessaging as any).waitForPeerConnection?.(to, 5000).catch(() => { });
-          }
-
-          await (p2pMessaging as any)?.p2pServiceRef?.current?.sendMessage?.(to, { kind: 'session-reset-request', reason }, 'signal');
-        } catch { }
-      } catch { }
-    };
-    try { window.addEventListener('p2p-session-reset-send', handler as EventListener); } catch { }
-    return () => { try { window.removeEventListener('p2p-session-reset-send', handler as EventListener); } catch { } };
-  }, [p2pMessaging]);
-
-  // Handle outgoing P2P call-signal sends from calling service (P2P-first signaling)
-  useEffect(() => {
-    const handler = async (evt: Event) => {
-      try {
-        const d: any = (evt as CustomEvent).detail || {};
-        const to: string = d?.to;
-        const signalObj: any = d?.signal;
-        const requestId: string = d?.requestId || '';
-        if (!to || !signalObj) return;
-        let success = false;
-        try {
-          if (!p2pMessaging.isPeerConnected(to)) {
-            try { await p2pMessaging.connectToPeer(to); } catch { }
-            try { await (p2pMessaging as any).waitForPeerConnection?.(to, 2000); } catch { }
-          }
-          const svc: any = (window as any).p2pService || (p2pMessaging as any)?.p2pServiceRef?.current || null;
-          if (svc && typeof svc.sendMessage === 'function') {
-            try {
-              await svc.sendMessage(to, { kind: 'call-signal', signal: signalObj }, 'signal');
-              success = true;
-            } catch {
-              await new Promise<void>((resolve) => {
-                let settled = false;
-                const t = setTimeout(() => { if (!settled) { settled = true; resolve(); } }, 1500);
-                const on = (ev: Event) => {
-                  const p = (ev as CustomEvent).detail?.peer;
-                  if (p === to) { if (!settled) { settled = true; clearTimeout(t); } resolve(); }
-                };
-                window.addEventListener('p2p-pq-established', on as EventListener, { once: true });
-              });
-              try {
-                await svc.sendMessage(to, { kind: 'call-signal', signal: signalObj }, 'signal');
-                success = true;
-              } catch { }
-            }
-          }
-        } catch { }
-        try {
-          window.dispatchEvent(new CustomEvent('p2p-call-signal-result', { detail: { requestId, success } }));
-        } catch { }
-      } catch { }
-    };
-    try { window.addEventListener('p2p-call-signal-send', handler as EventListener); } catch { }
-    return () => { try { window.removeEventListener('p2p-call-signal-send', handler as EventListener); } catch { } };
-  }, [p2pMessaging]);
-
-  // Handle incoming P2P messages 
-  useEffect(() => {
-    p2pMessaging.onMessage(async (encryptedMessage: EncryptedMessage) => {
-      try {
-        // Handle typing indicators
-        if (encryptedMessage.messageType === 'typing') {
-          const typingEvent = new CustomEvent(EventType.TYPING_INDICATOR, {
-            detail: {
-              username: encryptedMessage.from,
-              isTyping: encryptedMessage.content === SignalType.TYPING_START,
-            }
-          });
-          window.dispatchEvent(typingEvent);
-          SecurityAuditLogger.log('info', 'p2p-typing-received', {});
-          return;
-        }
-
-        // Handle reactions
-        if (encryptedMessage.messageType === 'reaction') {
-          const targetMessageId = encryptedMessage.metadata?.targetMessageId;
-          const action = encryptedMessage.metadata?.action;
-          const emoji = encryptedMessage.content;
-
-          if (targetMessageId && emoji && (action === SignalType.REACTION_ADD || action === SignalType.REACTION_REMOVE)) {
-            window.dispatchEvent(new CustomEvent(EventType.LOCAL_REACTION_UPDATE, {
-              detail: {
-                messageId: targetMessageId,
-                emoji: emoji,
-                isAdd: action === SignalType.REACTION_ADD,
-                username: encryptedMessage.from
-              }
-            }));
-            SecurityAuditLogger.log('info', 'p2p-reaction-received', {});
-          }
-          return;
-        }
-
-        // Handle message deletion
-        if (encryptedMessage.messageType === 'delete') {
-          const targetMessageId = encryptedMessage.metadata?.targetMessageId;
-          if (targetMessageId) {
-            let messageToPersist: Message | null = null;
-            setMessages(prev => prev.map(msg => {
-              if (msg.id === targetMessageId) {
-                const updated = { ...msg, isDeleted: true, content: 'This message was deleted' };
-                messageToPersist = updated;
-                return updated;
-              }
-              return msg;
-            }));
-
-            if (messageToPersist) {
-              try { saveMessageWithContextRef.current(messageToPersist); } catch { }
-            }
-
-            try {
-              const deleteEvent = new CustomEvent('remote-message-delete', {
-                detail: { messageId: targetMessageId }
-              });
-              window.dispatchEvent(deleteEvent);
-            } catch {
-              console.error('[P2P] Failed to dispatch remote delete event');
-            }
-
-            SecurityAuditLogger.log('info', 'p2p-delete-received', {});
-          }
-          return;
-        }
-
-        // Handle message editing
-        if (encryptedMessage.messageType === 'edit') {
-          const targetMessageId = encryptedMessage.metadata?.targetMessageId;
-          const newContent = encryptedMessage.metadata?.newContent || encryptedMessage.content;
-          if (targetMessageId && newContent) {
-            let messageToPersist: Message | null = null;
-            setMessages(prev => prev.map(msg => {
-              if (msg.id === targetMessageId) {
-                const updated = { ...msg, content: newContent, isEdited: true };
-                messageToPersist = updated;
-                return updated;
-              }
-              return msg;
-            }));
-
-            if (messageToPersist) {
-              try { saveMessageWithContextRef.current(messageToPersist); } catch { }
-            }
-
-            try {
-              const editEvent = new CustomEvent('remote-message-edit', {
-                detail: { messageId: targetMessageId, newContent }
-              });
-              window.dispatchEvent(editEvent);
-            } catch {
-              console.error('[P2P] Failed to dispatch remote edit event');
-            }
-
-            SecurityAuditLogger.log('info', 'p2p-edit-received', {});
-          }
-          return;
-        }
 
 
-        if (encryptedMessage.messageType === 'file') {
-          SecurityAuditLogger.log('info', 'p2p-file-metadata-ignored', {});
-          return;
-        }
-
-        const message: Message = {
-          id: encryptedMessage.id,
-          content: encryptedMessage.content,
-          sender: encryptedMessage.from,
-          recipient: encryptedMessage.to,
-          timestamp: new Date(encryptedMessage.timestamp),
-          type: 'text',
-          isCurrentUser: false,
-          p2p: true,
-          transport: 'p2p',
-          encrypted: encryptedMessage.encrypted,
-          receipt: { delivered: true, read: false },
-          ...(encryptedMessage.metadata?.replyTo && {
-            replyTo: {
-              id: encryptedMessage.metadata.replyTo.id,
-              sender: encryptedMessage.metadata.replyTo.sender,
-              content: encryptedMessage.metadata.replyTo.content
-            }
-          })
-        } as Message;
-
-        setMessages(prev => {
-          const exists = prev.some(m => {
-            if (m.id === message.id) {
-              return true;
-            }
-
-            try {
-              const sameSender = m.sender === message.sender;
-              const sameRecipient = m.recipient === message.recipient;
-              const sameType = m.type === message.type;
-              const sameContent = m.content === message.content;
-              const mt = m.timestamp instanceof Date ? m.timestamp.getTime() : (m.timestamp ? new Date(m.timestamp as any).getTime() : undefined);
-              const tt = message.timestamp instanceof Date ? message.timestamp.getTime() : (message.timestamp ? new Date(message.timestamp as any).getTime() : undefined);
-              const closeInTime = Math.abs(mt - tt) < 2000;
-              return sameSender && sameRecipient && sameType && sameContent && closeInTime;
-            } catch {
-              return false;
-            }
-          });
-          if (exists) {
-            return prev;
-          }
-          return [...prev, message];
-        });
-        saveMessageWithContextRef.current(message);
-        SecurityAuditLogger.log('info', `p2p-${encryptedMessage.messageType || 'message'}-received`, {});
-      } catch {
-        SecurityAuditLogger.log('error', 'p2p-message-handle-failed', { error: 'unknown' });
-      }
-    });
-  }, []);
-
-  // Connect to peer when conversation is selected
-  const p2pMessagingRef = useRef(p2pMessaging);
-  p2pMessagingRef.current = p2pMessaging;
-  const p2pInitializedRef = useRef(false);
-  const p2pSignalingConnectedRef = useRef(false);
-  const userInitiatedSelectionRef = useRef(false);
-  const lastSelectedConversationRef = useRef<string | null>(null);
-
-  useEffect(() => {
-    const isInit = p2pMessaging.p2pStatus?.isInitialized ?? false;
-    const signaling = p2pMessaging.p2pStatus?.signalingConnected ?? false;
-
-    if (p2pInitializedRef.current !== isInit || p2pSignalingConnectedRef.current !== signaling) {
-      p2pInitializedRef.current = isInit;
-      p2pSignalingConnectedRef.current = signaling;
-    }
-  }, [p2pMessaging.p2pStatus?.isInitialized, p2pMessaging.p2pStatus?.signalingConnected]);
-
-  const connectionAttemptsRef = useRef<Map<string, { inProgress: boolean; lastAttempt: number }>>(new Map());
-  const processedPeerConnectionsRef = useRef<Set<string>>(new Set());
-
-  // Listen for successful peer connections to update state
-  useEffect(() => {
-    const handlePeerConnected = (evt: Event) => {
-      try {
-        const peer = (evt as CustomEvent).detail?.peer;
-        if (peer) {
-          if (processedPeerConnectionsRef.current.has(peer)) {
-            return;
-          }
-          processedPeerConnectionsRef.current.add(peer);
-          connectionAttemptsRef.current.set(peer, { inProgress: false, lastAttempt: Date.now() });
-        }
-      } catch { }
-    };
-
-    const handlePeerDisconnected = (evt: Event) => {
-      try {
-        const peer = (evt as CustomEvent).detail?.peer;
-        if (peer) {
-          processedPeerConnectionsRef.current.delete(peer);
-        }
-      } catch { }
-    };
-
-    window.addEventListener('p2p-peer-connected', handlePeerConnected as EventListener);
-    window.addEventListener('p2p-peer-disconnected', handlePeerDisconnected as EventListener);
-    return () => {
-      window.removeEventListener('p2p-peer-connected', handlePeerConnected as EventListener);
-      window.removeEventListener('p2p-peer-disconnected', handlePeerDisconnected as EventListener);
-    };
-  }, []);
-
-  useEffect(() => {
-    if (selectedConversation !== lastSelectedConversationRef.current) {
-      if (lastSelectedConversationRef.current !== null) {
-        userInitiatedSelectionRef.current = true;
-      }
-      lastSelectedConversationRef.current = selectedConversation;
-    }
-
-    const isInitialized = p2pMessaging.p2pStatus?.isInitialized ?? false;
-    const signalingConnected = p2pMessaging.p2pStatus?.signalingConnected ?? false;
-
-    if (!isInitialized || !signalingConnected) { return; }
-    if (!selectedConversation || !p2pHybridKeys) { return; }
-    if (!userInitiatedSelectionRef.current) { return; }
-
-    const p2p = p2pMessagingRef.current;
-    if (!p2p?.isPeerConnected || !p2p?.connectToPeer) return;
-
-    const connected = p2p.isPeerConnected(selectedConversation);
-
-    if (!connected) {
-      const now = Date.now();
-      const attemptInfo = connectionAttemptsRef.current.get(selectedConversation);
-
-      if (attemptInfo?.inProgress) {
-        return;
-      }
-
-      if (attemptInfo && (now - attemptInfo.lastAttempt) < 10000) {
-        return;
-      }
-
-      connectionAttemptsRef.current.set(selectedConversation, { inProgress: true, lastAttempt: now });
-
-      p2p.connectToPeer(selectedConversation)
-        .then(() => {
-          connectionAttemptsRef.current.set(selectedConversation, { inProgress: false, lastAttempt: now });
-        })
-        .catch(() => {
-          connectionAttemptsRef.current.set(selectedConversation, { inProgress: false, lastAttempt: now });
-          SecurityAuditLogger.log('info', 'p2p-connect-failed-fallback-server', {});
-        });
-    }
-  }, [selectedConversation, p2pHybridKeys, p2pMessaging.p2pStatus?.isInitialized, p2pMessaging.p2pStatus?.signalingConnected]);
 
   // Get messages for the selected conversation
   const conversationMessagesCacheRef = useRef(new Map<string, { arr: Message[]; length: number; lastId?: string; lastTs?: number; receiptHash?: string; reactionHash?: string; contentHash?: string }>());
@@ -1650,141 +1240,11 @@ const ChatApp: React.FC = () => {
 
   const p2pConnectedPeers = p2pMessaging?.p2pStatus?.connectedPeers ?? [];
   const p2pConnectedStatus = useMemo(() => {
-    if (!selectedConversation || !p2pMessagingRef.current?.isPeerConnected) return false;
-    return p2pMessagingRef.current.isPeerConnected(selectedConversation);
+    if (!selectedConversation || !p2pMessaging?.isPeerConnected) return false;
+    return p2pMessaging.isPeerConnected(selectedConversation);
   }, [selectedConversation, p2pConnectedPeers.includes(selectedConversation)]);
 
-  // Handle conversation message clearing
-  useEffect(() => {
-    const lastHandled = new Map<string, number>();
 
-    const handleClearConversationMessages = (event: CustomEvent) => {
-      try {
-        if (!allowEvent('clear-conversation-messages')) return;
-        const detail = (event as CustomEvent).detail;
-        if (!isPlainObject(detail) || hasPrototypePollutionKeys(detail)) return;
-
-        const username = sanitizeNonEmptyText((detail as any).username, MAX_LOCAL_USERNAME_LENGTH, false);
-        if (!username || isUnsafeObjectKey(username)) return;
-
-        if (lastHandled.size > 512) {
-          lastHandled.clear();
-        }
-        const now = Date.now();
-        const last = lastHandled.get(username) || 0;
-        if (now - last < 2000) return;
-        lastHandled.set(username, now);
-
-        setMessages(prev => prev.filter(msg =>
-          !(msg.sender === username || msg.recipient === username)
-        ));
-      } catch { }
-    };
-
-    window.addEventListener('clear-conversation-messages', handleClearConversationMessages as EventListener);
-    return () => {
-      window.removeEventListener('clear-conversation-messages', handleClearConversationMessages as EventListener);
-    };
-  }, []);
-
-  // Handle queued message processing when user keys become available
-  useEffect(() => {
-    const processedKeysAvailableRef = new Map<string, number>();
-
-    const handleUserKeysAvailable = async (event: CustomEvent) => {
-      try {
-        if (!allowEvent('user-keys-available')) return;
-        const detail = (event as CustomEvent).detail;
-        if (!isPlainObject(detail) || hasPrototypePollutionKeys(detail)) return;
-
-        const username = sanitizeNonEmptyText((detail as any).username, MAX_LOCAL_USERNAME_LENGTH, false);
-        if (!username || isUnsafeObjectKey(username)) return;
-
-        if (processedKeysAvailableRef.size > 512) {
-          processedKeysAvailableRef.clear();
-        }
-        const now = Date.now();
-        const last = processedKeysAvailableRef.get(username) || 0;
-        if (now - last < 2000) return;
-        processedKeysAvailableRef.set(username, now);
-
-        const hybridKeysRaw = (detail as any).hybridKeys;
-        if (!isPlainObject(hybridKeysRaw) || hasPrototypePollutionKeys(hybridKeysRaw)) return;
-
-        const maybeKyber = (hybridKeysRaw as any).kyberPublicBase64;
-        const maybeDilithium = (hybridKeysRaw as any).dilithiumPublicBase64;
-        const maybeX25519 = (hybridKeysRaw as any).x25519PublicBase64;
-        if ((typeof maybeKyber === 'string' && maybeKyber.length > 10_000) || (typeof maybeDilithium === 'string' && maybeDilithium.length > 10_000)) {
-          return;
-        }
-        if (typeof maybeX25519 === 'string' && maybeX25519.length > 1_000) {
-          return;
-        }
-
-        const hybridKeys = sanitizeHybridKeys(hybridKeysRaw as any) as any;
-        if (!hybridKeys?.kyberPublicBase64 || !hybridKeys?.dilithiumPublicBase64) return;
-
-        SecurityAuditLogger.log('info', 'user-keys-available', { hasKeys: true });
-
-        let targetUser = Database.users.find(user => user.username === username);
-        if (!targetUser) {
-          targetUser = {
-            id: crypto.randomUUID(),
-            username,
-            isOnline: true,
-            hybridPublicKeys: hybridKeys
-          };
-          Database.setUsers(prev => [...prev, targetUser!]);
-          SecurityAuditLogger.log('info', 'user-added-with-keys', {});
-        } else if (!targetUser.hybridPublicKeys) {
-          Database.setUsers(prev => prev.map(user =>
-            user.username === username
-              ? { ...user, hybridPublicKeys: hybridKeys, isOnline: true }
-              : user
-          ));
-          targetUser = { ...targetUser, hybridPublicKeys: hybridKeys, isOnline: true };
-          SecurityAuditLogger.log('info', 'user-keys-updated', {});
-        }
-
-        const queuedMessages = await secureMessageQueue.processQueueForUser(username);
-        if (queuedMessages.length === 0) { return; }
-
-        targetUser = Database.users.find(user => user.username === username) || targetUser;
-
-        const sentIds: string[] = [];
-        for (const queuedMsg of queuedMessages) {
-          try {
-            await messageSender.handleSendMessage(
-              targetUser,
-              queuedMsg.content,
-              queuedMsg.replyTo,
-              queuedMsg.fileData,
-              queuedMsg.messageSignalType,
-              queuedMsg.originalMessageId,
-              queuedMsg.editMessageId
-            );
-            sentIds.push(queuedMsg.id);
-            await new Promise<void>((r) => setTimeout(r, 0));
-          } catch (_error) {
-            SecurityAuditLogger.log('error', 'queued-message-send-failed', { error: _error instanceof Error ? _error.message : 'unknown' });
-          }
-        }
-
-        if (sentIds.length) {
-          setMessages(prev => prev.map(msg => (
-            sentIds.includes(msg.id)
-              ? { ...msg, pending: false, receipt: { delivered: true, read: false } }
-              : msg
-          )));
-        }
-      } catch { }
-    };
-
-    window.addEventListener('user-keys-available', handleUserKeysAvailable as EventListener);
-    return () => {
-      window.removeEventListener('user-keys-available', handleUserKeysAvailable as EventListener);
-    };
-  }, [Database.users, messageSender]);
 
   // Restore encrypted block list from server when logged in and passphrase available
   useEffect(() => {
@@ -1800,133 +1260,15 @@ const ChatApp: React.FC = () => {
     tryRestoreBlockList();
   }, [Authentication.isLoggedIn, Authentication.accountAuthenticated, Authentication.passphrasePlaintextRef?.current, Authentication.aesKeyRef?.current]);
 
-  // Apply server-provided block list response
-  useEffect(() => {
-
-    const onBlockListResponse = async (e: Event) => {
-      try {
-        if (!allowEvent('block-list-response')) return;
-        const detail = (e as CustomEvent).detail;
-        if (!isPlainObject(detail) || hasPrototypePollutionKeys(detail)) return;
-
-        const passphrase = Authentication.passphrasePlaintextRef?.current || '';
-        const kyberSecret = Authentication.hybridKeysRef?.current?.kyber?.secretKey || null;
-        const key = passphrase ? passphrase : (kyberSecret ? { kyberSecret } : null);
-        if (!key || !Database.dbInitialized) return;
-
-        const encryptedDataRaw = typeof (detail as any).encryptedBlockList === 'string' ? (detail as any).encryptedBlockList : null;
-        const saltRaw = typeof (detail as any).salt === 'string' ? (detail as any).salt : null;
-        if (!encryptedDataRaw || !saltRaw) return;
-
-        const maxChars = Math.ceil((MAX_INLINE_BASE64_BYTES * 4) / 3) + 128;
-        const encryptedData = encryptedDataRaw.trim();
-        if (!encryptedData || encryptedData.length > maxChars) return;
-        if (!/^[A-Za-z0-9+/]*={0,2}$/.test(encryptedData)) return;
-        const pad = encryptedData.endsWith('==') ? 2 : encryptedData.endsWith('=') ? 1 : 0;
-        const estimatedBytes = Math.floor((encryptedData.length * 3) / 4) - pad;
-        if (estimatedBytes <= 0 || estimatedBytes > MAX_INLINE_BASE64_BYTES) return;
-
-        const salt = saltRaw.trim();
-        if (!salt || salt.length > 256) return;
-        if (!/^[A-Za-z0-9+/]*={0,2}$/.test(salt)) return;
-
-        const lastUpdated = typeof (detail as any).lastUpdated === 'number' && Number.isFinite((detail as any).lastUpdated)
-          ? (detail as any).lastUpdated
-          : null;
-        const versionRaw = typeof (detail as any).version === 'number' && Number.isFinite((detail as any).version)
-          ? (detail as any).version
-          : 3;
-        const version = versionRaw >= 3 ? Math.floor(versionRaw) : 3;
-        await new Promise((r) => setTimeout(r, 0));
-        await blockingSystem.handleServerBlockListData(encryptedData, salt, lastUpdated, version, key as any);
-      } catch { }
-    };
-    window.addEventListener('block-list-response', onBlockListResponse as EventListener);
-    return () => window.removeEventListener('block-list-response', onBlockListResponse as EventListener);
-  }, [Authentication.passphrasePlaintextRef?.current]);
-
-  useEffect(() => {
-    const lastHandled = new Map<string, number>();
-
-    const handleUserExistsResponse = async (event: Event) => {
-      try {
-        if (!allowEvent('user-exists-response')) return;
-        const detail = (event as CustomEvent).detail;
-        if (!isPlainObject(detail) || hasPrototypePollutionKeys(detail)) return;
-
-        const username = sanitizeNonEmptyText((detail as any).username, MAX_LOCAL_USERNAME_LENGTH, false);
-        if (!username || isUnsafeObjectKey(username)) return;
-
-        if (lastHandled.size > 512) {
-          lastHandled.clear();
-        }
-        const now = Date.now();
-        const last = lastHandled.get(username) || 0;
-        if (now - last < 2000) {
-          return;
-        }
-        lastHandled.set(username, now);
-
-        await new Promise((r) => setTimeout(r, 0));
-
-        const exists = (detail as any).exists === true;
-        const hybridPublicKeys = (detail as any).hybridPublicKeys;
-
-        if (!exists || !hybridPublicKeys) return;
-        if (!isPlainObject(hybridPublicKeys) || hasPrototypePollutionKeys(hybridPublicKeys)) return;
-
-        const maybeKyber = (hybridPublicKeys as any).kyberPublicBase64;
-        const maybeDilithium = (hybridPublicKeys as any).dilithiumPublicBase64;
-        if ((typeof maybeKyber === 'string' && maybeKyber.length > 10_000) || (typeof maybeDilithium === 'string' && maybeDilithium.length > 10_000)) {
-          return;
-        }
-
-        const sanitized = sanitizeHybridKeys(hybridPublicKeys as any);
-        if (!sanitized?.kyberPublicBase64 || !sanitized?.dilithiumPublicBase64) return;
-
-        if (sanitized?.kyberPublicBase64 && isValidKyberPublicKeyBase64(sanitized.kyberPublicBase64)) {
-          try {
-            if (typeof (window as any).edgeApi?.storePQKeys === 'function') {
-              await (window as any).edgeApi.storePQKeys({
-                username,
-                kyberPublicKey: sanitized.kyberPublicBase64,
-                dilithiumPublicKey: sanitized.dilithiumPublicBase64,
-                x25519PublicKey: sanitized.x25519PublicBase64
-              });
-            }
-          } catch { }
-        }
-
-        setTimeout(() => {
-          try {
-            window.dispatchEvent(new CustomEvent('user-keys-available', {
-              detail: { username, hybridKeys: sanitized }
-            }));
-          } catch { }
-        }, 0);
-      } catch { }
-    };
-
-    window.addEventListener('user-exists-response', handleUserExistsResponse as EventListener);
-    return () => window.removeEventListener('user-exists-response', handleUserExistsResponse as EventListener);
-  }, []);
-
   // Handle settings open/close events
   useEffect(() => {
-    const handleOpenSettings = () => {
-      setShowSettings(true);
-    };
-
-    const handleCloseSettings = () => {
-      setShowSettings(false);
-    };
-
-    window.addEventListener('openSettings', handleOpenSettings);
-    window.addEventListener('closeSettings', handleCloseSettings);
-
+    const handleOpenSettings = () => setShowSettings(true);
+    const handleCloseSettings = () => setShowSettings(false);
+    window.addEventListener(EventType.OPEN_SETTINGS, handleOpenSettings);
+    window.addEventListener(EventType.CLOSE_SETTINGS, handleCloseSettings);
     return () => {
-      window.removeEventListener('openSettings', handleOpenSettings);
-      window.removeEventListener('closeSettings', handleCloseSettings);
+      window.removeEventListener(EventType.OPEN_SETTINGS, handleOpenSettings);
+      window.removeEventListener(EventType.CLOSE_SETTINGS, handleCloseSettings);
     };
   }, []);
 
@@ -1973,10 +1315,10 @@ const ChatApp: React.FC = () => {
         console.error('[App] Failed to store PQ session keys:', e);
       }
     };
-    window.addEventListener('app:entering-background', handleEnteringBackground);
+    window.addEventListener(EventType.APP_ENTERING_BACKGROUND, handleEnteringBackground);
 
     return () => {
-      window.removeEventListener('app:entering-background', handleEnteringBackground);
+      window.removeEventListener(EventType.APP_ENTERING_BACKGROUND, handleEnteringBackground);
       if (!isEnteringBackgroundRef.current && torNetworkManager.isSupported()) {
         torNetworkManager.shutdown();
       }
@@ -2074,8 +1416,8 @@ const ChatApp: React.FC = () => {
         console.error('[Index] Failed to handle auth-ui-back (server):', _e);
       }
     };
-    window.addEventListener('auth-ui-back', handleAuthUiBack as EventListener);
-    return () => window.removeEventListener('auth-ui-back', handleAuthUiBack as EventListener);
+    window.addEventListener(EventType.AUTH_UI_BACK, handleAuthUiBack as EventListener);
+    return () => window.removeEventListener(EventType.AUTH_UI_BACK, handleAuthUiBack as EventListener);
   }, []);
 
   useEffect(() => {
@@ -2083,284 +1425,6 @@ const ChatApp: React.FC = () => {
       Authentication.storeUsernameMapping(Database.secureDBRef.current);
     }
   }, [Authentication.isLoggedIn, Database.secureDBRef.current, Authentication.originalUsernameRef.current]);
-
-  useEffect(() => {
-
-    const handleLocalMessageDelete = (event: CustomEvent) => {
-      try {
-        if (!allowEvent(EventType.LOCAL_MESSAGE_DELETE)) return;
-        const detail = (event as any).detail;
-        if (!isPlainObject(detail) || hasPrototypePollutionKeys(detail)) return;
-        const messageId = sanitizeNonEmptyText(detail.messageId, MAX_LOCAL_MESSAGE_ID_LENGTH, false);
-        if (!messageId) return;
-
-        let messageToPersist: Message | null = null;
-        setMessages(prev => {
-          const updatedMessages = prev.map(msg => {
-            if (msg.id === messageId) {
-              const updated = { ...msg, isDeleted: true, content: 'This message was deleted' } as Message;
-              messageToPersist = updated;
-              return updated;
-            }
-            return msg;
-          });
-          return updatedMessages;
-        });
-
-        if (messageToPersist) {
-          try { void saveMessageWithContext(messageToPersist); } catch { }
-        }
-      } catch { }
-    };
-
-    const handleLocalMessageEdit = (event: CustomEvent) => {
-      try {
-        if (!allowEvent(EventType.LOCAL_MESSAGE_EDIT)) return;
-        const detail = (event as any).detail;
-        if (!isPlainObject(detail) || hasPrototypePollutionKeys(detail)) return;
-        const messageId = sanitizeNonEmptyText(detail.messageId, MAX_LOCAL_MESSAGE_ID_LENGTH, false);
-        const newContent = sanitizeNonEmptyText(detail.newContent, MAX_LOCAL_MESSAGE_LENGTH, true);
-        if (!messageId || !newContent) return;
-
-        let messageToPersist: Message | null = null;
-        setMessages(prev => {
-          const updatedMessages = prev.map(msg => {
-            if (msg.id === messageId) {
-              const updated = { ...msg, content: newContent, isEdited: true } as Message;
-              messageToPersist = updated;
-              return updated;
-            }
-            return msg;
-          });
-          return updatedMessages;
-        });
-
-        if (messageToPersist) {
-          try { void saveMessageWithContext(messageToPersist); } catch { }
-        }
-      } catch { }
-    };
-
-    const handleLocalFileMessage = async (event: CustomEvent) => {
-      try {
-        if (!allowEvent('local-file-message')) return;
-        const detail = (event as any).detail;
-        if (!isPlainObject(detail) || hasPrototypePollutionKeys(detail)) return;
-
-        const fileId = sanitizeNonEmptyText(detail.id, MAX_LOCAL_MESSAGE_ID_LENGTH, false);
-        if (!fileId) return;
-
-        const filenameRaw = typeof detail.filename === 'string' ? detail.filename : 'file';
-        const filename = sanitizeFilename(filenameRaw, 128);
-        const mimeType = sanitizeNonEmptyText(detail.mimeType, MAX_LOCAL_MIMETYPE_LENGTH, false) || 'application/octet-stream';
-        const sender = sanitizeNonEmptyText(detail.sender, MAX_LOCAL_USERNAME_LENGTH, false) || '';
-        const recipient = sanitizeNonEmptyText(detail.recipient, MAX_LOCAL_USERNAME_LENGTH, false) || '';
-
-        const sizeCandidate = typeof detail.fileSize === 'number' ? detail.fileSize : typeof detail.size === 'number' ? detail.size : undefined;
-        const fileSize =
-          typeof sizeCandidate === 'number' && Number.isFinite(sizeCandidate) && sizeCandidate >= 0 && sizeCandidate <= MAX_LOCAL_FILE_SIZE_BYTES
-            ? sizeCandidate
-            : undefined;
-
-        const content = sanitizeNonEmptyText(detail.content, 2048, false) || '';
-        const blobUrl = content.startsWith('blob:') ? content : '';
-
-        let secureDbSaveSucceeded = false;
-        try {
-          if (Database.secureDBRef.current && blobUrl) {
-            const controller = new AbortController();
-            const timeout = setTimeout(() => controller.abort(), 15_000);
-            try {
-              const resp = await fetch(blobUrl, { signal: controller.signal });
-              if (resp.ok) {
-                const fetchedBlob = await resp.blob();
-                if (fetchedBlob.size > 0 && fetchedBlob.size <= MAX_LOCAL_FILE_SIZE_BYTES) {
-                  const saveResult = await Database.secureDBRef.current.saveFile(fileId, fetchedBlob);
-                  secureDbSaveSucceeded = Boolean(saveResult?.success);
-                  if (!saveResult.success && saveResult.quotaExceeded) {
-                    toast.warning('Storage limit reached. This file will not persist after restart.', {
-                      duration: 5000
-                    });
-                  }
-                }
-              }
-            } finally {
-              clearTimeout(timeout);
-            }
-          }
-        } catch (err) {
-          console.error('[Index] Failed to save file to SecureDB:', err);
-        }
-
-        let timestamp: Date;
-        try {
-          if (typeof detail.timestamp === 'number' && Number.isFinite(detail.timestamp)) {
-            timestamp = new Date(detail.timestamp);
-          } else if (typeof detail.timestamp === 'string') {
-            timestamp = new Date(detail.timestamp);
-          } else if (detail.timestamp instanceof Date) {
-            timestamp = detail.timestamp;
-          } else {
-            timestamp = new Date();
-          }
-          if (isNaN(timestamp.getTime())) {
-            timestamp = new Date();
-          }
-        } catch {
-          timestamp = new Date();
-        }
-
-        const receiptDetail = detail.receipt;
-        const receipt =
-          isPlainObject(receiptDetail) && !hasPrototypePollutionKeys(receiptDetail)
-            ? {
-              delivered: typeof receiptDetail.delivered === 'boolean' ? receiptDetail.delivered : false,
-              read: typeof receiptDetail.read === 'boolean' ? receiptDetail.read : false
-            }
-            : {
-              delivered: false,
-              read: false
-            };
-
-        let safeOriginalBase64Data: string | undefined;
-        if (!secureDbSaveSucceeded && typeof detail.originalBase64Data === 'string') {
-          const raw = detail.originalBase64Data;
-          const maxChars = Math.ceil((MAX_INLINE_BASE64_BYTES * 4) / 3) + 128;
-          if (raw.length > 0 && raw.length <= maxChars) {
-            let normalized = raw.trim();
-            const commaIndex = normalized.indexOf(',');
-            if (commaIndex > 0 && commaIndex < 128) {
-              normalized = normalized.slice(commaIndex + 1);
-            }
-            normalized = normalized.replace(/\s+/g, '').replace(/-/g, '+').replace(/_/g, '/');
-            if (/^[A-Za-z0-9+/]*={0,2}$/.test(normalized)) {
-              const pad = normalized.endsWith('==') ? 2 : normalized.endsWith('=') ? 1 : 0;
-              const estimatedBytes = Math.floor((normalized.length * 3) / 4) - pad;
-              if (estimatedBytes > 0 && estimatedBytes <= MAX_INLINE_BASE64_BYTES) {
-                safeOriginalBase64Data = normalized;
-              }
-            }
-          }
-        }
-
-        const newMessage: Message = {
-          id: fileId,
-          content: blobUrl,
-          sender,
-          recipient,
-          timestamp,
-          isCurrentUser: true,
-          type: 'file',
-          filename,
-          fileSize,
-          mimeType,
-          receipt,
-          ...(safeOriginalBase64Data ? { originalBase64Data: safeOriginalBase64Data } : {}),
-          version: typeof detail.version === 'string' && detail.version.length > 0 ? detail.version : '1'
-        } as Message;
-
-        let messageToPersist: Message | null = null;
-        setMessages(prev => {
-          const existingMessage = prev.find(msg => msg.id === fileId);
-          if (existingMessage) {
-            return prev;
-          }
-          messageToPersist = newMessage;
-          return [...prev, newMessage];
-        });
-
-        if (messageToPersist) {
-          try { void saveMessageWithContext(messageToPersist); } catch { }
-        }
-      } catch { }
-    };
-
-    window.addEventListener(EventType.LOCAL_MESSAGE_DELETE, handleLocalMessageDelete as EventListener);
-    window.addEventListener(EventType.LOCAL_MESSAGE_EDIT, handleLocalMessageEdit as EventListener);
-    window.addEventListener('local-file-message', handleLocalFileMessage as EventListener);
-
-    const handleLocalReactionUpdate = (event: CustomEvent) => {
-      try {
-        if (!allowEvent(EventType.LOCAL_REACTION_UPDATE)) return;
-        const detail = (event as any).detail;
-        if (!isPlainObject(detail) || hasPrototypePollutionKeys(detail)) return;
-        const messageId = sanitizeNonEmptyText(detail.messageId, MAX_LOCAL_MESSAGE_ID_LENGTH, false);
-        const emoji = sanitizeNonEmptyText(detail.emoji, MAX_LOCAL_EMOJI_LENGTH, false);
-        const username = sanitizeNonEmptyText(detail.username, MAX_LOCAL_USERNAME_LENGTH, false);
-        const isAdd = typeof detail.isAdd === 'boolean' ? detail.isAdd : null;
-        if (!messageId || !emoji || !username) return;
-        if (isAdd === null) return;
-        if (isUnsafeObjectKey(emoji)) return;
-
-        let updatedMessage: Message | null = null;
-
-        setMessages(prev => prev.map(msg => {
-          if (msg.id !== messageId) return msg;
-
-          const currentReactions: Record<string, string[]> = Object.create(null);
-          if (msg.reactions && typeof msg.reactions === 'object') {
-            for (const [reactionKey, rawUsers] of Object.entries(msg.reactions as Record<string, unknown>)) {
-              if (typeof reactionKey !== 'string' || isUnsafeObjectKey(reactionKey)) continue;
-              if (!Array.isArray(rawUsers)) continue;
-              const safeUsers: string[] = [];
-              const seen = new Set<string>();
-              for (const candidate of rawUsers as unknown[]) {
-                if (safeUsers.length >= 250) break;
-                const cleaned = sanitizeNonEmptyText(candidate, MAX_LOCAL_USERNAME_LENGTH, false);
-                if (!cleaned) continue;
-                if (seen.has(cleaned)) continue;
-                seen.add(cleaned);
-                safeUsers.push(cleaned);
-              }
-              if (safeUsers.length > 0) {
-                currentReactions[reactionKey] = safeUsers;
-              }
-            }
-          }
-
-          const users = currentReactions[emoji] ? [...currentReactions[emoji]] : [];
-          if (isAdd) {
-            if (!users.includes(username) && users.length < 250) {
-              users.push(username);
-            }
-          } else {
-            const idx = users.indexOf(username);
-            if (idx !== -1) {
-              users.splice(idx, 1);
-            }
-          }
-
-          if (users.length > 0) {
-            currentReactions[emoji] = users;
-          } else {
-            delete currentReactions[emoji];
-          }
-
-          const updated = { ...msg, reactions: currentReactions };
-          updatedMessage = updated;
-          return updated;
-        }));
-
-        if (updatedMessage) {
-          try {
-            void saveMessageWithContext(updatedMessage);
-          } catch (e) {
-            console.error('[Index] Failed to persist reaction update:', e);
-          }
-        }
-      } catch { }
-    };
-
-    window.addEventListener(EventType.LOCAL_REACTION_UPDATE, handleLocalReactionUpdate as EventListener);
-
-    return () => {
-      window.removeEventListener(EventType.LOCAL_MESSAGE_DELETE, handleLocalMessageDelete as EventListener);
-      window.removeEventListener(EventType.LOCAL_MESSAGE_EDIT, handleLocalMessageEdit as EventListener);
-      window.removeEventListener('local-file-message', handleLocalFileMessage as EventListener);
-      window.removeEventListener(EventType.LOCAL_REACTION_UPDATE, handleLocalReactionUpdate as EventListener);
-    };
-  }, [setMessages, saveMessageWithContext]);
-
 
   if (isResumingFromBackground) {
     return (

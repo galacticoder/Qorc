@@ -9,7 +9,7 @@ import { fileURLToPath } from 'url';
 import { WebSocketServer } from 'ws';
 import { SignalType } from './signals.js';
 import { CryptoUtils } from './crypto/unified-crypto.js';
-import { BlockingDatabase, initDatabase } from './database/database.js';
+import { BlockingDatabase, UserDatabase, initDatabase } from './database/database.js';
 import * as ServerConfig from './config/config.js';
 import * as authentication from './authentication/authentication.js';
 import { setServerPasswordOnInput } from './authentication/auth-utils.js';

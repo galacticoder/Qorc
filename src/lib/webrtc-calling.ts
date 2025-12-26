@@ -18,125 +18,18 @@ import {
   ScreenSharingFrameRate,
 } from './screen-sharing-consts';
 import { torNetworkManager } from './tor-network';
+import {
+  type CallState,
+  type CallOffer,
+  type CallAnswer,
+  type CallSignal,
+  CALL_SIGNAL_RATE_WINDOW_MS,
+  CALL_SIGNAL_RATE_MAX,
+  validateCallSignal,
+} from './webrtc-calling-types';
+import { EventType } from './event-types';
 
-export interface CallState {
-  id: string;
-  type: 'audio' | 'video';
-  direction: 'incoming' | 'outgoing';
-  status: 'ringing' | 'connecting' | 'connected' | 'ended' | 'declined' | 'missed';
-  peer: string;
-  startTime?: number;
-  endTime?: number;
-  duration?: number;
-  endReason?: 'user' | 'timeout' | 'missed' | 'failed' | 'connection-lost' | 'shutdown' | string;
-}
-
-export interface CallOffer {
-  callId: string;
-  type: 'audio' | 'video';
-  from: string;
-  to: string;
-  sdp: RTCSessionDescriptionInit;
-  timestamp: number;
-}
-
-export interface CallAnswer {
-  callId: string;
-  from: string;
-  to: string;
-  sdp: RTCSessionDescriptionInit;
-  accepted: boolean;
-}
-
-export interface CallSignal {
-  type: 'offer' | 'answer' | 'ice-candidate' | 'end-call' | 'decline-call' | 'connected';
-  callId: string;
-  from: string;
-  to: string;
-  data?: any;
-  timestamp: number;
-  isRenegotiation?: boolean;
-  pqSignature?: {
-    signature: string;
-    publicKey: string;
-  };
-}
-
-const isPlainObject = (value: unknown): value is Record<string, unknown> => {
-  if (typeof value !== 'object' || value === null) return false;
-  const proto = Object.getPrototypeOf(value);
-  return proto === Object.prototype || proto === null;
-};
-
-const hasPrototypePollutionKeys = (obj: Record<string, unknown>): boolean => {
-  return ['__proto__', 'prototype', 'constructor'].some((key) => Object.prototype.hasOwnProperty.call(obj, key));
-};
-
-const CALL_SIGNAL_RATE_WINDOW_MS = 10_000;
-const CALL_SIGNAL_RATE_MAX = 2500;
-const MAX_CALL_ID_LENGTH = 256;
-const MAX_CALL_USERNAME_LENGTH = 256;
-const MAX_CALL_SIG_BASE64_LENGTH = 40_000;
-const MAX_CALL_SDP_LENGTH = 2_000_000;
-const MAX_CALL_CANDIDATE_LENGTH = 16_384;
-const CALL_SIGNAL_MAX_SKEW_MS = 30 * 60 * 1000;
-
-const validateCallSignal = (detail: unknown): CallSignal | null => {
-  if (!isPlainObject(detail) || hasPrototypePollutionKeys(detail)) return null;
-
-  const type = (detail as any).type;
-  const callId = (detail as any).callId;
-  const from = (detail as any).from;
-  const to = (detail as any).to;
-  const timestamp = (detail as any).timestamp;
-
-  if (
-    type !== 'offer' &&
-    type !== 'answer' &&
-    type !== 'ice-candidate' &&
-    type !== 'end-call' &&
-    type !== 'decline-call' &&
-    type !== 'connected'
-  ) {
-    return null;
-  }
-  if (typeof callId !== 'string' || callId.length === 0 || callId.length > MAX_CALL_ID_LENGTH) return null;
-  if (typeof from !== 'string' || from.length === 0 || from.length > MAX_CALL_USERNAME_LENGTH) return null;
-  if (typeof to !== 'string' || to.length === 0 || to.length > MAX_CALL_USERNAME_LENGTH) return null;
-  if (!Number.isFinite(timestamp)) return null;
-  const skew = Math.abs(Date.now() - timestamp);
-  if (skew > CALL_SIGNAL_MAX_SKEW_MS) return null;
-
-  const pqSignature = (detail as any).pqSignature;
-  if (!isPlainObject(pqSignature) || hasPrototypePollutionKeys(pqSignature)) return null;
-  if (typeof (pqSignature as any).signature !== 'string' || (pqSignature as any).signature.length > MAX_CALL_SIG_BASE64_LENGTH) return null;
-  if (typeof (pqSignature as any).publicKey !== 'string' || (pqSignature as any).publicKey.length > MAX_CALL_SIG_BASE64_LENGTH) return null;
-
-  const data = (detail as any).data;
-  if (type === 'offer' || type === 'answer') {
-    if (!isPlainObject(data) || hasPrototypePollutionKeys(data)) return null;
-    const sdpObj = (data as any).sdp;
-    if (typeof sdpObj === 'string') {
-      if (sdpObj.length === 0 || sdpObj.length > MAX_CALL_SDP_LENGTH) return null;
-    } else if (isPlainObject(sdpObj)) {
-      if (hasPrototypePollutionKeys(sdpObj)) return null;
-      if (typeof sdpObj.type !== 'string' || sdpObj.type !== type) return null;
-      if (typeof sdpObj.sdp !== 'string' || sdpObj.sdp.length === 0 || sdpObj.sdp.length > MAX_CALL_SDP_LENGTH) return null;
-    } else {
-      return null;
-    }
-  }
-  if (type === 'ice-candidate') {
-    if (!isPlainObject(data) || hasPrototypePollutionKeys(data)) return null;
-    if (typeof (data as any).candidate !== 'string' || (data as any).candidate.length === 0 || (data as any).candidate.length > MAX_CALL_CANDIDATE_LENGTH) return null;
-    const sdpMLineIndex = (data as any).sdpMLineIndex;
-    const sdpMid = (data as any).sdpMid;
-    if (sdpMLineIndex != null && !Number.isFinite(sdpMLineIndex)) return null;
-    if (sdpMid != null && typeof sdpMid !== 'string') return null;
-  }
-
-  return detail as unknown as CallSignal;
-};
+export type { CallState, CallOffer, CallAnswer, CallSignal };
 
 export class WebRTCCallingService {
   private localStream: MediaStream | null = null;
@@ -1166,7 +1059,7 @@ export class WebRTCCallingService {
 
     let svc: any = (window as any).p2pService || null;
     if (!svc) {
-      try { window.dispatchEvent(new CustomEvent('p2p-init-required', { detail: { source: 'calling', peer } })); } catch { }
+      try { window.dispatchEvent(new CustomEvent(EventType.P2P_INIT_REQUIRED, { detail: { source: 'calling', peer } })); } catch { }
       svc = await this.waitForP2PService(15000);
     }
     if (!svc) {
@@ -1839,14 +1732,14 @@ export class WebRTCCallingService {
               if (d?.requestId === reqId) {
                 if (!settled) { settled = true; }
                 clearTimeout(timeout);
-                window.removeEventListener('p2p-call-signal-result', onResult as EventListener);
+                window.removeEventListener(EventType.P2P_CALL_SIGNAL_RESULT, onResult as EventListener);
                 resolve(!!d.success);
               }
             } catch { }
           };
-          try { window.addEventListener('p2p-call-signal-result', onResult as EventListener); } catch { }
+          try { window.addEventListener(EventType.P2P_CALL_SIGNAL_RESULT, onResult as EventListener); } catch { }
           try {
-            window.dispatchEvent(new CustomEvent('p2p-call-signal-send', {
+            window.dispatchEvent(new CustomEvent(EventType.P2P_CALL_SIGNAL_SEND, {
               detail: { to: signal.to, signal: signedSignal, requestId: reqId }
             }));
           } catch { resolve(false); }

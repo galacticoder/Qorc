@@ -7,6 +7,7 @@ import { SecureDB } from './secureDB';
 import { CryptoUtils } from './unified-crypto';
 import { SecureMemory } from './secure-memory';
 import { blockStatusCache } from './block-status-cache';
+import { EventType } from './event-types';
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -728,10 +729,10 @@ export class BlockingSystem {
     blockStatusCache.set(username, true);
     this.log('block.success', { username: username.slice(0, 8) + '...', totalBlocked: blockList.length });
 
-    window.dispatchEvent(new CustomEvent('block-status-changed', {
+    window.dispatchEvent(new CustomEvent(EventType.BLOCK_STATUS_CHANGED, {
       detail: { username, isBlocked: true }
     }));
-    window.dispatchEvent(new CustomEvent('user-blocked', {
+    window.dispatchEvent(new CustomEvent(EventType.USER_BLOCKED, {
       detail: { username }
     }));
   }
@@ -748,14 +749,14 @@ export class BlockingSystem {
       this.log('unblock.success', { username: username.slice(0, 8) + '...', totalBlocked: filteredList.length });
 
       // Dispatch event to update UI
-      window.dispatchEvent(new CustomEvent('block-status-changed', {
+      window.dispatchEvent(new CustomEvent(EventType.BLOCK_STATUS_CHANGED, {
         detail: { username, isBlocked: false }
       }));
     } else {
       blockStatusCache.set(username, false);
       this.log('unblock.notFound', { username: username.slice(0, 8) + '...' });
 
-      window.dispatchEvent(new CustomEvent('block-status-changed', {
+      window.dispatchEvent(new CustomEvent(EventType.BLOCK_STATUS_CHANGED, {
         detail: { username, isBlocked: false }
       }));
     }
@@ -862,7 +863,7 @@ export class BlockingSystem {
       });
     }
 
-    window.dispatchEvent(new CustomEvent('blocked-message', {
+    window.dispatchEvent(new CustomEvent(EventType.BLOCKED_MESSAGE, {
       detail: { timestamp: Date.now() }
     }));
 

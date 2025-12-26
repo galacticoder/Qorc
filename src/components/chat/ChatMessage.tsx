@@ -16,6 +16,7 @@ import { LinkExtractor } from "../../lib/link-extraction.ts";
 import { copyTextToClipboard } from "../../lib/clipboard";
 import { MessageContextMenu } from "./MessageContextMenu";
 import { UserAvatar } from "../ui/UserAvatar";
+import { EventType } from "../../lib/event-types";
 
 interface ExtendedChatMessageProps extends ChatMessageProps {
   readonly getDisplayUsername?: (username: string) => Promise<string>;
@@ -53,7 +54,7 @@ const parseSystemMessage = (content: string, message: any): { label: string; act
           label: 'Call back',
           onClick: () => {
             try {
-              window.dispatchEvent(new CustomEvent('ui-call-request', { detail: { peer, type: 'audio' } }));
+              window.dispatchEvent(new CustomEvent(EventType.UI_CALL_REQUEST, { detail: { peer, type: 'audio' } }));
             } catch { }
           }
         }];

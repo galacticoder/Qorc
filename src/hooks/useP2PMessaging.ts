@@ -7,6 +7,7 @@ import { useEffect, useRef, useState, useCallback } from 'react';
 import { WebRTCP2PService } from '../lib/webrtc-p2p';
 import { CryptoUtils } from '../lib/unified-crypto';
 import { SecurityAuditLogger } from '../lib/post-quantum-crypto';
+import { EventType } from '../lib/event-types';
 
 export interface P2PMessage {
   type: 'chat' | 'signal' | 'heartbeat' | 'dummy' | 'typing' | 'reaction' | 'file' | 'delivery-ack' | 'read-receipt';
@@ -594,10 +595,10 @@ export function useP2PMessaging(
           try { SecurityAuditLogger.log('info', 'p2p-peer-connected', { peer: peerUsername }); } catch { }
 
           try {
-            window.dispatchEvent(new CustomEvent('p2p-peer-reconnected', { detail: { peer: peerUsername } }));
+            window.dispatchEvent(new CustomEvent(EventType.P2P_PEER_RECONNECTED, { detail: { peer: peerUsername } }));
           } catch { }
 
-          try { window.dispatchEvent(new CustomEvent('p2p-peer-connected', { detail: { peer: peerUsername } })); } catch { }
+          try { window.dispatchEvent(new CustomEvent(EventType.P2P_PEER_CONNECTED, { detail: { peer: peerUsername } })); } catch { }
           clearLastError();
         });
 
@@ -1057,7 +1058,7 @@ export function useP2PMessaging(
             }
 
             try {
-              window.dispatchEvent(new CustomEvent('call-signal', { detail: callSignal }));
+              window.dispatchEvent(new CustomEvent(EventType.CALL_SIGNAL, { detail: callSignal }));
             } catch { }
             return;
           } catch (err) {
@@ -1091,7 +1092,7 @@ export function useP2PMessaging(
             const ackData = decryptedAck.payloadJson as any;
             if (ackData?.messageId) {
               window.dispatchEvent(
-                new CustomEvent('message-delivered', {
+                new CustomEvent(EventType.MESSAGE_DELIVERED, {
                   detail: { messageId: ackData.messageId, from: message.from },
                 }),
               );
@@ -1133,7 +1134,7 @@ export function useP2PMessaging(
               }
               processedReadReceiptsRef.current.add(id);
               window.dispatchEvent(
-                new CustomEvent('message-read', {
+                new CustomEvent(EventType.MESSAGE_READ, {
                   detail: { messageId: id, from: message.from },
                 }),
               );
@@ -1274,7 +1275,7 @@ export function useP2PMessaging(
         if (message.type === 'typing') {
           try {
             window.dispatchEvent(
-              new CustomEvent('p2p-typing-indicator', {
+              new CustomEvent(EventType.P2P_TYPING_INDICATOR, {
                 detail: {
                   from: message.from,
                   content: decryptedMessage.content,

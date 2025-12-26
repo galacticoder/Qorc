@@ -3,6 +3,7 @@ import { encryptLongTerm, decryptLongTerm, LongTermEnvelope } from './long-term-
 import websocketClient from './websocket';
 import { generateDefaultAvatar } from './utils';
 import { SignalType } from './signal-types';
+import { EventType } from './event-types';
 
 const MAX_AVATAR_SIZE_BYTES = 512 * 1024;
 const MAX_AVATAR_DIMENSION = 512;
@@ -95,7 +96,7 @@ class ProfilePictureSystem {
                         isDefault: true
                     };
                     await this.secureDB.store(AVATAR_STORE_KEY, 'own', this.ownAvatar).catch(() => { });
-                    window.dispatchEvent(new CustomEvent('profile-picture-updated', {
+                    window.dispatchEvent(new CustomEvent(EventType.PROFILE_PICTURE_UPDATED, {
                         detail: { type: 'own' }
                     }));
                 }
@@ -142,7 +143,7 @@ class ProfilePictureSystem {
             }
 
             this.initialized = true;
-            window.dispatchEvent(new CustomEvent('profile-picture-system-initialized'));
+            window.dispatchEvent(new CustomEvent(EventType.PROFILE_PICTURE_SYSTEM_INITIALIZED));
         } catch (error) {
             console.error('[ProfilePictureSystem] Initialize failed:', error);
         }
@@ -318,7 +319,7 @@ class ProfilePictureSystem {
 
             await this.uploadToServer();
 
-            window.dispatchEvent(new CustomEvent('profile-picture-updated', {
+            window.dispatchEvent(new CustomEvent(EventType.PROFILE_PICTURE_UPDATED, {
                 detail: { type: 'own' }
             }));
 
@@ -360,7 +361,7 @@ class ProfilePictureSystem {
         try {
             await this.secureDB.store(SETTINGS_KEY, 'profile', this.settings);
 
-            window.dispatchEvent(new CustomEvent('profile-settings-updated', {
+            window.dispatchEvent(new CustomEvent(EventType.PROFILE_SETTINGS_UPDATED, {
                 detail: { shareWithOthers: share }
             }));
 
@@ -482,7 +483,7 @@ class ProfilePictureSystem {
             this.avatarCache.set(fromUsername, cached);
             await this.persistCache();
 
-            window.dispatchEvent(new CustomEvent('profile-picture-updated', {
+            window.dispatchEvent(new CustomEvent(EventType.PROFILE_PICTURE_UPDATED, {
                 detail: { type: 'peer', username: fromUsername }
             }));
         }
@@ -668,7 +669,7 @@ class ProfilePictureSystem {
         this.avatarCache.set(username, cached);
         await this.persistCache();
 
-        window.dispatchEvent(new CustomEvent('profile-picture-updated', {
+        window.dispatchEvent(new CustomEvent(EventType.PROFILE_PICTURE_UPDATED, {
             detail: { type: 'peer', username, fromServer: true }
         }));
     }
@@ -726,7 +727,7 @@ class ProfilePictureSystem {
                     if (this.secureDB) {
                         await this.secureDB.store(AVATAR_STORE_KEY, 'own', this.ownAvatar);
                     }
-                    window.dispatchEvent(new CustomEvent('profile-picture-updated', {
+                    window.dispatchEvent(new CustomEvent(EventType.PROFILE_PICTURE_UPDATED, {
                         detail: { type: 'own', fromServer: true }
                     }));
                 } else {
@@ -744,7 +745,7 @@ class ProfilePictureSystem {
                         await this.secureDB.delete(AVATAR_STORE_KEY, 'own');
                     }
                     this.ownAvatar = null;
-                    window.dispatchEvent(new CustomEvent('profile-picture-updated', { detail: { type: 'own', fromServer: true } }));
+                    window.dispatchEvent(new CustomEvent(EventType.PROFILE_PICTURE_UPDATED, { detail: { type: 'own', fromServer: true } }));
                 } else {
                     try {
                         const defaultAvatar = generateDefaultAvatar(response.target);
@@ -757,12 +758,12 @@ class ProfilePictureSystem {
                             fallbackHash
                         );
 
-                        window.dispatchEvent(new CustomEvent('profile-picture-updated', {
+                        window.dispatchEvent(new CustomEvent(EventType.PROFILE_PICTURE_UPDATED, {
                             detail: { type: 'peer', username: response.target, fromServer: false, isDefault: true }
                         }));
 
                     } catch {
-                        window.dispatchEvent(new CustomEvent('profile-picture-updated', {
+                        window.dispatchEvent(new CustomEvent(EventType.PROFILE_PICTURE_UPDATED, {
                             detail: { type: 'peer', username: response.target, notFound: true }
                         }));
                     }

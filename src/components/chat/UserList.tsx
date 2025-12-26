@@ -5,6 +5,7 @@ import { ComposeIcon } from "./icons";
 import { Button } from "../ui/button";
 import { sanitizeTextInput } from "../../lib/sanitizers";
 import { UserAvatar } from "../ui/UserAvatar";
+import { EventType } from "../../lib/event-types";
 
 export interface User {
   readonly id: string;
@@ -140,7 +141,7 @@ export const Sidebar = React.memo<SidebarProps>(({ className, children, currentU
       action: () => {
         setActiveTab('settings');
         onActiveTabChange?.('settings');
-        window.dispatchEvent(new CustomEvent('openSettings'));
+        window.dispatchEvent(new CustomEvent(EventType.OPEN_SETTINGS));
       }
     },
   ], [onActiveTabChange]);

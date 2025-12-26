@@ -1,5 +1,6 @@
 import { useState, useRef, useCallback, useEffect, MutableRefObject } from "react";
 import { SignalType } from "../lib/signal-types";
+import { EventType } from "../lib/event-types";
 import { retrieveAuthTokens, clearTokenEncryptionKey } from "../lib/signals";
 import websocketClient from "../lib/websocket";
 import { CryptoUtils } from "../lib/unified-crypto";
@@ -1142,7 +1143,7 @@ export const useAuth = (_secureDB?: SecureDB) => {
       try {
         await secureDBInstance.storeUsernameMapping(loginUsernameRef.current, originalUsernameRef.current);
         try {
-          window.dispatchEvent(new CustomEvent('username-mapping-updated', { detail: { username: loginUsernameRef.current } }));
+          window.dispatchEvent(new CustomEvent(EventType.USERNAME_MAPPING_UPDATED, { detail: { username: loginUsernameRef.current } }));
         } catch { }
       } catch { }
     }
@@ -1420,7 +1421,7 @@ export const useAuth = (_secureDB?: SecureDB) => {
         });
 
         try {
-          window.dispatchEvent(new CustomEvent('hybrid-keys-updated'));
+          window.dispatchEvent(new CustomEvent(EventType.HYBRID_KEYS_UPDATED));
         } catch { }
       } catch { }
     };

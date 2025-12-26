@@ -3,6 +3,7 @@ import { v4 as uuidv4 } from "uuid";
 import * as pako from "pako";
 import { toast } from "sonner";
 import { SignalType } from "@/lib/signal-types";
+import { EventType } from "@/lib/event-types";
 import { IncomingFileChunks } from "@/pages/types";
 import { Message } from '@/components/chat/types';
 import { CryptoUtils } from "@/lib/unified-crypto";
@@ -73,21 +74,21 @@ const sanitizeEventDetail = (detail: Record<string, unknown>) => {
 
 function dispatchProgressEvent(detail: Record<string, unknown>) {
   try {
-    const evt = new CustomEvent('file-transfer-progress', { detail: sanitizeEventDetail(detail) });
+    const evt = new CustomEvent(EventType.FILE_TRANSFER_PROGRESS, { detail: sanitizeEventDetail(detail) });
     window.dispatchEvent(evt);
   } catch { }
 }
 
 function dispatchCompleteEvent(detail: Record<string, unknown>) {
   try {
-    const evt = new CustomEvent('file-transfer-complete', { detail: sanitizeEventDetail(detail) });
+    const evt = new CustomEvent(EventType.FILE_TRANSFER_COMPLETE, { detail: sanitizeEventDetail(detail) });
     window.dispatchEvent(evt);
   } catch { }
 }
 
 function dispatchCanceledEvent(detail: Record<string, unknown>) {
   try {
-    const evt = new CustomEvent('file-transfer-canceled', { detail: sanitizeEventDetail(detail) });
+    const evt = new CustomEvent(EventType.FILE_TRANSFER_CANCELED, { detail: sanitizeEventDetail(detail) });
     window.dispatchEvent(evt);
   } catch { }
 }

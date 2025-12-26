@@ -3,6 +3,8 @@
  * Prevents information disclosure through error messages and stack traces
  */
 
+import { EventType } from './event-types';
+
 export enum ErrorSeverity {
   LOW = 'low',
   MEDIUM = 'medium',
@@ -268,7 +270,7 @@ export class SecureErrorHandler {
           timestamp: error.timestamp,
           context: error.context
         };
-        window.dispatchEvent(new CustomEvent('secure-critical-error', { detail: payload }));
+        window.dispatchEvent(new CustomEvent(EventType.SECURE_CRITICAL_ERROR, { detail: payload }));
       }
     } catch { }
   }

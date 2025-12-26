@@ -3,6 +3,8 @@
  * Maintains block status in memory to avoid redundant checks
  */
 
+import { EventType } from './event-types';
+
 interface BlockStatusCache {
   [username: string]: {
     isBlocked: boolean;
@@ -39,7 +41,7 @@ class BlockStatusManager {
       timestamp: Date.now()
     };
 
-    window.dispatchEvent(new CustomEvent('block-status-changed', {
+    window.dispatchEvent(new CustomEvent(EventType.BLOCK_STATUS_CHANGED, {
       detail: { username, isBlocked }
     }));
   }

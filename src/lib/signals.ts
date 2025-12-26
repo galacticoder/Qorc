@@ -5,6 +5,7 @@ import { sanitizeHybridKeys } from './validators';
 import { SecureAuditLogger } from './secure-error-handler';
 import { clusterKeyManager } from './cluster-key-manager';
 import { SignalType } from './signal-types';
+import { EventType } from './event-types';
 import { profilePictureSystem } from './profile-picture-system';
 
 const __userExistsDebounce = new Map<string, number>();
@@ -169,7 +170,7 @@ export async function handleSignalMessages(data: any, handlers: SignalHandlers) 
         // Trigger events to process queued messages for each user
         Object.entries(usersData).forEach(([username, hybridKeys]) => {
           const sanitized = sanitizeHybridKeys(hybridKeys);
-          window.dispatchEvent(new CustomEvent('user-keys-available', {
+          window.dispatchEvent(new CustomEvent(EventType.USER_KEYS_AVAILABLE, {
             detail: { username, hybridKeys: sanitized }
           }));
         });
@@ -229,7 +230,7 @@ export async function handleSignalMessages(data: any, handlers: SignalHandlers) 
         );
 
         // Trigger event to process queued messages for this user
-        window.dispatchEvent(new CustomEvent('user-keys-available', {
+        window.dispatchEvent(new CustomEvent(EventType.USER_KEYS_AVAILABLE, {
           detail: { username, hybridKeys: sanitized }
         }));
 
@@ -291,7 +292,7 @@ export async function handleSignalMessages(data: any, handlers: SignalHandlers) 
           }).catch((error) => SecureAuditLogger.error('signals', 'auth-success', 'persist-tokens-failed', { error: error.message }));
           setAccountAuthenticated?.(true);
           setIsSubmittingAuth?.(false);
-          try { window.dispatchEvent(new CustomEvent('secure-chat:auth-success')); } catch { }
+          try { window.dispatchEvent(new CustomEvent(EventType.SECURE_CHAT_AUTH_SUCCESS)); } catch { }
         }
 
         if (data?.recovered && recoveredUser) {
@@ -381,7 +382,7 @@ export async function handleSignalMessages(data: any, handlers: SignalHandlers) 
                 Authentication?.setUsername?.(recoveredUser);
                 Authentication?.setMaxStepReached?.('server');
                 Authentication?.setRecoveryActive?.(false);
-                try { window.dispatchEvent(new CustomEvent('secure-chat:auth-success')); } catch { }
+                try { window.dispatchEvent(new CustomEvent(EventType.SECURE_CHAT_AUTH_SUCCESS)); } catch { }
                 vaultKeyUnwrapSuccess = true;
               }
             }
@@ -545,7 +546,7 @@ export async function handleSignalMessages(data: any, handlers: SignalHandlers) 
           } catch { }
 
           setAccountAuthenticated?.(true);
-          try { window.dispatchEvent(new CustomEvent('secure-chat:auth-success')); } catch { }
+          try { window.dispatchEvent(new CustomEvent(EventType.SECURE_CHAT_AUTH_SUCCESS)); } catch { }
           setIsLoggedIn?.(true);
           Authentication?.setMaxStepReached?.('passphrase');
           try { Authentication?.setTokenValidationInProgress?.(false); } catch { }
@@ -678,7 +679,7 @@ export async function handleSignalMessages(data: any, handlers: SignalHandlers) 
 
       case SignalType.PASSWORD_HASH_PARAMS: {
         try {
-          const event = new CustomEvent('password-hash-params', {
+          const event = new CustomEvent(EventType.PASSWORD_HASH_PARAMS, {
             detail: {
               salt: data.salt,
               timeCost: data.timeCost,
@@ -746,7 +747,7 @@ export async function handleSignalMessages(data: any, handlers: SignalHandlers) 
 
           if (!data?.success || data?.error || !data?.bundle) {
             SecureAuditLogger.warn('signals', 'libsignal', 'bundle-request-failed', { hasError: !!data?.error });
-            window.dispatchEvent(new CustomEvent('libsignal-bundle-failed', {
+            window.dispatchEvent(new CustomEvent(EventType.LIBSIGNAL_BUNDLE_FAILED, {
               detail: { peer: targetUser, error: data?.error || 'Bundle not available' }
             }));
             return;
@@ -785,7 +786,7 @@ export async function handleSignalMessages(data: any, handlers: SignalHandlers) 
           await new Promise(resolve => setTimeout(resolve, 0));
           if (confirm?.hasSession) {
             try { await (window as any).edgeApi?.trustPeerIdentity?.({ selfUsername: currentUser, peerUsername: targetUser, deviceId: 1 }); } catch { }
-            window.dispatchEvent(new CustomEvent('libsignal-session-ready', { detail: { peer: targetUser } }));
+            window.dispatchEvent(new CustomEvent(EventType.LIBSIGNAL_SESSION_READY, { detail: { peer: targetUser } }));
             await websocketClient.sendSecureControlMessage({
               type: SignalType.SESSION_ESTABLISHED,
               from: currentUser,
@@ -799,7 +800,7 @@ export async function handleSignalMessages(data: any, handlers: SignalHandlers) 
           SecureAuditLogger.error('signals', 'libsignal', 'bundle-processing-failed', { error: (_error as Error).message });
           const targetUser = data?.username;
           if (targetUser) {
-            window.dispatchEvent(new CustomEvent('libsignal-bundle-failed', {
+            window.dispatchEvent(new CustomEvent(EventType.LIBSIGNAL_BUNDLE_FAILED, {
               detail: { peer: targetUser, error: String(_error) }
             }));
           }
@@ -828,7 +829,7 @@ export async function handleSignalMessages(data: any, handlers: SignalHandlers) 
             __userExistsDebounce.set(uname, now);
           }
           setTimeout(() => {
-            try { window.dispatchEvent(new CustomEvent('user-exists-response', { detail: data })); } catch { }
+            try { window.dispatchEvent(new CustomEvent(EventType.USER_EXISTS_RESPONSE, { detail: data })); } catch { }
           }, 0);
         } catch (_error) {
           SecureAuditLogger.error('signals', 'user-exists', 'dispatch-failed', { error: (_error as Error).message });
@@ -839,7 +840,7 @@ export async function handleSignalMessages(data: any, handlers: SignalHandlers) 
             if (sanitized) {
               setTimeout(() => {
                 try {
-                  window.dispatchEvent(new CustomEvent('user-keys-available', {
+                  window.dispatchEvent(new CustomEvent(EventType.USER_KEYS_AVAILABLE, {
                     detail: { username: data.username, hybridKeys: sanitized }
                   }));
                 } catch { }
@@ -877,7 +878,7 @@ export async function handleSignalMessages(data: any, handlers: SignalHandlers) 
 
       case SignalType.OFFLINE_MESSAGES_RESPONSE: {
         try {
-          window.dispatchEvent(new CustomEvent('offline-messages-response', { detail: data }));
+          window.dispatchEvent(new CustomEvent(EventType.OFFLINE_MESSAGES_RESPONSE, { detail: data }));
         } catch (_error) {
           SecureAuditLogger.error('signals', 'offline-messages', 'dispatch-failed', { error: (_error as Error).message });
         }
@@ -885,23 +886,23 @@ export async function handleSignalMessages(data: any, handlers: SignalHandlers) 
       }
 
       case SignalType.BLOCK_TOKENS_UPDATE: {
-        window.dispatchEvent(new CustomEvent('block-tokens-updated', { detail: data }));
+        window.dispatchEvent(new CustomEvent(EventType.BLOCK_TOKENS_UPDATED, { detail: data }));
         break;
       }
 
       case SignalType.BLOCK_LIST_SYNC: {
-        window.dispatchEvent(new CustomEvent('block-list-synced', { detail: data }));
+        window.dispatchEvent(new CustomEvent(EventType.BLOCK_LIST_SYNCED, { detail: data }));
         break;
       }
 
       case SignalType.BLOCK_LIST_UPDATE: {
-        window.dispatchEvent(new CustomEvent('block-list-update', { detail: data }));
+        window.dispatchEvent(new CustomEvent(EventType.BLOCK_LIST_UPDATE, { detail: data }));
         break;
       }
 
       case SignalType.BLOCK_LIST_RESPONSE: {
         try {
-          window.dispatchEvent(new CustomEvent('block-list-response', { detail: data }));
+          window.dispatchEvent(new CustomEvent(EventType.BLOCK_LIST_RESPONSE, { detail: data }));
         } catch (_error) {
           SecureAuditLogger.error('signals', 'block-list-response', 'dispatch-failed', { error: (_error as Error).message });
         }
@@ -909,13 +910,13 @@ export async function handleSignalMessages(data: any, handlers: SignalHandlers) 
       }
 
       case SignalType.CLIENT_GENERATE_PREKEYS: {
-        window.dispatchEvent(new CustomEvent('generate-prekeys-request', { detail: data }));
+        window.dispatchEvent(new CustomEvent(EventType.GENERATE_PREKEYS_REQUEST, { detail: data }));
         break;
       }
 
       case SignalType.PREKEY_STATUS: {
         try {
-          window.dispatchEvent(new CustomEvent('libsignal-publish-status', { detail: data }));
+          window.dispatchEvent(new CustomEvent(EventType.LIBSIGNAL_PUBLISH_STATUS, { detail: data }));
         } catch (_error) {
           SecureAuditLogger.error('signals', 'prekey-status', 'dispatch-failed', { error: (_error as Error).message });
         }
@@ -924,7 +925,7 @@ export async function handleSignalMessages(data: any, handlers: SignalHandlers) 
 
       case 'libsignal-publish-status': {
         try {
-          window.dispatchEvent(new CustomEvent('libsignal-publish-status', { detail: data }));
+          window.dispatchEvent(new CustomEvent(EventType.LIBSIGNAL_PUBLISH_STATUS, { detail: data }));
         } catch (_error) {
           SecureAuditLogger.error('signals', 'libsignal-publish', 'dispatch-failed', { error: (_error as Error).message });
         }
@@ -982,7 +983,7 @@ export async function handleSignalMessages(data: any, handlers: SignalHandlers) 
         setLoginError?.(errorMessage);
         try { setAuthStatus?.(''); } catch { }
         try { setIsSubmittingAuth?.(false); } catch { }
-        try { window.dispatchEvent(new CustomEvent('auth-error', { detail: { category, code: (data as any)?.code } })); } catch { }
+        try { window.dispatchEvent(new CustomEvent(EventType.AUTH_ERROR, { detail: { category, code: (data as any)?.code } })); } catch { }
 
         if (category === 'passphrase' && !locked) {
           setAccountAuthenticated?.(false);
@@ -1009,7 +1010,7 @@ export async function handleSignalMessages(data: any, handlers: SignalHandlers) 
             deviceId: deviceId
           });
 
-          window.dispatchEvent(new CustomEvent('session-reset-received', {
+          window.dispatchEvent(new CustomEvent(EventType.SESSION_RESET_RECEIVED, {
             detail: { peerUsername, reason: data?.reason || 'peer-request' }
           }));
 
@@ -1030,7 +1031,7 @@ export async function handleSignalMessages(data: any, handlers: SignalHandlers) 
           break;
         }
 
-        window.dispatchEvent(new CustomEvent('session-established-received', {
+        window.dispatchEvent(new CustomEvent(EventType.SESSION_ESTABLISHED_RECEIVED, {
           detail: { fromPeer: peerUsername }
         }));
 
@@ -1044,7 +1045,7 @@ export async function handleSignalMessages(data: any, handlers: SignalHandlers) 
 
         if ((data as any)?.code === 'OFFLINE_LONGTERM_REQUIRED') {
           try {
-            window.dispatchEvent(new CustomEvent('offline-longterm-required', { detail: data }));
+            window.dispatchEvent(new CustomEvent(EventType.OFFLINE_LONGTERM_REQUIRED, { detail: data }));
           } catch { }
           break;
         }

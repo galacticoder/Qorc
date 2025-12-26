@@ -12,6 +12,7 @@ import {
   SecurityAuditLogger
 } from './post-quantum-crypto';
 import { handleP2PError } from './secure-error-handler';
+import { EventType } from './event-types';
 
 const USER_BLOCKED_EVENT_RATE_WINDOW_MS = 10_000;
 const USER_BLOCKED_EVENT_RATE_MAX = 200;
@@ -780,7 +781,7 @@ export class WebRTCP2PService {
           this.handlePQKeyExchangeFinalize(message.from);
         } else if (kind === 'session-reset-request') {
           try {
-            const evt = new CustomEvent('p2p-session-reset-request', { detail: { from: message.from, reason: message?.payload?.reason } });
+            const evt = new CustomEvent(EventType.P2P_SESSION_RESET_REQUEST, { detail: { from: message.from, reason: message?.payload?.reason } });
             window.dispatchEvent(evt);
           } catch { }
           try {
@@ -790,7 +791,7 @@ export class WebRTCP2PService {
           try { if (this.isLocalInitiator(message.from)) { this.initiatePostQuantumKeyExchange(message.from); } } catch { }
         } else if (kind === 'session-reset-ack') {
           try {
-            const evt = new CustomEvent('p2p-session-reset-ack', { detail: { from: message.from } });
+            const evt = new CustomEvent(EventType.P2P_SESSION_RESET_ACK, { detail: { from: message.from } });
             window.dispatchEvent(evt);
           } catch { }
           try {
@@ -852,10 +853,10 @@ export class WebRTCP2PService {
         try {
           const kind = message?.payload?.kind;
           if (kind === 'file-chunk') {
-            const evt = new CustomEvent('p2p-file-chunk', { detail: { from: message.from, to: message.to, payload: message.payload } });
+            const evt = new CustomEvent(EventType.P2P_FILE_CHUNK, { detail: { from: message.from, to: message.to, payload: message.payload } });
             window.dispatchEvent(evt);
           } else if (kind === 'file-ack') {
-            const evt = new CustomEvent('p2p-file-ack', { detail: { from: message.from, to: message.to, payload: message.payload } });
+            const evt = new CustomEvent(EventType.P2P_FILE_ACK, { detail: { from: message.from, to: message.to, payload: message.payload } });
             window.dispatchEvent(evt);
           }
         } catch { }
@@ -1057,7 +1058,7 @@ export class WebRTCP2PService {
 
       this.logAuditEvent('pq-key-established', from);
       try { this.auditLogger.log('info', 'p2p-pq-established', { peer: from }); } catch { }
-      try { window.dispatchEvent(new CustomEvent('p2p-pq-established', { detail: { peer: from } })); } catch { }
+      try { window.dispatchEvent(new CustomEvent(EventType.P2P_PQ_ESTABLISHED, { detail: { peer: from } })); } catch { }
 
       const finalize = { kind: 'pq-key-exchange-finalize' };
       try { this.auditLogger.log('info', 'p2p-pq-finalize', { peer: from }); } catch { }
@@ -1077,7 +1078,7 @@ export class WebRTCP2PService {
         this.pqSessions.set(from, session);
         this.logAuditEvent('pq-key-established', from);
         try { this.auditLogger.log('info', 'p2p-pq-established', { peer: from }); } catch { }
-        try { window.dispatchEvent(new CustomEvent('p2p-pq-established', { detail: { peer: from } })); } catch { }
+        try { window.dispatchEvent(new CustomEvent(EventType.P2P_PQ_ESTABLISHED, { detail: { peer: from } })); } catch { }
       }
     }
   }
@@ -1391,7 +1392,7 @@ export class WebRTCP2PService {
                   peer!.state = 'connected';
                   peer!.transport = 'webrtc';
                   try {
-                    window.dispatchEvent(new CustomEvent('p2p-fetch-peer-cert', { detail: { peer: from } }));
+                    window.dispatchEvent(new CustomEvent(EventType.P2P_FETCH_PEER_CERT, { detail: { peer: from } }));
                   } catch { }
                   if (this.shouldInitiateHandshake(from)) {
                     this.initiatePostQuantumKeyExchange(from);

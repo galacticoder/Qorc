@@ -3,6 +3,7 @@ import * as pako from "pako";
 import { CryptoUtils } from "../../../lib/unified-crypto";
 import websocketClient from "../../../lib/websocket";
 import { SignalType } from "../../../lib/signal-types";
+import { EventType } from "../../../lib/event-types";
 import { sanitizeFilename } from "../../../lib/sanitizers";
 import { syncEncryptedStorage } from "../../../lib/encrypted-storage";
 
@@ -806,7 +807,7 @@ export function useFileSender(
         }
       };
 
-      window.dispatchEvent(new CustomEvent('local-file-message', { detail: localMessage }));
+      window.dispatchEvent(new CustomEvent(EventType.LOCAL_FILE_MESSAGE, { detail: localMessage }));
 
       await sendChunksServer(state, userKeys);
 

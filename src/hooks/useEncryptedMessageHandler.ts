@@ -8,194 +8,39 @@ import type { User } from "../components/chat/UserList";
 import websocketClient from "../lib/websocket";
 import { blockingSystem } from "../lib/blocking-system";
 import { CryptoUtils } from "../lib/unified-crypto";
-
-const textEncoder = new TextEncoder();
-
-const MAX_MESSAGE_JSON_BYTES = 64 * 1024; // 64 KB
-const MAX_FILE_JSON_BYTES = 256 * 1024; // 256 KB
-const MAX_CALL_SIGNAL_BYTES = 256 * 1024; // 256 KB
-const MAX_INLINE_FILE_BYTES = 5 * 1024 * 1024; // 5 MB inline payloads
-const MAX_BLOB_URLS = 32;
-const BLOB_URL_TTL_MS = 15 * 60 * 1000; // 15 minutes
-const MESSAGE_RATE_LIMIT_WINDOW_MS = 5_000;
-const MESSAGE_RATE_LIMIT_MAX = 300;
-
-const BASE64_STANDARD_REGEX = /^[A-Za-z0-9+/]*={0,2}$/;
-const BASE64_URLSAFE_REGEX = /^[A-Za-z0-9\-_]*={0,2}$/;
-
-type PlainObject = Record<string, unknown>;
-
-const isPlainObject = (value: unknown): value is PlainObject => {
-  if (typeof value !== 'object' || value === null) {
-    return false;
-  }
-  const proto = Object.getPrototypeOf(value);
-  return proto === Object.prototype || proto === null;
-};
-
-const exceedsBytes = (input: string, limit: number): boolean => {
-  const bytes = textEncoder.encode(input).length;
-  return bytes > limit;
-};
-
-const MAX_CALL_SIGNAL_SIZE = MAX_CALL_SIGNAL_BYTES;
-const MAX_MESSAGE_SIZE = MAX_MESSAGE_JSON_BYTES;
-const MAX_FILE_MESSAGE_SIZE = MAX_FILE_JSON_BYTES;
-
-type BlobEntry = { url: string; expiresAt: number };
-
-const createBlobCache = () => {
-  const entries: BlobEntry[] = [];
-
-  const revoke = (entry: BlobEntry | undefined) => {
-    if (!entry) return;
-    try { URL.revokeObjectURL(entry.url); } catch { }
-  };
-
-  const flush = () => {
-    const now = Date.now();
-    while (entries.length && entries[0].expiresAt <= now) {
-      revoke(entries.shift());
-    }
-  };
-
-  const enqueue = (url: string) => {
-    const expiresAt = Date.now() + BLOB_URL_TTL_MS;
-    entries.push({ url, expiresAt });
-    flush();
-    if (entries.length > MAX_BLOB_URLS) {
-      revoke(entries.shift());
-    }
-  };
-
-  const clearAll = () => {
-    while (entries.length) {
-      revoke(entries.shift());
-    }
-  };
-
-  return { enqueue, flush, clearAll };
-};
-
-type RateLimitConfig = { windowMs: number; max: number };
-
-const DEFAULT_RATE_LIMIT: RateLimitConfig = {
-  windowMs: MESSAGE_RATE_LIMIT_WINDOW_MS,
-  max: MESSAGE_RATE_LIMIT_MAX,
-};
-
-const sanitizeRateLimitConfig = (input: any): RateLimitConfig => {
-  if (!input || typeof input !== 'object') {
-    return DEFAULT_RATE_LIMIT;
-  }
-
-  const rawWindow = Number((input.windowMs ?? input.window ?? input.windowMsMs));
-  const rawMax = Number((input.max ?? input.maxMessages ?? input.limit));
-
-  const windowMs = Number.isFinite(rawWindow)
-    ? Math.min(Math.max(500, Math.floor(rawWindow)), 60_000)
-    : DEFAULT_RATE_LIMIT.windowMs;
-  const max = Number.isFinite(rawMax)
-    ? Math.min(Math.max(50, Math.floor(rawMax)), 2000)
-    : DEFAULT_RATE_LIMIT.max;
-
-  return { windowMs, max };
-};
-
-// Helper function to create blob URL from base64 data
-function createBlobUrlFromBase64(
-  dataBase64: string,
-  fileType: string | undefined,
-  blobCache: ReturnType<typeof createBlobCache>
-): string | null {
-  try {
-    let cleanBase64 = dataBase64.trim();
-
-    const inlinePrefixIndex = cleanBase64.indexOf(',');
-    if (inlinePrefixIndex > 0 && inlinePrefixIndex < 128) {
-      cleanBase64 = cleanBase64.slice(inlinePrefixIndex + 1);
-    }
-
-    const isUrlSafe = BASE64_URLSAFE_REGEX.test(cleanBase64.replace(/=*$/, ''));
-    const regex = isUrlSafe ? BASE64_URLSAFE_REGEX : BASE64_STANDARD_REGEX;
-
-    if (!regex.test(cleanBase64)) {
-      return null;
-    }
-
-    const byteLength = Math.floor((cleanBase64.length * 3) / 4) - (cleanBase64.endsWith('==') ? 2 : cleanBase64.endsWith('=') ? 1 : 0);
-    if (byteLength > MAX_INLINE_FILE_BYTES) {
-      return null;
-    }
-
-    const binary = Uint8Array.from(atob(cleanBase64), char => char.charCodeAt(0));
-
-    const blob = new Blob([binary], { type: fileType || 'application/octet-stream' });
-    if (blob.size !== byteLength) {
-      return null;
-    }
-
-    const url = URL.createObjectURL(blob);
-    blobCache.enqueue(url);
-    return url;
-  } catch {
-    return null;
-  }
-}
-
-const safeJsonParse = (jsonString: string, maxBytes: number = MAX_MESSAGE_JSON_BYTES): any => {
-  if (!jsonString || typeof jsonString !== 'string') {
-    return null;
-  }
-  if (exceedsBytes(jsonString, maxBytes)) {
-    return null;
-  }
-  const trimmed = jsonString.trim();
-  if (!trimmed.startsWith('{') && !trimmed.startsWith('[')) {
-    return null;
-  }
-  try {
-    const parsed = JSON.parse(jsonString);
-    return parsed;
-  } catch {
-    return null;
-  }
-};
-
-const safeJsonParseForCallSignals = (jsonString: string): any => safeJsonParse(jsonString, MAX_CALL_SIGNAL_SIZE);
-const safeJsonParseForMessages = (jsonString: string): any => safeJsonParse(jsonString, MAX_MESSAGE_SIZE);
-
-const safeJsonParseForFileMessages = (jsonString: string): any => {
-  const parsed = safeJsonParse(jsonString, MAX_FILE_MESSAGE_SIZE);
-  if (!parsed || !isPlainObject(parsed)) {
-    return null;
-  }
-
-  const candidateFields = ['dataBase64', 'fileData', 'data', 'content'];
-  for (const field of candidateFields) {
-    const value = parsed[field];
-    if (typeof value !== 'string') {
-      continue;
-    }
-    const trimmed = value.trim();
-    if (!trimmed) {
-      continue;
-    }
-
-    const inlinePrefixIndex = trimmed.indexOf(',');
-    const base64Payload = inlinePrefixIndex > 0 ? trimmed.slice(inlinePrefixIndex + 1) : trimmed;
-    const isUrlSafe = BASE64_URLSAFE_REGEX.test(base64Payload.replace(/=*$/, ''));
-    const regex = isUrlSafe ? BASE64_URLSAFE_REGEX : BASE64_STANDARD_REGEX;
-    if (!regex.test(base64Payload)) {
-      return null;
-    }
-    const byteLength = Math.floor((base64Payload.length * 3) / 4) - (base64Payload.endsWith('==') ? 2 : base64Payload.endsWith('=') ? 1 : 0);
-    if (byteLength > MAX_INLINE_FILE_BYTES) {
-      return null;
-    }
-  }
-  return parsed;
-};
+import {
+  createBlobCache,
+  createBlobUrlFromBase64,
+  sanitizeRateLimitConfig,
+  safeJsonParse,
+  safeJsonParseForCallSignals,
+  safeJsonParseForMessages,
+  safeJsonParseForFileMessages,
+  isPlainObject,
+  BLOB_URL_TTL_MS,
+  MAX_RETRY_ATTEMPTS,
+  PENDING_QUEUE_TTL_MS,
+  PENDING_QUEUE_MAX_PER_PEER,
+  BUNDLE_REQUEST_COOLDOWN_MS,
+  KEY_REQUEST_CACHE_DURATION,
+  PQ_KEY_REPLENISH_COOLDOWN_MS,
+  MAX_RESETS_PER_PEER,
+  RESET_WINDOW_MS,
+  computeBackoffMs,
+  type RateLimitConfig,
+} from "../lib/message-handler-utils";
+import {
+  waitForSessionReady,
+  requestBundleAndWait,
+  createDeliveryReceiptPayload,
+  sendEncryptedDeliveryReceipt,
+  parseFileMessagePayload,
+  createFileMessage,
+  parseTextMessagePayload,
+  createTextMessage,
+  handleCallSignal,
+  type DeliveryReceiptContext,
+} from "../lib/message-type-handlers";
 
 export function useEncryptedMessageHandler(
   loginUsernameRef: React.MutableRefObject<string>,
@@ -304,11 +149,11 @@ export function useEncryptedMessageHandler(
           const handler = (event: Event) => {
             const d = (event as CustomEvent).detail;
             if (d?.username === senderUsername && d?.hybridKeys) {
-              window.removeEventListener('user-keys-available', handler as EventListener);
+              window.removeEventListener(EventType.USER_KEYS_AVAILABLE, handler as EventListener);
               if (!settled) { settled = true; clearTimeout(timeout); resolve(); }
             }
           };
-          window.addEventListener('user-keys-available', handler as EventListener, { once: true });
+          window.addEventListener(EventType.USER_KEYS_AVAILABLE, handler as EventListener, { once: true });
         });
         const refreshed = usersRef?.current?.find?.((u: any) => u.username === senderUsername);
         kyber = refreshed?.hybridPublicKeys?.kyberPublicBase64 || null;
@@ -326,11 +171,11 @@ export function useEncryptedMessageHandler(
         const handler = (event: Event) => {
           const d = (event as CustomEvent).detail;
           if (d?.username === senderUsername && d?.hybridKeys) {
-            window.removeEventListener('user-keys-available', handler as EventListener);
+            window.removeEventListener(EventType.USER_KEYS_AVAILABLE, handler as EventListener);
             if (!settled) { settled = true; clearTimeout(timeout); resolve(); }
           }
         };
-        window.addEventListener('user-keys-available', handler as EventListener, { once: true });
+        window.addEventListener(EventType.USER_KEYS_AVAILABLE, handler as EventListener, { once: true });
       });
       refreshedUser = usersRef?.current?.find?.((u: any) => u.username === senderUsername);
       hybrid = refreshedUser?.hybridPublicKeys ? { ...refreshedUser.hybridPublicKeys, kyberPublicBase64: kyber ?? refreshedUser.hybridPublicKeys?.kyberPublicBase64 } : null;
@@ -497,10 +342,10 @@ export function useEncryptedMessageHandler(
       } catch { }
     };
 
-    window.addEventListener('p2p-peer-reconnected', handlePeerReconnection as EventListener);
+    window.addEventListener(EventType.P2P_PEER_RECONNECTED, handlePeerReconnection as EventListener);
 
     return () => {
-      window.removeEventListener('p2p-peer-reconnected', handlePeerReconnection as EventListener);
+      window.removeEventListener(EventType.P2P_PEER_RECONNECTED, handlePeerReconnection as EventListener);
     };
   }, []);
 
@@ -598,11 +443,11 @@ export function useEncryptedMessageHandler(
       }
     };
 
-    window.addEventListener('session-established-received', handleSessionEstablished as EventListener);
+    window.addEventListener(EventType.SESSION_ESTABLISHED_RECEIVED, handleSessionEstablished as EventListener);
     window.addEventListener(EventType.LIBSIGNAL_SESSION_READY, handleSessionEstablished as EventListener);
 
     return () => {
-      window.removeEventListener('session-established-received', handleSessionEstablished as EventListener);
+      window.removeEventListener(EventType.SESSION_ESTABLISHED_RECEIVED, handleSessionEstablished as EventListener);
       window.removeEventListener(EventType.LIBSIGNAL_SESSION_READY, handleSessionEstablished as EventListener);
     };
   }, [getKeysOnDemand, usersRef, loginUsernameRef]);
@@ -689,8 +534,8 @@ export function useEncryptedMessageHandler(
         // Non-fatal
       }
     };
-    window.addEventListener('file-transfer-complete', handler as EventListener);
-    return () => window.removeEventListener('file-transfer-complete', handler as EventListener);
+    window.addEventListener(EventType.FILE_TRANSFER_COMPLETE, handler as EventListener);
+    return () => window.removeEventListener(EventType.FILE_TRANSFER_COMPLETE, handler as EventListener);
   }, [getKeysOnDemand, usersRef, loginUsernameRef]);
 
   // Automatic PQ Kyber prekey replenishment
@@ -836,13 +681,13 @@ export function useEncryptedMessageHandler(
     };
     const onP2PSessionResetAck = async (_evt: Event) => { };
     try {
-      window.addEventListener('p2p-session-reset-request', onP2PSessionResetReq as EventListener);
-      window.addEventListener('p2p-session-reset-ack', onP2PSessionResetAck as EventListener);
+      window.addEventListener(EventType.P2P_SESSION_RESET_REQUEST, onP2PSessionResetReq as EventListener);
+      window.addEventListener(EventType.P2P_SESSION_RESET_ACK, onP2PSessionResetAck as EventListener);
     } catch { }
     return () => {
       try {
-        window.removeEventListener('p2p-session-reset-request', onP2PSessionResetReq as EventListener);
-        window.removeEventListener('p2p-session-reset-ack', onP2PSessionResetAck as EventListener);
+        window.removeEventListener(EventType.P2P_SESSION_RESET_REQUEST, onP2PSessionResetReq as EventListener);
+        window.removeEventListener(EventType.P2P_SESSION_RESET_ACK, onP2PSessionResetAck as EventListener);
       } catch { }
     };
   }, [loginUsernameRef, requestBundleOnce]);
@@ -2236,22 +2081,14 @@ export function useEncryptedMessageHandler(
 
           // Handle call signals
           if (payload.type === 'call-signal') {
-            const callSignalData = safeJsonParseForCallSignals(payload.content);
-            if (callSignalData) {
-              try {
-                const originalFrom = (payload as any)?.fromOriginal;
-                if (typeof originalFrom === 'string') {
-                  window.dispatchEvent(new CustomEvent(EventType.USERNAME_MAPPING_RECEIVED, {
-                    detail: { hashed: payload.from, original: originalFrom }
-                  }));
-                  (callSignalData as any).fromOriginal = originalFrom;
-                }
-              } catch { }
-              const callSignalEvent = new CustomEvent('call-signal', {
-                detail: callSignalData
-              });
-              window.dispatchEvent(callSignalEvent);
-            } else {
+            const handled = handleCallSignal({
+              payload: {
+                content: payload.content,
+                from: payload.from,
+                fromOriginal: (payload as any)?.fromOriginal
+              }
+            });
+            if (!handled) {
               console.error('[EncryptedMessageHandler] Failed to parse call signal content');
             }
             return;
