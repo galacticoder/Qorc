@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef } from "react";
 import { SignalType } from "@/lib/signal-types";
+import { EventType } from "../lib/event-types";
 import websocketClient from "@/lib/websocket";
 
 type MessageHandler = (data: BaseMessage) => Promise<void>;
@@ -20,20 +21,20 @@ interface BaseMessage {
 
 const DEFAULT_ALLOWED_TYPES: Set<string> = new Set([
   // Transport-level envelope
-  'pq-envelope',
-  'pq-handshake-ack',
+  SignalType.PQ_ENVELOPE,
+  SignalType.PQ_HANDSHAKE_ACK,
   // Heartbeat messages
-  'pq-heartbeat-pong',
+  SignalType.PQ_HEARTBEAT_PONG,
   // Client error reporting
-  'client-error',
+  SignalType.CLIENT_ERROR,
 
   // Device attestation
-  'device-challenge',
-  'device-attestation-ack',
+  SignalType.DEVICE_CHALLENGE,
+  SignalType.DEVICE_ATTESTATION_ACK,
 
   // Profile picture system
-  'avatar-fetch-response',
-  'avatar-upload-response',
+  SignalType.AVATAR_FETCH_RESPONSE,
+  SignalType.AVATAR_UPLOAD_RESPONSE,
 
   // App-level messages
   SignalType.ENCRYPTED_MESSAGE,
@@ -60,23 +61,22 @@ const DEFAULT_ALLOWED_TYPES: Set<string> = new Set([
   SignalType.USER_EXISTS_RESPONSE,
   SignalType.P2P_PEER_CERT,
   SignalType.LIBSIGNAL_DELIVER_BUNDLE,
-  'libsignal-publish-status',
+  SignalType.LIBSIGNAL_PUBLISH_STATUS,
   SignalType.SESSION_RESET_REQUEST,
   SignalType.EDIT_MESSAGE,
   SignalType.DELETE_MESSAGE,
   SignalType.USER_DISCONNECT,
   SignalType.FILE_MESSAGE_CHUNK,
-  SignalType.MESSAGE_HISTORY_RESPONSE,
   SignalType.OFFLINE_MESSAGES_RESPONSE,
-  'delivery-receipt',
-  'read-receipt',
+  SignalType.DELIVERY_RECEIPT,
+  SignalType.READ_RECEIPT,
 ]);
 
 const RATE_LIMIT_WINDOW_MS = 1_000;
 const RATE_LIMIT_MAX_MESSAGES = 500;
 
 const DEFAULT_ENCRYPTED_TYPES = new Set<string>([
-  'pq-envelope',
+  SignalType.PQ_ENVELOPE,
   SignalType.ENCRYPTED_MESSAGE,
   SignalType.DR_SEND,
 ]);
@@ -88,7 +88,7 @@ const DEFAULT_SCHEMAS: Record<string, WebSocketMessageSchema> = {
   [SignalType.DR_SEND]: {
     validate: (message) => typeof message.payload === 'object' && message.payload !== null,
   },
-  ['pq-envelope']: {
+  [SignalType.PQ_ENVELOPE]: {
     validate: (message) =>
       typeof (message as any).version === 'string' &&
       (message as any).version === 'pq-ws-1' &&
@@ -203,16 +203,16 @@ export const useWebSocket = (
         const sessionEstablished = websocketClient.isPQSessionEstablished();
         const isHandshakeMessage = data.type === SignalType.SERVER_PUBLIC_KEY ||
           data.type === SignalType.SESSION_ESTABLISHED ||
-          data.type === 'pq-handshake-ack';
-        const isEncryptedTransport = data.type === 'pq-envelope' || data.type === 'pq-heartbeat-pong';
+          data.type === SignalType.PQ_HANDSHAKE_ACK;
+        const isEncryptedTransport = data.type === SignalType.PQ_ENVELOPE || data.type === SignalType.PQ_HEARTBEAT_PONG;
         const isErrorMessage = data.type === SignalType.ERROR;
         const isSafeControl = data.type === SignalType.TOKEN_VALIDATION_RESPONSE ||
           data.type === SignalType.IN_ACCOUNT ||
           data.type === SignalType.AUTH_SUCCESS ||
           data.type === SignalType.AUTH_ERROR ||
           data.type === SignalType.PASSWORD_HASH_PARAMS ||
-          data.type === 'device-challenge' ||
-          data.type === 'device-attestation-ack';
+          data.type === SignalType.DEVICE_CHALLENGE ||
+          data.type === SignalType.DEVICE_ATTESTATION_ACK;
 
         if (sessionEstablished && !isEncryptedTransport && !isHandshakeMessage && !isErrorMessage && !isSafeControl) {
           console.error('[useWebSocket] Security violation: plaintext after encryption established');
@@ -222,28 +222,28 @@ export const useWebSocket = (
 
         if (data.type === SignalType.USER_EXISTS_RESPONSE) {
           try {
-            window.dispatchEvent(new CustomEvent('user-exists-response', { detail: data }));
+            window.dispatchEvent(new CustomEvent(EventType.USER_EXISTS_RESPONSE, { detail: data }));
           } catch {
           }
         }
         if (data.type === SignalType.P2P_PEER_CERT) {
           try {
-            window.dispatchEvent(new CustomEvent('p2p-peer-cert', { detail: data }));
+            window.dispatchEvent(new CustomEvent(EventType.P2P_PEER_CERT, { detail: data }));
           } catch { }
         }
 
         // Heartbeat pong from server
-        if (data.type === 'pq-heartbeat-pong') {
+        if (data.type === SignalType.PQ_HEARTBEAT_PONG) {
           websocketClient.noteHeartbeatPong(data);
           return;
         }
 
-        if (data.type === 'device-challenge' || data.type === 'device-attestation-ack') {
+        if (data.type === SignalType.DEVICE_CHALLENGE || data.type === SignalType.DEVICE_ATTESTATION_ACK) {
           return;
         }
 
         // Decrypt pq-envelope using the client's session keys
-        if (data.type === 'pq-envelope') {
+        if (data.type === SignalType.PQ_ENVELOPE) {
           const decrypted = await websocketClient.decryptIncomingEnvelope(data);
           if (!decrypted) {
             return;
@@ -256,17 +256,17 @@ export const useWebSocket = (
 
           if (inner.type === SignalType.USER_EXISTS_RESPONSE) {
             try {
-              window.dispatchEvent(new CustomEvent('user-exists-response', { detail: inner }));
+              window.dispatchEvent(new CustomEvent(EventType.USER_EXISTS_RESPONSE, { detail: inner }));
             } catch {
             }
           }
           if (inner.type === SignalType.P2P_PEER_CERT) {
             try {
-              window.dispatchEvent(new CustomEvent('p2p-peer-cert', { detail: inner }));
+              window.dispatchEvent(new CustomEvent(EventType.P2P_PEER_CERT, { detail: inner }));
             } catch { }
           }
 
-          if (inner.type === 'device-challenge' || inner.type === 'device-attestation-ack') {
+          if (inner.type === SignalType.DEVICE_CHALLENGE || inner.type === SignalType.DEVICE_ATTESTATION_ACK) {
             try {
               websocketClient.handleEdgeServerMessage(inner);
             } catch {

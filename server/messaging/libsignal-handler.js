@@ -7,6 +7,7 @@
 import { LibsignalBundleDB } from '../database/database.js';
 import { SecureStateManager } from '../authentication/authentication.js';
 import { logger as cryptoLogger } from '../crypto/crypto-logger.js';
+import { SignalType } from '../signals.js';
 
 /**
  * Handle Signal Protocol bundle publication from client
@@ -21,7 +22,7 @@ export async function handleBundlePublish({ ws, parsed, state, context, sendPQRe
     if (!username) {
       cryptoLogger.error('[LIBSIGNAL] Bundle publish rejected - not authenticated');
       await sendPQResponse(ws, {
-        type: 'libsignal-publish-status',
+        type: SignalType.LIBSIGNAL_PUBLISH_STATUS,
         success: false,
         error: 'User not authenticated'
       });
@@ -33,7 +34,7 @@ export async function handleBundlePublish({ ws, parsed, state, context, sendPQRe
     if (!bundle) {
       cryptoLogger.error('[LIBSIGNAL] No bundle provided', { username });
       await sendPQResponse(ws, {
-        type: 'libsignal-publish-status',
+        type: SignalType.LIBSIGNAL_PUBLISH_STATUS,
         success: false,
         error: 'No bundle provided'
       });
@@ -50,7 +51,7 @@ export async function handleBundlePublish({ ws, parsed, state, context, sendPQRe
         errors: validationErrors
       });
       await sendPQResponse(ws, {
-        type: 'libsignal-publish-status',
+        type: SignalType.LIBSIGNAL_PUBLISH_STATUS,
         success: false,
         error: errorMsg
       });
@@ -91,7 +92,7 @@ export async function handleBundlePublish({ ws, parsed, state, context, sendPQRe
 
     // Send success acknowledgment
     await sendPQResponse(ws, {
-      type: 'libsignal-publish-status',
+      type: SignalType.LIBSIGNAL_PUBLISH_STATUS,
       success: true
     });
   } catch (error) {
@@ -101,7 +102,7 @@ export async function handleBundlePublish({ ws, parsed, state, context, sendPQRe
       error: error.message
     });
     await sendPQResponse(ws, {
-      type: 'libsignal-publish-status',
+      type: SignalType.LIBSIGNAL_PUBLISH_STATUS,
       success: false,
       error: error.message
     });
@@ -121,7 +122,7 @@ export async function handleBundleFailure({ ws, parsed, state, sendPQResponse })
   });
 
   await sendPQResponse(ws, {
-    type: 'libsignal-publish-status',
+    type: SignalType.LIBSIGNAL_PUBLISH_STATUS,
     success: false,
     error: `Client bundle generation failed at ${parsed.stage}: ${parsed.error}`
   });
@@ -167,7 +168,7 @@ export async function handleBundleRequest({ ws, parsed, state, sendPQResponse })
           requester: state.username,
           target: requestedUsername
         });
-        await sendPQResponse(ws, { type: 'ok' });
+        await sendPQResponse(ws, { type: SignalType.OK });
         return;
       }
     } catch (error) {
@@ -181,7 +182,7 @@ export async function handleBundleRequest({ ws, parsed, state, sendPQResponse })
     const bundle = flatBundle ? transformBundleForClient(flatBundle) : null;
 
     const responsePayload = {
-      type: 'libsignal-deliver-bundle',
+      type: SignalType.LIBSIGNAL_DELIVER_BUNDLE,
       username: requestedUsername,
       bundle,
       success: !!bundle,
@@ -215,7 +216,7 @@ export async function handleBundleRequest({ ws, parsed, state, sendPQResponse })
     });
     if (ws.readyState === 1) {
       await sendPQResponse(ws, {
-        type: 'libsignal-deliver-bundle',
+        type: SignalType.LIBSIGNAL_DELIVER_BUNDLE,
         username: parsed.username,
         bundle: null,
         success: false,

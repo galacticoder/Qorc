@@ -99,11 +99,10 @@ interface SignalHandlers {
   Database: any;
   handleFileMessageChunk: (data: any, meta: any) => Promise<void>;
   handleEncryptedMessagePayload: (message: any) => Promise<void>;
-  handleMessageHistory?: (data: any) => Promise<void>;
 }
 
 export async function handleSignalMessages(data: any, handlers: SignalHandlers) {
-  const { Authentication, Database, handleFileMessageChunk, handleEncryptedMessagePayload, handleMessageHistory } = handlers;
+  const { Authentication, Database, handleFileMessageChunk, handleEncryptedMessagePayload } = handlers;
   const { type, message } = data ?? {};
 
   const { setUsers } = Database ?? {};
@@ -814,14 +813,6 @@ export async function handleSignalMessages(data: any, handlers: SignalHandlers) 
           return;
         }
         await handleFileMessageChunk(data, { from: data?.from, to: data?.to });
-        break;
-      }
-
-      case SignalType.MESSAGE_HISTORY_RESPONSE: {
-        if (typeof handleMessageHistory !== 'function') {
-          return;
-        }
-        await handleMessageHistory(data);
         break;
       }
 

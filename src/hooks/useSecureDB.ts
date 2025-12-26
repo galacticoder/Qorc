@@ -5,6 +5,7 @@ import { User } from "@/components/chat/UserList";
 import { encryptedStorage, syncEncryptedStorage } from "@/lib/encrypted-storage";
 import { prewarmUsernameCache } from "@/hooks/useUnifiedUsernameDisplay";
 import { blockingSystem } from "@/lib/blocking-system";
+import { EventType } from "@/lib/event-types";
 
 const MAX_PENDING_MESSAGES = 500;
 const MAX_PENDING_MAPPINGS = 1000;
@@ -141,7 +142,7 @@ export const useSecureDB = ({ Authentication, setMessages }: UseSecureDBProps) =
 						const existingOriginal = await secureDBRef.current.retrieve('auth_metadata', 'original_username');
 						if (typeof existingOriginal === 'string' && existingOriginal) {
 							try { await secureDBRef.current.storeUsernameMapping(currentHashed, existingOriginal); } catch { }
-							try { window.dispatchEvent(new CustomEvent('username-mapping-updated', { detail: { username: currentHashed, original: existingOriginal } })); } catch { }
+							try { window.dispatchEvent(new CustomEvent(EventType.USERNAME_MAPPING_UPDATED, { detail: { username: currentHashed, original: existingOriginal } })); } catch { }
 						}
 					}
 				} catch { }
@@ -345,7 +346,7 @@ export const useSecureDB = ({ Authentication, setMessages }: UseSecureDBProps) =
 				if (!sanitized) return;
 				secureDBRef.current!.storeUsernameMapping(sanitized.hashed, sanitized.original)
 					.then(() => {
-						try { window.dispatchEvent(new CustomEvent('username-mapping-updated', { detail: { username: sanitized.hashed } })); } catch { }
+						try { window.dispatchEvent(new CustomEvent(EventType.USERNAME_MAPPING_UPDATED, { detail: { username: sanitized.hashed } })); } catch { }
 					})
 					.catch((err) => console.error('[useSecureDB] Failed to store username mapping', err));
 			} catch { }
@@ -393,11 +394,11 @@ export const useSecureDB = ({ Authentication, setMessages }: UseSecureDBProps) =
 			} catch { }
 		};
 
-		window.addEventListener('username-mapping-received', mappingListener as EventListener);
-		window.addEventListener('user-keys-available', keysListener as EventListener);
+		window.addEventListener(EventType.USERNAME_MAPPING_RECEIVED, mappingListener as EventListener);
+		window.addEventListener(EventType.USER_KEYS_AVAILABLE, keysListener as EventListener);
 		return () => {
-			window.removeEventListener('username-mapping-received', mappingListener as EventListener);
-			window.removeEventListener('user-keys-available', keysListener as EventListener);
+			window.removeEventListener(EventType.USERNAME_MAPPING_RECEIVED, mappingListener as EventListener);
+			window.removeEventListener(EventType.USER_KEYS_AVAILABLE, keysListener as EventListener);
 		};
 	}, [Authentication?.isLoggedIn, dbInitialized]);
 
@@ -414,8 +415,8 @@ export const useSecureDB = ({ Authentication, setMessages }: UseSecureDBProps) =
 				pendingMappingsRef.current.push(sanitized);
 			} catch { }
 		};
-		window.addEventListener('username-mapping-received', preInitListener as EventListener);
-		return () => window.removeEventListener('username-mapping-received', preInitListener as EventListener);
+		window.addEventListener(EventType.USERNAME_MAPPING_RECEIVED, preInitListener as EventListener);
+		return () => window.removeEventListener(EventType.USERNAME_MAPPING_RECEIVED, preInitListener as EventListener);
 	}, [dbInitialized]);
 
 	useEffect(() => {
@@ -426,18 +427,18 @@ export const useSecureDB = ({ Authentication, setMessages }: UseSecureDBProps) =
 			for (const m of toFlush) {
 				try {
 					await secureDBRef.current!.storeUsernameMapping(m.hashed, m.original);
-					try { window.dispatchEvent(new CustomEvent('username-mapping-updated', { detail: { username: m.hashed } })); } catch { }
+					try { window.dispatchEvent(new CustomEvent(EventType.USERNAME_MAPPING_UPDATED, { detail: { username: m.hashed } })); } catch { }
 				} catch (_err) {
 					console.error('[useSecureDB] Failed to flush mapping:', _err);
 				}
 			}
-			try { window.dispatchEvent(new CustomEvent('username-mapping-updated', { detail: { username: '__all__' } })); } catch { }
+			try { window.dispatchEvent(new CustomEvent(EventType.USERNAME_MAPPING_UPDATED, { detail: { username: '__all__' } })); } catch { }
 		})();
 	}, [dbInitialized]);
 
 	useEffect(() => {
 		if (!Authentication?.isLoggedIn || !dbInitialized || !secureDBRef.current) return;
-		try { window.dispatchEvent(new CustomEvent('username-mapping-updated', { detail: { username: '__all__' } })); } catch { }
+		try { window.dispatchEvent(new CustomEvent(EventType.USERNAME_MAPPING_UPDATED, { detail: { username: '__all__' } })); } catch { }
 	}, [Authentication?.isLoggedIn, dbInitialized]);
 
 	useEffect(() => {

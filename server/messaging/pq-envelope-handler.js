@@ -139,7 +139,7 @@ export async function handlePQHandshake({ ws, sessionId, parsed, serverHybridKey
     });
 
     await sendSecureMessage(ws, {
-      type: 'pq-handshake-ack',
+      type: SignalType.PQ_HANDSHAKE_ACK,
       sessionId: payload.sessionId,
       timestamp: Date.now()
     });
@@ -167,7 +167,7 @@ export async function handlePQHandshake({ ws, sessionId, parsed, serverHybridKey
     setTimeout(async () => {
       try {
         await sendSecureMessage(ws, {
-          type: 'pq-handshake-ack',
+          type: SignalType.PQ_HANDSHAKE_ACK,
           sessionId: payload.sessionId,
           timestamp: Date.now(),
           redundant: true
@@ -248,7 +248,7 @@ export async function handlePQEnvelope({ ws, sessionId, envelope, context, handl
     if (decrypted.to && decrypted.encryptedPayload) {
       // Stripped-down encrypted message for routing
       innerPayload = {
-        type: 'encrypted-message',
+        type: SignalType.ENCRYPTED_MESSAGE,
         to: decrypted.to,
         encryptedPayload: decrypted.encryptedPayload,
         messageId: decrypted.messageId || envelope.messageId
@@ -308,7 +308,7 @@ export async function sendPQEncryptedResponse(ws, pqSessionIdOrData, payload) {
 
     const innerMessage = payload?.type === 'encrypted-message'
       ? {
-        type: 'encrypted-message',
+        type: SignalType.ENCRYPTED_MESSAGE,
         from: payload.from,
         to: payload.to,
         encryptedPayload: payload.encryptedPayload
@@ -326,7 +326,7 @@ export async function sendPQEncryptedResponse(ws, pqSessionIdOrData, payload) {
     const { ciphertext, tag } = pqAead.encrypt(plaintext, nonce, aad);
 
     const envelope = {
-      type: 'pq-envelope',
+      type: SignalType.PQ_ENVELOPE,
       version: 'pq-ws-1',
       sessionId: session.sessionId,
       sessionFingerprint: session.fingerprint,
@@ -427,7 +427,7 @@ export async function sendSecureMessage(ws, payload) {
     });
 
     ws.send(JSON.stringify({
-      type: 'ERROR',
+      type: SignalType.ERROR,
       code: 'PQ_SESSION_REQUIRED',
       message: 'PQ handshake required before sending secure messages',
       requiresHandshake: true

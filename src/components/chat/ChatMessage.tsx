@@ -13,8 +13,6 @@ import { MessageReceipt } from "./MessageReceipt.tsx";
 import { useUnifiedUsernameDisplay } from "../../hooks/useUnifiedUsernameDisplay";
 import { LinkifyWithPreviews } from "./LinkifyWithPreviews.tsx";
 import { LinkExtractor } from "../../lib/link-extraction.ts";
-import { MarkdownRenderer } from "../ui/MarkdownRenderer";
-import { isMarkdownMessage, extractMarkdownContent } from "../../lib/markdown-parser";
 import { copyTextToClipboard } from "../../lib/clipboard";
 import { MessageContextMenu } from "./MessageContextMenu";
 import { UserAvatar } from "../ui/UserAvatar";
@@ -135,17 +133,13 @@ export const ChatMessage = React.memo<ExtendedChatMessageProps>(({ message, smar
 
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null);
 
-  const { isUrlOnly, urls, isMarkdown, markdownContent } = useMemo(() => {
+  const { isUrlOnly, urls } = useMemo(() => {
     const urlOnly = LinkExtractor.isUrlOnlyMessage(content);
     const extractedUrls = LinkExtractor.extractUrlStrings(content);
-    const hasMarkdown = isMarkdownMessage(content);
-    const mdContent = hasMarkdown ? extractMarkdownContent(content) : '';
 
     return {
       isUrlOnly: urlOnly,
-      urls: extractedUrls,
-      isMarkdown: hasMarkdown,
-      markdownContent: mdContent
+      urls: extractedUrls
     };
   }, [content]);
 
@@ -456,29 +450,19 @@ export const ChatMessage = React.memo<ExtendedChatMessageProps>(({ message, smar
             return (
               <div className="relative max-w-full" ref={bubbleRef}>
                 <div
-                  className={`px-4 py-3 ${isMarkdown ? 'text-base' : 'text-sm'
-                    } ${isMarkdown ? '' : 'whitespace-pre-wrap'
-                    } break-words`}
+                  className="px-4 py-3 text-sm whitespace-pre-wrap break-words"
                   style={{
                     backgroundColor: safeIsCurrentUser ? 'var(--color-accent-primary)' : 'var(--chat-bubble-received-bg)',
                     color: safeIsCurrentUser ? 'white' : 'var(--color-text-primary)',
                     borderRadius: 'var(--message-bubble-radius)',
                     wordBreak: "break-word",
-                    whiteSpace: isMarkdown ? "normal" : "pre-wrap",
+                    whiteSpace: "pre-wrap",
                     minWidth: '3rem',
                     maxWidth: '100%'
                   }}
                   onContextMenu={handleContextMenu}
                 >
-                  {isMarkdown ? (
-                    <MarkdownRenderer
-                      content={content}
-                      isCurrentUser={safeIsCurrentUser}
-                      className="compact"
-                      preCalculatedContent={markdownContent}
-                    />
-                  ) : (
-                    <LinkifyWithPreviews
+                  <LinkifyWithPreviews
                       options={{ rel: "noopener noreferrer" }}
                       showPreviews={false}
                       isCurrentUser={safeIsCurrentUser}
@@ -486,7 +470,6 @@ export const ChatMessage = React.memo<ExtendedChatMessageProps>(({ message, smar
                     >
                       {content}
                     </LinkifyWithPreviews>
-                  )}
                 </div>
               </div>
             );

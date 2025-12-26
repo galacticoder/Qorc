@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef } from 'react';
+import { SignalType } from '../lib/signal-types';
 
 const TYPING_STOP_DELAY = 1500;
 const MIN_TYPING_INTERVAL = 4000;
@@ -87,13 +88,13 @@ export function useTypingIndicator(
       const id = createTypingMessageId(kind, sequence);
       const payload = {
         domain: TYPING_DOMAIN,
-        type: kind === 'start' ? 'typing-start' : 'typing-stop',
+        type: kind === 'start' ? SignalType.TYPING_START : SignalType.TYPING_STOP,
         timestamp: Date.now(),
         nonce: createTypingNonce(),
         username: currentUsername,
         conversation: selectedConversation ?? null,
       };
-      await sendEncryptedMessage(id, JSON.stringify(payload), kind === 'start' ? 'typing-start' : 'typing-stop');
+      await sendEncryptedMessage(id, JSON.stringify(payload), kind === 'start' ? SignalType.TYPING_START : SignalType.TYPING_STOP);
       isTypingRef.current = kind === 'start';
       if (kind === 'stop') {
         pendingTypingRef.current = false;

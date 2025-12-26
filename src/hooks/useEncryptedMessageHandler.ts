@@ -2,6 +2,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { useCallback, useEffect, useRef } from "react";
 import { toast } from "sonner";
 import { SignalType } from "../lib/signal-types";
+import { EventType } from "../lib/event-types";
 import { Message } from "../components/chat/types";
 import type { User } from "../components/chat/UserList";
 import websocketClient from "../lib/websocket";
@@ -442,12 +443,12 @@ export function useEncryptedMessageHandler(
       _retryForPeer(peer);
     };
 
-    window.addEventListener('libsignal-session-ready', handleSessionReady as EventListener);
+    window.addEventListener(EventType.LIBSIGNAL_SESSION_READY, handleSessionReady as EventListener);
 
     return () => {
       clearInterval(interval);
       clearInterval(cacheCleanupInterval);
-      window.removeEventListener('libsignal-session-ready', handleSessionReady as EventListener);
+      window.removeEventListener(EventType.LIBSIGNAL_SESSION_READY, handleSessionReady as EventListener);
       blobCacheRef.current.clearAll();
       keyRequestCacheRef.current.clear();
       pendingRetryMessagesRef.current.clear();
@@ -541,12 +542,12 @@ export function useEncryptedMessageHandler(
               messageId: `delivery-receipt-${data.messageId}`,
               from: loginUsernameRef.current,
               to: peerUsername,
-              content: 'delivery-receipt',
+              content: SignalType.DELIVERY_RECEIPT,
               timestamp: Date.now(),
               messageType: 'signal-protocol',
               signalType: 'signal-protocol',
               protocolType: 'signal',
-              type: 'delivery-receipt'
+              type: SignalType.DELIVERY_RECEIPT
             };
 
             const encryptedMessage = await (window as any).edgeApi?.encrypt?.({
@@ -598,11 +599,11 @@ export function useEncryptedMessageHandler(
     };
 
     window.addEventListener('session-established-received', handleSessionEstablished as EventListener);
-    window.addEventListener('libsignal-session-ready', handleSessionEstablished as EventListener);
+    window.addEventListener(EventType.LIBSIGNAL_SESSION_READY, handleSessionEstablished as EventListener);
 
     return () => {
       window.removeEventListener('session-established-received', handleSessionEstablished as EventListener);
-      window.removeEventListener('libsignal-session-ready', handleSessionEstablished as EventListener);
+      window.removeEventListener(EventType.LIBSIGNAL_SESSION_READY, handleSessionEstablished as EventListener);
     };
   }, [getKeysOnDemand, usersRef, loginUsernameRef]);
 
@@ -626,11 +627,11 @@ export function useEncryptedMessageHandler(
               const ready = (e: Event) => {
                 const d = (e as CustomEvent).detail || {};
                 if (d?.peer === senderUsername) {
-                  try { window.removeEventListener('libsignal-session-ready', ready as EventListener); } catch { }
+                  try { window.removeEventListener(EventType.LIBSIGNAL_SESSION_READY, ready as EventListener); } catch { }
                   if (!settled) { settled = true; clearTimeout(timeout); resolve(); }
                 }
               };
-              window.addEventListener('libsignal-session-ready', ready as EventListener, { once: true });
+              window.addEventListener(EventType.LIBSIGNAL_SESSION_READY, ready as EventListener, { once: true });
             });
           }
         } catch { }
@@ -652,12 +653,12 @@ export function useEncryptedMessageHandler(
           messageId: `delivery-receipt-${messageId}`,
           from: loginUsernameRef.current,
           to: senderUsername,
-          content: 'delivery-receipt',
+          content: SignalType.DELIVERY_RECEIPT,
           timestamp: Date.now(),
           messageType: 'signal-protocol',
           signalType: 'signal-protocol',
           protocolType: 'signal',
-          type: 'delivery-receipt'
+          type: SignalType.DELIVERY_RECEIPT
         };
 
         const keys = await getKeysOnDemand?.();
@@ -800,11 +801,11 @@ export function useEncryptedMessageHandler(
           const handler = (event: Event) => {
             const d = (event as CustomEvent).detail || {};
             if (d?.username === peerUsername) {
-              try { window.removeEventListener('libsignal-session-ready', handler as EventListener); } catch { }
+              try { window.removeEventListener(EventType.LIBSIGNAL_SESSION_READY, handler as EventListener); } catch { }
               if (!settled) { settled = true; clearTimeout(timeout); resolve(); }
             }
           };
-          window.addEventListener('libsignal-session-ready', handler as EventListener, { once: true });
+          window.addEventListener(EventType.LIBSIGNAL_SESSION_READY, handler as EventListener, { once: true });
         });
       } finally {
         inFlightBundleRequestsRef.current.delete(peerUsername);
@@ -826,7 +827,7 @@ export function useEncryptedMessageHandler(
           await (window as any).edgeApi?.deleteSession?.({ selfUsername: loginUsernameRef.current, peerUsername: from, deviceId: 1 });
         } catch { }
         try {
-          window.dispatchEvent(new CustomEvent('session-reset-received', { detail: { peerUsername: from, reason: d?.reason || 'p2p-control' } }));
+          window.dispatchEvent(new CustomEvent(EventType.SESSION_RESET_RECEIVED, { detail: { peerUsername: from, reason: d?.reason || 'p2p-control' } }));
         } catch { }
         try {
           await requestBundleOnce(from, 'p2p-session-reset');
@@ -1099,12 +1100,12 @@ export function useEncryptedMessageHandler(
                       });
                       // Also request a P2P control reset so peer can react immediately over DC
                       try {
-                        window.dispatchEvent(new CustomEvent('p2p-session-reset-send', {
+                        window.dispatchEvent(new CustomEvent(EventType.P2P_SESSION_RESET_SEND, {
                           detail: { to: senderUsername, reason: 'decryption-failure' }
                         }));
                       } catch { }
 
-                      window.dispatchEvent(new CustomEvent('session-reset-received', {
+                      window.dispatchEvent(new CustomEvent(EventType.SESSION_RESET_RECEIVED, {
                         detail: { peerUsername: senderUsername, reason: 'local-initiated-reset' }
                       }));
                     } catch (notifyErr) {
@@ -1205,13 +1206,13 @@ export function useEncryptedMessageHandler(
                       });
                       // Request P2P control session reset too
                       try {
-                        window.dispatchEvent(new CustomEvent('p2p-session-reset-send', {
+                        window.dispatchEvent(new CustomEvent(EventType.P2P_SESSION_RESET_SEND, {
                           detail: { to: senderUsername, reason: isPqMacFailure ? 'pq-mac-failure' : 'decryption-failure' }
                         }));
                       } catch { }
 
                       // Emit local session-reset-received event
-                      window.dispatchEvent(new CustomEvent('session-reset-received', {
+                      window.dispatchEvent(new CustomEvent(EventType.SESSION_RESET_RECEIVED, {
                         detail: { peerUsername: senderUsername, reason: 'decryption-failure' }
                       }));
                     } catch (notifyErr) {
@@ -1261,11 +1262,11 @@ export function useEncryptedMessageHandler(
                           };
                           const cleanup = () => {
                             clearTimeout(timeout);
-                            window.removeEventListener('libsignal-session-ready', handleReady as EventListener);
-                            window.removeEventListener('libsignal-bundle-failed', handleFailed as EventListener);
+                            window.removeEventListener(EventType.LIBSIGNAL_SESSION_READY, handleReady as EventListener);
+                            window.removeEventListener(EventType.LIBSIGNAL_BUNDLE_FAILED, handleFailed as EventListener);
                           };
-                          window.addEventListener('libsignal-session-ready', handleReady as EventListener);
-                          window.addEventListener('libsignal-bundle-failed', handleFailed as EventListener);
+                          window.addEventListener(EventType.LIBSIGNAL_SESSION_READY, handleReady as EventListener);
+                          window.addEventListener(EventType.LIBSIGNAL_BUNDLE_FAILED, handleFailed as EventListener);
                         });
                         try {
                           await sessionReadyPromise;
@@ -1327,11 +1328,11 @@ export function useEncryptedMessageHandler(
                         const has = await (window as any).edgeApi?.hasSession?.({ selfUsername: currentUserForSession, peerUsername: senderUsername, deviceId: 1 });
                         if (!has?.hasSession) {
                         }
-                        try { window.dispatchEvent(new CustomEvent('libsignal-session-ready', { detail: { peer: senderUsername } })); } catch { }
+                        try { window.dispatchEvent(new CustomEvent(EventType.LIBSIGNAL_SESSION_READY, { detail: { peer: senderUsername } })); } catch { }
 
                         try {
                           if (has?.hasSession) await websocketClient.sendSecureControlMessage({
-                            type: 'session-established',
+                            type: SignalType.SESSION_ESTABLISHED,
                             from: currentUserForSession,
                             username: senderUsername,
                             deviceId: 1,
@@ -1377,11 +1378,11 @@ export function useEncryptedMessageHandler(
               const has = await (window as any).edgeApi?.hasSession?.({ selfUsername: currentUser, peerUsername, deviceId: 1 });
               if (!has?.hasSession) {
               }
-              try { window.dispatchEvent(new CustomEvent('libsignal-session-ready', { detail: { peer: peerUsername } })); } catch { }
+              try { window.dispatchEvent(new CustomEvent(EventType.LIBSIGNAL_SESSION_READY, { detail: { peer: peerUsername } })); } catch { }
 
               try {
                 if (has?.hasSession) await websocketClient.sendSecureControlMessage({
-                  type: 'session-established',
+                  type: SignalType.SESSION_ESTABLISHED,
                   from: currentUser,
                   username: peerUsername,
                   deviceId: 1,
@@ -1391,7 +1392,7 @@ export function useEncryptedMessageHandler(
               }
             }
           } catch (_error) {
-            try { window.dispatchEvent(new CustomEvent('libsignal-bundle-failed', { detail: { peer: encryptedMessage?.username, error: _error instanceof Error ? _error.message : String(_error) } })); } catch { }
+            try { window.dispatchEvent(new CustomEvent(EventType.LIBSIGNAL_BUNDLE_FAILED, { detail: { peer: encryptedMessage?.username, error: _error instanceof Error ? _error.message : String(_error) } })); } catch { }
             return;
           }
           return;
@@ -1405,7 +1406,7 @@ export function useEncryptedMessageHandler(
           const hashedFrom = (payload as any)?.from;
           if (typeof originalFrom === 'string' && typeof hashedFrom === 'string') {
             // Emit event so whoever holds SecureDB can store mapping
-            window.dispatchEvent(new CustomEvent('username-mapping-received', {
+            window.dispatchEvent(new CustomEvent(EventType.USERNAME_MAPPING_RECEIVED, {
               detail: { hashed: hashedFrom, original: originalFrom }
             }));
           }
@@ -1460,9 +1461,9 @@ export function useEncryptedMessageHandler(
         if (payload && typeof payload === 'object') {
           // Apply blocking filter for incoming messages (except system messages)
           if (payload.from && payload.from !== loginUsernameRef.current &&
-            payload.type !== 'read-receipt' && payload.type !== 'delivery-receipt' &&
-            payload.type !== 'typing-start' && payload.type !== 'typing-stop' &&
-            payload.type !== 'typing-indicator') {
+            payload.type !== SignalType.READ_RECEIPT && payload.type !== SignalType.DELIVERY_RECEIPT &&
+            payload.type !== SignalType.TYPING_START && payload.type !== SignalType.TYPING_STOP &&
+            payload.type !== SignalType.TYPING_INDICATOR) {
             try {
               let passphrase = null;
 
@@ -1482,8 +1483,8 @@ export function useEncryptedMessageHandler(
           }
 
           // Handle read receipts
-          if (payload.type === 'read-receipt' && payload.messageId) {
-            const event = new CustomEvent('message-read', {
+          if (payload.type === SignalType.READ_RECEIPT && payload.messageId) {
+            const event = new CustomEvent(EventType.MESSAGE_READ, {
               detail: {
                 messageId: payload.messageId,
                 from: payload.from
@@ -1494,8 +1495,8 @@ export function useEncryptedMessageHandler(
           }
 
           // Handle delivery receipts
-          if (payload.type === 'delivery-receipt' && payload.messageId) {
-            const event = new CustomEvent('message-delivered', {
+          if (payload.type === SignalType.DELIVERY_RECEIPT && payload.messageId) {
+            const event = new CustomEvent(EventType.MESSAGE_DELIVERED, {
               detail: {
                 messageId: payload.messageId,
                 from: payload.from
@@ -1519,21 +1520,21 @@ export function useEncryptedMessageHandler(
           }
 
           // Handle typing indicators
-          if (payload.type === 'typing-start' || payload.type === 'typing-stop' || payload.type === 'typing-indicator') {
+          if (payload.type === SignalType.TYPING_START || payload.type === SignalType.TYPING_STOP || payload.type === SignalType.TYPING_INDICATOR) {
             let indicatorType = payload.type;
-            if (payload.type === 'typing-indicator' && payload.content) {
+            if (payload.type === SignalType.TYPING_INDICATOR && payload.content) {
               const contentData = safeJsonParse(payload.content);
               if (contentData && contentData.type) {
                 indicatorType = contentData.type;
               } else {
-                indicatorType = 'typing-start';
+                indicatorType = SignalType.TYPING_START;
               }
             }
 
             // Dispatch typing-indicator event
             try {
               const username = String(payload.from || '');
-              const action = indicatorType === 'typing-stop' ? 'stop' : 'start';
+              const action = indicatorType === SignalType.TYPING_STOP ? 'stop' : 'start';
               const timestamp = Date.now();
               const nonceBytes = crypto.getRandomValues(new Uint8Array(24));
               const nonce = btoa(String.fromCharCode(...nonceBytes));
@@ -1543,7 +1544,7 @@ export function useEncryptedMessageHandler(
               const payloadBytes = encoder.encode(JSON.stringify(typedPayload));
               const macBytes = await CryptoUtils.Hash.generateBlake3Mac(payloadBytes, macKey);
               const signature = CryptoUtils.Base64.arrayBufferToBase64(macBytes);
-              const secureEvent = new CustomEvent('typing-indicator', {
+              const secureEvent = new CustomEvent(EventType.TYPING_INDICATOR, {
                 detail: {
                   signature,
                   timestamp,
@@ -1570,8 +1571,8 @@ export function useEncryptedMessageHandler(
 
           if (isActualMessage) {
             try {
-              const typingClearEvent = new CustomEvent('typing-indicator', {
-                detail: { from: payload.from, indicatorType: 'typing-stop' }
+              const typingClearEvent = new CustomEvent(EventType.TYPING_INDICATOR, {
+                detail: { from: payload.from, indicatorType: SignalType.TYPING_STOP }
               });
               window.dispatchEvent(typingClearEvent);
             } catch { }
@@ -1601,7 +1602,7 @@ export function useEncryptedMessageHandler(
           }
 
           // Handle message deletion first
-          if (payload.type === 'delete-message' || payload.type === 'DELETE_MESSAGE') {
+          if (payload.type === SignalType.DELETE_MESSAGE || payload.type === 'DELETE_MESSAGE') {
             const messageIdToDelete = payload.deleteMessageId || payload.messageId || payload.content;
             if (messageIdToDelete) {
               let messageToPersist: Message | null = null;
@@ -1625,7 +1626,7 @@ export function useEncryptedMessageHandler(
 
               // Dispatch remote message delete event for reply field updates
               try {
-                const deleteEvent = new CustomEvent('remote-message-delete', {
+                const deleteEvent = new CustomEvent(EventType.REMOTE_MESSAGE_DELETE, {
                   detail: { messageId: messageIdToDelete }
                 });
                 window.dispatchEvent(deleteEvent);
@@ -1637,7 +1638,7 @@ export function useEncryptedMessageHandler(
           }
 
           // Handle message editing
-          if (payload.type === 'edit-message' || payload.type === 'EDIT_MESSAGE') {
+          if (payload.type === SignalType.EDIT_MESSAGE || payload.type === 'EDIT_MESSAGE') {
             const messageIdToEdit = payload.messageId;
             const newContent = payload.content;
             if (messageIdToEdit && newContent) {
@@ -1660,7 +1661,7 @@ export function useEncryptedMessageHandler(
 
               // Dispatch remote message edit event for reply field updates
               try {
-                const editEvent = new CustomEvent('remote-message-edit', {
+                const editEvent = new CustomEvent(EventType.REMOTE_MESSAGE_EDIT, {
                   detail: { messageId: messageIdToEdit, newContent }
                 });
                 window.dispatchEvent(editEvent);
@@ -1671,8 +1672,8 @@ export function useEncryptedMessageHandler(
 
             // Dispatch typing stop event for edit messages (same as normal messages)
             try {
-              const typingStopEvent = new CustomEvent('typing-indicator', {
-                detail: { from: payload.from, indicatorType: 'typing-stop' }
+              const typingStopEvent = new CustomEvent(EventType.TYPING_INDICATOR, {
+                detail: { from: payload.from, indicatorType: SignalType.TYPING_STOP }
               });
               window.dispatchEvent(typingStopEvent);
             } catch (_error) {
@@ -1683,7 +1684,7 @@ export function useEncryptedMessageHandler(
           }
 
           // Handle reactions (add/remove)
-          if (payload.type === 'reaction-add' || payload.type === 'REACTION_ADD' || payload.type === 'reaction-remove' || payload.type === 'REACTION_REMOVE') {
+          if (payload.type === SignalType.REACTION_ADD || payload.type === 'REACTION_ADD' || payload.type === SignalType.REACTION_REMOVE || payload.type === 'REACTION_REMOVE') {
             const reactTo = (payload as any).reactTo;
             const emoji = (payload as any).emoji;
             if (reactTo && typeof emoji === 'string' && emoji.length > 0) {
@@ -1693,7 +1694,7 @@ export function useEncryptedMessageHandler(
                 const arr = Array.isArray(reactions[emoji]) ? [...reactions[emoji]] : [];
                 const actor = payload.from;
                 const has = arr.includes(actor);
-                const isAdd = (payload.type === 'reaction-add' || payload.type === 'REACTION_ADD');
+                const isAdd = (payload.type === SignalType.REACTION_ADD || payload.type === 'REACTION_ADD');
                 for (const key of Object.keys(reactions)) {
                   if (key !== emoji) {
                     reactions[key] = (reactions[key] || []).filter(u => u !== actor);
@@ -1716,7 +1717,7 @@ export function useEncryptedMessageHandler(
             const trimmedContent = payload.content.trim();
             if (trimmedContent.startsWith('{') || trimmedContent.startsWith('[')) {
               const typingCheckData = safeJsonParseForMessages(payload.content);
-              if (typingCheckData && (typingCheckData.type === 'typing-start' || typingCheckData.type === 'typing-stop')) {
+              if (typingCheckData && (typingCheckData.type === SignalType.TYPING_START || typingCheckData.type === SignalType.TYPING_STOP)) {
                 return;
               }
             }
@@ -1854,12 +1855,12 @@ export function useEncryptedMessageHandler(
 
                     const cleanup = () => {
                       clearTimeout(timeout);
-                      window.removeEventListener('libsignal-session-ready', handleSessionReady);
-                      window.removeEventListener('libsignal-bundle-failed', handleBundleFailed);
+                      window.removeEventListener(EventType.LIBSIGNAL_SESSION_READY, handleSessionReady);
+                      window.removeEventListener(EventType.LIBSIGNAL_BUNDLE_FAILED, handleBundleFailed);
                     };
 
-                    window.addEventListener('libsignal-session-ready', handleSessionReady);
-                    window.addEventListener('libsignal-bundle-failed', handleBundleFailed);
+                    window.addEventListener(EventType.LIBSIGNAL_SESSION_READY, handleSessionReady);
+                    window.addEventListener(EventType.LIBSIGNAL_BUNDLE_FAILED, handleBundleFailed);
                   });
 
                   await websocketClient.sendSecureControlMessage({
@@ -1878,12 +1879,12 @@ export function useEncryptedMessageHandler(
                   messageId: `delivery-receipt-${messageId}`,
                   from: loginUsernameRef.current,
                   to: payload.from,
-                  content: 'delivery-receipt',
+                  content: SignalType.DELIVERY_RECEIPT,
                   timestamp: Date.now(),
                   messageType: 'signal-protocol',
                   signalType: 'signal-protocol',
                   protocolType: 'signal',
-                  type: 'delivery-receipt'
+                  type: SignalType.DELIVERY_RECEIPT
                 };
 
                 // Use shared helper to resolve sender's PQ Kyber key
@@ -1920,7 +1921,7 @@ export function useEncryptedMessageHandler(
                             resolve();
                           }
                         };
-                        window.addEventListener('libsignal-session-ready', onReady as EventListener, { once: true });
+                        window.addEventListener(EventType.LIBSIGNAL_SESSION_READY, onReady as EventListener, { once: true });
                       });
                       try { await websocketClient.sendSecureControlMessage({ type: SignalType.LIBSIGNAL_REQUEST_BUNDLE, username: senderUsername }); } catch { }
                       await quickWait;
@@ -2139,12 +2140,12 @@ export function useEncryptedMessageHandler(
 
                     const cleanup = () => {
                       clearTimeout(timeout);
-                      window.removeEventListener('libsignal-session-ready', handleSessionReady);
-                      window.removeEventListener('libsignal-bundle-failed', handleBundleFailed);
+                      window.removeEventListener(EventType.LIBSIGNAL_SESSION_READY, handleSessionReady);
+                      window.removeEventListener(EventType.LIBSIGNAL_BUNDLE_FAILED, handleBundleFailed);
                     };
 
-                    window.addEventListener('libsignal-session-ready', handleSessionReady);
-                    window.addEventListener('libsignal-bundle-failed', handleBundleFailed);
+                    window.addEventListener(EventType.LIBSIGNAL_SESSION_READY, handleSessionReady);
+                    window.addEventListener(EventType.LIBSIGNAL_BUNDLE_FAILED, handleBundleFailed);
                   });
 
                   await websocketClient.sendSecureControlMessage({
@@ -2163,12 +2164,12 @@ export function useEncryptedMessageHandler(
                   messageId: `delivery-receipt-${messageId}`,
                   from: loginUsernameRef.current,
                   to: payload.from,
-                  content: 'delivery-receipt',
+                  content: SignalType.DELIVERY_RECEIPT,
                   timestamp: Date.now(),
                   messageType: 'signal-protocol',
                   signalType: 'signal-protocol',
                   protocolType: 'signal',
-                  type: 'delivery-receipt'
+                  type: SignalType.DELIVERY_RECEIPT
                 };
 
                 // Use shared helper to resolve sender's PQ Kyber key
@@ -2200,7 +2201,7 @@ export function useEncryptedMessageHandler(
                             resolve();
                           }
                         };
-                        window.addEventListener('libsignal-session-ready', onReady as EventListener, { once: true });
+                        window.addEventListener(EventType.LIBSIGNAL_SESSION_READY, onReady as EventListener, { once: true });
                       });
                       try { await websocketClient.sendSecureControlMessage({ type: SignalType.LIBSIGNAL_REQUEST_BUNDLE, username: senderUsername }); } catch { }
                       await quickWait;
@@ -2240,7 +2241,7 @@ export function useEncryptedMessageHandler(
               try {
                 const originalFrom = (payload as any)?.fromOriginal;
                 if (typeof originalFrom === 'string') {
-                  window.dispatchEvent(new CustomEvent('username-mapping-received', {
+                  window.dispatchEvent(new CustomEvent(EventType.USERNAME_MAPPING_RECEIVED, {
                     detail: { hashed: payload.from, original: originalFrom }
                   }));
                   (callSignalData as any).fromOriginal = originalFrom;

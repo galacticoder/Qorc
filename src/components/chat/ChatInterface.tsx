@@ -531,7 +531,7 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
   ) => {
     await onSendMessage(messageId ?? "", content, messageSignalType, replyToMsg);
 
-    if (messageSignalType !== 'typing-start' && messageSignalType !== 'typing-stop') {
+    if (messageSignalType !== SignalType.TYPING_START && messageSignalType !== SignalType.TYPING_STOP) {
       resetTypingAfterSend();
       setReplyTo(null);
     }

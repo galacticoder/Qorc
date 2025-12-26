@@ -9,13 +9,14 @@ import { fileURLToPath } from 'url';
 import { WebSocketServer } from 'ws';
 import { SignalType } from './signals.js';
 import { CryptoUtils } from './crypto/unified-crypto.js';
-import { MessageDatabase, UserDatabase, BlockingDatabase, AvatarDatabase, initDatabase } from './database/database.js';
+import { BlockingDatabase, initDatabase } from './database/database.js';
 import * as ServerConfig from './config/config.js';
 import * as authentication from './authentication/authentication.js';
 import { setServerPasswordOnInput } from './authentication/auth-utils.js';
 import { rateLimitMiddleware } from './rate-limiting/rate-limit-middleware.js';
 import { ConnectionStateManager } from './presence/connection-state.js';
 import authRoutes from './routes/auth-routes.js';
+import apiRoutes from './routes/api-routes.js';
 import { createServer as createBootstrapServer, registerShutdownHandlers } from './bootstrap/server-bootstrap.js';
 import { attachGateway } from './websocket/gateway.js';
 import { attachP2PSignaling } from './websocket/p2p-signaling.js';
@@ -31,30 +32,27 @@ import { handlePQHandshake, handlePQEnvelope, sendPQEncryptedResponse, createPQR
 import { handleBundlePublish, handleBundleRequest, handleBundleFailure } from './messaging/libsignal-handler.js';
 import { initializeCluster, shutdownCluster } from './cluster/cluster-integration.js';
 import clusterRoutes from './routes/cluster-routes.js';
-
-const KYBER_PUBLIC_KEY_LENGTH = 1568;
-const DILITHIUM_PUBLIC_KEY_LENGTH = 2592;
-const X25519_PUBLIC_KEY_LENGTH = 32;
-
-function isValidBase64Key(b64, expectedLen) {
-  if (!b64 || typeof b64 !== 'string') return false;
-  try {
-    const bytes = Buffer.from(b64, 'base64');
-    return bytes.length === expectedLen;
-  } catch (_e) {
-    return false;
-  }
-}
-
-function sanitizeHybridKeysServer(keys) {
-  const out = {};
-  if (keys && typeof keys === 'object') {
-    if (isValidBase64Key(keys.kyberPublicBase64, KYBER_PUBLIC_KEY_LENGTH)) out.kyberPublicBase64 = keys.kyberPublicBase64;
-    if (isValidBase64Key(keys.dilithiumPublicBase64, DILITHIUM_PUBLIC_KEY_LENGTH)) out.dilithiumPublicBase64 = keys.dilithiumPublicBase64;
-    if (isValidBase64Key(keys.x25519PublicBase64, X25519_PUBLIC_KEY_LENGTH)) out.x25519PublicBase64 = keys.x25519PublicBase64;
-  }
-  return out;
-}
+import {
+  handleEncryptedMessage,
+  handleSessionResetRequest,
+  handleSessionEstablished,
+  handleP2PSignalingRelay,
+  handleStoreOfflineMessage,
+  handleRetrieveOfflineMessages,
+  handleRateLimitStatus,
+  handleServerLogin,
+  handleCheckUserExists,
+  handleBlockListSync,
+  handleRetrieveBlockList,
+  handleBlockTokensUpdate,
+  handleAvatarUpload,
+  handleAvatarFetch,
+  handleP2PFetchPeerCert,
+  handleHybridKeysUpdate,
+  handleRegister,
+  handleUserDisconnect,
+  deliverToLocalConnections
+} from './handlers/signal-handlers.js';
 
 let server, wss, serverHybridKeyPair, blockTokenCleanupInterval, statusLogInterval;
 
@@ -147,152 +145,7 @@ async function createExpressApp() {
   app.use(express.json({ limit: SERVER_CONSTANTS.MAX_JSON_PAYLOAD_SIZE }));
   app.use('/api/auth', authRoutes);
   app.use('/api/cluster', clusterRoutes);
-  app.get('/api/health', (req, res) => {
-    res.status(200).json({ status: 'healthy', timestamp: Date.now() });
-  });
-
-  // Handle tunnel URL endpoint (ngrok)
-  app.get('/api/tunnel-url', async (req, res) => {
-    try {
-      const resp = await fetch('http://127.0.0.1:4040/api/tunnels');
-      if (!resp.ok) {
-        res.status(404).type('text/plain').send('Tunnel URL not found');
-        return;
-      }
-      const data = await resp.json();
-      const httpsTunnel = (data.tunnels || []).find(t => typeof t.public_url === 'string' && t.public_url.startsWith('https://'));
-      if (httpsTunnel) {
-        res.type('text/plain').send(httpsTunnel.public_url);
-      } else {
-        res.status(404).type('text/plain').send('Tunnel URL not found');
-      }
-    } catch (error) {
-      logError(error, { endpoint: '/api/tunnel-url' });
-      res.status(500).type('text/plain').send('Server error');
-    }
-  });
-
-  let cachedPublicIp = null;
-  let lastIpFetchTime = 0;
-
-  async function getPublicIp() {
-    const now = Date.now();
-    // Cache for 1 hour
-    if (cachedPublicIp && (now - lastIpFetchTime < 3600000)) {
-      return cachedPublicIp;
-    }
-    try {
-      const resp = await fetch('https://api.ipify.org?format=json');
-      if (resp.ok) {
-        const data = await resp.json();
-        if (data.ip) {
-          cachedPublicIp = data.ip;
-          lastIpFetchTime = now;
-          return cachedPublicIp;
-        }
-      }
-    } catch (err) {
-      cryptoLogger.warn('[ICE-CONFIG] Failed to auto-detect public IP', { error: err.message });
-    }
-    return process.env.PUBLIC_IP || null;
-  }
-
-  app.get('/api/ice/config', async (req, res) => {
-    try {
-      const turnRaw = process.env.TURN_SERVERS || '';
-      const stunRaw = process.env.STUN_SERVERS || '';
-      let turnServers = null;
-      let stunServers = null;
-      if (turnRaw) {
-        try {
-          const parsed = JSON.parse(turnRaw);
-          if (Array.isArray(parsed)) turnServers = parsed;
-        } catch { }
-      }
-      if (stunRaw) {
-        try {
-          const parsed = JSON.parse(stunRaw);
-          if (Array.isArray(parsed)) stunServers = parsed;
-        } catch { }
-      }
-      const iceServers = [];
-
-      // Add STUN servers
-      if (stunServers && Array.isArray(stunServers)) {
-        for (const url of stunServers) {
-          if (typeof url === 'string' && url.startsWith('stun:')) {
-            iceServers.push({ urls: url });
-          }
-        }
-      }
-
-      // Add TURN servers from TURN_SERVERS env
-      if (turnServers && Array.isArray(turnServers)) {
-        for (const entry of turnServers) {
-          if (!entry) continue;
-          const urls = entry.urls;
-          const hasUrls = Array.isArray(urls) ? urls.length > 0 : typeof urls === 'string';
-          if (!hasUrls) continue;
-          if (!entry.username || !entry.credential) continue;
-          iceServers.push(entry);
-        }
-      }
-
-      // Auto-detect Docker TURN if configured
-      const turnUsername = process.env.TURN_USERNAME;
-      const turnPassword = process.env.TURN_PASSWORD;
-
-      if (turnUsername && turnPassword) {
-        let turnExternalIp = process.env.TURN_EXTERNAL_IP;
-        if (!turnExternalIp || turnExternalIp.trim() === '') {
-          turnExternalIp = await getPublicIp();
-        }
-
-        if (turnExternalIp) {
-          const turnPort = process.env.TURN_PORT || '3478';
-          const turnsPort = process.env.TURNS_PORT || '5349';
-          const turnUrl = `turn:${turnExternalIp}:${turnPort}`;
-
-          const alreadyExists = iceServers.some(s => {
-            const urls = Array.isArray(s.urls) ? s.urls : [s.urls];
-            return urls.some(u => typeof u === 'string' && u.startsWith(turnUrl));
-          });
-
-          if (!alreadyExists) {
-            iceServers.push({
-              urls: [
-                `turn:${turnExternalIp}:${turnPort}`,
-                `turns:${turnExternalIp}:${turnsPort}`
-              ],
-              username: turnUsername,
-              credential: turnPassword
-            });
-            cryptoLogger.info('[ICE-CONFIG] Included Docker TURN server in ICE config', {
-              ip: turnExternalIp,
-              turnPort,
-              turnsPort,
-              autoDetected: !process.env.TURN_EXTERNAL_IP
-            });
-          }
-        }
-      }
-
-      // Fallback to public STUN if empty
-      if (iceServers.length === 0) {
-        iceServers.push(
-          { urls: 'stun:stun.l.google.com:19302' },
-          { urls: 'stun:stun1.l.google.com:19302' },
-          { urls: 'stun:stun2.l.google.com:19302' }
-        );
-      }
-
-      const iceTransportPolicy = process.env.ICE_TRANSPORT_POLICY === 'relay' ? 'relay' : 'all';
-      res.json({ iceServers, iceTransportPolicy });
-    } catch (error) {
-      logError(error, { endpoint: '/api/ice/config' });
-      res.status(500).json({ error: 'ICE configuration error' });
-    }
-  });
+  app.use('/api', apiRoutes);
 
   const __filename = fileURLToPath(import.meta.url);
   const __dirname = path.dirname(__filename);
@@ -367,57 +220,13 @@ async function createWebSocketServer({ server: httpsServer }) {
         return;
       }
 
-      // Deliver to local connections
-      let localSet = global.gateway?.getLocalConnections?.(recipientUser);
-
-      if (localSet && localSet.size) {
-        let deliveredCount = 0;
-        for (const client of localSet) {
-          if (client && client.readyState === 1) {
-            const recipientSessionId = client._sessionId;
-            if (!recipientSessionId) continue;
-
-            const isAuthed = !!(client._authenticated || client?.clientState?.hasAuthenticated);
-            if (!isAuthed) continue;
-
-            let recipientPqSessionId = client._pqSessionId;
-            if (!recipientPqSessionId) {
-              try {
-                const recipientState = await ConnectionStateManager.getState(recipientSessionId);
-                if (recipientState?.pqSessionId) {
-                  recipientPqSessionId = recipientState.pqSessionId;
-                  client._pqSessionId = recipientPqSessionId;
-                }
-              } catch {
-              }
-            }
-            if (!recipientPqSessionId) continue;
-
-            const recipientPqSession = await getPQSession(recipientPqSessionId);
-            if (!recipientPqSession) continue;
-
-            try {
-              await sendPQEncryptedResponse(client, recipientPqSession, parsedMessage);
-              deliveredCount++;
-            } catch (err) {
-              cryptoLogger.error('[CROSS-INSTANCE] PQ envelope failed', {
-                recipient: recipientUser.slice(0, 8) + '...',
-                session: recipientSessionId.slice(0, 8) + '...',
-                error: err.message
-              });
-            }
-          }
-        }
-        if (deliveredCount > 0) {
-          logDeliveryEvent('cross-instance-delivered', {
-            username: recipientUser.slice(0, 8) + '...',
-            count: deliveredCount
-          });
-        } else {
-          // No local connections found message will be handled by offline queue
-        }
-      } else {
-        // User not found locally so message will be delivered by another server 
+      // Deliver to local connections using shared helper
+      const result = await deliverToLocalConnections(recipientUser, parsedMessage);
+      if (result.delivered) {
+        logDeliveryEvent('cross-instance-delivered', {
+          username: recipientUser.slice(0, 8) + '...',
+          count: result.count
+        });
       }
     });
   } catch (error) {
@@ -955,14 +764,14 @@ async function handleWebSocketMessage({ ws, sessionId, message, parsed, context 
         break;
       }
 
-      case 'client-error':
+      case SignalType.CLIENT_ERROR:
         cryptoLogger.error('[CLIENT-ERROR] Client reported error', {
           sessionId: sessionId?.slice(0, 8) + '...',
           username: state.username?.slice(0, 4) + '...' || 'unknown',
           error: normalizedMessage.error
         });
         await sendSecureMessage(ws, {
-          type: 'error-acknowledged',
+          type: SignalType.ERROR_ACKNOWLEDGED,
           timestamp: Date.now()
         });
         break;
@@ -992,7 +801,7 @@ async function handleWebSocketMessage({ ws, sessionId, message, parsed, context 
         });
         break;
 
-      case 'signal-bundle-failure':
+      case SignalType.SIGNAL_BUNDLE_FAILURE:
         // Client reports Signal bundle generation failure
         await handleBundleFailure({
           ws,
@@ -1013,88 +822,7 @@ async function handleWebSocketMessage({ ws, sessionId, message, parsed, context 
         break;
 
       case SignalType.HYBRID_KEYS_UPDATE:
-        // Store hybrid public keys for user
-        if (!state.username) {
-          cryptoLogger.error('[AUTH] Hybrid keys update received but no username in state');
-          return await sendSecureMessage(ws, {
-            type: 'keys-stored',
-            success: false,
-            error: 'Authentication state error'
-          });
-        }
-
-        cryptoLogger.info('[AUTH] Hybrid keys update received', {
-          username: state.username.slice(0, 8) + '...'
-        });
-
-        try {
-          let senderDilithiumPublicKey = normalizedMessage.userData?.metadata?.sender?.dilithiumPublicKey;
-
-          if (!senderDilithiumPublicKey) {
-            const { UserDatabase: UDB } = await import('./database/database.js');
-            const existingKeys = await UDB.getHybridPublicKeys(state.username);
-            if (existingKeys?.dilithiumPublicBase64) {
-              senderDilithiumPublicKey = existingKeys.dilithiumPublicBase64;
-            }
-          }
-
-          if (!senderDilithiumPublicKey) {
-            throw new Error('Sender Dilithium public key required for verification');
-          }
-
-          // Decrypt the user data payload to extract hybrid keys
-          const userPayload = await CryptoUtils.Hybrid.decryptIncoming(
-            normalizedMessage.userData,
-            {
-              kyberSecretKey: serverHybridKeyPair.kyber.secretKey,
-              kyberPublicKey: serverHybridKeyPair.kyber.publicKey,
-              x25519SecretKey: serverHybridKeyPair.x25519.secretKey
-            },
-            { senderDilithiumPublicKey }
-          );
-
-          // Parse the decrypted payload to extract public keys
-          let parsedKeys;
-          if (userPayload.payloadJson) {
-            parsedKeys = userPayload.payloadJson;
-          } else {
-            const decoded = new TextDecoder().decode(userPayload.payload);
-            parsedKeys = JSON.parse(decoded);
-          }
-
-          // Extract public keys from the payload and sanitize
-          const extracted = {
-            kyberPublicBase64: parsedKeys.kyberPublicBase64 || '',
-            dilithiumPublicBase64: parsedKeys.dilithiumPublicBase64 || '',
-            x25519PublicBase64: parsedKeys.x25519PublicBase64 || ''
-          };
-          const hybridPublicKeys = sanitizeHybridKeysServer(extracted);
-
-          // Store keys in the users table via Postgres
-          const { UserDatabase } = await import('./database/database.js');
-          await UserDatabase.updateHybridPublicKeys(state.username, hybridPublicKeys);
-
-          cryptoLogger.info('[AUTH] Hybrid keys stored successfully', {
-            username: state.username.slice(0, 8) + '...',
-            dilithiumPrefix: hybridPublicKeys.dilithiumPublicBase64.slice(0, 6) + '...',
-            dilithiumSuffix: '...' + hybridPublicKeys.dilithiumPublicBase64.slice(-6)
-          });
-
-          await sendSecureMessage(ws, {
-            type: 'keys-stored',
-            success: true
-          });
-        } catch (error) {
-          cryptoLogger.error('[AUTH] Failed to process hybrid keys', {
-            username: state.username,
-            error: error.message
-          });
-          await sendSecureMessage(ws, {
-            type: 'keys-stored',
-            success: false,
-            error: 'Failed to process keys'
-          });
-        }
+        await handleHybridKeysUpdate({ ws, parsed: normalizedMessage, state, serverHybridKeyPair });
         break;
 
       case SignalType.SESSION_RESET_REQUEST:
@@ -1133,131 +861,30 @@ async function handleWebSocketMessage({ ws, sessionId, message, parsed, context 
         });
         break;
 
-      case SignalType.REQUEST_MESSAGE_HISTORY:
-        await handleMessageHistory({ ws, sessionId, parsed: normalizedMessage, state });
-        break;
 
       case SignalType.CHECK_USER_EXISTS:
-        // Require authentication to prevent user enumeration attacks
         if (!state?.hasAuthenticated || !state?.username) {
           cryptoLogger.warn('[CHECK_USER_EXISTS] Rejected - not authenticated');
-          return await sendSecureMessage(ws, {
-            type: SignalType.ERROR,
-            message: 'Authentication required'
-          });
-        }
-        await handleCheckUserExists({ ws, sessionId, parsed: normalizedMessage, state, context });
-        break;
-
-      case SignalType.USER_DISCONNECT: {
-        // User initiated disconnect via secure control message
-        const payloadUsername = typeof normalizedMessage.username === 'string' ? normalizedMessage.username.trim() : null;
-        const stateUsername = state?.username;
-
-        if (!state?.hasAuthenticated || !stateUsername) {
-          cryptoLogger.warn('[USER-DISCONNECT] Rejected - not authenticated', {
-            sessionId: sessionId?.slice(0, 8) + '...'
-          });
           return await sendSecureMessage(ws, { type: SignalType.ERROR, message: 'Authentication required' });
         }
-
-        if (!payloadUsername || payloadUsername !== stateUsername) {
-          cryptoLogger.warn('[USER-DISCONNECT] Username mismatch', {
-            sessionId: sessionId?.slice(0, 8) + '...',
-            stateUsername: stateUsername.slice(0, 4) + '...',
-            payloadUsername: payloadUsername ? payloadUsername.slice(0, 4) + '...' : null
-          });
-          return await sendSecureMessage(ws, { type: SignalType.ERROR, message: 'Invalid disconnect request' });
-        }
-
-        logEvent('user-disconnect', {
-          username: stateUsername.slice(0, 4) + '...',
-          sessionId: sessionId?.slice(0, 8) + '...',
-          timestamp: normalizedMessage.timestamp || Date.now()
-        });
-
-        try {
-          ws.close(1000, 'User disconnect');
-        } catch (_e) {
-        }
-
+        await handleCheckUserExists({ ws, parsed: normalizedMessage, state, context, serverHybridKeyPair });
         break;
-      }
 
-      case SignalType.P2P_FETCH_PEER_CERT: {
-        try {
-          if (!state?.hasAuthenticated || !state?.username) {
-            return await sendSecureMessage(ws, { type: SignalType.ERROR, message: 'Authentication required' });
-          }
-          const target = typeof normalizedMessage?.username === 'string' ? normalizedMessage.username.trim() : '';
-          if (!target || target.length > 128) {
-            return await sendSecureMessage(ws, { type: SignalType.ERROR, message: 'Invalid username' });
-          }
-          const { UserDatabase } = await import('./database/database.js');
-          const keys = await UserDatabase.getHybridPublicKeys(target);
-          if (!keys) {
-            return await sendSecureMessage(ws, { type: SignalType.P2P_PEER_CERT, username: target, error: 'NOT_FOUND' });
-          }
-          if (!keys || !keys.kyberPublicBase64 || !keys.dilithiumPublicBase64) {
-            return await sendSecureMessage(ws, { type: SignalType.P2P_PEER_CERT, username: target, error: 'KEYS_MISSING' });
-          }
-          const issuedAt = Date.now();
-          const expiresAt = issuedAt + 5 * 60 * 1000;
-          const proof = CryptoUtils.Hybrid.exportDilithiumPublicBase64(serverHybridKeyPair.dilithium.publicKey);
-          const canonical = JSON.stringify({
-            username: target,
-            dilithiumPublicKey: keys.dilithiumPublicBase64,
-            kyberPublicKey: keys.kyberPublicBase64,
-            x25519PublicKey: keys.x25519PublicBase64 || '',
-            proof,
-            issuedAt,
-            expiresAt
-          });
-          const signatureBytes = await CryptoUtils.Dilithium.sign(new TextEncoder().encode(canonical), serverHybridKeyPair.dilithium.secretKey);
-          const signature = Buffer.from(signatureBytes).toString('base64');
-
-          await sendSecureMessage(ws, {
-            type: SignalType.P2P_PEER_CERT,
-            username: target,
-            dilithiumPublicKey: keys.dilithiumPublicBase64,
-            kyberPublicKey: keys.kyberPublicBase64,
-            x25519PublicKey: keys.x25519PublicBase64 || '',
-            proof,
-            issuedAt,
-            expiresAt,
-            signature
-          });
-        } catch (_err) {
-          try { await sendSecureMessage(ws, { type: SignalType.ERROR, message: 'Failed to build peer certificate' }); } catch { }
-        }
+      case SignalType.USER_DISCONNECT:
+        await handleUserDisconnect({ ws, sessionId, parsed: normalizedMessage, state });
         break;
-      }
+
+      case SignalType.P2P_FETCH_PEER_CERT:
+        await handleP2PFetchPeerCert({ ws, parsed: normalizedMessage, state, serverHybridKeyPair });
+        break;
 
       case SignalType.BLOCK_LIST_SYNC:
         await handleBlockListSync({ ws, sessionId, parsed: normalizedMessage, state });
         break;
 
-      case SignalType.BLOCK_TOKENS_UPDATE: {
-        // Store server-side block tokens for filtering
-        if (!state?.hasAuthenticated || !state?.username) {
-          return await sendSecureMessage(ws, { type: SignalType.ERROR, message: 'Authentication required' });
-        }
-        try {
-          const tokens = Array.isArray(normalizedMessage.blockTokens) ? normalizedMessage.blockTokens : [];
-          const blockerHash = typeof normalizedMessage.blockerHash === 'string' ? normalizedMessage.blockerHash : undefined;
-          const { BlockingDatabase } = await import('./database/database.js');
-          await BlockingDatabase.storeBlockTokens(tokens, blockerHash);
-
-          const { clearBlockingCache } = await import('./security/blocking.js');
-          const blockedHashes = tokens.map(t => t.blockedHash).filter(Boolean);
-          await clearBlockingCache(blockerHash, blockedHashes);
-
-          await sendSecureMessage(ws, { type: 'ok', message: 'block-tokens-updated' });
-        } catch (_error) {
-          await sendSecureMessage(ws, { type: SignalType.ERROR, message: 'Failed to update block tokens' });
-        }
+      case SignalType.BLOCK_TOKENS_UPDATE:
+        await handleBlockTokensUpdate({ ws, parsed: normalizedMessage, state });
         break;
-      }
 
       case SignalType.RETRIEVE_BLOCK_LIST:
         await handleRetrieveBlockList({ ws, sessionId, parsed: normalizedMessage, state });
@@ -1288,204 +915,26 @@ async function handleWebSocketMessage({ ws, sessionId, message, parsed, context 
         });
         break;
 
-      case SignalType.REGISTER: {
-        const { register, signature, publicKey } = normalizedMessage.payload || {};
-        const username = normalizedMessage.from;
-
-        if (!register || !signature || !publicKey || !username) {
-          cryptoLogger.warn('[REGISTER] Missing required fields');
-          return await sendSecureMessage(ws, { type: SignalType.ERROR, message: 'Invalid registration format' });
-        }
-
-        if (register.username !== username) {
-          cryptoLogger.warn('[REGISTER] Username mismatch');
-          return await sendSecureMessage(ws, { type: SignalType.ERROR, message: 'Username mismatch' });
-        }
-
-        // 1. Verify timestamp (5 minute window)
-        const now = Date.now();
-        if (Math.abs(now - register.timestamp) > 5 * 60 * 1000) {
-          cryptoLogger.warn('[REGISTER] Stale registration', { username });
-          return await sendSecureMessage(ws, { type: SignalType.ERROR, message: 'Registration expired' });
-        }
-
-        // 2. Fetch stored public keys for the user to verify identity
-        const { UserDatabase } = await import('./database/database.js');
-        const storedKeys = await UserDatabase.getHybridPublicKeys(username);
-
-        if (!storedKeys || !storedKeys.dilithiumPublicBase64) {
-          cryptoLogger.warn('[REGISTER] User not found or no keys', { username });
-          return await sendSecureMessage(ws, { type: SignalType.ERROR, message: 'User not found' });
-        }
-
-        // 3. Verify the provided public key matches the stored one
-        if (storedKeys.dilithiumPublicBase64 !== publicKey) {
-          cryptoLogger.warn('[REGISTER] Public key mismatch', { username });
-          return await sendSecureMessage(ws, { type: SignalType.ERROR, message: 'Invalid public key' });
-        }
-
-        // 4. Verify the signature
-        try {
-          const canonical = new TextEncoder().encode(JSON.stringify(register));
-          const signatureBytes = Buffer.from(signature, 'base64');
-          const publicKeyBytes = Buffer.from(publicKey, 'base64');
-
-          const isValid = await CryptoUtils.Dilithium.verify(signatureBytes, canonical, publicKeyBytes);
-
-          if (!isValid) {
-            cryptoLogger.warn('[REGISTER] Invalid signature', { username });
-            return await sendSecureMessage(ws, { type: SignalType.ERROR, message: 'Invalid signature' });
-          }
-        } catch (err) {
-          cryptoLogger.error('[REGISTER] Verification error', { username, error: err.message });
-          return await sendSecureMessage(ws, { type: SignalType.ERROR, message: 'Verification failed' });
-        }
-
-        // 5. Authenticate the session
-        ws._username = username;
-        ws._authenticated = true;
-        ws._hasAuthenticated = true;
-
-        // Update connection state
-        await ConnectionStateManager.updateState(sessionId, {
-          username: username,
-          hasAuthenticated: true,
-          lastActivity: Date.now()
-        });
-
-        // Register for local delivery
-        if (global.gateway?.addLocalConnection) {
-          await global.gateway.addLocalConnection(username, ws);
-        }
-
-        cryptoLogger.info('[REGISTER] P2P signaling session authenticated', { username });
-        await sendSecureMessage(ws, { type: 'register-ack', success: true });
+      case SignalType.REGISTER:
+        await handleRegister({ ws, sessionId, parsed: normalizedMessage, serverHybridKeyPair });
         break;
-      }
 
-      case 'avatar-upload': {
-        if (!state?.hasAuthenticated || !state?.username) {
-          return await sendSecureMessage(ws, { type: 'avatar-upload-response', success: false, error: 'Authentication required' });
-        }
-
-        try {
-          const { envelope, shareWithOthers, publicData } = normalizedMessage;
-          if (!envelope || typeof envelope !== 'object') {
-            return await sendSecureMessage(ws, { type: 'avatar-upload-response', success: false, error: 'Invalid envelope' });
-          }
-
-          if (envelope.version !== 'lt-v1') {
-            cryptoLogger.warn('[AVATAR] Rejected upload with invalid/missing version', { version: envelope.version });
-            return await sendSecureMessage(ws, { type: 'avatar-upload-response', success: false, error: 'Unsupported envelope version' });
-          }
-
-          // Store encrypted envelope
-          const envelopeStr = JSON.stringify(envelope);
-          if (envelopeStr.length > 1024 * 1024) { // 1MB limit
-            return await sendSecureMessage(ws, { type: 'avatar-upload-response', success: false, error: 'Avatar too large' });
-          }
-
-          // If sharing publicly, also store the unencrypted public data
-          let publicDataStr = null;
-          if (shareWithOthers && publicData) {
-            publicDataStr = typeof publicData === 'string' ? publicData : JSON.stringify(publicData);
-          }
-
-          await AvatarDatabase.storeAvatar(state.username, envelopeStr, !!shareWithOthers, publicDataStr);
-
-          await sendSecureMessage(ws, { type: 'avatar-upload-response', success: true });
-        } catch (error) {
-          cryptoLogger.error('[AVATAR] Upload failed', { error: error.message });
-          await sendSecureMessage(ws, { type: 'avatar-upload-response', success: false, error: 'Upload failed' });
-        }
+      case SignalType.AVATAR_UPLOAD:
+        await handleAvatarUpload({ ws, parsed: normalizedMessage, state });
         break;
-      }
 
-      case 'avatar-fetch': {
-
-        if (!state?.hasAuthenticated || !state?.username) {
-          return await sendSecureMessage(ws, { type: 'avatar-fetch-response', found: false, error: 'Authentication required' });
-        }
-
-        try {
-          const { target } = normalizedMessage;
-
-          if (target === 'own') {
-            const result = await AvatarDatabase.getOwnAvatar(state.username);
-
-            let envelope = null;
-            if (result) {
-              try {
-                envelope = JSON.parse(result.encryptedEnvelope);
-                if (!envelope || envelope.version !== 'lt-v1') {
-                  cryptoLogger.warn('[AVATAR:WARN] Stored own avatar envelope has invalid version/missing, ignoring.', {
-                    username: state.username,
-                    version: envelope?.version
-                  });
-                  envelope = null;
-                }
-              } catch (e) {
-                cryptoLogger.error('[AVATAR:ERROR] Failed to parse own avatar envelope', e);
-                envelope = null;
-              }
-            }
-
-            if (envelope) {
-              await sendSecureMessage(ws, {
-                type: 'avatar-fetch-response',
-                target: 'own',
-                found: true,
-                envelope: envelope,
-                isDefault: false
-              });
-            } else {
-              await sendSecureMessage(ws, {
-                type: 'avatar-fetch-response',
-                target: 'own',
-                found: false
-              });
-            }
-          } else if (typeof target === 'string' && target.length > 0) {
-            const result = await AvatarDatabase.getPeerAvatar(target);
-
-            if (result) {
-              let publicData;
-              try {
-                publicData = JSON.parse(result.publicData);
-              } catch {
-                publicData = result.publicData;
-              }
-
-              await sendSecureMessage(ws, {
-                type: 'avatar-fetch-response',
-                target,
-                found: true,
-                envelope: publicData
-              });
-            } else {
-              await sendSecureMessage(ws, {
-                type: 'avatar-fetch-response',
-                target,
-                found: false
-              });
-            }
-          } else {
-            await sendSecureMessage(ws, { type: 'avatar-fetch-response', found: false, error: 'Invalid target' });
-          }
-        } catch {
-          await sendSecureMessage(ws, { type: 'avatar-fetch-response', found: false, error: 'Fetch failed' });
-        }
+      case SignalType.AVATAR_FETCH:
+        await handleAvatarFetch({ ws, parsed: normalizedMessage, state });
         break;
-      }
 
-      case 'offer':
-      case 'answer':
-      case 'ice-candidate':
+      case SignalType.OFFER:
+      case SignalType.ANSWER:
+      case SignalType.ICE_CANDIDATE:
         await handleP2PSignalingRelay({ ws, sessionId, parsed: normalizedMessage, state });
         break;
 
-      case 'ping':
-        await sendSecureMessage(ws, { type: 'pong', timestamp: Date.now() });
+      case SignalType.PING:
+        await sendSecureMessage(ws, { type: SignalType.PONG, timestamp: Date.now() });
         break;
 
       default:
@@ -1498,815 +947,6 @@ async function handleWebSocketMessage({ ws, sessionId, message, parsed, context 
       await sendSecureMessage(ws, { type: SignalType.ERROR, message: 'Internal server error' });
     } catch (_sendError) {
     }
-  }
-}
-
-async function handleEncryptedMessage({ ws, sessionId, parsed, state }) {
-  if (!state?.hasAuthenticated) {
-    cryptoLogger.warn('[MESSAGE-FORWARD] Rejected message from unauthenticated session', {
-      sessionId: sessionId?.slice(0, 8) + '...',
-      hasState: !!state,
-      hasAuth: state?.hasAuthenticated
-    });
-    return await sendSecureMessage(ws, { type: SignalType.ERROR, message: 'Authentication required' });
-  }
-
-  // Verify username is present in state
-  if (!state.username || typeof state.username !== 'string') {
-    cryptoLogger.error('[MESSAGE-FORWARD] Missing username in authenticated session', {
-      sessionId: sessionId?.slice(0, 8) + '...',
-      hasUsername: !!state.username
-    });
-    return await sendSecureMessage(ws, { type: SignalType.ERROR, message: 'Invalid session state' });
-  }
-
-  // Verify WebSocket session matches state
-  if (ws._username && ws._username !== state.username) {
-    cryptoLogger.error('[MESSAGE-FORWARD] Session username mismatch', {
-      sessionId: sessionId?.slice(0, 8) + '...',
-      wsUsername: ws._username?.slice(0, 4) + '...',
-      stateUsername: state.username?.slice(0, 4) + '...'
-    });
-    return await sendSecureMessage(ws, { type: SignalType.ERROR, message: 'Session mismatch' });
-  }
-
-  const { to: toUser, encryptedPayload, messageId } = parsed;
-  if (!toUser || !encryptedPayload) {
-    cryptoLogger.error('[MESSAGE-FORWARD] Invalid message format', {
-      hasTo: !!toUser,
-      hasPayload: !!encryptedPayload
-    });
-    return await sendSecureMessage(ws, { type: SignalType.ERROR, message: 'Invalid message format' });
-  }
-
-  const normalizedMessage = {
-    type: parsed.type,
-    to: toUser,
-    encryptedPayload,
-    from: state.username
-  };
-
-  const senderBlockedByRecipient = await checkBlocking(state.username, toUser);
-  const recipientBlockedBySender = await checkBlocking(toUser, state.username);
-
-  if (senderBlockedByRecipient || recipientBlockedBySender) {
-    logDeliveryEvent('message-blocked', {
-      from: state.username,
-      to: toUser,
-      reason: senderBlockedByRecipient ? 'sender-blocked-by-recipient' : 'recipient-blocked-by-sender'
-    });
-    return await sendSecureMessage(ws, { type: 'ok', message: 'blocked' });
-  }
-
-  // Save message to database
-  try {
-    await MessageDatabase.saveMessageInDB(normalizedMessage, serverHybridKeyPair);
-  } catch (error) {
-    logError(error, { operation: 'save-message' });
-  }
-
-  let localSet = global.gateway?.getLocalConnections?.(toUser);
-
-  if (localSet && localSet.size) {
-    let deliveredCount = 0;
-
-    for (const client of localSet) {
-      if (client && client.readyState === 1) {
-        const recipientSessionId = client._sessionId;
-
-        if (!recipientSessionId) continue;
-
-        const isAuthed = !!(client._authenticated || client?.clientState?.hasAuthenticated);
-        if (!isAuthed) continue;
-
-        let recipientPqSessionId = client._pqSessionId;
-        if (!recipientPqSessionId) {
-          try {
-            const recipientState = await ConnectionStateManager.getState(recipientSessionId);
-            if (recipientState?.pqSessionId) {
-              recipientPqSessionId = recipientState.pqSessionId;
-              client._pqSessionId = recipientPqSessionId;
-            }
-          } catch {
-          }
-        }
-        if (!recipientPqSessionId) continue;
-
-        const recipientPqSession = await getPQSession(recipientPqSessionId);
-        if (!recipientPqSession) continue;
-
-        try {
-          await sendPQEncryptedResponse(client, recipientPqSession, normalizedMessage);
-          deliveredCount++;
-        } catch (err) {
-          cryptoLogger.error('[MESSAGE-FORWARD] PQ envelope failed', {
-            session: recipientSessionId.slice(0, 8) + '...',
-            error: err.message
-          });
-        }
-      }
-    }
-    if (deliveredCount > 0) {
-      await sendSecureMessage(ws, { type: 'ok', message: 'relayed' });
-      logDeliveryEvent('local-delivery', { to: toUser, deliveredCount });
-      return;
-    }
-  }
-
-  const localServerId = process.env.SERVER_ID || 'default';
-  let remoteTargets = [];
-  try {
-    const distributed = await global.gateway?.getDistributedConnectionServers?.(toUser);
-    if (Array.isArray(distributed)) {
-      remoteTargets = distributed.filter((t) => t && t.serverId && t.serverId !== localServerId);
-    }
-  } catch {
-  }
-
-  if (remoteTargets.length > 0) {
-    try {
-      const receivers = await presenceService.publishToUser(toUser, JSON.stringify(normalizedMessage));
-      await sendSecureMessage(ws, { type: 'ok', message: 'relayed' });
-      logDeliveryEvent('cross-instance-published', { to: toUser, receivers, remoteTargets: remoteTargets.length });
-      return;
-    } catch (error) {
-      logError(error, { operation: 'cross-instance-delivery' });
-      await sendSecureMessage(ws, { type: SignalType.ERROR, message: 'Delivery failed' });
-      return;
-    }
-  }
-
-  // Offline recipients must use long-term offline storage
-  try {
-    await sendSecureMessage(ws, {
-      type: SignalType.ERROR,
-      message: 'Offline recipient requires long-term storage',
-      code: 'OFFLINE_LONGTERM_REQUIRED',
-      to: toUser,
-      messageId: messageId || null
-    });
-    logDeliveryEvent('offline-longterm-required', { to: toUser });
-  } catch (error) {
-    logError(error, { operation: 'offline-longterm-required' });
-  }
-}
-
-async function handleSessionResetRequest({ ws, sessionId, parsed, state }) {
-  if (!state?.hasAuthenticated) {
-    cryptoLogger.warn('[SESSION-RESET] Rejected from unauthenticated session', {
-      sessionId: sessionId?.slice(0, 8) + '...'
-    });
-    return await sendSecureMessage(ws, { type: SignalType.ERROR, message: 'Authentication required' });
-  }
-
-  if (!state.username || typeof state.username !== 'string') {
-    cryptoLogger.error('[SESSION-RESET] Missing username in authenticated session', {
-      sessionId: sessionId?.slice(0, 8) + '...'
-    });
-    return await sendSecureMessage(ws, { type: SignalType.ERROR, message: 'Invalid session state' });
-  }
-
-  const { targetUsername } = parsed;
-  if (!targetUsername || typeof targetUsername !== 'string') {
-    cryptoLogger.error('[SESSION-RESET] Invalid target username', {
-      from: state.username.slice(0, 8) + '...'
-    });
-    return await sendSecureMessage(ws, { type: SignalType.ERROR, message: 'Invalid target username' });
-  }
-
-  cryptoLogger.info('[SESSION-RESET] Forwarding session reset request', {
-    from: state.username.slice(0, 8) + '...',
-    to: targetUsername.slice(0, 8) + '...'
-  });
-
-  const resetNotification = {
-    type: SignalType.SESSION_RESET_REQUEST,
-    from: state.username,
-    reason: 'stale-keys-detected'
-  };
-
-  // Try local delivery
-  let localSet = global.gateway?.getLocalConnections?.(targetUsername);
-
-  if (localSet && localSet.size) {
-    let deliveredCount = 0;
-    for (const client of localSet) {
-      if (client && client.readyState === 1) {
-        const recipientSessionId = client._sessionId;
-        if (!recipientSessionId) continue;
-
-        const isAuthed = !!(client._authenticated || client?.clientState?.hasAuthenticated);
-        if (!isAuthed) continue;
-
-        let recipientPqSessionId = client._pqSessionId;
-        if (!recipientPqSessionId) {
-          try {
-            const recipientState = await ConnectionStateManager.getState(recipientSessionId);
-            if (recipientState?.pqSessionId) {
-              recipientPqSessionId = recipientState.pqSessionId;
-              client._pqSessionId = recipientPqSessionId;
-            }
-          } catch {
-          }
-        }
-        if (!recipientPqSessionId) continue;
-
-        const recipientPqSession = await getPQSession(recipientPqSessionId);
-        if (!recipientPqSession) continue;
-
-        try {
-          await sendPQEncryptedResponse(client, recipientPqSession, resetNotification);
-          deliveredCount++;
-        } catch (err) {
-          cryptoLogger.error('[SESSION-RESET] Delivery failed', {
-            session: recipientSessionId.slice(0, 8) + '...',
-            error: err.message
-          });
-        }
-      }
-    }
-    if (deliveredCount > 0) {
-      cryptoLogger.info('[SESSION-ESTABLISHED] Notification delivered', {
-        from: state.username.slice(0, 8) + '...',
-        to: targetUsername.slice(0, 8) + '...',
-        count: deliveredCount
-      });
-    }
-  }
-
-  await sendSecureMessage(ws, { type: 'ok', message: 'session-reset-sent' });
-}
-
-async function handleSessionEstablished({ ws, sessionId, parsed, state }) {
-  if (!state?.hasAuthenticated) {
-    cryptoLogger.warn('[SESSION-ESTABLISHED] Rejected from unauthenticated session', {
-      sessionId: sessionId?.slice(0, 8) + '...'
-    });
-    return await sendSecureMessage(ws, { type: SignalType.ERROR, message: 'Authentication required' });
-  }
-
-  if (!state.username || typeof state.username !== 'string') {
-    cryptoLogger.error('[SESSION-ESTABLISHED] Missing username in authenticated session', {
-      sessionId: sessionId?.slice(0, 8) + '...'
-    });
-    return await sendSecureMessage(ws, { type: SignalType.ERROR, message: 'Invalid session state' });
-  }
-
-  const targetUsername = parsed.username;
-  if (!targetUsername || typeof targetUsername !== 'string') {
-    cryptoLogger.error('[SESSION-ESTABLISHED] Invalid target username', {
-      from: state.username.slice(0, 8) + '...'
-    });
-    return await sendSecureMessage(ws, { type: SignalType.ERROR, message: 'Invalid target username' });
-  }
-
-  cryptoLogger.info('[SESSION-ESTABLISHED] Forwarding session establishment confirmation', {
-    from: state.username.slice(0, 8) + '...',
-    to: targetUsername.slice(0, 8) + '...'
-  });
-
-  const sessionEstablishedNotification = {
-    type: SignalType.SESSION_ESTABLISHED,
-    from: state.username,
-    username: state.username
-  };
-
-  // Try local delivery
-  let localSet = global.gateway?.getLocalConnections?.(targetUsername);
-
-  if (localSet && localSet.size) {
-    let deliveredCount = 0;
-    for (const client of localSet) {
-      if (client && client.readyState === 1) {
-        const recipientSessionId = client._sessionId;
-        if (!recipientSessionId) continue;
-
-        const isAuthed = !!(client._authenticated || client?.clientState?.hasAuthenticated);
-        if (!isAuthed) continue;
-
-        let recipientPqSessionId = client._pqSessionId;
-        if (!recipientPqSessionId) {
-          try {
-            const recipientState = await ConnectionStateManager.getState(recipientSessionId);
-            if (recipientState?.pqSessionId) {
-              recipientPqSessionId = recipientState.pqSessionId;
-              client._pqSessionId = recipientPqSessionId;
-            }
-          } catch {
-          }
-        }
-        if (!recipientPqSessionId) continue;
-
-        const recipientPqSession = await getPQSession(recipientPqSessionId);
-        if (!recipientPqSession) continue;
-
-        try {
-          await sendPQEncryptedResponse(client, recipientPqSession, sessionEstablishedNotification);
-          deliveredCount++;
-        } catch (err) {
-          cryptoLogger.error('[SESSION-ESTABLISHED] Delivery failed', {
-            session: recipientSessionId.slice(0, 8) + '...',
-            error: err.message
-          });
-        }
-      }
-    }
-    if (deliveredCount > 0) {
-      cryptoLogger.info('[SESSION-ESTABLISHED] Notification delivered', {
-        from: state.username.slice(0, 8) + '...',
-        to: targetUsername.slice(0, 8) + '...',
-        count: deliveredCount
-      });
-    }
-  }
-
-  await sendSecureMessage(ws, { type: 'ok', message: 'session-established-sent' });
-}
-
-async function handleP2PSignalingRelay({ ws, sessionId: _sessionId, parsed, state }) {
-  if (!state?.hasAuthenticated) {
-    return await sendSecureMessage(ws, { type: SignalType.ERROR, message: 'Authentication required' });
-  }
-  if (!state.username || typeof state.username !== 'string') {
-    return await sendSecureMessage(ws, { type: SignalType.ERROR, message: 'Invalid session state' });
-  }
-
-  const type = parsed?.type;
-  const to = typeof parsed?.to === 'string' ? parsed.to.trim() : '';
-  if (!to) {
-    return await sendSecureMessage(ws, { type: SignalType.ERROR, message: 'Invalid signaling target' });
-  }
-
-  const relayMessage = {
-    type,
-    from: state.username,
-    to,
-    payload: parsed?.payload,
-    ...(parsed?.meta ? { meta: parsed.meta } : {})
-  };
-
-  try {
-    const senderBlockedByRecipient = await checkBlocking(state.username, to);
-    const recipientBlockedBySender = await checkBlocking(to, state.username);
-    if (senderBlockedByRecipient || recipientBlockedBySender) {
-      return await sendSecureMessage(ws, { type: 'ok', message: 'blocked' });
-    }
-  } catch (_e) {
-  }
-
-  let localSet = global.gateway?.getLocalConnections?.(to);
-
-  if (localSet && localSet.size) {
-    let deliveredCount = 0;
-    for (const client of localSet) {
-      if (client && client.readyState === 1) {
-        const recipientSessionId = client._sessionId;
-        if (!recipientSessionId) continue;
-
-        const isAuthed = !!(client._authenticated || client?.clientState?.hasAuthenticated);
-        if (!isAuthed) continue;
-
-        let recipientPqSessionId = client._pqSessionId;
-        if (!recipientPqSessionId) {
-          try {
-            const recipientState = await ConnectionStateManager.getState(recipientSessionId);
-            if (recipientState?.pqSessionId) {
-              recipientPqSessionId = recipientState.pqSessionId;
-              client._pqSessionId = recipientPqSessionId;
-            }
-          } catch {
-          }
-        }
-        if (!recipientPqSessionId) continue;
-
-        const recipientPqSession = await getPQSession(recipientPqSessionId);
-        if (!recipientPqSession) continue;
-
-        try {
-          await sendPQEncryptedResponse(client, recipientPqSession, relayMessage);
-          deliveredCount++;
-        } catch {
-        }
-      }
-    }
-    if (deliveredCount > 0) {
-      await sendSecureMessage(ws, { type: 'ok', message: 'relayed' });
-      return;
-    }
-  }
-
-  const localServerId = process.env.SERVER_ID || 'default';
-  let remoteTargets = [];
-  try {
-    const distributed = await global.gateway?.getDistributedConnectionServers?.(to);
-    if (Array.isArray(distributed)) {
-      remoteTargets = distributed.filter((t) => t && t.serverId && t.serverId !== localServerId);
-    }
-  } catch {
-  }
-
-  if (remoteTargets.length > 0) {
-    try {
-      await presenceService.publishToUser(to, JSON.stringify(relayMessage));
-      await sendSecureMessage(ws, { type: 'ok', message: 'relayed' });
-      return;
-    } catch {
-    }
-  }
-
-  await sendSecureMessage(ws, {
-    type: SignalType.ERROR,
-    message: 'Peer offline'
-  });
-}
-
-async function handleStoreOfflineMessage({ ws, parsed, state }) {
-  if (!state?.hasAuthenticated) {
-    cryptoLogger.warn('[OFFLINE-STORE] Rejected - not authenticated');
-    return await sendSecureMessage(ws, { type: SignalType.ERROR, message: 'Authentication required' });
-  }
-
-  const { messageId, to, longTermEnvelope, version } = parsed;
-  if (!messageId || !to) {
-    cryptoLogger.warn('[OFFLINE-STORE] Rejected - missing messageId or to');
-    return await sendSecureMessage(ws, { type: SignalType.ERROR, message: 'Invalid message data' });
-  }
-
-  // Require long-term encryption
-  if (version !== 'lt-v1' || !longTermEnvelope) {
-    cryptoLogger.warn('[OFFLINE-STORE] Rejected - missing lt-v1 or envelope');
-    return await sendSecureMessage(ws, { type: SignalType.ERROR, message: 'Long-term encryption required' });
-  }
-
-  const senderBlockedByRecipient = await checkBlocking(state.username, to);
-  const recipientBlockedBySender = await checkBlocking(to, state.username);
-
-  if (senderBlockedByRecipient || recipientBlockedBySender) {
-    logDeliveryEvent('offline-message-blocked', {
-      from: state.username,
-      to,
-      reason: senderBlockedByRecipient ? 'sender-blocked-by-recipient' : 'recipient-blocked-by-sender'
-    });
-    return await sendSecureMessage(ws, { type: 'ok', message: 'blocked' });
-  }
-
-  try {
-    const offlineMessage = {
-      type: SignalType.ENCRYPTED_MESSAGE,
-      to,
-      longTermEnvelope,
-      version: 'lt-v1',
-      from: state.username
-    };
-
-    const success = await MessageDatabase.queueOfflineMessage(to, offlineMessage);
-    if (success) {
-      cryptoLogger.info('[OFFLINE-STORE] Message stored successfully', {
-        from: state.username?.slice(0, 8) + '...',
-        to: to?.slice(0, 8) + '...',
-        messageId: messageId?.slice(0, 16) + '...'
-      });
-      await sendSecureMessage(ws, { type: 'ok', message: 'Offline message stored' });
-      logEvent('offline-message-stored', { username: state.username });
-    } else {
-      cryptoLogger.error('[OFFLINE-STORE] Database queueOfflineMessage returned false');
-      await sendSecureMessage(ws, { type: SignalType.ERROR, message: 'Failed to store offline message' });
-    }
-  } catch (error) {
-    cryptoLogger.error('[OFFLINE-STORE] Exception', { error: error?.message });
-    logError(error, { operation: 'store-offline-message' });
-    await sendSecureMessage(ws, { type: SignalType.ERROR, message: 'Error storing offline message' });
-  }
-}
-
-async function handleRetrieveOfflineMessages({ ws, state }) {
-  cryptoLogger.info('[OFFLINE-RETRIEVE] Handler called', {
-    hasState: !!state,
-    hasAuthenticated: state?.hasAuthenticated,
-    username: state?.username?.slice(0, 8) + '...',
-    hasPqSessionId: !!ws._pqSessionId
-  });
-
-  if (!state?.hasAuthenticated) {
-    cryptoLogger.warn('[OFFLINE-RETRIEVE] Rejected - not authenticated');
-    return await sendSecureMessage(ws, { type: SignalType.ERROR, message: 'Authentication required' });
-  }
-
-  try {
-    const offlineMessages = await MessageDatabase.takeOfflineMessages(state.username, 50);
-    cryptoLogger.info('[OFFLINE-RETRIEVE] Retrieved messages from DB', {
-      username: state.username?.slice(0, 8) + '...',
-      count: offlineMessages?.length ?? 0
-    });
-
-    const pqSessionId = ws._pqSessionId;
-
-    if (pqSessionId) {
-      const session = await getPQSession(pqSessionId);
-
-      if (session) {
-        const responsePayload = {
-          type: SignalType.OFFLINE_MESSAGES_RESPONSE,
-          messages: offlineMessages,
-          count: offlineMessages.length,
-        };
-        cryptoLogger.info('[OFFLINE-RETRIEVE] Sending response', {
-          username: state.username?.slice(0, 8) + '...',
-          messageCount: offlineMessages.length,
-          responseType: responsePayload.type
-        });
-        await sendPQEncryptedResponse(ws, session, responsePayload);
-        cryptoLogger.info('[OFFLINE-RETRIEVE] Response sent successfully');
-        logEvent('offline-messages-retrieved', {
-          username: state.username,
-          count: offlineMessages.length,
-          pqEncrypted: true
-        });
-      } else {
-        cryptoLogger.error('[OFFLINE-RETRIEVE] PQ session not found in storage', {
-          pqSessionId: pqSessionId?.slice(0, 16) + '...'
-        });
-        throw new Error('PQ session required');
-      }
-    } else {
-      cryptoLogger.error('[OFFLINE-RETRIEVE] No PQ session ID on websocket');
-      throw new Error('PQ session required');
-    }
-  } catch (error) {
-    cryptoLogger.error('[OFFLINE-RETRIEVE] Error', { error: error?.message });
-    logError(error, { operation: 'retrieve-offline-messages' });
-    await sendSecureMessage(ws, { type: SignalType.ERROR, message: 'Error retrieving offline messages' });
-  }
-}
-
-async function handleRateLimitStatus({ ws, state }) {
-  try {
-    const stats = rateLimitMiddleware.getStats();
-    const globalStatus = await rateLimitMiddleware.getGlobalConnectionStatus();
-    const userStatus = state?.username ? await rateLimitMiddleware.getUserStatus(state.username) : null;
-
-    await sendSecureMessage(ws, {
-      type: SignalType.RATE_LIMIT_STATUS,
-      stats,
-      globalConnectionStatus: globalStatus,
-      userStatus,
-    });
-  } catch (error) {
-    logError(error, { operation: 'rate-limit-status' });
-    await sendSecureMessage(ws, { type: SignalType.ERROR, message: 'Error getting rate limit status' });
-  }
-}
-
-async function handleServerLogin({ ws, parsed }) {
-  if (parsed.resetType === 'global') {
-    await rateLimitMiddleware.resetGlobalConnectionLimits();
-    await sendSecureMessage(ws, {
-      type: SignalType.RATE_LIMIT_STATUS,
-      message: 'Global connection rate limits reset successfully',
-    });
-  } else if (parsed.resetType === 'user' && parsed.username) {
-    await rateLimitMiddleware.resetUserLimits(parsed.username);
-    await sendSecureMessage(ws, {
-      type: SignalType.RATE_LIMIT_STATUS,
-      message: `Rate limits reset for user: ${parsed.username}`,
-    });
-  } else {
-    await sendSecureMessage(ws, {
-      type: SignalType.ERROR,
-      message: 'Invalid reset type or missing username',
-    });
-  }
-}
-
-async function handleMessageHistory({ ws, sessionId, parsed, state }) {
-  if (!state?.hasAuthenticated) {
-    return await sendSecureMessage(ws, { type: SignalType.ERROR, message: 'Authentication required' });
-  }
-
-  const now = Date.now();
-  if (state.lastHistoryRequest && (now - state.lastHistoryRequest) < SERVER_CONSTANTS.HISTORY_REQUEST_COOLDOWN) {
-    return await sendSecureMessage(ws, {
-      type: SignalType.ERROR,
-      message: 'Rate limited: too many history requests',
-      error: 'RATE_LIMITED',
-    });
-  }
-  await ConnectionStateManager.updateState(sessionId, { lastHistoryRequest: now });
-
-  try {
-    const { limit = 50, since } = parsed;
-    const requestLimit = Math.min(Math.max(1, parseInt(limit) || 50), SERVER_CONSTANTS.MAX_HISTORY_LIMIT);
-
-    let sinceTimestamp = null;
-    if (since !== undefined) {
-      const parsedSince = parseInt(since);
-      if (isNaN(parsedSince) || !isFinite(parsedSince) || parsedSince < 0) {
-        return await sendSecureMessage(ws, {
-          type: SignalType.ERROR,
-          message: 'Invalid since parameter: must be a finite positive integer timestamp',
-          error: 'INVALID_SINCE_PARAMETER',
-        });
-      }
-      sinceTimestamp = parsedSince;
-    }
-
-    const messages = await MessageDatabase.getMessagesForUser(state.username, requestLimit);
-    const filteredMessages = sinceTimestamp ?
-      messages.filter(msg => msg.timestamp > sinceTimestamp) :
-      messages;
-
-    await sendSecureMessage(ws, {
-      type: SignalType.MESSAGE_HISTORY_RESPONSE,
-      messages: filteredMessages,
-      hasMore: messages.length === requestLimit,
-      timestamp: Date.now(),
-    });
-
-    logEvent('message-history-requested', {
-      username: state.username,
-      limit: requestLimit,
-      returned: filteredMessages.length
-    });
-  } catch (error) {
-    logError(error, { operation: 'message-history' });
-    await sendSecureMessage(ws, {
-      type: SignalType.ERROR,
-      message: 'Failed to fetch message history',
-      error: 'HISTORY_FETCH_FAILED',
-    });
-  }
-}
-
-async function handleCheckUserExists({ ws, parsed, state: _state, context }) {
-  const { username } = parsed;
-
-  const sendResponse = async (responseData) => {
-    const pqSessionId = context?.pqSessionId || ws?._pqSessionId;
-    if (pqSessionId) {
-      const pqSession = await getPQSession(pqSessionId);
-      if (pqSession) {
-        try {
-          await sendPQEncryptedResponse(ws, pqSession, responseData);
-          return;
-        } catch (err) {
-          cryptoLogger.error('[USER-CHECK] PQ send failed', {
-            error: err.message
-          });
-          throw err;
-        }
-      }
-    }
-    cryptoLogger.error('[USER-CHECK] No PQ session');
-    throw new Error('PQ session required');
-  };
-
-  if (!username || typeof username !== 'string') {
-    return await sendResponse({
-      type: SignalType.USER_EXISTS_RESPONSE,
-      exists: false,
-      error: 'Invalid username',
-    });
-  }
-
-  try {
-    const user = await UserDatabase.loadUser(username);
-
-    const response = {
-      type: SignalType.USER_EXISTS_RESPONSE,
-      exists: !!user,
-      username: username,
-    };
-
-    let sanitizedKeys = null;
-    const userHybridKeys = user?.hybridPublicKeys ?? user?.hybridpublickeys;
-    if (user && userHybridKeys) {
-      try {
-        const parsedKeys = typeof userHybridKeys === 'string'
-          ? JSON.parse(userHybridKeys)
-          : userHybridKeys;
-        sanitizedKeys = sanitizeHybridKeysServer(parsedKeys);
-        response.hybridPublicKeys = sanitizedKeys;
-      } catch (parseError) {
-        cryptoLogger.error('[USER-CHECK] Failed to parse hybrid keys', {
-          error: parseError.message
-        });
-      }
-    }
-
-    try {
-      if (sanitizedKeys && sanitizedKeys.kyberPublicBase64 && sanitizedKeys.dilithiumPublicBase64) {
-        const issuedAt = Date.now();
-        const expiresAt = issuedAt + 5 * 60 * 1000;
-        const proof = CryptoUtils.Hybrid.exportDilithiumPublicBase64(serverHybridKeyPair.dilithium.publicKey);
-        const canonical = JSON.stringify({
-          username,
-          dilithiumPublicKey: sanitizedKeys.dilithiumPublicBase64,
-          kyberPublicKey: sanitizedKeys.kyberPublicBase64,
-          x25519PublicKey: sanitizedKeys.x25519PublicBase64 || '',
-          proof,
-          issuedAt,
-          expiresAt
-        });
-        const signatureBytes = await CryptoUtils.Dilithium.sign(new TextEncoder().encode(canonical), serverHybridKeyPair.dilithium.secretKey);
-        const signature = Buffer.from(signatureBytes).toString('base64');
-        response.peerCertificate = {
-          username,
-          dilithiumPublicKey: sanitizedKeys.dilithiumPublicBase64,
-          kyberPublicKey: sanitizedKeys.kyberPublicBase64,
-          x25519PublicKey: sanitizedKeys.x25519PublicBase64 || '',
-          proof,
-          issuedAt,
-          expiresAt,
-          signature
-        };
-      }
-    } catch (certErr) {
-      cryptoLogger.warn('[USER-CHECK] Failed to attach peer certificate', { error: certErr?.message || String(certErr) });
-    }
-
-    await sendResponse(response);
-  } catch (error) {
-    logError(error, { operation: 'check-user-exists', username });
-    await sendResponse({
-      type: SignalType.USER_EXISTS_RESPONSE,
-      exists: false,
-      error: 'Failed to check user existence',
-    });
-  }
-}
-
-async function handleBlockListSync({ ws, parsed, state }) {
-  if (!state?.hasAuthenticated || !state?.username) {
-    return await sendSecureMessage(ws, { type: SignalType.ERROR, message: 'Authentication required' });
-  }
-
-  try {
-    const { encryptedBlockList, blockListHash, salt, version, lastUpdated } = parsed;
-
-    if (!encryptedBlockList || !blockListHash || !salt) {
-      return await sendSecureMessage(ws, {
-        type: SignalType.ERROR,
-        message: 'Missing encrypted block list, hash, or salt'
-      });
-    }
-
-    await BlockingDatabase.storeEncryptedBlockList(
-      state.username,
-      encryptedBlockList,
-      blockListHash,
-      salt,
-      version,
-      lastUpdated
-    );
-
-    await sendSecureMessage(ws, {
-      type: SignalType.BLOCK_LIST_SYNC,
-      success: true,
-      message: 'Block list synchronized successfully',
-    });
-
-    logEvent('block-list-synced', { username: state.username });
-  } catch (error) {
-    logError(error, { operation: 'block-list-sync' });
-    await sendSecureMessage(ws, {
-      type: SignalType.ERROR,
-      message: 'Error synchronizing block list'
-    });
-  }
-}
-
-async function handleRetrieveBlockList({ ws, state }) {
-  if (!state?.hasAuthenticated || !state?.username) {
-    return await sendSecureMessage(ws, { type: SignalType.ERROR, message: 'Authentication required' });
-  }
-
-  try {
-    const blockList = await BlockingDatabase.getEncryptedBlockList(state.username);
-
-    if (blockList) {
-      await sendSecureMessage(ws, {
-        type: SignalType.BLOCK_LIST_RESPONSE,
-        encryptedBlockList: blockList.encryptedBlockList,
-        blockListHash: blockList.blockListHash,
-        salt: blockList.salt,
-        version: blockList.version,
-        lastUpdated: blockList.lastUpdated,
-      });
-    } else {
-      await sendSecureMessage(ws, {
-        type: SignalType.BLOCK_LIST_RESPONSE,
-        encryptedBlockList: null,
-        message: 'No block list found',
-      });
-    }
-
-    logEvent('block-list-retrieved', { username: state.username });
-  } catch (error) {
-    logError(error, { operation: 'retrieve-block-list' });
-    await sendSecureMessage(ws, {
-      type: SignalType.ERROR,
-      message: 'Error retrieving block list'
-    });
   }
 }
 

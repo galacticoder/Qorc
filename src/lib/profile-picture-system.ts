@@ -2,6 +2,7 @@ import { SecureDB } from './secureDB';
 import { encryptLongTerm, decryptLongTerm, LongTermEnvelope } from './long-term-encryption';
 import websocketClient from './websocket';
 import { generateDefaultAvatar } from './utils';
+import { SignalType } from './signal-types';
 
 const MAX_AVATAR_SIZE_BYTES = 512 * 1024;
 const MAX_AVATAR_DIMENSION = 512;
@@ -550,7 +551,7 @@ class ProfilePictureSystem {
             }
 
             const uploadMessage: any = {
-                type: 'avatar-upload',
+                type: SignalType.AVATAR_UPLOAD,
                 envelope,
                 shareWithOthers: this.settings.shareWithOthers
             };
@@ -615,7 +616,7 @@ class ProfilePictureSystem {
             }
 
             await websocketClient.sendSecureControlMessage({
-                type: 'avatar-fetch',
+                type: SignalType.AVATAR_FETCH,
                 target: 'own'
             });
 
@@ -647,7 +648,7 @@ class ProfilePictureSystem {
             }
 
             await websocketClient.sendSecureControlMessage({
-                type: 'avatar-fetch',
+                type: SignalType.AVATAR_FETCH,
                 target: username
             });
         } catch { }

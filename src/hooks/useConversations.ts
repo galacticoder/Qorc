@@ -60,7 +60,7 @@ const getConversationPreview = (message: Message, currentUsername: string): stri
   const isMe = message.sender === currentUsername;
   const prefix = isMe ? 'You' : message.sender;
 
-  const isReactionMessage = message.content?.includes('reaction-add') || message.content?.includes('reaction-remove');
+  const isReactionMessage = message.content?.includes(SignalType.REACTION_ADD) || message.content?.includes(SignalType.REACTION_REMOVE);
 
   if (isReactionMessage) {
     if (isMe) {
@@ -350,8 +350,8 @@ export const useConversations = (currentUsername: string, users: User[], message
 
       const content = msg.content;
       if (content && (content.includes('"type":"typing-') ||
-        content.includes('delivery-receipt') ||
-        content.includes('read-receipt'))) {
+        content.includes(SignalType.DELIVERY_RECEIPT) ||
+        content.includes(SignalType.READ_RECEIPT))) {
         continue;
       }
 

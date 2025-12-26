@@ -1,6 +1,8 @@
 import React, { createContext, useContext, useState, useCallback, ReactNode, useEffect, useRef, useMemo } from 'react';
 import { CryptoUtils } from '../lib/unified-crypto';
 import { SecureMemory } from '../lib/secure-memory';
+import { SignalType } from '../lib/signal-types';
+import { EventType } from '../lib/event-types';
 
 type TypingAction = 'start' | 'stop';
 
@@ -267,8 +269,8 @@ export function TypingIndicatorProvider({
 
 		const secureChannel = new MessageChannel();
 		const listener = (event: MessageEvent) => {
-			if (event.data?.type === 'typing-indicator') {
-				const customEvent = new CustomEvent('typing-indicator', {
+			if (event.data?.type === EventType.TYPING_INDICATOR) {
+				const customEvent = new CustomEvent(EventType.TYPING_INDICATOR, {
 					detail: event.data.detail
 				});
 				handleTypingIndicator(customEvent);
@@ -283,7 +285,7 @@ export function TypingIndicatorProvider({
 					return;
 				}
 				secureChannel.port2.postMessage({
-					type: 'typing-indicator',
+					type: EventType.TYPING_INDICATOR,
 					detail: event.detail
 				});
 			} catch {
@@ -291,7 +293,7 @@ export function TypingIndicatorProvider({
 			}
 		};
 
-		window.addEventListener('typing-indicator', windowListener as EventListener);
+		window.addEventListener(EventType.TYPING_INDICATOR, windowListener as EventListener);
 
 		const handleP2PTypingIndicator = (event: Event) => {
 			if (!(event instanceof CustomEvent)) return;
@@ -303,7 +305,7 @@ export function TypingIndicatorProvider({
 			if (currentUsername && from === currentUsername) return;
 			if (!rateLimiterRef.current.tryConsume(`p2p:${from}`)) return;
 
-			const action = content === 'typing-start' ? 'start' : content === 'typing-stop' ? 'stop' : null;
+			const action = content === SignalType.TYPING_START ? 'start' : content === SignalType.TYPING_STOP ? 'stop' : null;
 			if (!action) return;
 
 			if (action === 'start') {
@@ -324,7 +326,7 @@ export function TypingIndicatorProvider({
 		window.addEventListener('p2p-typing-indicator', handleP2PTypingIndicator as EventListener);
 
 		return () => {
-			window.removeEventListener('typing-indicator', windowListener as EventListener);
+			window.removeEventListener(EventType.TYPING_INDICATOR, windowListener as EventListener);
 			window.removeEventListener('p2p-typing-indicator', handleP2PTypingIndicator as EventListener);
 			secureChannel.port1.onmessage = null;
 			secureChannel.port1.close();

@@ -21,13 +21,13 @@ import { useEncryptedMessageHandler } from "../hooks/useEncryptedMessageHandler"
 import { useChatSignals } from "../hooks/useChatSignals";
 import { useWebSocket } from "../hooks/useWebsocket";
 import { useConversations } from "../hooks/useConversations";
-import { useMessageHistory } from "../hooks/useMessageHistory";
 import { useUsernameDisplay } from "../hooks/useUsernameDisplay";
 import { storeUsernameMapping } from "../lib/username-display";
 import { useP2PMessaging, type HybridKeys, type PeerCertificateBundle, type EncryptedMessage } from "../hooks/useP2PMessaging";
 import { useMessageReceipts } from "../hooks/useMessageReceipts";
 import { p2pConfig, getSignalingServerUrl } from "../config/p2p.config";
 import websocketClient from "../lib/websocket";
+import { EventType } from "../lib/event-types";
 import { TypingIndicatorProvider } from "../contexts/TypingIndicatorContext";
 import { torNetworkManager } from "../lib/tor-network";
 import { ConnectSetup } from "../components/setup/ConnectSetup";
@@ -495,20 +495,11 @@ const ChatApp: React.FC = () => {
     Database.secureDBRef,
   );
 
-  const messageHistory = useMessageHistory(
-    Authentication.username || Authentication.loginUsernameRef.current || '',
-    Authentication.isLoggedIn,
-    setMessages,
-    Database.saveMessageToLocalDB,
-    Authentication.isLoggedIn && Authentication.accountAuthenticated
-  );
-
   const signalHandler = useChatSignals({
     Authentication,
     Database,
     fileHandler,
     encryptedHandler,
-    handleMessageHistory: messageHistory.handleMessageHistory
   });
 
   const {
@@ -765,11 +756,11 @@ const ChatApp: React.FC = () => {
       version: '1'
     } as Message : undefined;
 
-    if (messageSignalType === 'typing-start' || messageSignalType === 'typing-stop') {
+    if (messageSignalType === SignalType.TYPING_START || messageSignalType === SignalType.TYPING_STOP) {
       return messageSender.handleSendMessage(targetUser as any, content, replyToMessage, undefined, messageSignalType);
     }
 
-    if (messageSignalType === 'delete-message' || messageSignalType === 'edit-message') {
+    if (messageSignalType === SignalType.DELETE_MESSAGE || messageSignalType === SignalType.EDIT_MESSAGE) {
       return messageSender.handleSendMessage(targetUser as any, content, replyToMessage, undefined, messageSignalType, messageId);
     }
 
@@ -797,7 +788,7 @@ const ChatApp: React.FC = () => {
           );
 
           if (result.status === 'sent') {
-            window.dispatchEvent(new CustomEvent('local-reaction-update', {
+            window.dispatchEvent(new CustomEvent(EventType.LOCAL_REACTION_UPDATE, {
               detail: {
                 messageId,
                 emoji: content,
@@ -1370,10 +1361,10 @@ const ChatApp: React.FC = () => {
       try {
         // Handle typing indicators
         if (encryptedMessage.messageType === 'typing') {
-          const typingEvent = new CustomEvent('typing-indicator', {
+          const typingEvent = new CustomEvent(EventType.TYPING_INDICATOR, {
             detail: {
               username: encryptedMessage.from,
-              isTyping: encryptedMessage.content === 'typing-start',
+              isTyping: encryptedMessage.content === SignalType.TYPING_START,
             }
           });
           window.dispatchEvent(typingEvent);
@@ -1387,12 +1378,12 @@ const ChatApp: React.FC = () => {
           const action = encryptedMessage.metadata?.action;
           const emoji = encryptedMessage.content;
 
-          if (targetMessageId && emoji && (action === 'reaction-add' || action === 'reaction-remove')) {
-            window.dispatchEvent(new CustomEvent('local-reaction-update', {
+          if (targetMessageId && emoji && (action === SignalType.REACTION_ADD || action === SignalType.REACTION_REMOVE)) {
+            window.dispatchEvent(new CustomEvent(EventType.LOCAL_REACTION_UPDATE, {
               detail: {
                 messageId: targetMessageId,
                 emoji: emoji,
-                isAdd: action === 'reaction-add',
+                isAdd: action === SignalType.REACTION_ADD,
                 username: encryptedMessage.from
               }
             }));
@@ -2097,7 +2088,7 @@ const ChatApp: React.FC = () => {
 
     const handleLocalMessageDelete = (event: CustomEvent) => {
       try {
-        if (!allowEvent('local-message-delete')) return;
+        if (!allowEvent(EventType.LOCAL_MESSAGE_DELETE)) return;
         const detail = (event as any).detail;
         if (!isPlainObject(detail) || hasPrototypePollutionKeys(detail)) return;
         const messageId = sanitizeNonEmptyText(detail.messageId, MAX_LOCAL_MESSAGE_ID_LENGTH, false);
@@ -2124,7 +2115,7 @@ const ChatApp: React.FC = () => {
 
     const handleLocalMessageEdit = (event: CustomEvent) => {
       try {
-        if (!allowEvent('local-message-edit')) return;
+        if (!allowEvent(EventType.LOCAL_MESSAGE_EDIT)) return;
         const detail = (event as any).detail;
         if (!isPlainObject(detail) || hasPrototypePollutionKeys(detail)) return;
         const messageId = sanitizeNonEmptyText(detail.messageId, MAX_LOCAL_MESSAGE_ID_LENGTH, false);
@@ -2284,13 +2275,13 @@ const ChatApp: React.FC = () => {
       } catch { }
     };
 
-    window.addEventListener('local-message-delete', handleLocalMessageDelete as EventListener);
-    window.addEventListener('local-message-edit', handleLocalMessageEdit as EventListener);
+    window.addEventListener(EventType.LOCAL_MESSAGE_DELETE, handleLocalMessageDelete as EventListener);
+    window.addEventListener(EventType.LOCAL_MESSAGE_EDIT, handleLocalMessageEdit as EventListener);
     window.addEventListener('local-file-message', handleLocalFileMessage as EventListener);
 
     const handleLocalReactionUpdate = (event: CustomEvent) => {
       try {
-        if (!allowEvent('local-reaction-update')) return;
+        if (!allowEvent(EventType.LOCAL_REACTION_UPDATE)) return;
         const detail = (event as any).detail;
         if (!isPlainObject(detail) || hasPrototypePollutionKeys(detail)) return;
         const messageId = sanitizeNonEmptyText(detail.messageId, MAX_LOCAL_MESSAGE_ID_LENGTH, false);
@@ -2360,13 +2351,13 @@ const ChatApp: React.FC = () => {
       } catch { }
     };
 
-    window.addEventListener('local-reaction-update', handleLocalReactionUpdate as EventListener);
+    window.addEventListener(EventType.LOCAL_REACTION_UPDATE, handleLocalReactionUpdate as EventListener);
 
     return () => {
-      window.removeEventListener('local-message-delete', handleLocalMessageDelete as EventListener);
-      window.removeEventListener('local-message-edit', handleLocalMessageEdit as EventListener);
+      window.removeEventListener(EventType.LOCAL_MESSAGE_DELETE, handleLocalMessageDelete as EventListener);
+      window.removeEventListener(EventType.LOCAL_MESSAGE_EDIT, handleLocalMessageEdit as EventListener);
       window.removeEventListener('local-file-message', handleLocalFileMessage as EventListener);
-      window.removeEventListener('local-reaction-update', handleLocalReactionUpdate as EventListener);
+      window.removeEventListener(EventType.LOCAL_REACTION_UPDATE, handleLocalReactionUpdate as EventListener);
     };
   }, [setMessages, saveMessageWithContext]);
 

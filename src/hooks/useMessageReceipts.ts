@@ -2,6 +2,7 @@ import { useEffect, useCallback, useMemo, useRef } from 'react';
 import { Message } from '@/components/chat/types';
 import type { User } from '@/components/chat/UserList';
 import { SignalType } from '@/lib/signal-types';
+import { EventType } from '@/lib/event-types';
 import { sanitizeTextInput } from '@/lib/sanitizers';
 
 const READ_RECEIPT_PREFIX = 'read-receipt-';
@@ -360,9 +361,9 @@ export function useMessageReceipts(
               };
               const cleanup = () => {
                 clearTimeout(timeout);
-                window.removeEventListener('libsignal-session-ready', onReady as EventListener);
+                window.removeEventListener(EventType.LIBSIGNAL_SESSION_READY, onReady as EventListener);
               };
-              window.addEventListener('libsignal-session-ready', onReady as EventListener);
+              window.addEventListener(EventType.LIBSIGNAL_SESSION_READY, onReady as EventListener);
             });
           } catch { }
         }
@@ -371,7 +372,7 @@ export function useMessageReceipts(
           messageId: `${READ_RECEIPT_PREFIX}${safeMessageId}`,
           from: currentUsername,
           to: safeSender,
-          type: 'read-receipt',
+          type: SignalType.READ_RECEIPT,
           timestamp: Date.now(),
         };
 
@@ -479,8 +480,8 @@ export function useMessageReceipts(
       }
     };
 
-    window.addEventListener('message-delivered', handler as EventListener);
-    return () => window.removeEventListener('message-delivered', handler as EventListener);
+    window.addEventListener(EventType.MESSAGE_DELIVERED, handler as EventListener);
+    return () => window.removeEventListener(EventType.MESSAGE_DELIVERED, handler as EventListener);
   }, [setMessages, saveMessageToLocalDB]);
 
   useEffect(() => {
@@ -527,8 +528,8 @@ export function useMessageReceipts(
       }
     };
 
-    window.addEventListener('message-read', handler as EventListener);
-    return () => window.removeEventListener('message-read', handler as EventListener);
+    window.addEventListener(EventType.MESSAGE_READ, handler as EventListener);
+    return () => window.removeEventListener(EventType.MESSAGE_READ, handler as EventListener);
   }, [setMessages, saveMessageToLocalDB]);
 
   useEffect(() => {

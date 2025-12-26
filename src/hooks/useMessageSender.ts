@@ -1,5 +1,6 @@
 import { useCallback, useMemo, useRef, useEffect } from 'react';
 import { SignalType } from '../lib/signal-types';
+import { EventType } from '../lib/event-types';
 import { Message } from '../components/chat/types';
 import { CryptoUtils } from '../lib/unified-crypto';
 import websocketClient from '../lib/websocket';
@@ -21,12 +22,12 @@ const DILITHIUM_PUBLIC_KEY_LENGTH = 2_592;
 const X25519_PUBLIC_KEY_LENGTH = 32;
 
 const SIGNAL_TYPE_MAP: Record<string, string> = {
-  'typing-start': 'typing-indicator',
-  'typing-stop': 'typing-indicator',
-  'delete-message': 'delete-message',
-  'edit-message': 'edit-message',
-  [SignalType.REACTION_ADD]: 'reaction-add',
-  [SignalType.REACTION_REMOVE]: 'reaction-remove',
+  [SignalType.TYPING_START]: SignalType.TYPING_INDICATOR,
+  [SignalType.TYPING_STOP]: SignalType.TYPING_INDICATOR,
+  [SignalType.DELETE_MESSAGE]: SignalType.DELETE_MESSAGE,
+  [SignalType.EDIT_MESSAGE]: SignalType.EDIT_MESSAGE,
+  [SignalType.REACTION_ADD]: SignalType.REACTION_ADD,
+  [SignalType.REACTION_REMOVE]: SignalType.REACTION_REMOVE,
 };
 
 const TEXT_ENCODER = new TextEncoder();
@@ -222,10 +223,10 @@ const ensureSession = async (
         const customEvent = event as CustomEvent;
         if (customEvent.detail?.peer === peer) {
           sessionReadyFlag = true;
-          try { window.removeEventListener('libsignal-session-ready', readyHandler as EventListener); } catch { }
+          try { window.removeEventListener(EventType.LIBSIGNAL_SESSION_READY, readyHandler as EventListener); } catch { }
         }
       };
-      window.addEventListener('libsignal-session-ready', readyHandler as EventListener);
+      window.addEventListener(EventType.LIBSIGNAL_SESSION_READY, readyHandler as EventListener);
 
       try {
         let lastRequestAt = 0;
@@ -301,7 +302,7 @@ const ensureSession = async (
           delay = Math.min(delay + poisson * SESSION_POLL_BASE_MS, SESSION_POLL_MAX_MS);
         }
       } finally {
-        try { window.removeEventListener('libsignal-session-ready', readyHandler as EventListener); } catch { }
+        try { window.removeEventListener(EventType.LIBSIGNAL_SESSION_READY, readyHandler as EventListener); } catch { }
       }
 
       console.error(`[MessageSender] Failed to establish session with ${peer} after ${requestCount} attempts`);
@@ -432,10 +433,10 @@ export function useMessageSender(
       };
       const cleanup = () => {
         try { clearTimeout(timeout); } catch { }
-        try { window.removeEventListener('user-keys-available', onKeys as EventListener); } catch { }
+        try { window.removeEventListener(EventType.USER_KEYS_AVAILABLE, onKeys as EventListener); } catch { }
       };
 
-      window.addEventListener('user-keys-available', onKeys as EventListener);
+      window.addEventListener(EventType.USER_KEYS_AVAILABLE, onKeys as EventListener);
     });
 
     if (hybrid && hybrid.kyberPublicBase64 && hybrid.dilithiumPublicBase64) return hybrid;
@@ -495,8 +496,8 @@ export function useMessageSender(
       } catch { }
     };
 
-    window.addEventListener('offline-longterm-required', handler as EventListener);
-    return () => window.removeEventListener('offline-longterm-required', handler as EventListener);
+    window.addEventListener(EventType.OFFLINE_LONGTERM_REQUIRED, handler as EventListener);
+    return () => window.removeEventListener(EventType.OFFLINE_LONGTERM_REQUIRED, handler as EventListener);
   }, [recipientDirectory, resolvePeerHybridKeysToUse]);
 
   const sessionLocksRef = useRef(new WeakMap<object, Map<string, Promise<boolean>>>());
@@ -546,7 +547,7 @@ export function useMessageSender(
         peerCanDecryptRef.current.set(peerUsername, true);
 
         // Process any queued messages for this peer
-        window.dispatchEvent(new CustomEvent('libsignal-session-ready', {
+        window.dispatchEvent(new CustomEvent(EventType.LIBSIGNAL_SESSION_READY, {
           detail: { peer: peerUsername }
         }));
       } catch (_err) {
@@ -554,11 +555,11 @@ export function useMessageSender(
       }
     };
 
-    window.addEventListener('session-reset-received', handleSessionReset as EventListener);
-    window.addEventListener('session-established-received', handleSessionEstablished as EventListener);
+    window.addEventListener(EventType.SESSION_RESET_RECEIVED, handleSessionReset as EventListener);
+    window.addEventListener(EventType.SESSION_ESTABLISHED_RECEIVED, handleSessionEstablished as EventListener);
     return () => {
-      window.removeEventListener('session-reset-received', handleSessionReset as EventListener);
-      window.removeEventListener('session-established-received', handleSessionEstablished as EventListener);
+      window.removeEventListener(EventType.SESSION_RESET_RECEIVED, handleSessionReset as EventListener);
+      window.removeEventListener(EventType.SESSION_ESTABLISHED_RECEIVED, handleSessionEstablished as EventListener);
     };
   }, []);
 
@@ -638,7 +639,7 @@ export function useMessageSender(
           } while (!idCacheRef.current.isStale(messageId));
           idCacheRef.current.add(messageId);
 
-          const isTyping = (messageSignalType === 'typing-start' || messageSignalType === 'typing-stop');
+          const isTyping = (messageSignalType === SignalType.TYPING_START || messageSignalType === SignalType.TYPING_STOP);
 
           if (!isTyping) {
             // Create local bubble for real messages only
@@ -694,7 +695,7 @@ export function useMessageSender(
       }
 
       if (
-        (messageType === 'reaction-add' || messageType === 'reaction-remove') &&
+        (messageType === SignalType.REACTION_ADD || messageType === SignalType.REACTION_REMOVE) &&
         !sanitizedContent
       ) {
         return;
@@ -744,7 +745,7 @@ export function useMessageSender(
           } catch { }
         }
 
-        const wireMessageId = (messageType === 'edit-message' && editMessageId) ? editMessageId : messageId;
+        const wireMessageId = (messageType === SignalType.EDIT_MESSAGE && editMessageId) ? editMessageId : messageId;
 
         const payload: Record<string, unknown> = {
           messageId: wireMessageId,
@@ -768,7 +769,7 @@ export function useMessageSender(
         if (fileData) {
           payload.fileData = fileData;
         }
-        if (messageSignalType === 'delete-message' && originalMessageId) {
+        if (messageSignalType === SignalType.DELETE_MESSAGE && originalMessageId) {
           payload.deleteMessageId = originalMessageId;
         }
         if (
@@ -780,10 +781,10 @@ export function useMessageSender(
         }
 
         if (
-          messageType === 'reaction-add' ||
-          messageType === 'reaction-remove' ||
-          messageType === 'delivery-receipt' ||
-          messageType === 'read-receipt'
+          messageType === SignalType.REACTION_ADD ||
+          messageType === SignalType.REACTION_REMOVE ||
+          messageType === SignalType.DELIVERY_RECEIPT ||
+          messageType === SignalType.READ_RECEIPT
         ) {
           if (typeof localKeys.kyber.publicKeyBase64 === 'string') {
             payload.senderKyberPublicBase64 = localKeys.kyber.publicKeyBase64;
@@ -866,9 +867,9 @@ export function useMessageSender(
 
         if (
           secureDBRef?.current &&
-          messageType !== 'typing-indicator' &&
-          messageType !== 'delivery-receipt' &&
-          messageType !== 'read-receipt') {
+          messageType !== SignalType.TYPING_INDICATOR &&
+          messageType !== SignalType.DELIVERY_RECEIPT &&
+          messageType !== SignalType.READ_RECEIPT) {
           try {
             const messageData = {
               user: user,
@@ -903,17 +904,17 @@ export function useMessageSender(
           }
         }
 
-        if (messageType === 'delete-message' && originalMessageId) {
+        if (messageType === SignalType.DELETE_MESSAGE && originalMessageId) {
           window.dispatchEvent(
-            new CustomEvent('local-message-delete', { detail: { messageId: originalMessageId } }),
+            new CustomEvent(EventType.LOCAL_MESSAGE_DELETE, { detail: { messageId: originalMessageId } }),
           );
           return;
         }
 
-        if (messageType === 'edit-message') {
+        if (messageType === SignalType.EDIT_MESSAGE) {
           const targetId = editMessageId || wireMessageId;
           window.dispatchEvent(
-            new CustomEvent('local-message-edit', { detail: { messageId: targetId, newContent: sanitizedContent } }),
+            new CustomEvent(EventType.LOCAL_MESSAGE_EDIT, { detail: { messageId: targetId, newContent: sanitizedContent } }),
           );
           return;
         }
@@ -921,7 +922,7 @@ export function useMessageSender(
           (messageSignalType === SignalType.REACTION_ADD || messageSignalType === SignalType.REACTION_REMOVE) &&
           originalMessageId
         ) {
-          window.dispatchEvent(new CustomEvent('local-reaction-update', {
+          window.dispatchEvent(new CustomEvent(EventType.LOCAL_REACTION_UPDATE, {
             detail: {
               messageId: originalMessageId,
               emoji: sanitizedContent,
@@ -932,7 +933,7 @@ export function useMessageSender(
           return;
         }
 
-        if (messageType === 'typing-indicator') {
+        if (messageType === SignalType.TYPING_INDICATOR) {
           return;
         }
 
@@ -1122,8 +1123,8 @@ export function useMessageSender(
       }
     };
 
-    window.addEventListener('libsignal-session-ready', handleSessionReady as EventListener);
-    window.addEventListener('session-established-received', handleSessionEstablishedReceived as EventListener);
+    window.addEventListener(EventType.LIBSIGNAL_SESSION_READY, handleSessionReady as EventListener);
+    window.addEventListener(EventType.SESSION_ESTABLISHED_RECEIVED, handleSessionEstablishedReceived as EventListener);
 
     // Handle session resets - queue unacknowledged messages for retry
     const handleSessionReset = async (event: Event) => {
@@ -1191,12 +1192,12 @@ export function useMessageSender(
       }
     };
 
-    window.addEventListener('session-reset-received', handleSessionReset as EventListener);
+    window.addEventListener(EventType.SESSION_RESET_RECEIVED, handleSessionReset as EventListener);
 
     return () => {
-      window.removeEventListener('libsignal-session-ready', handleSessionReady as EventListener);
-      window.removeEventListener('session-established-received', handleSessionEstablishedReceived as EventListener);
-      window.removeEventListener('session-reset-received', handleSessionReset as EventListener);
+      window.removeEventListener(EventType.LIBSIGNAL_SESSION_READY, handleSessionReady as EventListener);
+      window.removeEventListener(EventType.SESSION_ESTABLISHED_RECEIVED, handleSessionEstablishedReceived as EventListener);
+      window.removeEventListener(EventType.SESSION_RESET_RECEIVED, handleSessionReset as EventListener);
     };
   }, [handleSendMessage]);
 

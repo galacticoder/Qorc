@@ -1795,7 +1795,7 @@ class WebSocketClient {
     PostQuantumUtils.clearMemory(payloadBytes);
 
     const envelope = {
-      type: 'pq-envelope',
+      type: SignalType.PQ_ENVELOPE,
       version: 'pq-ws-1',
       sessionId: this.sessionKeyMaterial.sessionId,
       sessionFingerprint: this.sessionKeyMaterial.fingerprint,

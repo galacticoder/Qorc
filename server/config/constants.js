@@ -24,11 +24,6 @@ export const SERVER_CONSTANTS = {
   BLOCK_TOKEN_CLEANUP_INTERVAL: 60 * 60 * 1000, // 1 hour
   STATUS_LOG_INTERVAL: 60000, // 1 minute
   
-  // History request cooldown
-  HISTORY_REQUEST_COOLDOWN: 1000, // 1 second between requests
-  MAX_HISTORY_LIMIT: 100,
-  DEFAULT_HISTORY_LIMIT: 50,
-  
   // Message size limits
   MAX_MESSAGE_SIZE: 5 * 1024 * 1024, // 5MB
   MAX_JSON_PAYLOAD_SIZE: 5 * 1024 * 1024, // 5MB
@@ -71,9 +66,8 @@ export const RATE_LIMIT_CONFIG = {
 
 // Database configuration
 export const DATABASE_CONFIG = {
-  // Message storage
+  // Offline message storage
   MAX_OFFLINE_MESSAGES_PER_USER: 1000,
-  MESSAGE_RETENTION_DAYS: 30,
   
   // Session storage
   SESSION_TTL: 24 * 60 * 60 * 1000, // 24 hours
@@ -92,7 +86,6 @@ export const VALID_MESSAGE_TYPES = [
   'RATE_LIMIT_STATUS',
   'PASSWORD_HASH_RESPONSE',
   'SERVER_LOGIN',
-  'REQUEST_MESSAGE_HISTORY',
   'BLOCK_LIST_SYNC',
   'RETRIEVE_BLOCK_LIST',
   'request-server-public-key',

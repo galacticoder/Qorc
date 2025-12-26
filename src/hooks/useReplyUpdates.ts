@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef } from 'react';
 import { Message } from '@/components/chat/types';
+import { EventType } from '@/lib/event-types';
 
 const MAX_TRACKED_ORIGINS = 5000;
 const MAX_REPLIES_PER_ORIGIN = 250;
@@ -240,16 +241,16 @@ export const useReplyUpdates = (
       }
     };
 
-    window.addEventListener('local-message-edit', handleMessageEdit as EventListener);
-    window.addEventListener('local-message-delete', handleMessageDelete as EventListener);
-    window.addEventListener('remote-message-edit', handleMessageEdit as EventListener);
-    window.addEventListener('remote-message-delete', handleMessageDelete as EventListener);
+    window.addEventListener(EventType.LOCAL_MESSAGE_EDIT, handleMessageEdit as EventListener);
+    window.addEventListener(EventType.LOCAL_MESSAGE_DELETE, handleMessageDelete as EventListener);
+    window.addEventListener(EventType.REMOTE_MESSAGE_EDIT, handleMessageEdit as EventListener);
+    window.addEventListener(EventType.REMOTE_MESSAGE_DELETE, handleMessageDelete as EventListener);
 
     return () => {
-      window.removeEventListener('local-message-edit', handleMessageEdit as EventListener);
-      window.removeEventListener('local-message-delete', handleMessageDelete as EventListener);
-      window.removeEventListener('remote-message-edit', handleMessageEdit as EventListener);
-      window.removeEventListener('remote-message-delete', handleMessageDelete as EventListener);
+      window.removeEventListener(EventType.LOCAL_MESSAGE_EDIT, handleMessageEdit as EventListener);
+      window.removeEventListener(EventType.LOCAL_MESSAGE_DELETE, handleMessageDelete as EventListener);
+      window.removeEventListener(EventType.REMOTE_MESSAGE_EDIT, handleMessageEdit as EventListener);
+      window.removeEventListener(EventType.REMOTE_MESSAGE_DELETE, handleMessageDelete as EventListener);
     };
   }, [updateReplyFields, handleMessageDeleted]);
 
