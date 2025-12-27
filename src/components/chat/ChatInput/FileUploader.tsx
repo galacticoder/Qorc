@@ -1,6 +1,6 @@
 import { useRef, useCallback } from "react";
 import { Button } from "../../ui/button";
-import { PaperclipIcon } from "../icons.tsx";
+import { PaperclipIcon } from "../assets/icons";
 import { cn } from "@/lib/utils";
 
 interface FileUploaderProps {

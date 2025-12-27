@@ -1,6 +1,6 @@
 import React, { useState, useRef } from 'react';
 import { LogOut } from 'lucide-react';
-import { ChatBubbleIcon, SettingsIcon, CallIcon } from '../chat/icons';
+import { ChatBubbleIcon, SettingsIcon, CallIcon } from '../chat/assets/icons';
 import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
 import { UserAvatar } from './UserAvatar';

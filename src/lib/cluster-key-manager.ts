@@ -5,6 +5,7 @@
  */
 
 import { PostQuantumHash, PostQuantumUtils } from './post-quantum-crypto';
+import { STORAGE_KEYS } from './storage-keys';
 
 interface ServerPublicKeys {
   kyberPublicBase64: string;
@@ -34,7 +35,7 @@ export class ClusterKeyManager {
   private fetchPromise: Promise<void> | null = null;
   private lastFetchTime = 0;
   private readonly CACHE_TTL_MS = 5 * 60 * 1000;
-  private readonly STORAGE_KEY = 'securechat_cluster_keys_v2';
+  private readonly STORAGE_KEY = STORAGE_KEYS.CLUSTER_KEY_STORAGE;
 
   private constructor() {
     this.loadFromStorage();

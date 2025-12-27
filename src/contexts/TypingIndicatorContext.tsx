@@ -3,6 +3,14 @@ import { CryptoUtils } from '../lib/unified-crypto';
 import { SecureMemory } from '../lib/secure-memory';
 import { SignalType } from '../lib/signal-types';
 import { EventType } from '../lib/event-types';
+import { isPlainObject, hasPrototypePollutionKeys, isValidUsername } from '../lib/sanitizers';
+import {
+	DEFAULT_MAX_TYPING_USERS,
+	DEFAULT_TYPING_TIMEOUT_MS,
+	DEFAULT_RATE_LIMIT_PER_MINUTE,
+	DEFAULT_UI_EVENT_RATE_MAX,
+	DEFAULT_TYPING_EVENT_RATE_WINDOW_MS
+} from '../lib/constants';
 
 type TypingAction = 'start' | 'stop';
 
@@ -30,25 +38,6 @@ interface SecureEventDetail {
 	};
 }
 
-const VALID_USERNAME = /^[a-z0-9@._-]{1,64}$/i;
-const EVENT_RATE_LIMIT_WINDOW_MS = 60000;
-const MAX_EVENT_QUEUE = 500;
-const DEFAULT_MAX_TYPING_USERS = 200;
-const DEFAULT_TYPING_TIMEOUT_MS = 5500;
-const DEFAULT_RATE_LIMIT_PER_MINUTE = 240;
-
-const isPlainObject = (value: unknown): value is Record<string, unknown> => {
-	if (typeof value !== 'object' || value === null) {
-		return false;
-	}
-	const proto = Object.getPrototypeOf(value);
-	return proto === Object.prototype || proto === null;
-};
-
-const hasPrototypePollutionKeys = (obj: Record<string, unknown>): boolean => {
-	return ['__proto__', 'prototype', 'constructor'].some((key) => Object.prototype.hasOwnProperty.call(obj, key));
-};
-
 class BoundedMap<K, V> extends Map<K, V> {
 	constructor(private readonly maxSize: number) {
 		super();
@@ -68,7 +57,7 @@ class BoundedMap<K, V> extends Map<K, V> {
 class RateLimiter {
 	private readonly permitMap = new Map<string, { count: number; resetAt: number }>();
 
-	constructor(private readonly limit: number, private readonly windowMs: number) {}
+	constructor(private readonly limit: number, private readonly windowMs: number) { }
 
 	public tryConsume(key: string): boolean {
 		const now = Date.now();
@@ -134,7 +123,7 @@ async function validateAndVerifyEvent(
 		}
 
 		nonceMap.set(nonceKey, detail.timestamp);
-		if (nonceMap.size > MAX_EVENT_QUEUE) {
+		if (nonceMap.size > DEFAULT_UI_EVENT_RATE_MAX) {
 			const oldestKey = nonceMap.keys().next().value;
 			if (oldestKey) {
 				nonceMap.delete(oldestKey);
@@ -144,12 +133,14 @@ async function validateAndVerifyEvent(
 		if (!detail.payload || typeof detail.payload !== 'object') {
 			return null;
 		}
+
 		if (!isPlainObject(detail.payload) || hasPrototypePollutionKeys(detail.payload)) {
 			return null;
 		}
 
 		const { username, action } = detail.payload;
-		if (!username || typeof username !== 'string' || !VALID_USERNAME.test(username)) {
+
+		if (!username || typeof username !== 'string' || !isValidUsername(username)) {
 			return null;
 		}
 
@@ -163,15 +154,16 @@ async function validateAndVerifyEvent(
 
 		const encoder = new TextEncoder();
 		const payloadBytes = encoder.encode(JSON.stringify(detail.payload));
+
 		const expectedMac = CryptoUtils.Base64.base64ToUint8Array(detail.signature);
 		const macKey = await CryptoUtils.Hash.generateBlake3Mac(encoder.encode(detail.nonce), encoder.encode(String(detail.timestamp)));
 		const verified = await CryptoUtils.Hash.verifyBlake3Mac(payloadBytes, macKey, expectedMac);
+
 		SecureMemory.zeroBuffer(payloadBytes);
 		SecureMemory.zeroBuffer(expectedMac);
 		SecureMemory.zeroBuffer(macKey);
-		if (!verified) {
-			return null;
-		}
+
+		if (!verified) return null;
 
 		return detail;
 	} catch {
@@ -188,11 +180,11 @@ export function TypingIndicatorProvider({
 }: TypingIndicatorProviderProps) {
 	const [typingUsers, setTypingUsers] = useState<Set<string>>(new Set());
 	const typingTimeoutsRef = useRef(new BoundedMap<string, ReturnType<typeof setTimeout>>(maxTypingUsers));
-	const nonceMap = useRef(new BoundedMap<string, number>(MAX_EVENT_QUEUE));
-	const rateLimiterRef = useRef(new RateLimiter(rateLimitPerMinute, EVENT_RATE_LIMIT_WINDOW_MS));
+	const nonceMap = useRef(new BoundedMap<string, number>(DEFAULT_UI_EVENT_RATE_MAX));
+	const rateLimiterRef = useRef(new RateLimiter(rateLimitPerMinute, DEFAULT_TYPING_EVENT_RATE_WINDOW_MS));
 
 	const setTypingUser = useCallback((username: string, isTyping: boolean) => {
-		if (!VALID_USERNAME.test(username)) {
+		if (!isValidUsername(username)) {
 			return;
 		}
 		setTypingUsers(prev => {
@@ -202,9 +194,8 @@ export function TypingIndicatorProvider({
 			}
 			const newSet = new Set(prev);
 			if (isTyping) {
-				if (newSet.size >= maxTypingUsers) {
+				if (newSet.size >= maxTypingUsers)
 					return prev;
-				}
 				newSet.add(username);
 			} else {
 				newSet.delete(username);
@@ -214,7 +205,7 @@ export function TypingIndicatorProvider({
 	}, [maxTypingUsers]);
 
 	const clearTypingUser = useCallback((username: string) => {
-		if (!VALID_USERNAME.test(username)) {
+		if (!isValidUsername(username)) {
 			return;
 		}
 		const existingTimeout = typingTimeoutsRef.current.get(username);
@@ -301,7 +292,7 @@ export function TypingIndicatorProvider({
 			if (!isPlainObject(detail) || hasPrototypePollutionKeys(detail)) return;
 			const from = detail.from;
 			const content = detail.content;
-			if (!from || typeof from !== 'string' || !VALID_USERNAME.test(from)) return;
+			if (!from || typeof from !== 'string' || !isValidUsername(from)) return;
 			if (currentUsername && from === currentUsername) return;
 			if (!rateLimiterRef.current.tryConsume(`p2p:${from}`)) return;
 
@@ -323,11 +314,11 @@ export function TypingIndicatorProvider({
 			}
 		};
 
-		window.addEventListener('p2p-typing-indicator', handleP2PTypingIndicator as EventListener);
+		window.addEventListener(EventType.P2P_TYPING_INDICATOR, handleP2PTypingIndicator as EventListener);
 
 		return () => {
 			window.removeEventListener(EventType.TYPING_INDICATOR, windowListener as EventListener);
-			window.removeEventListener('p2p-typing-indicator', handleP2PTypingIndicator as EventListener);
+			window.removeEventListener(EventType.P2P_TYPING_INDICATOR, handleP2PTypingIndicator as EventListener);
 			secureChannel.port1.onmessage = null;
 			secureChannel.port1.close();
 			secureChannel.port2.close();

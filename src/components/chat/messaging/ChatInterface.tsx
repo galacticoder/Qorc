@@ -3,22 +3,27 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Button } from "@/components/ui/button";
 import { ChatMessage } from "./ChatMessage";
 import { Message } from "./types";
-import { ChatInput } from "./ChatInput.tsx";
+import { ChatInput } from "../ChatInput.tsx";
 import { User } from "./UserList";
 import { SignalType } from "@/lib/signal-types";
 import { MessageReply } from "./types";
 import { useTypingIndicator } from "@/hooks/useTypingIndicator";
 import { TypingIndicatorList } from "./TypingIndicatorList";
 import { Video, MoreVertical, ShieldOff } from 'lucide-react';
-import { CallIcon } from './icons';
-import type { CallState } from "../../lib/webrtc-calling";
+import { CallIcon } from '../assets/icons';
+import type { CallState } from "../../../lib/webrtc-calling";
 import type { useAuth } from "@/hooks/useAuth";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
-import { BlockUserButton } from "./BlockUserButton";
+import { BlockUserButton } from "../calls/BlockUserButton";
 import { blockingSystem } from "@/lib/blocking-system";
 import { blockStatusCache } from "@/lib/block-status-cache";
 import { useReplyUpdates } from "@/hooks/useReplyUpdates";
-
+import { isPlainObject, hasPrototypePollutionKeys, sanitizeUiText } from "../../utils";
+import {
+  DEFAULT_EVENT_RATE_WINDOW_MS,
+  DEFAULT_UI_EVENT_RATE_MAX,
+  MAX_EVENT_USERNAME_LENGTH
+} from "../../../lib/constants";
 
 interface HybridKeys {
   readonly x25519: { readonly private: Uint8Array; readonly publicKeyBase64: string };
@@ -61,32 +66,6 @@ const NEAR_BOTTOM_THRESHOLD = 100;
 const MAX_BACKGROUND_MESSAGES = 1000;
 const BACKGROUND_BATCH_SIZE = 100;
 
-const UI_EVENT_RATE_WINDOW_MS = 10_000;
-const UI_EVENT_RATE_MAX = 500;
-const MAX_UI_USERNAME_LENGTH = 256;
-
-const isPlainObject = (value: unknown): value is Record<string, unknown> => {
-  if (typeof value !== 'object' || value === null) {
-    return false;
-  }
-  const proto = Object.getPrototypeOf(value);
-  return proto === Object.prototype || proto === null;
-};
-
-const hasPrototypePollutionKeys = (obj: unknown): boolean => {
-  if (obj == null || typeof obj !== 'object') return false;
-  const keys = Object.keys(obj as Record<string, unknown>);
-  return keys.some((key) => key === '__proto__' || key === 'constructor' || key === 'prototype');
-};
-
-const sanitizeUiText = (value: unknown, maxLen: number): string | null => {
-  if (typeof value !== 'string') return null;
-  const trimmed = value.trim();
-  if (!trimmed) return null;
-  const cleaned = trimmed.replace(/[\x00-\x1F\x7F]/g, '');
-  if (!cleaned) return null;
-  return cleaned.slice(0, maxLen);
-};
 
 export const ChatInterface = React.memo<ChatInterfaceProps>(({
   onSendMessage,
@@ -113,7 +92,6 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
   startCall,
 }) => {
   const scrollAreaRef = useRef<HTMLDivElement>(null);
-
   const uiEventRateRef = useRef<{ windowStart: number; count: number }>({ windowStart: Date.now(), count: 0 });
 
   const displayResolverRef = useRef(getDisplayUsername);
@@ -145,6 +123,7 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
     }
   }, [selectedConversation, handleConversationChange]);
 
+  // Scroll container to bottom
   const scrollToBottom = useCallback((container: Element) => {
     try {
       container.scrollTo({ top: container.scrollHeight, behavior: 'auto' });
@@ -222,6 +201,7 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
     loadBackgroundMessages();
   }, [selectedConversation, loadMoreMessages]);
 
+  // Handle lazy loading of older messages on scroll
   const handleLazyLoadScroll = useCallback(async (scrollContainer: Element) => {
     if (isLoadingMore || !hasMoreMessages || !selectedConversation || !loadMoreMessages) return;
 
@@ -306,16 +286,17 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
     checkBlockingStatus();
   }, [selectedConversation, callingAuthContext?.passphrasePlaintextRef?.current, callingAuthContext?.hybridKeysRef?.current]);
 
+  // Handle block status change events
   const handleBlockStatusChange = useCallback((event: Event) => {
     try {
       const now = Date.now();
       const bucket = uiEventRateRef.current;
-      if (now - bucket.windowStart > UI_EVENT_RATE_WINDOW_MS) {
+      if (now - bucket.windowStart > DEFAULT_EVENT_RATE_WINDOW_MS) {
         bucket.windowStart = now;
         bucket.count = 0;
       }
       bucket.count += 1;
-      if (bucket.count > UI_EVENT_RATE_MAX) {
+      if (bucket.count > DEFAULT_UI_EVENT_RATE_MAX) {
         return;
       }
 
@@ -323,7 +304,7 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
       const detail = event.detail;
       if (!isPlainObject(detail) || hasPrototypePollutionKeys(detail)) return;
 
-      const username = sanitizeUiText((detail as any).username, MAX_UI_USERNAME_LENGTH);
+      const username = sanitizeUiText((detail as any).username, MAX_EVENT_USERNAME_LENGTH);
       if (!username) return;
       const isBlocked = (detail as any).isBlocked === true;
 
@@ -338,6 +319,7 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
     return () => window.removeEventListener('block-status-changed', handleBlockStatusChange as EventListener);
   }, [handleBlockStatusChange]);
 
+  // Send read receipt for message
   const sendReadReceipt = useCallback(async (messageId: string, sender: string) => {
     const message = messages.find(m => m.id === messageId);
 
@@ -364,10 +346,8 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
     const currentMessagesLength = messages.length;
     const prevMessagesLength = prevMessagesLengthRef.current;
 
-    // Check if this is a new message 
     const isNewMessage = currentMessagesLength > prevMessagesLength;
 
-    // Get the latest message
     const latestMessage = messages[messages.length - 1];
     const isNewMessageId = latestMessage && latestMessage.id !== lastMessageIdRef.current;
 
@@ -503,8 +483,7 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
     }
   }, [scrollToBottom]);
 
-
-
+  // Handle audio call initiation
   const handleAudioCall = useCallback(async () => {
     if (!selectedConversation) return;
     try {
@@ -514,6 +493,7 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
     }
   }, [selectedConversation, startCall]);
 
+  // Handle video call initiation
   const handleVideoCall = useCallback(async () => {
     if (!selectedConversation) return;
     try {
@@ -523,6 +503,7 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
     }
   }, [selectedConversation, startCall]);
 
+  // Handle sending messages
   const handleMessageSend = useCallback(async (
     messageId: string | undefined,
     content: string,
@@ -537,16 +518,19 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
     }
   }, [onSendMessage, resetTypingAfterSend]);
 
+  // Handle message deletion
   const handleDeleteMessage = useCallback((message: Message) => {
     onSendMessage(message.id, "", SignalType.DELETE_MESSAGE, null);
   }, [onSendMessage]);
 
+  // Handle message reactions
   const handleReactToMessage = useCallback((targetMessage: Message, emoji: string) => {
     const isRemove = !!(targetMessage.reactions && targetMessage.reactions[emoji] && targetMessage.reactions[emoji].includes(currentUsername));
     const action = isRemove ? SignalType.REACTION_REMOVE : SignalType.REACTION_ADD;
     onSendMessage(targetMessage.id, emoji, action, null);
   }, [currentUsername, onSendMessage]);
 
+  // Handle message editing
   const handleEditMessage = useCallback(async (newContent: string) => {
     if (editingMessage) {
       await onSendMessage(editingMessage.id, newContent, SignalType.EDIT_MESSAGE, editingMessage.replyTo);
@@ -554,17 +538,23 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
     }
   }, [editingMessage, onSendMessage]);
 
+  // Handle reply, edit, cancellation
   const handleCancelReply = useCallback(() => setReplyTo(null), []);
   const handleCancelEdit = useCallback(() => setEditingMessage(null), []);
+
+  // Handle reply to message
   const handleReply = useCallback((message: Message) => {
     setEditingMessage(null);
     setReplyTo(message);
   }, []);
+
+  // Handle message edit
   const handleEdit = useCallback((message: Message) => {
     setReplyTo(null);
     setEditingMessage(message);
   }, []);
 
+  // Handle inline block status change
   const handleBlockStatusChangeInline = useCallback((username: string, isBlocked: boolean) => {
     if (username === selectedConversation) {
       setIsUserBlocked(isBlocked);
@@ -579,6 +569,8 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
       {selectedConversation ? "No messages yet. Start the conversation!" : "Select a conversation to view messages"}
     </div>
   ), [selectedConversation]);
+
+  // Handle reply click navigation
   const handleReplyClick = useCallback((replyId: string) => {
     const el = document.getElementById(`message-${replyId}`);
     if (el) {
@@ -587,7 +579,6 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
       setTimeout(() => el.classList.remove('bg-secondary/20'), 1500);
     }
   }, []);
-
 
   return (
     <div className="flex flex-col h-full relative" style={{ backgroundColor: 'var(--chat-background)' }}>

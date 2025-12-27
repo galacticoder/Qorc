@@ -1,7 +1,8 @@
 import React, { useMemo, useCallback, useState, useEffect } from 'react';
 import Linkify from 'linkify-react';
-import { LinkExtractor } from '../../lib/link-extraction';
+import { LinkExtractor } from '../../../lib/link-extraction';
 
+// Cached preview metadata
 interface CachedPreview {
   readonly title: string | null;
   readonly description: string | null;
@@ -17,6 +18,7 @@ const MAX_CACHE_SIZE = 100;
 const MAX_URL_LENGTH = 2048;
 const ALLOWED_PROTOCOLS = new Set(['http:', 'https:']);
 
+// Trim cache when it grows too large
 const cleanupCache = (): void => {
   if (linkPreviewCache.size > MAX_CACHE_SIZE) {
     const entries = Array.from(linkPreviewCache.entries());
@@ -27,6 +29,8 @@ const cleanupCache = (): void => {
 
 const IPV4_REGEX = /^(?:\d{1,3}\.){3}\d{1,3}$/;
 const IPV6_REGEX = /^\[?[A-F0-9:]+\]?$/i;
+
+// Detect localhost or private hosts to skip previews
 const isPrivateOrLocalHost = (hostname: string): boolean => {
   const lower = hostname.toLowerCase();
   if (lower === 'localhost' || lower.endsWith('.local')) return true;
@@ -35,6 +39,7 @@ const isPrivateOrLocalHost = (hostname: string): boolean => {
   return false;
 };
 
+// Validate URL protocol, length, and host
 const isValidUrl = (urlString: string): boolean => {
   if (typeof urlString !== 'string' || urlString.length === 0 || urlString.length > MAX_URL_LENGTH) {
     return false;
@@ -50,6 +55,7 @@ const isValidUrl = (urlString: string): boolean => {
   }
 };
 
+// Extract hostname from URL
 const getHostname = (urlString: string): string | null => {
   try {
     const url = new URL(urlString);
@@ -70,6 +76,7 @@ interface LinkifyWithPreviewsProps {
   readonly urls?: string[];
 }
 
+// Render a single link preview
 const CustomLinkPreview = React.memo(({ url, isCurrentUser: _isCurrentUser, showFallbackLink }: { url: string; isCurrentUser: boolean; showFallbackLink?: boolean }) => {
   const [data, setData] = useState<CachedPreview | null>(linkPreviewCache.get(url) || null);
   const [loading, setLoading] = useState(!data);
@@ -263,6 +270,7 @@ const CustomLinkPreview = React.memo(({ url, isCurrentUser: _isCurrentUser, show
   );
 });
 
+// Main component that linkifies text and shows previews
 const LinkifyWithPreviewsComponent: React.FC<LinkifyWithPreviewsProps> = ({
   children,
   options = {},
@@ -273,7 +281,6 @@ const LinkifyWithPreviewsComponent: React.FC<LinkifyWithPreviewsProps> = ({
   previewsOnly = false,
   urls: providedUrls
 }) => {
-  /* Restore URL decoding */
   const urls = useMemo(() => {
     const baseUrls = providedUrls ?? LinkExtractor.extractUrlStrings(children);
     return baseUrls

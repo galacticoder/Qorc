@@ -8,8 +8,6 @@ interface VoiceRecorderButtonProps {
 }
 
 export function VoiceRecorderButton({ onClick, disabled }: VoiceRecorderButtonProps) {
-
-
   return (
     <Button
       variant="ghost"

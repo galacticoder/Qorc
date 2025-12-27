@@ -1,13 +1,15 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { Button } from '../ui/button';
+import { Button } from '../../ui/button';
 import { Square, Play, Pause, Trash2, Send } from 'lucide-react';
 
+// Props for the voice recorder control
 interface VoiceRecorderProps {
   onSendVoiceNote: (audioBlob: Blob) => void;
   onCancel: () => void;
   disabled?: boolean;
 }
 
+// Voice recorder component for capturing and previewing voice notes
 export function VoiceRecorder({ onSendVoiceNote, onCancel, disabled }: VoiceRecorderProps) {
   const [isRecording, setIsRecording] = useState(false);
   const isRecordingRef = useRef(false);
@@ -29,6 +31,7 @@ export function VoiceRecorder({ onSendVoiceNote, onCancel, disabled }: VoiceReco
   const blobUrlRef = useRef<string | null>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
+  // Release media resources and reset state
   const cleanup = () => {
     if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
       mediaRecorderRef.current.stop();
@@ -69,6 +72,7 @@ export function VoiceRecorder({ onSendVoiceNote, onCancel, disabled }: VoiceReco
     return cleanup;
   }, []);
 
+  // Draw live mic level bars on canvas
   const drawVisualizer = () => {
     if (!analyserRef.current || !canvasRef.current) return;
 
@@ -103,10 +107,9 @@ export function VoiceRecorder({ onSendVoiceNote, onCancel, disabled }: VoiceReco
     for (let i = 0; i < barCount; i++) {
       const value = dataArray[i * step];
       const percent = value / 255;
-      const height = Math.max(4, percent * rect.height); // Minimum height of 4px
+      const height = Math.max(4, percent * rect.height);
       const y = (rect.height - height) / 2;
 
-      // Make bars rounded with 2px radius
       ctx.beginPath();
       ctx.roundRect(i * (barWidth + gap), y, barWidth, height, 2);
       ctx.fill();
@@ -117,6 +120,7 @@ export function VoiceRecorder({ onSendVoiceNote, onCancel, disabled }: VoiceReco
     }
   };
 
+  // Start microphone recording session
   const startRecording = async () => {
     try {
       setError(null);
@@ -127,7 +131,7 @@ export function VoiceRecorder({ onSendVoiceNote, onCancel, disabled }: VoiceReco
       // Load set microphone from settings
       let micDeviceId: string | undefined;
       try {
-        const { syncEncryptedStorage } = await import('../../lib/encrypted-storage');
+        const { syncEncryptedStorage } = await import('../../../lib/encrypted-storage');
         const stored = syncEncryptedStorage.getItem('app_settings_v1');
         if (stored) {
           const parsed = JSON.parse(stored);
@@ -155,9 +159,11 @@ export function VoiceRecorder({ onSendVoiceNote, onCancel, disabled }: VoiceReco
 
       const AudioCtx: typeof AudioContext = (window as any).AudioContext || (window as any).webkitAudioContext;
       const audioContext = new AudioCtx();
+
       if (audioContext.state === 'suspended') {
         await audioContext.resume();
       }
+      
       const analyser = audioContext.createAnalyser();
       const source = audioContext.createMediaStreamSource(stream);
       source.connect(analyser);
@@ -228,12 +234,14 @@ export function VoiceRecorder({ onSendVoiceNote, onCancel, disabled }: VoiceReco
     }
   };
 
+  // Stop active recording
   const stopRecording = () => {
     if (mediaRecorderRef.current && isRecording) {
       mediaRecorderRef.current.stop();
     }
   };
 
+  // Play back the recorded audio
   const playRecording = () => {
     if (!recordedBlob) return;
 
@@ -267,6 +275,7 @@ export function VoiceRecorder({ onSendVoiceNote, onCancel, disabled }: VoiceReco
     setIsPlaying(true);
   };
 
+  // Pause playback of the recording
   const pausePlayback = () => {
     if (audioRef.current) {
       audioRef.current.pause();
@@ -274,6 +283,7 @@ export function VoiceRecorder({ onSendVoiceNote, onCancel, disabled }: VoiceReco
     }
   };
 
+  // Send the recorded voice note
   const sendVoiceNote = async () => {
     if (recordedBlob && !disabled) {
       try {
@@ -284,6 +294,7 @@ export function VoiceRecorder({ onSendVoiceNote, onCancel, disabled }: VoiceReco
     }
   };
 
+  // Format seconds into mm:ss
   const formatTime = (seconds: number) => {
     const mins = Math.floor(seconds / 60);
     const secs = seconds % 60;

@@ -4,7 +4,8 @@
  */
 
 import { PostQuantumRandom } from './post-quantum-crypto';
-import { SecureAuditLogger } from './secure-error-handler';
+import { SecureAuditLogger } from "./secure-error-handler";
+import { STORAGE_KEYS } from './storage-keys';
 import { SecureDB } from './secureDB';
 import { encryptLongTerm, decryptLongTerm, LongTermEnvelope } from './long-term-encryption';
 import { SignalType } from './signal-types';
@@ -80,9 +81,9 @@ type SendCallback = (payload: EncryptedPayload) => Promise<boolean>;
 type IncomingOfflineEncryptedMessageCallback = (message: any) => void | Promise<void>;
 type OfflineMessagesEvent = CustomEvent<{ messages: OfflineMessage[] }>;
 
-const STORAGE_KEY = 'offlineMessageQueue';
+const STORAGE_KEY = STORAGE_KEYS.OFFLINE_MESSAGE_QUEUE;
 const AUDIT_CHANNEL = 'offlineQueue';
-const DEVICE_ID_KEY = 'offlineQueueDeviceId';
+const DEVICE_ID_KEY = STORAGE_KEYS.OFFLINE_QUEUE_DEVICE_ID;
 import { syncEncryptedStorage } from './encrypted-storage';
 const DEFAULT_MAX_RETRIES = 3;
 const DEFAULT_MESSAGE_EXPIRY = 7 * 24 * 60 * 60 * 1000;

@@ -6,41 +6,18 @@ import { Label } from '../../components/ui/label';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger } from '../../components/ui/dialog';
 import { blockingSystem, BlockedUser } from '../../lib/blocking-system';
 import { format } from 'date-fns';
+import { isPlainObject, hasPrototypePollutionKeys, sanitizeEventUsername, isValidUsername } from '../utils';
+import {
+  DEFAULT_EVENT_RATE_WINDOW_MS,
+  DEFAULT_EVENT_RATE_MAX,
+  MAX_EVENT_USERNAME_LENGTH
+} from '../../lib/constants';
 
 interface BlockedUsersSettingsProps {
   passphraseRef?: React.MutableRefObject<string>;
   kyberSecretRef?: React.MutableRefObject<Uint8Array | null>;
   getDisplayUsername?: (username: string) => Promise<string>;
 }
-
-const USERNAME_REGEX = /^[a-zA-Z0-9_-]{3,32}$/;
-
-const BLOCK_STATUS_EVENT_RATE_WINDOW_MS = 10_000;
-const BLOCK_STATUS_EVENT_RATE_MAX = 200;
-const MAX_BLOCK_STATUS_EVENT_USERNAME_LENGTH = 256;
-
-const isPlainObject = (value: unknown): value is Record<string, unknown> => {
-  if (typeof value !== 'object' || value === null) return false;
-  const proto = Object.getPrototypeOf(value);
-  return proto === Object.prototype || proto === null;
-};
-
-const hasPrototypePollutionKeys = (obj: unknown): boolean => {
-  if (obj == null || typeof obj !== 'object') return false;
-  const keys = Object.keys(obj as Record<string, unknown>);
-  return keys.some((key) => key === '__proto__' || key === 'constructor' || key === 'prototype');
-};
-
-const sanitizeEventUsername = (value: unknown): string | null => {
-  if (typeof value !== 'string') return null;
-  const trimmed = value.trim();
-  if (!trimmed || trimmed.length > MAX_BLOCK_STATUS_EVENT_USERNAME_LENGTH) return null;
-  const cleaned = trimmed.replace(/[\x00-\x1F\x7F]/g, '');
-  if (!cleaned) return null;
-  return cleaned.slice(0, MAX_BLOCK_STATUS_EVENT_USERNAME_LENGTH);
-};
-
-const validateUsername = (username: string): boolean => USERNAME_REGEX.test(username);
 
 export function BlockedUsersSettings({ passphraseRef, kyberSecretRef, getDisplayUsername }: BlockedUsersSettingsProps) {
   const [blockedUsers, setBlockedUsers] = useState<BlockedUser[]>([]);
@@ -127,12 +104,12 @@ export function BlockedUsersSettings({ passphraseRef, kyberSecretRef, getDisplay
       try {
         const now = Date.now();
         const bucket = blockStatusEventRateRef.current;
-        if (now - bucket.windowStart > BLOCK_STATUS_EVENT_RATE_WINDOW_MS) {
+        if (now - bucket.windowStart > DEFAULT_EVENT_RATE_WINDOW_MS) {
           bucket.windowStart = now;
           bucket.count = 0;
         }
         bucket.count += 1;
-        if (bucket.count > BLOCK_STATUS_EVENT_RATE_MAX) {
+        if (bucket.count > DEFAULT_EVENT_RATE_MAX) {
           return;
         }
 
@@ -140,7 +117,7 @@ export function BlockedUsersSettings({ passphraseRef, kyberSecretRef, getDisplay
         const detail = event.detail;
         if (!isPlainObject(detail) || hasPrototypePollutionKeys(detail)) return;
 
-        const username = sanitizeEventUsername((detail as any).username);
+        const username = sanitizeEventUsername((detail as any).username, MAX_EVENT_USERNAME_LENGTH);
         if (!username) return;
 
         if (passphraseRef?.current || kyberSecretRef?.current) {
@@ -172,7 +149,7 @@ export function BlockedUsersSettings({ passphraseRef, kyberSecretRef, getDisplay
       return;
     }
 
-    if (!validateUsername(username)) {
+    if (!isValidUsername(username)) {
       setError('Invalid username format');
       return;
     }
@@ -218,9 +195,8 @@ export function BlockedUsersSettings({ passphraseRef, kyberSecretRef, getDisplay
   };
 
   const passphrase = passphraseRef?.current;
-  const isValidUsername = newBlockUsername && validateUsername(newBlockUsername);
+  const isAValidUsername = newBlockUsername && isValidUsername(newBlockUsername);
 
-  // If neither key is present, show a prompt
   if (!passphrase && !kyberSecretRef?.current) {
     return (
       <Card>
@@ -269,7 +245,7 @@ export function BlockedUsersSettings({ passphraseRef, kyberSecretRef, getDisplay
                 placeholder="username"
                 autoComplete="off"
               />
-              {newBlockUsername && !isValidUsername && (
+              {newBlockUsername && !isAValidUsername && (
                 <div className="text-xs text-muted-foreground">Username must be 3-32 characters; letters, numbers, underscore or hyphen only.</div>
               )}
             </div>
@@ -284,7 +260,7 @@ export function BlockedUsersSettings({ passphraseRef, kyberSecretRef, getDisplay
               </Button>
               <Button
                 onClick={handleBlockUser}
-                disabled={loading || !isValidUsername}
+                disabled={loading || !isAValidUsername}
               >
                 Block
               </Button>

@@ -1,4 +1,4 @@
-import { Cross2Icon } from "../icons";
+import { Cross2Icon } from "../assets/icons";
 import { Pencil } from "lucide-react";
 
 interface EditingBannerProps {

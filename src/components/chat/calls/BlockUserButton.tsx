@@ -1,37 +1,16 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { Button } from '@/components/ui/button';
 import { toast } from 'sonner';
-import { BlockIcon, UnblockIcon } from './icons';
+import { BlockIcon, UnblockIcon } from '../assets/icons';
 import { blockingSystem } from '@/lib/blocking-system';
 import { blockStatusCache } from '@/lib/block-status-cache';
 import { truncateUsername } from '@/lib/utils';
-
-const BLOCK_STATUS_EVENT_RATE_WINDOW_MS = 10_000;
-const BLOCK_STATUS_EVENT_RATE_MAX = 200;
-const MAX_BLOCK_STATUS_EVENT_USERNAME_LENGTH = 256;
-
-const isPlainObject = (value: unknown): value is Record<string, unknown> => {
-  if (typeof value !== 'object' || value === null) {
-    return false;
-  }
-  const proto = Object.getPrototypeOf(value);
-  return proto === Object.prototype || proto === null;
-};
-
-const hasPrototypePollutionKeys = (obj: unknown): boolean => {
-  if (obj == null || typeof obj !== 'object') return false;
-  const keys = Object.keys(obj as Record<string, unknown>);
-  return keys.some((key) => key === '__proto__' || key === 'constructor' || key === 'prototype');
-};
-
-const sanitizeEventUsername = (value: unknown): string | null => {
-  if (typeof value !== 'string') return null;
-  const trimmed = value.trim();
-  if (!trimmed || trimmed.length > MAX_BLOCK_STATUS_EVENT_USERNAME_LENGTH) return null;
-  const cleaned = trimmed.replace(/[\x00-\x1F\x7F]/g, '');
-  if (!cleaned) return null;
-  return cleaned.slice(0, MAX_BLOCK_STATUS_EVENT_USERNAME_LENGTH);
-};
+import { isPlainObject, hasPrototypePollutionKeys, sanitizeEventUsername } from '../../utils';
+import {
+  DEFAULT_EVENT_RATE_WINDOW_MS,
+  DEFAULT_EVENT_RATE_MAX,
+  MAX_EVENT_USERNAME_LENGTH
+} from '../../../lib/constants';
 
 interface BlockUserButtonProps {
   readonly username: string;
@@ -126,12 +105,12 @@ export function BlockUserButton({
     try {
       const now = Date.now();
       const bucket = blockStatusEventRateRef.current;
-      if (now - bucket.windowStart > BLOCK_STATUS_EVENT_RATE_WINDOW_MS) {
+      if (now - bucket.windowStart > DEFAULT_EVENT_RATE_WINDOW_MS) {
         bucket.windowStart = now;
         bucket.count = 0;
       }
       bucket.count += 1;
-      if (bucket.count > BLOCK_STATUS_EVENT_RATE_MAX) {
+      if (bucket.count > DEFAULT_EVENT_RATE_MAX) {
         return;
       }
 
@@ -139,7 +118,7 @@ export function BlockUserButton({
       const detail = event.detail;
       if (!isPlainObject(detail) || hasPrototypePollutionKeys(detail)) return;
 
-      const changedUsername = sanitizeEventUsername((detail as any).username);
+      const changedUsername = sanitizeEventUsername((detail as any).username, MAX_EVENT_USERNAME_LENGTH);
       if (!changedUsername) return;
       const newBlockedState = (detail as any).isBlocked === true;
 

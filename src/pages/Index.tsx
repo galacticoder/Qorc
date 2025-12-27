@@ -2,17 +2,17 @@ import React, { useState, useCallback, useEffect, useRef, useMemo } from "react"
 import { createPortal } from "react-dom";
 import { useTheme } from "next-themes";
 import { Login } from "../components/chat/Login";
-import { User } from "../components/chat/UserList";
-import { ConversationList } from "../components/chat/ConversationList";
-import { ChatInterface } from "../components/chat/ChatInterface";
+import { User } from "../components/chat/messaging/UserList";
+import { ConversationList } from "../components/chat/messaging/ConversationList";
+import { ChatInterface } from "../components/chat/messaging/ChatInterface";
 import { AppSettings } from "../components/settings/AppSettings";
 import { Layout } from "../components/ui/Layout";
-import { CallLogs } from "../components/chat/CallLogs";
-import { Message, MessageReply } from "../components/chat/types";
+import { CallLogs } from "../components/chat/calls/CallLogs";
+import { Message, MessageReply } from "../components/chat/messaging/types";
 import { Dialog, DialogContent } from "../components/ui/dialog";
 import { EmojiPickerProvider } from "../contexts/EmojiPickerContext";
 import { useCallHistory } from "../contexts/CallHistoryContext";
-import { formatFileSize } from "../components/chat/ChatMessage/FileMessage";
+import { formatFileSize } from "../components/chat/messaging/ChatMessage/FileMessage";
 import { useAuth } from "../hooks/useAuth";
 import { useSecureDB } from "../hooks/useSecureDB";
 import { useFileHandler } from "../hooks/useFileHandler";
@@ -49,11 +49,11 @@ import { useEventHandlers } from "../hooks/useEventHandlers";
 import { toast, Toaster } from 'sonner';
 import { TorIndicator } from "../components/ui/TorIndicator";
 import { Button } from "../components/ui/button";
-import { ComposeIcon } from "../components/chat/icons";
+import { ComposeIcon } from "../components/chat/assets/icons";
 import { useCalling } from "../hooks/useCalling";
 import { truncateUsername } from "../lib/utils";
 import { resolveDisplayUsername } from "../lib/unified-username-display";
-const CallModalLazy = React.lazy(() => import("../components/chat/CallModal"));
+const CallModalLazy = React.lazy(() => import("../components/chat/calls/CallModal"));
 
 const getReplyContent = (message: Message): string => {
   if (message.type === 'file' || message.type === 'file-message' || message.filename) {

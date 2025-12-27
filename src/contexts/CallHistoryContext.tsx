@@ -1,5 +1,6 @@
 import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
-import { syncEncryptedStorage } from '@/lib/encrypted-storage';
+import { syncEncryptedStorage } from '../lib/encrypted-storage';
+import { STORAGE_KEYS } from '../lib/storage-keys';
 
 export interface CallLogEntry {
     id: string;
@@ -8,7 +9,7 @@ export interface CallLogEntry {
     direction: 'incoming' | 'outgoing';
     status: 'missed' | 'completed' | 'declined';
     startTime: number;
-    duration?: number; // in seconds
+    duration?: number;
 }
 
 interface CallHistoryContextType {
@@ -29,8 +30,6 @@ export const useCallHistory = () => {
     return context;
 };
 
-const STORAGE_KEY = 'call_history_v1';
-
 export const CallHistoryProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
     const [logs, setLogs] = useState<CallLogEntry[]>([]);
     const [isLoading, setIsLoading] = useState(true);
@@ -43,7 +42,7 @@ export const CallHistoryProvider: React.FC<{ children: React.ReactNode }> = ({ c
                 await syncEncryptedStorage.waitForInitialization();
                 if (!mounted) return;
 
-                const stored = syncEncryptedStorage.getItem(STORAGE_KEY);
+                const stored = syncEncryptedStorage.getItem(STORAGE_KEYS.CALL_HISTORY);
                 if (stored) {
                     const parsed = JSON.parse(stored);
                     if (Array.isArray(parsed)) {
@@ -65,7 +64,7 @@ export const CallHistoryProvider: React.FC<{ children: React.ReactNode }> = ({ c
 
     const saveLogs = useCallback((newLogs: CallLogEntry[]) => {
         try {
-            syncEncryptedStorage.setItem(STORAGE_KEY, JSON.stringify(newLogs));
+            syncEncryptedStorage.setItem(STORAGE_KEYS.CALL_HISTORY, JSON.stringify(newLogs));
         } catch (error) {
             console.error('Failed to save call history:', error);
         }

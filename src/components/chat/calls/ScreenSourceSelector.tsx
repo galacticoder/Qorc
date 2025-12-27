@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { Monitor, Square, X } from 'lucide-react';
-import { sanitizeTextInput } from '../../lib/sanitizers';
-import { Dialog, DialogContent } from '../ui/dialog';
+import { sanitizeTextInput } from '../../../lib/sanitizers';
+import { Dialog, DialogContent } from '../../ui/dialog';
 
 interface ScreenSource {
   readonly id: string;

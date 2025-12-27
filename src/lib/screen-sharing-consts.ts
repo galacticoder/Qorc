@@ -1,3 +1,5 @@
+import { QualityOption } from './constants';
+
 export interface ScreenSharingResolution {
   id: string;
   name: string;
@@ -9,7 +11,7 @@ export interface ScreenSharingResolution {
 export interface ScreenSharingSettings {
   resolution: ScreenSharingResolution;
   frameRate: number;
-  quality: 'low' | 'medium' | 'high';
+  quality: QualityOption;
 }
 
 export const SCREEN_SHARING_RESOLUTIONS: ScreenSharingResolution[] = [

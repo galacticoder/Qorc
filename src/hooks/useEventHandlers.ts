@@ -1,12 +1,12 @@
 import { useEffect, useCallback, useRef } from 'react';
-import { Message } from '../components/chat/types';
+import { Message } from '../components/chat/messaging/types';
 import { isPlainObject, hasPrototypePollutionKeys, sanitizeNonEmptyText, isUnsafeObjectKey } from '../lib/sanitizers';
 import { sanitizeHybridKeys, isValidKyberPublicKeyBase64 } from '../lib/validators';
 import { SecurityAuditLogger } from '../lib/post-quantum-crypto';
 import { secureMessageQueue } from '../lib/secure-message-queue';
 import { blockingSystem } from '../lib/blocking-system';
 import { EventType } from '../lib/event-types';
-import type { User } from '../components/chat/UserList';
+import type { User } from '../components/chat/messaging/UserList';
 
 const LOCAL_EVENT_RATE_LIMIT_WINDOW_MS = 10_000;
 const LOCAL_EVENT_RATE_LIMIT_MAX_EVENTS = 120;

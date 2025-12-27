@@ -13,30 +13,17 @@ import {
 } from './post-quantum-crypto';
 import { handleP2PError } from './secure-error-handler';
 import { EventType } from './event-types';
+import {
+  isPlainObject,
+  hasPrototypePollutionKeys,
+  sanitizeEventUsername
+} from './sanitizers';
+import {
+  DEFAULT_EVENT_RATE_WINDOW_MS,
+  DEFAULT_EVENT_RATE_MAX,
+  MAX_EVENT_USERNAME_LENGTH
+} from './constants';
 
-const USER_BLOCKED_EVENT_RATE_WINDOW_MS = 10_000;
-const USER_BLOCKED_EVENT_RATE_MAX = 200;
-const MAX_USER_BLOCKED_EVENT_USERNAME_LENGTH = 256;
-
-const isPlainObject = (value: unknown): value is Record<string, unknown> => {
-  if (typeof value !== 'object' || value === null) return false;
-  const proto = Object.getPrototypeOf(value);
-  return proto === Object.prototype || proto === null;
-};
-
-const hasPrototypePollutionKeys = (obj: unknown): boolean => {
-  if (obj == null || typeof obj !== 'object') return false;
-  const keys = Object.keys(obj as Record<string, unknown>);
-  return keys.some((key) => key === '__proto__' || key === 'constructor' || key === 'prototype');
-};
-
-const sanitizeEventUsername = (value: unknown): string | null => {
-  if (typeof value !== 'string') return null;
-  const trimmed = value.trim();
-  if (!trimmed || trimmed.length > MAX_USER_BLOCKED_EVENT_USERNAME_LENGTH) return null;
-  if (/[^\x20-\x7E]/.test(trimmed)) return null;
-  return trimmed;
-};
 
 interface PeerConnection {
   id: string;
@@ -136,19 +123,19 @@ export class WebRTCP2PService {
         try {
           const now = Date.now();
           const bucket = this.userBlockedEventRateState;
-          if (now - bucket.windowStart > USER_BLOCKED_EVENT_RATE_WINDOW_MS) {
+          if (now - bucket.windowStart > DEFAULT_EVENT_RATE_WINDOW_MS) {
             bucket.windowStart = now;
             bucket.count = 0;
           }
           bucket.count += 1;
-          if (bucket.count > USER_BLOCKED_EVENT_RATE_MAX) {
+          if (bucket.count > DEFAULT_EVENT_RATE_MAX) {
             return;
           }
 
           if (!(event instanceof CustomEvent)) return;
           const detail = event.detail;
           if (!isPlainObject(detail) || hasPrototypePollutionKeys(detail)) return;
-          const blockedUsername = sanitizeEventUsername((detail as any).username);
+          const blockedUsername = sanitizeEventUsername((detail as any).username, MAX_EVENT_USERNAME_LENGTH);
           if (blockedUsername) {
             this.disconnectPeer(blockedUsername);
           }

@@ -16,10 +16,12 @@ interface SignUpFormProps {
   readonly onChangeConfirmPassword?: (v: string) => void;
 }
 
-const USERNAME_MIN_LENGTH = 3;
-const USERNAME_MAX_LENGTH = 32;
-const PASSWORD_MAX_LENGTH = 1000;
-const USERNAME_REGEX = /^[a-zA-Z0-9_-]+$/;
+import {
+  USERNAME_MIN_LENGTH,
+  USERNAME_MAX_LENGTH,
+  PASSWORD_MAX_LENGTH,
+} from "../../../lib/constants";
+import { isValidUsername } from "../../../lib/sanitizers";
 
 export function SignUpForm({
   onSubmit,
@@ -62,9 +64,7 @@ export function SignUpForm({
     if (disabled || isSubmitting || !isFormValid) return;
 
     const sanitizedUsername = username.trim();
-
-    if (!USERNAME_REGEX.test(sanitizedUsername)) return;
-    if (sanitizedUsername.length < USERNAME_MIN_LENGTH || sanitizedUsername.length > USERNAME_MAX_LENGTH) return;
+    if (!isValidUsername(sanitizedUsername)) return;
     if (password.length > PASSWORD_MAX_LENGTH) return;
 
     setIsSubmitting(true);

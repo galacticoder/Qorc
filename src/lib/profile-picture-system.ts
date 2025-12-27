@@ -2,14 +2,15 @@ import { SecureDB } from './secureDB';
 import { encryptLongTerm, decryptLongTerm, LongTermEnvelope } from './long-term-encryption';
 import websocketClient from './websocket';
 import { generateDefaultAvatar } from './utils';
+import { STORAGE_KEYS } from './storage-keys';
 import { SignalType } from './signal-types';
 import { EventType } from './event-types';
 
 const MAX_AVATAR_SIZE_BYTES = 512 * 1024;
 const MAX_AVATAR_DIMENSION = 512;
 const ALLOWED_MIME_TYPES = ['image/jpeg', 'image/png', 'image/webp', 'image/svg+xml'];
-const AVATAR_STORE_KEY = 'profile_avatars';
-const SETTINGS_KEY = 'profile_settings';
+const AVATAR_STORE_KEY = STORAGE_KEYS.PROFILE_AVATARS;
+const SETTINGS_KEY = STORAGE_KEYS.PROFILE_SETTINGS;
 const AVATAR_CACHE_TTL = 1 * 60 * 1000; // 1 minute for avatar updates
 const SERVER_FETCH_DEBOUNCE = 3000; // 3 seconds between server fetch attempts
 

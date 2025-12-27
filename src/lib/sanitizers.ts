@@ -1,3 +1,5 @@
+import { USERNAME_REGEX } from './constants';
+
 const DEFAULT_ALLOWED_KEYS = ['username', 'type', 'peer', 'at', 'callId', 'status', 'startTime', 'endTime', 'durationMs', 'direction'] as const;
 
 type AllowedKey = typeof DEFAULT_ALLOWED_KEYS[number];
@@ -89,5 +91,32 @@ export const sanitizeNonEmptyText = (value: unknown, maxLength: number, allowNew
   return cleaned.length ? cleaned : null;
 };
 
-export type { TextSanitizeOptions, AllowedKey };
+// Sanitize usernames
+export const sanitizeUsername = (value: unknown, maxLen: number): string | null => {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  if (!trimmed || trimmed.length > maxLen) return null;
+  if (/[^\x20-\x7E]/.test(trimmed)) return null;
+  return trimmed;
+};
 
+// Sanitize event username values
+export const sanitizeEventUsername = (value: unknown, maxLen: number): string | null => {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  if (!trimmed || trimmed.length > maxLen) return null;
+  const cleaned = trimmed.replace(/[\x00-\x1F\x7F]/g, '');
+  if (!cleaned) return null;
+  return cleaned.slice(0, maxLen);
+};
+
+// Check if username is valid according to app rules
+export const isValidUsername = (username: unknown): username is string => {
+  if (typeof username !== 'string') return false;
+  if (!USERNAME_REGEX.test(username)) return false;
+  const reserved = ['__proto__', 'constructor', 'prototype'];
+  if (reserved.includes(username.toLowerCase())) return false;
+  return true;
+};
+
+export type { TextSanitizeOptions, AllowedKey };

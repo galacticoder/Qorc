@@ -11,9 +11,11 @@ import { encryptedStorage } from './encrypted-storage';
 import { SecureAuditLogger } from './secure-error-handler';
 import { PostQuantumRandom } from './post-quantum-crypto';
 import { SecureMemory } from './secure-memory';
+import { DEFAULT_QUALITY, QUALITY_OPTIONS } from './constants';
+import { STORAGE_KEYS } from './storage-keys';
 
-const STORAGE_KEY = 'screen_sharing_settings_v1';
-const DEVICE_KEY_STORAGE = 'screen_sharing_settings_device_key_v1';
+const STORAGE_KEY = STORAGE_KEYS.SCREEN_SHARING_SETTINGS;
+const DEVICE_KEY_STORAGE = STORAGE_KEYS.SCREEN_SHARING_DEVICE_KEY;
 const AUDIT_CHANNEL = 'screen-sharing';
 const RATE_LIMIT_WINDOW_MS = 100;
 const MAX_REQUESTS_PER_WINDOW = 5;
@@ -76,7 +78,7 @@ function deepValidateSettings(settings: any): settings is InternalSettings {
   if (typeof frameRate !== 'number' || !SCREEN_SHARING_FRAMERATES.includes(frameRate as typeof SCREEN_SHARING_FRAMERATES[number])) {
     return false;
   }
-  if (!['low', 'medium', 'high'].includes(quality)) {
+  if (!QUALITY_OPTIONS.includes(quality as any)) {
     return false;
   }
   return true;
@@ -201,7 +203,7 @@ export class ScreenSharingSettingsManager {
       return {
         resolution: buildDefaultResolution(),
         frameRate: 30,
-        quality: 'medium',
+        quality: DEFAULT_QUALITY,
         updatedAt: Date.now()
       };
     }
@@ -211,7 +213,7 @@ export class ScreenSharingSettingsManager {
         return {
           resolution: buildDefaultResolution(),
           frameRate: 30,
-          quality: 'medium',
+          quality: DEFAULT_QUALITY,
           updatedAt: Date.now()
         };
       }
@@ -224,7 +226,7 @@ export class ScreenSharingSettingsManager {
     return {
       resolution: buildDefaultResolution(),
       frameRate: 30,
-      quality: 'medium',
+      quality: DEFAULT_QUALITY,
       updatedAt: Date.now()
     };
   }
@@ -293,13 +295,13 @@ export class ScreenSharingSettingsManager {
     this.notifyListeners();
   }
 
-  public async setQuality(quality: 'low' | 'medium' | 'high'): Promise<void> {
+  public async setQuality(quality: string): Promise<void> {
     this.enforceRateLimit('setQuality');
-    if (!['low', 'medium', 'high'].includes(quality)) {
+    if (!QUALITY_OPTIONS.includes(quality as any)) {
       throw new Error('Invalid quality preset');
     }
     await this.ensureSettingsLoaded();
-    this.settings!.quality = quality;
+    this.settings!.quality = quality as any;
     this.settings!.updatedAt = Date.now();
     await this.saveSettings();
     this.notifyListeners();
@@ -322,7 +324,7 @@ export class ScreenSharingSettingsManager {
       this.settings!.frameRate = newSettings.frameRate;
     }
     if (newSettings.quality) {
-      if (!['low', 'medium', 'high'].includes(newSettings.quality)) {
+      if (!QUALITY_OPTIONS.includes(newSettings.quality as any)) {
         throw new Error('Invalid quality preset');
       }
       this.settings!.quality = newSettings.quality;
@@ -337,7 +339,7 @@ export class ScreenSharingSettingsManager {
     this.settings = {
       resolution: buildDefaultResolution(),
       frameRate: 30,
-      quality: 'medium',
+      quality: DEFAULT_QUALITY,
       updatedAt: Date.now()
     };
     await this.saveSettings();

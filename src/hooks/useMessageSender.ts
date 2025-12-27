@@ -1,7 +1,7 @@
 import { useCallback, useMemo, useRef, useEffect } from 'react';
 import { SignalType } from '../lib/signal-types';
 import { EventType } from '../lib/event-types';
-import { Message } from '../components/chat/types';
+import { Message } from '../components/chat/messaging/types';
 import { CryptoUtils } from '../lib/unified-crypto';
 import websocketClient from '../lib/websocket';
 import { isValidKyberPublicKeyBase64 } from '../lib/validators';

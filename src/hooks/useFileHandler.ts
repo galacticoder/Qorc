@@ -5,7 +5,7 @@ import { toast } from "sonner";
 import { SignalType } from "@/lib/signal-types";
 import { EventType } from "@/lib/event-types";
 import { IncomingFileChunks } from "@/pages/types";
-import { Message } from '@/components/chat/types';
+import { Message } from '@/components/chat/messaging/types';
 import { CryptoUtils } from "@/lib/unified-crypto";
 import { sanitizeTextInput } from "@/lib/sanitizers";
 

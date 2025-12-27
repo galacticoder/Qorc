@@ -1,4 +1,6 @@
 import React, { createContext, useContext, useState, ReactNode } from 'react';
+import { createPortal } from 'react-dom';
+import { cn } from '@/lib/utils';
 
 interface DialogContextType {
   isOpen: boolean;
@@ -12,9 +14,6 @@ interface DialogProps {
   open?: boolean;
   onOpenChange?: (open: boolean) => void;
 }
-
-import { createPortal } from 'react-dom';
-import { cn } from '@/lib/utils';
 
 export const Dialog: React.FC<DialogProps> = ({ children, open, onOpenChange }) => {
   const [internalOpen, setInternalOpen] = useState(false);
@@ -61,7 +60,6 @@ export const DialogContent: React.FC<{ children: ReactNode; className?: string }
   if (!context) throw new Error('DialogContent must be used within Dialog');
 
   const handleClose = React.useCallback(() => {
-    // Just trigger close, the effect handles the animation
     context.setIsOpen(false);
   }, [context]);
 

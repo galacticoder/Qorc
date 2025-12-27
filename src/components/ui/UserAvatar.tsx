@@ -1,31 +1,14 @@
 import React, { useState, useEffect, useCallback, memo } from 'react';
 import { profilePictureSystem } from '../../lib/profile-picture-system';
+import { isPlainObject, hasPrototypePollutionKeys } from '../../lib/sanitizers';
+import { sanitizeEventText } from '../utils';
+import {
+    DEFAULT_EVENT_RATE_WINDOW_MS,
+    DEFAULT_EVENT_RATE_MAX,
+    MAX_EVENT_TYPE_LENGTH,
+    MAX_EVENT_USERNAME_LENGTH
+} from '../../lib/constants';
 
-const PROFILE_PICTURE_EVENT_RATE_WINDOW_MS = 10_000;
-const PROFILE_PICTURE_EVENT_RATE_MAX = 200;
-const MAX_PROFILE_PICTURE_EVENT_TYPE_LENGTH = 32;
-const MAX_PROFILE_PICTURE_EVENT_USERNAME_LENGTH = 256;
-
-const isPlainObject = (value: unknown): value is Record<string, unknown> => {
-    if (typeof value !== 'object' || value === null) return false;
-    const proto = Object.getPrototypeOf(value);
-    return proto === Object.prototype || proto === null;
-};
-
-const hasPrototypePollutionKeys = (obj: unknown): boolean => {
-    if (obj == null || typeof obj !== 'object') return false;
-    const keys = Object.keys(obj as Record<string, unknown>);
-    return keys.some((key) => key === '__proto__' || key === 'constructor' || key === 'prototype');
-};
-
-const sanitizeEventText = (value: unknown, maxLen: number): string | null => {
-    if (typeof value !== 'string') return null;
-    const trimmed = value.trim();
-    if (!trimmed) return null;
-    const cleaned = trimmed.replace(/[\x00-\x1F\x7F]/g, '');
-    if (!cleaned) return null;
-    return cleaned.slice(0, maxLen);
-};
 
 interface UserAvatarProps {
     username: string;
@@ -102,7 +85,6 @@ export const UserAvatar = memo(function UserAvatar({
 
         const handleUpdate = (event: Event) => {
             try {
-                // Handle system initialization event
                 if (event.type === 'profile-picture-system-initialized') {
                     loadAvatar();
                     return;
@@ -110,12 +92,12 @@ export const UserAvatar = memo(function UserAvatar({
 
                 const now = Date.now();
                 const bucket = profilePictureEventRateRef.current;
-                if (now - bucket.windowStart > PROFILE_PICTURE_EVENT_RATE_WINDOW_MS) {
+                if (now - bucket.windowStart > DEFAULT_EVENT_RATE_WINDOW_MS) {
                     bucket.windowStart = now;
                     bucket.count = 0;
                 }
                 bucket.count += 1;
-                if (bucket.count > PROFILE_PICTURE_EVENT_RATE_MAX) {
+                if (bucket.count > DEFAULT_EVENT_RATE_MAX) {
                     return;
                 }
 
@@ -123,18 +105,13 @@ export const UserAvatar = memo(function UserAvatar({
                 const detail = event.detail;
                 if (!isPlainObject(detail) || hasPrototypePollutionKeys(detail)) return;
 
-                const type = sanitizeEventText((detail as any).type, MAX_PROFILE_PICTURE_EVENT_TYPE_LENGTH);
+                const type = sanitizeEventText((detail as any).type, MAX_EVENT_TYPE_LENGTH);
                 if (!type) return;
 
-                if (type === 'own') {
-                    if (isCurrentUser) {
-                        loadAvatar();
-                    }
-                    return;
-                }
-
-                if (type === 'peer') {
-                    const updatedUser = sanitizeEventText((detail as any).username, MAX_PROFILE_PICTURE_EVENT_USERNAME_LENGTH);
+                if (type === 'all') {
+                    setAvatarUrl(profilePictureSystem.getPeerAvatar(username));
+                } else if (type === 'single') {
+                    const updatedUser = sanitizeEventText((detail as any).username, MAX_EVENT_USERNAME_LENGTH);
                     if (!updatedUser) return;
                     const notFound = (detail as any).notFound === true;
 

@@ -3,27 +3,12 @@
 import { SecureAuditLogger } from './secure-error-handler';
 import { SecureDB } from './secureDB';
 
-const hasPrototypePollutionKeys = (obj: unknown): boolean => {
-  if (obj == null || typeof obj !== 'object') return false;
-  const keys = Object.keys(obj);
-  return keys.some((key) => key === '__proto__' || key === 'constructor' || key === 'prototype');
-};
-
-const isPlainObject = (value: unknown): value is Record<string, unknown> => {
-  if (value == null || typeof value !== 'object') return false;
-  const proto = Object.getPrototypeOf(value);
-  return proto === null || proto === Object.prototype;
-};
+import { isPlainObject, hasPrototypePollutionKeys, isValidUsername } from './sanitizers';
+import { STORAGE_KEYS } from './storage-keys';
 
 const validateUsername = (username: string): void => {
-  if (typeof username !== 'string' || username.length < 3 || username.length > 128) {
-    throw new Error('Invalid username length');
-  }
-  if (/[\x00-\x1F\x7F]/.test(username)) {
-    throw new Error('Username contains invalid control characters');
-  }
-  if (['__proto__', 'constructor', 'prototype'].includes(username)) {
-    throw new Error('Username is a reserved identifier');
+  if (!isValidUsername(username)) {
+    throw new Error('Invalid username format or reserved identifier');
   }
 };
 
@@ -118,7 +103,7 @@ const normalizeQueuedMessage = (value: unknown, username: string): QueuedMessage
   };
 };
 
-const STORAGE_KEY = 'secure_message_queue_v1';
+const STORAGE_KEY = STORAGE_KEYS.SECURE_MESSAGE_QUEUE;
 const MESSAGE_EXPIRY = 7 * 24 * 60 * 60 * 1000;
 const MAX_MESSAGES_PER_USER = 100;
 const MAX_PROCESSED_IDS = 10000;
@@ -138,9 +123,9 @@ class SecureMessageQueue {
     this.cleanupTimer = setInterval(() => this.cleanupExpired(), CLEANUP_INTERVAL);
   }
 
-/**
-   * Initialize with SecureDB instance for encrypted storage.
-   */
+  /**
+     * Initialize with SecureDB instance for encrypted storage.
+     */
   async initialize(_username: string, secureDB: SecureDB): Promise<void> {
     this.secureDB = secureDB;
     await this.loadFromStorage();
@@ -164,10 +149,10 @@ class SecureMessageQueue {
     if (!this.secureDB) {
       throw new Error('SecureMessageQueue not initialized');
     }
-    
+
     validateUsername(to);
     const sanitized = sanitizeContent(content);
-    
+
     const messageId = options?.messageId ?? crypto.randomUUID();
 
     if (this.processedIds.has(messageId)) {
@@ -195,7 +180,7 @@ class SecureMessageQueue {
 
     userQueue.push(queuedMessage);
     this.queue.set(to, userQueue);
-    
+
     this.processedIds.add(messageId);
     if (this.processedIds.size > MAX_PROCESSED_IDS) {
       const idsArray = Array.from(this.processedIds);
@@ -349,9 +334,9 @@ class SecureMessageQueue {
         version: 'v1',
         timestamp: Date.now()
       };
-      
+
       await this.secureDB.storeEphemeral(STORAGE_KEY, queueData);
-      
+
     } catch (_error) {
       console.error('[SecureMessageQueue] Storage save failed:', _error);
       SecureAuditLogger.error('secureMessageQueue', 'save-storage', 'failed', {
@@ -475,7 +460,7 @@ class SecureMessageQueue {
     }
     if (this.pendingSave) {
       this.pendingSave = false;
-      this.saveToStorage().catch(() => {});
+      this.saveToStorage().catch(() => { });
     }
   }
 }

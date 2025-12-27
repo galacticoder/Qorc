@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback } from "react";
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "../ui/card";
 import { Button } from "../ui/button";
-import { EncryptionIcon } from "./icons";
+import { EncryptionIcon } from "./assets/icons";
 import { TorIndicator } from "../ui/TorIndicator";
 import { SignInForm } from "./Login/SignIn.tsx";
 import { SignUpForm } from "./Login/SignUp.tsx";
@@ -11,12 +11,14 @@ import { ServerPasswordForm } from "./Login/ServerPassword.tsx";
 
 import { toast } from "sonner";
 
+// Server public key bundle
 interface ServerKeys {
   readonly x25519PublicBase64: string;
   readonly kyberPublicBase64: string;
   readonly dilithiumPublicBase64: string;
 }
 
+// Server trust change request payload
 interface ServerTrustRequest {
   readonly newKeys: ServerKeys;
   readonly pinned: ServerKeys | null;
@@ -57,12 +59,14 @@ const dispatchAuthEvent = (eventName: string, detail: Record<string, unknown>): 
   } catch { }
 };
 
+// Truncate keys for display
 const truncateKey = (key: string, maxLength: number = 16): string => {
   if (typeof key !== 'string' || key.length === 0) return '';
   const safeLength = Math.min(maxLength, key.length);
   return key.slice(0, safeLength) + '...';
 };
 
+// Wrapper to animate height transitions
 const AnimatedHeightWrapper = ({ children, className }: { children: React.ReactNode; className?: string }) => {
   return (
     <div
@@ -80,6 +84,7 @@ const AnimatedHeightWrapper = ({ children, className }: { children: React.ReactN
   );
 };
 
+// Main login/register component
 export const Login = React.memo<LoginProps>(({
   onAccountSubmit,
   onServerPasswordSubmit,
@@ -200,18 +205,22 @@ export const Login = React.memo<LoginProps>(({
     }
   }, [accountAuthenticated, isGeneratingKeys]);
 
+  // Track input changes for analytics
   const handleInputChange = useCallback((field: string, value: string): void => {
     dispatchAuthEvent('auth-ui-input', { field, value });
   }, []);
 
+  // Toggle between login and register mode
   const handleModeToggle = useCallback((): void => {
     setMode((prev) => (prev === 'login' ? 'register' : 'login'));
   }, []);
 
+  // Accept server trust change
   const handleAcceptTrust = useCallback(() => {
     onAcceptServerTrust?.();
   }, [onAcceptServerTrust]);
 
+  // Reject server trust change
   const handleRejectTrust = useCallback(() => {
     onRejectServerTrust?.();
   }, [onRejectServerTrust]);

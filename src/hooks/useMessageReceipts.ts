@@ -1,6 +1,6 @@
 import { useEffect, useCallback, useMemo, useRef } from 'react';
-import { Message } from '@/components/chat/types';
-import type { User } from '@/components/chat/UserList';
+import { Message } from '@/components/chat/messaging/types';
+import type { User } from '@/components/chat/messaging/UserList';
 import { SignalType } from '@/lib/signal-types';
 import { EventType } from '@/lib/event-types';
 import { sanitizeTextInput } from '@/lib/sanitizers';

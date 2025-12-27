@@ -4,7 +4,6 @@ import { Button } from '../ui/button';
 import { Input } from '../ui/input';
 import { Label } from '../ui/label';
 import { Textarea } from '../ui/textarea';
-import { TorVerification } from './TorVerification';
 import { getTorAutoSetup, TorSetupStatus } from '../../lib/tor-auto-setup';
 import { torNetworkManager } from '../../lib/tor-network';
 import { ShieldCheck, Server, Settings, ChevronDown, ChevronUp, RefreshCw, Loader2 } from 'lucide-react';
@@ -263,7 +262,6 @@ export function ConnectSetup({ onComplete, initialServerUrl = '' }: ConnectSetup
         }
       } catch { }
 
-      // Let parent continue flow (e.g., wsConnect + navigate)
       await (onComplete?.(serverUrl));
     } catch (_error) {
       console.error('[ConnectSetup] handleContinue error', _error);
@@ -452,15 +450,6 @@ export function ConnectSetup({ onComplete, initialServerUrl = '' }: ConnectSetup
           </Button>
         </div>
       </div>
-
-      {/* Verification Modal */}
-      {showVerification && (
-        <div className="fixed inset-0 bg-background/80 backdrop-blur-md z-50 flex items-center justify-center p-4" onClick={(e) => { if (e.target === e.currentTarget) setShowVerification(false); }}>
-          <div className="w-full max-w-2xl animate-in zoom-in-95 duration-300">
-            <TorVerification onClose={() => setShowVerification(false)} />
-          </div>
-        </div>
-      )}
     </div>
   );
 }

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef } from 'react';
-import { Message } from '@/components/chat/types';
+import { Message } from '@/components/chat/messaging/types';
 import { EventType } from '@/lib/event-types';
 
 const MAX_TRACKED_ORIGINS = 5000;

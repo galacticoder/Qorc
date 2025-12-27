@@ -1,9 +1,9 @@
 import React, { useState, useEffect, useRef, useCallback, memo } from 'react';
 import { Phone, PhoneOff, Video, VideoOff, Mic, MicOff, Monitor, MonitorOff, Minimize2, Maximize2, ChevronDown } from 'lucide-react';
-import type { CallState } from '../../lib/webrtc-calling';
-import { useUnifiedUsernameDisplay } from '../../hooks/useUnifiedUsernameDisplay';
-import { UserAvatar } from '../ui/UserAvatar';
-import { Popover, PopoverContent, PopoverTrigger } from '../ui/popover';
+import type { CallState } from '../../../lib/webrtc-calling';
+import { useUnifiedUsernameDisplay } from '../../../hooks/useUnifiedUsernameDisplay';
+import { UserAvatar } from '../../ui/UserAvatar';
+import { Popover, PopoverContent, PopoverTrigger } from '../../ui/popover';
 import { cn } from '@/lib/utils';
 
 const ScreenSourceSelectorLazy = React.lazy(() => import('./ScreenSourceSelector').then(m => ({ default: m.ScreenSourceSelector })));
@@ -255,7 +255,7 @@ export const CallModal: React.FC<CallModalProps> = memo(({
 
         // Load preferred camera
         try {
-          const { encryptedStorage } = await import('../../lib/encrypted-storage');
+          const { encryptedStorage } = await import('../../../lib/encrypted-storage');
           const saved = await encryptedStorage.getItem('preferred_camera_deviceId_v1_pq');
           if (saved && typeof saved === 'string') setPreferredCameraId(saved);
         } catch { }
@@ -366,7 +366,7 @@ export const CallModal: React.FC<CallModalProps> = memo(({
 
   const handleCameraChange = async (deviceId: string) => {
     try {
-      const { encryptedStorage } = await import('../../lib/encrypted-storage');
+      const { encryptedStorage } = await import('../../../lib/encrypted-storage');
       await encryptedStorage.setItem('preferred_camera_deviceId_v1_pq', deviceId);
       setPreferredCameraId(deviceId);
       await onSwitchCamera(deviceId);
@@ -621,7 +621,7 @@ export const CallModal: React.FC<CallModalProps> = memo(({
         {/* Controls Bar */}
         <div className="bg-card/80 backdrop-blur-md border-t border-border p-5 flex items-center justify-center gap-6">
 
-          {/* Accept/Decline (Incoming) */}
+          {/* Accept/Decline Incoming */}
           {isIncoming && isRinging ? (
             <>
               <button

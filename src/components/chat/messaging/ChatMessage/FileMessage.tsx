@@ -1,15 +1,15 @@
 import React, { useEffect, useCallback, useMemo } from "react";
 import { createPortal } from "react-dom";
-import { Avatar, AvatarFallback } from "../../ui/avatar";
+import { Avatar, AvatarFallback } from "../../../ui/avatar";
 import { format } from "date-fns";
-import { cn } from "../../../lib/utils";
-import { PaperclipIcon } from "../icons.tsx";
-import { Message } from "../types.ts";
-import { MessageReceipt } from "../MessageReceipt.tsx";
-import { VoiceMessage } from "../VoiceMessage";
-import { copyTextToClipboard } from "../../../lib/clipboard";
-import { sanitizeFilename } from "../../../lib/sanitizers";
-import { useFileUrl } from "../../../hooks/useFileUrl";
+import { cn } from "../../../../lib/utils";
+import { PaperclipIcon } from "../../assets/icons";
+import { Message } from "../types";
+import { MessageReceipt } from "../MessageReceipt";
+import { VoiceMessage } from "../../calls/VoiceMessage";
+import { copyTextToClipboard } from "../../../../lib/clipboard";
+import { sanitizeFilename } from "../../../../lib/sanitizers";
+import { useFileUrl } from "../../../../hooks/useFileUrl";
 
 interface FileMessageProps {
   readonly message: Message;
@@ -33,6 +33,7 @@ export const IMAGE_EXTENSIONS = ["jpg", "jpeg", "png", "gif", "webp"];
 export const VIDEO_EXTENSIONS = ["mp4", "webm", "ogg"];
 export const AUDIO_EXTENSIONS = ["mp3", "wav", "ogg", "m4a", "webm"];
 
+// Check if filename has one of the specified extensions
 export const hasExtension = (filename: string, extensions: readonly string[]): boolean => {
   if (!filename || typeof filename !== 'string' || filename.length > MAX_FILENAME_LENGTH) {
     return false;
@@ -46,6 +47,7 @@ export const hasExtension = (filename: string, extensions: readonly string[]): b
 const FILE_SIZE_UNITS = ["Bytes", "KB", "MB", "GB"] as const;
 const FILE_SIZE_BASE = 1024;
 
+// Format file size in human readable format
 export const formatFileSize = (bytes: number): string => {
   if (bytes === 0) return "0 Bytes";
   if (bytes < 0 || !Number.isFinite(bytes)) return "Unknown";
@@ -58,6 +60,7 @@ export const formatFileSize = (bytes: number): string => {
   return `${value.toFixed(1)} ${FILE_SIZE_UNITS[i]}`;
 };
 
+// Create and trigger download link for file
 const createDownloadLink = (href: string, filename: string): void => {
   const link = document.createElement('a');
   link.href = href;
@@ -69,6 +72,7 @@ const createDownloadLink = (href: string, filename: string): void => {
   document.body.removeChild(link);
 };
 
+// Validate and sanitize file URL
 const isSafeFileUrl = (url: string | null | undefined): string | null => {
   if (!url || typeof url !== 'string') return null;
   try {
@@ -83,6 +87,7 @@ const isSafeFileUrl = (url: string | null | undefined): string | null => {
   }
 };
 
+// Component to render file content based on type
 export const FileContent: React.FC<FileContentProps> = ({ message, isCurrentUser, secureDB }) => {
   const { content, filename, fileSize, mimeType, originalBase64Data } = message;
   const [imageError, setImageError] = React.useState(false);
@@ -316,6 +321,7 @@ export const FileContent: React.FC<FileContentProps> = ({ message, isCurrentUser
   );
 }
 
+// Main file message component with sender info and actions
 export function FileMessage({ message, isCurrentUser, onReply, onDelete, secureDB }: FileMessageProps) {
   const { content, sender, timestamp, filename, fileSize: _fileSize, mimeType, originalBase64Data } = message;
 
@@ -333,33 +339,40 @@ export function FileMessage({ message, isCurrentUser, onReply, onDelete, secureD
     return name.includes('voice-note');
   }, [filename]);
 
+  // Copy filename to clipboard
   const handleCopyFilename = useCallback((): void => {
     void copyTextToClipboard(filename || 'File');
   }, [filename]);
 
+  // Handle reply action
   const handleReply = useCallback((): void => {
     onReply?.(message);
   }, [onReply, message]);
 
+  // Handle delete action
   const handleDelete = useCallback((): void => {
     onDelete?.(message);
   }, [onDelete, message]);
 
+  // Handle mouse enter for action buttons
   const handleActionMouseEnter = useCallback((e: React.MouseEvent<HTMLButtonElement>): void => {
     e.currentTarget.style.backgroundColor = 'var(--color-accent-primary)';
     e.currentTarget.style.color = 'white';
   }, []);
 
+  // Handle mouse leave for action buttons
   const handleActionMouseLeave = useCallback((e: React.MouseEvent<HTMLButtonElement>): void => {
     e.currentTarget.style.backgroundColor = 'transparent';
     e.currentTarget.style.color = 'var(--color-text-secondary)';
   }, []);
 
+  // Handle mouse enter for delete button
   const handleDeleteMouseEnter = useCallback((e: React.MouseEvent<HTMLButtonElement>): void => {
     e.currentTarget.style.backgroundColor = '#ef4444';
     e.currentTarget.style.color = 'white';
   }, []);
 
+  // Handle mouse leave for delete button
   const handleDeleteMouseLeave = useCallback((e: React.MouseEvent<HTMLButtonElement>): void => {
     e.currentTarget.style.backgroundColor = 'transparent';
     e.currentTarget.style.color = 'var(--color-text-secondary)';
@@ -394,7 +407,6 @@ export function FileMessage({ message, isCurrentUser, onReply, onDelete, secureD
           <span className="text-xs text-muted-foreground">{format(timestamp, "h:mm a")}</span>
         </div>
 
-        {/* Use FileContent for all file types */}
         <FileContent message={message} isCurrentUser={isCurrentUser || false} secureDB={secureDB} />
 
         <div

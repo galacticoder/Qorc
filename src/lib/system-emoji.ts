@@ -1,4 +1,5 @@
 import { SecureAuditLogger } from './secure-error-handler';
+import { STORAGE_KEYS } from './storage-keys';
 import { SecureDB } from './secureDB';
 
 async function computeIntegrityHash(emojis: ReadonlyArray<string>): Promise<string> {
@@ -392,7 +393,7 @@ function isValidEmoji(candidate: unknown): candidate is string {
 
 // Usage Tracking
 const USAGE_STORE = 'emoji_data';
-const USAGE_KEY = 'usage_stats';
+const USAGE_KEY = STORAGE_KEYS.USAGE_STATS;
 let usageStats: Record<string, number> = {};
 let statsLoaded = false;
 

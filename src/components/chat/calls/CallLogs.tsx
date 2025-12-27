@@ -1,37 +1,20 @@
-import React, { useState, useMemo, useCallback, useEffect } from 'react';
+import React, { useState, useMemo, useCallback, useEffect, useRef } from 'react';
 import { Phone, Video, Search, Clock, Trash2, MoreVertical, ShieldOff } from 'lucide-react';
-import { Popover, PopoverContent, PopoverTrigger } from '../ui/popover';
-import { Input } from '../ui/input';
-import { Button } from '../ui/button';
-import { ScrollArea } from '../ui/scroll-area';
-import { UserAvatar } from '../ui/UserAvatar';
-import { useCallHistory, type CallLogEntry } from '../../contexts/CallHistoryContext';
-import { useUnifiedUsernameDisplay } from '../../hooks/useUnifiedUsernameDisplay';
-import { blockStatusCache } from '../../lib/block-status-cache';
+import { Popover, PopoverContent, PopoverTrigger } from '../../ui/popover';
+import { Input } from '../../ui/input';
+import { Button } from '../../ui/button';
+import { ScrollArea } from '../../ui/scroll-area';
+import { UserAvatar } from '../../ui/UserAvatar';
+import { useCallHistory, type CallLogEntry } from '../../../contexts/CallHistoryContext';
+import { useUnifiedUsernameDisplay } from '../../../hooks/useUnifiedUsernameDisplay';
+import { blockStatusCache } from '../../../lib/block-status-cache';
+import { isPlainObject, hasPrototypePollutionKeys, sanitizeUsername } from '../../utils';
 
-const BLOCK_STATUS_EVENT_RATE_WINDOW_MS = 10_000;
-const BLOCK_STATUS_EVENT_RATE_MAX = 200;
-const MAX_BLOCK_STATUS_USERNAME_LENGTH = 256;
-
-const isPlainObject = (value: unknown): value is Record<string, unknown> => {
-    if (typeof value !== 'object' || value === null) return false;
-    const proto = Object.getPrototypeOf(value);
-    return proto === Object.prototype || proto === null;
-};
-
-const hasPrototypePollutionKeys = (obj: unknown): boolean => {
-    if (obj == null || typeof obj !== 'object') return false;
-    const keys = Object.keys(obj as Record<string, unknown>);
-    return keys.some((key) => key === '__proto__' || key === 'constructor' || key === 'prototype');
-};
-
-const sanitizeUsername = (value: unknown): string | null => {
-    if (typeof value !== 'string') return null;
-    const trimmed = value.trim();
-    if (!trimmed || trimmed.length > MAX_BLOCK_STATUS_USERNAME_LENGTH) return null;
-    if (/[^\x20-\x7E]/.test(trimmed)) return null;
-    return trimmed;
-};
+import {
+    DEFAULT_EVENT_RATE_WINDOW_MS,
+    DEFAULT_EVENT_RATE_MAX,
+    MAX_EVENT_USERNAME_LENGTH
+} from '../../../lib/constants';
 
 interface CallLogItemProps {
     readonly log: CallLogEntry;
@@ -68,18 +51,18 @@ const CallLogItem: React.FC<CallLogItemProps> = React.memo(({
         };
 
         checkBlockedStatus();
-
-        const rateState = { windowStart: Date.now(), count: 0 };
+        const eventRateRef = useRef({ windowStart: Date.now(), count: 0 });
 
         const handleBlockStatusChange = (event: Event) => {
             try {
                 const now = Date.now();
-                if (now - rateState.windowStart > BLOCK_STATUS_EVENT_RATE_WINDOW_MS) {
-                    rateState.windowStart = now;
-                    rateState.count = 0;
+                const bucket = eventRateRef.current;
+                if (now - bucket.windowStart > DEFAULT_EVENT_RATE_WINDOW_MS) {
+                    bucket.windowStart = now;
+                    bucket.count = 0;
                 }
-                rateState.count += 1;
-                if (rateState.count > BLOCK_STATUS_EVENT_RATE_MAX) {
+                bucket.count += 1;
+                if (bucket.count > DEFAULT_EVENT_RATE_MAX) {
                     return;
                 }
 
@@ -87,7 +70,7 @@ const CallLogItem: React.FC<CallLogItemProps> = React.memo(({
                 const detail = event.detail;
                 if (!isPlainObject(detail) || hasPrototypePollutionKeys(detail)) return;
 
-                const username = sanitizeUsername((detail as any).username);
+                const username = sanitizeUsername((detail as any).username, MAX_EVENT_USERNAME_LENGTH);
                 if (!username) return;
                 const newBlockedState = (detail as any).isBlocked === true;
 

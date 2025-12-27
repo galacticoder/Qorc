@@ -1,10 +1,11 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
-import { cn } from '../../lib/utils';
-import { Button } from '../ui/button';
+import { cn } from '../../../lib/utils';
+import { Button } from '../../ui/button';
 import { Play, Pause } from 'lucide-react';
-import { useFileUrl } from '../../hooks/useFileUrl';
-import type { SecureDB } from '../../lib/secureDB';
+import { useFileUrl } from '../../../hooks/useFileUrl';
+import type { SecureDB } from '../../../lib/secureDB';
 
+// Props for voice message bubble
 interface VoiceMessageProps {
   audioUrl: string;
   timestamp: Date;
@@ -16,6 +17,7 @@ interface VoiceMessageProps {
   secureDB?: SecureDB | null;
 }
 
+// Voice message playback component
 export function VoiceMessage({
   audioUrl,
   timestamp: _timestamp,
@@ -26,7 +28,6 @@ export function VoiceMessage({
   messageId,
   secureDB,
 }: VoiceMessageProps) {
-  // Use useFileUrl to resolve the audio source from SecureDB if needed
   const { url: resolvedUrl, loading: _urlLoading, error: urlError } = useFileUrl({
     secureDB: secureDB || null,
     fileId: messageId,
@@ -49,6 +50,7 @@ export function VoiceMessage({
   const safeAudioUrl = audioUrl && !audioUrl.startsWith('blob:') ? audioUrl : '';
   const effectiveAudioUrl = resolvedUrl || safeAudioUrl;
 
+  // Capture duration when metadata loads
   const handleLoadedMetadata = useCallback(() => {
     if (!audioRef.current) return;
     const dur = audioRef.current.duration;
@@ -70,17 +72,20 @@ export function VoiceMessage({
     setIsLoading(false);
   }, []);
 
+  // Track current playback time
   const handleTimeUpdate = useCallback(() => {
     if (audioRef.current) {
       setCurrentTime(audioRef.current.currentTime);
     }
   }, []);
 
+  // Reset state when audio ends
   const handleEnded = useCallback(() => {
     setIsPlaying(false);
     setCurrentTime(0);
   }, []);
 
+  // Handle playback/load errors
   const handleError = useCallback(() => {
     setError('Failed to load audio');
     setIsLoading(false);
@@ -103,10 +108,12 @@ export function VoiceMessage({
     };
   }, [handleLoadedMetadata, handleTimeUpdate, handleEnded, handleError]);
 
+  // Format duration label
   const formatDuration = (seconds: number) => {
     return `${Math.round(seconds)}s`;
   };
 
+  // Play/pause toggle handler
   const togglePlayback = async () => {
     try {
       setError(null);
@@ -137,6 +144,7 @@ export function VoiceMessage({
     }
   };
 
+  // Seek playback based on waveform click
   const handleCanvasClick = useCallback(async (e: React.MouseEvent<HTMLCanvasElement>) => {
     const canvas = canvasRef.current;
     if (!canvas || !audioRef.current || duration === 0) return;
@@ -150,7 +158,6 @@ export function VoiceMessage({
       audioRef.current.currentTime = seekTime;
       setCurrentTime(seekTime);
 
-      // If not already playing, start playback
       if (!isPlaying) {
         await audioRef.current.play();
         setIsPlaying(true);
@@ -160,6 +167,7 @@ export function VoiceMessage({
     }
   }, [duration, isPlaying]);
 
+  // Render waveform bars and progress
   const drawWaveform = () => {
     const canvas = canvasRef.current;
     const peaks = peaksRef.current;
@@ -220,7 +228,6 @@ export function VoiceMessage({
       const amp = peaks[i];
       const y = Math.max(2, Math.round(amp * (height / 2)));
 
-      // Draw rounded bar
       ctx.beginPath();
       ctx.roundRect(x, centerY - y, effectiveBarWidth, y * 2, 2);
       ctx.fill();
@@ -228,7 +235,6 @@ export function VoiceMessage({
 
     const progress = duration > 0 ? Math.min(1, currentTime / duration) : 0;
 
-    // Create a clipping region for the progress
     ctx.save();
     ctx.beginPath();
     ctx.rect(0, 0, width * progress, height);
@@ -272,7 +278,6 @@ export function VoiceMessage({
         const audioCtx = new AudioCtx();
         const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer.slice(0));
 
-        // Set duration from the decoded buffer if not already set
         if (audioBuffer.duration && audioBuffer.duration > 0) {
           setDuration(audioBuffer.duration);
         }
@@ -283,7 +288,6 @@ export function VoiceMessage({
         const peaks: number[] = new Array(targetWidth);
         const minThreshold = 0.05;
 
-        // First pass: calculate raw peaks and find global maximum
         let globalMax = 0;
         for (let i = 0; i < targetWidth; i++) {
           const start = i * samplesPerPixel;
@@ -300,7 +304,6 @@ export function VoiceMessage({
           peaks[i] = amp;
         }
 
-        // Second pass: normalize peaks
         const normalizationFactor = globalMax > 0.01 ? 1 / globalMax : 1;
         for (let i = 0; i < targetWidth; i++) {
           peaks[i] = Math.min(1, Math.max(minThreshold, peaks[i] * normalizationFactor));

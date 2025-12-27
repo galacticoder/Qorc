@@ -1,14 +1,14 @@
 import React, { useState, useRef, useEffect, useCallback } from "react";
-import { User } from "./UserList";
+import { User } from "./messaging/UserList";
 import { SignalType } from "../../lib/signal-types";
-import { Message } from "./types";
+import { Message } from "./messaging/types";
 import { useFileSender } from "./ChatInput/useFileSender";
 import { ProgressBar } from "./ChatInput/ProgressBar";
 import { EditingBanner } from "./ChatInput/EditingBanner";
 import { ReplyBanner } from "./ChatInput/ReplyBanner";
-import { VoiceRecorder } from "./VoiceRecorder";
+import { VoiceRecorder } from "./calls/VoiceRecorder";
 import { VoiceRecorderButton } from "./ChatInput/VoiceRecorderButton";
-import { MessageReply } from "./types";
+import { MessageReply } from "./messaging/types";
 
 interface HybridKeys {
   x25519: { private: Uint8Array; publicKeyBase64: string };
@@ -58,6 +58,7 @@ interface ChatInputProps {
   getPeerHybridKeys?: (peerUsername: string) => Promise<{ kyberPublicBase64: string; dilithiumPublicBase64: string; x25519PublicBase64?: string } | null>;
 }
 
+// Main chat input component for sending messages and files
 export function ChatInput({
   onSendMessage,
   onSendFile: _onSendFile,
@@ -98,6 +99,7 @@ export function ChatInput({
     }
   }, [editingMessage]);
 
+  // Sanitize message content
   const sanitizeMessage = useCallback((input: string): string => {
     const MAX_LENGTH = 10000;
 
@@ -123,6 +125,7 @@ export function ChatInput({
     return sanitized;
   }, []);
 
+  // Handle sending text messages or edits
   const handleSend = useCallback(async () => {
     if (!message.trim() || isSending || !selectedConversation || disabled) {
       return;
@@ -151,6 +154,7 @@ export function ChatInput({
     }
   }, [message, isSending, selectedConversation, disabled, sanitizeMessage, editingMessage, onEditMessage, onSendMessage, onCancelEdit, replyTo, onCancelReply]);
 
+  // Validate file size and type
   const validateFile = useCallback((file: File): string | null => {
     const MAX_SIZE = 50 * 1024 * 1024;
     if (file.size > MAX_SIZE) {
@@ -159,6 +163,7 @@ export function ChatInput({
     return null;
   }, []);
 
+  // Handle file selection and upload
   const handleFileChange = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -186,6 +191,7 @@ export function ChatInput({
     }
   }, [validateFile, sendFile]);
 
+  // Handle sending voice notes as audio files
   const handleSendVoiceNote = useCallback(async (audioBlob: Blob) => {
     if (!selectedConversation) return;
 
@@ -216,11 +222,13 @@ export function ChatInput({
     }
   }, [selectedConversation, validateFile, sendFile]);
 
+  // Handle message input changes and typing indicators
   const handleMessageChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     setMessage(e.target.value);
     onTyping();
   }, [onTyping]);
 
+  // Handle keyboard events (Enter to send)
   const handleKeyDown = useCallback((e: React.KeyboardEvent<HTMLInputElement>) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();

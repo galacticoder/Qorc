@@ -25,7 +25,6 @@ const CollapsibleTrigger = React.forwardRef<
 >(({ className, onClick, asChild, children, ...props }, ref) => {
 
     if (asChild && React.isValidElement(children)) {
-        // Clone the child and merge props
         return React.cloneElement(children as React.ReactElement<any>, {
             ref,
             onClick: (e: any) => {
@@ -58,14 +57,12 @@ const CollapsibleContent = React.forwardRef<
     const contentRef = React.useRef<HTMLDivElement>(null);
     const [height, setHeight] = React.useState<number | undefined>(0);
 
-    // Update height when open state changes
     React.useEffect(() => {
         if (contentRef.current) {
             setHeight(open ? contentRef.current.scrollHeight : 0);
         }
     }, [open]);
 
-    // Also update height when content changes while open
     React.useEffect(() => {
         if (open && contentRef.current) {
             const updateHeight = () => {
@@ -74,7 +71,6 @@ const CollapsibleContent = React.forwardRef<
                 }
             };
 
-            // Use ResizeObserver to detect content changes
             const resizeObserver = new ResizeObserver(updateHeight);
             resizeObserver.observe(contentRef.current);
 
@@ -104,10 +100,8 @@ const CollapsibleContent = React.forwardRef<
 })
 CollapsibleContent.displayName = "CollapsibleContent"
 
-// Context to share state between components
 const CollapsibleContext = React.createContext<{ open?: boolean }>({ open: false })
 
-// Wrapper to provide context
 const CollapsibleRoot = React.forwardRef<
     HTMLDivElement,
     React.HTMLAttributes<HTMLDivElement> & {
@@ -126,11 +120,9 @@ const CollapsibleRoot = React.forwardRef<
                     if (React.isValidElement(child) && child.type === CollapsibleTrigger) {
                         return React.cloneElement(child as React.ReactElement<any>, {
                             onClick: (e: any) => {
-                                // Don't toggle if disabled
                                 if (!(child.props as any).disabled) {
                                     onOpenChange?.(!open);
                                 }
-                                // Still call original onClick if it exists
                                 (child.props as any).onClick?.(e);
                             },
                         })

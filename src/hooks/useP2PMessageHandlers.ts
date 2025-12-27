@@ -1,5 +1,5 @@
 import { useEffect, useRef } from 'react';
-import { Message } from '../components/chat/types';
+import { Message } from '../components/chat/messaging/types';
 import { EventType } from '../lib/event-types';
 import { SignalType } from '../lib/signal-types';
 import { SecurityAuditLogger } from '../lib/post-quantum-crypto';

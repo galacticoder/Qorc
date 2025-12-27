@@ -4,6 +4,7 @@
 
 import { pseudonymizeUsernameWithCache } from './username-hash';
 import { SecureDB } from './secureDB';
+import { STORAGE_KEYS } from './storage-keys';
 import { CryptoUtils } from './unified-crypto';
 import { SecureMemory } from './secure-memory';
 import { blockStatusCache } from './block-status-cache';
@@ -40,7 +41,7 @@ const isPlainObject = (value: unknown): value is Record<string, unknown> => {
 const NOTIFICATION_TITLE = 'Message Blocked';
 const NOTIFICATION_BODY = 'A message was blocked. See app for details.';
 
-const MESSAGE_QUEUE_KEY = 'secure_block_queue';
+const MESSAGE_QUEUE_KEY = STORAGE_KEYS.BLOCKING_QUEUE;
 const QUEUE_STORAGE_VERSION = 1;
 const QUEUE_SESSION_KEY_ID = 'queue_session_key';
 

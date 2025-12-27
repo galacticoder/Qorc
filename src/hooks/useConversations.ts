@@ -3,9 +3,9 @@
  */
 
 import { useState, useCallback, useEffect, useMemo, useRef } from "react";
-import { Conversation } from "../components/chat/ConversationList";
-import { Message } from "../components/chat/types";
-import { User } from "../components/chat/UserList";
+import { Conversation } from "../components/chat/messaging/ConversationList";
+import { Message } from "../components/chat/messaging/types";
+import { User } from "../components/chat/messaging/UserList";
 import { SignalType } from "../lib/signal-types";
 import websocketClient from "../lib/websocket";
 import { pseudonymizeUsernameWithCache } from "../lib/username-hash";

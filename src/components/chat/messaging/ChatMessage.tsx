@@ -1,22 +1,22 @@
 import React, { useRef, useMemo, useCallback, useState } from "react";
-import { cn } from "../../lib/utils";
+import { cn } from "../../../lib/utils";
 import { format, isSameMinute, isToday, isYesterday, isThisYear } from "date-fns";
-import { EmojiPicker } from "../ui/EmojiPicker";
-import { useEmojiPicker } from "../../contexts/EmojiPickerContext";
-import { ChatMessageProps } from "./types.ts";
-import { SystemMessage } from "./ChatMessage/SystemMessage.tsx";
-import { recordEmojiUsage } from "../../lib/system-emoji";
-import { DeletedMessage } from "./ChatMessage/DeletedMessage.tsx";
-import { FileContent } from "./ChatMessage/FileMessage.tsx";
-import { VoiceMessage } from "./VoiceMessage";
-import { MessageReceipt } from "./MessageReceipt.tsx";
-import { useUnifiedUsernameDisplay } from "../../hooks/useUnifiedUsernameDisplay";
+import { EmojiPicker } from "../../ui/EmojiPicker";
+import { useEmojiPicker } from "../../../contexts/EmojiPickerContext";
+import { ChatMessageProps } from "./types";
+import { SystemMessage } from "./ChatMessage/SystemMessage";
+import { recordEmojiUsage } from "../../../lib/system-emoji";
+import { DeletedMessage } from "./ChatMessage/DeletedMessage";
+import { FileContent } from "./ChatMessage/FileMessage";
+import { VoiceMessage } from "../calls/VoiceMessage";
+import { MessageReceipt } from "./MessageReceipt";
+import { useUnifiedUsernameDisplay } from "../../../hooks/useUnifiedUsernameDisplay";
 import { LinkifyWithPreviews } from "./LinkifyWithPreviews.tsx";
-import { LinkExtractor } from "../../lib/link-extraction.ts";
-import { copyTextToClipboard } from "../../lib/clipboard";
+import { LinkExtractor } from "../../../lib/link-extraction.ts";
+import { copyTextToClipboard } from "../../../lib/clipboard";
 import { MessageContextMenu } from "./MessageContextMenu";
-import { UserAvatar } from "../ui/UserAvatar";
-import { EventType } from "../../lib/event-types";
+import { UserAvatar } from "../../ui/UserAvatar";
+import { EventType } from "../../../lib/event-types";
 
 interface ExtendedChatMessageProps extends ChatMessageProps {
   readonly getDisplayUsername?: (username: string) => Promise<string>;
@@ -27,12 +27,14 @@ interface SystemAction {
   readonly onClick: () => void;
 }
 
+// Check if string is valid JSON
 const isValidJson = (str: string): boolean => {
   if (typeof str !== 'string' || str.length === 0) return false;
   const trimmed = str.trim();
   return trimmed.startsWith('{') || trimmed.startsWith('[');
 };
 
+// Parse system message content
 const parseSystemMessage = (content: string, message: any): { label: string; actions?: SystemAction[]; isError?: boolean } => {
   if (!isValidJson(content)) {
     return { label: content };
@@ -68,6 +70,7 @@ const parseSystemMessage = (content: string, message: any): { label: string; act
   }
 };
 
+// Format message timestamp for display
 const formatTimestamp = (timestamp: Date): string => {
   try {
     if (!(timestamp instanceof Date) || isNaN(timestamp.getTime())) {
@@ -110,12 +113,13 @@ export const ChatMessage = React.memo<ExtendedChatMessageProps>(({ message, smar
     fallbackToOriginal: true
   });
 
+  // Group messages within 3 minutes from same sender
   const isGrouped = useMemo(() => {
     if (!previousMessage) return false;
     if (previousMessage.sender !== sender) return false;
     if (!(previousMessage.timestamp instanceof Date) || !(timestamp instanceof Date)) return false;
     const diff = Math.abs(timestamp.getTime() - previousMessage.timestamp.getTime());
-    const GROUP_GAP_MS = 3 * 60 * 1000; // group messages within 3 minutes from same sender
+    const GROUP_GAP_MS = 3 * 60 * 1000;
     return diff <= GROUP_GAP_MS || isSameMinute(previousMessage.timestamp, timestamp);
   }, [previousMessage, sender, timestamp]);
 
@@ -163,6 +167,7 @@ export const ChatMessage = React.memo<ExtendedChatMessageProps>(({ message, smar
 
   const timestampDisplay = useMemo(() => formatTimestamp(timestamp), [timestamp]);
 
+  // Handle emoji selection
   const handlePickEmoji = useCallback((emoji: string) => {
     recordEmojiUsage(emoji, secureDB);
     if (currentUsername && message.reactions) {
@@ -175,22 +180,27 @@ export const ChatMessage = React.memo<ExtendedChatMessageProps>(({ message, smar
     onReact?.(message, emoji);
   }, [currentUsername, message, onReact, secureDB]);
 
+  // Handle message copy
   const handleCopyMessage = useCallback(() => {
     void copyTextToClipboard(content);
   }, [content]);
 
+  // Handle message reply
   const handleReply = useCallback(() => {
     onReply?.(message);
   }, [onReply, message]);
 
+  // Handle message deletion
   const handleDelete = useCallback(() => {
     onDelete?.(message);
   }, [onDelete, message]);
 
+  // Handle message editing
   const handleEdit = useCallback(() => {
     onEdit?.(message);
   }, [onEdit, message]);
 
+  // Handle file download
   const handleDownload = useCallback(async () => {
     try {
       const { originalBase64Data, mimeType, filename } = message;
@@ -234,6 +244,7 @@ export const ChatMessage = React.memo<ExtendedChatMessageProps>(({ message, smar
     }
   }, [message, content, timestamp]);
 
+  // Handle context menu
   const handleContextMenu = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
     e.stopPropagation();
@@ -253,8 +264,6 @@ export const ChatMessage = React.memo<ExtendedChatMessageProps>(({ message, smar
     if (!audioUrl || audioUrl === 'File' || audioUrl === 'voice-note') return false;
     return true;
   }, [isFileMessageType, message, content]);
-
-
 
   if (isSystemMessage) {
     return <SystemMessage content={systemLabel} actions={systemActions} isError={systemIsError} />;

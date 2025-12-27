@@ -1,8 +1,8 @@
 import React, { useMemo, useCallback, useState } from 'react';
 import type { JSX } from 'react';
 import { Phone, PhoneIncoming, PhoneOutgoing, PhoneMissed, Video, VideoOff } from 'lucide-react';
-import { CallState } from '../../lib/webrtc-calling';
-import { useUnifiedUsernameDisplay } from '../../hooks/useUnifiedUsernameDisplay';
+import { CallState } from '../../../lib/webrtc-calling';
+import { useUnifiedUsernameDisplay } from '../../../hooks/useUnifiedUsernameDisplay';
 
 interface CallHistoryProps {
   readonly calls: readonly CallState[];

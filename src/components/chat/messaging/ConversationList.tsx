@@ -1,38 +1,18 @@
 import React, { memo, useMemo, useEffect, useState, useCallback } from "react";
-import { cn } from "../../lib/utils";
-import { ScrollArea } from "../ui/scroll-area";
-import { Button } from "../ui/button";
-import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from "../ui/dialog";
+import { cn } from "../../../lib/utils";
+import { ScrollArea } from "../../ui/scroll-area";
+import { Button } from "../../ui/button";
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from "../../ui/dialog";
 import { Trash2, Search, Phone, Video, Loader2 } from "lucide-react";
-import { Input } from "../ui/input";
+import { Input } from "../../ui/input";
 import { toast } from "sonner";
-import { UserAvatar } from "../ui/UserAvatar";
+import { UserAvatar } from "../../ui/UserAvatar";
+import { isPlainObject, hasPrototypePollutionKeys, sanitizeUiText } from "../../utils";
 
 const UI_CALL_STATUS_RATE_WINDOW_MS = 10_000;
 const UI_CALL_STATUS_RATE_MAX = 500;
 const MAX_UI_CALL_STATUS_PEER_LENGTH = 256;
 const MAX_UI_CALL_STATUS_VALUE_LENGTH = 64;
-
-const isPlainObject = (value: unknown): value is Record<string, unknown> => {
-  if (typeof value !== 'object' || value === null) return false;
-  const proto = Object.getPrototypeOf(value);
-  return proto === Object.prototype || proto === null;
-};
-
-const hasPrototypePollutionKeys = (obj: unknown): boolean => {
-  if (obj == null || typeof obj !== 'object') return false;
-  const keys = Object.keys(obj as Record<string, unknown>);
-  return keys.some((key) => key === '__proto__' || key === 'constructor' || key === 'prototype');
-};
-
-const sanitizeUiText = (value: unknown, maxLen: number): string | null => {
-  if (typeof value !== 'string') return null;
-  const trimmed = value.trim();
-  if (!trimmed) return null;
-  const cleaned = trimmed.replace(/[\x00-\x1F\x7F]/g, '');
-  if (!cleaned) return null;
-  return cleaned.slice(0, maxLen);
-};
 
 export interface Conversation {
   readonly id: string;
@@ -54,8 +34,10 @@ interface ConversationListProps {
   readonly showNewChatInput?: boolean;
 }
 
+// Call status type
 type CallStatus = { status: 'ringing' | 'connecting' | 'connected'; isVideo: boolean } | null;
 
+// Anonymize username for display
 const anonymize = (value: string): string => {
   if (typeof value !== 'string' || value.length === 0) {
     return 'anon:user';
@@ -68,7 +50,6 @@ const anonymize = (value: string): string => {
     return 'anon:user';
   }
 };
-
 
 interface ConversationItemProps {
   readonly conversation: Conversation;
@@ -122,10 +103,12 @@ const ConversationItem = memo<ConversationItemProps>(({
     return anonymize(conversation.username);
   }, [conversation.displayName, conversation.username, resolvedName]);
 
+  // Handle conversation selection
   const handleClick = useCallback(() => {
     onSelect(conversation.username);
   }, [onSelect, conversation.username]);
 
+  // Handle conversation removal
   const handleRemove = useCallback((e: React.MouseEvent) => {
     e.stopPropagation();
     if (onRemove) {
@@ -251,6 +234,7 @@ const ConversationItem = memo<ConversationItemProps>(({
   );
 });
 
+// Main conversation list component
 export const ConversationList = memo<ConversationListProps>(function ConversationList({
   conversations,
   selectedConversation,
@@ -267,11 +251,13 @@ export const ConversationList = memo<ConversationListProps>(function Conversatio
   const [newChatUsername, setNewChatUsername] = useState("");
   const [isAdding, setIsAdding] = useState(false);
 
+  // Handle remove conversation click
   const handleRemoveClick = useCallback((username: string) => {
     setConversationToDelete(username);
     setShowConfirmDialog(true);
   }, []);
 
+  // Handle confirm removal
   const handleConfirmRemove = useCallback(() => {
     if (conversationToDelete && onRemoveConversation) {
       onRemoveConversation(conversationToDelete);
@@ -280,11 +266,13 @@ export const ConversationList = memo<ConversationListProps>(function Conversatio
     setConversationToDelete(null);
   }, [conversationToDelete, onRemoveConversation]);
 
+  // Handle cancel removal
   const handleCancelRemove = useCallback(() => {
     setShowConfirmDialog(false);
     setConversationToDelete(null);
   }, []);
 
+  // Handle add new chat
   const handleAddChat = useCallback(async () => {
     if (!newChatUsername.trim() || !onAddConversation) return;
 
@@ -301,6 +289,7 @@ export const ConversationList = memo<ConversationListProps>(function Conversatio
 
   const callStatusRateRef = React.useRef<{ windowStart: number; count: number }>({ windowStart: Date.now(), count: 0 });
 
+  // Handle call status events
   const handleCallStatus = useCallback((e: Event) => {
     try {
       const now = Date.now();
@@ -344,6 +333,7 @@ export const ConversationList = memo<ConversationListProps>(function Conversatio
 
   const [refreshTick, setRefreshTick] = useState(0);
 
+  // Format time for display
   const formatTime = useCallback((date?: Date): string => {
     if (!date || !(date instanceof Date) || isNaN(date.getTime())) {
       return "";
@@ -390,7 +380,7 @@ export const ConversationList = memo<ConversationListProps>(function Conversatio
       // If newest message is hours old, refresh every 5 minutes
       if (minAgeMs >= 60 * 60 * 1000) return 5 * 60 * 1000;
 
-      // For recent messages (< 1 hour), refresh every minute
+      // For recent messages < 1 hour, refresh every minute
       return 60 * 1000;
     };
 

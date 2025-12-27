@@ -1,8 +1,4 @@
-/**
- * Secure Error Handler
- * Prevents information disclosure through error messages and stack traces
- */
-
+import { STORAGE_KEYS } from './storage-keys';
 import { EventType } from './event-types';
 
 export enum ErrorSeverity {
@@ -38,7 +34,7 @@ export class SecureErrorHandler {
   private errors: SecureError[] = [];
   private readonly MAX_ERROR_HISTORY = 1000;
   private readonly CRITICAL_ALERT_ENDPOINT = '/api/security/critical-error';
-  private readonly CRITICAL_LOCAL_KEY = 'secure_critical_errors_v1';
+  private readonly CRITICAL_LOCAL_KEY = STORAGE_KEYS.SECURE_CRITICAL_ERRORS;
   private readonly MAX_LOCAL_CRITICAL = 100;
   private readonly MIN_ALERT_INTERVAL_MS = 5000;
   private lastAlertSentAt = 0;

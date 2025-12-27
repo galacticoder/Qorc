@@ -1,12 +1,13 @@
 import React, { useState, useCallback, useMemo, useRef, useEffect } from "react";
-import { cn } from "../../lib/utils";
+import { cn } from "../../../lib/utils";
 import { MessageSquare, Settings, LogOut } from "lucide-react";
-import { ComposeIcon } from "./icons";
-import { Button } from "../ui/button";
-import { sanitizeTextInput } from "../../lib/sanitizers";
-import { UserAvatar } from "../ui/UserAvatar";
-import { EventType } from "../../lib/event-types";
+import { ComposeIcon } from "../assets/icons";
+import { Button } from "../../ui/button";
+import { sanitizeTextInput, isValidUsername } from "../../../lib/sanitizers";
+import { UserAvatar } from "../../ui/UserAvatar";
+import { EventType } from "../../../lib/event-types";
 
+// Chat user data model
 export interface User {
   readonly id: string;
   readonly username: string;
@@ -19,6 +20,7 @@ export interface User {
   };
 }
 
+// Sidebar component props
 interface SidebarProps {
   readonly className?: string;
   readonly children?: React.ReactNode;
@@ -28,6 +30,7 @@ interface SidebarProps {
   readonly onActiveTabChange?: (tab: string) => void;
 }
 
+// Sidebar for navigation and starting chats
 export const Sidebar = React.memo<SidebarProps>(({ className, children, currentUsername, onAddConversation, onLogout, onActiveTabChange }) => {
   const [activeTab, setActiveTab] = useState<string>("messages");
   const [showAddUser, setShowAddUser] = useState<boolean>(false);
@@ -58,19 +61,13 @@ export const Sidebar = React.memo<SidebarProps>(({ className, children, currentU
     return () => window.removeEventListener('open-new-chat', openNewChat as EventListener);
   }, []);
 
-  const validateUsername = useCallback((username: string): boolean => {
-    if (typeof username !== 'string' || !username) return false;
-    const usernameRegex = /^[a-zA-Z0-9_-]{3,32}$/;
-    return usernameRegex.test(username);
-  }, []);
-
+  // Add a new conversation/user
   const handleAddUser = useCallback(async () => {
     const sanitized = sanitizeTextInput(newUsername, { maxLength: 32, allowNewlines: false });
     const username = sanitized.trim();
 
     if (!username || username === currentUsername) return;
-
-    if (!validateUsername(username)) {
+    if (!isValidUsername(username)) {
       setValidationError("Username must be 3-32 characters; letters, numbers, underscore or hyphen only");
       return;
     }
@@ -94,13 +91,14 @@ export const Sidebar = React.memo<SidebarProps>(({ className, children, currentU
       setIsValidating(false);
       abortControllerRef.current = null;
     }
-  }, [newUsername, currentUsername, validateUsername, onAddConversation, onActiveTabChange]);
+  }, [newUsername, currentUsername, onAddConversation, onActiveTabChange]);
 
+  // Handle Enter/Escape in add user input
   const handleKeyPress = useCallback((e: React.KeyboardEvent<HTMLInputElement>) => {
     if (e.key === 'Enter' && !isValidating) {
       e.preventDefault();
       const sanitized = sanitizeTextInput(newUsername, { maxLength: 32, allowNewlines: false }).trim();
-      if (sanitized && validateUsername(sanitized)) {
+      if (sanitized && isValidUsername(sanitized)) {
         handleAddUser();
       }
     } else if (e.key === 'Escape') {
@@ -109,14 +107,16 @@ export const Sidebar = React.memo<SidebarProps>(({ className, children, currentU
       setNewUsername("");
       setValidationError("");
     }
-  }, [newUsername, isValidating, validateUsername, handleAddUser]);
+  }, [newUsername, isValidating, handleAddUser]);
 
+  // Sanitize add user input
   const handleInputChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     const sanitized = sanitizeTextInput(e.target.value, { maxLength: 32, allowNewlines: false });
     setNewUsername(sanitized);
     setValidationError("");
   }, []);
 
+  // Close add user modal and reset state
   const handleCloseModal = useCallback(() => {
     setShowAddUser(false);
     setNewUsername("");
@@ -124,6 +124,7 @@ export const Sidebar = React.memo<SidebarProps>(({ className, children, currentU
     setActiveTab("messages");
   }, []);
 
+  // Primary navigation items
   const navigationItems = useMemo(() => [
     {
       id: 'messages',
@@ -133,6 +134,7 @@ export const Sidebar = React.memo<SidebarProps>(({ className, children, currentU
     },
   ], [onActiveTabChange]);
 
+  // Secondary navigation items
   const secondaryItems = useMemo(() => [
     {
       id: 'settings',
@@ -146,16 +148,12 @@ export const Sidebar = React.memo<SidebarProps>(({ className, children, currentU
     },
   ], [onActiveTabChange]);
 
+  // Trigger logout action
   const handleLogout = useCallback(() => {
     setActiveTab('logout');
     onActiveTabChange?.('logout');
     onLogout?.();
   }, [onActiveTabChange, onLogout]);
-
-  const _userInitial = useMemo(() =>
-    currentUsername?.charAt(0).toUpperCase() || "U",
-    [currentUsername]
-  );
 
   return (
     <div className={cn(
@@ -360,7 +358,6 @@ export const Sidebar = React.memo<SidebarProps>(({ className, children, currentU
           </div>
         </div>
       )}
-
     </div>
   );
 });

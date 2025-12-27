@@ -1,8 +1,8 @@
 import { useMemo } from "react";
 import { Button } from "../../ui/button.tsx";
-import { PaperPlaneIcon } from "../icons.tsx";
+import { PaperPlaneIcon } from "../assets/icons";
 import { cn } from "@/lib/utils";
-import { Message } from "../types";
+import { Message } from "../messaging/types";
 
 interface SendButtonProps {
   readonly disabled: boolean;

@@ -2,6 +2,7 @@ import { useRef, useState, useCallback, useEffect } from "react";
 import * as pako from "pako";
 import { CryptoUtils } from "../../../lib/unified-crypto";
 import websocketClient from "../../../lib/websocket";
+import { STORAGE_KEYS } from '../../../lib/storage-keys';
 import { SignalType } from "../../../lib/signal-types";
 import { EventType } from "../../../lib/event-types";
 import { sanitizeFilename } from "../../../lib/sanitizers";
@@ -18,7 +19,7 @@ const PAUSE_POLL_MS = 100;
 const P2P_POLL_MS = 100;
 const YIELD_INTERVAL = 8;
 const MAC_SALT = new TextEncoder().encode('ft-mac-salt-v1');
-const TOR_ENABLED_KEY = 'tor_enabled';
+const TOR_ENABLED_KEY = STORAGE_KEYS.TOR_ENABLED;
 
 interface HybridPublicKeys {
   readonly x25519PublicBase64?: string;
@@ -133,6 +134,7 @@ export function useFileSender(
     };
   }, []);
 
+  // Refill rate limiter tokens based on elapsed time
   const refillTokens = useCallback((): void => {
     const now = Date.now();
     const elapsed = (now - lastRefillRef.current) / 1000;
@@ -143,6 +145,7 @@ export function useFileSender(
     }
   }, []);
 
+  // Take a token from rate limiter if available
   const takeToken = useCallback((): boolean => {
     refillTokens();
     if (rateTokensRef.current >= 1) {
@@ -152,6 +155,7 @@ export function useFileSender(
     return false;
   }, [refillTokens]);
 
+  // Compute MAC for chunk integrity verification
   const computeChunkMacAsync = useCallback(async (
     iv: Uint8Array,
     authTag: Uint8Array,
@@ -162,7 +166,6 @@ export function useFileSender(
     messageId: string,
     filename: string
   ): Promise<string> => {
-    // Extended MAC binds metadata to the chunk: iv||authTag||encrypted||idx||total||messageId||filename
     const idxBuf = new Uint8Array(8);
     const dv = new DataView(idxBuf.buffer);
     dv.setUint32(0, chunkIndex >>> 0, false);
@@ -187,6 +190,7 @@ export function useFileSender(
     return CryptoUtils.Base64.arrayBufferToBase64(macBytes);
   }, []);
 
+  // Schedule inactivity timeout for transfer cancellation
   const scheduleInactivityTimer = useCallback((state: TransferState): void => {
     if (state.inactivityTimer) clearTimeout(state.inactivityTimer);
     state.inactivityTimer = setTimeout(() => {
@@ -196,6 +200,7 @@ export function useFileSender(
     }, INACTIVITY_TIMEOUT_MS);
   }, []);
 
+  // Check if Tor is enabled for routing preferences
   const isTorEnabled = useCallback((): boolean => {
     try {
       const flag = syncEncryptedStorage.getItem(TOR_ENABLED_KEY);
@@ -204,12 +209,14 @@ export function useFileSender(
     return true;
   }, []);
 
+  // Check if recipient user is currently online
   const isRecipientOnline = useCallback((): boolean => {
     if (!targetUsername) return false;
     const u = users.find(u => u.username === targetUsername);
     return !!u?.isOnline;
   }, [users, targetUsername]);
 
+  // Attempt to establish P2P connection for direct transfer
   const attemptP2P = useCallback(async (): Promise<boolean> => {
     try {
       if (!p2pConnector?.connectToPeer || !p2pConnector?.getConnectedPeers || !targetUsername) {
@@ -241,6 +248,7 @@ export function useFileSender(
     }
   }, [p2pConnector, targetUsername]);
 
+  // Ensure WebSocket connection to server is ready
   const ensureWsReady = useCallback(async (): Promise<void> => {
     try {
       if (!websocketClient.isConnectedToServer()) {
@@ -250,6 +258,7 @@ export function useFileSender(
     }
   }, []);
 
+  // Get session API wrapper for Signal session management
   const getSessionApi = useCallback(() => {
     const edgeApi = (globalThis as any)?.edgeApi ?? null;
     return {
@@ -268,6 +277,7 @@ export function useFileSender(
     };
   }, []);
 
+  // Ensure Signal session is established
   const ensureSignalSession = useCallback(async (forceReestablish: boolean = false): Promise<boolean> => {
     try {
       if (!targetUsername || !getKeysOnDemand) return false;
@@ -440,6 +450,7 @@ export function useFileSender(
     }
   }, [getKeysOnDemand, targetUsername, currentUsername]);
 
+  // Send encrypted file chunks using server relay
   const sendChunksServer = useCallback(async (
     state: TransferState,
     userKeys: readonly UserKeyEnvelope[]
@@ -649,6 +660,7 @@ export function useFileSender(
     }
   }, [computeChunkMacAsync, currentUsername, scheduleInactivityTimer, users]);
 
+  // Send a file
   const sendFile = useCallback(async (file: File): Promise<void> => {
     if (!targetUsername) {
       throw new Error('No target username specified');
@@ -688,13 +700,12 @@ export function useFileSender(
       currentTransferRef.current = state;
       scheduleInactivityTimer(state);
 
-      // Generate raw symmetric key bytes
       const rawAesBytes = crypto.getRandomValues(new Uint8Array(32));
       const aesKey = await CryptoUtils.Keys.importRawAesKey(rawAesBytes);
       currentAesKeyRef.current = aesKey;
       const aesKeyBase64 = CryptoUtils.Base64.arrayBufferToBase64(rawAesBytes);
 
-      const macInfo = new TextEncoder().encode(`ft:${safeName}:${file.size}`);
+      const macInfo = new TextEncoder().encode(`ft:${safeName}:${file.size} `);
       currentMacKeyRef.current = await CryptoUtils.KDF.blake3Hkdf(
         rawAesBytes,
         MAC_SALT,
@@ -731,9 +742,7 @@ export function useFileSender(
 
       if (filteredUsers.length === 0) {
         console.error('[FILE-SENDER] Missing recipient keys', { to: targetUsername });
-        throw new Error(
-          `Cannot send file: Post-quantum hybrid encryption keys are required but not available for ${targetUsername}`
-        );
+        throw new Error(`Cannot send file: Post - quantum hybrid encryption keys are required but not available for ${targetUsername}`);
       }
 
       if (!getKeysOnDemand) {
@@ -841,6 +850,7 @@ export function useFileSender(
     sendChunksServer
   ]);
 
+  // Pause current file transfer
   const pauseCurrent = useCallback((): void => {
     const st = currentTransferRef.current;
     if (st) {
@@ -848,6 +858,7 @@ export function useFileSender(
     }
   }, []);
 
+  // Resume paused file transfer
   const resumeCurrent = useCallback((): void => {
     const st = currentTransferRef.current;
     if (st) {
@@ -857,6 +868,7 @@ export function useFileSender(
     }
   }, [scheduleInactivityTimer]);
 
+  // Cancel current file transfer and cleanup resources
   const cancelCurrent = useCallback((): void => {
     const st = currentTransferRef.current;
     if (st) {

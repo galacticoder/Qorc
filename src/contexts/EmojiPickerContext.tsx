@@ -1,6 +1,5 @@
 import React, { createContext, useContext, useState, useCallback, useMemo } from 'react';
-
-const VALID_PICKER_ID = /^[A-Za-z0-9_-]+$/;
+import { VALID_EMOJI_PICKER_ID } from '../lib/constants';
 
 interface EmojiPickerContextType {
   readonly openPickerId: string | null;
@@ -15,7 +14,7 @@ export function EmojiPickerProvider({ children }: { children: React.ReactNode })
   const [openPickerId, setOpenPickerId] = useState<string | null>(null);
 
   const openPicker = useCallback((pickerId: string) => {
-    if (!VALID_PICKER_ID.test(pickerId)) {
+    if (!VALID_EMOJI_PICKER_ID.test(pickerId)) {
       return;
     }
     setOpenPickerId(prev => (prev === pickerId ? prev : pickerId));

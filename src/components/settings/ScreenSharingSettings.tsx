@@ -3,30 +3,23 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../..
 import { Label } from '../../components/ui/label';
 import { Button } from '../../components/ui/button';
 import { Separator } from '../../components/ui/separator';
-import { 
+import {
   ScreenSharingSettings as ScreenSharingSettingsType,
   SCREEN_SHARING_RESOLUTIONS,
-  SCREEN_SHARING_FRAMERATES 
+  SCREEN_SHARING_FRAMERATES
 } from '../../lib/screen-sharing-consts';
 import { screenSharingSettings } from '../../lib/screen-sharing-settings';
-
-const QUALITY_LABELS: Record<'low' | 'medium' | 'high', string> = {
-  low: 'Low',
-  medium: 'Medium',
-  high: 'High'
-};
-
-const QUALITY_DESCRIPTIONS: Record<'low' | 'medium' | 'high', string> = {
-  low: 'Lower bandwidth usage',
-  medium: 'Balanced quality and bandwidth',
-  high: 'Best quality, higher bandwidth'
-};
-
-const QUALITY_OPTIONS: ReadonlyArray<'low' | 'medium' | 'high'> = ['low', 'medium', 'high'];
+import {
+  QUALITY_OPTIONS,
+  QUALITY_LABELS,
+  QUALITY_DESCRIPTIONS,
+  QualityOption,
+  DEFAULT_QUALITY
+} from '../../lib/constants';
 
 const RESET_FEEDBACK_DURATION_MS = 1000;
 
-function validateQualityOption(value: string): value is 'low' | 'medium' | 'high' {
+function validateQualityOption(value: string): value is QualityOption {
   return QUALITY_OPTIONS.includes(value as any);
 }
 
@@ -34,7 +27,7 @@ function getDefaultSettings(): ScreenSharingSettingsType {
   return {
     resolution: SCREEN_SHARING_RESOLUTIONS[0],
     frameRate: SCREEN_SHARING_FRAMERATES[0],
-    quality: 'medium'
+    quality: DEFAULT_QUALITY
   };
 }
 
@@ -101,7 +94,7 @@ export function ScreenSharingSettings() {
   const handleReset = useCallback(() => {
     if (isResetting) return;
     setIsResetting(true);
-    screenSharingSettings.resetToDefaults().catch(() => {});
+    screenSharingSettings.resetToDefaults().catch(() => { });
     setTimeout(() => setIsResetting(false), RESET_FEEDBACK_DURATION_MS);
   }, [isResetting]);
 

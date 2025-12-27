@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useMemo } from "react";
-import { Cross2Icon } from "../icons";
-import { Message } from "../types";
+import { Cross2Icon } from "../assets/icons";
+import { Message } from "../messaging/types";
 import { Image, Video, Mic, Paperclip } from "lucide-react";
 
 interface ReplyBannerProps {

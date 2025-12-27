@@ -1,7 +1,7 @@
 import { useRef, useEffect, useCallback, useState } from "react";
 import { SecureDB } from "@/lib/secureDB";
-import { Message } from "@/components/chat/types";
-import { User } from "@/components/chat/UserList";
+import { Message } from "@/components/chat/messaging/types";
+import { User } from "@/components/chat/messaging/UserList";
 import { encryptedStorage, syncEncryptedStorage } from "@/lib/encrypted-storage";
 import { prewarmUsernameCache } from "@/hooks/useUnifiedUsernameDisplay";
 import { blockingSystem } from "@/lib/blocking-system";
