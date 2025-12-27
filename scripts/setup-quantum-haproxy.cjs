@@ -44,13 +44,11 @@ async function hasOqsProvider(env) {
 
 
     const modulePaths = [
-      // Linux
       '/usr/local/lib/ossl-modules/oqsprovider.so',
       '/usr/local/lib64/ossl-modules/oqsprovider.so',
       '/usr/lib/ossl-modules/oqsprovider.so',
       '/usr/lib64/ossl-modules/oqsprovider.so',
       '/usr/lib/x86_64-linux-gnu/ossl-modules/oqsprovider.so',
-      // macOS Homebrew locations
       '/opt/homebrew/lib/ossl-modules/oqsprovider.dylib',
       '/usr/local/lib/ossl-modules/oqsprovider.dylib'
     ];
@@ -157,7 +155,6 @@ async function hasOqsProvider(env) {
       } catch { }
     }
 
-    // Combine ECDSA cert to cert.pem
     const combined = path.join(baseDir, 'cert.pem');
     await fsp.writeFile(combined, (await fsp.readFile(ecdsaCrt)).toString() + (await fsp.readFile(ecdsaKey)).toString());
 

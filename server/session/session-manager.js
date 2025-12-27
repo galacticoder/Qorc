@@ -11,13 +11,7 @@ const REDIS_BATCH_QUEUE_KEY = 'session:batch:queue';
 let batchTimer = null;
 let batchProcessing = false;
 
-/**
- * Generate device ID for WebSocket connections
- * 
- * @param {Object} ws - WebSocket connection object
- * @param {Object} request - HTTP upgrade request object
- * @returns {string} - Secure device identifier
- */
+// Generate device ID for WebSocket connections
 export function generateDeviceId(ws, request = null) {
   const req = request || ws?.upgradeReq || ws?._socket?._httpMessage?.req;
   const hdrId = req?.headers?.['x-device-id'] || ws?.headers?.['x-device-id'];
@@ -36,11 +30,7 @@ export function generateDeviceId(ws, request = null) {
   return Buffer.from(hash).slice(0, 16).toString('hex');
 }
 
-/**
- * Helper for consistent session refresh error handling
- * 
- * @param {string} sessionId - Session identifier to refresh
- */
+// Helper for consistent session refresh error handling
 export function safeRefreshSession(sessionId) {
   try {
     ConnectionStateManager.refreshSession(sessionId);
@@ -52,9 +42,7 @@ export function safeRefreshSession(sessionId) {
   }
 }
 
-/**
- * Batch processing function for database operations
- */
+// Batch processing function for database operations
 async function processBatch() {
   if (batchProcessing) {
     return;
@@ -72,12 +60,10 @@ async function processBatch() {
 
     cryptoLogger.info('[SESSION] Processing batch of operations', { count: batchToProcess.length });
 
-    // Process all batched operations
     const results = await Promise.allSettled(
       batchToProcess.map(operation => operation.execute())
     );
 
-    // Log failed operations
     const failedCount = results.filter(result => result.status === 'rejected').length;
     if (failedCount > 0) {
       cryptoLogger.error('[SESSION] Batch operations failed', {
@@ -93,7 +79,6 @@ async function processBatch() {
       batchTimer = null;
     }
 
-    // Continue processing if there are more operations
     const hasMore = await hasRedisQueueItems();
     if (hasMore) {
       setImmediate(processBatch);
@@ -105,9 +90,7 @@ async function processBatch() {
   }
 }
 
-/**
- * Get batch from Redis queue
- */
+// Get batch from Redis queue
 async function getRedisQueueBatch() {
   try {
     return await withRedisClient(async (client) => {
@@ -129,9 +112,7 @@ async function getRedisQueueBatch() {
   }
 }
 
-/**
- * Check if Redis queue has items
- */
+// Check if Redis queue has items
 async function hasRedisQueueItems() {
   try {
     return await withRedisClient(async (client) => {
@@ -144,18 +125,12 @@ async function hasRedisQueueItems() {
   }
 }
 
-/**
- * Add operation to batch with overflow protection
- * 
- * @param {Object} operation - Operation object with execute() method
- */
+// Add operation to batch with overflow protection
 export async function addToBatch(operation) {
   await addToRedisQueue(operation);
 }
 
-/**
- * Add operation to Redis queue
- */
+// Add operation to Redis queue
 async function addToRedisQueue(operation) {
   await withRedisClient(async (client) => {
     const queueLength = await client.llen(REDIS_BATCH_QUEUE_KEY);
@@ -172,9 +147,7 @@ async function addToRedisQueue(operation) {
   });
 }
 
-/**
- * Cleanup function for shutdown
- */
+// Cleanup function for shutdown
 export async function cleanupSessionManager() {
   if (batchTimer) {
     clearTimeout(batchTimer);
@@ -197,9 +170,7 @@ export async function cleanupSessionManager() {
   cryptoLogger.info('[SESSION] Session manager cleanup complete');
 }
 
-/**
- * Export batch configuration for external monitoring
- */
+// Export batch configuration for external monitoring
 export const BATCH_CONFIG = {
   BATCH_SIZE,
   BATCH_TIMEOUT,

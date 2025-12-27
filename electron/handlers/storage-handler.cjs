@@ -34,7 +34,6 @@ class StorageHandler {
       throw new Error('Invalid key format');
     }
     
-    // Prevent path traversal in keys
     if (key.includes('/') || key.includes('\\') || key.includes('..')) {
       throw new Error('Invalid key characters');
     }
@@ -96,10 +95,11 @@ class StorageHandler {
     if (!url || typeof url !== 'string' || url.length > 2048) {
       throw new Error('Invalid URL');
     }
-    // Require wss:// only
+
     if (!/^wss:\/\/.+/i.test(url)) {
       throw new Error('Only secure WebSocket (wss://) allowed');
     }
+
     try {
       const parsed = new URL(url);
       if (parsed.username || parsed.password) {
@@ -108,6 +108,7 @@ class StorageHandler {
     } catch (e) {
       throw new Error('Invalid URL format');
     }
+
     if (!this.secureStorage) {
       throw new Error('Secure storage not initialized');
     }
@@ -127,7 +128,6 @@ class StorageHandler {
 
   sanitizeError(err) {
     if (!err) return 'Unknown error';
-    // Remove potentially sensitive information from error messages
     const message = err.message || String(err);
     return message.replace(/\/[^\s]+/g, '[PATH]').substring(0, 200);
   }

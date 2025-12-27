@@ -6,12 +6,7 @@ const WebSocket = require('ws');
 const crypto = require('crypto');
 const tls = require('tls');
 const { gunzipSync } = require('zlib');
-let SocksProxyAgent;
-try {
-  SocksProxyAgent = require('socks-proxy-agent').SocksProxyAgent;
-} catch (e) {
-  console.warn('[WS] socks-proxy-agent not found');
-}
+const SocksProxyAgent = require('socks-proxy-agent').SocksProxyAgent;
 
 class WebSocketHandler {
   constructor(securityMiddleware, storageHandler = null) {
@@ -35,8 +30,6 @@ class WebSocketHandler {
     // Message queue
     this.messageQueue = [];
     this.MAX_QUEUE_SIZE = 100;
-
-    // Chunk reassembly for large messages
     this.chunkBuffer = new Map();
 
     // Connection metrics
@@ -53,8 +46,6 @@ class WebSocketHandler {
 
     // Certificate pinning
     this.pinnedFingerprints = new Set();
-
-    // Extra headers to send on WS handshake
     this.extraHeaders = {};
 
     // Device proof material
@@ -450,7 +441,6 @@ class WebSocketHandler {
         return;
       }
 
-      // Device proof challenge
       if (parsed.type === 'device-proof-challenge') {
         this.handleDeviceProofChallenge(parsed);
         return;
@@ -461,7 +451,6 @@ class WebSocketHandler {
         return;
       }
 
-      // Extract session ID from PQ session messages
       if (parsed.sessionId && !this.sessionId) {
         this.sessionId = parsed.sessionId;
       }
@@ -713,7 +702,6 @@ class WebSocketHandler {
     this.stopHeartbeat();
     this.stopAppHeartbeat();
 
-    // Close connection
     if (this.connection) {
       try {
         this.connection.close(1000, 'Normal closure');
@@ -722,7 +710,6 @@ class WebSocketHandler {
       this.connection = null;
     }
 
-    // Clear state
     this.messageQueue = [];
     this.sessionId = null;
     this.isBackgroundMode = false;

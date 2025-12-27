@@ -6,12 +6,10 @@
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const http = require('http');
-const https = require('https');
 const { spawn, execSync } = require('child_process');
 
 const repoRoot = path.resolve(__dirname, '..');
-const lbScript = path.join(repoRoot, 'server', 'cluster', 'auto-loadbalancer.js');
+const lbScript = path.join(repoRoot, 'server', 'load-balancer', 'auto-loadbalancer.js');
 
 function loadDotEnv(filePath) {
   try {
@@ -54,9 +52,7 @@ class CircularBuffer { constructor(n = 1000) { this.a = []; this.n = n; } push(x
 class Debouncer { constructor(fn, d = 50) { this.fn = fn; this.d = d; this.t = null; this.p = false; } call() { this.p = true; if (this.t) return; this.t = setTimeout(() => { if (this.p) { this.fn(); this.p = false; } this.t = null; }, this.d); } flush() { if (this.t) { clearTimeout(this.t); this.t = null; } if (this.p) { this.fn(); this.p = false; } } }
 class RateLimiter { constructor(ms = 1000) { this.ms = ms; this.last = 0; } ok() { const now = Date.now(); if (now - this.last >= this.ms) { this.last = now; return true; } return false; } }
 
-async function httpGetJSON(url, timeoutMs = 1500) { return new Promise((resolve) => { try { const mod = url.startsWith('https:') ? https : http; const req = mod.get(url, { timeout: timeoutMs }, res => { let d = ''; res.on('data', c => d += c); res.on('end', () => { try { resolve(JSON.parse(d || '{}')); } catch { resolve(null); } }); }); req.on('error', () => resolve(null)); req.on('timeout', () => { try { req.destroy(); } catch { }; resolve(null); }); } catch { resolve(null); } }); }
 async function getTunnelUrl() { try { const logPath = path.join(repoRoot, 'scripts', 'config', 'tunnel', 'cloudflared.log'); if (!fs.existsSync(logPath)) return null; const c = fs.readFileSync(logPath, 'utf8'); const m = c.match(/https:\/\/[a-zA-Z0-9-]+\.trycloudflare\.com/); return m ? m[0] : null; } catch { return null; } }
-
 function isHAProxyInstalled() { try { execSync('command -v haproxy >/dev/null 2>&1'); return true; } catch { return false; } }
 
 async function runNodeScript(scriptPath, args = [], env = process.env) {
@@ -116,7 +112,6 @@ async function ensureQuantumReady() {
   if (needSetup) {
     log('Running quantum setup...');
     await runNodeScript(path.join(repoRoot, 'scripts', 'setup-quantum-haproxy.cjs'));
-    // Reload detected module path after setup
     oqsModule = await readOqsModulePath();
     env = { ...process.env, OPENSSL_CONF: localConf };
     if (oqsModule) {
@@ -127,7 +122,6 @@ async function ensureQuantumReady() {
     }
   }
 
-  // Re-check provider
   const ok2 = await hasOqsProvider(env);
   if (!ok2) {
     log('Ensuring dependencies (may prompt for sudo)...');
@@ -175,7 +169,7 @@ async function ensureHaproxyBuiltOrReady() {
   // 3) Build 
   log('Building HAProxy with OQS...');
   await runNodeScript(path.join(repoRoot, 'scripts', 'build-quantum-haproxy.cjs'));
-  // Re-load metadata
+  
   if (fs.existsSync(buildMetaPath)) {
     try {
       const meta = JSON.parse(fs.readFileSync(buildMetaPath, 'utf8'));
@@ -202,7 +196,6 @@ class LBTUI {
     this.metrics = new RateLimiter(1000);
     this.stats = { cpu: '?', mem: '?', servers: 0, serverList: [], url: null, lbPort: CONFIG.HAPROXY_HTTPS_PORT };
 
-    // Command mode state
     this.cmdMode = false;
     this.cmdInput = '';
     this.cmdCursor = 0;
@@ -323,23 +316,17 @@ class LBTUI {
       const cryptoModule = await import(path.join(repoRoot, 'server', 'crypto', 'unified-crypto.js'));
       const { CryptoUtils } = cryptoModule;
 
-      // Get HAProxy stats keypair
       const keypair = await this.getKeypair();
-
-      // Serialize command
       const payloadBytes = Buffer.from(JSON.stringify(commandObj), 'utf8');
 
-      // Generate ephemeral X25519 keypair
       const ephemeralX25519Secret = crypto.randomBytes(32);
       const ephemeralX25519Public = x25519.getPublicKey(ephemeralX25519Secret);
       const x25519SharedSecret = x25519.getSharedSecret(ephemeralX25519Secret, keypair.x25519.publicKey);
 
-      // Encapsulate with ML-KEM-1024
       const kemEnc = ml_kem1024.encapsulate(keypair.kyber.publicKey);
       const kyberSharedSecret = kemEnc.sharedSecret;
       const kyberCiphertext = kemEnc.ciphertext || kemEnc.cipherText;
 
-      // Derive AEAD key using unified quantum HKDF
       const rawSecret = Buffer.concat([
         Buffer.from(kyberSharedSecret),
         Buffer.from(x25519SharedSecret),
@@ -357,7 +344,6 @@ class LBTUI {
       const aad = new TextEncoder().encode('lb-command-v2');
       const { ciphertext, tag } = aead.encrypt(payloadBytes, nonce, aad);
 
-      // Prepare encrypted package
       const encryptedPackage = {
         kyberCiphertext: Buffer.from(kyberCiphertext).toString('base64'),
         x25519EphemeralPublic: Buffer.from(ephemeralX25519Public).toString('base64'),
@@ -366,7 +352,6 @@ class LBTUI {
         tag: Buffer.from(tag).toString('base64'),
       };
 
-      // Sign entire encrypted package with ML-DSA-87
       const packageBytes = Buffer.from(JSON.stringify(encryptedPackage));
       const signature = ml_dsa87.sign(packageBytes, keypair.dilithium.secretKey);
 
@@ -391,7 +376,6 @@ class LBTUI {
     cmd = cmd.trim();
     if (!cmd) return;
 
-    // Add to history
     if (this.cmdHistory.length === 0 || this.cmdHistory[this.cmdHistory.length - 1] !== cmd) {
       this.cmdHistory.push(cmd);
       if (this.cmdHistory.length > 100) this.cmdHistory.shift();
@@ -402,14 +386,12 @@ class LBTUI {
     const parts = cmd.split(/\s+/);
     const mainCmd = parts[0].toLowerCase();
 
-    // Find matching command
     let cmdDef = this.commands.find(c =>
       c.name.toLowerCase() === mainCmd ||
       (c.aliases || []).some(a => a.toLowerCase() === mainCmd)
     );
 
     if (!cmdDef && parts.length > 1) {
-      // Try multi-word command
       const fullCmd = `${parts[0]} ${parts[1]}`.toLowerCase();
       cmdDef = this.commands.find(c => c.name.toLowerCase() === fullCmd);
     }
@@ -421,7 +403,6 @@ class LBTUI {
     }
 
     try {
-      // Execute command
       if (cmdDef.name === '/help') {
         this.add('\x1b[33mAvailable commands:\x1b[0m');
         for (const c of this.commands) {
@@ -474,7 +455,6 @@ class LBTUI {
   onKey(k) {
     const c = k.charCodeAt(0);
 
-    // Command mode handling
     if (this.cmdMode) {
       if (c === 3 || k === '\x1b') { // Ctrl+C or ESC
         this.cmdMode = false;
@@ -498,7 +478,7 @@ class LBTUI {
         return;
       }
 
-      if (k === '\t') { // Tab - autocomplete
+      if (k === '\t') { // Tab autocomplete
         if (this.cmdSuggestions.length > 0) {
           this.cmdInput = this.cmdSuggestions[this.cmdSuggestionIndex];
           this.cmdCursor = this.cmdInput.length;
@@ -556,7 +536,7 @@ class LBTUI {
         return;
       }
 
-      if (k === '\x1b[A') { // Up arrow - history
+      if (k === '\x1b[A') { // Up arrow history
         if (this.cmdHistory.length > 0) {
           if (this.cmdHistoryIndex === -1) {
             this.cmdHistoryIndex = this.cmdHistory.length - 1;
@@ -571,7 +551,7 @@ class LBTUI {
         return;
       }
 
-      if (k === '\x1b[B') { // Down arrow - history
+      if (k === '\x1b[B') { // Down arrow history
         if (this.cmdHistoryIndex !== -1) {
           if (this.cmdHistoryIndex < this.cmdHistory.length - 1) {
             this.cmdHistoryIndex++;
@@ -587,7 +567,6 @@ class LBTUI {
         return;
       }
 
-      // Regular character input
       if (c >= 32 && c <= 126) {
         this.cmdInput = this.cmdInput.slice(0, this.cmdCursor) + k + this.cmdInput.slice(this.cmdCursor);
         this.cmdCursor++;
@@ -639,12 +618,13 @@ class LBTUI {
     }
   }
   poll() {
-    if (!this.metrics.ok()) return; // ps cpu/mem
+    if (!this.metrics.ok()) return;
     try { const out = execSync(`ps -p ${this.pid} -o %cpu=,%mem=`, { encoding: 'utf8', timeout: 500 }).trim().split(/\s+/); if (out.length >= 2) { this.stats.cpu = out[0]; this.stats.mem = out[1]; } } catch { }
     this.getActiveServers().then(servers => { this.stats.servers = servers.length; this.stats.serverList = servers; this.renderDeb.call(); }).catch(() => { });
     this.getLbPort().then(port => { if (port) this.stats.lbPort = port; this.renderDeb.call(); }).catch(() => { });
     getTunnelUrl().then(u => { this.stats.url = u; this.renderDeb.call(); }).catch(() => { });
   }
+
   async getActiveServers() {
     try {
       const mod = await import(path.join(repoRoot, 'server', 'presence', 'presence.js'));
@@ -667,6 +647,7 @@ class LBTUI {
       return [];
     }
   }
+
   async getLbPort() {
     try {
       const mod = await import(path.join(repoRoot, 'server', 'presence', 'presence.js'));
@@ -682,6 +663,7 @@ class LBTUI {
       return null;
     }
   }
+  
   start() {
     this.renderDeb.call();
     this.interval = setInterval(() => {
@@ -973,7 +955,7 @@ async function ensureStatsCredentials() {
 
 (async () => {
   if (!fs.existsSync(lbScript)) {
-    logErr('auto-loadbalancer not found at server/cluster/auto-loadbalancer.js');
+    logErr('auto-loadbalancer not found at server/loadbalancer/auto-loadbalancer.js');
     process.exit(1);
   }
 

@@ -7,9 +7,7 @@ const BLOCKING_CACHE_TTL = 30; // 30 seconds TTL
 const BLOCKING_RATE_LIMIT_WINDOW = 60; // 60 seconds
 const BLOCKING_RATE_LIMIT_MAX = 100; // Max 100 checks per minute per user
 
-/**
- * Normalize and validate a client-supplied pseudonymized username hash.
- */
+// Normalize and validate a client-supplied pseudonymized username hash.
 function normalizeUserHash(username) {
   if (typeof username !== 'string') return '';
   const trimmed = username.trim();
@@ -19,13 +17,7 @@ function normalizeUserHash(username) {
   return '';
 }
 
-/**
- * Check if sender is blocked by recipient
- * 
- * @param {string} senderUser - Sender username (pseudonymized hex)
- * @param {string} recipientUser - Recipient username (pseudonymized hex)
- * @returns {Promise<boolean>} - True if blocked, false otherwise
- */
+// Check if sender is blocked by recipient
 export async function checkBlocking(senderUser, recipientUser) {
   if (!senderUser || !recipientUser || senderUser === recipientUser) {
     return false;
@@ -49,51 +41,45 @@ export async function checkBlocking(senderUser, recipientUser) {
   try {
     await enforceBlockingRateLimit(senderUser);
 
-    // Validate client-supplied pseudonym hashes
     const senderHash = normalizeUserHash(senderUser);
     const recipientHash = normalizeUserHash(recipientUser);
     if (!senderHash || !recipientHash) {
       cryptoLogger.warn('[BLOCKING] Invalid pseudonym hash format');
-      return false; 
+      return false;
     }
 
     const cacheKey = `block:${senderHash}:${recipientHash}`;
-    
-    // Check Redis cache
+
     const cached = await getFromRedisCache(cacheKey);
     if (cached !== null) {
       return cached;
     }
-    
-    // Cache miss - check database with timing attack protection
+
     const startTime = Date.now();
     const isBlocked = await BlockingDatabase.isMessageBlocked(senderHash, recipientHash);
     const dbTime = Date.now() - startTime;
-    
+
     const minDelay = 50;
     if (dbTime < minDelay) {
       await new Promise(resolve => setTimeout(resolve, minDelay - dbTime));
     }
-    
+
     // Store in Redis cache
     await setInRedisCache(cacheKey, isBlocked);
-    
+
     return isBlocked;
-    
   } catch (error) {
     cryptoLogger.error('[BLOCKING] Error in blocking check', error);
     return false;
   }
 }
 
-/**
- * Enforce rate limiting on blocking checks
- */
+// Enforce rate limiting on blocking checks
 async function enforceBlockingRateLimit(username) {
   const rateLimitKey = `blocking:ratelimit:${Buffer.from(
     CryptoUtils.Hash.blake3(Buffer.from(username))
   ).toString('hex')}`;
-  
+
   await withRedisClient(async (client) => {
     const count = await client.incr(rateLimitKey);
     if (count === 1) {
@@ -105,9 +91,7 @@ async function enforceBlockingRateLimit(username) {
   });
 }
 
-/**
- * Get blocking status from Redis cache
- */
+// Get blocking status from Redis cache
 async function getFromRedisCache(cacheKey) {
   try {
     return await withRedisClient(async (client) => {
@@ -121,9 +105,7 @@ async function getFromRedisCache(cacheKey) {
   }
 }
 
-/**
- * Set blocking status in Redis cache
- */
+// Set blocking status in Redis cache
 async function setInRedisCache(cacheKey, isBlocked) {
   try {
     await withRedisClient(async (client) => {
@@ -134,15 +116,12 @@ async function setInRedisCache(cacheKey, isBlocked) {
   }
 }
 
-/**
- * Clear Redis cache for specific blocker/blocked relationships
- */
+// Clear Redis cache for specific blocker/blocked relationships
 export async function clearBlockingCache(blockerHash, blockedHashes = []) {
   try {
     await withRedisClient(async (client) => {
       const keys = [];
-      
-      // Clear all cache entries for this blocker's relationships
+
       if (blockerHash && Array.isArray(blockedHashes)) {
         for (const blockedHash of blockedHashes) {
           if (blockedHash) {
@@ -151,7 +130,7 @@ export async function clearBlockingCache(blockerHash, blockedHashes = []) {
           }
         }
       }
-      
+
       if (keys.length > 0) {
         await client.del(...keys);
         cryptoLogger.info('[BLOCKING] Cache cleared', { count: keys.length });
@@ -162,9 +141,7 @@ export async function clearBlockingCache(blockerHash, blockedHashes = []) {
   }
 }
 
-/**
- * Export cache configuration for monitoring
- */
+// Export cache configuration for monitoring
 export const BLOCKING_CONFIG = {
   BLOCKING_CACHE_TTL,
   BLOCKING_RATE_LIMIT_WINDOW,

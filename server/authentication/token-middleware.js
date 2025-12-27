@@ -8,13 +8,8 @@ import fs from 'fs/promises';
 import path from 'path';
 import { fileURLToPath } from 'url';
 
-/**
- * JWT authentication middleware
- */
+// JWT authentication middleware
 class TokenMiddleware {
-  /**
-   * Check rate limit with exponential backoff
-   */
   static async checkRateLimit(identifier) {
     const bucketKey = `auth:rl:${identifier}`;
     const blockKey = `auth:block:${identifier}`;
@@ -46,28 +41,23 @@ class TokenMiddleware {
     const startTime = Date.now();
     
     try {
-      // Rate limiting check
       const userId = request.headers['x-user-id'] || 'anonymous';
       await this.checkRateLimit(userId);
       
-      // Extract token from different possible sources
       const token = this.extractTokenFromRequest(request);
       
       if (!token) {
         return this.handleAuthFailure(ws, 'no_token', 'No authentication token provided');
       }
 
-      // Validate token format and extract payload
       const authResult = await this.validateToken(token, request);
       
       if (!authResult.valid) {
         return this.handleAuthFailure(ws, authResult.error, authResult.message, authResult.metadata);
       }
 
-      // Enhance connection with authentication context
       this.enhanceConnectionContext(ws, authResult, request);
 
-      // Log successful authentication
       await this.logAuthSuccess(authResult, request, 'websocket_auth');
 
       console.log(`[TOKEN-MW] WebSocket authenticated: user=${authResult.userId}, device=${authResult.deviceId}, duration=${Date.now() - startTime}ms`);
@@ -81,15 +71,11 @@ class TokenMiddleware {
     }
   }
 
-  /**
-   * HTTP request token authentication middleware
-   */
+  // HTTP request token authentication middleware
   static async authenticateHTTP(req, res, next) {
     try {
-      // Set security headers
       this.setSecurityHeaders(res);
       
-      // Rate limiting check
       const userId = req.headers['x-user-id'] || 'anonymous';
       await this.checkRateLimit(userId);
       
@@ -126,7 +112,6 @@ class TokenMiddleware {
         });
       }
 
-      // Add auth context to request
       req.auth = authResult;
       req.userId = authResult.userId;
       req.deviceId = authResult.deviceId;
@@ -145,18 +130,13 @@ class TokenMiddleware {
     }
   }
 
-  /**
-   * Validate JWT token with security checks
-   */
+  // Validate JWT token with security checks
   static async validateToken(token, request) {
     const startTime = Date.now();
     const randomDelay = crypto.randomInt(50, 150);
     
     try {
-      // Add random delay to prevent timing attacks
       await new Promise(resolve => setTimeout(resolve, randomDelay));
-      
-      // Parse token without verification first for blacklist check
       const unsafePayload = TokenService.parseTokenUnsafe(token);
       
       if (!unsafePayload) {
@@ -179,10 +159,8 @@ class TokenMiddleware {
         };
       }
 
-      // Verify token signature and claims
       const payload = await TokenService.verifyToken(token, 'access');
       
-      // TLS required and binding enforced always
       if (!request || !request.socket || !request.socket.encrypted) {
         return {
           valid: false,
@@ -219,7 +197,6 @@ class TokenMiddleware {
         };
       }
       
-      // security validations
       const securityCheck = await this.performSecurityChecks(payload, request);
       if (!securityCheck.valid) {
         return securityCheck;
@@ -290,9 +267,7 @@ class TokenMiddleware {
     }
   }
 
-  /**
-   * security checks on token
-   */
+  // Security checks on token
   static async performSecurityChecks(payload, request) {
     const now = Math.floor(Date.now() / 1000);
     
@@ -311,7 +286,6 @@ class TokenMiddleware {
     } catch (_e) {
     }
 
-    // Validate nonce for replay protection
     if (payload.nonce) {
       const nonceResult = await this.validateNonce(payload.nonce, payload.jti, payload.exp);
       if (!nonceResult.valid) {
@@ -319,7 +293,6 @@ class TokenMiddleware {
       }
     }
 
-    // Validate device binding if present
     if (payload.deviceId && request) {
       const deviceValidation = await this.validateDeviceBinding(payload, request);
       if (!deviceValidation.valid) {
@@ -327,11 +300,9 @@ class TokenMiddleware {
       }
     }
 
-    // Check risk score and enforce additional security measures
     if (payload.sec && payload.sec.risk === 'high') {
       console.warn(`[TOKEN-MW] High-risk token detected: ${payload.jti} for user ${payload.sub}`);
       
-      // Increment high-risk access counter in Redis
       await this.trackHighRiskAccess(payload.sub, payload.jti);
       
       // Check if user has exceeded high-risk access threshold
@@ -362,7 +333,6 @@ class TokenMiddleware {
       }
     }
 
-    // Validate scopes are not escalated
     if (!this.validateScopes(payload.scopes)) {
       return {
         valid: false,
@@ -375,9 +345,7 @@ class TokenMiddleware {
     return { valid: true };
   }
 
-  /**
-   * Validate nonce for replay attack protection
-   */
+  // Validate nonce for replay attack protection
   static async validateNonce(nonce, tokenId, expiresAt) {
     try {
       const nonceKey = `nonce:${nonce}`;
@@ -393,21 +361,17 @@ class TokenMiddleware {
         };
       }
       
-      // Mark nonce as used with TTL matching token expiry
       const ttlSeconds = Math.max(1, expiresAt - Math.floor(Date.now() / 1000));
       await this.markNonceUsed(nonceKey, ttlSeconds);
       
       return { valid: true };
     } catch (error) {
       console.error('[TOKEN-MW] Nonce validation error:', error);
-      // Fail open for nonce validation errors to avoid DoS
       return { valid: true };
     }
   }
   
-  /**
-   * Check if nonce has been used 
-   */
+  // Check if nonce has been used
   static async checkNonceUsed(nonceKey) {
     return await withRedisClient(async (client) => {
       const exists = await client.exists(nonceKey);
@@ -415,27 +379,21 @@ class TokenMiddleware {
     });
   }
   
-  /**
-   * Mark nonce as used with TTL 
-   */
+  // Mark nonce as used with TTL matching token expiry
   static async markNonceUsed(nonceKey, ttlSeconds) {
     await withRedisClient(async (client) => {
       await client.set(nonceKey, '1', 'EX', Math.max(1, ttlSeconds), 'NX');
     });
   }
   
-  /**
-   * Track high-risk token access in Redis
-   */
+  // Track high-risk token access in Redis
   static async trackHighRiskAccess(userId, tokenId) {
     const key = `highrisk:${userId}`;
     const now = Math.floor(Date.now() / 1000);
     
     try {
       await withRedisClient(async (client) => {
-        // Add timestamp to sorted set (score = timestamp)
         await client.zadd(key, now, `${tokenId}:${now}`);
-        // Set expiry to 1 hour
         await client.expire(key, 3600);
       });
     } catch (error) {
@@ -443,10 +401,7 @@ class TokenMiddleware {
     }
   }
   
-  /**
-   * Check if user has exceeded high-risk access threshold
-   * Threshold: More than 10 high-risk accesses in 10 minutes
-   */
+  // Check if user has exceeded high-risk access threshold
   static async checkHighRiskThreshold(userId) {
     const key = `highrisk:${userId}`;
     const now = Math.floor(Date.now() / 1000);
@@ -458,9 +413,8 @@ class TokenMiddleware {
         const count = await client.zcount(key, tenMinutesAgo, now);
         
         if (count > 10) {
-          // Set a cooldown period
           const cooldownKey = `highrisk:cooldown:${userId}`;
-          const cooldownSeconds = 300; // 5 minutes
+          const cooldownSeconds = 300;
           await client.set(cooldownKey, '1', 'EX', cooldownSeconds, 'NX');
           
           return {
@@ -490,7 +444,6 @@ class TokenMiddleware {
         const count = await client.incr(key);
         
         if (count === 1) {
-          // Set expiry to 60 seconds on first request
           await client.expire(key, 60);
         }
         
@@ -513,9 +466,7 @@ class TokenMiddleware {
     }
   }
   
-  /**
-   * Validate device binding for more security
-   */
+  // Validate device binding
   static async validateDeviceBinding(payload, request) {
     if (!payload.device_binding) {
       return { valid: true };
@@ -550,9 +501,7 @@ class TokenMiddleware {
     return { valid: true };
   }
 
-  /**
-   * Check if token needs refresh
-   */
+  // Check if token needs refresh
   static checkTokenRefreshNeeds(payload) {
     const now = Math.floor(Date.now() / 1000);
     const timeToExpiration = payload.exp - now;
@@ -563,31 +512,25 @@ class TokenMiddleware {
     const needsRefresh = timeToExpiration <= refreshThreshold;
     
     let urgency = 'none';
-    if (timeToExpiration <= 60) urgency = 'critical'; // Less than 1 minute
-    else if (timeToExpiration <= 300) urgency = 'high'; // Less than 5 minutes
+    if (timeToExpiration <= 60) urgency = 'critical';
+    else if (timeToExpiration <= 300) urgency = 'high';
     else if (needsRefresh) urgency = 'medium';
     
     return { needsRefresh, urgency, timeToExpiration };
   }
 
-  /**
-   * Handle token refresh for WebSocket connections
-   */
+  // Handle token refresh for WebSocket connections
   static async handleTokenRefresh(ws, refreshToken) {
     try {
-      // Verify refresh token
       const refreshPayload = await TokenService.verifyToken(refreshToken, 'refresh');
       
-      // Check if refresh token is still valid in database
       const tokenRecord = await TokenDatabase.getRefreshToken(refreshPayload.jti, refreshToken);
       if (!tokenRecord) {
         throw new Error('Refresh token not found or invalid');
       }
 
-      // Generate new access token
       const newTokens = await TokenService.refreshAccessToken(refreshToken);
       
-      // Send new tokens to client
       await sendSecureMessage(ws, {
         type: 'token_refreshed',
         accessToken: newTokens.accessToken,
@@ -620,9 +563,7 @@ class TokenMiddleware {
     }
   }
 
-  /**
-   * Extract token from various request sources
-   */
+  // Extract token from various request sources
   static extractTokenFromRequest(request) {
     const authHeader = request.headers.authorization;
     if (!authHeader || !authHeader.startsWith('Bearer ')) {
@@ -639,9 +580,7 @@ class TokenMiddleware {
     return authHeader.slice(7);
   }
 
-  /**
-   * Extract device context from request
-   */
+  // Extract device context from request
   static extractDeviceContext(_request) {
     return {
       timestamp: Math.floor(Date.now() / 86400000)
@@ -649,9 +588,7 @@ class TokenMiddleware {
   }
 
 
-  /**
-   * Calculate device binding hash
-   */
+  // Calculate device binding hash
   static async calculateDeviceBinding(deviceId, context) {
     const bindingData = {
       deviceId,
@@ -674,20 +611,16 @@ class TokenMiddleware {
     return Buffer.from(mac).toString('hex').slice(0, 16);
   }
   
-  /**
-   * Detect anomalous token usage patterns (device-based)
-   */
+  // Detect anomalous token usage patterns
   static async detectAnomalousUsage(authResult, request) {
     try {
       const usage = await this.getTokenUsagePattern(authResult.tokenId);
       const anomalies = [];
       
-      // Detect device changes - check if current device differs from token's device
       if (authResult.deviceId && request.deviceId && authResult.deviceId !== request.deviceId) {
         anomalies.push('device_mismatch');
       }
       
-      // Unusual request rate (possible automated attack)
       if (usage.requestsLastHour > 1000) {
         anomalies.push('high_request_rate');
       }
@@ -702,7 +635,6 @@ class TokenMiddleware {
           securityFlags: JSON.stringify({ anomalies })
         });
         
-        // Trigger more security measures for device mismatch
         if (anomalies.includes('device_mismatch')) {
           return { requiresReauth: true, reason: 'device_changed', anomalies };
         }
@@ -715,9 +647,7 @@ class TokenMiddleware {
     }
   }
   
-  /**
-   * Get token usage pattern from auth audit logs
-   */
+  // Get token usage pattern from auth audit logs
   static async getTokenUsagePattern(tokenId) {
     try {
       const now = Math.floor(Date.now() / 1000);
@@ -756,7 +686,6 @@ class TokenMiddleware {
       };
     } catch (error) {
       console.error('[TOKEN-MW] Failed to get token usage pattern:', error);
-      // Return safe defaults on error
       return {
         lastSeen: 0,
         requestsLastHour: 0,
@@ -764,9 +693,7 @@ class TokenMiddleware {
     }
   }
   
-  /**
-   * Get device binding secret for HMAC
-   */
+  // Get device binding secret for HMAC
   static async getDeviceBindingSecret() {
     const env = process.env.DEVICE_BINDING_SECRET;
     if (env && Buffer.from(env).length >= 32) return Buffer.from(env);
@@ -783,9 +710,7 @@ class TokenMiddleware {
     return strong;
   }
 
-  /**
-   * Validate token scopes
-   */
+  // Validate token scopes
   static validateScopes(scopes) {
     if (!Array.isArray(scopes)) return false;
     
@@ -801,9 +726,7 @@ class TokenMiddleware {
     );
   }
 
-  /**
-   *  better the WebSocket connection with authentication context
-   */
+  // Better the WebSocket connection with authentication context
   static enhanceConnectionContext(ws, authResult) {
     ws.auth = authResult;
     ws.userId = authResult.userId;
@@ -813,16 +736,13 @@ class TokenMiddleware {
     ws.authenticated = true;
     ws.authTime = Date.now();
     
-    // Set up token refresh monitoring
     if (authResult.needsRefresh) {
       ws.needsTokenRefresh = true;
       ws.refreshUrgency = authResult.refreshUrgency;
     }
   }
 
-  /**
-   * Handle authentication failures
-   */
+  // Handle authentication failures
   static async handleAuthFailure(ws, error, message, metadata = {}) {
     const response = {
       type: 'auth_error',
@@ -845,9 +765,7 @@ class TokenMiddleware {
     console.warn(`[TOKEN-MW] WebSocket auth failure: ${error} - ${message}`);
   }
 
-  /**
-   * Set security headers for HTTP responses
-   */
+  // Set security headers for HTTP responses
   static setSecurityHeaders(res) {
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('X-Frame-Options', 'DENY');
@@ -859,9 +777,7 @@ class TokenMiddleware {
     res.setHeader('X-Robots-Tag', 'noindex, nofollow');
   }
   
-  /**
-   * Validate CSRF token for state-changing operations
-   */
+  // Validate CSRF token for state-changing operations
   static validateCSRFToken(req) {
     const csrfToken = req.headers['x-csrf-token'];
     const sessionCsrf = req.session?.csrfToken;
@@ -877,9 +793,7 @@ class TokenMiddleware {
     return { valid: true };
   }
   
-  /**
-   * Constant-time string comparison to prevent timing attacks
-   */
+  // Constant-time string comparison to prevent timing attacks
   static constantTimeCompare(a, b) {
     if (!a || !b) return false;
     if (a.length !== b.length) return false;
@@ -891,9 +805,7 @@ class TokenMiddleware {
     return result === 0;
   }
   
-  /**
-   * Sanitize error messages to prevent information leakage
-   */
+  // Sanitize error messages to prevent information leakage
   static sanitizeErrorForClient(error) {
     const genericMessage = 'Authentication failed';
     
@@ -912,7 +824,6 @@ class TokenMiddleware {
       }
     }
     
-    // Log full error internally, return generic to client
     console.error('[TOKEN-MW] Auth error:', error);
     return { 
       message: genericMessage, 
@@ -921,9 +832,7 @@ class TokenMiddleware {
     };
   }
   
-  /**
-   * Get appropriate HTTP status code for auth errors
-   */
+  // Get appropriate HTTP status code for auth errors
   static getHTTPStatusFromError(error) {
     const statusMap = {
       'no_token': 401,
@@ -942,9 +851,7 @@ class TokenMiddleware {
     return statusMap[error] || 401;
   }
 
-  /**
-   * Log successful authentication
-   */
+  // Log successful authentication
   static async logAuthSuccess(authResult, request, action) {
     const context = this.extractDeviceContext(request);
     
@@ -960,9 +867,7 @@ class TokenMiddleware {
     });
   }
 
-  /**
-   * Get TLS fingerprint for session binding
-   */
+  // Get TLS fingerprint for session binding
   static getTLSFingerprint(request) {
     const socket = (request && request.socket) ? request.socket : request;
     if (!socket || !socket.encrypted) {
@@ -996,9 +901,7 @@ class TokenMiddleware {
   }
   
 
-  /**
-   * Create authentication context for new connections
-   */
+  // Create authentication context for new connections
   static async createAuthContext(_userId, _deviceId, _request) {
     const deviceFingerprint = null;
     const securityContext = {};

@@ -10,7 +10,6 @@ import { sendPQEncryptedResponse, sendSecureMessage, createPQResponseSender } fr
 import { handleBundlePublish, handleBundleRequest, handleBundleFailure } from '../messaging/libsignal-handler.js';
 import { rateLimitMiddleware } from '../rate-limiting/rate-limit-middleware.js';
 import { logger as cryptoLogger } from '../crypto/crypto-logger.js';
-import { withRedisClient } from '../presence/presence.js';
 
 const KYBER_PUBLIC_KEY_LENGTH = 1568;
 const DILITHIUM_PUBLIC_KEY_LENGTH = 2592;

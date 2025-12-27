@@ -6,7 +6,7 @@
  *   node scripts/install-deps.cjs --client
  *   node scripts/install-deps.cjs --server
  * Components:
- *   haproxy, tailscale, jq, redis, postgres, cloudflared
+ *   haproxy, tailscale, jq, redis, postgres, cloudflared, docker
  *   all  -> installs a reasonable set: haproxy, tailscale, jq
  */
 
@@ -197,7 +197,6 @@ async function installRedisTlsLocal() {
     return false;
   }
 
-  // Install into server/bin and mark executable
   try {
     await require('fs/promises').mkdir(binDir, { recursive: true, mode: 0o755 });
     fs.copyFileSync(builtServer, redisBin);
@@ -462,16 +461,13 @@ async function installComponent(name) {
         const tmpRoot = await require('fs/promises').mkdtemp(path.join(os.tmpdir(), 'oqs-provider-'));
         const srcDir = path.join(tmpRoot, 'src');
         try {
-          // Clone latest main branch
           await execFileAsync('git', ['clone', '--depth', '1', 'https://github.com/open-quantum-safe/oqs-provider.git', srcDir], { stdio: 'inherit' });
 
-          // Build
           const buildDir = path.join(srcDir, '_build');
           await require('fs/promises').mkdir(buildDir, { recursive: true });
           await execFileAsync('cmake', ['-S', '..', '-B', '.'], { cwd: buildDir, stdio: 'inherit' });
           await execFileAsync('cmake', ['--build', '.'], { cwd: buildDir, stdio: 'inherit' });
 
-          // Install
           const installed = await trySudo(['cmake', '--install', '.'], { cwd: buildDir });
           if (!installed) {
             console.log('[INFO] Run: cd', buildDir, '&& sudo cmake --install .');
@@ -519,7 +515,6 @@ async function installComponent(name) {
       return false;
     }
     case 'electron': {
-      // Check if electron is installed
       const repoRoot = path.resolve(__dirname, '..');
 
       const findElectronPath = () => {
@@ -574,7 +569,6 @@ async function installComponent(name) {
       }
     }
     case 'libevent': {
-      // Check if libevent is installed
       if (plat === 'linux') {
         if (pmHas('apt-get')) {
           try {
@@ -601,6 +595,73 @@ async function installComponent(name) {
         }
       }
 
+      return false;
+    }
+    case 'docker': {
+      let isDocker = fs.existsSync('/.dockerenv');
+      if (!isDocker && fs.existsSync('/proc/self/cgroup')) {
+        try {
+          const cgroup = fs.readFileSync('/proc/self/cgroup', 'utf8');
+          isDocker = cgroup.includes('docker') || cgroup.includes('buildkit');
+        } catch { }
+      }
+      if (!isDocker && (process.env.container === 'docker' || process.env.CI_DOCKER_BUILD)) {
+        isDocker = true;
+      }
+
+      if (isDocker) {
+        console.log('[INFO] Running inside Docker (build or run). Skipping Docker installation.');
+        return true;
+      }
+      if (findInPath('docker')) return true;
+      if (plat === 'linux') {
+        if (pmHas('apt-get')) {
+          try {
+            await trySudo(['apt-get', 'update']);
+            await trySudo(['apt-get', 'install', '-y', 'ca-certificates', 'curl', 'gnupg']);
+            await execFileAsync('curl', ['-fsSL', 'https://download.docker.com/linux/ubuntu/gpg'], { stdio: 'pipe' });
+            await trySudo(['sh', '-c', 'curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg']);
+            await trySudo(['sh', '-c', 'echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null']);
+            await trySudo(['apt-get', 'update']);
+            return await trySudo(['apt-get', 'install', '-y', 'docker-ce', 'docker-ce-cli', 'containerd.io']);
+          } catch (e) {
+            return await installLinux('docker.io') || await installLinux('docker-ce');
+          }
+        }
+        if (pmHas('dnf')) {
+          try {
+            await trySudo(['dnf', 'install', '-y', 'dnf-plugins-core']);
+            await trySudo(['dnf', 'config-manager', '--add-repo', 'https://download.docker.com/linux/fedora/docker-ce.repo']);
+            return await trySudo(['dnf', 'install', '-y', 'docker-ce', 'docker-ce-cli', 'containerd.io']);
+          } catch (e) {
+            return await installLinux('docker');
+          }
+        }
+        if (pmHas('yum')) {
+          try {
+            await trySudo(['yum', 'install', '-y', 'yum-utils']);
+            await trySudo(['yum-config-manager', '--add-repo', 'https://download.docker.com/linux/centos/docker-ce.repo']);
+            return await trySudo(['yum', 'install', '-y', 'docker-ce', 'docker-ce-cli', 'containerd.io']);
+          } catch (e) {
+            return await installLinux('docker');
+          }
+        }
+        if (pmHas('pacman')) {
+          return await trySudo(['pacman', '-S', '--noconfirm', 'docker']);
+        }
+        if (pmHas('zypper')) {
+          return await trySudo(['zypper', '--non-interactive', 'install', 'docker']);
+        }
+        if (pmHas('apk')) {
+          return await trySudo(['apk', 'add', '--no-cache', 'docker']);
+        }
+        // Generic fallback
+        return await installLinux('docker.io') || await installLinux('docker-ce') || await installLinux('docker');
+      }
+      if (plat === 'darwin' && pmHas('brew')) {
+        return await tryExec('brew', ['install', '--cask', 'docker']);
+      }
+      console.log('[INFO] Install Docker from https://docs.docker.com/get-docker/');
       return false;
     }
     case 'rust': {
@@ -642,12 +703,11 @@ async function installComponent(name) {
     process.exit(1);
   }
 
-  // Check for help flag
   if (args.length === 0 || args.some(a => a === '-h' || a === '--help')) {
     console.log('Usage: node scripts/install-deps.cjs <component...>');
     console.log('       node scripts/install-deps.cjs --client');
     console.log('       node scripts/install-deps.cjs --server');
-    console.log('Components: haproxy, tailscale, jq, redis, postgres, cloudflared, nodejs, curl, wget, python3, openssl, build-tools, cmake, ninja, liboqs, oqs-provider, pnpm, electron, libevent, rust');
+    console.log('Components: haproxy, tailscale, jq, redis, postgres, cloudflared, docker, nodejs, curl, wget, python3, openssl, build-tools, cmake, ninja, liboqs, oqs-provider, pnpm, electron, libevent, rust');
     console.log('Presets:');
     console.log('  all      - All server and edge dependencies');
     console.log('  server   - Server runtime dependencies');
@@ -658,8 +718,8 @@ async function installComponent(name) {
   }
 
   const presets = {
-    all: ['git', 'nodejs', 'redis', 'postgres', 'python3', 'openssl', 'build-tools', 'cmake', 'ninja', 'liboqs', 'oqs-provider', 'haproxy', 'tailscale', 'jq', 'cloudflared'],
-    server: ['nodejs', 'redis', 'postgres', 'python3', 'openssl', 'build-tools', 'tailscale'],
+    all: ['git', 'nodejs', 'redis', 'postgres', 'python3', 'openssl', 'build-tools', 'cmake', 'ninja', 'liboqs', 'oqs-provider', 'haproxy', 'tailscale', 'jq', 'cloudflared', 'docker'],
+    server: ['nodejs', 'redis', 'postgres', 'python3', 'openssl', 'build-tools', 'tailscale', 'docker'],
     client: ['nodejs', 'git', 'curl', 'wget', 'pnpm', 'libevent', 'rust', 'build-tools', 'electron'],
     edge: ['haproxy', 'cloudflared'],
     quantum: ['git', 'openssl', 'build-tools', 'cmake', 'ninja', 'liboqs', 'oqs-provider']

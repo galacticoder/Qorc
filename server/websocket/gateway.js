@@ -10,12 +10,7 @@ import { sendSecureMessage } from '../messaging/pq-envelope-handler.js';
 import fs from 'fs';
 import { gzipSync } from 'zlib';
 
-/**
- * Attach WebSocket gateway
- * 
- * @param {Object} params - Gateway configuration
- * @returns {Object} - Gateway control interface
- */
+// Attach WebSocket gateway
 export function attachGateway({
   wss,
   serverHybridKeyPair,
@@ -43,7 +38,7 @@ export function attachGateway({
   } = config || {};
 
   const isTestEnv = false;
-  
+
   const stats = {
     connectionsOpened: 0,
     connectionsClosed: 0,
@@ -53,7 +48,7 @@ export function attachGateway({
   };
   let ttyStream = null;
   let lastProgressUpdate = 0;
-  
+
 
   if (isTestEnv) {
     try {
@@ -67,16 +62,16 @@ export function attachGateway({
     const now = Date.now();
     if (now - lastProgressUpdate < 50 && stats.connectionsClosed < stats.connectionsOpened) return;
     lastProgressUpdate = now;
-    
+
     const total = stats.connectionsOpened;
     const closed = stats.connectionsClosed;
     const percent = total > 0 ? Math.floor((closed / total) * 100) : 0;
     const barLength = 30;
     const filled = Math.floor((percent / 100) * barLength);
     const bar = '█'.repeat(filled) + '░'.repeat(barLength - filled);
-    
+
     ttyStream.write(`\r[WS] ${bar} ${closed}/${total} | ${stats.rateLimitExceeded} rate-limited | ${stats.totalMessages} msgs`);
-    
+
     if (closed === total) {
       ttyStream.write('\n');
     }
@@ -85,7 +80,7 @@ export function attachGateway({
 
   const localDeliveryMap = new Map(); // Per-server: username -> Set<ws objects>
   const REDIS_DELIVERY_KEY_PREFIX = 'ws:delivery:';
-  const REDIS_CONNECTION_TTL = 3600; // 1 hour TTL
+  const REDIS_CONNECTION_TTL = 3600;
 
   const SESSION_REFRESH_MIN_INTERVAL_MS = 60_000;
   const DELIVERY_STALE_THRESHOLD_MS = 5 * 60_000;
@@ -148,9 +143,9 @@ export function attachGateway({
     }
 
     if (!serverHybridKeyPair ||
-        !serverHybridKeyPair.kyber?.publicKey ||
-        !serverHybridKeyPair.dilithium?.publicKey ||
-        !serverHybridKeyPair.x25519?.publicKey) {
+      !serverHybridKeyPair.kyber?.publicKey ||
+      !serverHybridKeyPair.dilithium?.publicKey ||
+      !serverHybridKeyPair.x25519?.publicKey) {
       throw new Error('Server hybrid key pair not properly initialized');
     }
 
@@ -195,25 +190,23 @@ export function attachGateway({
     return { chunks: cachedPublicKeyChunks, logInfo: cachedPublicKeyLogInfo };
   };
 
-  /**
-   * Add local WebSocket connection to delivery map
-   */
+  // Add local WebSocket connection to delivery map
   const addLocalConnection = async (username, ws) => {
     if (!username || !ws) return;
-    
+
     let set = localDeliveryMap.get(username);
     if (!set) {
       set = new Set();
       localDeliveryMap.set(username, set);
     }
     set.add(ws);
-    
+
     logger.debug('[WS] Added local connection', {
       username: username.slice(0, 4) + '...',
       sessionId: ws._sessionId?.slice(0, 8) + '...',
       totalConnections: set.size
     });
-    
+
     // Register in Redis for distributed delivery
     if (ws._sessionId) {
       try {
@@ -239,24 +232,22 @@ export function attachGateway({
     }
   };
 
-  /**
-   * Remove local WebSocket connection from delivery map
-   */
+  // Remove local WebSocket connection from delivery map
   const removeLocalConnection = async (username, ws) => {
     if (!username || !ws) return;
-    
+
     const set = localDeliveryMap.get(username);
     if (set) {
       set.delete(ws);
       if (set.size === 0) localDeliveryMap.delete(username);
-      
+
       logger.debug('[WS] Removed local connection', {
         username: username.slice(0, 4) + '...',
         sessionId: ws._sessionId?.slice(0, 8) + '...',
         remainingConnections: set.size
       });
     }
-    
+
     // Remove from Redis registry
     if (ws._sessionId) {
       try {
@@ -272,21 +263,17 @@ export function attachGateway({
     }
   };
 
-  /**
-   * Get local WebSocket connections for a username
-   */
+  // Get local WebSocket connections for a username
   const getLocalConnections = (username) => {
     if (!username) return null;
     const set = localDeliveryMap.get(username);
     return set ? new Set(set) : null;
   };
-  
-  /**
-   * Get all server instances that have connections for a username
-   */
+
+  // Get all server instances that have connections for a username
   const getDistributedConnectionServers = async (username) => {
     if (!username) return [];
-    
+
     try {
       return await withRedisClient(async (client) => {
         const key = `${REDIS_DELIVERY_KEY_PREFIX}${username}`;
@@ -304,9 +291,7 @@ export function attachGateway({
     }
   };
 
-  /**
-   * Handle incoming WebSocket message
-   */
+  // Handle incoming WebSocket message
   const handleMessage = async ({ ws, sessionId, message, parsed }) => {
     if (typeof onMessage === 'function') {
       try {
@@ -331,7 +316,7 @@ export function attachGateway({
         }
         ws.isAlive = false;
         try {
-          ws.ping(() => {});
+          ws.ping(() => { });
         } catch { }
         maybeRefreshSession(ws, 'heartbeat');
       } catch (error) {
@@ -431,8 +416,8 @@ export function attachGateway({
       if (hdrId && typeof hdrId === 'string') {
         ws.deviceId = hdrId.trim().slice(0, 64);
       }
-    } catch (_) {}
-    
+    } catch (_) { }
+
     try {
       const allowed = await rateLimiter.checkConnectionLimit(ws);
       if (!allowed) {
@@ -483,8 +468,7 @@ export function attachGateway({
 
     try {
       const { chunks: cachedChunks, logInfo } = getCachedPublicKeyChunks();
-      
-      // Check if connection is still open before sending
+
       if (ws.readyState !== 1) {
         logger.warn('[WS] Connection closed before key exchange', {
           sessionId: sessionId?.slice(0, 8) + '...',
@@ -499,8 +483,7 @@ export function attachGateway({
         readyState: ws.readyState,
         bufferedAmount: ws.bufferedAmount
       });
-      
-      // Send chunks
+
       for (let i = 0; i < cachedChunks.totalChunks; i++) {
         const chunkBase64 = cachedChunks.chunks[i];
         const chunkEnvelope = JSON.stringify({
@@ -522,7 +505,7 @@ export function attachGateway({
         });
       }
     } catch (error) {
-      logger.error('[WS] Failed to send server public keys', { 
+      logger.error('[WS] Failed to send server public keys', {
         sessionId: sessionId?.slice(0, 8) + '...',
         error: error.message,
         stack: error.stack
@@ -565,7 +548,7 @@ export function attachGateway({
             quota: bandwidthQuota,
             used: bandwidthUsed,
           });
-        } catch {}
+        } catch { }
         ws.close(1008, 'Bandwidth quota exceeded');
         return;
       }
@@ -608,7 +591,7 @@ export function attachGateway({
 
       try {
         const messageResult = await processWebSocketMessage(sessionId, messageString);
-        
+
         if (!messageResult || typeof messageResult !== 'object') {
           throw new Error('Invalid message result structure');
         }
@@ -622,7 +605,7 @@ export function attachGateway({
             sessionId: sessionId?.slice(0, 8) + '...',
             progress: Math.round(messageResult.progress * 100) + '%'
           });
-        
+
           return;
         }
 
@@ -653,7 +636,7 @@ export function attachGateway({
     ws.on('close', async () => {
       let username = ws._username;
       let wasAuthenticated = ws.clientState?.hasAuthenticated;
-      
+
       if (sessionId) {
         try {
           const state = await ConnectionStateManager.getState(sessionId);
@@ -677,7 +660,7 @@ export function attachGateway({
 
       if (username) {
         await removeLocalConnection(username, ws);
-        
+
         if (wasAuthenticated) {
           try {
             await presenceService.setUserOffline(username, ws._sessionId || sessionId);
@@ -686,9 +669,9 @@ export function attachGateway({
               sessionId: sessionId?.slice(0, 8) + '...'
             });
           } catch (e) {
-            logger.warn('[WS] Failed to mark user offline', { 
+            logger.warn('[WS] Failed to mark user offline', {
               username: username?.slice(0, 4) + '...',
-              error: e?.message 
+              error: e?.message
             });
           }
         }
@@ -713,7 +696,7 @@ export function attachGateway({
 
       const duration = Date.now() - connectionOpenedAt;
       stats.connectionsClosed++;
-      
+
       logger.info('[WS] Connection closed', {
         sessionId: sessionId?.slice(0, 8) + '...',
         duration: `${duration}ms`,

@@ -2,11 +2,8 @@ import { withRedisClient } from '../presence/presence.js';
 import { logger as cryptoLogger } from '../crypto/crypto-logger.js';
 import { CryptoUtils } from '../crypto/unified-crypto.js';
 
-/**
- */
-
 const REDIS_PQ_SESSION_PREFIX = 'pq:session:';
-const REDIS_PQ_SESSION_TTL = 3600; // 1 hour TTL
+const REDIS_PQ_SESSION_TTL = 3600;
 const REDIS_PQ_COUNTER_PREFIX = 'pq:counter:';
 
 function clampInt(value, { min, max, defaultValue }) {
@@ -54,10 +51,6 @@ function setCachedSession(sessionId, session) {
     if (!oldestKey) break;
     pqSessionCache.delete(oldestKey);
   }
-}
-
-function deleteCachedSession(sessionId) {
-  pqSessionCache.delete(sessionId);
 }
 
 // Session key encryption configuration
@@ -150,11 +143,7 @@ async function decryptSessionKey(encoded, sessionId, direction) {
   return new Uint8Array(plaintext);
 }
 
-/**
- * Store PQ session in Redis
- * @param {string} sessionId - Session identifier
- * @param {Object} sessionData - Session data containing keys and metadata
- */
+// Store PQ session in Redis
 export async function storePQSession(sessionId, sessionData) {
   if (!sessionId || !sessionData) {
     throw new Error('Session ID and data are required');
@@ -196,11 +185,7 @@ export async function storePQSession(sessionId, sessionData) {
   });
 }
 
-/**
- * Retrieve PQ session from Redis
- * @param {string} sessionId - Session identifier
- * @returns {Object|null} - Session data or null if not found
- */
+// Retrieve PQ session from Redis
 export async function getPQSession(sessionId) {
   if (!sessionId) {
     return null;
@@ -214,7 +199,7 @@ export async function getPQSession(sessionId) {
   return await withRedisClient(async (client) => {
     const key = `${REDIS_PQ_SESSION_PREFIX}${sessionId}`;
     const data = await client.get(key);
-    
+
     if (!data) {
       cryptoLogger.debug('[PQ-SESSION] Session not found in Redis', {
         sessionId: sessionId.slice(0, 16) + '...',
@@ -248,34 +233,6 @@ export async function getPQSession(sessionId) {
     setCachedSession(sessionId, session);
     return session;
   });
-}
-
-/**
- * Update PQ session counter (for replay protection)
- * @param {string} sessionId - Session identifier
- * @param {number} counter - New counter value
- */
-export async function updatePQSessionCounter(sessionId, counter) {
-  if (!sessionId) {
-    return;
-  }
-
-  try {
-    const cached = getCachedSession(sessionId);
-    if (cached) {
-      cached.counter = counter;
-      setCachedSession(sessionId, cached);
-    }
-  } catch {
-  }
-
-  try {
-    await withRedisClient(async (client) => {
-      const counterKey = `${REDIS_PQ_COUNTER_PREFIX}${sessionId}`;
-      await client.setex(counterKey, REDIS_PQ_SESSION_TTL, String(counter));
-    });
-  } catch {
-  }
 }
 
 export async function incrementPQSessionCounter(sessionId) {
@@ -316,59 +273,3 @@ export async function incrementPQSessionCounter(sessionId) {
   return nextCounter;
 }
 
-/**
- * Delete PQ session
- * @param {string} sessionId - Session identifier
- */
-export async function deletePQSession(sessionId) {
-  if (!sessionId) {
-    return;
-  }
-
-  deleteCachedSession(sessionId);
-
-  await withRedisClient(async (client) => {
-    const key = `${REDIS_PQ_SESSION_PREFIX}${sessionId}`;
-    await client.del(key);
-    const counterKey = `${REDIS_PQ_COUNTER_PREFIX}${sessionId}`;
-    await client.del(counterKey);
-  });
-
-  cryptoLogger.info('[PQ-SESSION] Deleted from Redis', {
-    sessionId: sessionId.slice(0, 16) + '...',
-    serverId: process.env.SERVER_ID
-  });
-}
-
-/**
- * Get all PQ session keys from Redis (for monitoring/debugging)
- */
-export async function getAllPQSessionKeys() {
-  return await withRedisClient(async (client) => {
-    const pattern = `${REDIS_PQ_SESSION_PREFIX}*`;
-    let cursor = '0';
-    const out = [];
-
-    do {
-      const [nextCursor, keys] = await client.scan(cursor, 'MATCH', pattern, 'COUNT', 200);
-      cursor = nextCursor;
-      for (const key of keys || []) {
-        out.push(key.replace(REDIS_PQ_SESSION_PREFIX, ''));
-      }
-    } while (cursor !== '0' && out.length < 100_000);
-
-    return out;
-  });
-}
-
-/**
- * Get statistics about PQ sessions
- */
-export async function getPQSessionStats() {
-  const keys = await getAllPQSessionKeys();
-  return {
-    sessionCount: keys.length,
-    redisPrefix: REDIS_PQ_SESSION_PREFIX,
-    sessionTTL: REDIS_PQ_SESSION_TTL
-  };
-}

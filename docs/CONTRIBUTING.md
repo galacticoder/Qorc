@@ -32,8 +32,8 @@ This project and everyone participating in it is governed by the [Qor Code of Co
     ```
 
 4.  **Start the Application:**
-    *   **Server:** `node scripts/start-server.cjs`
-    *   **Client:** `node scripts/start-client.cjs`
+    *   **Server:** `node scripts/start-docker.cjs server`
+    *   **Client:** `node scripts/start-docker.cjs client`
 
 ## Development Workflow
 

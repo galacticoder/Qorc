@@ -3,7 +3,6 @@ set -e
 
 echo "[REDIS-ENTRYPOINT] Starting Redis TLS setup..."
 
-# Check if certificates exist in the mounted volume
 if [ ! -f /certs/redis-ca.crt ] || [ ! -f /certs/redis.crt ] || [ ! -f /certs/redis-client.crt ]; then
   echo "[REDIS-ENTRYPOINT] Generating TLS certificates..."
   
@@ -17,7 +16,7 @@ if [ ! -f /certs/redis-ca.crt ] || [ ! -f /certs/redis.crt ] || [ ! -f /certs/re
   openssl req -new -key /certs/redis.key \
     -out /certs/redis.csr -subj "/CN=redis"
 
-# Create SANs config
+# SANs config
 cat > /certs/redis-san.cnf <<EOF
 [req]
 distinguished_name = req_distinguished_name

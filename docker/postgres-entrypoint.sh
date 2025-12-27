@@ -6,7 +6,6 @@ echo "[POSTGRES-ENTRYPOINT] Starting Postgres TLS setup..."
 CERT_DIR="/var/lib/postgresql/certs"
 mkdir -p "$CERT_DIR"
 
-# Check if certificates exist
 if [ ! -f "$CERT_DIR/server.crt" ] || [ ! -f "$CERT_DIR/server.key" ] || [ ! -f "$CERT_DIR/root.crt" ]; then
   echo "[POSTGRES-ENTRYPOINT] Generating TLS certificates..."
   

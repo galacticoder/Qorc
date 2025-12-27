@@ -31,9 +31,8 @@ const NONCE_SIZE = 36;
 const GCM_IV_SIZE = 12;
 const MAC_SIZE = 32;
 
-/**
- * Decrypt a pq-envelope
- */
+
+// Decrypt a pq-envelope
 async function decryptEnvelope(envelope, recvKeyBase64) {
   const modules = await loadCryptoModules();
   if (!modules) return null;
@@ -91,9 +90,7 @@ async function decryptEnvelope(envelope, recvKeyBase64) {
   }
 }
 
-/**
- * Encrypt a payload into a pq-envelope
- */
+// Encrypt a payload into a pq-envelope
 async function encryptEnvelope(payload, sendKeyBase64, sessionId, counter = 0, sessionFingerprint = null) {
   const modules = await loadCryptoModules();
   if (!modules) return null;
@@ -161,9 +158,7 @@ async function encryptEnvelope(payload, sendKeyBase64, sessionId, counter = 0, s
   }
 }
 
-/**
- * Get the inner message type from a payload
- */
+// Get the inner message type from a payload
 function getMessageType(decrypted) {
   if (!decrypted) return '';
   
@@ -194,9 +189,7 @@ function getMessageType(decrypted) {
   return innerData?.type || innerData?.signalType || outerType;
 }
 
-/**
- * Check if a message type should show a notification
- */
+// Check if a message type should show a notification
 function shouldNotify(messageType, decrypted) {
   const skipTypes = [
     'typing-start', 'typing-stop', 'typing-indicator',
@@ -219,7 +212,7 @@ function shouldNotify(messageType, decrypted) {
     messageType === 'file-message' ||
     (innerData?.content && typeof innerData.content === 'string' && innerData.content.length > 0);
   const isCallSignal = messageType.startsWith('call-') ||
-    ['call-offer', 'call-answer', 'call-ice', 'call-signal', 'call-end'].includes(messageType);
+    ['call-offer', 'call-answer', 'call-ice', 'call-signal'].includes(messageType);
 
   return isActualMessage || isCallSignal;
 }

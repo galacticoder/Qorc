@@ -13,10 +13,10 @@ const { extract } = require('tar');
 
 const { resolveTorDownloadInfo, expertBundleFileName } = require('./tor-download-info.cjs');
 const OUT_DIR = path.resolve(process.cwd(), 'tor-bundles');
-
 function log(...args) { console.log('[prepare-tor]', ...args); }
 function logErr(...args) { console.error('[prepare-tor]', ...args); }
 
+// Get platform info
 function hostPlatformToken() {
   const p = process.platform;
   const a = process.arch;
@@ -26,6 +26,7 @@ function hostPlatformToken() {
   throw new Error(`Unsupported host platform: ${p}/${a}`);
 }
 
+// Convert platform to directory
 function platformToDir(token) {
   if (token.startsWith('linux-')) return 'linux';
   if (token.startsWith('macos-')) return 'macos';
@@ -124,7 +125,6 @@ async function ensureBundle(token) {
     }
   }
 
-  // Final presence checks
   const isWinToken = token.startsWith('windows-');
   const ext = isWinToken ? '.exe' : '';
   const torPath = path.join(targetDir, `tor${ext}`);

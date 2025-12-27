@@ -7,11 +7,12 @@
 const qss = require('./secure-storage.cjs');
 
 class ElectronSecureStorage {
-  constructor(serviceName = 'Qor-Chat-chat-app') {
+  constructor(serviceName = 'Qor-Chat-App') {
     this.serviceName = serviceName;
     this.initialized = false;
   }
 
+// Initialize secure storage
   async initialize(installPath) {
     if (this.initialized) return;
 
@@ -19,6 +20,7 @@ class ElectronSecureStorage {
     this.initialized = true;
   }
 
+// Sanitize and validate key
   sanitizeKey(key) {
     if (typeof key !== 'string' || !key || key.length > 128) {
       throw new Error('Invalid key');

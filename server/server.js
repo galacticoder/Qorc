@@ -27,8 +27,7 @@ import { presenceService } from './presence/presence-service.js';
 import { SERVER_CONSTANTS, SECURITY_HEADERS, CORS_CONFIG } from './config/constants.js';
 import { logger as cryptoLogger } from './crypto/crypto-logger.js';
 import { withRedisClient } from './presence/presence.js';
-import { getPQSession } from './session/pq-session-storage.js';
-import { handlePQHandshake, handlePQEnvelope, sendPQEncryptedResponse, createPQResponseSender, sendSecureMessage, initializeEnvelopeHandler } from './messaging/pq-envelope-handler.js';
+import { handlePQHandshake, handlePQEnvelope, createPQResponseSender, sendSecureMessage, initializeEnvelopeHandler } from './messaging/pq-envelope-handler.js';
 import { handleBundlePublish, handleBundleRequest, handleBundleFailure } from './messaging/libsignal-handler.js';
 import { initializeCluster, shutdownCluster } from './cluster/cluster-integration.js';
 import clusterRoutes from './routes/cluster-routes.js';
@@ -56,9 +55,7 @@ import {
 
 let server, wss, serverHybridKeyPair, blockTokenCleanupInterval, statusLogInterval;
 
-/**
- * Verify TURN server is reachable before starting
- */
+// Verify TURN server is reachable before starting
 async function verifyTurnServer() {
   const turnUsername = process.env.TURN_USERNAME;
   const turnPassword = process.env.TURN_PASSWORD;
@@ -309,7 +306,6 @@ async function prepareWorkerContext() {
     deviceAttestationService
   };
 }
-
 
 async function onServerReady({ server: httpsServer, wss: wsServer, context, workerId, tls }) {
   server = httpsServer;
@@ -586,12 +582,10 @@ async function handleWebSocketMessage({ ws, sessionId, message, parsed, context 
           } catch (_cleanupError) {
           }
 
-          // Restore authentication to WebSocket session
           ws._username = username;
           ws._authenticated = true;
           ws._hasAuthenticated = true;
 
-          // Update connection state in Redis with authenticated status
           await ConnectionStateManager.updateState(sessionId, {
             username: username,
             hasAuthenticated: true,
@@ -610,7 +604,6 @@ async function handleWebSocketMessage({ ws, sessionId, message, parsed, context 
             cryptoLogger.warn('[TOKEN-VALIDATION] addLocalConnection failed', { error: e?.message });
           }
 
-          // Mark user as online on this server
           try {
             await presenceService.setUserOnline(username, sessionId);
           } catch (e) {
@@ -622,7 +615,6 @@ async function handleWebSocketMessage({ ws, sessionId, message, parsed, context 
             sessionId: sessionId?.slice(0, 8) + '...'
           });
 
-          // Send success response with username extracted from validated tokens
           await sendSecureMessage(ws, {
             type: SignalType.TOKEN_VALIDATION_RESPONSE,
             valid: true,
@@ -681,12 +673,10 @@ async function handleWebSocketMessage({ ws, sessionId, message, parsed, context 
             });
           }
 
-          // Restore authentication to WebSocket session
           ws._username = username;
           ws._authenticated = true;
           ws._hasAuthenticated = true;
 
-          // Update connection state in Redis with authenticated status
           await ConnectionStateManager.updateState(sessionId, {
             username: username,
             hasAuthenticated: true,
@@ -696,7 +686,6 @@ async function handleWebSocketMessage({ ws, sessionId, message, parsed, context 
             lastActivity: Date.now()
           });
 
-          // Register connection for local message delivery on this server
           try {
             if (global.gateway?.addLocalConnection) {
               await global.gateway.addLocalConnection(username, ws);
@@ -705,7 +694,6 @@ async function handleWebSocketMessage({ ws, sessionId, message, parsed, context 
             cryptoLogger.warn('[AUTH-RECOVERY] addLocalConnection failed', { error: e?.message });
           }
 
-          // Mark user as online on this server
           try {
             await presenceService.setUserOnline(username, sessionId);
           } catch (e) {
@@ -791,7 +779,6 @@ async function handleWebSocketMessage({ ws, sessionId, message, parsed, context 
         break;
 
       case SignalType.LIBSIGNAL_PUBLISH_BUNDLE:
-        // Store Signal Protocol bundle for user
         await handleBundlePublish({
           ws,
           parsed: normalizedMessage,
@@ -802,7 +789,6 @@ async function handleWebSocketMessage({ ws, sessionId, message, parsed, context 
         break;
 
       case SignalType.SIGNAL_BUNDLE_FAILURE:
-        // Client reports Signal bundle generation failure
         await handleBundleFailure({
           ws,
           parsed: normalizedMessage,
@@ -812,7 +798,6 @@ async function handleWebSocketMessage({ ws, sessionId, message, parsed, context 
         break;
 
       case SignalType.LIBSIGNAL_REQUEST_BUNDLE:
-        // Client requesting another user's Signal Protocol bundle
         await handleBundleRequest({
           ws,
           parsed: normalizedMessage,
@@ -826,21 +811,17 @@ async function handleWebSocketMessage({ ws, sessionId, message, parsed, context 
         break;
 
       case SignalType.SESSION_RESET_REQUEST:
-        // Forward session reset request to the target user
         await handleSessionResetRequest({ ws, sessionId, parsed: normalizedMessage, state });
         break;
 
       case SignalType.SESSION_ESTABLISHED:
-        // Forward session establishment confirmation to the target user
         await handleSessionEstablished({ ws, sessionId, parsed: normalizedMessage, state });
         break;
 
       case SignalType.SERVER_LOGIN:
-        // Route to server authentication handler
         if (normalizedMessage.resetType) {
           await handleServerLogin({ ws, sessionId, parsed: normalizedMessage, state });
         } else {
-          // Server password authentication
           await serverAuthHandler.handleServerAuthentication(
             ws,
             JSON.stringify(normalizedMessage),
@@ -896,7 +877,6 @@ async function handleWebSocketMessage({ ws, sessionId, message, parsed, context 
         break;
 
       case SignalType.PQ_HEARTBEAT_PING:
-        // Post-quantum heartbeat
         await sendSecureMessage(ws, {
           type: SignalType.PQ_HEARTBEAT_PONG,
           sessionId: ws._pqSessionId || sessionId,
@@ -905,7 +885,6 @@ async function handleWebSocketMessage({ ws, sessionId, message, parsed, context 
         break;
 
       case SignalType.PQ_ENVELOPE:
-        // Post-quantum encrypted WebSocket envelope - decrypt and process inner message
         await handlePQEnvelope({
           ws,
           sessionId,
@@ -950,17 +929,15 @@ async function handleWebSocketMessage({ ws, sessionId, message, parsed, context 
   }
 }
 
-async function gracefulShutdown(signal) {
+async function shutdownServer(signal) {
   logEvent('shutdown-initiated', { signal });
 
-  // Shutdown cluster first (removes from Redis cluster:master if primary)
   try {
     await shutdownCluster();
   } catch (error) {
     logError(error, { operation: 'cluster-shutdown' });
   }
 
-  // Clear intervals
   if (blockTokenCleanupInterval) {
     clearInterval(blockTokenCleanupInterval);
     blockTokenCleanupInterval = null;
@@ -970,31 +947,26 @@ async function gracefulShutdown(signal) {
     statusLogInterval = null;
   }
 
-  // Cleanup session manager before closing Redis
   try {
     await cleanupSessionManager();
   } catch (error) {
     logError(error, { operation: 'session-cleanup' });
   }
 
-  // Close WebSocket server
   if (wss) {
     wss.close();
   }
 
-  // Close HTTPS server
   if (server) {
     server.close();
   }
 
-  // Close presence service pattern subscriber
   try {
     await presenceService.close();
   } catch (error) {
     logError(error, { operation: 'presence-close' });
   }
 
-  // Cleanup Redis connections after all operations complete
   try {
     const { cleanup: cleanupRedis } = await import('./presence/presence.js');
     await cleanupRedis();
@@ -1010,9 +982,8 @@ async function gracefulShutdown(signal) {
 // Main server startup
 async function startServer() {
   try {
-    // Register shutdown handlers
     registerShutdownHandlers({
-      handler: gracefulShutdown,
+      handler: shutdownServer,
     });
 
     cryptoLogger.info('[TURN] Verifying TURN server connectivity...');
@@ -1021,7 +992,6 @@ async function startServer() {
     await setServerPasswordOnInput();
     await initDatabase();
 
-    // Log auto-generated security keys status
     cryptoLogger.info('Encryption keys initialized');
     cryptoLogger.info(`PASSWORD_HASH_PEPPER: ${process.env.PASSWORD_HASH_PEPPER ? 'loaded' : 'missing'}`);
     cryptoLogger.info(`USER_ID_SALT: ${process.env.USER_ID_SALT ? 'loaded' : 'missing'}`);

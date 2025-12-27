@@ -64,7 +64,7 @@ export class ClusterManager extends EventEmitter {
     this.serverKeys = serverKeys;
     this.isPrimary = isPrimary;
     this.autoApprove = autoApprove;
-    this.isApproved = isPrimary; // Primary server is auto-approved
+    this.isApproved = isPrimary;
     this.isShuttingDown = false;
 
     // Cluster state
@@ -91,9 +91,7 @@ export class ClusterManager extends EventEmitter {
     });
   }
 
-  /**
-   * Parse PORT environment variable with support for "dynamic" (0 = auto-assign)
-   */
+  // Parse PORT environment variable
   parsePort(portValue) {
     const DEFAULT_PORT = 8443;
     if (!portValue) return DEFAULT_PORT;
@@ -106,32 +104,21 @@ export class ClusterManager extends EventEmitter {
     return parsed;
   }
 
-  /**
-   * Initialize cluster manager and join cluster
-   */
+  // Initialize cluster manager and join cluster
   async initialize() {
     try {
-      // Generate cluster authentication keys
       await this.generateClusterKeys();
-
-      // Clean up stale server entries before joining
       await this.cleanupStaleServers();
 
-      // Register server in cluster
       if (this.isPrimary) {
         await this.initializePrimaryServer();
       } else {
         await this.requestClusterJoin();
       }
 
-      // Set up cluster message subscriber
       await this.setupMessageSubscriber();
-
-      // Start heartbeat and health monitoring
       this.startHeartbeat();
       this.startHealthMonitoring();
-
-      // Set up key rotation
       this.startKeyRotation();
 
       cryptoLogger.info('[CLUSTER] Cluster manager started', {
@@ -146,12 +133,9 @@ export class ClusterManager extends EventEmitter {
     }
   }
 
-  /**
-   * Generate post-quantum keys for cluster authentication
-   */
+  // Generate post-quantum keys for cluster authentication
   async generateClusterKeys() {
     try {
-      // Generate ML-DSA key pair for signing cluster messages
       const keyPair = ml_dsa87.keygen();
       this.clusterSigningKey = keyPair.secretKey;
       this.clusterPublicKey = keyPair.publicKey;
@@ -168,15 +152,11 @@ export class ClusterManager extends EventEmitter {
     }
   }
 
-  /**
-   * Initialize as primary server (master)
-   */
+  // Initialize as primary master server
   async initializePrimaryServer() {
     try {
       await withRedisClient(async (client) => {
         const pipeline = client.pipeline();
-
-        // Register as master server
         pipeline.set(CLUSTER_KEYS.MASTER, this.serverId);
 
         // Register server info
@@ -199,18 +179,15 @@ export class ClusterManager extends EventEmitter {
           publicKeys: this.exportPublicKeys(),
         }));
 
-        // Store cluster token (hashed)
         const tokenHash = crypto.createHash('sha256').update(this.clusterToken).digest('hex');
         pipeline.hset(CLUSTER_KEYS.TOKENS, this.serverId, tokenHash);
 
-        // Initialize health
         pipeline.hset(CLUSTER_KEYS.HEALTH, this.serverId, JSON.stringify({
           status: 'healthy',
           lastCheck: Date.now(),
           uptime: 0,
         }));
 
-        // Store shared server password hash if provided
         if (process.env.SERVER_PASSWORD_HASH) {
           pipeline.hset(CLUSTER_KEYS.SHARED_CONFIG, 'SERVER_PASSWORD_HASH', process.env.SERVER_PASSWORD_HASH);
           cryptoLogger.info('[CLUSTER] Stored shared server password hash in Redis');
@@ -230,13 +207,10 @@ export class ClusterManager extends EventEmitter {
     }
   }
 
-  /**
-   * Request to join cluster (with auto-approval support)
-   */
+  // Request to join cluster
   async requestClusterJoin() {
     try {
       await withRedisClient(async (client) => {
-        // Check if already approved
         const existingServer = await client.hget(CLUSTER_KEYS.SERVERS, this.serverId);
         if (existingServer) {
           this.isApproved = true;
@@ -253,7 +227,7 @@ export class ClusterManager extends EventEmitter {
           port: this.parsePort(process.env.PORT),
         };
 
-        // If auto-approve is enabled, directly register server
+        // If auto-approve is enabled then directly register server
         if (this.autoApprove) {
           const serverInfo = {
             serverId: this.serverId,
@@ -289,7 +263,7 @@ export class ClusterManager extends EventEmitter {
           return;
         }
 
-        // Manual approval flow
+        // Manual approval
         await client.hset(CLUSTER_KEYS.PENDING, this.serverId, JSON.stringify(pendingInfo));
         await client.publish(CLUSTER_KEYS.MESSAGES, JSON.stringify({
           type: 'join-request',
@@ -305,7 +279,7 @@ export class ClusterManager extends EventEmitter {
         this.emit('join-requested');
       });
 
-      // Wait for approval if not auto-approved
+      // Wait for approval
       if (!this.isApproved) {
         await this.waitForApproval();
       }
@@ -315,16 +289,13 @@ export class ClusterManager extends EventEmitter {
     }
   }
 
-  /**
-   * Wait for cluster join approval
-   */
+  // Wait for cluster join approval
   async waitForApproval() {
     const startTime = Date.now();
 
     while (!this.isApproved && Date.now() - startTime < CONFIG.APPROVAL_TIMEOUT) {
       await new Promise(resolve => setTimeout(resolve, 2000));
 
-      // Check if approved
       const isApproved = await withRedisClient(async (client) => {
         const serverInfo = await client.hget(CLUSTER_KEYS.SERVERS, this.serverId);
         return !!serverInfo;
@@ -347,9 +318,7 @@ export class ClusterManager extends EventEmitter {
     }
   }
 
-  /**
-   * Approve a pending server (primary only)
-   */
+  // Approve a pending server (primary only)
   async approveServer(targetServerId) {
     if (!this.isPrimary) {
       throw new Error('Only primary server can approve new servers');
@@ -357,7 +326,6 @@ export class ClusterManager extends EventEmitter {
 
     try {
       await withRedisClient(async (client) => {
-        // Get pending server info
         const pendingData = await client.hget(CLUSTER_KEYS.PENDING, targetServerId);
         if (!pendingData) {
           throw new Error(`Server ${targetServerId} not found in pending list`);
@@ -368,15 +336,12 @@ export class ClusterManager extends EventEmitter {
           throw new Error(`Server ${targetServerId} has corrupted pending data`);
         }
 
-        // Verify server count limit
         const serverCount = await client.hlen(CLUSTER_KEYS.SERVERS);
         if (serverCount >= CONFIG.MAX_SERVERS_IN_CLUSTER) {
           throw new Error('Maximum cluster size reached');
         }
 
         const pipeline = client.pipeline();
-
-        // Move from pending to approved
         pipeline.hdel(CLUSTER_KEYS.PENDING, targetServerId);
 
         // Register server
@@ -400,7 +365,6 @@ export class ClusterManager extends EventEmitter {
           publicKeys: pendingInfo.publicKeys,
         }));
 
-        // Initialize health
         pipeline.hset(CLUSTER_KEYS.HEALTH, targetServerId, JSON.stringify({
           status: 'healthy',
           lastCheck: Date.now(),
@@ -409,7 +373,6 @@ export class ClusterManager extends EventEmitter {
 
         await pipeline.exec();
 
-        // Notify cluster
         await client.publish(CLUSTER_KEYS.MESSAGES, JSON.stringify({
           type: 'server-approved',
           serverId: targetServerId,
@@ -430,9 +393,7 @@ export class ClusterManager extends EventEmitter {
     }
   }
 
-  /**
-   * Reject a pending server (primary only)
-   */
+  // Reject a pending server (primary only)
   async rejectServer(targetServerId, reason = 'Rejected by admin') {
     if (!this.isPrimary) {
       throw new Error('Only primary server can reject servers');
@@ -442,7 +403,6 @@ export class ClusterManager extends EventEmitter {
       await withRedisClient(async (client) => {
         await client.hdel(CLUSTER_KEYS.PENDING, targetServerId);
 
-        // Notify rejected server
         await client.publish(CLUSTER_KEYS.MESSAGES, JSON.stringify({
           type: 'server-rejected',
           serverId: targetServerId,
@@ -464,9 +424,7 @@ export class ClusterManager extends EventEmitter {
     }
   }
 
-  /**
-   * Get list of pending servers (primary only)
-   */
+  // Get list of pending servers (primary only)
   async getPendingServers() {
     return await withRedisClient(async (client) => {
       const pending = await client.hgetall(CLUSTER_KEYS.PENDING);
@@ -480,9 +438,7 @@ export class ClusterManager extends EventEmitter {
     });
   }
 
-  /**
-   * Force remove a server from cluster (primary only)
-   */
+  // Force remove a server from cluster (primary only)
   async forceRemoveServer(targetServerId) {
     if (!this.isPrimary) {
       throw new Error('Only primary server can force remove servers');
@@ -496,13 +452,11 @@ export class ClusterManager extends EventEmitter {
       let serverInfo = null;
 
       await withRedisClient(async (client) => {
-        // Get server info before removal for audit logging
         const serverData = await client.hget(CLUSTER_KEYS.SERVERS, targetServerId);
         if (serverData) {
           serverInfo = safeJsonParse(serverData, { serverId: targetServerId });
         }
 
-        // Also check pending servers
         const pendingData = await client.hget(CLUSTER_KEYS.PENDING, targetServerId);
         if (pendingData && !serverInfo) {
           serverInfo = safeJsonParse(pendingData, { serverId: targetServerId });
@@ -533,7 +487,6 @@ export class ClusterManager extends EventEmitter {
         }));
       });
 
-      // Update local state
       this.clusterServers.delete(targetServerId);
       this.serverHealth.delete(targetServerId);
 
@@ -557,9 +510,7 @@ export class ClusterManager extends EventEmitter {
     }
   }
 
-  /**
-   * Start sending heartbeats
-   */
+  // Start sending heartbeats
   startHeartbeat() {
     this.heartbeatInterval = setInterval(async () => {
       if (!this.isApproved || this.isShuttingDown) return;
@@ -572,9 +523,7 @@ export class ClusterManager extends EventEmitter {
     }, CONFIG.HEARTBEAT_INTERVAL);
   }
 
-  /**
-   * Update server port in Redis (for dynamic port allocation)
-   */
+  // Update server port in Redis
   async updateServerPort(actualPort) {
     try {
       await withRedisClient(async (client) => {
@@ -601,9 +550,7 @@ export class ClusterManager extends EventEmitter {
     }
   }
 
-  /**
-   * Send heartbeat to cluster
-   */
+  // Send heartbeat to cluster
   async sendHeartbeat() {
     try {
       await withRedisClient(async (client) => {
@@ -634,9 +581,7 @@ export class ClusterManager extends EventEmitter {
     }
   }
 
-  /**
-   * Start health monitoring of cluster servers
-   */
+  // Start health monitoring of cluster servers
   startHealthMonitoring() {
     this.healthCheckInterval = setInterval(async () => {
       if (!this.isApproved || this.isShuttingDown) return;
@@ -649,9 +594,7 @@ export class ClusterManager extends EventEmitter {
     }, CONFIG.HEALTH_CHECK_INTERVAL);
   }
 
-  /**
-   * Check health of all cluster servers
-   */
+  // Check health of all cluster servers
   async checkClusterHealth() {
     try {
       await withRedisClient(async (client) => {
@@ -681,13 +624,10 @@ export class ClusterManager extends EventEmitter {
               const timeSinceHeartbeat = now - serverInfo.lastHeartbeat;
 
               if (timeSinceHeartbeat > CONFIG.SERVER_TIMEOUT) {
-                // Server is dead
                 await this.handleDeadServer(serverId, serverInfo);
               } else {
-                // Update local cache
                 this.clusterServers.set(serverId, serverInfo);
 
-                // Update health status
                 const health = {
                   status: 'healthy',
                   lastCheck: now,
@@ -712,9 +652,7 @@ export class ClusterManager extends EventEmitter {
     }
   }
 
-  /**
-   * Clean up stale server entries on startup
-   */
+  // Clean up stale server entries on startup
   async cleanupStaleServers() {
     try {
       await withRedisClient(async (client) => {
@@ -749,7 +687,6 @@ export class ClusterManager extends EventEmitter {
                   pipeline.hdel(CLUSTER_KEYS.KEYS, serverId);
                   pipeline.hdel(CLUSTER_KEYS.TOKENS, serverId);
 
-                  // If the stale server was primary, clear master key
                   if (serverInfo.isPrimary) {
                     const currentMaster = await client.get(CLUSTER_KEYS.MASTER);
                     if (currentMaster === serverId) {
@@ -789,9 +726,7 @@ export class ClusterManager extends EventEmitter {
     }
   }
 
-  /**
-   * Handle a dead/unresponsive server
-   */
+  // Handle a dead/unresponsive server
   async handleDeadServer(serverId, serverInfo) {
     try {
       cryptoLogger.warn('[CLUSTER] Detected dead server', { serverId });
@@ -799,7 +734,6 @@ export class ClusterManager extends EventEmitter {
       await withRedisClient(async (client) => {
         const pipeline = client.pipeline();
 
-        // Remove from active servers
         pipeline.hdel(CLUSTER_KEYS.SERVERS, serverId);
         pipeline.hdel(CLUSTER_KEYS.HEALTH, serverId);
         pipeline.hdel(CLUSTER_KEYS.KEYS, serverId);
@@ -807,7 +741,6 @@ export class ClusterManager extends EventEmitter {
 
         await pipeline.exec();
 
-        // Notify cluster
         await client.publish(CLUSTER_KEYS.MESSAGES, JSON.stringify({
           type: 'server-dead',
           serverId,
@@ -816,13 +749,11 @@ export class ClusterManager extends EventEmitter {
         }));
       });
 
-      // Update local state
       this.clusterServers.delete(serverId);
       this.serverHealth.delete(serverId);
 
       this.emit('server-dead', { serverId, serverInfo });
 
-      // If primary died, initiate election
       if (serverInfo.isPrimary) {
         await this.handlePrimaryFailure();
       }
@@ -832,7 +763,7 @@ export class ClusterManager extends EventEmitter {
   }
 
   /**
-   * Handle primary server failure (initiate election)
+   * Handle primary server failure
    * Queue-based primary selection
    */
   async handlePrimaryFailure() {
@@ -871,14 +802,12 @@ export class ClusterManager extends EventEmitter {
             message: 'Next server in queue promoted to primary'
           });
 
-          // Notify cluster
           await client.publish(CLUSTER_KEYS.MESSAGES, JSON.stringify({
             type: 'primary-elected',
             serverId: oldestServer.serverId,
             timestamp: Date.now(),
           }));
 
-          // If we are the new primary, update our state
           if (oldestServer.serverId === this.serverId) {
             this.isPrimary = true;
             cryptoLogger.info('[CLUSTER] This server promoted to primary (next in queue)');
@@ -891,9 +820,7 @@ export class ClusterManager extends EventEmitter {
     }
   }
 
-  /**
-   * Set up message subscriber for inter-server communication
-   */
+  // Set up message subscriber for inter-server communication
   async setupMessageSubscriber() {
     try {
       this.messageSubscriber = await createSubscriber();
@@ -915,11 +842,8 @@ export class ClusterManager extends EventEmitter {
     }
   }
 
-  /**
-   * Handle cluster messages
-   */
+  // Handle cluster messages
   async handleClusterMessage(msg) {
-    // Ignore own messages
     if (msg.serverId === this.serverId) return;
 
     switch (msg.type) {
@@ -967,9 +891,7 @@ export class ClusterManager extends EventEmitter {
     }
   }
 
-  /**
-   * Start key rotation
-   */
+  // Start key rotation
   startKeyRotation() {
     this.keyRotationInterval = setInterval(async () => {
       if (!this.isApproved || this.isShuttingDown) return;
@@ -982,17 +904,13 @@ export class ClusterManager extends EventEmitter {
     }, CONFIG.KEY_ROTATION_INTERVAL);
   }
 
-  /**
-   * Rotate cluster authentication keys
-   */
+  // Rotate cluster authentication keys
   async rotateKeys() {
     try {
       cryptoLogger.info('[CLUSTER] Starting key rotation', { serverId: this.serverId });
 
-      // Generate new cluster keys
       await this.generateClusterKeys();
 
-      // Update in Redis
       await withRedisClient(async (client) => {
         const keysData = await client.hget(CLUSTER_KEYS.KEYS, this.serverId);
         if (keysData) {
@@ -1002,7 +920,6 @@ export class ClusterManager extends EventEmitter {
           await client.hset(CLUSTER_KEYS.KEYS, this.serverId, JSON.stringify(keys));
         }
 
-        // Update token hash
         const tokenHash = crypto.createHash('sha256').update(this.clusterToken).digest('hex');
         await client.hset(CLUSTER_KEYS.TOKENS, this.serverId, tokenHash);
       });
@@ -1015,9 +932,7 @@ export class ClusterManager extends EventEmitter {
     }
   }
 
-  /**
-   * Export public keys for distribution
-   */
+  // Export public keys for distribution
   exportPublicKeys() {
     return {
       kyber: Buffer.from(this.serverKeys.kyber.publicKey).toString('base64'),
@@ -1026,9 +941,7 @@ export class ClusterManager extends EventEmitter {
     };
   }
 
-  /**
-   * Get all server public keys from cluster
-   */
+  // Get all server public keys from cluster
   async getAllServerKeys() {
     return await withRedisClient(async (client) => {
       const keysData = await client.hgetall(CLUSTER_KEYS.KEYS);
@@ -1045,9 +958,7 @@ export class ClusterManager extends EventEmitter {
     });
   }
 
-  /**
-   * Get cluster status
-   */
+  // Get cluster status
   async getClusterStatus() {
     return await withRedisClient(async (client) => {
       const [servers, pending, health, master] = await Promise.all([
@@ -1080,21 +991,14 @@ export class ClusterManager extends EventEmitter {
     });
   }
 
-  /**
-   * Get shared cluster configuration
-   * @param {string} key - Configuration key to retrieve
-   */
+  // Get shared cluster configuration
   static async getSharedConfig(key) {
     return await withRedisClient(async (client) => {
       return await client.hget(CLUSTER_KEYS.SHARED_CONFIG, key);
     });
   }
 
-  /**
-   * Set shared cluster configuration (primary only)
-   * @param {string} key - Configuration key
-   * @param {string} value - Configuration value
-   */
+  // Set shared cluster configuration (primary only)
   async setSharedConfig(key, value) {
     if (!this.isPrimary) {
       throw new Error('Only primary server can set shared configuration');
@@ -1106,14 +1010,11 @@ export class ClusterManager extends EventEmitter {
     });
   }
 
-  /**
-   * shutdown
-   */
+  // Shutdown cluster manager
   async shutdown() {
     cryptoLogger.info('[CLUSTER] Shutting down cluster manager', { serverId: this.serverId });
     this.isShuttingDown = true;
 
-    // Remove from cluster BEFORE clearing intervals
     try {
       await withRedisClient(async (client) => {
         const pipeline = client.pipeline();
@@ -1122,7 +1023,6 @@ export class ClusterManager extends EventEmitter {
         pipeline.hdel(CLUSTER_KEYS.KEYS, this.serverId);
         pipeline.hdel(CLUSTER_KEYS.TOKENS, this.serverId);
 
-        // If this is the primary server, remove master key so another server can become primary
         if (this.isPrimary) {
           cryptoLogger.info('[CLUSTER] Removing master key - allowing new primary election', { serverId: this.serverId });
           pipeline.del(CLUSTER_KEYS.MASTER);
@@ -1130,7 +1030,6 @@ export class ClusterManager extends EventEmitter {
 
         await pipeline.exec();
 
-        // Notify cluster
         await client.publish(CLUSTER_KEYS.MESSAGES, JSON.stringify({
           type: 'server-shutdown',
           serverId: this.serverId,
@@ -1139,18 +1038,15 @@ export class ClusterManager extends EventEmitter {
         }));
       });
     } catch (error) {
-      // Ignore pool draining errors during shutdown (expected)
       if (!error?.message?.includes('pool is draining') && !error?.message?.includes('cannot accept work')) {
         cryptoLogger.error('[CLUSTER] Error during shutdown cleanup', error);
       }
     }
 
-    // Clear intervals AFTER Redis cleanup
     if (this.heartbeatInterval) clearInterval(this.heartbeatInterval);
     if (this.healthCheckInterval) clearInterval(this.healthCheckInterval);
     if (this.keyRotationInterval) clearInterval(this.keyRotationInterval);
 
-    // Unsubscribe from messages
     if (this.messageSubscriber) {
       try {
         await this.messageSubscriber.unsubscribe();

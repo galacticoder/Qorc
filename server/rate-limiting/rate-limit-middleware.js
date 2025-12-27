@@ -7,36 +7,36 @@ import { sendSecureMessage } from '../messaging/pq-envelope-handler.js';
 
 // Rate limiting middleware for WebSocket connections
 export class RateLimitMiddleware {
-  constructor(limiters, { lazy = false } = {}) {
-    this._limiter = null;
-    this._limiterFactory = limiters
-      ? async () => limiters
-      : () => getDistributedRateLimiter();
+	constructor(limiters, { lazy = false } = {}) {
+		this._limiter = null;
+		this._limiterFactory = limiters
+			? async () => limiters
+			: () => getDistributedRateLimiter();
 
-    if (!lazy && !limiters) {
-      this._initializePromise = this._limiterFactory().then((value) => {
-        this._limiter = value;
-        return value;
-      });
-    }
-  }
+		if (!lazy && !limiters) {
+			this._initializePromise = this._limiterFactory().then((value) => {
+				this._limiter = value;
+				return value;
+			});
+		}
+	}
 
-  async #limiter() {
-    if (this._limiter) {
-      return this._limiter;
-    }
+	async #limiter() {
+		if (this._limiter) {
+			return this._limiter;
+		}
 
-    if (this._initializePromise) {
-      return this._initializePromise;
-    }
+		if (this._initializePromise) {
+			return this._initializePromise;
+		}
 
-    this._initializePromise = this._limiterFactory().then((value) => {
-      this._limiter = value;
-      return value;
-    });
+		this._initializePromise = this._limiterFactory().then((value) => {
+			this._limiter = value;
+			return value;
+		});
 
-    return this._initializePromise;
-  }
+		return this._initializePromise;
+	}
 
 	// Check global connection rate limit
 	async checkConnectionLimit(ws) {
@@ -48,7 +48,7 @@ export class RateLimitMiddleware {
 		const limiter = await this.#limiter();
 		const result = await limiter.checkGlobalConnectionLimit();
 
-     if (!result.allowed) {
+		if (!result.allowed) {
 			cryptoLogger.warn('[RATE-LIMIT] Global connection blocked', { reason: result.reason });
 
 			await sendSecureMessage(ws, {
@@ -108,19 +108,19 @@ export class RateLimitMiddleware {
 		return limiter.getUserAuthStatus(username);
 	}
 
-  // Non-consuming category status (short-window)
-  async getUserCredentialStatus(username, category, ws = undefined) {
-    const limiter = await this.#limiter();
-    const ip = this._getClientIp(ws);
-    return limiter.getUserCategoryStatus(username, category, ip);
-  }
+	// Non-consuming category status (short-window)
+	async getUserCredentialStatus(username, category, ws = undefined) {
+		const limiter = await this.#limiter();
+		const ip = this._getClientIp(ws);
+		return limiter.getUserCategoryStatus(username, category, ip);
+	}
 
-  // Record a credential failure (persisted in Redis) and get attempts/cooldown info
-  async recordCredentialFailure(username, category, ws = undefined) {
-    const limiter = await this.#limiter();
-    const ip = this._getClientIp(ws);
-    return limiter.consumeUserAuthAttempt(username, category, ip);
-  }
+	// Record a credential failure and get attempts/cooldown info
+	async recordCredentialFailure(username, category, ws = undefined) {
+		const limiter = await this.#limiter();
+		const ip = this._getClientIp(ws);
+		return limiter.consumeUserAuthAttempt(username, category, ip);
+	}
 
 	// Check message rate limit
 	async checkMessageLimit(ws, username) {
@@ -161,9 +161,7 @@ export class RateLimitMiddleware {
 		return true;
 	}
 
-	/**
-	 * Check bundle operation rate limit for authenticated users
-	 */
+	// Check bundle operation rate limit for authenticated users
 	async checkBundleLimit(ws, username) {
 		if (!this.isValidWebSocket(ws)) {
 			cryptoLogger.warn('[RATE-LIMIT-SECURITY] Invalid WebSocket object in bundle check');
@@ -202,9 +200,7 @@ export class RateLimitMiddleware {
 		return true;
 	}
 
-	/**
-	 * Apply rate limiting to WebSocket message based on message type
-	 */
+	// Apply rate limiting to WebSocket message based on message type
 	async applyMessageRateLimiting(ws, messageType, username) {
 		if (!this.isValidMessageType(messageType)) {
 			cryptoLogger.warn('[RATE-LIMIT-SECURITY] Invalid message type provided');
@@ -215,24 +211,19 @@ export class RateLimitMiddleware {
 			case SignalType.ACCOUNT_SIGN_IN:
 			case SignalType.ACCOUNT_SIGN_UP:
 				return this.checkAuthLimit(ws);
-
 			case SignalType.ENCRYPTED_MESSAGE:
 			case SignalType.FILE_MESSAGE_CHUNK:
 			case SignalType.DR_SEND:
 				return this.checkMessageLimit(ws, username);
-
-			case SignalType.X3DH_PUBLISH_BUNDLE:
-			case SignalType.X3DH_REQUEST_BUNDLE:
+			case SignalType.LIBSIGNAL_PUBLISH_BUNDLE:
+			case SignalType.LIBSIGNAL_REQUEST_BUNDLE:
 				return this.checkBundleLimit(ws, username);
-
 			default:
 				return true;
 		}
 	}
 
-	/**
-	 * Get rate limiting statistics with security metrics
-	 */
+	// Get rate limiting statistics with security metrics
 	async getStats() {
 		const limiter = await this.#limiter();
 		const baseStats = await limiter.getStats();
@@ -252,7 +243,7 @@ export class RateLimitMiddleware {
 	async getSecurityHealth(precomputedStats = null) {
 		try {
 			const stats = precomputedStats || (await (await this.#limiter()).getStats());
-			
+
 			const health = {
 				status: 'operational',
 				rateLimiterActive: true,
@@ -290,12 +281,12 @@ export class RateLimitMiddleware {
 				});
 			}
 
-			// Check for suspicious activity (many blocked users)
+			// Check for suspicious activity
 			const blockRatio = stats.users.activeLimiters > 0
 				? stats.users.blocked / stats.users.activeLimiters
 				: 0;
 
-			if (blockRatio > 0.1) { // More than 10% blocked
+			if (blockRatio > 0.1) {
 				health.alerts.push({
 					severity: 'warning',
 					message: `High block rate detected: ${(blockRatio * 100).toFixed(1)}% of active users blocked`
@@ -307,7 +298,7 @@ export class RateLimitMiddleware {
 			cryptoLogger.error('[RATE-LIMIT-HEALTH] Failed to get security health', {
 				error: error.message
 			});
-			
+
 			return {
 				status: 'error',
 				rateLimiterActive: false,
@@ -320,9 +311,7 @@ export class RateLimitMiddleware {
 		}
 	}
 
-	/**
-	 * Generate actionable recommendations based on current state
-	 */
+	// Generate actionable recommendations based on current state
 	_generateRecommendations(stats, _health) {
 		const recommendations = [];
 
@@ -371,9 +360,7 @@ export class RateLimitMiddleware {
 		return recommendations;
 	}
 
-	/**
-	 * Reset rate limits for a specific user (admin function)
-	 */
+	// Reset rate limits for a specific user (admin function)
 	async resetUserLimits(username) {
 		if (!this.isValidUsername(username)) {
 			cryptoLogger.warn('[RATE-LIMIT-SECURITY] Invalid username provided for reset');
@@ -381,35 +368,31 @@ export class RateLimitMiddleware {
 		}
 
 		const limiter = await this.#limiter();
-    try {
-      const hashed = (await (async () => {
-        try { return crypto.createHash('sha256').update(username).digest('hex'); } catch { return null; }
-      })());
-      if (hashed) {
-        await limiter.userMessageLimiter.delete(hashed);
-        await limiter.userBundleLimiter.delete(hashed);
-        await limiter.userAuthLimiter.delete(hashed);
-        await limiter.authAccountPasswordLimiter.delete(hashed);
-        await limiter.authPassphraseLimiter.delete(hashed);
-        await limiter.authServerPasswordLimiter.delete(hashed);
-        return true;
-      }
-    } catch {}
+		try {
+			const hashed = (await (async () => {
+				try { return crypto.createHash('sha256').update(username).digest('hex'); } catch { return null; }
+			})());
+			if (hashed) {
+				await limiter.userMessageLimiter.delete(hashed);
+				await limiter.userBundleLimiter.delete(hashed);
+				await limiter.userAuthLimiter.delete(hashed);
+				await limiter.authAccountPasswordLimiter.delete(hashed);
+				await limiter.authPassphraseLimiter.delete(hashed);
+				await limiter.authServerPasswordLimiter.delete(hashed);
+				return true;
+			}
+		} catch { }
 		return false;
 	}
 
-	/**
-	 * Reset global connection limits (admin function)
-	 */
+	// Reset global connection limits (admin function)
 	async resetGlobalConnectionLimits() {
 		const limiter = await this.#limiter();
 		await limiter.globalConnectionLimiter.delete('global-conn');
 		return true;
 	}
 
-	/**
-	 * Get current rate limit status for a user
-	 */
+	// Get current rate limit status for a user
 	async getUserStatus(username) {
 		if (!this.isValidUsername(username)) {
 			cryptoLogger.warn('[RATE-LIMIT-SECURITY] Invalid username provided for status check');
@@ -439,29 +422,25 @@ export class RateLimitMiddleware {
 		};
 	}
 
-	/**
-	 * Get global connection rate limit status
-	 */
+	// Get global connection rate limit status
 	async getGlobalConnectionStatus() {
 		const limiter = await this.#limiter();
 		return limiter.getGlobalConnectionStatus();
 	}
 
-	/**
-	 * Security utility functions
-	 */
+	// Security utility functions
 	isValidWebSocket(ws) {
 		return ws && typeof ws === 'object' && typeof ws.send === 'function' && typeof ws.close === 'function';
 	}
 
-  _getClientIp(ws) {
-    try {
-      if (!this.isValidWebSocket(ws)) return undefined;
-      const req = ws.upgradeReq || ws._socket || {};
-      const direct = (req.socket && req.socket.remoteAddress) || req.remoteAddress || undefined;
-      return direct || undefined;
-    } catch { return undefined; }
-  }
+	_getClientIp(ws) {
+		try {
+			if (!this.isValidWebSocket(ws)) return undefined;
+			const req = ws.upgradeReq || ws._socket || {};
+			const direct = (req.socket && req.socket.remoteAddress) || req.remoteAddress || undefined;
+			return direct || undefined;
+		} catch { return undefined; }
+	}
 
 	isValidUsername(username) {
 		if (!username || typeof username !== 'string') return false;
@@ -474,13 +453,10 @@ export class RateLimitMiddleware {
 	}
 
 	generateSecureRequestId() {
-		// Generate a cryptographically secure request ID for tracking
 		return crypto.randomBytes(16).toString('hex');
 	}
 
-	/**
-	 * Perform security audit with Redis metrics
-	 */
+	// Perform security audit with Redis metrics
 	async performSecurityAudit() {
 		try {
 			const limiter = await this.#limiter();
@@ -490,8 +466,7 @@ export class RateLimitMiddleware {
 			const audit = {
 				timestamp: Date.now(),
 				timestampISO: new Date().toISOString(),
-				
-				// Real-time metrics from Redis
+
 				metrics: {
 					backend: stats.backend,
 					redis: stats.redis,

@@ -3,13 +3,10 @@
  * IPC request validation, rate limiting, and security controls
  */
 
-const crypto = require('crypto');
-
 class SecurityMiddleware {
   constructor() {
     this.requestCounts = new Map();
     
-    // Request size limits (bytes)
     this.SIZE_LIMITS = {
       'secure:set': 65536,
       'secure:get': 512,
@@ -18,7 +15,6 @@ class SecurityMiddleware {
       'default': 1024 * 1024
     };
     
-    // Rate limits (requests per minute)
     this.RATE_LIMITS = {
       'secure:set': 300,
       'secure:get': 1000,
@@ -40,19 +36,15 @@ class SecurityMiddleware {
     this.auditLog = [];
   }
 
-  /**
-   * Validate and rate limit IPC request
-   */
+  // Validate and rate limit IPC request
   async validateRequest(channel, args) {
     const now = Date.now();
     
-    // Check rate limit
     if (!this.checkRateLimit(channel, now)) {
       this.logSecurityEvent('rate-limit-exceeded', channel, { timestamp: now });
       throw new Error('Rate limit exceeded');
     }
     
-    // Check request size
     const requestSize = this.calculateRequestSize(args);
     const sizeLimit = this.SIZE_LIMITS[channel] || this.SIZE_LIMITS.default;
     
@@ -64,26 +56,21 @@ class SecurityMiddleware {
       throw new Error(`Request size ${requestSize} exceeds limit ${sizeLimit}`);
     }
     
-    // Validate request structure
     this.validateRequestStructure(channel, args);
     
     return true;
   }
 
-  /**
-   * Check rate limit for channel
-   */
+  // Check rate limit for channel
   checkRateLimit(channel, now) {
     const limit = this.RATE_LIMITS[channel] || this.RATE_LIMITS.default;
-    const windowMs = 60000; // 1 minute
+    const windowMs = 60000;
     
     if (!this.requestCounts.has(channel)) {
       this.requestCounts.set(channel, []);
     }
     
     const counts = this.requestCounts.get(channel);
-    
-    // Remove old timestamps
     while (counts.length > 0 && counts[0] < now - windowMs) {
       counts.shift();
     }
@@ -96,9 +83,7 @@ class SecurityMiddleware {
     return true;
   }
 
-  /**
-   * Calculate request size
-   */
+  // Calculate request size
   calculateRequestSize(args) {
     try {
       return JSON.stringify(args).length;
@@ -107,9 +92,7 @@ class SecurityMiddleware {
     }
   }
 
-  /**
-   * Validate request structure based on channel
-   */
+  // Validate request structure based on channel
   validateRequestStructure(channel, args) {
     switch (channel) {
       case 'secure:set':
@@ -135,7 +118,7 @@ class SecurityMiddleware {
         if (!args[0].data) {
           throw new Error('Invalid data');
         }
-        // Sanitize filename
+
         const sanitized = this.sanitizeFilename(args[0].filename);
         if (sanitized !== args[0].filename) {
           throw new Error('Invalid characters in filename');
@@ -146,7 +129,6 @@ class SecurityMiddleware {
         if (!args[0] || typeof args[0] !== 'string') {
           throw new Error('Invalid server URL');
         }
-        // Validate URL format
         try {
           const url = new URL(args[0]);
           if (!['wss:', 'ws:'].includes(url.protocol)) {
@@ -159,9 +141,7 @@ class SecurityMiddleware {
     }
   }
 
-  /**
-   * Sanitize filename to prevent path traversal
-   */
+  // Sanitize filename
   sanitizeFilename(filename) {
     return filename
       .replace(/[\/\\]/g, '')

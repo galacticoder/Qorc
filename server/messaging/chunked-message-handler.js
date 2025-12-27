@@ -1,6 +1,6 @@
 /**
  * Chunked Message Handler
- * Implements secure chunked transfer protocol to prevent DoS attacks
+ * Implements chunked transfer protocol to prevent DoS attacks
  * and handle large messages efficiently
  */
 
@@ -50,14 +50,12 @@ redis.call('EXPIRE', key, ttlSeconds)
 return count + 1
 `;
 
-/**
- * Chunked message manager for handling large messages
- */
+// Chunked message manager for handling large messages
 class ChunkedMessageManager {
   constructor() {
     this.activeChunks = new Map();
     this.verifyChunkSender = null;
-    
+
     this.cleanupInterval = setInterval(() => {
       this.cleanupExpiredChunks();
     }, 60000);
@@ -70,9 +68,7 @@ class ChunkedMessageManager {
     this.verifyChunkSender = verifier;
   }
 
-  /**
-   * Process incoming chunk data
-   */
+  // Process incoming chunk data
   async processChunk(connectionId, chunkData, verifySender) {
     let normalizedConnectionId;
     try {
@@ -82,7 +78,6 @@ class ChunkedMessageManager {
 
       await this.enforceRateLimit(normalizedConnectionId);
 
-      // Initialize chunked message if first chunk
       if (!this.activeChunks.has(normalizedConnectionId)) {
         if (this.activeChunks.size >= MAX_ACTIVE_CONNECTIONS) {
           throw new Error('Too many active chunked connections');
@@ -133,12 +128,11 @@ class ChunkedMessageManager {
         }
         message.signature = signature;
       }
-      
-      // Validate message integrity
+
       if (message.totalChunks !== totalChunks) {
         throw new Error('Chunk count mismatch');
       }
-      
+
       if (message.checksum !== checksum) {
         throw new Error('Checksum mismatch');
       }
@@ -154,24 +148,20 @@ class ChunkedMessageManager {
         }
       }
 
-      // Check if all chunks received
       if (message.receivedChunks === totalChunks) {
         const assembledData = this.assembleMessage(message);
-        
-        // Verify final checksum
+
         const finalChecksum = await this.calculateChecksum(assembledData);
         if (!this.constantTimeCompare(finalChecksum, checksum)) {
           throw new Error('Final checksum verification failed');
         }
 
-        // Zero chunk buffers after use
         for (const buffer of message.chunks.values()) {
           if (buffer?.fill) {
             buffer.fill(0);
           }
         }
 
-        // Clean up
         connectionChunks.delete(messageId);
         if (connectionChunks.size === 0) {
           this.activeChunks.delete(normalizedConnectionId);
@@ -192,31 +182,26 @@ class ChunkedMessageManager {
 
     } catch (error) {
       cryptoLogger.error('Chunk processing failed', error, { connectionId, messageId: chunkData?.messageId });
-      
-      // Clean up failed message
       const cleanupId = normalizedConnectionId || (typeof connectionId === 'string' ? connectionId.trim() : connectionId);
       if (cleanupId && this.activeChunks.has(cleanupId)) {
         const connectionChunks = this.activeChunks.get(cleanupId);
         if (chunkData?.messageId && connectionChunks.has(chunkData.messageId)) {
           connectionChunks.delete(chunkData.messageId);
         }
-        // Clean up empty connection
         if (connectionChunks.size === 0) {
           this.activeChunks.delete(cleanupId);
         }
       }
-      
+
       throw error;
     }
   }
 
-  /**
-   * Split large message into chunks
-   */
+  // Split large message into chunks
   async splitMessage(data, messageId) {
     const dataBuffer = Buffer.isBuffer(data) ? data : Buffer.from(data);
     const totalChunks = Math.ceil(dataBuffer.length / CHUNK_SIZE);
-    
+
     if (totalChunks > MAX_CHUNKS_PER_MESSAGE) {
       throw new Error(`Message too large: ${dataBuffer.length} bytes (max: ${MAX_CHUNKS_PER_MESSAGE * CHUNK_SIZE})`);
     }
@@ -241,9 +226,7 @@ class ChunkedMessageManager {
     return chunks;
   }
 
-  /**
-   * Validate chunk data
-   */
+  // Validate chunk data
   parseChunkData(chunkData) {
     if (!chunkData || typeof chunkData !== 'object' || Array.isArray(chunkData)) {
       throw new Error('Invalid chunk data structure');
@@ -302,7 +285,6 @@ class ChunkedMessageManager {
       if (senderId.length === 0 || senderId.length > MAX_IDENTIFIER_LENGTH || RESERVED_IDENTIFIERS.has(senderId)) {
         throw new Error('Invalid sender identifier');
       }
-      // Validate sender format (alphanumeric, hyphens, underscores only)
       if (!/^[a-zA-Z0-9_-]+$/.test(senderId)) {
         throw new Error('Invalid sender identifier format');
       }
@@ -312,7 +294,6 @@ class ChunkedMessageManager {
       if (signature.length === 0 || signature.length > 1024) {
         throw new Error('Invalid chunk signature length');
       }
-      // Signature should be base64 or hex
       if (!/^[a-zA-Z0-9+/=_-]+$/.test(signature)) {
         throw new Error('Invalid chunk signature format');
       }
@@ -329,9 +310,7 @@ class ChunkedMessageManager {
     };
   }
 
-  /**
-   * Assemble message from chunks
-   */
+  // Assemble message from chunks
   assembleMessage(message) {
     const chunks = [];
     for (let i = 0; i < message.totalChunks; i++) {
@@ -340,29 +319,25 @@ class ChunkedMessageManager {
       }
       chunks.push(message.chunks.get(i));
     }
-    
+
     return Buffer.concat(chunks);
   }
 
-  /**
-   * Calculate checksum for data
-   */
+  // Calculate checksum for data
   async calculateChecksum(data) {
     const hash = await CryptoUtils.Hash.blake3(data);
     return hash.toString('hex');
   }
 
-  /**
-   * Clean up expired chunks
-   */
+  // Clean up expired chunks
   cleanupExpiredChunks() {
     const now = Date.now();
-    
+
     for (const [connectionId, connectionChunks] of this.activeChunks.entries()) {
       for (const [messageId, message] of connectionChunks.entries()) {
         if (now - message.startTime > CHUNK_TIMEOUT) {
           cryptoLogger.warn('Cleaning up expired chunked message', { connectionId, messageId });
-          
+
           if (message.chunks && message.chunks.size > 0) {
             for (const buffer of message.chunks.values()) {
               if (buffer && buffer.fill && Buffer.isBuffer(buffer)) {
@@ -371,32 +346,28 @@ class ChunkedMessageManager {
             }
             message.chunks.clear();
           }
-          
+
           connectionChunks.delete(messageId);
         }
       }
-      
+
       if (connectionChunks.size === 0) {
         this.activeChunks.delete(connectionId);
       }
     }
   }
 
-  /**
-   * Get active chunk count for connection
-   */
+  // Get active chunk count for connection
   getActiveChunkCount(connectionId) {
     const connectionChunks = this.activeChunks.get(connectionId);
     return connectionChunks ? connectionChunks.size : 0;
   }
 
-  /**
-   * Clean up connection chunks
-   */
+  // Clean up connection chunks
   cleanupConnection(connectionId) {
     try {
       const normalized = this.normalizeConnectionId(connectionId);
-      
+
       const connectionChunks = this.activeChunks.get(normalized);
       if (connectionChunks && connectionChunks.size > 0) {
         for (const message of connectionChunks.values()) {
@@ -410,7 +381,7 @@ class ChunkedMessageManager {
           }
         }
       }
-      
+
       this.activeChunks.delete(normalized);
     } catch {
       const connectionChunks = this.activeChunks.get(connectionId);
@@ -426,20 +397,18 @@ class ChunkedMessageManager {
           }
         }
       }
-      
+
       this.activeChunks.delete(connectionId);
     }
   }
 
-  /**
-   * Destroy manager and cleanup
-   */
+  // Destroy manager and cleanup
   destroy() {
     if (this.cleanupInterval) {
       clearInterval(this.cleanupInterval);
       this.cleanupInterval = null;
     }
-    
+
     for (const connectionChunks of this.activeChunks.values()) {
       if (connectionChunks && connectionChunks.size > 0) {
         for (const message of connectionChunks.values()) {
@@ -454,7 +423,7 @@ class ChunkedMessageManager {
         }
       }
     }
-    
+
     this.activeChunks.clear();
   }
 
@@ -472,7 +441,7 @@ class ChunkedMessageManager {
   async enforceRateLimit(connectionId) {
     const key = `chunk:ratelimit:${connectionId}`;
     const now = Date.now();
-    
+
     try {
       const withRedisClient = await getWithRedisClient();
       await withRedisClient(async (client) => {
@@ -524,42 +493,35 @@ class ChunkedMessageManager {
   }
 }
 
-// Global instance
 const chunkedMessageManager = new ChunkedMessageManager();
 
-/**
- * Enhanced message size validation with chunked support
- */
+// Message size validation
 export class MessageSizeValidator {
-  static MAX_SINGLE_MESSAGE_SIZE = 1024 * 1024; // 1MB for single messages
-  static MAX_CHUNKED_MESSAGE_SIZE = 1024 * 1024; // 1MB for chunked messages 
+  static MAX_SINGLE_MESSAGE_SIZE = 1024 * 1024;
+  static MAX_CHUNKED_MESSAGE_SIZE = 1024 * 1024;
   static CHUNK_SIZE = CHUNK_SIZE;
 
-  /**
-   * Check if message needs chunking
-   */
+  // Check if message needs chunking
   static needsChunking(data) {
     const size = Buffer.isBuffer(data) ? data.length : Buffer.byteLength(data);
     return size > this.MAX_SINGLE_MESSAGE_SIZE;
   }
 
-  /**
-   * Validate message size
-   */
+  // Validate message size
   static validateSize(data, allowChunked = true) {
     const size = Buffer.isBuffer(data) ? data.length : Buffer.byteLength(data);
-    
+
     if (size <= this.MAX_SINGLE_MESSAGE_SIZE) {
       return { valid: true, needsChunking: false };
     }
-    
+
     if (allowChunked && size <= this.MAX_CHUNKED_MESSAGE_SIZE) {
       return { valid: true, needsChunking: true };
     }
-    
-    return { 
-      valid: false, 
-      error: `Message too large: ${size} bytes (max: ${allowChunked ? this.MAX_CHUNKED_MESSAGE_SIZE : this.MAX_SINGLE_MESSAGE_SIZE})` 
+
+    return {
+      valid: false,
+      error: `Message too large: ${size} bytes (max: ${allowChunked ? this.MAX_CHUNKED_MESSAGE_SIZE : this.MAX_SINGLE_MESSAGE_SIZE})`
     };
   }
 }
@@ -579,9 +541,7 @@ Object.defineProperty(MessageSizeValidator, 'CHUNK_SIZE', {
   configurable: false
 });
 
-/**
- * Process incoming WebSocket message with chunked support
- */
+// Process incoming WebSocket message
 export async function processWebSocketMessage(connectionId, rawMessage, options = {}) {
   try {
     if (!connectionId || typeof connectionId !== 'string' || connectionId.length === 0 || connectionId.length > MAX_IDENTIFIER_LENGTH) {
@@ -615,7 +575,7 @@ export async function processWebSocketMessage(connectionId, rawMessage, options 
     // Check if this is a chunked message
     if (message.type === 'chunked' && message.chunkData) {
       const result = await chunkedMessageManager.processChunk(connectionId, message.chunkData, options.verifySender);
-      
+
       if (result.complete) {
         const rawComplete = JSON.stringify(result.data);
         return {
@@ -652,28 +612,26 @@ export async function processWebSocketMessage(connectionId, rawMessage, options 
   }
 }
 
-/**
- * Send large message with chunked support
- */
+// Send large message
 export async function sendLargeMessage(ws, data, messageId) {
   const sizeValidation = MessageSizeValidator.validateSize(data, true);
-  
+
   if (!sizeValidation.valid) {
     throw new Error(sizeValidation.error);
   }
 
   if (sizeValidation.needsChunking) {
     const chunks = await chunkedMessageManager.splitMessage(data, messageId);
-    
+
     for (const chunk of chunks) {
       const chunkMessage = {
         type: 'chunked',
         chunkData: chunk
       };
-      
+
       await sendSecureMessage(ws, chunkMessage);
     }
-    
+
     return {
       chunked: true,
       chunkCount: chunks.length
@@ -692,16 +650,12 @@ export async function sendLargeMessage(ws, data, messageId) {
   }
 }
 
-/**
- * Clean up connection chunks
- */
+// Clean up connection chunks
 export function cleanupConnection(connectionId) {
   chunkedMessageManager.cleanupConnection(connectionId);
 }
 
-/**
- * Get connection chunk status
- */
+// Get connection chunk status
 export function getConnectionChunkStatus(connectionId) {
   return {
     activeChunks: chunkedMessageManager.getActiveChunkCount(connectionId),

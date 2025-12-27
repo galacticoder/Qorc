@@ -12,6 +12,13 @@ const { promisify } = require('util');
 const execFileAsync = promisify(execFile);
 
 const repoRoot = path.resolve(__dirname, '..');
+const CERT_DIR = path.join(repoRoot, 'server', 'config', 'certs');
+const ENV_PATH = path.join(repoRoot, '.env');
+const DB_TLS_LINES = [
+  'DB_CA_CERT_PATH=/app/postgres-certs/root.crt',
+  'DB_TLS_SERVERNAME=postgres'
+];
+const AUTH_WAIT_SECONDS = 120;
 
 function findInPath(bin) {
   const exts = process.platform === 'win32' ? (process.env.PATHEXT || '.EXE;.CMD;.BAT;.COM').split(';') : [''];
@@ -25,14 +32,9 @@ function findInPath(bin) {
   return null;
 }
 
-async function mergeEnv(newLines) {
-  const envPath = path.resolve('/app/.env');
+async function mergeEnv(targetPath, newLines, ownership = null) {
   let existing = '';
-  try {
-    existing = await fs.promises.readFile(envPath, 'utf8');
-  } catch (e) {
-    existing = '';
-  }
+  try { existing = await fs.promises.readFile(targetPath, 'utf8'); } catch { existing = ''; }
 
   const map = new Map();
   existing.split(/\r?\n/).forEach(line => {
@@ -40,13 +42,19 @@ async function mergeEnv(newLines) {
     if (m) map.set(m[1], line);
   });
 
-  newLines.forEach(l => {
-    const m = l.match(/^([^#=\s]+)=?(.*)$/);
-    if (m) map.set(m[1], l);
+  newLines.forEach((line) => {
+    const m = line.match(/^([^#=\s]+)=?(.*)$/);
+    if (m) map.set(m[1], line);
   });
 
   const merged = [...map.values()].join('\n') + '\n';
-  await fs.promises.writeFile(envPath, merged, 'utf8');
+  const tmp = `${targetPath}.tmp`;
+  await fs.promises.writeFile(tmp, merged, 'utf8');
+  if (ownership) {
+    const { uid, gid } = ownership;
+    try { await fs.promises.chown(tmp, uid, gid); } catch { }
+  }
+  await fs.promises.rename(tmp, targetPath);
 }
 
 async function getTailscaleDNS() {
@@ -60,14 +68,27 @@ async function getTailscaleDNS() {
   }
 }
 
+async function getStatus() {
+  try {
+    const { stdout } = await execFileAsync('tailscale', ['status', '--json'], { windowsHide: true });
+    return JSON.parse(stdout || '{}');
+  } catch {
+    return null;
+  }
+}
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
 let currentChild = null;
 let aborted = false;
 let printingDisabled = false;
 const safeWrite = (s) => { if (!printingDisabled) try { process.stdout.write(s); } catch { } };
 
 async function ensureLoggedIn() {
-  let dns = await getTailscaleDNS();
-  if (dns) return dns;
+  const initialStatus = await getStatus();
+  if (initialStatus && initialStatus.Self && initialStatus.Self.DNSName) {
+    return String(initialStatus.Self.DNSName).replace(/\.$/, '');
+  }
 
   const host = process.env.TAILSCALE_HOSTNAME || `Qor-${Math.random().toString(16).slice(2, 10)}`;
   const args = ['up', '--hostname', host, '--accept-dns=true'];
@@ -76,11 +97,38 @@ async function ensureLoggedIn() {
   const cmd = needsSudo ? 'sudo' : 'tailscale';
   const cmdArgs = needsSudo ? ['tailscale', ...args] : args;
 
-  if (process.env.TS_AUTHKEY) {
-    const key = process.env.TS_AUTHKEY.trim();
-    cmdArgs.push('--authkey', key);
-    await execFileAsync(cmd, cmdArgs, { windowsHide: true });
-  } else {
+  const waitForDns = async () => {
+    safeWrite('[INFO] Waiting for Tailscale authentication');
+    let dots = 0;
+    let lastBackendState = '';
+    for (let i = 0; i < AUTH_WAIT_SECONDS; i++) {
+      if (aborted) { safeWrite('\n'); throw new Error('aborted'); }
+      const status = await getStatus();
+      const dns = status && status.Self && status.Self.DNSName ? String(status.Self.DNSName).replace(/\.$/, '') : '';
+      if (dns) { safeWrite('\n'); return dns; }
+      const backend = status && status.BackendState ? status.BackendState : '';
+      if (backend && backend !== lastBackendState) {
+        safeWrite(`\n[INFO] Backend state: ${backend}\n`);
+        lastBackendState = backend;
+        const loginUrl = status && status.LoginURL ? status.LoginURL : null;
+        if (backend === 'NeedsLogin' && loginUrl) console.log(`[AUTH] Go to: ${loginUrl}`);
+      }
+      safeWrite('.');
+      dots = (dots + 1) % 3;
+      if (dots === 0) safeWrite('\r[INFO] Waiting for Tailscale authentication');
+      await sleep(1000);
+    }
+    safeWrite('\n');
+    throw new Error('Timed out waiting for Tailscale authentication');
+  };
+
+  const runAuth = async () => {
+    if (process.env.TS_AUTHKEY) {
+      const key = process.env.TS_AUTHKEY.trim();
+      await execFileAsync(cmd, [...cmdArgs, '--authkey', key], { windowsHide: true });
+      return;
+    }
+
     if (!process.stdin.isTTY) {
       console.error('[FATAL] Tailscale authentication requires interactive mode or TS_AUTHKEY.');
       console.error('[FATAL] In Docker/non-interactive environments, set TS_AUTHKEY in your .env file.');
@@ -89,11 +137,9 @@ async function ensureLoggedIn() {
     }
 
     console.log('[INFO] Starting Tailscale authentication...');
-    if (needsSudo) {
-      console.log('[INFO] Running with sudo (Tailscale requires root access)');
-    }
+    if (needsSudo) console.log('[INFO] Running with sudo (Tailscale requires root access)');
     console.log('[INFO] Waiting for authentication to complete...');
-    let loginUrl = '';
+
     let urlShown = false;
     const child = spawn(cmd, cmdArgs, { stdio: ['inherit', 'pipe', 'pipe'] });
     currentChild = child;
@@ -101,62 +147,26 @@ async function ensureLoggedIn() {
     const showUrl = (s) => {
       const m = s.match(/https?:\/\/\S+/);
       if (m && !urlShown) {
-        loginUrl = m[0];
         urlShown = true;
-        console.log(`[AUTH] Go to: ${loginUrl}`);
+        console.log(`[AUTH] Go to: ${m[0]}`);
       }
     };
 
-    child.stdout.on('data', (buf) => {
-      const s = buf.toString();
-      showUrl(s);
-    });
-    child.stderr.on('data', (buf) => {
-      const s = buf.toString();
-      showUrl(s);
-    });
-    await new Promise((resolve) => child.on('exit', (code, signal) => {
-      if (signal === 'SIGINT' || signal === 'SIGTERM' || code === 130) {
-        aborted = true;
-      }
-      resolve();
+    child.stdout.on('data', (buf) => showUrl(buf.toString()));
+    child.stderr.on('data', (buf) => showUrl(buf.toString()));
+    const exitCode = await new Promise((resolve) => child.on('exit', (code, signal) => {
+      if (signal === 'SIGINT' || signal === 'SIGTERM' || code === 130) aborted = true;
+      resolve(code);
     }));
     currentChild = null;
 
-    if (aborted) {
-      printingDisabled = true;
-      throw new Error('aborted');
-    }
+    if (aborted) { printingDisabled = true; throw new Error('aborted'); }
+    if (exitCode !== 0) throw new Error(`tailscale up exited with code ${exitCode}`);
+  };
 
-    if (!urlShown) {
-      console.error('[ERROR] Tailscale did not provide an auth URL.');
-      console.error('[ERROR] This may indicate a configuration issue.');
-      console.error('[ERROR] For non-interactive environments, use TS_AUTHKEY instead.');
-      throw new Error('No Tailscale auth URL received');
-    }
-  }
-
+  await runAuth();
   if (aborted) throw new Error('aborted');
-  safeWrite('[INFO] Waiting for Tailscale authentication');
-  let dotCount = 0;
-  for (let i = 0; i < 90; i++) {
-    if (typeof aborted !== 'undefined' && aborted) { process.stdout.write('\n'); throw new Error('aborted'); }
-    dns = await getTailscaleDNS();
-    if (dns) {
-      safeWrite('\n');
-      return dns;
-    }
-    safeWrite('.');
-    dotCount++;
-    if (dotCount >= 3) {
-      safeWrite('\r[INFO] Waiting for Tailscale authentication   ');
-      safeWrite('\r[INFO] Waiting for Tailscale authentication');
-      dotCount = 0;
-    }
-    await new Promise((r) => setTimeout(r, 1000));
-  }
-  process.stdout.write('\n');
-  throw new Error('Timed out waiting for Tailscale authentication');
+  return waitForDns();
 }
 
 async function getTailscaleVersion() {
@@ -214,22 +224,10 @@ async function tailscaleSupportsCertFiles() {
       throw new Error("Your 'tailscale cert' lacks --cert-file/--key-file flags. Update Tailscale (>=1.38).");
     }
 
-    const baseDir = path.join(repoRoot, 'server', 'config', 'certs');
-    const certPath = path.join(baseDir, `${dns}.crt`);
-    const keyPath = path.join(baseDir, `${dns}.key`);
-    await fsp.mkdir(baseDir, { recursive: true });
+    const certPath = path.join(CERT_DIR, `${dns}.crt`);
+    const keyPath = path.join(CERT_DIR, `${dns}.key`);
+    await fsp.mkdir(CERT_DIR, { recursive: true });
 
-    const tlsLines = [
-      `TLS_CERT_PATH=${certPath}`,
-      `TLS_KEY_PATH=${keyPath}`
-    ];
-
-    const dbTlsLines = [
-      `DB_CA_CERT_PATH=/app/postgres-certs/root.crt`,
-      `DB_TLS_SERVERNAME=postgres`
-    ];
-
-    // Check if certs already exist and ask user
     const certExists = fs.existsSync(certPath);
     const keyExists = fs.existsSync(keyPath);
 
@@ -275,16 +273,13 @@ async function tailscaleSupportsCertFiles() {
       process.exit(1);
     }
 
-    // Permissions and ownership 
     try { await fsp.chmod(keyPath, 0o600); } catch { }
     try { await fsp.chmod(certPath, 0o644); } catch { }
 
     if (process.platform !== 'win32' && process.env.SUDO_USER) {
       try {
-        const { execFileAsync } = require('child_process');
-        const { promisify } = require('util');
-        const uid = parseInt(process.env.SUDO_UID || '1000');
-        const gid = parseInt(process.env.SUDO_GID || '1000');
+        const uid = parseInt(process.env.SUDO_UID || '1000', 10);
+        const gid = parseInt(process.env.SUDO_GID || '1000', 10);
         await fsp.chown(certPath, uid, gid);
         await fsp.chown(keyPath, uid, gid);
       } catch { }
@@ -294,67 +289,40 @@ async function tailscaleSupportsCertFiles() {
     console.log('Cert:', certPath);
     console.log('Key :', keyPath, '(600)');
 
-    // Write/update .env at project root
-    const envPath = path.join(repoRoot, '.env');
-    const absCert = certPath;
-    const absKey = keyPath;
-
-    // Update or create .env with TLS paths and SERVER_HOST
-    let envText = '';
-    try { envText = await fsp.readFile(envPath, 'utf8'); } catch { }
-    const lines = envText ? envText.split(/\r?\n/) : [];
-    const setKV = (k, v) => {
-      const idx = lines.findIndex(l => l.trim().startsWith(k + '='));
-      const newLine = `${k}=${JSON.stringify(v).replace(/^"|"$/g, '')}`;
-      if (idx >= 0) lines[idx] = newLine; else lines.push(newLine);
-    };
-    setKV('TLS_CERT_PATH', absCert);
-    setKV('TLS_KEY_PATH', absKey);
-    if (!/^[ \t]*SERVER_HOST=/.test(envText || '')) setKV('SERVER_HOST', '127.0.0.1');
-    const newEnv = lines.filter(Boolean).join('\n') + '\n';
+    const tlsLines = [
+      `TLS_CERT_PATH=${certPath}`,
+      `TLS_KEY_PATH=${keyPath}`
+    ];
 
     try {
-      // If running as sudo, write as the original user
-      if (process.platform !== 'win32' && process.env.SUDO_USER && process.getuid() === 0) {
-        const tmpFile = envPath + '.tmp';
-        await mergeEnv([...tlsLines, ...dbTlsLines]);
-
-        const uid = parseInt(process.env.SUDO_UID || '1000');
-        const gid = parseInt(process.env.SUDO_GID || '1000');
-        await fsp.chown(tmpFile, uid, gid);
-        await fsp.rename(tmpFile, envPath);
-      } else {
-        await mergeEnv([...tlsLines, ...dbTlsLines]);
-      }
-
+      const ownership = (process.platform !== 'win32' && process.env.SUDO_USER)
+        ? { uid: parseInt(process.env.SUDO_UID || '1000', 10), gid: parseInt(process.env.SUDO_GID || '1000', 10) }
+        : null;
+      await mergeEnv(ENV_PATH, [...tlsLines, ...DB_TLS_LINES, 'SERVER_HOST=127.0.0.1'], ownership);
       console.log('[OK] Updated .env with TLS_CERT_PATH, TLS_KEY_PATH, SERVER_HOST');
     } catch (err) {
-      if (err.code === 'EACCES') {
-        if (process.platform !== 'win32' && findInPath('sudo')) {
-          const tmpUserFile = envPath + '.tmp.' + Date.now();
-          try {
-            await mergeEnv([...tlsLines, ...dbTlsLines]);
-            const uid = process.getuid ? process.getuid() : null;
-            const gid = process.getgid ? process.getgid() : null;
-            const chownSpec = uid !== null && gid !== null ? `${uid}:${gid}` : `${process.env.USER || '$(id -u)'}:${process.env.GROUP || '$(id -g)'}`;
-            const cmd = `cp '${tmpUserFile}' '${envPath}' && chown ${chownSpec} '${envPath}' && chmod 644 '${envPath}'`;
-            await execFileAsync('sudo', ['bash', '-lc', cmd]);
-            try { await fsp.unlink(tmpUserFile); } catch { }
-            console.log('[OK] Updated .env with TLS_CERT_PATH, TLS_KEY_PATH, SERVER_HOST');
-            return;
-          } catch (e2) {
-            try { await fsp.unlink(tmpUserFile); } catch { }
-            console.log('[WARN] Could not write .env even with sudo');
-          }
+      if (err.code === 'EACCES' && process.platform !== 'win32' && findInPath('sudo')) {
+        const chownSpec = (process.getuid && process.getgid)
+          ? `${process.getuid()}:${process.getgid()}`
+          : `${process.env.USER || '$(id -u)'}:${process.env.GROUP || '$(id -g)'}`;
+        const tmp = `${ENV_PATH}.tmp.${Date.now()}`;
+        try {
+          await mergeEnv(tmp, [...tlsLines, ...DB_TLS_LINES, 'SERVER_HOST=127.0.0.1']);
+          const cmd = `cp '${tmp}' '${ENV_PATH}' && chown ${chownSpec} '${ENV_PATH}' && chmod 644 '${ENV_PATH}'`;
+          await execFileAsync('sudo', ['bash', '-lc', cmd]);
+          try { await fsp.unlink(tmp); } catch { }
+          console.log('[OK] Updated .env with TLS_CERT_PATH, TLS_KEY_PATH, SERVER_HOST');
+          return;
+        } catch (e2) {
+          try { await fsp.unlink(tmp); } catch { }
+          console.log('[WARN] Could not write .env even with sudo');
         }
-        console.log('[WARN] Could not write .env (permission denied)');
-        console.log('[INFO] Manually add to .env:');
-        console.log(`  TLS_CERT_PATH=${absCert}`);
-        console.log(`  TLS_KEY_PATH=${absKey}`);
-        console.log(`  SERVER_HOST=127.0.0.1`);
-      } else {
-        throw err;
       }
+      console.log('[WARN] Could not write .env (permission denied)');
+      console.log('[INFO] Manually add to .env:');
+      console.log(`  TLS_CERT_PATH=${certPath}`);
+      console.log(`  TLS_KEY_PATH=${keyPath}`);
+      console.log('  SERVER_HOST=127.0.0.1');
     }
   } catch (e) {
     if (e && String(e.message || e) === 'aborted') {

@@ -1,7 +1,6 @@
 /**
  * LibSignal Protocol Bundle Handler
  * Handles Signal Protocol bundle storage, retrieval, and validation
- * for quantum-secure end-to-end encrypted messaging
  */
 
 import { LibsignalBundleDB } from '../database/database.js';
@@ -9,9 +8,7 @@ import { SecureStateManager } from '../authentication/authentication.js';
 import { logger as cryptoLogger } from '../crypto/crypto-logger.js';
 import { SignalType } from '../signals.js';
 
-/**
- * Handle Signal Protocol bundle publication from client
- */
+// Handle Signal Protocol bundle publication from client
 export async function handleBundlePublish({ ws, parsed, state, context, sendPQResponse }) {
   cryptoLogger.info('[LIBSIGNAL] Bundle publish request', {
     username: (state.username || 'unknown').slice(0, 8) + '...'
@@ -58,21 +55,17 @@ export async function handleBundlePublish({ ws, parsed, state, context, sendPQRe
       setTimeout(() => {
         try {
           ws.close(1008, 'Invalid Signal bundle structure');
-        } catch {}
+        } catch { }
       }, 100);
       return;
     }
 
-    // Transform nested bundle to flat structure for database
     const flatBundle = transformBundleForStorage(bundle);
-
-    // Store bundle in database
     await LibsignalBundleDB.publish(username, flatBundle);
     cryptoLogger.info('[LIBSIGNAL] Bundle stored successfully', {
       username: username.slice(0, 8) + '...'
     });
 
-    // Complete authentication if this was the final step
     if (ws.clientState?.pendingSignalBundle && context?.authHandler) {
       cryptoLogger.info('[LIBSIGNAL] Completing authentication after bundle', {
         username: username.slice(0, 8) + '...'
@@ -90,7 +83,6 @@ export async function handleBundlePublish({ ws, parsed, state, context, sendPQRe
       );
     }
 
-    // Send success acknowledgment
     await sendPQResponse(ws, {
       type: SignalType.LIBSIGNAL_PUBLISH_STATUS,
       success: true
@@ -110,9 +102,7 @@ export async function handleBundlePublish({ ws, parsed, state, context, sendPQRe
   }
 }
 
-/**
- * Handle Signal Protocol bundle failure from client
- */
+// Handle Signal Protocol bundle failure from client
 export async function handleBundleFailure({ ws, parsed, state, sendPQResponse }) {
   const failureUsername = state.username || parsed.username || 'unknown';
   cryptoLogger.error('[LIBSIGNAL] Client bundle generation failed', {
@@ -130,13 +120,11 @@ export async function handleBundleFailure({ ws, parsed, state, sendPQResponse })
   setTimeout(() => {
     try {
       ws.close(1008, `Signal bundle failure: ${parsed.stage}`);
-    } catch {}
+    } catch { }
   }, 100);
 }
 
-/**
- * Handle Signal Protocol bundle request from client
- */
+// Handle Signal Protocol bundle request from client
 export async function handleBundleRequest({ ws, parsed, state, sendPQResponse }) {
   cryptoLogger.info('[LIBSIGNAL] Bundle request', {
     requester: (state.username || 'unknown').slice(0, 8) + '...',
@@ -151,7 +139,7 @@ export async function handleBundleRequest({ ws, parsed, state, sendPQResponse })
 
     const throttleKey = `bundle:throttle:${state.username}:${requestedUsername}`;
     const now = Date.now();
-    
+
     try {
       const { withRedisClient } = await import('../presence/presence.js');
       const shouldThrottle = await withRedisClient(async (client) => {
@@ -162,7 +150,7 @@ export async function handleBundleRequest({ ws, parsed, state, sendPQResponse })
         await client.set(throttleKey, now.toString(), 'EX', 2);
         return false;
       });
-      
+
       if (shouldThrottle) {
         cryptoLogger.warn('[LIBSIGNAL] Throttling bundle request', {
           requester: state.username,
@@ -175,10 +163,7 @@ export async function handleBundleRequest({ ws, parsed, state, sendPQResponse })
       cryptoLogger.warn('[LIBSIGNAL] Redis throttle check failed, allowing request', { error: error.message });
     }
 
-    // Retrieve bundle from database
     const flatBundle = await LibsignalBundleDB.take(requestedUsername);
-
-    // Transform flat bundle to nested structure for client
     const bundle = flatBundle ? transformBundleForClient(flatBundle) : null;
 
     const responsePayload = {
@@ -199,7 +184,6 @@ export async function handleBundleRequest({ ws, parsed, state, sendPQResponse })
       });
     }
 
-    // Check WebSocket state
     if (ws.readyState !== 1) {
       cryptoLogger.error('[LIBSIGNAL] Cannot send bundle - WebSocket not open', {
         state: ws.readyState
@@ -207,9 +191,8 @@ export async function handleBundleRequest({ ws, parsed, state, sendPQResponse })
       return;
     }
 
-    // Send bundle response
     await sendPQResponse(ws, responsePayload);
-    cryptoLogger.debug('[LIBSIGNAL] Bundle response sent via PQ envelope');
+    cryptoLogger.debug('[LIBSIGNAL] Bundle response sent');
   } catch (error) {
     cryptoLogger.error('[LIBSIGNAL] Bundle retrieval failed', {
       error: error.message
@@ -226,9 +209,7 @@ export async function handleBundleRequest({ ws, parsed, state, sendPQResponse })
   }
 }
 
-/**
- * Validate bundle structure comprehensively
- */
+// Validate bundle structure
 function validateBundleStructure(bundle) {
   const errors = [];
 
@@ -276,9 +257,7 @@ function validateBundleStructure(bundle) {
   return errors;
 }
 
-/**
- * Transform nested bundle structure to flat structure for database
- */
+// Transform nested bundle structure to flat structure for database
 function transformBundleForStorage(bundle) {
   return {
     registrationId: bundle.registrationId,
@@ -295,9 +274,7 @@ function transformBundleForStorage(bundle) {
   };
 }
 
-/**
- * Transform flat bundle from database to nested structure for client
- */
+// Transform flat bundle from database to nested structure for client
 function transformBundleForClient(flatBundle) {
   return {
     registrationId: flatBundle.registrationId,

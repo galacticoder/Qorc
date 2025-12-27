@@ -12,12 +12,10 @@ const { URL } = require('url');
 const repoRoot = path.resolve(__dirname, '..');
 
 if (process.platform === 'win32') {
-  console.error('[ERROR] Windows is not supported for server deployment.');
-  console.error('[ERROR] Use Docker instead:');
+  console.error('[ERROR] Windows is not supported for server deployment. Use Docker instead:');
   console.error('[ERROR]   node scripts\start-server.cjs server');
   process.exit(1);
 }
-
 
 function loadDotEnv(filePath) {
   try {
@@ -49,14 +47,13 @@ function fileExistsMaybeRelative(p) {
   try { return fs.existsSync(abs); } catch { return false; }
 }
 
-// Editable defaults (override using environment)
 const CONFIG = {
   PORT: process.env.PORT || '',
   BIND_ADDRESS: process.env.BIND_ADDRESS || '127.0.0.1',
   REDIS_URL: process.env.REDIS_URL || 'rediss://127.0.0.1:6379',
   ENABLE_CLUSTERING: process.env.ENABLE_CLUSTERING || 'true',
   CLUSTER_WORKERS: process.env.CLUSTER_WORKERS || '1',
-  CLUSTER_PRIMARY: process.env.CLUSTER_PRIMARY || '', // '', 'true', or 'false'
+  CLUSTER_PRIMARY: process.env.CLUSTER_PRIMARY || '',
   AUTO_APPROVE: process.env.CLUSTER_AUTO_APPROVE || 'true',
   ALLOWED_CORS_ORIGINS: process.env.ALLOWED_CORS_ORIGINS || 'http://localhost:5173,http://127.0.0.1:5173',
   TLS_CERT_PATH: process.env.TLS_CERT_PATH || '',
@@ -70,8 +67,6 @@ const CONFIG = {
 };
 
 const serverDir = path.join(repoRoot, 'server');
-
-// Prefer a project-local TLS-enabled Redis binary if configured or present.
 const localRedisTls = path.join(repoRoot, 'server', 'bin', 'redis-server-tls');
 const REDIS_SERVER_BIN = process.env.TLS_REDIS_SERVER ||
   (fs.existsSync(localRedisTls) ? localRedisTls : null) ||
@@ -116,7 +111,6 @@ class CircularBuffer {
   length() { return this.buffer.length; }
 }
 
-// Debouncer for reducing render calls
 class Debouncer {
   constructor(fn, delay = 50) {
     this.fn = fn;
@@ -267,8 +261,6 @@ function findSudo() {
   try { execSync('command -v sudo >/dev/null 2>&1'); return true; } catch { return false; }
 }
 
-// Shared helper to generate a strong random secret (base64) using OpenSSL when
-// available, otherwise Node crypto.
 function generateStrongSecret(bytes = 48) {
   try {
     return execSync(`openssl rand -base64 ${bytes}`, { encoding: 'utf8' }).trim();
@@ -278,17 +270,14 @@ function generateStrongSecret(bytes = 48) {
   }
 }
 
-// Ensure KEY_ENCRYPTION_SECRET exists
 async function ensureKeyEncryptionSecret() {
   const secretFile = path.join(serverDir, 'config', 'secrets', 'KEY_ENCRYPTION_SECRET');
   const secretDir = path.dirname(secretFile);
 
-  // If already set and strong enough, keep it
   if (CONFIG.KEY_ENCRYPTION_SECRET && CONFIG.KEY_ENCRYPTION_SECRET.length >= 32) {
     return CONFIG.KEY_ENCRYPTION_SECRET;
   }
 
-  // Load from persisted file if available
   try {
     if (fs.existsSync(secretFile)) {
       const content = fs.readFileSync(secretFile, 'utf8').trim();
@@ -299,11 +288,9 @@ async function ensureKeyEncryptionSecret() {
     }
   } catch { }
 
-  // Generate new secret
   log('Generating KEY_ENCRYPTION_SECRET...');
   const secret = generateStrongSecret(48);
 
-  // Persist to file
   try {
     if (!fs.existsSync(secretDir)) {
       fs.mkdirSync(secretDir, { recursive: true, mode: 0o700 });
@@ -318,17 +305,14 @@ async function ensureKeyEncryptionSecret() {
   return secret;
 }
 
-// Ensure SESSION_STORE_KEY exists for PQ session key encryption.
 async function ensureSessionStoreKey() {
   const secretFile = path.join(serverDir, 'config', 'secrets', 'SESSION_STORE_KEY');
   const secretDir = path.dirname(secretFile);
 
-  // If already set and strong enough, keep it
   if (process.env.SESSION_STORE_KEY && process.env.SESSION_STORE_KEY.trim().length >= 32) {
     return process.env.SESSION_STORE_KEY.trim();
   }
 
-  // Load from persisted file if available
   try {
     if (fs.existsSync(secretFile)) {
       const content = fs.readFileSync(secretFile, 'utf8').trim();
@@ -339,11 +323,9 @@ async function ensureSessionStoreKey() {
     }
   } catch { }
 
-  // Generate new secret (≥
   log('Generating SESSION_STORE_KEY for PQ session storage...');
   const secret = generateStrongSecret(48);
 
-  // Persist to file
   try {
     if (!fs.existsSync(secretDir)) {
       fs.mkdirSync(secretDir, { recursive: true, mode: 0o700 });
@@ -491,28 +473,23 @@ class ServerUI {
     this.tlsCache = null;
     this.lastTlsCheck = 0;
 
-    // Setup terminal
     this.width = process.stdout.columns || 80;
     this.height = (process.stdout.rows || 24) - 1;
 
-    // Debounced render
     this.renderDebouncer = new Debouncer(() => this._doRender(), 100);
 
-    // Handle terminal resize
     process.stdout.on('resize', () => {
       this.width = process.stdout.columns || 80;
       this.height = (process.stdout.rows || 24) - 1;
       this.renderDebouncer.call();
     });
 
-    // Setup input handling
     if (process.stdin.isTTY) {
       process.stdin.setRawMode(true);
       process.stdin.setEncoding('utf8');
       process.stdin.on('data', (key) => this._handleInput(key));
     }
 
-    // Enter alternate screen, disable line wrap, clear, hide cursor
     process.stdout.write('\x1b[?1049h\x1b[?7l\x1b[2J\x1b[H\x1b[?25l');
   }
 
@@ -675,7 +652,6 @@ class ServerUI {
     const w = this.width;
     const h = this.height;
 
-    // Check if server is alive
     let alive = false;
     try {
       process.kill(this.serverPid, 0);
@@ -768,7 +744,7 @@ class ServerUI {
     }
     headerLine = headerLine.substring(0, w);
     headerLine += ' '.repeat(Math.max(0, w - headerLine.length));
-    lines.push('\x1b[30;46;1m' + headerLine + '\x1b[0m'); // black on cyan, bold
+    lines.push('\x1b[30;46;1m' + headerLine + '\x1b[0m');
 
     // Stats line
     const uptimeTxt = `UP ${fmtTime(uptime)}`;
@@ -801,7 +777,6 @@ class ServerUI {
       statsLine += '\x1b[33mTLS none\x1b[0m';
     }
 
-    // Strip ANSI for length calculation
     const stripAnsi = (s) => s.replace(/\x1b\[[0-9;]+m/g, '');
     const statsPlain = stripAnsi(statsLine);
     if (statsPlain.length < rightStatsStart) {
@@ -898,7 +873,6 @@ class ServerUI {
 }
 
 async function ensureTLSIfMissing() {
-  // If TLS paths not set or files missing, automatically generate
   const hasCert = CONFIG.TLS_CERT_PATH && fileExistsMaybeRelative(CONFIG.TLS_CERT_PATH);
   const hasKey = CONFIG.TLS_KEY_PATH && fileExistsMaybeRelative(CONFIG.TLS_KEY_PATH);
   if (hasCert && hasKey) return;
@@ -913,7 +887,6 @@ async function ensureTLSIfMissing() {
     process.exit(code);
   }
 
-  // Reload .env and update CONFIG
   loadDotEnv(path.join(repoRoot, '.env'));
   if (process.env.TLS_CERT_PATH) {
     CONFIG.TLS_CERT_PATH = process.env.TLS_CERT_PATH;
@@ -927,7 +900,6 @@ async function ensureTLSIfMissing() {
 }
 
 async function ensureDbCaBundleEnv() {
-  // If caller already pinned a CA bundle and the file exists, respect that.
   const pinnedPath = process.env.DB_CA_CERT_PATH || process.env.PGSSLROOTCERT;
   if (pinnedPath) {
     try {
@@ -957,7 +929,6 @@ async function ensureDbCaBundleEnv() {
   } catch {
   }
 
-  // Basic sanitization to avoid nonsense values in commands
   if (!/^[-A-Za-z0-9_.]+$/.test(dbHost)) {
     logErr(`[START] WARN: PGHOST/DATABASE_URL host '${dbHost}' is not a simple hostname/IP; cannot auto-generate DB_CA_CERT_PATH`);
     return;
@@ -1029,7 +1000,6 @@ async function ensureDbCaBundleEnv() {
     fs.writeFileSync(caOutPath, pemBundle, { mode: 0o644 });
     log('[START] Generated Postgres CA bundle from remote TLS chain:', caOutPath);
 
-    // Try to extract CN from the inspected certificate output
     let cn = null;
     try {
       const cnMatch = stdout.match(/CN\s*=\s*([^\n]+)/);
@@ -1139,7 +1109,6 @@ async function ensureRedisTls() {
     }
   }
 
-  // Derive TLS servername for Redis from the HTTPS certificate CN if not already set.
   if (!process.env.REDIS_TLS_SERVERNAME && CONFIG.TLS_CERT_PATH && fs.existsSync(CONFIG.TLS_CERT_PATH)) {
     try {
       const subj = execSync(`openssl x509 -in "${CONFIG.TLS_CERT_PATH}" -noout -subject`, { encoding: 'utf8' }).trim();
@@ -1178,7 +1147,6 @@ async function ensureRedisTls() {
     process.exit(1);
   }
 
-  // Check if redis-server is available
   try {
     execSync(`${REDIS_SERVER_BIN} --version`, { stdio: 'ignore', shell: true });
   } catch {
@@ -1229,7 +1197,6 @@ async function ensureCorrectCertificateConfig() {
     const { promisify } = require('util');
     const execFileAsync = promisify(execFile);
 
-    // 1. Get current Tailscale hostname
     let dnsName = '';
     try {
       const { stdout } = await execFileAsync('tailscale', ['status', '--json'], { windowsHide: true });
@@ -1241,20 +1208,15 @@ async function ensureCorrectCertificateConfig() {
 
     if (!dnsName) return;
 
-    // 2. Construct expected paths
     const certDir = path.join(repoRoot, 'server', 'config', 'certs');
     const expectedCert = path.join(certDir, `${dnsName}.crt`);
     const expectedKey = path.join(certDir, `${dnsName}.key`);
-
-    // 3. Check if files exist
     if (fs.existsSync(expectedCert) && fs.existsSync(expectedKey)) {
       const currentCert = process.env.TLS_CERT_PATH;
       const currentKey = process.env.TLS_KEY_PATH;
 
-      // 4. Update if mismatch
       if (currentCert !== expectedCert || currentKey !== expectedKey) {
         log(`[CONFIG] Detected hostname mismatch. Switching certs to: ${dnsName}`);
-
         process.env.TLS_CERT_PATH = expectedCert;
         process.env.TLS_KEY_PATH = expectedKey;
         CONFIG.TLS_CERT_PATH = expectedCert;
@@ -1285,10 +1247,7 @@ async function ensureCorrectCertificateConfig() {
 }
 
 async function main() {
-  // Auto-correct certificates before anything else
   await ensureCorrectCertificateConfig();
-
-  // Start tailscaled if in Docker and not running
   const isDocker = require('fs').existsSync('/.dockerenv');
   if (process.platform === 'linux' && (isDocker || !process.stdin.isTTY)) {
     try {
@@ -1334,7 +1293,6 @@ async function main() {
   await ensurePostgresBootstrap();
   await ensureServerDeps();
 
-  // Auto-set Redis TLS certificate paths if not already configured
   if (!process.env.REDIS_CA_CERT_PATH || !process.env.REDIS_CLIENT_CERT_PATH || !process.env.REDIS_CLIENT_KEY_PATH) {
     const dockerCertsDir = '/app/redis-certs';
     const isDocker = fs.existsSync(dockerCertsDir);
@@ -1345,7 +1303,6 @@ async function main() {
     const redisClientCert = path.join(certsDir, 'redis-client.crt');
     const redisClientKey = path.join(certsDir, 'redis-client.key');
 
-    // Wait for certificate files to exist
     let certsExist = false;
     const maxWaitTime = 30000;
     const checkInterval = 500;
@@ -1431,7 +1388,6 @@ async function main() {
     const certsDir = isDocker ? dockerCertsDir : path.join(repoRoot, 'postgres-certs');
     const postgresCaCert = path.join(certsDir, 'root.crt');
 
-    // Wait for certificate file to exist
     let certExists = false;
     const maxWaitTime = 30000;
     const checkInterval = 500;
@@ -1441,7 +1397,6 @@ async function main() {
       log('[START] Waiting for Postgres SSL certificates to be ready...');
       while (!certExists && (Date.now() - startTime) < maxWaitTime) {
         if (fs.existsSync(postgresCaCert)) {
-          // Verify the file is readable and has content
           try {
             const content = fs.readFileSync(postgresCaCert, 'utf8');
             if (content && content.includes('BEGIN CERTIFICATE')) {
@@ -1449,7 +1404,6 @@ async function main() {
               break;
             }
           } catch (e) {
-            // File exists but not readable yet, continue waiting
           }
         }
         await new Promise(resolve => setTimeout(resolve, checkInterval));
@@ -1544,7 +1498,6 @@ async function main() {
   log(`  TLS Cert: ${CONFIG.TLS_CERT_PATH}`);
   log(`  TLS Key: ${CONFIG.TLS_KEY_PATH}`);
 
-  // Environment for the server
   const env = {
     ...process.env,
     PORT: String(CONFIG.PORT),
@@ -1633,7 +1586,7 @@ async function main() {
     stdio: ['ignore', 'pipe', 'pipe']
   });
 
-  // Setup UI
+  // Setup TUI
   const ui = new ServerUI(child.pid, CONFIG);
 
   const lastLines = [];
@@ -1660,7 +1613,6 @@ async function main() {
     ui.stop(false);
     logStream.end();
 
-    // Show errors if server crashed
     if (code !== 0) {
       console.error(`\n[ERROR] Server exited with code ${code}`);
       if (lastLines.length) {

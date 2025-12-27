@@ -14,17 +14,17 @@ import os from 'os';
 import { logger as cryptoLogger } from '../crypto/crypto-logger.js';
 
 export class HAProxyConfigGenerator {
-  constructor({ 
-    listenPort = 443, 
+  constructor({
+    listenPort = 443,
     httpPort = 80,
     statsPort = 8404,
     tlsCertPath = process.env.HAPROXY_CERT_PATH || path.join(process.cwd(), 'server', 'config', 'certs'),
     maxConnections = 100000,
-    statsUsername = 'admin', // will be prompted for a new one. this is the default
-    statsPassword = 'adminpass', // will be prompted for a new one. this is the default
+    statsUsername = 'admin', // Will be prompted for a new one. This is the default
+    statsPassword = 'adminpass', // Will be prompted for a new one. This is the default
     timeouts = {
       connect: '30s',
-      client: '3600s',  // 1 hour for WebSocket
+      client: '3600s',
       server: '3600s',
       tunnel: '3600s',
       httpKeepAlive: '60s',
@@ -43,20 +43,17 @@ export class HAProxyConfigGenerator {
     const candidate = envCert || path.join(this.tlsCertPath, 'cert.pem');
     this.certFile = candidate;
     this.dhParamFile = path.join(this.tlsCertPath, 'dhparams.pem');
-    // Stats socket path per-user in tmpdir unless overridden
     const uid = (typeof process.getuid === 'function') ? String(process.getuid()) : 'nouid';
     this.statsSocketPath = process.env.HAPROXY_STATS_SOCKET || path.join(os.tmpdir(), `haproxy-admin-${uid}.sock`);
     this.backends = [];
   }
-  
-  /**
-   * Add backend server to configuration
-   */
-  addBackend({ 
-    name, 
-    host = '127.0.0.1', 
-    port, 
-    weight = 100, 
+
+  // Add backend server to configuration
+  addBackend({
+    name,
+    host = '127.0.0.1',
+    port,
+    weight = 100,
     maxconn = 10000,
     checkInterval = '5s',
     checkTimeout = '3s',
@@ -74,17 +71,16 @@ export class HAProxyConfigGenerator {
       cryptoLogger.error('[HAPROXY] Invalid backend host', { name, host });
       return;
     }
-    
-    // Validate port is a valid number
+
     const portNum = parseInt(port, 10);
     if (!portNum || portNum <= 0 || portNum > 65535) {
       const errorMsg = `Server "${name}" at ${host}:${port} has invalid port - skipping from load balancer`;
       cryptoLogger.error('[HAPROXY] Invalid backend port', { name, host, port });
       console.error(`\n[ERROR] ${errorMsg}`);
       console.error(`[ERROR] Server "${name}" needs to be restarted with a valid port\n`);
-      return; 
+      return;
     }
-    
+
     this.backends.push({
       name,
       host,
@@ -95,14 +91,10 @@ export class HAProxyConfigGenerator {
       checkTimeout,
     });
   }
-  
-  /**
-   * Generate complete HAProxy configuration
-   */
+
+  // Generate complete HAProxy configuration
   generateConfig() {
-    // Allow 0 backends to maintain tunnel URL when no servers are active
-    
-    return `# HAProxy Configuration for Quantum-Secure Server Cluster
+    return `# HAProxy Configuration for Qor-Chat Server Cluster
 # Generated automatically - DO NOT EDIT MANUALLY
 # Generated at: ${new Date().toISOString()}
 
@@ -120,7 +112,7 @@ global
     log /dev/log local0
     log /dev/log local1 notice
     
-    # Quantum-Secure SSL/TLS settings (TLS 1.3 only + PQC key exchange)
+    # Quantum-Secure SSL/TLS settings
     ssl-default-bind-ciphersuites TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256
     ssl-default-bind-options no-tlsv10 no-tlsv11 no-tlsv12 no-sslv3
     
@@ -164,7 +156,7 @@ defaults
     compression type text/html text/plain text/css text/javascript application/javascript application/json
 
 #---------------------------------------------------------------------
-# Stats interface (protected)
+# Stats interface
 #---------------------------------------------------------------------
 listen stats
     bind *:${this.statsPort}
@@ -174,7 +166,7 @@ listen stats
     stats show-legends
     stats show-node
     
-    # SECURITY: Require authentication (configured at startup)
+    # SECURITY: Require authentication
     stats auth ${this.statsUsername}:${this.statsPassword}
     stats admin if TRUE
     
@@ -251,7 +243,7 @@ backend http_backend
     mode http
     balance roundrobin
     
-    # Cookie-based sticky sessions (allows better load distribution)
+    # Cookie-based sticky sessions
     cookie SERVERID insert indirect nocache
     
     # Health check with auto-recovery
@@ -265,23 +257,21 @@ backend http_backend
 ${this.generateBackendServers('http')}
 
 #---------------------------------------------------------------------
-# Backend: WebSocket traffic (sticky sessions required)
+# Backend: WebSocket traffic
 #---------------------------------------------------------------------
 backend websocket_backend
     mode http
     balance leastconn
     
-    # Sticky sessions for WebSocket using source IP (cookies don't work for WS upgrade)
+    # Sticky sessions for WebSocket using source IP
     stick-table type ip size 100k expire 3600s
     stick on src
     
-    # WebSocket-specific options - keep connections alive indefinitely
+    # WebSocket-specific options
     no option http-server-close
     no option httpclose
     option http-keep-alive
     option forwardfor
-    
-    # CRITICAL: Disable request buffering for real-time WebSocket communication
     no option http-buffer-request
     
     # Forward WebSocket upgrade headers to backend
@@ -299,7 +289,7 @@ backend websocket_backend
 ${this.generateBackendServers('websocket')}
 
 #---------------------------------------------------------------------
-# Cache for static content (optional)
+# Cache for static content
 #---------------------------------------------------------------------
 cache quantum_cache
     total-max-size 256
@@ -307,30 +297,25 @@ cache quantum_cache
     max-age 300
 `;
   }
-  
-  /**
-   * Generate backend server configuration
-   */
+
+  // Generate backend server configuration
   generateBackendServers(type) {
     if (this.backends.length === 0) {
       return `\t# No backend servers available - HAProxy will return 503 Service Unavailable`;
     }
     return this.backends.map(backend => {
-      // health checks and failover (check every 2s, fail after 2 failures)
       const checkParams = `check inter 2s fall 2 rise 2`;
-      const sslParams = 'ssl verify none'; // Backend servers use self-signed certs
+      const sslParams = 'ssl verify none';
       const alpnParam = type === 'websocket' ? 'alpn http/1.1' : 'alpn h2,http/1.1';
       const cookieParam = type === 'websocket' ? '' : 'cookie SERVERID ';
-      
+
       return type === 'websocket'
         ? `\tserver ${backend.name} ${backend.host}:${backend.port} ${sslParams} ${alpnParam} weight ${backend.weight} maxconn ${backend.maxconn} ${checkParams}`
         : `\tserver ${backend.name} ${backend.host}:${backend.port} ${cookieParam}${sslParams} ${alpnParam} weight ${backend.weight} maxconn ${backend.maxconn} ${checkParams}`;
     }).join('\n');
   }
-  
-  /**
-   * Write configuration to file
-   */
+
+  // Write configuration to file
   async writeConfig(outputPath) {
     try {
       const config = this.generateConfig();
@@ -342,15 +327,13 @@ cache quantum_cache
       throw error;
     }
   }
-  
-  /**
-   * Validate configuration using HAProxy binary
-   */
+
+  // Validate configuration using HAProxy binary
   async validateConfig(configPath) {
     const { execFile } = await import('child_process');
     const { promisify } = await import('util');
     const execFileAsync = promisify(execFile);
-    
+
     try {
       await execFileAsync('haproxy', ['-c', '-f', configPath], { env: { ...process.env } });
       cryptoLogger.info('[HAPROXY] Configuration validated successfully');
@@ -360,20 +343,16 @@ cache quantum_cache
       throw new Error(`HAProxy configuration is invalid: ${error.message}`);
     }
   }
-  
-  /**
-   * Reload HAProxy with new configuration 
-   */
+
+  // Reload HAProxy with new configuration
   async reloadHAProxy(configPath) {
     const { execFile } = await import('child_process');
     const { promisify } = await import('util');
     const execFileAsync = promisify(execFile);
-    
+
     try {
-      // Validate first
       await this.validateConfig(configPath);
-      
-      // Determine PID file path
+
       const isRoot = typeof process.getuid === 'function' && process.getuid() === 0;
       const pidFile = process.env.HAPROXY_PID_FILE || (isRoot && process.platform !== 'win32' ? '/var/run/haproxy-auto.pid' : path.join(os.tmpdir(), 'haproxy-auto.pid'));
       let oldPid = null;
@@ -381,12 +360,11 @@ cache quantum_cache
         const pidStr = await fs.readFile(pidFile, 'utf8');
         const n = parseInt(pidStr, 10);
         if (Number.isFinite(n) && n > 0) oldPid = n;
-      } catch {}
-      
-      // Build arguments for a soft reload
+      } catch { }
+
       const args = ['-f', configPath, '-D', '-p', pidFile];
       if (oldPid) args.push('-sf', String(oldPid));
-      
+
       const env = { ...process.env };
       if (process.env.LD_LIBRARY_PATH) env.LD_LIBRARY_PATH = process.env.LD_LIBRARY_PATH;
       if (process.env.OPENSSL_CONF) env.OPENSSL_CONF = process.env.OPENSSL_CONF;
@@ -401,13 +379,11 @@ cache quantum_cache
   }
 }
 
-/**
- * Generate HAProxy configuration from cluster state
- */
+// Generate HAProxy configuration from cluster state
 export async function generateConfigFromCluster(clusterManager, outputPath) {
   try {
     const status = await clusterManager.getClusterStatus();
-    
+
     const generator = new HAProxyConfigGenerator({
       listenPort: parseInt(process.env.HAPROXY_HTTPS_PORT || '8443', 10),
       httpPort: parseInt(process.env.HAPROXY_HTTP_PORT || '8080', 10),
@@ -416,14 +392,13 @@ export async function generateConfigFromCluster(clusterManager, outputPath) {
       statsUsername: process.env.HAPROXY_STATS_USERNAME || 'admin',
       statsPassword: process.env.HAPROXY_STATS_PASSWORD || 'adminpass',
     });
-    
-    // Add all healthy servers as backends
+
     for (const server of status.servers) {
       if (server.health?.status === 'healthy') {
         const serverUrl = process.env[`SERVER_${server.serverId}_URL`] || `127.0.0.1:${3000 + parseInt(server.serverId.slice(-4), 16) % 1000}`;
         const [host, portStr] = serverUrl.split(':');
         const port = parseInt(portStr, 10);
-        
+
         generator.addBackend({
           name: server.serverId,
           host,
@@ -433,15 +408,14 @@ export async function generateConfigFromCluster(clusterManager, outputPath) {
         });
       }
     }
-    
-    // Write configuration
+
     await generator.writeConfig(outputPath);
-    
+
     cryptoLogger.info('[HAPROXY] Generated configuration from cluster', {
       serverCount: status.serverCount,
       outputPath
     });
-    
+
     return generator;
   } catch (error) {
     cryptoLogger.error('[HAPROXY] Failed to generate configuration from cluster', error);

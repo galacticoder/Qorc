@@ -20,6 +20,7 @@ process.on('uncaughtException', (err) => {
   try { app.exit(1); } catch (_) { try { process.exit(1); } catch (_) { } }
 });
 
+// Fatal exit handler
 function fatalExit(message) {
   const msg = String(message || 'Fatal error');
   try { console.error('[MAIN] FATAL:', msg); } catch (_) { }
@@ -42,8 +43,6 @@ const { FileHandler } = require('./handlers/file-handler.cjs');
 const { TrayHandler } = require('./handlers/tray-handler.cjs');
 const { NotificationHandler } = require('./handlers/notification-handler.cjs');
 const { P2PSignalingHandler } = require('./handlers/p2p-signaling-handler.cjs');
-const WebSocket = require('ws');
-const { SocksProxyAgent } = require('socks-proxy-agent');
 const { decryptEnvelope, encryptEnvelope } = require('./handlers/pq-crypto-handler.cjs');
 
 const ElectronTorManager = require('./tor-manager.cjs');
@@ -79,6 +78,7 @@ const BACKGROUND_NOTIFICATION_COOLDOWN_MS = 5000;
 let backgroundMessageCount = 0;
 let backgroundCallNotifiedFrom = new Set();
 
+// Persist pending server messages to storage
 async function persistPendingMessages() {
   if (!storageHandler) {
     return;
@@ -94,6 +94,7 @@ async function persistPendingMessages() {
   }
 }
 
+// Load persisted messages from storage
 async function loadPersistedMessages() {
   if (!storageHandler) {
     return [];
@@ -197,6 +198,7 @@ async function sendBackgroundDeliveryReceipt(senderUsername, messageId, myUserna
   }
 }
 
+// Deliver queued messages to renderer
 async function deliverQueuedMessages() {
   try {
     if (!mainWindow || mainWindow.isDestroyed() || !mainWindow.webContents || mainWindow.webContents.isDestroyed()) {
@@ -243,6 +245,7 @@ async function deliverQueuedMessages() {
   }
 }
 
+// Setup secure error logging
 async function setupSecureLogging() {
   process.on('uncaughtException', (err) => {
     dialog.showErrorBox('Critical Error', 'Application error occurred');
@@ -250,6 +253,7 @@ async function setupSecureLogging() {
   });
 }
 
+// Verify libsignal native library availability
 async function verifyLibsignalNativeAvailability() {
   try {
     const pkgJsonPath = require.resolve('@signalapp/libsignal-client/package.json');
@@ -274,6 +278,7 @@ async function verifyLibsignalNativeAvailability() {
   }
 }
 
+// Initialize all handlers and services
 async function initializeHandlers() {
   try {
     securityMiddleware = new SecurityMiddleware();
@@ -297,7 +302,6 @@ async function initializeHandlers() {
       throw new Error('File handler initialization failed');
     }
 
-    // Make sure a stable device ID persisted on machine 
     let deviceId;
 
     const existing = await storageHandler.getItem('device-id');
@@ -481,7 +485,6 @@ async function initializeHandlers() {
                       return;
                     }
 
-                    // Only notify for messages and calls
                     const isActualMessage = ['message', 'text', 'file-message'].includes(innerType) ||
                       (innerPayload?.content && typeof innerPayload.content === 'string' && innerPayload.content.trim().length > 0);
                     const isCallSignal = innerType?.startsWith?.('call-');
@@ -508,7 +511,6 @@ async function initializeHandlers() {
                     pendingServerMessages.push({ message: decryptedMessage, timestamp: Date.now() });
                     persistPendingMessages();
 
-                    // Show notification
                     backgroundMessageCount++;
                     const now = Date.now();
                     const timeSinceLast = now - lastBackgroundNotificationTime;
@@ -529,7 +531,6 @@ async function initializeHandlers() {
                     }
                     if (trayHandler) trayHandler.incrementUnread();
 
-                    // Send delivery receipt for actual messages while in background
                     if (isActualMessage && !isCallSignal) {
                       const messageId = innerPayload?.messageId || innerPayload?.id || `bg-${Date.now()}`;
                       sendBackgroundDeliveryReceipt(senderUsername, messageId, myUsername).catch(() => { });
@@ -563,12 +564,12 @@ async function initializeHandlers() {
     return true;
   } catch (error) {
     const msg = String(error?.message || 'Initialization failed');
-    console.error('[MAIN] Critical initialization failure:', msg);
     try { dialog.showErrorBox('Critical Initialization Failure', msg); } catch (_) { }
     return false;
   }
 }
 
+// Create main browser window
 async function createWindow() {
   const webPreferences = {
     nodeIntegration: false,
@@ -633,7 +634,6 @@ async function createWindow() {
       isWindowDestroyed = true;
 
       // Store session state
-      // Store session state
       backgroundSessionState = {
         ...backgroundSessionState,
         isBackgroundMode: true,
@@ -666,6 +666,7 @@ async function createWindow() {
   setupSecurityPolicies();
 }
 
+// Load app from dist directory
 async function loadApp() {
   const distPath = path.join(__dirname, '../dist/index.html');
   try {
@@ -677,6 +678,7 @@ async function loadApp() {
   }
 }
 
+// Setup security policies and CSP
 function setupSecurityPolicies() {
   app.on('web-contents-created', (event, contents) => {
     contents.session.webRequest.onHeadersReceived((details, callback) => {
@@ -749,6 +751,7 @@ function setupSecurityPolicies() {
   });
 }
 
+// Register IPC handlers
 function registerIPCHandlers() {
   ipcMain.handle('session:get-background-state', () => {
     const wsConnected = websocketHandler?.isConnected?.() || false;
@@ -1054,7 +1057,6 @@ function registerIPCHandlers() {
     return await websocketHandler.send(payload);
   });
 
-  // Token refresh via HTTP with device proof
   ipcMain.handle('auth:refresh', async (_event, { refreshToken }) => {
     try {
       if (!websocketHandler || !websocketHandler.serverUrl) {
@@ -1576,18 +1578,15 @@ function registerIPCHandlers() {
 
   ipcMain.handle('webrtc:get-ice-config', async () => {
     try {
-      // Get server URL from websocket handler if available
       let serverUrl = websocketHandler?.serverUrl || '';
       if (!serverUrl) {
         return null;
       }
 
-      // Convert WebSocket URL to HTTP
       const wsUrl = new URL(serverUrl);
       const httpProto = wsUrl.protocol === 'wss:' ? 'https:' : 'http:';
       const baseUrl = `${httpProto}//${wsUrl.host}`;
 
-      // Fetch ICE config from server
       const https = require('https');
       const http = require('http');
 

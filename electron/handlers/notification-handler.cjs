@@ -4,6 +4,7 @@
 
 const { Notification, app } = require('electron');
 
+// Notification limits
 const MAX_TITLE_LENGTH = 64;
 const MAX_BODY_LENGTH = 256;
 const RATE_LIMIT_WINDOW_MS = 1000;
@@ -21,6 +22,7 @@ class NotificationHandler {
     return { success: true };
   }
 
+// Sanitize text input
   sanitizeText(text, maxLength) {
     if (typeof text !== 'string') return '';
     let sanitized = text.replace(/[\x00-\x1F\x7F]/g, '');
@@ -30,6 +32,7 @@ class NotificationHandler {
     return sanitized;
   }
 
+// Check if rate limited
   isRateLimited() {
     const now = Date.now();
     this.notificationTimes = this.notificationTimes.filter(
@@ -39,6 +42,7 @@ class NotificationHandler {
     return this.notificationTimes.length >= MAX_NOTIFICATIONS_PER_WINDOW;
   }
 
+// Record notification for rate limiting
   recordNotification() {
     this.notificationTimes.push(Date.now());
   
@@ -47,6 +51,7 @@ class NotificationHandler {
     }
   }
 
+// Show notification
   show({ title, body, silent = false, urgency = 'normal', data = null }) {
     if (!this.enabled) {
       return { success: false, reason: 'disabled' };
@@ -92,6 +97,7 @@ class NotificationHandler {
     }
   }
 
+// Show message notification
   showMessageNotification({ sender, preview, conversationId }) {
     const sanitizedSender = this.sanitizeText(sender, 32) || 'Someone';
     const sanitizedPreview = this.sanitizeText(preview, 100) || 'New message';
@@ -111,6 +117,7 @@ class NotificationHandler {
     return this.enabled;
   }
 
+// Set badge count
   setBadgeCount(count) {
     if (typeof count !== 'number' || count < 0) return;
     
@@ -121,6 +128,7 @@ class NotificationHandler {
     } catch (e) {}
   }
 
+// Clear badge
   clearBadge() {
     this.setBadgeCount(0);
   }

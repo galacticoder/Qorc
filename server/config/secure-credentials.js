@@ -1,9 +1,8 @@
-#!/usr/bin/env node
 /**
- * Quantum-Secure Credentials Manager for HAProxy
+ * Quantum-SECURE-CREDS Credentials Manager for HAProxy
  * 
- * Uses ML-KEM-1024 (Kyber) and ML-DSA-87 (Dilithium) for post-quantum encryption
- * Generates and manages its own dedicated keypair (separate from server keys)
+ * Uses ML-KEM-1024 (Kyber) and ML-DSA-87 for post-quantum encryption
+ * Generates and manages its own dedicated keypair
  */
 
 import crypto from 'crypto';
@@ -22,9 +21,7 @@ const __dirname = path.dirname(__filename);
 const CREDS_FILE = path.join(__dirname, '.haproxy-stats-creds.pqc');
 const KEY_ENC_FILE = path.join(__dirname, '.haproxy-keys.enc');
 
-/**
- * Generate dedicated keypair for credential encryption (independent of server keys)
- */
+// Generate dedicated keypair for credential encryption
 async function deriveKEK(username, password, salt) {
   const { kek, salt: usedSalt } = await CryptoUtils.KDF.deriveUsernamePasswordKEK(
     username,
@@ -74,7 +71,7 @@ async function generateAndProtectKeypair(username, password) {
 
   const aead = new CryptoUtils.PostQuantumAEAD(kek);
   const nonce = CryptoUtils.Random.generateRandomBytes(36);
-  const aad = new TextEncoder().encode('haproxy-secure-keys-v2');
+  const aad = new TextEncoder().encode('haproxy-SECURE-CREDS-keys-v2');
   const { ciphertext, tag } = aead.encrypt(keysBlob, nonce, aad);
 
   const payload = {
@@ -93,8 +90,7 @@ async function generateAndProtectKeypair(username, password) {
 
   fs.writeFileSync(KEY_ENC_FILE, JSON.stringify(payload, null, 2), { mode: 0o600 });
 
-  console.log('[SECURE] All keypairs generated');
-  console.log('[SECURE] Encrypted key material saved to:', KEY_ENC_FILE);
+  console.log('[SECURE-CREDS] All keypairs generated and saved to:', KEY_ENC_FILE);
 
   return keypair;
 }
@@ -123,7 +119,7 @@ export async function unlockKeypair(username, password) {
   const ciphertext = Buffer.from(data.enc?.ciphertext || '', 'base64');
 
   const aead = new CryptoUtils.PostQuantumAEAD(kek);
-  const aad = new TextEncoder().encode('haproxy-secure-keys-v2');
+  const aad = new TextEncoder().encode('haproxy-SECURE-CREDS-keys-v2');
   const decrypted = aead.decrypt(ciphertext, nonce, tag, aad);
   const keys = JSON.parse(Buffer.from(decrypted).toString('utf8'));
 
@@ -143,12 +139,10 @@ export async function unlockKeypair(username, password) {
   };
 }
 
-/**
- * Encrypt credentials 
- */
+// Encrypt credentials
 async function encryptCredentials(username, password) {
   const keypair = await generateAndProtectKeypair(username, password);
-  
+
   const credentials = {
     username,
     password,
@@ -156,16 +150,16 @@ async function encryptCredentials(username, password) {
     version: 2,
   };
   const plaintext = JSON.stringify(credentials);
-  
+
   const ephemeralX25519Secret = crypto.randomBytes(32);
   const ephemeralX25519Public = x25519.getPublicKey(ephemeralX25519Secret);
-  
+
   const x25519SharedSecret = x25519.getSharedSecret(ephemeralX25519Secret, keypair.x25519.publicKey);
-  
+
   const kemEnc = ml_kem1024.encapsulate(keypair.kyber.publicKey);
   const kyberSharedSecret = kemEnc.sharedSecret;
   const kyberCiphertext = kemEnc.ciphertext || kemEnc.cipherText;
-  
+
   const rawSecret = Buffer.concat([
     Buffer.from(kyberSharedSecret),
     Buffer.from(x25519SharedSecret),
@@ -182,7 +176,7 @@ async function encryptCredentials(username, password) {
   const nonce = CryptoUtils.Random.generateRandomBytes(36);
   const aad = new TextEncoder().encode('haproxy-credentials-v2');
   const { ciphertext, tag } = aead.encrypt(Buffer.from(plaintext, 'utf8'), nonce, aad);
-  
+
   const encryptedPackage = {
     kyberCiphertext: Buffer.from(kyberCiphertext).toString('base64'),
     x25519EphemeralPublic: Buffer.from(ephemeralX25519Public).toString('base64'),
@@ -190,10 +184,10 @@ async function encryptCredentials(username, password) {
     tag: Buffer.from(tag).toString('base64'),
     ciphertext: Buffer.from(ciphertext).toString('base64'),
   };
-  
+
   const packageBytes = Buffer.from(JSON.stringify(encryptedPackage));
   const signature = ml_dsa87.sign(packageBytes, keypair.dilithium.secretKey);
-  
+
   return {
     version: 2,
     encrypted: encryptedPackage,
@@ -202,30 +196,28 @@ async function encryptCredentials(username, password) {
   };
 }
 
-/**
- * Decrypt credentials 
- */
+// Decrypt credentials
 async function decryptCredentials(encryptedObj, { username, password } = {}) {
   const keypair = await unlockKeypair(username, password);
   const encryptedPackage = encryptedObj.encrypted;
-  
+
   if (encryptedObj.version !== 2) {
     throw new Error('Unsupported credentials version; regenerate credentials with the current scheme');
   }
 
   const packageBytes = Buffer.from(JSON.stringify(encryptedPackage));
   const signatureBuffer = Buffer.from(encryptedObj.signature, 'base64');
-  
+
   const isValid = ml_dsa87.verify(
     signatureBuffer,
     packageBytes,
     keypair.dilithium.publicKey
   );
-  
+
   if (!isValid) {
     throw new Error('SECURITY: Credential signature verification failed - data may be tampered');
   }
-  
+
   const kyberCiphertext = Buffer.from(encryptedPackage.kyberCiphertext, 'base64');
   const x25519EphemeralPublic = Buffer.from(encryptedPackage.x25519EphemeralPublic, 'base64');
   const nonce = Buffer.from(encryptedPackage.nonce, 'base64');
@@ -233,7 +225,7 @@ async function decryptCredentials(encryptedObj, { username, password } = {}) {
   const tag = Buffer.from(encryptedPackage.tag, 'base64');
   const kyberSharedSecret = ml_kem1024.decapsulate(kyberCiphertext, keypair.kyber.secretKey);
   const x25519SharedSecret = x25519.getSharedSecret(keypair.x25519.secretKey, x25519EphemeralPublic);
-  
+
   const rawSecret = Buffer.concat([
     Buffer.from(kyberSharedSecret),
     Buffer.from(x25519SharedSecret),
@@ -245,151 +237,141 @@ async function decryptCredentials(encryptedObj, { username, password } = {}) {
     info,
     32
   );
-  
+
   const aead = new CryptoUtils.PostQuantumAEAD(aeadKey);
   const aad = new TextEncoder().encode('haproxy-credentials-v2');
   const plaintext = aead.decrypt(ciphertext, nonce, tag, aad);
-  
+
   return JSON.parse(Buffer.from(plaintext).toString('utf8'));
 }
 
-/**
- * Save encrypted credentials to file
- */
+// Save encrypted credentials to file
 export async function saveCredentials(username, password) {
   if (!username || !password) {
     throw new Error('Username and password are required');
   }
-  
-  console.log('[SECURE] Encrypting credentials...');
+
+  console.log('[SECURE-CREDS] Encrypting credentials...');
   const encrypted = await encryptCredentials(username, password);
-  
-  // Save with restrictive permissions
+
   fs.writeFileSync(CREDS_FILE, JSON.stringify(encrypted, null, 2), { mode: 0o600 });
-  
-  console.log(`[SECURE] Credentials encrypted and saved to: (${CREDS_FILE})`);
+
+  console.log(`[SECURE-CREDS] Credentials encrypted and saved to: (${CREDS_FILE})`);
 }
 
-/**
- * Load and decrypt credentials from file
- */
+// Load and decrypt credentials from file
 export async function loadCredentials({ username, password } = {}) {
   if (!fs.existsSync(CREDS_FILE)) {
     return null;
   }
-  
+
   const encrypted = JSON.parse(fs.readFileSync(CREDS_FILE, 'utf8'));
-  
-  console.log('[SECURE] Decrypting credentials...');
+
+  console.log('[SECURE-CREDS] Decrypting credentials...');
   const credentials = await decryptCredentials(encrypted, { username, password });
-  console.log('[SECURE] Credentials decrypted successfully');
-  
+  console.log('[SECURE-CREDS] Credentials decrypted successfully');
+
   return credentials;
 }
 
-/**
- * Verify provided credentials against stored (constant-time)
- */
+// Verify provided credentials against stored
 export async function verifyCredentials(username, password) {
   const stored = await loadCredentials({ username, password });
   if (!stored) throw new Error('No credentials stored');
-  
-  // Use constant-time comparison
+
   const uA = Buffer.from(String(username) || '', 'utf8');
   const uB = Buffer.from(String(stored.username) || '', 'utf8');
   const pA = Buffer.from(String(password) || '', 'utf8');
   const pB = Buffer.from(String(stored.password) || '', 'utf8');
-  
+
   const userMatch = (uA.length === uB.length) && crypto.timingSafeEqual(uA, uB);
   const passMatch = (pA.length === pB.length) && crypto.timingSafeEqual(pA, pB);
-  
+
   if (!userMatch || !passMatch) {
     return false;
   }
   return true;
 }
 
-/**
- * Delete credentials file
- */
+// Delete credentials file
 export function deleteCredentials() {
   if (fs.existsSync(CREDS_FILE)) {
     fs.unlinkSync(CREDS_FILE);
-    console.log('[SECURE] Credentials file deleted');
+    console.log('[SECURE-CREDS] Credentials file deleted');
   }
-  
+
   if (fs.existsSync(KEY_ENC_FILE)) {
-    try { fs.unlinkSync(KEY_ENC_FILE); } catch {}
-    console.log('[SECURE] Encrypted key file deleted');
+    try { fs.unlinkSync(KEY_ENC_FILE); } catch { }
+    console.log('[SECURE-CREDS] Encrypted key file deleted');
   }
 }
 
 // CLI mode
 if (import.meta.url === `file://${process.argv[1]}`) {
   const command = process.argv[2];
-  
+
   (async () => {
     try {
       switch (command) {
-      case 'save':
-        if (process.argv.length < 5) {
-          console.error('Usage: node secure-credentials.js save <username> <password>');
-          process.exit(1);
-        }
-        await saveCredentials(process.argv[3], process.argv[4]);
-        break;
-        
-      case 'load':
-        console.error('Usage: node secure-credentials.js load-unlocked <username> <password>');
-        process.exit(2);
-        
-      case 'load-unlocked':
-        if (process.argv.length < 5) {
+        case 'save':
+          if (process.argv.length < 5) {
+            console.error('Usage: node secure-credentials.js save <username> <password>');
+            process.exit(1);
+          }
+          await saveCredentials(process.argv[3], process.argv[4]);
+          break;
+
+        case 'load':
           console.error('Usage: node secure-credentials.js load-unlocked <username> <password>');
           process.exit(2);
-        }
-        const creds = await loadCredentials({ username: process.argv[3], password: process.argv[4] });
-        if (creds) {
+
+        case 'load-unlocked':
+          if (process.argv.length < 5) {
+            console.error('Usage: node secure-credentials.js load-unlocked <username> <password>');
+            process.exit(2);
+          }
+          const creds = await loadCredentials({ username: process.argv[3], password: process.argv[4] });
+          if (creds) {
+            console.log('');
+            console.log('Credentials:');
+            console.log('\tUsername:', creds.username);
+            console.log('\tPassword:', '********');
+            console.log('\tStored:', new Date(creds.timestamp).toISOString());
+          } else {
+            console.log('No credentials found');
+          }
+          break;
+
+        case 'delete':
+          deleteCredentials();
+          break;
+
+        case 'verify':
+          if (process.argv.length < 5) {
+            console.error('Usage: node secure-credentials.js verify <username> <password>');
+            process.exit(2);
+          }
+          if (await verifyCredentials(process.argv[3], process.argv[4])) {
+            console.log('OK');
+            process.exit(0);
+          } else {
+            console.log('MISMATCH');
+            process.exit(1);
+          }
+
+        default:
+          console.log('Credentials Manager for HAProxy\n');
           console.log('');
-          console.log('Credentials:');
-          console.log('\tUsername:', creds.username);
-          console.log('\tPassword:', '********');
-          console.log('\tStored:', new Date(creds.timestamp).toISOString());
-        } else {
-          console.log('No credentials found');
-        }
-        break;
-        
-      case 'delete':
-        deleteCredentials();
-        break;
-      
-      case 'verify':
-        if (process.argv.length < 5) {
-          console.error('Usage: node secure-credentials.js verify <username> <password>');
-          process.exit(2);
-        }
-        if (await verifyCredentials(process.argv[3], process.argv[4])) {
-          console.log('OK');
-          process.exit(0);
-        } else {
-          console.log('MISMATCH');
+          console.log('Usage:');
+          console.log('\tnode secure-credentials.js save <username> <password>');
+          console.log('\tnode secure-credentials.js load');
+          console.log('\tnode secure-credentials.js delete');
+          console.log('');
           process.exit(1);
-        }
-        
-      default:
-        console.log('Credentials Manager for HAProxy\n');
-        console.log('');
-        console.log('Usage:');
-        console.log('\tnode secure-credentials.js save <username> <password>');
-        console.log('\tnode secure-credentials.js load');
-        console.log('\tnode secure-credentials.js delete');
-        console.log('');
-        process.exit(1);
+      }
+    } catch (error) {
+      console.error('[ERROR]', error.message);
+      process.exit(1);
     }
-  } catch (error) {
-    console.error('[ERROR]', error.message);
-    process.exit(1);
-  }
   })();
 }

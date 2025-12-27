@@ -19,9 +19,7 @@ function sha3(buf) {
   return Buffer.from(noble.sha3_512(buf));
 }
 
-/**
- * Read file safely, return empty buffer on error
- */
+// Read file
 async function readFileSafe(filePath) {
   try {
     return await fs.readFile(filePath, 'utf8');
@@ -30,13 +28,10 @@ async function readFileSafe(filePath) {
   }
 }
 
-/**
- * Gather machine-specific identifiers and derive 64-byte context
- */
+// Gather machine-specific identifiers and derive 64-byte context
 async function getMachineContext(installPath) {
   await loadNoble();
   
-  // Gather machine-specific data (best-effort, async, Linux-safe)
   const sources = await Promise.all([
     readFileSafe('/etc/machine-id'),
     readFileSafe('/sys/class/dmi/id/product_uuid'),
@@ -45,18 +40,15 @@ async function getMachineContext(installPath) {
     Promise.resolve(installPath || '')
   ]);
   
-  // Hash each source individually with domain separation
   const hashedParts = sources.map((source, idx) => {
     const prefix = Buffer.from(`QSSv1/machine-entropy/${idx}`, 'utf8');
     const data = Buffer.from(String(source).trim(), 'utf8');
     return sha3(Buffer.concat([prefix, data]));
   });
   
-  // Final hash of all parts
   const combined = Buffer.concat(hashedParts);
   const final = sha3(Buffer.concat([Buffer.from('QSSv1/machine-context', 'utf8'), combined]));
   
-  // Clear intermediate buffers
   hashedParts.forEach(buf => buf.fill(0));
   combined.fill(0);
   

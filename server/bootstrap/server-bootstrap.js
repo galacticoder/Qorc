@@ -25,21 +25,19 @@ export function parseClusterWorkers(rawValue, { logger = console, defaultWorkers
   return parsed;
 }
 
+// Basic validation of certificate content
 function validateCertificateContent(key, cert, { logger = console } = {}) {
-  // Basic validation of certificate content
   if (!key || !cert) {
     logger?.error?.('[BOOTSTRAP] Missing key or certificate content');
     return false;
   }
 
-  // Check if key looks like a PEM-encoded private key
   const keyStr = key.toString('utf8');
   if (!keyStr.includes('BEGIN') || !keyStr.includes('PRIVATE KEY')) {
     logger?.error?.('[BOOTSTRAP] Key does not appear to be a valid PEM-encoded private key');
     return false;
   }
 
-  // Check if cert looks like a PEM-encoded certificate
   const certStr = cert.toString('utf8');
   if (!certStr.includes('BEGIN CERTIFICATE') || !certStr.includes('END CERTIFICATE')) {
     logger?.error?.('[BOOTSTRAP] Certificate does not appear to be a valid PEM-encoded certificate');
@@ -108,7 +106,6 @@ export function loadServerCertificates({ certPath, keyPath, logger = console } =
       const key = fs.readFileSync(validKeyPath);
       const cert = fs.readFileSync(validCertPath);
 
-      // Validate certificate contents
       if (!validateCertificateContent(key, cert, { logger })) {
         const error = new Error('Invalid certificate or key content');
         logger?.error?.('[BOOTSTRAP]', error.message);
@@ -212,7 +209,7 @@ export async function createServer({
 
     const workerRespawns = new Map(); // workerId -> { count, lastRespawn }
     const RESPAWN_LIMIT = 5;
-    const RESPAWN_WINDOW_MS = 60000; // 1 minute
+    const RESPAWN_WINDOW_MS = 60000;
 
     cluster.on('exit', (worker, code, signal) => {
       if (typeof onWorkerExit === 'function') {
@@ -222,7 +219,6 @@ export async function createServer({
         const workerId = worker.id;
         const respawnData = workerRespawns.get(workerId) || { count: 0, lastRespawn: now };
 
-        // Reset counter if outside window
         if (now - respawnData.lastRespawn > RESPAWN_WINDOW_MS) {
           respawnData.count = 0;
         }
@@ -231,7 +227,6 @@ export async function createServer({
         respawnData.lastRespawn = now;
         workerRespawns.set(workerId, respawnData);
 
-        // Check if respawn limit exceeded
         if (respawnData.count > RESPAWN_LIMIT) {
           logger?.error?.(`[BOOTSTRAP] Worker ${worker.process.pid} respawn limit exceeded (${RESPAWN_LIMIT} respawns in ${RESPAWN_WINDOW_MS}ms). Not respawning.`);
           logger?.error?.('[BOOTSTRAP] This indicates a critical issue. Please investigate and restart the server manually.');
@@ -240,7 +235,6 @@ export async function createServer({
 
         logger?.warn?.(`[BOOTSTRAP] Worker ${worker.process.pid} exited (code=${code}, signal=${signal}). Respawning... (${respawnData.count}/${RESPAWN_LIMIT})`);
         const newWorker = cluster.fork();
-        // Transfer respawn tracking to new worker
         workerRespawns.delete(workerId);
         workerRespawns.set(newWorker.id, respawnData);
       }
@@ -293,10 +287,8 @@ export function registerShutdownHandlers({
   }
 
   let isShuttingDown = false;
-
   const wrappedHandler = (signal) => {
     if (isShuttingDown) {
-      logger?.warn?.(`[BOOTSTRAP] Already shutting down, ignoring ${signal}`);
       return;
     }
     isShuttingDown = true;

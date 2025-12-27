@@ -9,7 +9,7 @@
  */
 
 import { ClusterManager } from './cluster-manager.js';
-import { generateConfigFromCluster } from './haproxy-config-generator.js';
+import { generateConfigFromCluster } from '../load-balancer/haproxy-config-generator.js';
 import { logger as cryptoLogger } from '../crypto/crypto-logger.js';
 import crypto from 'crypto';
 import os from 'os';
@@ -18,9 +18,7 @@ import path from 'path';
 let clusterManager = null;
 let configUpdateInterval = null;
 
-/**
- * Initialize cluster integration
- */
+// Initialize cluster integration
 export async function initializeCluster({
   serverHybridKeyPair,
   serverId = null,
@@ -35,7 +33,6 @@ export async function initializeCluster({
     if (isPrimary === null || isPrimary === undefined) {
       isPrimary = process.env.CLUSTER_PRIMARY === 'true' || process.env.SERVER_ROLE === 'primary';
 
-      // If still not set, check if cluster master exists in Redis
       if (!isPrimary) {
         const { withRedisClient } = await import('../presence/presence.js');
         try {
@@ -53,7 +50,6 @@ export async function initializeCluster({
       }
     }
 
-    // Get auto-approve setting from env or parameter
     const enableAutoApprove = autoApprove || process.env.CLUSTER_AUTO_APPROVE === 'true';
 
     cryptoLogger.info('[CLUSTER] Initializing cluster integration', {
@@ -62,7 +58,6 @@ export async function initializeCluster({
       autoApprove: enableAutoApprove
     });
 
-    // Create cluster manager
     clusterManager = new ClusterManager({
       serverId,
       serverKeys: serverHybridKeyPair,
@@ -70,10 +65,7 @@ export async function initializeCluster({
       autoApprove: enableAutoApprove,
     });
 
-    // Set up event handlers
     setupClusterEventHandlers(clusterManager, autoApprove);
-
-    // Initialize cluster manager
     await clusterManager.initialize();
 
     if (isPrimary && process.env.HAPROXY_AUTO_CONFIG === 'true') {
@@ -89,18 +81,14 @@ export async function initializeCluster({
   }
 }
 
-/**
- * Generate unique server ID
- */
+// Generate unique server ID
 function generateServerId() {
   const hostname = process.env.HOSTNAME || 'server';
   const randomPart = crypto.randomBytes(8).toString('hex');
   return `${hostname}-${randomPart}`;
 }
 
-/**
- * Set up cluster event handlers
- */
+// Set up cluster event handlers
 function setupClusterEventHandlers(manager, autoApprove) {
   manager.on('join-request', async (serverInfo) => {
     cryptoLogger.info('[CLUSTER] New server requesting to join', {
@@ -149,7 +137,6 @@ function setupClusterEventHandlers(manager, autoApprove) {
   manager.on('promoted-to-primary', () => {
     cryptoLogger.info('[CLUSTER] This server has been promoted to primary');
 
-    // Start HAProxy config updater if enabled
     if (process.env.HAPROXY_AUTO_CONFIG === 'true') {
       startHAProxyConfigUpdater(manager);
     }
@@ -171,9 +158,7 @@ function setupClusterEventHandlers(manager, autoApprove) {
   });
 }
 
-/**
- * Start automatic HAProxy configuration updater
- */
+// Start HAProxy configuration updater
 function startHAProxyConfigUpdater(manager) {
   if (configUpdateInterval) {
     return;
@@ -187,12 +172,10 @@ function startHAProxyConfigUpdater(manager) {
     configPath
   });
 
-  // Update immediately
   updateHAProxyConfig(manager, configPath).catch(error => {
     cryptoLogger.error('[CLUSTER] Failed to update HAProxy config', error);
   });
 
-  // Set up periodic updates
   configUpdateInterval = setInterval(async () => {
     try {
       await updateHAProxyConfig(manager, configPath);
@@ -202,16 +185,12 @@ function startHAProxyConfigUpdater(manager) {
   }, updateInterval);
 }
 
-/**
- * Update HAProxy configuration
- */
+// Update HAProxy configuration
 async function updateHAProxyConfig(manager, configPath) {
   try {
     cryptoLogger.debug('[CLUSTER] Updating HAProxy configuration');
-
     const generator = await generateConfigFromCluster(manager, configPath);
 
-    // Validate and reload if configured
     if (process.env.HAPROXY_AUTO_RELOAD === 'true') {
       await generator.reloadHAProxy(configPath);
       cryptoLogger.info('[CLUSTER] HAProxy configuration updated and reloaded');
@@ -224,16 +203,12 @@ async function updateHAProxyConfig(manager, configPath) {
   }
 }
 
-/**
- * Get cluster manager instance
- */
+// Get cluster manager instance
 export function getClusterManager() {
   return clusterManager;
 }
 
-/**
- * Get cluster status
- */
+// Get cluster status
 export async function getClusterStatus() {
   if (!clusterManager) {
     throw new Error('Cluster manager not initialized');
@@ -242,9 +217,7 @@ export async function getClusterStatus() {
   return await clusterManager.getClusterStatus();
 }
 
-/**
- * Get all server public keys for client distribution
- */
+// Get all server public keys for client distribution
 export async function getAllServerPublicKeys() {
   if (!clusterManager) {
     throw new Error('Cluster manager not initialized');
@@ -253,9 +226,7 @@ export async function getAllServerPublicKeys() {
   return await clusterManager.getAllServerKeys();
 }
 
-/**
- * Approve a pending server (primary only)
- */
+// Approve a pending server (primary only)
 export async function approveServer(serverId) {
   if (!clusterManager) {
     throw new Error('Cluster manager not initialized');
@@ -264,9 +235,7 @@ export async function approveServer(serverId) {
   return await clusterManager.approveServer(serverId);
 }
 
-/**
- * Reject a pending server (primary only)
- */
+// Reject a pending server (primary only)
 export async function rejectServer(serverId, reason) {
   if (!clusterManager) {
     throw new Error('Cluster manager not initialized');
@@ -275,9 +244,7 @@ export async function rejectServer(serverId, reason) {
   return await clusterManager.rejectServer(serverId, reason);
 }
 
-/**
- * Get list of pending servers
- */
+// Get list of pending servers
 export async function getPendingServers() {
   if (!clusterManager) {
     throw new Error('Cluster manager not initialized');
@@ -286,9 +253,7 @@ export async function getPendingServers() {
   return await clusterManager.getPendingServers();
 }
 
-/**
- * Force remove a server from cluster (primary only)
- */
+// Force remove a server from cluster (primary only)
 export async function removeServer(serverId) {
   if (!clusterManager) {
     throw new Error('Cluster manager not initialized');
@@ -297,19 +262,15 @@ export async function removeServer(serverId) {
   return await clusterManager.forceRemoveServer(serverId);
 }
 
-/**
- * shutdown of cluster integration
- */
+// Shutdown of cluster integration
 export async function shutdownCluster() {
   cryptoLogger.info('[CLUSTER] Shutting down cluster integration');
 
-  // Stop config updater
   if (configUpdateInterval) {
     clearInterval(configUpdateInterval);
     configUpdateInterval = null;
   }
 
-  // Shutdown cluster manager
   if (clusterManager) {
     await clusterManager.shutdown();
     clusterManager = null;
@@ -318,9 +279,7 @@ export async function shutdownCluster() {
   cryptoLogger.info('[CLUSTER] Cluster integration shutdown complete');
 }
 
-/**
- * Register cluster shutdown handlers
- */
+// Register cluster shutdown handlers
 export function registerClusterShutdownHandlers() {
   const signals = ['SIGINT', 'SIGTERM', 'SIGQUIT'];
 

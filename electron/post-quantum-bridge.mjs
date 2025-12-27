@@ -1,4 +1,3 @@
-// src/lib/post-quantum-crypto.ts
 import { ml_kem1024 } from "@noble/post-quantum/ml-kem.js";
 import { ml_dsa87 } from "@noble/post-quantum/ml-dsa.js";
 import { blake3 } from "@noble/hashes/blake3.js";
@@ -7,6 +6,7 @@ import { hkdf } from "@noble/hashes/hkdf.js";
 import { gcm } from "@noble/ciphers/aes.js";
 import { x25519 } from "@noble/curves/ed25519.js";
 
+// Validate input is Uint8Array
 function ensureUint8Array(value, name, expectedLength) {
   if (!(value instanceof Uint8Array)) {
     throw new TypeError(`${name} must be a Uint8Array`);
@@ -24,6 +24,7 @@ function ensureUint8Array(value, name, expectedLength) {
   return value;
 }
 
+// Key encryption and decryption class
 var PostQuantumKEM = class {
   static kyber = ml_kem1024;
 
@@ -34,6 +35,7 @@ var PostQuantumKEM = class {
     sharedSecret: 32,
   };
 
+  // Generate new encryption key pair
   static generateKeyPair() {
     const kp = this.kyber.keygen();
     if (!kp || typeof kp !== "object") {
@@ -459,7 +461,6 @@ function timingSafeEqual(a, b) {
 
 var PostQuantumUtils = class _PostQuantumUtils {
   static MAX_DATA_SIZE = 10 * 1024 * 1024;
-  // 10MB
   static timingSafeEqual = timingSafeEqual;
   static clearMemory(data) {
     if (!data) {
@@ -530,7 +531,6 @@ var PostQuantumUtils = class _PostQuantumUtils {
 
 var PostQuantumSession = class _PostQuantumSession {
   static DEFAULT_TIMEOUT = 30 * 60 * 1e3;
-  // 30 minutes
   static sessions = /* @__PURE__ */ new Map();
   static createSession(
     sessionId,
@@ -720,7 +720,6 @@ var PostQuantumWorker = class _PostQuantumWorker {
 
 var ClientServerProtocol = class _ClientServerProtocol {
   static MAX_MESSAGE_AGE_MS = 5 * 60 * 1e3;
-  // 5 minutes
   static CLIENT_SALT = blake3(
     new TextEncoder().encode("client-server-protocol-v1-salt-client"),
   );

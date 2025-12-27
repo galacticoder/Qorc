@@ -55,7 +55,7 @@ export async function createRedisClient(redisUrl) {
   } else {
     tlsOptions.servername = 'redis';
   }
-  
+
   if (process.env.REDIS_CA_CERT_PATH) {
     tlsOptions.ca = [fs.readFileSync(process.env.REDIS_CA_CERT_PATH)];
   }
@@ -65,7 +65,7 @@ export async function createRedisClient(redisUrl) {
   if (process.env.REDIS_CLIENT_KEY_PATH) {
     tlsOptions.key = fs.readFileSync(process.env.REDIS_CLIENT_KEY_PATH);
   }
-  
+
   tlsOptions.rejectUnauthorized = true;
 
   const options = {
@@ -103,12 +103,9 @@ export class DistributedRateLimiter {
     cryptoLogger.info('Initializing distributed rate limiter', { redisUrl: sanitizeRedisUrl(redisUrl) });
 
     const redis = await redisClientFactory(redisUrl);
-
     const cfg = RATE_LIMIT_CONFIG;
-
     const cats = cfg.AUTH_CATEGORIES;
 
-    // Per-IP limiter : fixed defaults
     const IP_POINTS = 40;           // total failures per minute
     const IP_DURATION_S = 60;       // 60s window
     const IP_BLOCK_S = 600;         // 10 minutes block on abuse
@@ -292,7 +289,6 @@ export class DistributedRateLimiter {
       ws._connectionId = `conn_${crypto.randomUUID()}`;
     }
 
-    // Check if rate limiter is initialized
     if (!this.connectionAuthLimiter) {
       cryptoLogger.warn('Connection auth limiter not initialized; allowing request');
       return { allowed: true };
@@ -335,7 +331,6 @@ export class DistributedRateLimiter {
     }
   }
 
-  // Consume a user auth attempt and return UI-relevant info
   async consumeUserAuthAttempt(username, category = 'account_password', ip) {
     const keyForAttempts = this._getAttemptKey(username);
 
@@ -344,7 +339,6 @@ export class DistributedRateLimiter {
     let categoryBlocked = false;
     let categoryBlockMs = 0;
 
-    // Per-IP limiter (if IP available)
     let ipBlocked = false;
     let ipBlockMs = 0;
     try {
@@ -372,7 +366,6 @@ export class DistributedRateLimiter {
       attemptsRemaining = 0;
     }
 
-    // Always record in long-window per-user limiter (aggregated abuse tracking)
     let globalBlocked = false;
     let globalBlockMs = 0;
     try {
@@ -515,9 +508,7 @@ export class DistributedRateLimiter {
     }
   }
 
-  /**
-   * Get rate limiting statistics from Redis
-   */
+  // Get rate limiting statistics from Redis
   async getStats() {
     const stats = {
       timestamp: Date.now(),
@@ -587,9 +578,7 @@ export class DistributedRateLimiter {
     return stats;
   }
 
-  /**
-   * Scan Redis for keys matching pattern
-   */
+  // Scan Redis for keys matching pattern
   async _scanKeys(pattern, maxKeys = 1000) {
     const keys = [];
     let cursor = '0';
@@ -598,7 +587,6 @@ export class DistributedRateLimiter {
 
     try {
       do {
-        // Check timeout to prevent long-running scans
         if (Date.now() - startTime > timeout) {
           cryptoLogger.warn('[RATE-LIMIT-STATS] Scan timeout reached', {
             pattern,
@@ -616,7 +604,6 @@ export class DistributedRateLimiter {
         cursor = result[0];
         keys.push(...result[1]);
 
-        // Limit total keys to prevent memory issues
         if (keys.length >= maxKeys) {
           cryptoLogger.info('[RATE-LIMIT-STATS] Max keys limit reached', {
             pattern,
@@ -635,22 +622,18 @@ export class DistributedRateLimiter {
     return keys;
   }
 
-  /**
-   * Get blocked users and top abusers from rate limiter keys
-   */
+  // Get blocked users and top abusers from rate limiter keys
   async _getBlockedUsers(msgKeys, bundleKeys, authKeys) {
     const allKeys = [...msgKeys, ...bundleKeys, ...authKeys];
     const blocked = [];
     const now = Date.now();
 
-    // Sample up to 100 keys to find blocked users
     const sampleSize = Math.min(100, allKeys.length);
     const sampled = allKeys
       .sort(() => Math.random() - 0.5)
       .slice(0, sampleSize);
 
     try {
-      // Use pipeline for efficiency
       const pipeline = this.redis.pipeline();
       sampled.forEach(key => pipeline.get(key));
       const results = await pipeline.exec();

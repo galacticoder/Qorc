@@ -1,6 +1,5 @@
 /**
  * File Operations Handler
- * Provides secure async file operations with validation and resource limits
  */
 
 const fs = require('fs').promises;
@@ -11,21 +10,16 @@ class FileHandler {
   constructor(securityMiddleware) {
     this.securityMiddleware = securityMiddleware;
     
-    // File operation limits
-    this.maxFileSize = 100 * 1024 * 1024; // 100 MB default
+    this.maxFileSize = 100 * 1024 * 1024; // 100 Mb file size limit
     this.maxPathLength = 4096;
     this.allowedExtensions = new Set([
       '.txt', '.json', '.log', '.dat', '.key', '.pem'
     ]);
-    
-    // Permitted base directories
     this.basePaths = new Set();
     this.initialized = false;
   }
 
-  /**
-   * Initialize with configuration
-   */
+  // Initialize with configuration
   initialize(config = {}) {
     const {
       maxFileSize = 100 * 1024 * 1024,
@@ -51,29 +45,23 @@ class FileHandler {
     return { success: true };
   }
 
-  /**
-   * Validate and sanitize file path
-   */
+  // Validate and sanitize file path
   async validatePath(filePath) {
     if (!filePath || typeof filePath !== 'string') {
       throw new Error('Invalid file path');
     }
 
-    // Check length
     if (filePath.length > this.maxPathLength) {
       throw new Error('Path too long');
     }
 
-    // Normalize and resolve
     const normalized = path.normalize(filePath);
     const resolved = path.resolve(normalized);
 
-    // Prevent path traversal
     if (normalized.includes('..') || normalized.includes('~')) {
       throw new Error('Path traversal detected');
     }
 
-    // Check against base paths if configured
     if (this.basePaths.size > 0) {
       let allowed = false;
       for (const basePath of this.basePaths) {
@@ -88,7 +76,6 @@ class FileHandler {
       }
     }
 
-    // Check extension
     const ext = path.extname(resolved).toLowerCase();
     if (this.allowedExtensions.size > 0 && !this.allowedExtensions.has(ext)) {
       throw new Error(`File extension not allowed: ${ext}`);
@@ -97,14 +84,11 @@ class FileHandler {
     return resolved;
   }
 
-  /**
-   * Read file with size limits
-   */
+  // Read file
   async readFile(filePath, options = {}) {
     try {
       const validPath = await this.validatePath(filePath);
       
-      // Check file exists and get stats
       const stats = await fs.stat(validPath);
       
       if (!stats.isFile()) {
@@ -128,9 +112,7 @@ class FileHandler {
     }
   }
 
-  /**
-   * Write file with atomic operations
-   */
+  // Write file
   async writeFile(filePath, content, options = {}) {
     if (!this.initialized) {
       throw new Error('File handler not initialized');
@@ -138,7 +120,6 @@ class FileHandler {
     try {
       const validPath = await this.validatePath(filePath);
       
-      // Validate content
       if (content === null || content === undefined) {
         throw new Error('Invalid content');
       }
@@ -146,16 +127,13 @@ class FileHandler {
       const contentStr = typeof content === 'string' ? content : JSON.stringify(content);
       const contentBuffer = Buffer.from(contentStr, options.encoding || 'utf8');
 
-      // Check size limit
       if (contentBuffer.length > this.maxFileSize) {
         throw new Error('Content too large');
       }
 
-      // Ensure directory exists
       const dir = path.dirname(validPath);
       await fs.mkdir(dir, { recursive: true, mode: 0o700 });
 
-      // Write atomically using temp file
       const tempPath = `${validPath}.tmp.${crypto.randomBytes(8).toString('hex')}`;
       
       try {
@@ -182,31 +160,25 @@ class FileHandler {
     }
   }
 
-  /**
-   * Append to file
-   */
+  // Append to file
   async appendFile(filePath, content, options = {}) {
     try {
       const validPath = await this.validatePath(filePath);
       
-      // Check if file exists and get current size
       let currentSize = 0;
       try {
         const stats = await fs.stat(validPath);
         currentSize = stats.size;
       } catch (error) {
-        // File doesn't exist, will be created
       }
 
       const contentStr = typeof content === 'string' ? content : JSON.stringify(content);
       const contentBuffer = Buffer.from(contentStr, options.encoding || 'utf8');
 
-      // Check combined size limit
       if (currentSize + contentBuffer.length > this.maxFileSize) {
         throw new Error('File would exceed size limit');
       }
 
-      // Ensure directory exists
       const dir = path.dirname(validPath);
       await fs.mkdir(dir, { recursive: true, mode: 0o700 });
 
@@ -223,14 +195,11 @@ class FileHandler {
     }
   }
 
-  /**
-   * Delete file
-   */
+  // Delete file
   async deleteFile(filePath) {
     try {
       const validPath = await this.validatePath(filePath);
       
-      // Check file exists
       const stats = await fs.stat(validPath);
       
       if (!stats.isFile()) {
@@ -244,9 +213,7 @@ class FileHandler {
     }
   }
 
-  /**
-   * Check if file exists
-   */
+  // Check if file exists
   async exists(filePath) {
     try {
       const validPath = await this.validatePath(filePath);
@@ -262,6 +229,7 @@ class FileHandler {
     }
   }
 
+  // Get file stats
   async getStats(filePath) {
     try {
       const validPath = await this.validatePath(filePath);
@@ -326,9 +294,7 @@ class FileHandler {
     }
   }
 
-  /**
-   * Delete directory
-   */
+  // Delete directory
   async deleteDirectory(dirPath, options = {}) {
     try {
       const validPath = await this.validatePath(dirPath);
@@ -346,32 +312,26 @@ class FileHandler {
 
       return { success: true };
     } catch (error) {
-      console.error('[FILE] Delete directory failed:', this.sanitizeError(error));
       return { success: false, error: 'Failed to delete directory' };
     }
   }
 
-  /**
-   * Copy file
-   */
+  // Copy file
   async copyFile(sourcePath, destPath, options = {}) {
     try {
       const validSource = await this.validatePath(sourcePath);
       const validDest = await this.validatePath(destPath);
       
-      // Check source exists and is file
       const stats = await fs.stat(validSource);
       
       if (!stats.isFile()) {
         throw new Error('Source is not a file');
       }
 
-      // Check size limit
       if (stats.size > this.maxFileSize) {
         throw new Error('File too large to copy');
       }
 
-      // Ensure destination directory exists
       const destDir = path.dirname(validDest);
       await fs.mkdir(destDir, { recursive: true, mode: 0o700 });
 
@@ -383,7 +343,6 @@ class FileHandler {
 
       return { success: true, size: stats.size };
     } catch (error) {
-      console.error('[FILE] Copy file failed:', this.sanitizeError(error));
       return { success: false, error: 'Failed to copy file' };
     }
   }

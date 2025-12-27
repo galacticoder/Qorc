@@ -1,8 +1,6 @@
 #!/usr/bin/env node
 /*
- * Client launcher - cross-platform
- * - Starts the Electron client
- * - Run `node scripts/install-deps.cjs --client` first to install dependencies
+ * Starts the Electron client
  */
 
 const fs = require('fs');
@@ -10,13 +8,10 @@ const path = require('path');
 const { spawn, execSync } = require('child_process');
 
 const repoRoot = path.resolve(__dirname, '..');
-
-function log(...args) { console.log('[CLIENT]', ...args); }
 function logErr(...args) { console.error('[CLIENT]', ...args); }
 
 if (process.argv.slice(2).some(arg => arg === '-h' || arg === '--help')) {
     console.log('Usage: node start-client.cjs - Starts Qor-Chat client');
-    console.log('');
     console.log('Prerequisites: Run `node scripts/install-deps.cjs --client` first');
     process.exit(0);
 }

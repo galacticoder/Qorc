@@ -1,16 +1,7 @@
 /**
  * Unified Private Key Encryption System
  * 
- * Provides consistent, quantum-resistant encryption for server key material:
- * - Post-quantum private keys (ML-DSA, ML-KEM)
- * - Internal audit keys for key metadata integrity
- * 
- * Security Features:
- * - QuantumResistantAEAD v3 encryption (AES-256-GCM -> XChaCha20-Poly1305 cascade + BLAKE3 MAC)
- * - Argon2id v1.3 key derivation with quantum-resistant parameters
- * - Constant-time operations to prevent timing attacks
- * - Secure memory management with zeroing
- * - Domain-separated cryptographic keys via SHAKE256
+ * Provides consistent, quantum-resistant encryption for server key material
  */
 
 import crypto from 'crypto';
@@ -24,7 +15,6 @@ import path from 'path';
 import { logger } from './crypto-logger.js';
 
 const SUPPORTED_KEY_TYPES = new Set(['mldsa', 'mlkem']);
-
 const isTypedArray = (value) => ArrayBuffer.isView(value) && !(value instanceof DataView);
 
 const toUint8Array = (value, name) => {
@@ -81,32 +71,29 @@ const normalizeForSerialization = (value) => {
 const stableStringify = (value) => JSON.stringify(normalizeForSerialization(value));
 
 
-/**
- * Unified Key Encryption Configuration
- * Uses quantum-resistant parameters for maximum security
- */
+// Key Encryption Configuration
 const UNIFIED_KEY_CONFIG = {
   // QuantumResistantAEAD parameters
   NONCE_LENGTH: 24,           // 24-byte nonce  
   KEY_LENGTH: 64,             // 512-bit master/domain keys
   TAG_LENGTH: 16,             // 128-bit authentication tag
   QR_NONCE_LENGTH: 36,        // 12 (AES-GCM) + 24 (XChaCha20-Poly1305)
-  
-  // Argon2id parameters (quantum-resistant)
+
+  // Argon2id parameters
   ARGON2_MEMORY: Math.min(Math.max(parseInt(process.env.UNIFIED_ARGON2_MEMORY || '', 10) || 262144, 131072), 524288), // clamp 128MB-512MB in KiB
   ARGON2_TIME: Math.min(Math.max(parseInt(process.env.UNIFIED_ARGON2_TIME || '', 10) || 4, 2), 8),
   ARGON2_PARALLELISM: Math.min(Math.max(parseInt(process.env.UNIFIED_ARGON2_PARALLELISM || '', 10) || 2, 1), 8),
   ARGON2_VERSION: 0x13,       // Argon2 v1.3
   ARGON2_ALGORITHM: 2,        // argon2id
-  
+
   // Salt and secret management
   SALT_LENGTH: 64,            // 512-bit salt
   SECRET_LENGTH: 64,          // 512-bit secret
-  
+
   // Key versioning
-  CURRENT_VERSION: 3,         // Current encryption scheme version (QuantumResistantAEAD)
-  MIN_SUPPORTED_VERSION: 3,   // Enforce v3-only 
-  
+  CURRENT_VERSION: 3,         // Current encryption scheme version
+  MIN_SUPPORTED_VERSION: 3,   // Latest version only
+
   // File permissions
   PRIVATE_KEY_MODE: 0o600,    // Owner read/write only
   PUBLIC_KEY_MODE: 0o644,     // Owner read/write, others read
@@ -115,12 +102,7 @@ const UNIFIED_KEY_CONFIG = {
 Object.freeze(UNIFIED_KEY_CONFIG);
 
 
-/**
- * QuantumResistantAEAD Implementation (v3)
- * AES-256-GCM -> XChaCha20-Poly1305 cascade + BLAKE3 MAC
- * Key: 64 bytes (32 for AES-256-GCM + 32 for XChaCha20)
- * Nonce: 36 bytes (12 for AES-GCM + 24 for XChaCha20)
- */
+// QuantumResistantAEAD Implementation
 class QuantumResistantAEAD {
   constructor(key) {
     if (!key || key.length !== 64) {
@@ -227,12 +209,7 @@ class UnifiedKeyEncryption {
     this.domainKeys = new Map();
   }
 
-  /**
-   * Initialize the encryption service
-   * @param {string} secret - Master secret for key derivation
-   * @param {Uint8Array} salt - Salt for key derivation (optional)
-   * @returns {Promise<void>}
-   */
+  // Initialize the encryption service
   async initialize(secret, salt = null) {
     if (this.initialized) return;
 
@@ -244,14 +221,9 @@ class UnifiedKeyEncryption {
       throw new Error('Secret length exceeds maximum allowed size');
     }
 
-
-    // Ensure directory exists and is secure
     await this.createSecureDirectory(this.keyPairPath);
-
-    // Load or create salt (persisted)
     const usedSalt = await this.getOrCreateSalt(salt);
 
-    // Derive 64-byte master key using Node argon2id
     const argon2Result = await argon2.hash(secret, {
       type: argon2.argon2id,
       version: UNIFIED_KEY_CONFIG.ARGON2_VERSION,
@@ -270,20 +242,13 @@ class UnifiedKeyEncryption {
     this.masterKey = new Uint8Array(argon2Result);
     this.salt = usedSalt;
 
-    // Initialize domain-separated keys
     await this.initializeDomainKeys();
 
     this.initialized = true;
     logger.info('UnifiedKeyEncryption initialized', { version: UNIFIED_KEY_CONFIG.CURRENT_VERSION });
   }
 
-  /**
-   * Encrypt a private key using QuantumResistantAEAD
-   * @param {Uint8Array|Buffer|string} privateKey - Private key to encrypt
-   * @param {string} keyType - Type of key (rsa, ec, postquantum, ed25519)
-   * @param {Uint8Array} aad - Additional authenticated data (optional)
-   * @returns {Promise<Object>} - Encrypted key data
-   */
+  // Encrypt a private key using QuantumResistantAEAD
   async encryptPrivateKey(privateKey, keyType, aad = null) {
     if (!this.initialized) {
       throw new Error('UnifiedKeyEncryption not initialized');
@@ -302,8 +267,6 @@ class UnifiedKeyEncryption {
       throw new Error(`Unsupported key type: ${keyType}`);
     }
 
-
-    // Convert to Uint8Array
     let keyBytes;
     if (typeof privateKey === 'string') {
       keyBytes = new TextEncoder().encode(privateKey);
@@ -315,10 +278,7 @@ class UnifiedKeyEncryption {
       throw new Error('Unsupported private key format');
     }
 
-    // Create authenticated AAD
     const contextAad = aad || this.createAAD(normalizedKeyType, {});
-
-    // Use domain-separated key for AEAD
     const domainKey = this.getDomainKey(normalizedKeyType);
     const aead = new QuantumResistantAEAD(domainKey);
     const result = aead.encrypt(keyBytes, null, contextAad);
@@ -340,7 +300,6 @@ class UnifiedKeyEncryption {
       }
     };
 
-    // Add metadata MAC for integrity
     const macKey = this.getDomainKey('audit').slice(0, 32);
     const mac = blake3(Buffer.from(stableStringify(encryptedData)), { key: macKey });
     encryptedData.metadataMAC = Buffer.from(mac).toString('base64');
@@ -348,25 +307,18 @@ class UnifiedKeyEncryption {
     return encryptedData;
   }
 
-  /**
-   * Decrypt a private key using QuantumResistantAEAD
-   * @param {Object} encryptedKeyData - Encrypted key data
-   * @param {string} expectedKeyType - Expected key type for validation
-   * @returns {Promise<Uint8Array>} - Decrypted private key
-   */
+  // Decrypt a private key using QuantumResistantAEAD
   async decryptPrivateKey(encryptedKeyData, expectedKeyType) {
     if (!this.initialized) {
       throw new Error('UnifiedKeyEncryption not initialized');
     }
 
-    // Validate encrypted key data structure
     if (!encryptedKeyData || typeof encryptedKeyData !== 'object') {
       throw new Error('Invalid encrypted key data');
     }
 
     const { version, keyType, nonce, ciphertext, salt, algorithm, metadataMAC } = encryptedKeyData;
 
-    // Validate required fields
     if (typeof version !== 'number') {
       throw new Error('Encrypted key data missing version');
     }
@@ -383,12 +335,10 @@ class UnifiedKeyEncryption {
       throw new Error('Encrypted key data missing algorithm');
     }
 
-    // Version compatibility check
     if (version < UNIFIED_KEY_CONFIG.MIN_SUPPORTED_VERSION || version > UNIFIED_KEY_CONFIG.CURRENT_VERSION) {
       throw new Error(`Unsupported key version: ${version}`);
     }
 
-    // Key type validation
     if (typeof keyType !== 'string') {
       throw new Error('Encrypted key data missing key type');
     }
@@ -402,12 +352,10 @@ class UnifiedKeyEncryption {
       throw new Error(`Key type mismatch: expected ${expectedKeyType}, got ${keyType}`);
     }
 
-    // Decode base64 data
     const nonceBytes = Buffer.from(nonce, 'base64');
     const ciphertextBytes = Buffer.from(ciphertext, 'base64');
     const saltBytes = Buffer.from(salt, 'base64');
 
-    // Validate lengths
     if (algorithm === 'QuantumResistantAEAD') {
       if (nonceBytes.length !== UNIFIED_KEY_CONFIG.QR_NONCE_LENGTH) {
         throw new Error(`Invalid nonce length: ${nonceBytes.length}`);
@@ -419,12 +367,10 @@ class UnifiedKeyEncryption {
       throw new Error(`Invalid salt length: ${saltBytes.length}`);
     }
 
-    // Enforce salt match
     if (!this.constantTimeCompare(saltBytes, this.salt)) {
       throw new Error('Salt mismatch: key encrypted under a different salt');
     }
 
-    // Verify metadata integrity if present
     if (metadataMAC) {
       const macKey = this.getDomainKey('audit').slice(0, 32);
       const expectedMac = blake3(Buffer.from(stableStringify({
@@ -448,24 +394,16 @@ class UnifiedKeyEncryption {
       }
     }
 
-    // Create AAD
     const contextAad = this.createAAD(normalizedKeyType, {});
 
-    // QuantumResistantAEAD v3
     const domainKey = this.getDomainKey(normalizedKeyType);
     const qaead = new QuantumResistantAEAD(domainKey);
     const decryptedKey = qaead.decrypt(ciphertextBytes, nonceBytes, contextAad);
-    
+
     return decryptedKey;
   }
 
-  /**
-   * Encrypt and save a private key to file
-   * @param {string} keyName - Name of the key file (without extension)
-   * @param {Uint8Array|Buffer|string} privateKey - Private key to encrypt
-   * @param {string} keyType - Type of key
-   * @returns {Promise<void>}
-   */
+  // Encrypt and save a private key to file
   async encryptAndSavePrivateKey(keyName, privateKey, keyType) {
     const safeName = this.sanitizeKeyName(keyName);
     const encryptedData = await this.encryptPrivateKey(privateKey, keyType);
@@ -476,12 +414,7 @@ class UnifiedKeyEncryption {
     logger.info('Encrypted private key saved', { keyType, filePath });
   }
 
-  /**
-   * Load and decrypt a private key from file
-   * @param {string} keyName - Name of the key file (without extension)
-   * @param {string} keyType - Expected key type
-   * @returns {Promise<Uint8Array>} - Decrypted private key
-   */
+  // Load and decrypt a private key from file
   async loadAndDecryptPrivateKey(keyName, keyType) {
     const safeName = this.sanitizeKeyName(keyName);
     const filePath = path.join(this.keyPairPath, `${safeName}-private.enc`);
@@ -501,11 +434,7 @@ class UnifiedKeyEncryption {
     }
   }
 
-  /**
-   * Check if an encrypted key file exists
-   * @param {string} keyName - Name of the key file (without extension)
-   * @returns {Promise<boolean>}
-   */
+  // Check if an encrypted key file exists
   async hasEncryptedKey(keyName) {
     const safeName = this.sanitizeKeyName(keyName);
     const filePath = path.join(this.keyPairPath, `${safeName}-private.enc`);
@@ -517,11 +446,7 @@ class UnifiedKeyEncryption {
     }
   }
 
-  /**
-   * Delete an encrypted key file
-   * @param {string} keyName - Name of the key file (without extension)
-   * @returns {Promise<void>}
-   */
+  // Delete an encrypted key file
   async deleteEncryptedKey(keyName) {
     const safeName = this.sanitizeKeyName(keyName);
     const filePath = path.join(this.keyPairPath, `${safeName}-private.enc`);
@@ -535,9 +460,6 @@ class UnifiedKeyEncryption {
     }
   }
 
-  /**
-   * Constant-time comparison to prevent timing attacks
-   */
   constantTimeCompare(a, b) {
     const aBuf = a ? Buffer.from(a) : Buffer.alloc(0);
     const bBuf = b ? Buffer.from(b) : Buffer.alloc(0);
@@ -549,21 +471,15 @@ class UnifiedKeyEncryption {
     try { return crypto.timingSafeEqual(pa, pb) && aBuf.length === bBuf.length; } catch { return false; }
   }
 
-  /**
-   * Securely zero sensitive data
-   * @param {Uint8Array} data - Data to zero
-   */
+  // Securely zero sensitive data
   secureZero(data) {
     if (data && data.length > 0) {
-      try { crypto.randomFillSync(data); } catch {}
+      try { crypto.randomFillSync(data); } catch { }
       data.fill(0);
     }
   }
 
-  /**
-   * Get encryption metadata
-   * @returns {Object} - Encryption configuration metadata
-   */
+  // Get encryption metadata
   getMetadata() {
     return {
       version: UNIFIED_KEY_CONFIG.CURRENT_VERSION,
@@ -582,10 +498,7 @@ class UnifiedKeyEncryption {
     };
   }
 
-  /**
-   * Get the salt used for key derivation
-   * @returns {Uint8Array} The salt (defensive copy)
-   */
+  // Get the salt used for key derivation
   getSalt() {
     if (!this.initialized) {
       throw new Error('UnifiedKeyEncryption not initialized');
@@ -596,22 +509,22 @@ class UnifiedKeyEncryption {
   destroy() {
     try {
       if (this.masterKey) this.secureZero(this.masterKey);
-    } catch {}
+    } catch { }
     try {
       if (this.salt) this.secureZero(this.salt);
-    } catch {}
+    } catch { }
     try {
       for (const [, v] of this.domainKeys) {
         this.secureZero(v);
       }
       this.domainKeys.clear();
-    } catch {}
+    } catch { }
     this.masterKey = null;
     this.salt = null;
     this.initialized = false;
   }
 
-  // ===== helpers for v3 =====
+  // Helpers
   async createSecureDirectory(dirPath) {
     const resolved = path.resolve(dirPath);
     await fs.mkdir(resolved, { recursive: true, mode: 0o700 });
@@ -620,7 +533,7 @@ class UnifiedKeyEncryption {
       if ((stats.mode & 0o777) !== 0o700) {
         await fs.chmod(resolved, 0o700);
       }
-    } catch {}
+    } catch { }
   }
 
   async getOrCreateSalt(providedSalt) {
@@ -696,15 +609,15 @@ class UnifiedKeyEncryption {
       const handle = await fs.open(tmp, 'w', mode);
       try {
         await handle.writeFile(data);
-        try { await handle.sync(); } catch {}
+        try { await handle.sync(); } catch { }
       } finally {
-        try { await handle.close(); } catch {}
+        try { await handle.close(); } catch { }
       }
       await fs.rename(tmp, filePath);
       try {
         const dirHandle = await fs.open(dir, 'r');
-        try { await dirHandle.sync(); } finally { try { await dirHandle.close(); } catch {} }
-      } catch {}
+        try { await dirHandle.sync(); } finally { try { await dirHandle.close(); } catch { } }
+      } catch { }
     } finally {
       try {
         await fs.rm(tmp, { force: true });
@@ -746,7 +659,6 @@ class UnifiedKeyEncryption {
       }
     };
   }
-
 }
 
 export { UnifiedKeyEncryption, UNIFIED_KEY_CONFIG };

@@ -6,20 +6,20 @@ import { withRedisClient } from '../presence/presence.js';
 
 export const validateUsernameFormat = (username) => {
   if (!username || typeof username !== 'string') return false;
-  // Accept both original usernames (alphanumeric with underscores/hyphens) and pseudonymized usernames (32+ char hex)
   const isPseudonym = /^[a-f0-9]{32,}$/i.test(username);
   if (isPseudonym) return true;
+
   return /^[a-zA-Z0-9_-]+$/.test(username);
 };
 
 export const validateUsernameLength = (username) => {
   if (!username || typeof username !== 'string') return false;
-  // Pseudonymized usernames can be longer (32-128 chars for hex strings)
   const isPseudonym = /^[a-f0-9]{32,}$/i.test(username);
   if (isPseudonym) {
     return username.length >= 32 && username.length <= 128;
   }
-  return username.length >= 3 && username.length <= 32; // Original usernames
+
+  return username.length >= 3 && username.length <= 32;
 };
 export const isUsernameAvailable = async (username) => {
   try {
@@ -77,7 +77,7 @@ export const isServerFull = async () => {
     );
     return result === 1;
   } catch (error) {
-    console.error('[AUTH] Redis error in isServerFull, failing safe (treating as full):', error);
+    console.error('[AUTH] Redis error in isServerFull. Treating server as full:', error);
     return true;
   }
 };
@@ -102,7 +102,7 @@ export async function setServerPasswordOnInput() {
     if (process.env.SERVER_PASSWORD && process.env.SERVER_PASSWORD.length > 0) {
       const password = process.env.SERVER_PASSWORD;
       if (password.length > 512) {
-        console.error('SERVER_PASSWORD too long (max 512 characters). Exiting gracefully...');
+        console.error('SERVER_PASSWORD too long (max 512 characters). Exiting...');
         process.emit('SIGTERM');
         return;
       }
@@ -121,7 +121,7 @@ export async function setServerPasswordOnInput() {
             console.log('[SERVER] Stored password hash in cluster shared config');
           });
         } catch (error) {
-          console.log('[SERVER] Note: Could not store password in cluster (cluster may not be initialized yet):', error.message);
+          console.log('[SERVER] Could not store password in cluster:', error.message);
         }
       }
 
@@ -156,7 +156,7 @@ export async function setServerPasswordOnInput() {
     if (error?.message?.includes('Password must be at least')) {
       console.error(`[SERVER] Password too short: ${error.message}`);
       console.error('Please set a server password with at least 12 characters via SERVER_PASSWORD or SERVER_PASSWORD_HASH.');
-      console.error('Exiting gracefully...');
+      console.error('Exiting...');
     } else {
       console.error('[SERVER] Failed to set server password:', {
         message: error?.message || error,

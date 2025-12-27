@@ -3,13 +3,6 @@
  * Double AEAD: AES-256-GCM + XChaCha20-Poly1305
  * KDF: SHA3-512
  * MAC: BLAKE3 keyed authentication
- * 
- * Security properties:
- * - Double encryption layers
- * - Machine-bound keys
- * - Atomic writes with 0600 permissions
- * - Memory zeroization
- * - Timing-safe comparisons
  */
 
 const crypto = require('crypto');
@@ -18,11 +11,12 @@ const os = require('os');
 const { ensureDir, atomicWrite, readFile, removeFile, listFiles, toSafeFileName, fromSafeFileName } = require('./secure-file.cjs');
 const { getMachineContext } = require('./machine-entropy.cjs');
 
+// Storage paths
 const CONFIG_DIR = path.join(os.homedir(), '.config', 'Qor-chat-client');
 const STORE_DIR = path.join(CONFIG_DIR, 'secure-store');
 const MASTER_KEY_FILE = path.join(CONFIG_DIR, 'master.key');
 
-const NONCE_SIZE = 36; // 12 bytes for AES-GCM + 24 bytes for XChaCha20
+const NONCE_SIZE = 36;
 const MAC_SIZE = 32;
 let noble = null;
 let kAES = null;
@@ -70,17 +64,13 @@ function timingSafeEqual(a, b) {
   return crypto.timingSafeEqual(a, b);
 }
 
-/**
- * Initialize the secure storage system
- */
+// Initialize the secure storage system
 async function init({ installPath, logger }) {
   if (initialized) {
     return;
   }
 
   await loadNoble();
-
-  // Ensure directories exist with strict permissions
   await ensureDir(CONFIG_DIR, 0o700);
   await ensureDir(STORE_DIR, 0o700);
 
@@ -100,17 +90,14 @@ async function init({ installPath, logger }) {
     }
   }
 
-  // Get machine-specific entropy
   const machineContext = await getMachineContext(installPath);
 
-  // Derive root key from master key + machine context
   const root = sha3(Buffer.concat([
     Buffer.from('QSSv1/ROOT', 'utf8'),
     masterKey,
     machineContext
   ]));
 
-  // Derive subkeys for each encryption layer
   const aesKeyMaterial = sha3(Buffer.concat([
     Buffer.from('QSSv1/AES-256-GCM', 'utf8'),
     root
@@ -128,36 +115,28 @@ async function init({ installPath, logger }) {
   kXChaCha = xchachaKeyMaterial.subarray(0, 32);
   kMAC = macKeyMaterial.subarray(0, 32);
 
-  // Zeroize sensitive intermediate data
   zeroize(masterKey, machineContext, root, aesKeyMaterial, xchachaKeyMaterial, macKeyMaterial);
 
   initialized = true;
 }
 
-/**
- * Get file path for a key
- */
+// Get file path for a key
 function filePathForKey(key) {
   const safeName = toSafeFileName(key);
   return path.join(STORE_DIR, `${safeName}.bin`);
 }
 
-/**
- * Encrypt and store a value
- */
+// Encrypt and store a value
 async function setItem(key, value) {
   if (!initialized) {
     throw new Error('Storage not initialized');
   }
 
   const data = Buffer.isBuffer(value) ? value : Buffer.from(value, 'utf8');
-  
-  // Generate random nonce: 12 bytes for AES-GCM + 24 bytes for XChaCha20
   const nonce = crypto.randomBytes(NONCE_SIZE);
   const nAES = nonce.subarray(0, 12);
   const nXChaCha = nonce.subarray(12, 36);
 
-  // Additional authenticated data for each layer (binds nonces)
   const aad1 = Buffer.concat([Buffer.from('QSSv1 L1', 'utf8'), nXChaCha]);
   const aad2 = Buffer.concat([Buffer.from('QSSv1 L2', 'utf8'), nAES]);
 
@@ -171,31 +150,27 @@ async function setItem(key, value) {
     authTag1 = cipher.getAuthTag();
     layer1 = Buffer.concat([layer1Ciphertext, authTag1]);
 
-    // Layer 2: XChaCha20-Poly1305 encryption (requires pre-allocated output buffer)
+    // Layer 2: XChaCha20-Poly1305 encryption
     const xchacha = noble.xchacha20poly1305(kXChaCha, nXChaCha);
-    layer2 = Buffer.alloc(layer1.length + 16); // plaintext + 16-byte Poly1305 tag
+    layer2 = Buffer.alloc(layer1.length + 16);
     xchacha.encrypt(layer1, layer2, aad2);
 
-    // Layer 3: BLAKE3 MAC for authentication
+    // Layer 3: BLAKE3 MAC
     const macInput = Buffer.concat([Buffer.from('QSSv1', 'utf8'), nonce, layer2]);
     mac = blake3k(kMAC, macInput).subarray(0, MAC_SIZE);
 
     // Final file format: [nonce(36) | layer2_ciphertext | mac(32)]
     fileData = Buffer.concat([nonce, layer2, mac]);
 
-    // Atomic write with strict permissions
     await atomicWrite(filePathForKey(key), fileData, 0o600);
 
     return true;
   } finally {
-    // Zeroize all intermediate buffers
     zeroize(nonce, nAES, nXChaCha, aad1, aad2, layer1Ciphertext, authTag1, layer1, layer2, mac, fileData);
   }
 }
 
-/**
- * Retrieve and decrypt a value
- */
+// Retrieve and decrypt a value
 async function getItem(key) {
   if (!initialized) {
     throw new Error('Storage not initialized');
@@ -213,13 +188,11 @@ async function getItem(key) {
     throw err;
   }
 
-  // Validate file size
-  const minSize = NONCE_SIZE + 16 + MAC_SIZE; // nonce + min ciphertext + mac
+  const minSize = NONCE_SIZE + 16 + MAC_SIZE;
   if (fileData.length < minSize) {
     throw new Error('Invalid encrypted file: too small');
   }
 
-  // Parse file format: [nonce(36) | ciphertext | mac(32)]
   const nonce = fileData.subarray(0, NONCE_SIZE);
   const mac = fileData.subarray(fileData.length - MAC_SIZE);
   const layer2 = fileData.subarray(NONCE_SIZE, fileData.length - MAC_SIZE);
@@ -233,7 +206,6 @@ async function getItem(key) {
   let macCheck, layer1, authTag1, layer1Ciphertext, plaintext;
 
   try {
-    // Verify BLAKE3 MAC
     const macInput = Buffer.concat([Buffer.from('QSSv1', 'utf8'), nonce, layer2]);
     macCheck = blake3k(kMAC, macInput).subarray(0, MAC_SIZE);
 
@@ -241,20 +213,17 @@ async function getItem(key) {
       throw new Error('MAC verification failed: data may be tampered');
     }
 
-    // Layer 2: Decrypt XChaCha20-Poly1305 (requires pre-allocated output buffer)
     const xchacha = noble.xchacha20poly1305(kXChaCha, nXChaCha);
-    layer1 = Buffer.alloc(layer2.length - 16); // ciphertext - 16-byte Poly1305 tag
+    layer1 = Buffer.alloc(layer2.length - 16);
     xchacha.decrypt(layer2, layer1, aad2);
 
     if (!layer1 || layer1.length < 16) {
       throw new Error('Layer 2 decryption failed');
     }
 
-    // Split Layer 1 into ciphertext and auth tag
     authTag1 = layer1.subarray(layer1.length - 16);
     layer1Ciphertext = layer1.subarray(0, layer1.length - 16);
 
-    // Layer 1: Decrypt AES-256-GCM
     const decipher = crypto.createDecipheriv('aes-256-gcm', kAES, nAES);
     decipher.setAAD(aad1);
     decipher.setAuthTag(authTag1);
@@ -262,14 +231,11 @@ async function getItem(key) {
 
     return plaintext;
   } finally {
-    // Zeroize all intermediate buffers
     zeroize(nonce, nAES, nXChaCha, aad1, aad2, macCheck, layer1, authTag1, layer1Ciphertext);
   }
 }
 
-/**
- * Remove a stored value
- */
+// Remove a stored value
 async function removeItem(key) {
   if (!initialized) {
     throw new Error('Storage not initialized');
@@ -279,9 +245,7 @@ async function removeItem(key) {
   await removeFile(filePath);
 }
 
-/**
- * List all stored keys
- */
+// List all stored keys
 async function listKeys() {
   if (!initialized) {
     throw new Error('Storage not initialized');

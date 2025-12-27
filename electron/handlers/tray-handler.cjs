@@ -14,7 +14,7 @@ class TrayHandler {
     this.onQuit = null;
   }
 
-  // Will use real app icon when i create one
+  // Will use my real app icon when i create one
   initialize({ iconPath, onShowWindow, onQuit }) {
     if (this.tray) return { success: true };
 
@@ -22,7 +22,6 @@ class TrayHandler {
       this.onShowWindow = onShowWindow;
       this.onQuit = onQuit;
 
-      // Create tray icon
       let icon;
       try {
         icon = nativeImage.createFromPath(iconPath);
@@ -49,6 +48,7 @@ class TrayHandler {
     }
   }
 
+  // Update context menu with unread count
   updateContextMenu() {
     if (!this.tray) return;
 
@@ -87,6 +87,7 @@ class TrayHandler {
     this.tray.setContextMenu(contextMenu);
   }
 
+  // Set unread count and update UI
   setUnreadCount(count) {
     if (typeof count !== 'number' || count < 0) return;
     this.unreadCount = Math.min(count, 9999);
@@ -100,22 +101,27 @@ class TrayHandler {
     }
   }
 
+  // Increment unread count
   incrementUnread() {
     this.setUnreadCount(this.unreadCount + 1);
   }
 
+  // Clear unread count
   clearUnread() {
     this.setUnreadCount(0);
   }
 
+  // Get quitting state
   getIsQuitting() {
     return this.isQuitting;
   }
 
+  // Set quitting state
   setIsQuitting(value) {
     this.isQuitting = Boolean(value);
   }
 
+  // Destroy tray
   destroy() {
     if (this.tray) {
       try {

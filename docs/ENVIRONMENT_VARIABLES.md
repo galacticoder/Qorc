@@ -40,11 +40,11 @@ Values shown in parentheses indicate typical defaults when the variable is unset
 | `DB_TLS_SERVERNAME` | derived or unset | `server/database/database.js`, `scripts/start-server.cjs` | SNI/hostname used for Postgres TLS hostname verification. Auto-set by `ensureDbCaBundleEnv()` when probing the remote certificate. |
 | `DB_CONNECT_HOST` | derived or `(localhost)` | `server/database/database.js`, `scripts/start-server.cjs` | Host used for TCP connections to Postgres when `DATABASE_URL` is not set. Auto-populated by `scripts/start-server.cjs` when generating the CA bundle. |
 | `REDIS_TLS_SERVERNAME` | derived from HTTPS certificate when possible | `server/presence/presence.js`, `server/rate-limiting/distributed-rate-limiter.js`, `scripts/start-server.cjs` | SNI hostname used for TLS connections to Redis. When unset and a local TLS Redis is used, `start-server.cjs` derives it from the HTTPS certificate CN. |
-| `OPENSSL_CONF` | unset | `scripts/setup-quantum-haproxy.cjs`, `scripts/build-quantum-haproxy.cjs`, `scripts/start-loadbalancer.cjs`, `scripts/start-server.cjs`, `server/cluster/auto-loadbalancer.js` | OpenSSL configuration file. Quantum scripts set this to a local `openssl-oqs.cnf` that loads the OQS provider for PQ TLS. |
+| `OPENSSL_CONF` | unset | `scripts/setup-quantum-haproxy.cjs`, `scripts/build-quantum-haproxy.cjs`, `scripts/start-loadbalancer.cjs`, `scripts/start-server.cjs`, `server/load-balancer/auto-loadbalancer.js` | OpenSSL configuration file. Quantum scripts set this to a local `openssl-oqs.cnf` that loads the OQS provider for PQ TLS. |
 | `OPENSSL_MODULES` | unset | same as above | Directory containing OpenSSL provider modules. Set by quantum setup scripts so the `oqsprovider` module can be loaded. |
-| `LD_LIBRARY_PATH` | unset | `scripts/setup-quantum-haproxy.cjs`, `scripts/build-quantum-haproxy.cjs`, `server/cluster/haproxy-config-generator.js`, `server/cluster/auto-loadbalancer.js` | Library search path used when invoking `haproxy` or OpenSSL with the PQ provider installed in non-standard locations. |
-| `LB_OPENSSL_CONF` | derived from `OPENSSL_CONF` | `scripts/start-loadbalancer.cjs`, `server/cluster/auto-loadbalancer.js` | OpenSSL configuration used by the load balancer process. Normally set by `scripts/start-loadbalancer.cjs` to point at `server/config/openssl-oqs.cnf`. |
-| `LB_HAPROXY_CFG` | derived (`server/config/haproxy-quantum.cfg`) | `scripts/start-loadbalancer.cjs`, `server/cluster/auto-loadbalancer.js` | Path to the quantum-enabled HAProxy configuration used by the auto-loadbalancer. |
+| `LD_LIBRARY_PATH` | unset | `scripts/setup-quantum-haproxy.cjs`, `scripts/build-quantum-haproxy.cjs`, `server/cluster/haproxy-config-generator.js`, `server/load-balancer/auto-loadbalancer.js` | Library search path used when invoking `haproxy` or OpenSSL with the PQ provider installed in non-standard locations. |
+| `LB_OPENSSL_CONF` | derived from `OPENSSL_CONF` | `scripts/start-loadbalancer.cjs`, `server/load-balancer/auto-loadbalancer.js` | OpenSSL configuration used by the load balancer process. Normally set by `scripts/start-loadbalancer.cjs` to point at `server/config/openssl-oqs.cnf`. |
+| `LB_HAPROXY_CFG` | derived (`server/config/haproxy-quantum.cfg`) | `scripts/start-loadbalancer.cjs`, `server/load-balancer/auto-loadbalancer.js` | Path to the quantum-enabled HAProxy configuration used by the auto-loadbalancer. |
 | `TLS_REDIS_SERVER` | auto-written by `scripts/install-deps.cjs` | `scripts/start-server.cjs` | Path to a project-local `redis-server` binary compiled with TLS support. When set, `start-server.cjs` prefers this over the system Redis. |
 
 ---
@@ -95,7 +95,7 @@ Values shown in parentheses indicate typical defaults when the variable is unset
 
 | Name | Default / required | Used by | Description |
 | ---- | ------------------ | ------- | ----------- |
-| `REDIS_URL` | **required** | `server/presence/presence.js`, `server/rate-limiting/distributed-rate-limiter.js`, `scripts/start-server.cjs`, `scripts/start-loadbalancer.cjs`, `server/cluster/auto-loadbalancer.js` | Redis connection URL. Must use `rediss://` with TLS; plaintext `redis://` is treated as an error in production paths. |
+| `REDIS_URL` | **required** | `server/presence/presence.js`, `server/rate-limiting/distributed-rate-limiter.js`, `scripts/start-server.cjs`, `scripts/start-loadbalancer.cjs`, `server/load-balancer/auto-loadbalancer.js` | Redis connection URL. Must use `rediss://` with TLS; plaintext `redis://` is treated as an error in production paths. |
 | `REDIS_CLUSTER_NODES` | unset | `server/presence/presence.js` | Comma-separated `host:port` list enabling ioredis cluster mode for presence and messaging when set. |
 | `REDIS_USERNAME` | unset | `server/presence/presence.js`, `server/rate-limiting/distributed-rate-limiter.js` | Redis ACL username used for both presence and rate limiter clients. |
 | `REDIS_PASSWORD` | unset | same as above | Redis ACL password. |
@@ -158,25 +158,25 @@ Several of these secrets (`KEY_ENCRYPTION_SECRET`, `TOKEN_PEPPER`, `AUTH_AUDIT_H
 
 | Name | Default / required | Used by | Description |
 | ---- | ------------------ | ------- | ----------- |
-| `HAPROXY_HTTPS_PORT` | if root: `(443)`, else `(8443)` | `scripts/start-loadbalancer.cjs`, `server/cluster/haproxy-config-generator.js`, `server/cluster/auto-loadbalancer.js`, `scripts/simple-tunnel.cjs` | External HTTPS listen port for the HAProxy load balancer. |
+| `HAPROXY_HTTPS_PORT` | if root: `(443)`, else `(8443)` | `scripts/start-loadbalancer.cjs`, `server/cluster/haproxy-config-generator.js`, `server/load-balancer/auto-loadbalancer.js`, `scripts/simple-tunnel.cjs` | External HTTPS listen port for the HAProxy load balancer. |
 | `HAPROXY_HTTP_PORT` | if root: `(80)`, else `(8080)` | same as above | Optional HTTP listen port used to redirect HTTP to HTTPS. |
 | `HAPROXY_STATS_PORT` | `(8404)` | same as above | Port for the HAProxy statistics dashboard. |
-| `HAPROXY_STATS_USERNAME` | `'admin'` when first created | `scripts/start-loadbalancer.cjs`, `server/cluster/haproxy-config-generator.js`, `server/cluster/auto-loadbalancer.js` | Username for the HAProxy stats HTTP interface and the PQ command-encryption keypair. When unset, tooling loads it from encrypted credentials or initializes it to `admin`. |
+| `HAPROXY_STATS_USERNAME` | `'admin'` when first created | `scripts/start-loadbalancer.cjs`, `server/cluster/haproxy-config-generator.js`, `server/load-balancer/auto-loadbalancer.js` | Username for the HAProxy stats HTTP interface and the PQ command-encryption keypair. When unset, tooling loads it from encrypted credentials or initializes it to `admin`. |
 | `HAPROXY_STATS_PASSWORD` | generated or prompted when first created | same as above | Password for the HAProxy stats HTTP interface and PQ command-encryption keypair. When unset, tooling either unlocks the stored value or prompts/generates a strong random password and stores it encrypted under `server/config/.haproxy-*`. |
-| `HAPROXY_CERT_PATH` | `server/config/certs` (generator) or `/etc/haproxy/certs` (auto-LB) | `server/cluster/haproxy-config-generator.js`, `server/cluster/auto-loadbalancer.js` | Directory containing certificates used by HAProxy for TLS termination. |
+| `HAPROXY_CERT_PATH` | `server/config/certs` (generator) or `/etc/haproxy/certs` (auto-LB) | `server/cluster/haproxy-config-generator.js`, `server/load-balancer/auto-loadbalancer.js` | Directory containing certificates used by HAProxy for TLS termination. |
 | `HAPROXY_CERT_FILE` | `cert.pem` inside `HAPROXY_CERT_PATH` | `server/cluster/haproxy-config-generator.js` | Specific certificate file that the generated HAProxy config should reference. |
-| `HAPROXY_CONFIG_PATH` | `/etc/haproxy/haproxy-auto.cfg` when root; temp file otherwise | `server/cluster/cluster-integration.js`, `server/cluster/auto-loadbalancer.js` | Path to the HAProxy configuration file written and reloaded by cluster tools. |
-| `HAPROXY_PID_FILE` | `/var/run/haproxy-auto.pid` when root; temp file otherwise | `server/cluster/auto-loadbalancer.js`, `server/cluster/haproxy-config-generator.js` | PID file used to detect and control the HAProxy process. |
-| `HAPROXY_STATS_SOCKET` | `${TMPDIR}/haproxy-admin-<uid>.sock` | `server/cluster/haproxy-config-generator.js`, `server/cluster/auto-loadbalancer.js` | Unix domain socket path for HAProxy admin commands. Can be overridden explicitly. |
-| `LOADBALANCER_LOCK_FILE` | `/var/run/auto-loadbalancer.pid` when root; temp file otherwise | `server/cluster/auto-loadbalancer.js` | Lock file ensuring only one auto-loadbalancer process is running. |
+| `HAPROXY_CONFIG_PATH` | `/etc/haproxy/haproxy-auto.cfg` when root; temp file otherwise | `server/cluster/cluster-integration.js`, `server/load-balancer/auto-loadbalancer.js` | Path to the HAProxy configuration file written and reloaded by cluster tools. |
+| `HAPROXY_PID_FILE` | `/var/run/haproxy-auto.pid` when root; temp file otherwise | `server/load-balancer/auto-loadbalancer.js`, `server/cluster/haproxy-config-generator.js` | PID file used to detect and control the HAProxy process. |
+| `HAPROXY_STATS_SOCKET` | `${TMPDIR}/haproxy-admin-<uid>.sock` | `server/cluster/haproxy-config-generator.js`, `server/load-balancer/auto-loadbalancer.js` | Unix domain socket path for HAProxy admin commands. Can be overridden explicitly. |
+| `LOADBALANCER_LOCK_FILE` | `/var/run/auto-loadbalancer.pid` when root; temp file otherwise | `server/load-balancer/auto-loadbalancer.js` | Lock file ensuring only one auto-loadbalancer process is running. |
 | `HAPROXY_AUTO_CONFIG` | `('false')` | `server/cluster/cluster-integration.js` | When `'true'` and this node is primary, cluster integration automatically writes HAProxy configuration from Redis cluster state. |
 | `HAPROXY_AUTO_RELOAD` | `('false')` | `server/cluster/cluster-integration.js` | When `'true'`, HAProxy is automatically validated and reloaded after configuration updates. |
 | `HAPROXY_UPDATE_INTERVAL` | `(60000)` ms | `server/cluster/cluster-integration.js` | Interval for periodic HAProxy configuration regeneration in the primary node. |
-| `HAPROXY_BIN` | `('haproxy')` | `server/cluster/auto-loadbalancer.js` | Name or path of the HAProxy binary used by the auto-loadbalancer process. |
-| `LB_HAPROXY_BIN` | derived | `scripts/start-loadbalancer.cjs`, `server/cluster/auto-loadbalancer.js` | Effective HAProxy binary to run (system or project-built), chosen after config validation. |
+| `HAPROXY_BIN` | `('haproxy')` | `server/load-balancer/auto-loadbalancer.js` | Name or path of the HAProxy binary used by the auto-loadbalancer process. |
+| `LB_HAPROXY_BIN` | derived | `scripts/start-loadbalancer.cjs`, `server/load-balancer/auto-loadbalancer.js` | Effective HAProxy binary to run (system or project-built), chosen after config validation. |
 | `HAPROXY_VERSION` | `(3.2.0)` | `scripts/build-quantum-haproxy.cjs` | HAProxy source version to download and compile for the quantum build. |
-| `CLUSTER_API_URL` | `(https://localhost:3000/api/cluster)` | `server/cluster/cluster-cli.js` | Base URL for the cluster management HTTP API used by the CLI tool. |
-| `CLUSTER_ADMIN_TOKEN` | **required** | `server/cluster/cluster-cli.js` | Static admin token used by the CLI to authenticate cluster management operations. |
+| `CLUSTER_API_URL` | `(https://localhost:3000/api/cluster)` | `scripts/cluster-cli.js` | Base URL for the cluster management HTTP API used by the CLI tool. |
+| `CLUSTER_ADMIN_TOKEN` | **required** | `scripts/cluster-cli.js` | Static admin token used by the CLI to authenticate cluster management operations. |
 
 ---
 
@@ -192,11 +192,10 @@ Several of these secrets (`KEY_ENCRYPTION_SECRET`, `TOKEN_PEPPER`, `AUTH_AUDIT_H
 
 ---
 
-## Scripts and testing helpers
+## Cloudflared tunnel
 
 | Name | Default / required | Used by | Description |
 | ---- | ------------------ | ------- | ----------- |
-| `NODE_TLS_REJECT_UNAUTHORIZED` | set to `'0'` within script | `scripts/run-artillery.cjs` | Artillery runner sets this to `0` in its own environment to allow self-signed certificates during load tests. Not used by the main server directly. |
 | `CLOUDFLARED_TOKEN` | unset | `scripts/simple-tunnel.cjs` | Optional Cloudflare Tunnel token. When set, creates a persistent tunnel using this token. If unset, a quick tunnel (trycloudflare.com) is created. |
 
 ---
@@ -227,15 +226,6 @@ Several of these secrets (`KEY_ENCRYPTION_SECRET`, `TOKEN_PEPPER`, `AUTH_AUDIT_H
 | ---- | ------------------ | ------- | ----------- |
 | `ELECTRON_INSTANCE_ID` | unset → `'1'` | `electron/main.cjs`, `electron/preload.cjs` | When set, each instance uses a separate `userData` directory (`<base>-instance-<id>`) and is exposed to the renderer as `electronAPI.instanceId`. |
 | `INSTANCE_ID` | unset → `'1'` in preload | `electron/preload.cjs`, `server/authentication/token-security.js` | Generic instance identifier used by Electron and embedded in distributed security events; the preload script falls back to this when `ELECTRON_INSTANCE_ID` is not set. |
-
----
-
-## Client launcher (start-client.cjs)
-
-| Name | Default / required | Used by | Description |
-| ---- | ------------------ | ------- | ----------- |
-| `START_ELECTRON` | `(1)` | `start-client.cjs` | When set to `0`, runs only the Vite dev server without starting Electron. |
-| `FORCE_ELECTRON_REBUILD` | unset | `start-client.cjs` | When set (any non-empty value), forces `@electron/rebuild` to rebuild native modules for the current Electron version even if a cache marker exists. |
 
 ---
 

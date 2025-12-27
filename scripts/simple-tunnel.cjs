@@ -39,8 +39,7 @@ async function start() {
   await fsp.mkdir(path.dirname(logFile), { recursive: true });
   const out = fs.createWriteStream(logFile, { flags: 'w' });
 
-  // If CLOUDFLARED_TOKEN is set, use it for persistent tunnel
-  // Otherwise use quick tunnel (trycloudflare.com)
+  // If CLOUDFLARED_TOKEN is set then use it for persistent tunnel
   const args = process.env.CLOUDFLARED_TOKEN
     ? ['tunnel', 'run', '--token', process.env.CLOUDFLARED_TOKEN]
     : ['tunnel', '--url', `https://127.0.0.1:${port}`, '--no-tls-verify'];

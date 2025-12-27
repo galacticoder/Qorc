@@ -16,9 +16,6 @@ config/*.js
 dist
 coverage
 .github
-artillery.yml
-cluster-cli.sh
-admin-cli.sh
 index.html
 eslint.config.js
 tailwind.config.js

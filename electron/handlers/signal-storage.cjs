@@ -1,13 +1,5 @@
 /**
  * Signal Protocol Storage
- * 
- * Storage interfaces for libsignal-client with encrypted persistence:
- * - IdentityKeyStore
- * - PreKeyStore
- * - SignedPreKeyStore
- * - SessionStore
- * - KyberPreKeyStore
- * - SenderKeyStore
  */
 
 const crypto = require('crypto');
@@ -15,8 +7,8 @@ const fs = require('fs');
 const path = require('path');
 const { app } = require('electron');
 
-// In-memory storage encryption key (32 bytes).
-let STORAGE_KEY = null; // Buffer | null
+// Storage key and instances
+let STORAGE_KEY = null;
 const STORE_INSTANCES = [];
 
 function setStorageKey(opts) {
@@ -98,7 +90,6 @@ function _readJSON(filePath) {
 class SignalProtocolStore {
   constructor() {
     STORE_INSTANCES.push(this);
-    // Persistence paths
     this._storeDir = this._getStoreDir();
     this._sessionsPath = path.join(this._storeDir, 'signal-sessions.json');
     this._trustedPath = path.join(this._storeDir, 'signal-trusted-identities.json');
@@ -112,10 +103,9 @@ class SignalProtocolStore {
     this.senderKeys = new Map(); // sender:distributionId -> senderKeyRecord
     this.trustedIdentities = new Map(); // address -> identityKey
 
-    // Load persisted trusted identities, sessions, and identity keys
-    try { this._loadTrusted(); } catch (e) { /* ignore */ }
-    try { this._loadSessions(); } catch (e) { /* ignore */ }
-    try { this._loadIdentities(); } catch (e) { /* ignore */ }
+    try { this._loadTrusted(); } catch (e) { }
+    try { this._loadSessions(); } catch (e) { }
+    try { this._loadIdentities(); } catch (e) { }
   }
 
   // Identity Key Store
@@ -328,7 +318,6 @@ class SignalProtocolStore {
     this.senderKeys.set(key, Buffer.from(senderKeyRecord));
   }
 
-  // Utility methods
   clearAllData() {
     this._ensureStoreDir();
     this.identityKeys.clear();

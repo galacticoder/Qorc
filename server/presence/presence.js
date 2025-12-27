@@ -435,12 +435,7 @@ function hashUsername(username) {
   return crypto.createHash('sha256').update(normalized).digest('hex');
 }
 
-/**
- * Enforces rate limits across all cluster servers
- * 
- * @param {string} key - Rate limit key (e.g., "presence:set:username")
- * @throws {Error} - If rate limit exceeded
- */
+// Enforces rate limits across all cluster servers
 async function enforceRateLimit(key) {
   try {
     await withRedisClient(async (client) => {
@@ -596,9 +591,7 @@ export async function subscribeUserChannel(subscriber, username, onMessage) {
   };
 }
 
-/**
- * Clear all presence data on server startup to prevent hanging sessions
- */
+// Clear all presence data on server startup to prevent hanging sessions
 export async function clearAllPresenceData() {
   try {
     return await withRedisClient(async (client) => {

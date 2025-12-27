@@ -1,7 +1,6 @@
 /**
  * Post-Quantum Envelope Handler
  * Handles PQ handshake establishment and encrypted envelope processing
- * for quantum-secure WebSocket communication
  */
 
 import crypto from 'crypto';
@@ -14,9 +13,7 @@ import { storePQSession, getPQSession, incrementPQSessionCounter } from '../sess
 // Server signing key for envelope authentication
 let serverDilithiumSigningKey = null;
 
-/**
- * Initialize the envelope handler with server keys
- */
+// Initialize the envelope handler with server keys
 export function initializeEnvelopeHandler(serverHybridKeyPair) {
   if (serverHybridKeyPair?.dilithium?.secretKey) {
     serverDilithiumSigningKey = serverHybridKeyPair.dilithium.secretKey;
@@ -26,10 +23,7 @@ export function initializeEnvelopeHandler(serverHybridKeyPair) {
   }
 }
 
-/**
- * Handle PQ handshake initialization from client
- * Establishes quantum-secure session keys for WebSocket communication
- */
+// Handle PQ handshake initialization from client
 export async function handlePQHandshake({ ws, sessionId, parsed, serverHybridKeyPair }) {
   cryptoLogger.info('[PQ-HANDSHAKE] Received handshake request', {
     sessionId,
@@ -62,7 +56,6 @@ export async function handlePQHandshake({ ws, sessionId, parsed, serverHybridKey
       timestamp: payload.timestamp
     });
 
-    // Clear old session ID to ensure ack is sent in plaintext
     const oldSessionId = ws._pqSessionId;
     ws._pqSessionId = undefined;
 
@@ -73,7 +66,6 @@ export async function handlePQHandshake({ ws, sessionId, parsed, serverHybridKey
       });
     }
 
-    // Decapsulate Kyber KEM ciphertext to get PQ shared secret
     const kemCiphertextBytes = CryptoUtils.Hash.base64ToUint8Array(payload.kemCiphertext);
     const pqSharedSecret = await CryptoUtils.Kyber.decapsulate(
       kemCiphertextBytes,
@@ -81,14 +73,12 @@ export async function handlePQHandshake({ ws, sessionId, parsed, serverHybridKey
       serverHybridKeyPair.kyber.publicKey
     );
 
-    // Compute classical X25519 shared secret using client's ephemeral key
     const clientX25519Public = CryptoUtils.Hash.base64ToUint8Array(payload.clientX25519PublicKey);
     const classicalSharedSecret = CryptoUtils.Hybrid.computeClassicalSharedSecret(
       serverHybridKeyPair.x25519.secretKey,
       clientX25519Public
     );
 
-    // Combine PQ and classical secrets via XOR, then derive session keys using PQ KDF
     const encoder = new TextEncoder();
     const baseInfo = `${payload.fingerprint}:${payload.sessionId}`;
     const sendSalt = encoder.encode(`${baseInfo}:send-${payload.timestamp}`);
@@ -100,7 +90,6 @@ export async function handlePQHandshake({ ws, sessionId, parsed, serverHybridKey
       fingerprint: payload.fingerprint.slice(0, 16) + '...'
     });
 
-    // XOR pqSharedSecret with classicalSharedSecret
     const combinedSecret = new Uint8Array(pqSharedSecret.length);
     for (let i = 0; i < pqSharedSecret.length; i++) {
       combinedSecret[i] = pqSharedSecret[i] ^ classicalSharedSecret[i % classicalSharedSecret.length];
@@ -109,14 +98,12 @@ export async function handlePQHandshake({ ws, sessionId, parsed, serverHybridKey
     const clientSendKey = PostQuantumHash.deriveKey(combinedSecret, sendSalt, 'ws-pq-hybrid-send', 32);
     const clientRecvKey = PostQuantumHash.deriveKey(combinedSecret, recvSalt, 'ws-pq-hybrid-recv', 32);
 
-    // Best-effort wipe of intermediate secrets
     try {
       pqSharedSecret.fill(0);
       classicalSharedSecret.fill(0);
       combinedSecret.fill(0);
     } catch { }
 
-    // Store session in Redis
     const sessionData = {
       sessionId: payload.sessionId,
       recvKey: clientSendKey,
@@ -189,10 +176,7 @@ export async function handlePQHandshake({ ws, sessionId, parsed, serverHybridKey
   }
 }
 
-/**
- * Handle incoming PQ-encrypted envelope
- * Decrypts and processes the inner message
- */
+// Handle incoming PQ-encrypted envelope
 export async function handlePQEnvelope({ ws, sessionId, envelope, context, handleInnerMessage }) {
   const pqSessionId = envelope.sessionId;
   if (!pqSessionId) {
@@ -203,7 +187,6 @@ export async function handlePQEnvelope({ ws, sessionId, envelope, context, handl
     });
   }
 
-  // Retrieve session from Redis
   const session = await getPQSession(pqSessionId);
   if (!session) {
     cryptoLogger.warn('[PQ-ENVELOPE] Unknown PQ session', {
@@ -237,16 +220,13 @@ export async function handlePQEnvelope({ ws, sessionId, envelope, context, handl
       counter: envelope.counter
     });
 
-    // Decrypt using post-quantum AEAD
+    // Decrypt
     const pqAead = new CryptoUtils.PostQuantumAEAD(session.recvKey);
     const plaintext = pqAead.decrypt(ciphertext, nonce, tag, aad);
-
     const decrypted = JSON.parse(new TextDecoder().decode(plaintext));
 
-    // Extract inner payload based on message structure
     let innerPayload;
     if (decrypted.to && decrypted.encryptedPayload) {
-      // Stripped-down encrypted message for routing
       innerPayload = {
         type: SignalType.ENCRYPTED_MESSAGE,
         to: decrypted.to,
@@ -261,7 +241,6 @@ export async function handlePQEnvelope({ ws, sessionId, envelope, context, handl
       type: innerPayload?.type
     });
 
-    // Process the inner message
     await handleInnerMessage({
       ws,
       sessionId,
@@ -281,13 +260,9 @@ export async function handlePQEnvelope({ ws, sessionId, envelope, context, handl
   }
 }
 
-/**
- * Send PQ-encrypted response to client
- * REQUIRED for all sensitive data transmission
- */
+// Send PQ-encrypted response to client
 export async function sendPQEncryptedResponse(ws, pqSessionIdOrData, payload) {
   try {
-    // Support both session object and session ID
     let session;
     if (typeof pqSessionIdOrData === 'string') {
       session = await getPQSession(pqSessionIdOrData);
@@ -375,24 +350,20 @@ export async function sendPQEncryptedResponse(ws, pqSessionIdOrData, payload) {
   }
 }
 
-/**
- * Send secure message with automatic PQ encryption when session is available
- * Only whitelisted message types allowed in plaintext during handshake
- */
+// Send secure message with automatic PQ encryption when session is available
 export async function sendSecureMessage(ws, payload) {
   const pqSessionId = ws._pqSessionId;
 
   // Whitelist: Only these message types are allowed without PQ encryption
   // These are strictly for the initial handshake phase before PQ session exists
   const allowedPlaintextTypes = [
-    'pq-handshake-ack',      // PQ handshake acknowledgment
-    'error',                 // Generic errors (can happen before handshake)
-    'server-public-key',     // Server keys must be deliverable pre-PQ handshake
-    'ERROR',                 // System errors
-    'register-ack'           // P2P registration acknowledgment
+    'pq-handshake-ack',
+    'error',
+    'server-public-key',
+    'ERROR',
+    'register-ack'
   ];
 
-  // If PQ session exists, encryption is MANDATORY
   if (pqSessionId) {
     try {
       const session = await getPQSession(pqSessionId);
@@ -471,10 +442,7 @@ export async function sendSecureMessage(ws, payload) {
   }
 }
 
-/**
- * Get or create PQ response sender for a connection
- * Ensures PQ envelope is used when available
- */
+// Get or create PQ response sender for a connection
 export async function createPQResponseSender(ws, context) {
   return async (wsTarget, payload) => {
     const pqSessionId = wsTarget._pqSessionId || context?.pqSessionId;

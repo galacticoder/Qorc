@@ -1,16 +1,6 @@
 #!/usr/bin/env node
 /**
  * Hybrid Post-Quantum Cluster Admin Authentication
- * 
- *  Quantum + Classical Hybrid Cryptography:
- * - ML-KEM-1024 + X25519 hybrid key encapsulation
- * - ML-DSA-87 + Ed25519 dual signatures (post-quantum + classical)
- * - Username+password protected keypairs (cannot access without credentials)
- * - Argon2id key derivation with username binding
- * - XChaCha20-Poly1305 authenticated encryption
- * - BLAKE3 cryptographic hashing
- * - Time-bound tokens with expiration
- * - Redis-backed revocation and replay protection
  */
 
 import crypto from 'crypto';
@@ -22,22 +12,22 @@ import { ml_dsa87 } from '@noble/post-quantum/ml-dsa.js';
 import { ed25519 } from '@noble/curves/ed25519.js';
 import { x25519 } from '@noble/curves/ed25519.js';
 import { blake3 } from '@noble/hashes/blake3.js';
-import { withRedisClient } from '../presence/presence.js';
-import { logger as cryptoLogger } from '../crypto/crypto-logger.js';
-import { CryptoUtils } from '../crypto/unified-crypto.js';
+import { withRedisClient } from '../server/presence/presence.js';
+import { logger as cryptoLogger } from '../server/crypto/crypto-logger.js';
+import { CryptoUtils } from '../server/crypto/unified-crypto.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const ADMIN_KEYS_ENC_FILE = path.join(__dirname, '../config/.cluster-admin-keys.enc');
+const ADMIN_KEYS_ENC_FILE = path.join(__dirname, '../server/config/.cluster-admin-keys.enc');
 
 // Configuration constants
 const ADMIN_CONFIG = {
-  TOKEN_EXPIRATION: 3600000,         // 1 hour
+  TOKEN_EXPIRATION: 3600000,          // 1 hour
   MAX_FAILED_ATTEMPTS: 5,             // 5 failed attempts
   LOCKOUT_DURATION: 900000,           // 15 minutes lockout
   NONCE_EXPIRATION: 86400000,         // 24 hours nonce cache
-  TOKEN_VERSION: 3,                   // v3 = unified PQ AEAD
+  TOKEN_VERSION: 3,
   ALGORITHM: 'ML-KEM-1024+X25519 | ML-DSA-87+Ed25519 | PostQuantumAEAD',
 };
 
@@ -63,10 +53,7 @@ function parseJsonOrThrow(raw, errorMessage) {
   }
 }
 
-/**
- * Derive Key Encryption Key from username + password
- * (centralized Argon2id + quantumHKDF via unified crypto)
- */
+// Derive Key Encryption Key from username + password
 async function deriveKEK(username, password, salt) {
   if (!username || username.length < 3) {
     throw new Error('Username must be at least 3 characters');
@@ -90,9 +77,7 @@ async function deriveKEK(username, password, salt) {
   };
 }
 
-/**
- * Generate hybrid admin keypair set (PQ + Classical)
- */
+// Generate hybrid admin keypair set (PQ + Classical)
 function generateHybridKeypair() {
   // Post-quantum keys
   const kemKeypair = ml_kem1024.keygen();
@@ -106,22 +91,18 @@ function generateHybridKeypair() {
   const ed25519Public = ed25519.getPublicKey(ed25519Secret);
 
   return {
-    // Post-quantum KEM (Key Encapsulation Mechanism)
     kyber: {
       publicKey: kemKeypair.publicKey,
       secretKey: kemKeypair.secretKey,
     },
-    // Post-quantum signature
     dilithium: {
       publicKey: mldsaKeypair.publicKey,
       secretKey: mldsaKeypair.secretKey,
     },
-    // Classical ECDH
     x25519: {
       publicKey: x25519Public,
       secretKey: x25519Secret,
     },
-    // Classical signature
     ed25519: {
       publicKey: ed25519Public,
       secretKey: ed25519Secret,
@@ -129,9 +110,7 @@ function generateHybridKeypair() {
   };
 }
 
-/**
- * Protect admin keypair with username+password KEK
- */
+// Protect admin keypair with username+password KEK
 async function protectKeypair(keypair, username, password) {
   const { kek, usernameHash, salt } = await deriveKEK(username, password);
 
@@ -147,7 +126,6 @@ async function protectKeypair(keypair, username, password) {
     ed25519SecretKey: Buffer.from(keypair.ed25519.secretKey).toString('base64'),
   }), 'utf8');
 
-  // Encrypt with unified PostQuantumAEAD using KEK
   const aead = new CryptoUtils.PostQuantumAEAD(kek);
   const nonce = CryptoUtils.Random.generateRandomBytes(36);
   const aad = new TextEncoder().encode('cluster-admin-keys-v3');
@@ -174,25 +152,20 @@ async function protectKeypair(keypair, username, password) {
   return encryptedPackage;
 }
 
-/**
- * Unlock admin keypair with username+password
- */
+// Unlock admin keypair with username+password
 async function unlockKeypair(username, password, encryptedPackage) {
   if (!encryptedPackage || encryptedPackage.version !== 3) {
     throw new Error('Invalid or incompatible encrypted key package - please re-run admin setup');
   }
 
-  // Derive KEK from credentials
   const salt = Buffer.from(encryptedPackage.kdf.salt, 'base64');
   const { kek, usernameHash } = await deriveKEK(username, password, salt);
 
-  // Verify username binding (constant-time comparison)
   const storedHash = Buffer.from(encryptedPackage.usernameHash, 'base64');
   if (usernameHash.length !== storedHash.length || !crypto.timingSafeEqual(usernameHash, storedHash)) {
     throw new Error('SECURITY: Username does not match encrypted keyset');
   }
 
-  // Decrypt keypair using PostQuantumAEAD
   const nonce = Buffer.from(encryptedPackage.encryption.nonce, 'base64');
   const tag = Buffer.from(encryptedPackage.encryption.tag, 'base64');
   const ciphertext = Buffer.from(encryptedPackage.encryption.ciphertext, 'base64');
@@ -206,7 +179,6 @@ async function unlockKeypair(username, password, encryptedPackage) {
     throw new Error('SECURITY: Failed to decrypt admin keys - invalid credentials or corrupted data');
   }
 
-  // Parse keys
   const keys = parseJsonOrThrow(
     Buffer.from(decrypted).toString('utf8'),
     'SECURITY: Failed to parse decrypted admin keys'
@@ -232,67 +204,56 @@ async function unlockKeypair(username, password, encryptedPackage) {
   };
 }
 
-/**
- * Hybrid Admin Authentication Class
- */
-class HybridAdminAuth {
+// Admin Authentication Class
+class AdminAuth {
   constructor() {
     this.keypair = null;
     this.initialized = false;
     this.adminUsername = null;
   }
 
-  /**
-   * Initialize with admin credentials
-   */
+  // Initialize with admin credentials
   async initialize(username, password) {
     if (!username || !password) {
       throw new Error('Admin username and password required for initialization');
     }
 
     try {
-      // Check if encrypted keys exist
       if (fs.existsSync(ADMIN_KEYS_ENC_FILE)) {
-        // Load and unlock existing keys
         const encryptedPackage = parseJsonOrThrow(
           fs.readFileSync(ADMIN_KEYS_ENC_FILE, 'utf8'),
           'SECURITY: Corrupted admin key file'
         );
         this.keypair = await unlockKeypair(username, password, encryptedPackage);
-        cryptoLogger.info('[HYBRID-ADMIN] Unlocked existing admin keypair');
+        cryptoLogger.info('[ADMIN] Unlocked existing admin keypair');
       } else {
-        // Generate new keypair and protect with credentials
         this.keypair = generateHybridKeypair();
         const encryptedPackage = await protectKeypair(this.keypair, username, password);
 
-        // Save encrypted keys
         fs.writeFileSync(ADMIN_KEYS_ENC_FILE, JSON.stringify(encryptedPackage, null, 2), { mode: 0o600 });
-        cryptoLogger.info('[HYBRID-ADMIN] Generated and protected new admin keypair');
+        cryptoLogger.info('[ADMIN] Generated and protected new admin keypair');
       }
 
       this.adminUsername = username;
       this.initialized = true;
 
-      cryptoLogger.info('[HYBRID-ADMIN] Hybrid admin auth initialized', {
+      cryptoLogger.info('[ADMIN] Hybrid admin auth initialized', {
         algorithm: ADMIN_CONFIG.ALGORITHM,
         username: username,
       });
     } catch (error) {
-      cryptoLogger.error('[HYBRID-ADMIN] Failed to initialize', { error: error.message });
+      cryptoLogger.error('[ADMIN] Failed to initialize', { error: error.message });
       throw error;
     }
   }
 
-  /**
-   * Generate hybrid admin token
-   */
+  // Generate admin token
   async generateAdminToken(adminId, metadata = {}) {
     if (!this.initialized) {
       throw new Error('Admin auth not initialized - must unlock keys first');
     }
 
     try {
-      // Token payload
       const payload = {
         version: ADMIN_CONFIG.TOKEN_VERSION,
         adminId,
@@ -330,7 +291,7 @@ class HybridAdminAuth {
       const aad = new TextEncoder().encode('admin-token-v3');
       const { ciphertext, tag } = aead.encrypt(payloadBytes, nonce, aad);
 
-      // Prepare token structure (before signing)
+      // Prepare token structure
       const tokenStructure = {
         version: ADMIN_CONFIG.TOKEN_VERSION,
         kyberCiphertext: Buffer.from(kyberCiphertext).toString('base64'),
@@ -354,7 +315,6 @@ class HybridAdminAuth {
 
       const tokenString = Buffer.from(JSON.stringify(token)).toString('base64url');
 
-      // Store token hash in Redis
       const tokenHash = blake3(tokenString);
       await withRedisClient(async (client) => {
         await client.hset(REDIS_KEYS.ADMIN_TOKENS, tokenHash.toString('hex'), JSON.stringify({
@@ -367,7 +327,7 @@ class HybridAdminAuth {
         await client.pexpire(REDIS_KEYS.ADMIN_TOKENS, ADMIN_CONFIG.TOKEN_EXPIRATION);
       });
 
-      cryptoLogger.info('[HYBRID-ADMIN] Generated hybrid admin token', {
+      cryptoLogger.info('[ADMIN] Generated admin token', {
         adminId,
         algorithm: ADMIN_CONFIG.ALGORITHM,
         expiresAt: new Date(payload.expiresAt).toISOString(),
@@ -375,21 +335,18 @@ class HybridAdminAuth {
 
       return tokenString;
     } catch (error) {
-      cryptoLogger.error('[HYBRID-ADMIN] Failed to generate token', { error: error.message });
+      cryptoLogger.error('[ADMIN] Failed to generate token', { error: error.message });
       throw error;
     }
   }
 
-  /**
-   * Verify hybrid admin token
-   */
+  // Verify admin token
   async verifyAdminToken(tokenString) {
     if (!this.initialized) {
       throw new Error('Admin auth not initialized - must unlock keys first');
     }
 
     try {
-      // Parse token
       const tokenJson = Buffer.from(tokenString, 'base64url').toString('utf8');
       const token = parseJsonOrThrow(tokenJson, 'Invalid admin token');
 
@@ -397,7 +354,6 @@ class HybridAdminAuth {
         throw new Error('Invalid token version');
       }
 
-      // Reconstruct signed structure
       const tokenStructure = {
         version: token.version,
         kyberCiphertext: token.kyberCiphertext,
@@ -496,34 +452,30 @@ class HybridAdminAuth {
         algorithm: ADMIN_CONFIG.ALGORITHM,
       };
     } catch (error) {
-      cryptoLogger.error('[HYBRID-ADMIN] Token verification failed', { error: error.message });
+      cryptoLogger.error('[ADMIN] Token verification failed', { error: error.message });
       throw error;
     }
   }
 
-  /**
-   * Revoke admin token
-   */
+  // Revoke admin token
   async revokeToken(tokenString) {
     try {
       const tokenHash = blake3(tokenString).toString('hex');
       await withRedisClient(async (client) => {
         const removed = await client.hdel(REDIS_KEYS.ADMIN_TOKENS, tokenHash);
         if (removed > 0) {
-          cryptoLogger.info('[HYBRID-ADMIN] Token revoked', {
+          cryptoLogger.info('[ADMIN] Token revoked', {
             tokenHash: tokenHash.substring(0, 16) + '...',
           });
         }
       });
     } catch (error) {
-      cryptoLogger.error('[HYBRID-ADMIN] Failed to revoke token', error);
+      cryptoLogger.error('[ADMIN] Failed to revoke token', error);
       throw error;
     }
   }
 
-  /**
-   * Rate limiting
-   */
+  // Rate limiting
   async checkRateLimit(identifier) {
     const key = `${REDIS_KEYS.ADMIN_RATE_LIMIT}:${identifier}`;
 
@@ -539,9 +491,7 @@ class HybridAdminAuth {
     });
   }
 
-  /**
-   * Log failed authentication attempt
-   */
+  // Log failed authentication attempt
   async logFailedAttempt(identifier, reason, ip) {
     const failKey = `${REDIS_KEYS.ADMIN_FAILURES}:${identifier}`;
 
@@ -556,7 +506,7 @@ class HybridAdminAuth {
         const lockKey = `${REDIS_KEYS.ADMIN_FAILURES}:lock:${identifier}`;
         await client.set(lockKey, '1', 'PX', ADMIN_CONFIG.LOCKOUT_DURATION);
 
-        cryptoLogger.error('[HYBRID-ADMIN] Account locked', {
+        cryptoLogger.error('[ADMIN] Account locked', {
           identifier,
           failures,
           lockoutMinutes: ADMIN_CONFIG.LOCKOUT_DURATION / 60000,
@@ -577,9 +527,7 @@ class HybridAdminAuth {
     });
   }
 
-  /**
-   * Check if locked out
-   */
+  // Check if locked out
   async isLockedOut(identifier) {
     const lockKey = `${REDIS_KEYS.ADMIN_FAILURES}:lock:${identifier}`;
     return await withRedisClient(async (client) => {
@@ -588,9 +536,7 @@ class HybridAdminAuth {
     });
   }
 
-  /**
-   * Audit log
-   */
+  // Audit log
   async auditLog(adminId, action, details, ip) {
     await withRedisClient(async (client) => {
       await client.lpush(REDIS_KEYS.ADMIN_AUDIT, JSON.stringify({
@@ -604,23 +550,19 @@ class HybridAdminAuth {
       await client.ltrim(REDIS_KEYS.ADMIN_AUDIT, 0, 999);
     });
 
-    cryptoLogger.info('[HYBRID-ADMIN] Admin action', { adminId, action });
+    cryptoLogger.info('[ADMIN] Admin action', { adminId, action });
   }
 }
 
-// Singleton instance
-const hybridAdminAuth = new HybridAdminAuth();
+const adminAuth = new AdminAuth();
 
-/**
- * Express middleware for hybrid admin authentication
- */
+// Express middleware for admin authentication
 export async function requireAdmin(req, res, next) {
   try {
-    // Check if locked out
     const ip = req.ip || req.connection.remoteAddress;
     const identifier = `ip:${ip}`;
 
-    const lockedOut = await hybridAdminAuth.isLockedOut(identifier);
+    const lockedOut = await adminAuth.isLockedOut(identifier);
     if (lockedOut) {
       return res.status(429).json({
         success: false,
@@ -628,10 +570,9 @@ export async function requireAdmin(req, res, next) {
       });
     }
 
-    // Get token from Authorization header
     const authHeader = req.headers.authorization;
     if (!authHeader || !authHeader.startsWith('Bearer ')) {
-      await hybridAdminAuth.logFailedAttempt(identifier, 'Missing authorization header', ip);
+      await adminAuth.logFailedAttempt(identifier, 'Missing authorization header', ip);
       return res.status(401).json({
         success: false,
         error: 'Unauthorized - Bearer token required',
@@ -639,21 +580,15 @@ export async function requireAdmin(req, res, next) {
     }
 
     const token = authHeader.substring(7);
+    const result = await adminAuth.verifyAdminToken(token);
+    await adminAuth.checkRateLimit(result.adminId);
 
-    // Verify token
-    const result = await hybridAdminAuth.verifyAdminToken(token);
-
-    // Check rate limit
-    await hybridAdminAuth.checkRateLimit(result.adminId);
-
-    // Attach admin info to request
     req.admin = {
       id: result.adminId,
       metadata: result.metadata,
     };
 
-    // Audit log
-    await hybridAdminAuth.auditLog(
+    await adminAuth.auditLog(
       result.adminId,
       `${req.method} ${req.path}`,
       { params: req.params, query: req.query },
@@ -665,9 +600,8 @@ export async function requireAdmin(req, res, next) {
     const ip = req.ip || req.connection.remoteAddress;
     const identifier = `ip:${ip}`;
 
-    // Log failure
     try {
-      await hybridAdminAuth.logFailedAttempt(identifier, error.message, ip);
+      await adminAuth.logFailedAttempt(identifier, error.message, ip);
     } catch (_logError) {
     }
 
@@ -685,29 +619,22 @@ export async function requireAdmin(req, res, next) {
   }
 }
 
-/**
- * Initialize admin auth with credentials
- */
+// Initialize admin auth with credentials
 export async function initializeAdminAuth(username, password) {
-  return await hybridAdminAuth.initialize(username, password);
+  return await adminAuth.initialize(username, password);
 }
 
-/**
- * Generate admin token (requires initialized auth)
- */
+// Generate admin token
 export async function generateAdminToken(adminId, metadata = {}) {
-  return await hybridAdminAuth.generateAdminToken(adminId, metadata);
+  return await adminAuth.generateAdminToken(adminId, metadata);
 }
 
-/**
- * Revoke admin token
- */
+// Revoke admin token
 export async function revokeAdminToken(tokenString) {
-  return await hybridAdminAuth.revokeToken(tokenString);
+  return await adminAuth.revokeToken(tokenString);
 }
 
-// Export singleton
-export { hybridAdminAuth };
+export { adminAuth };
 
 // CLI mode
 if (import.meta.url === `file://${process.argv[1]}`) {
@@ -718,7 +645,7 @@ if (import.meta.url === `file://${process.argv[1]}`) {
       switch (command) {
         case 'setup': {
           if (process.argv.length < 5) {
-            console.error('Usage: node hybrid-admin-auth.js setup <username> <password>');
+            console.error('Usage: node admin-auth.js setup <username> <password>');
             console.error('');
             console.error('Password must be at least 16 characters for maximum security.');
             process.exit(1);
@@ -727,8 +654,8 @@ if (import.meta.url === `file://${process.argv[1]}`) {
           const username = process.argv[3];
           const password = process.argv[4];
 
-          console.log('[HYBRID-ADMIN] Setting up admin authentication...');
-          console.log('[HYBRID-ADMIN] Generating hybrid keypair (PQ + Classical)...');
+          console.log('[ADMIN] Setting up admin authentication...');
+          console.log('[ADMIN] Generating hybrid keypair (PQ + Classical)...');
 
           await initializeAdminAuth(username, password);
 
@@ -750,10 +677,10 @@ if (import.meta.url === `file://${process.argv[1]}`) {
 
         case 'generate': {
           if (process.argv.length < 6) {
-            console.error('Usage: node hybrid-admin-auth.js generate <username> <password> <adminId> [metadata]');
+            console.error('Usage: node admin-auth.js generate <username> <password> <adminId> [metadata]');
             console.error('');
             console.error('Example:');
-            console.error('  node hybrid-admin-auth.js generate admin secretpass admin@company.com \'{"role":"superadmin"}\'');
+            console.error('  node admin-auth.js generate admin secretpass admin@company.com \'{"role":"superadmin"}\'');
             process.exit(1);
           }
 
@@ -770,10 +697,10 @@ if (import.meta.url === `file://${process.argv[1]}`) {
             }
           })();
 
-          console.log('[HYBRID-ADMIN] Unlocking admin keys...');
+          console.log('[ADMIN] Unlocking admin keys...');
           await initializeAdminAuth(username, password);
 
-          console.log('[HYBRID-ADMIN] Generating admin token...');
+          console.log('[ADMIN] Generating admin token...');
           const token = await generateAdminToken(adminId, metadata);
 
           console.log('');

@@ -2,23 +2,18 @@ import { TokenDatabase } from './token-database.js';
 import { TokenService } from './token-service.js';
 import crypto from 'node:crypto';
 
-/**
- * Security configuration constants for hardened token refresh thresholds
- */
+// Security configuration constants for hardened token refresh thresholds
 const SECURITY_CONFIG = {
   // Token refresh abuse detection thresholds (per 24 hours)
   CRITICAL_REFRESH_THRESHOLD: 8,
   HIGH_REFRESH_THRESHOLD: 5,
   MODERATE_REFRESH_THRESHOLD: 3,
   
-  // Device and access thresholds
   MAX_DEVICES_PER_DAY: 3,
   MAX_FAILED_ATTEMPTS: 5,
   
-  // Time windows (in hours)
   DETECTION_WINDOW_HOURS: 24,
   
-  // Rate limiting parameters
   RATE_LIMIT_BASE_DELAY: 2000,
   RATE_LIMIT_MAX_DELAY: 60000,
   
@@ -40,7 +35,7 @@ function safeJsonParse(raw) {
 }
 
 /**
- * token security manager
+ * Token security manager
  * Handles revocation, blacklisting, suspicious activity detection,
  * and more
  */
@@ -50,21 +45,17 @@ class TokenSecurityManager {
       await this.enforceSecurityOpRateLimit('system', 'revokeToken');
       console.log(`[TOKEN-SEC] Revoking token ${tokenId}, reason: ${reason}`);
       
-      // Get token information before revocation
       const tokenInfo = await TokenDatabase.getRefreshToken(tokenId);
       if (!tokenInfo) {
         console.warn(`[TOKEN-SEC] Token ${tokenId} not found for revocation`);
         return false;
       }
 
-      // Revoke the token
       const revoked = await TokenDatabase.revokeRefreshToken(tokenId, reason, revokeFamily);
       
       if (revoked) {
-        // Blacklist for immediate effect
         await TokenDatabase.blacklistToken(tokenId, 'refresh', tokenInfo.userId, reason, revokedBy);
         
-        // Log security event
         await this.logSecureAuthEvent({
           userId: tokenInfo.userId,
           deviceId: tokenInfo.deviceId,
@@ -91,20 +82,14 @@ class TokenSecurityManager {
     }
   }
 
-  /**
-   * Logout user from all devices
-   */
+  // Logout user from all devices
   static async logoutFromAllDevices(userId, reason = 'user_request', initiatedBy = 'user') {
     try {
       console.log(`[TOKEN-SEC] Logging out user ${userId} from all devices`);
       
-      // Get all user sessions for logging
       const sessions = await TokenDatabase.getUserSessions(userId);
-      
-      // Revoke all tokens
       const revokedCount = await TokenDatabase.revokeAllUserTokens(userId, `logout_all:${reason}`);
       
-      // Log security event
       await this.logSecureAuthEvent({
         userId,
         action: 'logout_all_devices',
@@ -134,9 +119,7 @@ class TokenSecurityManager {
     }
   }
 
-  /**
-   * Detect suspicious token activity
-   */
+  // Detect suspicious token activity
   static async detectSuspiciousActivity(userId, tokenId, activityContext = {}) {
     try {
       await this.enforceSecurityOpRateLimit(userId, 'detectSuspiciousActivity');
@@ -147,18 +130,11 @@ class TokenSecurityManager {
       }
       try {
       const suspiciousFlags = [];
-      
-      // Get recent auth events for this user
       const recentEvents = await this.getRecentAuthEvents(userId, SECURITY_CONFIG.DETECTION_WINDOW_HOURS);
-      
-      // Adaptive thresholds per user
       const adaptive = await this.getAdaptiveThresholds(userId);
-      
-      // Detect rapid token requests with strict graduated responses
       const tokenRequests = recentEvents.filter(e => e.action === 'token_refreshed');
       const refreshCount = tokenRequests.length;
       
-      // Hardened thresholds to aggressively detect token theft activity
       if (refreshCount >= adaptive.CRITICAL_REFRESH_THRESHOLD) {
         suspiciousFlags.push('critical_token_refresh');
         await this.logSecureAuthEvent({
@@ -174,7 +150,7 @@ class TokenSecurityManager {
             securityLevel: 'maximum'
           })
         });
-        // Immediate automatic logout from all devices
+        
         await this.logoutFromAllDevices(userId, 'critical_token_abuse_detected', 'security_system');
         
       } else if (refreshCount >= adaptive.HIGH_REFRESH_THRESHOLD) {
@@ -246,7 +222,6 @@ class TokenSecurityManager {
         
         console.warn(`[TOKEN-SEC] Suspicious activity detected for user ${userId}:`, suspiciousFlags);
         
-        // Take automatic action for critical risk
         if (riskScore === 'critical') {
           await this.handleCriticalRisk(userId, suspiciousFlags);
         }
@@ -271,9 +246,7 @@ class TokenSecurityManager {
     }
   }
 
-  /**
-   * Handle critical security risk
-   */
+  // Handle critical security risk
   static async handleCriticalRisk(userId, flags) {
     console.error(`[TOKEN-SEC] CRITICAL RISK detected for user ${userId}:`, flags);
     
@@ -302,9 +275,7 @@ class TokenSecurityManager {
     });
   }
 
-  /**
-   * Get recommended action based on risk score
-   */
+  // Get recommended action based on risk score
   static getRecommendedAction(riskScore) {
     switch (riskScore) {
       case 'critical':
@@ -319,9 +290,7 @@ class TokenSecurityManager {
     }
   }
 
-  /**
-   * Validate token against security policies
-   */
+  // Validate token against security policies
   static async validateTokenSecurity(token, context = {}) {
     try {
       await this.enforceSecurityOpRateLimit(context.userId || 'anonymous', 'validateTokenSecurity');
@@ -333,7 +302,6 @@ class TokenSecurityManager {
         };
       }
 
-      // Check if token is blacklisted
       const isBlacklisted = await TokenDatabase.isTokenBlacklisted(payload.jti);
       if (isBlacklisted) {
         return {
@@ -342,7 +310,6 @@ class TokenSecurityManager {
         };
       }
 
-      // Check token age policy
       const tokenAge = Date.now() / 1000 - payload.iat;
       const maxAge = this.getMaxTokenAge(payload.type || 'access');
       
@@ -357,7 +324,6 @@ class TokenSecurityManager {
         }
       }
 
-      // Check for token reuse
       await this.updateTokenUsage(payload.jti, context);
       const recentUsage = await this.checkRecentTokenUsage(payload.jti);
       if (recentUsage.suspicious) {
@@ -386,9 +352,7 @@ class TokenSecurityManager {
     }
   }
 
-  /**
-   * Check for suspicious token usage patterns
-   */
+  // Check for suspicious token usage patterns
   static async checkRecentTokenUsage(tokenId) {
     const usageKey = `token:usage:${tokenId}`;
     const now = Date.now();
@@ -399,7 +363,7 @@ class TokenSecurityManager {
       return await withRedisClient(async (client) => {
         const count = await client.zcount(usageKey, oneMinuteAgo, now);
         
-        // Detect rapid token usage (possible token sharing)
+        // Detect rapid token usage
         if (count > 20) {
           return {
             suspicious: true,
@@ -419,22 +383,17 @@ class TokenSecurityManager {
     }
   }
 
-  /**
-   * Calculate risk score for token
-   */
+  // Calculate risk score for token
   static calculateTokenRiskScore(payload, context) {
     let score = 0;
     
-    // Age factor
     const ageHours = (Date.now() / 1000 - payload.iat) / 3600;
     if (ageHours > 12) score += 1;
     if (ageHours > 20) score += 2;
     
-    // Security context
     if (payload.sec?.risk === 'high') score += 3;
     else if (payload.sec?.risk === 'medium') score += 1;
     
-    // Context factors
     if (context.newDevice) score += 2;
     
     if (score >= 6) return 'high';
@@ -508,7 +467,6 @@ class TokenSecurityManager {
       const { withRedisClient } = await import('../presence/presence.js');
 
       let attempt = 0;
-      // Try to acquire lock with retries
       while (Date.now() < deadline) {
         const acquired = await withRedisClient(async (client) => {
           const result = await client.set(lockKey, lockId, 'NX', 'EX', ttlSeconds);
@@ -772,9 +730,7 @@ class TokenSecurityManager {
     }
   }
 
-  /**
-   * Get recent authentication events for analysis
-   */
+  // Get recent authentication events for analysis
   static async getRecentAuthEvents(userId, hours = 24) {
     try {
       const now = Math.floor(Date.now() / 1000);
@@ -827,9 +783,7 @@ class TokenSecurityManager {
     }
   }
 
-  /**
-   * Schedule cleanup of expired security data
-   */
+  // Schedule cleanup of expired security data
   static async scheduleSecurityCleanup() {
     try {
       const cleanup = await TokenDatabase.cleanupExpiredTokens();
@@ -837,7 +791,6 @@ class TokenSecurityManager {
       if (cleanup && (cleanup.tokens > 0 || cleanup.blacklist > 0 || cleanup.audit > 0)) {
         console.log(`[TOKEN-SEC] Security cleanup completed:`, cleanup);
         
-        // Log cleanup activity
         await TokenDatabase.logAuthEvent({
           action: 'security_cleanup',
           success: true,
@@ -855,9 +808,7 @@ class TokenSecurityManager {
     }
   }
 
-  /**
-   * Generate security report for monitoring
-   */
+  // Generate security report for monitoring
   static async generateSecurityReport(timeframeHours = 24, userId = null) {
     try {
       const report = {
@@ -876,7 +827,6 @@ class TokenSecurityManager {
         recommendations: []
       };
 
-      // If userId is provided, filter data for that specific user
       if (userId) {
         const events = await this.getRecentAuthEvents(userId, timeframeHours);
         report.summary = {
@@ -903,16 +853,12 @@ class TokenSecurityManager {
   static _securityCleanupInterval = null;
   static _securityReportInterval = null;
   
-  /**
-   * Initialize security monitoring
-   */
+  // Initialize security monitoring
   static async initializeSecurityMonitoring() {
     console.log('[TOKEN-SEC] Initializing token security monitoring...');
     
-    // Clear any existing intervals
     this.stopSecurityMonitoring();
     
-    // Schedule periodic cleanup
     this._securityCleanupInterval = setInterval(async () => {
       try {
         await this.scheduleSecurityCleanup();
@@ -921,7 +867,6 @@ class TokenSecurityManager {
       }
     }, 4 * 60 * 60 * 1000);
     
-    // Schedule periodic security reports
     this._securityReportInterval = setInterval(async () => {
       try {
         await this.generateSecurityReport();
@@ -932,15 +877,12 @@ class TokenSecurityManager {
     
     this._setupProcessCleanupHandlers();
     
-    // Initialize distributed monitoring
     await this.initializeDistributedMonitoring();
     
     console.log('[TOKEN-SEC] Security monitoring initialized');
   }
   
-  /**
-   * Stop security monitoring and clear intervals
-   */
+  // Stop security monitoring and clear intervals
   static stopSecurityMonitoring() {
     if (this._securityCleanupInterval) {
       clearInterval(this._securityCleanupInterval);
@@ -972,9 +914,7 @@ class TokenSecurityManager {
   
   static _cleanupHandlersSetup = false;
   
-  /**
-   * Set up process cleanup handlers to ensure timers are cleared on shutdown
-   */
+  // Set up process cleanup handlers to ensure timers are cleared on shutdown
   static _setupProcessCleanupHandlers() {
     if (this._cleanupHandlersSetup) {
       return;

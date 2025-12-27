@@ -1,3 +1,4 @@
+// Tor manager for Electron that handles Tor installation, configuration and process management
 const { spawn, execFile } = require('child_process');
 const { promisify } = require('util');
 const execFileAsync = promisify(execFile);
@@ -19,6 +20,7 @@ const DOWNLOAD_TIMEOUT = 300000;
 const HEALTH_CHECK_INTERVAL = 30000;
 const CONTROL_PASSWORD_FILE = '.control_password';
 
+// Allowed config directives
 const ALLOWED_DIRECTIVES = new Set([
   'AvoidDiskWrites', 'Bridge', 'CircuitBuildTimeout', 'ClientOnly', 'ClientTransportPlugin',
   'ControlPort', 'CookieAuthentication', 'DataDirectory', 'DisableDebuggerAttachment',
@@ -31,6 +33,7 @@ const ALLOWED_DIRECTIVES = new Set([
   'UpdateBridgesFromAuthority', 'UseBridges', 'UseEntryGuards', 'UseMicrodescriptors'
 ]);
 
+// Tor Manager class
 class ElectronTorManager {
   constructor({ appInstance } = {}) {
     if (!appInstance?.getPath || appInstance.isPackaged === undefined) {
@@ -194,7 +197,7 @@ class ElectronTorManager {
       env.LD_LIBRARY_PATH = libPath;
       if (this.platform === 'darwin') env.DYLD_LIBRARY_PATH = libPath;
     }
-    // Ensure pluggable transport binaries (snowflake-client, obfs4proxy, etc.) are discoverable
+
     env.PATH = `${this.torDir}${path.delimiter}${path.join(this.torDir, 'pluggable_transports')}${path.delimiter}${env.PATH || ''}`;
     return env;
   }
@@ -273,11 +276,9 @@ class ElectronTorManager {
     const signaturePath = `${archivePath}.asc`;
     const checksumPath = path.join(this.torDir, 'sha256sums.txt');
 
-    // Download archive and per-file .asc signature
     await this.downloadFile(downloadUrl, archivePath);
     await this.downloadFile(`${downloadUrl}.asc`, signaturePath);
 
-    // Download checksums file
     const { baseUrl } = await resolveTorDownloadInfo();
     const unsignedChecksums = `${baseUrl}/sha256sums-unsigned-build.txt`;
     const signedChecksums = `${baseUrl}/sha256sums-signed-build.txt`;
@@ -328,8 +329,6 @@ class ElectronTorManager {
   async verifySha256(archivePath, checksumPath) {
     const checksumContent = await fs.readFile(checksumPath, 'utf8');
     const filename = path.basename(archivePath);
-
-    // Try GNU coreutils sha256sum format: "<hash>  <filename>"
     const escaped = filename.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     let match = checksumContent.match(new RegExp(`^([a-fA-F0-9]{64})\\s+\\*?${escaped}$`, 'm'));
 
@@ -712,13 +711,11 @@ class ElectronTorManager {
     if (this.torProcess) {
       const proc = this.torProcess;
 
-      // Clear health monitor
       if (this.healthInterval) {
         clearInterval(this.healthInterval);
         this.healthInterval = null;
       }
 
-      // Clear bootstrap timeout
       if (this._bootstrapTimeout) {
         clearTimeout(this._bootstrapTimeout);
         this._bootstrapTimeout = null;
@@ -878,7 +875,6 @@ class ElectronTorManager {
         return { success: true, isTor: true };
       }
 
-      // Check if bridges are configured
       const bridgesConfigured = await this.areBridgesConfigured();
 
       const { SocksProxyAgent } = await import('socks-proxy-agent');

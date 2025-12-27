@@ -19,9 +19,7 @@ function normalizeUsername(username) {
   return USERNAME_REGEX.test(trimmed) ? trimmed : null;
 }
 
-/**
- * Anonymize identifier using BLAKE3 for quantum-resistant hashing
- */
+// Anonymize identifier using BLAKE3
 function anonymizeIdentifier(identifier) {
   if (!identifier || typeof identifier !== 'string') {
     return 'anon';
@@ -42,8 +40,8 @@ try {
 
 const rateLimitMiddleware = {
   checkAuthRateLimit: rateLimit({
-    windowMs: 15 * 60 * 1000, // 15 minutes
-    max: 5, // Max 5 attempts per user per window
+    windowMs: 15 * 60 * 1000,
+    max: 5,
     message: {
       error: 'Too many authentication attempts',
       code: 'RATE_LIMIT_EXCEEDED',
@@ -67,8 +65,8 @@ const rateLimitMiddleware = {
     }
   }),
   checkTokenVerificationRateLimit: rateLimit({
-    windowMs: 1 * 60 * 1000, // 1 minute
-    max: 20, // Max 20 verifications per minute per token hash
+    windowMs: 1 * 60 * 1000,
+    max: 20,
     standardHeaders: true,
     legacyHeaders: false,
     handler: (req, res) => {
@@ -95,7 +93,7 @@ const rateLimitMiddleware = {
  */
 router.post('/login', rateLimitMiddleware.checkAuthRateLimit, async (req, res) => {
   try {
-  const { username, password, deviceInfo } = req.body || {};
+    const { username, password, deviceInfo } = req.body || {};
     if (!(req.socket && req.socket.encrypted)) {
       return res.status(403).json({ error: 'TLS is required', code: 'TLS_REQUIRED' });
     }
@@ -107,11 +105,11 @@ router.post('/login', rateLimitMiddleware.checkAuthRateLimit, async (req, res) =
       return res.status(403).json({ error: 'TLS fingerprint required', code: 'TLS_FINGERPRINT_REQUIRED' });
     }
 
-  const normalizedUsername = normalizeUsername(username);
-  if (!normalizedUsername || typeof password !== 'string') {
+    const normalizedUsername = normalizeUsername(username);
+    if (!normalizedUsername || typeof password !== 'string') {
       return res.status(400).json({
-      error: 'Invalid username or password format.',
-      code: 'INVALID_CREDENTIALS_FORMAT'
+        error: 'Invalid username or password format.',
+        code: 'INVALID_CREDENTIALS_FORMAT'
       });
     }
 
@@ -123,12 +121,12 @@ router.post('/login', rateLimitMiddleware.checkAuthRateLimit, async (req, res) =
     }
 
     const userData = await UserDatabase.loadUser(normalizedUsername);
-      if (!userData) {
-        return res.status(401).json({
-          error: 'Invalid credentials',
-          code: 'INVALID_CREDENTIALS'
-        });
-      }
+    if (!userData) {
+      return res.status(401).json({
+        error: 'Invalid credentials',
+        code: 'INVALID_CREDENTIALS'
+      });
+    }
 
     // Verify password 
     const isPasswordValid = await CryptoUtils.Password.verifyPassword(userData.passwordHash, password);
@@ -139,7 +137,7 @@ router.post('/login', rateLimitMiddleware.checkAuthRateLimit, async (req, res) =
       });
     }
 
-    
+
     // Issue tokens 
     if (!tlsBinding) {
       return res.status(403).json({ error: 'TLS binding missing', code: 'TLS_BINDING_MISSING' });
@@ -175,7 +173,6 @@ router.post('/login', rateLimitMiddleware.checkAuthRateLimit, async (req, res) =
       });
     }
 
-    // Return successful authentication
     res.json({
       success: true,
       user: {
@@ -211,7 +208,7 @@ router.post('/login', rateLimitMiddleware.checkAuthRateLimit, async (req, res) =
  */
 router.post('/refresh', rateLimitMiddleware.checkAuthRateLimit, async (req, res) => {
   try {
-  const { refreshToken, deviceInfo: _deviceInfo } = req.body || {};
+    const { refreshToken, deviceInfo: _deviceInfo } = req.body || {};
     const deviceId = req.headers['x-device-id'];
     if (!(req.socket && req.socket.encrypted)) {
       return res.status(403).json({ error: 'TLS is required', code: 'TLS_REQUIRED' });
@@ -232,7 +229,7 @@ router.post('/refresh', rateLimitMiddleware.checkAuthRateLimit, async (req, res)
         code: 'INVALID_TOKEN_FORMAT'
       });
     }
-    
+
     // Validate refresh token using tokenId
     const tokenInfo = await TokenDatabase.getRefreshToken(parsedToken.jti, refreshToken);
     if (!tokenInfo || tokenInfo.isRevoked) {
@@ -242,21 +239,22 @@ router.post('/refresh', rateLimitMiddleware.checkAuthRateLimit, async (req, res)
       });
     }
 
-    // Enforce device match and device proof
     if (!deviceId || deviceId !== tokenInfo.deviceId) {
       return res.status(401).json({ error: 'Device mismatch', code: 'DEVICE_MISMATCH' });
     }
-    // Verify device proof using a server-issued nonce
+
     const nonceKey = `refresh:nonce:${parsedToken.jti}`;
     const nonce = await withRedisClient(async (client) => await client.get(nonceKey));
+
     if (!nonce) {
       return res.status(400).json({ error: 'Nonce required', code: 'NONCE_REQUIRED' });
     }
+
     const signatureBase64 = req.headers['x-device-proof'];
     if (!signatureBase64 || typeof signatureBase64 !== 'string') {
       return res.status(401).json({ error: 'Missing device proof', code: 'DEVICE_PROOF_REQUIRED' });
     }
-    // Lookup stored device public key for this user/device
+
     const sessions = await TokenDatabase.getUserSessions(tokenInfo.userId);
     const session = (sessions || []).find(s => s.deviceId === tokenInfo.deviceId);
     const devicePubPem = session?.securityFlags?.deviceEd25519PublicKey;
@@ -271,7 +269,7 @@ router.post('/refresh', rateLimitMiddleware.checkAuthRateLimit, async (req, res)
       if (!ok) {
         return res.status(401).json({ error: 'Invalid device proof', code: 'DEVICE_PROOF_INVALID' });
       }
-      // One-time nonce
+
       await withRedisClient(async (client) => { await client.del(nonceKey); });
     } catch (_e) {
       return res.status(401).json({ error: 'Device proof error', code: 'DEVICE_PROOF_ERROR' });
@@ -285,7 +283,7 @@ router.post('/refresh', rateLimitMiddleware.checkAuthRateLimit, async (req, res)
         token: anonymizeIdentifier(tokenInfo?.id || 'unknown')
       });
       await TokenSecurityManager.revokeToken(tokenInfo.id, `security_violation:${securityValidation.reason}`);
-      
+
       return res.status(401).json({
         error: 'Token security validation failed',
         code: 'SECURITY_VALIDATION_FAILED'
@@ -307,10 +305,10 @@ router.post('/refresh', rateLimitMiddleware.checkAuthRateLimit, async (req, res)
         user: anonymizeIdentifier(tokenInfo.userId),
         flags: suspiciousActivity.flags
       });
-      
+
       if (suspiciousActivity.riskScore === 'high' || suspiciousActivity.riskScore === 'critical') {
         await TokenSecurityManager.revokeToken(tokenInfo.id, 'suspicious_activity_detected');
-        
+
         return res.status(401).json({
           error: 'Suspicious activity detected',
           code: 'SUSPICIOUS_ACTIVITY'
@@ -421,7 +419,6 @@ router.post('/logout-all', TokenMiddleware.authenticateHTTP, async (req, res) =>
       });
     }
 
-    // Logout from all devices
     const result = await TokenSecurityManager.logoutFromAllDevices(userId, 'user_request', 'user');
 
     if (result.success) {
@@ -504,7 +501,6 @@ router.get('/sessions', TokenMiddleware.authenticateHTTP, async (req, res) => {
       });
     }
 
-    // Get active sessions
     const sessions = await TokenDatabase.getUserSessions(userId);
 
     res.json({
@@ -553,7 +549,6 @@ router.delete('/sessions/:deviceId', TokenMiddleware.authenticateHTTP, async (re
       });
     }
 
-    // Revoke all tokens for the device
     const revokedCount = await TokenDatabase.revokeDeviceTokens(userId, deviceId, 'device_revocation');
 
     res.json({
@@ -578,7 +573,7 @@ router.delete('/sessions/:deviceId', TokenMiddleware.authenticateHTTP, async (re
 router.get('/security-report', TokenMiddleware.authenticateHTTP, async (req, res) => {
   try {
     const userId = req.user?.sub;
-    
+
     let timeframeHours = 24;
     if (req.query.hours !== undefined) {
       const parsedHours = parseInt(req.query.hours, 10);
@@ -617,7 +612,7 @@ router.get('/security-report', TokenMiddleware.authenticateHTTP, async (req, res
 
 /**
  * POST /api/auth/verify-token
- * Verify token validity (for client-side token validation)
+ * Verify token validity
  */
 router.post('/refresh-challenge', async (req, res) => {
   try {
@@ -651,7 +646,6 @@ router.post('/verify-token', rateLimitMiddleware.checkTokenVerificationRateLimit
       });
     }
 
-    // Verify token
     const payload = await TokenService.verifyAccessToken(token);
     if (!payload) {
       return res.status(401).json({
@@ -690,9 +684,7 @@ router.post('/verify-token', rateLimitMiddleware.checkTokenVerificationRateLimit
   }
 });
 
-/**
- * Generate device ID from request context
- */
+// Generate device ID from request context
 function generateDeviceId(_req) {
   return crypto.randomBytes(16).toString('hex');
 }
@@ -707,7 +699,7 @@ function deriveDeviceId(req) {
         return trimmed.length > 64 ? trimmed.slice(0, 64) : trimmed;
       }
     }
-  } catch (_e) {}
+  } catch (_e) { }
   return generateDeviceId(req);
 }
 

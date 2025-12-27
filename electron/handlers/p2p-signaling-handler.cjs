@@ -29,20 +29,24 @@ class P2PSignalingHandler {
     this.heartbeatInterval = 30000;
   }
 
+  // Set Tor ready state
   setTorReady(ready) {
     this.torReady = ready;
   }
 
+  // Update Tor configuration
   updateTorConfig(config) {
     if (config && config.socksPort) {
       this.torSocksPort = config.socksPort;
     }
   }
 
+  // Set background mode
   setBackgroundMode(enabled) {
     this.isBackgroundMode = enabled;
   }
 
+  // Connect to P2P signaling server
   async connect(serverUrl, options = {}) {
     if (!serverUrl || typeof serverUrl !== 'string') {
       return { success: false, error: 'Invalid server URL' };

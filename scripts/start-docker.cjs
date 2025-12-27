@@ -291,7 +291,7 @@ async function main() {
             updates.REDIS_EXTERNAL_PORT = availableRedisPort;
         }
 
-        // 4. TURN server (coturn) - uses host network, check ports
+        // 4. TURN server
         if (command === 'server' || command === 'coturn') {
             const turnPort = parseInt(env.TURN_PORT || '3478', 10);
             const turnInUse = await isPortInUse(turnPort);
@@ -356,9 +356,8 @@ async function main() {
                     process.env.NO_GUI = 'true';
                     let sharedServices = 'redis';
                     if (command === 'server') sharedServices = 'postgres redis coturn';
-                    if (command === 'coturn') sharedServices = ''; // Coturn has no dependencies
+                    if (command === 'coturn') sharedServices = '';
 
-                    // Only start shared services if there are any
                     if (sharedServices) {
                         execSync(`docker compose --env-file .env -f docker/docker-compose.yml up -d --remove-orphans --no-recreate ${sharedServices}`, { cwd: repoRoot, stdio: 'inherit' });
                     }

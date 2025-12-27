@@ -39,7 +39,6 @@ function concatUint8Arrays(...arrays) {
 }
 
 function deriveInnerKeyMaterial(pqSharedSecret, classicalSharedSecret, salt, routingDigest) {
-  // Use concatenation instead of XOR for better hybrid security (NIST SP 800-56C)
   const combined = new Uint8Array(pqSharedSecret.length + classicalSharedSecret.length);
   combined.set(pqSharedSecret, 0);
   combined.set(classicalSharedSecret, pqSharedSecret.length);
@@ -85,8 +84,6 @@ class PostQuantumAEAD {
     const expanded = sha3_512(inputKey);
     const k1 = expanded.slice(0, 32);
     const k2 = expanded.slice(32, 64);
-
-    // Derive separate MAC key using BLAKE3 with domain separation
     const macKey = blake3(Buffer.concat([
       Buffer.from('quantum-secure-mac-v1'),
       inputKey
@@ -121,7 +118,6 @@ class PostQuantumAEAD {
       const macInput = Buffer.concat([layer2, aadBytes, nonce]);
       const mac = blake3(macInput, { key: macKey });
 
-      // Return ciphertext and MAC as separate components
       return {
         ciphertext: Buffer.from(layer2),
         tag: Buffer.from(mac)
@@ -146,7 +142,6 @@ class PostQuantumAEAD {
     const { k1, k2, macKey } = this._deriveDoubleKey(this.key);
 
     try {
-      // Verify BLAKE3 MAC
       const macInput = Buffer.concat([ciphertext, aadBytes, nonce]);
       const expectedMac = blake3(macInput, { key: macKey });
 
@@ -154,7 +149,7 @@ class PostQuantumAEAD {
         throw new Error('BLAKE3 MAC verification failed');
       }
 
-      // Layer 2: Decrypt XChaCha20-Poly1305 (reverse order)
+      // Layer 2: Decrypt XChaCha20-Poly1305
       const xnonce = nonce.slice(12, 36);
       const xchacha = xchacha20poly1305(k2, xnonce, aadBytes);
       const layer1 = xchacha.decrypt(ciphertext);
@@ -209,9 +204,9 @@ export function anonymizeIdentifier(identifier) {
 }
 
 
-// Quantum-resistant cryptographic configuration
+// Cryptographic configuration
 class CryptoConfig {
-  // Post-quantum security levels
+  // Security levels
   static SECURITY_LEVEL = 256;              // 256-bit quantum security
   static CLASSICAL_SECURITY_LEVEL = 256;    // Classical security level
   static POST_QUANTUM_SECURITY_LEVEL = 256; // Post-quantum security level
@@ -239,7 +234,7 @@ class CryptoConfig {
   static SCRYPT_R = 16;
   static SCRYPT_P = 2;
 
-  // Argon2id parameters (configurable via environment variables)
+  // Argon2id parameters
   static get ARGON2_TIME() {
     const MIN_TIME = 3;
     const DEFAULT_TIME = 4;
@@ -267,22 +262,16 @@ class CryptoConfig {
   }
 
   static get ARGON2_PARALLELISM() {
-    // Enforce parallelism of 4 for optimal security/performance balance on modern CPUs
     return 4;
   }
 
-  // Quantum-resistant entropy
   static ENTROPY_BITS = 512;
   static TIMING_ROUNDS = 10;
-
-  // Protocol versioning
   static PROTOCOL_VERSION = 'quantum-v2';
 }
 
 class QuantumRandomGenerator {
-  /**
-   * Generate random bytes using multiple entropy sources
-   */
+  // Generate random bytes using multiple entropy sources
   static async generateSecureRandom(length, useTimingEntropy = false) {
     if (!Number.isInteger(length) || length < 0) {
       throw new Error(`Invalid random length: ${length} - must be non-negative integer`);
@@ -312,9 +301,7 @@ class QuantumRandomGenerator {
     }
   }
 
-  /**
-   * Generate timing-based entropy for additional quantum resistance
-   */
+  // Generate timing-based entropy
   static async generateTimingEntropy(length = 32) {
     const measurements = [];
     const loopSchedule = await QuantumRandomGenerator.generateSecureRandom(CryptoConfig.TIMING_ROUNDS);
@@ -322,7 +309,6 @@ class QuantumRandomGenerator {
     for (let i = 0; i < CryptoConfig.TIMING_ROUNDS; i++) {
       const start = process.hrtime.bigint();
 
-      // Variable quantum-resistant operations driven by secure randomness
       const iterationCount = 512 + (loopSchedule[i] % 768);
       for (let j = 0; j < iterationCount; j++) {
         const data = Buffer.from(String(j + i * 1000));
@@ -343,9 +329,7 @@ class QuantumRandomGenerator {
     return shake256(timingData, { dkLen: length });
   }
 
-  /**
-   * Generate cryptographically secure random bytes (synchronous)
-   */
+  // Generate random bytes
   static generateRandomBytes(length) {
     if (!Number.isInteger(length) || length < 0) {
       throw new Error(`Invalid random length: ${length} - must be non-negative integer`);
@@ -353,23 +337,17 @@ class QuantumRandomGenerator {
     return new Uint8Array(crypto.randomBytes(length));
   }
 
-  /**
-   * Generate cryptographically secure salt (synchronous)
-   */
+  // Generate cryptographically secure salt
   static generateSalt(length = CryptoConfig.SALT_LENGTH) {
     return this.generateRandomBytes(length);
   }
 
-  /**
-   * Generate quantum-resistant nonce (synchronous)
-   */
+  // Generate quantum-resistant nonce
   static generateNonce(length = CryptoConfig.XCHACHA20_NONCE_SIZE) {
     return this.generateRandomBytes(length);
   }
 
-  /**
-   * Generate UUID v4
-   */
+  // Generate UUID v4
   static generateUUID() {
     return randomUUID();
   }
@@ -409,9 +387,7 @@ class QuantumHashService {
     throw new TypeError(`${name} must be a byte array or convertible to Uint8Array`);
   }
 
-  /**
-   * Quantum-resistant hash using multiple algorithms
-   */
+  // Quantum-resistant hash using multiple algorithms
   static async digestQuantumResistant(...parts) {
     const arrays = parts.map(p => (p instanceof Uint8Array ? p : new Uint8Array(p)));
     const totalLen = arrays.reduce((s, a) => s + a.length, 0);
@@ -422,9 +398,7 @@ class QuantumHashService {
   }
 
 
-  /**
-   * BLAKE3-based MAC with quantum-resistant key derivation
-   */
+  // BLAKE3-based MAC with quantum-resistant key derivation
   static async generateBlake3Mac(message, key) {
     if (!key || key.length < 16) {
       throw new Error('BLAKE3 MAC requires key length >= 16 bytes');
@@ -441,10 +415,7 @@ class QuantumHashService {
     return blake3(messageBytes, { key: normalizedKey });
   }
 
-  /**
-   * SHA-512 digest for a single byte array
-   * Used for hashing data
-   */
+  // SHA-512 digest for a single byte array
   static async digestSHA512(data) {
     if (!data) {
       throw new Error('digestSHA512: data parameter must be defined');
@@ -455,10 +426,7 @@ class QuantumHashService {
     return new Uint8Array(await webcrypto.subtle.digest('SHA-512', data));
   }
 
-  /**
-   * SHA-512 digest for combining two byte arrays
-   * Used for salt derivation in hybrid encryption
-   */
+  // SHA-512 digest for combining two byte arrays
   static async digestSHA512Bytes(a, b) {
     if (!a || !b) {
       throw new Error('digestSHA512Bytes: both parameters must be defined');
@@ -472,16 +440,12 @@ class QuantumHashService {
     return new Uint8Array(await webcrypto.subtle.digest('SHA-512', combined));
   }
 
-  /**
-   * BLAKE3 hash function
-   */
+  // BLAKE3 hash function
   static blake3(data) {
     return blake3(data);
   }
 
-  /**
-   * BLAKE3 keyed hash
-   */
+  // BLAKE3 keyed hash
   static blake3Keyed(data, key) {
     const dataBytes = QuantumHashService.toUint8Array(data, 'data');
     const keyBytes = QuantumHashService.toUint8Array(key, 'key');
@@ -489,25 +453,19 @@ class QuantumHashService {
     return blake3(dataBytes, { key: normalizedKey });
   }
 
-  /**
-   * SHA3-512 hash
-   */
+  // SHA3-512 hash
   static sha3_512(data) {
     const dataBytes = data instanceof Uint8Array ? data : new Uint8Array(data);
     return sha3_512(dataBytes);
   }
 
-  /**
-   * SHAKE256 XOF
-   */
+  // SHAKE256 XOF
   static shake256(data, dkLen) {
     const dataBytes = data instanceof Uint8Array ? data : new Uint8Array(data);
     return shake256(dataBytes, { dkLen });
   }
 
-  /**
-   * Hash data using Argon2id
-   */
+  // Hash data using Argon2id
   static async hashData(data) {
     const salt = new Uint8Array(crypto.randomBytes(16));
     const hash = await argon2.hash(Buffer.from(data), {
@@ -520,9 +478,7 @@ class QuantumHashService {
     return hash;
   }
 
-  /**
-   * Hash data using provided Argon2 parameters
-   */
+  // Hash data using provided Argon2 parameters
   static async hashDataUsingInfo(data, params) {
     const salt = params.salt ?
       (typeof params.salt === 'string' ? Buffer.from(params.salt, 'base64') : Buffer.from(params.salt)) :
@@ -537,9 +493,7 @@ class QuantumHashService {
     return hash;
   }
 
-  /**
-   * Parse Argon2 hash string
-   */
+  // Parse Argon2 hash string
   static async parseArgon2Hash(encodedHash) {
     const parts = encodedHash.split("$");
     if (parts.length !== 6) {
@@ -572,11 +526,8 @@ class QuantumHashService {
     };
   }
 
-  /**
-   * BLAKE3-based HKDF
-   */
+  // BLAKE3-based HKDF
   static async blake3Hkdf(ikm, salt, info, outLen) {
-    // HKDF-Extract: PRK = BLAKE3-MAC(salt, ikm) - salt is key, ikm is message  
     const prk = await this.generateBlake3Mac(ikm, salt);
 
     const output = new Uint8Array(outLen);
@@ -602,17 +553,13 @@ class QuantumHashService {
     return output;
   }
 
-  /**
-   * Generate a fingerprint for a key
-   */
+  // Generate a fingerprint for a key
   static async fingerprintKey(key) {
     const keyBytes = key instanceof Uint8Array ? key : new Uint8Array(key);
-    return blake3(keyBytes).slice(0, 16); // 16-byte fingerprint
+    return blake3(keyBytes).slice(0, 16);
   }
 
-  /**
-   * Constant-time comparison to prevent timing attacks
-   */
+  // Constant-time comparison to prevent timing attacks
   static constantTimeCompare(a, b) {
     if (!a || !b) {
       return false;
@@ -622,7 +569,6 @@ class QuantumHashService {
     const bBuf = Buffer.from(b);
 
     if (aBuf.length !== bBuf.length) {
-      // Ensure timingSafeEqual still runs for same duration
       const maxLen = Math.max(aBuf.length, bBuf.length);
       const paddedA = Buffer.alloc(maxLen);
       const paddedB = Buffer.alloc(maxLen);
@@ -631,9 +577,7 @@ class QuantumHashService {
 
       try {
         crypto.timingSafeEqual(paddedA, paddedB);
-      } catch {
-        // Ignore errors; length mismatch already means failure
-      }
+      } catch { }
       return false;
     }
 
@@ -644,16 +588,13 @@ class QuantumHashService {
     }
   }
 
-  /**
-   * Verify BLAKE3 concatenation MAC
-   */
+  // Verify BLAKE3 concatenation MAC
   static async verifyBlake3ConcatMac(message, key, expectedMac) {
     const computedMac = await this.generateBlake3ConcatMac(message, key);
     return QuantumHashService.safeCompare(computedMac, expectedMac);
   }
 
   static async generateBlake3ConcatMac(message, key) {
-    // Enhance key with SHAKE256 for quantum resistance 
     const messageBytes = QuantumHashService.toUint8Array(message, 'message');
     const keyBytes = QuantumHashService.toUint8Array(key, 'key');
     const enhancedKey = shake256(keyBytes, { dkLen: 64 });
@@ -661,12 +602,8 @@ class QuantumHashService {
     return blake3(messageBytes, { key: macKey });
   }
 
-
-  /**
-   * Quantum-resistant MAC using multiple algorithms
-   */
+  // Quantum-resistant MAC using multiple algorithms
   static async generateQuantumMAC(message, key) {
-    // Generate multiple MACs for quantum resistance
     const messageBytes = QuantumHashService.toUint8Array(message, 'message');
     const keyBytes = QuantumHashService.toUint8Array(key, 'key');
     const blake3Mac = await this.generateBlake3Mac(messageBytes, keyBytes);
@@ -674,13 +611,12 @@ class QuantumHashService {
     const shakeKey = shake256(keyBytes, { dkLen: 32 });
     const shakeMac = shake256(Buffer.concat([shakeKey, messageBytes]), { dkLen: 32 });
 
-    // Combine all MACs
     const combined = new Uint8Array(blake3Mac.length + sha3Mac.length + shakeMac.length);
     combined.set(blake3Mac, 0);
     combined.set(sha3Mac, blake3Mac.length);
     combined.set(shakeMac, blake3Mac.length + sha3Mac.length);
 
-    return blake3(combined); // Final 256-bit MAC
+    return blake3(combined);
   }
 
   static async verifyBlake3Mac(message, key, expectedMac) {
@@ -693,9 +629,7 @@ class QuantumHashService {
     return QuantumHashService.safeCompare(computedMac, expectedMac);
   }
 
-  /**
-   * Quantum-resistant HMAC using BLAKE3
-   */
+  // Quantum-resistant HMAC using BLAKE3
   static async hmacBlake3(key, message) {
     const messageBytes = QuantumHashService.toUint8Array(message, 'message');
     const keyBytes = QuantumHashService.toUint8Array(key, 'key');
@@ -703,10 +637,7 @@ class QuantumHashService {
     return blake3(messageBytes, { key: enhancedKey });
   }
 
-
-  /**
-   * Enhanced constant-time comparison with quantum resistance
-   */
+  // Constant-time comparison
   static constantTimeCompare(a, b) {
     return QuantumHashService.safeCompare(a, b);
   }
@@ -727,22 +658,14 @@ class QuantumHashService {
 
 }
 
-
 class QuantumKyberService {
-  /**
-   * Use ML-KEM-1024 
-   */
   static kyberInstance() {
     return new MlKem1024();
   }
 
-  /**
-   * Generate ML-KEM-1024 key pair with better entropy
-   */
+  // Generate ML-KEM-1024 key pair
   static async generateKeyPair() {
     const kyber = this.kyberInstance();
-
-    // Add additional entropy for better resistance
     const additionalEntropy = await QuantumRandomGenerator.generateSecureRandom(64);
     const result = await kyber.generateKeyPair(additionalEntropy);
 
@@ -766,23 +689,17 @@ class QuantumKyberService {
     throw new Error('Failed to generate ML-KEM-1024 key pair');
   }
 
-  /**
-   * Enhanced encapsulation with shared secret derivation
-   */
+  // Encapsulation with shared secret derivation
   static async encapsulate(publicKeyBytes) {
     if (!publicKeyBytes || publicKeyBytes.length === 0) {
       throw new Error('Invalid public key for encapsulation');
     }
 
     const kyber = this.kyberInstance();
-
-    // Add quantum-resistant randomness to encapsulation
     const additionalEntropy = await QuantumRandomGenerator.generateSecureRandom(32);
     const result = await kyber.encap(publicKeyBytes, additionalEntropy);
-
     const [ciphertext, rawSharedSecret] = result;
 
-    // Use raw shared secret 
     return {
       ciphertext: new Uint8Array(ciphertext),
       sharedSecret: new Uint8Array(rawSharedSecret),
@@ -791,44 +708,31 @@ class QuantumKyberService {
     };
   }
 
-  /**
-   * Enhanced decapsulation with quantum-resistant shared secret derivation
-   */
+  // Decapsulation with quantum-resistant shared secret derivation
   static async decapsulate(ciphertextBytes, secretKeyBytes) {
     if (!ciphertextBytes || !secretKeyBytes) {
       throw new Error('Invalid parameters for decapsulation');
     }
-    // Skip expensive key validation for performance - server keys are internally generated and trusted
-
     const kyber = this.kyberInstance();
     const rawSharedSecret = await kyber.decap(ciphertextBytes, secretKeyBytes);
 
-    // Use raw shared secret 
     return new Uint8Array(rawSharedSecret);
   }
 
-  /**
-   * Derive enhanced shared secret 
-   */
+  // Derive enhanced shared secret
   static async deriveEnhancedSharedSecret(rawSharedSecret, publicKeyBytes) {
-    // Use HKDF with BLAKE3 
     const salt = await QuantumHashService.digestQuantumResistant(publicKeyBytes);
     const info = new TextEncoder().encode('ML-KEM-1024-enhanced-shared-secret-v2');
-
-    // Use quantum-resistant HKDF
     return await QuantumKDFService.quantumHKDF(rawSharedSecret, salt.slice(0, 64), info, 64);
   }
 
-  /**
-   * Validate ML-KEM-1024 key pair integrity with caching
-   */
+  // Validate ML-KEM-1024 key pair integrity with caching
   static async validateKeyPair(keyPair, forceRevalidation = false) {
     if (!keyPair.publicKey || !keyPair.secretKey) {
       return false;
     }
 
-    // Check validation cache first
-    const cacheTTL = 5 * 60 * 1000; // 5 minutes cache TTL
+    const cacheTTL = 5 * 60 * 1000;
 
     if (!forceRevalidation && keyPair._validation) {
       const { valid, ts } = keyPair._validation;
@@ -841,7 +745,6 @@ class QuantumKyberService {
     if (keyPair.publicKeyHash) {
       const computedHash = await QuantumHashService.fingerprintKey(keyPair.publicKey);
       if (!QuantumHashService.constantTimeCompare(keyPair.publicKeyHash, computedHash)) {
-        // Update cache with failure
         keyPair._validation = { valid: false, ts: Date.now() };
         return false;
       }
@@ -853,11 +756,9 @@ class QuantumKyberService {
       const decapSecret = await this.decapsulate(encapResult.ciphertext, keyPair.secretKey, keyPair.publicKey);
       const isValid = QuantumHashService.constantTimeCompare(encapResult.sharedSecret, decapSecret);
 
-      // Update cache with result
       keyPair._validation = { valid: isValid, ts: Date.now() };
       return isValid;
     } catch {
-      // Update cache with failure
       keyPair._validation = { valid: false, ts: Date.now() };
       return false;
     }
@@ -884,26 +785,20 @@ class DilithiumService {
 }
 
 class QuantumKDFService {
-  /**
-   * Quantum-resistant HKDF using multiple hash functions
-   */
+  // Quantum-resistant HKDF using multiple hash functions
   static async quantumHKDF(ikm, salt, info, outLen) {
-    // Use multiple hash functions for quantum resistance
     const blake3Prk = await QuantumHashService.generateBlake3Mac(ikm, salt);
     const sha3Prk = sha3_512(Buffer.concat([salt.slice(0, 64), ikm]));
     const shakePrk = shake256(Buffer.concat([salt.slice(0, 32), ikm]), { dkLen: 64 });
 
-    // Combine PRKs for maximum security
     const combinedPrk = new Uint8Array(blake3Prk.length + sha3Prk.length + shakePrk.length);
     combinedPrk.set(blake3Prk, 0);
     combinedPrk.set(sha3Prk, blake3Prk.length);
     combinedPrk.set(shakePrk, blake3Prk.length + sha3Prk.length);
 
     const masterPrk = blake3(combinedPrk);
-
-    // HKDF-Expand with quantum resistance
     const output = new Uint8Array(outLen);
-    const hashLen = 64; // Use 512-bit blocks for quantum resistance
+    const hashLen = 64;
     const n = Math.ceil(outLen / hashLen);
 
     let t = new Uint8Array(0);
@@ -915,12 +810,10 @@ class QuantumKDFService {
       input.set(info, t.length);
       input[input.length - 1] = i;
 
-      // Use quantum-resistant expansion
       const blake3T = await QuantumHashService.generateBlake3Mac(input, masterPrk);
       const sha3T = sha3_512(Buffer.concat([masterPrk.slice(0, 64), input]));
       const shakeT = shake256(Buffer.concat([masterPrk.slice(0, 32), input]), { dkLen: 32 });
 
-      // Combine outputs
       const combined = new Uint8Array(blake3T.length + sha3T.length + shakeT.length);
       combined.set(blake3T, 0);
       combined.set(sha3T, blake3T.length);
@@ -936,10 +829,7 @@ class QuantumKDFService {
     return output;
   }
 
-  /**
-   * Derive a KEK from username+password using Argon2id + quantumHKDF.
-   * Centralized helper for all password-based key encryption.
-   */
+  // Derive a KEK from username+password using Argon2id + quantumHKDF.
   static async deriveUsernamePasswordKEK(username, password, options = {}) {
     if (!username || typeof username !== 'string' || username.length < 3) {
       throw new Error('deriveUsernamePasswordKEK: username must be at least 3 characters');
@@ -954,7 +844,7 @@ class QuantumKDFService {
     const {
       salt,
       timeCost = CryptoConfig.ARGON2_TIME + 1,
-      memoryCost = Math.min(CryptoConfig.ARGON2_MEMORY * 2, 1 << 20), // cap at 1 GiB
+      memoryCost = Math.min(CryptoConfig.ARGON2_MEMORY * 2, 1 << 20),
       parallelism = CryptoConfig.ARGON2_PARALLELISM,
       hashLength = 64,
     } = options;
@@ -964,7 +854,6 @@ class QuantumKDFService {
       if (salt instanceof Uint8Array || Buffer.isBuffer(salt)) {
         saltBuf = Buffer.from(salt);
       } else if (typeof salt === 'string') {
-        // Accept base64-encoded salt
         saltBuf = Buffer.from(salt, 'base64');
       } else {
         throw new Error('deriveUsernamePasswordKEK: salt must be a Uint8Array, Buffer, or base64 string');
@@ -976,7 +865,6 @@ class QuantumKDFService {
       saltBuf = crypto.randomBytes(32);
     }
 
-    // Argon2id base key
     const baseKey = await argon2.hash(pwd, {
       type: argon2.argon2id,
       timeCost,
@@ -987,13 +875,11 @@ class QuantumKDFService {
       raw: true,
     });
 
-    // Bind KEK to username with BLAKE3, then feed into quantumHKDF
     const usernameHash = blake3(usernameBytes);
     const ikm = new Uint8Array(baseKey.length + usernameHash.length);
     ikm.set(baseKey, 0);
     ikm.set(usernameHash, baseKey.length);
 
-    // Use a domain-separated salt for HKDF
     const hkSalt = shake256(saltBuf, { dkLen: 64 });
     const info = new TextEncoder().encode('username-password-kek-v1');
 
@@ -1001,21 +887,15 @@ class QuantumKDFService {
     return { kek, salt: new Uint8Array(saltBuf) };
   }
 
-
-  /**
-   * AES key derivation using BLAKE3-HKDF compatible with client
-   */
+  // AES key derivation using BLAKE3-HKDF
   static async deriveAesKeyFromIkm(ikmUint8Array, saltUint8Array, context) {
     try {
-      // Create context-bound info parameter
       const contextInfo = context ?
         new TextEncoder().encode(`Qor-chat hybrid key v2:${context}`) :
         CryptoConfig.HKDF_INFO;
 
-      // Use BLAKE3-HKDF for key derivation
       const keyMaterial = await QuantumHashService.blake3Hkdf(ikmUint8Array, saltUint8Array, contextInfo, 32);
 
-      // Validate key material
       if (!keyMaterial || keyMaterial.length !== 32) {
         throw new Error(`Invalid key material length: ${keyMaterial?.length}`);
       }
@@ -1027,26 +907,18 @@ class QuantumKDFService {
     }
   }
 
-
-  /**
-   * Enhanced session key derivation with BLAKE3 and context binding
-   */
+  // Session key derivation with BLAKE3 and context binding
   static async deriveSessionKey(ikm, salt, sessionContext) {
     const contextInfo = new TextEncoder().encode(`session-key-v2:${sessionContext}`);
     return await QuantumHashService.blake3Hkdf(ikm, salt, contextInfo, 32);
   }
 
-
-  /**
-   * Simple HKDF wrapper (synchronous) for tests using BLAKE3
-   */
+  // Simple HKDF wrapper for tests using BLAKE3
   static deriveKey(ikm, salt, info, outLen) {
     return PostQuantumHash.deriveKey(ikm, salt, info, outLen);
   }
 
-  /**
-   * Derive multiple keys with different context strings
-   */
+  // Derive multiple keys with different context strings
   static deriveMultipleKeys(ikm, salt, contexts, outLen) {
     const out = {};
     for (const ctx of contexts) {
@@ -1064,20 +936,17 @@ class PostQuantumAESService {
     else if (data instanceof Uint8Array) dataBuf = data;
     else throw new Error('Unsupported data type for PostQuantum encrypt');
 
-    // Use PostQuantumAEAD for encryption
     const pqAead = new PostQuantumAEAD(key);
-    const nonce = await QuantumRandomGenerator.generateSecureRandom(36); // 36-byte nonce for PostQuantumAEAD
+    const nonce = await QuantumRandomGenerator.generateSecureRandom(36);
 
     const { ciphertext, tag } = pqAead.encrypt(dataBuf, nonce, new TextEncoder().encode('server-aes-service'));
 
-    // Return combined format for backward compatibility
     const encrypted = Buffer.concat([ciphertext, tag]);
     return { nonce, encrypted };
   }
 
   static async decryptWithPostQuantumAead(nonce, encrypted, key, aad) {
     try {
-      // Validate inputs
       if (!nonce || nonce.length !== 36) {
         throw new Error(`Invalid nonce length: ${nonce?.length}, expected 36 bytes`);
       }
@@ -1088,11 +957,9 @@ class PostQuantumAESService {
         throw new Error('No key provided');
       }
 
-      // Split encrypted data into ciphertext and tag
       const ciphertext = encrypted.slice(0, -32);
       const tag = encrypted.slice(-32);
 
-      // Use PostQuantumAEAD for decryption
       const pqAead = new PostQuantumAEAD(key);
       const plainBuf = pqAead.decrypt(ciphertext, nonce, tag, aad);
 
@@ -1109,9 +976,7 @@ class PostQuantumAESService {
     }
   }
 
-  /**
-   * Password-based encryption using PostQuantumAEAD
-   */
+  // Password-based encryption using PostQuantumAEAD
   static async encryptData(data, password) {
     if (typeof password !== 'string' || password.trim().length < MIN_PASSWORD_LENGTH) {
       throw new Error('Password must be a non-empty string with sufficient length');
@@ -1124,8 +989,8 @@ class PostQuantumAESService {
     const nonce = QuantumRandomGenerator.generateNonce(36);
     const plain = data instanceof Uint8Array ? data : new Uint8Array(data);
     const { ciphertext: ct, tag } = aead.encrypt(plain, nonce);
-    // Store combined for backward compatibility
     const ciphertext = Buffer.concat([ct, tag]);
+
     return { ciphertext, salt, nonce };
   }
 
@@ -1137,9 +1002,9 @@ class PostQuantumAESService {
     const info = new TextEncoder().encode('pq-password-aead-v1');
     const key = await QuantumHashService.blake3Hkdf(pwdBytes, encrypted.salt, info, 32);
     const aead = new PostQuantumAEAD(key);
-    // Split ciphertext and tag
     const ct = encrypted.ciphertext.slice(0, -32);
     const tag = encrypted.ciphertext.slice(-32);
+
     return aead.decrypt(ct, encrypted.nonce, tag);
   }
 
@@ -1256,7 +1121,6 @@ class HybridService {
   }
 
   static async openSecureEnvelope(envelope, ownKeys, senderDilithiumPublicKey) {
-    // Normalize to internal expected structure
     const internal = {
       version: envelope.version,
       routing: envelope.routing,
@@ -1318,7 +1182,7 @@ class HybridService {
     return new Uint8Array(shared.slice(0, 32));
   }
 
-  static async createInnerLayer(payload, recipientKeys, routingDigest, pqSharedSecret, recipientX25519) {
+  static async createInnerLayer(payload, routingDigest, pqSharedSecret, recipientX25519) {
     if (!recipientX25519) {
       throw new Error('Recipient X25519 public key is required for inner layer');
     }
@@ -1380,7 +1244,7 @@ class HybridService {
     const recipientKyber = QuantumHashService.base64ToUint8Array(recipientKeys.kyberPublicBase64);
     const { ciphertext: kemCiphertext, sharedSecret: pqSharedSecret } = await QuantumKyberService.encapsulate(recipientKyber);
 
-    const innerLayer = await this.createInnerLayer(normalizedPayload, recipientKeys, routingDigest, pqSharedSecret, recipientX25519);
+    const innerLayer = await this.createInnerLayer(normalizedPayload, routingDigest, pqSharedSecret, recipientX25519);
 
     const outerSalt = crypto.randomBytes(32);
     const { outerKey, outerMacKey } = this.deriveOuterKeys(pqSharedSecret, outerSalt, routingDigest);
@@ -1532,7 +1396,6 @@ class HybridService {
           throw new Error('Inner envelope MAC verification failed');
         }
 
-        // Decrypt inner payload with payloadType as AAD to bind ciphertext to context
         const aad = new TextEncoder().encode(innerLayer.payloadType);
         const aead = new PostQuantumAEAD(encKey);
         const plaintextBytes = aead.decrypt(innerCiphertext, innerNonce, innerTag, aad);
@@ -1558,7 +1421,6 @@ class HybridService {
       SecureMemory.wipe(outerMacKey);
     }
   }
-
 }
 
 class PasswordService {

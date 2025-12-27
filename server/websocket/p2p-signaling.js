@@ -3,6 +3,7 @@
  * Signaling relay for WebRTC peer connections
  */
 import { checkBlocking } from '../security/blocking.js';
+import { SignalType } from '../signals.js';
 
 export function attachP2PSignaling(wss, logger = console) {
   const peerConnections = new Map(); // username -> Set of ws connections
@@ -22,30 +23,30 @@ export function attachP2PSignaling(wss, logger = console) {
         const { type, from, to, payload } = message;
 
         // Register peer
-        if (type === 'register') {
+        if (type === SignalType.REGISTER) {
           currentUsername = from;
           if (!peerConnections.has(from)) {
             peerConnections.set(from, new Set());
           }
           peerConnections.get(from).add(ws);
-          
+
           logger.info('[P2P Signaling] User registered', { username: from?.slice(0, 8) + '...', totalPeers: peerConnections.size });
-          
+
           ws.send(JSON.stringify({
-            type: 'registered',
+            type: SignalType.REGISTER_ACK, // was 'registered'
             username: from,
           }));
           return;
         }
 
         // Relay signaling messages
-        if (type === 'offer' || type === 'answer' || type === 'ice-candidate') {
+        if (type === SignalType.OFFER || type === SignalType.ANSWER || type === SignalType.ICE_CANDIDATE) {
           try {
             const senderBlockedByRecipient = await checkBlocking(from, to);
             const recipientBlockedBySender = await checkBlocking(to, from);
-            
+
             if (senderBlockedByRecipient || recipientBlockedBySender) {
-              ws.send(JSON.stringify({ type: 'error', error: 'BLOCKED' }));
+              ws.send(JSON.stringify({ type: SignalType.ERROR, error: 'BLOCKED' }));
               logger.info('[P2P Signaling] Signaling blocked', {
                 from: from?.slice(0, 8) + '...',
                 to: to?.slice(0, 8) + '...',
@@ -58,7 +59,7 @@ export function attachP2PSignaling(wss, logger = console) {
           }
 
           const targetSockets = peerConnections.get(to);
-          
+
           if (targetSockets && targetSockets.size > 0) {
             const relayMessage = JSON.stringify({
               type,
@@ -82,13 +83,13 @@ export function attachP2PSignaling(wss, logger = console) {
               }));
             } else {
               ws.send(JSON.stringify({
-                type: 'error',
+                type: SignalType.ERROR,
                 error: 'PEER_OFFLINE',
               }));
             }
           } else {
             ws.send(JSON.stringify({
-              type: 'error',
+              type: SignalType.ERROR,
               error: 'PEER_NOT_FOUND',
             }));
           }
@@ -96,13 +97,13 @@ export function attachP2PSignaling(wss, logger = console) {
         }
 
         ws.send(JSON.stringify({
-          type: 'error',
+          type: SignalType.ERROR,
           error: 'UNKNOWN_MESSAGE_TYPE',
         }));
       } catch (error) {
         logger.error('[P2P Signaling] Message error:', error.message);
         ws.send(JSON.stringify({
-          type: 'error',
+          type: SignalType.ERROR,
           error: 'INVALID_MESSAGE',
         }));
       }

@@ -11,6 +11,7 @@ const { SignalProtocolStore } = require('./signal-storage.cjs');
 
 let _libsignal = null;
 let _libsignalPromise = null;
+
 async function _loadLibsignal() {
   if (_libsignal) return _libsignal;
   if (!_libsignalPromise) {
@@ -42,20 +43,14 @@ async function _loadLibsignal() {
 class QuantumResistantSignalHandler {
   constructor(securityMiddleware) {
     this.securityMiddleware = securityMiddleware;
-
-    // Signal Protocol storage
     this.store = new SignalProtocolStore();
 
-    // Post-quantum bridge
     this.pqBridge = null;
     this.pqBridgePromise = null;
 
-    // PQ outer-layer keys
     this.pqKyberKeyPairs = new Map();
     this.staticMlkemKeys = new Map();
     this.peerKyberPublicKeys = new Map();
-
-    // Session locks for thread safety
     this.sessionLocks = new Map();
 
     try {
@@ -69,9 +64,7 @@ class QuantumResistantSignalHandler {
     this._libsignalCache = null;
   }
 
-  /**
-   * Load post-quantum cryptography bridge
-   */
+  // Load bridge
   async loadPQBridge() {
     if (this.pqBridge) return this.pqBridge;
 
@@ -97,9 +90,7 @@ class QuantumResistantSignalHandler {
     return this.pqBridgePromise;
   }
 
-  /**
-   * Acquire lock for session ops
-   */
+  // Acquire lock for session ops
   async acquireSessionLock(key, timeout = 5000) {
     const startTime = Date.now();
     while (this.sessionLocks.get(key)) {
@@ -111,22 +102,19 @@ class QuantumResistantSignalHandler {
     this.sessionLocks.set(key, true);
   }
 
-  /**
-   * Release session lock
-   */
+  // Release session lock
   releaseSessionLock(key) {
     this.sessionLocks.delete(key);
   }
 
-  /**
-   * Validate username
-   */
+  // Validate username
   validateUsername(username) {
     if (!username || typeof username !== 'string') {
       throw new Error('Invalid username');
     }
-    // Accept both regular usernames and pseudonymized ones (32+ char hex)
+
     const isPseudonym = /^[a-f0-9]{32,}$/i.test(username);
+
     if (!isPseudonym && !/^[a-zA-Z0-9_-]+$/.test(username)) {
       throw new Error('Username contains invalid characters');
     }
@@ -135,9 +123,7 @@ class QuantumResistantSignalHandler {
     }
   }
 
-  /**
-   * Generate Signal Protocol identity and keys for a user
-   */
+  // Generate Signal Protocol identity and keys for a user
   async generateIdentity(username) {
     const libsignal = await _loadLibsignal();
     try {
@@ -172,9 +158,7 @@ class QuantumResistantSignalHandler {
     }
   }
 
-  /**
-   * Generate pre-keys for a user
-   */
+  // Generate pre-keys for a user
   async generatePreKeys(username, startId = 1, count = 100) {
     const libsignal = await _loadLibsignal();
     try {
@@ -204,9 +188,7 @@ class QuantumResistantSignalHandler {
     }
   }
 
-  /**
-   * Generate signed pre-key
-   */
+  // Generate signed pre-key
   async generateSignedPreKey(username, keyId) {
     const libsignal = await _loadLibsignal();
     try {
@@ -219,8 +201,6 @@ class QuantumResistantSignalHandler {
 
       const signedPreKey = libsignal.PrivateKey.generate();
       const identityPrivateKey = libsignal.PrivateKey.deserialize(Buffer.from(identityKeyPair.privKey));
-
-      // Sign the pre-key
       const signature = identityPrivateKey.sign(signedPreKey.getPublicKey().serialize());
 
       await this.store.storeSignedPreKey(username, keyId, {
@@ -240,9 +220,7 @@ class QuantumResistantSignalHandler {
     }
   }
 
-  /**
-   * Generate Kyber pre-key for Signal Protocol (libsignal-native Kyber)
-   */
+  // Generate Kyber pre-key for Signal Protocol
   async generateKyberPreKey(username, keyId) {
     const libsignal = await _loadLibsignal();
     try {
@@ -256,10 +234,8 @@ class QuantumResistantSignalHandler {
       const signature = identityPrivateKey.sign(pubBytes);
       const kyberRecord = libsignal.KyberPreKeyRecord.new(Number(keyId), Number(timestamp), kyberKeyPair, signature);
 
-      // Store in our storage for later retrieval
       await this.store.storeKyberPreKey(username, keyId, kyberRecord.serialize(), timestamp, false);
 
-      // Also keep accessible for outer PQ layer decapsulation if needed
       if (!this.kyberKeys) this.kyberKeys = new Map();
       this.kyberKeys.set(`${username}:${keyId}`, {
         keyPair: kyberKeyPair,
@@ -294,9 +270,7 @@ class QuantumResistantSignalHandler {
     }
   }
 
-  /**
-   * Create pre-key bundle for distribution
-   */
+  // Create pre-key bundle for distribution
   async createPreKeyBundle(username) {
     const libsignal = await _loadLibsignal();
     try {
@@ -378,9 +352,7 @@ class QuantumResistantSignalHandler {
     }
   }
 
-  /**
-   * Process incoming pre-key bundle and establish session
-   */
+  // Process incoming pre-key bundle and establish session
   async processPreKeyBundle(selfUsername, peerUsername, bundle) {
     const libsignal = await _loadLibsignal();
     const sessionKey = `${selfUsername}:${peerUsername}.1`;
@@ -391,7 +363,6 @@ class QuantumResistantSignalHandler {
 
       await this.acquireSessionLock(sessionKey);
 
-      // If a session exists delete it first
       const existingSession = await this.store.loadSession(selfUsername, `${peerUsername}.1`);
       if (existingSession) {
         await this.store.deleteSession(selfUsername, `${peerUsername}.1`);
@@ -472,8 +443,6 @@ class QuantumResistantSignalHandler {
 
           await this.store.trustPeerIdentity(selfUsername, addressUsernameOnly);
           await this.store.saveIdentity(selfUsername, addressUsernameOnly, newIdentityBytes);
-
-          const savedIdentity = await this.store.getIdentity(selfUsername, addressUsernameOnly);
           const freshIdentityStore = await this._createIdentityKeyStore(selfUsername);
 
           try {
@@ -485,7 +454,7 @@ class QuantumResistantSignalHandler {
               new Date()
             );
           } catch (retryError) {
-            console.error('[SIGNAL-V2] Retry failed after saving identity:', retryError);
+            console.error('[SIGNAL-V2] Retry failed after saving identity:',retryError);
             console.error('[SIGNAL-V2] Retry error code:', retryError.code);
             console.error('[SIGNAL-V2] Retry error name:', retryError.name);
             throw retryError;
@@ -504,9 +473,7 @@ class QuantumResistantSignalHandler {
     }
   }
 
-  /**
-   * Check if session exists
-   */
+  // Check if session exists
   async hasSession(selfUsername, peerUsername, deviceId = 1) {
     try {
       const address = `${peerUsername}.${deviceId}`;
@@ -517,9 +484,7 @@ class QuantumResistantSignalHandler {
     }
   }
 
-  /**
-   * Encrypt with Signal Protocol
-   */
+  // Encrypt with Signal Protocol
   async encryptWithSignalProtocol(fromUsername, toUsername, plaintext) {
     const libsignal = await _loadLibsignal();
     const toAddress = libsignal.ProtocolAddress.new(toUsername, 1);
@@ -540,9 +505,7 @@ class QuantumResistantSignalHandler {
     };
   }
 
-  /**
-   * Wrap with Post-Quantum Hybrid Encryption
-   */
+  // Wrap with Post-Quantum Hybrid Encryption
   async wrapWithPQHybrid(signalMessage, fromUsername, toUsername, options = {}) {
     const bridge = await this.loadPQBridge();
 
@@ -624,9 +587,7 @@ class QuantumResistantSignalHandler {
     }
   }
 
-  /**
-   * Full decryption
-   */
+  // Full decryption
   async decrypt(fromUsername, toUsername, encryptedData) {
     const libsignal = await _loadLibsignal();
     const sessionKey = `${toUsername}:${fromUsername}`;
@@ -637,7 +598,6 @@ class QuantumResistantSignalHandler {
 
       await this.acquireSessionLock(sessionKey);
 
-      // Unwrap PQ outer layer
       const bridge = await this.loadPQBridge();
       const kemCiphertext = Buffer.from(encryptedData.kemCiphertext, 'base64');
       const salt = Buffer.from(encryptedData.salt, 'base64');
@@ -764,9 +724,7 @@ class QuantumResistantSignalHandler {
     }
   }
 
-  /**
-   * Delete session with a peer 
-   */
+  // Delete session with a peer
   async deleteSession(selfUsername, peerUsername, deviceId = 1) {
     try {
       this.validateUsername(selfUsername);
@@ -780,18 +738,14 @@ class QuantumResistantSignalHandler {
     }
   }
 
-  /**
-   * Delete all sessions with a peer
-   */
+  // Delete all sessions with a peer
   async deleteAllSessions(selfUsername, peerUsername) {
     try {
       this.validateUsername(selfUsername);
       this.validateUsername(peerUsername);
 
-      // Delete main device session
       await this.store.deleteSession(selfUsername, `${peerUsername}.1`);
 
-      // Delete any sub-device sessions
       const subDevices = await this.store.getSubDeviceSessions(selfUsername, peerUsername);
       for (const deviceId of subDevices) {
         await this.store.deleteSession(selfUsername, `${peerUsername}.${deviceId}`);
@@ -804,24 +758,25 @@ class QuantumResistantSignalHandler {
     }
   }
 
-  /**
-   * Set the static ML-KEM-1024 keypair for the given user
-   */
+  // Set the static ML-KEM-1024 keypair for the given user
   async setStaticMlkemKeys(username, publicKeyBase64, secretKeyBase64) {
     try {
       this.validateUsername(username);
       if (typeof publicKeyBase64 !== 'string' || typeof secretKeyBase64 !== 'string') {
         throw new Error('Missing ML-KEM keys');
       }
+
       const bridge = await this.loadPQBridge();
       const pub = Buffer.from(publicKeyBase64, 'base64');
       const sec = Buffer.from(secretKeyBase64, 'base64');
+
       if (pub.length !== bridge.KEM.sizes.publicKey) {
         throw new Error(`Invalid ML-KEM public key length: ${pub.length}`);
       }
       if (sec.length !== bridge.KEM.sizes.secretKey) {
         throw new Error(`Invalid ML-KEM secret key length: ${sec.length}`);
       }
+
       this.staticMlkemKeys.set(username, { publicKey: new Uint8Array(pub), secretKey: new Uint8Array(sec) });
       return { success: true };
     } catch (error) {
@@ -830,23 +785,25 @@ class QuantumResistantSignalHandler {
     }
   }
 
-  /**
-   * Create store wrappers for libsignal
-   */
+  // Create store wrappers for libsignal
   async _createSessionStore(username) {
     const libsignal = await _loadLibsignal();
     const outerStore = this.store;
+
     class SessionStoreImpl extends libsignal.SessionStore {
       constructor() { super(); }
+      
       async saveSession(name, record) {
         const idx = name.name() + '.' + name.deviceId();
         await outerStore.storeSession(username, idx, record.serialize());
       }
+
       async getSession(name) {
         const idx = name.name() + '.' + name.deviceId();
         const buf = await outerStore.loadSession(username, idx);
         return buf ? libsignal.SessionRecord.deserialize(buf) : null;
       }
+
       async getExistingSessions(addresses) {
         const out = [];
         for (const a of addresses) {
@@ -865,19 +822,23 @@ class QuantumResistantSignalHandler {
     const outerStore = this.store;
     class IdentityKeyStoreImpl extends libsignal.IdentityKeyStore {
       constructor() { super(); }
+
       async getIdentityKey() {
         const pair = await outerStore.getIdentityKeyPair(username);
         if (!pair) throw new Error('Missing identity key pair');
         return libsignal.PrivateKey.deserialize(Buffer.from(pair.privKey));
       }
+
       async getLocalRegistrationId() {
         const id = await outerStore.getLocalRegistrationId(username);
         if (typeof id !== 'number') throw new Error('Missing registration ID');
         return id;
       }
+
       async isTrustedIdentity(address, identityKey, direction) {
         return await outerStore.isTrustedIdentity(username, address.name(), identityKey.serialize(), direction);
       }
+
       async saveIdentity(address, identityKey) {
         const existing = await outerStore.getIdentity(username, address.name());
         await outerStore.saveIdentity(username, address.name(), identityKey.serialize());
@@ -885,6 +846,7 @@ class QuantumResistantSignalHandler {
         const changed = !Buffer.from(existing).equals(identityKey.serialize());
         return changed ? libsignal.IdentityChange.ReplacedExisting : libsignal.IdentityChange.NewOrUnchanged;
       }
+
       async getIdentity(address) {
         const key = await outerStore.getIdentity(username, address.name());
         return key ? libsignal.PublicKey.deserialize(key) : null;
@@ -951,15 +913,18 @@ class QuantumResistantSignalHandler {
     const outerStore = this.store;
     class KyberPreKeyStoreImpl extends libsignal.KyberPreKeyStore {
       constructor() { super(); }
+
       async saveKyberPreKey(id, record) {
         const ts = Number(record.timestamp());
         await outerStore.storeKyberPreKey(username, id, record.serialize(), ts, false);
       }
+
       async getKyberPreKey(id) {
         const data = await outerStore.loadKyberPreKey(username, id);
         if (!data) throw new Error('Missing kyber prekey ' + id);
         return libsignal.KyberPreKeyRecord.deserialize(Buffer.from(data.record));
       }
+
       async markKyberPreKeyUsed(kyberPreKeyId, signedPreKeyId, baseKey) {
         await outerStore.markKyberPreKeyUsed(username, kyberPreKeyId);
       }
@@ -1001,6 +966,7 @@ class QuantumResistantSignalHandler {
     } catch (e) {
       return;
     }
+    
     if (!obj || typeof obj !== 'object') return;
     for (const key of Object.keys(obj)) {
       const entry = obj[key];
@@ -1112,9 +1078,7 @@ class QuantumResistantSignalHandler {
     }
   }
 
-  /**
-   * Set a peers Kyber public key
-   */
+  // Set a peers Kyber public key
   setPeerKyberPublicKey(peerUsername, kyberPublicKeyBase64) {
     if (!peerUsername || !kyberPublicKeyBase64) return { success: false, error: 'Missing parameters' };
     try {
@@ -1128,16 +1092,12 @@ class QuantumResistantSignalHandler {
     }
   }
 
-  /**
-   * Check if we have a peers Kyber public key
-   */
+  // Check if we have a peers Kyber public key
   hasPeerKyberPublicKey(peerUsername) {
     return this.peerKyberPublicKeys.has(peerUsername);
   }
 
-  /**
-   * Trust a peer's identity key
-   */
+  // Trust a peer's identity key
   async trustPeerIdentity(selfUsername, peerUsername, deviceId = 1) {
     try {
       const address = `${peerUsername}.${deviceId}`;
@@ -1149,9 +1109,7 @@ class QuantumResistantSignalHandler {
     }
   }
 
-  /**
-   * Clean up all data
-   */
+  // Clean up all data
   clearAll() {
     this.store.clearAllData();
     this.pqKyberKeyPairs.clear();

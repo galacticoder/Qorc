@@ -9,7 +9,6 @@ import { PostQuantumHash } from '../crypto/post-quantum-hash.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-
 const RESERVED_JSON_KEYS = new Set(['__proto__', 'prototype', 'constructor']);
 
 function sanitizeParsedJson(value) {
@@ -46,201 +45,99 @@ const DB_FIELD_KEY_FILE_PATH = process.env.DB_FIELD_KEY_FILE
   ? path.resolve(process.env.DB_FIELD_KEY_FILE)
   : path.resolve(__dirname, '../config/generated-db-field-key.txt');
 
-function generateSecurePepper() {
+function generate64bytes() {
   return randomBytes(64).toString('hex');
 }
 
-function generateSecureUserIdSalt() {
-  return randomBytes(64).toString('hex');
-}
-
-function generateSecureDbFieldKey() {
-  return randomBytes(64).toString('hex');
-}
-
-function persistGeneratedPepper(pepper) {
+function persistGeneratedSecret(secret, filePath, secretName, description, warning) {
   try {
-    const dir = path.dirname(PEPPER_FILE_PATH);
+    const dir = path.dirname(filePath);
     if (!fs.existsSync(dir)) {
       fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
     }
-    const header = '# Auto-generated PASSWORD_HASH_PEPPER for quantum-secure password hashing\n';
-    const warning = '# Losing this pepper will invalidate ALL user passwords\n';
+    const header = `# Auto-generated ${secretName} for ${description}\n`;
+    const warnLine = `# ${warning}\n`;
     const backup = '# BACKUP THIS FILE SECURELY - Required for all server instances\n';
-    const content = `${header}${warning}${backup}${pepper}\n`;
-    fs.writeFileSync(PEPPER_FILE_PATH, content, { mode: 0o600 });
-    cryptoLogger.warn('[DB] AUTO-GENERATED PASSWORD_HASH_PEPPER', {
-      path: PEPPER_FILE_PATH,
-      length: pepper.length
+    const content = `${header}${warnLine}${backup}${secret}\n`;
+    fs.writeFileSync(filePath, content, { mode: 0o600 });
+    cryptoLogger.warn(`[DB] AUTO-GENERATED ${secretName}`, {
+      path: filePath,
+      length: secret.length
     });
   } catch (error) {
-    cryptoLogger.error('[DB] Failed to persist generated pepper', {
+    cryptoLogger.error(`[DB] Failed to persist generated ${secretName}`, {
       error: error.message
     });
-    throw new Error('Failed to save auto-generated PASSWORD_HASH_PEPPER');
+    throw new Error(`Failed to save auto-generated ${secretName}`);
   }
 }
 
-function persistGeneratedUserIdSalt(salt) {
-  try {
-    const dir = path.dirname(USER_ID_SALT_FILE_PATH);
-    if (!fs.existsSync(dir)) {
-      fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-    }
-    const header = '# Auto-generated USER_ID_SALT for secure user ID hashing\n';
-    const warning = '# Losing this salt will affect token service user ID hashing\n';
-    const backup = '# BACKUP THIS FILE SECURELY - Required for all server instances\n';
-    const content = `${header}${warning}${backup}${salt}\n`;
-    fs.writeFileSync(USER_ID_SALT_FILE_PATH, content, { mode: 0o600 });
-    cryptoLogger.warn('[DB] AUTO-GENERATED USER_ID_SALT', {
-      path: USER_ID_SALT_FILE_PATH,
-      length: salt.length
-    });
-  } catch (error) {
-    cryptoLogger.error('[DB] Failed to persist generated user ID salt', {
-      error: error.message
-    });
-    throw new Error('Failed to save auto-generated USER_ID_SALT');
-  }
-}
+function loadOrGenerateSecret(envVarName, filePath, secretName, description, warning) {
+  let secret = process.env[envVarName];
 
-function persistGeneratedDbFieldKey(key) {
-  try {
-    const dir = path.dirname(DB_FIELD_KEY_FILE_PATH);
-    if (!fs.existsSync(dir)) {
-      fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-    }
-    const header = '# Auto-generated DB_FIELD_KEY for database field encryption\n';
-    const warning = '# Losing this key will make all encrypted database fields unreadable\n';
-    const backup = '# BACKUP THIS FILE SECURELY - Required for all server instances\n';
-    const content = `${header}${warning}${backup}${key}\n`;
-    fs.writeFileSync(DB_FIELD_KEY_FILE_PATH, content, { mode: 0o600 });
-    cryptoLogger.warn('[DB] AUTO-GENERATED DB_FIELD_KEY', {
-      path: DB_FIELD_KEY_FILE_PATH,
-      length: key.length
-    });
-  } catch (error) {
-    cryptoLogger.error('[DB] Failed to persist generated DB field key', {
-      error: error.message
-    });
-    throw new Error('Failed to save auto-generated DB_FIELD_KEY');
-  }
-}
-
-function loadOrGeneratePepper() {
-  // First check environment variable
-  let pepper = process.env.PASSWORD_HASH_PEPPER;
-
-  if (!pepper) {
-    // Try to load from file
-    if (fs.existsSync(PEPPER_FILE_PATH)) {
+  if (!secret) {
+    if (fs.existsSync(filePath)) {
       try {
-        const content = fs.readFileSync(PEPPER_FILE_PATH, 'utf8');
+        const content = fs.readFileSync(filePath, 'utf8');
         const lines = content.split('\n').filter(line => line && !line.startsWith('#'));
-        pepper = lines[0]?.trim();
-        if (pepper && pepper.length >= 32) {
-          cryptoLogger.info('[DB] Loaded PASSWORD_HASH_PEPPER from file', {
-            path: PEPPER_FILE_PATH,
-            length: pepper.length
+        secret = lines[0]?.trim();
+        if (secret && secret.length >= 32) {
+          cryptoLogger.info(`[DB] Loaded ${secretName} from file`, {
+            path: filePath,
+            length: secret.length
           });
         } else {
-          pepper = null;
+          secret = null;
         }
       } catch (error) {
-        cryptoLogger.error('[DB] Failed to read pepper file', { error: error.message });
-        pepper = null;
+        cryptoLogger.error(`[DB] Failed to read ${secretName} file`, {
+          error: error.message
+        });
+        secret = null;
       }
     }
   }
 
-  if (!pepper || pepper.length < 32) {
-    pepper = generateSecurePepper();
-    persistGeneratedPepper(pepper);
+  if (!secret || secret.length < 32) {
+    secret = generate64bytes();
+    persistGeneratedSecret(secret, filePath, secretName, description, warning);
   }
 
-  return pepper;
-}
-
-function loadOrGenerateUserIdSalt() {
-  let salt = process.env.USER_ID_SALT;
-
-  if (!salt) {
-    // Try to load from file
-    if (fs.existsSync(USER_ID_SALT_FILE_PATH)) {
-      try {
-        const content = fs.readFileSync(USER_ID_SALT_FILE_PATH, 'utf8');
-        const lines = content.split('\n').filter(line => line && !line.startsWith('#'));
-        salt = lines[0]?.trim();
-        if (salt && salt.length >= 32) {
-          cryptoLogger.info('[DB] Loaded USER_ID_SALT from file', {
-            path: USER_ID_SALT_FILE_PATH,
-            length: salt.length
-          });
-        } else {
-          salt = null;
-        }
-      } catch (error) {
-        cryptoLogger.error('[DB] Failed to read user ID salt file', { error: error.message });
-        salt = null;
-      }
-    }
-  }
-
-  if (!salt || salt.length < 32) {
-    salt = generateSecureUserIdSalt();
-    persistGeneratedUserIdSalt(salt);
-  }
-
-  return salt;
-}
-
-function loadOrGenerateDbFieldKey() {
-  let key = process.env.DB_FIELD_KEY;
-
-  if (!key) {
-    // Try to load from file
-    if (fs.existsSync(DB_FIELD_KEY_FILE_PATH)) {
-      try {
-        const content = fs.readFileSync(DB_FIELD_KEY_FILE_PATH, 'utf8');
-        const lines = content.split('\n').filter(line => line && !line.startsWith('#'));
-        key = lines[0]?.trim();
-        if (key && key.length >= 32) {
-          cryptoLogger.info('[DB] Loaded DB_FIELD_KEY from file', {
-            path: DB_FIELD_KEY_FILE_PATH,
-            length: key.length
-          });
-        } else {
-          key = null;
-        }
-      } catch (error) {
-        cryptoLogger.error('[DB] Failed to read DB field key file', { error: error.message });
-        key = null;
-      }
-    }
-  }
-
-  if (!key || key.length < 32) {
-    key = generateSecureDbFieldKey();
-    persistGeneratedDbFieldKey(key);
-  }
-
-  return key;
+  return secret;
 }
 
 const USE_PG = true;
 
-const PASSWORD_PEPPER_ENV = loadOrGeneratePepper();
+const PASSWORD_PEPPER_ENV = loadOrGenerateSecret(
+  'PASSWORD_HASH_PEPPER',
+  PEPPER_FILE_PATH,
+  'PASSWORD_HASH_PEPPER',
+  'password hashing',
+  'Losing this pepper will invalidate ALL user passwords'
+);
 if (!process.env.PASSWORD_HASH_PEPPER) {
   process.env.PASSWORD_HASH_PEPPER = PASSWORD_PEPPER_ENV;
 }
 const PASSWORD_PEPPER = Buffer.from(PASSWORD_PEPPER_ENV, 'utf8');
 
-const USER_ID_SALT_ENV = loadOrGenerateUserIdSalt();
+const USER_ID_SALT_ENV = loadOrGenerateSecret(
+  'USER_ID_SALT',
+  USER_ID_SALT_FILE_PATH,
+  'USER_ID_SALT',
+  'secure user ID hashing',
+  'Losing this salt will affect token service user ID hashing'
+);
 if (!process.env.USER_ID_SALT) {
   process.env.USER_ID_SALT = USER_ID_SALT_ENV;
 }
 
-const DB_FIELD_KEY_ENV = loadOrGenerateDbFieldKey();
+const DB_FIELD_KEY_ENV = loadOrGenerateSecret(
+  'DB_FIELD_KEY',
+  DB_FIELD_KEY_FILE_PATH,
+  'DB_FIELD_KEY',
+  'database field encryption',
+  'Losing this key will make all encrypted database fields unreadable'
+);
 if (!process.env.DB_FIELD_KEY) {
   process.env.DB_FIELD_KEY = DB_FIELD_KEY_ENV;
 }
@@ -341,7 +238,7 @@ class LibsignalFieldEncryption {
   static encryptField(value, fieldName) {
     if (value === null || value === undefined) return null;
     const key = this.deriveFieldKey(fieldName);
-    const nonce = randomBytes(36); // 36-byte nonce for PostQuantumAEAD (12 + 24)
+    const nonce = randomBytes(36);
     const aad = Buffer.from(`libsignal-field:${fieldName}:v1`, 'utf8');
     const aead = new CryptoUtils.PostQuantumAEAD(key);
     const plaintext = Buffer.from(String(value), 'utf8');
@@ -357,7 +254,6 @@ class LibsignalFieldEncryption {
     const base = value.slice(LIBSIGNAL_FIELD_PREFIX.length);
     const data = Buffer.from(base, 'base64');
 
-    // Require at least nonce (36) + tag (32) + 1 byte ciphertext
     if (data.length < 36 + 32 + 1) {
       throw new Error('Encrypted libsignal field payload too short');
     }
@@ -428,7 +324,6 @@ async function tryCreateDatabaseViaConnection(dbName, user, password, host, port
 
   try {
     const { Pool } = await import('pg');
-
     const maintenancePool = new Pool({
       host,
       port,
@@ -441,7 +336,6 @@ async function tryCreateDatabaseViaConnection(dbName, user, password, host, port
     });
 
     try {
-      // Try to create the target database
       const escapedDbName = dbName.replace(/"/g, '""');
       cryptoLogger.info('[DB] Attempting to create database via connection', {
         database: dbName,
@@ -457,7 +351,6 @@ async function tryCreateDatabaseViaConnection(dbName, user, password, host, port
     } catch (err) {
       const msg = err?.message || String(err);
 
-      // Database already exists is OK
       if (/already exists/i.test(msg)) {
         cryptoLogger.info('[DB] Database already exists', { database: dbName });
         await maintenancePool.end();
@@ -523,7 +416,6 @@ export async function getPgPool() {
       console.warn(`[DB] Invalid DB_CONNECT_TIMEOUT value '${process.env.DB_CONNECT_TIMEOUT}', using default: ${connectTimeoutMs}`);
     }
 
-    // If DATABASE_URL is provided, use it directly
     if (process.env.DATABASE_URL) {
       const poolConfig = {
         connectionString: process.env.DATABASE_URL,
@@ -558,7 +450,6 @@ export async function getPgPool() {
             pgPool = null;
           }
 
-          // Don't retry on certain unrecoverable errors
           if (/authentication failed|password|role.*does not exist/i.test(msg)) {
             cryptoLogger.error('[DB] Authentication error, not retrying', { error: msg });
             throw err;
@@ -640,7 +531,6 @@ export async function getPgPool() {
         error: msg,
       });
 
-      // First try docker
       const created = await tryCreateDatabaseViaConnection(defaultDbName, user, passwordFromEnv, host, port, {
         ...sslConfig,
         servername: process.env.DB_TLS_SERVERNAME || host,
@@ -691,7 +581,7 @@ export async function initDatabase() {
 
   const pool = await getPgPool();
 
-  // Core user table
+  // User table
   await pool.query(`
     CREATE TABLE IF NOT EXISTS users (
       username TEXT PRIMARY KEY,
@@ -713,7 +603,7 @@ export async function initDatabase() {
     )
   `);
 
-
+  // Temporary offline message storage
   await pool.query(`
     CREATE TABLE IF NOT EXISTS offline_messages (
       id BIGSERIAL PRIMARY KEY,
@@ -764,7 +654,7 @@ export async function initDatabase() {
     )
   `);
 
-  // Authentication token storage (refresh tokens, families, blacklist, audit, device sessions)
+  // Authentication token storage
   await pool.query(`
     CREATE TABLE IF NOT EXISTS refresh_tokens (
       tokenId TEXT PRIMARY KEY,
@@ -848,7 +738,6 @@ export async function initDatabase() {
     )
   `);
 
-  // Indexes for faster lookups
   await pool.query('CREATE INDEX IF NOT EXISTS idx_block_tokens_hash ON block_tokens(tokenHash)');
   await pool.query('CREATE INDEX IF NOT EXISTS idx_block_tokens_blocker ON block_tokens(blockerHash)');
   await pool.query('CREATE INDEX IF NOT EXISTS idx_block_tokens_expires ON block_tokens(expiresAt) WHERE expiresAt IS NOT NULL');
@@ -885,7 +774,6 @@ export async function initDatabase() {
 
   console.log('[DB] Database tables initialized');
 }
-
 
 export class UserDatabase {
   static encodeStoredPasswordHash(rawHash) {
@@ -1117,9 +1005,7 @@ export class UserDatabase {
     }
   }
 
-  /**
-   * Store sanitized hybrid public keys for a user
-   */
+  // Store sanitized hybrid public keys for a user
   static async updateHybridPublicKeys(username, hybridPublicKeys) {
     if (!username || typeof username !== 'string' || username.length < 3 || username.length > 32) {
       console.error(`[DB] Invalid username for hybrid key update: ${username}`);
@@ -1146,9 +1032,7 @@ export class UserDatabase {
     }
   }
 
-  /**
-   * Load stored hybrid public keys for a user (or null if missing)
-   */
+  // Load stored hybrid public keys for a user
   static async getHybridPublicKeys(username) {
     if (!username || typeof username !== 'string' || username.length < 3 || username.length > 32) {
       console.error(`[DB] Invalid username for hybrid key lookup: ${username}`);
@@ -1321,7 +1205,6 @@ export class LibsignalBundleDB {
 
     const now = Date.now();
     try {
-      // Encrypt libsignal key material at rest (identity + prekeys + signatures)
       const encIdentityKey = LibsignalFieldEncryption.encryptField(bundle.identityKeyBase64, 'identityKeyBase64');
       const encPreKeyPublic = bundle.preKeyPublicBase64
         ? LibsignalFieldEncryption.encryptField(bundle.preKeyPublicBase64, 'preKeyPublicBase64')
@@ -1489,19 +1372,10 @@ export class LibsignalBundleDB {
 }
 
 /**
- * Secure Blocking Database
- * Manages user block lists with end-to-end encryption and zero-knowledge server design
+ * Blocking Database
  */
 export class BlockingDatabase {
-  /**
-   * Store encrypted block list for a user
-   * @param {string} username - Username of the blocker
-   * @param {string} encryptedBlockList - Encrypted block list (client-encrypted)
-   * @param {string} blockListHash - Hash for integrity verification
-   * @param {string} salt - Salt used for encryption
-   * @param {number} version - Version number
-   * @param {number} lastUpdated - Last updated timestamp
-   */
+  // Store encrypted block list for a user
   static async storeEncryptedBlockList(username, encryptedBlockList, blockListHash, salt, version, lastUpdated) {
     if (!username || typeof username !== 'string' || username.length < 3 || username.length > 32) {
       console.error(`[BLOCKING] Invalid username: ${username}`);
@@ -1564,11 +1438,7 @@ export class BlockingDatabase {
     }
   }
 
-  /**
-   * Retrieve encrypted block list for a user
-   * @param {string} username - Username of the blocker
-   * @returns {Object|null} Block list data or null if not found
-   */
+  // Retrieve encrypted block list for a user
   static async getEncryptedBlockList(username) {
     if (!username || typeof username !== 'string' || username.length < 3 || username.length > 32) {
       console.error(`[BLOCKING] Invalid username: ${username}`);
@@ -1608,12 +1478,7 @@ export class BlockingDatabase {
     }
   }
 
-  /**
-   * Store block tokens for server-side filtering
-   * Block tokens are cryptographic hashes that allow the server to filter messages
-   * without knowing the actual usernames or relationships
-   * @param {Array} blockTokens - Array of {tokenHash, blockerHash, blockedHash, expiresAt}
-   */
+  // Store block tokens for server-side filtering
   static async storeBlockTokens(blockTokens, blockerHashForClear) {
     if (Array.isArray(blockTokens) && blockTokens.length === 0) {
       try {
@@ -1680,7 +1545,6 @@ export class BlockingDatabase {
             );
           }
 
-          // Insert new tokens
           for (const token of normalizedTokens) {
             await client.query(`
               INSERT INTO block_tokens (tokenHash, blockerHash, blockedHash, createdAt, expiresAt)
@@ -1710,7 +1574,6 @@ export class BlockingDatabase {
             db.prepare('DELETE FROM block_tokens WHERE blockerHash = ?').run(blockerHash);
           }
 
-          // Insert new tokens
           for (const token of tokens) {
             insertStmt.run(
               token.tokenHash,
@@ -1732,12 +1595,7 @@ export class BlockingDatabase {
     }
   }
 
-  /**
-   * Check if a message should be blocked based on block tokens
-   * @param {string} fromHash - Hash of sender username
-   * @param {string} toHash - Hash of recipient username  
-   * @returns {boolean} True if message should be blocked
-   */
+  // Check if a message should be blocked based on block tokens
   static async isMessageBlocked(fromHash, toHash) {
     const validLen = (s) => typeof s === 'string' && /^[a-f0-9]+$/i.test(s) && (s.length === 32 || s.length === 64 || s.length === 128);
     if (!validLen(fromHash) || !validLen(toHash)) {
@@ -1750,7 +1608,7 @@ export class BlockingDatabase {
 
     try {
       const now = Date.now();
-      // Case 1: recipient has blocked sender (blocker = to, blocked = from)
+      // Case 1: recipient has blocked sender
       if (USE_PG) {
         const pool = await getPgPool();
         const { rows } = await pool.query(
@@ -1765,7 +1623,7 @@ export class BlockingDatabase {
         if (row) return true;
       }
 
-      // Case 2: sender has blocked recipient (blocker = from, blocked = to)
+      // Case 2: sender has blocked recipient
       if (USE_PG) {
         const pool = await getPgPool();
         const { rows } = await pool.query(
@@ -1780,7 +1638,6 @@ export class BlockingDatabase {
         if (row2) return true;
       }
 
-      // No matching block found
       return false;
     } catch (error) {
       console.error('[BLOCKING] Error checking block status:', error);
@@ -1788,9 +1645,7 @@ export class BlockingDatabase {
     }
   }
 
-  /**
-   * Clean up expired block tokens
-   */
+  // Clean up expired block tokens
   static async cleanupExpiredTokens() {
     const now = Date.now();
 
@@ -1818,17 +1673,9 @@ export class BlockingDatabase {
   }
 }
 
-/**
- * Avatar storage - stores encrypted avatar envelopes
- */
+// Avatar storage
 export class AvatarDatabase {
-  /**
-   * Store or update an encrypted avatar
-   * @param {string} username - Username
-   * @param {string} encryptedEnvelope - JSON-stringified encrypted envelope
-   * @param {boolean} shareWithOthers - Whether avatar is shared publicly
-   * @param {string|null} publicData - Optional public avatar data (if shareWithOthers=true)
-   */
+  // Store or update an encrypted avatar
   static async storeAvatar(username, encryptedEnvelope, shareWithOthers = false, publicData = null) {
     if (!username || typeof username !== 'string') {
       throw new Error('Invalid username');
@@ -1865,10 +1712,7 @@ export class AvatarDatabase {
     }
   }
 
-  /**
-   * Get own encrypted avatar (returns full encrypted envelope)
-   * @param {string} username - Username
-   */
+  // Get own encrypted avatar
   static async getOwnAvatar(username) {
     if (!username || typeof username !== 'string') {
       return null;
@@ -1897,10 +1741,7 @@ export class AvatarDatabase {
     }
   }
 
-  /**
-   * Get a peer's public avatar
-   * @param {string} username - Username of the peer
-   */
+  // Get a peer's public avatar
   static async getPeerAvatar(username) {
     if (!username || typeof username !== 'string') {
       return null;
@@ -1929,10 +1770,7 @@ export class AvatarDatabase {
     }
   }
 
-  /**
-   * Delete avatar
-   * @param {string} username - Username
-   */
+  // Delete avatar
   static async deleteAvatar(username) {
     if (!username || typeof username !== 'string') {
       return;

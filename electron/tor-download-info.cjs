@@ -1,11 +1,14 @@
 const https = require('https');
 
+// Download URLs
 const DEFAULT_UPDATE_URL = 'https://aus1.torproject.org/torbrowser/update_3/release/downloads.json';
 const DEFAULT_DIST_BASE = 'https://dist.torproject.org/torbrowser';
 
+// Request limits
 const MAX_REDIRECTS = 5;
 const JSON_TIMEOUT_MS = 15_000;
 
+// Get JSON with redirects
 function httpGetJson(url, redirectsLeft = MAX_REDIRECTS) {
   return new Promise((resolve, reject) => {
     const req = https.get(url, { timeout: JSON_TIMEOUT_MS }, (res) => {

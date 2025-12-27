@@ -61,15 +61,12 @@ class TokenService {
   }
 
   async initialize() {
-    // If already initialized, return immediately
     if (this.initialized) return;
 
-    // If initialization is already in progress, wait for it to complete
     if (this.initializationPromise) {
       return await this.initializationPromise;
     }
 
-    // Create the initialization promise to prevent concurrent initialization
     this.initializationPromise = this.doInitialize();
 
     try {
@@ -84,10 +81,8 @@ class TokenService {
 
     const lock = await this.acquireLock(20000);
     try {
-      // Re-check initialization status after acquiring lock
       if (this.initialized) return;
 
-      // Initialize unified key encryption system
       this.keyEncryption = new UnifiedKeyEncryption(this.keyPairPath);
       const kek = await this.deriveKeyEncryptionKey();
       await this.keyEncryption.initialize(kek);
@@ -104,22 +99,18 @@ class TokenService {
     console.log(`[TOKEN] TokenService initialized`);
   }
 
-  /**
-   * Load or generate all cryptographic keys
-   */
+  // Load or generate all cryptographic keys
   async loadOrGenerateAllKeys() {
     await this.loadOrGeneratePostQuantumKeys();
   }
 
 
-  /**
-   * Load or generate post-quantum cryptographic keys (ML-DSA + ML-KEM)
-   */
+  // Load or generate post-quantum cryptographic keys (ML-DSA + ML-KEM)
   async loadOrGeneratePostQuantumKeys() {
     const mldsaPublicPath = path.join(this.keyPairPath, 'mldsa-public.key');
     const mlkemPublicPath = path.join(this.keyPairPath, 'mlkem-public.key');
 
-    // Try to load existing keys (encrypted private + public files)
+    // Try to load existing keys
     try {
       const hasMldsa = await this.keyEncryption.hasEncryptedKey('mldsa');
       const hasMlkem = await this.keyEncryption.hasEncryptedKey('mlkem');
@@ -144,7 +135,6 @@ class TokenService {
     const mlkem = new MlKem1024();
     const [mlkemPublicKey, mlkemPrivateKey] = await mlkem.generateKeyPair();
 
-    // Ensure config directory exists
     await fs.mkdir(this.keyPairPath, { recursive: true });
 
     // Save public keys
@@ -153,7 +143,6 @@ class TokenService {
       fs.writeFile(mlkemPublicPath, mlkemPublicKey, { mode: 0o644 })
     ]);
 
-    // Encrypt and persist private keys
     await this.keyEncryption.encryptAndSavePrivateKey('mldsa', mldsaKeyPair.secretKey, 'mldsa');
     await this.keyEncryption.encryptAndSavePrivateKey('mlkem', mlkemPrivateKey, 'mlkem');
 
@@ -165,21 +154,15 @@ class TokenService {
     console.log('[TOKEN] Generated post-quantum keys');
   }
 
-
-
-  /**
-   * Generate access token (7-day lifetime, same as refresh tokens)
-   */
+  // Generate access token
   async generateAccessToken(userId, deviceId = null, scopes = ['chat:read', 'chat:write'], securityContext = {}, tlsBinding = null) {
     if (!this.initialized) await this.initialize();
 
     const now = Math.floor(Date.now() / 1000);
     const tokenId = await this.generateSecureTokenId();
 
-    // Calculate risk score from security context
     const riskScore = this.calculateRiskScore(securityContext);
 
-    // Enhanced payload with security context
     const payload = {
       iss: 'Qor-chat-server',
       sub: await this.hashUserId(userId),
@@ -187,22 +170,15 @@ class TokenService {
       iat: now,
       exp: now + (7 * 24 * 60 * 60),
       jti: tokenId,
-
-      // Custom claims
       type: 'access',
       scopes: this.validateScopes(scopes),
-
       nbf: now,
       auth_time: now,
       nonce: await this.generateNonce(),
-
-      // Security metadata
       sec: {
         risk: riskScore,
         ctx: this.buildSecurityContext(securityContext)
       },
-
-      // Anti-replay protection
       cnf: {
         jkt: await this.generateJWKThumbprint()
       }
@@ -219,9 +195,7 @@ class TokenService {
     return this.signTokenWithIntegrity(payload);
   }
 
-  /**
-   * Generate refresh token (long-lived, 7 days)
-   */
+  // Generate refresh token
   async generateRefreshToken(userId, deviceId = null, family = null, securityContext = {}, tlsBinding = null) {
     if (!this.initialized) await this.initialize();
 
@@ -229,7 +203,6 @@ class TokenService {
     const tokenId = await this.generateSecureTokenId();
     const familyId = family || await this.generateSecureTokenId();
 
-    // Calculate risk score from security context
     const riskScore = this.calculateRiskScore(securityContext);
 
     const payload = {
@@ -239,17 +212,11 @@ class TokenService {
       iat: now,
       exp: now + (7 * 24 * 60 * 60),
       jti: tokenId,
-
-      // Custom claims
       type: 'refresh',
       family: familyId,
-
       nbf: now,
       nonce: await this.generateNonce(),
-
-      // Rotation tracking
       generation: 1,
-
       sec: {
         risk: riskScore
       }
@@ -266,10 +233,7 @@ class TokenService {
     return this.signTokenWithIntegrity(payload);
   }
 
-  /**
-   * Generate device access token for reconnection
-   * Slightly longer lived (1 hour) for reconnection scenarios
-   */
+  // Generate device access token for reconnection
   async generateDeviceToken(userId, deviceId, deviceFingerprint) {
     if (!this.initialized) await this.initialize();
 
@@ -293,9 +257,7 @@ class TokenService {
     return this.signTokenWithIntegrity(payload);
   }
 
-  /**
-   * Sign JWT token
-   */
+  // Sign JWT token
   async signTokenWithIntegrity(payload) {
     payload._integrity = {
       version: '3.0-pq-only',
@@ -329,22 +291,18 @@ class TokenService {
     const signingInput = `${encodedHeader}.${encodedPayload}`;
     const signingBuffer = Buffer.from(signingInput);
 
-    // Add key commitment and algorithm/domain separation
     const keyCommitment = await this.generateKeyCommitment();
     const commitmentBytes = Buffer.from(keyCommitment, 'hex');
     const signingBufferWithCommitment = Buffer.concat([signingBuffer, commitmentBytes]);
 
-    // Primary PQ signature (ML-DSA-87) with domain separation
     const mldsaSignature = await this.signWithMLDSA(
       Buffer.concat([Buffer.from('ALG:ML-DSA-87:v2'), signingBufferWithCommitment])
     );
 
-    // BLAKE3 MAC with HKDF-derived key
     const macKey = await this.deriveQuantumIntegrityKey('blake3-mac');
     const blake3MacKey = hkdf(blake3, macKey, Buffer.from('blake3-mac-salt'), Buffer.from('blake3-mac'), 32);
     const blake3Mac = blake3(signingBufferWithCommitment, { key: blake3MacKey });
 
-    // Construct PQ-centric signature bundle
     const signatureBundle = {
       version: '3.0-pq-only',
       algorithms: {
@@ -366,26 +324,18 @@ class TokenService {
   }
 
 
-  /**
-   * Verify and decode JWT token
-   * @param {string} token - JWT token to verify
-   * @param {string|null} expectedType - Expected token type ('access' or 'refresh')
-   * @param {boolean} skipReplayCheck - Skip nonce replay protection (for multiple verifications in same request)
-   */
+  // Verify and decode JWT token
   async verifyToken(token, expectedType = null, skipReplayCheck = false) {
     if (!this.initialized) await this.initialize();
     return await this.verifyQuantumToken(token, expectedType, skipReplayCheck);
   }
 
 
-  /**
-   * Create token pair (access + refresh)
-   */
+  // Create token pair (access + refresh)
   async createTokenPair(userId, deviceId = null, tlsBinding = null, existingFamily = null) {
     const family = existingFamily || await this.generateSecureTokenId();
 
     const [accessToken, refreshToken] = await Promise.all([
-      // Do not bind any user metadata; privacy-first tokens
       this.generateAccessToken(userId, deviceId, undefined, {}, tlsBinding),
       this.generateRefreshToken(userId, deviceId, family, {}, tlsBinding)
     ]);
@@ -410,9 +360,7 @@ class TokenService {
     };
   }
 
-  /**
-   * Refresh access token using refresh token
-   */
+  // Refresh access token using refresh token
   async refreshAccessToken(refreshToken) {
     const payload = await this.verifyToken(refreshToken, 'refresh');
 
@@ -441,9 +389,7 @@ class TokenService {
     };
   }
 
-  /**
-   * Rotate refresh token (generate new refresh token)
-   */
+  // Rotate refresh token (generate new refresh token)
   async rotateRefreshToken(refreshToken) {
     const payload = await this.verifyToken(refreshToken, 'refresh');
 
@@ -456,11 +402,8 @@ class TokenService {
     return newRefreshToken;
   }
 
-  /**
-   * Generate token ID with maximum entropy from multiple sources
-   */
+  // Generate token ID with maximum entropy from multiple sources
   async generateSecureTokenId() {
-    // Multiple entropy sources for quantum resistance
     const classicalEntropy = crypto.randomBytes(CRYPTO_CONFIG.TOKEN_ENTROPY_BYTES);
     const timingEntropy = await this.generateQuantumTimingEntropy();
     const systemEntropy = await this.generateSystemEntropy();
@@ -479,13 +422,10 @@ class TokenService {
     return Buffer.from(finalHash).toString('hex');
   }
 
-  /**
-   * Generate timing entropy with multiple unpredictable sources
-   */
+  // Generate timing entropy with multiple unpredictable sources
   async generateQuantumTimingEntropy() {
     const measurements = [];
 
-    // Multiple timing measurements for quantum resistance
     for (let round = 0; round < 5; round++) {
       const start = process.hrtime.bigint();
 
@@ -510,15 +450,12 @@ class TokenService {
       await new Promise(resolve => setTimeout(resolve, sleepMs));
     }
 
-    // Combine all timing measurements
     const timingData = Buffer.from(measurements.map(m => m.toString(16)).join(''));
 
     return shake256(timingData, 32);
   }
 
-  /**
-   * Generate system-level entropy from multiple sources
-   */
+  // Generate system-level entropy from multiple sources
   async generateSystemEntropy() {
     const sources = [];
 
@@ -544,13 +481,10 @@ class TokenService {
     // Combine all sources
     const combined = Buffer.concat(sources);
 
-    // Hash with BLAKE3 for speed and security
     return blake3(combined).slice(0, 24);
   }
 
-  /**
-   * Generate cryptographic nonce
-   */
+  // Generate cryptographic nonce
   async generateNonce() {
     const timestamp = BigInt(Date.now());
     const random = crypto.randomBytes(24);
@@ -558,9 +492,7 @@ class TokenService {
     return blake3(combined).slice(0, 16).toString('hex'); // 128-bit nonce
   }
 
-  /**
-   * Hash user ID for privacy protection in tokens
-   */
+  // Hash user ID for privacy protection in tokens
   async hashUserId(userId) {
     const salt = process.env.USER_ID_SALT;
 
@@ -575,9 +507,7 @@ class TokenService {
     return blake3(combined, { key: userIdKey }).slice(0, 16).toString('hex');
   }
 
-  /**
-   * Validate and sanitize token scopes
-   */
+  // Validate and sanitize token scopes
   validateScopes(scopes) {
     const allowedScopes = [
       'chat:read', 'chat:write', 'chat:delete', 'chat:reconnect',
@@ -595,9 +525,7 @@ class TokenService {
     );
   }
 
-  /**
-   * Build security context for tokens
-   */
+  // Build security context for tokens
   buildSecurityContext(context) {
     if (!context || typeof context !== 'object') {
       return { risk: 'low' };
@@ -610,9 +538,7 @@ class TokenService {
     };
   }
 
-  /**
-   * Calculate risk score based on context
-   */
+  // Calculate risk score based on context
   calculateRiskScore(context) {
     let score = 0;
 
@@ -625,17 +551,13 @@ class TokenService {
     return 'high';
   }
 
-  /**
-   * Hash user agent for fingerprinting
-   */
+  // Hash user agent for fingerprinting
   hashUserAgent(userAgent) {
     if (!userAgent) return 'unknown';
     return blake3(Buffer.from(userAgent.substring(0, 200))).slice(0, 8).toString('hex');
   }
 
-  /**
-   * Create device binding for better security
-   */
+  // Create device binding
   async createDeviceBinding(deviceId, context) {
     if (!deviceId) return null;
 
@@ -651,9 +573,7 @@ class TokenService {
       .slice(0, 16).toString('hex');
   }
 
-  /**
-   * Generate JWK thumbprint for key binding
-   */
+  // Generate JWK thumbprint for key binding
   async generateJWKThumbprint() {
     if (!this.mldsaPublicKey) return null;
     const jwk = await this.publicKeyToJWK();
@@ -662,9 +582,7 @@ class TokenService {
     return blake3(Buffer.from(canonicalJwk)).slice(0, 16).toString('hex');
   }
 
-  /**
-   * Convert public key to JWK-like format (PQ)
-   */
+  // Convert public key to JWK-like format
   async publicKeyToJWK() {
     if (!this.mldsaPublicKey) {
       throw new Error('ML-DSA public key not initialized');
@@ -681,9 +599,7 @@ class TokenService {
   }
 
 
-  /**
-   * Calculate payload checksum for integrity
-   */
+  // Calculate payload checksum for integrity
   async calculatePayloadChecksum(payload) {
     const payloadCopy = { ...payload };
     delete payloadCopy._integrity;
@@ -692,9 +608,7 @@ class TokenService {
     return blake3(Buffer.from(canonical)).slice(0, 16).toString('hex');
   }
 
-  /**
-   * Get certificate thumbprint
-   */
+  // Get certificate thumbprint
   async getCertThumbprint() {
     if (!this.mldsaPublicKey) {
       throw new Error('ML-DSA public key not initialized');
@@ -702,9 +616,7 @@ class TokenService {
     return Buffer.from(blake3(Buffer.from(this.mldsaPublicKey))).toString('base64url');
   }
 
-  /**
-   * Get certificate thumbprint SHA256 for security
-   */
+  // Get certificate thumbprint SHA256
   async getCertThumbprintSHA256() {
     if (!this.mldsaPublicKey) {
       throw new Error('ML-DSA public key not initialized');
@@ -714,10 +626,7 @@ class TokenService {
     return sha256.digest('base64url');
   }
 
-
-  /**
-   * Derive key encryption key for private key protection using secure KDF
-   */
+  // Derive key encryption key for private key protection using secure KDF
   async deriveKeyEncryptionKey() {
     let secret = process.env.KEY_ENCRYPTION_SECRET;
     if (!secret) {
@@ -728,7 +637,6 @@ class TokenService {
       throw new Error('KEY_ENCRYPTION_SECRET must be at least 32 characters');
     }
 
-    // Generate and persist a strong random salt per installation if not exists
     const saltPath = path.join(this.keyPairPath, 'kek.salt');
     let salt;
 
@@ -755,7 +663,6 @@ class TokenService {
       }
     }
 
-    // Use Argon2id for key derivation
     try {
       const derived = await argon2.hash(secret, {
         type: argon2.argon2id,
@@ -773,9 +680,7 @@ class TokenService {
     }
   }
 
-  /**
-   * Derive device binding key
-   */
+  // Derive device binding key
   async deriveDeviceBindingKey(deviceId) {
     const salt = blake3(Buffer.concat([Buffer.from(deviceId), Buffer.from('device-binding')])).slice(0, 32);
 
@@ -787,9 +692,7 @@ class TokenService {
     });
   }
 
-  /**
-   * Sign with ML-DSA-87 
-   */
+  // Sign with ML-DSA-87
   async signWithMLDSA(data) {
     const msg = data instanceof Buffer ? new Uint8Array(data) : data;
     let sk = this.mldsaPrivateKey;
@@ -800,10 +703,7 @@ class TokenService {
     return ml_dsa87.sign(msg, sk);
   }
 
-
-  /**
-   * Derive quantum-resistant integrity key using HKDF with BLAKE3 (PQ-only inputs)
-   */
+  // Derive quantum-resistant integrity key using HKDF with BLAKE3
   async deriveQuantumIntegrityKey(domain = 'default') {
     const mldsaKeyMaterial = this.mldsaPublicKey ? Buffer.from(this.mldsaPublicKey).slice(0, 64) : Buffer.alloc(64);
     const mlkemKeyMaterial = this.mlkemPublicKey ? Buffer.from(this.mlkemPublicKey).slice(0, 64) : Buffer.alloc(64);
@@ -821,9 +721,7 @@ class TokenService {
     return hkdf(blake3, combinedKeyMaterial, salt, info, 64);
   }
 
-  /**
-   * Calculate checksum
-   */
+  // Calculate checksum
   async calculateQuantumChecksum(payload) {
     const payloadCopy = { ...payload };
     delete payloadCopy._integrity;
@@ -831,15 +729,11 @@ class TokenService {
     const canonical = JSON.stringify(payloadCopy, Object.keys(payloadCopy).sort());
     const data = Buffer.from(canonical);
 
-    // Use multiple hash functions 
     const blake3Hash = blake3(data);
     const sha3Hash = sha3_512(data);
     const shakeHash = shake256(data, 32);
-
-    // Combine all hashes
     const combined = Buffer.concat([blake3Hash, sha3Hash, shakeHash]);
 
-    // Final hash with BLAKE3
     return blake3(combined).slice(0, 24).toString('hex');
   }
 
@@ -854,20 +748,13 @@ class TokenService {
     return Buffer.from(blake3(keys)).toString('hex');
   }
 
-  /**
-   * Get ML-DSA key identifier
-   */
+  // Get ML-DSA key identifier
   async getMLDSAKeyId() {
     if (!this.mldsaPublicKey) return 'mldsa-default';
     return blake3(this.mldsaPublicKey).slice(0, 8).toString('hex');
   }
 
-  /**
-   * Verify quantum-resistant hybrid token
-   * @param {string} token - JWT token to verify
-   * @param {string|null} expectedType - Expected token type ('access' or 'refresh')
-   * @param {boolean} skipReplayCheck - Skip nonce replay protection (for multiple verifications in same request)
-   */
+  // Verify hybrid token
   async verifyQuantumToken(token, expectedType = null, _skipReplayCheck = false) {
     if (!this.initialized) await this.initialize();
     if (!token || typeof token !== 'string') {
@@ -892,27 +779,21 @@ class TokenService {
 
     const signingInput = `${encodedHeader}.${encodedPayload}`;
     const signingBuffer = Buffer.from(signingInput);
-
-    // Decode signature bundle
     const signatureBundle = parseJsonOrThrow(
       this.base64UrlDecode(encodedSignature),
       'Invalid token signature bundle'
     );
 
-
     if (signatureBundle.version !== '3.0-pq-only') {
       throw new Error('Unsupported signature version');
     }
 
-    // Reconstruct the same signing buffer used during token creation
     const keyCommitment = signatureBundle.key_commitment;
     if (!keyCommitment) {
       throw new Error('Missing key commitment in signature bundle');
     }
     const commitmentBytes = Buffer.from(keyCommitment, 'hex');
     const signingBufferWithCommitment = Buffer.concat([signingBuffer, commitmentBytes]);
-
-    // Verify PQ signature and BLAKE3 MAC using the same augmented buffer
     const signatureNames = ['ML-DSA-87', 'BLAKE3-MAC'];
     const verificationResults = await Promise.all([
       this.verifyMLDSASignature(
@@ -925,8 +806,6 @@ class TokenService {
       )
     ]);
 
-
-    // Both signature and MAC must be valid 
     const allValid = verificationResults.every(result => result === true);
     if (!allValid) {
       const failedSignatures = signatureNames.filter((name, index) => !verificationResults[index]);
@@ -934,16 +813,13 @@ class TokenService {
       throw new Error('Signature verification failed');
     }
 
-    // Decode and validate payload
     const payload = parseJsonOrThrow(
       this.base64UrlDecode(encodedPayload),
       'Invalid token payload'
     );
     const now = Math.floor(Date.now() / 1000);
-
-    // increased quantum-resistant validation
+ 
     await this.validateQuantumPayload(payload, now, expectedType);
-
     return payload;
   }
 
@@ -979,9 +855,7 @@ class TokenService {
     }
   }
 
-  /**
-   * Validate quantum-resistant payload
-   */
+  // Validate quantum-resistant payload
   async validateQuantumPayload(payload, now, expectedType) {
     if (payload.exp && payload.exp < now) {
       throw new Error('Token expired');
@@ -1003,7 +877,6 @@ class TokenService {
       throw new Error(`Expected ${expectedType} token, got ${payload.type}`);
     }
 
-    // Quantum-specific validations
     if (!payload._integrity || payload._integrity.version !== '3.0-pq-only') {
       throw new Error('Invalid quantum integrity metadata');
     }
@@ -1012,7 +885,6 @@ class TokenService {
       throw new Error('Insufficient security level');
     }
 
-    // Verify quantum checksum
     const expectedChecksum = payload._integrity.checksum;
     const computedChecksum = await this.calculateQuantumChecksum(payload);
     const ok = this.constantTimeCompare(Buffer.from(expectedChecksum, 'hex'), Buffer.from(computedChecksum, 'hex'));
@@ -1021,13 +893,9 @@ class TokenService {
     }
   }
 
-  /**
-   * Constant-time comparison to prevent timing attacks
-   */
+  // Constant-time comparison to prevent timing attacks
   constantTimeCompare(a, b) {
     if (!a || !b) return false;
-
-    // Convert to Buffers if needed
     const bufferA = Buffer.isBuffer(a) ? a : Buffer.from(a);
     const bufferB = Buffer.isBuffer(b) ? b : Buffer.from(b);
 
@@ -1053,9 +921,7 @@ class TokenService {
     }
   }
 
-  /**
-   * Generate device fingerprint from request headers and client info
-   */
+  // Generate device fingerprint from request headers and client info
   generateDeviceFingerprint(userAgent = '', clientVersion = '', additionalData = {}) {
     const data = {
       userAgent: userAgent.substring(0, 200),
@@ -1069,10 +935,7 @@ class TokenService {
       .substring(0, 16);
   }
 
-
-  /**
-   * Base64URL encoding 
-   */
+  // Base64URL encoding 
   base64UrlEncode(data) {
     const buffer = Buffer.isBuffer(data) ? data : Buffer.from(data);
     return buffer
@@ -1082,18 +945,14 @@ class TokenService {
       .replace(/=/g, '');
   }
 
-  /**
-   * Base64URL decoding
-   */
+  // Base64URL decoding
   base64UrlDecode(encoded) {
     const padded = encoded + '='.repeat((4 - (encoded.length % 4)) % 4);
     const standard = padded.replace(/-/g, '+').replace(/_/g, '/');
     return Buffer.from(standard, 'base64');
   }
 
-  /**
-   * Validate token structure without verifying signature (for blacklist checks)
-   */
+  // Validate token structure without verifying signature (for blacklist checks)
   parseTokenUnsafe(token) {
     if (!token || typeof token !== 'string') {
       return null;
@@ -1176,11 +1035,7 @@ class TokenService {
     try { await fs.unlink(this.lockPath); } catch { }
   }
 
-
-  /**
-   * Get or create a local secret file with strong entropy
-   * Returns a hex-encoded string of at least minBytes length
-   */
+  // Get or create a local secret file with strong entropy
   async getOrCreateLocalSecret(fileName, minBytes = 48, forceRegen = false) {
     await fs.mkdir(this.keyPairPath, { recursive: true });
     const secretPath = path.join(this.keyPairPath, fileName);
@@ -1192,7 +1047,7 @@ class TokenService {
         if (secret && secret.length >= 32) return secret;
       }
     } catch { }
-    // Generate new secret
+
     const bytes = crypto.randomBytes(Math.max(32, minBytes));
     secret = bytes.toString('hex');
     try {
@@ -1210,16 +1065,9 @@ class TokenService {
     return secret;
   }
 
-  /**
-   * Validate access and refresh tokens for a user
-   * @param {string} accessToken - The access token to validate
-   * @param {string} refreshToken - The refresh token to validate
-   * @param {string} username - The username associated with the tokens
-   * @returns {Promise<boolean>} - True if tokens are valid, false otherwise
-   */
+  // Validate access and refresh tokens for a user
   async validateTokens(accessToken, refreshToken, username) {
     try {
-      // Ensure service is initialized
       await this.initialize();
 
       const accessPayload = await this.verifyToken(accessToken, 'access', true);
@@ -1247,7 +1095,6 @@ class TokenService {
         return false;
       }
 
-      // Ensure the associated account exists in the primary database
       try {
         const { UserDatabase } = await import('../database/database.js');
         const user = await UserDatabase.loadUser(username);
@@ -1260,7 +1107,6 @@ class TokenService {
         return false;
       }
 
-      // Check if tokens are not blacklisted (fail closed for security)
       try {
         const { TokenDatabase } = await import('./token-database.js');
         if (!TokenDatabase || typeof TokenDatabase.isTokenBlacklisted !== 'function') {

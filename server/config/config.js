@@ -7,12 +7,7 @@ function parsePort(portValue) {
   return isNaN(parsed) ? 8443 : parsed;
 }
 
-/**
- * Generates a cryptographically random number of attempts between min and max
- * @param {number} min - Minimum attempts (default 5)
- * @param {number} max - Maximum attempts (default 10)
- * @returns {number} Random number of attempts
- */
+// Generates a cryptographically random number of attempts between min and max
 function getRandomizedAttempts(min = 5, max = 10) {
   const range = max - min + 1;
   const randomBytes = crypto.randomBytes(4);

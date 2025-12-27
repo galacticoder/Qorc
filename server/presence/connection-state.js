@@ -81,7 +81,6 @@ async function enforceRateLimit(key, limit = RATE_LIMIT_MAX_REQUESTS, windowMs =
       const rateLimitKey = `ratelimit:${key}`;
       const count = await client.incr(rateLimitKey);
 
-      // Set expiry on first request (atomic with INCR)
       if (count === 1) {
         await client.pexpire(rateLimitKey, windowMs);
       }
@@ -101,9 +100,7 @@ async function enforceRateLimit(key, limit = RATE_LIMIT_MAX_REQUESTS, windowMs =
   }
 }
 
-/**
- * Connection state manager
- */
+// Connection state manager
 export class ConnectionStateManager {
   static async recordServerStartup() {
     try {
@@ -116,9 +113,7 @@ export class ConnectionStateManager {
     }
   }
 
-  /**
-   * Create a new session and return session ID
-   */
+  // Create a new session and return session ID
   static async createSession(username = null) {
     const normalizedUsername = normalizeUsername(username);
     const sessionId = generateSessionId();
@@ -143,9 +138,7 @@ export class ConnectionStateManager {
     return sessionId;
   }
 
-  /**
-   * Get connection state by session ID
-   */
+  // Get connection state by session ID
   static async getState(sessionId) {
     if (!isValidSessionId(sessionId)) return null;
 
@@ -161,9 +154,7 @@ export class ConnectionStateManager {
     }
   }
 
-  /**
-   * Get authentication state for a user (for reconnection recovery)
-   */
+  // Get authentication state for a user
   static async getUserAuthState(username) {
     const normalizedUsername = normalizeUsername(username);
     if (!normalizedUsername) return null;
@@ -180,9 +171,7 @@ export class ConnectionStateManager {
     }
   }
 
-  /**
-   * Store authentication state for a user
-   */
+  // Store authentication state for a user
   static async storeUserAuthState(username, authState) {
     const normalizedUsername = normalizeUsername(username);
     if (!normalizedUsername) return false;
@@ -204,9 +193,7 @@ export class ConnectionStateManager {
     }
   }
 
-  /**
-   * Clear authentication state for a user (on explicit logout)
-   */
+  // Clear authentication state for a user
   static async clearUserAuthState(username) {
     const normalizedUsername = normalizeUsername(username);
     if (!normalizedUsername) return;
@@ -220,9 +207,7 @@ export class ConnectionStateManager {
     }
   }
 
-  /**
-   * Refresh user auth state TTL (call on activity)
-   */
+  // Refresh user auth state TTL
   static async refreshUserAuthState(username) {
     const normalizedUsername = normalizeUsername(username);
     if (!normalizedUsername) return false;
@@ -245,15 +230,12 @@ export class ConnectionStateManager {
     }
   }
 
-  /**
-   * Update connection state atomically using Lua
-   */
+  // Update connection state
   static async updateState(sessionId, updates) {
     if (!isValidSessionId(sessionId)) return false;
     try {
       await enforceRateLimit(`session:update:${sessionId}`, 500);
       return await withRedisClient(async (client) => {
-        // Prepare the Lua script
         const luaScript = `
           local sessionKey = KEYS[1]
           local sessionId = ARGV[1]
@@ -374,9 +356,7 @@ export class ConnectionStateManager {
     }
   }
 
-  /**
-   * Cleanup session state when connection closes
-   */
+  // Cleanup session state when connection closes
   static async cleanupConnection(sessionId) {
     if (!isValidSessionId(sessionId)) return false;
 
@@ -422,9 +402,7 @@ export class ConnectionStateManager {
     }
   }
 
-  /**
-   * Refresh session TTL (call on activity)
-   */
+  // Refresh session TTL
   static async refreshSession(sessionId) {
     if (!isValidSessionId(sessionId)) return false;
     try {
@@ -462,9 +440,7 @@ export class ConnectionStateManager {
     }
   }
 
-  /**
-   * Delete session (on disconnect)
-   */
+  // Delete session
   static async deleteSession(sessionId) {
     if (!isValidSessionId(sessionId)) return;
 
@@ -500,9 +476,7 @@ export class ConnectionStateManager {
     }
   }
 
-  /**
-   * Check if user already has an active session (prevent duplicate logins)
-   */
+  // Check if user already has an active session
   static async getUserActiveSession(username) {
     const normalizedUsername = normalizeUsername(username);
     if (!normalizedUsername) return null;
@@ -522,9 +496,7 @@ export class ConnectionStateManager {
     }
   }
 
-  /**
-   * Get session statistics (for monitoring)
-   */
+  // Get session statistics
   static async getSessionStats() {
     try {
       return await withRedisClient(async (client) => {
@@ -562,9 +534,7 @@ export class ConnectionStateManager {
     }
   }
 
-  /**
-   * Cleanup expired sessions (periodic maintenance)
-   */
+  // Cleanup expired sessions (periodic maintenance)
   static async cleanupExpiredSessions() {
     try {
       return await withRedisClient(async (client) => {
@@ -606,9 +576,7 @@ export class ConnectionStateManager {
     }
   }
 
-  /**
-   * Clean up sessions that might be stale from a server restart
-   */
+  // Clean up sessions that might be stale from a server restart
   static async cleanupStaleSessionsFromRestart() {
     try {
       return await withRedisClient(async (client) => {
@@ -722,9 +690,7 @@ export class ConnectionStateManager {
     }
   }
 
-  /**
-   * Force cleanup all sessions for a specific user (for login conflicts)
-   */
+  // Force cleanup all sessions for a specific user
   static async forceCleanupUserSessions(username) {
     const normalizedUsername = normalizeUsername(username);
     if (!normalizedUsername) return;
@@ -733,7 +699,6 @@ export class ConnectionStateManager {
       return await withRedisClient(async (client) => {
         cryptoLogger.info('Force cleaning up user sessions', { username: normalizedUsername });
 
-        // Get the current session ID for this username
         const currentSessionId = await client.get(USER_SESSION_KEY(normalizedUsername));
 
         if (currentSessionId) {
@@ -758,9 +723,7 @@ export class ConnectionStateManager {
     }
   }
 
-  /**
-   * Cleanup stale username mappings (for server startup)
-   */
+  // Cleanup stale username mappings
   static async cleanupStaleUsernameMappings() {
     try {
       return await withRedisClient(async (client) => {

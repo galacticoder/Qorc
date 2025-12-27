@@ -547,7 +547,7 @@ Session keys are stored encrypted-at-rest in Redis:
   - Stored as base64(nonce || tag || ciphertext) embedded in the Redis value.
 - Redis key prefix: `pq:session:<sessionId>`, TTL: 1 hour.
 
-Helper functions (`storePQSession`, `getPQSession`, `updatePQSessionCounter`, `deletePQSession`, `getPQSessionStats`) abstract away this storage format.
+Helper functions (`storePQSession`, `getPQSession`) abstract away this storage format.
 
 ---
 

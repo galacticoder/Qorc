@@ -39,8 +39,8 @@ async function sendAuthError(ws, { message, code = 'AUTH_FAILED', category = 'ge
 
 function ensureAttemptState(ws) {
   if (!ws.clientState) ws.clientState = {};
+  // Randomize attempts between 5-10
   if (!ws.clientState.attempts) {
-    // Randomize attempts between 5-10
     const randomAttempts = () => crypto.randomInt(5, 11);
     ws.clientState = SecureStateManager.setState(ws, {
       attempts: {
@@ -106,7 +106,7 @@ class DistributedLockManager {
   }
 }
 
-// Immutable state manager to prevent accidental mutation
+// Immutable state manager
 export class SecureStateManager {
   static states = new WeakMap();
   static setState(ws, updates) {
@@ -142,11 +142,9 @@ class SecureString {
 export class AccountAuthHandler {
   constructor(serverHybridKeyPair) {
     this.serverHybridKeyPair = serverHybridKeyPair;
-    console.log('[AUTH] AccountAuthHandler initialized');
   }
 
   async processDeviceChallengeRequest(ws) {
-    console.log('[AUTH] Processing device challenge request');
     try {
       const deviceService = ws._deviceAttestationService;
       if (!deviceService) {
@@ -164,7 +162,6 @@ export class AccountAuthHandler {
   }
 
   async processDeviceAttestation(ws, str) {
-    console.log('[AUTH] Processing device attestation');
     try {
       const parsed = JSON.parse(str);
       const { attestation } = parsed;
@@ -178,10 +175,8 @@ export class AccountAuthHandler {
         throw new Error('Device attestation service not initialized');
       }
 
-      // Verify signature but do not consume challenge yet
       deviceService.verifySignature(attestation);
 
-      // Store for later use in handleSignUp
       ws.clientState = SecureStateManager.setState(ws, {
         deviceAttestation: attestation
       });
@@ -189,6 +184,7 @@ export class AccountAuthHandler {
       await sendSecureMessage(ws, {
         type: SignalType.DEVICE_ATTESTATION_ACK
       });
+
       console.log('[AUTH] Device attestation verified and stored');
     } catch (e) {
       console.error('[AUTH] Device attestation verification failed:', e.message);
@@ -197,14 +193,12 @@ export class AccountAuthHandler {
   }
 
   async processAuthRequest(ws, str) {
-    console.log('[AUTH] Processing authentication request');
-
     if (!str || typeof str !== 'string') {
       console.error('[AUTH] Invalid authentication request format');
       return rejectConnection(ws, SignalType.AUTH_ERROR, "Invalid request format");
     }
 
-    if (str.length > 1048576) { // 1MB limit
+    if (str.length > 1048576) {
       console.error('[AUTH] Authentication request too large');
       return rejectConnection(ws, SignalType.AUTH_ERROR, "Request too large");
     }
@@ -218,8 +212,6 @@ export class AccountAuthHandler {
         return rejectConnection(ws, SignalType.AUTH_ERROR, "Invalid request structure");
       }
 
-      console.log(`[AUTH] Auth type: ${type}`);
-
       // Verify request signature only if a client public key is already known for this connection
       if (ws.clientPublicKey) {
         const signatureHeader = ws.headers?.['x-request-signature'];
@@ -231,7 +223,7 @@ export class AccountAuthHandler {
         }
       }
 
-      // Decrypt both payloads sequentially for no race conditions
+      // Decrypt both payloads
       const passwordEnvelope = await CryptoUtils.Hybrid.decryptIncoming(
         passwordData,
         {
@@ -297,7 +289,7 @@ export class AccountAuthHandler {
         return rejectConnection(ws, SignalType.AUTH_ERROR, "Authentication failed");
       }
 
-      // Prevent multiple concurrent logins via distributed lock + TOCTOU presence check
+      // Prevent multiple concurrent logins
       if (type === SignalType.ACCOUNT_SIGN_IN) {
         const lockKey = `auth:${username}`;
         const lock = await DistributedLockManager.acquire(lockKey, 5000);
@@ -367,7 +359,6 @@ export class AccountAuthHandler {
   }
 
   async handleSignUp(ws, username, password) {
-    console.log(`[AUTH] Starting sign up for user: ${username}`);
     const existingUser = await UserDatabase.loadUser(username);
     if (existingUser) {
       console.error(`[AUTH] Username already exists: ${username}`);
@@ -382,8 +373,6 @@ export class AccountAuthHandler {
       });
     }
 
-    console.log(`[AUTH] Storing password hash for user: ${username}`);
-
     if (typeof password !== 'string' || !password.startsWith('$argon2')) {
       console.error(`[AUTH] Expected Argon2 encoded hash for new user ${username}`);
       const info = await rateLimitMiddleware.recordCredentialFailure(username, 'account_password', ws);
@@ -397,7 +386,7 @@ export class AccountAuthHandler {
       });
     }
 
-    // Parse Argon2 parameters from the provided encoded hash and persist them for future login
+    // Parse Argon2 parameters from the provided encoded hash and store them
     let parsed;
     try {
       parsed = await CryptoUtils.Password.parseArgon2Hash(password);
@@ -462,14 +451,13 @@ export class AccountAuthHandler {
     await UserDatabase.saveUserRecord(userRecord);
     console.log(`[AUTH] User record saved for: ${username}`);
 
-    // Send account authentication success first
     await sendSecureMessage(ws, {
       type: SignalType.IN_ACCOUNT,
       message: "Account created successfully",
       username: username
     });
 
-    // Then request passphrase setup with fresh Argon2 parameters
+    // Request passphrase setup
     const passphraseSalt = crypto.randomBytes(16).toString('base64');
     await sendSecureMessage(ws, {
       type: SignalType.PASSPHRASE_HASH,
@@ -492,7 +480,6 @@ export class AccountAuthHandler {
           pendingPassphrase: true,
           hasPassedAccountLogin: true
         });
-        console.log(`[AUTH] User ${username} state persisted to Redis for session: ${ws._sessionId}`);
       } catch (error) {
         console.error(`[AUTH] Failed to persist state to Redis for user ${username}:`, error.message);
       }
@@ -503,8 +490,6 @@ export class AccountAuthHandler {
   }
 
   async handleSignIn(ws, username, password) {
-    console.log(`[AUTH] Starting sign in for user: ${username}`);
-
     {
       const status = await rateLimitMiddleware.getUserCredentialStatus(username, 'account_password', ws);
       if (!status.allowed) {
@@ -523,7 +508,6 @@ export class AccountAuthHandler {
 
     const userData = await UserDatabase.loadUser(username);
     if (!userData) {
-      // Consistent timing to prevent user enumeration
       const elapsedTime = Date.now() - startTime;
       const minTime = 300;
       if (elapsedTime < minTime) await new Promise(r => setTimeout(r, minTime - elapsedTime));
@@ -538,13 +522,12 @@ export class AccountAuthHandler {
       });
     }
 
-    // Password hash parameter negotiation for Argon2
     const isStoredArgon2 = typeof userData.passwordHash === 'string' && userData.passwordHash.startsWith('$argon2');
 
     if (isStoredArgon2 && !(typeof password === 'string' && password.startsWith('$argon2'))) {
       console.log(`[AUTH] Sending password hash parameters challenge to user: ${username}`);
 
-      // Use stored parameters if present; otherwise parse from encoded hash
+      // Use stored parameters if present, otherwise parse from encoded hash
       let hashParams;
       if (userData.passwordSalt && userData.passwordMemoryCost && userData.passwordTimeCost && userData.passwordParallelism) {
         hashParams = {
@@ -583,7 +566,6 @@ export class AccountAuthHandler {
         message: "Please hash your password with these parameters and send back"
       });
 
-      // Store username only in memory. do not persist to Redis until credentials are verified
       ws.clientState = SecureStateManager.setState(ws, { username, pendingPasswordHash: true });
       try {
         if (ws._sessionId) {
@@ -618,7 +600,7 @@ export class AccountAuthHandler {
 
     if (!isPasswordValid) {
       const elapsedTime = Date.now() - startTime;
-      const minTime = 300; // Minimum 300ms for failed attempts
+      const minTime = 300;
       if (elapsedTime < minTime) {
         await new Promise(resolve => setTimeout(resolve, minTime - elapsedTime));
       }
@@ -714,7 +696,6 @@ export class AccountAuthHandler {
         message: "Please hash your passphrase with this info and send back"
       });
 
-      // Mark account-login step as passed only after password verification succeeded
       ws.clientState = SecureStateManager.setState(ws, { username, pendingPassphrase: true, hasPassedAccountLogin: true });
       try {
         if (ws._sessionId) {
@@ -758,6 +739,7 @@ export class AccountAuthHandler {
 
     if (!passphraseHash || typeof passphraseHash !== 'string' || passphraseHash.length < 10 || passphraseHash.length > 5000) {
       console.error(`[AUTH] Invalid passphrase hash format for user: ${username}`);
+
       const info = await rateLimitMiddleware.recordCredentialFailure(username, 'passphrase', ws);
       return sendAuthError(ws, {
         message: info?.locked ? "Invalid passphrase format" : "Invalid passphrase format",
@@ -829,7 +811,6 @@ export class AccountAuthHandler {
         userRecord.memoryCost = parsed.memoryCost;
         userRecord.timeCost = parsed.timeCost;
         userRecord.parallelism = parsed.parallelism;
-        console.log(`[AUTH] Passphrase hash parsed for new user: ${username}`);
       } catch (e) {
         console.error(`[AUTH] Failed to parse passphrase hash params for user ${username}:`, e);
         return rejectConnection(ws, SignalType.AUTH_ERROR, "Invalid passphrase hash parameters");
@@ -870,7 +851,6 @@ export class AccountAuthHandler {
           parsedStored.parallelism === parsedProvided.parallelism
         );
 
-        // Constant-time equality for salt and hash bytes
         const saltEqual = (
           parsedStored.salt.length === parsedProvided.salt.length &&
           crypto.timingSafeEqual(parsedStored.salt, parsedProvided.salt)
@@ -970,7 +950,6 @@ export class AccountAuthHandler {
       return rejectConnection(ws, SignalType.AUTH_ERROR, "User does not exist");
     }
 
-    // Constant-time comparison of encoded Argon2 hashes
     let isPasswordValid = false;
     try {
       const storedHash = userData.passwordHashStored;
@@ -1032,7 +1011,6 @@ export class AccountAuthHandler {
     }
 
     if (passParams) {
-      // Validate all required fields are present before sending
       const requiredFields = ['version', 'algorithm', 'salt', 'memoryCost', 'timeCost', 'parallelism'];
       const missingFields = requiredFields.filter(field =>
         passParams[field] === undefined ||
@@ -1059,7 +1037,6 @@ export class AccountAuthHandler {
         message: "Please hash your passphrase with this info and send back"
       });
 
-      // Mark account-login step as passed password verified
       ws.clientState = SecureStateManager.setState(ws, { username, pendingPassphrase: true, hasPassedAccountLogin: true });
       try {
         if (ws._sessionId) {
@@ -1101,11 +1078,9 @@ export class AccountAuthHandler {
       return rejectConnection(ws, SignalType.AUTH_ERROR, "Invalid authentication state");
     }
 
-    // Ensure we have a deviceId for this connection and persist it on ws
     const deviceId = ws.deviceId || await this.generateDeviceId(ws);
     ws.deviceId = deviceId;
 
-    // Enforce TLS and device proof-of-possession before issuing any tokens
     try {
       const req = ws.upgradeReq || ws._socket;
       const isTLS = !!(req && req.socket && req.socket.encrypted);
@@ -1120,7 +1095,7 @@ export class AccountAuthHandler {
     }
   }
 
-  // Device proof-of-possession (Ed25519) flow
+  // Device proof-of-possession
   async startDeviceProof(ws, username) {
     const nonce = crypto.randomBytes(32).toString('base64');
     ws.clientState = SecureStateManager.setState(ws, {
@@ -1162,7 +1137,7 @@ export class AccountAuthHandler {
       if (!did || typeof did !== 'string') {
         return rejectConnection(ws, SignalType.AUTH_ERROR, 'Missing device id');
       }
-      // Verify signature
+
       let ok = false;
       try {
         const keyObj = crypto.createPublicKey({ key: publicKeyPem, format: 'pem', type: 'spki' });
@@ -1177,7 +1152,6 @@ export class AccountAuthHandler {
         return rejectConnection(ws, SignalType.AUTH_ERROR, 'Device proof failed');
       }
 
-      // Persist/update device session with public key (in securityFlags)
       try {
         await TokenDatabase.createOrUpdateDeviceSession({
           deviceId: did,
@@ -1197,7 +1171,6 @@ export class AccountAuthHandler {
         console.warn('[AUTH] Failed to persist device public key:', e?.message || e);
       }
 
-      // Clear pending proof state and issue tokens
       ws.clientState = SecureStateManager.setState(ws, {
         pendingDeviceProof: false,
         deviceProofNonce: undefined,
@@ -1296,9 +1269,7 @@ export class AccountAuthHandler {
     return { username, authenticated: false, tokens: tokenPair };
   }
 
-  /**
-   * Generate unique device ID for the connection
-   */
+  // Generate unique device ID for the connection
   async generateDeviceId(ws) {
     const request = ws.upgradeReq || ws._socket;
     const deviceContext = TokenMiddleware.extractDeviceContext(request);
@@ -1323,9 +1294,7 @@ export class AccountAuthHandler {
     return Buffer.from(mac).toString('hex').slice(0, 32);
   }
 
-  /**
-   * Extract device name from request headers
-   */
+  // Extract device name from request headers
   extractDeviceName(ws) {
     try {
       const request = ws.upgradeReq || ws._socket;
@@ -1351,9 +1320,7 @@ export class AccountAuthHandler {
     }
   }
 
-  /**
-   * Generate password hash parameters for client-side hashing
-   */
+  // Generate password hash parameters for client-side hashing
   async generatePasswordHashParams() {
     const salt = new Uint8Array(crypto.randomBytes(16));
     const saltBase64 = Buffer.from(salt).toString('base64');
@@ -1384,8 +1351,7 @@ export class ServerAuthHandler {
     const username = clientState?.username;
 
     if (!username) {
-      console.error('[AUTH] No username found - account authentication required first');
-      console.error('[AUTH] clientState:', JSON.stringify(clientState));
+      console.error('[AUTH] No username found. Account authentication required first');
       return rejectConnection(ws, SignalType.AUTH_ERROR, "Please complete account authentication first");
     }
 
@@ -1508,7 +1474,6 @@ export class ServerAuthHandler {
           ws.upgradeReq || ws._socket
         );
 
-        // Ensure deviceId is set and stable for this connection
         const deviceId = ws.deviceId || await this.generateDeviceId(ws);
         ws.deviceId = deviceId;
 
@@ -1601,7 +1566,6 @@ export class ServerAuthHandler {
         securityLevel: 256
       };
 
-      // Include final tokens if newly generated
       if (finalTokens) {
         response.tokens = {
           accessToken: finalTokens.accessToken,
@@ -1612,15 +1576,12 @@ export class ServerAuthHandler {
         };
       }
 
-      // Mark WebSocket as authenticated for PQ session
       ws._authenticated = true;
-
       await sendSecureMessage(ws, response);
 
       // Deliver any queued offline messages after complete server authentication
       try {
         const { MessageDatabase } = await import('../database/database.js');
-        console.log(`[AUTH] Checking for offline messages for user: ${username}`);
         const queued = await MessageDatabase.takeOfflineMessages(username, 200);
         console.log(`[AUTH] Found ${queued.length} offline messages for user: ${username}`);
 
@@ -1657,7 +1618,6 @@ export class ServerAuthHandler {
       return rejectConnection(ws, SignalType.AUTH_ERROR, "Authentication failed");
     }
   }
-
 }
 
 AccountAuthHandler.validateArgon2Parameters = async function (parsed) {

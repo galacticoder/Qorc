@@ -25,13 +25,10 @@ async function ensureInitialized() {
 }
 
 /**
- * token database manager
+ * Token database manager
  * Handles secure storage, retrieval, and management of authentication tokens
  */
 class TokenDatabase {
-  /**
-   * Store refresh token in Postgres
-   */
   static async storeRefreshToken(tokenData) {
     await ensureInitialized();
     
@@ -49,17 +46,14 @@ class TokenDatabase {
       userAgent
     } = tokenData;
 
-    // Hash the token for secure storage
     const tokenHash = await this.hashToken(rawToken);
     const now = Math.floor(Date.now() / 1000);
 
-    // Ensure user exists before creating refresh token
     const userExists = await this.userExists(userId);
     if (!userExists) {
       throw new Error(`User ${userId} does not exist in database`);
     }
 
-    // Enforce per-user cap on active refresh tokens before issuing a new one
     try {
       const maxActive = Math.max(1, Math.min(10, Number.parseInt(process.env.MAX_ACTIVE_REFRESH_TOKENS || '2', 10) || 2));
       const enforcement = await this.enforceMaxActiveRefreshTokens(userId, maxActive, 'revoke_oldest');
@@ -130,10 +124,8 @@ class TokenDatabase {
         ],
       );
 
-      // Update token family
       await this.updateTokenFamily(family, userId, deviceId);
       
-      // Log the token issuance
       await this.logAuthEvent({
         userId,
         deviceId,
@@ -165,9 +157,7 @@ class TokenDatabase {
     }
   }
 
-  /**
-   * Retrieve and validate refresh token
-   */
+  // Retrieve and validate refresh token
   static async getRefreshToken(tokenId, rawToken = null) {
     await ensureInitialized();
 
@@ -205,7 +195,6 @@ class TokenDatabase {
         normalizedTokenHash = '0'.repeat(64); 
       }
       
-      // Always compute expected hash regardless of validity to keep constant time
       const dummyToken = rawToken || 'dummy_token_for_constant_time_comparison';
       const expectedHash = await this.hashToken(dummyToken);
       
@@ -234,7 +223,6 @@ class TokenDatabase {
       }
     }
 
-    // Update last used timestamp
     try {
       await this.updateTokenLastUsed(tokenId);
     } catch (error) {
@@ -278,9 +266,7 @@ class TokenDatabase {
     };
   }
 
-  /**
-   * Revoke refresh token and optionally entire token family
-   */
+  // Revoke refresh token and optionally entire token family
   static async revokeRefreshToken(tokenId, reason = 'manual_revoke', revokeFamily = false) {
     await ensureInitialized();
 
@@ -326,35 +312,32 @@ class TokenDatabase {
       throw new Error(`Token revocation failed: ${error.message}`);
     } finally {
       client.release();
+    
+      try {
+        await this.logAuthEvent({
+          userId: tokenRecord.userId,
+          deviceId: tokenRecord.deviceId,
+          action: 'token_revoked',
+          tokenType: 'refresh',
+          tokenId,
+          success: true,
+          securityFlags: JSON.stringify({ revokeFamily, reason }),
+        });
+      } catch {
+        console.warn('[TOKEN-DB] Failed to log token revocation event');
+      }
+      
+      return true;
     }
-
-    try {
-      await this.logAuthEvent({
-        userId: tokenRecord.userId,
-        deviceId: tokenRecord.deviceId,
-        action: 'token_revoked',
-        tokenType: 'refresh',
-        tokenId,
-        success: true,
-        securityFlags: JSON.stringify({ revokeFamily, reason }),
-      });
-    } catch {
-      console.warn('[TOKEN-DB] Failed to log token revocation event');
-    }
-
-    return true;
   }
 
-  /**
-   * Rotate refresh token (create new token in same family)
-   */
+  
+  // Rotate refresh token (create new token in same family)
   static async rotateRefreshToken(_oldTokenId, _newTokenData) {
     throw new Error('TokenDatabase.rotateRefreshToken is not supported in the Postgres-only backend; use revokeRefreshToken + storeRefreshToken instead');
   }
 
-  /**
-   * Blacklist token
-   */
+  // Blacklist token
   static async blacklistToken(tokenId, tokenType, userId = null, reason = 'security_incident', revokedBy = 'system') {
     await ensureInitialized();
 
@@ -396,9 +379,7 @@ class TokenDatabase {
     }
   }
 
-  /**
-   * Check if token is blacklisted
-   */
+  // Check if token is blacklisted
   static async isTokenBlacklisted(tokenId) {
     await ensureInitialized();
 
@@ -411,9 +392,7 @@ class TokenDatabase {
     return rows.length > 0;
   }
 
-  /**
-   * Manage device sessions
-   */
+  // Manage device sessions
   static async createOrUpdateDeviceSession(deviceData) {
     await ensureInitialized();
 
@@ -478,9 +457,7 @@ class TokenDatabase {
     }
   }
 
-  /**
-   * Get all active sessions for a user
-   */
+  // Get all active sessions for a user
   static async getUserSessions(userId) {
     await ensureInitialized();
 
@@ -514,9 +491,7 @@ class TokenDatabase {
     }));
   }
 
-  /**
-   * Revoke all tokens for user (logout from all devices)
-   */
+  // Revoke all tokens for user (logout from all devices)
   static async revokeAllUserTokens(userId, reason = 'user_logout') {
     await ensureInitialized();
 
@@ -568,9 +543,7 @@ class TokenDatabase {
     return revokedCount;
   }
 
-  /**
-   * Revoke all tokens for a specific device (logout single device)
-   */
+  // Revoke all tokens for a specific device (logout single device)
   static async revokeDeviceTokens(userId, deviceId, reason = 'device_revocation') {
     await ensureInitialized();
 
@@ -623,9 +596,7 @@ class TokenDatabase {
     return revokedCount;
   }
 
-  /**
-   * Clean up expired tokens and blacklist entries
-   */
+  // Clean up expired tokens and blacklist entries
   static async cleanupExpiredTokens() {
     await ensureInitialized();
 
@@ -661,9 +632,7 @@ class TokenDatabase {
     }
   }
 
-  /**
-   * Log authentication events for security monitoring
-   */
+  // Log authentication events for security monitoring
   static async logAuthEvent(eventData) {
     await ensureInitialized();
 
@@ -722,9 +691,7 @@ class TokenDatabase {
     }
   }
 
-  /**
-   * Check if a user exists in the database
-   */
+  // Check if a user exists in the database
   static async userExists(username) {
     await ensureInitialized();
 
@@ -736,10 +703,7 @@ class TokenDatabase {
     return rows.length > 0;
   }
 
-  /**
-   * Private helper methods
-   */
-  
+  // Private helper methods
   static async _getOrCreatePepper() {
     const env = process.env.TOKEN_PEPPER;
     if (env && Buffer.from(env).length >= 32) return Buffer.from(env);
@@ -821,9 +785,7 @@ class TokenDatabase {
     );
   }
 
-  /**
-   * Count active (unrevoked, unexpired) refresh tokens for a user
-   */
+  // Count active refresh tokens for a user
   static async countActiveRefreshTokens(userId) {
     await ensureInitialized();
     const now = Math.floor(Date.now() / 1000);
@@ -836,9 +798,7 @@ class TokenDatabase {
     return Number(row?.count || 0);
   }
 
-  /**
-   * Get active refresh tokens for a user ordered from oldest to newest by lastUsed/issuedAt
-   */
+  // Get active refresh tokens for a user ordered from oldest to newest by lastUsed/issuedAt
   static async getActiveRefreshTokens(userId) {
     await ensureInitialized();
     const now = Math.floor(Date.now() / 1000);
@@ -855,9 +815,7 @@ class TokenDatabase {
     return rows || [];
   }
 
-  /**
-   * Revoke the oldest active refresh tokens for a user
-   */
+  // Revoke the oldest active refresh tokens for a user
   static async revokeOldestActiveTokens(userId, countToRevoke, reason = 'token_cap_enforced') {
     await ensureInitialized();
     const count = Math.max(0, Number(countToRevoke || 0));
@@ -895,7 +853,6 @@ class TokenDatabase {
 
       await client.query('COMMIT');
 
-      // Audit log each revocation 
       for (const r of toRevoke) {
         await this.logAuthEvent({
           userId,
@@ -932,7 +889,6 @@ class TokenDatabase {
       return { enforced: false, rejected: false, activeCount, tokensRevoked: 0 };
     }
 
-    // One more token is about to be added; compute how many we must revoke
     const tokensToRevoke = Math.max(0, (activeCount + 1) - max);
 
     if (strategy === 'reject') {
@@ -944,7 +900,6 @@ class TokenDatabase {
   }
 }
 
-// Field-level encryption for sensitive columns
 class FieldEncryption {
   static deriveFieldKey(fieldName) {
     const masterRaw = process.env.DB_FIELD_KEY || '';
@@ -992,7 +947,7 @@ class FieldEncryption {
   }
 }
 
-// JSON sanitizer to reduce injection/abuse surface
+// JSON sanitizer
 TokenDatabase.sanitizeJSON = function(obj, maxDepth = 3, currentDepth = 0) {
   if (currentDepth >= maxDepth) return {};
   if (!obj || typeof obj !== 'object') return {};

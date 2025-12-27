@@ -1,3 +1,4 @@
+// Device credentials handler
 const { ipcMain } = require('electron');
 const { init: initSecureStorage, setItem, getItem } = require('./secure-storage.cjs');
 const crypto = require('crypto');
@@ -14,10 +15,12 @@ async function loadNoble() {
     }
 }
 
+// Storage key for device keys
 const DEVICE_KEYPAIR_KEY = 'device_mldsa87_keypair';
 
 let cachedKeyPair = null;
 
+// Get existing device key pair or create new one
 async function getOrGenerateDeviceKeyPair() {
     if (cachedKeyPair) {
         return cachedKeyPair;
@@ -55,11 +58,13 @@ async function getOrGenerateDeviceKeyPair() {
     return cachedKeyPair;
 }
 
+// Create hash of public key
 async function hashPublicKey(publicKey) {
     await loadNoble();
     return Buffer.from(blake3(publicKey));
 }
 
+// Register IPC handlers for device credentials
 function initDeviceCredentials({ logger, installPath }) {
     initSecureStorage({ logger, installPath }).catch(err => {
         logger?.error('Failed to initialize secure storage for device credentials:', err);
