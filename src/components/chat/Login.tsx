@@ -8,8 +8,8 @@ import { SignUpForm } from "./Login/SignUp.tsx";
 import { PassphrasePrompt } from "./Login/PassphrasePrompt.tsx";
 import { PasswordHashPrompt } from "./Login/PasswordHashPrompt.tsx";
 import { ServerPasswordForm } from "./Login/ServerPassword.tsx";
-
 import { toast } from "sonner";
+import { EventType } from "../../lib/event-types";
 
 // Server public key bundle
 interface ServerKeys {
@@ -127,11 +127,11 @@ export const Login = React.memo<LoginProps>(({
     const handleAuthError = () => {
       setIsSubmitting(false);
     };
-    window.addEventListener('auth-rate-limited', handleRateLimited as any);
-    window.addEventListener('auth-error', handleAuthError as any);
+    window.addEventListener(EventType.AUTH_RATE_LIMITED, handleRateLimited as any);
+    window.addEventListener(EventType.AUTH_ERROR, handleAuthError as any);
     return () => {
-      window.removeEventListener('auth-rate-limited', handleRateLimited as any);
-      window.removeEventListener('auth-error', handleAuthError as any);
+      window.removeEventListener(EventType.AUTH_RATE_LIMITED, handleRateLimited as any);
+      window.removeEventListener(EventType.AUTH_ERROR, handleAuthError as any);
     };
   }, []);
 
@@ -142,7 +142,7 @@ export const Login = React.memo<LoginProps>(({
     if (setShowPasswordPrompt) {
       setShowPasswordPrompt(false);
     }
-    dispatchAuthEvent('auth-ui-back', { to: 'server' });
+    dispatchAuthEvent(EventType.AUTH_UI_BACK, { to: 'server' });
   }, [setShowPassphrasePrompt, setShowPasswordPrompt]);
 
   const handleAccountSubmit = useCallback(async (username: string, password: string): Promise<void> => {
@@ -207,7 +207,7 @@ export const Login = React.memo<LoginProps>(({
 
   // Track input changes for analytics
   const handleInputChange = useCallback((field: string, value: string): void => {
-    dispatchAuthEvent('auth-ui-input', { field, value });
+    dispatchAuthEvent(EventType.AUTH_UI_INPUT, { field, value });
   }, []);
 
   // Toggle between login and register mode

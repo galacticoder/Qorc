@@ -86,7 +86,7 @@ export function useLocalMessageHandlers({
       const fileId = sanitizeNonEmptyText(detail.id, MAX_LOCAL_MESSAGE_ID_LENGTH, false);
       if (!fileId) return;
 
-      const filenameRaw = typeof detail.filename === 'string' ? detail.filename : 'file';
+      const filenameRaw = typeof detail.filename === 'string' ? detail.filename : SignalType.FILE;
       const filename = sanitizeFilename(filenameRaw, 128);
       const mimeType = sanitizeNonEmptyText(detail.mimeType, MAX_LOCAL_MIMETYPE_LENGTH, false) || 'application/octet-stream';
       const sender = sanitizeNonEmptyText(detail.sender, MAX_LOCAL_USERNAME_LENGTH, false) || '';
@@ -169,7 +169,7 @@ export function useLocalMessageHandlers({
         recipient,
         timestamp,
         isCurrentUser: true,
-        type: 'file',
+        type: SignalType.FILE,
         filename,
         fileSize,
         mimeType,

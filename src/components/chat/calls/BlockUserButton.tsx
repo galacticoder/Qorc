@@ -5,17 +5,18 @@ import { BlockIcon, UnblockIcon } from '../assets/icons';
 import { blockingSystem } from '@/lib/blocking-system';
 import { blockStatusCache } from '@/lib/block-status-cache';
 import { truncateUsername } from '@/lib/utils';
-import { isPlainObject, hasPrototypePollutionKeys, sanitizeEventUsername } from '../../utils';
+import { isPlainObject, hasPrototypePollutionKeys, sanitizeEventUsername } from '../../../lib/sanitizers';
 import {
   DEFAULT_EVENT_RATE_WINDOW_MS,
   DEFAULT_EVENT_RATE_MAX,
   MAX_EVENT_USERNAME_LENGTH
 } from '../../../lib/constants';
+import { EventType } from '@/lib/event-types';
 
 interface BlockUserButtonProps {
   readonly username: string;
-  readonly passphraseRef?: React.MutableRefObject<string>;
-  readonly kyberSecretRef?: React.MutableRefObject<Uint8Array | null>;
+  readonly passphraseRef?: React.RefObject<string>;
+  readonly kyberSecretRef?: React.RefObject<Uint8Array | null>;
   readonly getDisplayUsername?: (username: string) => Promise<string>;
   readonly onPassphraseRequired?: () => void;
   readonly variant?: 'default' | 'outline' | 'ghost' | 'destructive' | 'secondary' | 'link';
@@ -40,9 +41,7 @@ export function BlockUserButton({
 }: BlockUserButtonProps) {
   const [isBlocked, setIsBlocked] = useState(false);
   const [loading, setLoading] = useState(false);
-
   const blockStatusEventRateRef = useRef<{ windowStart: number; count: number }>({ windowStart: Date.now(), count: 0 });
-
   const [resolvedName, setResolvedName] = useState<string>(username);
 
   const checkBlockStatus = useCallback(async () => {
@@ -129,8 +128,8 @@ export function BlockUserButton({
   }, [username]);
 
   useEffect(() => {
-    window.addEventListener('block-status-changed', handleBlockStatusChangeEvent as EventListener);
-    return () => window.removeEventListener('block-status-changed', handleBlockStatusChangeEvent as EventListener);
+    window.addEventListener(EventType.BLOCK_STATUS_CHANGED, handleBlockStatusChangeEvent as EventListener);
+    return () => window.removeEventListener(EventType.BLOCK_STATUS_CHANGED, handleBlockStatusChangeEvent as EventListener);
   }, [handleBlockStatusChangeEvent]);
 
 

@@ -1,14 +1,14 @@
 import React, { useState, useEffect, useCallback, memo } from 'react';
 import { profilePictureSystem } from '../../lib/profile-picture-system';
 import { isPlainObject, hasPrototypePollutionKeys } from '../../lib/sanitizers';
-import { sanitizeEventText } from '../utils';
+import { sanitizeEventText } from '../../lib/sanitizers';
+import { EventType } from '../../lib/event-types';
 import {
     DEFAULT_EVENT_RATE_WINDOW_MS,
     DEFAULT_EVENT_RATE_MAX,
     MAX_EVENT_TYPE_LENGTH,
     MAX_EVENT_USERNAME_LENGTH
 } from '../../lib/constants';
-
 
 interface UserAvatarProps {
     username: string;
@@ -85,7 +85,7 @@ export const UserAvatar = memo(function UserAvatar({
 
         const handleUpdate = (event: Event) => {
             try {
-                if (event.type === 'profile-picture-system-initialized') {
+                if (event.type === EventType.PROFILE_PICTURE_SYSTEM_INITIALIZED) {
                     loadAvatar();
                     return;
                 }
@@ -126,11 +126,11 @@ export const UserAvatar = memo(function UserAvatar({
             } catch { }
         };
 
-        window.addEventListener('profile-picture-updated', handleUpdate as EventListener);
-        window.addEventListener('profile-picture-system-initialized', handleUpdate as EventListener);
+        window.addEventListener(EventType.PROFILE_PICTURE_UPDATED, handleUpdate as EventListener);
+        window.addEventListener(EventType.PROFILE_PICTURE_SYSTEM_INITIALIZED, handleUpdate as EventListener);
         return () => {
-            window.removeEventListener('profile-picture-updated', handleUpdate as EventListener);
-            window.removeEventListener('profile-picture-system-initialized', handleUpdate as EventListener);
+            window.removeEventListener(EventType.PROFILE_PICTURE_UPDATED, handleUpdate as EventListener);
+            window.removeEventListener(EventType.PROFILE_PICTURE_SYSTEM_INITIALIZED, handleUpdate as EventListener);
         };
     }, [loadAvatar, username, isCurrentUser]);
 

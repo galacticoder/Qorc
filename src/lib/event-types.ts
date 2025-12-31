@@ -94,12 +94,15 @@ export const EventType = {
 
   // UI events
   UI_CALL_LOG: 'ui-call-log',
+  UI_CALL_STATUS: 'ui-call-status',
+  OPEN_NEW_CHAT: 'open-new-chat',
 
   // WebSocket events
   WS_RECONNECTED: 'ws-reconnected',
   PQ_SESSION_ESTABLISHED: 'pq-session-established',
   AUTH_RATE_LIMITED: 'auth-rate-limited',
   AUTH_ERROR: 'auth-error',
+  AUTH_UI_INPUT: 'auth-ui-input',
   TOKEN_VALIDATION_START: 'token-validation-start',
   TOKEN_VALIDATION_TIMEOUT: 'token-validation-timeout',
 

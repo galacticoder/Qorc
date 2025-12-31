@@ -18,11 +18,16 @@ import { BlockUserButton } from "../calls/BlockUserButton";
 import { blockingSystem } from "@/lib/blocking-system";
 import { blockStatusCache } from "@/lib/block-status-cache";
 import { useReplyUpdates } from "@/hooks/useReplyUpdates";
-import { isPlainObject, hasPrototypePollutionKeys, sanitizeUiText } from "../../utils";
+import { isPlainObject, hasPrototypePollutionKeys, sanitizeUiText } from "../../../lib/sanitizers";
+import { EventType } from "@/lib/event-types";
 import {
   DEFAULT_EVENT_RATE_WINDOW_MS,
   DEFAULT_UI_EVENT_RATE_MAX,
-  MAX_EVENT_USERNAME_LENGTH
+  MAX_EVENT_USERNAME_LENGTH,
+  SCROLL_THRESHOLD,
+  NEAR_BOTTOM_THRESHOLD,
+  MAX_BACKGROUND_MESSAGES,
+  BACKGROUND_BATCH_SIZE
 } from "../../../lib/constants";
 
 interface HybridKeys {
@@ -60,12 +65,6 @@ interface ChatInterfaceProps {
   readonly currentCall?: CallState | null;
   readonly startCall: (targetUser: string, callType?: 'audio' | 'video') => Promise<string>;
 }
-
-const SCROLL_THRESHOLD = 200;
-const NEAR_BOTTOM_THRESHOLD = 100;
-const MAX_BACKGROUND_MESSAGES = 1000;
-const BACKGROUND_BATCH_SIZE = 100;
-
 
 export const ChatInterface = React.memo<ChatInterfaceProps>(({
   onSendMessage,
@@ -179,7 +178,7 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
         const maxMessages = MAX_BACKGROUND_MESSAGES;
         const batchSize = BACKGROUND_BATCH_SIZE;
 
-        // Load in batches up to 1000 messages
+        // Load in batches
         let loadedCount = currentCount;
         while (loadedCount < maxMessages) {
           if (backgroundLoadConversationRef.current !== conversationToLoad) break;
@@ -315,8 +314,8 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
   }, [selectedConversation]);
 
   useEffect(() => {
-    window.addEventListener('block-status-changed', handleBlockStatusChange as EventListener);
-    return () => window.removeEventListener('block-status-changed', handleBlockStatusChange as EventListener);
+    window.addEventListener(EventType.BLOCK_STATUS_CHANGED, handleBlockStatusChange as EventListener);
+    return () => window.removeEventListener(EventType.BLOCK_STATUS_CHANGED, handleBlockStatusChange as EventListener);
   }, [handleBlockStatusChange]);
 
   // Send read receipt for message

@@ -2,6 +2,7 @@ import React from "react";
 import { Label } from "../../ui/label";
 import { Input } from "../../ui/input";
 import { Button } from "../../ui/button";
+import { SERVER_PASSWORD_MAX_LENGTH } from "../../../lib/constants";
 
 interface ServerPasswordFormProps {
   readonly serverPassword: string;
@@ -10,8 +11,6 @@ interface ServerPasswordFormProps {
   readonly authStatus?: string;
   readonly onSubmit: (e: React.FormEvent) => void;
 }
-
-const SERVER_PASSWORD_MAX_LENGTH = 1000;
 
 export function ServerPasswordForm({
   serverPassword,

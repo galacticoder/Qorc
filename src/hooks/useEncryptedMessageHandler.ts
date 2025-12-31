@@ -43,15 +43,15 @@ import {
 } from "../lib/message-type-handlers";
 
 export function useEncryptedMessageHandler(
-  loginUsernameRef: React.MutableRefObject<string>,
+  loginUsernameRef: React.RefObject<string>,
   setMessages: React.Dispatch<React.SetStateAction<Message[]>>,
   saveMessageToLocalDB: (msg: Message) => Promise<void>,
   isAuthenticated?: boolean,
   getKeysOnDemand?: () => Promise<{ x25519: { private: Uint8Array; publicKeyBase64: string }; kyber: { publicKeyBase64: string; secretKey: Uint8Array }; dilithium?: { publicKeyBase64: string; secretKey: Uint8Array } } | null>,
-  usersRef?: React.MutableRefObject<User[]>,
+  usersRef?: React.RefObject<User[]>,
   options?: { rateLimit?: Partial<RateLimitConfig> },
   handleFileMessageChunk?: (data: any, meta: any) => Promise<void>,
-  secureDBRef?: React.MutableRefObject<any | null>
+  secureDBRef?: React.RefObject<any | null>
 ) {
   const blobCacheRef = useRef(createBlobCache());
   const rateStateRef = useRef<{ windowStart: number; count: number }>({ windowStart: 0, count: 0 });
@@ -1408,7 +1408,7 @@ export function useEncryptedMessageHandler(
             payload.content &&
             typeof payload.content === 'string' &&
             payload.content.trim().length > 0;
-          const isFileMessage = payload.type === 'file-message' && payload.fileName;
+          const isFileMessage = payload.type === SignalType.FILE_MESSAGE && payload.fileName;
           const isActualMessage = isTextMessage || isFileMessage;
 
           const isCallSignal = payload.type?.startsWith?.('call-') ||
@@ -1558,7 +1558,7 @@ export function useEncryptedMessageHandler(
 
           // Handle regular messages 
           if ((payload.type === 'message' || payload.type === 'text' || !payload.type) &&
-            payload.content && payload.type !== 'file-message') {
+            payload.content && payload.type !== SignalType.FILE_MESSAGE) {
             const trimmedContent = payload.content.trim();
             if (trimmedContent.startsWith('{') || trimmedContent.startsWith('[')) {
               const typingCheckData = safeJsonParseForMessages(payload.content);
@@ -1831,7 +1831,7 @@ export function useEncryptedMessageHandler(
           }
 
           // Handle file messages
-          if (payload.type === 'file-message') {
+          if (payload.type === SignalType.FILE_MESSAGE) {
             let messageId = payload.messageId || uuidv4();
             let fileName = payload.fileName;
             let fileType = payload.fileType || 'application/octet-stream';
@@ -1884,7 +1884,7 @@ export function useEncryptedMessageHandler(
                 sender: payload.from,
                 recipient: (payload as any)?.to || loginUsernameRef.current,
                 timestamp: new Date(payload.timestamp || Date.now()),
-                type: 'file',
+                type: SignalType.FILE,
                 isCurrentUser: false,
                 filename: fileName,
                 mimeType: fileType,
@@ -1910,7 +1910,7 @@ export function useEncryptedMessageHandler(
                 sender: payload.from,
                 recipient: (payload as any)?.to || loginUsernameRef.current,
                 timestamp: new Date(payload.timestamp || Date.now()),
-                type: 'file',
+                type: SignalType.FILE,
                 isCurrentUser: false,
                 filename: fileName,
                 mimeType: fileType,

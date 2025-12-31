@@ -8,8 +8,8 @@ import { UserAvatar } from '../../ui/UserAvatar';
 import { useCallHistory, type CallLogEntry } from '../../../contexts/CallHistoryContext';
 import { useUnifiedUsernameDisplay } from '../../../hooks/useUnifiedUsernameDisplay';
 import { blockStatusCache } from '../../../lib/block-status-cache';
-import { isPlainObject, hasPrototypePollutionKeys, sanitizeUsername } from '../../utils';
-
+import { isPlainObject, hasPrototypePollutionKeys, sanitizeUsername } from '../../../lib/sanitizers';
+import { EventType } from '@/lib/event-types';
 import {
     DEFAULT_EVENT_RATE_WINDOW_MS,
     DEFAULT_EVENT_RATE_MAX,
@@ -80,8 +80,8 @@ const CallLogItem: React.FC<CallLogItemProps> = React.memo(({
             } catch { }
         };
 
-        window.addEventListener('block-status-changed', handleBlockStatusChange as EventListener);
-        return () => window.removeEventListener('block-status-changed', handleBlockStatusChange as EventListener);
+        window.addEventListener(EventType.BLOCK_STATUS_CHANGED, handleBlockStatusChange as EventListener);
+        return () => window.removeEventListener(EventType.BLOCK_STATUS_CHANGED, handleBlockStatusChange as EventListener);
     }, [log.peerUsername]);
 
     return (

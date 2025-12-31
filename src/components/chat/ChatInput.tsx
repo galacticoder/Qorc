@@ -9,6 +9,8 @@ import { ReplyBanner } from "./ChatInput/ReplyBanner";
 import { VoiceRecorder } from "./calls/VoiceRecorder";
 import { VoiceRecorderButton } from "./ChatInput/VoiceRecorderButton";
 import { MessageReply } from "./messaging/types";
+import { MAX_FILE_SIZE } from "@/lib/constants";
+import { sanitizeMessage } from "@/lib/sanitizers";
 
 interface HybridKeys {
   x25519: { private: Uint8Array; publicKeyBase64: string };
@@ -99,32 +101,6 @@ export function ChatInput({
     }
   }, [editingMessage]);
 
-  // Sanitize message content
-  const sanitizeMessage = useCallback((input: string): string => {
-    const MAX_LENGTH = 10000;
-
-    let sanitized = input.normalize('NFC').trim();
-    if (sanitized.length > MAX_LENGTH) {
-      sanitized = sanitized.slice(0, MAX_LENGTH);
-    }
-
-    sanitized = sanitized
-      .replace(/[\u0000-\u0008\u000B-\u001F\u007F-\u009F\u2000-\u200F\u2028-\u202F\u205F-\u206F\uFEFF\uFFF0-\uFFFF]/g, '')
-      .replace(/[\u200B-\u200D\u2060\uFEFF]/g, '')
-      .replace(/[\u202A-\u202E\u2066-\u2069]/g, '')
-      .replace(/[\u0300-\u036F]{5,}/g, '')
-      .replace(/[\uD800-\uDFFF]/g, '')
-      .replace(/[\uFDD0-\uFDEF]/g, '')
-      .replace(/[\u0001-\u0008\u000E-\u001F\u007F]/g, '')
-      .replace(/&/g, '&amp;')
-      .replace(/</g, '&lt;')
-      .replace(/>/g, '&gt;')
-      .replace(/"/g, '&quot;')
-      .replace(/'/g, '&#x27;');
-
-    return sanitized;
-  }, []);
-
   // Handle sending text messages or edits
   const handleSend = useCallback(async () => {
     if (!message.trim() || isSending || !selectedConversation || disabled) {
@@ -152,13 +128,12 @@ export function ChatInput({
     } finally {
       setIsSending(false);
     }
-  }, [message, isSending, selectedConversation, disabled, sanitizeMessage, editingMessage, onEditMessage, onSendMessage, onCancelEdit, replyTo, onCancelReply]);
+  }, [message, isSending, selectedConversation, disabled, editingMessage, onEditMessage, onSendMessage, onCancelEdit, replyTo, onCancelReply, sanitizeMessage]);
 
   // Validate file size and type
   const validateFile = useCallback((file: File): string | null => {
-    const MAX_SIZE = 50 * 1024 * 1024;
-    if (file.size > MAX_SIZE) {
-      return 'File is too large. Maximum size is 50MB.';
+    if (file.size > MAX_FILE_SIZE) {
+      return 'File is too large. Maximum size is ' + MAX_FILE_SIZE + 'MB.';
     }
     return null;
   }, []);
@@ -321,7 +296,7 @@ export function ChatInput({
               </label>
               <input
                 ref={fileInputRef}
-                type="file"
+                type={SignalType.FILE}
                 id="file-input"
                 style={{ display: 'none' }}
                 onChange={handleFileChange}

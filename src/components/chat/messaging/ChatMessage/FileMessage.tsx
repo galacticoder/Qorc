@@ -10,6 +10,7 @@ import { VoiceMessage } from "../../calls/VoiceMessage";
 import { copyTextToClipboard } from "../../../../lib/clipboard";
 import { sanitizeFilename } from "../../../../lib/sanitizers";
 import { useFileUrl } from "../../../../hooks/useFileUrl";
+import { MAX_FILENAME_LENGTH, FILENAME_SANITIZE_REGEX, IMAGE_EXTENSIONS, VIDEO_EXTENSIONS, AUDIO_EXTENSIONS, FILE_SIZE_UNITS, FILE_SIZE_BASE } from "../../../../lib/constants";
 
 interface FileMessageProps {
   readonly message: Message;
@@ -26,13 +27,6 @@ interface FileContentProps {
   readonly secureDB?: any;
 }
 
-const MAX_FILENAME_LENGTH = 255;
-const FILENAME_SANITIZE_REGEX = /[^\w.-]/g;
-
-export const IMAGE_EXTENSIONS = ["jpg", "jpeg", "png", "gif", "webp"];
-export const VIDEO_EXTENSIONS = ["mp4", "webm", "ogg"];
-export const AUDIO_EXTENSIONS = ["mp3", "wav", "ogg", "m4a", "webm"];
-
 // Check if filename has one of the specified extensions
 export const hasExtension = (filename: string, extensions: readonly string[]): boolean => {
   if (!filename || typeof filename !== 'string' || filename.length > MAX_FILENAME_LENGTH) {
@@ -43,9 +37,6 @@ export const hasExtension = (filename: string, extensions: readonly string[]): b
   const lowerFilename = sanitizedFilename.toLowerCase();
   return extensions.some(ext => lowerFilename.endsWith('.' + ext.toLowerCase()));
 };
-
-const FILE_SIZE_UNITS = ["Bytes", "KB", "MB", "GB"] as const;
-const FILE_SIZE_BASE = 1024;
 
 // Format file size in human readable format
 export const formatFileSize = (bytes: number): string => {

@@ -17,8 +17,8 @@ import { DownloadSettings } from './sections/DownloadSettings';
 import { DataManagementSettings } from './sections/DataManagementSettings';
 
 interface AppSettingsProps {
-  passphraseRef?: React.MutableRefObject<string>;
-  kyberSecretRef?: React.MutableRefObject<Uint8Array | null>;
+  passphraseRef?: React.RefObject<string>;
+  kyberSecretRef?: React.RefObject<Uint8Array | null>;
   getDisplayUsername?: (username: string) => Promise<string>;
   currentUsername?: string;
   currentDisplayName?: string;

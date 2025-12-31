@@ -3,6 +3,7 @@ import { PasswordField } from "./PasswordField.tsx";
 import { Input } from "../../ui/input";
 import { Label } from "../../ui/label";
 import { Button } from "../../ui/button";
+import { PASSPHRASE_MIN_LENGTH, PASSPHRASE_MAX_LENGTH } from "../../../lib/constants";
 
 interface PassphrasePromptProps {
   readonly mode: "login" | "register";
@@ -14,9 +15,6 @@ interface PassphrasePromptProps {
   readonly onChangePassphrase?: (v: string) => void;
   readonly onChangeConfirm?: (v: string) => void;
 }
-
-const PASSPHRASE_MIN_LENGTH = 12;
-const PASSPHRASE_MAX_LENGTH = 1000;
 
 export function PassphrasePrompt({
   mode,

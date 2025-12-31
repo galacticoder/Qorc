@@ -7,12 +7,9 @@ import { Trash2, Search, Phone, Video, Loader2 } from "lucide-react";
 import { Input } from "../../ui/input";
 import { toast } from "sonner";
 import { UserAvatar } from "../../ui/UserAvatar";
-import { isPlainObject, hasPrototypePollutionKeys, sanitizeUiText } from "../../utils";
-
-const UI_CALL_STATUS_RATE_WINDOW_MS = 10_000;
-const UI_CALL_STATUS_RATE_MAX = 500;
-const MAX_UI_CALL_STATUS_PEER_LENGTH = 256;
-const MAX_UI_CALL_STATUS_VALUE_LENGTH = 64;
+import { isPlainObject, hasPrototypePollutionKeys, sanitizeUiText } from "../../../lib/sanitizers";
+import { EventType } from "../../../lib/event-types";
+import { UI_CALL_STATUS_RATE_WINDOW_MS, UI_CALL_STATUS_RATE_MAX, MAX_UI_CALL_STATUS_PEER_LENGTH, MAX_UI_CALL_STATUS_VALUE_LENGTH } from "../../../lib/constants";
 
 export interface Conversation {
   readonly id: string;
@@ -327,8 +324,8 @@ export const ConversationList = memo<ConversationListProps>(function Conversatio
   }, []);
 
   useEffect(() => {
-    window.addEventListener('ui-call-status', handleCallStatus as EventListener);
-    return () => window.removeEventListener('ui-call-status', handleCallStatus as EventListener);
+    window.addEventListener(EventType.UI_CALL_STATUS, handleCallStatus as EventListener);
+    return () => window.removeEventListener(EventType.UI_CALL_STATUS, handleCallStatus as EventListener);
   }, [handleCallStatus]);
 
   const [refreshTick, setRefreshTick] = useState(0);

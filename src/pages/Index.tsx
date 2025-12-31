@@ -56,7 +56,7 @@ import { resolveDisplayUsername } from "../lib/unified-username-display";
 const CallModalLazy = React.lazy(() => import("../components/chat/calls/CallModal"));
 
 const getReplyContent = (message: Message): string => {
-  if (message.type === 'file' || message.type === 'file-message' || message.filename) {
+  if (message.type === SignalType.FILE || message.type === SignalType.FILE_MESSAGE || message.filename) {
     const fileSize = message.fileSize ? ` (${formatFileSize(message.fileSize)})` : '';
     const filename = message.filename || 'File';
 
@@ -1663,7 +1663,7 @@ const ChatApp: React.FC = () => {
                                       x25519PublicBase64: targetUser.hybridPublicKeys.x25519PublicBase64,
                                     },
                                     {
-                                      messageType: 'file',
+                                      messageType: SignalType.FILE,
                                       metadata: {
                                         filename: fileData.filename,
                                         size: fileData.size,

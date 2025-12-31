@@ -70,7 +70,7 @@ const getConversationPreview = (message: Message, currentUsername: string): stri
     }
   }
 
-  if (message.type === 'file' || message.type === 'file-message' || filename) {
+  if (message.type === SignalType.FILE || message.type === SignalType.FILE_MESSAGE || filename) {
     if (filename && filename.match(/\.(jpg|jpeg|png|gif|bmp|webp|svg|ico|tiff)$/i)) {
       return `${prefix} sent an image`;
     }

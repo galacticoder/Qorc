@@ -2,7 +2,6 @@ import React from 'react';
 import { Button } from '../../ui/button';
 import { screenSharingSettings } from '../../../lib/screen-sharing-settings';
 import { SCREEN_SHARING_RESOLUTIONS, SCREEN_SHARING_FRAMERATES } from '../../../lib/screen-sharing-consts';
-
 import {
     QUALITY_OPTIONS,
     QUALITY_LABELS,

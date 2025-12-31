@@ -2,6 +2,7 @@ import React, { useState, useCallback, useMemo } from "react";
 import { Input } from "../../ui/input";
 import { Label } from "../../ui/label";
 import { Button } from "../../ui/button";
+import { USERNAME_MAX_LENGTH, PASSWORD_MAX_LENGTH } from "../../../lib/constants";
 
 interface SignInFormProps {
   readonly onSubmit: (username: string, password: string) => Promise<void>;
@@ -14,9 +15,6 @@ interface SignInFormProps {
   readonly onChangeUsername?: (v: string) => void;
   readonly onChangePassword?: (v: string) => void;
 }
-
-const USERNAME_MAX_LENGTH = 32;
-const PASSWORD_MAX_LENGTH = 1000;
 
 export function SignInForm({
   onSubmit,

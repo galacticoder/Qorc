@@ -57,8 +57,8 @@ export const Sidebar = React.memo<SidebarProps>(({ className, children, currentU
     const openNewChat = () => {
       setShowAddUser(true);
     };
-    window.addEventListener('open-new-chat', openNewChat as EventListener);
-    return () => window.removeEventListener('open-new-chat', openNewChat as EventListener);
+    window.addEventListener(EventType.OPEN_NEW_CHAT, openNewChat as EventListener);
+    return () => window.removeEventListener(EventType.OPEN_NEW_CHAT, openNewChat as EventListener);
   }, []);
 
   // Add a new conversation/user

@@ -2,6 +2,12 @@ import React, { useState, useCallback, useMemo } from "react";
 import { Input } from "../../ui/input";
 import { Label } from "../../ui/label";
 import { Button } from "../../ui/button";
+import { isValidUsername } from "../../../lib/sanitizers";
+import {
+  USERNAME_MIN_LENGTH,
+  USERNAME_MAX_LENGTH,
+  PASSWORD_MAX_LENGTH,
+} from "../../../lib/constants";
 
 interface SignUpFormProps {
   readonly onSubmit: (username: string, password: string) => Promise<void>;
@@ -15,13 +21,6 @@ interface SignUpFormProps {
   readonly onChangePassword?: (v: string) => void;
   readonly onChangeConfirmPassword?: (v: string) => void;
 }
-
-import {
-  USERNAME_MIN_LENGTH,
-  USERNAME_MAX_LENGTH,
-  PASSWORD_MAX_LENGTH,
-} from "../../../lib/constants";
-import { isValidUsername } from "../../../lib/sanitizers";
 
 export function SignUpForm({
   onSubmit,

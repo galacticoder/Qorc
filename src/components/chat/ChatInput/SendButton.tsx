@@ -12,8 +12,6 @@ interface SendButtonProps {
 }
 
 export function SendButton({ disabled, isSending, editingMessage, onClick }: SendButtonProps) {
-
-
   const buttonContent = useMemo(() => {
     if (isSending) {
       return (

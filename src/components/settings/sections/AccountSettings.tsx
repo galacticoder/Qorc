@@ -3,13 +3,15 @@ import { Camera, Shield, X } from 'lucide-react';
 import { toast } from 'sonner';
 import { profilePictureSystem } from '../../../lib/profile-picture-system';
 import { isPlainObject, hasPrototypePollutionKeys } from '../../../lib/sanitizers';
-import { sanitizeEventText } from '../../utils';
+import { sanitizeEventText } from '../../../lib/sanitizers';
 import { AnimatedSwitch } from '../../ui/AnimatedSwitch';
-
+import { SignalType } from '../../../lib/signal-types';
+import { EventType } from '../../../lib/event-types';
 import {
     DEFAULT_EVENT_RATE_WINDOW_MS,
     DEFAULT_EVENT_RATE_MAX,
-    MAX_EVENT_TYPE_LENGTH
+    MAX_EVENT_TYPE_LENGTH,
+    MAX_PROFILE_IMAGE_SIZE
 } from '../../../lib/constants';
 
 interface AccountSettingsProps {
@@ -58,8 +60,8 @@ export const AccountSettings = ({
             } catch { }
         };
 
-        window.addEventListener('profile-picture-updated', handleAvatarUpdate as EventListener);
-        return () => window.removeEventListener('profile-picture-updated', handleAvatarUpdate as EventListener);
+        window.addEventListener(EventType.PROFILE_PICTURE_UPDATED, handleAvatarUpdate as EventListener);
+        return () => window.removeEventListener(EventType.PROFILE_PICTURE_UPDATED, handleAvatarUpdate as EventListener);
     }, [setAvatarUrl]);
 
     const handleAvatarChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -68,8 +70,8 @@ export const AccountSettings = ({
 
         e.target.value = '';
 
-        if (file.size > 5 * 1024 * 1024) {
-            toast.error('Image too large (max 5MB)');
+        if (file.size > MAX_PROFILE_IMAGE_SIZE) {
+            toast.error(`Image too large (max ${MAX_PROFILE_IMAGE_SIZE / 1024 / 1024}MB)`);
             return;
         }
 
@@ -136,7 +138,7 @@ export const AccountSettings = ({
                     </div>
                     <input
                         ref={avatarInputRef}
-                        type="file"
+                        type={SignalType.FILE}
                         accept="image/*"
                         onChange={handleAvatarChange}
                         style={{ display: 'none' }}

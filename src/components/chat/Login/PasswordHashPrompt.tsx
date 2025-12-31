@@ -2,6 +2,7 @@ import React, { useState, useCallback } from "react";
 import { Button } from "../../ui/button";
 import { Input } from "../../ui/input";
 import { Label } from "../../ui/label";
+import { PASSWORD_MAX_LENGTH } from "../../../lib/constants";
 
 interface PasswordHashPromptProps {
   readonly onSubmit: (password: string) => Promise<void>;
@@ -10,8 +11,6 @@ interface PasswordHashPromptProps {
   readonly initialPassword?: string;
   readonly onChangePassword?: (v: string) => void;
 }
-
-const PASSWORD_MAX_LENGTH = 1000;
 
 export function PasswordHashPrompt({
   onSubmit,

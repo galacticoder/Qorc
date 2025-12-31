@@ -36,7 +36,7 @@ interface PeerConnection {
 }
 
 interface P2PMessage {
-  type: 'chat' | 'signal' | 'heartbeat' | 'dummy' | 'typing' | 'reaction' | 'file' | 'delivery-ack' | 'read-receipt' | 'edit' | 'delete';
+  type: 'chat' | 'signal' | 'heartbeat' | 'dummy' | 'typing' | 'reaction' | SignalType.FILE | 'delivery-ack' | 'read-receipt' | 'edit' | 'delete';
   from: string;
   to: string;
   timestamp: number;
@@ -623,7 +623,7 @@ export class WebRTCP2PService {
   async sendMessage(
     to: string,
     message: any,
-    messageType: 'chat' | 'signal' | 'typing' | 'reaction' | 'file' | 'delivery-ack' | 'read-receipt' | 'edit' | 'delete' = 'chat'
+    messageType: 'chat' | 'signal' | 'typing' | 'reaction' | SignalType.FILE | 'delivery-ack' | 'read-receipt' | 'edit' | 'delete' = 'chat'
   ): Promise<void> {
     const peer = this.peers.get(to);
     const isHandshakeMessage = messageType === 'signal' && (message?.kind?.startsWith('pq-key') || message?.kind?.startsWith('session-'));
@@ -795,7 +795,7 @@ export class WebRTCP2PService {
       case 'chat':
       case 'typing':
       case 'reaction':
-      case 'file':
+      case SignalType.FILE:
       case 'edit':
       case 'delete': {
         const session = this.pqSessions.get(message.from);

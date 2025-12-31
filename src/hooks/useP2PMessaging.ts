@@ -10,7 +10,7 @@ import { SecurityAuditLogger } from '../lib/post-quantum-crypto';
 import { EventType } from '../lib/event-types';
 
 export interface P2PMessage {
-  type: 'chat' | 'signal' | 'heartbeat' | 'dummy' | 'typing' | 'reaction' | 'file' | 'delivery-ack' | 'read-receipt';
+  type: 'chat' | 'signal' | 'heartbeat' | 'dummy' | 'typing' | 'reaction' | SignalType.FILE | 'delivery-ack' | 'read-receipt';
   from: string;
   to: string;
   timestamp: number;
@@ -28,7 +28,7 @@ export interface EncryptedMessage {
   p2p: boolean;
   transport?: 'p2p';
   routeProof?: string;
-  messageType?: 'text' | 'typing' | 'reaction' | 'file' | 'edit' | 'delete';
+  messageType?: 'text' | 'typing' | 'reaction' | SignalType.FILE | 'edit' | 'delete';
   metadata?: any;
 }
 
@@ -349,7 +349,7 @@ export function useP2PMessaging(
   const processedReadReceiptsRef = useRef<Set<string>>(new Set());
   const RECEIPT_RETENTION_MS = 24 * 60 * 60 * 1000;
 
-  type QueuedItem = { to: string; envelope: any; type: 'text' | 'typing' | 'reaction' | 'file'; enqueuedAt: number; ttlMs: number };
+  type QueuedItem = { to: string; envelope: any; type: 'text' | 'typing' | 'reaction' | SignalType.FILE; enqueuedAt: number; ttlMs: number };
   const outboundQueueRef = useRef(new Map<string, QueuedItem[]>());
   const flushTimersRef = useRef(new Map<string, ReturnType<typeof setTimeout>>());
   const flushPeerQueueRef = useRef<(peer: string) => void>(() => { });
@@ -707,7 +707,7 @@ export function useP2PMessaging(
     [p2pStatus.connectedPeers],
   );
 
-  const enqueueOutbound = useCallback((to: string, envelope: any, type: 'text' | 'typing' | 'reaction' | 'file', ttlMs: number) => {
+  const enqueueOutbound = useCallback((to: string, envelope: any, type: 'text' | 'typing' | 'reaction' | SignalType.FILE, ttlMs: number) => {
     const now = Date.now();
     const arr = outboundQueueRef.current.get(to) || [];
     const pruned = arr.filter(it => (now - it.enqueuedAt) < it.ttlMs).slice(-MAX_INCOMING_QUEUE);
@@ -766,7 +766,7 @@ export function useP2PMessaging(
       content: string,
       remoteHybridKeys?: RemoteHybridKeys,
       options?: {
-        messageType?: 'text' | 'typing' | 'reaction' | 'file' | 'edit' | 'delete';
+        messageType?: 'text' | 'typing' | 'reaction' | SignalType.FILE | 'edit' | 'delete';
         metadata?: any;
       }
     ): Promise<P2PSendResult> => {
@@ -888,16 +888,16 @@ export function useP2PMessaging(
         });
 
         // Determine P2P message type
-        let p2pType: 'chat' | 'typing' | 'reaction' | 'file' = 'chat';
+        let p2pType: 'chat' | 'typing' | 'reaction' | SignalType.FILE = 'chat';
         if (options?.messageType === 'typing') p2pType = 'typing';
         else if (options?.messageType === 'reaction') p2pType = 'reaction';
-        else if (options?.messageType === 'file') p2pType = 'file';
+        else if (options?.messageType === SignalType.FILE) p2pType = SignalType.FILE;
 
         try { SecurityAuditLogger.log('info', 'p2p-send-request', { to, type: p2pType }); } catch { }
         const connectedPeers = p2pServiceRef.current?.getConnectedPeers() ?? [];
         const serviceConnected = connectedPeers.includes(to);
         if (!serviceConnected) {
-          const ttl = p2pType === 'typing' ? 5000 : p2pType === 'reaction' ? 30000 : p2pType === 'file' ? 180000 : 120000;
+          const ttl = p2pType === 'typing' ? 5000 : p2pType === 'reaction' ? 30000 : p2pType === SignalType.FILE ? 180000 : 120000;
           enqueueOutbound(to, encryptedEnvelope, p2pType as any, ttl);
           try { SecurityAuditLogger.log('info', 'p2p-enqueued-not-connected', { to, type: p2pType }); } catch { }
           connectToPeer(to).catch(() => {
@@ -925,12 +925,12 @@ export function useP2PMessaging(
 
         if (errorMsg.includes('no PQ session') || errorMsg.includes('without established PQ session')) {
           try {
-            const p2pType: 'chat' | 'typing' | 'reaction' | 'file' =
+            const p2pType: 'chat' | 'typing' | 'reaction' | SignalType.FILE =
               options?.messageType === 'typing' ? 'typing'
                 : options?.messageType === 'reaction' ? 'reaction'
-                  : options?.messageType === 'file' ? 'file'
+                  : options?.messageType === SignalType.FILE ? SignalType.FILE
                     : 'chat';
-            const ttl = p2pType === 'typing' ? 5000 : p2pType === 'reaction' ? 30000 : p2pType === 'file' ? 180000 : 120000;
+            const ttl = p2pType === 'typing' ? 5000 : p2pType === 'reaction' ? 30000 : p2pType === SignalType.FILE ? 180000 : 120000;
             const messageObj = {
               id: messageId,
               content,
@@ -966,12 +966,12 @@ export function useP2PMessaging(
         }
 
         try {
-          const p2pType: 'chat' | 'typing' | 'reaction' | 'file' =
+          const p2pType: 'chat' | 'typing' | 'reaction' | SignalType.FILE =
             options?.messageType === 'typing' ? 'typing'
               : options?.messageType === 'reaction' ? 'reaction'
-                : options?.messageType === 'file' ? 'file'
+                : options?.messageType === SignalType.FILE ? SignalType.FILE
                   : 'chat';
-          const ttl = p2pType === 'typing' ? 5000 : p2pType === 'reaction' ? 30000 : p2pType === 'file' ? 180000 : 120000;
+          const ttl = p2pType === 'typing' ? 5000 : p2pType === 'reaction' ? 30000 : p2pType === SignalType.FILE ? 180000 : 120000;
           const messageObj = {
             id: messageId,
             content,
@@ -1146,7 +1146,7 @@ export function useP2PMessaging(
         }
 
         // Accept chat, typing, reaction, file, edit, and delete messages
-        if (!['chat', 'typing', 'reaction', 'file', 'edit', 'delete'].includes(message.type)) {
+        if (!['chat', 'typing', 'reaction', SignalType.FILE, 'edit', 'delete'].includes(message.type)) {
           return;
         }
         if (!hybridKeys?.dilithium?.secretKey || !hybridKeys?.dilithium?.publicKeyBase64) {
@@ -1246,10 +1246,10 @@ export function useP2PMessaging(
         const messageId = await generateMessageId(channelId, messageSequence);
 
         // Determine message type from P2P message type or decrypted message
-        let messageType: 'text' | 'typing' | 'reaction' | 'file' | 'edit' | 'delete' = 'text';
+        let messageType: 'text' | 'typing' | 'reaction' | SignalType.FILE | 'edit' | 'delete' = 'text';
         if (message.type === 'typing') messageType = 'typing';
         else if (message.type === 'reaction') messageType = 'reaction';
-        else if (message.type === 'file') messageType = 'file';
+        else if (message.type === SignalType.FILE) messageType = SignalType.FILE;
         else if ((message.type as string) === 'edit') {
           // Handle edit
           messageType = 'edit';
@@ -1317,7 +1317,7 @@ export function useP2PMessaging(
           });
         }
 
-        if (message.type === 'chat' || message.type === 'file') {
+        if (message.type === 'chat' || message.type === SignalType.FILE) {
           try {
             const ackPayload = {
               messageId: encryptedMessage.id,

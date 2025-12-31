@@ -5,8 +5,8 @@ export interface AuthProps {
   isSubmittingAuth?: boolean;
   loginError: string;
   accountAuthenticated: boolean;
-  hybridKeysRef: React.MutableRefObject<{ x25519: { private: CryptoKey | Uint8Array }, kyber: { secretKey: Uint8Array } } | null>;
-  loginUsernameRef: React.MutableRefObject<string>;
+  hybridKeysRef: React.RefObject<{ x25519: { private: CryptoKey | Uint8Array }, kyber: { secretKey: Uint8Array } } | null>;
+  loginUsernameRef: React.RefObject<string>;
   initializeKeys: () => Promise<void>;
   handleAccountSubmit: (
     mode: "login" | "register",

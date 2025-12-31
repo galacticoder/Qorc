@@ -17,6 +17,7 @@ import { copyTextToClipboard } from "../../../lib/clipboard";
 import { MessageContextMenu } from "./MessageContextMenu";
 import { UserAvatar } from "../../ui/UserAvatar";
 import { EventType } from "../../../lib/event-types";
+import { SignalType } from "../../../lib/signal-types";
 
 interface ExtendedChatMessageProps extends ChatMessageProps {
   readonly getDisplayUsername?: (username: string) => Promise<string>;
@@ -155,9 +156,8 @@ export const ChatMessage = React.memo<ExtendedChatMessageProps>(({ message, smar
   }, [isSystemMessage, content, message]);
 
   const isFileMessageType =
-    type === "FILE_MESSAGE" ||
-    type === "file" ||
-    type === "file-message";
+    type === SignalType.FILE_MESSAGE ||
+    type === SignalType.FILE;
 
   const isVoiceNote = useMemo(() => {
     if (!isFileMessageType) return false;
@@ -385,7 +385,7 @@ export const ChatMessage = React.memo<ExtendedChatMessageProps>(({ message, smar
           </details>
         )}
 
-        {!isUrlOnly && !isSystemMessage && !isDeleted && urls.length > 0 && type !== "FILE_MESSAGE" && type !== "file" && type !== "file-message" && (
+        {!isUrlOnly && !isSystemMessage && !isDeleted && urls.length > 0 && type !== SignalType.FILE_MESSAGE && type !== SignalType.FILE && (
           <div
             className="mb-3 w-full flex self-stretch"
             style={{

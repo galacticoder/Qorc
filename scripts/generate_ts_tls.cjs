@@ -236,6 +236,17 @@ async function tailscaleSupportsCertFiles() {
       if (certExists) console.log(`  - ${certPath}`);
       if (keyExists) console.log(`  - ${keyPath}`);
 
+      const currentCert = process.env.TLS_CERT_PATH;
+      const currentKey = process.env.TLS_KEY_PATH;
+      
+      const envCertMatch = currentCert && (currentCert === certPath || currentCert === `/app/server/config/certs/${dns}.crt`);
+      const envKeyMatch = currentKey && (currentKey === keyPath || currentKey === `/app/server/config/certs/${dns}.key`);
+
+      if (envCertMatch && envKeyMatch) {
+          console.log('[INFO] .env already points to these certificates.');
+          process.exit(0);
+      }
+
       const readline = require('readline');
       const rl = readline.createInterface({
         input: process.stdin,
@@ -251,7 +262,17 @@ async function tailscaleSupportsCertFiles() {
 
       if (!answer.trim().match(/^y(es)?$/i)) {
         console.log('[INFO] Keeping existing certificates');
-        console.log('[INFO] Certificate paths already in .env');
+        
+        const tlsLines = [
+          `TLS_CERT_PATH=/app/server/config/certs/${dns}.crt`,
+          `TLS_KEY_PATH=/app/server/config/certs/${dns}.key`
+        ];
+        try {
+          await mergeEnv(ENV_PATH, [...tlsLines, ...DB_TLS_LINES, 'SERVER_HOST=127.0.0.1']);
+          console.log('[OK] Updated .env with existing TLS certificate paths');
+        } catch (e) {
+          console.log('[WARN] Could not update .env with existing paths');
+        }
         process.exit(0);
       }
 
@@ -290,8 +311,8 @@ async function tailscaleSupportsCertFiles() {
     console.log('Key :', keyPath, '(600)');
 
     const tlsLines = [
-      `TLS_CERT_PATH=${certPath}`,
-      `TLS_KEY_PATH=${keyPath}`
+      `TLS_CERT_PATH=/app/server/config/certs/${dns}.crt`,
+      `TLS_KEY_PATH=/app/server/config/certs/${dns}.key`
     ];
 
     try {

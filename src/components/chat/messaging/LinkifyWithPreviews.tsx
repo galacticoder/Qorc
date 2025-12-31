@@ -1,6 +1,7 @@
 import React, { useMemo, useCallback, useState, useEffect } from 'react';
 import Linkify from 'linkify-react';
 import { LinkExtractor } from '../../../lib/link-extraction';
+import { MAX_CACHE_SIZE, MAX_URL_LENGTH, ALLOWED_PROTOCOLS, IPV4_REGEX, IPV6_REGEX } from '@/lib/constants';
 
 // Cached preview metadata
 interface CachedPreview {
@@ -14,10 +15,6 @@ interface CachedPreview {
 
 const linkPreviewCache = new Map<string, CachedPreview>();
 
-const MAX_CACHE_SIZE = 100;
-const MAX_URL_LENGTH = 2048;
-const ALLOWED_PROTOCOLS = new Set(['http:', 'https:']);
-
 // Trim cache when it grows too large
 const cleanupCache = (): void => {
   if (linkPreviewCache.size > MAX_CACHE_SIZE) {
@@ -26,9 +23,6 @@ const cleanupCache = (): void => {
     toRemove.forEach(([key]) => linkPreviewCache.delete(key));
   }
 };
-
-const IPV4_REGEX = /^(?:\d{1,3}\.){3}\d{1,3}$/;
-const IPV6_REGEX = /^\[?[A-F0-9:]+\]?$/i;
 
 // Detect localhost or private hosts to skip previews
 const isPrivateOrLocalHost = (hostname: string): boolean => {

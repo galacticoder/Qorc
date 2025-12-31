@@ -188,7 +188,7 @@ export function useFileHandler(
   getKeysOnDemand: () => Promise<{ x25519: { private: any; publicKeyBase64: string }; kyber: { publicKeyBase64: string; secretKey: Uint8Array } } | null>,
   onNewMessage: (message: Message) => void,
   setLoginError: (err: string) => void,
-  secureDBRef?: React.MutableRefObject<any | null>
+  secureDBRef?: React.RefObject<any | null>
 ) {
   const incomingFileChunksRef = useRef<IncomingFileChunks>({});
   const macStateRef = useRef<Map<string, { macKey: Uint8Array; fileSize: number }>>(new Map());

@@ -279,7 +279,7 @@ export function createFileMessage(
     sender,
     recipient,
     timestamp,
-    type: 'file',
+    type: SignalType.FILE,
     isCurrentUser: false,
     filename: fileName,
     mimeType: fileType,

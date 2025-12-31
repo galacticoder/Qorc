@@ -14,10 +14,10 @@ import {
   QUALITY_LABELS,
   QUALITY_DESCRIPTIONS,
   QualityOption,
-  DEFAULT_QUALITY
+  DEFAULT_QUALITY,
+  RESET_FEEDBACK_DURATION_MS
 } from '../../lib/constants';
 
-const RESET_FEEDBACK_DURATION_MS = 1000;
 
 function validateQualityOption(value: string): value is QualityOption {
   return QUALITY_OPTIONS.includes(value as any);

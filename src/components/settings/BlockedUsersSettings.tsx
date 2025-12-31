@@ -6,7 +6,8 @@ import { Label } from '../../components/ui/label';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger } from '../../components/ui/dialog';
 import { blockingSystem, BlockedUser } from '../../lib/blocking-system';
 import { format } from 'date-fns';
-import { isPlainObject, hasPrototypePollutionKeys, sanitizeEventUsername, isValidUsername } from '../utils';
+import { isPlainObject, hasPrototypePollutionKeys, sanitizeEventUsername, isValidUsername } from '../../lib/sanitizers';
+import { EventType } from '../../lib/event-types';
 import {
   DEFAULT_EVENT_RATE_WINDOW_MS,
   DEFAULT_EVENT_RATE_MAX,
@@ -14,8 +15,8 @@ import {
 } from '../../lib/constants';
 
 interface BlockedUsersSettingsProps {
-  passphraseRef?: React.MutableRefObject<string>;
-  kyberSecretRef?: React.MutableRefObject<Uint8Array | null>;
+  passphraseRef?: React.RefObject<string>;
+  kyberSecretRef?: React.RefObject<Uint8Array | null>;
   getDisplayUsername?: (username: string) => Promise<string>;
 }
 
@@ -127,11 +128,11 @@ export function BlockedUsersSettings({ passphraseRef, kyberSecretRef, getDisplay
     };
 
     document.addEventListener('visibilitychange', handleVisibilityChange);
-    window.addEventListener('block-status-changed', handleBlockStatusChange as EventListener);
+    window.addEventListener(EventType.BLOCK_STATUS_CHANGED, handleBlockStatusChange as EventListener);
 
     return () => {
       document.removeEventListener('visibilitychange', handleVisibilityChange);
-      window.removeEventListener('block-status-changed', handleBlockStatusChange as EventListener);
+      window.removeEventListener(EventType.BLOCK_STATUS_CHANGED, handleBlockStatusChange as EventListener);
     };
   }, [passphraseRef, kyberSecretRef, loadBlockedUsers]);
 

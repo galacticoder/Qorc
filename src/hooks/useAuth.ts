@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback, useEffect, MutableRefObject } from "react";
+import { useState, useRef, useCallback, useEffect, RefObject } from "react";
 import { SignalType } from "../lib/signal-types";
 import { EventType } from "../lib/event-types";
 import { retrieveAuthTokens, clearTokenEncryptionKey } from "../lib/signals";
@@ -11,7 +11,7 @@ import { encryptedStorage, syncEncryptedStorage } from "../lib/encrypted-storage
 import { pseudonymizeUsername } from "../lib/username-hash";
 import { PostQuantumSignature, PostQuantumUtils } from "../lib/post-quantum-crypto";
 
-const secureWipeStringRef = (ref: MutableRefObject<string>) => {
+const secureWipeStringRef = (ref: RefObject<string>) => {
   try {
     const len = ref.current?.length || 0;
     if (len > 0) {
@@ -158,15 +158,15 @@ export const useAuth = (_secureDB?: SecureDB) => {
       }
     };
 
-    try { window.addEventListener('auth-error', onAuthError as any); } catch { }
-    try { window.addEventListener('auth-rate-limited', onAuthRateLimited as any); } catch { }
+    try { window.addEventListener(EventType.AUTH_ERROR, onAuthError as any); } catch { }
+    try { window.addEventListener(EventType.AUTH_RATE_LIMITED, onAuthRateLimited as any); } catch { }
 
     return () => {
       if (countdownInterval) {
         clearInterval(countdownInterval);
       }
-      try { window.removeEventListener('auth-error', onAuthError as any); } catch { }
-      try { window.removeEventListener('auth-rate-limited', onAuthRateLimited as any); } catch { }
+      try { window.removeEventListener(EventType.AUTH_ERROR, onAuthError as any); } catch { }
+      try { window.removeEventListener(EventType.AUTH_RATE_LIMITED, onAuthRateLimited as any); } catch { }
     };
   }, []);
 
@@ -1149,7 +1149,7 @@ export const useAuth = (_secureDB?: SecureDB) => {
     }
   }, []);
 
-  const logout = async (secureDBRef?: MutableRefObject<SecureDB | null>, loginErrorMessage: string = "") => {
+  const logout = async (secureDBRef?: RefObject<SecureDB | null>, loginErrorMessage: string = "") => {
     try {
       const user = loginUsernameRef.current || '';
       if (user && websocketClient.isConnectedToServer()) {
@@ -1216,7 +1216,7 @@ export const useAuth = (_secureDB?: SecureDB) => {
 
   };
 
-  const useLogout = (Database: { secureDBRef: MutableRefObject<SecureDB | null> }) => {
+  const useLogout = (Database: { secureDBRef: RefObject<SecureDB | null> }) => {
     return async () => await logout(Database.secureDBRef, "Logged out");
   };
 
@@ -1257,8 +1257,8 @@ export const useAuth = (_secureDB?: SecureDB) => {
       } catch { }
     };
 
-    window.addEventListener('auth-ui-back', handleAuthUiBack as EventListener);
-    return () => window.removeEventListener('auth-ui-back', handleAuthUiBack as EventListener);
+    window.addEventListener(EventType.AUTH_UI_BACK, handleAuthUiBack as EventListener);
+    return () => window.removeEventListener(EventType.AUTH_UI_BACK, handleAuthUiBack as EventListener);
   }, []);
 
   useEffect(() => {
@@ -1275,8 +1275,8 @@ export const useAuth = (_secureDB?: SecureDB) => {
         }
       } catch { }
     };
-    window.addEventListener('auth-ui-input', handleAuthUiInput as EventListener);
-    return () => window.removeEventListener('auth-ui-input', handleAuthUiInput as EventListener);
+    window.addEventListener(EventType.AUTH_UI_INPUT, handleAuthUiInput as EventListener);
+    return () => window.removeEventListener(EventType.AUTH_UI_INPUT, handleAuthUiInput as EventListener);
   }, []);
 
   useEffect(() => {

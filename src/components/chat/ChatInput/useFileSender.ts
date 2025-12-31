@@ -7,19 +7,7 @@ import { SignalType } from "../../../lib/signal-types";
 import { EventType } from "../../../lib/event-types";
 import { sanitizeFilename } from "../../../lib/sanitizers";
 import { syncEncryptedStorage } from "../../../lib/encrypted-storage";
-
-const DEFAULT_CHUNK_SIZE_SMALL = 192 * 1024;
-const DEFAULT_CHUNK_SIZE_LARGE = 384 * 1024;
-const LARGE_FILE_THRESHOLD = 10 * 1024 * 1024;
-const MAX_CHUNKS_PER_SECOND = 50;
-const INACTIVITY_TIMEOUT_MS = 120000;
-const P2P_CONNECT_TIMEOUT_MS = 3500;
-const RATE_LIMITER_SLEEP_MS = 10;
-const PAUSE_POLL_MS = 100;
-const P2P_POLL_MS = 100;
-const YIELD_INTERVAL = 8;
-const MAC_SALT = new TextEncoder().encode('ft-mac-salt-v1');
-const TOR_ENABLED_KEY = STORAGE_KEYS.TOR_ENABLED;
+import { DEFAULT_CHUNK_SIZE_SMALL, DEFAULT_CHUNK_SIZE_LARGE, LARGE_FILE_THRESHOLD, MAX_CHUNKS_PER_SECOND, INACTIVITY_TIMEOUT_MS, P2P_CONNECT_TIMEOUT_MS, RATE_LIMITER_SLEEP_MS, PAUSE_POLL_MS, P2P_POLL_MS, YIELD_INTERVAL, MAC_SALT, SESSION_WAIT_MS, SESSION_POLL_BASE_MS, SESSION_POLL_MAX_MS, BUNDLE_REQUEST_COOLDOWN_MS, SESSION_FRESH_COOLDOWN_MS } from "../../../lib/constants";
 
 interface HybridPublicKeys {
   readonly x25519PublicBase64?: string;
@@ -88,13 +76,6 @@ export function useFileSender(
   const currentMacKeyRef = useRef<Uint8Array | null>(null);
   const rateTokensRef = useRef<number>(MAX_CHUNKS_PER_SECOND);
   const lastRefillRef = useRef<number>(Date.now());
-
-  const SESSION_WAIT_MS = 12_000;
-  const SESSION_POLL_BASE_MS = 200;
-  const SESSION_POLL_MAX_MS = 1_500;
-  const BUNDLE_REQUEST_COOLDOWN_MS = 5000;
-  const SESSION_FRESH_COOLDOWN_MS = 10_000;
-
   const bundleRequestTracker = useRef<Map<string, number>>(new Map());
   const sessionEstablishedAt = useRef<Map<string, number>>(new Map());
   const peersNeedingSessionRefresh = useRef<Set<string>>(new Set());
@@ -123,14 +104,14 @@ export function useFileSender(
       } catch { }
     };
 
-    window.addEventListener('session-reset-received', handleSessionReset as EventListener);
-    window.addEventListener('libsignal-session-ready', handleSessionEstablished as EventListener);
-    window.addEventListener('session-established-received', handleSessionEstablished as EventListener);
+    window.addEventListener(EventType.SESSION_RESET_RECEIVED, handleSessionReset as EventListener);
+    window.addEventListener(EventType.LIBSIGNAL_SESSION_READY, handleSessionEstablished as EventListener);
+    window.addEventListener(EventType.SESSION_ESTABLISHED_RECEIVED, handleSessionEstablished as EventListener);
 
     return () => {
-      window.removeEventListener('session-reset-received', handleSessionReset as EventListener);
-      window.removeEventListener('libsignal-session-ready', handleSessionEstablished as EventListener);
-      window.removeEventListener('session-established-received', handleSessionEstablished as EventListener);
+      window.removeEventListener(EventType.SESSION_RESET_RECEIVED, handleSessionReset as EventListener);
+      window.removeEventListener(EventType.LIBSIGNAL_SESSION_READY, handleSessionEstablished as EventListener);
+      window.removeEventListener(EventType.SESSION_ESTABLISHED_RECEIVED, handleSessionEstablished as EventListener);
     };
   }, []);
 
@@ -203,7 +184,7 @@ export function useFileSender(
   // Check if Tor is enabled for routing preferences
   const isTorEnabled = useCallback((): boolean => {
     try {
-      const flag = syncEncryptedStorage.getItem(TOR_ENABLED_KEY);
+      const flag = syncEncryptedStorage.getItem(STORAGE_KEYS.TOR_ENABLED);
       if (typeof flag === 'string') return flag !== 'false';
     } catch { }
     return true;
@@ -336,7 +317,7 @@ export function useFileSender(
           sessionReadyFlag = true;
         }
       };
-      window.addEventListener('libsignal-session-ready', readyHandler as EventListener);
+      window.addEventListener(EventType.LIBSIGNAL_SESSION_READY, readyHandler as EventListener);
 
       try {
         let lastRequestAt = 0;
@@ -442,7 +423,7 @@ export function useFileSender(
           }
         }
       } finally {
-        try { window.removeEventListener('libsignal-session-ready', readyHandler as EventListener); } catch { }
+        try { window.removeEventListener(EventType.LIBSIGNAL_SESSION_READY, readyHandler as EventListener); } catch { }
       }
       return false;
     } catch {
@@ -475,7 +456,7 @@ export function useFileSender(
           }
         } catch { }
       };
-      window.addEventListener('session-reset-received', resetHandler as EventListener);
+      window.addEventListener(EventType.SESSION_RESET_RECEIVED, resetHandler as EventListener);
 
       try {
         const hasPendingReset = targetUsername && peersNeedingSessionRefresh.current.has(targetUsername);
@@ -655,7 +636,7 @@ export function useFileSender(
         return;
 
       } finally {
-        window.removeEventListener('session-reset-received', resetHandler as EventListener);
+        window.removeEventListener(EventType.SESSION_RESET_RECEIVED, resetHandler as EventListener);
       }
     }
   }, [computeChunkMacAsync, currentUsername, scheduleInactivityTimer, users]);
@@ -682,7 +663,7 @@ export function useFileSender(
       const totalChunks = Math.ceil(rawBytes.length / chunkSize);
       const fileId = crypto.randomUUID();
 
-      const safeName = sanitizeFilename(file.name || 'file');
+      const safeName = sanitizeFilename(file.name || SignalType.FILE);
       const state: TransferState = {
         fileId,
         fileName: safeName,
@@ -808,7 +789,7 @@ export function useFileSender(
         fileSize: file.size,
         mimeType: file.type || 'application/octet-stream',
         originalBase64Data: fileBase64,
-        type: 'file',
+        type: SignalType.FILE,
         isCurrentUser: true,
         receipt: {
           delivered: false,

@@ -195,7 +195,7 @@ export const useCalling = (authContext: ReturnType<typeof useAuth>) => {
         endTime: call.endTime
       };
       const statusNeedsImmediateDispatch = call.status === 'ended' || call.status === 'declined' || call.status === 'missed';
-      eventDebouncer.current.enqueue('ui-call-status', statusDetail, statusNeedsImmediateDispatch);
+      eventDebouncer.current.enqueue(EventType.UI_CALL_STATUS, statusDetail, statusNeedsImmediateDispatch);
 
       const wasConnected = everConnectedRef.current.has(call.id);
 

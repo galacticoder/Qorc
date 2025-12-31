@@ -1,4 +1,5 @@
 import { USERNAME_REGEX } from './constants';
+import { SignalType } from './signal-types';
 
 const DEFAULT_ALLOWED_KEYS = ['username', 'type', 'peer', 'at', 'callId', 'status', 'startTime', 'endTime', 'durationMs', 'direction'] as const;
 
@@ -25,6 +26,32 @@ export const sanitizeTextInput = (input: string, options: TextSanitizeOptions = 
   if (sanitized.length > maxLength) {
     sanitized = sanitized.slice(0, maxLength);
   }
+
+  return sanitized;
+};
+
+// Sanitize message content
+export const sanitizeMessage = (input: string): string => {
+  const MAX_LENGTH = 10000;
+
+  let sanitized = input.normalize('NFC').trim();
+  if (sanitized.length > MAX_LENGTH) {
+    sanitized = sanitized.slice(0, MAX_LENGTH);
+  }
+
+  sanitized = sanitized
+    .replace(/[\u0000-\u0008\u000B-\u001F\u007F-\u009F\u2000-\u200F\u2028-\u202F\u205F-\u206F\uFEFF\uFFF0-\uFFFF]/g, '')
+    .replace(/[\u200B-\u200D\u2060\uFEFF]/g, '')
+    .replace(/[\u202A-\u202E\u2066-\u2069]/g, '')
+    .replace(/[\u0300-\u036F]{5,}/g, '')
+    .replace(/[\uD800-\uDFFF]/g, '')
+    .replace(/[\uFDD0-\uFDEF]/g, '')
+    .replace(/[\u0001-\u0008\u000E-\u001F\u007F]/g, '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#x27;');
 
   return sanitized;
 };
@@ -57,13 +84,13 @@ const UNSAFE_FILENAME_CHARS_REGEX = /[\u0000-\u001F\u007F/\\:*?"<>|]+/g;
 const WHITESPACE_COLLAPSE_REGEX = /\s+/g;
 
 export const sanitizeFilename = (name: string, maxLength: number = 128): string => {
-  if (typeof name !== 'string') return 'file';
+  if (typeof name !== 'string') return SignalType.FILE;
 
   let out = name.normalize('NFKC');
   out = out.replace(UNSAFE_FILENAME_CHARS_REGEX, '_');
   out = out.replace(WHITESPACE_COLLAPSE_REGEX, ' ').trim();
 
-  if (!out) out = 'file';
+  if (!out) out = SignalType.FILE;
   if (out.length > maxLength) out = out.slice(0, maxLength);
 
   return out;
@@ -117,6 +144,26 @@ export const isValidUsername = (username: unknown): username is string => {
   const reserved = ['__proto__', 'constructor', 'prototype'];
   if (reserved.includes(username.toLowerCase())) return false;
   return true;
+};
+
+// Sanitize UI text by trimming, removing control chars, and truncating
+export const sanitizeUiText = (value: unknown, maxLen: number): string | null => {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  const cleaned = trimmed.replace(/[\x00-\x1F\x7F]/g, '');
+  if (!cleaned) return null;
+  return cleaned.slice(0, maxLen);
+};
+
+// Sanitize generic event text values
+export const sanitizeEventText = (value: unknown, maxLen: number): string | null => {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  const cleaned = trimmed.replace(/[\x00-\x1F\x7F]/g, '');
+  if (!cleaned) return null;
+  return cleaned.slice(0, maxLen);
 };
 
 export type { TextSanitizeOptions, AllowedKey };

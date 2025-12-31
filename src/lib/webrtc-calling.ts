@@ -1771,18 +1771,18 @@ export class WebRTCCallingService {
           try { await websocketClient.sendSecureControlMessage(reqBase); } catch { }
           await new Promise<void>((resolve) => {
             const timeout = setTimeout(() => {
-              window.removeEventListener('libsignal-session-ready', handler as EventListener);
+              window.removeEventListener(EventType.LIBSIGNAL_SESSION_READY, handler as EventListener);
               resolve();
             }, 5000);
             const handler = (e: Event) => {
               const d = (e as CustomEvent).detail;
               if (d?.peer === signal.to) {
                 clearTimeout(timeout);
-                window.removeEventListener('libsignal-session-ready', handler as EventListener);
+                window.removeEventListener(EventType.LIBSIGNAL_SESSION_READY, handler as EventListener);
                 resolve();
               }
             };
-            window.addEventListener('libsignal-session-ready', handler as EventListener, { once: true });
+            window.addEventListener(EventType.LIBSIGNAL_SESSION_READY, handler as EventListener, { once: true });
           });
         }
       } catch { }
@@ -1844,7 +1844,7 @@ export class WebRTCCallingService {
                 resolve();
               }
             };
-            window.addEventListener('libsignal-session-ready', handler as EventListener, { once: true });
+            window.addEventListener(EventType.LIBSIGNAL_SESSION_READY, handler as EventListener, { once: true });
           });
 
           const reResolved = await this.resolveRecipientHybridKeys(signal.to);

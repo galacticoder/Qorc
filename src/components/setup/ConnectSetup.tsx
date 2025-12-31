@@ -25,7 +25,6 @@ export function ConnectSetup({ onComplete, initialServerUrl = '' }: ConnectSetup
   });
   const [isSetupRunning, setIsSetupRunning] = useState(false);
   const [showAdvanced, setShowAdvanced] = useState(false);
-  const [showVerification, setShowVerification] = useState(false);
 
   // Server selection state
   const [customServerUrl, setCustomServerUrl] = useState('');
@@ -79,12 +78,6 @@ export function ConnectSetup({ onComplete, initialServerUrl = '' }: ConnectSetup
       } catch { }
     })();
   }, [initialServerUrl]);
-
-  useEffect(() => {
-    if (!showVerification) return;
-    document.body.classList.add('overflow-hidden');
-    return () => document.body.classList.remove('overflow-hidden');
-  }, [showVerification]);
 
   const normalizeToWss = (value: string): string => {
     let v = (value || '').trim();

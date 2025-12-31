@@ -2,17 +2,14 @@ import React, { useState, useEffect, useMemo } from "react";
 import { Cross2Icon } from "../assets/icons";
 import { Message } from "../messaging/types";
 import { Image, Video, Mic, Paperclip } from "lucide-react";
+import { SignalType } from '@/lib/signal-types';
+import { IMAGE_EXTENSIONS, VIDEO_EXTENSIONS, AUDIO_EXTENSIONS, HEX_PATTERN } from '@/lib/constants';
 
 interface ReplyBannerProps {
   readonly replyTo: Message;
   readonly onCancelReply: () => void;
   readonly getDisplayUsername?: (username: string) => Promise<string>;
 }
-
-const IMAGE_EXTENSIONS = ['jpg', 'jpeg', 'png', 'gif', 'bmp', 'webp', 'svg', 'ico', 'tiff'] as const;
-const VIDEO_EXTENSIONS = ['mp4', 'webm', 'ogg', 'avi', 'mov', 'wmv', 'flv', 'mkv'] as const;
-const AUDIO_EXTENSIONS = ['mp3', 'wav', 'ogg', 'webm', 'm4a', 'aac', 'flac'] as const;
-const HEX_PATTERN = /^[a-f0-9]{32,}$/i;
 
 export interface ReplyMessage {
   sender: string;
@@ -65,7 +62,7 @@ export function ReplyBanner({ replyTo, onCancelReply, getDisplayUsername }: Repl
   const isVideoMsg = useMemo(() => isVideo(replyTo), [replyTo]);
   const isVoiceMsg = useMemo(() => isVoiceNote(replyTo), [replyTo]);
   const isFileMsg = useMemo(() =>
-    replyTo.type === 'file' || replyTo.type === 'file-message' || replyTo.filename,
+    replyTo.type === SignalType.FILE || replyTo.type === SignalType.FILE_MESSAGE || replyTo.filename,
     [replyTo]
   );
 

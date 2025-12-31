@@ -44,7 +44,7 @@ export function FileUploader({ onFileSelected, disabled }: FileUploaderProps) {
       >
         <PaperclipIcon className="h-5 w-5" />
       </Button>
-      <input ref={fileInputRef} type="file" className="hidden" onChange={handleChange} />
+      <input ref={fileInputRef} type=SignalType.FILE className="hidden" onChange={handleChange} />
     </>
   );
 }

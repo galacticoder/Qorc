@@ -114,7 +114,7 @@ export function useP2PMessageHandlers({
         }
 
         // File metadata (ignored - handled separately)
-        if (encryptedMessage.messageType === 'file') {
+        if (encryptedMessage.messageType === SignalType.FILE) {
           SecurityAuditLogger.log('info', 'p2p-file-metadata-ignored', {});
           return;
         }

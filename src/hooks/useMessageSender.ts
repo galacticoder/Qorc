@@ -140,9 +140,9 @@ const getIdCache = () => {
 
 const mapSignalType = (baseType: string, messageSignalType?: string, fileData?: string): string => {
   if (!messageSignalType) {
-    return fileData ? 'file-message' : baseType;
+    return fileData ? SignalType.FILE_MESSAGE : baseType;
   }
-  return SIGNAL_TYPE_MAP[messageSignalType] ?? (fileData ? 'file-message' : baseType);
+  return SIGNAL_TYPE_MAP[messageSignalType] ?? (fileData ? SignalType.FILE_MESSAGE : baseType);
 };
 
 const createLocalMessage = (
@@ -160,7 +160,7 @@ const createLocalMessage = (
     sender,
     recipient,
     timestamp: new Date(timestamp),
-    type: fileData ? 'file' : 'text',
+    type: fileData ? SignalType.FILE : 'text',
     isCurrentUser: true,
     receipt: { delivered: false, read: false },
     version: '1',
@@ -361,9 +361,9 @@ const recipientKeyValidator = () => {
 
 export function useMessageSender(
   users: { username: string; hybridPublicKeys?: { kyberPublicBase64: string; dilithiumPublicBase64: string; x25519PublicBase64?: string } }[],
-  loginUsernameRef: React.MutableRefObject<string>,
+  loginUsernameRef: React.RefObject<string>,
   currentUsername: string,
-  originalUsernameRef: React.MutableRefObject<string>,
+  originalUsernameRef: React.RefObject<string>,
   onNewMessage: (message: Message) => void,
   _serverHybridPublic: { x25519PublicBase64: string; kyberPublicBase64: string; dilithiumPublicBase64: string } | null,
   getKeysOnDemand: () => Promise<{
@@ -371,12 +371,12 @@ export function useMessageSender(
     kyber: { publicKeyBase64: string; secretKey: Uint8Array };
     dilithium: { publicKeyBase64: string; secretKey: Uint8Array };
   } | null>,
-  _aesKeyRef: React.MutableRefObject<CryptoKey | null>,
-  _keyManagerRef?: React.MutableRefObject<any>,
-  _passphraseRef?: React.MutableRefObject<string>,
+  _aesKeyRef: React.RefObject<CryptoKey | null>,
+  _keyManagerRef?: React.RefObject<any>,
+  _passphraseRef?: React.RefObject<string>,
   isLoggedIn?: boolean,
   hasUsernameMapping?: (hashedUsername: string) => Promise<boolean>,
-  secureDBRef?: React.MutableRefObject<SecureDB | null>,
+  secureDBRef?: React.RefObject<SecureDB | null>,
   resolvePeerHybridKeys?: (peerUsername: string) => Promise<{ kyberPublicBase64: string; dilithiumPublicBase64: string; x25519PublicBase64?: string } | null>
 ) {
   const recipientDirectory = useMemo(() => {

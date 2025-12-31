@@ -1,6 +1,7 @@
 export enum SignalType {
   PUBLICKEYS = 'public-keys',
   FILE_MESSAGE = 'file-message',
+  FILE = 'file',
   FILE_MESSAGE_CHUNK = 'file-message-chunk',
   ENCRYPTED_MESSAGE = 'encrypted-message',
   STORE_OFFLINE_MESSAGE = 'store-offline-message',

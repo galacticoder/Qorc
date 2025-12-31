@@ -116,14 +116,14 @@ const pruneOldReceipts = (store: Map<string, number>) => {
 };
 
 const updateMessageReceipt = async (
-  messageIndexRef: React.MutableRefObject<Map<string, number>>,
+  messageIndexRef: React.RefObject<Map<string, number>>,
   setMessages: React.Dispatch<React.SetStateAction<Message[]>>,
   messageId: string,
   updater: (receipt: Message['receipt'] | undefined) => Message['receipt'] | undefined,
-  messagesRef: React.MutableRefObject<Message[]>,
-  dbReceiptQueueRef?: React.MutableRefObject<Map<string, (receipt: Message['receipt'] | undefined) => Message['receipt'] | undefined>>,
-  dbFlushTimeoutRef?: React.MutableRefObject<ReturnType<typeof setTimeout> | null>,
-  flushDBReceiptsRef?: React.MutableRefObject<(() => Promise<void>) | null>,
+  messagesRef: React.RefObject<Message[]>,
+  dbReceiptQueueRef?: React.RefObject<Map<string, (receipt: Message['receipt'] | undefined) => Message['receipt'] | undefined>>,
+  dbFlushTimeoutRef?: React.RefObject<ReturnType<typeof setTimeout> | null>,
+  flushDBReceiptsRef?: React.RefObject<(() => Promise<void>) | null>,
 ): Promise<Message | null> => {
   const index = messageIndexRef.current.get(messageId);
   let updatedMessage: Message | null = null;
@@ -178,7 +178,7 @@ export function useMessageReceipts(
     kyber: { publicKeyBase64: string; secretKey: Uint8Array };
     dilithium: { publicKeyBase64: string; secretKey: Uint8Array };
   } | null>,
-  secureDBRef?: React.MutableRefObject<any>,
+  secureDBRef?: React.RefObject<any>,
 ) {
   const sentReceiptsRef = useRef<Map<string, number>>(new Map());
   const messageIndexRef = useRef<Map<string, number>>(new Map());
