@@ -15,13 +15,12 @@ import {
     DEFAULT_EVENT_RATE_MAX,
     MAX_EVENT_USERNAME_LENGTH
 } from '../../../lib/constants';
+import { formatRelativeAge, formatCallDurationSeconds } from '../../../lib/date-utils';
 
 interface CallLogItemProps {
     readonly log: CallLogEntry;
     readonly index: number;
     readonly totalLogs: number;
-    readonly formatTime: (timestamp: number) => string;
-    readonly formatDuration: (seconds?: number) => string;
     readonly getDisplayUsername?: (username: string) => Promise<string>;
     readonly onDelete: (id: string) => void;
 }
@@ -30,8 +29,6 @@ const CallLogItem: React.FC<CallLogItemProps> = React.memo(({
     log,
     index,
     totalLogs,
-    formatTime,
-    formatDuration,
     getDisplayUsername,
     onDelete
 }) => {
@@ -106,7 +103,7 @@ const CallLogItem: React.FC<CallLogItemProps> = React.memo(({
                             )}
                         </div>
                         <span className="text-xs text-muted-foreground font-medium shrink-0 ml-2">
-                            {formatTime(log.startTime)}
+                            {formatRelativeAge(log.startTime)}
                         </span>
                     </div>
 
@@ -126,7 +123,7 @@ const CallLogItem: React.FC<CallLogItemProps> = React.memo(({
                             <>
                                 <span className="w-1 h-1 rounded-full bg-zinc-200" />
                                 <span>
-                                    {formatDuration(log.duration)}
+                                    {formatCallDurationSeconds(log.duration)}
                                 </span>
                             </>
                         )}
@@ -199,48 +196,6 @@ export const CallLogs = React.memo<CallLogsProps>(({ getDisplayUsername }) => {
         });
     }, [logs, searchQuery, usernameMap]);
 
-    const formatTime = useCallback((timestamp: number): string => {
-        const date = new Date(timestamp);
-        if (!date || !(date instanceof Date) || isNaN(date.getTime())) {
-            return "";
-        }
-
-        const now = new Date();
-        const diff = now.getTime() - date.getTime();
-
-        if (diff < 0) return "";
-
-        const minutes = Math.floor(diff / 60000);
-        const hours = Math.floor(diff / 3600000);
-        const days = Math.floor(diff / 86400000);
-
-        if (minutes < 1) return "now";
-        if (minutes < 60) return `${minutes}m`;
-        if (hours < 24) return `${hours}h`;
-        if (days < 7) return `${days}d`;
-
-        const month = (date.getMonth() + 1).toString().padStart(2, '0');
-        const day = date.getDate().toString().padStart(2, '0');
-        const year = date.getFullYear().toString().slice(-2);
-        return `${month}/${day}/${year}`;
-    }, []);
-
-    const formatDuration = useCallback((seconds?: number) => {
-        if (!seconds) return '';
-
-        const hours = Math.floor(seconds / 3600);
-        const mins = Math.floor((seconds % 3600) / 60);
-        const secs = seconds % 60;
-
-        if (hours > 0) {
-            return `${hours}hr ${mins}m ${secs}s`;
-        } else if (mins > 0) {
-            return `${mins}m ${secs}s`;
-        } else {
-            return `${secs}s`;
-        }
-    }, []);
-
     return (
         <div className="flex flex-col h-full relative" style={{ backgroundColor: 'var(--chat-background)' }}>
             <div className="absolute top-0 left-0 right-0 z-10 p-6 space-y-4 bg-gradient-to-b from-background via-background/80 to-transparent">
@@ -301,8 +256,6 @@ export const CallLogs = React.memo<CallLogsProps>(({ getDisplayUsername }) => {
                                 log={log}
                                 index={index}
                                 totalLogs={filteredLogs.length}
-                                formatTime={formatTime}
-                                formatDuration={formatDuration}
                                 getDisplayUsername={getDisplayUsername}
                                 onDelete={deleteLog}
                             />

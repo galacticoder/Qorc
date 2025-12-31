@@ -1,8 +1,8 @@
 import React, { useMemo } from 'react';
-import { format } from 'date-fns';
 import { MessageReceipt as ReceiptType } from './types';
 import { Check, CheckCheck } from 'lucide-react';
 import { cn } from '../../../lib/utils';
+import { formatReceiptTime } from '../../../lib/date-utils';
 
 interface MessageReceiptProps {
 	readonly receipt?: ReceiptType;
@@ -10,22 +10,11 @@ interface MessageReceiptProps {
 	readonly className?: string;
 }
 
-const formatTime = (date: Date | undefined): string | undefined => {
-	if (!date || !(date instanceof Date) || isNaN(date.getTime())) {
-		return undefined;
-	}
-	try {
-		return format(date, 'p');
-	} catch {
-		return undefined;
-	}
-};
-
 export const MessageReceipt: React.FC<MessageReceiptProps> = ({ receipt, isCurrentUser, className }) => {
 	if (!isCurrentUser || !receipt) return null;
 
-	const readTime = useMemo(() => formatTime(receipt.readAt), [receipt?.readAt]);
-	const deliveredTime = useMemo(() => formatTime(receipt.deliveredAt), [receipt?.deliveredAt]);
+	const readTime = useMemo(() => formatReceiptTime(receipt.readAt), [receipt?.readAt]);
+	const deliveredTime = useMemo(() => formatReceiptTime(receipt.deliveredAt), [receipt?.deliveredAt]);
 
 	if (receipt.read) {
 		return (

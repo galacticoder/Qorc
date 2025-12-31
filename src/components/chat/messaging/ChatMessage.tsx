@@ -1,6 +1,7 @@
 import React, { useRef, useMemo, useCallback, useState } from "react";
 import { cn } from "../../../lib/utils";
-import { format, isSameMinute, isToday, isYesterday, isThisYear } from "date-fns";
+import { format, isSameMinute } from "date-fns";
+import { formatMessageTimestamp } from "../../../lib/date-utils";
 import { EmojiPicker } from "../../ui/EmojiPicker";
 import { useEmojiPicker } from "../../../contexts/EmojiPickerContext";
 import { ChatMessageProps } from "./types";
@@ -68,31 +69,6 @@ const parseSystemMessage = (content: string, message: any): { label: string; act
     return { label, actions, isError: parsed.isError };
   } catch {
     return { label: content };
-  }
-};
-
-// Format message timestamp for display
-const formatTimestamp = (timestamp: Date): string => {
-  try {
-    if (!(timestamp instanceof Date) || isNaN(timestamp.getTime())) {
-      return '';
-    }
-    // Today: show time only
-    if (isToday(timestamp)) {
-      return format(timestamp, 'h:mm a');
-    }
-    // Yesterday: prefix
-    if (isYesterday(timestamp)) {
-      return `Yesterday ${format(timestamp, 'h:mm a')}`;
-    }
-    // This year: Month day, time
-    if (isThisYear(timestamp)) {
-      return format(timestamp, 'MMM d, h:mm a');
-    }
-    // Other years: include year
-    return format(timestamp, 'MMM d, yyyy, h:mm a');
-  } catch {
-    return '';
   }
 };
 
@@ -165,7 +141,7 @@ export const ChatMessage = React.memo<ExtendedChatMessageProps>(({ message, smar
     return name.includes('voice-note');
   }, [isFileMessageType, message.filename]);
 
-  const timestampDisplay = useMemo(() => formatTimestamp(timestamp), [timestamp]);
+  const timestampDisplay = useMemo(() => formatMessageTimestamp(timestamp), [timestamp]);
 
   // Handle emoji selection
   const handlePickEmoji = useCallback((emoji: string) => {

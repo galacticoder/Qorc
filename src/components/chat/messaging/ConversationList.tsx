@@ -10,6 +10,7 @@ import { UserAvatar } from "../../ui/UserAvatar";
 import { isPlainObject, hasPrototypePollutionKeys, sanitizeUiText } from "../../../lib/sanitizers";
 import { EventType } from "../../../lib/event-types";
 import { UI_CALL_STATUS_RATE_WINDOW_MS, UI_CALL_STATUS_RATE_MAX, MAX_UI_CALL_STATUS_PEER_LENGTH, MAX_UI_CALL_STATUS_VALUE_LENGTH } from "../../../lib/constants";
+import { formatRelativeAge } from "../../../lib/date-utils";
 
 export interface Conversation {
   readonly id: string;
@@ -53,7 +54,6 @@ interface ConversationItemProps {
   readonly isSelected: boolean;
   readonly onSelect: (username: string) => void;
   readonly onRemove?: (username: string) => void;
-  readonly formatTime: (date?: Date) => string;
   readonly callStatus?: CallStatus;
   readonly getDisplayUsername?: (username: string) => Promise<string>;
 }
@@ -63,7 +63,6 @@ const ConversationItem = memo<ConversationItemProps>(({
   isSelected,
   onSelect,
   onRemove,
-  formatTime,
   callStatus,
   getDisplayUsername
 }) => {
@@ -165,7 +164,7 @@ const ConversationItem = memo<ConversationItemProps>(({
               className="text-xs flex-shrink-0 select-none"
               style={{ color: isSelected ? 'rgba(255, 255, 255, 0.7)' : 'var(--color-text-secondary)' }}
             >
-              {formatTime(conversation.lastMessageTime)}
+              {formatRelativeAge(conversation.lastMessageTime)}
             </span>
           )}
         </div>
@@ -330,32 +329,6 @@ export const ConversationList = memo<ConversationListProps>(function Conversatio
 
   const [refreshTick, setRefreshTick] = useState(0);
 
-  // Format time for display
-  const formatTime = useCallback((date?: Date): string => {
-    if (!date || !(date instanceof Date) || isNaN(date.getTime())) {
-      return "";
-    }
-
-    const now = new Date();
-    const diff = now.getTime() - date.getTime();
-
-    if (diff < 0) return "";
-
-    const minutes = Math.floor(diff / 60000);
-    const hours = Math.floor(diff / 3600000);
-    const days = Math.floor(diff / 86400000);
-
-    if (minutes < 1) return "now";
-    if (minutes < 60) return `${minutes}m`;
-    if (hours < 24) return `${hours}h`;
-    if (days < 7) return `${days}d`;
-
-    const month = (date.getMonth() + 1).toString().padStart(2, '0');
-    const day = date.getDate().toString().padStart(2, '0');
-    const year = date.getFullYear().toString().slice(-2);
-    return `${month}/${day}/${year}`;
-  }, [refreshTick]);
-
   useEffect(() => {
     const getRefreshInterval = (): number => {
       const now = Date.now();
@@ -440,7 +413,6 @@ export const ConversationList = memo<ConversationListProps>(function Conversatio
                   isSelected={selectedConversation === conversation.username}
                   onSelect={onSelectConversation}
                   onRemove={handleRemoveClick}
-                  formatTime={formatTime}
                   callStatus={conversation.username === activePeer ? activeStatus : null}
                   getDisplayUsername={getDisplayUsername}
                 />

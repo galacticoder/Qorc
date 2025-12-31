@@ -3,31 +3,13 @@ import type { JSX } from 'react';
 import { Phone, PhoneIncoming, PhoneOutgoing, PhoneMissed, Video, VideoOff } from 'lucide-react';
 import { CallState } from '../../../lib/webrtc-calling';
 import { useUnifiedUsernameDisplay } from '../../../hooks/useUnifiedUsernameDisplay';
+import { formatCallDurationMs, formatCallHistoryTime } from '../../../lib/date-utils';
 
 interface CallHistoryProps {
   readonly calls: readonly CallState[];
   readonly onCallUser?: (username: string, type: 'audio' | 'video') => void;
   readonly getDisplayUsername?: (username: string) => Promise<string>;
 }
-
-const formatDuration = (duration?: number): string => {
-  if (!duration) return '';
-  const mins = Math.floor(duration / 60000);
-  const secs = Math.floor((duration % 60000) / 1000);
-  return `${mins}:${secs.toString().padStart(2, '0')}`;
-};
-
-const formatTime = (timestamp?: number): string => {
-  if (!timestamp) return '';
-  const date = new Date(timestamp);
-  const now = new Date();
-  const isToday = date.toDateString() === now.toDateString();
-
-  if (isToday) {
-    return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-  }
-  return date.toLocaleDateString([], { month: 'short', day: 'numeric' });
-};
 
 const getCallIcon = (call: CallState): JSX.Element => {
   const iconClass = "w-4 h-4";
@@ -53,13 +35,13 @@ const getCallIcon = (call: CallState): JSX.Element => {
 const getStatusText = (call: CallState): string => {
   switch (call.status) {
     case 'connected':
-      return call.duration ? formatDuration(call.duration) : 'Connected';
+      return call.duration ? formatCallDurationMs(call.duration) : 'Connected';
     case 'missed':
       return 'Missed';
     case 'declined':
       return 'Declined';
     case 'ended':
-      return call.duration ? formatDuration(call.duration) : 'Ended';
+      return call.duration ? formatCallDurationMs(call.duration) : 'Ended';
     default:
       return call.status;
   }
@@ -164,7 +146,7 @@ const CallHistoryItem: React.FC<CallHistoryItemProps> = React.memo(({
         <div>
           <p className="font-medium text-sm">{displayName}</p>
           <p className="text-xs text-gray-500">
-            {getStatusText(call)} • {formatTime(call.startTime)}
+            {getStatusText(call)} • {formatCallHistoryTime(call.startTime)}
           </p>
         </div>
       </div>
