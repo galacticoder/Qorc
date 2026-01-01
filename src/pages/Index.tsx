@@ -51,7 +51,7 @@ import { toast, Toaster } from 'sonner';
 import { TorIndicator } from "../components/ui/TorIndicator";
 import { Button } from "../components/ui/button";
 import { ComposeIcon } from "../components/chat/assets/icons";
-import { useCalling } from "../hooks/useCalling";
+import { useCalling } from "../hooks/calling/useCalling";
 import { truncateUsername } from "../lib/utils";
 import { resolveDisplayUsername } from "../lib/unified-username-display";
 const CallModalLazy = React.lazy(() => import("../components/chat/calls/CallModal"));

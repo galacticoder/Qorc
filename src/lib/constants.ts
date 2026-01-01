@@ -109,3 +109,20 @@ export const RATE_LIMIT_WINDOW_MS = 60_000;
 export const RATE_LIMIT_MAX_MESSAGES = 200;
 export const CERT_CLOCK_SKEW_MS = 2 * 60 * 1000;
 export const RECEIPT_RETENTION_MS = 24 * 60 * 60 * 1000;
+
+// Calling constants
+export const CALLING_MAX_USERNAME_LENGTH = 120;
+export const CALLING_MAX_CALL_ID_LENGTH = 256;
+export const CALLING_EVENT_ALLOWED_PAYLOAD_KEYS = new Set([
+  'type',
+  'peer',
+  'at',
+  'callId',
+  'status',
+  'startTime',
+  'endTime',
+  'durationMs',
+  'direction',
+  'isVideo',
+  'isOutgoing'
+]);

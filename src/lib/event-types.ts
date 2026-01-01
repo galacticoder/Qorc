@@ -96,6 +96,7 @@ export const EventType = {
   // UI events
   UI_CALL_LOG: 'ui-call-log',
   UI_CALL_STATUS: 'ui-call-status',
+  UI_CALL_ENDED: 'ui-call-ended',
   OPEN_NEW_CHAT: 'open-new-chat',
 
   // WebSocket events
