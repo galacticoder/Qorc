@@ -36,7 +36,7 @@ interface PeerConnection {
 }
 
 interface P2PMessage {
-  type: SignalType.CHAT | 'signal' | 'heartbeat' | 'dummy' | SignalType.TYPING | SignalType.REACTION | SignalType.FILE | SignalType.DELIVERY_ACK | SignalType.READ_RECEIPT | SignalType.EDIT | SignalType.DELETE;
+  type: SignalType.CHAT | SignalType.SIGNAL | 'heartbeat' | 'dummy' | SignalType.TYPING | SignalType.REACTION | SignalType.FILE | SignalType.DELIVERY_ACK | SignalType.READ_RECEIPT | SignalType.EDIT | SignalType.DELETE;
   from: string;
   to: string;
   timestamp: number;
@@ -623,10 +623,10 @@ export class WebRTCP2PService {
   async sendMessage(
     to: string,
     message: any,
-    messageType: SignalType.CHAT | 'signal' | SignalType.TYPING | SignalType.REACTION | SignalType.FILE | SignalType.DELIVERY_ACK | SignalType.READ_RECEIPT | SignalType.EDIT | SignalType.DELETE = SignalType.CHAT
+    messageType: SignalType.CHAT | SignalType.SIGNAL | SignalType.TYPING | SignalType.REACTION | SignalType.FILE | SignalType.DELIVERY_ACK | SignalType.READ_RECEIPT | SignalType.EDIT | SignalType.DELETE = SignalType.CHAT
   ): Promise<void> {
     const peer = this.peers.get(to);
-    const isHandshakeMessage = messageType === 'signal' && (message?.kind?.startsWith('pq-key') || message?.kind?.startsWith('session-'));
+    const isHandshakeMessage = messageType === SignalType.SIGNAL && (message?.kind?.startsWith('pq-key') || message?.kind?.startsWith('session-'));
     const canUseDataChannel = !!(peer?.dataChannel && peer.dataChannel.readyState === 'open');
 
     if (!peer) {
@@ -745,7 +745,7 @@ export class WebRTCP2PService {
     }
 
     switch (message.type) {
-      case 'signal': {
+      case SignalType.SIGNAL: {
         let kind = message.payload?.kind;
 
         if (!kind && message.payload?.version === 'pq-aead-v1') {
@@ -774,7 +774,7 @@ export class WebRTCP2PService {
           try {
             this.resetPqSession(message.from);
           } catch { }
-          try { await this.sendMessage(message.from, { kind: 'session-reset-ack' }, 'signal'); } catch { }
+          try { await this.sendMessage(message.from, { kind: 'session-reset-ack' }, SignalType.SIGNAL); } catch { }
           try { if (this.isLocalInitiator(message.from)) { this.initiatePostQuantumKeyExchange(message.from); } } catch { }
         } else if (kind === 'session-reset-ack') {
           try {
@@ -830,7 +830,7 @@ export class WebRTCP2PService {
                   this.initiatePostQuantumKeyExchange(message.from);
                 }
               } else {
-                try { await this.sendMessage(message.from, { kind: SignalType.SESSION_RESET_REQUEST, reason: 'decrypt-failed' }, 'signal'); } catch { }
+                try { await this.sendMessage(message.from, { kind: SignalType.SESSION_RESET_REQUEST, reason: 'decrypt-failed' }, SignalType.SIGNAL); } catch { }
               }
             }
           } catch { }
@@ -929,7 +929,7 @@ export class WebRTCP2PService {
         kyberPublicKey: PostQuantumUtils.uint8ArrayToBase64(session.kyberKeyPair!.publicKey)
       };
 
-      await this.sendMessage(peerUsername, initPayload, 'signal');
+      await this.sendMessage(peerUsername, initPayload, SignalType.SIGNAL);
       this.logAuditEvent('pq-key-init', peerUsername);
     } catch {
     }
@@ -993,7 +993,7 @@ export class WebRTCP2PService {
       };
       try { this.auditLogger.log('info', 'p2p-pq-response', { peer: from }); } catch { }
 
-      await this.sendMessage(from, response, 'signal');
+      await this.sendMessage(from, response, SignalType.SIGNAL);
       this.logAuditEvent('pq-key-response', from);
     } catch {
     }
@@ -1050,7 +1050,7 @@ export class WebRTCP2PService {
       const finalize = { kind: 'pq-key-exchange-finalize' };
       try { this.auditLogger.log('info', 'p2p-pq-finalize', { peer: from }); } catch { }
 
-      await this.sendMessage(from, finalize, 'signal');
+      await this.sendMessage(from, finalize, SignalType.SIGNAL);
       this.logAuditEvent('pq-key-finalize', from);
     } catch {
     }

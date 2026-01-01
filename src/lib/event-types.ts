@@ -6,11 +6,14 @@ export const EventType = {
   // Session events
   SESSION_RESET_RECEIVED: 'session-reset-received',
   SESSION_ESTABLISHED_RECEIVED: 'session-established-received',
+  SESSION_KEY_REFRESH: 'session-key-refresh',
   LIBSIGNAL_SESSION_READY: 'libsignal-session-ready',
   LIBSIGNAL_BUNDLE_FAILED: 'libsignal-bundle-failed',
+  LOCAL_INITIATED_RESET: 'local-initiated-reset',
 
   // P2P events
   P2P_SESSION_RESET_SEND: 'p2p-session-reset-send',
+  P2P_SESSION_RESET: 'p2p-session-reset',
   P2P_SESSION_RESET_REQUEST: 'p2p-session-reset-request',
   P2P_SESSION_RESET_ACK: 'p2p-session-reset-ack',
   P2P_PQ_ESTABLISHED: 'p2p-pq-established',

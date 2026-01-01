@@ -1,17 +1,18 @@
 import React, { useEffect, useCallback, useRef } from 'react';
-import { Message } from '../components/chat/messaging/types';
-import { EventType } from '../lib/event-types';
-import { SignalType } from '../lib/signal-types';
-import { isPlainObject, hasPrototypePollutionKeys, isUnsafeObjectKey, sanitizeNonEmptyText, sanitizeFilename } from '../lib/sanitizers';
+import { Message } from '../../components/chat/messaging/types';
+import { EventType } from '../../lib/event-types';
+import { SignalType } from '../../lib/signal-types';
+import { isPlainObject, hasPrototypePollutionKeys, isUnsafeObjectKey, sanitizeNonEmptyText, sanitizeFilename } from '../../lib/sanitizers';
 import { toast } from 'sonner';
-
-const MAX_LOCAL_MESSAGE_ID_LENGTH = 160;
-const MAX_LOCAL_MESSAGE_LENGTH = 10_000;
-const MAX_LOCAL_USERNAME_LENGTH = 256;
-const MAX_LOCAL_MIMETYPE_LENGTH = 128;
-const MAX_LOCAL_EMOJI_LENGTH = 32;
-const MAX_LOCAL_FILE_SIZE_BYTES = 50 * 1024 * 1024;
-const MAX_INLINE_BASE64_BYTES = 10 * 1024 * 1024;
+import { 
+  MAX_LOCAL_MESSAGE_ID_LENGTH,
+  MAX_LOCAL_MESSAGE_LENGTH,
+  MAX_LOCAL_USERNAME_LENGTH,
+  MAX_LOCAL_MIMETYPE_LENGTH,
+  MAX_LOCAL_EMOJI_LENGTH,
+  MAX_LOCAL_FILE_SIZE_BYTES,
+  MAX_INLINE_BASE64_BYTES 
+} from '../../lib/constants';
 
 interface UseLocalMessageHandlersProps {
   setMessages: React.Dispatch<React.SetStateAction<Message[]>>;
@@ -80,7 +81,7 @@ export function useLocalMessageHandlers({
 
   const handleLocalFileMessage = useCallback(async (event: CustomEvent) => {
     try {
-      if (!allowEvent('local-file-message')) return;
+      if (!allowEvent(EventType.LOCAL_FILE_MESSAGE)) return;
       const detail = (event as any).detail;
       if (!isPlainObject(detail) || hasPrototypePollutionKeys(detail)) return;
 

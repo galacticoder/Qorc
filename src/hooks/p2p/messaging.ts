@@ -365,7 +365,7 @@ export function createHandleIncomingP2PMessage(
 ) {
   return async (message: P2PMessage) => {
     try {
-      if (message.type === 'signal') {
+      if (message.type === SignalType.SIGNAL) {
         try {
           const payload = message.payload;
           let parsed: any = null;

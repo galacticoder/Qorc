@@ -48,6 +48,8 @@ export enum SignalType {
   HYBRID_KEYS = 'hybrid-keys',
   HYBRID_KEYS_UPDATE = 'hybrid-keys-update',
   DR_SEND = 'dr-send',
+  SIGNAL_PROTOCOL = 'signal-protocol',
+  SIGNAL = 'signal',
   TEXT = 'text',
   CHAT = 'chat',
   TYPING = 'typing',

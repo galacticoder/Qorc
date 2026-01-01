@@ -37,6 +37,12 @@ export const DEFAULT_EVENT_RATE_WINDOW_MS = 10_000;
 export const DEFAULT_EVENT_RATE_MAX = 200;
 export const DEFAULT_UI_EVENT_RATE_MAX = 500;
 
+// Typing
+export const TYPING_STOP_DELAY = 1500;
+export const MIN_TYPING_INTERVAL = 4000;
+export const CONVERSATION_CHANGE_DEBOUNCE = 100;
+export const TYPING_DOMAIN = 'typing-indicator-v1';
+
 // UI call status throttling
 export const UI_CALL_STATUS_RATE_WINDOW_MS = 10_000;
 export const UI_CALL_STATUS_RATE_MAX = 500;
@@ -134,6 +140,16 @@ export const MAX_CONVERSATIONS = 1000;
 export const CONVERSATION_RATE_LIMIT_WINDOW_MS = 10_000;
 export const CONVERSATION_RATE_LIMIT_MAX = 8;
 export const VALIDATION_TIMEOUT_MS = 15_000;
+
+
+// Local message constants
+export const MAX_LOCAL_MESSAGE_ID_LENGTH = 160;
+export const MAX_LOCAL_MESSAGE_LENGTH = 10_000;
+export const MAX_LOCAL_USERNAME_LENGTH = 256;
+export const MAX_LOCAL_MIMETYPE_LENGTH = 128;
+export const MAX_LOCAL_EMOJI_LENGTH = 32;
+export const MAX_LOCAL_FILE_SIZE_BYTES = 50 * 1024 * 1024;
+export const MAX_INLINE_BASE64_BYTES = 10 * 1024 * 1024;
 
 // Calling constants
 export const CALLING_MAX_USERNAME_LENGTH = 120;

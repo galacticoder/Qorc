@@ -3,7 +3,7 @@ import { SignalType } from "../signal-types";
 export interface P2PMessage {
   type:
     | SignalType.CHAT
-    | 'signal'
+    | SignalType.SIGNAL
     | 'heartbeat'
     | 'dummy'
     | SignalType.TYPING

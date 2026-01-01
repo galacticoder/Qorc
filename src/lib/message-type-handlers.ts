@@ -155,9 +155,9 @@ export function createDeliveryReceiptPayload(
     to: toUsername,
     content: SignalType.DELIVERY_RECEIPT,
     timestamp: Date.now(),
-    messageType: 'signal-protocol',
-    signalType: 'signal-protocol',
-    protocolType: 'signal',
+    messageType: SignalType.SIGNAL_PROTOCOL,
+    signalType: SignalType.SIGNAL_PROTOCOL,
+    protocolType: SignalType.SIGNAL,
     type: SignalType.DELIVERY_RECEIPT
   };
 }

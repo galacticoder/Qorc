@@ -17,7 +17,7 @@ import { useAuth } from "../hooks/auth/useAuth";
 import { useSecureDB } from "../hooks/useSecureDB";
 import { useFileHandler } from "../hooks/useFileHandler";
 import { useMessageSender } from "../hooks/message-sending/useMessageSender";
-import { useEncryptedMessageHandler } from "../hooks/useEncryptedMessageHandler";
+import { useEncryptedMessageHandler } from "../hooks/message-handling/useEncryptedMessageHandler";
 import { useChatSignals } from "../hooks/useChatSignals";
 import { useWebSocket } from "../hooks/useWebsocket";
 import { useConversations } from "../hooks/message-sending/useConversations";
@@ -42,7 +42,7 @@ import { isValidKyberPublicKeyBase64, sanitizeHybridKeys } from "../lib/validato
 import { SecurityAuditLogger } from "../lib/post-quantum-crypto";
 import { sanitizeFilename, isPlainObject, hasPrototypePollutionKeys, isUnsafeObjectKey, sanitizeNonEmptyText } from "../lib/sanitizers";
 import { useRateLimiter } from "../hooks/useRateLimiter";
-import { useLocalMessageHandlers } from "../hooks/useLocalMessageHandlers";
+import { useLocalMessageHandlers } from "../hooks/message-handling/useLocalMessageHandlers";
 import { useP2PMessageHandlers } from "../hooks/p2p/useP2PMessageHandlers";
 import { useP2PConnectionManager } from "../hooks/p2p/useP2PConnectionManager";
 import { useP2PSignalHandlers } from "../hooks/p2p/useP2PSignalHandlers";

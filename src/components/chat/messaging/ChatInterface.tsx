@@ -7,7 +7,7 @@ import { ChatInput } from "../ChatInput.tsx";
 import { User } from "./UserList";
 import { SignalType } from "@/lib/signal-types";
 import { MessageReply } from "./types";
-import { useTypingIndicator } from "@/hooks/useTypingIndicator";
+import { useTypingIndicator } from "@/hooks/message-handling/useTypingIndicator";
 import { TypingIndicatorList } from "./TypingIndicatorList";
 import { Video, MoreVertical, ShieldOff } from 'lucide-react';
 import { CallIcon } from '../assets/icons';

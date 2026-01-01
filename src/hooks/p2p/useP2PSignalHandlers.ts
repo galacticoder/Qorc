@@ -25,7 +25,7 @@ export function useP2PSignalHandlers({ p2pMessaging }: UseP2PSignalHandlersProps
             try { await p2pMessaging.connectToPeer(to); } catch { }
             await (p2pMessaging as any).waitForPeerConnection?.(to, 5000).catch(() => { });
           }
-          await (p2pMessaging as any)?.p2pServiceRef?.current?.sendMessage?.(to, { kind: SignalType.SESSION_RESET_REQUEST, reason }, 'signal');
+          await (p2pMessaging as any)?.p2pServiceRef?.current?.sendMessage?.(to, { kind: SignalType.SESSION_RESET_REQUEST, reason }, SignalType.SIGNAL);
         } catch { }
       } catch { }
     };
@@ -54,7 +54,7 @@ export function useP2PSignalHandlers({ p2pMessaging }: UseP2PSignalHandlersProps
           const svc: any = (window as any).p2pService || (p2pMessaging as any)?.p2pServiceRef?.current || null;
           if (svc && typeof svc.sendMessage === 'function') {
             try {
-              await svc.sendMessage(to, { kind: EventType.CALL_SIGNAL, signal: signalObj }, 'signal');
+              await svc.sendMessage(to, { kind: EventType.CALL_SIGNAL, signal: signalObj }, SignalType.SIGNAL);
               success = true;
             } catch {
               // Wait for PQ establishment and retry
@@ -68,7 +68,7 @@ export function useP2PSignalHandlers({ p2pMessaging }: UseP2PSignalHandlersProps
                 window.addEventListener(EventType.P2P_PQ_ESTABLISHED, on as EventListener, { once: true });
               });
               try {
-                await svc.sendMessage(to, { kind: EventType.CALL_SIGNAL, signal: signalObj }, 'signal');
+                await svc.sendMessage(to, { kind: EventType.CALL_SIGNAL, signal: signalObj }, SignalType.SIGNAL);
                 success = true;
               } catch { }
             }

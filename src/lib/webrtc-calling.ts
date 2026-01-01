@@ -1751,7 +1751,7 @@ export class WebRTCCallingService {
         to: signal.to,
         content: JSON.stringify(signedSignal),
         timestamp: Date.now(),
-        messageType: 'signal-protocol',
+        messageType: SignalType.SIGNAL_PROTOCOL,
         type: EventType.CALL_SIGNAL
       };
 

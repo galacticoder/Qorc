@@ -1,10 +1,6 @@
 import { useCallback, useEffect, useRef } from 'react';
-import { SignalType } from '../lib/signal-types';
-
-const TYPING_STOP_DELAY = 1500;
-const MIN_TYPING_INTERVAL = 4000;
-const CONVERSATION_CHANGE_DEBOUNCE = 100;
-const TYPING_DOMAIN = 'typing-indicator-v1';
+import { SignalType } from '../../lib/signal-types';
+import { TYPING_DOMAIN, TYPING_STOP_DELAY, MIN_TYPING_INTERVAL, CONVERSATION_CHANGE_DEBOUNCE } from '../../lib/constants';
 
 const createRandomHex = (byteLength: number) => {
   const bytes = crypto.getRandomValues(new Uint8Array(byteLength));
