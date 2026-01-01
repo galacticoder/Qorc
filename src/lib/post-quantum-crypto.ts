@@ -787,7 +787,7 @@ export class PostQuantumWorker {
     }
 
     const worker = new Worker(workerUrl, { type: 'module' });
-    worker.addEventListener('message', (event: MessageEvent<unknown>) => {
+    worker.addEventListener(SignalType.MESSAGE, (event: MessageEvent<unknown>) => {
       try {
         const data = event.data;
         if (!isPlainObject(data) || hasPrototypePollutionKeys(data)) {

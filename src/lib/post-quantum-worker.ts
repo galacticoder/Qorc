@@ -199,7 +199,7 @@ type WorkerResponse =
   | { id: string; success: false; error: string };
 
 
-self.addEventListener('message', async (event: MessageEvent<WorkerRequest>) => {
+self.addEventListener(SignalType.MESSAGE, async (event: MessageEvent<WorkerRequest>) => {
   try {
     // Validate event.data for prototype pollution
     if (!isPlainObject(event.data)) {

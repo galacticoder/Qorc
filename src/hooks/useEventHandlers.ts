@@ -1,4 +1,4 @@
-import { useEffect, useCallback, useRef } from 'react';
+import React, { useEffect, useCallback, useRef } from 'react';
 import { Message } from '../components/chat/messaging/types';
 import { isPlainObject, hasPrototypePollutionKeys, sanitizeNonEmptyText, isUnsafeObjectKey } from '../lib/sanitizers';
 import { sanitizeHybridKeys, isValidKyberPublicKeyBase64 } from '../lib/validators';
@@ -118,7 +118,7 @@ export function useEventHandlers({
 
     const handleUserExistsResponse = async (event: Event) => {
       try {
-        if (!allowEvent('user-exists-response')) return;
+        if (!allowEvent(EventType.USER_EXISTS_RESPONSE)) return;
         const detail = (event as CustomEvent).detail;
         if (!isPlainObject(detail) || hasPrototypePollutionKeys(detail)) return;
 

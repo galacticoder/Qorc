@@ -372,7 +372,7 @@ export function createTextMessage(
     sender,
     recipient,
     timestamp,
-    type: 'text',
+    type: SignalType.TEXT,
     isCurrentUser: false,
     p2p,
     encrypted: true,

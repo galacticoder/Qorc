@@ -90,6 +90,7 @@ export const EventType = {
   // App lifecycle events
   APP_ENTERING_BACKGROUND: 'app:entering-background',
   AUTH_UI_BACK: 'auth-ui-back',
+  AUTH_UI_FORWARD: 'auth-ui-forward',
   SECURE_CHAT_AUTH_SUCCESS: 'secure-chat:auth-success',
 
   // UI events

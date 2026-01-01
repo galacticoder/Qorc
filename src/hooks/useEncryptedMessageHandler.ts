@@ -1,5 +1,5 @@
 import { v4 as uuidv4 } from 'uuid';
-import { useCallback, useEffect, useRef } from "react";
+import React, { useCallback, useEffect, useRef } from "react";
 import { toast } from "sonner";
 import { SignalType } from "../lib/signal-types";
 import { EventType } from "../lib/event-types";
@@ -819,7 +819,7 @@ export function useEncryptedMessageHandler(
               timestamp: encryptedMessage.timestamp,
               from: encryptedMessage.from,
               to: encryptedMessage.to,
-              type: 'message',
+              type: SignalType.MESSAGE,
               p2p: true
             };
           } catch (_error) {
@@ -936,7 +936,7 @@ export function useEncryptedMessageHandler(
 
                     try {
                       await websocketClient.sendSecureControlMessage({
-                        type: 'session-reset-request',
+                        type: SignalType.SESSION_RESET_REQUEST,
                         from: currentUser,
                         targetUsername: senderUsername,
                         deviceId: 1,
@@ -1042,7 +1042,7 @@ export function useEncryptedMessageHandler(
                     // Send session reset notification
                     try {
                       await websocketClient.sendSecureControlMessage({
-                        type: 'session-reset-request',
+                        type: SignalType.SESSION_RESET_REQUEST,
                         from: currentUser,
                         targetUsername: senderUsername,
                         deviceId: 1,
@@ -1121,7 +1121,7 @@ export function useEncryptedMessageHandler(
                             encryptedData: cleanedEnvelope
                           });
                           if (retried?.success && typeof retried?.plaintext === 'string') {
-                            payload = safeJsonParseForMessages(retried.plaintext) || { content: retried.plaintext, type: 'message' };
+                            payload = safeJsonParseForMessages(retried.plaintext) || { content: retried.plaintext, type: SignalType.MESSAGE };
                             if (encryptedMessage.from && payload && !payload.from) {
                               (payload as any).from = encryptedMessage.from;
                             }
@@ -1148,7 +1148,7 @@ export function useEncryptedMessageHandler(
                 if (!payload) return;
               }
 
-              payload = safeJsonParseForMessages(decrypted.plaintext) || { content: decrypted.plaintext, type: 'message' };
+              payload = safeJsonParseForMessages(decrypted.plaintext) || { content: decrypted.plaintext, type: SignalType.MESSAGE };
               if (!payload || typeof payload !== 'object') {
                 console.error('[EncryptedMessageHandler] Decrypted payload invalid');
                 return;
@@ -1404,7 +1404,7 @@ export function useEncryptedMessageHandler(
             return;
           }
 
-          const isTextMessage = (payload.type === 'message' || payload.type === 'text' || !payload.type) &&
+          const isTextMessage = (payload.type === SignalType.MESSAGE || payload.type === SignalType.TEXT || !payload.type) &&
             payload.content &&
             typeof payload.content === 'string' &&
             payload.content.trim().length > 0;
@@ -1412,7 +1412,7 @@ export function useEncryptedMessageHandler(
           const isActualMessage = isTextMessage || isFileMessage;
 
           const isCallSignal = payload.type?.startsWith?.('call-') ||
-            ['call-offer', 'call-answer', 'call-ice', 'call-signal', 'call-end', 'call-reject'].includes(payload.type);
+            ['call-offer', 'call-answer', 'call-ice', EventType.CALL_SIGNAL, 'call-end', 'call-reject'].includes(payload.type);
 
           if (isActualMessage) {
             try {
@@ -1440,7 +1440,7 @@ export function useEncryptedMessageHandler(
                   title,
                   body,
                   silent: false,
-                  data: { from: payload.from, type: isCallSignal ? 'call' : 'message' }
+                  data: { from: payload.from, type: isCallSignal ? 'call' : SignalType.MESSAGE }
                 }).catch((e: Error) => console.error('[EncryptedMessageHandler] Notification failed:', e));
               }
             } catch (e) { console.error('[EncryptedMessageHandler] Notification error:', e); }
@@ -1557,7 +1557,7 @@ export function useEncryptedMessageHandler(
           }
 
           // Handle regular messages 
-          if ((payload.type === 'message' || payload.type === 'text' || !payload.type) &&
+          if ((payload.type === SignalType.MESSAGE || payload.type === SignalType.TEXT || !payload.type) &&
             payload.content && payload.type !== SignalType.FILE_MESSAGE) {
             const trimmedContent = payload.content.trim();
             if (trimmedContent.startsWith('{') || trimmedContent.startsWith('[')) {
@@ -1630,7 +1630,7 @@ export function useEncryptedMessageHandler(
                 sender: payload.from,
                 recipient: (payload as any)?.to || loginUsernameRef.current,
                 timestamp: new Date(payload.timestamp || Date.now()),
-                type: 'text',
+                type: SignalType.TEXT,
                 isCurrentUser: false,
                 p2p: payload.p2p || false,
                 encrypted: true,
@@ -1652,7 +1652,7 @@ export function useEncryptedMessageHandler(
                   encrypted: true,
                   transport: payload.p2p ? 'p2p' : 'websocket',
                   timestamp: new Date(payload.timestamp || Date.now()),
-                  type: 'text',
+                  type: SignalType.TEXT,
                   isCurrentUser: false,
                   version: payload.version || '1.0',
                   ...(replyToForSave && { replyTo: replyToForSave })
@@ -2080,7 +2080,7 @@ export function useEncryptedMessageHandler(
           }
 
           // Handle call signals
-          if (payload.type === 'call-signal') {
+          if (payload.type === EventType.CALL_SIGNAL) {
             const handled = handleCallSignal({
               payload: {
                 content: payload.content,
@@ -2102,7 +2102,9 @@ export function useEncryptedMessageHandler(
     [setMessages, saveMessageToLocalDB, isAuthenticated, getKeysOnDemand, usersRef, handleFileMessageChunk, replenishPqKyberPrekey]
   );
 
-  callbackRef.current = handleEncryptedMessageCallback;
+  useEffect(() => {
+    callbackRef.current = handleEncryptedMessageCallback;
+  }, [handleEncryptedMessageCallback]);
 
   return handleEncryptedMessageCallback;
 }

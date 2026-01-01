@@ -5,7 +5,8 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { unstable_batchedUpdates } from 'react-dom';
 import { WebRTCCallingService, CallState } from '../lib/webrtc-calling';
-import type { useAuth } from './useAuth';
+import { EventType } from '../lib/event-types';
+import type { useAuth } from './auth/useAuth';
 
 const stopMediaStream = (stream: MediaStream | null) => {
   if (!stream) return;

@@ -9,6 +9,7 @@ import { STORAGE_KEYS } from './storage-keys';
 import { SecureDB } from './secureDB';
 import { encryptLongTerm, decryptLongTerm, LongTermEnvelope } from './long-term-encryption';
 import { SignalType } from './signal-types';
+import { EventType } from './event-types';
 
 const hasPrototypePollutionKeys = (obj: unknown): boolean => {
   if (obj == null || typeof obj !== 'object') return false;
@@ -373,7 +374,7 @@ export class OfflineMessageQueue {
     );
 
     window.addEventListener(
-      'ws-reconnected',
+      EventType.WS_RECONNECTED,
       () => {
         if (!this.pendingRetrieveAfterAuth) {
           return;

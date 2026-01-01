@@ -13,7 +13,7 @@ import { Dialog, DialogContent } from "../components/ui/dialog";
 import { EmojiPickerProvider } from "../contexts/EmojiPickerContext";
 import { useCallHistory } from "../contexts/CallHistoryContext";
 import { formatFileSize } from "../components/chat/messaging/ChatMessage/FileMessage";
-import { useAuth } from "../hooks/useAuth";
+import { useAuth } from "../hooks/auth/useAuth";
 import { useSecureDB } from "../hooks/useSecureDB";
 import { useFileHandler } from "../hooks/useFileHandler";
 import { useMessageSender } from "../hooks/useMessageSender";
@@ -23,7 +23,8 @@ import { useWebSocket } from "../hooks/useWebsocket";
 import { useConversations } from "../hooks/useConversations";
 import { useUsernameDisplay } from "../hooks/useUsernameDisplay";
 import { storeUsernameMapping } from "../lib/username-display";
-import { useP2PMessaging, type HybridKeys, type PeerCertificateBundle, type EncryptedMessage } from "../hooks/useP2PMessaging";
+import { useP2PMessaging, type EncryptedMessage } from "../hooks/p2p/useP2PMessaging";
+import { useP2PKeys } from "../hooks/p2p/useP2PKeys";
 import { useMessageReceipts } from "../hooks/useMessageReceipts";
 import { p2pConfig, getSignalingServerUrl } from "../config/p2p.config";
 import websocketClient from "../lib/websocket";
@@ -42,9 +43,9 @@ import { SecurityAuditLogger } from "../lib/post-quantum-crypto";
 import { sanitizeFilename, isPlainObject, hasPrototypePollutionKeys, isUnsafeObjectKey, sanitizeNonEmptyText } from "../lib/sanitizers";
 import { useRateLimiter } from "../hooks/useRateLimiter";
 import { useLocalMessageHandlers } from "../hooks/useLocalMessageHandlers";
-import { useP2PMessageHandlers } from "../hooks/useP2PMessageHandlers";
-import { useP2PConnectionManager } from "../hooks/useP2PConnectionManager";
-import { useP2PSignalHandlers } from "../hooks/useP2PSignalHandlers";
+import { useP2PMessageHandlers } from "../hooks/p2p/useP2PMessageHandlers";
+import { useP2PConnectionManager } from "../hooks/p2p/useP2PConnectionManager";
+import { useP2PSignalHandlers } from "../hooks/p2p/useP2PSignalHandlers";
 import { useEventHandlers } from "../hooks/useEventHandlers";
 import { toast, Toaster } from 'sonner';
 import { TorIndicator } from "../components/ui/TorIndicator";
@@ -250,7 +251,9 @@ const ChatApp: React.FC = () => {
   const { loadMoreConversationMessages, flushPendingSaves } = Database;
 
   const usersRef = useRef<User[]>([]);
-  usersRef.current = Database.users;
+  useEffect(() => {
+    usersRef.current = Database.users;
+  }, [Database.users]);
 
   useEffect(() => {
     try {
@@ -317,94 +320,6 @@ const ChatApp: React.FC = () => {
     }
   );
 
-  const getPeerHybridKeys = useCallback(async (peerUsername: string) => {
-    const existingUser = Database.users.find(u => u.username === peerUsername);
-    if (existingUser?.hybridPublicKeys?.kyberPublicBase64 && existingUser?.hybridPublicKeys?.dilithiumPublicBase64) {
-      return existingUser.hybridPublicKeys;
-    }
-
-    try {
-      await websocketClient.sendSecureControlMessage({
-        type: SignalType.P2P_FETCH_PEER_CERT,
-        username: peerUsername
-      });
-      await websocketClient.sendSecureControlMessage({
-        type: SignalType.CHECK_USER_EXISTS,
-        username: peerUsername
-      });
-    } catch (e) {
-      console.error('[Index] Failed to send key requests:', e);
-      toast.error('Could not resolve recipient keys. P2P messaging may be unavailable.', {
-        duration: 5000
-      });
-      return null;
-    }
-
-    return new Promise<{ kyberPublicBase64: string; dilithiumPublicBase64: string; x25519PublicBase64?: string } | null>((resolve) => {
-      let settled = false;
-      const timeout = setTimeout(() => {
-        if (!settled) {
-          console.warn('[Index] Key resolution timed out for:', peerUsername);
-          settled = true;
-          cleanup();
-          resolve(null);
-        }
-      }, 5000);
-
-      const cleanup = () => {
-        window.removeEventListener('user-exists-response', onUserExists as EventListener);
-        window.removeEventListener('p2p-peer-cert', onPeerCert as EventListener);
-      };
-
-      const handleCert = (pc: any) => {
-        if (pc && pc.kyberPublicKey && pc.dilithiumPublicKey) {
-          if (!settled) {
-            settled = true;
-            clearTimeout(timeout);
-            cleanup();
-
-            const keys = {
-              kyberPublicBase64: pc.kyberPublicKey,
-              dilithiumPublicBase64: pc.dilithiumPublicKey,
-              x25519PublicBase64: pc.x25519PublicKey
-            };
-
-            if (Database.secureDBRef.current) {
-              storeUsernameMapping(peerUsername, Database.secureDBRef.current).catch(() => { });
-            }
-
-            try {
-              window.dispatchEvent(new CustomEvent(EventType.USER_KEYS_AVAILABLE, {
-                detail: { username: peerUsername, hybridKeys: keys }
-              }));
-            } catch { }
-
-            resolve(keys);
-          }
-        }
-      };
-
-      const onUserExists = (e: Event) => {
-        const d = (e as CustomEvent).detail || {};
-        if (d?.username === peerUsername) {
-          const pc = d?.peerCertificate || d?.p2pCertificate || d?.cert || null;
-          if (pc) handleCert(pc);
-        }
-      };
-
-      const onPeerCert = (e: Event) => {
-        const d = (e as CustomEvent).detail || {};
-        if (d?.username === peerUsername) {
-          handleCert(d);
-        }
-      };
-
-      window.addEventListener(EventType.USER_EXISTS_RESPONSE, onUserExists as EventListener);
-      window.addEventListener(EventType.P2P_PEER_CERT, onPeerCert as EventListener);
-    });
-  }, [Database.users, Database.secureDBRef]);
-
-  getPeerHybridKeysRef.current = getPeerHybridKeys;
 
   const encryptedHandler = useEncryptedMessageHandler(
     Authentication.loginUsernameRef,
@@ -554,163 +469,36 @@ const ChatApp: React.FC = () => {
     return { current: kyberSecret || null };
   }, [Authentication.hybridKeysRef?.current?.kyber?.secretKey]);
 
-  const [p2pKeysVersion, setP2pKeysVersion] = useState(0);
+  const {
+    p2pHybridKeys,
+    fetchPeerCertificates,
+    getPeerHybridKeys,
+    trustedIssuerDilithiumPublicKeyBase64,
+    signalingTokenProvider,
+    username: p2pUsername,
+  } = useP2PKeys(
+    {
+      hybridKeysRef: Authentication.hybridKeysRef,
+      loginUsernameRef: Authentication.loginUsernameRef,
+      serverHybridPublic: Authentication.serverHybridPublic,
+    },
+    {
+      secureDBRef: Database.secureDBRef,
+      users: Database.users,
+    }
+  );
+
   useEffect(() => {
-    const bump = () => setP2pKeysVersion((v) => v + 1);
-    window.addEventListener(EventType.HYBRID_KEYS_UPDATED, bump as EventListener);
-    window.addEventListener(EventType.SECURE_CHAT_AUTH_SUCCESS, bump as EventListener);
-    return () => {
-      window.removeEventListener(EventType.HYBRID_KEYS_UPDATED, bump as EventListener);
-      window.removeEventListener(EventType.SECURE_CHAT_AUTH_SUCCESS, bump as EventListener);
-    };
-  }, []);
-
-  const p2pHybridKeys = useMemo<HybridKeys | null>(() => {
-    const keys = Authentication.hybridKeysRef.current;
-    if (!keys?.dilithium?.secretKey || !keys?.dilithium?.publicKeyBase64) {
-      return null;
-    }
-    return {
-      dilithium: {
-        secretKey: keys.dilithium.secretKey,
-        publicKeyBase64: keys.dilithium.publicKeyBase64,
-      },
-      kyber: keys.kyber ? {
-        secretKey: keys.kyber.secretKey,
-      } : undefined,
-      x25519: keys.x25519 ? {
-        private: keys.x25519.private,
-      } : undefined,
-    };
-  }, [Authentication.hybridKeysRef.current, p2pKeysVersion]);
-
-  const fetchPeerCertificates = useCallback(async (peerUsername: string): Promise<PeerCertificateBundle | null> => {
-    try {
-      return await new Promise<PeerCertificateBundle | null>(async (resolve) => {
-        let settled = false;
-
-        const wsHandler = (evt: Event) => {
-          try {
-            const msg: any = (evt as CustomEvent).detail || {};
-            if (!msg || typeof msg !== 'object') return;
-            if (msg.type !== 'p2p-peer-cert') return;
-            if (typeof msg.username !== 'string' || msg.username !== peerUsername) return;
-            if (typeof msg.dilithiumPublicKey !== 'string' || typeof msg.kyberPublicKey !== 'string' || typeof msg.signature !== 'string' || typeof msg.proof !== 'string') return;
-            try { window.removeEventListener('p2p-peer-cert', wsHandler as EventListener); } catch { }
-            try { window.removeEventListener('user-exists-response', userExistsHandler as EventListener); } catch { }
-            const bundle = {
-              username: msg.username,
-              dilithiumPublicKey: msg.dilithiumPublicKey,
-              kyberPublicKey: msg.kyberPublicKey,
-              x25519PublicKey: msg.x25519PublicKey,
-              proof: msg.proof,
-              issuedAt: msg.issuedAt,
-              expiresAt: msg.expiresAt,
-              signature: msg.signature
-            } as PeerCertificateBundle;
-
-            if (Database.secureDBRef.current) {
-              storeUsernameMapping(bundle.username, Database.secureDBRef.current).catch(() => { });
-            }
-
-            try {
-              const hybridKeys = {
-                kyberPublicBase64: bundle.kyberPublicKey,
-                dilithiumPublicBase64: bundle.dilithiumPublicKey,
-                x25519PublicBase64: bundle.x25519PublicKey,
-              };
-              window.dispatchEvent(new CustomEvent(EventType.USER_KEYS_AVAILABLE, {
-                detail: { username: bundle.username, hybridKeys },
-              }));
-            } catch { }
-
-            settled = true;
-            resolve(bundle);
-          } catch { }
-        };
-
-        const userExistsHandler = (evt: Event) => {
-          try {
-            const data: any = (evt as CustomEvent).detail || {};
-            if (typeof data?.username !== 'string' || data.username !== peerUsername) return;
-            const pc = data?.peerCertificate || data?.p2pCertificate || data?.cert || null;
-            if (!pc) return;
-            const dpk = pc.dilithiumPublicKey;
-            const kpk = pc.kyberPublicKey;
-            const sig = pc.signature;
-            const proof = pc.proof;
-            if (typeof dpk !== 'string' || typeof kpk !== 'string' || typeof sig !== 'string' || typeof proof !== 'string') return;
-            try { (websocketClient as any).unregisterMessageHandler?.('p2p-peer-cert'); } catch { }
-            try { window.removeEventListener('user-exists-response', userExistsHandler as EventListener); } catch { }
-            const bundle = {
-              username: peerUsername,
-              dilithiumPublicKey: dpk,
-              kyberPublicKey: kpk,
-              x25519PublicKey: pc.x25519PublicKey,
-              proof,
-              issuedAt: pc.issuedAt,
-              expiresAt: pc.expiresAt,
-              signature: sig
-            } as PeerCertificateBundle;
-
-            if (Database.secureDBRef.current) {
-              storeUsernameMapping(bundle.username, Database.secureDBRef.current).catch(() => { });
-            }
-            try {
-              const hybridKeys = {
-                kyberPublicBase64: bundle.kyberPublicKey,
-                dilithiumPublicBase64: bundle.dilithiumPublicKey,
-                x25519PublicBase64: bundle.x25519PublicKey,
-              };
-              window.dispatchEvent(new CustomEvent(EventType.USER_KEYS_AVAILABLE, {
-                detail: { username: bundle.username, hybridKeys },
-              }));
-            } catch { }
-
-            settled = true;
-            resolve(bundle);
-          } catch { }
-        };
-
-        try { window.addEventListener(EventType.P2P_PEER_CERT, wsHandler as EventListener); } catch { }
-        try { window.addEventListener(EventType.USER_EXISTS_RESPONSE, userExistsHandler as EventListener); } catch { }
-
-        try {
-          await websocketClient.sendSecureControlMessage({ type: SignalType.P2P_FETCH_PEER_CERT, username: peerUsername });
-        } catch {
-        }
-        try {
-          await websocketClient.sendSecureControlMessage({ type: SignalType.CHECK_USER_EXISTS, username: peerUsername });
-        } catch {
-        }
-
-        setTimeout(() => {
-          if (!settled) {
-            try { window.removeEventListener('p2p-peer-cert', wsHandler as EventListener); } catch { }
-            try { window.removeEventListener('user-exists-response', userExistsHandler as EventListener); } catch { }
-            resolve(null);
-          }
-        }, 5000);
-      });
-    } catch {
-      return null;
-    }
-  }, []);
+    getPeerHybridKeysRef.current = getPeerHybridKeys;
+  }, [getPeerHybridKeys]);
 
   const p2pMessaging = useP2PMessaging(
-    Authentication.loginUsernameRef.current || '',
+    p2pUsername,
     p2pHybridKeys,
     {
       fetchPeerCertificates,
-      signalingTokenProvider: async () => {
-        try {
-          const tokens = await (window as any).edgeApi?.retrieveAuthTokens?.();
-          return tokens?.accessToken || null;
-        } catch {
-          return null;
-        }
-      },
-      trustedIssuerDilithiumPublicKeyBase64: Authentication.serverHybridPublic?.dilithiumPublicBase64 || '',
+      signalingTokenProvider,
+      trustedIssuerDilithiumPublicKeyBase64,
       onServiceReady: (service) => {
         try { (window as any).p2pService = service; } catch { }
       }
@@ -791,7 +579,7 @@ const ChatApp: React.FC = () => {
       sender: replyTo.sender,
       content: replyTo.content,
       timestamp: new Date(),
-      type: 'text' as const,
+      type: SignalType.TEXT as const,
       isCurrentUser: false,
       version: '1'
     } as Message : undefined;
@@ -819,7 +607,7 @@ const ChatApp: React.FC = () => {
               x25519PublicBase64: targetUser.hybridPublicKeys.x25519PublicBase64,
             },
             {
-              messageType: 'reaction',
+              messageType: SignalType.REACTION,
               metadata: {
                 targetMessageId: messageId,
                 action: messageSignalType
@@ -873,7 +661,7 @@ const ChatApp: React.FC = () => {
               sender: Authentication.loginUsernameRef.current || '',
               recipient: selectedConversation,
               timestamp: new Date(),
-              type: 'text',
+              type: SignalType.TEXT,
               isCurrentUser: true,
               p2p: true,
               transport: 'p2p',

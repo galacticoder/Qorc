@@ -1095,7 +1095,7 @@ export class WebRTCCallingService {
         settled = true;
         try { clearTimeout(timer); } catch { }
         try { clearInterval(poller); } catch { }
-        try { window.removeEventListener('p2p-pq-established', on as EventListener); } catch { }
+        try { window.removeEventListener(EventType.P2P_PQ_ESTABLISHED, on as EventListener); } catch { }
         if (err) return reject(err);
         resolve();
       };
@@ -1123,7 +1123,7 @@ export class WebRTCCallingService {
       };
 
       try {
-        window.addEventListener('p2p-pq-established', on as EventListener);
+        window.addEventListener(EventType.P2P_PQ_ESTABLISHED, on as EventListener);
       } catch {
       }
     });
@@ -1755,7 +1755,7 @@ export class WebRTCCallingService {
         content: JSON.stringify(signedSignal),
         timestamp: Date.now(),
         messageType: 'signal-protocol',
-        type: 'call-signal'
+        type: EventType.CALL_SIGNAL
       };
 
       try {
@@ -2163,7 +2163,7 @@ export class WebRTCCallingService {
     };
 
     this.callSignalHandler = handler as EventListener;
-    window.addEventListener('call-signal', this.callSignalHandler);
+    window.addEventListener(EventType.CALL_SIGNAL, this.callSignalHandler);
   }
 
   private async handleCallSignal(signal: CallSignal): Promise<void> {
@@ -2491,7 +2491,7 @@ export class WebRTCCallingService {
     }
 
     if (this.callSignalHandler) {
-      window.removeEventListener('call-signal', this.callSignalHandler);
+      window.removeEventListener(EventType.CALL_SIGNAL, this.callSignalHandler);
       this.callSignalHandler = null;
     }
 

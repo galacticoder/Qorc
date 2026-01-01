@@ -53,6 +53,7 @@ export default defineConfig({
     },
   },
   build: {
+    sourcemap: true,
     outDir: 'dist',
     emptyOutDir: true,
     chunkSizeWarningLimit: 1000,

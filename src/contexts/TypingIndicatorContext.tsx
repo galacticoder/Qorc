@@ -23,9 +23,9 @@ interface TypingIndicatorContextType {
 interface TypingIndicatorProviderProps {
 	readonly children: ReactNode;
 	readonly currentUsername?: string;
-	readonly maxTypingUsers?: number;
-	readonly typingTimeoutMs?: number;
-	readonly rateLimitPerMinute?: number;
+	readonly DEFAULT_MAX_TYPING_USERS?: number;
+	readonly DEFAULT_TYPING_TIMEOUT_MS?: number;
+	readonly DEFAULT_RATE_LIMIT_PER_MINUTE?: number;
 }
 
 interface SecureEventDetail {
@@ -174,14 +174,12 @@ async function validateAndVerifyEvent(
 export function TypingIndicatorProvider({
 	children,
 	currentUsername,
-	maxTypingUsers = DEFAULT_MAX_TYPING_USERS,
-	typingTimeoutMs = DEFAULT_TYPING_TIMEOUT_MS,
-	rateLimitPerMinute = DEFAULT_RATE_LIMIT_PER_MINUTE,
 }: TypingIndicatorProviderProps) {
 	const [typingUsers, setTypingUsers] = useState<Set<string>>(new Set());
-	const typingTimeoutsRef = useRef(new BoundedMap<string, ReturnType<typeof setTimeout>>(maxTypingUsers));
+	const typingTimeoutsRef = useRef(new BoundedMap<string, ReturnType<typeof setTimeout>>(DEFAULT_MAX_TYPING_USERS));
+	
 	const nonceMap = useRef(new BoundedMap<string, number>(DEFAULT_UI_EVENT_RATE_MAX));
-	const rateLimiterRef = useRef(new RateLimiter(rateLimitPerMinute, DEFAULT_TYPING_EVENT_RATE_WINDOW_MS));
+	const rateLimiterRef = useRef(new RateLimiter(DEFAULT_RATE_LIMIT_PER_MINUTE, DEFAULT_TYPING_EVENT_RATE_WINDOW_MS));
 
 	const setTypingUser = useCallback((username: string, isTyping: boolean) => {
 		if (!isValidUsername(username)) {
@@ -194,7 +192,7 @@ export function TypingIndicatorProvider({
 			}
 			const newSet = new Set(prev);
 			if (isTyping) {
-				if (newSet.size >= maxTypingUsers)
+				if (newSet.size >= DEFAULT_MAX_TYPING_USERS)
 					return prev;
 				newSet.add(username);
 			} else {
@@ -202,7 +200,7 @@ export function TypingIndicatorProvider({
 			}
 			return newSet;
 		});
-	}, [maxTypingUsers]);
+	}, [DEFAULT_MAX_TYPING_USERS]);
 
 	const clearTypingUser = useCallback((username: string) => {
 		if (!isValidUsername(username)) {
@@ -251,7 +249,7 @@ export function TypingIndicatorProvider({
 				setTypingUser(username, true);
 				const timeout = setTimeout(() => {
 					clearTypingUser(username);
-				}, typingTimeoutMs);
+				}, DEFAULT_TYPING_TIMEOUT_MS);
 				typingTimeoutsRef.current.set(username, timeout);
 			} else {
 				clearTypingUser(username);
@@ -307,7 +305,7 @@ export function TypingIndicatorProvider({
 				setTypingUser(from, true);
 				const timeout = setTimeout(() => {
 					clearTypingUser(from);
-				}, typingTimeoutMs);
+				}, DEFAULT_TYPING_TIMEOUT_MS);
 				typingTimeoutsRef.current.set(from, timeout);
 			} else {
 				clearTypingUser(from);
@@ -327,7 +325,7 @@ export function TypingIndicatorProvider({
 			rateLimiterRef.current.reset();
 			nonceMap.current.clear();
 		};
-	}, [clearTypingUser, currentUsername, setTypingUser, typingTimeoutMs]);
+	}, [clearTypingUser, currentUsername, setTypingUser, DEFAULT_TYPING_TIMEOUT_MS]);
 
 	const value = useMemo<TypingIndicatorContextType>(() => ({
 		typingUsers: Array.from(typingUsers),

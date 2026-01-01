@@ -1,4 +1,4 @@
-import { useRef, useEffect, useCallback, useState } from "react";
+import React, { useRef, useEffect, useCallback, useState } from "react";
 import { SecureDB } from "@/lib/secureDB";
 import { Message } from "@/components/chat/messaging/types";
 import { User } from "@/components/chat/messaging/UserList";

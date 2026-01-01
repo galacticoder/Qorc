@@ -12,7 +12,7 @@ import { TypingIndicatorList } from "./TypingIndicatorList";
 import { Video, MoreVertical, ShieldOff } from 'lucide-react';
 import { CallIcon } from '../assets/icons';
 import type { CallState } from "../../../lib/webrtc-calling";
-import type { useAuth } from "@/hooks/useAuth";
+import type { useAuth } from "@/hooks/auth/useAuth";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { BlockUserButton } from "../calls/BlockUserButton";
 import { blockingSystem } from "@/lib/blocking-system";

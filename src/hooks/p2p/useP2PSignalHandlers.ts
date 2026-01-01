@@ -1,5 +1,6 @@
-import { useEffect } from 'react';
-import { EventType } from '../lib/event-types';
+import React, { useEffect } from 'react';
+import { EventType } from '../../lib/event-types';
+import { SignalType } from '../../lib/signal-types';
 
 interface UseP2PSignalHandlersProps {
   p2pMessaging: {
@@ -24,13 +25,13 @@ export function useP2PSignalHandlers({ p2pMessaging }: UseP2PSignalHandlersProps
             try { await p2pMessaging.connectToPeer(to); } catch { }
             await (p2pMessaging as any).waitForPeerConnection?.(to, 5000).catch(() => { });
           }
-          await (p2pMessaging as any)?.p2pServiceRef?.current?.sendMessage?.(to, { kind: 'session-reset-request', reason }, 'signal');
+          await (p2pMessaging as any)?.p2pServiceRef?.current?.sendMessage?.(to, { kind: SignalType.SESSION_RESET_REQUEST, reason }, 'signal');
         } catch { }
       } catch { }
     };
 
-    try { window.addEventListener('p2p-session-reset-send', handler as EventListener); } catch { }
-    return () => { try { window.removeEventListener('p2p-session-reset-send', handler as EventListener); } catch { } };
+    try { window.addEventListener(EventType.P2P_SESSION_RESET_SEND, handler as EventListener); } catch { }
+    return () => { try { window.removeEventListener(EventType.P2P_SESSION_RESET_SEND, handler as EventListener); } catch { } };
   }, [p2pMessaging]);
 
   // Handle outgoing P2P call signals
@@ -53,7 +54,7 @@ export function useP2PSignalHandlers({ p2pMessaging }: UseP2PSignalHandlersProps
           const svc: any = (window as any).p2pService || (p2pMessaging as any)?.p2pServiceRef?.current || null;
           if (svc && typeof svc.sendMessage === 'function') {
             try {
-              await svc.sendMessage(to, { kind: 'call-signal', signal: signalObj }, 'signal');
+              await svc.sendMessage(to, { kind: EventType.CALL_SIGNAL, signal: signalObj }, 'signal');
               success = true;
             } catch {
               // Wait for PQ establishment and retry
@@ -64,10 +65,10 @@ export function useP2PSignalHandlers({ p2pMessaging }: UseP2PSignalHandlersProps
                   const p = (ev as CustomEvent).detail?.peer;
                   if (p === to) { if (!settled) { settled = true; clearTimeout(t); } resolve(); }
                 };
-                window.addEventListener('p2p-pq-established', on as EventListener, { once: true });
+                window.addEventListener(EventType.P2P_PQ_ESTABLISHED, on as EventListener, { once: true });
               });
               try {
-                await svc.sendMessage(to, { kind: 'call-signal', signal: signalObj }, 'signal');
+                await svc.sendMessage(to, { kind: EventType.CALL_SIGNAL, signal: signalObj }, 'signal');
                 success = true;
               } catch { }
             }

@@ -1,4 +1,4 @@
-import { useEffect, useCallback, useMemo, useRef } from 'react';
+import React, { useEffect, useCallback, useMemo, useRef } from 'react';
 import { Message } from '@/components/chat/messaging/types';
 import type { User } from '@/components/chat/messaging/UserList';
 import { SignalType } from '@/lib/signal-types';

@@ -129,7 +129,7 @@ export async function handleSignalMessages(data: any, handlers: SignalHandlers) 
   } = Authentication ?? {};
 
   if (!type) {
-    SecureAuditLogger.warn('signals', 'message', 'missing-type', {});
+    SecureAuditLogger.warn('signals', SignalType.MESSAGE, 'missing-type', {});
     return;
   }
 
@@ -350,7 +350,7 @@ export async function handleSignalMessages(data: any, handlers: SignalHandlers) 
                           {
                             senderDilithiumSecretKey: keys?.dilithium?.secretKey,
                             senderDilithiumPublicKey: keys?.dilithium?.publicKey,
-                            metadata: { context: 'hybrid-keys-update' }
+                            metadata: { context: SignalType.HYBRID_KEYS_UPDATE }
                           }
                         );
                         websocketClient.send(JSON.stringify({ type: SignalType.HYBRID_KEYS_UPDATE, userData: encryptedHybridKeys }));
@@ -493,7 +493,7 @@ export async function handleSignalMessages(data: any, handlers: SignalHandlers) 
                     {
                       senderDilithiumSecretKey: keys?.dilithium?.secretKey,
                       senderDilithiumPublicKey: keys?.dilithium?.publicKey,
-                      metadata: { context: 'hybrid-keys-update' }
+                      metadata: { context: SignalType.HYBRID_KEYS_UPDATE }
                     }
                   );
                   websocketClient.send(JSON.stringify({ type: SignalType.HYBRID_KEYS_UPDATE, userData: encryptedHybridKeys }));

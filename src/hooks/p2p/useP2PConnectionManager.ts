@@ -1,7 +1,7 @@
-import { useEffect, useRef } from 'react';
-import { SecurityAuditLogger } from '../lib/post-quantum-crypto';
-import { getSignalingServerUrl } from '../config/p2p.config';
-import { EventType } from '../lib/event-types';
+import React, { useEffect, useRef } from 'react';
+import { SecurityAuditLogger } from '../../lib/post-quantum-crypto';
+import { getSignalingServerUrl } from '../../config/p2p.config';
+import { EventType } from '../../lib/event-types';
 
 interface P2PStatus {
   isInitialized?: boolean;
@@ -30,7 +30,10 @@ export function useP2PConnectionManager({
   p2pMessaging,
 }: UseP2PConnectionManagerProps) {
   const p2pMessagingRef = useRef(p2pMessaging);
-  p2pMessagingRef.current = p2pMessaging;
+
+  useEffect(() => {
+    p2pMessagingRef.current = p2pMessaging;
+  }, [p2pMessaging]);
 
   const p2pInitAttemptRef = useRef(0);
   const p2pInitializedRef = useRef(false);
@@ -40,7 +43,7 @@ export function useP2PConnectionManager({
   const connectionAttemptsRef = useRef<Map<string, { inProgress: boolean; lastAttempt: number }>>(new Map());
   const processedPeerConnectionsRef = useRef<Set<string>>(new Set());
 
-  // Initialize P2P with retries
+  // Initialize P2P
   useEffect(() => {
     let cancelled = false;
     let retryTimer: ReturnType<typeof setTimeout> | null = null;
@@ -159,7 +162,6 @@ export function useP2PConnectionManager({
         })
         .catch(() => {
           connectionAttemptsRef.current.set(selectedConversation, { inProgress: false, lastAttempt: now });
-          SecurityAuditLogger.log('info', 'p2p-connect-failed-fallback-server', {});
         });
     }
   }, [selectedConversation, p2pHybridKeys, p2pMessaging.p2pStatus?.isInitialized, p2pMessaging.p2pStatus?.signalingConnected]);

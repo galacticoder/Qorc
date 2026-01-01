@@ -23,7 +23,7 @@ import {
   DEFAULT_EVENT_RATE_MAX,
   MAX_EVENT_USERNAME_LENGTH
 } from './constants';
-
+import { SignalType } from './signal-types';
 
 interface PeerConnection {
   id: string;
@@ -36,7 +36,7 @@ interface PeerConnection {
 }
 
 interface P2PMessage {
-  type: 'chat' | 'signal' | 'heartbeat' | 'dummy' | 'typing' | 'reaction' | SignalType.FILE | 'delivery-ack' | 'read-receipt' | 'edit' | 'delete';
+  type: SignalType.CHAT | 'signal' | 'heartbeat' | 'dummy' | SignalType.TYPING | SignalType.REACTION | SignalType.FILE | SignalType.DELIVERY_ACK | SignalType.READ_RECEIPT | SignalType.EDIT | SignalType.DELETE;
   from: string;
   to: string;
   timestamp: number;
@@ -623,7 +623,7 @@ export class WebRTCP2PService {
   async sendMessage(
     to: string,
     message: any,
-    messageType: 'chat' | 'signal' | 'typing' | 'reaction' | SignalType.FILE | 'delivery-ack' | 'read-receipt' | 'edit' | 'delete' = 'chat'
+    messageType: SignalType.CHAT | 'signal' | SignalType.TYPING | SignalType.REACTION | SignalType.FILE | SignalType.DELIVERY_ACK | SignalType.READ_RECEIPT | SignalType.EDIT | SignalType.DELETE = SignalType.CHAT
   ): Promise<void> {
     const peer = this.peers.get(to);
     const isHandshakeMessage = messageType === 'signal' && (message?.kind?.startsWith('pq-key') || message?.kind?.startsWith('session-'));
@@ -766,7 +766,7 @@ export class WebRTCP2PService {
           await this.handlePQKeyExchangeResponse(message.from, message.payload);
         } else if (kind === 'pq-key-exchange-finalize') {
           this.handlePQKeyExchangeFinalize(message.from);
-        } else if (kind === 'session-reset-request') {
+        } else if (kind === SignalType.SESSION_RESET_REQUEST) {
           try {
             const evt = new CustomEvent(EventType.P2P_SESSION_RESET_REQUEST, { detail: { from: message.from, reason: message?.payload?.reason } });
             window.dispatchEvent(evt);
@@ -792,12 +792,12 @@ export class WebRTCP2PService {
         }
         break;
       }
-      case 'chat':
-      case 'typing':
-      case 'reaction':
+      case SignalType.CHAT:
+      case SignalType.TYPING:
+      case SignalType.REACTION:
       case SignalType.FILE:
-      case 'edit':
-      case 'delete': {
+      case SignalType.EDIT:
+      case SignalType.DELETE: {
         const session = this.pqSessions.get(message.from);
         if (!session || !session.established || !session.sendKey || !session.receiveKey) {
           try { this.auditLogger.log('error', 'p2p-no-session-reject', { from: message.from, type: message.type }); } catch { }
@@ -830,7 +830,7 @@ export class WebRTCP2PService {
                   this.initiatePostQuantumKeyExchange(message.from);
                 }
               } else {
-                try { await this.sendMessage(message.from, { kind: 'session-reset-request', reason: 'decrypt-failed' }, 'signal'); } catch { }
+                try { await this.sendMessage(message.from, { kind: SignalType.SESSION_RESET_REQUEST, reason: 'decrypt-failed' }, 'signal'); } catch { }
               }
             }
           } catch { }
@@ -850,8 +850,8 @@ export class WebRTCP2PService {
         this.onMessageCallback?.(message);
         break;
       }
-      case 'delivery-ack':
-      case 'read-receipt': {
+      case SignalType.DELIVERY_ACK:
+      case SignalType.READ_RECEIPT: {
         const session = this.pqSessions.get(message.from);
         if (!session || !session.established || !session.sendKey || !session.receiveKey) {
           try { this.auditLogger.log('error', 'p2p-no-session-reject', { from: message.from, type: message.type }); } catch { }
@@ -1044,7 +1044,7 @@ export class WebRTCP2PService {
       this.pqSessions.set(from, session);
 
       this.logAuditEvent('pq-key-established', from);
-      try { this.auditLogger.log('info', 'p2p-pq-established', { peer: from }); } catch { }
+      try { this.auditLogger.log('info', EventType.P2P_PQ_ESTABLISHED, { peer: from }); } catch { }
       try { window.dispatchEvent(new CustomEvent(EventType.P2P_PQ_ESTABLISHED, { detail: { peer: from } })); } catch { }
 
       const finalize = { kind: 'pq-key-exchange-finalize' };
@@ -1064,7 +1064,7 @@ export class WebRTCP2PService {
         session.inProgress = false;
         this.pqSessions.set(from, session);
         this.logAuditEvent('pq-key-established', from);
-        try { this.auditLogger.log('info', 'p2p-pq-established', { peer: from }); } catch { }
+        try { this.auditLogger.log('info', EventType.P2P_PQ_ESTABLISHED, { peer: from }); } catch { }
         try { window.dispatchEvent(new CustomEvent(EventType.P2P_PQ_ESTABLISHED, { detail: { peer: from } })); } catch { }
       }
     }

@@ -1,8 +1,8 @@
-import { useEffect, useRef } from 'react';
-import { Message } from '../components/chat/messaging/types';
-import { EventType } from '../lib/event-types';
-import { SignalType } from '../lib/signal-types';
-import { SecurityAuditLogger } from '../lib/post-quantum-crypto';
+import React, { useEffect, useRef } from 'react';
+import { Message } from '../../components/chat/messaging/types';
+import { EventType } from '../../lib/event-types';
+import { SignalType } from '../../lib/signal-types';
+import { SecurityAuditLogger } from '../../lib/post-quantum-crypto';
 import type { EncryptedMessage } from './useP2PMessaging';
 
 interface UseP2PMessageHandlersProps {
@@ -27,19 +27,18 @@ export function useP2PMessageHandlers({
     p2pMessaging.onMessage(async (encryptedMessage: EncryptedMessage) => {
       try {
         // Typing indicators
-        if (encryptedMessage.messageType === 'typing') {
+        if (encryptedMessage.messageType === SignalType.TYPING) {
           window.dispatchEvent(new CustomEvent(EventType.TYPING_INDICATOR, {
             detail: {
               username: encryptedMessage.from,
               isTyping: encryptedMessage.content === SignalType.TYPING_START,
             }
           }));
-          SecurityAuditLogger.log('info', 'p2p-typing-received', {});
           return;
         }
 
         // Reactions
-        if (encryptedMessage.messageType === 'reaction') {
+        if (encryptedMessage.messageType === SignalType.REACTION) {
           const targetMessageId = encryptedMessage.metadata?.targetMessageId;
           const action = encryptedMessage.metadata?.action;
           const emoji = encryptedMessage.content;
@@ -53,13 +52,12 @@ export function useP2PMessageHandlers({
                 username: encryptedMessage.from
               }
             }));
-            SecurityAuditLogger.log('info', 'p2p-reaction-received', {});
           }
           return;
         }
 
         // Message deletion
-        if (encryptedMessage.messageType === 'delete') {
+        if (encryptedMessage.messageType === SignalType.DELETE) {
           const targetMessageId = encryptedMessage.metadata?.targetMessageId;
           if (targetMessageId) {
             let messageToPersist: Message | null = null;
@@ -79,14 +77,12 @@ export function useP2PMessageHandlers({
             try {
               window.dispatchEvent(new CustomEvent(EventType.REMOTE_MESSAGE_DELETE, { detail: { messageId: targetMessageId } }));
             } catch { }
-
-            SecurityAuditLogger.log('info', 'p2p-delete-received', {});
           }
           return;
         }
 
         // Message editing
-        if (encryptedMessage.messageType === 'edit') {
+        if (encryptedMessage.messageType === SignalType.EDIT) {
           const targetMessageId = encryptedMessage.metadata?.targetMessageId;
           const newContent = encryptedMessage.metadata?.newContent || encryptedMessage.content;
           if (targetMessageId && newContent) {
@@ -107,15 +103,12 @@ export function useP2PMessageHandlers({
             try {
               window.dispatchEvent(new CustomEvent(EventType.REMOTE_MESSAGE_EDIT, { detail: { messageId: targetMessageId, newContent } }));
             } catch { }
-
-            SecurityAuditLogger.log('info', 'p2p-edit-received', {});
           }
           return;
         }
 
-        // File metadata (ignored - handled separately)
+        // File metadata (ignored and handled separately)
         if (encryptedMessage.messageType === SignalType.FILE) {
-          SecurityAuditLogger.log('info', 'p2p-file-metadata-ignored', {});
           return;
         }
 
@@ -126,7 +119,7 @@ export function useP2PMessageHandlers({
           sender: encryptedMessage.from,
           recipient: encryptedMessage.to,
           timestamp: new Date(encryptedMessage.timestamp),
-          type: 'text',
+          type: SignalType.TEXT,
           isCurrentUser: false,
           p2p: true,
           transport: 'p2p',
@@ -162,7 +155,6 @@ export function useP2PMessageHandlers({
         });
 
         saveMessageRef.current(message);
-        SecurityAuditLogger.log('info', `p2p-${encryptedMessage.messageType || 'message'}-received`, {});
       } catch {
         SecurityAuditLogger.log('error', 'p2p-message-handle-failed', { error: 'unknown' });
       }

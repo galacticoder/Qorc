@@ -96,3 +96,16 @@ export const ALLOWED_PROTOCOLS = new Set(['http:', 'https:']);
 // General size caps
 export const MAX_FILE_SIZE = 50 * 1024 * 1024;
 export const MAX_PROFILE_IMAGE_SIZE = 5 * 1024 * 1024;
+
+export const MAX_P2P_INCOMING_QUEUE = 256;
+export const MAX_P2P_PEER_CACHE = 256;
+export const P2P_PEER_CACHE_TTL_MS = 5 * 60 * 1000;
+export const P2P_ROUTE_PROOF_TTL_MS = 60 * 1000;
+export const MAX_P2P_CERT_CACHE_SIZE = 128;
+export const MAX_P2P_ROUTE_PROOF_CACHE_SIZE = 512;
+export const MAX_MESSAGE_CONTENT_LENGTH = 64 * 1024;
+export const MAX_P2P_USERNAME_LENGTH = 96;
+export const RATE_LIMIT_WINDOW_MS = 60_000;
+export const RATE_LIMIT_MAX_MESSAGES = 200;
+export const CERT_CLOCK_SKEW_MS = 2 * 60 * 1000;
+export const RECEIPT_RETENTION_MS = 24 * 60 * 60 * 1000;

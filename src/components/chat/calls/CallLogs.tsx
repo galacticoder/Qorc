@@ -39,6 +39,7 @@ const CallLogItem: React.FC<CallLogItemProps> = React.memo(({
     });
 
     const [isBlocked, setIsBlocked] = useState<boolean>(false);
+    const eventRateRef = useRef({ windowStart: Date.now(), count: 0 });
 
     // Check if user is blocked
     useEffect(() => {
@@ -48,7 +49,6 @@ const CallLogItem: React.FC<CallLogItemProps> = React.memo(({
         };
 
         checkBlockedStatus();
-        const eventRateRef = useRef({ windowStart: Date.now(), count: 0 });
 
         const handleBlockStatusChange = (event: Event) => {
             try {

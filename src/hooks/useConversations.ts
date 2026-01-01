@@ -196,7 +196,7 @@ export const useConversations = (currentUsername: string, users: User[], message
               clearTimeout(timeoutId);
               timeoutId = null;
             }
-            window.removeEventListener('user-exists-response', handleUserExistsResponse as EventListener);
+            window.removeEventListener(EventType.USER_EXISTS_RESPONSE, handleUserExistsResponse as EventListener);
             eventCleanupRef.current.delete(pseudonym);
           };
 
@@ -244,7 +244,7 @@ export const useConversations = (currentUsername: string, users: User[], message
             resolve(newConversation);
           };
 
-          window.addEventListener('user-exists-response', handleUserExistsResponse as EventListener);
+          window.addEventListener(EventType.USER_EXISTS_RESPONSE, handleUserExistsResponse as EventListener);
 
           try {
             websocketClient.send(

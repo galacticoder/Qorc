@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useRef, useEffect } from 'react';
+import React, { useCallback, useMemo, useRef, useEffect } from 'react';
 import { SignalType } from '../lib/signal-types';
 import { EventType } from '../lib/event-types';
 import { Message } from '../components/chat/messaging/types';
@@ -160,7 +160,7 @@ const createLocalMessage = (
     sender,
     recipient,
     timestamp: new Date(timestamp),
-    type: fileData ? SignalType.FILE : 'text',
+    type: fileData ? SignalType.FILE : SignalType.TEXT,
     isCurrentUser: true,
     receipt: { delivered: false, read: false },
     version: '1',
@@ -602,7 +602,7 @@ export function useMessageSender(
       // Pre-compute sanitized content and reply info for potential queuing
       const sanitizedContent = sanitizeContent(content);
       const replyToData = sanitizeReply(replyTo);
-      const messageType = mapSignalType('message', messageSignalType, fileDataToSend);
+      const messageType = mapSignalType(SignalType.MESSAGE, messageSignalType, fileDataToSend);
 
       let recipient = recipientDirectory.get(recipientUsername);
       if (!recipient?.hybridPublicKeys) {
@@ -690,7 +690,7 @@ export function useMessageSender(
         return;
       }
 
-      if (messageType === 'message' && !sanitizedContent) {
+      if (messageType === SignalType.MESSAGE && !sanitizedContent) {
         return;
       }
 

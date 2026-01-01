@@ -166,4 +166,11 @@ export const sanitizeEventText = (value: unknown, maxLen: number): string | null
   return cleaned.slice(0, maxLen);
 };
 
+export const sanitizeErrorMessage = (error: unknown): string => {
+  if (!error) return 'UNKNOWN';
+  if (typeof error === 'string') return error.slice(0, 80);
+  if (error instanceof Error) return error.message.slice(0, 80);
+  return 'UNRECOGNIZED_ERROR';
+};
+
 export type { TextSanitizeOptions, AllowedKey };

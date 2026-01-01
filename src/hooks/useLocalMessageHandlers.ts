@@ -1,6 +1,7 @@
-import { useEffect, useCallback, useRef } from 'react';
+import React, { useEffect, useCallback, useRef } from 'react';
 import { Message } from '../components/chat/messaging/types';
 import { EventType } from '../lib/event-types';
+import { SignalType } from '../lib/signal-types';
 import { isPlainObject, hasPrototypePollutionKeys, isUnsafeObjectKey, sanitizeNonEmptyText, sanitizeFilename } from '../lib/sanitizers';
 import { toast } from 'sonner';
 

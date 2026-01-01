@@ -330,7 +330,7 @@ export function ChatInput({
                 outline: 'none',
                 border: 'none',
                 color: 'hsl(var(--foreground))',
-                userSelect: 'text',
+                userSelect: SignalType.TEXT,
               }}
             />
 
