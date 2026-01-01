@@ -40,7 +40,7 @@ export function useEventHandlers({
 
     const handleUserKeysAvailable = async (event: CustomEvent) => {
       try {
-        if (!allowEvent('user-keys-available')) return;
+        if (!allowEvent(EventType.USER_KEYS_AVAILABLE)) return;
         const detail = (event as CustomEvent).detail;
         if (!isPlainObject(detail) || hasPrototypePollutionKeys(detail)) return;
 
@@ -66,7 +66,7 @@ export function useEventHandlers({
         const hybridKeys = sanitizeHybridKeys(hybridKeysRaw as any) as any;
         if (!hybridKeys?.kyberPublicBase64 || !hybridKeys?.dilithiumPublicBase64) return;
 
-        SecurityAuditLogger.log('info', 'user-keys-available', { hasKeys: true });
+        SecurityAuditLogger.log('info', EventType.USER_KEYS_AVAILABLE, { hasKeys: true });
 
         let targetUser = users.find(user => user.username === username);
         if (!targetUser) {
@@ -289,7 +289,7 @@ export function useEventHandlers({
 
     const handleClearConversationMessages = (event: CustomEvent) => {
       try {
-        if (!allowEvent('clear-conversation-messages')) return;
+        if (!allowEvent(EventType.CLEAR_CONVERSATION_MESSAGES)) return;
         const detail = (event as CustomEvent).detail;
         if (!isPlainObject(detail) || hasPrototypePollutionKeys(detail)) return;
 

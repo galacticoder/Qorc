@@ -1,170 +1,20 @@
 import React, { useEffect, useCallback, useMemo, useRef } from 'react';
-import { Message } from '@/components/chat/messaging/types';
-import type { User } from '@/components/chat/messaging/UserList';
-import { SignalType } from '@/lib/signal-types';
-import { EventType } from '@/lib/event-types';
-import { sanitizeTextInput } from '@/lib/sanitizers';
-
-const READ_RECEIPT_PREFIX = 'read-receipt-';
-const DELIVERY_RECEIPT_PREFIX = 'delivery-receipt-';
-const RECEIPT_RETENTION_MS = 24 * 60 * 60 * 1000;
-const RATE_LIMIT_WINDOW_MS = 60_000;
-const RATE_LIMIT_MAX_RECEIPTS = 100;
-
-const sanitizeUsername = (value: string | undefined) => {
-  if (typeof value !== 'string') return undefined;
-  const sanitized = sanitizeTextInput(value, { maxLength: 96, allowNewlines: false });
-  return sanitized.length ? sanitized : undefined;
-};
-
-interface ReceiptEventDetail {
-  messageId: string;
-  from: string;
-}
-
-const isReceiptEventDetail = (value: unknown): value is ReceiptEventDetail => {
-  if (!value || typeof value !== 'object') return false;
-  const detail = value as Record<string, unknown>;
-  return typeof detail.messageId === 'string' && typeof detail.from === 'string';
-};
-
-const sanitizeMessageId = (id: string | undefined) => {
-  if (!id || typeof id !== 'string') return undefined;
-  const trimmed = sanitizeTextInput(id, { maxLength: 256, allowNewlines: false });
-  return trimmed.length ? trimmed : undefined;
-};
-
-const validateHybridKeys = (keys: any): boolean => {
-  if (!keys || typeof keys !== 'object') return false;
-  return (
-    typeof keys.kyberPublicBase64 === 'string' &&
-    keys.kyberPublicBase64.length > 0 &&
-    typeof keys.dilithiumPublicBase64 === 'string' &&
-    keys.dilithiumPublicBase64.length > 0
-  );
-};
-
-const buildSmartStatusMap = (messages: Message[], currentUsername: string) => {
-  const map = new Map<string, Message['receipt']>();
-
-  // Track latest read and delivered per peer
-  const latestReadPerPeer = new Map<string, { id: string; timestamp: number; receipt: Message['receipt'] }>();
-  const latestDeliveredPerPeer = new Map<string, { id: string; timestamp: number; receipt: Message['receipt'] }>();
-
-  for (const msg of messages) {
-    if (msg.sender !== currentUsername || !msg.receipt) continue;
-    const peer = msg.recipient || '';
-    if (!peer) continue;
-
-    const timestamp = msg.timestamp instanceof Date ? msg.timestamp.getTime() : new Date(msg.timestamp).getTime();
-    if (isNaN(timestamp)) continue;
-
-    // Track latest read message per peer
-    if (msg.receipt.read) {
-      const existing = latestReadPerPeer.get(peer);
-      if (!existing || timestamp > existing.timestamp) {
-        latestReadPerPeer.set(peer, { id: msg.id, timestamp, receipt: msg.receipt });
-      }
-    }
-
-    // Track latest delivered message per peer
-    if (msg.receipt.delivered && !msg.receipt.read) {
-      const existing = latestDeliveredPerPeer.get(peer);
-      if (!existing || timestamp > existing.timestamp) {
-        latestDeliveredPerPeer.set(peer, { id: msg.id, timestamp, receipt: msg.receipt });
-      }
-    }
-  }
-
-  for (const [, readInfo] of latestReadPerPeer) {
-    map.set(readInfo.id, { ...readInfo.receipt, read: true });
-  }
-
-  for (const [peer, deliveredInfo] of latestDeliveredPerPeer) {
-    const readInfo = latestReadPerPeer.get(peer);
-    if (!readInfo || deliveredInfo.timestamp > readInfo.timestamp) {
-      map.set(deliveredInfo.id, { ...deliveredInfo.receipt, delivered: true });
-    }
-  }
-
-  return map;
-};
-
-const markReceiptSent = (store: Map<string, number>, messageId: string) => {
-  store.set(messageId, Date.now());
-};
-
-
-
-const hasRecentReceipt = (store: Map<string, number>, messageId: string) => {
-  const timestamp = store.get(messageId);
-  if (!timestamp) return false;
-  if (Date.now() - timestamp > RECEIPT_RETENTION_MS) {
-    store.delete(messageId);
-    return false;
-  }
-  return true;
-};
-
-const pruneOldReceipts = (store: Map<string, number>) => {
-  const cutoff = Date.now() - RECEIPT_RETENTION_MS;
-  for (const [messageId, timestamp] of store.entries()) {
-    if (timestamp < cutoff) {
-      store.delete(messageId);
-    }
-  }
-};
-
-const updateMessageReceipt = async (
-  messageIndexRef: React.RefObject<Map<string, number>>,
-  setMessages: React.Dispatch<React.SetStateAction<Message[]>>,
-  messageId: string,
-  updater: (receipt: Message['receipt'] | undefined) => Message['receipt'] | undefined,
-  messagesRef: React.RefObject<Message[]>,
-  dbReceiptQueueRef?: React.RefObject<Map<string, (receipt: Message['receipt'] | undefined) => Message['receipt'] | undefined>>,
-  dbFlushTimeoutRef?: React.RefObject<ReturnType<typeof setTimeout> | null>,
-  flushDBReceiptsRef?: React.RefObject<(() => Promise<void>) | null>,
-): Promise<Message | null> => {
-  const index = messageIndexRef.current.get(messageId);
-  let updatedMessage: Message | null = null;
-
-  if (index !== undefined) {
-    const currentMessages = messagesRef.current;
-    if (index >= 0 && index < currentMessages.length) {
-      const target = currentMessages[index];
-      const nextReceipt = updater(target.receipt);
-      if (nextReceipt !== target.receipt) {
-        updatedMessage = { ...target, receipt: nextReceipt };
-      }
-    }
-
-    if (updatedMessage) {
-      const msgToSet = updatedMessage;
-      setMessages((prev) => {
-        if (index < 0 || index >= prev.length) {
-          return prev;
-        }
-        const next = [...prev];
-        next[index] = msgToSet;
-        return next;
-      });
-    }
-  } else {
-    if (dbReceiptQueueRef && dbFlushTimeoutRef && flushDBReceiptsRef) {
-      dbReceiptQueueRef.current.set(messageId, updater);
-
-      if (dbFlushTimeoutRef.current) {
-        clearTimeout(dbFlushTimeoutRef.current);
-      }
-      dbFlushTimeoutRef.current = setTimeout(() => {
-        const flushFn = flushDBReceiptsRef.current;
-        if (flushFn) void flushFn();
-      }, 500);
-    }
-  }
-
-  return updatedMessage;
-};
+import { Message } from '../../components/chat/messaging/types';
+import type { User } from '../../components/chat/messaging/UserList';
+import { SignalType } from '../../lib/signal-types';
+import { EventType } from '../../lib/event-types';
+import { sanitizeMessageId, sanitizeUsername } from '../../lib/sanitizers';
+import { RECEIPT_RETENTION_MS, RATE_LIMIT_MAX_RECEIPTS, RATE_LIMIT_WINDOW_MS, READ_RECEIPT_PREFIX, DELIVERY_RECEIPT_PREFIX } from '../../lib/constants';
+import type { RateLimitBucket, PendingReceiptInfo, ReceiptUpdater } from '../../lib/types/message-sending-types';
+import {
+  isReceiptEventDetail,
+  buildSmartStatusMap,
+  markReceiptSent,
+  hasRecentReceipt,
+  pruneOldReceipts,
+  updateMessageReceipt
+} from './receipts';
+import { validateHybridKeys } from './validation';
 
 export function useMessageReceipts(
   messages: Message[],
@@ -183,9 +33,9 @@ export function useMessageReceipts(
   const sentReceiptsRef = useRef<Map<string, number>>(new Map());
   const messageIndexRef = useRef<Map<string, number>>(new Map());
   const messagesRef = useRef<Message[]>(messages);
-  const rateLimitRef = useRef<{ windowStart: number; count: number }>({ windowStart: Date.now(), count: 0 });
-  const pendingReceiptsRef = useRef<Map<string, { kind: 'delivered' | 'read'; addedAt: number; attempts: number }>>(new Map());
-  const dbReceiptQueueRef = useRef<Map<string, (receipt: Message['receipt'] | undefined) => Message['receipt'] | undefined>>(new Map());
+  const rateLimitRef = useRef<RateLimitBucket>({ windowStart: Date.now(), count: 0 });
+  const pendingReceiptsRef = useRef<Map<string, PendingReceiptInfo>>(new Map());
+  const dbReceiptQueueRef = useRef<Map<string, ReceiptUpdater>>(new Map());
   const dbFlushTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const flushDBReceiptsRef = useRef<(() => Promise<void>) | null>(null);
 
@@ -204,7 +54,7 @@ export function useMessageReceipts(
         const allMessages = await secureDBRef.current.loadMessages().catch(() => []);
         let hasChanges = false;
 
-        const unappliedUpdates = new Map<string, (receipt: Message['receipt'] | undefined) => Message['receipt'] | undefined>();
+        const unappliedUpdates = new Map<string, ReceiptUpdater>();
 
         for (const [messageId, updater] of queue.entries()) {
           const msgIndex = allMessages.findIndex((m: Message) => m.id === messageId);

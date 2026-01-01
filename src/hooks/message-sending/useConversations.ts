@@ -1,111 +1,20 @@
-/**
- * useConversations Hook
- */
-
 import { useState, useCallback, useEffect, useMemo, useRef } from "react";
-import { Conversation } from "../components/chat/messaging/ConversationList";
-import { Message } from "../components/chat/messaging/types";
-import { User } from "../components/chat/messaging/UserList";
-import { SignalType } from "../lib/signal-types";
-import websocketClient from "../lib/websocket";
-import { pseudonymizeUsernameWithCache } from "../lib/username-hash";
-import { SecureDB } from "../lib/secureDB";
-import { sanitizeEventPayload, sanitizeTextInput } from "../lib/sanitizers";
-
-// Constants for validation
-const MAX_PREVIEW_LENGTH = 80;
-const MIN_USERNAME_LENGTH = 2;
-const MAX_USERNAME_LENGTH = 64;
-const USERNAME_PATTERN = /^[a-zA-Z0-9._-]{2,64}$/;
-const PSEUDONYM_PATTERN = /^[a-f0-9]{32,}$/i;
-const MAX_CONVERSATIONS = 1000;
-
-// Rate limiting
-const CONVERSATION_RATE_LIMIT_WINDOW_MS = 10_000;
-const CONVERSATION_RATE_LIMIT_MAX = 8;
-const VALIDATION_TIMEOUT_MS = 15_000;
-
-// Dispatch sanitized events only
-const dispatchSafeEvent = (name: string, detail: Record<string, unknown>, allowedKeys?: string[]): void => {
-  try {
-    const sanitized = sanitizeEventPayload(detail, allowedKeys);
-    window.dispatchEvent(new CustomEvent(name, { detail: sanitized }));
-  } catch (_error) {
-    console.error(`[useConversations] Failed to dispatch event ${name}:`, _error);
-  }
-};
-
-const sanitizePreviewText = (input: string | undefined | null): string => {
-  if (!input || typeof input !== 'string') {
-    return '';
-  }
-
-  const clean = sanitizeTextInput(input, { maxLength: MAX_PREVIEW_LENGTH, allowNewlines: false });
-  return clean.replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#x27;');
-};
-
-// Generate safe preview text from message
-const getConversationPreview = (message: Message, currentUsername: string): string => {
-  if (message.type === 'system' || message.isSystemMessage) {
-    try {
-      const parsed = JSON.parse(message.content);
-      if (parsed?.label && typeof parsed.label === 'string') {
-        return sanitizePreviewText(parsed.label);
-      }
-    } catch { }
-    return 'System message';
-  }
-
-  const filename = sanitizePreviewText(message.filename);
-  const isMe = message.sender === currentUsername;
-  const prefix = isMe ? 'You' : message.sender;
-
-  const isReactionMessage = message.content?.includes(SignalType.REACTION_ADD) || message.content?.includes(SignalType.REACTION_REMOVE);
-
-  if (isReactionMessage) {
-    if (isMe) {
-      return 'You reacted to a message';
-    } else {
-      return `${message.sender} reacted to your message`;
-    }
-  }
-
-  if (message.type === SignalType.FILE || message.type === SignalType.FILE_MESSAGE || filename) {
-    if (filename && filename.match(/\.(jpg|jpeg|png|gif|bmp|webp|svg|ico|tiff)$/i)) {
-      return `${prefix} sent an image`;
-    }
-    if (filename && filename.match(/\.(mp4|webm|ogg|avi|mov|wmv|flv|mkv)$/i)) {
-      return `${prefix} sent a video`;
-    }
-    if (filename && (filename.toLowerCase().includes('voice-note') || filename.match(/\.(mp3|wav|ogg|webm|m4a|aac|flac)$/i))) {
-      return `${prefix} sent a voice message`;
-    }
-    return `${prefix} sent a file`;
-  }
-
-  return sanitizePreviewText(message.content);
-};
-
-// Validate username format
-const isValidUsername = (username: string): boolean => {
-  if (!username || typeof username !== 'string') return false;
-  if (username.length < MIN_USERNAME_LENGTH || username.length > MAX_USERNAME_LENGTH) return false;
-  return USERNAME_PATTERN.test(username);
-};
-
-// Check if string looks like a pseudonym hash
-const isPseudonymHash = (value: string): boolean => {
-  return PSEUDONYM_PATTERN.test(value);
-};
-
-const createConversation = (username: string, isOnline: boolean): Conversation => ({
-  id: crypto.randomUUID(),
-  username,
-  isOnline,
-  lastMessage: undefined,
-  lastMessageTime: undefined,
-  unreadCount: 0
-});
+import { Conversation } from "../../components/chat/messaging/ConversationList";
+import { Message } from "../../components/chat/messaging/types";
+import { User } from "../../components/chat/messaging/UserList";
+import { SignalType } from "../../lib/signal-types";
+import { EventType } from "../../lib/event-types";
+import websocketClient from "../../lib/websocket";
+import { pseudonymizeUsernameWithCache } from "../../lib/username-hash";
+import { SecureDB } from "../../lib/secureDB";
+import { MAX_CONVERSATIONS, CONVERSATION_RATE_LIMIT_WINDOW_MS, CONVERSATION_RATE_LIMIT_MAX, VALIDATION_TIMEOUT_MS } from "../../lib/constants";
+import {
+  dispatchSafeEvent,
+  getConversationPreview,
+  isValidConversationUsername,
+  isPseudonymHash,
+  createConversation
+} from "./conversations";
 
 export const useConversations = (currentUsername: string, users: User[], messages: Message[], secureDB: SecureDB | null) => {
   const [conversations, setConversations] = useState<Conversation[]>([]);
@@ -115,7 +24,6 @@ export const useConversations = (currentUsername: string, users: User[], message
   // Rate limiting state
   const rateStateRef = useRef<{ windowStart: number; count: number }>({ windowStart: 0, count: 0 });
   const pendingAddsRef = useRef<Map<string, Promise<Conversation | null>>>(new Map());
-
   const eventCleanupRef = useRef<Map<string, () => void>>(new Map());
 
   const addConversation = useCallback(async (username: string, autoSelect: boolean = true): Promise<Conversation | null> => {
@@ -129,7 +37,7 @@ export const useConversations = (currentUsername: string, users: User[], message
 
     // Check if it looks like a pseudonym or validate as username
     const looksLikePseudonym = isPseudonymHash(trimmed);
-    if (!looksLikePseudonym && !isValidUsername(trimmed)) {
+    if (!looksLikePseudonym && !isValidConversationUsername(trimmed)) {
       throw new Error('[useConversations] Invalid username format (2-64 chars, alphanumeric/._- only)');
     }
 
@@ -164,7 +72,7 @@ export const useConversations = (currentUsername: string, users: User[], message
         if (!looksLikePseudonym && trimmed !== pseudonym) {
           try {
             await secureDB.storeUsernameMapping(pseudonym, trimmed);
-            dispatchSafeEvent('username-mapping-updated', { username: pseudonym, original: trimmed }, ['username', 'original']);
+            dispatchSafeEvent(EventType.USERNAME_MAPPING_UPDATED, { username: pseudonym, original: trimmed }, ['username', 'original']);
           } catch (_error) {
             console.error('[useConversations] Failed to store username mapping:', _error);
             throw new Error('[useConversations] Failed to store username mapping');
@@ -226,7 +134,7 @@ export const useConversations = (currentUsername: string, users: User[], message
 
             if (hybridPublicKeys) {
               try {
-                dispatchSafeEvent('user-keys-available', { username: pseudonym, hybridKeys: hybridPublicKeys }, ['username', 'hybridKeys']);
+                dispatchSafeEvent(EventType.USER_KEYS_AVAILABLE, { username: pseudonym, hybridKeys: hybridPublicKeys }, ['username', 'hybridKeys']);
               } catch (dispatchError) {
                 console.error('Failed to dispatch user-keys-available:', dispatchError);
               }
@@ -507,7 +415,7 @@ export const useConversations = (currentUsername: string, users: User[], message
     }
 
     if (clearMessages) {
-      dispatchSafeEvent('clear-conversation-messages', { username }, ['username']);
+      dispatchSafeEvent(EventType.CLEAR_CONVERSATION_MESSAGES, { username }, ['username']);
     }
 
     try {

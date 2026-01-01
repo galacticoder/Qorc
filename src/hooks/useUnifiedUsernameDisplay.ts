@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import { EventType } from '../lib/event-types';
 
 interface UseUnifiedUsernameDisplayProps {
   username: string;
@@ -236,10 +237,10 @@ export function useUnifiedUsernameDisplay({
       }
     };
 
-    window.addEventListener('username-mapping-updated', handler as EventListener);
+    window.addEventListener(EventType.USERNAME_MAPPING_UPDATED, handler as EventListener);
     window.addEventListener('username-mapping-received', handler as EventListener);
     return () => {
-      window.removeEventListener('username-mapping-updated', handler as EventListener);
+      window.removeEventListener(EventType.USERNAME_MAPPING_UPDATED, handler as EventListener);
       window.removeEventListener('username-mapping-received', handler as EventListener);
     };
   }, [resolveUsername, sanitizedUsername]);

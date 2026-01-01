@@ -1,6 +1,8 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { SecureDB } from '../lib/secureDB';
 import { UsernameDisplayContext } from '../lib/username-display';
+import { EventType } from '../lib/event-types';
+
 
 const MAX_USERNAME_LENGTH = 256;
 const RATE_LIMIT_WINDOW_MS = 5_000;
@@ -114,10 +116,10 @@ export const useUsernameDisplay = (secureDB: SecureDB | undefined, currentUserOr
       }
     };
 
-    window.addEventListener('username-mapping-updated', handler as EventListener);
+    window.addEventListener(EventType.USERNAME_MAPPING_UPDATED, handler as EventListener);
     window.addEventListener('username-mapping-received', handler as EventListener);
     return () => {
-      window.removeEventListener('username-mapping-updated', handler as EventListener);
+      window.removeEventListener(EventType.USERNAME_MAPPING_UPDATED, handler as EventListener);
       window.removeEventListener('username-mapping-received', handler as EventListener);
     };
   }, [clearCache]);

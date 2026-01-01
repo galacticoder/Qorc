@@ -21,7 +21,7 @@ import {
   getChannelId,
   generateMessageId,
 } from "../../lib/utils/p2p-utils";
-import { P2P_ROUTE_PROOF_TTL_MS, MAX_MESSAGE_CONTENT_LENGTH, MAX_P2P_USERNAME_LENGTH, RATE_LIMIT_WINDOW_MS, RATE_LIMIT_MAX_MESSAGES, MAX_P2P_INCOMING_QUEUE } from "../../lib/constants";
+import { P2P_ROUTE_PROOF_TTL_MS, MAX_MESSAGE_CONTENT_LENGTH, MAX_USERNAME_LENGTH, RATE_LIMIT_WINDOW_MS, RATE_LIMIT_MAX_MESSAGES, MAX_P2P_INCOMING_QUEUE } from "../../lib/constants";
 import { isPlainObject, hasPrototypePollutionKeys } from "../../lib/sanitizers";
 
 // Shared refs required by the messaging helpers for queueing, rate limits, and event callbacks 
@@ -138,7 +138,7 @@ export function createSendP2PMessage(
       throw createP2PError('LOCAL_KEYS_MISSING');
     }
 
-    if (!to || typeof to !== 'string' || to.length === 0 || to.length > MAX_P2P_USERNAME_LENGTH) {
+    if (!to || typeof to !== 'string' || to.length === 0 || to.length > MAX_USERNAME_LENGTH) {
       throw createP2PError('INVALID_RECIPIENT');
     }
 

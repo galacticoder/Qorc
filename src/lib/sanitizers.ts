@@ -1,5 +1,6 @@
 import { USERNAME_REGEX } from './constants';
 import { SignalType } from './signal-types';
+import { MAX_CONTENT_LENGTH, MAX_USERNAME_LENGTH } from './constants';
 
 const DEFAULT_ALLOWED_KEYS = ['username', 'type', 'peer', 'at', 'callId', 'status', 'startTime', 'endTime', 'durationMs', 'direction'] as const;
 
@@ -119,12 +120,21 @@ export const sanitizeNonEmptyText = (value: unknown, maxLength: number, allowNew
 };
 
 // Sanitize usernames
-export const sanitizeUsername = (value: unknown, maxLen: number): string | null => {
+export const sanitizeUsername = (value: unknown, maxLen?: number): string | null => {
   if (typeof value !== 'string') return null;
+  const maxLength = maxLen ?? MAX_USERNAME_LENGTH;
   const trimmed = value.trim();
-  if (!trimmed || trimmed.length > maxLen) return null;
+  if (!trimmed || trimmed.length > maxLength) return null;
   if (/[^\x20-\x7E]/.test(trimmed)) return null;
   return trimmed;
+};
+
+
+// Sanitize message ID values
+export const sanitizeMessageId = (id: string | undefined) => {
+  if (!id || typeof id !== 'string') return undefined;
+  const trimmed = sanitizeTextInput(id, { maxLength: 256, allowNewlines: false });
+  return trimmed.length ? trimmed : undefined;
 };
 
 // Sanitize event username values
@@ -135,6 +145,15 @@ export const sanitizeEventUsername = (value: unknown, maxLen: number): string | 
   const cleaned = trimmed.replace(/[\x00-\x1F\x7F]/g, '');
   if (!cleaned) return null;
   return cleaned.slice(0, maxLen);
+};
+
+// Sanitize message content values
+export const sanitizeContent = (value: string | undefined) => {
+  if (typeof value !== 'string') return undefined;
+  const trimmed = value.trim();
+  if (!trimmed) return undefined;
+  const normalized = trimmed.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, '');
+  return normalized.slice(0, MAX_CONTENT_LENGTH);
 };
 
 // Check if username is valid according to app rules

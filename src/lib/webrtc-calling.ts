@@ -397,7 +397,7 @@ export class WebRTCCallingService {
         } catch { }
       };
       this.userKeysAvailableHandler = handlerHybrid as EventListener;
-      window.addEventListener('user-keys-available', this.userKeysAvailableHandler);
+      window.addEventListener(EventType.USER_KEYS_AVAILABLE, this.userKeysAvailableHandler);
     } catch { }
 
     if (!this.pqDeviceKeyPair) {
@@ -510,7 +510,6 @@ export class WebRTCCallingService {
 
     } catch (_error) {
       console.error('[Calling] Failed to start call:', _error);
-      // Only call endCall if we still have a valid currentCall for this callId
       if (this.currentCall && this.currentCall.id === callId) {
         this.endCall('failed');
       }
@@ -697,11 +696,9 @@ export class WebRTCCallingService {
             }
           } catch (err) {
             console.error('[Calling] Preferred camera failed to start. strictly aborting.', err);
-            // Do NOT fallback to random camera. User must fix their device or selection.
             return false;
           }
         } else {
-          // No preference? Try any camera.
           const newStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
           const newVideo = newStream.getVideoTracks()[0];
           if (newVideo) {
@@ -1927,7 +1924,7 @@ export class WebRTCCallingService {
         const handler = (evt: Event) => {
           const d = (evt as CustomEvent).detail;
           if (d?.username === peer && d?.hybridKeys) {
-            window.removeEventListener('user-keys-available', handler as EventListener);
+            window.removeEventListener(EventType.USER_KEYS_AVAILABLE, handler as EventListener);
             if (!settled) {
               settled = true;
               clearTimeout(timeout);
@@ -1941,7 +1938,7 @@ export class WebRTCCallingService {
             }
           }
         };
-        window.addEventListener('user-keys-available', handler as EventListener, { once: true });
+        window.addEventListener(EventType.USER_KEYS_AVAILABLE, handler as EventListener, { once: true });
       });
 
       const updated = this.peerHybridKeysCache.get(peer);
@@ -2486,7 +2483,7 @@ export class WebRTCCallingService {
     }
 
     if (this.userKeysAvailableHandler) {
-      window.removeEventListener('user-keys-available', this.userKeysAvailableHandler);
+      window.removeEventListener(EventType.USER_KEYS_AVAILABLE, this.userKeysAvailableHandler);
       this.userKeysAvailableHandler = null;
     }
 

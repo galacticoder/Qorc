@@ -8,10 +8,25 @@ export const VALID_EMOJI_PICKER_ID = /^[A-Za-z0-9_-]+$/;
 export const HEX_PATTERN = /^[a-f0-9]{32,}$/i;
 export const IPV4_REGEX = /^(?:\d{1,3}\.){3}\d{1,3}$/;
 export const IPV6_REGEX = /^\[?[A-F0-9:]+\]?$/i;
+export const BASE64_SAFE_REGEX = /^[A-Za-z0-9+/=_-]+$/;
+export const FILENAME_SANITIZE_REGEX = /[^\w.-]/g;
+
+export const READ_RECEIPT_PREFIX = 'read-receipt-';
+export const DELIVERY_RECEIPT_PREFIX = 'delivery-receipt-';
+
+// Cache and key lengths
+export const ID_CACHE_TTL_MS = 5 * 60 * 1000;
+export const MAX_ID_CACHE_SIZE = 4_096;
+export const KYBER_PUBLIC_KEY_LENGTH = 1_568;
+export const DILITHIUM_PUBLIC_KEY_LENGTH = 2_592;
+export const X25519_PUBLIC_KEY_LENGTH = 32;
+export const MAX_PAYLOAD_CACHE_SIZE = 2000;
 
 // Event metadata + rate limits
 export const MAX_EVENT_TYPE_LENGTH = 32;
 export const MAX_EVENT_USERNAME_LENGTH = 256;
+export const MAX_CONTENT_LENGTH = 16 * 1024;
+export const RATE_LIMIT_MAX_RECEIPTS = 100;
 
 export const RESET_FEEDBACK_DURATION_MS = 1000;
 export const DEFAULT_MAX_TYPING_USERS = 200;
@@ -32,9 +47,9 @@ export const MAX_UI_CALL_STATUS_VALUE_LENGTH = 64;
 export const PASSWORD_MAX_LENGTH = 1000;
 export const SERVER_PASSWORD_MAX_LENGTH = 1000;
 
-// Filename helpers
+// File helpers
 export const MAX_FILENAME_LENGTH = 255;
-export const FILENAME_SANITIZE_REGEX = /[^\w.-]/g;
+export const MAX_FILEDATA_LENGTH = 10 * 1024 * 1024;
 
 // File-size units
 export const FILE_SIZE_UNITS = ["Bytes", "KB", "MB", "GB"] as const;
@@ -104,11 +119,21 @@ export const P2P_ROUTE_PROOF_TTL_MS = 60 * 1000;
 export const MAX_P2P_CERT_CACHE_SIZE = 128;
 export const MAX_P2P_ROUTE_PROOF_CACHE_SIZE = 512;
 export const MAX_MESSAGE_CONTENT_LENGTH = 64 * 1024;
-export const MAX_P2P_USERNAME_LENGTH = 96;
+export const MAX_USERNAME_LENGTH = 96;
 export const RATE_LIMIT_WINDOW_MS = 60_000;
 export const RATE_LIMIT_MAX_MESSAGES = 200;
 export const CERT_CLOCK_SKEW_MS = 2 * 60 * 1000;
 export const RECEIPT_RETENTION_MS = 24 * 60 * 60 * 1000;
+
+// Conversation constants
+export const MAX_PREVIEW_LENGTH = 80;
+export const CONVERSATION_MIN_USERNAME_LENGTH = 2;
+export const CONVERSATION_MAX_USERNAME_LENGTH = 64;
+export const CONVERSATION_USERNAME_PATTERN = /^[a-zA-Z0-9._-]{2,64}$/;
+export const MAX_CONVERSATIONS = 1000;
+export const CONVERSATION_RATE_LIMIT_WINDOW_MS = 10_000;
+export const CONVERSATION_RATE_LIMIT_MAX = 8;
+export const VALIDATION_TIMEOUT_MS = 15_000;
 
 // Calling constants
 export const CALLING_MAX_USERNAME_LENGTH = 120;
