@@ -1,6 +1,6 @@
 import React, { memo } from "react";
 import { cn } from "../../../lib/utils";
-import { useUnifiedUsernameDisplay } from "../../../hooks/useUnifiedUsernameDisplay";
+import { useUnifiedUsernameDisplay } from "../../../hooks/database/useUnifiedUsernameDisplay";
 
 interface TypingIndicatorProps {
   username: string;

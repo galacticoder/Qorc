@@ -2,119 +2,11 @@ import { useEffect, useMemo, useRef } from "react";
 import { SignalType } from "@/lib/signal-types";
 import { EventType } from "../lib/event-types";
 import websocketClient from "@/lib/websocket";
+import { WEBSOCKET_RATE_LIMIT_MAX_MESSAGES, WEBSOCKET_RATE_LIMIT_WINDOW_MS } from "@/lib/constants";
+import { isPlainObject, hasPrototypePollutionKeys } from "@/lib/sanitizers";
+import { BaseMessage, WebSocketMessageSchema, DEFAULT_ALLOWED_TYPES, DEFAULT_ENCRYPTED_TYPES, DEFAULT_SCHEMAS, WebSocketHookOptions } from "@/lib/types/websocket-types";
 
 type MessageHandler = (data: BaseMessage) => Promise<void>;
-
-interface WebSocketMessageSchema {
-  validate: (message: BaseMessage) => boolean;
-}
-
-interface WebSocketHookOptions {
-  schemas?: Record<string, WebSocketMessageSchema>;
-  onAudit?: (event: { code: string; type: string }) => void;
-}
-
-interface BaseMessage {
-  type: string;
-  [key: string]: unknown;
-}
-
-const DEFAULT_ALLOWED_TYPES: Set<string> = new Set([
-  // Transport-level envelope
-  SignalType.PQ_ENVELOPE,
-  SignalType.PQ_HANDSHAKE_ACK,
-  // Heartbeat messages
-  SignalType.PQ_HEARTBEAT_PONG,
-  // Client error reporting
-  SignalType.CLIENT_ERROR,
-
-  // Device attestation
-  SignalType.DEVICE_CHALLENGE,
-  SignalType.DEVICE_ATTESTATION_ACK,
-
-  // Profile picture system
-  SignalType.AVATAR_FETCH_RESPONSE,
-  SignalType.AVATAR_UPLOAD_RESPONSE,
-
-  // App-level messages
-  SignalType.ENCRYPTED_MESSAGE,
-  SignalType.DR_SEND,
-  SignalType.SERVERMESSAGE,
-  SignalType.SERVERLIMIT,
-  SignalType.AUTH_ERROR,
-  SignalType.NAMEEXISTSERROR,
-  SignalType.INVALIDNAME,
-  SignalType.INVALIDNAMELENGTH,
-  SignalType.TOKEN_VALIDATION_RESPONSE,
-  SignalType.ERROR,
-  SignalType.BLOCK_LIST_UPDATE,
-  SignalType.BLOCK_LIST_SYNC,
-  SignalType.BLOCK_LIST_RESPONSE,
-  SignalType.PASSPHRASE_HASH,
-  SignalType.PASSPHRASE_SUCCESS,
-  SignalType.PASSWORD_HASH_PARAMS,
-  SignalType.CONNECTION_RESTORED,
-  SignalType.SESSION_ESTABLISHED,
-  SignalType.SERVER_PUBLIC_KEY,
-  SignalType.IN_ACCOUNT,
-  SignalType.AUTH_SUCCESS,
-  SignalType.USER_EXISTS_RESPONSE,
-  SignalType.P2P_PEER_CERT,
-  SignalType.LIBSIGNAL_DELIVER_BUNDLE,
-  SignalType.LIBSIGNAL_PUBLISH_STATUS,
-  SignalType.SESSION_RESET_REQUEST,
-  SignalType.EDIT_MESSAGE,
-  SignalType.DELETE_MESSAGE,
-  SignalType.USER_DISCONNECT,
-  SignalType.FILE_MESSAGE_CHUNK,
-  SignalType.OFFLINE_MESSAGES_RESPONSE,
-  SignalType.DELIVERY_RECEIPT,
-  SignalType.READ_RECEIPT,
-]);
-
-const RATE_LIMIT_WINDOW_MS = 1_000;
-const RATE_LIMIT_MAX_MESSAGES = 500;
-
-const DEFAULT_ENCRYPTED_TYPES = new Set<string>([
-  SignalType.PQ_ENVELOPE,
-  SignalType.ENCRYPTED_MESSAGE,
-  SignalType.DR_SEND,
-]);
-
-const DEFAULT_SCHEMAS: Record<string, WebSocketMessageSchema> = {
-  [SignalType.ENCRYPTED_MESSAGE]: {
-    validate: (message) => typeof message.encryptedPayload === 'object' && message.encryptedPayload !== null,
-  },
-  [SignalType.DR_SEND]: {
-    validate: (message) => typeof message.payload === 'object' && message.payload !== null,
-  },
-  [SignalType.PQ_ENVELOPE]: {
-    validate: (message) =>
-      typeof (message as any).version === 'string' &&
-      (message as any).version === 'pq-ws-1' &&
-      typeof (message as any).sessionId === 'string' &&
-      typeof (message as any).sessionFingerprint === 'string' &&
-      typeof (message as any).messageId === 'string' &&
-      typeof (message as any).counter === 'number' &&
-      typeof (message as any).timestamp === 'number' &&
-      typeof (message as any).nonce === 'string' &&
-      typeof (message as any).ciphertext === 'string' &&
-      typeof (message as any).tag === 'string' &&
-      typeof (message as any).aad === 'string',
-  },
-};
-
-const hasPrototypePollutionKeys = (obj: unknown): boolean => {
-  if (obj == null || typeof obj !== 'object') return false;
-  const keys = Object.keys(obj);
-  return keys.some((key) => key === '__proto__' || key === 'constructor' || key === 'prototype');
-};
-
-const isPlainObject = (value: unknown): value is Record<string, unknown> => {
-  if (value == null || typeof value !== 'object') return false;
-  const proto = Object.getPrototypeOf(value);
-  return proto === null || proto === Object.prototype;
-};
 
 const sanitizeIncomingMessage = (
   payload: unknown,
@@ -179,12 +71,12 @@ export const useWebSocket = (
         // Rate limiting
         const now = Date.now();
         const bucket = rateLimitRef.current;
-        if (now - bucket.windowStart > RATE_LIMIT_WINDOW_MS) {
+        if (now - bucket.windowStart > WEBSOCKET_RATE_LIMIT_WINDOW_MS) {
           bucket.windowStart = now;
           bucket.count = 0;
         }
         bucket.count += 1;
-        if (bucket.count > RATE_LIMIT_MAX_MESSAGES) {
+        if (bucket.count > WEBSOCKET_RATE_LIMIT_MAX_MESSAGES) {
           return;
         }
 
@@ -199,7 +91,7 @@ export const useWebSocket = (
           return;
         }
 
-        // Enforce encrypted-only mode after PQ session establishment
+        // Enforce encrypted only mode after PQ session establishment
         const sessionEstablished = websocketClient.isPQSessionEstablished();
         const isHandshakeMessage = data.type === SignalType.SERVER_PUBLIC_KEY ||
           data.type === SignalType.SESSION_ESTABLISHED ||
@@ -242,7 +134,7 @@ export const useWebSocket = (
           return;
         }
 
-        // Decrypt pq-envelope using the client's session keys
+        // Decrypt pq-envelope
         if (data.type === SignalType.PQ_ENVELOPE) {
           const decrypted = await websocketClient.decryptIncomingEnvelope(data);
           if (!decrypted) {
@@ -255,22 +147,14 @@ export const useWebSocket = (
           }
 
           if (inner.type === SignalType.USER_EXISTS_RESPONSE) {
-            try {
-              window.dispatchEvent(new CustomEvent(EventType.USER_EXISTS_RESPONSE, { detail: inner }));
-            } catch {
-            }
+            try { window.dispatchEvent(new CustomEvent(EventType.USER_EXISTS_RESPONSE, { detail: inner })); } catch { }
           }
           if (inner.type === SignalType.P2P_PEER_CERT) {
-            try {
-              window.dispatchEvent(new CustomEvent(EventType.P2P_PEER_CERT, { detail: inner }));
-            } catch { }
+            try { window.dispatchEvent(new CustomEvent(EventType.P2P_PEER_CERT, { detail: inner })); } catch { }
           }
 
           if (inner.type === SignalType.DEVICE_CHALLENGE || inner.type === SignalType.DEVICE_ATTESTATION_ACK) {
-            try {
-              websocketClient.handleEdgeServerMessage(inner);
-            } catch {
-            }
+            try { websocketClient.handleEdgeServerMessage(inner); } catch { }
             return;
           }
 
@@ -296,14 +180,8 @@ export const useWebSocket = (
         }
 
         let consumed = false;
-        try {
-          consumed = websocketClient.handleEdgeServerMessage(detail);
-        } catch {
-        }
-
-        if (consumed) {
-          return;
-        }
+        try { consumed = websocketClient.handleEdgeServerMessage(detail); } catch { }
+        if (consumed) { return; }
 
         handler(detail ?? evt).catch((error) => {
           console.error('[useWebSocket] Handler error:', error instanceof Error ? error.message : 'Unknown error');
@@ -313,9 +191,9 @@ export const useWebSocket = (
       }
     };
 
-    window.addEventListener('edge:server-message', listener as EventListener);
+    window.addEventListener(EventType.EDGE_SERVER_MESSAGE, listener as EventListener);
     return () => {
-      window.removeEventListener('edge:server-message', listener as EventListener);
+      window.removeEventListener(EventType.EDGE_SERVER_MESSAGE, listener as EventListener);
     };
   }, [allowedTypes, routeMessage, schemas, setLoginError]);
 };

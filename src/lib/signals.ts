@@ -904,7 +904,7 @@ export async function handleSignalMessages(data: any, handlers: SignalHandlers) 
         try {
           window.dispatchEvent(new CustomEvent(EventType.BLOCK_LIST_RESPONSE, { detail: data }));
         } catch (_error) {
-          SecureAuditLogger.error('signals', 'block-list-response', 'dispatch-failed', { error: (_error as Error).message });
+          SecureAuditLogger.error('signals', EventType.BLOCK_LIST_RESPONSE, 'dispatch-failed', { error: (_error as Error).message });
         }
         break;
       }

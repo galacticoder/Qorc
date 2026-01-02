@@ -1,8 +1,6 @@
 import { useCallback, useRef } from 'react';
 
-/**
- * Rate limiting hook for client-side events.
- */
+// Rate limiting hook for events
 export function useRateLimiter(windowMs: number, maxEvents: number) {
     const rateBucketsRef = useRef<Map<string, { windowStart: number; count: number }>>(new Map());
 

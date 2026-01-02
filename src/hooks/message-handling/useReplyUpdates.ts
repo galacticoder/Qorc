@@ -1,24 +1,9 @@
 import { useCallback, useEffect, useRef } from 'react';
 import { Message } from '@/components/chat/messaging/types';
 import { EventType } from '@/lib/event-types';
-
-const MAX_TRACKED_ORIGINS = 5000;
-const MAX_REPLIES_PER_ORIGIN = 250;
-const RATE_LIMIT_WINDOW_MS = 10_000;
-const RATE_LIMIT_MAX_EVENTS = 100;
-
-const sanitizeMessageId = (value: unknown): string | null => {
-  if (typeof value !== 'string') return null;
-  const trimmed = value.trim();
-  if (!trimmed || trimmed.length > 160) return null;
-  return trimmed;
-};
-
-const sanitizeContent = (value: unknown): string | null => {
-  if (typeof value !== 'string') return null;
-  const normalized = value.normalize('NFC').replace(/[\u0000-\u001F\u007F]/g, '').slice(0, 10000);
-  return normalized.length ? normalized : null;
-};
+import { REPLY_MAX_TRACKED_ORIGINS, REPLY_MAX_REPLIES_PER_ORIGIN, REPLY_RATE_LIMIT_WINDOW_MS, REPLY_RATE_LIMIT_MAX_EVENTS } from '@/lib/constants';
+import { sanitizeContent, sanitizeMessageId } from '@/lib/sanitizers';
+import { validateEventDetail } from '../../lib/utils/shared-utils';
 
 const createReplyUpdateError = (code: string) => {
   const error = new Error(code);
@@ -27,47 +12,24 @@ const createReplyUpdateError = (code: string) => {
   return error;
 };
 
-const isPlainObject = (value: unknown): value is Record<string, unknown> => {
-  if (typeof value !== 'object' || value === null) return false;
-  const proto = Object.getPrototypeOf(value);
-  return proto === Object.prototype || proto === null;
-};
-
-const hasPrototypePollutionKeys = (obj: Record<string, unknown>): boolean => {
-  return ['__proto__', 'prototype', 'constructor'].some(key => Object.prototype.hasOwnProperty.call(obj, key));
-};
-
-const validateEventDetail = (detail: unknown): detail is { messageId: string; newContent?: string } => {
-  if (!isPlainObject(detail)) return false;
-  if (hasPrototypePollutionKeys(detail)) return false;
-  return typeof detail.messageId === 'string';
-};
-
 const trimOriginMap = (map: Map<string, Set<string>>): void => {
-  if (map.size <= MAX_TRACKED_ORIGINS) return;
+  if (map.size <= REPLY_MAX_TRACKED_ORIGINS) return;
   const iterator = map.keys();
-  while (map.size > MAX_TRACKED_ORIGINS) {
+  while (map.size > REPLY_MAX_TRACKED_ORIGINS) {
     const next = iterator.next();
     if (next.done) break;
     map.delete(next.value);
   }
 };
 
-/**
- * Hook for managing reply field updates when messages are edited
- */
+// Hook for managing reply field updates when messages are edited
 export const useReplyUpdates = (
   messages: readonly Message[],
   onMessagesUpdate: React.Dispatch<React.SetStateAction<Message[]>>,
   persistMessage?: (msg: Message) => Promise<void>
 ) => {
-  // Reverse mapping: original message ID -> set of message IDs that reply to it
   const replyMappingRef = useRef<Map<string, Set<string>>>(new Map());
-
-  // Index of messages by ID for fast lookup
   const messageIndexRef = useRef<Map<string, number>>(new Map());
-
-  // Rate limiting state
   const rateLimitRef = useRef<{ windowStart: number; count: number }>({ windowStart: Date.now(), count: 0 });
 
   // Build and maintain the reply mapping whenever messages change
@@ -76,17 +38,14 @@ export const useReplyUpdates = (
     const messageIndex = new Map<string, number>();
 
     messages.forEach((message, index) => {
-      // Build message index for fast lookup
       messageIndex.set(message.id, index);
-
-      // Build reply mapping
       if (message.replyTo?.id) {
         const replyToId = message.replyTo.id;
         if (!replyMapping.has(replyToId)) {
           replyMapping.set(replyToId, new Set());
         }
         const replyingSet = replyMapping.get(replyToId)!;
-        if (replyingSet.size < MAX_REPLIES_PER_ORIGIN) {
+        if (replyingSet.size < REPLY_MAX_REPLIES_PER_ORIGIN) {
           replyingSet.add(message.id);
         }
       }
@@ -97,16 +56,13 @@ export const useReplyUpdates = (
     trimOriginMap(replyMappingRef.current);
   }, [messages]);
 
-  // Function to update reply fields when a message is edited
+  // Update reply fields when a message is edited
   const updateReplyFields = useCallback((editedMessageId: string, newContent: string) => {
     const replyingMessageIds = replyMappingRef.current.get(editedMessageId);
 
-    if (!replyingMessageIds || replyingMessageIds.size === 0) {
-      return;
-    }
+    if (!replyingMessageIds || replyingMessageIds.size === 0) { return; }
 
     const toPersist: Message[] = [];
-
     onMessagesUpdate((currentMessages) => {
       const editedIndex = messageIndexRef.current.get(editedMessageId);
       const editedMessage = editedIndex !== undefined ? currentMessages[editedIndex] : undefined;
@@ -144,15 +100,13 @@ export const useReplyUpdates = (
     }
   }, [onMessagesUpdate, persistMessage]);
 
+  // Update reply fields when a message is deleted
   const handleMessageDeleted = useCallback((deletedMessageId: string) => {
     const replyingMessageIds = replyMappingRef.current.get(deletedMessageId);
 
-    if (!replyingMessageIds || replyingMessageIds.size === 0) {
-      return;
-    }
+    if (!replyingMessageIds || replyingMessageIds.size === 0) { return; }
 
     const toPersist: Message[] = [];
-
     onMessagesUpdate(currentMessages => {
       let hasUpdates = false;
       const updatedMessages = currentMessages.map(msg => {
@@ -188,15 +142,14 @@ export const useReplyUpdates = (
   useEffect(() => {
     const handleMessageEdit = (event: CustomEvent) => {
       try {
-        // Rate limiting
         const now = Date.now();
         const bucket = rateLimitRef.current;
-        if (now - bucket.windowStart > RATE_LIMIT_WINDOW_MS) {
+        if (now - bucket.windowStart > REPLY_RATE_LIMIT_WINDOW_MS) {
           bucket.windowStart = now;
           bucket.count = 0;
         }
         bucket.count += 1;
-        if (bucket.count > RATE_LIMIT_MAX_EVENTS) {
+        if (bucket.count > REPLY_RATE_LIMIT_MAX_EVENTS) {
           return;
         }
 
@@ -216,15 +169,14 @@ export const useReplyUpdates = (
 
     const handleMessageDelete = (event: CustomEvent) => {
       try {
-        // Rate limiting
         const now = Date.now();
         const bucket = rateLimitRef.current;
-        if (now - bucket.windowStart > RATE_LIMIT_WINDOW_MS) {
+        if (now - bucket.windowStart >  REPLY_RATE_LIMIT_WINDOW_MS) {
           bucket.windowStart = now;
           bucket.count = 0;
         }
         bucket.count += 1;
-        if (bucket.count > RATE_LIMIT_MAX_EVENTS) {
+        if (bucket.count > REPLY_RATE_LIMIT_MAX_EVENTS) {
           return;
         }
 

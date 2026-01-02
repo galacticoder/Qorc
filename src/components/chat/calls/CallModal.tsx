@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback, memo } from 'react';
 import { Phone, PhoneOff, Video, VideoOff, Mic, MicOff, Monitor, MonitorOff, Minimize2, Maximize2, ChevronDown } from 'lucide-react';
 import type { CallState } from '../../../lib/webrtc-calling';
-import { useUnifiedUsernameDisplay } from '../../../hooks/useUnifiedUsernameDisplay';
+import { useUnifiedUsernameDisplay } from '../../../hooks/database/useUnifiedUsernameDisplay';
 import { UserAvatar } from '../../ui/UserAvatar';
 import { Popover, PopoverContent, PopoverTrigger } from '../../ui/popover';
 import { cn } from '@/lib/utils';

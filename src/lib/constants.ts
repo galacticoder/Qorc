@@ -10,6 +10,9 @@ export const IPV4_REGEX = /^(?:\d{1,3}\.){3}\d{1,3}$/;
 export const IPV6_REGEX = /^\[?[A-F0-9:]+\]?$/i;
 export const BASE64_SAFE_REGEX = /^[A-Za-z0-9+/=_-]+$/;
 export const FILENAME_SANITIZE_REGEX = /[^\w.-]/g;
+export const BASE64_STANDARD_REGEX = /^[A-Za-z0-9+/]*={0,2}$/;
+export const BASE64_URLSAFE_REGEX = /^[A-Za-z0-9_-]*={0,2}$/;
+export const CONVERSATION_USERNAME_PATTERN = /^[a-zA-Z0-9._-]{2,64}$/;
 
 export const READ_RECEIPT_PREFIX = 'read-receipt-';
 export const DELIVERY_RECEIPT_PREFIX = 'delivery-receipt-';
@@ -66,7 +69,6 @@ export const SCROLL_THRESHOLD = 200;
 export const NEAR_BOTTOM_THRESHOLD = 100;
 export const MAX_BACKGROUND_MESSAGES = 1000;
 export const BACKGROUND_BATCH_SIZE = 100;
-
 export const QUALITY_OPTIONS = ['low', 'medium', 'high'] as const;
 export const DEFAULT_QUALITY: QualityOption = 'medium';
 export type QualityOption = (typeof QUALITY_OPTIONS)[number];
@@ -75,7 +77,6 @@ export const QUALITY_LABELS: Record<QualityOption, string> = {
     medium: 'Medium',
     high: 'High'
 };
-
 export const QUALITY_DESCRIPTIONS: Record<QualityOption, string> = {
     low: 'Lower bandwidth usage',
     medium: 'Balanced quality and bandwidth',
@@ -135,12 +136,10 @@ export const RECEIPT_RETENTION_MS = 24 * 60 * 60 * 1000;
 export const MAX_PREVIEW_LENGTH = 80;
 export const CONVERSATION_MIN_USERNAME_LENGTH = 2;
 export const CONVERSATION_MAX_USERNAME_LENGTH = 64;
-export const CONVERSATION_USERNAME_PATTERN = /^[a-zA-Z0-9._-]{2,64}$/;
 export const MAX_CONVERSATIONS = 1000;
 export const CONVERSATION_RATE_LIMIT_WINDOW_MS = 10_000;
 export const CONVERSATION_RATE_LIMIT_MAX = 8;
 export const VALIDATION_TIMEOUT_MS = 15_000;
-
 
 // Local message constants
 export const MAX_LOCAL_MESSAGE_ID_LENGTH = 160;
@@ -150,6 +149,44 @@ export const MAX_LOCAL_MIMETYPE_LENGTH = 128;
 export const MAX_LOCAL_EMOJI_LENGTH = 32;
 export const MAX_LOCAL_FILE_SIZE_BYTES = 50 * 1024 * 1024;
 export const MAX_INLINE_BASE64_BYTES = 10 * 1024 * 1024;
+export const LOCAL_EVENT_RATE_LIMIT_WINDOW_MS = 10_000;
+export const LOCAL_EVENT_RATE_LIMIT_MAX_EVENTS = 120;
+
+// Replies
+export const REPLY_MAX_TRACKED_ORIGINS = 5000;
+export const REPLY_MAX_REPLIES_PER_ORIGIN = 250;
+export const REPLY_RATE_LIMIT_WINDOW_MS = 10_000;
+export const REPLY_RATE_LIMIT_MAX_EVENTS = 100;
+
+// Websocket constants
+export const WEBSOCKET_RATE_LIMIT_WINDOW_MS = 1_000;
+export const WEBSOCKET_RATE_LIMIT_MAX_MESSAGES = 500;
+
+export const MAX_FILE_SIZE_BYTES = 50 * 1024 * 1024;
+export const MAX_TOTAL_CHUNKS = 10_000;
+export const MAX_CHUNK_SIZE_BYTES = 384 * 1024;
+export const MAX_CONCURRENT_TRANSFERS = 16;
+export const MAX_BASE64_CHARS = MAX_CHUNK_SIZE_BYTES * 2;
+export const RATE_LIMIT_MAX_EVENTS = 6_000;
+
+// Database constants
+export const DB_MAX_PENDING_MESSAGES = 500;
+export const DB_MAX_PENDING_MAPPINGS = 1000;
+export const DB_MAX_MESSAGES = 5000;
+export const DB_RATE_LIMIT_WINDOW_MS = 10_000;
+export const DB_RATE_LIMIT_MAX_EVENTS = 200;
+export const DB_SAVE_DEBOUNCE_MS = 100;
+
+// Username display constants
+export const USERNAME_DISPLAY_MAX_LENGTH = 256;
+export const USERNAME_DISPLAY_RATE_LIMIT_WINDOW_MS = 5_000;
+export const USERNAME_DISPLAY_RATE_LIMIT_MAX_EVENTS = 50;
+export const USERNAME_DISPLAY_CACHE_TTL_MS = 5 * 60 * 1000;
+export const USERNAME_DISPLAY_MAX_CACHE_SIZE = 512;
+export const USERNAME_DISPLAY_RESOLVE_TIMEOUT_MS = 10_000;
+export const USERNAME_ANON_PREFIX = 'anon:';
+export const USERNAME_HEX_PATTERN = /^[a-f0-9]{32}$/i;
+export const USERNAME_OBFUSCATED_LENGTH = 12;
 
 // Calling constants
 export const CALLING_MAX_USERNAME_LENGTH = 120;

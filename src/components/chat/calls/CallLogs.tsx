@@ -6,7 +6,7 @@ import { Button } from '../../ui/button';
 import { ScrollArea } from '../../ui/scroll-area';
 import { UserAvatar } from '../../ui/UserAvatar';
 import { useCallHistory, type CallLogEntry } from '../../../contexts/CallHistoryContext';
-import { useUnifiedUsernameDisplay } from '../../../hooks/useUnifiedUsernameDisplay';
+import { useUnifiedUsernameDisplay } from '../../../hooks/database/useUnifiedUsernameDisplay';
 import { blockStatusCache } from '../../../lib/block-status-cache';
 import { isPlainObject, hasPrototypePollutionKeys, sanitizeUsername } from '../../../lib/sanitizers';
 import { EventType } from '@/lib/event-types';

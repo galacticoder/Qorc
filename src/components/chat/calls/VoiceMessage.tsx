@@ -2,7 +2,7 @@ import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { cn } from '../../../lib/utils';
 import { Button } from '../../ui/button';
 import { Play, Pause } from 'lucide-react';
-import { useFileUrl } from '../../../hooks/useFileUrl';
+import { useFileUrl } from '../../../hooks/file-handling/useFileUrl';
 import type { SecureDB } from '../../../lib/secureDB';
 
 // Props for voice message bubble

@@ -1,48 +1,18 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { SecureDB } from '../lib/secureDB';
-import { UsernameDisplayContext } from '../lib/username-display';
-import { EventType } from '../lib/event-types';
+import { SecureDB } from '../../lib/secureDB';
+import { UsernameDisplayContext } from '../../lib/username-display';
+import { EventType } from '../../lib/event-types';
+import { isPlainObject, hasPrototypePollutionKeys } from '../../lib/sanitizers';
+import { sanitizeDbUsername, anonymizeUsername } from '../../lib/utils/database-utils';
+import { USERNAME_DISPLAY_RATE_LIMIT_WINDOW_MS, USERNAME_DISPLAY_RATE_LIMIT_MAX_EVENTS } from '../../lib/constants';
+import type { RateLimitBucket } from '../../lib/types/database-types';
 
-
-const MAX_USERNAME_LENGTH = 256;
-const RATE_LIMIT_WINDOW_MS = 5_000;
-const RATE_LIMIT_MAX_EVENTS = 50;
-
-const hasPrototypePollutionKeys = (obj: unknown): boolean => {
-  if (obj == null || typeof obj !== 'object') return false;
-  const keys = Object.keys(obj);
-  return keys.some((key) => key === '__proto__' || key === 'constructor' || key === 'prototype');
-};
-
-const isPlainObject = (value: unknown): value is Record<string, unknown> => {
-  if (value == null || typeof value !== 'object') return false;
-  const proto = Object.getPrototypeOf(value);
-  return proto === null || proto === Object.prototype;
-};
-
-const sanitizeUsername = (value: unknown): string | null => {
-  if (typeof value !== 'string') return null;
-  const trimmed = value.trim();
-  if (!trimmed || trimmed.length > MAX_USERNAME_LENGTH) return null;
-  if (/[\x00-\x1F\x7F]/.test(trimmed)) return null;
-  return trimmed;
-};
-
-const anonymizeUsername = (username: string) => {
-  try {
-    const encoder = new TextEncoder();
-    const bytes = encoder.encode(username);
-    const hex = Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('');
-    return `anon:${hex.slice(0, 12)}`;
-  } catch {
-    return 'anon:unknown';
-  }
-};
-
+// Hook for username display context
 export const useUsernameDisplay = (secureDB: SecureDB | undefined, currentUserOriginal?: string) => {
   const [displayContext, setDisplayContext] = useState<UsernameDisplayContext | null>(null);
-  const rateLimitRef = useRef<{ windowStart: number; count: number }>({ windowStart: Date.now(), count: 0 });
+  const rateLimitRef = useRef<RateLimitBucket>({ windowStart: Date.now(), count: 0 });
 
+  // Initialize display context when secureDB is available
   useEffect(() => {
     if (secureDB) {
       try {
@@ -56,9 +26,10 @@ export const useUsernameDisplay = (secureDB: SecureDB | undefined, currentUserOr
     }
   }, [secureDB, currentUserOriginal]);
 
+  // Gets display name
   const getDisplayUsername = useCallback(
     async (username: string): Promise<string> => {
-      const sanitized = sanitizeUsername(username);
+      const sanitized = sanitizeDbUsername(username);
       if (!sanitized) {
         return anonymizeUsername('invalid');
       }
@@ -77,6 +48,7 @@ export const useUsernameDisplay = (secureDB: SecureDB | undefined, currentUserOr
     [displayContext],
   );
 
+  // Clears cached usernames
   const clearCache = useCallback(() => {
     try {
       displayContext?.clearCache();
@@ -85,17 +57,18 @@ export const useUsernameDisplay = (secureDB: SecureDB | undefined, currentUserOr
     }
   }, [displayContext]);
 
+  // Handles username mapping update events
   useEffect(() => {
     const handler = (event: Event) => {
       try {
         const now = Date.now();
         const bucket = rateLimitRef.current;
-        if (now - bucket.windowStart > RATE_LIMIT_WINDOW_MS) {
+        if (now - bucket.windowStart > USERNAME_DISPLAY_RATE_LIMIT_WINDOW_MS) {
           bucket.windowStart = now;
           bucket.count = 0;
         }
         bucket.count += 1;
-        if (bucket.count > RATE_LIMIT_MAX_EVENTS) {
+        if (bucket.count > USERNAME_DISPLAY_RATE_LIMIT_MAX_EVENTS) {
           return;
         }
 
@@ -107,7 +80,7 @@ export const useUsernameDisplay = (secureDB: SecureDB | undefined, currentUserOr
           return;
         }
 
-        const username = sanitizeUsername(detail?.username ?? detail?.hashed);
+        const username = sanitizeDbUsername(detail?.username ?? detail?.hashed);
         if (!username) return;
 
         clearCache();
@@ -117,10 +90,10 @@ export const useUsernameDisplay = (secureDB: SecureDB | undefined, currentUserOr
     };
 
     window.addEventListener(EventType.USERNAME_MAPPING_UPDATED, handler as EventListener);
-    window.addEventListener('username-mapping-received', handler as EventListener);
+    window.addEventListener(EventType.USERNAME_MAPPING_RECEIVED, handler as EventListener);
     return () => {
       window.removeEventListener(EventType.USERNAME_MAPPING_UPDATED, handler as EventListener);
-      window.removeEventListener('username-mapping-received', handler as EventListener);
+      window.removeEventListener(EventType.USERNAME_MAPPING_RECEIVED, handler as EventListener);
     };
   }, [clearCache]);
 

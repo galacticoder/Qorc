@@ -17,7 +17,7 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover
 import { BlockUserButton } from "../calls/BlockUserButton";
 import { blockingSystem } from "@/lib/blocking-system";
 import { blockStatusCache } from "@/lib/block-status-cache";
-import { useReplyUpdates } from "@/hooks/useReplyUpdates";
+import { useReplyUpdates } from "@/hooks/message-handling/useReplyUpdates.ts";
 import { isPlainObject, hasPrototypePollutionKeys, sanitizeUiText } from "../../../lib/sanitizers";
 import { EventType } from "@/lib/event-types";
 import {

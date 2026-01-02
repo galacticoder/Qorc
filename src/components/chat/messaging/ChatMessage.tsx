@@ -11,7 +11,7 @@ import { DeletedMessage } from "./ChatMessage/DeletedMessage";
 import { FileContent } from "./ChatMessage/FileMessage";
 import { VoiceMessage } from "../calls/VoiceMessage";
 import { MessageReceipt } from "./MessageReceipt";
-import { useUnifiedUsernameDisplay } from "../../../hooks/useUnifiedUsernameDisplay";
+import { useUnifiedUsernameDisplay } from "../../../hooks/database/useUnifiedUsernameDisplay";
 import { LinkifyWithPreviews } from "./LinkifyWithPreviews.tsx";
 import { LinkExtractor } from "../../../lib/link-extraction.ts";
 import { copyTextToClipboard } from "../../../lib/clipboard";

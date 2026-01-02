@@ -6,14 +6,8 @@ import { SecurityAuditLogger } from '../lib/post-quantum-crypto';
 import { secureMessageQueue } from '../lib/secure-message-queue';
 import { blockingSystem } from '../lib/blocking-system';
 import { EventType } from '../lib/event-types';
+import { LOCAL_EVENT_RATE_LIMIT_MAX_EVENTS, LOCAL_EVENT_RATE_LIMIT_WINDOW_MS, MAX_LOCAL_USERNAME_LENGTH, MAX_INLINE_BASE64_BYTES, MAX_LOCAL_MESSAGE_ID_LENGTH, MAX_LOCAL_EMOJI_LENGTH } from '../lib/constants';
 import type { User } from '../components/chat/messaging/UserList';
-
-const LOCAL_EVENT_RATE_LIMIT_WINDOW_MS = 10_000;
-const LOCAL_EVENT_RATE_LIMIT_MAX_EVENTS = 120;
-const MAX_LOCAL_MESSAGE_ID_LENGTH = 160;
-const MAX_LOCAL_USERNAME_LENGTH = 256;
-const MAX_LOCAL_EMOJI_LENGTH = 32;
-const MAX_INLINE_BASE64_BYTES = 10 * 1024 * 1024;
 
 interface UseEventHandlersProps {
   allowEvent: (eventType: string) => boolean;
@@ -66,19 +60,15 @@ export function useEventHandlers({
         const hybridKeys = sanitizeHybridKeys(hybridKeysRaw as any) as any;
         if (!hybridKeys?.kyberPublicBase64 || !hybridKeys?.dilithiumPublicBase64) return;
 
-        SecurityAuditLogger.log('info', EventType.USER_KEYS_AVAILABLE, { hasKeys: true });
-
         let targetUser = users.find(user => user.username === username);
         if (!targetUser) {
           targetUser = { id: crypto.randomUUID(), username, isOnline: true, hybridPublicKeys: hybridKeys };
           setUsers(prev => [...prev, targetUser!]);
-          SecurityAuditLogger.log('info', 'user-added-with-keys', {});
         } else if (!targetUser.hybridPublicKeys) {
           setUsers(prev => prev.map(user =>
             user.username === username ? { ...user, hybridPublicKeys: hybridKeys, isOnline: true } : user
           ));
           targetUser = { ...targetUser, hybridPublicKeys: hybridKeys, isOnline: true };
-          SecurityAuditLogger.log('info', 'user-keys-updated', {});
         }
 
         const queuedMessages = await secureMessageQueue.processQueueForUser(username);
@@ -112,7 +102,7 @@ export function useEventHandlers({
     return () => window.removeEventListener(EventType.USER_KEYS_AVAILABLE, handleUserKeysAvailable as EventListener);
   }, [users, messageSender, allowEvent]);
 
-  // Handle user-exists-response
+  // Handle user exists-response
   useEffect(() => {
     const lastHandled = new Map<string, number>();
 
@@ -176,7 +166,7 @@ export function useEventHandlers({
   useEffect(() => {
     const onBlockListResponse = async (e: Event) => {
       try {
-        if (!allowEvent('block-list-response')) return;
+        if (!allowEvent(EventType.BLOCK_LIST_RESPONSE)) return;
         const detail = (e as CustomEvent).detail;
         if (!isPlainObject(detail) || hasPrototypePollutionKeys(detail)) return;
 

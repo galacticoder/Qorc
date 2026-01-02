@@ -4,6 +4,7 @@ import { Message } from "../messaging/types";
 import { Image, Video, Mic, Paperclip } from "lucide-react";
 import { SignalType } from '@/lib/signal-types';
 import { IMAGE_EXTENSIONS, VIDEO_EXTENSIONS, AUDIO_EXTENSIONS, HEX_PATTERN } from '@/lib/constants';
+import { hasExtension } from '@/lib/utils/file-utils';
 
 interface ReplyBannerProps {
   readonly replyTo: Message;
@@ -19,12 +20,6 @@ export interface ReplyMessage {
   type?: string;
   id?: string;
 }
-
-const hasExtension = (filename: string | undefined, extensions: readonly string[]): boolean => {
-  if (!filename) return false;
-  const ext = filename.toLowerCase().split('.').pop();
-  return ext ? extensions.includes(ext) : false;
-};
 
 const isVoiceNote = (message: Message): boolean => {
   return Boolean(

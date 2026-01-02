@@ -8,9 +8,9 @@ import { Message } from "../types";
 import { MessageReceipt } from "../MessageReceipt";
 import { VoiceMessage } from "../../calls/VoiceMessage";
 import { copyTextToClipboard } from "../../../../lib/clipboard";
-import { sanitizeFilename } from "../../../../lib/sanitizers";
-import { useFileUrl } from "../../../../hooks/useFileUrl";
-import { MAX_FILENAME_LENGTH, FILENAME_SANITIZE_REGEX, IMAGE_EXTENSIONS, VIDEO_EXTENSIONS, AUDIO_EXTENSIONS, FILE_SIZE_UNITS, FILE_SIZE_BASE } from "../../../../lib/constants";
+import { useFileUrl } from "../../../../hooks/file-handling/useFileUrl";
+import { formatFileSize, hasExtension, isSafeFileUrl, createDownloadLink } from "../../../../lib/utils/file-utils";
+import { IMAGE_EXTENSIONS, VIDEO_EXTENSIONS, AUDIO_EXTENSIONS } from "../../../../lib/constants";
 
 interface FileMessageProps {
   readonly message: Message;
@@ -26,57 +26,6 @@ interface FileContentProps {
   readonly isCurrentUser: boolean;
   readonly secureDB?: any;
 }
-
-// Check if filename has one of the specified extensions
-export const hasExtension = (filename: string, extensions: readonly string[]): boolean => {
-  if (!filename || typeof filename !== 'string' || filename.length > MAX_FILENAME_LENGTH) {
-    return false;
-  }
-
-  const sanitizedFilename = filename.replace(FILENAME_SANITIZE_REGEX, '');
-  const lowerFilename = sanitizedFilename.toLowerCase();
-  return extensions.some(ext => lowerFilename.endsWith('.' + ext.toLowerCase()));
-};
-
-// Format file size in human readable format
-export const formatFileSize = (bytes: number): string => {
-  if (bytes === 0) return "0 Bytes";
-  if (bytes < 0 || !Number.isFinite(bytes)) return "Unknown";
-
-  const i = Math.min(
-    Math.floor(Math.log(bytes) / Math.log(FILE_SIZE_BASE)),
-    FILE_SIZE_UNITS.length - 1
-  );
-  const value = bytes / Math.pow(FILE_SIZE_BASE, i);
-  return `${value.toFixed(1)} ${FILE_SIZE_UNITS[i]}`;
-};
-
-// Create and trigger download link for file
-const createDownloadLink = (href: string, filename: string): void => {
-  const link = document.createElement('a');
-  link.href = href;
-  link.download = sanitizeFilename(filename || 'download');
-  link.rel = 'noopener noreferrer';
-  link.style.display = 'none';
-  document.body.appendChild(link);
-  link.click();
-  document.body.removeChild(link);
-};
-
-// Validate and sanitize file URL
-const isSafeFileUrl = (url: string | null | undefined): string | null => {
-  if (!url || typeof url !== 'string') return null;
-  try {
-    const parsed = new URL(url, 'http://localhost');
-    const protocol = parsed.protocol.toLowerCase();
-    if (protocol === 'blob:' || protocol === 'http:' || protocol === 'https:') {
-      return url;
-    }
-    return null;
-  } catch {
-    return null;
-  }
-};
 
 // Component to render file content based on type
 export const FileContent: React.FC<FileContentProps> = ({ message, isCurrentUser, secureDB }) => {
