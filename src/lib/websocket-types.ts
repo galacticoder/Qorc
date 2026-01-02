@@ -10,7 +10,7 @@ export type WebSocketLifecycleState =
   | 'connected'
   | 'disconnected'
   | 'paused'
-  | 'error';
+  | SignalType.ERROR;
 
 export interface PendingSend {
   id: string;

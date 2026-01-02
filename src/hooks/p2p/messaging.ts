@@ -1,9 +1,9 @@
 import { RefObject } from "react";
 import { WebRTCP2PService } from "../../lib/webrtc-p2p";
-import { CryptoUtils } from "../../lib/unified-crypto";
-import { SecurityAuditLogger } from "../../lib/post-quantum-crypto";
-import { EventType } from "../../lib/event-types";
-import { SignalType } from "../../lib/signal-types";
+import { CryptoUtils } from "../../lib/utils/crypto-utils";
+import { SecurityAuditLogger } from "../../lib/cryptography/audit-logger";
+import { EventType } from "../../lib/types/event-types";
+import { SignalType } from "../../lib/types/signal-types";
 import type {
   P2PMessage,
   P2PSendResult,
@@ -691,7 +691,7 @@ export function createHandleIncomingP2PMessage(
         });
       } catch { }
       try {
-        SecurityAuditLogger.log('error', 'p2p-incoming-error', {
+        SecurityAuditLogger.log(SignalType.ERROR, 'p2p-incoming-error', {
           from: (message as any)?.from || null,
           type: (message as any)?.type || null,
           error: _error instanceof Error ? _error.message : String(_error),

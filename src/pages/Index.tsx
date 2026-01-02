@@ -28,18 +28,18 @@ import { useP2PKeys } from "../hooks/p2p/useP2PKeys";
 import { useMessageReceipts } from "../hooks/message-sending/useMessageReceipts";
 import { p2pConfig, getSignalingServerUrl } from "../config/p2p.config";
 import websocketClient from "../lib/websocket";
-import { EventType } from "../lib/event-types";
+import { EventType } from "../lib/types/event-types";
 import { TypingIndicatorProvider } from "../contexts/TypingIndicatorContext";
 import { torNetworkManager } from "../lib/tor-network";
 import { ConnectSetup } from "../components/setup/ConnectSetup";
-import { SignalType } from "../lib/signal-types";
-import { blockingSystem } from "../lib/blocking-system";
+import { SignalType } from "../lib/types/signal-types";
+import { blockingSystem } from "../lib/blocking/blocking-system";
 import { retrieveAuthTokens } from "../lib/signals";
 import { syncEncryptedStorage } from "../lib/encrypted-storage";
 import { secureMessageQueue } from "../lib/secure-message-queue";
 import { initializeOfflineMessageQueue, offlineMessageQueue } from "../lib/offline-message-queue";
-import { isValidKyberPublicKeyBase64, sanitizeHybridKeys } from "../lib/validators";
-import { SecurityAuditLogger } from "../lib/post-quantum-crypto";
+import { isValidKyberPublicKeyBase64, sanitizeHybridKeys } from "../lib/utils/messaging-validators";
+import { SecurityAuditLogger } from "../lib/cryptography/audit-logger";
 import { sanitizeFilename, isPlainObject, hasPrototypePollutionKeys, isUnsafeObjectKey, sanitizeNonEmptyText } from "../lib/sanitizers";
 import { useRateLimiter } from "../hooks/useRateLimiter";
 import { useLocalMessageHandlers } from "../hooks/message-handling/useLocalMessageHandlers";
@@ -52,7 +52,7 @@ import { TorIndicator } from "../components/ui/TorIndicator";
 import { Button } from "../components/ui/button";
 import { ComposeIcon } from "../components/chat/assets/icons";
 import { useCalling } from "../hooks/calling/useCalling";
-import { truncateUsername } from "../lib/utils";
+import { truncateUsername } from "../lib/utils/avatar-utils";
 import { resolveDisplayUsername } from "../lib/unified-username-display";
 const CallModalLazy = React.lazy(() => import("../components/chat/calls/CallModal"));
 
@@ -160,8 +160,8 @@ const ChatApp: React.FC = () => {
 
               if (storedUsername) {
                 try {
-                  const { loadVaultKeyRaw, loadWrappedMasterKey, ensureVaultKeyCryptoKey } = await import('../lib/vault-key');
-                  const { AES } = await import('../lib/unified-crypto');
+                  const { loadVaultKeyRaw, loadWrappedMasterKey, ensureVaultKeyCryptoKey } = await import('../lib/cryptography/vault-key');
+                  const { AES } = await import('../lib/utils/crypto-utils');
 
                   let vaultKey: CryptoKey | null = null;
                   const rawVaultKey = await loadVaultKeyRaw(storedUsername);
@@ -815,7 +815,7 @@ const ChatApp: React.FC = () => {
         try {
           await Authentication.storeUsernameMapping(Database.secureDBRef.current!);
         } catch {
-          SecurityAuditLogger.log('error', 'user-mapping-store-failed', { error: 'unknown' });
+          SecurityAuditLogger.log(SignalType.ERROR, 'user-mapping-store-failed', { error: 'unknown' });
         }
       };
       storeCurrentUserMapping();
@@ -868,7 +868,7 @@ const ChatApp: React.FC = () => {
           );
           SecurityAuditLogger.log('info', 'message-queue-initialized', {});
         } catch {
-          SecurityAuditLogger.log('error', 'message-queue-init-failed', { error: 'unknown' });
+          SecurityAuditLogger.log(SignalType.ERROR, 'message-queue-init-failed', { error: 'unknown' });
         }
       };
       initMessageQueue();
@@ -1129,7 +1129,7 @@ const ChatApp: React.FC = () => {
       await (window as any).edgeApi?.wsConnect?.();
       setSetupComplete(true);
     } catch (_error) {
-      SecurityAuditLogger.log('error', 'connect-setup-failed', { error: _error instanceof Error ? _error.message : 'unknown' });
+      SecurityAuditLogger.log(SignalType.ERROR, 'connect-setup-failed', { error: _error instanceof Error ? _error.message : 'unknown' });
     }
   };
 
@@ -1182,7 +1182,7 @@ const ChatApp: React.FC = () => {
           }
         }
       } catch (_error) {
-        SecurityAuditLogger.log('error', 'connection-init-failed', { error: _error instanceof Error ? _error.message : 'unknown' });
+        SecurityAuditLogger.log(SignalType.ERROR, 'connection-init-failed', { error: _error instanceof Error ? _error.message : 'unknown' });
       }
     };
 
@@ -1478,7 +1478,7 @@ const ChatApp: React.FC = () => {
                           await Database.saveMessageToLocalDB(dataToSave);
 
                         } catch (error) {
-                          SecurityAuditLogger.log('error', 'file-transfer-failed', { error: error instanceof Error ? error.message : 'unknown' });
+                          SecurityAuditLogger.log(SignalType.ERROR, 'file-transfer-failed', { error: error instanceof Error ? error.message : 'unknown' });
                           toast.error(error instanceof Error ? error.message : "Failed to send file", {
                             duration: 5000
                           });

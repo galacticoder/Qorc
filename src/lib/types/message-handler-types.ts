@@ -1,19 +1,19 @@
 /**
- * Message type handlers - utility functions for processing different message types
+ * Message type handler functions for processing different message types
  */
 
 import { v4 as uuidv4 } from 'uuid';
-import websocketClient from './websocket';
+import websocketClient from '../websocket';
 import { SignalType } from './signal-types';
 import { EventType } from './event-types';
-import { Message } from '../components/chat/messaging/types';
+import { Message } from '../../components/chat/messaging/types';
 import {
   safeJsonParseForMessages,
   safeJsonParseForFileMessages,
   safeJsonParseForCallSignals,
   createBlobUrlFromBase64,
-  type BlobEntry,
-} from './message-handler-utils';
+  createBlobCache
+} from '../utils/message-handler-utils';
 
 export interface DeliveryReceiptContext {
   currentUser: string;
@@ -41,7 +41,7 @@ export interface FileMessageContext {
     version?: string;
   };
   loginUsername: string;
-  blobCache: Map<string, BlobEntry>;
+  blobCache: ReturnType<typeof createBlobCache>;
 }
 
 export interface TextMessageContext {
@@ -67,9 +67,7 @@ export interface CallSignalContext {
   };
 }
 
-/**
- * Wait for a Signal Protocol session to be ready with the peer
- */
+// Wait for a Signal Protocol session to be ready with the peer
 export async function waitForSessionReady(
   senderUsername: string,
   timeoutMs: number = 10000
@@ -117,9 +115,7 @@ export async function waitForSessionReady(
   });
 }
 
-/**
- * Request a bundle and optionally wait for session to be ready
- */
+// Request a bundle and optionally wait for session to be ready
 export async function requestBundleAndWait(
   senderUsername: string,
   waitForSession: boolean = true,
@@ -141,9 +137,7 @@ export async function requestBundleAndWait(
   }
 }
 
-/**
- * Create a delivery receipt payload
- */
+// Create a delivery receipt payload
 export function createDeliveryReceiptPayload(
   messageId: string,
   fromUsername: string,
@@ -162,9 +156,7 @@ export function createDeliveryReceiptPayload(
   };
 }
 
-/**
- * Send an encrypted delivery receipt
- */
+// Send an encrypted delivery receipt
 export async function sendEncryptedDeliveryReceipt(
   ctx: DeliveryReceiptContext
 ): Promise<boolean> {
@@ -219,9 +211,7 @@ export async function sendEncryptedDeliveryReceipt(
   }
 }
 
-/**
- * Parse file message payload
- */
+// Parse file message payload
 export function parseFileMessagePayload(ctx: FileMessageContext): {
   messageId: string;
   fileName: string;
@@ -258,9 +248,7 @@ export function parseFileMessagePayload(ctx: FileMessageContext): {
   return { messageId, fileName, fileType, fileSize, dataBase64, contentValue };
 }
 
-/**
- * Create a file message object
- */
+// Create a file message object
 export function createFileMessage(
   messageId: string,
   fileContent: string,
@@ -295,9 +283,7 @@ export function createFileMessage(
   };
 }
 
-/**
- * Parse text message payload
- */
+// Parse text message payload
 export function parseTextMessagePayload(ctx: TextMessageContext): {
   messageId: string;
   messageContent: string;
@@ -353,9 +339,7 @@ export function parseTextMessagePayload(ctx: TextMessageContext): {
   return { messageId, messageContent, replyTo };
 }
 
-/**
- * Create a text message object
- */
+// Create a text message object
 export function createTextMessage(
   messageId: string,
   content: string,
@@ -381,9 +365,7 @@ export function createTextMessage(
   };
 }
 
-/**
- * Handle call signal payload
- */
+// Handle call signal payload
 export function handleCallSignal(ctx: CallSignalContext): boolean {
   const callSignalData = safeJsonParseForCallSignals(ctx.payload.content);
   if (!callSignalData) {

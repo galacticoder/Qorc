@@ -1,5 +1,5 @@
 import { RefObject } from "react";
-import { CryptoUtils } from "../../lib/unified-crypto";
+import { CryptoUtils } from "../../lib/utils/crypto-utils";
 import type { PeerCertificateBundle, HybridKeys, RouteProofRecord, CertCacheEntry } from "../../lib/types/p2p-types";
 import {
   toUint8,

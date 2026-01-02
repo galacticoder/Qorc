@@ -1,6 +1,6 @@
 import { Message } from '../../components/chat/messaging/types';
 import { Conversation } from '../../components/chat/messaging/ConversationList';
-import { SignalType } from '../../lib/signal-types';
+import { SignalType } from '../../lib/types/signal-types';
 import { sanitizeEventPayload, sanitizeTextInput } from '../../lib/sanitizers';
 import { MAX_PREVIEW_LENGTH, CONVERSATION_MIN_USERNAME_LENGTH, CONVERSATION_MAX_USERNAME_LENGTH, CONVERSATION_USERNAME_PATTERN, HEX_PATTERN, IMAGE_EXTENSIONS, VIDEO_EXTENSIONS, AUDIO_EXTENSIONS } from '../../lib/constants';
 

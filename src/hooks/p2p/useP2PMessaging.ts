@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState, useCallback } from 'react';
 import { WebRTCP2PService } from '../../lib/webrtc-p2p';
-import { EventType } from '../../lib/event-types';
+import { EventType } from '../../lib/types/event-types';
 import { MAX_P2P_INCOMING_QUEUE, RECEIPT_RETENTION_MS, RATE_LIMIT_WINDOW_MS } from '../../lib/constants';
 import { createSendP2PReadReceipt } from './receipts';
 import { sanitizeErrorMessage } from '../../lib/sanitizers';

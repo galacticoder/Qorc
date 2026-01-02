@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect, useCallback } from "react";
 import { User } from "./messaging/UserList";
-import { SignalType } from "../../lib/signal-types";
+import { SignalType } from "../../lib/types/signal-types";
 import { Message } from "./messaging/types";
 import { useFileSender } from "./ChatInput/useFileSender";
 import { ProgressBar } from "./ChatInput/ProgressBar";

@@ -1,6 +1,6 @@
 /**
  * Secure Memory Management Service
- * Provides controlled creation, zeroing, and tracking of sensitive memory
+ * Controlled creation, zeroing, and tracking of sensitive memory
  */
 
 const globalScope = (() => {
@@ -43,9 +43,7 @@ export class SecureMemory {
   private static readonly allocatedBuffers = new WeakSet<Uint8Array>();
   private static readonly MAX_BUFFER_SIZE = 1_048_576;
 
-  /**
-   * Create a secure buffer
-   */
+  // Create a secure buffer
   static createSecureBuffer(size: number): Uint8Array {
     if (!Number.isInteger(size) || size < 0) {
       throw new Error('Invalid buffer size');
@@ -60,9 +58,7 @@ export class SecureMemory {
     return buffer;
   }
 
-  /**
-   * Securely zero out a buffer with anti-forensics
-   */
+  // Securely zero out a buffer with anti-forensics
   static zeroBuffer(buffer: Uint8Array): void {
     if (!(buffer instanceof Uint8Array)) {
       throw new TypeError('Buffer must be Uint8Array');
@@ -114,18 +110,14 @@ export class SecureMemory {
     buffer.fill(0);
   }
 
-  /**
-   * Secure copy of buffer data
-   */
+  // Secure copy of buffer data
   static secureBufferCopy(source: Uint8Array): Uint8Array {
     const copy = this.createSecureBuffer(source.length);
     copy.set(source);
     return copy;
   }
 
-  /**
-   * Compare two buffers in constant time to prevent timing attacks
-   */
+  // Compare two buffers in constant time
   static constantTimeCompare(a: Uint8Array, b: Uint8Array): boolean {
     const maxLength = Math.max(a.length, b.length);
     let result = a.length ^ b.length;

@@ -118,7 +118,8 @@ export const useCalling = (authContext: ReturnType<typeof useAuth>) => {
       } catch (_error) {
         if (attempt < 3) {
           const baseDelay = 500;
-          const jitterBytes = await import('../../lib/post-quantum-crypto').then(m => m.PostQuantumRandom.randomBytes(1));
+          const { PostQuantumRandom } = await import('../../lib/cryptography/random');
+          const jitterBytes = PostQuantumRandom.randomBytes(1);
           const jitter = jitterBytes[0] % 200;
           const delay = Math.min(5000, baseDelay * Math.pow(2, attempt)) + jitter;
           await new Promise((resolve) => setTimeout(resolve, delay));

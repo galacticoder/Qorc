@@ -1,15 +1,13 @@
-import { SignalType } from './signal-types';
+import { SignalType } from './types/signal-types';
 import websocketClient from './websocket';
 import { screenSharingSettings } from './screen-sharing-settings';
-import {
-  PostQuantumKEM,
-  PostQuantumHash,
-  PostQuantumAEAD,
-  PostQuantumRandom,
-  PostQuantumSignature,
-  PostQuantumUtils,
-  SecurityAuditLogger
-} from './post-quantum-crypto';
+import { PostQuantumKEM } from './cryptography/kem';
+import { PostQuantumHash } from './cryptography/hash';
+import { PostQuantumAEAD } from './cryptography/aead';
+import { PostQuantumRandom } from './cryptography/random';
+import { PostQuantumSignature } from './cryptography/signature';
+import { PostQuantumUtils } from './utils/pq-utils';
+import { SecurityAuditLogger } from './cryptography/audit-logger';
 import { syncEncryptedStorage } from './encrypted-storage';
 import {
   ScreenSharingSettings,
@@ -27,7 +25,7 @@ import {
   CALL_SIGNAL_RATE_MAX,
   validateCallSignal,
 } from './webrtc-calling-types';
-import { EventType } from './event-types';
+import { EventType } from './types/event-types';
 
 export type { CallState, CallOffer, CallAnswer, CallSignal };
 
@@ -126,7 +124,7 @@ export class WebRTCCallingService {
 
   private async encryptDeviceIdPQ(deviceId: string, publicKey: Uint8Array): Promise<string> {
     if (!deviceId) return '';
-    if (!publicKey || publicKey.length !== PostQuantumKEM.SIZES.publicKey) {
+    if (!publicKey || publicKey.length !== PQ_KEM_PUBLIC_KEY_SIZE) {
       throw new Error('Invalid PQ device public key');
     }
 
@@ -162,7 +160,7 @@ export class WebRTCCallingService {
       const parts = encryptedData.split('.');
       // New format: v2.<kemCiphertext>.<nonce>.<ciphertext>.<tag>
       if (parts[0] === 'v2' && parts.length === 5) {
-        if (!privateKey || privateKey.length !== PostQuantumKEM.SIZES.secretKey) {
+        if (!privateKey || privateKey.length !== PQ_KEM_SECRET_KEY_SIZE) {
           return '';
         }
         const kemCiphertext = PostQuantumUtils.base64ToUint8Array(parts[1]);
@@ -266,7 +264,7 @@ export class WebRTCCallingService {
   }
 
   private buildPqAuditEnvelope(data: Record<string, unknown>): string | null {
-    if (!this.pqAuditPublicKey || this.pqAuditPublicKey.length !== PostQuantumKEM.SIZES.publicKey) {
+    if (!this.pqAuditPublicKey || this.pqAuditPublicKey.length !== PQ_KEM_PUBLIC_KEY_SIZE) {
       return null;
     }
     try {
@@ -324,8 +322,8 @@ export class WebRTCCallingService {
                 const publicKey = PostQuantumUtils.hexToBytes(parsed.publicKey);
                 const privateKey = PostQuantumUtils.hexToBytes(parsed.privateKey);
                 if (
-                  publicKey.length === PostQuantumKEM.SIZES.publicKey &&
-                  privateKey.length === PostQuantumKEM.SIZES.secretKey
+                  publicKey.length === PQ_KEM_PUBLIC_KEY_SIZE &&
+                  privateKey.length === PQ_KEM_SECRET_KEY_SIZE
                 ) {
                   this.pqDeviceKeyPair = { publicKey, privateKey };
                 } else {

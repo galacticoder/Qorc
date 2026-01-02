@@ -1,8 +1,8 @@
 import React, { useEffect, useCallback, useMemo, useRef } from 'react';
 import { Message } from '../../components/chat/messaging/types';
 import type { User } from '../../components/chat/messaging/UserList';
-import { SignalType } from '../../lib/signal-types';
-import { EventType } from '../../lib/event-types';
+import { SignalType } from '../../lib/types/signal-types';
+import { EventType } from '../../lib/types/event-types';
 import { sanitizeMessageId, sanitizeUsername } from '../../lib/sanitizers';
 import { RECEIPT_RETENTION_MS, RATE_LIMIT_MAX_RECEIPTS, RATE_LIMIT_WINDOW_MS, READ_RECEIPT_PREFIX, DELIVERY_RECEIPT_PREFIX } from '../../lib/constants';
 import type { RateLimitBucket, PendingReceiptInfo, ReceiptUpdater } from '../../lib/types/message-sending-types';

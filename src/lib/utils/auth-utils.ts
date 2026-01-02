@@ -1,8 +1,9 @@
 import { RefObject } from "react";
-import { CryptoUtils } from "../unified-crypto";
-import { PostQuantumUtils } from "../post-quantum-crypto";
+import { CryptoUtils } from "../utils/crypto-utils";
+import { PostQuantumUtils } from "../utils/pq-utils";
 import { syncEncryptedStorage } from "../encrypted-storage";
 
+// Securely wipe a string reference by overwriting it multiple times
 export const secureWipeStringRef = (ref: RefObject<string>) => {
   try {
     const len = ref.current?.length || 0;
@@ -19,6 +20,7 @@ export const secureWipeStringRef = (ref: RefObject<string>) => {
   } catch { }
 };
 
+// Safely decode a base64 string into Uint8Array, with length and format validation
 export const safeDecodeB64 = (b64?: string): Uint8Array | null => {
   try {
     if (!b64 || typeof b64 !== 'string' || b64.length > 10000) return null;
@@ -26,6 +28,7 @@ export const safeDecodeB64 = (b64?: string): Uint8Array | null => {
   } catch { return null; }
 };
 
+// Validate server key structure and lengths
 export const validateServerKeys = (val: any): boolean => {
   if (!val || typeof val !== 'object') return false;
   if (!val.x25519PublicBase64 || !val.kyberPublicBase64 || !val.dilithiumPublicBase64) return false;
@@ -45,6 +48,7 @@ export const validateServerKeys = (val: any): boolean => {
   return true;
 };
 
+// Manage pinned server configuration
 export const PinnedServer = {
   get() {
     try {
@@ -64,6 +68,7 @@ export const PinnedServer = {
   }
 };
 
+// Derive a combined secret input from username, password, and passphrase
 export const deriveCombinedSecretInput = (username: string, password: string, passphrase: string): string => {
   const u = (username || "").trim();
   const p = password || "";

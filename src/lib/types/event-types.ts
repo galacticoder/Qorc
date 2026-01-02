@@ -29,6 +29,7 @@ export const EventType = {
   P2P_FILE_CHUNK: 'p2p-file-chunk',
 
   // Message events
+  MESSAGE: 'message',
   MESSAGE_READ: 'message-read',
   MESSAGE_DELIVERED: 'message-delivered',
   MESSAGE_REACTION: 'message-reaction',

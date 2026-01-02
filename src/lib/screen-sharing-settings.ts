@@ -6,11 +6,11 @@ import {
   SCREEN_SHARING_RESOLUTIONS,
   SCREEN_SHARING_FRAMERATES
 } from './screen-sharing-consts';
-import { CryptoUtils } from './unified-crypto';
+import { CryptoUtils } from './utils/crypto-utils';
 import { encryptedStorage } from './encrypted-storage';
 import { SecureAuditLogger } from './secure-error-handler';
-import { PostQuantumRandom } from './post-quantum-crypto';
-import { SecureMemory } from './secure-memory';
+import { PostQuantumRandom } from './cryptography/random';
+import { SecureMemory } from './cryptography/secure-memory';
 import { DEFAULT_QUALITY, QUALITY_OPTIONS } from './constants';
 import { STORAGE_KEYS } from './storage-keys';
 

@@ -1,6 +1,6 @@
 import { v4 as uuidv4 } from "uuid";
 import { toast } from "sonner";
-import { SignalType } from "../../lib/signal-types";
+import { SignalType } from "../../lib/types/signal-types";
 import { Message } from '../../components/chat/messaging/types';
 import { dispatchCompleteEvent, dispatchCanceledEvent, detectMimeType, releaseFileEntry } from "../../lib/utils/file-utils";
 import type { ExtendedFileState } from "../../lib/types/file-types";

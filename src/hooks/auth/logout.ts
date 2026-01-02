@@ -1,5 +1,5 @@
 import { RefObject } from "react";
-import { SignalType } from "../../lib/signal-types";
+import { SignalType } from "../../lib/types/signal-types";
 import { clearTokenEncryptionKey } from "../../lib/signals";
 import websocketClient from "../../lib/websocket";
 import { syncEncryptedStorage } from "../../lib/encrypted-storage";

@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
-import { EventType } from '../../lib/event-types';
+import { EventType } from '../../lib/types/event-types';
 import { isPlainObject, hasPrototypePollutionKeys } from '../../lib/sanitizers';
 import {
   sanitizeDbUsername,

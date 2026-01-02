@@ -1,9 +1,9 @@
 import { useState, useRef, useCallback, useEffect, RefObject } from "react";
-import { SignalType } from "../../lib/signal-types";
-import { EventType } from "../../lib/event-types";
+import { SignalType } from "../../lib/types/signal-types";
+import { EventType } from "../../lib/types/event-types";
 import { retrieveAuthTokens } from "../../lib/signals";
 import websocketClient from "../../lib/websocket";
-import { CryptoUtils } from "../../lib/unified-crypto";
+import { CryptoUtils } from "../../lib/utils/crypto-utils";
 import { SecureDB } from "../../lib/secureDB";
 import { SecureKeyManager } from "../../lib/secure-key-manager";
 import { encryptedStorage, syncEncryptedStorage } from "../../lib/encrypted-storage";

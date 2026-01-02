@@ -3,7 +3,7 @@ import type { JSX } from 'react';
 import { Phone, PhoneIncoming, PhoneOutgoing, PhoneMissed, Video, VideoOff } from 'lucide-react';
 import { CallState } from '../../../lib/webrtc-calling';
 import { useUnifiedUsernameDisplay } from '../../../hooks/database/useUnifiedUsernameDisplay';
-import { formatCallDurationMs, formatCallHistoryTime } from '../../../lib/date-utils';
+import { formatCallDurationMs, formatCallHistoryTime } from '../../../lib/utils/date-utils';
 
 interface CallHistoryProps {
   readonly calls: readonly CallState[];

@@ -1,7 +1,7 @@
-import { SignalType } from '../../lib/signal-types';
-import { EventType } from '../../lib/event-types';
+import { SignalType } from '../../lib/types/signal-types';
+import { EventType } from '../../lib/types/event-types';
 import websocketClient from '../../lib/websocket';
-import { safeJsonParseForMessages } from '../../lib/message-handler-utils';
+import { safeJsonParseForMessages } from '../../lib/utils/message-handler-utils';
 import type { DecryptResult, EncryptedEnvelope } from '../../lib/types/message-handling-types';
 
 // Validate P2P message structure

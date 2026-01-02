@@ -1,8 +1,8 @@
 import React, { RefObject } from "react";
 import { WebRTCP2PService } from "../../lib/webrtc-p2p";
-import { CryptoUtils } from "../../lib/unified-crypto";
-import { SecurityAuditLogger } from "../../lib/post-quantum-crypto";
-import { EventType } from "../../lib/event-types";
+import { CryptoUtils } from "../../lib/utils/crypto-utils";
+import { SecurityAuditLogger } from "../../lib/cryptography/audit-logger";
+import { EventType } from "../../lib/types/event-types";
 import type { P2PStatus, HybridKeys, PeerCertificateBundle, EncryptedMessage, P2PMessage, RouteProofRecord, CertCacheEntry } from "../../lib/types/p2p-types";
 import {
   createP2PError,

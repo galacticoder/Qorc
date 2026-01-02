@@ -2,7 +2,7 @@ import React, { useState, useEffect, useMemo } from "react";
 import { Cross2Icon } from "../assets/icons";
 import { Message } from "../messaging/types";
 import { Image, Video, Mic, Paperclip } from "lucide-react";
-import { SignalType } from '@/lib/signal-types';
+import { SignalType } from '@/lib/types/signal-types';
 import { IMAGE_EXTENSIONS, VIDEO_EXTENSIONS, AUDIO_EXTENSIONS, HEX_PATTERN } from '@/lib/constants';
 import { hasExtension } from '@/lib/utils/file-utils';
 

@@ -1,13 +1,14 @@
 import React, { useEffect, useCallback, useRef } from 'react';
 import { Message } from '../components/chat/messaging/types';
 import { isPlainObject, hasPrototypePollutionKeys, sanitizeNonEmptyText, isUnsafeObjectKey } from '../lib/sanitizers';
-import { sanitizeHybridKeys, isValidKyberPublicKeyBase64 } from '../lib/validators';
-import { SecurityAuditLogger } from '../lib/post-quantum-crypto';
+import { sanitizeHybridKeys, isValidKyberPublicKeyBase64 } from '../lib/utils/messaging-validators';
+import { SecurityAuditLogger } from '../lib/cryptography/audit-logger';
 import { secureMessageQueue } from '../lib/secure-message-queue';
-import { blockingSystem } from '../lib/blocking-system';
-import { EventType } from '../lib/event-types';
+import { blockingSystem } from '../lib/blocking/blocking-system';
+import { EventType } from '../lib/types/event-types';
 import { LOCAL_EVENT_RATE_LIMIT_MAX_EVENTS, LOCAL_EVENT_RATE_LIMIT_WINDOW_MS, MAX_LOCAL_USERNAME_LENGTH, MAX_INLINE_BASE64_BYTES, MAX_LOCAL_MESSAGE_ID_LENGTH, MAX_LOCAL_EMOJI_LENGTH } from '../lib/constants';
 import type { User } from '../components/chat/messaging/UserList';
+import { SignalType } from '../lib/types/signal-types';
 
 interface UseEventHandlersProps {
   allowEvent: (eventType: string) => boolean;
@@ -86,7 +87,7 @@ export function useEventHandlers({
             sentIds.push(queuedMsg.id);
             await new Promise<void>((r) => setTimeout(r, 0));
           } catch (_error) {
-            SecurityAuditLogger.log('error', 'queued-message-send-failed', { error: _error instanceof Error ? _error.message : 'unknown' });
+            SecurityAuditLogger.log(SignalType.ERROR, 'queued-message-send-failed', { error: _error instanceof Error ? _error.message : 'unknown' });
           }
         }
 

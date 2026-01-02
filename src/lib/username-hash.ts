@@ -1,4 +1,4 @@
-import { CryptoUtils } from "@/lib/unified-crypto";
+import { CryptoUtils } from "@/lib/utils/crypto-utils";
 
 export interface PseudonymizationConfig {
   cacheSize?: number;

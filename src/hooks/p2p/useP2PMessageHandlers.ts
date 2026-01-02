@@ -1,8 +1,8 @@
 import React, { useEffect, useRef } from 'react';
 import { Message } from '../../components/chat/messaging/types';
-import { EventType } from '../../lib/event-types';
-import { SignalType } from '../../lib/signal-types';
-import { SecurityAuditLogger } from '../../lib/post-quantum-crypto';
+import { EventType } from '../../lib/types/event-types';
+import { SignalType } from '../../lib/types/signal-types';
+import { SecurityAuditLogger } from '../../lib/cryptography/audit-logger';
 import type { EncryptedMessage } from './useP2PMessaging';
 
 interface UseP2PMessageHandlersProps {
@@ -156,7 +156,7 @@ export function useP2PMessageHandlers({
 
         saveMessageRef.current(message);
       } catch {
-        SecurityAuditLogger.log('error', 'p2p-message-handle-failed', { error: 'unknown' });
+        SecurityAuditLogger.log(SignalType.ERROR, 'p2p-message-handle-failed', { error: 'unknown' });
       }
     });
   }, []);

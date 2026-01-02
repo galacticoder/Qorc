@@ -1,28 +1,18 @@
-/**
- * Utility functions for encrypted message handling
- */
+import { isPlainObject } from '../sanitizers';
+import {
+  MAX_MESSAGE_JSON_BYTES,
+  MAX_FILE_JSON_BYTES,
+  MAX_CALL_SIGNAL_BYTES,
+  MAX_INLINE_FILE_BYTES,
+  MAX_BLOB_URLS,
+  BLOB_URL_TTL_MS,
+  MESSAGE_RATE_LIMIT_WINDOW_MS,
+  MESSAGE_RATE_LIMIT_MAX,
+  BASE64_URLSAFE_REGEX,
+  BASE64_STANDARD_REGEX
+} from '../constants';
 
 const textEncoder = new TextEncoder();
-
-export const MAX_MESSAGE_JSON_BYTES = 64 * 1024; // 64 KB
-export const MAX_FILE_JSON_BYTES = 256 * 1024; // 256 KB
-export const MAX_CALL_SIGNAL_BYTES = 256 * 1024; // 256 KB
-export const MAX_INLINE_FILE_BYTES = 5 * 1024 * 1024; // 5 MB inline payloads
-export const MAX_BLOB_URLS = 32;
-export const BLOB_URL_TTL_MS = 15 * 60 * 1000; // 15 minutes
-export const MESSAGE_RATE_LIMIT_WINDOW_MS = 5_000;
-export const MESSAGE_RATE_LIMIT_MAX = 300;
-
-export const BASE64_STANDARD_REGEX = /^[A-Za-z0-9+/]*={0,2}$/;
-export const BASE64_URLSAFE_REGEX = /^[A-Za-z0-9\-_]*={0,2}$/;
-
-export type PlainObject = Record<string, unknown>;
-
-export const isPlainObject = (value: unknown): value is PlainObject => {
-  if (typeof value !== 'object' || value === null) return false;
-  const proto = Object.getPrototypeOf(value);
-  return proto === Object.prototype || proto === null;
-};
 
 export const exceedsBytes = (input: string, limit: number): boolean => {
   return textEncoder.encode(input).length > limit;
@@ -155,17 +145,6 @@ export const safeJsonParseForFileMessages = (jsonString: string): any => {
   }
   return parsed;
 };
-
-// Retry/backoff helpers
-export const MAX_RETRY_ATTEMPTS = 3;
-export const PENDING_QUEUE_TTL_MS = 120_000;
-export const PENDING_QUEUE_MAX_PER_PEER = 50;
-export const MAX_GLOBAL_PENDING_MESSAGES = 1000;
-export const BUNDLE_REQUEST_COOLDOWN_MS = 2_000;
-export const KEY_REQUEST_CACHE_DURATION = 5000;
-export const PQ_KEY_REPLENISH_COOLDOWN_MS = 60_000;
-export const MAX_RESETS_PER_PEER = 5;
-export const RESET_WINDOW_MS = 60_000;
 
 export const computeBackoffMs = (attempts: number): number => {
   if (attempts <= 0) return 1000;

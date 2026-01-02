@@ -1,9 +1,9 @@
 import { RefObject } from "react";
 import { WebRTCP2PService } from "../../lib/webrtc-p2p";
-import { CryptoUtils } from "../../lib/unified-crypto";
+import { CryptoUtils } from "../../lib/utils/crypto-utils";
 import type { HybridKeys, PeerCertificateBundle } from "../../lib/types/p2p-types";
 import { RECEIPT_RETENTION_MS } from "../../lib/constants";
-import { SignalType } from "../../lib/signal-types";
+import { SignalType } from "../../lib/types/signal-types";
 
 export interface ReceiptRefs {
   p2pServiceRef: RefObject<WebRTCP2PService | null>;

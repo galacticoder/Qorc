@@ -1,3 +1,5 @@
+import { URL_REGEX, SIMPLE_URL_REGEX, MAX_LINKS_PER_TEXT, COMMON_COMPOUND_TLDS, SUSPICIOUS_QUERY_PARAMS, COMMON_TLDS } from './constants';
+
 export interface ExtractedLink {
   url: string;
   originalText: string;
@@ -6,24 +8,10 @@ export interface ExtractedLink {
 }
 
 export class LinkExtractor {
-  private static readonly URL_REGEX = /(https?:\/\/(?:[-\w.]|%[0-9A-Fa-f]{2})+(?::[0-9]+)?(?:\/(?:[\w\/_~!$&'()*+,;=:@.-]|%[0-9A-Fa-f]{2})*)*(?:\?(?:[\w&=%._~!$'()*+,;:@/?-]|%[0-9A-Fa-f]{2})*)?(?:#(?:[\w._~!$&'()*+,;=:@/?-]|%[0-9A-Fa-f]{2})*)?)/gi;
-  private static readonly SIMPLE_URL_REGEX = /(?:^|\s)((?:www\.)?(?:[a-zA-Z0-9-]+\.)+[a-zA-Z]{2,})(?:\/(?:[\w\/_~!$&'()*+,;=:@.-]|%[0-9A-Fa-f]{2})*)*(?:\?(?:[\w&=%._~!$'()*+,;:@/?-]|%[0-9A-Fa-f]{2})*)?(?:#(?:[\w._~!$&'()*+,;=:@/?-]|%[0-9A-Fa-f]{2})*)?/gi;
-  private static readonly MAX_LINKS_PER_TEXT = 50;
-  private static readonly SUSPICIOUS_QUERY_PARAMS = new Set(['redirect', 'url', 'target', 'goto', 'dest', 'destination', 'location']);
-  private static readonly COMMON_TLDS = new Set([
-    'com','org','net','edu','gov','mil','int','biz','info','name','pro','aero','asia','cat','coop','jobs','mobi','museum','travel',
-    'us','uk','ca','au','de','fr','jp','cn','in','br','ru','it','es','nl','se','no','fi','dk','ch','be','at','pl','cz','gr','pt','ie','hu','ro','bg','sk','hr','si','lt','lv','ee',
-    'kr','hk','sg','nz','mx','ar','cl','co','za','ae','sa','tr','il','id','my','ph','th','vn','pk','bd','ng','ke','gh','tz','ug','zw',
-    'io','ai','app','dev','tech','cloud','digital','software','systems','solutions','online','store','shop','blog','news','press','today','life','live','world','social','media',
-    'xyz','top','club','site','space','fun','link','click','help','design','art','eco','one','plus','guru','global','agency','company','center',
-    'tv','fm','cc','ly','me','io','ai','gg','gl','gs','la','md','nu','sh','su','to','ws'
-  ]);
-  private static readonly COMMON_COMPOUND_TLDS = new Set(['co.uk','com.au','com.br','com.cn','com.sg','com.tr','com.mx','com.sa','com.ar','com.pl','com.hk','com.tw']);
-
   static extractLinks(text: string): ExtractedLink[] {
     const links: ExtractedLink[] = [];
 
-    for (const match of text.matchAll(this.URL_REGEX)) {
+    for (const match of text.matchAll(URL_REGEX)) {
       if (!match[1] || match.index === undefined) continue;
       const normalized = this.normalizeUrl(match[1]);
       if (!normalized) continue;
@@ -34,12 +22,12 @@ export class LinkExtractor {
         startIndex: match.index,
         endIndex: match.index + match[1].length
       });
-      if (links.length >= this.MAX_LINKS_PER_TEXT) {
+      if (links.length >= MAX_LINKS_PER_TEXT) {
         return links;
       }
     }
 
-    for (const match of text.matchAll(this.SIMPLE_URL_REGEX)) {
+    for (const match of text.matchAll(SIMPLE_URL_REGEX)) {
       if (!match[1] || match.index === undefined) continue;
       const startIndex = match.index + match[0].length - match[1].length;
       const endIndex = startIndex + match[1].length;
@@ -61,13 +49,13 @@ export class LinkExtractor {
         startIndex,
         endIndex
       });
-      if (links.length >= this.MAX_LINKS_PER_TEXT) {
+      if (links.length >= MAX_LINKS_PER_TEXT) {
         break;
       }
     }
 
     links.sort((a, b) => a.startIndex - b.startIndex);
-    return links.length > this.MAX_LINKS_PER_TEXT ? links.slice(0, this.MAX_LINKS_PER_TEXT) : links;
+    return links.length > MAX_LINKS_PER_TEXT ? links.slice(0, MAX_LINKS_PER_TEXT) : links;
   }
 
   static extractUrlStrings(text: string): string[] {
@@ -142,7 +130,7 @@ export class LinkExtractor {
         return null;
       }
 
-      for (const param of this.SUSPICIOUS_QUERY_PARAMS) {
+      for (const param of SUSPICIOUS_QUERY_PARAMS) {
         if (urlObj.searchParams.has(param)) {
           return null;
         }
@@ -180,11 +168,11 @@ export class LinkExtractor {
     if (parts.some(part => part.length === 0 || part.length > 63)) return false;
 
     const compoundCandidate = parts.slice(-2).join('.').toLowerCase();
-    const tld = this.COMMON_COMPOUND_TLDS.has(compoundCandidate)
+    const tld = COMMON_COMPOUND_TLDS.has(compoundCandidate)
       ? compoundCandidate
       : parts[parts.length - 1].toLowerCase();
 
-    return this.COMMON_TLDS.has(tld) || this.COMMON_COMPOUND_TLDS.has(tld);
+    return COMMON_TLDS.has(tld) || COMMON_COMPOUND_TLDS.has(tld);
   }
 }
 

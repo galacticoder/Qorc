@@ -1,5 +1,5 @@
 import { RefObject } from "react";
-import { CryptoUtils } from "../../lib/unified-crypto";
+import { CryptoUtils } from "../../lib/utils/crypto-utils";
 import type { HybridKeys } from "../../lib/types/auth-types";
 
 export interface AuthSuccessRefs {

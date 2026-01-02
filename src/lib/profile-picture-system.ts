@@ -1,10 +1,10 @@
 import { SecureDB } from './secureDB';
-import { encryptLongTerm, decryptLongTerm, LongTermEnvelope } from './long-term-encryption';
+import { encryptLongTerm, decryptLongTerm, LongTermEnvelope } from './cryptography/long-term-encryption';
 import websocketClient from './websocket';
-import { generateDefaultAvatar } from './utils';
+import { generateDefaultAvatar } from './utils/avatar-utils';
 import { STORAGE_KEYS } from './storage-keys';
-import { SignalType } from './signal-types';
-import { EventType } from './event-types';
+import { SignalType } from './types/signal-types';
+import { EventType } from './types/event-types';
 
 const MAX_AVATAR_SIZE_BYTES = 512 * 1024;
 const MAX_AVATAR_DIMENSION = 512;

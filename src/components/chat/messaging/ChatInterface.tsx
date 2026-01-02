@@ -5,7 +5,7 @@ import { ChatMessage } from "./ChatMessage";
 import { Message } from "./types";
 import { ChatInput } from "../ChatInput.tsx";
 import { User } from "./UserList";
-import { SignalType } from "@/lib/signal-types";
+import { SignalType } from "@/lib/types/signal-types.ts";
 import { MessageReply } from "./types";
 import { useTypingIndicator } from "@/hooks/message-handling/useTypingIndicator";
 import { TypingIndicatorList } from "./TypingIndicatorList";
@@ -15,11 +15,11 @@ import type { CallState } from "../../../lib/webrtc-calling";
 import type { useAuth } from "@/hooks/auth/useAuth";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { BlockUserButton } from "../calls/BlockUserButton";
-import { blockingSystem } from "@/lib/blocking-system";
-import { blockStatusCache } from "@/lib/block-status-cache";
+import { blockingSystem } from "@/lib/blocking/blocking-system.ts";
+import { blockStatusCache } from "@/lib/blocking/block-status-cache.ts";
 import { useReplyUpdates } from "@/hooks/message-handling/useReplyUpdates.ts";
 import { isPlainObject, hasPrototypePollutionKeys, sanitizeUiText } from "../../../lib/sanitizers";
-import { EventType } from "@/lib/event-types";
+import { EventType } from "@/lib/types/event-types.ts";
 import {
   DEFAULT_EVENT_RATE_WINDOW_MS,
   DEFAULT_UI_EVENT_RATE_MAX,

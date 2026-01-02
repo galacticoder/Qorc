@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { EventType } from '../../lib/event-types';
-import { SignalType } from '../../lib/signal-types';
+import { EventType } from '../../lib/types/event-types';
+import { SignalType } from '../../lib/types/signal-types';
 import websocketClient from '../../lib/websocket';
 import { storeUsernameMapping } from '../../lib/username-display';
 import type { HybridKeys, PeerCertificateBundle } from '../../lib/types/p2p-types';

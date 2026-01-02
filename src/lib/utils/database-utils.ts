@@ -6,7 +6,6 @@ import {
   USERNAME_DISPLAY_CACHE_TTL_MS,
   USERNAME_DISPLAY_MAX_CACHE_SIZE,
 } from '../constants';
-import { isPlainObject, hasPrototypePollutionKeys } from '../sanitizers';
 import type { MappingPayload, ResolveCache } from '../types/database-types';
 
 // Sanitize username for database operations

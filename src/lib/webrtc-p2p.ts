@@ -2,17 +2,15 @@
  * WebRTC/Tor P2P transport for end-to-end encrypted peer messaging.
  */
 
-import { CryptoUtils } from './unified-crypto';
-import {
-  PostQuantumKEM,
-  PostQuantumAEAD,
-  PostQuantumHash,
-  PostQuantumRandom,
-  PostQuantumUtils,
-  SecurityAuditLogger
-} from './post-quantum-crypto';
+import { CryptoUtils } from './utils/crypto-utils';
+import { PostQuantumKEM } from './cryptography/kem';
+import { PostQuantumAEAD } from './cryptography/aead';
+import { PostQuantumHash } from './cryptography/hash';
+import { PostQuantumRandom } from './cryptography/random';
+import { PostQuantumUtils } from './utils/pq-utils';
+import { SecurityAuditLogger } from './cryptography/audit-logger';
 import { handleP2PError } from './secure-error-handler';
-import { EventType } from './event-types';
+import { EventType } from './types/event-types';
 import {
   isPlainObject,
   hasPrototypePollutionKeys,
@@ -23,7 +21,7 @@ import {
   DEFAULT_EVENT_RATE_MAX,
   MAX_EVENT_USERNAME_LENGTH
 } from './constants';
-import { SignalType } from './signal-types';
+import { SignalType } from './types/signal-types';
 
 interface PeerConnection {
   id: string;
@@ -50,7 +48,7 @@ interface SignalingMeta {
 }
 
 interface SignalingMessage {
-  type: 'offer' | 'answer' | 'ice-candidate' | 'error' | 'relayed';
+  type: 'offer' | 'answer' | 'ice-candidate' | SignalType.ERROR | 'relayed';
   from: string;
   to: string;
   payload: any;
@@ -452,7 +450,7 @@ export class WebRTCP2PService {
 
     // Check if user is blocked before allowing P2P connection
     try {
-      const { blockStatusCache } = await import('./block-status-cache');
+      const { blockStatusCache } = await import('./blocking/block-status-cache');
       const isBlocked = blockStatusCache.get(username);
       if (isBlocked === true) {
         throw new Error(`Cannot connect to blocked user: ${username}`);
@@ -642,7 +640,7 @@ export class WebRTCP2PService {
     if (!isHandshakeMessage) {
       const session = this.pqSessions.get(to);
       if (!session || !session.established || !session.sendKey || !session.receiveKey) {
-        try { this.auditLogger.log('error', 'p2p-send-no-session', { peer: to, type: messageType }); } catch { }
+        try { this.auditLogger.log(SignalType.ERROR, 'p2p-send-no-session', { peer: to, type: messageType }); } catch { }
         throw new Error(`SECURITY: Cannot send ${messageType} message without established PQ session`);
       }
     }
@@ -800,7 +798,7 @@ export class WebRTCP2PService {
       case SignalType.DELETE: {
         const session = this.pqSessions.get(message.from);
         if (!session || !session.established || !session.sendKey || !session.receiveKey) {
-          try { this.auditLogger.log('error', 'p2p-no-session-reject', { from: message.from, type: message.type }); } catch { }
+          try { this.auditLogger.log(SignalType.ERROR, 'p2p-no-session-reject', { from: message.from, type: message.type }); } catch { }
           try {
             if (this.shouldInitiateHandshake(message.from)) {
               this.initiatePostQuantumKeyExchange(message.from);
@@ -810,7 +808,7 @@ export class WebRTCP2PService {
         }
 
         if (!message.payload || message.payload.version !== 'pq-aead-v1') {
-          try { this.auditLogger.log('error', 'p2p-unencrypted-reject', { from: message.from, type: message.type }); } catch { }
+          try { this.auditLogger.log(SignalType.ERROR, 'p2p-unencrypted-reject', { from: message.from, type: message.type }); } catch { }
           return;
         }
 
@@ -819,7 +817,7 @@ export class WebRTCP2PService {
           message.payload = decrypted;
           try { this.auditLogger.log('info', 'p2p-decrypt-ok', { from: message.from }); } catch { }
         } catch {
-          try { this.auditLogger.log('error', 'p2p-decrypt-failed', { from: message.from }); } catch { }
+          try { this.auditLogger.log(SignalType.ERROR, 'p2p-decrypt-failed', { from: message.from }); } catch { }
           try {
             const last = this.lastPqRekeyAttempt.get(message.from) || 0;
             const now = Date.now();
@@ -854,12 +852,12 @@ export class WebRTCP2PService {
       case SignalType.READ_RECEIPT: {
         const session = this.pqSessions.get(message.from);
         if (!session || !session.established || !session.sendKey || !session.receiveKey) {
-          try { this.auditLogger.log('error', 'p2p-no-session-reject', { from: message.from, type: message.type }); } catch { }
+          try { this.auditLogger.log(SignalType.ERROR, 'p2p-no-session-reject', { from: message.from, type: message.type }); } catch { }
           return;
         }
 
         if (!message.payload || message.payload.version !== 'pq-aead-v1') {
-          try { this.auditLogger.log('error', 'p2p-unencrypted-reject', { from: message.from, type: message.type }); } catch { }
+          try { this.auditLogger.log(SignalType.ERROR, 'p2p-unencrypted-reject', { from: message.from, type: message.type }); } catch { }
           return;
         }
 
@@ -869,7 +867,7 @@ export class WebRTCP2PService {
           message.payload = decrypted;
           try { this.auditLogger.log('info', 'p2p-receipt-decrypt-ok', { from: message.from, type: message.type }); } catch { }
         } catch {
-          try { this.auditLogger.log('error', 'p2p-receipt-decrypt-failed', { from: message.from, type: message.type }); } catch { }
+          try { this.auditLogger.log(SignalType.ERROR, 'p2p-receipt-decrypt-failed', { from: message.from, type: message.type }); } catch { }
           return;
         }
         this.onMessageCallback?.(message);
@@ -1258,7 +1256,7 @@ export class WebRTCP2PService {
     }
 
     try {
-      const { blockStatusCache } = await import('./block-status-cache');
+      const { blockStatusCache } = await import('./blocking/block-status-cache');
       const isBlocked = blockStatusCache.get(from);
       if (isBlocked === true) {
         return;
@@ -1482,7 +1480,7 @@ export class WebRTCP2PService {
         }
         break;
 
-      case 'error':
+      case SignalType.ERROR:
         try { this.auditLogger.log('warn', 'p2p-signaling-error', { from, to, messageType: message?.type }); } catch { }
         console.error('[P2P] Signaling error', {
           from,

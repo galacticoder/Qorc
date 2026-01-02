@@ -1,4 +1,4 @@
-import { EventType } from '../../lib/event-types';
+import { EventType } from '../../lib/types/event-types';
 import type { UserWithKeys, PendingRetryMessage } from '../../lib/types/message-sending-types';
 import { logError } from '../../lib/utils/message-sending-utils';
 

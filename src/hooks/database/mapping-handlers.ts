@@ -1,6 +1,6 @@
 import type { SecureDB } from '../../lib/secureDB';
 import type { User } from '../../components/chat/messaging/UserList';
-import { EventType } from '../../lib/event-types';
+import { EventType } from '../../lib/types/event-types';
 import { isPlainObject, hasPrototypePollutionKeys } from '../../lib/sanitizers';
 import { sanitizeDbUsername, sanitizeMappingPayload } from '../../lib/utils/database-utils';
 import { validateEventDetail } from '../../lib/utils/shared-utils';

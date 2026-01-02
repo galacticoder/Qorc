@@ -1,4 +1,4 @@
-import { SignalType } from "../signal-types";
+import { SignalType } from "./signal-types";
 
 export interface P2PMessage {
   type:

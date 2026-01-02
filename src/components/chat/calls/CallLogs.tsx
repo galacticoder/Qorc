@@ -7,15 +7,15 @@ import { ScrollArea } from '../../ui/scroll-area';
 import { UserAvatar } from '../../ui/UserAvatar';
 import { useCallHistory, type CallLogEntry } from '../../../contexts/CallHistoryContext';
 import { useUnifiedUsernameDisplay } from '../../../hooks/database/useUnifiedUsernameDisplay';
-import { blockStatusCache } from '../../../lib/block-status-cache';
+import { blockStatusCache } from '../../../lib/blocking/block-status-cache';
 import { isPlainObject, hasPrototypePollutionKeys, sanitizeUsername } from '../../../lib/sanitizers';
-import { EventType } from '@/lib/event-types';
+import { EventType } from '@/lib/types/event-types';
 import {
     DEFAULT_EVENT_RATE_WINDOW_MS,
     DEFAULT_EVENT_RATE_MAX,
     MAX_EVENT_USERNAME_LENGTH
 } from '../../../lib/constants';
-import { formatRelativeAge, formatCallDurationSeconds } from '../../../lib/date-utils';
+import { formatRelativeAge, formatCallDurationSeconds } from '../../../lib/utils/date-utils';
 
 interface CallLogItemProps {
     readonly log: CallLogEntry;

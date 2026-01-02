@@ -4,7 +4,7 @@ import type { CallState } from '../../../lib/webrtc-calling';
 import { useUnifiedUsernameDisplay } from '../../../hooks/database/useUnifiedUsernameDisplay';
 import { UserAvatar } from '../../ui/UserAvatar';
 import { Popover, PopoverContent, PopoverTrigger } from '../../ui/popover';
-import { cn } from '@/lib/utils';
+import { cn } from '../../../lib/utils/shared-utils';
 
 const ScreenSourceSelectorLazy = React.lazy(() => import('./ScreenSourceSelector').then(m => ({ default: m.ScreenSourceSelector })));
 

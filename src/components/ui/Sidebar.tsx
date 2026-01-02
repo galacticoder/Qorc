@@ -1,7 +1,7 @@
 import React, { useState, useRef } from 'react';
 import { LogOut } from 'lucide-react';
 import { ChatBubbleIcon, SettingsIcon, CallIcon } from '../chat/assets/icons';
-import { cn } from '@/lib/utils';
+import { cn } from '@/lib/utils/shared-utils';
 import { Button } from '@/components/ui/button';
 import { UserAvatar } from './UserAvatar';
 import { useTheme } from 'next-themes';

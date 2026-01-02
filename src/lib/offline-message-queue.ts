@@ -3,13 +3,13 @@
  * Stores messages locally and retries delivery when users come online
  */
 
-import { PostQuantumRandom } from './post-quantum-crypto';
+import { PostQuantumRandom } from './cryptography/random';
 import { SecureAuditLogger } from "./secure-error-handler";
 import { STORAGE_KEYS } from './storage-keys';
 import { SecureDB } from './secureDB';
-import { encryptLongTerm, decryptLongTerm, LongTermEnvelope } from './long-term-encryption';
-import { SignalType } from './signal-types';
-import { EventType } from './event-types';
+import { encryptLongTerm, decryptLongTerm, LongTermEnvelope } from './cryptography/long-term-encryption';
+import { SignalType } from './types/signal-types';
+import { EventType } from './types/event-types';
 
 const hasPrototypePollutionKeys = (obj: unknown): boolean => {
   if (obj == null || typeof obj !== 'object') return false;

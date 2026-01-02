@@ -1,8 +1,8 @@
 import React, { useMemo } from 'react';
 import { MessageReceipt as ReceiptType } from './types';
 import { Check, CheckCheck } from 'lucide-react';
-import { cn } from '../../../lib/utils';
-import { formatReceiptTime } from '../../../lib/date-utils';
+import { cn } from '../../../lib/utils/shared-utils';
+import { formatReceiptTime } from '../../../lib/utils/date-utils';
 
 interface MessageReceiptProps {
 	readonly receipt?: ReceiptType;

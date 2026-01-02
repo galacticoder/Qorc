@@ -2,16 +2,16 @@ import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { Button } from '@/components/ui/button';
 import { toast } from 'sonner';
 import { BlockIcon, UnblockIcon } from '../assets/icons';
-import { blockingSystem } from '@/lib/blocking-system';
-import { blockStatusCache } from '@/lib/block-status-cache';
-import { truncateUsername } from '@/lib/utils';
+import { blockingSystem } from '@/lib/blocking/blocking-system';
+import { blockStatusCache } from '@/lib/blocking/block-status-cache';
+import { truncateUsername } from '@/lib/utils/avatar-utils';
 import { isPlainObject, hasPrototypePollutionKeys, sanitizeEventUsername } from '../../../lib/sanitizers';
 import {
   DEFAULT_EVENT_RATE_WINDOW_MS,
   DEFAULT_EVENT_RATE_MAX,
   MAX_EVENT_USERNAME_LENGTH
 } from '../../../lib/constants';
-import { EventType } from '@/lib/event-types';
+import { EventType } from '@/lib/types/event-types';
 
 interface BlockUserButtonProps {
   readonly username: string;

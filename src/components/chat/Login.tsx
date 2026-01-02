@@ -9,7 +9,7 @@ import { PassphrasePrompt } from "./Login/PassphrasePrompt.tsx";
 import { PasswordHashPrompt } from "./Login/PasswordHashPrompt.tsx";
 import { ServerPasswordForm } from "./Login/ServerPassword.tsx";
 import { toast } from "sonner";
-import { EventType } from "../../lib/event-types";
+import { EventType } from "../../lib/types/event-types.ts";
 
 // Server public key bundle
 interface ServerKeys {

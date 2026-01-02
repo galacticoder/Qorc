@@ -1,11 +1,11 @@
 import { v4 as uuidv4 } from 'uuid';
-import { CryptoUtils } from './unified-crypto';
+import { CryptoUtils } from './utils/crypto-utils';
 import websocketClient from './websocket';
-import { sanitizeHybridKeys } from './validators';
+import { sanitizeHybridKeys } from './utils/messaging-validators';
 import { SecureAuditLogger } from './secure-error-handler';
-import { clusterKeyManager } from './cluster-key-manager';
-import { SignalType } from './signal-types';
-import { EventType } from './event-types';
+import { clusterKeyManager } from './cryptography/cluster-key-manager';
+import { SignalType } from './types/signal-types';
+import { EventType } from './types/event-types';
 import { profilePictureSystem } from './profile-picture-system';
 
 const __userExistsDebounce = new Map<string, number>();
@@ -299,21 +299,21 @@ export async function handleSignalMessages(data: any, handlers: SignalHandlers) 
           let vaultKeyUnwrapSuccess = false;
           try {
             let vaultKey: CryptoKey | null = null;
-            const { loadVaultKeyRaw, ensureVaultKeyCryptoKey } = await import('./vault-key');
+            const { loadVaultKeyRaw, ensureVaultKeyCryptoKey } = await import('./cryptography/vault-key');
             const raw = await loadVaultKeyRaw(recoveredUser);
             if (raw && raw.length === 32) {
-              const { AES } = await import('./unified-crypto');
+              const { AES } = await import('./utils/crypto-utils');
               vaultKey = await AES.importAesKey(raw);
             } else {
               vaultKey = await ensureVaultKeyCryptoKey(recoveredUser);
             }
 
             if (vaultKey) {
-              const { loadWrappedMasterKey } = await import('./vault-key');
+              const { loadWrappedMasterKey } = await import('./cryptography/vault-key');
               const masterKeyBytes = await loadWrappedMasterKey(recoveredUser, vaultKey);
 
               if (masterKeyBytes && masterKeyBytes.length === 32) {
-                const { AES } = await import('./unified-crypto');
+                const { AES } = await import('./utils/crypto-utils');
                 const masterKey = await AES.importAesKey(masterKeyBytes);
                 if (aesKeyRef) {
                   aesKeyRef.current = masterKey;
@@ -417,10 +417,10 @@ export async function handleSignalMessages(data: any, handlers: SignalHandlers) 
 
           let vaultKey: CryptoKey | null = null;
           try {
-            const { loadVaultKeyRaw, ensureVaultKeyCryptoKey } = await import('./vault-key');
+            const { loadVaultKeyRaw, ensureVaultKeyCryptoKey } = await import('./cryptography/vault-key');
             let raw = await loadVaultKeyRaw(loginUsernameRef?.current || data.username || '');
             if (raw && raw.length === 32) {
-              const { AES } = await import('./unified-crypto');
+              const { AES } = await import('./utils/crypto-utils');
               vaultKey = await AES.importAesKey(raw);
             } else if (loginUsernameRef?.current) {
               vaultKey = await ensureVaultKeyCryptoKey(loginUsernameRef.current);
@@ -430,14 +430,14 @@ export async function handleSignalMessages(data: any, handlers: SignalHandlers) 
           let masterKeyBytes: Uint8Array | null = null;
           if (vaultKey && loginUsernameRef?.current) {
             try {
-              const { loadWrappedMasterKey } = await import('./vault-key');
+              const { loadWrappedMasterKey } = await import('./cryptography/vault-key');
               masterKeyBytes = await loadWrappedMasterKey(loginUsernameRef.current, vaultKey);
             } catch { }
           }
 
           if (masterKeyBytes && masterKeyBytes.length === 32) {
             try {
-              const { AES } = await import('./unified-crypto');
+              const { AES } = await import('./utils/crypto-utils');
               const masterKey = await AES.importAesKey(masterKeyBytes);
               if (aesKeyRef) {
                 aesKeyRef.current = masterKey;
@@ -453,7 +453,7 @@ export async function handleSignalMessages(data: any, handlers: SignalHandlers) 
               try {
                 const existingKeys = await Authentication.keyManagerRef.current!.getKeys().catch(() => null);
                 if (!existingKeys) {
-                  const { CryptoUtils } = await import('./unified-crypto');
+                  const { CryptoUtils } = await import('./utils/crypto-utils');
                   const pair = await CryptoUtils.Hybrid.generateHybridKeyPair();
                   await Authentication.keyManagerRef.current!.storeKeys(pair);
                 }
@@ -470,7 +470,7 @@ export async function handleSignalMessages(data: any, handlers: SignalHandlers) 
               try {
                 const maybeKeys = await Authentication.keyManagerRef.current.getKeys().catch(() => null);
                 if (!maybeKeys) {
-                  const { CryptoUtils } = await import('./unified-crypto');
+                  const { CryptoUtils } = await import('./utils/crypto-utils');
                   const pair = await CryptoUtils.Hybrid.generateHybridKeyPair();
                   await Authentication.keyManagerRef.current.storeKeys(pair);
                 }
@@ -710,7 +710,7 @@ export async function handleSignalMessages(data: any, handlers: SignalHandlers) 
           const user = loginUsernameRef?.current || '';
           if (user && aesKeyRef?.current) {
             try {
-              const { ensureVaultKeyCryptoKey, saveWrappedMasterKey } = await import('./vault-key');
+              const { ensureVaultKeyCryptoKey, saveWrappedMasterKey } = await import('./cryptography/vault-key');
               const vaultKey = await ensureVaultKeyCryptoKey(user);
               const raw = new Uint8Array(await (globalThis as any).crypto?.subtle?.exportKey('raw', aesKeyRef.current as CryptoKey));
               await saveWrappedMasterKey(user, raw, vaultKey);

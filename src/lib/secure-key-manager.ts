@@ -1,8 +1,8 @@
-import { CryptoUtils } from './unified-crypto';
+import { CryptoUtils } from './utils/crypto-utils';
 import { SecureAuditLogger } from './secure-error-handler';
 import * as argon2 from "argon2-wasm";
 import { blake3 as nobleBlake3 } from '@noble/hashes/blake3.js';
-import { PostQuantumUtils } from './post-quantum-crypto';
+import { PostQuantumUtils } from './utils/pq-utils';
 import { SQLiteKV } from './sqlite-kv';
 
 const getCrypto = () => {
@@ -315,7 +315,7 @@ export class SecureKeyManager {
 			throw new Error('Failed to export master key for post-quantum encryption.');
 		}
 
-		const { PostQuantumAEAD } = await import('./post-quantum-crypto');
+		const { PostQuantumAEAD } = await import('./cryptography/aead');
 
 		// Encrypt secret keys using post-quantum AEAD
 		const kyberSecretBytes = new TextEncoder().encode(JSON.stringify(Array.from(keys.kyber.secretKey)));
@@ -394,7 +394,7 @@ export class SecureKeyManager {
 		}
 
 		// Import PostQuantumAEAD for decryption
-		const { PostQuantumAEAD } = await import('./post-quantum-crypto');
+		const { PostQuantumAEAD } = await import('./cryptography/aead');
 
 		const ciphertext = CryptoUtils.Base64.base64ToUint8Array(encryptedData.bundleCiphertext);
 		const nonce = CryptoUtils.Base64.base64ToUint8Array(encryptedData.bundleNonce);

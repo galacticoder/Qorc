@@ -1,6 +1,6 @@
 import React, { useEffect } from 'react';
-import { EventType } from '../../lib/event-types';
-import { SignalType } from '../../lib/signal-types';
+import { EventType } from '../../lib/types/event-types';
+import { SignalType } from '../../lib/types/signal-types';
 
 interface UseP2PSignalHandlersProps {
   p2pMessaging: {

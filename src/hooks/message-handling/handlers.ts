@@ -1,8 +1,8 @@
-import { EventType } from '../../lib/event-types';
-import { SignalType } from '../../lib/signal-types';
-import { CryptoUtils } from '../../lib/unified-crypto';
-import { safeJsonParse, safeJsonParseForMessages } from '../../lib/message-handler-utils';
-import { sanitizeContent, sanitizeTextInput } from '../../lib/sanitizers';
+import { EventType } from '../../lib/types/event-types';
+import { SignalType } from '../../lib/types/signal-types';
+import { CryptoUtils } from '../../lib/utils/crypto-utils';
+import { safeJsonParse } from '../../lib/utils/message-handler-utils';
+import { sanitizeTextInput } from '../../lib/sanitizers';
 import type { Message } from '../../components/chat/messaging/types';
 
 // Dispatch read receipt event

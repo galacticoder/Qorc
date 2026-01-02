@@ -1,6 +1,8 @@
 import { sanitizeTextInput } from '../sanitizers';
 import { isPlainObject, hasPrototypePollutionKeys } from '../sanitizers';
-import { EventType } from '../event-types';
+import { EventType } from '../types/event-types';
+import type { IncomingFileChunks } from '../../pages/types';
+import type { ExtendedFileState } from '../types/file-types';
 import {
   BASE64_STANDARD_REGEX,
   BASE64_URLSAFE_REGEX,
@@ -14,9 +16,9 @@ import {
   IMAGE_EXTENSIONS,
   VIDEO_EXTENSIONS,
   AUDIO_EXTENSIONS,
+  BASE64_SAFE_REGEX,
+  MAX_INLINE_BYTES,
 } from '../constants';
-import type { IncomingFileChunks } from '../../pages/types';
-import type { ExtendedFileState } from '../types/file-types';
 
 // Sanitize event detail for file transfer events
 export const sanitizeEventDetail = (detail: Record<string, unknown>): Record<string, unknown> => {
@@ -218,9 +220,6 @@ export const isVoiceNote = (filename: string): boolean => {
 };
 
 // Validate and decode base64 for file URL
-const MAX_INLINE_BYTES = 10 * 1024 * 1024;
-const BASE64_SAFE_REGEX = /^[A-Za-z0-9+/=_-]+$/;
-
 export const validateAndDecodeBase64 = (input: string | null | undefined): Uint8Array | null => {
   if (!input || typeof input !== 'string') return null;
   let cleanBase64 = input.trim();

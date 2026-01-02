@@ -5,8 +5,8 @@ import { profilePictureSystem } from '../../../lib/profile-picture-system';
 import { isPlainObject, hasPrototypePollutionKeys } from '../../../lib/sanitizers';
 import { sanitizeEventText } from '../../../lib/sanitizers';
 import { AnimatedSwitch } from '../../ui/AnimatedSwitch';
-import { SignalType } from '../../../lib/signal-types';
-import { EventType } from '../../../lib/event-types';
+import { SignalType } from '../../../lib/types/signal-types';
+import { EventType } from '../../../lib/types/event-types';
 import {
     DEFAULT_EVENT_RATE_WINDOW_MS,
     DEFAULT_EVENT_RATE_MAX,

@@ -1,8 +1,8 @@
 import { RefObject } from "react";
 import websocketClient from "../../lib/websocket";
-import { CryptoUtils } from "../../lib/unified-crypto";
+import { CryptoUtils } from "../../lib/utils/crypto-utils";
 import { SecureKeyManager } from "../../lib/secure-key-manager";
-import { ensureVaultKeyCryptoKey, saveWrappedMasterKey } from "../../lib/vault-key";
+import { ensureVaultKeyCryptoKey, saveWrappedMasterKey } from "../../lib/cryptography/vault-key";
 import { validateServerKeys, deriveCombinedSecretInput } from "../../lib/utils/auth-utils";
 import type { ServerHybridPublicKeys, HybridKeys } from "../../lib/types/auth-types";
 

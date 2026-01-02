@@ -1,7 +1,7 @@
 import React from 'react';
 import { unstable_batchedUpdates } from 'react-dom';
 import { WebRTCCallingService, CallState } from '../../lib/webrtc-calling';
-import { EventType } from '../../lib/event-types';
+import { EventType } from '../../lib/types/event-types';
 import { stopMediaStream, EventDebouncer } from '../../lib/utils/calling-utils';
 
 export interface CallbackRefs {

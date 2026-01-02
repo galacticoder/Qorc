@@ -1,7 +1,7 @@
 import React, { useEffect, useRef } from 'react';
-import { SecurityAuditLogger } from '../../lib/post-quantum-crypto';
+import { SecurityAuditLogger } from '../../lib/cryptography/audit-logger';
 import { getSignalingServerUrl } from '../../config/p2p.config';
-import { EventType } from '../../lib/event-types';
+import { EventType } from '../../lib/types/event-types';
 
 interface P2PStatus {
   isInitialized?: boolean;

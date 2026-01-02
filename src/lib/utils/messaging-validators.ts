@@ -1,5 +1,6 @@
-import { CryptoUtils } from './unified-crypto';
-import { PostQuantumKEM, PostQuantumSignature } from './post-quantum-crypto';
+import { CryptoUtils } from './crypto-utils';
+import { PostQuantumSignature } from '../cryptography/signature';
+import { PQ_KEM_PUBLIC_KEY_SIZE } from '../constants';
 
 export function isValidKyberPublicKeyBase64(value: unknown): value is string {
   if (typeof value !== 'string') {
@@ -8,7 +9,7 @@ export function isValidKyberPublicKeyBase64(value: unknown): value is string {
   try {
     const normalized = value.trim();
     const bytes = CryptoUtils.Base64.base64ToUint8Array(normalized);
-    return bytes.length === PostQuantumKEM.sizes.publicKey;
+    return bytes.length === PQ_KEM_PUBLIC_KEY_SIZE
   } catch {
     return false;
   }

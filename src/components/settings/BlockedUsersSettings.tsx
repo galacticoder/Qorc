@@ -4,10 +4,10 @@ import { Button } from '../../components/ui/button';
 import { Input } from '../../components/ui/input';
 import { Label } from '../../components/ui/label';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger } from '../../components/ui/dialog';
-import { blockingSystem, BlockedUser } from '../../lib/blocking-system';
+import { blockingSystem, BlockedUser } from '../../lib/blocking/blocking-system';
 import { format } from 'date-fns';
 import { isPlainObject, hasPrototypePollutionKeys, sanitizeEventUsername, isValidUsername } from '../../lib/sanitizers';
-import { EventType } from '../../lib/event-types';
+import { EventType } from '../../lib/types/event-types';
 import {
   DEFAULT_EVENT_RATE_WINDOW_MS,
   DEFAULT_EVENT_RATE_MAX,

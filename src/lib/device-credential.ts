@@ -1,13 +1,8 @@
 /**
  * Device Credential Manager
- * Quantum-secure device attestation using ML-DSA-87 signatures
- * 
- * Device keypairs are generated from hardware entropy and stored in
- * machine-bound Electron secure storage. Used to limit account creation
- * per device without server knowledge.
  */
 
-import { PostQuantumUtils } from './post-quantum-crypto';
+import { PostQuantumUtils } from './utils/pq-utils';
 
 interface DeviceCredentials {
     publicKey: Uint8Array;

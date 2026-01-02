@@ -1,5 +1,5 @@
 import * as pako from "pako";
-import { CryptoUtils } from "../../lib/unified-crypto";
+import { CryptoUtils } from "../../lib/utils/crypto-utils";
 import { decodeBase64Chunk, validateEnvelope, releaseFileEntry, dispatchCanceledEvent } from "../../lib/utils/file-utils";
 import type { ExtendedFileState } from "../../lib/types/file-types";
 

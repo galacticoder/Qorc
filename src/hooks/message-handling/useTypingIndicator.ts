@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef } from 'react';
-import { SignalType } from '../../lib/signal-types';
+import { SignalType } from '../../lib/types/signal-types';
 import { TYPING_DOMAIN, TYPING_STOP_DELAY, MIN_TYPING_INTERVAL, CONVERSATION_CHANGE_DEBOUNCE } from '../../lib/constants';
 
 const createRandomHex = (byteLength: number) => {

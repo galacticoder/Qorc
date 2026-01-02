@@ -1,6 +1,6 @@
 import { Button } from "../../ui/button";
 import { Mic } from "lucide-react";
-import { cn } from "@/lib/utils";
+import { cn } from "@/lib/utils/shared-utils";
 
 interface VoiceRecorderButtonProps {
   readonly onClick: () => void;

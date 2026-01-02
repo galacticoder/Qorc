@@ -1,5 +1,23 @@
-import { ml_kem1024 } from '@noble/post-quantum/ml-kem.js';
 import * as argon2 from "argon2-wasm";
+import { kyber } from '../utils/crypto-utils';
+import { SignalType } from '../types/signal-types';
+import { EventType } from '../types/event-types';
+import { isPlainObject, hasPrototypePollutionKeys } from "../sanitizers";
+import {
+  PQ_KEM_PUBLIC_KEY_SIZE,
+  PQ_KEM_SECRET_KEY_SIZE,
+  WORKER_MAX_KEYS,
+  WORKER_AUTH_TOKEN_LIFETIME_MS,
+  WORKER_RATE_LIMIT_DEFAULT_WINDOW_MS,
+  WORKER_RATE_LIMIT_DEFAULT_MAX,
+  WORKER_RATE_LIMIT_KEM_GENERATE_MAX,
+  WORKER_RATE_LIMIT_KEM_DESTROY_MAX,
+  WORKER_RATE_LIMIT_ARGON2_HASH_MAX,
+  WORKER_RATE_LIMIT_ARGON2_VERIFY_MAX,
+  REPLAY_WINDOW_MS,
+  MAX_PROCESSED_IDS,
+  KEY_LIFETIME_MS
+} from '../constants';
 
 declare const self: DedicatedWorkerGlobalScope;
 interface DedicatedWorkerGlobalScope {
@@ -7,18 +25,12 @@ interface DedicatedWorkerGlobalScope {
   addEventListener(type: string, listener: EventListenerOrEventListenerObject): void;
 }
 
-const kyber = ml_kem1024;
-
-const KEM_PUBLIC_KEY_BYTES = 1568;
-const KEM_SECRET_KEY_BYTES = 3168;
-
-const MAX_KEYS = 256;
 const RATE_LIMIT_CONFIG = {
-  DEFAULT: { windowMs: 60_000, maxRequests: 100 },
-  'kem.generateKeyPair': { windowMs: 60_000, maxRequests: 10 },
-  'kem.destroyKey': { windowMs: 60_000, maxRequests: 50 },
-  'argon2.hash': { windowMs: 60_000, maxRequests: 20 },
-  'argon2.verify': { windowMs: 60_000, maxRequests: 50 }
+  DEFAULT: { windowMs: WORKER_RATE_LIMIT_DEFAULT_WINDOW_MS, maxRequests: WORKER_RATE_LIMIT_DEFAULT_MAX },
+  'kem.generateKeyPair': { windowMs: WORKER_RATE_LIMIT_DEFAULT_WINDOW_MS, maxRequests: WORKER_RATE_LIMIT_KEM_GENERATE_MAX },
+  'kem.destroyKey': { windowMs: WORKER_RATE_LIMIT_DEFAULT_WINDOW_MS, maxRequests: WORKER_RATE_LIMIT_KEM_DESTROY_MAX },
+  'argon2.hash': { windowMs: WORKER_RATE_LIMIT_DEFAULT_WINDOW_MS, maxRequests: WORKER_RATE_LIMIT_ARGON2_HASH_MAX },
+  'argon2.verify': { windowMs: WORKER_RATE_LIMIT_DEFAULT_WINDOW_MS, maxRequests: WORKER_RATE_LIMIT_ARGON2_VERIFY_MAX }
 } as const;
 const rateBuckets = new Map<string, Map<string, { count: number; resetAt: number }>>();
 const processedIds = new Map<string, { timestamp: number; origin: string }>();
@@ -27,25 +39,13 @@ const activeKeys = new Map<string, { key: Uint8Array; timestamp: number; origin:
 let AUTH_TOKEN = new Uint8Array(32);
 crypto.getRandomValues(AUTH_TOKEN);
 let authTokenTimestamp = Date.now();
-const AUTH_TOKEN_LIFETIME = 60 * 60 * 1000;
+const AUTH_TOKEN_LIFETIME = WORKER_AUTH_TOKEN_LIFETIME_MS;
 
 self.postMessage({
-  type: 'auth-token-init',
+  type: SignalType.AUTH_TOKEN_INIT,
   token: Array.from(AUTH_TOKEN, (b) => b.toString(16).padStart(2, '0')).join(''),
   timestamp: Date.now()
 });
-
-function hasPrototypePollutionKeys(obj: unknown): boolean {
-  if (obj == null || typeof obj !== 'object') return false;
-  const keys = Object.keys(obj);
-  return keys.some((key) => key === '__proto__' || key === 'constructor' || key === 'prototype');
-}
-
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  if (value == null || typeof value !== 'object') return false;
-  const proto = Object.getPrototypeOf(value);
-  return proto === null || proto === Object.prototype;
-}
 
 self.addEventListener('beforeunload', () => {
   for (const keyData of activeKeys.values()) {
@@ -109,7 +109,7 @@ function rotateAuthTokenIfNeeded(): void {
   authTokenTimestamp = now;
 
   self.postMessage({
-    type: 'auth-token-rotated',
+    type: SignalType.AUTH_TOKEN_ROTATED,
     token: Array.from(AUTH_TOKEN, (b) => b.toString(16).padStart(2, '0')).join(''),
     timestamp: now
   });
@@ -138,9 +138,6 @@ function authenticateEnvelope(envelope: { auth: string }): void {
   }
 }
 
-const REPLAY_WINDOW_MS = 5 * 60 * 1000; // 5 minutes
-const MAX_PROCESSED_IDS = 2048;
-
 function rejectIfReplay(id: string, origin: string): void {
   const now = Date.now();
   const existing = processedIds.get(id);
@@ -160,12 +157,10 @@ function rejectIfReplay(id: string, origin: string): void {
   }
 }
 
-const KEY_LIFETIME_MS = 60 * 60 * 1000; // 1 hour
-
 function storeKey(keyId: string, secretKey: Uint8Array, origin: string): void {
   cleanupExpiredKeys(Date.now());
 
-  if (activeKeys.size >= MAX_KEYS) {
+  if (activeKeys.size >= WORKER_MAX_KEYS) {
     const entries = Array.from(activeKeys.entries()).sort((a, b) => a[1].timestamp - b[1].timestamp);
     const [oldestKeyId, oldestKeyData] = entries[0];
     oldestKeyData.key.fill(0);
@@ -199,7 +194,7 @@ type WorkerResponse =
   | { id: string; success: false; error: string };
 
 
-self.addEventListener(SignalType.MESSAGE, async (event: MessageEvent<WorkerRequest>) => {
+self.addEventListener(EventType.MESSAGE, async (event: MessageEvent<WorkerRequest>) => {
   try {
     // Validate event.data for prototype pollution
     if (!isPlainObject(event.data)) {
@@ -218,7 +213,7 @@ self.addEventListener(SignalType.MESSAGE, async (event: MessageEvent<WorkerReque
     switch (type) {
       case 'kem.generateKeyPair': {
         const keyPair = kyber.keygen();
-        if (keyPair.publicKey.length !== KEM_PUBLIC_KEY_BYTES || keyPair.secretKey.length !== KEM_SECRET_KEY_BYTES) {
+        if (keyPair.publicKey.length !== PQ_KEM_PUBLIC_KEY_SIZE || keyPair.secretKey.length !== PQ_KEM_SECRET_KEY_SIZE) {
           throw new Error('Invalid key pair generated');
         }
         const keyId = secureRandomId();

@@ -1,16 +1,15 @@
 import { v4 as uuidv4 } from 'uuid';
-import { SignalType } from './signal-types';
-import { EventType } from './event-types';
+import { SignalType } from './types/signal-types';
+import { EventType } from './types/event-types';
+import { blockingSystem } from './blocking/blocking-system';
 import { torNetworkManager } from './tor-network';
-import {
-  PostQuantumAEAD,
-  PostQuantumHash,
-  PostQuantumKEM,
-  PostQuantumRandom,
-  PostQuantumUtils,
-  PostQuantumSignature,
-  SecurityAuditLogger
-} from './post-quantum-crypto';
+import { PostQuantumAEAD } from './cryptography/aead';
+import { PostQuantumHash } from './cryptography/hash';
+import { PostQuantumKEM } from './cryptography/kem';
+import { PostQuantumRandom } from './cryptography/random';
+import { PostQuantumUtils } from './utils/pq-utils';
+import { PostQuantumSignature } from './cryptography/signature';
+import { SecurityAuditLogger } from './cryptography/audit-logger';
 import { x25519 } from '@noble/curves/ed25519.js';
 import { SecureAuditLogger, handleNetworkError, handleCriticalError } from './secure-error-handler';
 import {
@@ -176,7 +175,7 @@ class WebSocketClient {
         error: message.error
       });
       this.resetSessionKeys(false);
-      this.lifecycleState = 'error';
+      this.lifecycleState = SignalType.ERROR;
       return true;
     }
 
@@ -186,7 +185,7 @@ class WebSocketClient {
       });
       const wasConnectedBefore = this.lifecycleState !== 'idle' || this.sessionKeyMaterial != null;
 
-      if (this.lifecycleState === 'disconnected' || this.lifecycleState === 'error' || this.lifecycleState === 'idle') {
+      if (this.lifecycleState === 'disconnected' || this.lifecycleState === SignalType.ERROR || this.lifecycleState === 'idle') {
         (async () => {
           try {
             const api = (window as any).edgeApi;
@@ -215,6 +214,7 @@ class WebSocketClient {
 
               this.startHeartbeat();
               void this.flushPendingQueue();
+              void blockingSystem.processQueuedMessages();
 
               try {
                 await (window as any).edgeApi?.requestPendingMessages?.();
@@ -231,7 +231,7 @@ class WebSocketClient {
                 error: error instanceof Error ? error.message : String(error)
               });
 
-              this.lifecycleState = 'error';
+              this.lifecycleState = SignalType.ERROR;
             });
         })();
       }
@@ -307,7 +307,7 @@ class WebSocketClient {
       await this.establishConnection();
     } catch (_error) {
       if (this.lifecycleState === 'connecting' || this.lifecycleState === 'handshaking') {
-        this.lifecycleState = 'error';
+        this.lifecycleState = SignalType.ERROR;
       }
       this.handleConnectionError(_error as Error, 'connect');
       throw _error;
@@ -409,6 +409,7 @@ class WebSocketClient {
     this.startConnectivityWatchdog();
     this.startHeartbeat();
     this.attachTorCircuitListener();
+    void blockingSystem.processQueuedMessages();
   }
 
   /**
@@ -544,7 +545,7 @@ class WebSocketClient {
     // Allow for some reordering but detect large gaps or duplicates
     if (counter <= this.expectedRemoteNonceCounter - MAX_NONCE_SEQUENCE_GAP) {
       this.metrics.securityEvents.replayAttempts += 1;
-      SecurityAuditLogger.log('error', 'ws-nonce-replay', {
+      SecurityAuditLogger.log(SignalType.ERROR, 'ws-nonce-replay', {
         received: counter,
         expected: this.expectedRemoteNonceCounter,
         gap: this.expectedRemoteNonceCounter - counter
@@ -576,7 +577,7 @@ class WebSocketClient {
 
     if (skew > MAX_REPLAY_WINDOW_MS) {
       this.metrics.securityEvents.replayAttempts += 1;
-      SecurityAuditLogger.log('error', 'ws-timestamp-invalid', {
+      SecurityAuditLogger.log(SignalType.ERROR, 'ws-timestamp-invalid', {
         timestamp,
         now,
         skew,
@@ -611,7 +612,7 @@ class WebSocketClient {
       const signature = PostQuantumSignature.sign(message, this.signingKeyPair.privateKey);
       return PostQuantumUtils.uint8ArrayToBase64(signature);
     } catch {
-      SecurityAuditLogger.log('error', 'ws-message-signing-failed', {});
+      SecurityAuditLogger.log(SignalType.ERROR, 'ws-message-signing-failed', {});
       return undefined;
     }
   }
@@ -621,7 +622,7 @@ class WebSocketClient {
    */
   private async verifyMessageSignature(envelope: any): Promise<boolean> {
     if (!envelope.signature) {
-      SecurityAuditLogger.log('error', 'ws-signature-missing', {
+      SecurityAuditLogger.log(SignalType.ERROR, 'ws-signature-missing', {
         messageId: envelope.messageId
       });
       this.metrics.securityEvents.signatureFailures += 1;
@@ -643,7 +644,7 @@ class WebSocketClient {
 
       if (!valid) {
         this.metrics.securityEvents.signatureFailures += 1;
-        SecurityAuditLogger.log('error', 'ws-signature-invalid', {
+        SecurityAuditLogger.log(SignalType.ERROR, 'ws-signature-invalid', {
           messageId: envelope.messageId
         });
       }
@@ -829,7 +830,7 @@ class WebSocketClient {
     if (this.circuitBreakerFailures >= CIRCUIT_BREAKER_THRESHOLD) {
       this.circuitBreakerOpenUntil = Date.now() + CIRCUIT_BREAKER_TIMEOUT_MS;
 
-      SecurityAuditLogger.log('error', 'ws-circuit-breaker-triggered', {
+      SecurityAuditLogger.log(SignalType.ERROR, 'ws-circuit-breaker-triggered', {
         failures: this.circuitBreakerFailures,
         openDurationMs: CIRCUIT_BREAKER_TIMEOUT_MS
       });
@@ -1049,7 +1050,7 @@ class WebSocketClient {
   private handleConnectionError(error: Error, stage: string): void {
     SecureAuditLogger.error('ws', stage, 'failure', { message: error.message });
     this.metrics.lastFailureAt = Date.now();
-    this.lifecycleState = 'error';
+    this.lifecycleState = SignalType.ERROR;
     this.resetSessionKeys(false);
     if (!this.isManualClose) {
       this.attemptReconnect();

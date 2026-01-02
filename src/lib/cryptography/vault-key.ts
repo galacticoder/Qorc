@@ -1,5 +1,5 @@
-import { AES } from './unified-crypto';
-import { AEAD as PostQuantumAEAD } from './post-quantum-crypto';
+import { AES } from '../utils/crypto-utils';
+import { PostQuantumAEAD } from './aead';
 
 function sanitizeId(value: string): string {
   return (value || 'unknown').replace(/[^a-zA-Z0-9_-]/g, '_');
@@ -78,7 +78,6 @@ export async function saveWrappedMasterKey(username: string, masterKeyBytes: Uin
       return false;
     }
 
-    // Derive a 32-byte symmetric key from the vault CryptoKey for PQ AEAD
     const rawVaultKey = new Uint8Array(await subtle.exportKey('raw', vaultKey));
     try {
       const aad = new TextEncoder().encode(`vault-wrapped-master-v2:${username}`);

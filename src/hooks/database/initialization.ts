@@ -1,7 +1,7 @@
 import { SecureDB } from '../../lib/secureDB';
 import { encryptedStorage, syncEncryptedStorage } from '../../lib/encrypted-storage';
-import { blockingSystem } from '../../lib/blocking-system';
-import { EventType } from '../../lib/event-types';
+import { blockingSystem } from '../../lib/blocking/blocking-system';
+import { EventType } from '../../lib/types/event-types';
 
 // Validate CryptoKey structure
 export const isValidCryptoKey = (key: unknown): key is CryptoKey => {

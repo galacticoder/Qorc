@@ -1,29 +1,24 @@
 /**
  * Global block status cache
- * Maintains block status in memory to avoid redundant checks
  */
 
-import { EventType } from './event-types';
+import { EventType } from '../types/event-types';
+import { BLOCK_STATUS_CACHE_TTL_MS } from '../constants';
 
-interface BlockStatusCache {
-  [username: string]: {
-    isBlocked: boolean;
-    timestamp: number;
-  };
+interface BlockStatusCacheEntry {
+  isBlocked: boolean;
+  timestamp: number;
 }
 
 class BlockStatusManager {
-  private cache: BlockStatusCache = {};
-  private readonly CACHE_TTL = 30000; // 30 seconds
+  private cache: Record<string, BlockStatusCacheEntry> = {};
+  private readonly CACHE_TTL = BLOCK_STATUS_CACHE_TTL_MS;
 
-  /**
-   * Get cached block status for a user
-   */
+  // Get cached block status for a user
   get(username: string): boolean | null {
     const cached = this.cache[username];
     if (!cached) return null;
 
-    // Check if cache is still valid
     if (Date.now() - cached.timestamp > this.CACHE_TTL) {
       delete this.cache[username];
       return null;
@@ -32,9 +27,7 @@ class BlockStatusManager {
     return cached.isBlocked;
   }
 
-  /**
-   * Update block status in cache and dispatch event
-   */
+  // Update block status in cache and dispatch event
   set(username: string, isBlocked: boolean): void {
     this.cache[username] = {
       isBlocked,
@@ -46,16 +39,12 @@ class BlockStatusManager {
     }));
   }
 
-  /**
-   * Invalidate cache for a specific user
-   */
+  // Invalidate cache for a specific user
   invalidate(username: string): void {
     delete this.cache[username];
   }
 
-  /**
-   * Clear entire cache
-   */
+  // Clear entire cache
   clear(): void {
     this.cache = {};
   }

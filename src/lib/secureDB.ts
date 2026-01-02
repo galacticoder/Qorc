@@ -1,5 +1,6 @@
 import { SecureAuditLogger } from './secure-error-handler';
 import { SQLiteKV } from './sqlite-kv';
+import { PostQuantumAEAD } from './cryptography/aead';
 
 interface EphemeralConfig {
   enabled: boolean;
@@ -159,15 +160,11 @@ export class SecureDB {
 
   private async getPostQuantumAEAD(): Promise<PostQuantumAEADLike> {
     if (!this.postQuantumAEAD) {
-      try {
-        const module = await import('./post-quantum-crypto');
-        const aead = module.PostQuantumAEAD;
-        if (!aead) throw new Error('PostQuantumAEAD not found in module');
-        this.postQuantumAEAD = aead;
-      } catch (error) {
-        SecureAuditLogger.error('securedb', 'initialization', 'module-load-failed', { error: (error as Error).message });
+      if (!PostQuantumAEAD) {
+        SecureAuditLogger.error('securedb', 'initialization', 'module-load-failed', { error: 'PostQuantumAEAD unavailable' });
         throw new Error('Encryption module unavailable');
       }
+      this.postQuantumAEAD = PostQuantumAEAD;
     }
     return this.postQuantumAEAD;
   }

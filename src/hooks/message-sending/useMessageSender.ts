@@ -1,11 +1,11 @@
 import React, { useCallback, useMemo, useRef, useEffect } from 'react';
-import { SignalType } from '../../lib/signal-types';
-import { EventType } from '../../lib/event-types';
+import { SignalType } from '../../lib/types/signal-types';
+import { EventType } from '../../lib/types/event-types';
 import { Message } from '../../components/chat/messaging/types';
 import websocketClient from '../../lib/websocket';
-import { isValidKyberPublicKeyBase64 } from '../../lib/validators';
+import { isValidKyberPublicKeyBase64 } from '../../lib/utils/messaging-validators';
 import type { SecureDB } from '../../lib/secureDB';
-import { encryptLongTerm } from '../../lib/long-term-encryption';
+import { encryptLongTerm } from '../../lib/cryptography/long-term-encryption';
 import { sanitizeContent, sanitizeUsername } from '../../lib/sanitizers';
 import type { HybridPublicKeys, UserWithKeys, PendingRetryMessage } from '../../lib/types/message-sending-types';
 import { validateFileData, sanitizeReply, logError, getIdCache, mapSignalType, createLocalMessage, getSessionApi, TEXT_ENCODER } from '../../lib/utils/message-sending-utils';
@@ -14,7 +14,7 @@ import { recipientKeyValidator } from './validation';
 import { createDefaultResolvePeerHybridKeys } from './keys';
 import { createSessionResetHandler, createSessionEstablishedHandler, createSessionReadyHandler, createSessionResetRetryHandler } from './handlers';
 import { globalEncryptedPayloadCache, globalLongTermStoreAttempted, buildMessagePayload, encryptAndSend, cacheEncryptedPayload, dispatchLocalEvents, storeUnacknowledgedMessage, queueMessageForLater, requestBundleForRetry } from './send';
-import { CryptoUtils } from '../../lib/unified-crypto';
+import { CryptoUtils } from '../../lib/utils/crypto-utils';
 
 export function useMessageSender(
   users: UserWithKeys[],

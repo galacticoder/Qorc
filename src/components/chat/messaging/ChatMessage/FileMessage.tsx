@@ -2,7 +2,7 @@ import React, { useEffect, useCallback, useMemo } from "react";
 import { createPortal } from "react-dom";
 import { Avatar, AvatarFallback } from "../../../ui/avatar";
 import { format } from "date-fns";
-import { cn } from "../../../../lib/utils";
+import { cn } from "../../../../lib/utils/shared-utils";
 import { PaperclipIcon } from "../../assets/icons";
 import { Message } from "../types";
 import { MessageReceipt } from "../MessageReceipt";

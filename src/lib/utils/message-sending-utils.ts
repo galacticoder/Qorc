@@ -1,9 +1,9 @@
-import { SignalType } from '../signal-types';
+import { SignalType } from '../types/signal-types';
 import { Message } from '../../components/chat/messaging/types';
 import { sanitizeContent, sanitizeUsername } from '../sanitizers';
 import { MAX_FILEDATA_LENGTH, BASE64_SAFE_REGEX, MAX_ID_CACHE_SIZE, ID_CACHE_TTL_MS } from '../constants';
 import type { IdCache, SessionApi } from '../types/message-sending-types';
-import { CryptoUtils } from '../unified-crypto';
+import { CryptoUtils } from '../utils/crypto-utils';
 
 export const TEXT_ENCODER = new TextEncoder();
 

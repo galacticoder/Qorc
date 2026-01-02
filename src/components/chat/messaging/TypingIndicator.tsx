@@ -1,5 +1,5 @@
 import React, { memo } from "react";
-import { cn } from "../../../lib/utils";
+import { cn } from "../../../lib/utils/shared-utils";
 import { useUnifiedUsernameDisplay } from "../../../hooks/database/useUnifiedUsernameDisplay";
 
 interface TypingIndicatorProps {

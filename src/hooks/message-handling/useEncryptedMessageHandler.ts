@@ -1,27 +1,30 @@
 import React, { useCallback, useEffect, useRef } from "react";
-import { SignalType } from "../../lib/signal-types";
-import { EventType } from "../../lib/event-types";
+import { SignalType } from "../../lib/types/signal-types";
+import { EventType } from "../../lib/types/event-types";
 import { Message } from "../../components/chat/messaging/types";
 import type { User } from "../../components/chat/messaging/UserList";
 import websocketClient from "../../lib/websocket";
-import { blockingSystem } from "../../lib/blocking-system";
+import { blockingSystem } from "../../lib/blocking/blocking-system";
+import { handleCallSignal } from "../../lib/types/message-handler-types";
+import { resolveSenderHybridKeys, requestBundleOnce } from "./keys";
+import { sendEncryptedDeliveryReceipt, retryFailedDeliveryReceipts } from "./receipts";
+import { processTextMessage, processFileMessage, checkBlockingFilter, getMessageType } from "./message-processing";
+import type { PendingRetryEntry, FailedDeliveryReceipt, AttemptsLedgerEntry, ResetCounterEntry } from "../../lib/types/message-handling-types";
+import { handleSessionResetAndRetry, retryPendingMessages, replenishPqKyberPrekey } from "./session";
 import {
   createBlobCache,
   sanitizeRateLimitConfig,
-  BLOB_URL_TTL_MS,
+  type RateLimitConfig,
+} from "../../lib/utils/message-handler-utils";
+import { BLOB_URL_TTL_MS,
   KEY_REQUEST_CACHE_DURATION,
   PENDING_QUEUE_TTL_MS,
   PENDING_QUEUE_MAX_PER_PEER,
   MAX_GLOBAL_PENDING_MESSAGES,
   PQ_KEY_REPLENISH_COOLDOWN_MS,
   MAX_RESETS_PER_PEER,
-  RESET_WINDOW_MS,
-  type RateLimitConfig,
-} from "../../lib/message-handler-utils";
-import { handleCallSignal } from "../../lib/message-type-handlers";
-import { resolveSenderHybridKeys, requestBundleOnce } from "./keys";
-import { sendEncryptedDeliveryReceipt, retryFailedDeliveryReceipts } from "./receipts";
-import { handleSessionResetAndRetry, retryPendingMessages, replenishPqKyberPrekey } from "./session";
+  RESET_WINDOW_MS 
+} from "../../lib/constants";
 import {
   dispatchReadReceiptEvent,
   dispatchDeliveryReceiptEvent,
@@ -42,8 +45,6 @@ import {
   trustPeerIdentity,
   parseDecryptedPayload
 } from "./decryption";
-import { processTextMessage, processFileMessage, checkBlockingFilter, getMessageType } from "./message-processing";
-import type { PendingRetryEntry, FailedDeliveryReceipt, AttemptsLedgerEntry, ResetCounterEntry } from "../../lib/types/message-handling-types";
 
 export function useEncryptedMessageHandler(
   loginUsernameRef: React.RefObject<string>,

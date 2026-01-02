@@ -1,26 +1,17 @@
 /**
  * Long-Term Encryption Module
- * 
  * Encrypts data using recipient's long-term Kyber public key so it can be 
  * decrypted on any device using their passphrase-derived secret key.
- * 
- * Used for:
- * - Offline messages stored on server
- * - Profile pictures stored on server
- * - Any data that needs to persist across sessions
  */
 
-import {
-    KEM as PostQuantumKEM,
-    AEAD as PostQuantumAEAD,
-    Hash as PostQuantumHash,
-    Random as PostQuantumRandom,
-    Utils as PostQuantumUtils
-} from './post-quantum-crypto';
+import { PostQuantumKEM } from './kem';
+import { PostQuantumAEAD } from './aead';
+import { PostQuantumHash } from './hash';
+import { PostQuantumRandom } from './random';
+import { PostQuantumUtils } from '../utils/pq-utils';
+import { PQ_KEM_PUBLIC_KEY_SIZE, PQ_KEM_SECRET_KEY_SIZE, LONG_TERM_ENVELOPE_VERSION, LONG_TERM_ENVELOPE_KDF_INFO } from '../constants';
 
-const ENVELOPE_VERSION = 'lt-v1';
 const KDF_SALT = new TextEncoder().encode('long-term-encryption-v1');
-const KDF_INFO = 'long-term-aead-key-v1';
 
 export interface LongTermEnvelope {
     version: string;
@@ -39,14 +30,7 @@ export interface LongTermDecryptResult {
     timestamp: number;
 }
 
-/**
- * Encrypt data to a recipient's long-term Kyber public key.
- * Uses Kyber KEM to establish shared secret, then AEAD for encryption.
- * 
- * @param data - Data to encrypt (string or Uint8Array)
- * @param recipientKyberPublicKey - Recipient's Kyber public key (base64 or Uint8Array)
- * @param senderPublicKey - Optional sender's Kyber public key for identification
- */
+// Encrypt data to a recipient's long-term Kyber public key
 export async function encryptLongTerm(
     data: string | Uint8Array,
     recipientKyberPublicKey: string | Uint8Array,
@@ -61,8 +45,8 @@ export async function encryptLongTerm(
         : recipientKyberPublicKey;
 
     // Validate key length
-    if (recipientKey.length !== PostQuantumKEM.SIZES.publicKey) {
-        throw new Error(`Invalid Kyber public key length: ${recipientKey.length}, expected ${PostQuantumKEM.SIZES.publicKey}`);
+    if (recipientKey.length !== PQ_KEM_PUBLIC_KEY_SIZE) {
+        throw new Error(`Invalid Kyber public key length: ${recipientKey.length}, expected ${PQ_KEM_PUBLIC_KEY_SIZE}`);
     }
 
     // Kyber encapsulation
@@ -70,14 +54,14 @@ export async function encryptLongTerm(
 
     let aeadKey: Uint8Array | null = null;
     try {
-        aeadKey = PostQuantumHash.deriveKey(sharedSecret, KDF_SALT, KDF_INFO, 32);
+        aeadKey = PostQuantumHash.deriveKey(sharedSecret, KDF_SALT, LONG_TERM_ENVELOPE_KDF_INFO, 32);
         const nonce = PostQuantumRandom.randomBytes(36);
         const timestamp = Date.now();
-        const aad = new TextEncoder().encode(`${ENVELOPE_VERSION}:${timestamp}`);
+        const aad = new TextEncoder().encode(`${LONG_TERM_ENVELOPE_VERSION}:${timestamp}`);
         const { ciphertext, tag } = PostQuantumAEAD.encrypt(plaintextBytes, aeadKey, aad, nonce);
 
         return {
-            version: ENVELOPE_VERSION,
+            version: LONG_TERM_ENVELOPE_VERSION,
             kemCiphertext: PostQuantumUtils.uint8ArrayToBase64(kemCiphertext),
             nonce: PostQuantumUtils.uint8ArrayToBase64(nonce),
             ciphertext: PostQuantumUtils.uint8ArrayToBase64(ciphertext),
@@ -91,17 +75,12 @@ export async function encryptLongTerm(
     }
 }
 
-/**
- * Decrypt data using recipient's long-term Kyber secret key.
- * 
- * @param envelope - The encrypted envelope
- * @param recipientKyberSecretKey - Recipient's Kyber secret key (base64 or Uint8Array)
- */
+// Decrypt data using recipient's long-term Kyber secret key
 export async function decryptLongTerm(
     envelope: LongTermEnvelope,
     recipientKyberSecretKey: string | Uint8Array
 ): Promise<LongTermDecryptResult> {
-    if (envelope.version !== ENVELOPE_VERSION) {
+    if (envelope.version !== LONG_TERM_ENVELOPE_VERSION) {
         throw new Error(`Unsupported envelope version: ${envelope.version}`);
     }
 
@@ -109,8 +88,8 @@ export async function decryptLongTerm(
         ? PostQuantumUtils.base64ToUint8Array(recipientKyberSecretKey)
         : recipientKyberSecretKey;
 
-    if (secretKey.length !== PostQuantumKEM.SIZES.secretKey) {
-        throw new Error(`Invalid Kyber secret key length: ${secretKey.length}, expected ${PostQuantumKEM.SIZES.secretKey}`);
+    if (secretKey.length !== PQ_KEM_SECRET_KEY_SIZE) {
+        throw new Error(`Invalid Kyber secret key length: ${secretKey.length}, expected ${PQ_KEM_SECRET_KEY_SIZE}`);
     }
 
     // Decode envelope fields
@@ -125,15 +104,12 @@ export async function decryptLongTerm(
     let aeadKey: Uint8Array | null = null;
     try {
         // Derive same AEAD key
-        aeadKey = PostQuantumHash.deriveKey(sharedSecret, KDF_SALT, KDF_INFO, 32);
+        aeadKey = PostQuantumHash.deriveKey(sharedSecret, KDF_SALT, LONG_TERM_ENVELOPE_KDF_INFO, 32);
 
-        // Recreate AAD
-        const aad = new TextEncoder().encode(`${ENVELOPE_VERSION}:${envelope.timestamp}`);
+        const aad = new TextEncoder().encode(`${LONG_TERM_ENVELOPE_VERSION}:${envelope.timestamp}`);
 
-        // Decrypt
         const plaintext = PostQuantumAEAD.decrypt(ciphertext, nonce, tag, aeadKey, aad);
 
-        // Try to decode as text/JSON
         let text: string | undefined;
         let json: unknown;
         try {
@@ -157,10 +133,7 @@ export async function decryptLongTerm(
     }
 }
 
-/**
- * Encrypt JSON data for long-term storage.
- * Convenience wrapper that handles JSON serialization.
- */
+// Encrypt JSON data for long-term storage
 export async function encryptJsonLongTerm<T>(
     data: T,
     recipientKyberPublicKey: string | Uint8Array,
@@ -170,9 +143,7 @@ export async function encryptJsonLongTerm<T>(
     return encryptLongTerm(jsonStr, recipientKyberPublicKey, senderPublicKey);
 }
 
-/**
- * Decrypt and parse JSON data from long-term storage.
- */
+// Decrypt and parse JSON data from long-term storage
 export async function decryptJsonLongTerm<T>(
     envelope: LongTermEnvelope,
     recipientKyberSecretKey: string | Uint8Array
@@ -184,14 +155,12 @@ export async function decryptJsonLongTerm<T>(
     return result.json as T;
 }
 
-/**
- * Check if an object is a valid LongTermEnvelope
- */
+// Check if an object is a valid LongTermEnvelope
 export function isLongTermEnvelope(obj: unknown): obj is LongTermEnvelope {
     if (!obj || typeof obj !== 'object') return false;
     const e = obj as Record<string, unknown>;
     return (
-        e.version === ENVELOPE_VERSION &&
+        e.version === LONG_TERM_ENVELOPE_VERSION &&
         typeof e.kemCiphertext === 'string' &&
         typeof e.nonce === 'string' &&
         typeof e.ciphertext === 'string' &&

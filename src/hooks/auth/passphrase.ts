@@ -1,10 +1,10 @@
 import { RefObject } from "react";
-import { SignalType } from "../../lib/signal-types";
+import { SignalType } from "../../lib/types/signal-types";
 import websocketClient from "../../lib/websocket";
-import { CryptoUtils } from "../../lib/unified-crypto";
+import { CryptoUtils } from "../../lib/utils/crypto-utils";
 import type { ServerHybridPublicKeys, HybridKeys, HashParams } from "../../lib/types/auth-types";
-import { EventType } from "../../lib/event-types";
-import { ErrorType } from "../../lib/error-types";
+import { EventType } from "../../lib/types/event-types";
+import { ErrorType } from "../../lib/types/error-types";
 
 export interface PassphraseRefs {
   loginUsernameRef: RefObject<string>;

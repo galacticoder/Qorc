@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef } from "react";
-import { SignalType } from "@/lib/signal-types";
-import { EventType } from "../lib/event-types";
+import { SignalType } from "@/lib/types/signal-types";
+import { EventType } from "../lib/types/event-types";
 import websocketClient from "@/lib/websocket";
 import { WEBSOCKET_RATE_LIMIT_MAX_MESSAGES, WEBSOCKET_RATE_LIMIT_WINDOW_MS } from "@/lib/constants";
 import { isPlainObject, hasPrototypePollutionKeys } from "@/lib/sanitizers";

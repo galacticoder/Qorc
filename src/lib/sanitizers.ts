@@ -1,5 +1,5 @@
 import { USERNAME_REGEX } from './constants';
-import { SignalType } from './signal-types';
+import { SignalType } from './types/signal-types';
 import { MAX_CONTENT_LENGTH, MAX_USERNAME_LENGTH } from './constants';
 
 const DEFAULT_ALLOWED_KEYS = ['username', 'type', 'peer', 'at', 'callId', 'status', 'startTime', 'endTime', 'durationMs', 'direction'] as const;

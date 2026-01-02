@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef } from 'react';
 import { Message } from '@/components/chat/messaging/types';
-import { EventType } from '@/lib/event-types';
+import { EventType } from '@/lib/types/event-types';
 import { REPLY_MAX_TRACKED_ORIGINS, REPLY_MAX_REPLIES_PER_ORIGIN, REPLY_RATE_LIMIT_WINDOW_MS, REPLY_RATE_LIMIT_MAX_EVENTS } from '@/lib/constants';
 import { sanitizeContent, sanitizeMessageId } from '@/lib/sanitizers';
 import { validateEventDetail } from '../../lib/utils/shared-utils';

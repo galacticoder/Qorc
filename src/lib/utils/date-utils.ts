@@ -1,8 +1,6 @@
 import { format, isToday, isYesterday, isThisYear } from 'date-fns';
 
-/**
- * Format a date as relative age string (now, Xm, Xh, Xd, or MM/DD/YY).
- */
+// Format a date as relative age string (now, Xm, Xh, Xd, or MM/DD/YY)
 export const formatRelativeAge = (date: Date | number | undefined): string => {
   if (date === undefined || date === null) return '';
 
@@ -31,9 +29,7 @@ export const formatRelativeAge = (date: Date | number | undefined): string => {
   return `${month}/${day}/${year}`;
 };
 
-/**
- * Format call duration from seconds to human-readable string (Xhr Xm Xs).
- */
+// Format call duration from seconds to human-readable string (Xhr Xm Xs)
 export const formatCallDurationSeconds = (seconds?: number): string => {
   if (!seconds) return '';
 
@@ -50,9 +46,7 @@ export const formatCallDurationSeconds = (seconds?: number): string => {
   }
 };
 
-/**
- * Format call duration from milliseconds to M:SS format.
- */
+// Format call duration from milliseconds to M:SS format 
 export const formatCallDurationMs = (duration?: number): string => {
   if (!duration) return '';
   const mins = Math.floor(duration / 60000);
@@ -60,9 +54,7 @@ export const formatCallDurationMs = (duration?: number): string => {
   return `${mins}:${secs.toString().padStart(2, '0')}`;
 };
 
-/**
- * Format timestamp for call history: time if today, short date otherwise.
- */
+// Format timestamp for call history: time if today, short date otherwise
 export const formatCallHistoryTime = (timestamp?: number): string => {
   if (!timestamp) return '';
   const date = new Date(timestamp);
@@ -75,10 +67,8 @@ export const formatCallHistoryTime = (timestamp?: number): string => {
   return date.toLocaleDateString([], { month: 'short', day: 'numeric' });
 };
 
-/**
- * Format message timestamp for chat display with context-aware output.
- * today/yesterday/this year/other year formatting.
- */
+// Format message timestamp for chat display with context-aware output.
+// today/yesterday/this year/other year formatting.
 export const formatMessageTimestamp = (timestamp: Date): string => {
   try {
     if (!(timestamp instanceof Date) || isNaN(timestamp.getTime())) {
@@ -103,10 +93,8 @@ export const formatMessageTimestamp = (timestamp: Date): string => {
   }
 };
 
-/**
- * Format time for message receipts.
- * locale-aware time format.
- */
+// Format time for message receipts.
+// locale-aware time format.
 export const formatReceiptTime = (date: Date | undefined): string | undefined => {
   if (!date || !(date instanceof Date) || isNaN(date.getTime())) {
     return undefined;

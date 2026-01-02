@@ -1,11 +1,11 @@
 import React, { useState, useCallback, useMemo, useRef, useEffect } from "react";
-import { cn } from "../../../lib/utils";
+import { cn } from "../../../lib/utils/shared-utils";
 import { MessageSquare, Settings, LogOut } from "lucide-react";
 import { ComposeIcon } from "../assets/icons";
 import { Button } from "../../ui/button";
 import { sanitizeTextInput, isValidUsername } from "../../../lib/sanitizers";
 import { UserAvatar } from "../../ui/UserAvatar";
-import { EventType } from "../../../lib/event-types";
+import { EventType } from "../../../lib/types/event-types";
 
 // Chat user data model
 export interface User {

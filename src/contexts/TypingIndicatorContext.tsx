@@ -1,8 +1,8 @@
 import React, { createContext, useContext, useState, useCallback, ReactNode, useEffect, useRef, useMemo } from 'react';
-import { CryptoUtils } from '../lib/unified-crypto';
-import { SecureMemory } from '../lib/secure-memory';
-import { SignalType } from '../lib/signal-types';
-import { EventType } from '../lib/event-types';
+import { CryptoUtils } from '../lib/utils/crypto-utils';
+import { SecureMemory } from '../lib/cryptography/secure-memory';
+import { SignalType } from '../lib/types/signal-types';
+import { EventType } from '../lib/types/event-types';
 import { isPlainObject, hasPrototypePollutionKeys, isValidUsername } from '../lib/sanitizers';
 import {
 	DEFAULT_MAX_TYPING_USERS,

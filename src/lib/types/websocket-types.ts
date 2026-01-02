@@ -1,4 +1,4 @@
-import { SignalType } from "../signal-types";
+import { SignalType } from "./signal-types";
 
 export interface WebSocketMessageSchema {
   validate: (message: BaseMessage) => boolean;

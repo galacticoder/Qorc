@@ -1,7 +1,7 @@
 import { useRef, useCallback } from "react";
 import { Button } from "../../ui/button";
 import { PaperclipIcon } from "../assets/icons";
-import { cn } from "@/lib/utils";
+import { cn } from "@/lib/utils/shared-utils";
 
 interface FileUploaderProps {
   readonly onFileSelected: (file: File) => void;

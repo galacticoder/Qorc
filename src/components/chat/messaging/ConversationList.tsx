@@ -1,5 +1,5 @@
 import React, { memo, useMemo, useEffect, useState, useCallback } from "react";
-import { cn } from "../../../lib/utils";
+import { cn } from "../../../lib/utils/shared-utils";
 import { ScrollArea } from "../../ui/scroll-area";
 import { Button } from "../../ui/button";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from "../../ui/dialog";
@@ -8,9 +8,9 @@ import { Input } from "../../ui/input";
 import { toast } from "sonner";
 import { UserAvatar } from "../../ui/UserAvatar";
 import { isPlainObject, hasPrototypePollutionKeys, sanitizeUiText } from "../../../lib/sanitizers";
-import { EventType } from "../../../lib/event-types";
+import { EventType } from "../../../lib/types/event-types";
 import { UI_CALL_STATUS_RATE_WINDOW_MS, UI_CALL_STATUS_RATE_MAX, MAX_UI_CALL_STATUS_PEER_LENGTH, MAX_UI_CALL_STATUS_VALUE_LENGTH } from "../../../lib/constants";
-import { formatRelativeAge } from "../../../lib/date-utils";
+import { formatRelativeAge } from "../../../lib/utils/date-utils";
 
 export interface Conversation {
   readonly id: string;

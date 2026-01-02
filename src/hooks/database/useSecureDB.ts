@@ -2,7 +2,7 @@ import React, { useRef, useEffect, useCallback, useState } from 'react';
 import { SecureDB } from '../../lib/secureDB';
 import type { Message } from '../../components/chat/messaging/types';
 import type { User } from '../../components/chat/messaging/UserList';
-import { EventType } from '../../lib/event-types';
+import { EventType } from '../../lib/types/event-types';
 import { DB_SAVE_DEBOUNCE_MS } from '../../lib/constants';
 import { prewarmUsernameCache } from '../../lib/utils/database-utils';
 import type { UseSecureDBProps, UseSecureDBReturn, MappingPayload, RateLimitBucket } from '../../lib/types/database-types';

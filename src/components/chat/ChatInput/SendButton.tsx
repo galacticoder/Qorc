@@ -1,7 +1,7 @@
 import { useMemo } from "react";
 import { Button } from "../../ui/button.tsx";
 import { PaperPlaneIcon } from "../assets/icons";
-import { cn } from "@/lib/utils";
+import { cn } from "@/lib/utils/shared-utils";
 import { Message } from "../messaging/types";
 
 interface SendButtonProps {

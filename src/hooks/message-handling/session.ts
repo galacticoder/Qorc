@@ -1,13 +1,9 @@
-import { SignalType } from '../../lib/signal-types';
-import { EventType } from '../../lib/event-types';
+import { SignalType } from '../../lib/types/signal-types';
+import { EventType } from '../../lib/types/event-types';
 import websocketClient from '../../lib/websocket';
 import type { PendingRetryEntry, AttemptsLedgerEntry, ResetCounterEntry } from '../../lib/types/message-handling-types';
-import {
-  BUNDLE_REQUEST_COOLDOWN_MS,
-  MAX_RETRY_ATTEMPTS,
-  PENDING_QUEUE_MAX_PER_PEER,
-  computeBackoffMs
-} from '../../lib/message-handler-utils';
+import { computeBackoffMs } from '../../lib/utils/message-handler-utils';
+import { BUNDLE_REQUEST_COOLDOWN_MS, MAX_RETRY_ATTEMPTS, PENDING_QUEUE_MAX_PER_PEER } from '../../lib/constants';
 
 // Handle session reset and queue message for retry
 export const handleSessionResetAndRetry = async (

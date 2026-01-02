@@ -1,5 +1,5 @@
 import { STORAGE_KEYS } from './storage-keys';
-import { EventType } from './event-types';
+import { EventType } from './types/event-types';
 
 export enum ErrorSeverity {
   LOW = 'low',
@@ -371,7 +371,7 @@ export class SecureAuditLogger {
     try {
       const payload = {
         channel: SecureAuditLogger.CHANNEL,
-        level: 'error',
+        level: SignalType.ERROR,
         namespace,
         event,
         action,

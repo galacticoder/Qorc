@@ -1,22 +1,12 @@
-import { CryptoUtils } from "../unified-crypto";
+import { CryptoUtils } from "../utils/crypto-utils";
 import { MAX_P2P_PEER_CACHE, P2P_ROUTE_PROOF_TTL_MS, CERT_CLOCK_SKEW_MS } from "../constants";
+import { concatUint8Arrays } from "./shared-utils";
 
 export const createP2PError = (code: string) => {
   const error = new Error(code);
   error.name = 'P2PError';
   (error as Error & { code?: string }).code = code;
   return error;
-};
-
-export const concatUint8Arrays = (...arrays: Uint8Array[]) => {
-  const total = arrays.reduce((acc, arr) => acc + arr.length, 0);
-  const merged = new Uint8Array(total);
-  let offset = 0;
-  arrays.forEach((arr) => {
-    merged.set(arr, offset);
-    offset += arr.length;
-  });
-  return merged;
 };
 
 export const getChannelId = (localKey: string, remoteKey: string) =>

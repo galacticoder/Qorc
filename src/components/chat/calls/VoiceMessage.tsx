@@ -1,9 +1,10 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
-import { cn } from '../../../lib/utils';
+import { cn } from '../../../lib/utils/shared-utils';
 import { Button } from '../../ui/button';
 import { Play, Pause } from 'lucide-react';
 import { useFileUrl } from '../../../hooks/file-handling/useFileUrl';
 import type { SecureDB } from '../../../lib/secureDB';
+import { SignalType } from '../../../lib/types/signal-types';
 
 // Props for voice message bubble
 interface VoiceMessageProps {
@@ -99,7 +100,7 @@ export function VoiceMessage({
         audioRef.current.removeEventListener('loadedmetadata', handleLoadedMetadata);
         audioRef.current.removeEventListener('timeupdate', handleTimeUpdate);
         audioRef.current.removeEventListener('ended', handleEnded);
-        audioRef.current.removeEventListener('error', handleError);
+        audioRef.current.removeEventListener(SignalType.ERROR, handleError);
         audioRef.current = null;
       }
       if (drawRafRef.current) {
@@ -132,7 +133,7 @@ export function VoiceMessage({
         audio.addEventListener('loadedmetadata', handleLoadedMetadata);
         audio.addEventListener('timeupdate', handleTimeUpdate);
         audio.addEventListener('ended', handleEnded);
-        audio.addEventListener('error', handleError);
+        audio.addEventListener(SignalType.ERROR, handleError);
       }
       await audioRef.current.play();
       setIsPlaying(true);

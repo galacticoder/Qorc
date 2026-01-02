@@ -1,4 +1,4 @@
-import { CryptoUtils } from '../../lib/unified-crypto';
+import { CryptoUtils } from '../../lib/utils/crypto-utils';
 import { KYBER_PUBLIC_KEY_LENGTH, DILITHIUM_PUBLIC_KEY_LENGTH, X25519_PUBLIC_KEY_LENGTH } from '../../lib/constants';
 import type { HybridPublicKeys } from '../../lib/types/message-sending-types';
 

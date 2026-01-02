@@ -1,5 +1,5 @@
-import { SignalType } from '../../lib/signal-types';
-import { EventType } from '../../lib/event-types';
+import { SignalType } from '../../lib/types/signal-types';
+import { EventType } from '../../lib/types/event-types';
 import websocketClient from '../../lib/websocket';
 import type { HybridKeys, ResolvedSenderKeys, UserWithHybridKeys } from '../../lib/types/message-handling-types';
 

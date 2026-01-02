@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { SecureDB } from '../../lib/secureDB';
 import { UsernameDisplayContext } from '../../lib/username-display';
-import { EventType } from '../../lib/event-types';
+import { EventType } from '../../lib/types/event-types';
 import { isPlainObject, hasPrototypePollutionKeys } from '../../lib/sanitizers';
 import { sanitizeDbUsername, anonymizeUsername } from '../../lib/utils/database-utils';
 import { USERNAME_DISPLAY_RATE_LIMIT_WINDOW_MS, USERNAME_DISPLAY_RATE_LIMIT_MAX_EVENTS } from '../../lib/constants';

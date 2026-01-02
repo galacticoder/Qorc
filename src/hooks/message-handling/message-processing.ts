@@ -1,7 +1,7 @@
 import { v4 as uuidv4 } from 'uuid';
-import { SignalType } from '../../lib/signal-types';
+import { SignalType } from '../../lib/types/signal-types';
 import { Message } from '../../components/chat/messaging/types';
-import { safeJsonParseForMessages, safeJsonParseForFileMessages, createBlobUrlFromBase64 } from '../../lib/message-handler-utils';
+import { safeJsonParseForMessages, safeJsonParseForFileMessages, createBlobUrlFromBase64 } from '../../lib/utils/message-handler-utils';
 import { toast } from 'sonner';
 
 // Process text message and add to state

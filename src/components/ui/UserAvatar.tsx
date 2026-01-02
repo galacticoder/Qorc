@@ -2,7 +2,7 @@ import React, { useState, useEffect, useCallback, memo } from 'react';
 import { profilePictureSystem } from '../../lib/profile-picture-system';
 import { isPlainObject, hasPrototypePollutionKeys } from '../../lib/sanitizers';
 import { sanitizeEventText } from '../../lib/sanitizers';
-import { EventType } from '../../lib/event-types';
+import { EventType } from '../../lib/types/event-types';
 import {
     DEFAULT_EVENT_RATE_WINDOW_MS,
     DEFAULT_EVENT_RATE_MAX,
