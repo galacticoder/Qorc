@@ -1,7 +1,7 @@
 /**
  * Long-Term Encryption Module
  * Encrypts data using recipient's long-term Kyber public key so it can be 
- * decrypted on any device using their passphrase-derived secret key.
+ * decrypted on any device using their passphrase derived secret key.
  */
 
 import { PostQuantumKEM } from './kem';
@@ -30,7 +30,7 @@ export interface LongTermDecryptResult {
     timestamp: number;
 }
 
-// Encrypt data to a recipient's long-term Kyber public key
+// Encrypt data
 export async function encryptLongTerm(
     data: string | Uint8Array,
     recipientKyberPublicKey: string | Uint8Array,
@@ -44,12 +44,10 @@ export async function encryptLongTerm(
         ? PostQuantumUtils.base64ToUint8Array(recipientKyberPublicKey)
         : recipientKyberPublicKey;
 
-    // Validate key length
     if (recipientKey.length !== PQ_KEM_PUBLIC_KEY_SIZE) {
         throw new Error(`Invalid Kyber public key length: ${recipientKey.length}, expected ${PQ_KEM_PUBLIC_KEY_SIZE}`);
     }
 
-    // Kyber encapsulation
     const { ciphertext: kemCiphertext, sharedSecret } = PostQuantumKEM.encapsulate(recipientKey);
 
     let aeadKey: Uint8Array | null = null;
@@ -75,7 +73,7 @@ export async function encryptLongTerm(
     }
 }
 
-// Decrypt data using recipient's long-term Kyber secret key
+// Decrypt data
 export async function decryptLongTerm(
     envelope: LongTermEnvelope,
     recipientKyberSecretKey: string | Uint8Array
@@ -92,18 +90,15 @@ export async function decryptLongTerm(
         throw new Error(`Invalid Kyber secret key length: ${secretKey.length}, expected ${PQ_KEM_SECRET_KEY_SIZE}`);
     }
 
-    // Decode envelope fields
     const kemCiphertext = PostQuantumUtils.base64ToUint8Array(envelope.kemCiphertext);
     const nonce = PostQuantumUtils.base64ToUint8Array(envelope.nonce);
     const ciphertext = PostQuantumUtils.base64ToUint8Array(envelope.ciphertext);
     const tag = PostQuantumUtils.base64ToUint8Array(envelope.tag);
 
-    // Decapsulate to get shared secret
     const sharedSecret = PostQuantumKEM.decapsulate(kemCiphertext, secretKey);
 
     let aeadKey: Uint8Array | null = null;
     try {
-        // Derive same AEAD key
         aeadKey = PostQuantumHash.deriveKey(sharedSecret, KDF_SALT, LONG_TERM_ENVELOPE_KDF_INFO, 32);
 
         const aad = new TextEncoder().encode(`${LONG_TERM_ENVELOPE_VERSION}:${envelope.timestamp}`);

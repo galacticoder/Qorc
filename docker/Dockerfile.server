@@ -29,11 +29,11 @@ RUN mkdir -p /var/run/tailscale /var/lib/tailscale && \
 WORKDIR /app
 
 COPY scripts/ ./scripts/
-COPY server/package*.json ./server/
+COPY server/package*.json ./
 
 RUN node scripts/install-deps.cjs --server
 
-RUN cd server && npm install
+RUN npm install
 
 COPY server/ ./server/
 

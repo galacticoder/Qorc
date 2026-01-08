@@ -2,6 +2,7 @@ import { useRef, useCallback } from "react";
 import { Button } from "../../ui/button";
 import { PaperclipIcon } from "../assets/icons";
 import { cn } from "@/lib/utils/shared-utils";
+import { SignalType } from "@/lib/types/signal-types";
 
 interface FileUploaderProps {
   readonly onFileSelected: (file: File) => void;
@@ -44,7 +45,7 @@ export function FileUploader({ onFileSelected, disabled }: FileUploaderProps) {
       >
         <PaperclipIcon className="h-5 w-5" />
       </Button>
-      <input ref={fileInputRef} type=SignalType.FILE className="hidden" onChange={handleChange} />
+      <input ref={fileInputRef} type={SignalType.FILE} className="hidden" onChange={handleChange} />
     </>
   );
 }

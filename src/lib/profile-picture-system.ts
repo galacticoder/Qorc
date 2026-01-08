@@ -5,6 +5,7 @@ import { generateDefaultAvatar } from './utils/avatar-utils';
 import { STORAGE_KEYS } from './storage-keys';
 import { SignalType } from './types/signal-types';
 import { EventType } from './types/event-types';
+import { unifiedSignalTransport } from './transport/unified-signal-transport';
 
 const MAX_AVATAR_SIZE_BYTES = 512 * 1024;
 const MAX_AVATAR_DIMENSION = 512;
@@ -45,7 +46,7 @@ class ProfilePictureSystem {
     private static instance: ProfilePictureSystem | null = null;
     private secureDB: SecureDB | null = null;
     private ownAvatar: AvatarData | null = null;
-    private settings: ProfileSettings = { shareWithOthers: false, lastUpdated: 0 };
+    private settings: ProfileSettings = { shareWithOthers: true, lastUpdated: 0 };
     private avatarCache: Map<string, CachedAvatar> = new Map();
     private pendingRequests: Set<string> = new Set();
     private initialized = false;
@@ -79,7 +80,6 @@ class ProfilePictureSystem {
                 }
             } catch (avatarError: any) {
                 if (/decrypt|BLAKE3|MAC/i.test(avatarError?.message)) {
-                    console.warn('[ProfilePictureSystem] Clearing corrupted avatar data');
                     await this.secureDB.clearStore(AVATAR_STORE_KEY).catch(() => { });
                 }
             }
@@ -117,7 +117,6 @@ class ProfilePictureSystem {
                 }
             } catch (settingsError: any) {
                 if (/decrypt|BLAKE3|MAC/i.test(settingsError?.message)) {
-                    console.warn('[ProfilePictureSystem] Clearing corrupted settings data');
                     await this.secureDB.clearStore(SETTINGS_KEY).catch(() => { });
                 }
             }
@@ -128,17 +127,16 @@ class ProfilePictureSystem {
                 if (cachedAvatars && typeof cachedAvatars === 'object') {
                     const cache = cachedAvatars as Record<string, CachedAvatar>;
                     const now = Date.now();
+                    let count = 0;
                     for (const [username, avatar] of Object.entries(cache)) {
-                        const recalculatedExpiresAt = avatar.cachedAt + AVATAR_CACHE_TTL;
-                        if (recalculatedExpiresAt > now && this.isValidCachedAvatar(avatar)) {
-                            avatar.expiresAt = recalculatedExpiresAt;
+                        if (this.isValidCachedAvatar(avatar)) {
                             this.avatarCache.set(username, avatar);
+                            count++;
                         }
                     }
                 }
             } catch (cacheError: any) {
                 if (/decrypt|BLAKE3|MAC/i.test(cacheError?.message)) {
-                    console.warn('[ProfilePictureSystem] Clearing corrupted avatar cache');
                 }
                 this.avatarCache.clear();
             }
@@ -167,13 +165,14 @@ class ProfilePictureSystem {
     private isValidCachedAvatar(data: unknown): data is CachedAvatar {
         if (!data || typeof data !== 'object') return false;
         const d = data as any;
+        const isDataValid = d.data === null || (typeof d.data === 'string' && d.data.length <= MAX_AVATAR_SIZE_BYTES * 1.4);
+        const isHashValid = d.hash === null || (typeof d.hash === 'string' && d.hash.length === 64);
+
         return (
-            typeof d.data === 'string' &&
-            typeof d.hash === 'string' &&
+            isDataValid &&
+            isHashValid &&
             typeof d.cachedAt === 'number' &&
-            typeof d.expiresAt === 'number' &&
-            d.data.length <= MAX_AVATAR_SIZE_BYTES * 1.4 &&
-            d.hash.length === 64
+            typeof d.expiresAt === 'number'
         );
     }
 
@@ -378,7 +377,7 @@ class ProfilePictureSystem {
 
     getPeerAvatar(username: string): string | null {
         const cached = this.avatarCache.get(username);
-        if (cached) {
+        if (cached && cached.data) {
             return cached.data;
         }
         return null;
@@ -386,7 +385,7 @@ class ProfilePictureSystem {
 
     getPeerAvatarHash(username: string): string | null {
         const cached = this.avatarCache.get(username);
-        if (cached) {
+        if (cached && cached.hash) {
             return cached.hash;
         }
         return null;
@@ -416,9 +415,15 @@ class ProfilePictureSystem {
         this.pendingRequests.add(username);
 
         try {
+            await unifiedSignalTransport.send(username, { type: 'profile-picture-request' }, SignalType.SIGNAL);
+        } catch (p2pError) {
             await this.fetchPeerFromServer(username);
         } finally {
-            setTimeout(() => this.pendingRequests.delete(username), 30000);
+            setTimeout(() => {
+                if (this.pendingRequests.has(username)) {
+                    this.pendingRequests.delete(username);
+                }
+            }, 30000);
         }
     }
 
@@ -427,7 +432,10 @@ class ProfilePictureSystem {
     }
 
     createProfilePictureResponse(): ProfilePictureMessage | null {
-        if (!this.settings.shareWithOthers || !this.ownAvatar) {
+        if (!this.settings.shareWithOthers) {
+            return { type: 'profile-picture-response' };
+        }
+        if (!this.ownAvatar) {
             return { type: 'profile-picture-response' };
         }
 
@@ -446,13 +454,30 @@ class ProfilePictureSystem {
         if (!message || typeof message.type !== 'string') return null;
 
         if (message.type === 'profile-picture-request') {
-            return this.createProfilePictureResponse();
+            const response = this.createProfilePictureResponse();
+            if (response) {
+                await unifiedSignalTransport.send(fromUsername, response, SignalType.SIGNAL).catch(() => { });
+            }
+            return response;
         }
 
         if (message.type === 'profile-picture-response') {
             this.pendingRequests.delete(fromUsername);
 
             if (!message.data || !message.hash) {
+                const defaultAvatar = generateDefaultAvatar(fromUsername);
+                const defaultHash = await this.hashData(defaultAvatar);
+
+                this.avatarCache.set(fromUsername, {
+                    data: defaultAvatar,
+                    hash: defaultHash,
+                    cachedAt: Date.now(),
+                    expiresAt: Date.now() + AVATAR_CACHE_TTL
+                });
+
+                window.dispatchEvent(new CustomEvent(EventType.PROFILE_PICTURE_UPDATED, {
+                    detail: { type: 'peer', username: fromUsername, fromServer: false, usedDefault: true }
+                }));
                 return null;
             }
 
@@ -653,7 +678,8 @@ class ProfilePictureSystem {
                 type: SignalType.AVATAR_FETCH,
                 target: username
             });
-        } catch { }
+        } catch (err) {
+        }
     }
 
     /**
@@ -685,9 +711,6 @@ class ProfilePictureSystem {
         isDefault?: boolean;
         publicData?: any;
     }): Promise<void> {
-        if (!response.found || !response.envelope) {
-        }
-
         const isOwn = response.target === 'own';
         const isDefault = !!response.isDefault;
 

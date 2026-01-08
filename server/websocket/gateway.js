@@ -310,6 +310,9 @@ export function attachGateway({
   const heartbeatInterval = setInterval(() => {
     for (const ws of wss.clients) {
       try {
+        if (ws?._isP2PSignaling) {
+          continue;
+        }
         if (ws.isAlive === false) {
           try { ws.terminate?.(); } catch { }
           continue;

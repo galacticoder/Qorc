@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback, memo } from 'react';
 import { Phone, PhoneOff, Video, VideoOff, Mic, MicOff, Monitor, MonitorOff, Minimize2, Maximize2, ChevronDown } from 'lucide-react';
-import type { CallState } from '../../../lib/webrtc-calling';
+import type { CallState } from '../../../lib/transport/secure-calling-service';
 import { useUnifiedUsernameDisplay } from '../../../hooks/database/useUnifiedUsernameDisplay';
 import { UserAvatar } from '../../ui/UserAvatar';
 import { Popover, PopoverContent, PopoverTrigger } from '../../ui/popover';
@@ -428,7 +428,7 @@ export const CallModal: React.FC<CallModalProps> = memo(({
             {isIncoming && isRinging ? `Incoming ${isVideoCall ? 'video' : 'audio'} call...` : isConnected ? formatTime(callDuration) : 'Calling...'}
           </div>
         </div>
-        <div className="flex items-center gap-1" onMouseDown={(e) => e.stopPropagation() }>
+        <div className="flex items-center gap-1" onMouseDown={(e) => e.stopPropagation()}>
           {isIncoming && isRinging ? (
             <>
               <button
@@ -551,13 +551,13 @@ export const CallModal: React.FC<CallModalProps> = memo(({
             if (hasRemoteVideo) availableStreams.push('remote-cam');
             if (hasLocalVideo) availableStreams.push('local');
 
-            let mainView: StreamType = 'local'; 
+            let mainView: StreamType = 'local';
 
             if (focusedView && availableStreams.includes(focusedView)) {
               mainView = focusedView;
             } else {
               if (hasRemoteScreen) mainView = 'remote-screen';
-              
+
               else if (hasRemoteVideo) mainView = 'remote-cam';
               else if (hasLocalVideo) mainView = 'local';
               else mainView = 'local';

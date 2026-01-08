@@ -282,51 +282,6 @@ export async function handleSessionEstablished({ ws, sessionId, parsed, state })
   await sendSecureMessage(ws, { type: SignalType.OK, message: 'session-established-sent' });
 }
 
-export async function handleP2PSignalingRelay({ ws, sessionId: _sessionId, parsed, state }) {
-  if (!state?.hasAuthenticated) {
-    return await sendSecureMessage(ws, { type: SignalType.ERROR, message: 'Authentication required' });
-  }
-  if (!state.username || typeof state.username !== 'string') {
-    return await sendSecureMessage(ws, { type: SignalType.ERROR, message: 'Invalid session state' });
-  }
-
-  const type = parsed?.type;
-  const to = typeof parsed?.to === 'string' ? parsed.to.trim() : '';
-  if (!to) {
-    return await sendSecureMessage(ws, { type: SignalType.ERROR, message: 'Invalid signaling target' });
-  }
-
-  const relayMessage = {
-    type,
-    from: state.username,
-    to,
-    payload: parsed?.payload,
-    ...(parsed?.meta ? { meta: parsed.meta } : {})
-  };
-
-  try {
-    const senderBlockedByRecipient = await checkBlocking(state.username, to);
-    const recipientBlockedBySender = await checkBlocking(to, state.username);
-    if (senderBlockedByRecipient || recipientBlockedBySender) {
-      return await sendSecureMessage(ws, { type: SignalType.OK, message: 'blocked' });
-    }
-  } catch (_e) { }
-
-  const localResult = await deliverToLocalConnections(to, relayMessage);
-  if (localResult.delivered) {
-    await sendSecureMessage(ws, { type: SignalType.OK, message: 'relayed' });
-    return;
-  }
-
-  const remoteResult = await tryRemoteDelivery(to, relayMessage);
-  if (remoteResult.delivered) {
-    await sendSecureMessage(ws, { type: SignalType.OK, message: 'relayed' });
-    return;
-  }
-
-  await sendSecureMessage(ws, { type: SignalType.ERROR, message: 'Peer offline' });
-}
-
 export async function handleStoreOfflineMessage({ ws, parsed, state }) {
   if (!state?.hasAuthenticated) {
     cryptoLogger.warn('[OFFLINE-STORE] Rejected - not authenticated');
@@ -687,11 +642,11 @@ export async function handleAvatarUpload({ ws, parsed, state }) {
     }
 
     if (envelope.version !== 'lt-v1') {
-      cryptoLogger.warn('[AVATAR] Rejected upload with invalid/missing version', { version: envelope.version });
       return await sendSecureMessage(ws, { type: SignalType.AVATAR_UPLOAD_RESPONSE, success: false, error: 'Unsupported envelope version' });
     }
 
     const envelopeStr = JSON.stringify(envelope);
+
     if (envelopeStr.length > 1024 * 1024) {
       return await sendSecureMessage(ws, { type: SignalType.AVATAR_UPLOAD_RESPONSE, success: false, error: 'Avatar too large' });
     }
@@ -705,7 +660,6 @@ export async function handleAvatarUpload({ ws, parsed, state }) {
 
     await sendSecureMessage(ws, { type: SignalType.AVATAR_UPLOAD_RESPONSE, success: true });
   } catch (error) {
-    cryptoLogger.error('[AVATAR] Upload failed', { error: error.message });
     await sendSecureMessage(ws, { type: SignalType.AVATAR_UPLOAD_RESPONSE, success: false, error: 'Upload failed' });
   }
 }
@@ -726,14 +680,9 @@ export async function handleAvatarFetch({ ws, parsed, state }) {
         try {
           envelope = JSON.parse(result.encryptedEnvelope);
           if (!envelope || envelope.version !== 'lt-v1') {
-            cryptoLogger.warn('[AVATAR:WARN] Stored own avatar envelope has invalid version/missing, ignoring.', {
-              username: state.username,
-              version: envelope?.version
-            });
             envelope = null;
           }
         } catch (e) {
-          cryptoLogger.error('[AVATAR:ERROR] Failed to parse own avatar envelope', e);
           envelope = null;
         }
       }

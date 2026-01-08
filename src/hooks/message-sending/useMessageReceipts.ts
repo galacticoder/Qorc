@@ -15,6 +15,7 @@ import {
   updateMessageReceipt
 } from './receipts';
 import { validateHybridKeys } from './validation';
+import { unifiedSignalTransport } from '../../lib/transport/unified-signal-transport';
 
 export function useMessageReceipts(
   messages: Message[],
@@ -219,32 +220,11 @@ export function useMessageReceipts(
         }
 
         const readReceiptData = {
-          messageId: `${READ_RECEIPT_PREFIX}${safeMessageId}`,
-          from: currentUsername,
-          to: safeSender,
-          type: SignalType.READ_RECEIPT,
+          messageId: safeMessageId,
           timestamp: Date.now(),
         };
 
-        const encryptedMessage = await (window as any).edgeApi?.encrypt?.({
-          fromUsername: currentUsername,
-          toUsername: safeSender,
-          plaintext: JSON.stringify(readReceiptData),
-          recipientKyberPublicKey: hybridKeys.kyberPublicBase64,
-          recipientHybridKeys: hybridKeys
-        });
-
-        if (!encryptedMessage?.success || !encryptedMessage?.encryptedPayload) {
-          return;
-        }
-
-        const readReceiptPayload = {
-          type: SignalType.ENCRYPTED_MESSAGE,
-          to: safeSender,
-          encryptedPayload: encryptedMessage.encryptedPayload,
-        };
-
-        websocketClient.send(JSON.stringify(readReceiptPayload));
+        await unifiedSignalTransport.send(safeSender, readReceiptData, SignalType.READ_RECEIPT);
 
         markReceiptSent(sentReceiptsRef.current, safeMessageId);
       } catch { }

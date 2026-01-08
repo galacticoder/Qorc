@@ -3,11 +3,12 @@ import { Message } from '../../components/chat/messaging/types';
 import { EventType } from '../../lib/types/event-types';
 import { SignalType } from '../../lib/types/signal-types';
 import { SecurityAuditLogger } from '../../lib/cryptography/audit-logger';
+import { profilePictureSystem } from '../../lib/profile-picture-system';
 import type { EncryptedMessage } from './useP2PMessaging';
 
 interface UseP2PMessageHandlersProps {
   p2pMessaging: {
-    onMessage: (handler: (msg: EncryptedMessage) => Promise<void>) => void;
+    onMessage: (handler: (msg: EncryptedMessage) => Promise<void>) => () => void;
   };
   setMessages: React.Dispatch<React.SetStateAction<Message[]>>;
   saveMessageWithContext: (message: Message) => Promise<any> | void;
@@ -23,9 +24,19 @@ export function useP2PMessageHandlers({
   const saveMessageRef = useRef(saveMessageWithContext);
   useEffect(() => { saveMessageRef.current = saveMessageWithContext; }, [saveMessageWithContext]);
 
+  // Register once and clean up the listener on unmount/change
   useEffect(() => {
-    p2pMessaging.onMessage(async (encryptedMessage: EncryptedMessage) => {
+    const cleanup = p2pMessaging.onMessage(async (encryptedMessage: EncryptedMessage) => {
       try {
+        // Profile picture requests/responses
+        if (encryptedMessage.messageType === SignalType.SIGNAL) {
+          const payload = encryptedMessage.content as any;
+          if (payload?.type === 'profile-picture-request' || payload?.type === 'profile-picture-response') {
+            profilePictureSystem.handleIncomingMessage(payload, encryptedMessage.from).catch(() => { });
+            return;
+          }
+        }
+
         // Typing indicators
         if (encryptedMessage.messageType === SignalType.TYPING) {
           window.dispatchEvent(new CustomEvent(EventType.TYPING_INDICATOR, {
@@ -53,6 +64,21 @@ export function useP2PMessageHandlers({
               }
             }));
           }
+          return;
+        }
+
+        // [NEW] Call Signals (P2P Calling)
+        if (encryptedMessage.messageType === SignalType.CALL_SIGNAL) {
+          const payload = encryptedMessage.content as any;
+
+          let signal = payload;
+          if (payload?.type === EventType.CALL_SIGNAL && typeof payload.content === 'string') {
+              signal = JSON.parse(payload.content);
+          }
+
+          window.dispatchEvent(new CustomEvent(EventType.CALL_SIGNAL, {
+            detail: signal
+          }));
           return;
         }
 
@@ -155,9 +181,14 @@ export function useP2PMessageHandlers({
         });
 
         saveMessageRef.current(message);
-      } catch {
-        SecurityAuditLogger.log(SignalType.ERROR, 'p2p-message-handle-failed', { error: 'unknown' });
+
+      } catch (err) {
+        SecurityAuditLogger.log(SignalType.ERROR, 'p2p-message-handle-failed', { error: String(err) });
       }
     });
-  }, []);
+
+    return () => {
+      cleanup?.();
+    };
+  }, [p2pMessaging]);
 }

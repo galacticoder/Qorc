@@ -1,16 +1,16 @@
 import { RefObject } from "react";
-import { WebRTCP2PService } from "../../lib/webrtc-p2p";
+import { SecureP2PService } from "../../lib/transport/secure-p2p-service";
 import { CryptoUtils } from "../../lib/utils/crypto-utils";
 import type { HybridKeys, PeerCertificateBundle } from "../../lib/types/p2p-types";
 import { RECEIPT_RETENTION_MS } from "../../lib/constants";
 import { SignalType } from "../../lib/types/signal-types";
 
 export interface ReceiptRefs {
-  p2pServiceRef: RefObject<WebRTCP2PService | null>;
+  p2pServiceRef: RefObject<SecureP2PService | null>;
   sentP2PReceiptsRef: RefObject<Map<string, number>>;
 }
 
-// Constructs a read receipt sender that encrypts acknowledgements with the recipient's keys
+// Constructs read receipt sender
 export function createSendP2PReadReceipt(
   refs: ReceiptRefs,
   hybridKeys: HybridKeys | null,

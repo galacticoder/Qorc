@@ -11,7 +11,7 @@ import { useTypingIndicator } from "@/hooks/message-handling/useTypingIndicator"
 import { TypingIndicatorList } from "./TypingIndicatorList";
 import { Video, MoreVertical, ShieldOff } from 'lucide-react';
 import { CallIcon } from '../assets/icons';
-import type { CallState } from "../../../lib/webrtc-calling";
+import type { CallState } from "../../../lib/transport/secure-calling-service";
 import type { useAuth } from "@/hooks/auth/useAuth";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { BlockUserButton } from "../calls/BlockUserButton";
@@ -151,8 +151,10 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
     if (!scrollContainer) return;
 
     scrollToBottom(scrollContainer);
-    initialScrollDoneRef.current.set(selectedConversation, true);
-  }, [messages, selectedConversation, scrollToBottom]);
+    if (messages.length > 0 || !hasMoreMessages) {
+      initialScrollDoneRef.current.set(selectedConversation, true);
+    }
+  }, [messages, selectedConversation, scrollToBottom, hasMoreMessages]);
 
   useEffect(() => {
     if (selectedConversation) {

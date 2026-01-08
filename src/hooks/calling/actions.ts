@@ -1,13 +1,15 @@
 import React from 'react';
 import { unstable_batchedUpdates } from 'react-dom';
-import { WebRTCCallingService } from '../../lib/webrtc-calling';
+import { SecureCallingService } from '../../lib/transport/secure-calling-service';
 import { isValidCallingUsername, isValidCallId, stopMediaStream } from '../../lib/utils/calling-utils';
+import { PostQuantumUtils } from '../../lib/utils/pq-utils';
 
 export interface ActionRefs {
-  serviceRef: React.RefObject<WebRTCCallingService | null>;
+  serviceRef: React.RefObject<SecureCallingService | null>;
   localStreamRef: React.RefObject<MediaStream | null>;
   remoteStreamRef: React.RefObject<MediaStream | null>;
   remoteScreenStreamRef: React.RefObject<MediaStream | null>;
+  getPeerKeys?: (username: string) => Promise<{ kyberPublicBase64: string; dilithiumPublicBase64: string; x25519PublicBase64?: string } | null>;
 }
 
 export interface ActionSetters {
@@ -41,10 +43,42 @@ export const createStartCall = (
       throw new Error('[useCalling] Cannot call yourself');
     }
 
+    // Make sure keys are available for peer
     try {
+      if (refs.getPeerKeys) {
+        try {
+          const service = refs.serviceRef.current;
+          let hasKeys = false;
+          if (service && (service as any).hasPeerKeys) {
+            hasKeys = (service as any).hasPeerKeys(peer);
+          }
+
+          if (!hasKeys) {
+            const keys = await refs.getPeerKeys(peer);
+            if (keys) {
+              const peerKeys = {
+                username: peer,
+                dilithiumPublicKey: PostQuantumUtils.base64ToUint8Array(keys.dilithiumPublicBase64),
+                kyberPublicKey: PostQuantumUtils.base64ToUint8Array(keys.kyberPublicBase64),
+                x25519PublicKey: keys.x25519PublicBase64 ? PostQuantumUtils.base64ToUint8Array(keys.x25519PublicBase64) : undefined
+              };
+
+              if (peerKeys.dilithiumPublicKey.length > 0 && peerKeys.kyberPublicKey.length > 0) {
+                refs.serviceRef.current.setPeerKeys(peer, peerKeys as any);
+              }
+            }
+          }
+        } catch (keyError) {
+          console.warn('[useCalling] Failed to fetch keys for peer call:', keyError);
+        }
+      }
+
       const callId = await refs.serviceRef.current.startCall(peer, callType);
       return callId;
-    } catch (_error) {
+    } catch (_error: any) {
+      if (_error.message === 'arbitration-loss') {
+        return '';
+      }
       console.error('[useCalling] Failed to start call:', _error);
       unstable_batchedUpdates(() => {
         setters.setCurrentCall(null);
@@ -65,7 +99,7 @@ export const createStartCall = (
 
 // Callback for answering a call
 export const createAnswerCall = (refs: ActionRefs) => {
-  return async (callId: string) => {
+  return async (callId: string, peer?: string) => {
     if (!refs.serviceRef.current) {
       throw new Error('[useCalling] Calling service not initialized');
     }
@@ -75,6 +109,35 @@ export const createAnswerCall = (refs: ActionRefs) => {
     }
 
     try {
+      if (peer && refs.getPeerKeys) {
+        try {
+          const service = refs.serviceRef.current;
+          let hasKeys = false;
+          if (service && (service as any).hasPeerKeys) {
+            hasKeys = (service as any).hasPeerKeys(peer);
+          }
+
+          if (!hasKeys) {
+            const keys = await refs.getPeerKeys(peer);
+            if (keys) {
+              const peerKeys = {
+                username: peer,
+                dilithiumPublicKey: PostQuantumUtils.base64ToUint8Array(keys.dilithiumPublicBase64),
+                kyberPublicKey: PostQuantumUtils.base64ToUint8Array(keys.kyberPublicBase64),
+                x25519PublicKey: keys.x25519PublicBase64 ? PostQuantumUtils.base64ToUint8Array(keys.x25519PublicBase64) : undefined
+              };
+
+              // Validate keys
+              if (peerKeys.dilithiumPublicKey.length > 0 && peerKeys.kyberPublicKey.length > 0) {
+                refs.serviceRef.current.setPeerKeys(peer, peerKeys as any);
+              }
+            }
+          }
+        } catch (keyError) {
+          console.warn('[useCalling] Failed to fetch keys for answering call:', keyError);
+        }
+      }
+
       await refs.serviceRef.current.answerCall(callId);
     } catch (_error) {
       console.error('[useCalling] Failed to answer call:', _error);
@@ -95,6 +158,40 @@ export const createDeclineCall = (refs: ActionRefs) => {
     }
 
     try {
+      const service = refs.serviceRef.current;
+      if (refs.getPeerKeys) {
+        try {
+          const currentCall = (service as any).currentCall;
+          if (currentCall && currentCall.id === callId && currentCall.peer) {
+            const peer = currentCall.peer;
+
+            let hasKeys = false;
+            if (service && (service as any).hasPeerKeys) {
+              hasKeys = (service as any).hasPeerKeys(peer);
+            }
+
+            if (!hasKeys) {
+              const keys = await refs.getPeerKeys(peer);
+
+              if (keys) {
+                const peerKeys = {
+                  username: peer,
+                  dilithiumPublicKey: PostQuantumUtils.base64ToUint8Array(keys.dilithiumPublicBase64),
+                  kyberPublicKey: PostQuantumUtils.base64ToUint8Array(keys.kyberPublicBase64),
+                  x25519PublicKey: keys.x25519PublicBase64 ? PostQuantumUtils.base64ToUint8Array(keys.x25519PublicBase64) : undefined
+                };
+
+                if (peerKeys.dilithiumPublicKey.length > 0 && peerKeys.kyberPublicKey.length > 0) {
+                  service.setPeerKeys(peer, peerKeys as any);
+                }
+              }
+            }
+          }
+        } catch (keyError) {
+          console.warn('[useCalling] Failed to fetch keys for decline call:', keyError);
+        }
+      }
+
       await refs.serviceRef.current.declineCall(callId);
     } catch (_error) {
       console.error('[useCalling] Failed to decline call:', _error);

@@ -1,7 +1,7 @@
 import React, { useMemo, useCallback, useState } from 'react';
 import type { JSX } from 'react';
 import { Phone, PhoneIncoming, PhoneOutgoing, PhoneMissed, Video, VideoOff } from 'lucide-react';
-import { CallState } from '../../../lib/webrtc-calling';
+import { CallState } from '../../../lib/transport/secure-calling-service';
 import { useUnifiedUsernameDisplay } from '../../../hooks/database/useUnifiedUsernameDisplay';
 import { formatCallDurationMs, formatCallHistoryTime } from '../../../lib/utils/date-utils';
 

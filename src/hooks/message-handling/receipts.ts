@@ -1,6 +1,7 @@
 import { SignalType } from '../../lib/types/signal-types';
 import { EventType } from '../../lib/types/event-types';
 import websocketClient from '../../lib/websocket';
+import { unifiedSignalTransport } from '../../lib/transport/unified-signal-transport';
 import type { FailedDeliveryReceipt, HybridKeys, UserWithHybridKeys } from '../../lib/types/message-handling-types';
 import { DELIVERY_RECEIPT_PREFIX } from '@/lib/constants';
 
@@ -89,13 +90,10 @@ export const sendEncryptedDeliveryReceipt = async (
       }
     }
 
-    const deliveryReceiptPayload = {
-      type: SignalType.ENCRYPTED_MESSAGE,
-      to: senderUsername,
+    await unifiedSignalTransport.send(senderUsername, {
+      messageId: `${DELIVERY_RECEIPT_PREFIX}-${messageId}`,
       encryptedPayload: encryptedMessage.encryptedPayload
-    };
-
-    websocketClient.send(JSON.stringify(deliveryReceiptPayload));
+    }, SignalType.ENCRYPTED_MESSAGE);
 
     const receiptKey = `${senderUsername}:${messageId}`;
     failedDeliveryReceiptsRef.current.delete(receiptKey);
@@ -156,12 +154,10 @@ export const retryFailedDeliveryReceipts = async (
       });
 
       if (encryptedMessage?.success && encryptedMessage?.encryptedPayload) {
-        const deliveryReceiptPayload = {
-          type: SignalType.ENCRYPTED_MESSAGE,
-          to: peerUsername,
+        await unifiedSignalTransport.send(peerUsername, {
+          messageId: `${DELIVERY_RECEIPT_PREFIX}-${data.messageId}`,
           encryptedPayload: encryptedMessage.encryptedPayload
-        };
-        websocketClient.send(JSON.stringify(deliveryReceiptPayload));
+        }, SignalType.ENCRYPTED_MESSAGE);
         failedDeliveryReceiptsRef.current.delete(key);
       } else {
         data.attempts++;

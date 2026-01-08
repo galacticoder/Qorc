@@ -1,5 +1,5 @@
 /**
- * Post-Quantum AEAD (Authenticated Encryption with Associated Data)
+ * Post-Quantum AEAD
  * Dual-layer encryption: AES-256-GCM + XChaCha20-Poly1305 + BLAKE3 MAC
  */
 
@@ -30,12 +30,12 @@ export class PostQuantumAEAD {
     const expanded = sha3_512(inputKey);
     const k1 = expanded.slice(0, 32);
     const k2 = expanded.slice(32, 64);
-    
+
     const macKey = blake3(PostQuantumUtils.concatBytes(
       new TextEncoder().encode('quantum-secure-mac-v1'),
       inputKey
     ), { dkLen: 32 });
-    
+
     return { k1, k2, macKey };
   }
 
@@ -60,14 +60,14 @@ export class PostQuantumAEAD {
       const iv = nonce.slice(0, PQ_AEAD_GCM_IV_SIZE);
       const cipher = gcm(k1, iv, aadBytes);
       const layer1 = cipher.encrypt(plaintext);
-      
+
       const xnonce = nonce.slice(PQ_AEAD_GCM_IV_SIZE, PQ_AEAD_NONCE_SIZE);
       const xchacha = xchacha20poly1305(k2, xnonce, aadBytes);
       const layer2 = xchacha.encrypt(layer1);
-      
+
       const macInput = PostQuantumUtils.concatBytes(layer2, aadBytes, nonce);
       const mac = blake3(macInput, { key: macKey });
-      
+
       return { ciphertext: layer2, nonce, tag: mac };
     } finally {
       PostQuantumUtils.clearMemory(k1);
@@ -106,19 +106,19 @@ export class PostQuantumAEAD {
     try {
       const macInput = PostQuantumUtils.concatBytes(ciphertext, aadBytes, nonce);
       const expectedMac = blake3(macInput, { key: macKey });
-      
+
       if (!PostQuantumUtils.timingSafeEqual(tag, expectedMac)) {
         throw new Error('BLAKE3 MAC verification failed');
       }
-      
+
       const xnonce = nonce.slice(PQ_AEAD_GCM_IV_SIZE, PQ_AEAD_NONCE_SIZE);
       const xchacha = xchacha20poly1305(k2, xnonce, aadBytes);
       const layer1 = xchacha.decrypt(ciphertext);
-      
+
       const iv = nonce.slice(0, PQ_AEAD_GCM_IV_SIZE);
       const decipher = gcm(k1, iv, aadBytes);
       const plaintext = decipher.decrypt(layer1);
-      
+
       return plaintext;
     } finally {
       PostQuantumUtils.clearMemory(k1);

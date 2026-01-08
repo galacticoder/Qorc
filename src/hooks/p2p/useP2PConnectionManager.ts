@@ -139,14 +139,16 @@ export function useP2PConnectionManager({
     const isInitialized = p2pMessaging.p2pStatus?.isInitialized ?? false;
     const signalingConnected = p2pMessaging.p2pStatus?.signalingConnected ?? false;
 
-    if (!isInitialized || !signalingConnected) return;
+    if (!isInitialized || !signalingConnected) {
+      return;
+    }
     if (!selectedConversation || !p2pHybridKeys) return;
-    if (!userInitiatedSelectionRef.current) return;
 
     const p2p = p2pMessagingRef.current;
     if (!p2p?.isPeerConnected || !p2p?.connectToPeer) return;
 
     const connected = p2p.isPeerConnected(selectedConversation);
+
     if (!connected) {
       const now = Date.now();
       const attemptInfo = connectionAttemptsRef.current.get(selectedConversation);

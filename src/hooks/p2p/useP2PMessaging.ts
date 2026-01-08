@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState, useCallback } from 'react';
-import { WebRTCP2PService } from '../../lib/webrtc-p2p';
+import { SecureP2PService } from '../../lib/transport/secure-p2p-service';
 import { EventType } from '../../lib/types/event-types';
 import { MAX_P2P_INCOMING_QUEUE, RECEIPT_RETENTION_MS, RATE_LIMIT_WINDOW_MS } from '../../lib/constants';
 import { createSendP2PReadReceipt } from './receipts';
@@ -49,11 +49,11 @@ export function useP2PMessaging(
   options?: {
     fetchPeerCertificates?: (peer: string) => Promise<PeerCertificateBundle | null>;
     signalingTokenProvider?: () => Promise<string | null>;
-    onServiceReady?: (service: WebRTCP2PService | null) => void;
+    onServiceReady?: (service: SecureP2PService | null) => void;
     trustedIssuerDilithiumPublicKeyBase64?: string;
   },
 ) {
-  const p2pServiceRef = useRef<WebRTCP2PService | null>(null);
+  const p2pServiceRef = useRef<SecureP2PService | null>(null);
   const [p2pStatus, setP2PStatus] = useState<P2PStatus>({
     isInitialized: false,
     connectedPeers: [],
@@ -245,6 +245,11 @@ export function useP2PMessaging(
 
   const onMessage = useCallback((callback: (message: EncryptedMessage) => void) => {
     messageCallbackRef.current = callback;
+    return () => {
+      if (messageCallbackRef.current === callback) {
+        messageCallbackRef.current = null;
+      }
+    };
   }, []);
 
   const getP2PStats = useCallback(

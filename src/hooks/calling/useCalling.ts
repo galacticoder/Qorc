@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
-import { WebRTCCallingService, CallState } from '../../lib/webrtc-calling';
+import { SecureCallingService, CallState } from '../../lib/transport/secure-calling-service';
 import type { useAuth } from '../auth/useAuth';
 import { stopMediaStream, debounceEventDispatcher, isValidCallingUsername } from '../../lib/utils/calling-utils';
 import {
@@ -25,8 +25,13 @@ import {
   type ActionSetters
 } from './actions';
 
-// Hook wiring the WebRTC calling service to the auth context
-export const useCalling = (authContext: ReturnType<typeof useAuth>) => {
+// Hook wiring the calling service to the auth context
+export const useCalling = (
+  authContext: ReturnType<typeof useAuth>,
+  options?: {
+    getPeerKeys?: (username: string) => Promise<{ kyberPublicBase64: string; dilithiumPublicBase64: string; x25519PublicBase64?: string } | null>;
+  }
+) => {
   if (!authContext) {
     throw new Error('[useCalling] Auth context is required');
   }
@@ -41,14 +46,14 @@ export const useCalling = (authContext: ReturnType<typeof useAuth>) => {
 
   const { username, loginUsernameRef, isLoggedIn, accountAuthenticated } = authContext;
 
-  const [callingService, setCallingService] = useState<WebRTCCallingService | null>(null);
+  const [callingService, setCallingService] = useState<SecureCallingService | null>(null);
   const [currentCall, setCurrentCall] = useState<CallState | null>(null);
   const [localStream, setLocalStream] = useState<MediaStream | null>(null);
   const [remoteStream, setRemoteStream] = useState<MediaStream | null>(null);
   const [remoteScreenStream, setRemoteScreenStream] = useState<MediaStream | null>(null);
   const [isInitialized, setIsInitialized] = useState(false);
 
-  const serviceRef = useRef<WebRTCCallingService | null>(null);
+  const serviceRef = useRef<SecureCallingService | null>(null);
   const everConnectedRef = useRef<Set<string>>(new Set());
 
   const currentUsername = username || loginUsernameRef?.current || '';
@@ -73,7 +78,8 @@ export const useCalling = (authContext: ReturnType<typeof useAuth>) => {
     serviceRef,
     localStreamRef,
     remoteStreamRef,
-    remoteScreenStreamRef
+    remoteScreenStreamRef,
+    getPeerKeys: options?.getPeerKeys
   };
 
   const actionSetters: ActionSetters = {
@@ -99,7 +105,7 @@ export const useCalling = (authContext: ReturnType<typeof useAuth>) => {
     if (!isFullyAuthenticated) { return; }
     if (hasBeenAuthenticatedRef.current && !isFullyAuthenticated) { return; }
 
-    const service = new WebRTCCallingService(currentUsername);
+    const service = new SecureCallingService(currentUsername);
     serviceRef.current = service;
 
     setupIncomingCallCallback(service, callbackRefs, callbackSetters);
@@ -196,7 +202,6 @@ export const useCalling = (authContext: ReturnType<typeof useAuth>) => {
     localStream,
     remoteStream,
     remoteScreenStream,
-    peerConnection: callingService?.getPeerConnection() || null,
     isInitialized,
     isScreenSharing,
 

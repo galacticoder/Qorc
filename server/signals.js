@@ -79,6 +79,10 @@ export const SignalType = {
   CHECK_USER_EXISTS: "check-user-exists",
   USER_EXISTS_RESPONSE: "user-exists-response",
 
+  // P2P certificate exchange
+  P2P_FETCH_PEER_CERT: "p2p-fetch-peer-cert",
+  P2P_PEER_CERT: "p2p-peer-cert",
+
   // Session management
   PQ_HANDSHAKE_INIT: "pq-handshake-init",
   PQ_HANDSHAKE_ACK: "pq-handshake-ack",
@@ -101,13 +105,6 @@ export const SignalType = {
   BLOCK_TOKENS_UPDATE: "block-tokens-update",
   RETRIEVE_BLOCK_LIST: "retrieve-block-list",
   BLOCK_LIST_RESPONSE: "block-list-response",
-
-  // P2P signaling
-  P2P_FETCH_PEER_CERT: "p2p-fetch-peer-cert",
-  P2P_PEER_CERT: "p2p-peer-cert",
-  OFFER: "offer",
-  ANSWER: "answer",
-  ICE_CANDIDATE: "ice-candidate",
 
   // Misc
   PING: "ping",

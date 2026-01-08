@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback, useEffect, RefObject } from "react";
+import { useState, useRef, useCallback, useEffect } from "react";
 import { SignalType } from "../../lib/types/signal-types";
 import { EventType } from "../../lib/types/event-types";
 import { retrieveAuthTokens } from "../../lib/signals";

@@ -40,6 +40,10 @@ import { secureMessageQueue } from "../lib/secure-message-queue";
 import { initializeOfflineMessageQueue, offlineMessageQueue } from "../lib/offline-message-queue";
 import { isValidKyberPublicKeyBase64, sanitizeHybridKeys } from "../lib/utils/messaging-validators";
 import { SecurityAuditLogger } from "../lib/cryptography/audit-logger";
+import { PostQuantumUtils } from "../lib/utils/pq-utils";
+import { CryptoUtils } from "../lib/utils/crypto-utils";
+import { unifiedSignalTransport } from "../lib/transport/unified-signal-transport";
+
 import { sanitizeFilename, isPlainObject, hasPrototypePollutionKeys, isUnsafeObjectKey, sanitizeNonEmptyText } from "../lib/sanitizers";
 import { useRateLimiter } from "../hooks/useRateLimiter";
 import { useLocalMessageHandlers } from "../hooks/message-handling/useLocalMessageHandlers";
@@ -109,7 +113,6 @@ const ChatApp: React.FC = () => {
 
   const Authentication = useAuth();
   const callHistory = useCallHistory();
-  const callingHook = useCalling(Authentication);
 
   useEffect(() => {
     const checkBackgroundState = async () => {
@@ -286,6 +289,7 @@ const ChatApp: React.FC = () => {
   );
 
   const getPeerHybridKeysRef = useRef<((peerUsername: string) => Promise<{ kyberPublicBase64: string; dilithiumPublicBase64: string; x25519PublicBase64?: string } | null>) | null>(null);
+  const p2pServiceRef = useRef<any>(null);
 
   const messageSender = useMessageSender(
     Database.users,
@@ -317,7 +321,8 @@ const ChatApp: React.FC = () => {
         return getPeerHybridKeysRef.current(peerUsername);
       }
       return null;
-    }
+    },
+    p2pServiceRef
   );
 
 
@@ -492,6 +497,8 @@ const ChatApp: React.FC = () => {
     getPeerHybridKeysRef.current = getPeerHybridKeys;
   }, [getPeerHybridKeys]);
 
+  const callingHook = useCalling(Authentication, { getPeerKeys: getPeerHybridKeys });
+
   const p2pMessaging = useP2PMessaging(
     p2pUsername,
     p2pHybridKeys,
@@ -501,9 +508,23 @@ const ChatApp: React.FC = () => {
       trustedIssuerDilithiumPublicKeyBase64,
       onServiceReady: (service) => {
         try { (window as any).p2pService = service; } catch { }
+        p2pServiceRef.current = service;
       }
     }
   );
+
+
+
+  // Update P2P sender whenever sendP2PMessage changes or service becomes ready
+  useEffect(() => {
+    if (p2pMessaging.sendP2PMessage && p2pServiceRef.current && p2pMessaging.p2pStatus.isInitialized) {
+      unifiedSignalTransport.setP2PSender(async (to, payload, type) => {
+        await p2pMessaging.sendP2PMessage(to, payload, undefined, { messageType: type as any });
+      });
+    } else {
+      unifiedSignalTransport.setP2PSender(null as any);
+    }
+  }, [p2pMessaging.sendP2PMessage, p2pMessaging.p2pStatus.isInitialized]);
 
   const getOrCreateUser = useCallback((username: string): User => {
     let targetUser = Database.users.find(user => user.username === username);
@@ -544,6 +565,33 @@ const ChatApp: React.FC = () => {
     loginUsernameRef: Authentication.loginUsernameRef,
   });
 
+  // Pre-fetch peer keys for calling when conversation opens
+  useEffect(() => {
+    if (selectedConversation && getPeerHybridKeys && callingHook?.callingService) {
+      getPeerHybridKeys(selectedConversation).then(keys => {
+        if (keys && callingHook.callingService) {
+          const service = callingHook.callingService;
+          const peer = selectedConversation;
+
+          try {
+            const peerKeys = {
+              username: peer,
+              dilithiumPublicKey: PostQuantumUtils.base64ToUint8Array(keys.dilithiumPublicBase64),
+              kyberPublicKey: PostQuantumUtils.base64ToUint8Array(keys.kyberPublicBase64),
+              x25519PublicKey: keys.x25519PublicBase64 ? PostQuantumUtils.base64ToUint8Array(keys.x25519PublicBase64) : undefined
+            };
+
+            if (peerKeys.dilithiumPublicKey.length > 0 && peerKeys.kyberPublicKey.length > 0) {
+              service.setPeerKeys(peer, peerKeys as any);
+            }
+          } catch (e) {
+            console.warn('[Index] Failed to pre-cache keys for calling:', e);
+          }
+        }
+      }).catch(() => { });
+    }
+  }, [selectedConversation, getPeerHybridKeys, callingHook.callingService]);
+
   useP2PConnectionManager({
     isLoggedIn: Authentication.isLoggedIn,
     selectedServerUrl,
@@ -563,6 +611,87 @@ const ChatApp: React.FC = () => {
     Authentication,
     Database,
   });
+
+  // Register the E2E Encryption Provider for UnifiedSignalTransport
+  useEffect(() => {
+    if (!Authentication.isLoggedIn) return;
+
+    unifiedSignalTransport.setEncryptionProvider(async (to, payload, type) => {
+      try {
+        const currentUser = Authentication.loginUsernameRef.current;
+        if (!currentUser || to === 'SERVER') return null;
+
+        let peerKeys = await getPeerHybridKeys(to);
+        let resolvedUsername = to;
+
+        if ((!peerKeys || !peerKeys.kyberPublicBase64) && to.length === 32) {
+          const usersList = Array.isArray(Database.users) ? Database.users : [];
+          const found = usersList.find((u: any) =>
+            (u.id === to || u.pixelId === to || u.uuid === to) && u.username
+          );
+          if (found) {
+            resolvedUsername = found.username;
+            peerKeys = await getPeerHybridKeys(resolvedUsername);
+
+            try {
+              const { quicTransport } = await import('../lib/transport/quic-transport');
+              quicTransport.registerUsernameAlias(resolvedUsername, to);
+            } catch { }
+          } else {
+            try {
+              const { quicTransport } = await import('../lib/transport/quic-transport');
+              const alias = quicTransport.resolveUsernameAlias(to);
+              if (alias && alias !== to) {
+                console.debug('[UnifiedTransport] Resolved hash', to, 'via QuicTransport alias to', alias);
+                resolvedUsername = alias;
+                peerKeys = await getPeerHybridKeys(resolvedUsername);
+              }
+            } catch (err) {
+              console.warn('[UnifiedTransport] Failed to query QuicTransport alias:', err);
+            }
+          }
+        }
+
+        if (!peerKeys?.kyberPublicBase64) {
+          console.warn('[UnifiedTransport] Auto-encryption failed: No peer keys for', to, resolvedUsername !== to ? `(alias: ${resolvedUsername})` : '');
+          return null;
+        }
+
+        const signalPayload = {
+          type: 'signal-fallback',
+          kind: type,
+          content: payload.content || JSON.stringify(payload),
+          from: currentUser,
+          timestamp: Date.now(),
+          ...payload
+        };
+
+        const result = await (window as any).edgeApi?.encrypt?.({
+          fromUsername: currentUser,
+          toUsername: resolvedUsername,
+          plaintext: JSON.stringify(signalPayload),
+          recipientKyberPublicKey: peerKeys.kyberPublicBase64,
+          recipientHybridKeys: peerKeys
+        });
+
+        if (result?.success && result?.encryptedPayload) {
+          return {
+            encryptedPayload: result.encryptedPayload,
+            messageId: payload.messageId || crypto.randomUUID().replace(/-/g, '')
+          };
+        }
+      } catch (e) {
+        console.error('[UnifiedTransport] Auto-encryption provider failed:', e);
+      }
+      return null;
+    });
+
+    return () => {
+      (unifiedSignalTransport as any).encryptionProvider = null;
+      (unifiedSignalTransport as any).p2pEncryptionProvider = null;
+    };
+  }, [Authentication.isLoggedIn, getPeerHybridKeys, p2pHybridKeys]);
+
 
   const onSendMessage = useCallback(async (
     messageId: string,
@@ -1533,7 +1662,7 @@ const ChatApp: React.FC = () => {
               localStream={callingHook.localStream}
               remoteStream={callingHook.remoteStream}
               remoteScreenStream={callingHook.remoteScreenStream}
-              onAnswer={() => callingHook.currentCall && callingHook.answerCall(callingHook.currentCall.id)}
+              onAnswer={() => callingHook.currentCall && callingHook.answerCall(callingHook.currentCall.id, callingHook.currentCall.peer)}
               onDecline={() => callingHook.currentCall && callingHook.declineCall(callingHook.currentCall.id)}
               onEndCall={callingHook.endCall}
               onToggleMute={callingHook.toggleMute}

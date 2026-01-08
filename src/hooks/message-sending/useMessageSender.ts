@@ -15,6 +15,8 @@ import { createDefaultResolvePeerHybridKeys } from './keys';
 import { createSessionResetHandler, createSessionEstablishedHandler, createSessionReadyHandler, createSessionResetRetryHandler } from './handlers';
 import { globalEncryptedPayloadCache, globalLongTermStoreAttempted, buildMessagePayload, encryptAndSend, cacheEncryptedPayload, dispatchLocalEvents, storeUnacknowledgedMessage, queueMessageForLater, requestBundleForRetry } from './send';
 import { CryptoUtils } from '../../lib/utils/crypto-utils';
+import type { SecureP2PService } from '../../lib/transport/secure-p2p-service';
+import { unifiedSignalTransport } from '../../lib/transport/unified-signal-transport';
 
 export function useMessageSender(
   users: UserWithKeys[],
@@ -34,7 +36,8 @@ export function useMessageSender(
   isLoggedIn?: boolean,
   hasUsernameMapping?: (hashedUsername: string) => Promise<boolean>,
   secureDBRef?: React.RefObject<SecureDB | null>,
-  resolvePeerHybridKeys?: (peerUsername: string) => Promise<HybridPublicKeys | null>
+  resolvePeerHybridKeys?: (peerUsername: string) => Promise<HybridPublicKeys | null>,
+  p2pServiceRef?: React.RefObject<SecureP2PService | null>
 ) {
   const recipientDirectory = useMemo(() => {
     const map = new Map<string, UserWithKeys>();
@@ -172,7 +175,7 @@ export function useMessageSender(
         if (!encrypted?.success || !encrypted?.encryptedPayload) { logError('encryption-failed', new Error(encrypted?.error || 'Unknown')); throw new Error(`Encryption failed: ${encrypted?.error}`); }
 
         cacheEncryptedPayload(recipientUsername, wireMessageId, encrypted.encryptedPayload);
-        websocketClient.send(JSON.stringify({ type: SignalType.ENCRYPTED_MESSAGE, to: recipientUsername, messageId: wireMessageId, encryptedPayload: encrypted.encryptedPayload }));
+        await unifiedSignalTransport.send(recipientUsername, { messageId: wireMessageId, encryptedPayload: encrypted.encryptedPayload }, messageType as SignalType);
 
         if (messageType !== SignalType.TYPING_INDICATOR && messageType !== SignalType.DELIVERY_RECEIPT && messageType !== SignalType.READ_RECEIPT) {
           await storeUnacknowledgedMessage(secureDBRef, recipientUsername, timestamp, { user, content, replyTo, fileData, messageSignalType, originalMessageId: messageId, editMessageId, timestamp });

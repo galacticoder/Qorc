@@ -1,6 +1,6 @@
 import React from 'react';
 import { unstable_batchedUpdates } from 'react-dom';
-import { WebRTCCallingService, CallState } from '../../lib/webrtc-calling';
+import { SecureCallingService, CallState } from '../../lib/transport/secure-calling-service';
 import { EventType } from '../../lib/types/event-types';
 import { stopMediaStream, EventDebouncer } from '../../lib/utils/calling-utils';
 
@@ -21,7 +21,7 @@ export interface CallbackSetters {
 
 // Register the handler for incoming calls
 export const setupIncomingCallCallback = (
-  service: WebRTCCallingService,
+  service: SecureCallingService,
   refs: CallbackRefs,
   setters: CallbackSetters
 ) => {
@@ -40,7 +40,7 @@ export const setupIncomingCallCallback = (
 
 // Keep call state updates in sync, emit telemetry, and clean up media when the call changes
 export const setupCallStateChangeCallback = (
-  service: WebRTCCallingService,
+  service: SecureCallingService,
   refs: CallbackRefs,
   setters: CallbackSetters
 ) => {
@@ -172,7 +172,7 @@ export const setupCallStateChangeCallback = (
 
 // Track local, remote, and screen share streams
 export const setupStreamCallbacks = (
-  service: WebRTCCallingService,
+  service: SecureCallingService,
   refs: CallbackRefs,
   setters: CallbackSetters
 ) => {

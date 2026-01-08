@@ -77,14 +77,14 @@ export const QUALITY_OPTIONS = ['low', 'medium', 'high'] as const;
 export const DEFAULT_QUALITY: QualityOption = 'medium';
 export type QualityOption = (typeof QUALITY_OPTIONS)[number];
 export const QUALITY_LABELS: Record<QualityOption, string> = {
-    low: 'Low',
-    medium: 'Medium',
-    high: 'High'
+  low: 'Low',
+  medium: 'Medium',
+  high: 'High'
 };
 export const QUALITY_DESCRIPTIONS: Record<QualityOption, string> = {
-    low: 'Lower bandwidth usage',
-    medium: 'Balanced quality and bandwidth',
-    high: 'Best quality, higher bandwidth'
+  low: 'Lower bandwidth usage',
+  medium: 'Balanced quality and bandwidth',
+  high: 'Best quality, higher bandwidth'
 };
 
 export const IMAGE_EXTENSIONS = ['jpg', 'jpeg', 'png', 'gif', 'bmp', 'webp', 'svg', 'ico', 'tiff'] as const;
@@ -133,6 +133,10 @@ export const MAX_MESSAGE_CONTENT_LENGTH = 64 * 1024;
 export const MAX_USERNAME_LENGTH = 96;
 export const CERT_CLOCK_SKEW_MS = 2 * 60 * 1000;
 export const RECEIPT_RETENTION_MS = 24 * 60 * 60 * 1000;
+export const P2P_MESSAGE_RATE_LIMIT = 100;
+export const P2P_MESSAGE_RATE_WINDOW_MS = 60_000;
+export const P2P_MAX_MESSAGE_SIZE = 5 * 1024 * 1024;
+export const P2P_MAX_PEERS = 100;
 
 // General rate limit
 export const RATE_LIMIT_WINDOW_MS = 60_000;
@@ -210,6 +214,10 @@ export const CALLING_EVENT_ALLOWED_PAYLOAD_KEYS = new Set([
   'isVideo',
   'isOutgoing'
 ]);
+export const CALL_TIMEOUT = 60_000;
+export const CALL_RING_TIMEOUT = 60_000;
+export const CALL_AUDIO_PADDING_BLOCK = 128;
+export const CALL_KEY_ROTATION_INTERVAL = 10_000;
 
 // Blocking constants
 export const NOTIFICATION_TITLE = 'Message Blocked';
@@ -358,3 +366,19 @@ export const WORKER_RATE_LIMIT_ARGON2_VERIFY_MAX = 50;
 // Crypto HKDF Info
 export const CRYPTO_HKDF_INFO = 'Qor-chat hybrid key v2';
 export const LONG_TERM_ENVELOPE_KDF_INFO = 'long-term-aead-key-v1';
+
+// Noise Protocol
+export const NOISE_PROTOCOL_VERSION = 'hybrid-session-v1';
+export const NOISE_SESSION_SALT = 'qorchat-hybrid-session-v1';
+export const NOISE_KEY_ROTATION_INTERVAL_MS = 10 * 60 * 1000;
+export const NOISE_MAX_MESSAGES_PER_SESSION = 1_000_000;
+export const NOISE_MAX_SESSION_AGE_MS = 24 * 60 * 60 * 1000;
+export const NOISE_REPLAY_WINDOW_SIZE = BigInt(32768);
+
+// QUIC Transport
+export const QUIC_CONNECTION_TIMEOUT_MS = 30_000;
+export const QUIC_KEEPALIVE_INTERVAL_MS = 10_000;
+export const QUIC_MAX_STREAMS_PER_CONNECTION = 100;
+export const QUIC_RECONNECT_BACKOFF_BASE_MS = 1000;
+export const QUIC_MAX_RECONNECT_ATTEMPTS = 5;
+export const QUIC_BUFFER_LOW_THRESHOLD = 256 * 1024;

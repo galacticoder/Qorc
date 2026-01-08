@@ -719,7 +719,7 @@ async function installComponent(name) {
 
   const presets = {
     all: ['git', 'nodejs', 'redis', 'postgres', 'python3', 'openssl', 'build-tools', 'cmake', 'ninja', 'liboqs', 'oqs-provider', 'haproxy', 'tailscale', 'jq', 'cloudflared', 'docker'],
-    server: ['nodejs', 'redis', 'postgres', 'python3', 'openssl', 'build-tools', 'tailscale', 'docker'],
+    server: ['nodejs', 'redis', 'postgres', 'python3', 'openssl', 'build-tools', 'tailscale'],
     client: ['nodejs', 'git', 'curl', 'wget', 'pnpm', 'libevent', 'rust', 'build-tools', 'electron'],
     edge: ['haproxy', 'cloudflared'],
     quantum: ['git', 'openssl', 'build-tools', 'cmake', 'ninja', 'liboqs', 'oqs-provider']

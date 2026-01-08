@@ -18,8 +18,8 @@ const args = process.argv.slice(2);
 const command = args[0];
 const flags = args.slice(1);
 
-const validProfiles = ['server', 'loadbalancer', 'coturn'];
-const validServices = ['redis', 'postgres', 'server', 'loadbalancer', 'coturn'];
+const validProfiles = ['server', 'loadbalancer'];
+const validServices = ['redis', 'postgres', 'server', 'loadbalancer'];
 
 function showHelp() {
     console.log('Docker Deployment Helper');
@@ -27,7 +27,7 @@ function showHelp() {
     console.log('Usage:');
     console.log('  node scripts/start-docker.cjs <profile>              - Start profile stack');
     console.log('  node scripts/start-docker.cjs <profile> --build      - Rebuild and start profile');
-    console.log('  node scripts/start-docker.cjs stop <service>      - Stop specific service (server, loadbalancer, coturn, postgres)');
+    console.log('  node scripts/start-docker.cjs stop <service>      - Stop specific service (server, loadbalancer, postgres)');
     console.log('  node scripts/start-docker.cjs stop all            - Stop all services');
     console.log('  node scripts/start-docker.cjs delete <service>    - Stop, remove containers, and delete images');
     console.log('  node scripts/start-docker.cjs reset               - Stop all services and remove volumes');
@@ -291,22 +291,7 @@ async function main() {
             updates.REDIS_EXTERNAL_PORT = availableRedisPort;
         }
 
-        // 4. TURN server
-        if (command === 'server' || command === 'coturn') {
-            const turnPort = parseInt(env.TURN_PORT || '3478', 10);
-            const turnInUse = await isPortInUse(turnPort);
-            if (turnInUse) {
-                console.log(`[WARN] TURN port ${turnPort} is in use. WebRTC relay may not work.`);
-                console.log(`[INFO] Free port ${turnPort} or set TURN_PORT in .env to a different value.`);
-            }
-            const turnsPort = parseInt(env.TURNS_PORT || '5349', 10);
-            const turnsInUse = await isPortInUse(turnsPort);
-            if (turnsInUse) {
-                console.log(`[WARN] TURNS port ${turnsPort} is in use. WebRTC TLS relay may not work.`);
-            }
-        }
-
-        // 5. Load Balancer
+        // 4. LoadBalancer
         if (command === 'loadbalancer') {
             const httpPort = parseInt(env.HAPROXY_HTTP_PORT || '8080', 10);
             const availableHttpPort = await findAvailablePort(httpPort);
@@ -355,8 +340,7 @@ async function main() {
                 if (runDetached) {
                     process.env.NO_GUI = 'true';
                     let sharedServices = 'redis';
-                    if (command === 'server') sharedServices = 'postgres redis coturn';
-                    if (command === 'coturn') sharedServices = '';
+                    if (command === 'server') sharedServices = 'postgres redis';
 
                     if (sharedServices) {
                         execSync(`docker compose --env-file .env -f docker/docker-compose.yml up -d --remove-orphans --no-recreate ${sharedServices}`, { cwd: repoRoot, stdio: 'inherit' });
@@ -366,15 +350,11 @@ async function main() {
                         execSync(`docker compose --env-file .env -f docker/docker-compose.yml build ${command}`, { cwd: repoRoot, stdio: 'inherit' });
                     }
 
-                    let profile = command;
-                    if (command === 'coturn') profile = 'turn';
-
-                    const runCommand = `docker compose --env-file .env -f docker/docker-compose.yml --profile ${profile} up -d --remove-orphans ${command}`;
+                    const runCommand = `docker compose --env-file .env -f docker/docker-compose.yml --profile ${command} up -d --remove-orphans ${command}`;
                     execSync(runCommand, { cwd: repoRoot, stdio: 'inherit' });
                 } else {
                     let sharedServices = 'redis';
-                    if (command === 'server') sharedServices = 'postgres redis coturn';
-                    if (command === 'coturn') sharedServices = '';
+                    if (command === 'server') sharedServices = 'postgres redis';
 
                     if (sharedServices) {
                         execSync(`docker compose --env-file .env -f docker/docker-compose.yml up -d --remove-orphans --no-recreate ${sharedServices}`, { cwd: repoRoot, stdio: 'inherit' });

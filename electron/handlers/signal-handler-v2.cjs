@@ -454,7 +454,7 @@ class QuantumResistantSignalHandler {
               new Date()
             );
           } catch (retryError) {
-            console.error('[SIGNAL-V2] Retry failed after saving identity:',retryError);
+            console.error('[SIGNAL-V2] Retry failed after saving identity:', retryError);
             console.error('[SIGNAL-V2] Retry error code:', retryError.code);
             console.error('[SIGNAL-V2] Retry error name:', retryError.name);
             throw retryError;
@@ -649,61 +649,62 @@ class QuantumResistantSignalHandler {
 
       let plaintext;
       let usedPreKeyId = null;
-      if (signalMessage.type === 3) {
-        const preKeyMessage = libsignal.PreKeySignalMessage.deserialize(messageBytes);
+      let decrypted = false;
+      let retryCount = 0;
 
+      while (!decrypted && retryCount < 2) {
         try {
-          usedPreKeyId = preKeyMessage.preKeyId();
-        } catch { }
+          if (signalMessage.type === 3) {
+            const preKeyMessage = libsignal.PreKeySignalMessage.deserialize(messageBytes);
+            try { usedPreKeyId = preKeyMessage.preKeyId(); } catch { }
 
-        const sessionStore = await this._createSessionStore(toUsername);
-        const identityStore = await this._createIdentityKeyStore(toUsername);
-        const preKeyStore = await this._createPreKeyStore(toUsername);
-        const signedPreKeyStore = await this._createSignedPreKeyStore(toUsername);
-        const kyberPreKeyStore = await this._createKyberPreKeyStore(toUsername);
+            const sessionStore = await this._createSessionStore(toUsername);
+            const identityStore = await this._createIdentityKeyStore(toUsername);
+            const preKeyStore = await this._createPreKeyStore(toUsername);
+            const signedPreKeyStore = await this._createSignedPreKeyStore(toUsername);
+            const kyberPreKeyStore = await this._createKyberPreKeyStore(toUsername);
 
-        try {
-          plaintext = await libsignal.signalDecryptPreKey(
-            preKeyMessage,
-            fromAddress,
-            sessionStore,
-            identityStore,
-            preKeyStore,
-            signedPreKeyStore,
-            kyberPreKeyStore
-          );
-        } catch (preKeyError) {
-          console.error('[SIGNAL-V2] PreKey decryption failed, marking for session reset:', preKeyError.message);
-          const error = new Error(preKeyError.message);
-          error.code = 'SESSION_KEYS_INVALID';
-          error.requiresKeyRefresh = true;
-          throw error;
-        }
+            plaintext = await libsignal.signalDecryptPreKey(
+              preKeyMessage,
+              fromAddress,
+              sessionStore,
+              identityStore,
+              preKeyStore,
+              signedPreKeyStore,
+              kyberPreKeyStore
+            );
 
-        if (usedPreKeyId != null) {
-          await this.store.removePreKey(toUsername, usedPreKeyId);
-          if (usedPreKeyId === 1) {
-            await this.generatePreKeys(toUsername, 1, 1);
+            if (usedPreKeyId != null) {
+              await this.store.removePreKey(toUsername, usedPreKeyId);
+              if (usedPreKeyId === 1) {
+                await this.generatePreKeys(toUsername, 1, 1);
+              }
+            }
+          } else {
+            const signalMessageObj = libsignal.SignalMessage.deserialize(messageBytes);
+            const sessionStore = await this._createSessionStore(toUsername);
+            const identityStore = await this._createIdentityKeyStore(toUsername);
+
+            plaintext = await libsignal.signalDecrypt(
+              signalMessageObj,
+              fromAddress,
+              sessionStore,
+              identityStore
+            );
           }
-        }
-      } else {
-        const signalMessageObj = libsignal.SignalMessage.deserialize(messageBytes);
-        const sessionStore = await this._createSessionStore(toUsername);
-        const identityStore = await this._createIdentityKeyStore(toUsername);
+          decrypted = true;
+        } catch (error) {
+          if (retryCount === 0 && error.message.includes('untrusted identity')) {
+            await this.store.trustPeerIdentity(toUsername, fromUsername);
+            retryCount++;
+            continue;
+          }
 
-        try {
-          plaintext = await libsignal.signalDecrypt(
-            signalMessageObj,
-            fromAddress,
-            sessionStore,
-            identityStore
-          );
-        } catch (signalError) {
-          console.error('[SIGNAL-V2] Signal message decryption failed, marking for session reset:', signalError.message);
-          const error = new Error(signalError.message);
-          error.code = 'SESSION_KEYS_INVALID';
-          error.requiresKeyRefresh = true;
-          throw error;
+          console.error('[SIGNAL-V2] Decryption failed:', error.message);
+          const decError = new Error(error.message);
+          decError.code = 'SESSION_KEYS_INVALID';
+          decError.requiresKeyRefresh = true;
+          throw decError;
         }
       }
 
@@ -792,7 +793,7 @@ class QuantumResistantSignalHandler {
 
     class SessionStoreImpl extends libsignal.SessionStore {
       constructor() { super(); }
-      
+
       async saveSession(name, record) {
         const idx = name.name() + '.' + name.deviceId();
         await outerStore.storeSession(username, idx, record.serialize());
@@ -966,7 +967,7 @@ class QuantumResistantSignalHandler {
     } catch (e) {
       return;
     }
-    
+
     if (!obj || typeof obj !== 'object') return;
     for (const key of Object.keys(obj)) {
       const entry = obj[key];

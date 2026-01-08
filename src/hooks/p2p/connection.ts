@@ -1,5 +1,5 @@
 import React, { RefObject } from "react";
-import { WebRTCP2PService } from "../../lib/webrtc-p2p";
+import { SecureP2PService } from "../../lib/transport/secure-p2p-service";
 import { CryptoUtils } from "../../lib/utils/crypto-utils";
 import { SecurityAuditLogger } from "../../lib/cryptography/audit-logger";
 import { EventType } from "../../lib/types/event-types";
@@ -15,7 +15,7 @@ import {
 import { P2P_ROUTE_PROOF_TTL_MS } from "../../lib/constants";
 
 export interface ConnectionRefs {
-  p2pServiceRef: RefObject<WebRTCP2PService | null>;
+  p2pServiceRef: RefObject<SecureP2PService | null>;
   routeProofCacheRef: RefObject<Map<string, RouteProofRecord>>;
   peerCertificateCacheRef: RefObject<Map<string, CertCacheEntry>>;
   peerAuthCacheRef: RefObject<ReturnType<typeof buildAuthenticator>>;
@@ -28,7 +28,6 @@ export interface ConnectionRefs {
   handleIncomingP2PMessageRef: RefObject<((message: P2PMessage) => Promise<void>) | null>;
 }
 
-// Dispatch helpers used to update state shared with the hook consumer
 export interface ConnectionSetters {
   setP2PStatus: React.Dispatch<React.SetStateAction<P2PStatus>>;
   setIncomingMessages: React.Dispatch<React.SetStateAction<EncryptedMessage[]>>;
@@ -38,7 +37,7 @@ export interface ConnectionSetters {
 
 export interface ConnectionOptions {
   signalingTokenProvider?: () => Promise<string | null>;
-  onServiceReady?: (service: WebRTCP2PService | null) => void;
+  onServiceReady?: (service: SecureP2PService | null) => void;
 }
 
 // Tears down the current peer service, clears caches, and resets status indicators
@@ -53,7 +52,7 @@ export function createDestroyService(
         refs.p2pServiceRef.current.destroy();
       } catch { }
       options?.onServiceReady?.(null);
-      (refs.p2pServiceRef as { current: WebRTCP2PService | null }).current = null;
+      (refs.p2pServiceRef as { current: SecureP2PService | null }).current = null;
     }
 
     refs.routeProofCacheRef.current.clear();
@@ -90,23 +89,28 @@ export function createInitializeP2P(
     setters.clearLastError();
     try {
       if (refs.p2pServiceRef.current) {
+        const currentService = refs.p2pServiceRef.current;
+        if (currentService.isCompatible(username, signalingServerUrl)) {
+          return;
+        }
+
         try {
-          refs.p2pServiceRef.current.destroy();
+          currentService.destroy();
         } catch { }
         options?.onServiceReady?.(null);
-        (refs.p2pServiceRef as { current: WebRTCP2PService | null }).current = null;
+        (refs.p2pServiceRef as { current: SecureP2PService | null }).current = null;
       }
-      
+
       refs.routeProofCacheRef.current.clear();
       refs.peerCertificateCacheRef.current.clear();
       (refs.peerAuthCacheRef as { current: ReturnType<typeof buildAuthenticator> }).current = buildAuthenticator();
-      
+
       refs.outboundQueueRef.current.forEach((arr) => arr.forEach(it => { try { it.envelope = null; } catch { } }));
       refs.outboundQueueRef.current.clear();
-      
+
       refs.flushTimersRef.current.forEach(t => clearTimeout(t));
       refs.flushTimersRef.current.clear();
-      
+
       refs.incomingQueueRef.current.clear();
       setters.setIncomingMessages([]);
 
@@ -114,20 +118,15 @@ export function createInitializeP2P(
         throw createP2PError('AUTH_REQUIRED');
       }
 
-      const service = new WebRTCP2PService(username);
-      (refs.p2pServiceRef as { current: WebRTCP2PService | null }).current = service;
+      const service = new SecureP2PService(username);
+      (refs.p2pServiceRef as { current: SecureP2PService | null }).current = service;
       options?.onServiceReady?.(service);
-      const dilithiumPublic = toUint8(hybridKeys.dilithium.publicKeyBase64);
-      const dilithiumSecret = hybridKeys.dilithium.secretKey;
-      
-      if (dilithiumPublic && dilithiumSecret) {
-        service.setDilithiumKeys({ publicKey: dilithiumPublic, secretKey: dilithiumSecret });
+      if (hybridKeys) {
+        service.setHybridKeys(hybridKeys);
       }
-      
+
       service.onMessage((message: P2PMessage) => {
-        refs.handleIncomingP2PMessageRef.current?.(message).catch((err) => {
-          console.error('[P2P] Error handling incoming message:', err);
-        });
+        refs.handleIncomingP2PMessageRef.current?.(message).catch(() => { });
       });
 
       service.onPeerConnected((peerUsername: string) => {
@@ -147,8 +146,9 @@ export function createInitializeP2P(
           window.dispatchEvent(new CustomEvent(EventType.P2P_PEER_RECONNECTED, { detail: { peer: peerUsername } }));
         } catch { }
 
-        try { 
-          window.dispatchEvent(new CustomEvent(EventType.P2P_PEER_CONNECTED, { detail: { peer: peerUsername } })); } catch { }
+        try {
+          window.dispatchEvent(new CustomEvent(EventType.P2P_PEER_CONNECTED, { detail: { peer: peerUsername } }));
+        } catch { }
         setters.clearLastError();
       });
 
@@ -286,11 +286,11 @@ export function createWaitForPeerConnection(
         try { clearTimeout(timer); } catch { }
         resolve(ok);
       };
-      
+
       const set = refs.peerWaitersRef.current.get(peerUsername) || new Set<(ok: boolean) => void>();
       set.add(resolver);
       refs.peerWaitersRef.current.set(peerUsername, set);
-      
+
       const timer = setTimeout(() => {
         if (resolved) return;
         resolved = true;

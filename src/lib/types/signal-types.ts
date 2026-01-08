@@ -71,6 +71,7 @@ export enum SignalType {
   SIGNAL = 'signal',
 
   // P2P and WebRTC
+  CALL_SIGNAL = 'call-signal',
   P2P_FETCH_PEER_CERT = 'p2p-fetch-peer-cert',
   P2P_PEER_CERT = 'p2p-peer-cert',
   OFFER = 'offer',

@@ -73,24 +73,6 @@ Values shown in parentheses indicate typical defaults when the variable is unset
 
 ---
 
-## TURN Server (coturn)
-
-| Name | Default / required | Used by | Description |
-| ---- | ------------------ | ------- | ----------- |
-| `TURN_EXTERNAL_IP` | auto-detected | `docker/coturn-entrypoint.sh`, `server/server.js` | Public IP address of the TURN server. The entrypoint script attempts to auto-detect this if not set. |
-| `TURN_PORT` | `(3478)` | `docker/coturn-entrypoint.sh`, `server/server.js` | UDP/TCP listening port for plain TURN/STUN. |
-| `TURNS_PORT` | `(5349)` | `docker/coturn-entrypoint.sh` | TCP listening port for TURN over TLS (TURNS). |
-| `TURN_TLS_CERT` | unset | `docker/coturn-entrypoint.sh` | Path to the TLS certificate file for TURNS. If set, this file path (inside the container) is added to the turnserver configuration. |
-| `TURN_TLS_KEY` | unset | `docker/coturn-entrypoint.sh` | Path to the TLS private key file for TURNS. |
-| `TURN_REALM` | `(turn.local)` | `docker/coturn-entrypoint.sh` | Authentication realm for the TURN server. |
-| `TURN_USERNAME` | `(turnuser)` | `docker/coturn-entrypoint.sh`, `server/server.js` | Username for the static TURN credentials. |
-| `TURN_PASSWORD` | `(turnpassword)` | `docker/coturn-entrypoint.sh`, `server/server.js` | Password for the static TURN credentials. |
-| `TURN_MIN_PORT` | `(49152)` | `docker/coturn-entrypoint.sh` | Start of the UDP relay port range. |
-| `TURN_MAX_PORT` | `(65535)` | `docker/coturn-entrypoint.sh` | End of the UDP relay port range. |
-| `TURN_HEALTHCHECK_HOST` | unset | `server/server.js` | Hostname or IP to use when the main server checks TURN server connectivity. Useful if `coturn` is unreachable via `TURN_EXTERNAL_IP`. |
-
----
-
 ## Redis, presence, and rate limiting
 
 | Name | Default / required | Used by | Description |

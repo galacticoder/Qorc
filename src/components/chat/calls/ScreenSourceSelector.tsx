@@ -97,42 +97,12 @@ export const ScreenSourceSelector = React.memo<ScreenSourceSelectorProps>(({
           }
 
           const formattedSources: ScreenSource[] = rawSources.map((source: any) => {
-            let thumbnail: string | undefined;
-
-            if (source.thumbnail) {
-              if (typeof source.thumbnail === 'string') {
-                thumbnail = source.thumbnail;
-              } else if (typeof source.thumbnail.toDataURL === 'function') {
-                try {
-                  thumbnail = source.thumbnail.toDataURL();
-                } catch {
-                  thumbnail = undefined;
-                }
-              }
-            }
-
             const isScreen = typeof source.id === 'string' && source.id.startsWith('screen:');
-            const originalName = typeof source.name === 'string' ? source.name : '';
-            let displayName = originalName || source.id;
-
-            if (isScreen) {
-              if (!displayName || displayName.trim() === '') {
-                const screenNum = source.id.split(':')[1] || '0';
-                const num = parseInt(screenNum, 10);
-                displayName = `Screen ${Number.isFinite(num) ? num + 1 : 1}`;
-              } else {
-                displayName = `Screen: ${displayName}`;
-              }
-            } else {
-              if (!displayName || displayName.trim() === '') {
-                displayName = `Window`;
-              }
-            }
 
             return {
               id: sanitizeTextInput(String(source.id), { maxLength: 256, allowNewlines: false }),
-              name: sanitizeTextInput(displayName, { maxLength: 128, allowNewlines: false }),
-              thumbnail,
+              name: sanitizeTextInput(source.name || (isScreen ? 'Screen' : 'Window'), { maxLength: 128, allowNewlines: false }),
+              thumbnail: typeof source.thumbnail === 'string' ? source.thumbnail : undefined,
               type: isScreen ? 'screen' as const : 'window' as const
             };
           });

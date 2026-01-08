@@ -475,7 +475,7 @@ export async function handleSignalMessages(data: any, handlers: SignalHandlers) 
                   await Authentication.keyManagerRef.current.storeKeys(pair);
                 }
               } catch { }
-              
+
               try { await Authentication.getKeysOnDemand?.(); } catch { }
               const publicKeys = await Authentication.keyManagerRef.current.getPublicKeys();
               if (publicKeys) {
@@ -846,7 +846,7 @@ export async function handleSignalMessages(data: any, handlers: SignalHandlers) 
                 } catch { }
               }, 0);
             }
-            
+
             if (handlers?.Database?.setUsers) {
               setTimeout(() => {
                 try {
@@ -1084,6 +1084,21 @@ export async function handleSignalMessages(data: any, handlers: SignalHandlers) 
           }
         } catch (error) {
           SecureAuditLogger.error('signals', 'avatar-fetch', 'handler-failed', {
+            error: error instanceof Error ? error.message : 'unknown'
+          });
+        }
+        break;
+      }
+
+      case 'profile-picture-request':
+      case 'profile-picture-response': {
+        try {
+          const from = data?.from || message?.from;
+          if (from) {
+            profilePictureSystem.handleIncomingMessage(data || message, from).catch(() => { });
+          }
+        } catch (error) {
+          SecureAuditLogger.error('signals', 'profile-picture-signal', 'handler-failed', {
             error: error instanceof Error ? error.message : 'unknown'
           });
         }

@@ -8,6 +8,7 @@ import { EventType } from "../../../lib/types/event-types";
 import { sanitizeFilename } from "../../../lib/sanitizers";
 import { syncEncryptedStorage } from "../../../lib/encrypted-storage";
 import { DEFAULT_CHUNK_SIZE_SMALL, DEFAULT_CHUNK_SIZE_LARGE, LARGE_FILE_THRESHOLD, MAX_CHUNKS_PER_SECOND, INACTIVITY_TIMEOUT_MS, P2P_CONNECT_TIMEOUT_MS, RATE_LIMITER_SLEEP_MS, PAUSE_POLL_MS, P2P_POLL_MS, YIELD_INTERVAL, MAC_SALT, SESSION_WAIT_MS, SESSION_POLL_BASE_MS, SESSION_POLL_MAX_MS, BUNDLE_REQUEST_COOLDOWN_MS, SESSION_FRESH_COOLDOWN_MS } from "../../../lib/constants";
+import { unifiedSignalTransport } from "../../../lib/transport/unified-signal-transport";
 
 interface HybridPublicKeys {
   readonly x25519PublicBase64?: string;
@@ -590,15 +591,14 @@ export function useFileSender(
             const chunkDataBase64 = CryptoUtils.Encrypt.serializeEncryptedData(iv, authTag, encrypted);
 
             const fullChunkMessage = {
-              type: SignalType.ENCRYPTED_MESSAGE,
-              to: uk.username,
+              messageId: state.fileId,
               encryptedPayload: {
                 ...encryptedMetadata.encryptedPayload,
                 chunkData: chunkDataBase64
               }
             };
 
-            websocketClient.send(JSON.stringify(fullChunkMessage));
+            await unifiedSignalTransport.send(uk.username, fullChunkMessage, SignalType.FILE_MESSAGE_CHUNK);
           }
 
           state.lastSentIndex = nextIndex;

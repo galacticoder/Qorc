@@ -22,11 +22,13 @@ export const EventType = {
   P2P_PEER_RECONNECTED: 'p2p-peer-reconnected',
   P2P_FETCH_PEER_CERT: 'p2p-fetch-peer-cert',
   P2P_PEER_CERT: 'p2p-peer-cert',
-  P2P_TYPING_INDICATOR: 'p2p-typing-indicator',
   P2P_CALL_SIGNAL_SEND: 'p2p-call-signal-send',
   P2P_CALL_SIGNAL_RESULT: 'p2p-call-signal-result',
   P2P_INIT_REQUIRED: 'p2p-init-required',
   P2P_FILE_CHUNK: 'p2p-file-chunk',
+  P2P_CONNECTION_STATE_CHANGE: 'p2p-connection-state-change',
+  P2P_MESSAGE_RECEIVED: 'p2p-message-received',
+
 
   // Message events
   MESSAGE: 'message',
@@ -62,6 +64,7 @@ export const EventType = {
   CALL_REJECTED: 'call-rejected',
   CALL_ICE_CANDIDATE: 'call-ice-candidate',
   CALL_SIGNAL: 'call-signal',
+  CALL_SIGNAL_OUT: 'call-signal-out',
   UI_CALL_REQUEST: 'ui-call-request',
 
   // File events

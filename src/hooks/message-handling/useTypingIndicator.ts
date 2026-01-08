@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef } from 'react';
 import { SignalType } from '../../lib/types/signal-types';
 import { TYPING_DOMAIN, TYPING_STOP_DELAY, MIN_TYPING_INTERVAL, CONVERSATION_CHANGE_DEBOUNCE } from '../../lib/constants';
+import { unifiedSignalTransport } from '../../lib/transport/unified-signal-transport';
 
 const createRandomHex = (byteLength: number) => {
   const bytes = crypto.getRandomValues(new Uint8Array(byteLength));
@@ -72,14 +73,15 @@ export function useTypingIndicator(
     typingQueueRef.current = typingQueueRef.current
       .then(() => wrappedTask())
       .catch(() => wrappedTask())
-      .catch(() => {});
+      .catch(() => { });
 
     return typingQueueRef.current;
   }, []);
 
   const sendTypingSignal = useCallback(
     async (kind: 'start' | 'stop') => {
-      if (!sendEncryptedMessage) return;
+      if (!selectedConversation) return;
+
       const sequence = ++messageSequenceRef.current;
       const id = createTypingMessageId(kind, sequence);
       const payload = {
@@ -88,15 +90,17 @@ export function useTypingIndicator(
         timestamp: Date.now(),
         nonce: createTypingNonce(),
         username: currentUsername,
-        conversation: selectedConversation ?? null,
+        conversation: selectedConversation,
       };
-      await sendEncryptedMessage(id, JSON.stringify(payload), kind === 'start' ? SignalType.TYPING_START : SignalType.TYPING_STOP);
+
+      await unifiedSignalTransport.sendTyping(selectedConversation, { ...payload, messageId: id }, kind === 'start');
+
       isTypingRef.current = kind === 'start';
       if (kind === 'stop') {
         pendingTypingRef.current = false;
       }
     },
-    [currentUsername, selectedConversation, sendEncryptedMessage],
+    [currentUsername, selectedConversation],
   );
 
   const sendTypingStart = useCallback(

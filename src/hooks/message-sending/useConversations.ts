@@ -4,10 +4,10 @@ import { Message } from "../../components/chat/messaging/types";
 import { User } from "../../components/chat/messaging/UserList";
 import { SignalType } from "../../lib/types/signal-types";
 import { EventType } from "../../lib/types/event-types";
-import websocketClient from "../../lib/websocket";
 import { pseudonymizeUsernameWithCache } from "../../lib/username-hash";
 import { SecureDB } from "../../lib/secureDB";
 import { MAX_CONVERSATIONS, CONVERSATION_RATE_LIMIT_WINDOW_MS, CONVERSATION_RATE_LIMIT_MAX, VALIDATION_TIMEOUT_MS } from "../../lib/constants";
+import { unifiedSignalTransport } from "../../lib/transport/unified-signal-transport";
 import {
   dispatchSafeEvent,
   getConversationPreview,
@@ -95,7 +95,7 @@ export const useConversations = (currentUsername: string, users: User[], message
           return existingConversation;
         }
 
-        return await new Promise<Conversation | null>((resolve, reject) => {
+        return await new Promise<Conversation | null>(async (resolve, reject) => {
           let timeoutId: number | null = null;
           let resolved = false;
 
@@ -155,12 +155,7 @@ export const useConversations = (currentUsername: string, users: User[], message
           window.addEventListener(EventType.USER_EXISTS_RESPONSE, handleUserExistsResponse as EventListener);
 
           try {
-            websocketClient.send(
-              JSON.stringify({
-                type: SignalType.CHECK_USER_EXISTS,
-                username: pseudonym
-              })
-            );
+            await unifiedSignalTransport.send('SERVER', { username: pseudonym }, SignalType.CHECK_USER_EXISTS);
           } catch (_error) {
             resolved = true;
             cleanup();

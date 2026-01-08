@@ -32,7 +32,13 @@ const path = require('path');
 const fs = require('fs').promises;
 const crypto = require('crypto');
 
-app.disableHardwareAcceleration();
+// For better Linux/Wayland screen sharing support
+if (process.platform === 'linux') {
+  app.commandLine.appendSwitch('enable-features', 'WebRTCPipeWireCapturer');
+  app.commandLine.appendSwitch('ozone-platform-hint', 'auto');
+} else {
+  app.disableHardwareAcceleration();
+}
 
 const { initDeviceCredentials } = require('./handlers/device-credentials.cjs');
 const { SecurityMiddleware } = require('./handlers/security-middleware.cjs');
@@ -1287,16 +1293,23 @@ function registerIPCHandlers() {
     try {
       const options = {
         types: ['window', 'screen'],
-        thumbnailSize: { width: 300, height: 300 },
-        fetchWindowIcons: process.platform === 'win32'
+        thumbnailSize: { width: 400, height: 400 }, // Slightly larger for better quality
+        fetchWindowIcons: true
       };
 
       const sources = await desktopCapturer.getSources(options);
-      const validSources = sources.filter(s => s.id && s.name !== undefined);
 
-      return validSources;
+      // Map to plain objects that can be serialized over IPC
+      return sources.map(source => ({
+        id: source.id,
+        name: source.name || (source.id.startsWith('screen') ? `Screen ${source.id.split(':')[1] || ''}` : 'Window'),
+        thumbnail: source.thumbnail ? source.thumbnail.toDataURL() : null,
+        type: source.id.startsWith('screen') ? 'screen' : 'window',
+        appIcon: source.appIcon ? source.appIcon.toDataURL() : null
+      }));
     } catch (error) {
-      throw error;
+      console.error('[MAIN] Failed to get screen sources:', error);
+      return [];
     }
   });
 
@@ -1575,63 +1588,6 @@ function registerIPCHandlers() {
   } catch (e) {
     console.error('[MAIN] P2P signaling handler init failed:', e?.message || e);
   }
-
-  ipcMain.handle('webrtc:get-ice-config', async () => {
-    try {
-      let serverUrl = websocketHandler?.serverUrl || '';
-      if (!serverUrl) {
-        return null;
-      }
-
-      const wsUrl = new URL(serverUrl);
-      const httpProto = wsUrl.protocol === 'wss:' ? 'https:' : 'http:';
-      const baseUrl = `${httpProto}//${wsUrl.host}`;
-
-      const https = require('https');
-      const http = require('http');
-
-      return await new Promise((resolve) => {
-        const url = new URL(`${baseUrl}/api/ice/config`);
-        const requestModule = url.protocol === 'https:' ? https : http;
-
-        const req = requestModule.request({
-          hostname: url.hostname,
-          port: url.port || (url.protocol === 'https:' ? 443 : 80),
-          path: url.pathname,
-          method: 'GET',
-          timeout: 10000,
-          headers: { 'Accept': 'application/json' }
-        }, (res) => {
-          let data = '';
-          res.on('data', (chunk) => { data += chunk; });
-          res.on('end', () => {
-            try {
-              if (res.statusCode !== 200) {
-                return resolve(null);
-              }
-              const ice = JSON.parse(data);
-              if (ice && Array.isArray(ice.iceServers) && ice.iceServers.length > 0) {
-                resolve({
-                  iceServers: ice.iceServers,
-                  iceTransportPolicy: ice.iceTransportPolicy || 'all'
-                });
-              } else {
-                resolve(null);
-              }
-            } catch {
-              resolve(null);
-            }
-          });
-        });
-
-        req.on('error', () => resolve(null));
-        req.on('timeout', () => { req.destroy(); resolve(null); });
-        req.end();
-      });
-    } catch (error) {
-      return null;
-    }
-  });
 }
 
 async function cleanup() {

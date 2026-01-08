@@ -4,13 +4,14 @@ import { SignalType } from '../../lib/types/signal-types';
 import websocketClient from '../../lib/websocket';
 import { storeUsernameMapping } from '../../lib/username-display';
 import type { HybridKeys, PeerCertificateBundle } from '../../lib/types/p2p-types';
+import { toUint8 } from '../../lib/utils/p2p-utils';
 
 // Refs and state from authentication needed to derive P2P keys
 export interface AuthenticationRefs {
   hybridKeysRef: React.RefObject<{
     dilithium?: { secretKey: Uint8Array; publicKeyBase64: string };
-    kyber?: { secretKey: Uint8Array };
-    x25519?: { private: Uint8Array };
+    kyber?: { secretKey: Uint8Array; publicKeyBase64: string };
+    x25519?: { private: Uint8Array; publicKeyBase64: string };
   } | null>;
   loginUsernameRef: React.RefObject<string | null>;
   serverHybridPublic?: { dilithiumPublicBase64?: string };
@@ -45,10 +46,12 @@ export function useP2PKeys(authRefs: AuthenticationRefs, dbRefs: DatabaseRefs) {
         secretKey: keys.dilithium.secretKey,
         publicKeyBase64: keys.dilithium.publicKeyBase64,
       },
-      kyber: keys.kyber ? {
+      kyber: (keys.kyber?.secretKey && keys.kyber?.publicKeyBase64) ? {
+        publicKey: toUint8(keys.kyber.publicKeyBase64)!,
         secretKey: keys.kyber.secretKey,
       } : undefined,
-      x25519: keys.x25519 ? {
+      x25519: (keys.x25519?.private && keys.x25519?.publicKeyBase64) ? {
+        publicKey: toUint8(keys.x25519.publicKeyBase64)!,
         private: keys.x25519.private,
       } : undefined,
     };
@@ -176,7 +179,8 @@ export function useP2PKeys(authRefs: AuthenticationRefs, dbRefs: DatabaseRefs) {
         type: SignalType.CHECK_USER_EXISTS,
         username: peerUsername
       });
-    } catch {
+    } catch (err) {
+      console.error('[useP2PKeys] Check/Fetch request failed:', err);
       return null;
     }
 

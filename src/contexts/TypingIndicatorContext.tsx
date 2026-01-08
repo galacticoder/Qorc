@@ -177,7 +177,7 @@ export function TypingIndicatorProvider({
 }: TypingIndicatorProviderProps) {
 	const [typingUsers, setTypingUsers] = useState<Set<string>>(new Set());
 	const typingTimeoutsRef = useRef(new BoundedMap<string, ReturnType<typeof setTimeout>>(DEFAULT_MAX_TYPING_USERS));
-	
+
 	const nonceMap = useRef(new BoundedMap<string, number>(DEFAULT_UI_EVENT_RATE_MAX));
 	const rateLimiterRef = useRef(new RateLimiter(DEFAULT_RATE_LIMIT_PER_MINUTE, DEFAULT_TYPING_EVENT_RATE_WINDOW_MS));
 
@@ -227,15 +227,24 @@ export function TypingIndicatorProvider({
 				return;
 			}
 
-			const secureEvent = await validateAndVerifyEvent(event, nonceMap.current, rateLimiterRef.current);
+			let username: string | undefined;
+			let action: TypingAction | undefined;
 
-			if (!secureEvent) {
-				return;
+			// Handle P2P originated unified signals
+			if (event.detail?.transport === 'p2p') {
+				username = event.detail.from;
+				const content = event.detail.content;
+				action = content === SignalType.TYPING_START ? 'start' : content === SignalType.TYPING_STOP ? 'stop' : null;
+				if (!username || !action || !isValidUsername(username)) return;
+				if (!rateLimiterRef.current.tryConsume(`p2p:${username}`)) return;
+			} else {
+				const secureEvent = await validateAndVerifyEvent(event, nonceMap.current, rateLimiterRef.current);
+				if (!secureEvent) {
+					return;
+				}
+				username = secureEvent.payload.username;
+				action = secureEvent.payload.action;
 			}
-
-			const { payload } = secureEvent;
-			const username = payload.username;
-			const action = payload.action;
 
 			if (currentUsername && username === currentUsername) {
 				return;
@@ -284,39 +293,8 @@ export function TypingIndicatorProvider({
 
 		window.addEventListener(EventType.TYPING_INDICATOR, windowListener as EventListener);
 
-		const handleP2PTypingIndicator = (event: Event) => {
-			if (!(event instanceof CustomEvent)) return;
-			const detail = event.detail;
-			if (!isPlainObject(detail) || hasPrototypePollutionKeys(detail)) return;
-			const from = detail.from;
-			const content = detail.content;
-			if (!from || typeof from !== 'string' || !isValidUsername(from)) return;
-			if (currentUsername && from === currentUsername) return;
-			if (!rateLimiterRef.current.tryConsume(`p2p:${from}`)) return;
-
-			const action = content === SignalType.TYPING_START ? 'start' : content === SignalType.TYPING_STOP ? 'stop' : null;
-			if (!action) return;
-
-			if (action === 'start') {
-				const existingTimeout = typingTimeoutsRef.current.get(from);
-				if (existingTimeout) {
-					clearTimeout(existingTimeout);
-				}
-				setTypingUser(from, true);
-				const timeout = setTimeout(() => {
-					clearTypingUser(from);
-				}, DEFAULT_TYPING_TIMEOUT_MS);
-				typingTimeoutsRef.current.set(from, timeout);
-			} else {
-				clearTypingUser(from);
-			}
-		};
-
-		window.addEventListener(EventType.P2P_TYPING_INDICATOR, handleP2PTypingIndicator as EventListener);
-
 		return () => {
 			window.removeEventListener(EventType.TYPING_INDICATOR, windowListener as EventListener);
-			window.removeEventListener(EventType.P2P_TYPING_INDICATOR, handleP2PTypingIndicator as EventListener);
 			secureChannel.port1.onmessage = null;
 			secureChannel.port1.close();
 			secureChannel.port2.close();

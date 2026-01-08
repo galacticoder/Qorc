@@ -168,10 +168,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
     return ipcRenderer.invoke('screen:getSources');
   },
 
-  getIceConfiguration: () => {
-    return ipcRenderer.invoke('webrtc:get-ice-config');
-  },
-
   saveFile: (data) => {
     if (!data || typeof data !== 'object') {
       return Promise.reject(new Error('saveFile requires an object parameter'));

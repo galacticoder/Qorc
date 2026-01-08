@@ -19,7 +19,7 @@ import authRoutes from './routes/auth-routes.js';
 import apiRoutes from './routes/api-routes.js';
 import { createServer as createBootstrapServer, registerShutdownHandlers } from './bootstrap/server-bootstrap.js';
 import { attachGateway } from './websocket/gateway.js';
-import { attachP2PSignaling } from './websocket/p2p-signaling.js';
+import { attachQuicRelay } from './websocket/quic-relay.js';
 import { cleanupSessionManager } from './session/session-manager.js';
 import { checkBlocking } from './security/blocking.js';
 import { logEvent, logError, logDeliveryEvent, logRateLimitEvent } from './security/logging.js';
@@ -35,7 +35,6 @@ import {
   handleEncryptedMessage,
   handleSessionResetRequest,
   handleSessionEstablished,
-  handleP2PSignalingRelay,
   handleStoreOfflineMessage,
   handleRetrieveOfflineMessages,
   handleRateLimitStatus,
@@ -49,71 +48,18 @@ import {
   handleP2PFetchPeerCert,
   handleHybridKeysUpdate,
   handleRegister,
-  handleUserDisconnect,
   deliverToLocalConnections
 } from './handlers/signal-handlers.js';
 
 let server, wss, serverHybridKeyPair, blockTokenCleanupInterval, statusLogInterval;
-
-// Verify TURN server is reachable before starting
-async function verifyTurnServer() {
-  const turnUsername = process.env.TURN_USERNAME;
-  const turnPassword = process.env.TURN_PASSWORD;
-
-  if (!turnUsername || !turnPassword) {
-    throw new Error('TURN server credentials not configured. Set TURN_USERNAME and TURN_PASSWORD in .env');
-  }
-
-  const turnPort = process.env.TURN_PORT || '3478';
-  const candidates = [];
-  if (process.env.TURN_HEALTHCHECK_HOST) candidates.push(process.env.TURN_HEALTHCHECK_HOST);
-  if (process.env.TURN_EXTERNAL_IP && process.env.TURN_EXTERNAL_IP.trim() !== '') {
-    candidates.push(process.env.TURN_EXTERNAL_IP.trim());
-  }
-  candidates.push('coturn');
-  candidates.push('127.0.0.1');
-
-  // Test TCP connectivity to TURN server using first reachable candidate
-  const net = await import('net');
-
-  for (const host of candidates) {
-    const target = host;
-    try {
-      await new Promise((resolve, reject) => {
-        const socket = new net.default.Socket();
-        const timeout = setTimeout(() => {
-          socket.destroy();
-          reject(new Error(`timeout`));
-        }, 5000);
-
-        socket.connect(parseInt(turnPort, 10), target, () => {
-          clearTimeout(timeout);
-          socket.destroy();
-          resolve(true);
-        });
-
-        socket.on('error', (err) => {
-          clearTimeout(timeout);
-          socket.destroy();
-          reject(err);
-        });
-      });
-
-      cryptoLogger.info('[TURN] TURN server connectivity verified', { host: target, port: turnPort });
-      return { ip: target, port: turnPort };
-    } catch (err) {
-      cryptoLogger.warn('[TURN] TURN connectivity attempt failed', { host, port: turnPort, error: err?.message });
-    }
-  }
-
-  throw new Error(`TURN server not reachable on any candidate host. Tried: ${candidates.join(', ')}. Check if coturn container is running and set TURN_HEALTHCHECK_HOST or TURN_EXTERNAL_IP appropriately.`);
-}
 
 async function createExpressApp() {
   const app = express();
   app.set('trust proxy', true);
 
   app.use((req, res, next) => {
+    res.header('Access-Control-Allow-Origin', '*');
+    res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept');
     for (const [header, value] of Object.entries(SECURITY_HEADERS)) {
       res.setHeader(header, value);
     }
@@ -399,7 +345,8 @@ async function onServerReady({ server: httpsServer, wss: wsServer, context, work
 
   // Store gateway reference for cross-instance delivery
   global.gateway = gateway;
-  attachP2PSignaling(wss, cryptoLogger);
+  const quicRelay = attachQuicRelay(wss, cryptoLogger);
+  global.quicRelay = quicRelay;
 }
 
 async function handleWebSocketMessage({ ws, sessionId, message, parsed, context }) {
@@ -906,12 +853,6 @@ async function handleWebSocketMessage({ ws, sessionId, message, parsed, context 
         await handleAvatarFetch({ ws, parsed: normalizedMessage, state });
         break;
 
-      case SignalType.OFFER:
-      case SignalType.ANSWER:
-      case SignalType.ICE_CANDIDATE:
-        await handleP2PSignalingRelay({ ws, sessionId, parsed: normalizedMessage, state });
-        break;
-
       case SignalType.PING:
         await sendSecureMessage(ws, { type: SignalType.PONG, timestamp: Date.now() });
         break;
@@ -985,9 +926,6 @@ async function startServer() {
     registerShutdownHandlers({
       handler: shutdownServer,
     });
-
-    cryptoLogger.info('[TURN] Verifying TURN server connectivity...');
-    await verifyTurnServer();
 
     await setServerPasswordOnInput();
     await initDatabase();

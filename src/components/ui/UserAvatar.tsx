@@ -40,8 +40,8 @@ export const UserAvatar = memo(function UserAvatar({
             return profilePictureSystem.getPeerAvatar(username);
         }
     });
-    const [requested, setRequested] = useState(false);
     const [isLoaded, setIsLoaded] = useState(false);
+    const lastRequestTimeRef = React.useRef<number>(0);
     const currentUrlRef = React.useRef<string | null>(avatarUrl);
     const profilePictureEventRateRef = React.useRef<{ windowStart: number; count: number }>({ windowStart: Date.now(), count: 0 });
 
@@ -54,8 +54,8 @@ export const UserAvatar = memo(function UserAvatar({
                 setIsLoaded(false);
             }
 
-            if (!own && !requested) {
-                setRequested(true);
+            if (!own && Date.now() - lastRequestTimeRef.current > 10000) {
+                lastRequestTimeRef.current = Date.now();
                 profilePictureSystem.fetchOwnFromServer().catch(() => { });
             }
 
@@ -70,15 +70,13 @@ export const UserAvatar = memo(function UserAvatar({
                 }
             }
 
-            if (!requested) {
-                const isStale = profilePictureSystem.isPeerAvatarStale(username);
-                if (isStale) {
-                    setRequested(true);
-                    profilePictureSystem.requestPeerAvatar(username);
-                }
+            const isStale = profilePictureSystem.isPeerAvatarStale(username);
+            if (isStale && Date.now() - lastRequestTimeRef.current > 10000) {
+                lastRequestTimeRef.current = Date.now();
+                profilePictureSystem.requestPeerAvatar(username);
             }
         }
-    }, [username, isCurrentUser, requested]);
+    }, [username, isCurrentUser]);
 
     useEffect(() => {
         loadAvatar();
@@ -110,18 +108,19 @@ export const UserAvatar = memo(function UserAvatar({
 
                 if (type === 'all') {
                     setAvatarUrl(profilePictureSystem.getPeerAvatar(username));
-                } else if (type === 'single') {
+                } else if (type === 'single' || type === 'peer') {
                     const updatedUser = sanitizeEventText((detail as any).username, MAX_EVENT_USERNAME_LENGTH);
                     if (!updatedUser) return;
                     const notFound = (detail as any).notFound === true;
 
                     if (updatedUser === username) {
                         if (notFound) {
-                            setTimeout(() => setRequested(false), 5000);
                         } else {
                             loadAvatar();
                         }
                     }
+                } else if (type === 'own' && isCurrentUser) {
+                    loadAvatar();
                 }
             } catch { }
         };
@@ -139,14 +138,14 @@ export const UserAvatar = memo(function UserAvatar({
         if (isCurrentUser) return;
 
         const refreshInterval = setInterval(() => {
-            const peer = profilePictureSystem.getPeerAvatar(username);
-            if (!peer && currentUrlRef.current) {
-                setRequested(false);
+            const isStale = profilePictureSystem.isPeerAvatarStale(username);
+            if (isStale) {
+                loadAvatar();
             }
         }, 30000);
 
         return () => clearInterval(refreshInterval);
-    }, [username, isCurrentUser]);
+    }, [username, isCurrentUser, loadAvatar]);
 
     const pixelSize = SIZE_MAP[size];
     const skeletonColor = 'var(--color-secondary)';
