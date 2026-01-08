@@ -185,7 +185,7 @@ export const createHandleAccountSubmit = (
         websocketClient.send(JSON.stringify({ type: SignalType.DEVICE_CHALLENGE_REQUEST }));
         const challenge = await challengePromise;
 
-        const { deviceCredentialManager } = await import('../../lib/device-credential');
+        const { deviceCredentialManager } = await import('../../lib/cryptography/device-credential');
         const attestation = await deviceCredentialManager.signChallenge(challenge);
 
         const ackPromise = new Promise<void>((resolve, reject) => {

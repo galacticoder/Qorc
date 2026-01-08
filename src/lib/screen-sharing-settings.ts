@@ -7,12 +7,12 @@ import {
   SCREEN_SHARING_FRAMERATES
 } from './screen-sharing-consts';
 import { CryptoUtils } from './utils/crypto-utils';
-import { encryptedStorage } from './encrypted-storage';
+import { encryptedStorage } from './database/encrypted-storage';
 import { SecureAuditLogger } from './secure-error-handler';
 import { PostQuantumRandom } from './cryptography/random';
 import { SecureMemory } from './cryptography/secure-memory';
 import { DEFAULT_QUALITY, QUALITY_OPTIONS } from './constants';
-import { STORAGE_KEYS } from './storage-keys';
+import { STORAGE_KEYS } from './database/storage-keys';
 
 const STORAGE_KEY = STORAGE_KEYS.SCREEN_SHARING_SETTINGS;
 const DEVICE_KEY_STORAGE = STORAGE_KEYS.SCREEN_SHARING_DEVICE_KEY;

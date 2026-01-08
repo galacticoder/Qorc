@@ -4,7 +4,7 @@ import { EventType } from '../../lib/types/event-types';
 import { Message } from '../../components/chat/messaging/types';
 import websocketClient from '../../lib/websocket';
 import { isValidKyberPublicKeyBase64 } from '../../lib/utils/messaging-validators';
-import type { SecureDB } from '../../lib/secureDB';
+import type { SecureDB } from '../../lib/database/secureDB';
 import { encryptLongTerm } from '../../lib/cryptography/long-term-encryption';
 import { sanitizeContent, sanitizeUsername } from '../../lib/sanitizers';
 import type { HybridPublicKeys, UserWithKeys, PendingRetryMessage } from '../../lib/types/message-sending-types';

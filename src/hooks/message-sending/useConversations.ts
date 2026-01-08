@@ -5,7 +5,7 @@ import { User } from "../../components/chat/messaging/UserList";
 import { SignalType } from "../../lib/types/signal-types";
 import { EventType } from "../../lib/types/event-types";
 import { pseudonymizeUsernameWithCache } from "../../lib/username-hash";
-import { SecureDB } from "../../lib/secureDB";
+import { SecureDB } from "../../lib/database/secureDB";
 import { MAX_CONVERSATIONS, CONVERSATION_RATE_LIMIT_WINDOW_MS, CONVERSATION_RATE_LIMIT_MAX, VALIDATION_TIMEOUT_MS } from "../../lib/constants";
 import { unifiedSignalTransport } from "../../lib/transport/unified-signal-transport";
 import {

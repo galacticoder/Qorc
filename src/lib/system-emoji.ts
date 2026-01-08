@@ -1,6 +1,6 @@
 import { SecureAuditLogger } from './secure-error-handler';
-import { STORAGE_KEYS } from './storage-keys';
-import { SecureDB } from './secureDB';
+import { STORAGE_KEYS } from './database/storage-keys';
+import { SecureDB } from './database/secureDB';
 
 async function computeIntegrityHash(emojis: ReadonlyArray<string>): Promise<string> {
   const text = emojis.join('');

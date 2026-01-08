@@ -1,5 +1,5 @@
 import React, { useRef, useEffect, useCallback, useState } from 'react';
-import { SecureDB } from '../../lib/secureDB';
+import { SecureDB } from '../../lib/database/secureDB';
 import type { Message } from '../../components/chat/messaging/types';
 import type { User } from '../../components/chat/messaging/UserList';
 import { EventType } from '../../lib/types/event-types';

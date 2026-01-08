@@ -2,7 +2,7 @@
  * Device Credential Manager
  */
 
-import { PostQuantumUtils } from './utils/pq-utils';
+import { PostQuantumUtils } from '../utils/pq-utils';
 
 interface DeviceCredentials {
     publicKey: Uint8Array;
@@ -15,10 +15,12 @@ interface DeviceAttestation {
     challenge: string;
 }
 
+// Device Credential Manager
 class DeviceCredentialManager {
     private publicKey: Uint8Array | null = null;
     private keyHash: Uint8Array | null = null;
 
+    // Get device credentials
     async getCredentials(): Promise<DeviceCredentials> {
         if (this.publicKey && this.keyHash) {
             return {
@@ -46,6 +48,7 @@ class DeviceCredentialManager {
         };
     }
 
+    // Sign a challenge with device credentials
     async signChallenge(challenge: string): Promise<DeviceAttestation> {
         if (typeof window === 'undefined' || !(window as any).edgeApi?.deviceCredentials) {
             throw new Error('Device credentials API not available');
@@ -61,6 +64,7 @@ class DeviceCredentialManager {
         };
     }
 
+    // Get device hash
     async getDeviceHash(): Promise<string> {
         const credentials = await this.getCredentials();
         return PostQuantumUtils.bytesToHex(credentials.keyHash);

@@ -3,7 +3,7 @@ import { cn } from '../../../lib/utils/shared-utils';
 import { Button } from '../../ui/button';
 import { Play, Pause } from 'lucide-react';
 import { useFileUrl } from '../../../hooks/file-handling/useFileUrl';
-import type { SecureDB } from '../../../lib/secureDB';
+import type { SecureDB } from '../../../lib/database/secureDB';
 import { SignalType } from '../../../lib/types/signal-types';
 
 // Props for voice message bubble

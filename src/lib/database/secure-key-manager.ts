@@ -1,9 +1,10 @@
-import { CryptoUtils } from './utils/crypto-utils';
-import { SecureAuditLogger } from './secure-error-handler';
+import { CryptoUtils } from '../utils/crypto-utils';
 import * as argon2 from "argon2-wasm";
 import { blake3 as nobleBlake3 } from '@noble/hashes/blake3.js';
-import { PostQuantumUtils } from './utils/pq-utils';
+import { PostQuantumUtils } from '../utils/pq-utils';
 import { SQLiteKV } from './sqlite-kv';
+import { PostQuantumAEAD } from '../cryptography/aead';
+import { EncryptedKeyData, DecryptedKeys } from '../types/database-types';
 
 const getCrypto = () => {
 	if (typeof globalThis !== 'undefined' && globalThis.crypto) {
@@ -16,75 +17,27 @@ const getCrypto = () => {
 	}
 };
 
-interface EncryptedKeyData {
-	bundleCiphertext: string;
-	bundleNonce: string;
-	bundleTag: string;
-	bundleAad: string;
-	bundleMac: string;
-	kyberPublicBase64: string;
-	dilithiumPublicBase64: string;
-	x25519PublicBase64: string;
-	salt: string;
-	version: number; // Schema version for post-quantum format
-	argon2Params: {
-		version: number;
-		algorithm: string;
-		memoryCost: number;
-		timeCost: number;
-		parallelism: number;
-	};
-	createdAt: number;
-	expiresAt: number;
-	sequence: number;
-	payloadSize: number;
-}
-
-
-interface DecryptedKeys {
-	kyber: {
-		publicKeyBase64: string;
-		secretKey: Uint8Array;
-	};
-	dilithium: {
-		publicKeyBase64: string;
-		secretKey: Uint8Array;
-	};
-	x25519: {
-		publicKeyBase64: string;
-		private: Uint8Array;
-	};
-}
-
 export class SecureKeyManager {
-	private storeName = 'encryptedKeys';
 	private masterKey: CryptoKey | null = null;
 	private username: string;
-	private initializationPromise: Promise<void> | null = null; // Single-flight guard
+	private initializationPromise: Promise<void> | null = null;
 
 	constructor(username: string) {
 		this.username = username;
-		// Clear any stale state
 		this.masterKey = null;
 	}
 
-	/**
-	 * Get the master AES-GCM key for use by other components (e.g., SecureDB)
-	 * @returns {CryptoKey | null} The master encryption key, or null if not initialized
-	 */
+	// Get master AES-GCM key
 	getMasterKey(): CryptoKey | null {
 		return this.masterKey;
 	}
 
-	/**
-	 * Initialize the key manager directly with a pre-existing master key (raw 32 bytes)
-	 * Used for token-only unlock via wrapped device-bound key
-	 */
+	// Initialize the key manager with master key
 	async initializeWithMasterKey(masterKeyRaw: Uint8Array): Promise<void> {
 		if (!masterKeyRaw || !(masterKeyRaw instanceof Uint8Array) || masterKeyRaw.length !== 32) {
 			throw new Error('Master key must be 32 raw bytes');
 		}
-		// Import as AES-GCM key (extractable for PQ AEAD compatibility)
+
 		const masterKey = await (getCrypto().subtle.importKey(
 			'raw',
 			masterKeyRaw,
@@ -93,7 +46,7 @@ export class SecureKeyManager {
 			['encrypt', 'decrypt']
 		));
 		this.masterKey = masterKey;
-		// Ensure metadata exists for subsequent operations; create if missing for token-only path
+
 		let meta = await this.getKeyMetadata();
 		if (!meta || !meta.salt || !meta.argon2Params) {
 			try {
@@ -118,10 +71,7 @@ export class SecureKeyManager {
 		}
 	}
 
-	/**
-	 * Get the Argon2 encoded hash for the current passphrase
-	 * @returns {Promise<string | null>} The Argon2 encoded hash string, or null if not initialized
-	 */
+	// Get Argon2 hash for the current passphrase
 	async getEncodedPassphraseHash(passphrase: string): Promise<string | null> {
 		if (!this.masterKey) {
 			return null;
@@ -130,11 +80,10 @@ export class SecureKeyManager {
 		try {
 			const metadata = await this.getKeyMetadata();
 			if (!metadata || !metadata.salt || !metadata.argon2Params) {
-				SecureAuditLogger.error('secure-key-manager', 'passphrase-hash', 'no-metadata', {});
+				console.error('[secure-key-manager] No key metadata available for passphrase hashing');
 				return null;
 			}
 
-			// Re-hash the passphrase with the stored salt and params to get the encoded hash
 			const saltBytes = CryptoUtils.Base64.base64ToUint8Array(metadata.salt);
 
 			const hashResult = await argon2.hash({
@@ -150,12 +99,12 @@ export class SecureKeyManager {
 
 			return hashResult.encoded;
 		} catch (_error) {
-			SecureAuditLogger.error('secure-key-manager', 'passphrase-hash', 'encode-failed', { error: (_error as Error).message });
+			console.error('[secure-key-manager] Failed to encode passphrase hash', { error: (_error as Error).message });
 			return null;
 		}
 	}
 
-	// ----- Internal storage helpers (SQLite) -----
+	// Internal storage helpers
 	private async kv() { return SQLiteKV.forUser(this.username); }
 
 	private async storeKeyMetadata(metadata: any): Promise<void> {
@@ -174,53 +123,46 @@ export class SecureKeyManager {
 		return (await this.kv()).getJsonKey<EncryptedKeyData>('keys');
 	}
 
+	// Initialize key manager
 	async initialize(passphrase: string, salt?: string, argon2Params?: { version: number; algorithm: string; memoryCost: number; timeCost: number; parallelism: number }): Promise<void> {
-		// If already initialized, return immediately
 		if (this.masterKey) {
 			return;
 		}
 
-		// If initialization is in progress, wait for it to complete
 		if (this.initializationPromise) {
 			return this.initializationPromise;
 		}
 
-		// Create the initialization promise to prevent concurrent initialization
 		this.initializationPromise = this.doInitialize(passphrase, salt, argon2Params);
 
 		try {
 			await this.initializationPromise;
 		} finally {
-			// Clear the promise once initialization is complete (success or failure)
 			this.initializationPromise = null;
 		}
 	}
 
+	// Do initialization
 	private async doInitialize(passphrase: string, salt?: string, argon2Params?: { version: number; algorithm: string; memoryCost: number; timeCost: number; parallelism: number }): Promise<void> {
-		// Double-check in case another thread completed initialization while we were waiting
 		if (this.masterKey) {
 			return;
 		}
 
-		// Clear any stale state first
 		this.masterKey = null;
 
 		let keySalt: Uint8Array;
 		let keyIv: Uint8Array;
 		let storedArgon2Params: { version: number; algorithm: string; memoryCost: number; timeCost: number; parallelism: number };
 
-		// Check if we have existing metadata for salt/params recovery
+		// Load any previously stored metadata to recover salt and Argon2 parameters
 		let existingMetadata: any = null;
 		try {
 			existingMetadata = await this.getKeyMetadata();
 		} catch (_error) {
-			SecureAuditLogger.error('secure-key-manager', 'initialization', 'metadata-load-failed', {
-				error: (_error as Error).message
-			});
-			throw new Error('Failed to load key metadata. Use recoverFromCorruption() if corruption is suspected.');
+			throw new Error('Failed to load key metadata: ' + (_error as Error).message);
 		}
 
-		// Use stored salt if available, otherwise use provided salt or generate new one
+		// Use stored salt if available otherwise use provided salt or generate new one
 		if (salt) {
 			keySalt = CryptoUtils.Base64.base64ToUint8Array(salt);
 			keyIv = getCrypto().getRandomValues(new Uint8Array(16));
@@ -228,11 +170,10 @@ export class SecureKeyManager {
 			keySalt = CryptoUtils.Base64.base64ToUint8Array(existingMetadata.salt);
 			keyIv = getCrypto().getRandomValues(new Uint8Array(16));
 		} else {
-			keySalt = getCrypto().getRandomValues(new Uint8Array(32)); // Increased from 16 to 32 for quantum security
+			keySalt = getCrypto().getRandomValues(new Uint8Array(32));
 			keyIv = getCrypto().getRandomValues(new Uint8Array(16));
 		}
 
-		// Use Argon2ID for quantum-resistant key derivation
 		if (argon2Params) {
 			storedArgon2Params = argon2Params;
 		} else if (existingMetadata?.argon2Params) {
@@ -241,9 +182,9 @@ export class SecureKeyManager {
 			storedArgon2Params = {
 				version: 0x13,
 				algorithm: 'argon2id',
-				memoryCost: 524288, // 512MB for quantum-resistant security
-				timeCost: 6, // Increased iterations for stronger key derivation
-				parallelism: 4 // Optimal parallelism for modern systems
+				memoryCost: 524288,
+				timeCost: 6,
+				parallelism: 4
 			};
 		}
 
@@ -255,13 +196,13 @@ export class SecureKeyManager {
 			time: storedArgon2Params.timeCost,
 			mem: storedArgon2Params.memoryCost,
 			parallelism: storedArgon2Params.parallelism,
-			type: 2, // argon2id
+			type: 2,
 			version: storedArgon2Params.version,
 			hashLen: 32
 		});
 
 		const elapsedTime = performance.now() - startTime;
-		const minTime = 200; // Minimum 200ms for enhanced security
+		const minTime = 200;
 		if (elapsedTime < minTime) {
 			await new Promise(resolve => setTimeout(resolve, minTime - elapsedTime));
 		}
@@ -270,18 +211,16 @@ export class SecureKeyManager {
 			throw new Error('CRITICAL: Invalid Argon2 key derivation result');
 		}
 
-		// Import the derived hash as a crypto key (extractable for PostQuantumAEAD)
 		const masterKey = await getCrypto().subtle.importKey(
 			'raw',
 			argon2Result.hash,
-			{ name: 'AES-GCM' }, // Format for WebCrypto compatibility
-			true, // Make extractable for PostQuantumAEAD encryption
+			{ name: 'AES-GCM' },
+			true,
 			['encrypt', 'decrypt']
 		);
 
 		this.masterKey = masterKey;
 
-		// Always store metadata if it doesn't exist yet (even if salt was provided externally)
 		if (!existingMetadata || !existingMetadata.salt) {
 			await this.storeKeyMetadata({
 				salt: CryptoUtils.Base64.arrayBufferToBase64(keySalt),
@@ -296,6 +235,7 @@ export class SecureKeyManager {
 		}
 	}
 
+	// Store encrypted keys
 	async storeKeys(keys: DecryptedKeys): Promise<void> {
 		if (!this.masterKey) {
 			throw new Error('Key manager not initialized');
@@ -306,7 +246,7 @@ export class SecureKeyManager {
 			throw new Error('Key metadata not found or incomplete');
 		}
 
-		// Export master key to raw bytes for post-quantum AEAD
+		// Export master key to raw bytes
 		let key: Uint8Array;
 		try {
 			const masterKeyBytes = await getCrypto().subtle.exportKey('raw', this.masterKey);
@@ -315,9 +255,7 @@ export class SecureKeyManager {
 			throw new Error('Failed to export master key for post-quantum encryption.');
 		}
 
-		const { PostQuantumAEAD } = await import('./cryptography/aead');
-
-		// Encrypt secret keys using post-quantum AEAD
+		// Encrypt secret keys
 		const kyberSecretBytes = new TextEncoder().encode(JSON.stringify(Array.from(keys.kyber.secretKey)));
 		const dilithiumSecretBytes = new TextEncoder().encode(JSON.stringify(Array.from(keys.dilithium.secretKey)));
 		const x25519SecretBytes = new TextEncoder().encode(JSON.stringify(Array.from(keys.x25519.private)));
@@ -329,7 +267,7 @@ export class SecureKeyManager {
 		};
 
 		const payloadBytes = new TextEncoder().encode(JSON.stringify(payload));
-		const pqNonce = getCrypto().getRandomValues(new Uint8Array(36)); // 36-byte nonce: 12 for AES-GCM + 24 for XChaCha20
+		const pqNonce = getCrypto().getRandomValues(new Uint8Array(36));
 		const pqAad = new TextEncoder().encode(`secure-key-manager-pq-${this.username}`);
 		const pqEncResult = PostQuantumAEAD.encrypt(payloadBytes, key, pqAad, pqNonce);
 
@@ -364,6 +302,7 @@ export class SecureKeyManager {
 		key.fill(0);
 	}
 
+	// Get decrypted keys from encrypted storage
 	async getKeys(): Promise<DecryptedKeys | null> {
 		if (!this.masterKey) {
 			throw new Error('Key manager not initialized');
@@ -374,9 +313,6 @@ export class SecureKeyManager {
 		try {
 			encryptedData = await this.getEncryptedKeys();
 		} catch (_error) {
-			SecureAuditLogger.error('secure-key-manager', 'get-keys', 'retrieval-failed', {
-				error: (_error as Error).message
-			});
 			throw new Error(`Failed to retrieve encrypted keys: ${_error instanceof Error ? _error.message : String(_error)}`);
 		}
 
@@ -384,7 +320,7 @@ export class SecureKeyManager {
 			return null;
 		}
 
-		// Export master key to raw bytes for post-quantum AEAD
+		// Export master key to raw bytes
 		let key: Uint8Array;
 		try {
 			const masterKeyBytes = await getCrypto().subtle.exportKey('raw', this.masterKey);
@@ -393,9 +329,6 @@ export class SecureKeyManager {
 			throw new Error('Failed to export master key for post-quantum decryption.');
 		}
 
-		// Import PostQuantumAEAD for decryption
-		const { PostQuantumAEAD } = await import('./cryptography/aead');
-
 		const ciphertext = CryptoUtils.Base64.base64ToUint8Array(encryptedData.bundleCiphertext);
 		const nonce = CryptoUtils.Base64.base64ToUint8Array(encryptedData.bundleNonce);
 		const tag = CryptoUtils.Base64.base64ToUint8Array(encryptedData.bundleTag);
@@ -403,16 +336,11 @@ export class SecureKeyManager {
 		const storedMac = CryptoUtils.Base64.base64ToUint8Array(encryptedData.bundleMac);
 
 		if (nonce.length !== 36) {
-			throw new Error(`Invalid payload nonce length: ${nonce.length}, expected 36`);
+			throw new Error(`Invalid payload nonce length: ${nonce.length}.`);
 		}
 
-		// PostQuantumAEAD returns 32-byte BLAKE3 MAC
 		if (tag.length !== 32) {
-			SecureAuditLogger.error('secure-key-manager', 'get-keys', 'invalid-tag-length', {
-				tagLength: tag.length,
-				expected: 32
-			});
-			throw new Error(`Invalid payload tag length: ${tag.length}. Expected 32 bytes (PostQuantumAEAD format). Please clear your encrypted keys and re-register.`);
+			throw new Error(`Invalid payload tag length: ${tag.length}.`);
 		}
 
 		const fullCiphertext = new Uint8Array(ciphertext.length + tag.length);
@@ -425,17 +353,6 @@ export class SecureKeyManager {
 		const expectedMac = nobleBlake3(macInput, { key });
 
 		if (!PostQuantumUtils.timingSafeEqual(expectedMac, storedMac)) {
-			console.error('[SecureKeyManager] MAC verification failed:', {
-				keyLength: key.length,
-				ciphertextLength: ciphertext.length,
-				tagLength: tag.length,
-				aadLength: storedAad.length,
-				fullCiphertextLength: fullCiphertext.length,
-				macInputLength: macInput.length,
-				expectedMacHex: Array.from(expectedMac.slice(0, 8)).map(b => b.toString(16).padStart(2, '0')).join(''),
-				storedMacHex: Array.from(storedMac.slice(0, 8)).map(b => b.toString(16).padStart(2, '0')).join(''),
-				aadText: new TextDecoder().decode(storedAad)
-			});
 			throw new Error('Payload integrity verification failed');
 		}
 
@@ -446,13 +363,9 @@ export class SecureKeyManager {
 		}
 
 		const decodeKey = (base64: string, expectedLength: number): Uint8Array => {
-			// Decode from base64 to get UTF-8 encoded JSON string
 			const jsonBytes = CryptoUtils.Base64.base64ToUint8Array(base64);
-			// Decode UTF-8 to string
 			const jsonString = new TextDecoder().decode(jsonBytes);
-			// Parse JSON array
 			const array = JSON.parse(jsonString);
-			// Convert array back to Uint8Array
 			const bytes = new Uint8Array(array);
 
 			if (bytes.length !== expectedLength) {
@@ -461,7 +374,6 @@ export class SecureKeyManager {
 			return bytes;
 		};
 
-		// ML-KEM-1024 secret key = 3168 bytes; ML-DSA-87 secret key = 4896 bytes; X25519 secret key = 32 bytes
 		const kyberSecret = decodeKey(parsed.kyber, 3168);
 		const dilithiumSecret = decodeKey(parsed.dilithium, 4896);
 		const x25519Secret = decodeKey(parsed.x25519, 32);
@@ -483,6 +395,7 @@ export class SecureKeyManager {
 		};
 	}
 
+	// Get public keys from encrypted data
 	async getPublicKeys(): Promise<{ kyberPublicBase64: string; dilithiumPublicBase64: string; x25519PublicBase64: string } | null> {
 		const encryptedData = await this.getEncryptedKeys();
 		if (!encryptedData) {
@@ -504,10 +417,12 @@ export class SecureKeyManager {
 		};
 	}
 
+	// Clear master key
 	clearKeys(): void {
 		this.masterKey = null;
 	}
 
+	// Check if keys exist
 	async hasKeys(): Promise<boolean> {
 		try {
 			const encryptedData = await this.getEncryptedKeys();
@@ -516,41 +431,8 @@ export class SecureKeyManager {
 			return false;
 		}
 	}
-
-
-	async deleteKeys(): Promise<void> {
-		this.masterKey = null;
-		try {
-			await (await this.kv()).deleteJsonKey('metadata');
-		} catch { }
-		try {
-			await (await this.kv()).deleteJsonKey('keys');
-		} catch { }
-	}
-
-	/**
-	 * Explicit recovery method that must be called intentionally by the user
-	 */
-	async recoverFromCorruption(): Promise<void> {
-		SecureAuditLogger.warn('secure-key-manager', 'recovery', 'destructive-recovery-initiated', {});
-		try {
-			await this.deleteKeys();
-		} catch (keyDeleteError) {
-			SecureAuditLogger.error('secure-key-manager', 'recovery', 'key-delete-failed', {
-				error: (keyDeleteError as Error).message
-			});
-			try {
-				await this.deleteDatabase();
-			} catch (dbDeleteError) {
-				SecureAuditLogger.error('secure-key-manager', 'recovery', 'database-delete-failed', {
-					error: (dbDeleteError as Error).message
-				});
-				throw new Error(`Recovery failed: Could not delete keys or database. Manual intervention required.`);
-			}
-		}
-		this.masterKey = null;
-	}
-
+	
+	// Delete database
 	async deleteDatabase(): Promise<void> {
 		this.masterKey = null;
 		await (await this.kv()).clearSecureKeys();

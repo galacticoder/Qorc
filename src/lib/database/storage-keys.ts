@@ -1,7 +1,7 @@
-/** Centralized storage keys for local and encrypted storage. */
+/** All storage keys for local and encrypted storage. */
 
 export const STORAGE_KEYS = {
-    CLUSTER_KEY_STORAGE: 'securechat_cluster_keys_v2',
+    CLUSTER_KEY_STORAGE: 'qorchat_cluster_keys_v2',
     SCREEN_SHARING_SETTINGS: 'screen_sharing_settings_v1',
     SCREEN_SHARING_DEVICE_KEY: 'screen_sharing_settings_device_key_v1',
     SECURE_MESSAGE_QUEUE: 'secure_message_queue_v1',

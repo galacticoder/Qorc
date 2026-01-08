@@ -8,7 +8,6 @@ import { PostQuantumRandom } from '../cryptography/random';
 import { PostQuantumUtils } from '../utils/pq-utils';
 import { PostQuantumKEM } from '../cryptography/kem';
 import { CryptoUtils } from '../utils/crypto-utils';
-import { handleP2PError } from '../secure-error-handler';
 import { P2P_MESSAGE_RATE_LIMIT, P2P_MESSAGE_RATE_WINDOW_MS, P2P_MAX_MESSAGE_SIZE, P2P_MAX_PEERS } from '../constants';
 import {
     isPlainObject,
@@ -22,7 +21,6 @@ import {
 } from '../constants';
 import { QuicTransport, quicTransport } from './quic-transport';
 import {
-    SecureStream,
     ConnectionState,
     PeerIdentity,
 } from './secure-transport';
@@ -192,7 +190,7 @@ export class SecureP2PService {
             this.startDummyTraffic();
             this.startHeartbeat();
         } catch (error) {
-            handleP2PError(error as Error, { context: 'p2p_initialization' });
+            console.error('P2P initialization failed:', error);
             throw error;
         }
     }

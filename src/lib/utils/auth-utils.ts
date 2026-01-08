@@ -1,7 +1,7 @@
 import { RefObject } from "react";
 import { CryptoUtils } from "../utils/crypto-utils";
 import { PostQuantumUtils } from "../utils/pq-utils";
-import { syncEncryptedStorage } from "../encrypted-storage";
+import { syncEncryptedStorage } from "../database/encrypted-storage";
 
 // Securely wipe a string reference by overwriting it multiple times
 export const secureWipeStringRef = (ref: RefObject<string>) => {
@@ -52,7 +52,7 @@ export const validateServerKeys = (val: any): boolean => {
 export const PinnedServer = {
   get() {
     try {
-      const storedStr = syncEncryptedStorage.getItem('securechat_server_pin_v2');
+      const storedStr = syncEncryptedStorage.getItem('qorchat_server_pin_v2');
       if (!storedStr || storedStr.length > 4096) return null;
 
       const parsed = JSON.parse(storedStr);
@@ -63,7 +63,7 @@ export const PinnedServer = {
   set(val: any) {
     try {
       if (!validateServerKeys(val)) return;
-      syncEncryptedStorage.setItem('securechat_server_pin_v2', JSON.stringify(val));
+      syncEncryptedStorage.setItem('qorchat_server_pin_v2', JSON.stringify(val));
     } catch { }
   }
 };

@@ -135,7 +135,7 @@ export class SecureCallingService {
 
         // Load preferred camera
         try {
-            const { encryptedStorage } = await import('../encrypted-storage');
+            const { encryptedStorage } = await import('../database/encrypted-storage');
             const storedCamera = await encryptedStorage.getItem('preferred_camera_deviceId_v1');
             if (storedCamera && typeof storedCamera === 'string') {
                 this.preferredCameraDeviceId = storedCamera;

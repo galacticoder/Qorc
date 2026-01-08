@@ -202,7 +202,7 @@ export async function handleSignalMessages(data: any, handlers: SignalHandlers) 
             clusterKeyManager.updateServerKeys(serverId, hybridKeys as any);
           }
 
-          try { const { encryptedStorage } = await import('./encrypted-storage'); await encryptedStorage.setItem('securechat_server_pin_v2', JSON.stringify(hybridKeys)); } catch { }
+          try { const { encryptedStorage } = await import('./database/encrypted-storage'); await encryptedStorage.setItem('qorchat_server_pin_v2', JSON.stringify(hybridKeys)); } catch { }
         } catch (_err) {
           SecureAuditLogger.error('signals', 'server-key', 'persist-failed', { error: (_err as Error).message });
         }
@@ -242,7 +242,7 @@ export async function handleSignalMessages(data: any, handlers: SignalHandlers) 
           SecureAuditLogger.warn('signals', 'pq-session', 'missing-server-keys', {});
           return;
         }
-        try { const { encryptedStorage } = await import('./encrypted-storage'); await encryptedStorage.setItem('securechat_server_pin_v2', JSON.stringify(data.serverKeys)); } catch { }
+        try { const { encryptedStorage } = await import('./database/encrypted-storage'); await encryptedStorage.setItem('qorchat_server_pin_v2', JSON.stringify(data.serverKeys)); } catch { }
         (websocketClient as any).initiateSessionKeyExchange?.(data.serverKeys);
         break;
       }
@@ -264,7 +264,7 @@ export async function handleSignalMessages(data: any, handlers: SignalHandlers) 
           let fallback = loginUsernameRef?.current as string | undefined;
           if (!fallback) {
             try {
-              const { syncEncryptedStorage } = await import('./encrypted-storage');
+              const { syncEncryptedStorage } = await import('./database/encrypted-storage');
               fallback = syncEncryptedStorage.getItem('last_authenticated_username') || '';
             } catch {
               fallback = '';
@@ -278,7 +278,7 @@ export async function handleSignalMessages(data: any, handlers: SignalHandlers) 
 
         if (recoveredUser && /^[a-zA-Z0-9._-]{3,100}$/.test(recoveredUser)) {
           loginUsernameRef && (loginUsernameRef.current = recoveredUser);
-          try { (await import('./encrypted-storage')).syncEncryptedStorage.setItem('last_authenticated_username', recoveredUser); } catch { }
+          try { (await import('./database/encrypted-storage')).syncEncryptedStorage.setItem('last_authenticated_username', recoveredUser); } catch { }
         } else {
           SecureAuditLogger.warn('signals', 'auth-success', 'invalid-username', {});
           recoveredUser = '';
@@ -320,7 +320,7 @@ export async function handleSignalMessages(data: any, handlers: SignalHandlers) 
                 }
 
                 if (!Authentication?.keyManagerRef?.current) {
-                  const mod = await import('./secure-key-manager');
+                  const mod = await import('./database/secure-key-manager');
                   const SKM = (mod as any).SecureKeyManager || (mod as any).default;
                   Authentication.keyManagerRef.current = new SKM(recoveredUser);
                 }
@@ -410,7 +410,7 @@ export async function handleSignalMessages(data: any, handlers: SignalHandlers) 
         if (data.valid) {
           if (typeof data.username === 'string' && data.username) {
             if (loginUsernameRef) loginUsernameRef.current = data.username;
-            try { (await import('./encrypted-storage')).syncEncryptedStorage.setItem('last_authenticated_username', data.username); } catch { }
+            try { (await import('./database/encrypted-storage')).syncEncryptedStorage.setItem('last_authenticated_username', data.username); } catch { }
             Authentication?.setUsername?.(data.username);
           }
           try { setLoginError?.(''); } catch { }
@@ -444,7 +444,7 @@ export async function handleSignalMessages(data: any, handlers: SignalHandlers) 
               }
 
               if (!Authentication?.keyManagerRef?.current) {
-                const mod = await import('./secure-key-manager');
+                const mod = await import('./database/secure-key-manager');
                 const SKM = (mod as any).SecureKeyManager || (mod as any).default;
                 Authentication.keyManagerRef.current = new SKM(loginUsernameRef!.current);
               }
@@ -620,7 +620,7 @@ export async function handleSignalMessages(data: any, handlers: SignalHandlers) 
         const userCandidate = typeof data?.username === 'string' ? data.username.trim() : loginUsernameRef?.current;
         if (userCandidate) {
           if (loginUsernameRef) loginUsernameRef.current = userCandidate;
-          try { (await import('./encrypted-storage')).syncEncryptedStorage.setItem('last_authenticated_username', userCandidate as string); } catch { }
+          try { (await import('./database/encrypted-storage')).syncEncryptedStorage.setItem('last_authenticated_username', userCandidate as string); } catch { }
         }
 
         if (data?.tokens?.accessToken && data.tokens.refreshToken) {

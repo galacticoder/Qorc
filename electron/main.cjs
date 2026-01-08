@@ -582,7 +582,7 @@ async function createWindow() {
     contextIsolation: true,
     enableRemoteModule: false,
     preload: path.join(__dirname, 'preload.cjs'),
-    partition: 'persist:securechat',
+    partition: 'persist:qorchat',
     allowRunningInsecureContent: false,
     experimentalFeatures: false,
     sandbox: true,

@@ -1,5 +1,5 @@
 import type { Message } from '../../components/chat/messaging/types';
-import type { SecureDB } from '../secureDB';
+import type { SecureDB } from '../database/secureDB';
 
 // Extended file state for incoming transfers
 export interface ExtendedFileState {

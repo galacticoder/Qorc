@@ -253,7 +253,7 @@ class WebSocketClient {
 
   private async initializeSigningKeys(): Promise<void> {
     try {
-      const { encryptedStorage } = await import('./encrypted-storage');
+      const { encryptedStorage } = await import('./database/encrypted-storage');
       const stored = await encryptedStorage.getItem('ws_client_signing_key_v1');
       if (stored) {
         try {

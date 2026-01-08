@@ -3,7 +3,7 @@
  */
 
 import { CryptoUtils } from '../utils/crypto-utils';
-import { SecureDB } from '../secureDB';
+import { SecureDB } from '../database/secureDB';
 import { pseudonymizeUsernameWithCache } from '../username-hash';
 import { isPlainObject, hasPrototypePollutionKeys } from '../sanitizers';
 import { hexToBytes, bytesToHex, validateUsername, isPseudonymizedUsername } from '../utils/blocking-utils';

@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { SecureDB } from '../../lib/secureDB';
+import { SecureDB } from '../../lib/database/secureDB';
 import { UsernameDisplayContext } from '../../lib/username-display';
 import { EventType } from '../../lib/types/event-types';
 import { isPlainObject, hasPrototypePollutionKeys } from '../../lib/sanitizers';

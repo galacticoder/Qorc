@@ -4,9 +4,9 @@ import { EventType } from "../../lib/types/event-types";
 import { retrieveAuthTokens } from "../../lib/signals";
 import websocketClient from "../../lib/websocket";
 import { CryptoUtils } from "../../lib/utils/crypto-utils";
-import { SecureDB } from "../../lib/secureDB";
-import { SecureKeyManager } from "../../lib/secure-key-manager";
-import { encryptedStorage, syncEncryptedStorage } from "../../lib/encrypted-storage";
+import { SecureDB } from "../../lib/database/secureDB";
+import { SecureKeyManager } from "../../lib/database/secure-key-manager";
+import { encryptedStorage, syncEncryptedStorage } from "../../lib/database/encrypted-storage";
 import { secureWipeStringRef, PinnedServer } from "../../lib/utils/auth-utils";
 import type { ServerHybridPublicKeys, HybridKeys, ServerTrustRequest, HashParams, MaxStepReached } from "../../lib/types/auth-types";
 import { createDeriveEffectivePassphrase, createGetKeysOnDemand, createWaitForServerKeys, createInitializeKeys } from "./keyManagement";
@@ -174,7 +174,7 @@ export const useAuth = (_secureDB?: SecureDB) => {
   // Clear secure DB helper
   const clearSecureDBForUser = async (pseudonym: string) => {
     try {
-      const { SQLiteKV } = await import('../../lib/sqlite-kv');
+      const { SQLiteKV } = await import('../../lib/database/sqlite-kv');
       await (SQLiteKV as any).purgeUserDb(pseudonym);
     } catch { }
   };

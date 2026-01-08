@@ -1,4 +1,4 @@
-import type { SecureDB } from '../../lib/secureDB';
+import type { SecureDB } from '../../lib/database/secureDB';
 import type { User } from '../../components/chat/messaging/UserList';
 import { EventType } from '../../lib/types/event-types';
 import { isPlainObject, hasPrototypePollutionKeys } from '../../lib/sanitizers';

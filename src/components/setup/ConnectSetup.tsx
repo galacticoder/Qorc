@@ -1,5 +1,4 @@
 import { useEffect, useMemo, useState, useRef } from 'react';
-import { debounce } from '../../lib/debounce';
 import { Button } from '../ui/button';
 import { Input } from '../ui/input';
 import { Label } from '../ui/label';
@@ -38,6 +37,17 @@ export function ConnectSetup({ onComplete, initialServerUrl = '' }: ConnectSetup
   const [transport, setTransport] = useState<'obfs4' | 'snowflake'>('obfs4');
   const [bridgesText, setBridgesText] = useState('');
   const bridgesTextRef = useRef('');
+
+  const debounce = <T extends (...args: any[]) => void>(fn: T, wait: number) => {
+    let timeout: ReturnType<typeof setTimeout> | null = null;
+    return (...args: Parameters<T>) => {
+      if (timeout) clearTimeout(timeout);
+      timeout = setTimeout(() => {
+        timeout = null;
+        fn(...args);
+      }, wait);
+    };
+  };
 
   const debouncedSetBridges = useMemo(
     () => debounce((value: string) => {

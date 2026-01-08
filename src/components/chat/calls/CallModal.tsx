@@ -255,7 +255,7 @@ export const CallModal: React.FC<CallModalProps> = memo(({
 
         // Load preferred camera
         try {
-          const { encryptedStorage } = await import('../../../lib/encrypted-storage');
+          const { encryptedStorage } = await import('../../../lib/database/encrypted-storage');
           const saved = await encryptedStorage.getItem('preferred_camera_deviceId_v1_pq');
           if (saved && typeof saved === 'string') setPreferredCameraId(saved);
         } catch { }
@@ -366,7 +366,7 @@ export const CallModal: React.FC<CallModalProps> = memo(({
 
   const handleCameraChange = async (deviceId: string) => {
     try {
-      const { encryptedStorage } = await import('../../../lib/encrypted-storage');
+      const { encryptedStorage } = await import('../../../lib/database/encrypted-storage');
       await encryptedStorage.setItem('preferred_camera_deviceId_v1_pq', deviceId);
       setPreferredCameraId(deviceId);
       await onSwitchCamera(deviceId);

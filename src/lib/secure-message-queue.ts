@@ -1,10 +1,10 @@
 /** Encrypted offline message queue stored in SecureDB. */
 
 import { SecureAuditLogger } from './secure-error-handler';
-import { SecureDB } from './secureDB';
+import { SecureDB } from './database/secureDB';
 
 import { isPlainObject, hasPrototypePollutionKeys, isValidUsername } from './sanitizers';
-import { STORAGE_KEYS } from './storage-keys';
+import { STORAGE_KEYS } from './database/storage-keys';
 
 const validateUsername = (username: string): void => {
   if (!isValidUsername(username)) {

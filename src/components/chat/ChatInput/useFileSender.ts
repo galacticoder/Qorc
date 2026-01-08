@@ -2,11 +2,11 @@ import { useRef, useState, useCallback, useEffect } from "react";
 import * as pako from "pako";
 import { CryptoUtils } from "../../../lib/utils/crypto-utils";
 import websocketClient from "../../../lib/websocket";
-import { STORAGE_KEYS } from '../../../lib/storage-keys';
+import { STORAGE_KEYS } from '../../../lib/database/storage-keys';
 import { SignalType } from "../../../lib/types/signal-types";
 import { EventType } from "../../../lib/types/event-types";
 import { sanitizeFilename } from "../../../lib/sanitizers";
-import { syncEncryptedStorage } from "../../../lib/encrypted-storage";
+import { syncEncryptedStorage } from "../../../lib/database/encrypted-storage";
 import { DEFAULT_CHUNK_SIZE_SMALL, DEFAULT_CHUNK_SIZE_LARGE, LARGE_FILE_THRESHOLD, MAX_CHUNKS_PER_SECOND, INACTIVITY_TIMEOUT_MS, P2P_CONNECT_TIMEOUT_MS, RATE_LIMITER_SLEEP_MS, PAUSE_POLL_MS, P2P_POLL_MS, YIELD_INTERVAL, MAC_SALT, SESSION_WAIT_MS, SESSION_POLL_BASE_MS, SESSION_POLL_MAX_MS, BUNDLE_REQUEST_COOLDOWN_MS, SESSION_FRESH_COOLDOWN_MS } from "../../../lib/constants";
 import { unifiedSignalTransport } from "../../../lib/transport/unified-signal-transport";
 

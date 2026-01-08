@@ -1,10 +1,6 @@
 import { SecureDB } from './secureDB';
-
-const hasPrototypePollutionKeys = (obj: unknown): boolean => {
-  if (obj == null || typeof obj !== 'object') return false;
-  const keys = Object.keys(obj);
-  return keys.some((key) => key === '__proto__' || key === 'constructor' || key === 'prototype');
-};
+import { hasPrototypePollutionKeys } from '../sanitizers';
+import { STORAGE_MAX_QUEUE_SIZE, STORAGE_RATE_LIMIT_WINDOW_MS, STORAGE_RATE_LIMIT_MAX_OPS } from '../constants';
 
 const validateKey = (key: string): void => {
   if (typeof key !== 'string' || key.length === 0 || key.length > 256) {
@@ -17,10 +13,6 @@ const validateKey = (key: string): void => {
     throw new Error('Storage key is a reserved identifier');
   }
 };
-
-const MAX_QUEUE_SIZE = 100;
-const RATE_LIMIT_WINDOW_MS = 1_000;
-const RATE_LIMIT_MAX_OPS = 100;
 
 class EncryptedStorageManager {
   private secureDB: SecureDB | null = null;
@@ -37,14 +29,14 @@ class EncryptedStorageManager {
     });
   }
 
-
+  // Initialize storage manager with SecureDB instance
   async initialize(secureDB: SecureDB): Promise<void> {
     this.secureDB = secureDB;
     this.initialized = true;
     this.resolveInitialization();
 
     // Process queued operations
-    const queue = this.preInitQueue.slice(0, MAX_QUEUE_SIZE);
+    const queue = this.preInitQueue.slice(0, STORAGE_MAX_QUEUE_SIZE);
     this.preInitQueue = [];
 
     for (const op of queue) {
@@ -60,10 +52,12 @@ class EncryptedStorageManager {
     }
   }
 
+  // Check if storage manager is initialized
   isInitialized(): boolean {
     return this.initialized && this.secureDB !== null;
   }
 
+  // Set an item in storage
   async setItem(key: string, value: any): Promise<void> {
     this.enforceRateLimit();
     validateKey(key);
@@ -75,7 +69,7 @@ class EncryptedStorageManager {
     }
 
     if (!this.isInitialized()) {
-      if (this.preInitQueue.length >= MAX_QUEUE_SIZE) {
+      if (this.preInitQueue.length >= STORAGE_MAX_QUEUE_SIZE) {
         throw new Error('Pre-initialization queue is full');
       }
       this.preInitQueue.push({ operation: 'set', key, value });
@@ -90,6 +84,7 @@ class EncryptedStorageManager {
     }
   }
 
+  // Retrieve an item from storage
   async getItem(key: string): Promise<any | null> {
     this.enforceRateLimit();
     validateKey(key);
@@ -115,12 +110,13 @@ class EncryptedStorageManager {
     }
   }
 
+  // Remove an item from storage
   async removeItem(key: string): Promise<void> {
     this.enforceRateLimit();
     validateKey(key);
 
     if (!this.isInitialized()) {
-      if (this.preInitQueue.length >= MAX_QUEUE_SIZE) {
+      if (this.preInitQueue.length >= STORAGE_MAX_QUEUE_SIZE) {
         throw new Error('Pre-initialization queue is full');
       }
       this.preInitQueue.push({ operation: 'remove', key });
@@ -135,6 +131,7 @@ class EncryptedStorageManager {
     }
   }
 
+  // Clear all items from storage
   async clear(): Promise<void> {
     if (!this.isInitialized()) {
       this.preInitQueue = [];
@@ -149,6 +146,7 @@ class EncryptedStorageManager {
     }
   }
 
+  // Reset the storage manager
   reset(): void {
     this.secureDB = null;
     this.initialized = false;
@@ -159,28 +157,31 @@ class EncryptedStorageManager {
     this.rateLimitWindowStart = 0;
     this.rateLimitCount = 0;
   }
+  
+  // Wait for storage manager to be initialized
+  async waitForInitialization(): Promise<void> {
+    if (this.initialized) return;
+    return this.initializationPromise;
+  }
 
   private enforceRateLimit(): void {
     const now = Date.now();
-    if (now - this.rateLimitWindowStart > RATE_LIMIT_WINDOW_MS) {
+    if (now - this.rateLimitWindowStart > STORAGE_RATE_LIMIT_WINDOW_MS) {
       this.rateLimitWindowStart = now;
       this.rateLimitCount = 0;
     }
 
     this.rateLimitCount += 1;
-    if (this.rateLimitCount > RATE_LIMIT_MAX_OPS) {
+    if (this.rateLimitCount > STORAGE_RATE_LIMIT_MAX_OPS) {
       throw new Error('Storage operation rate limit exceeded');
     }
   }
 
-  async waitForInitialization(): Promise<void> {
-    if (this.initialized) return;
-    return this.initializationPromise;
-  }
 }
 
 export const encryptedStorage = new EncryptedStorageManager();
 
+// Sync adapter for SvelteKit's storage API
 class SyncEncryptedStorageAdapter {
   private memoryCache = new Map<string, any>();
   private pendingGets = new Map<string, Promise<any>>();
@@ -194,6 +195,7 @@ class SyncEncryptedStorageAdapter {
     });
   }
 
+  // Initialize the sync adapter
   async initialize(): Promise<void> {
     if (!encryptedStorage.isInitialized()) {
       return;
@@ -201,7 +203,7 @@ class SyncEncryptedStorageAdapter {
 
     const syncAccessKeys = [
       'last_authenticated_username',
-      'securechat_server_pin_v2',
+      'qorchat_server_pin_v2',
       'call_history_v1',
       'app_settings_v1',
       'offlineQueueDeviceId',
@@ -223,6 +225,7 @@ class SyncEncryptedStorageAdapter {
     this.resolveSelfInitialization();
   }
 
+  // Get an item from the sync adapter
   getItem(key: string): string | null {
     if (this.memoryCache.has(key)) {
       const value = this.memoryCache.get(key);
@@ -249,6 +252,7 @@ class SyncEncryptedStorageAdapter {
     return null;
   }
 
+  // Set an item in the sync adapter
   setItem(key: string, value: string): void {
     this.memoryCache.set(key, value);
 
@@ -257,6 +261,7 @@ class SyncEncryptedStorageAdapter {
     });
   }
 
+  // Remove an item from the sync adapter
   removeItem(key: string): void {
     this.memoryCache.delete(key);
     encryptedStorage.removeItem(key).catch(error => {
@@ -264,6 +269,7 @@ class SyncEncryptedStorageAdapter {
     });
   }
 
+  // Reset the sync adapter
   reset(): void {
     this.memoryCache.clear();
     this.pendingGets.clear();
@@ -273,6 +279,7 @@ class SyncEncryptedStorageAdapter {
     });
   }
 
+  // Wait for the sync adapter to be initialized
   async waitForInitialization(): Promise<void> {
     await encryptedStorage.waitForInitialization();
     if (this.selfInitialized) return;

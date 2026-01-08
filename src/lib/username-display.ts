@@ -1,4 +1,4 @@
-import { SecureDB } from './secureDB';
+import { SecureDB } from './database/secureDB';
 import { pseudonymizeUsernameWithCache } from './username-hash';
 import {
   UsernameDisplayConfiguration,

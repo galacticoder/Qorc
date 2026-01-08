@@ -1,5 +1,5 @@
 import type { Message } from '../../components/chat/messaging/types';
-import type { SecureDB } from '../../lib/secureDB';
+import type { SecureDB } from '../../lib/database/secureDB';
 import { DB_MAX_PENDING_MESSAGES, DB_MAX_MESSAGES } from '../../lib/constants';
 
 // Process message from DB format to UI format

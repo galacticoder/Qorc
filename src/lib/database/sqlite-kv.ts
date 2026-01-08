@@ -1,11 +1,9 @@
+/**
+ * SQLite KV wrapper
+ */
+
 import initSqlJs, { Database, SqlJsStatic } from 'sql.js';
 import wasmUrl from 'sql.js/dist/sql-wasm.wasm?url';
-
-// SQLite KV wrapper using OPFS for persistence.
-// One file per user: securechat_<sanitized>_db.sqlite
-// Tables:
-// - kv_data(store TEXT NOT NULL, key TEXT NOT NULL, value BLOB NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, PRIMARY KEY(store, key))
-// - secure_keys(key TEXT PRIMARY KEY, value TEXT NOT NULL)
 
 export class SQLiteKV {
   private static SQL: SqlJsStatic | null = null;
@@ -17,13 +15,14 @@ export class SQLiteKV {
 
   private constructor(username: string) {
     this.username = SQLiteKV.sanitizeIdentifier(username);
-    this.filename = `securechat_${this.username}_db.sqlite`;
+    this.filename = `qorchat_${this.username}_db.sqlite`;
   }
 
   static sanitizeIdentifier(value: string): string {
     return (value || 'unknown').replace(/[^a-zA-Z0-9_-]/g, '_');
   }
 
+  // Get or create a SQLiteKV instance for a user
   static async forUser(username: string): Promise<SQLiteKV> {
     const key = SQLiteKV.sanitizeIdentifier(username);
     let inst = SQLiteKV.instances.get(key);
@@ -35,6 +34,7 @@ export class SQLiteKV {
     return inst;
   }
 
+  // Purge a user database
   static async purgeUserDb(username: string): Promise<void> {
     const key = SQLiteKV.sanitizeIdentifier(username);
     const inst = SQLiteKV.instances.get(key);
@@ -45,10 +45,11 @@ export class SQLiteKV {
     try {
       const root = await (navigator as any).storage.getDirectory();
       const dir = await root.getDirectoryHandle('sqlite-kv', { create: true });
-      await dir.removeEntry(`securechat_${key}_db.sqlite`, { recursive: false }).catch(() => {});
+      await dir.removeEntry(`qorchat_${key}_db.sqlite`, { recursive: false }).catch(() => {});
     } catch {}
   }
 
+  // Ensure the database is ready
   private async ensureReady(): Promise<void> {
     if (!SQLiteKV.SQL) {
       SQLiteKV.SQL = await initSqlJs({ locateFile: () => wasmUrl });
@@ -58,6 +59,7 @@ export class SQLiteKV {
     this.ensureSchema();
   }
 
+  // Ensure the database schema exists
   private ensureSchema(): void {
     if (!this.db) return;
     this.db.run(`PRAGMA journal_mode = WAL;`);
@@ -79,6 +81,7 @@ export class SQLiteKV {
     );`);
   }
 
+  // Open the database from OPFS
   private async openFromOPFS(): Promise<Database> {
     const SQL = SQLiteKV.SQL!;
     const root = await (navigator as any).storage.getDirectory();
@@ -102,6 +105,7 @@ export class SQLiteKV {
     }
   }
 
+  // Persist database to OPFS
   private async persist(): Promise<void> {
     if (!this.db) return;
     const data = this.db.export();
@@ -115,14 +119,16 @@ export class SQLiteKV {
     } catch {}
   }
 
+  // Destroy database and clean up resources
   async destroy(): Promise<void> {
     try { await this.persist(); } catch {}
     try { this.db?.close(); } catch {}
     this.db = null;
   }
 
-  // KV operations ------------------------------------------------------------
+  // KV operations --
 
+  // Set a binary value
   async setBinary(store: string, key: string, value: Uint8Array): Promise<void> {
     if (!this.db) await this.ensureReady();
     const now = Date.now();
@@ -134,6 +140,7 @@ export class SQLiteKV {
     await this.persist();
   }
 
+  // Get a binary value
   async getBinary(store: string, key: string): Promise<Uint8Array | null> {
     if (!this.db) await this.ensureReady();
     const stmt = this.db!.prepare(`SELECT value FROM kv_data WHERE store=? AND key=?`);
@@ -148,6 +155,7 @@ export class SQLiteKV {
     } finally { try { stmt.free(); } catch {} }
   }
 
+  // Delete a key
   async delete(store: string, key: string): Promise<void> {
     if (!this.db) await this.ensureReady();
     const stmt = this.db!.prepare(`DELETE FROM kv_data WHERE store=? AND key=?`);
@@ -155,6 +163,7 @@ export class SQLiteKV {
     await this.persist();
   }
 
+  // Delete multiple keys
   async deleteMany(store: string, keys: string[]): Promise<number> {
     if (!this.db) await this.ensureReady();
     if (keys.length === 0) return 0;
@@ -172,6 +181,7 @@ export class SQLiteKV {
     return keys.length;
   }
 
+  // Scan by store prefix
   async scanByStorePrefix(prefix: string): Promise<Array<{ store: string; key: string; value: Uint8Array }>> {
     if (!this.db) await this.ensureReady();
     const results: Array<{ store: string; key: string; value: Uint8Array }> = [];
@@ -186,6 +196,7 @@ export class SQLiteKV {
     return results;
   }
 
+  // Get all entries for a store
   async entriesForStore(store: string): Promise<Array<{ key: string; value: Uint8Array }>> {
     if (!this.db) await this.ensureReady();
     const results: Array<{ key: string; value: Uint8Array }> = [];
@@ -200,6 +211,7 @@ export class SQLiteKV {
     return results;
   }
 
+  // Clear all entries for a store
   async clearStore(store: string): Promise<number> {
     if (!this.db) await this.ensureReady();
     const stmt = this.db!.prepare(`DELETE FROM kv_data WHERE store=?`);
@@ -208,6 +220,7 @@ export class SQLiteKV {
     return this.db!.getRowsModified?.() ?? 0;
   }
 
+  // Clear all entries except the ones in keepStores
   async clearAllExcept(keepStores: Set<string>): Promise<number> {
     if (!this.db) await this.ensureReady();
     const stmt = this.db!.prepare(`DELETE FROM kv_data WHERE store NOT IN (${Array.from(keepStores).map(() => '?').join(',') || "''"})`);
@@ -225,6 +238,7 @@ export class SQLiteKV {
     await this.persist();
   }
 
+  // Get a JSON value
   async getJsonKey<T = any>(key: string): Promise<T | null> {
     if (!this.db) await this.ensureReady();
     const stmt = this.db!.prepare(`SELECT value FROM secure_keys WHERE key=?`);
@@ -239,6 +253,7 @@ export class SQLiteKV {
     } finally { try { stmt.free(); } catch {} }
   }
 
+  // Delete a JSON key
   async deleteJsonKey(key: string): Promise<void> {
     if (!this.db) await this.ensureReady();
     const stmt = this.db!.prepare(`DELETE FROM secure_keys WHERE key=?`);
@@ -246,12 +261,14 @@ export class SQLiteKV {
     await this.persist();
   }
 
+  // Clear all secure keys
   async clearSecureKeys(): Promise<void> {
     if (!this.db) await this.ensureReady();
     this.db!.run('DELETE FROM secure_keys;');
     await this.persist();
   }
 
+  // Clear all data
   async clearAll(): Promise<void> {
     if (!this.db) await this.ensureReady();
     this.db!.run('DELETE FROM kv_data;');

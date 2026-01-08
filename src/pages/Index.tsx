@@ -35,7 +35,7 @@ import { ConnectSetup } from "../components/setup/ConnectSetup";
 import { SignalType } from "../lib/types/signal-types";
 import { blockingSystem } from "../lib/blocking/blocking-system";
 import { retrieveAuthTokens } from "../lib/signals";
-import { syncEncryptedStorage } from "../lib/encrypted-storage";
+import { syncEncryptedStorage } from "../lib/database/encrypted-storage";
 import { secureMessageQueue } from "../lib/secure-message-queue";
 import { initializeOfflineMessageQueue, offlineMessageQueue } from "../lib/offline-message-queue";
 import { isValidKyberPublicKeyBase64, sanitizeHybridKeys } from "../lib/utils/messaging-validators";
@@ -157,7 +157,7 @@ const ChatApp: React.FC = () => {
 
               const storedUsername = state.username ||
                 Authentication.loginUsernameRef.current ||
-                (await import('../lib/encrypted-storage')).syncEncryptedStorage.getItem('last_authenticated_username');
+                (await import('../lib/database/encrypted-storage')).syncEncryptedStorage.getItem('last_authenticated_username');
 
               let localAuthRestored = false;
 
@@ -184,7 +184,7 @@ const ChatApp: React.FC = () => {
                       Authentication.loginUsernameRef.current = storedUsername;
 
                       if (!Authentication.keyManagerRef.current) {
-                        const { SecureKeyManager } = await import('../lib/secure-key-manager');
+                        const { SecureKeyManager } = await import('../lib/database/secure-key-manager');
                         Authentication.keyManagerRef.current = new SecureKeyManager(storedUsername);
                       }
                       try {

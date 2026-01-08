@@ -4,8 +4,8 @@
 
 import { CryptoUtils } from '../utils/crypto-utils';
 import { SecureMemory } from '../cryptography/secure-memory';
-import { SecureDB } from '../secureDB';
-import { STORAGE_KEYS } from '../storage-keys';
+import { SecureDB } from '../database/secureDB';
+import { STORAGE_KEYS } from '../database/storage-keys';
 import { isPlainObject, hasPrototypePollutionKeys } from '../sanitizers';
 import { QueuedMessage, PersistedQueue, StoredSessionKey } from '../types/blocking-types';
 import { QUEUE_STORAGE_VERSION, QUEUE_SESSION_KEY_ID, BLOCK_QUEUE_OVERFLOW_LIMIT, BLOCK_MAX_QUEUE_AGE_MS } from '../constants';

@@ -382,3 +382,24 @@ export const QUIC_MAX_STREAMS_PER_CONNECTION = 100;
 export const QUIC_RECONNECT_BACKOFF_BASE_MS = 1000;
 export const QUIC_MAX_RECONNECT_ATTEMPTS = 5;
 export const QUIC_BUFFER_LOW_THRESHOLD = 256 * 1024;
+
+// Encrypted storage
+export const STORAGE_MAX_QUEUE_SIZE = 100;
+export const STORAGE_RATE_LIMIT_WINDOW_MS = 1_000;
+export const STORAGE_RATE_LIMIT_MAX_OPS = 100;
+
+// SecureDb
+export const SECURE_DB_MAX_VALUE_SIZE = 100 * 1024 * 1024;
+export const SECURE_DB_MIN_CLEANUP_INTERVAL = 60_000;
+export const SECURE_DB_MAX_EPHEMERAL_BATCH = 1000;
+export const SECURE_DB_EPHEMERAL_PREFIX = 'ephemeral:';
+export const SECURE_DB_MAX_FILE_SIZE = 50 * 1024 * 1024;
+export const SECURE_DB_MAX_TOTAL_FILE_STORAGE = 10 * 1024 * 1024 * 1024;
+export const SECURE_DB_BLOCKED_MIME_TYPES = [
+    'application/x-msdownload',
+    'application/x-msdos-program',
+    'application/x-sh',
+    'application/x-bat',
+    'application/x-executable',
+    'application/vnd.microsoft.portable-executable',
+  ];

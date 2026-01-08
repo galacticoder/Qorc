@@ -1,5 +1,5 @@
 import type { User } from '../../components/chat/messaging/UserList';
-import type { SecureDB } from '../../lib/secureDB';
+import type { SecureDB } from '../../lib/database/secureDB';
 
 // Load users from database
 export const loadUsers = async (secureDB: SecureDB): Promise<User[]> => {

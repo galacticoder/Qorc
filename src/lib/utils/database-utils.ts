@@ -5,6 +5,9 @@ import {
   USERNAME_OBFUSCATED_LENGTH,
   USERNAME_DISPLAY_CACHE_TTL_MS,
   USERNAME_DISPLAY_MAX_CACHE_SIZE,
+  SECURE_DB_MAX_FILE_SIZE,
+  SECURE_DB_MAX_TOTAL_FILE_STORAGE,
+  SECURE_DB_BLOCKED_MIME_TYPES,
 } from '../constants';
 import type { MappingPayload, ResolveCache } from '../types/database-types';
 
@@ -100,3 +103,48 @@ export const prewarmUsernameCache = (mappings: Array<{ hashed: string; original:
     }
   }
 };
+
+// Validate file data
+export const validateFileData = (data: ArrayBuffer | Blob, fileId: string): void => {
+  const size = data instanceof Blob ? data.size : data.byteLength;
+
+  if (size > SECURE_DB_MAX_FILE_SIZE) {
+    throw new Error(`File too large: ${size} bytes (max: ${SECURE_DB_MAX_FILE_SIZE})`);
+  }
+
+  if (size === 0) {
+    throw new Error('File is empty');
+  }
+
+  if (!fileId || typeof fileId !== 'string' || fileId.length === 0 || fileId.length > 255) {
+    throw new Error('Invalid file ID');
+  }
+
+  if (data instanceof Blob && data.type) {
+    const mimeType = data.type.toLowerCase();
+    if (SECURE_DB_BLOCKED_MIME_TYPES.some(blocked => mimeType.includes(blocked))) {
+      throw new Error(`Blocked file type: ${data.type}`);
+    }
+  }
+}
+
+// Get total storage used by all files in bytes
+export const getFilesStorageUsage = async (kv: any): Promise<{ used: number; limit: number; available: number }> => {
+  try {
+    const entries = await kv.entriesForStore('files');
+    let totalSize = 0;
+    for (const { value } of entries) {
+      if (value instanceof Uint8Array) {
+        totalSize += value.byteLength;
+      }
+    }
+    return {
+      used: totalSize,
+      limit: SECURE_DB_MAX_TOTAL_FILE_STORAGE,
+      available: Math.max(0, SECURE_DB_MAX_TOTAL_FILE_STORAGE - totalSize)
+    };
+  } catch (err) {
+    console.error('Failed to get files storage usage:', err);
+    return { used: 0, limit: SECURE_DB_MAX_TOTAL_FILE_STORAGE, available: SECURE_DB_MAX_TOTAL_FILE_STORAGE };
+  }
+}

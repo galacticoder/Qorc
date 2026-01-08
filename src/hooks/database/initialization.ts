@@ -1,5 +1,5 @@
-import { SecureDB } from '../../lib/secureDB';
-import { encryptedStorage, syncEncryptedStorage } from '../../lib/encrypted-storage';
+import { SecureDB } from '../../lib/database/secureDB';
+import { encryptedStorage, syncEncryptedStorage } from '../../lib/database/encrypted-storage';
 import { blockingSystem } from '../../lib/blocking/blocking-system';
 import { EventType } from '../../lib/types/event-types';
 

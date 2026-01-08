@@ -131,7 +131,7 @@ export function VoiceRecorder({ onSendVoiceNote, onCancel, disabled }: VoiceReco
       // Load set microphone from settings
       let micDeviceId: string | undefined;
       try {
-        const { syncEncryptedStorage } = await import('../../../lib/encrypted-storage');
+        const { syncEncryptedStorage } = await import('../../../lib/database/encrypted-storage');
         const stored = syncEncryptedStorage.getItem('app_settings_v1');
         if (stored) {
           const parsed = JSON.parse(stored);

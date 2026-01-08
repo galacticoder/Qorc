@@ -2,7 +2,7 @@
  * User Blocking System
  */
 
-import { SecureDB } from '../secureDB';
+import { SecureDB } from '../database/secureDB';
 import { blockStatusCache } from './block-status-cache';
 import { EventType } from '../types/event-types';
 import { isPlainObject, hasPrototypePollutionKeys } from '../sanitizers';
@@ -99,7 +99,7 @@ export class BlockingSystem {
   private async getCurrentAuthenticatedUser(): Promise<string | null> {
     try {
       try {
-        const { syncEncryptedStorage } = await import('../encrypted-storage');
+        const { syncEncryptedStorage } = await import('../database/encrypted-storage');
         const last = syncEncryptedStorage.getItem('last_authenticated_username');
         if (last && typeof last === 'string') {
           return last;

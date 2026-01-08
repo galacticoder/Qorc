@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { useTheme } from 'next-themes';
-import { syncEncryptedStorage } from '../../lib/encrypted-storage';
+import { syncEncryptedStorage } from '../../lib/database/encrypted-storage';
 import { BlockedUsersSettings } from './BlockedUsersSettings';
 import { profilePictureSystem } from '../../lib/profile-picture-system';
 import { screenSharingSettings } from '../../lib/screen-sharing-settings';
@@ -204,7 +204,7 @@ export const AppSettings = React.memo(function AppSettings({
     if (confirm('Clear all local data? This will log you out and remove all stored messages.')) {
       setIsClearingData(true);
       try {
-        const { encryptedStorage } = await import('../../lib/encrypted-storage');
+        const { encryptedStorage } = await import('../../lib/database/encrypted-storage');
         await encryptedStorage.setItem('app_settings_v1', '');
         window.location.reload();
       } catch {

@@ -1,8 +1,8 @@
-import { SecureDB } from './secureDB';
+import { SecureDB } from './database/secureDB';
 import { encryptLongTerm, decryptLongTerm, LongTermEnvelope } from './cryptography/long-term-encryption';
 import websocketClient from './websocket';
 import { generateDefaultAvatar } from './utils/avatar-utils';
-import { STORAGE_KEYS } from './storage-keys';
+import { STORAGE_KEYS } from './database/storage-keys';
 import { SignalType } from './types/signal-types';
 import { EventType } from './types/event-types';
 import { unifiedSignalTransport } from './transport/unified-signal-transport';

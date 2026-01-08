@@ -63,3 +63,87 @@ export interface RateLimitBucket {
   windowStart: number;
   count: number;
 }
+
+// Key manager types --
+export interface EncryptedKeyData {
+  bundleCiphertext: string;
+  bundleNonce: string;
+  bundleTag: string;
+  bundleAad: string;
+  bundleMac: string;
+  kyberPublicBase64: string;
+  dilithiumPublicBase64: string;
+  x25519PublicBase64: string;
+  salt: string;
+  version: number;
+  argon2Params: {
+    version: number;
+    algorithm: string;
+    memoryCost: number;
+    timeCost: number;
+    parallelism: number;
+  };
+  createdAt: number;
+  expiresAt: number;
+  sequence: number;
+  payloadSize: number;
+}
+
+export interface DecryptedKeys {
+  kyber: {
+    publicKeyBase64: string;
+    secretKey: Uint8Array;
+  };
+  dilithium: {
+    publicKeyBase64: string;
+    secretKey: Uint8Array;
+  };
+  x25519: {
+    publicKeyBase64: string;
+    private: Uint8Array;
+  };
+}
+
+// SecureDB --
+export interface EphemeralConfig {
+  enabled: boolean;
+  defaultTTL: number;
+  maxTTL: number;
+  cleanupInterval: number;
+}
+
+export interface EphemeralData {
+  data: any;
+  createdAt: number;
+  expiresAt: number;
+  ttl: number;
+  autoDelete: boolean;
+}
+
+export interface StoredMessage {
+  id?: string;
+  timestamp?: number;
+  [key: string]: unknown;
+}
+
+export interface StoredUser {
+  id?: string;
+  username?: string;
+  [key: string]: unknown;
+}
+
+export interface ConversationMetadata {
+  peerUsername: string;
+  lastMessage: StoredMessage;
+  unreadCount: number;
+  lastReadTimestamp: number;
+}
+
+export type PostQuantumAEADLike = {
+  encrypt(plaintext: Uint8Array, key: Uint8Array, aad?: Uint8Array, nonce?: Uint8Array): {
+    ciphertext: Uint8Array;
+    nonce: Uint8Array;
+    tag: Uint8Array;
+  };
+  decrypt(ciphertext: Uint8Array, nonce: Uint8Array, tag: Uint8Array, key: Uint8Array, aad?: Uint8Array): Uint8Array;
+};

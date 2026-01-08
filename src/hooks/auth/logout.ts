@@ -2,9 +2,9 @@ import { RefObject } from "react";
 import { SignalType } from "../../lib/types/signal-types";
 import { clearTokenEncryptionKey } from "../../lib/signals";
 import websocketClient from "../../lib/websocket";
-import { syncEncryptedStorage } from "../../lib/encrypted-storage";
-import { SecureDB } from "../../lib/secureDB";
-import { SecureKeyManager } from "../../lib/secure-key-manager";
+import { syncEncryptedStorage } from "../../lib/database/encrypted-storage";
+import { SecureDB } from "../../lib/database/secureDB";
+import { SecureKeyManager } from "../../lib/database/secure-key-manager";
 import { secureWipeStringRef } from "../../lib/utils/auth-utils";
 import type { HybridKeys } from "../../lib/types/auth-types";
 
@@ -76,7 +76,7 @@ export const createLogout = (
     } catch { }
 
     try {
-      syncEncryptedStorage.removeItem('securechat_server_pin_v2');
+      syncEncryptedStorage.removeItem('qorchat_server_pin_v2');
     } catch { }
 
     if (refs.keyManagerRef.current) {

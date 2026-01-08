@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { getSystemEmojis, searchEmojis } from '../../lib/system-emoji';
-import type { SecureDB } from '../../lib/secureDB';
+import type { SecureDB } from '../../lib/database/secureDB';
 
 interface EmojiPickerProps {
   onEmojiSelect: (emoji: string) => void;

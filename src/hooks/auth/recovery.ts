@@ -2,8 +2,8 @@ import { RefObject } from "react";
 import { SignalType } from "../../lib/types/signal-types";
 import { EventType } from "../../lib/types/event-types";
 import websocketClient from "../../lib/websocket";
-import { syncEncryptedStorage } from "../../lib/encrypted-storage";
-import { SecureDB } from "../../lib/secureDB";
+import { syncEncryptedStorage } from "../../lib/database/encrypted-storage";
+import { SecureDB } from "../../lib/database/secureDB";
 
 export interface RecoveryRefs {
   loginUsernameRef: RefObject<string>;

@@ -1,6 +1,6 @@
 import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
-import { syncEncryptedStorage } from '../lib/encrypted-storage';
-import { STORAGE_KEYS } from '../lib/storage-keys';
+import { syncEncryptedStorage } from '../lib/database/encrypted-storage';
+import { STORAGE_KEYS } from '../lib/database/storage-keys';
 
 export interface CallLogEntry {
     id: string;

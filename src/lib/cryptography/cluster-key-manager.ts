@@ -5,7 +5,7 @@
 
 import { PostQuantumHash } from './hash';
 import { PostQuantumUtils } from '../utils/pq-utils';
-import { STORAGE_KEYS } from '../storage-keys';
+import { STORAGE_KEYS } from '../database/storage-keys';
 import { CRYPTO_CACHE_TTL_MS } from '../constants';
 
 interface ServerPublicKeys {
@@ -187,7 +187,7 @@ export class ClusterKeyManager {
       const entries = Array.from(this.serverKeys.values());
       (async () => {
         try {
-          const { encryptedStorage } = await import('../encrypted-storage');
+          const { encryptedStorage } = await import('../database/encrypted-storage');
           await encryptedStorage.setItem(STORAGE_KEYS.CLUSTER_KEY_STORAGE, JSON.stringify({
             keys: entries,
             lastFetch: this.lastFetchTime,
@@ -204,7 +204,7 @@ export class ClusterKeyManager {
     try {
       (async () => {
         try {
-          const { encryptedStorage } = await import('../encrypted-storage');
+          const { encryptedStorage } = await import('../database/encrypted-storage');
           const stored = await encryptedStorage.getItem(STORAGE_KEYS.CLUSTER_KEY_STORAGE);
           const raw = typeof stored === 'string' ? stored : stored ? JSON.stringify(stored) : null;
           if (!raw) return;
@@ -228,7 +228,7 @@ export class ClusterKeyManager {
     this.serverKeys.clear();
     this.lastFetchTime = 0;
     try {
-      (async () => { try { const { encryptedStorage } = await import('../encrypted-storage'); await encryptedStorage.setItem(STORAGE_KEYS.CLUSTER_KEY_STORAGE, ''); } catch { } })();
+      (async () => { try { const { encryptedStorage } = await import('../database/encrypted-storage'); await encryptedStorage.setItem(STORAGE_KEYS.CLUSTER_KEY_STORAGE, ''); } catch { } })();
     } catch { }
   }
 
