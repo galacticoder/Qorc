@@ -1,63 +1,44 @@
-import { SecureDB } from './database/secureDB';
+import { SecureDB } from './secureDB';
 import { pseudonymizeUsernameWithCache } from './username-hash';
-import {
-  UsernameDisplayConfiguration,
-  recordUsernameResolutionEvent,
-  sanitizeUsernameInput
-} from './unified-username-display';
+import { UsernameDisplayConfiguration } from './unified-username-display';
+import { sanitizeUsernameInput } from '../utils/username-utils';
 
-/**
- * Persist a mapping from pseudonym to original username when available.
- */
+// Store a mapping from pseudonym to original username
 export async function storeUsernameMapping(
   originalUsername: string,
   secureDB: SecureDB
 ): Promise<void> {
-  const startTime = Date.now();
   const sanitizedOriginal = sanitizeUsernameInput(originalUsername);
-  let success = false;
 
   if (!sanitizedOriginal) {
-    recordUsernameResolutionEvent('ensure-mapping', originalUsername, 'Unknown User', Date.now() - startTime, false);
     return;
   }
 
   try {
     const pseudonym = await pseudonymizeUsernameWithCache(sanitizedOriginal, secureDB);
     await secureDB.storeUsernameMapping(pseudonym, sanitizedOriginal);
-    success = true;
-  } catch {
-  } finally {
-    recordUsernameResolutionEvent('ensure-mapping', sanitizedOriginal, sanitizedOriginal, Date.now() - startTime, success);
-  }
+  } catch { }
 }
 
-/**
- * Resolve a username for display, preferring original names over pseudonyms.
- */
+// Resolve a username for display preferring original names over pseudonyms
 export async function getDisplayUsername(
   username: string,
   secureDB: SecureDB,
   currentUserOriginal?: string
 ): Promise<string> {
-  const startTime = Date.now();
   const sanitized = sanitizeUsernameInput(username);
   const config = UsernameDisplayConfiguration.get();
   let result = sanitized;
-  let success = false;
 
   if (!sanitized || sanitized.length > config.maxUsernameLength) {
-    recordUsernameResolutionEvent('context-resolve', username, 'Unknown User', Date.now() - startTime, false);
     return 'Unknown User';
   }
 
   try {
-    // If this is the current user and we have their original username, use it
     if (currentUserOriginal) {
       const cachedHash = await secureDB.getCachedUsernameHash(currentUserOriginal);
       if (cachedHash && sanitized === cachedHash) {
         result = currentUserOriginal;
-        success = true;
         return result;
       }
     }
@@ -66,22 +47,14 @@ export async function getDisplayUsername(
     const originalUsername = await secureDB.getOriginalUsername(sanitized);
     if (originalUsername && typeof originalUsername === 'string') {
       result = originalUsername;
-      success = true;
       return result;
     }
 
-    success = true;
     return result;
-  } catch {
-    return result;
-  } finally {
-    recordUsernameResolutionEvent('context-resolve', sanitized, result, Date.now() - startTime, success);
-  }
+  } catch { return result; }
 }
 
-/**
- * Username display helper with caching and bounded concurrency.
- */
+// Username display helper
 export class UsernameDisplayContext {
   private readonly cache = new Map<string, { value: string; timestamp: number }>();
   private readonly pendingRequests = new Map<string, Promise<string>>();
@@ -90,7 +63,8 @@ export class UsernameDisplayContext {
     private secureDB: SecureDB,
     private currentUserOriginal?: string
   ) {}
-  
+
+  // Get display username
   async getDisplayUsername(username: string): Promise<string> {
     const sanitized = sanitizeUsernameInput(username);
     const config = UsernameDisplayConfiguration.get();
@@ -99,7 +73,6 @@ export class UsernameDisplayContext {
       return 'Unknown User';
     }
 
-    // Check cache
     const cached = this.cache.get(sanitized);
     const now = Date.now();
     if (cached && now - cached.timestamp < config.cacheTTL) {
@@ -110,7 +83,6 @@ export class UsernameDisplayContext {
       this.cache.delete(sanitized);
     }
 
-    // Deduplicate concurrent requests
     if (this.pendingRequests.has(sanitized)) {
       return this.pendingRequests.get(sanitized)!;
     }
@@ -135,6 +107,7 @@ export class UsernameDisplayContext {
     return request;
   }
 
+  // Get display usernames
   async getDisplayUsernames(usernames: string[]): Promise<Map<string, string>> {
     const results = new Map<string, string>();
 
@@ -161,6 +134,7 @@ export class UsernameDisplayContext {
     return results;
   }
 
+  // Preload usernames
   async preloadUsernames(usernames: string[]): Promise<void> {
     if (Array.isArray(usernames) && usernames.length > 0) {
       try {
@@ -170,11 +144,13 @@ export class UsernameDisplayContext {
     }
   }
   
+  // Clear cache
   clearCache(): void {
     this.cache.clear();
     this.pendingRequests.clear();
   }
 
+  // Evict oldest entries if cache exceeds size limit
   private evictIfNeeded(): void {
     const { cacheSize } = UsernameDisplayConfiguration.get();
     while (this.cache.size > cacheSize) {

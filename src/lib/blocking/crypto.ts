@@ -4,7 +4,7 @@
 
 import { CryptoUtils } from '../utils/crypto-utils';
 import { SecureDB } from '../database/secureDB';
-import { pseudonymizeUsernameWithCache } from '../username-hash';
+import { pseudonymizeUsernameWithCache } from '../database/username-hash';
 import { isPlainObject, hasPrototypePollutionKeys } from '../sanitizers';
 import { hexToBytes, bytesToHex, validateUsername, isPseudonymizedUsername } from '../utils/blocking-utils';
 import { BlockToken, BlockedUser, EncryptedBlockList, KeyMaterial } from '../types/blocking-types';

@@ -16,6 +16,7 @@ export const CONVERSATION_USERNAME_PATTERN = /^[a-zA-Z0-9._-]{2,64}$/;
 export const CLIPBOARD_CONTROL_CHARS_REGEX = /[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g;
 export const URL_REGEX = /(https?:\/\/(?:[-\w.]|%[0-9A-Fa-f]{2})+(?::[0-9]+)?(?:\/(?:[\w\/_~!$&'()*+,;=:@.-]|%[0-9A-Fa-f]{2})*)*(?:\?(?:[\w&=%._~!$'()*+,;:@/?-]|%[0-9A-Fa-f]{2})*)?(?:#(?:[\w._~!$&'()*+,;=:@/?-]|%[0-9A-Fa-f]{2})*)?)/gi;
 export const SIMPLE_URL_REGEX = /(?:^|\s)((?:www\.)?(?:[a-zA-Z0-9-]+\.)+[a-zA-Z]{2,})(?:\/(?:[\w\/_~!$&'()*+,;=:@.-]|%[0-9A-Fa-f]{2})*)*(?:\?(?:[\w&=%._~!$'()*+,;:@/?-]|%[0-9A-Fa-f]{2})*)?(?:#(?:[\w._~!$&'()*+,;=:@/?-]|%[0-9A-Fa-f]{2})*)?/gi;
+export const VALID_USERNAME_PATTERN = /^[\w\-_.@]+$/i;
 
 export const READ_RECEIPT_PREFIX = 'read-receipt-';
 export const DELIVERY_RECEIPT_PREFIX = 'delivery-receipt-';
@@ -197,6 +198,8 @@ export const USERNAME_DISPLAY_RESOLVE_TIMEOUT_MS = 10_000;
 export const USERNAME_ANON_PREFIX = 'anon:';
 export const USERNAME_HEX_PATTERN = /^[a-f0-9]{32}$/i;
 export const USERNAME_OBFUSCATED_LENGTH = 12;
+
+export const PSEUDONYM_SALT_BASE64 = "cHNldWRvbnltLXYxLWdsb2JhbC1zYWx0";
 
 // Calling constants
 export const CALLING_MAX_USERNAME_LENGTH = 120;

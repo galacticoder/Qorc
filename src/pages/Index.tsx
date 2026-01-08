@@ -22,7 +22,7 @@ import { useChatSignals } from "../hooks/useChatSignals";
 import { useWebSocket } from "../hooks/useWebsocket";
 import { useConversations } from "../hooks/message-sending/useConversations";
 import { useUsernameDisplay } from "../hooks/database/useUsernameDisplay";
-import { storeUsernameMapping } from "../lib/username-display";
+import { storeUsernameMapping } from "../lib/database/username-display";
 import { useP2PMessaging, type EncryptedMessage } from "../hooks/p2p/useP2PMessaging";
 import { useP2PKeys } from "../hooks/p2p/useP2PKeys";
 import { useMessageReceipts } from "../hooks/message-sending/useMessageReceipts";
@@ -57,7 +57,7 @@ import { Button } from "../components/ui/button";
 import { ComposeIcon } from "../components/chat/assets/icons";
 import { useCalling } from "../hooks/calling/useCalling";
 import { truncateUsername } from "../lib/utils/avatar-utils";
-import { resolveDisplayUsername } from "../lib/unified-username-display";
+import { resolveDisplayUsername } from "../lib/database/unified-username-display";
 const CallModalLazy = React.lazy(() => import("../components/chat/calls/CallModal"));
 
 const getReplyContent = (message: Message): string => {

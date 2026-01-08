@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { SecureDB } from '../../lib/database/secureDB';
-import { UsernameDisplayContext } from '../../lib/username-display';
+import { UsernameDisplayContext } from '../../lib/database/username-display';
 import { EventType } from '../../lib/types/event-types';
 import { isPlainObject, hasPrototypePollutionKeys } from '../../lib/sanitizers';
 import { sanitizeDbUsername, anonymizeUsername } from '../../lib/utils/database-utils';

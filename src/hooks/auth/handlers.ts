@@ -2,7 +2,7 @@ import { RefObject } from "react";
 import { SignalType } from "../../lib/types/signal-types";
 import websocketClient from "../../lib/websocket";
 import { CryptoUtils } from "../../lib/utils/crypto-utils";
-import { pseudonymizeUsername } from "../../lib/username-hash";
+import { pseudonymizeUsername } from "../../lib/database/username-hash";
 import { PostQuantumSignature } from "../../lib/cryptography/signature";
 import { PostQuantumUtils } from "../../lib/utils/pq-utils";
 import type { ServerHybridPublicKeys, HybridKeys, HashParams } from "../../lib/types/auth-types";
