@@ -103,10 +103,10 @@ const normalizeQueuedMessage = (value: unknown, username: string): QueuedMessage
 };
 
 const STORAGE_KEY = STORAGE_KEYS.SECURE_MESSAGE_QUEUE;
-const MESSAGE_EXPIRY = 7 * 24 * 60 * 60 * 1000;
-const MAX_MESSAGES_PER_USER = 100;
-const MAX_PROCESSED_IDS = 10000;
-const CLEANUP_INTERVAL = 60 * 60 * 1000;
+const MESSAGE_EXPIRY = 4 * 60 * 60 * 1000; // 4 hours - if keys don't arrive by then, they won't
+const MAX_MESSAGES_PER_USER = 50;
+const MAX_PROCESSED_IDS = 5000;
+const CLEANUP_INTERVAL = 5 * 60 * 1000; // 5 minutes
 const SAVE_DEBOUNCE_MS = 1000;
 
 class SecureMessageQueue {
@@ -270,17 +270,15 @@ class SecureMessageQueue {
     return validMessages;
   }
 
-  /**
-   * Clean up expired messages
-   */
+  // Clean up expired messages and notify if any were dropped
   private async cleanupExpired(): Promise<void> {
     const now = Date.now();
-    let expiredCount = 0;
+    const expiredByUser: Map<string, number> = new Map();
 
     for (const [username, userQueue] of this.queue.entries()) {
       const validMessages = userQueue.filter(msg => {
         if (msg.expiresAt <= now) {
-          expiredCount++;
+          expiredByUser.set(username, (expiredByUser.get(username) ?? 0) + 1);
           return false;
         }
         return true;
@@ -293,8 +291,15 @@ class SecureMessageQueue {
       }
     }
 
-    if (expiredCount > 0) {
+    const totalExpired = Array.from(expiredByUser.values()).reduce((a, b) => a + b, 0);
+    if (totalExpired > 0) {
       this.scheduleSave();
+      // Dispatch event so UI can notify user
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent('secure-queue-messages-expired', {
+          detail: { count: totalExpired, byUser: Object.fromEntries(expiredByUser) }
+        }));
+      }
     }
   }
 

@@ -34,10 +34,10 @@ import { torNetworkManager } from "../lib/transport/tor-network";
 import { ConnectSetup } from "../components/setup/ConnectSetup";
 import { SignalType } from "../lib/types/signal-types";
 import { blockingSystem } from "../lib/blocking/blocking-system";
-import { retrieveAuthTokens } from "../lib/signals";
+import { retrieveAuthTokens } from "../lib/signals/signals";
 import { syncEncryptedStorage } from "../lib/database/encrypted-storage";
 import { secureMessageQueue } from "../lib/secure-message-queue";
-import { initializeOfflineMessageQueue, offlineMessageQueue } from "../lib/offline-message-queue";
+import { offlineMessageQueue } from "../lib/websocket/offline-message-handler";
 import { isValidKyberPublicKeyBase64, sanitizeHybridKeys } from "../lib/utils/messaging-validators";
 import { SecurityAuditLogger } from "../lib/cryptography/audit-logger";
 import { PostQuantumUtils } from "../lib/utils/pq-utils";
@@ -373,9 +373,6 @@ const ChatApp: React.FC = () => {
     }
 
     offlineDbInitializedRef.current = true;
-    try {
-      initializeOfflineMessageQueue(db);
-    } catch { }
   }, [Authentication.isLoggedIn, Database.dbInitialized]);
 
   useEffect(() => {

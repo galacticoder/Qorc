@@ -13,6 +13,9 @@ export const FILENAME_SANITIZE_REGEX = /[^\w.-]/g;
 export const BASE64_STANDARD_REGEX = /^[A-Za-z0-9+/]*={0,2}$/;
 export const BASE64_URLSAFE_REGEX = /^[A-Za-z0-9_-]*={0,2}$/;
 export const CONVERSATION_USERNAME_PATTERN = /^[a-zA-Z0-9._-]{2,64}$/;
+export const AUTH_USERNAME_REGEX = /^[a-zA-Z0-9._-]{3,100}$/;
+export const JWT_LIKE_REGEX = /^[A-Za-z0-9_.~-]+\.[A-Za-z0-9_.~-]+\.[A-Za-z0-9_.~-]*$/;
+export const TOKEN_STORAGE_KEY_BASE = 'tok';
 export const CLIPBOARD_CONTROL_CHARS_REGEX = /[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g;
 export const URL_REGEX = /(https?:\/\/(?:[-\w.]|%[0-9A-Fa-f]{2})+(?::[0-9]+)?(?:\/(?:[\w\/_~!$&'()*+,;=:@.-]|%[0-9A-Fa-f]{2})*)*(?:\?(?:[\w&=%._~!$'()*+,;:@/?-]|%[0-9A-Fa-f]{2})*)?(?:#(?:[\w._~!$&'()*+,;=:@/?-]|%[0-9A-Fa-f]{2})*)?)/gi;
 export const SIMPLE_URL_REGEX = /(?:^|\s)((?:www\.)?(?:[a-zA-Z0-9-]+\.)+[a-zA-Z]{2,})(?:\/(?:[\w\/_~!$&'()*+,;=:@.-]|%[0-9A-Fa-f]{2})*)*(?:\?(?:[\w&=%._~!$'()*+,;:@/?-]|%[0-9A-Fa-f]{2})*)?(?:#(?:[\w._~!$&'()*+,;=:@/?-]|%[0-9A-Fa-f]{2})*)?/gi;
@@ -21,9 +24,11 @@ export const UNSAFE_FILENAME_CHARS_REGEX = /[\u0000-\u001F\u007F/\\:*?"<>|]+/g;
 export const WHITESPACE_COLLAPSE_REGEX = /\s+/g;
 export const CONTROL_CHARS_REGEX = /[\u0000-\u001F\u007F]/g;
 export const NEWLINE_REGEX = /[\r\n]+/g;
+export const SANITIZE_REGEX = /(javascript:|<script[^>]*>.*?<\/script>)/gi;
 
 export const READ_RECEIPT_PREFIX = 'read-receipt-';
 export const DELIVERY_RECEIPT_PREFIX = 'delivery-receipt-';
+export const SECURE_DB_EPHEMERAL_PREFIX = 'ephemeral:';
 
 // Cache and key lengths
 export const ID_CACHE_TTL_MS = 5 * 60 * 1000;
@@ -399,7 +404,6 @@ export const STORAGE_RATE_LIMIT_MAX_OPS = 100;
 export const SECURE_DB_MAX_VALUE_SIZE = 100 * 1024 * 1024;
 export const SECURE_DB_MIN_CLEANUP_INTERVAL = 60_000;
 export const SECURE_DB_MAX_EPHEMERAL_BATCH = 1000;
-export const SECURE_DB_EPHEMERAL_PREFIX = 'ephemeral:';
 export const SECURE_DB_MAX_FILE_SIZE = 50 * 1024 * 1024;
 export const SECURE_DB_MAX_TOTAL_FILE_STORAGE = 10 * 1024 * 1024 * 1024;
 export const SECURE_DB_BLOCKED_MIME_TYPES = [

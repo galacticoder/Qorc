@@ -1,4 +1,7 @@
 import { SignalType } from "./signal-types";
+import { LongTermEnvelope } from '../cryptography/long-term-encryption';
+
+export type IncomingOfflineMessageCallback = (message: any) => void | Promise<void>;
 
 export interface WebSocketMessageSchema {
   validate: (message: BaseMessage) => boolean;
@@ -195,4 +198,60 @@ export interface HeartbeatCallbacks {
 export interface MessageHandlerCallbacks {
   decryptEnvelope: (envelope: any) => Promise<any | null>;
   handleHeartbeatResponse: (message: any) => void;
+}
+
+// Offline messaging
+export interface EncryptedPayload {
+  content: string;
+  nonce: string;
+  tag: string;
+  mac: string;
+  aad?: string;
+  kemCiphertext?: string;
+  envelopeVersion?: string;
+  sessionId?: string;
+  type?: string;
+}
+
+export interface QueuedMessage {
+  id: string;
+  to: string;
+  encryptedPayload: EncryptedPayload;
+  timestamp: number;
+  retryCount: number;
+  maxRetries: number;
+  expiresAt: number;
+  nextAttempt: number;
+  sizeBytes: number;
+}
+
+export interface OfflineMessage {
+  encryptedPayload?: EncryptedPayload;
+  longTermEnvelope?: LongTermEnvelope;
+  version?: string;
+  messageId?: string;
+  to?: string;
+  from?: string;
+  expiresAt?: number;
+  maxRetries?: number;
+}
+
+export interface UserStatus {
+  username: string;
+  isOnline: boolean;
+  lastSeen: number;
+}
+
+export interface QueueStats {
+  totalQueuedMessages: number;
+  usersWithQueuedMessages: number;
+  onlineUsers: number;
+  totalUsers: number;
+}
+
+export interface QueueMetrics {
+  messagesQueued: number;
+  messagesDelivered: number;
+  messagesFailed: number;
+  messagesExpired: number;
 }

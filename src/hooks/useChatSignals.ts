@@ -1,5 +1,5 @@
 import { useCallback } from "react";
-import { handleSignalMessages } from "@/lib/signals";
+import { handleSignalMessages } from "@/lib/signals/signals";
 import type { useAuth } from "@/hooks/auth/useAuth";
 
 interface ChatSignalsProps {

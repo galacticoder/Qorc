@@ -6,7 +6,15 @@ import { SecurityAuditLogger } from '../lib/cryptography/audit-logger';
 import { secureMessageQueue } from '../lib/secure-message-queue';
 import { blockingSystem } from '../lib/blocking/blocking-system';
 import { EventType } from '../lib/types/event-types';
-import { LOCAL_EVENT_RATE_LIMIT_MAX_EVENTS, LOCAL_EVENT_RATE_LIMIT_WINDOW_MS, MAX_LOCAL_USERNAME_LENGTH, MAX_INLINE_BASE64_BYTES, MAX_LOCAL_MESSAGE_ID_LENGTH, MAX_LOCAL_EMOJI_LENGTH } from '../lib/constants';
+import {
+  LOCAL_EVENT_RATE_LIMIT_MAX_EVENTS,
+  LOCAL_EVENT_RATE_LIMIT_WINDOW_MS,
+  MAX_LOCAL_USERNAME_LENGTH,
+  MAX_INLINE_BASE64_BYTES,
+  MAX_LOCAL_MESSAGE_ID_LENGTH,
+  MAX_LOCAL_EMOJI_LENGTH,
+  BASE64_STANDARD_REGEX
+} from '../lib/constants';
 import type { User } from '../components/chat/messaging/UserList';
 import { SignalType } from '../lib/types/signal-types';
 
@@ -183,7 +191,7 @@ export function useEventHandlers({
         const maxChars = Math.ceil((MAX_INLINE_BASE64_BYTES * 4) / 3) + 128;
         const encryptedData = encryptedDataRaw.trim();
         if (!encryptedData || encryptedData.length > maxChars) return;
-        if (!/^[A-Za-z0-9+/]*={0,2}$/.test(encryptedData)) return;
+        if (!BASE64_STANDARD_REGEX.test(encryptedData)) return;
 
         const pad = encryptedData.endsWith('==') ? 2 : encryptedData.endsWith('=') ? 1 : 0;
         const estimatedBytes = Math.floor((encryptedData.length * 3) / 4) - pad;
@@ -191,7 +199,7 @@ export function useEventHandlers({
 
         const salt = saltRaw.trim();
         if (!salt || salt.length > 256) return;
-        if (!/^[A-Za-z0-9+/]*={0,2}$/.test(salt)) return;
+        if (!BASE64_STANDARD_REGEX.test(salt)) return;
 
         const lastUpdated = typeof (detail as any).lastUpdated === 'number' && Number.isFinite((detail as any).lastUpdated)
           ? (detail as any).lastUpdated : null;

@@ -103,7 +103,7 @@ export const createHandleAuthSuccess = (
     try { await new Promise(resolve => setTimeout(resolve, 0)); } catch { }
 
     try {
-      const { retrieveOfflineMessages } = await import('../../lib/offline-message-queue');
+      const { retrieveOfflineMessages } = await import('../../lib/websocket/offline-message-handler');
       retrieveOfflineMessages();
     } catch { }
   };
