@@ -420,8 +420,8 @@ export class SecureP2PService {
         const messageStr = JSON.stringify(message);
 
         // Rate limit and size check
-        if (messageStr.length > P2P_MAX_MESSAGE_SIZE) { return; }
-        if (!this.checkMessageRateLimit(message.from)) { return; }
+        if (messageStr.length > P2P_MAX_MESSAGE_SIZE) { console.log('[SecureP2PService] handleP2PMessage - message too large', { size: messageStr.length }); return; }
+        if (!this.checkMessageRateLimit(message.from)) { console.log('[SecureP2PService] handleP2PMessage - rate limited', { from: message.from }); return; }
 
 
         // Verify signature

@@ -1,6 +1,6 @@
 import { SignalType } from '../../lib/types/signal-types';
 import { EventType } from '../../lib/types/event-types';
-import websocketClient from '../../lib/websocket';
+import websocketClient from '../../lib/websocket/websocket';
 import type { PendingRetryEntry, AttemptsLedgerEntry, ResetCounterEntry } from '../../lib/types/message-handling-types';
 import { computeBackoffMs } from '../../lib/utils/message-handler-utils';
 import { BUNDLE_REQUEST_COOLDOWN_MS, MAX_RETRY_ATTEMPTS, PENDING_QUEUE_MAX_PER_PEER } from '../../lib/constants';

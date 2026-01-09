@@ -16,6 +16,7 @@ import { DilithiumService } from './services';
 import { HYBRID_ENVELOPE_VERSION, INNER_ENVELOPE_VERSION } from '../constants';
 import type { DecryptOptions, RoutingHeader, NormalizedPayload, RoutingHeaderBuildInput, HybridEnvelope, HybridRecipientKeys, ClientRoutingParams, HybridEncryptOptions, EnvelopeDecryptKeys, HybridDecryptionResult, InnerEnvelope } from '../types/crypto-types';
 import { concatUint8Arrays } from '../utils/shared-utils';
+import { clampX25519Scalar } from '../utils/noise-utils';
 import { SignalType } from '../types/signal-types';
 
 const textEncoder = new TextEncoder();
@@ -156,14 +157,6 @@ async function deriveInnerKeyMaterial(
   SecureMemory.zeroBuffer(okm);
   SecureMemory.zeroBuffer(combined);
   return { encKey, macKey };
-}
-
-function clampX25519Scalar(sk: Uint8Array): Uint8Array {
-  const out = new Uint8Array(sk);
-  out[0] &= 248;
-  out[31] &= 127;
-  out[31] |= 64;
-  return out;
 }
 
 function generateEphemeralX25519() {

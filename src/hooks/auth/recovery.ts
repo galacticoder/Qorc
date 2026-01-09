@@ -1,7 +1,7 @@
 import { RefObject } from "react";
 import { SignalType } from "../../lib/types/signal-types";
 import { EventType } from "../../lib/types/event-types";
-import websocketClient from "../../lib/websocket";
+import websocketClient from "../../lib/websocket/websocket";
 import { syncEncryptedStorage } from "../../lib/database/encrypted-storage";
 import { SecureDB } from "../../lib/database/secureDB";
 

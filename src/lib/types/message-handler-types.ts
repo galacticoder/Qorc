@@ -3,7 +3,7 @@
  */
 
 import { v4 as uuidv4 } from 'uuid';
-import websocketClient from '../websocket';
+import websocketClient from '../websocket/websocket';
 import { SignalType } from './signal-types';
 import { EventType } from './event-types';
 import { Message } from '../../components/chat/messaging/types';

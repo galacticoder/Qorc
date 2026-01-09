@@ -86,3 +86,113 @@ export const DEFAULT_SCHEMAS: Record<string, WebSocketMessageSchema> = {
       typeof (message as any).aad === 'string',
   },
 };
+
+export type WebSocketLifecycleState =
+  | 'idle'
+  | 'tor-check'
+  | 'connecting'
+  | 'handshaking'
+  | 'connected'
+  | 'disconnected'
+  | 'paused'
+  | SignalType.ERROR;
+
+export interface PendingSend {
+  id: string;
+  payload: unknown;
+  createdAt: number;
+  attempt: number;
+  flushAfter: number;
+  highPriority?: boolean;
+}
+
+export interface ServerKeyMaterial {
+  kyberPublicKey: Uint8Array;
+  dilithiumPublicKey?: Uint8Array;
+  x25519PublicKey?: Uint8Array;
+  fingerprint: string;
+  serverId?: string;
+}
+
+export interface ConnectionMetrics {
+  lastConnectedAt: number | null;
+  totalReconnects: number;
+  consecutiveFailures: number;
+  lastFailureAt: number | null;
+  lastRateLimitAt: number | null;
+  messagesSent: number;
+  messagesReceived: number;
+  bytesSent: number;
+  bytesReceived: number;
+  averageLatencyMs: number;
+  lastLatencyMs: number | null;
+  securityEvents: {
+    replayAttempts: number;
+    signatureFailures: number;
+    rateLimitHits: number;
+    fingerprintMismatches: number;
+  };
+}
+
+export interface RateLimitState {
+  messageTimestamps: number[];
+  lastResetTime: number;
+  violationCount: number;
+}
+
+export interface ConnectionHealth {
+  state: WebSocketLifecycleState;
+  isHealthy: boolean;
+  metrics: ConnectionMetrics;
+  queueDepth: number;
+  sessionAge: number | null;
+  torStatus: {
+    ready: boolean;
+    circuitHealth: 'unknown' | 'good' | 'degraded' | 'poor';
+  };
+  lastHeartbeat: number | null;
+  quality: 'excellent' | 'good' | 'fair' | 'poor' | 'unknown';
+}
+
+export interface MessageHandler {
+  (message: unknown): void;
+}
+
+export interface SessionKeyMaterial {
+  sessionId: string;
+  sendKey: Uint8Array;
+  recvKey: Uint8Array;
+  establishedAt: number;
+  fingerprint: string;
+}
+
+export interface EncryptionContext {
+  sessionKeyMaterial?: SessionKeyMaterial;
+  previousSessionFingerprint?: string;
+  sessionTransitionTime?: number;
+  serverSignatureKey?: Uint8Array;
+  signingKeyPair?: { publicKey: Uint8Array; privateKey: Uint8Array };
+}
+
+export interface HandshakeCallbacks {
+  transmit: (message: string) => Promise<void>;
+  registerMessageHandler: (type: string, handler: MessageHandler) => void;
+  unregisterMessageHandler: (type: string) => void;
+  getQueueLength: () => number;
+  getTorAdaptedTimeout: (baseTimeout: number) => number;
+  onSessionEstablished: (session: SessionKeyMaterial, serverSignatureKey?: Uint8Array) => void;
+  onHandshakeError: (error: Error) => void;
+}
+
+export interface HeartbeatCallbacks {
+  onSendHeartbeat: () => Promise<void>;
+  onConnectionLost: (error: Error) => void;
+  onRehandshakeNeeded: () => void;
+  getLifecycleState: () => string;
+  getSessionId: () => string | undefined;
+}
+
+export interface MessageHandlerCallbacks {
+  decryptEnvelope: (envelope: any) => Promise<any | null>;
+  handleHeartbeatResponse: (message: any) => void;
+}

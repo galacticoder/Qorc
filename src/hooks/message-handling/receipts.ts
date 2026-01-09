@@ -1,6 +1,6 @@
 import { SignalType } from '../../lib/types/signal-types';
 import { EventType } from '../../lib/types/event-types';
-import websocketClient from '../../lib/websocket';
+import websocketClient from '../../lib/websocket/websocket';
 import { unifiedSignalTransport } from '../../lib/transport/unified-signal-transport';
 import type { FailedDeliveryReceipt, HybridKeys, UserWithHybridKeys } from '../../lib/types/message-handling-types';
 import { DELIVERY_RECEIPT_PREFIX } from '@/lib/constants';

@@ -1,8 +1,7 @@
 import { v4 as uuidv4 } from 'uuid';
 import { CryptoUtils } from './utils/crypto-utils';
-import websocketClient from './websocket';
+import websocketClient from './websocket/websocket';
 import { sanitizeHybridKeys } from './utils/messaging-validators';
-import { SecureAuditLogger } from './secure-error-handler';
 import { clusterKeyManager } from './cryptography/cluster-key-manager';
 import { SignalType } from './types/signal-types';
 import { EventType } from './types/event-types';
@@ -43,7 +42,7 @@ class SecureTokenStorage {
       );
       return !!ok;
     } catch (_error) {
-      SecureAuditLogger.error('tokens', 'storage', 'store-failed', { error: (_error as Error).message });
+      console.error('[tokens] store-failed', (_error as Error).message);
       return false;
     }
   }
@@ -61,7 +60,7 @@ class SecureTokenStorage {
       if (!access || !refresh) return null;
       return { accessToken: access, refreshToken: refresh };
     } catch (_error) {
-      SecureAuditLogger.error('tokens', 'retrieval', 'retrieve-failed', { error: (_error as Error).message });
+      console.error('[tokens] retrieve-failed', (_error as Error).message);
       return null;
     }
   }
@@ -129,7 +128,7 @@ export async function handleSignalMessages(data: any, handlers: SignalHandlers) 
   } = Authentication ?? {};
 
   if (!type) {
-    SecureAuditLogger.warn('signals', SignalType.MESSAGE, 'missing-type', {});
+    console.warn('[signals] missing-type');
     return;
   }
 
@@ -144,12 +143,12 @@ export async function handleSignalMessages(data: any, handlers: SignalHandlers) 
       }
       case SignalType.PUBLICKEYS: {
         if (!Array.isArray(Object.keys(data?.message ?? {}))) {
-          SecureAuditLogger.warn('signals', 'publickeys', 'invalid-payload', {});
+          console.warn('[signals] publickeys invalid-payload');
           return;
         }
         const usersData = JSON.parse(message) as Record<string, { x25519PublicBase64: string; kyberPublicBase64: string }>;
         if (!setUsers) {
-          SecureAuditLogger.warn('signals', 'publickeys', 'setusers-unavailable', {});
+          console.warn('[signals] publickeys setusers-unavailable');
           return;
         }
         setUsers(
@@ -184,14 +183,14 @@ export async function handleSignalMessages(data: any, handlers: SignalHandlers) 
 
         if (!rawKeys) {
           console.error('[SIGNALS] SERVER_PUBLIC_KEY missing hybridKeys!');
-          SecureAuditLogger.warn('signals', 'server-key', 'missing-keys', {});
+          console.warn('[signals] server-key missing-keys');
           return;
         }
 
         // Sanitize server keys before pinning
         const hybridKeys = sanitizeHybridKeys(rawKeys);
         if (!hybridKeys || !hybridKeys.kyberPublicBase64) {
-          SecureAuditLogger.warn('signals', 'server-key', 'invalid-key-material', {});
+          console.warn('[signals] server-key invalid-key-material');
           return;
         }
 
@@ -204,7 +203,7 @@ export async function handleSignalMessages(data: any, handlers: SignalHandlers) 
 
           try { const { encryptedStorage } = await import('./database/encrypted-storage'); await encryptedStorage.setItem('qorchat_server_pin_v2', JSON.stringify(hybridKeys)); } catch { }
         } catch (_err) {
-          SecureAuditLogger.error('signals', 'server-key', 'persist-failed', { error: (_err as Error).message });
+          console.error('[signals] server-key persist-failed', (_err as Error).message);
         }
 
         if (setServerHybridPublic) {
@@ -217,7 +216,7 @@ export async function handleSignalMessages(data: any, handlers: SignalHandlers) 
         if (!setUsers) break;
         const { username, hybridKeys } = data ?? {};
         if (typeof username !== 'string' || !hybridKeys) {
-          SecureAuditLogger.warn('signals', 'hybrid-keys', 'invalid-payload', {});
+          console.warn('[signals] hybrid-keys invalid-payload');
           return;
         }
         const sanitized = sanitizeHybridKeys(hybridKeys);
@@ -239,7 +238,7 @@ export async function handleSignalMessages(data: any, handlers: SignalHandlers) 
 
       case SignalType.PQ_SESSION_INIT: {
         if (!data?.serverKeys || typeof data.serverKeys !== 'object') {
-          SecureAuditLogger.warn('signals', 'pq-session', 'missing-server-keys', {});
+          console.warn('[signals] pq-session missing-server-keys');
           return;
         }
         try { const { encryptedStorage } = await import('./database/encrypted-storage'); await encryptedStorage.setItem('qorchat_server_pin_v2', JSON.stringify(data.serverKeys)); } catch { }
@@ -249,7 +248,7 @@ export async function handleSignalMessages(data: any, handlers: SignalHandlers) 
 
       case SignalType.PQ_SESSION_RESPONSE: {
         if (!data?.kemCiphertext || !data?.sessionId) {
-          SecureAuditLogger.warn('signals', 'pq-session', 'invalid-response', {});
+          console.warn('[signals] pq-session invalid-response');
           return;
         }
         (websocketClient as any).handleSessionKeyExchangeResponse?.(data);
@@ -280,7 +279,7 @@ export async function handleSignalMessages(data: any, handlers: SignalHandlers) 
           loginUsernameRef && (loginUsernameRef.current = recoveredUser);
           try { (await import('./database/encrypted-storage')).syncEncryptedStorage.setItem('last_authenticated_username', recoveredUser); } catch { }
         } else {
-          SecureAuditLogger.warn('signals', 'auth-success', 'invalid-username', {});
+          console.warn('[signals] auth-success invalid-username');
           recoveredUser = '';
         }
 
@@ -289,7 +288,7 @@ export async function handleSignalMessages(data: any, handlers: SignalHandlers) 
           await persistAuthTokens({
             accessToken: String(data.tokens.accessToken),
             refreshToken: String(data.tokens.refreshToken)
-          }).catch((error) => SecureAuditLogger.error('signals', 'auth-success', 'persist-tokens-failed', { error: error.message }));
+          }).catch((error) => console.error('[signals] persist-tokens-failed', error.message));
           setAccountAuthenticated?.(true);
           setIsSubmittingAuth?.(false);
           try { window.dispatchEvent(new CustomEvent(EventType.SECURE_CHAT_AUTH_SUCCESS)); } catch { }
@@ -401,11 +400,10 @@ export async function handleSignalMessages(data: any, handlers: SignalHandlers) 
 
       case SignalType.TOKEN_VALIDATION_RESPONSE: {
         if (!data || typeof data !== 'object') {
-          SecureAuditLogger.warn('signals', 'token-validation', 'invalid-data', {});
+          console.warn('[signals] token-validation invalid-data');
           return;
         }
 
-        try { SecureAuditLogger.info('auth', 'token-validate', 'response', { valid: !!(data as any).valid, error: (data as any)?.error || null }); } catch { }
 
         if (data.valid) {
           if (typeof data.username === 'string' && data.username) {
@@ -561,12 +559,10 @@ export async function handleSignalMessages(data: any, handlers: SignalHandlers) 
               const api: any = (window as any).electronAPI;
               const inst = api?.instanceId ? String(api.instanceId) : '1';
               const verify = api?.secureStore?.get ? await api.secureStore.get(`tok:${inst}`) : null;
-              SecureAuditLogger.info('auth', 'tokens', 'persist-verify', { ok: !!ok, hasValue: typeof verify === 'string', instanceId: inst });
             } catch { }
           }
         } else {
           if (Authentication?.accountAuthenticated || Authentication?.isLoggedIn) {
-            try { SecureAuditLogger.info('auth', 'token-validate', 'ignored-stale-failure', {}); } catch { }
             break;
           }
 
@@ -576,11 +572,8 @@ export async function handleSignalMessages(data: any, handlers: SignalHandlers) 
             setAuthStatus?.('Refreshing session...');
             const tokens = await retrieveAuthTokens();
             const rt = tokens?.refreshToken;
-            try { SecureAuditLogger.info('auth', 'refresh', 'start', { hasRefreshToken: !!rt }); } catch { }
             if (rt && (window as any).edgeApi?.refreshTokens) {
-              try { SecureAuditLogger.info('auth', 'refresh', 'challenge', {}); } catch { }
               const res = await (window as any).edgeApi.refreshTokens({ refreshToken: rt });
-              try { SecureAuditLogger.info('auth', 'refresh', 'result', { success: !!res?.success, status: res?.status || null, hasTokens: !!(res?.tokens?.accessToken && res?.tokens?.refreshToken) }); } catch { }
               if (res?.success && res.tokens?.accessToken && res.tokens?.refreshToken) {
                 await persistAuthTokens({ accessToken: res.tokens.accessToken, refreshToken: res.tokens.refreshToken });
                 try { await websocketClient.attemptTokenValidationOnce?.('refresh'); } catch { }
@@ -589,10 +582,9 @@ export async function handleSignalMessages(data: any, handlers: SignalHandlers) 
                 break;
               }
             } else {
-              try { SecureAuditLogger.warn('auth', 'refresh', 'edge-api-missing', { hasEdgeApi: !!(window as any).edgeApi, hasMethod: !!(window as any).edgeApi?.refreshTokens }); } catch { }
             }
           } catch (e) {
-            SecureAuditLogger.error('auth', 'refresh', 'failed', { error: (e as Error)?.message || String(e) });
+            console.error('[auth] refresh failed', (e as Error)?.message || String(e));
           } finally {
             try { setAuthStatus?.(''); setTokenValidationInProgress?.(false); } catch { }
           }
@@ -633,7 +625,6 @@ export async function handleSignalMessages(data: any, handlers: SignalHandlers) 
             const api: any = (window as any).electronAPI;
             const inst = api?.instanceId ? String(api.instanceId) : '1';
             const verify = api?.secureStore?.get ? await api.secureStore.get(`tok:${inst}`) : null;
-            SecureAuditLogger.info('auth', 'tokens', 'persist-verify', { ok: !!ok, hasValue: typeof verify === 'string', instanceId: inst });
           } catch { }
         }
 
@@ -691,7 +682,7 @@ export async function handleSignalMessages(data: any, handlers: SignalHandlers) 
           });
           window.dispatchEvent(event);
         } catch (_error) {
-          SecureAuditLogger.error('signals', 'password-params', 'dispatch-failed', { error: (_error as Error).message });
+          console.error('[signals] password-params dispatch-failed', (_error as Error).message);
           try {
             setIsSubmittingAuth?.(false);
             setAuthStatus?.('');
@@ -718,7 +709,7 @@ export async function handleSignalMessages(data: any, handlers: SignalHandlers) 
             } catch { }
           }
         } catch (_error) {
-          SecureAuditLogger.error('signals', 'password-hash', 'derive-key-failed', { error: (_error as Error).message });
+          console.error('[signals] password-hash derive-key-failed', (_error as Error).message);
         }
 
         setShowPassphrasePrompt?.(false);
@@ -733,7 +724,7 @@ export async function handleSignalMessages(data: any, handlers: SignalHandlers) 
       case SignalType.EDIT_MESSAGE:
       case SignalType.DELETE_MESSAGE: {
         if (!handleEncryptedMessagePayload) {
-          SecureAuditLogger.warn('signals', 'encrypted-message', 'no-handler', {});
+          console.warn('[signals] encrypted-message no-handler');
           return;
         }
         await handleEncryptedMessagePayload(data);
@@ -746,7 +737,7 @@ export async function handleSignalMessages(data: any, handlers: SignalHandlers) 
           const targetUser = data?.username;
 
           if (!data?.success || data?.error || !data?.bundle) {
-            SecureAuditLogger.warn('signals', 'libsignal', 'bundle-request-failed', { hasError: !!data?.error });
+            console.warn('[signals] libsignal bundle-request-failed');
             window.dispatchEvent(new CustomEvent(EventType.LIBSIGNAL_BUNDLE_FAILED, {
               detail: { peer: targetUser, error: data?.error || 'Bundle not available' }
             }));
@@ -754,7 +745,7 @@ export async function handleSignalMessages(data: any, handlers: SignalHandlers) 
           }
 
           if (!currentUser || !targetUser) {
-            SecureAuditLogger.warn('signals', 'libsignal', 'missing-fields', {});
+            console.warn('[signals] libsignal missing-fields');
             return;
           }
 
@@ -797,7 +788,7 @@ export async function handleSignalMessages(data: any, handlers: SignalHandlers) 
             throw new Error('Session not present after bundle processing');
           }
         } catch (_error) {
-          SecureAuditLogger.error('signals', 'libsignal', 'bundle-processing-failed', { error: (_error as Error).message });
+          console.error('[signals] libsignal bundle-processing-failed', (_error as Error).message);
           const targetUser = data?.username;
           if (targetUser) {
             window.dispatchEvent(new CustomEvent(EventType.LIBSIGNAL_BUNDLE_FAILED, {
@@ -810,7 +801,7 @@ export async function handleSignalMessages(data: any, handlers: SignalHandlers) 
 
       case SignalType.FILE_MESSAGE_CHUNK: {
         if (!handleFileMessageChunk) {
-          SecureAuditLogger.warn('signals', 'file-chunk', 'no-handler', {});
+          console.warn('[signals] file-chunk no-handler');
           return;
         }
         await handleFileMessageChunk(data, { from: data?.from, to: data?.to });
@@ -832,7 +823,7 @@ export async function handleSignalMessages(data: any, handlers: SignalHandlers) 
             try { window.dispatchEvent(new CustomEvent(EventType.USER_EXISTS_RESPONSE, { detail: data })); } catch { }
           }, 0);
         } catch (_error) {
-          SecureAuditLogger.error('signals', 'user-exists', 'dispatch-failed', { error: (_error as Error).message });
+          console.error('[signals] user-exists dispatch-failed', (_error as Error).message);
         }
         try {
           if (data?.exists && data?.username && data?.hybridPublicKeys) {
@@ -880,7 +871,7 @@ export async function handleSignalMessages(data: any, handlers: SignalHandlers) 
         try {
           window.dispatchEvent(new CustomEvent(EventType.OFFLINE_MESSAGES_RESPONSE, { detail: data }));
         } catch (_error) {
-          SecureAuditLogger.error('signals', 'offline-messages', 'dispatch-failed', { error: (_error as Error).message });
+          console.error('[signals] offline-messages dispatch-failed', (_error as Error).message);
         }
         break;
       }
@@ -904,7 +895,7 @@ export async function handleSignalMessages(data: any, handlers: SignalHandlers) 
         try {
           window.dispatchEvent(new CustomEvent(EventType.BLOCK_LIST_RESPONSE, { detail: data }));
         } catch (_error) {
-          SecureAuditLogger.error('signals', EventType.BLOCK_LIST_RESPONSE, 'dispatch-failed', { error: (_error as Error).message });
+          console.error('[signals] block-list-response dispatch-failed', (_error as Error).message);
         }
         break;
       }
@@ -918,7 +909,7 @@ export async function handleSignalMessages(data: any, handlers: SignalHandlers) 
         try {
           window.dispatchEvent(new CustomEvent(EventType.LIBSIGNAL_PUBLISH_STATUS, { detail: data }));
         } catch (_error) {
-          SecureAuditLogger.error('signals', 'prekey-status', 'dispatch-failed', { error: (_error as Error).message });
+          console.error('[signals] prekey-status dispatch-failed', (_error as Error).message);
         }
         break;
       }
@@ -927,7 +918,7 @@ export async function handleSignalMessages(data: any, handlers: SignalHandlers) 
         try {
           window.dispatchEvent(new CustomEvent(EventType.LIBSIGNAL_PUBLISH_STATUS, { detail: data }));
         } catch (_error) {
-          SecureAuditLogger.error('signals', 'libsignal-publish', 'dispatch-failed', { error: (_error as Error).message });
+          console.error('[signals] libsignal-publish dispatch-failed', (_error as Error).message);
         }
         break;
       }
@@ -999,7 +990,7 @@ export async function handleSignalMessages(data: any, handlers: SignalHandlers) 
         const deviceId = data?.deviceId || 1;
 
         if (!peerUsername || !loginUsernameRef?.current) {
-          SecureAuditLogger.warn('signals', 'session-reset', 'missing-peer', {});
+          console.warn('[signals] session-reset missing-peer');
           break;
         }
 
@@ -1015,10 +1006,7 @@ export async function handleSignalMessages(data: any, handlers: SignalHandlers) 
           }));
 
         } catch (_err) {
-          SecureAuditLogger.error('signals', 'session-reset', 'delete-failed', {
-            error: _err instanceof Error ? _err.message : String(_err),
-            peer: peerUsername
-          });
+          console.error('[signals] session-reset delete-failed', _err instanceof Error ? _err.message : String(_err));
         }
         break;
       }
@@ -1027,7 +1015,7 @@ export async function handleSignalMessages(data: any, handlers: SignalHandlers) 
         const peerUsername = data?.from || data?.username;
 
         if (!peerUsername) {
-          SecureAuditLogger.warn('signals', 'session-established', 'missing-peer', {});
+          console.warn('[signals] session-established missing-peer');
           break;
         }
 
@@ -1051,24 +1039,17 @@ export async function handleSignalMessages(data: any, handlers: SignalHandlers) 
         }
 
         if (errorMsg.includes('Unknown PQ session') || errorMsg.includes('PQ session')) {
-          SecureAuditLogger.warn('signals', 'session-error', 'unknown-session', {
-            message: errorMsg,
-            action: 'rehandshaking'
-          });
+          console.warn('[signals] session-error unknown-session', errorMsg);
 
           try {
             websocketClient.resetSessionKeys();
             await websocketClient.performHandshake(false);
             void websocketClient.flushPendingQueue();
           } catch (_error) {
-            SecureAuditLogger.error('signals', 'session-error', 'rehandshake-failed', {
-              error: _error instanceof Error ? _error.message : String(_error)
-            });
+            console.error('[signals] session-error rehandshake-failed', _error instanceof Error ? _error.message : String(_error));
           }
         } else {
-          SecureAuditLogger.warn('signals', 'server-error', 'received', {
-            message: errorMsg
-          });
+          console.warn('[signals] server-error received', errorMsg);
         }
         break;
       }
@@ -1083,9 +1064,7 @@ export async function handleSignalMessages(data: any, handlers: SignalHandlers) 
             }).catch(() => { });
           }
         } catch (error) {
-          SecureAuditLogger.error('signals', 'avatar-fetch', 'handler-failed', {
-            error: error instanceof Error ? error.message : 'unknown'
-          });
+          console.error('[signals] avatar-fetch handler-failed', error instanceof Error ? error.message : 'unknown');
         }
         break;
       }
@@ -1098,24 +1077,17 @@ export async function handleSignalMessages(data: any, handlers: SignalHandlers) 
             profilePictureSystem.handleIncomingMessage(data || message, from).catch(() => { });
           }
         } catch (error) {
-          SecureAuditLogger.error('signals', 'profile-picture-signal', 'handler-failed', {
-            error: error instanceof Error ? error.message : 'unknown'
-          });
+          console.error('[signals] profile-picture-signal handler-failed', error instanceof Error ? error.message : 'unknown');
         }
         break;
       }
 
       default: {
-        SecureAuditLogger.warn('signals', 'unhandled', 'unknown-signal-type', {
-          type: type,
-          hasMessage: !!message,
-          messagePreview: message ? String(message).substring(0, 100) : ''
-        });
         break;
       }
     }
   } catch (_error) {
-    SecureAuditLogger.error('signals', 'handler', 'signal-processing-error', { error: (_error as Error).message });
+    console.error('[signals] signal-processing-error', (_error as Error).message);
     setLoginError?.('Error processing server message');
   }
 }

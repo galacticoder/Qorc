@@ -1,47 +1,11 @@
 /**
- * Tor setup and management with automated installation and configuration
+ * Tor setup and management
  */
 
-import { handleCriticalError } from './secure-error-handler';
+import { TorSetupStatus, TorInstallOptions, ElectronTorSetupAPI } from '../types/tor-types';
+import { sanitizeBinaryPath, isValidBridgeLine } from '../utils/tor-utils';
 
-interface ElectronTorSetupAPI {
-  checkTorInstallation: () => Promise<{ isInstalled: boolean; version?: string; bundled?: boolean }>;
-  downloadTor: () => Promise<{ success: boolean; error?: string }>;
-  installTor: () => Promise<{ success: boolean; error?: string }>;
-  configureTor: (config: { config: string }) => Promise<{ success: boolean; pending?: boolean; error?: string }>;
-  startTor: () => Promise<{ success: boolean; error?: string }>;
-  stopTor: () => Promise<{ success: boolean; error?: string }>;
-  uninstallTor: () => Promise<{ success: boolean; error?: string }>;
-  verifyTorConnection: () => Promise<{ success: boolean; isTor?: boolean; error?: string }>;
-  getTorStatus: () => Promise<{ isRunning: boolean }>;
-  getTorInfo: () => Promise<{ version?: string; systemTorVersion?: string; socksPort?: number; controlPort?: number }>;
-  onTorConfigureComplete?: (callback: (event: unknown, data: unknown) => void) => () => void;
-  platform?: string;
-}
-
-export interface TorSetupStatus {
-  isInstalled: boolean;
-  isConfigured: boolean;
-  isRunning: boolean;
-  version?: string;
-  socksPort?: number;
-  controlPort?: number;
-  error?: string;
-  setupProgress: number; // 0-100
-  currentStep: string;
-}
-
-export interface TorInstallOptions {
-  autoStart: boolean;
-  enableBridges: boolean;
-  allowBridgeFallback?: boolean;
-  bridges?: string[];
-  transport?: 'obfs4' | 'snowflake';
-  obfs4ProxyPath?: string;
-  customConfig?: Record<string, string | number | boolean>;
-  onProgress?: (status: TorSetupStatus) => void;
-}
-
+// Tor setup
 export class TorAutoSetup {
   private status: TorSetupStatus = {
     isInstalled: false,
@@ -54,9 +18,7 @@ export class TorAutoSetup {
   private progressCallback?: (status: TorSetupStatus) => void;
   private bridgeFallbackAllowed = false;
 
-  /**
-   * Automatically setup Tor
-   */
+  // Automatically setup Tor
   async autoSetup(options: TorInstallOptions = { autoStart: true, enableBridges: false }): Promise<boolean> {
     this.progressCallback = options.onProgress;
     this.bridgeFallbackAllowed = Boolean(options.allowBridgeFallback);
@@ -65,7 +27,7 @@ export class TorAutoSetup {
       this.updateStatus(5, 'Checking system requirements...');
 
       if (!this.isElectronEnvironment()) {
-        this.updateStatus(0, 'Desktop application required', 'Tor auto-setup requires the desktop application.');
+        this.updateStatus(0, 'Desktop application required', 'Tor setup requires the desktop application.');
         return false;
       }
 
@@ -79,8 +41,7 @@ export class TorAutoSetup {
           this.status.version = bundledTorCheck.version;
         }
       } else {
-        this.updateStatus(15, 'Preparing Tor Expert Bundle download...');
-        this.updateStatus(20, 'Downloading Tor Expert Bundle...', 'Downloading ~15MB from torproject.org');
+        this.updateStatus(20, 'Downloading Tor Expert Bundle...');
         const downloadSuccess = await this.downloadTor();
 
         if (!downloadSuccess) {
@@ -154,12 +115,11 @@ export class TorAutoSetup {
     } catch (_error) {
       console.error('[TOR-SETUP] Auto setup failed:', _error);
       this.updateStatus(0, 'Setup failed', _error instanceof Error ? _error.message : 'Unknown error');
-      handleCriticalError(_error as Error, { context: 'tor_auto_setup' });
       throw _error;
     }
   }
 
-
+  // Check if bundled Tor is available
   private async checkBundledTor(): Promise<{ isInstalled: boolean; version?: string; bundled?: boolean }> {
     try {
       const api = this.getElectronAPI();
@@ -179,6 +139,7 @@ export class TorAutoSetup {
     }
   }
 
+  // Download Tor Expert Bundle
   private async downloadTor(): Promise<boolean> {
     try {
       const api = this.getElectronAPI();
@@ -204,6 +165,7 @@ export class TorAutoSetup {
     }
   }
 
+  // Install Tor
   private async installTor(): Promise<boolean> {
     try {
       const api = this.getElectronAPI();
@@ -226,6 +188,7 @@ export class TorAutoSetup {
     }
   }
 
+  // Configure Tor
   private async configureTor(options: TorInstallOptions): Promise<boolean> {
     try {
       const config = this.generateTorConfig(options);
@@ -270,6 +233,7 @@ export class TorAutoSetup {
     }
   }
 
+  // Start Tor
   private async startTor(): Promise<{ success: boolean; error?: string }> {
     try {
       const api = this.getElectronAPI();
@@ -288,6 +252,7 @@ export class TorAutoSetup {
     }
   }
 
+  // Verify Tor connection
   private async verifyTorConnection(): Promise<boolean> {
     try {
       const api = this.getElectronAPI();
@@ -310,6 +275,7 @@ export class TorAutoSetup {
     }
   }
 
+  // Generate Tor configuration
   private generateTorConfig(options: TorInstallOptions): string {
     const socksPort = options.customConfig?.socksPort || 9150;
     const controlPort = options.customConfig?.controlPort || 9151;
@@ -339,7 +305,7 @@ export class TorAutoSetup {
       config.push('', '# Bridge configuration', 'UseBridges 1');
 
       if (transport === 'obfs4') {
-        const obfs4Path = this.sanitizeBinaryPath(options.obfs4ProxyPath?.trim() || './pluggable_transports/lyrebird');
+        const obfs4Path = sanitizeBinaryPath(options.obfs4ProxyPath?.trim() || './pluggable_transports/lyrebird');
         config.push(`ClientTransportPlugin obfs4 exec ${obfs4Path}`);
       } else if (transport === 'snowflake') {
         config.push('ClientTransportPlugin snowflake exec snowflake-client');
@@ -352,7 +318,7 @@ export class TorAutoSetup {
           const trimmed = (line || '').trim();
           if (!trimmed) continue;
 
-          if (!this.isValidBridgeLine(trimmed)) {
+          if (!isValidBridgeLine(trimmed)) {
             console.warn('[TOR-SETUP] Invalid bridge line skipped:', trimmed);
             continue;
           }
@@ -392,19 +358,7 @@ export class TorAutoSetup {
     return config.join('\n');
   }
 
-  private sanitizeBinaryPath(path: string): string {
-    const sanitized = path.replace(/[^a-zA-Z0-9_\-./]/g, '');
-    return sanitized || 'obfs4proxy';
-  }
-
-  private isValidBridgeLine(line: string): boolean {
-    const startsWithBridge = line.startsWith('Bridge ') ? line : `Bridge ${line}`;
-    const obfs4Pattern = /^Bridge\s+(obfs4|vanilla)\s+[\d.]+:\d+\s+[A-F0-9]{40}(\s+.+)?$/i;
-    const snowflakePattern = /^Bridge\s+snowflake(\s+.+)?$/i;
-
-    return obfs4Pattern.test(startsWithBridge) || snowflakePattern.test(startsWithBridge);
-  }
-
+  // Get Electron API
   private getElectronAPI(): ElectronTorSetupAPI | null {
     if (typeof window === 'undefined' || !window.electronAPI) {
       return null;
@@ -412,10 +366,12 @@ export class TorAutoSetup {
     return window.electronAPI as ElectronTorSetupAPI;
   }
 
+  // Check if running in Electron environment
   private isElectronEnvironment(): boolean {
     return typeof window !== 'undefined' && Boolean(window.electronAPI);
   }
 
+  // Update setup status
   private updateStatus(progress: number, step: string, error?: string): void {
     this.status.setupProgress = progress;
     this.status.currentStep = step;
@@ -428,10 +384,12 @@ export class TorAutoSetup {
     }
   }
 
+  // Get current setup status
   getStatus(): TorSetupStatus {
     return { ...this.status };
   }
 
+  // Refresh current setup status
   async refreshStatus(): Promise<TorSetupStatus> {
     try {
       const api = this.getElectronAPI();
@@ -477,6 +435,7 @@ export class TorAutoSetup {
     return { ...this.status };
   }
 
+  // Stop Tor
   async stopTor(): Promise<boolean> {
     try {
       const api = this.getElectronAPI();
@@ -498,6 +457,7 @@ export class TorAutoSetup {
     }
   }
 
+  // Uninstall Tor
   async uninstallTor(): Promise<boolean> {
     try {
       const api = this.getElectronAPI();

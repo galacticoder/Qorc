@@ -1,7 +1,7 @@
 import { SignalType } from '../../lib/types/signal-types';
 import { EventType } from '../../lib/types/event-types';
 import { CryptoUtils } from '../../lib/utils/crypto-utils';
-import websocketClient from '../../lib/websocket';
+import websocketClient from '../../lib/websocket/websocket';
 import { secureMessageQueue } from '../../lib/secure-message-queue';
 import { MAX_PAYLOAD_CACHE_SIZE } from '../../lib/constants';
 import type { HybridPublicKeys } from '../../lib/types/message-sending-types';

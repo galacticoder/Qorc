@@ -516,6 +516,7 @@ export function createHandleIncomingP2PMessage(
             newChannelId,
             minSequence,
           );
+        }
       }
 
       if (!validProof) {
@@ -661,9 +662,8 @@ export function createHandleIncomingP2PMessage(
           await refs.p2pServiceRef.current?.sendMessage(message.from, encryptedAck, SignalType.DELIVERY_ACK);
         } catch { }
       }
-    }
-  }
-  catch (_error) {
+    } catch (_error) {
+      console.error('[P2P-Messaging] handleIncomingP2PMessage - ERROR', { from: (message as any)?.from, type: (message as any)?.type, error: _error instanceof Error ? _error.message : String(_error) });
       try {
         SecurityAuditLogger.log(SignalType.ERROR, 'p2p-incoming-error', {
           from: (message as any)?.from || null,

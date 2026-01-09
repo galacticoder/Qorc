@@ -1,7 +1,7 @@
 import { SignalType } from '../../lib/types/signal-types';
 import { EventType } from '../../lib/types/event-types';
 import { CryptoUtils } from '../../lib/utils/crypto-utils';
-import websocketClient from '../../lib/websocket';
+import websocketClient from '../../lib/websocket/websocket';
 import { SESSION_WAIT_MS, SESSION_POLL_BASE_MS, SESSION_POLL_MAX_MS, BUNDLE_REQUEST_COOLDOWN_MS } from '../../lib/constants';
 import { TEXT_ENCODER, getSessionApi } from '../../lib/utils/message-sending-utils';
 import type { SigningKeys } from '../../lib/types/message-sending-types';

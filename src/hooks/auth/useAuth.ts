@@ -2,7 +2,7 @@ import { useState, useRef, useCallback, useEffect } from "react";
 import { SignalType } from "../../lib/types/signal-types";
 import { EventType } from "../../lib/types/event-types";
 import { retrieveAuthTokens } from "../../lib/signals";
-import websocketClient from "../../lib/websocket";
+import websocketClient from "../../lib/websocket/websocket";
 import { CryptoUtils } from "../../lib/utils/crypto-utils";
 import { SecureDB } from "../../lib/database/secureDB";
 import { SecureKeyManager } from "../../lib/database/secure-key-manager";

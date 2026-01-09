@@ -27,10 +27,10 @@ import { useP2PMessaging, type EncryptedMessage } from "../hooks/p2p/useP2PMessa
 import { useP2PKeys } from "../hooks/p2p/useP2PKeys";
 import { useMessageReceipts } from "../hooks/message-sending/useMessageReceipts";
 import { p2pConfig, getSignalingServerUrl } from "../config/p2p.config";
-import websocketClient from "../lib/websocket";
+import websocketClient from "../lib/websocket/websocket";
 import { EventType } from "../lib/types/event-types";
 import { TypingIndicatorProvider } from "../contexts/TypingIndicatorContext";
-import { torNetworkManager } from "../lib/tor-network";
+import { torNetworkManager } from "../lib/transport/tor-network";
 import { ConnectSetup } from "../components/setup/ConnectSetup";
 import { SignalType } from "../lib/types/signal-types";
 import { blockingSystem } from "../lib/blocking/blocking-system";
@@ -1009,7 +1009,7 @@ const ChatApp: React.FC = () => {
     if (Database.secureDBRef.current) {
       Promise.all([
         import('../lib/profile-picture-system'),
-        import('../lib/websocket')
+        import('../lib/websocket/websocket')
       ]).then(([{ profilePictureSystem }, { default: _websocketClient }]) => {
         profilePictureSystem.setSecureDB(Database.secureDBRef.current);
         profilePictureSystem.initialize().catch(() => { });

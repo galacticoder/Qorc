@@ -2,7 +2,7 @@ import React, { useCallback, useMemo, useRef, useEffect } from 'react';
 import { SignalType } from '../../lib/types/signal-types';
 import { EventType } from '../../lib/types/event-types';
 import { Message } from '../../components/chat/messaging/types';
-import websocketClient from '../../lib/websocket';
+import websocketClient from '../../lib/websocket/websocket';
 import { isValidKyberPublicKeyBase64 } from '../../lib/utils/messaging-validators';
 import type { SecureDB } from '../../lib/database/secureDB';
 import { encryptLongTerm } from '../../lib/cryptography/long-term-encryption';

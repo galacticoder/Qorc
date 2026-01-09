@@ -1,4 +1,11 @@
-import { URL_REGEX, SIMPLE_URL_REGEX, MAX_LINKS_PER_TEXT, COMMON_COMPOUND_TLDS, SUSPICIOUS_QUERY_PARAMS, COMMON_TLDS } from './constants';
+import {
+  URL_REGEX,
+  SIMPLE_URL_REGEX,
+  MAX_LINKS_PER_TEXT,
+  COMMON_COMPOUND_TLDS,
+  SUSPICIOUS_QUERY_PARAMS,
+  COMMON_TLDS
+} from './constants';
 
 export interface ExtractedLink {
   url: string;
@@ -7,6 +14,7 @@ export interface ExtractedLink {
   endIndex: number;
 }
 
+// Link extraction
 export class LinkExtractor {
   static extractLinks(text: string): ExtractedLink[] {
     const links: ExtractedLink[] = [];
@@ -58,10 +66,12 @@ export class LinkExtractor {
     return links.length > MAX_LINKS_PER_TEXT ? links.slice(0, MAX_LINKS_PER_TEXT) : links;
   }
 
+  // Extract URL strings from text
   static extractUrlStrings(text: string): string[] {
     return this.extractLinks(text).map(link => link.url);
   }
 
+  // Check if message contains only URLs
   static isUrlOnlyMessage(text: string): boolean {
     const links = this.extractLinks(text);
     if (links.length === 0) return false;
@@ -77,11 +87,13 @@ export class LinkExtractor {
     return previousEnd >= text.length || text.slice(previousEnd).trim() === '';
   }
 
+  // Get first URL from text
   static getFirstUrl(text: string): string | null {
     const links = this.extractLinks(text);
     return links.length > 0 ? links[0].url : null;
   }
 
+  // Replace URLs in text
   static replaceUrls(text: string, replaceFn: (url: string, originalText: string) => string): string {
     const links = this.extractLinks(text);
     if (links.length === 0) return text;
@@ -97,18 +109,22 @@ export class LinkExtractor {
     return result + text.slice(previousEnd);
   }
 
+  // Remove URLs from text
   static removeUrls(text: string, replacement: string = ''): string {
     return this.replaceUrls(text, () => replacement);
   }
 
+  // Check if text contains URLs
   static hasUrls(text: string): boolean {
     return this.extractLinks(text).length > 0;
   }
 
+  // Get text without URLs
   static getTextWithoutUrls(text: string): string {
     return this.removeUrls(text, ' ').replace(/\s+/g, ' ').trim();
   }
 
+  // Normalize URL
   private static normalizeUrl(url: string): string | null {
     try {
       let normalized = url.trim();
@@ -142,6 +158,7 @@ export class LinkExtractor {
     }
   }
 
+  // Check if hostname is allowed
   private static isAllowedHostname(hostname: string): boolean {
     const lower = hostname.toLowerCase();
     if (!lower || lower.length > 255) return false;
@@ -159,6 +176,7 @@ export class LinkExtractor {
     return true;
   }
 
+  // Check if simple URL is valid
   private static isValidSimpleUrl(url: string): boolean {
     const domainPart = url.split(/[\/?#]/)[0];
     if (!domainPart.includes('.')) return false;

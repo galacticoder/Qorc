@@ -215,7 +215,7 @@ export class BlockingSystem {
 
   private async sendToServer(message: Record<string, unknown>): Promise<void> {
     try {
-      const { default: websocketClient } = await import('../websocket');
+      const { default: websocketClient } = await import('../websocket/websocket');
       websocketClient.send(message);
       resetCircuitBreaker(this.circuitBreaker);
       void this.messageQueue.persist();

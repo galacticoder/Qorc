@@ -1,6 +1,5 @@
 /** Encrypted offline message queue stored in SecureDB. */
 
-import { SecureAuditLogger } from './secure-error-handler';
 import { SecureDB } from './database/secureDB';
 
 import { isPlainObject, hasPrototypePollutionKeys, isValidUsername } from './sanitizers';
@@ -339,9 +338,6 @@ class SecureMessageQueue {
 
     } catch (_error) {
       console.error('[SecureMessageQueue] Storage save failed:', _error);
-      SecureAuditLogger.error('secureMessageQueue', 'save-storage', 'failed', {
-        error: (_error as Error)?.message
-      });
     }
   }
 
@@ -435,9 +431,6 @@ class SecureMessageQueue {
         await this.cleanupExpired();
       } catch (_error) {
         console.error('[SecureMessageQueue] Storage load failed:', _error);
-        SecureAuditLogger.error('secureMessageQueue', 'load-storage', 'failed', {
-          error: (_error as Error)?.message
-        });
       } finally {
         this.loadPromise = null;
       }

@@ -1,79 +1,20 @@
 /**
- * Tor network manager with anonymous routing and circuit management
+ * Tor network manager
  */
 
-import { handleNetworkError } from './secure-error-handler';
-
-type TorCircuitHealth = 'good' | 'degraded' | 'poor' | 'unknown';
-
-type TorCircuitRotationResult = {
-  success: boolean;
-  method?: string;
-  beforeIP?: string;
-  afterIP?: string;
-  ipChanged?: boolean;
-  circuitChanged?: boolean;
-  message?: string;
-  error?: string;
-  beforeCircuit?: string;
-  afterCircuit?: string;
-};
-
-type TorInitializationResult = { success: boolean; error?: string; socksPort?: number; controlPort?: number; bootstrapped?: boolean };
-
-type TorTestConnectionResult = { success: boolean; error?: string };
-
-type TorRequestResult = { response: unknown; body: string };
-
-interface TorElectronNetworkAPI {
-  initializeTor(config: TorConfig): Promise<TorInitializationResult>;
-  testTorConnection(): Promise<TorTestConnectionResult>;
-  rotateTorCircuit(): Promise<TorCircuitRotationResult>;
-  makeTorRequest(options: {
-    url: string;
-    method: string;
-    headers: Record<string, string>;
-    body?: string;
-    timeout: number;
-  }): Promise<TorRequestResult>;
-  getTorWebSocketUrl(url: string): Promise<string | { success?: boolean; url?: string; error?: string }>;
-}
-
-const REQUIRED_ELECTRON_METHODS: Array<keyof TorElectronNetworkAPI> = [
-  'initializeTor',
-  'testTorConnection',
-  'rotateTorCircuit',
-  'makeTorRequest',
-  'getTorWebSocketUrl'
-];
-
-export interface TorConfig {
-  enabled: boolean;
-  socksPort: number;
-  controlPort: number;
-  host: string;
-  circuitRotationInterval: number; // minutes
-  maxRetries: number;
-  connectionTimeout: number; // milliseconds
-}
-
-export interface TorConnectionStats {
-  isConnected: boolean;
-  circuitCount: number;
-  lastCircuitRotation: number;
-  connectionAttempts: number;
-  failedConnections: number;
-  bytesTransmitted: number;
-  bytesReceived: number;
-  averageLatency: number;
-  lastHealthCheck: number;
-  circuitHealth: TorCircuitHealth;
-  isBootstrapped?: boolean;
-}
-
-const DEFAULT_MONITOR_INTERVAL_MS = 30_000;
-const MAX_BACKOFF_MS = 30_000;
-const CIRCUIT_ROTATION_RATE_LIMIT_MS = 5_000;
+import { 
+  TorConfig,
+  TorConnectionStats,
+  TorElectronNetworkAPI,
+  TorRequestResult,
+  TorCircuitHealth,
+  REQUIRED_ELECTRON_METHODS
+ } from '../types/tor-types';
+import { 
+  TOR_DEFAULT_MONITOR_INTERVAL_MS,
+  TOR_MAX_BACKOFF_MS,
+  TOR_CIRCUIT_ROTATION_RATE_LIMIT_MS
+ } from '../constants';
 
 export class TorNetworkManager {
   private config: TorConfig;
@@ -116,6 +57,7 @@ export class TorNetworkManager {
     }
   }
 
+  // Validate Electron API
   private validateElectronAPI(): TorElectronNetworkAPI {
     if (typeof window === 'undefined') {
       throw new Error('[TOR] Electron APIs unavailable outside renderer environment');
@@ -135,6 +77,7 @@ export class TorNetworkManager {
     return api as TorElectronNetworkAPI;
   }
 
+  // Retry with exponential backoff
   private async retryWithBackoff<T>(operation: () => Promise<T>, maxRetries = this.config.maxRetries): Promise<T> {
     let attempt = 0;
     let lastError: unknown;
@@ -147,7 +90,7 @@ export class TorNetworkManager {
         attempt += 1;
         if (attempt > maxRetries) break;
 
-        const delay = Math.min(1000 * 2 ** (attempt - 1), MAX_BACKOFF_MS);
+        const delay = Math.min(1000 * 2 ** (attempt - 1), TOR_MAX_BACKOFF_MS);
         await new Promise((resolve) => setTimeout(resolve, delay));
       }
     }
@@ -155,6 +98,7 @@ export class TorNetworkManager {
     throw lastError ?? new Error('Unknown Tor operation failure');
   }
 
+  // Start circuit rotation
   private startCircuitRotation(): void {
     if (this.circuitRotationTimer) {
       clearInterval(this.circuitRotationTimer);
@@ -173,6 +117,7 @@ export class TorNetworkManager {
     this.circuitRotationTimer = timer;
   }
 
+  // Stop circuit rotation
   private stopCircuitRotation(): void {
     if (this.circuitRotationTimer) {
       clearInterval(this.circuitRotationTimer);
@@ -180,6 +125,7 @@ export class TorNetworkManager {
     }
   }
 
+  // Start connection monitoring
   private startConnectionMonitoring(): void {
     if (this.connectionMonitorTimer) {
       clearInterval(this.connectionMonitorTimer);
@@ -203,18 +149,19 @@ export class TorNetworkManager {
       } catch (_error) {
         console.error('[TOR] Connection monitoring failed:', _error);
       }
-    }, DEFAULT_MONITOR_INTERVAL_MS);
+    }, TOR_DEFAULT_MONITOR_INTERVAL_MS);
 
     this.connectionMonitorTimer = timer;
   }
 
   private isInitializing = false;
 
+  // Schedule reinitialization
   private scheduleReinitialization(): void {
     if (this.monitorBackoffMs === 0) {
       this.monitorBackoffMs = 1000;
     } else {
-      this.monitorBackoffMs = Math.min(this.monitorBackoffMs * 2, MAX_BACKOFF_MS);
+      this.monitorBackoffMs = Math.min(this.monitorBackoffMs * 2, TOR_MAX_BACKOFF_MS);
     }
 
     setTimeout(async () => {
@@ -233,6 +180,7 @@ export class TorNetworkManager {
     }, this.monitorBackoffMs);
   }
 
+  // Stop all timers
   private stopAllTimers(): void {
     if (this.connectionMonitorTimer) {
       clearInterval(this.connectionMonitorTimer);
@@ -242,6 +190,7 @@ export class TorNetworkManager {
     this.stopCircuitRotation();
   }
 
+  // Check circuit health
   private async checkCircuitHealth(): Promise<void> {
     const start = performance.now();
     const test = await this.validateElectronAPI().testTorConnection();
@@ -267,6 +216,7 @@ export class TorNetworkManager {
     this.notifyStatsCallbacks();
   }
 
+  // Initialize Tor network
   async initialize(): Promise<boolean> {
     if (!this.config.enabled) {
       return false;
@@ -317,7 +267,6 @@ export class TorNetworkManager {
     } catch (_error) {
       console.error('[TOR] Failed to initialize Tor connection:', _error);
       this.stats.failedConnections += 1;
-      handleNetworkError(_error as Error, { context: 'tor_initialization' });
       this.notifyConnectionCallbacks(false);
       return false;
     } finally {
@@ -325,6 +274,7 @@ export class TorNetworkManager {
     }
   }
 
+  // Test Tor connection
   private async testTorConnection(): Promise<boolean> {
     const api = this.validateElectronAPI();
 
@@ -340,9 +290,10 @@ export class TorNetworkManager {
     }
   }
 
+  // Create Tor WebSocket
   async createTorWebSocket(url: string): Promise<WebSocket | null> {
     if (!this.isInitialized) {
-      console.error('[TOR] Cannot create WebSocket - Tor not initialized');
+      console.error('[TOR] Tor not initialized cannot create WebSocket');
       return null;
     }
 
@@ -378,15 +329,14 @@ export class TorNetworkManager {
         throw new Error(`Invalid Tor WebSocket URL scheme: ${torUrl.split(':')[0]}. Only ws:// or wss:// allowed.`);
       }
 
-      // Browser WebSocket cannot set SOCKS; main process handles Tor proxying.
       return new WebSocket(torUrl);
     } catch (_error) {
       console.error('[TOR] Failed to create Tor WebSocket:', _error);
-      handleNetworkError(_error as Error, { context: 'tor_websocket_creation' });
       return null;
     }
   }
 
+  // Make Tor request
   async makeRequest(options: {
     url: string;
     method?: string;
@@ -432,6 +382,7 @@ export class TorNetworkManager {
     });
   }
 
+  // Rotate Tor circuit
   async rotateCircuit(): Promise<boolean> {
     if (!this.isInitialized) {
       console.error('[TOR] Cannot rotate circuit - Tor not initialized');
@@ -439,7 +390,7 @@ export class TorNetworkManager {
     }
 
     const now = Date.now();
-    if (now - this.lastManualRotation < CIRCUIT_ROTATION_RATE_LIMIT_MS) {
+    if (now - this.lastManualRotation < TOR_CIRCUIT_ROTATION_RATE_LIMIT_MS) {
       return false;
     }
 
@@ -461,23 +412,26 @@ export class TorNetworkManager {
       return true;
     } catch (_error) {
       console.error('[TOR] Circuit rotation error:', _error);
-      handleNetworkError(_error as Error, { context: 'tor_circuit_rotation' });
       return false;
     }
   }
 
+  // Get Tor stats
   getStats(): TorConnectionStats {
     return { ...this.stats };
   }
 
+  // Check if Tor is bootstrapped
   isBootstrapped(): boolean {
     return this.stats.isBootstrapped || false;
   }
 
+  // Check if Tor is connected
   isConnected(): boolean {
     return this.config.enabled && this.stats.isConnected;
   }
 
+  // Check if Tor is supported
   isSupported(): boolean {
     try {
       this.validateElectronAPI();
@@ -487,14 +441,17 @@ export class TorNetworkManager {
     }
   }
 
+  // Register connection change callback
   onConnectionChange(callback: (connected: boolean) => void): void {
     this.connectionCallbacks.add(callback);
   }
 
+  // Unregister connection change callback
   offConnectionChange(callback: (connected: boolean) => void): void {
     this.connectionCallbacks.delete(callback);
   }
 
+  // Notify connection callbacks
   private notifyConnectionCallbacks(connected: boolean): void {
     this.connectionCallbacks.forEach((callback) => {
       try {
@@ -506,16 +463,20 @@ export class TorNetworkManager {
     this.notifyStatsCallbacks();
   }
 
+  // Notify stats callbacks
   private readonly statsCallbacks = new Set<(stats: TorConnectionStats) => void>();
 
+  // Register stats change callback
   onStatsChange(callback: (stats: TorConnectionStats) => void): void {
     this.statsCallbacks.add(callback);
   }
 
+  // Unregister stats change callback
   offStatsChange(callback: (stats: TorConnectionStats) => void): void {
     this.statsCallbacks.delete(callback);
   }
 
+  // Notify stats callbacks
   private notifyStatsCallbacks(): void {
     const currentStats = this.getStats();
     this.statsCallbacks.forEach((callback) => {
@@ -527,6 +488,7 @@ export class TorNetworkManager {
     });
   }
 
+  // Update Tor configuration
   updateConfig(newConfig: Partial<TorConfig>): void {
     const validatedConfig: Partial<TorConfig> = {};
 
@@ -559,6 +521,7 @@ export class TorNetworkManager {
     }
   }
 
+  // Shutdown Tor network
   async shutdown(): Promise<void> {
     this.stopAllTimers();
     this.stats.isConnected = false;
@@ -570,6 +533,7 @@ export class TorNetworkManager {
     this.notifyConnectionCallbacks(false);
   }
 
+  // Get connection health
   getConnectionHealth(): {
     isHealthy: boolean;
     circuitHealth: TorCircuitHealth;

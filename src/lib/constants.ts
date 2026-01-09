@@ -17,6 +17,10 @@ export const CLIPBOARD_CONTROL_CHARS_REGEX = /[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g
 export const URL_REGEX = /(https?:\/\/(?:[-\w.]|%[0-9A-Fa-f]{2})+(?::[0-9]+)?(?:\/(?:[\w\/_~!$&'()*+,;=:@.-]|%[0-9A-Fa-f]{2})*)*(?:\?(?:[\w&=%._~!$'()*+,;:@/?-]|%[0-9A-Fa-f]{2})*)?(?:#(?:[\w._~!$&'()*+,;=:@/?-]|%[0-9A-Fa-f]{2})*)?)/gi;
 export const SIMPLE_URL_REGEX = /(?:^|\s)((?:www\.)?(?:[a-zA-Z0-9-]+\.)+[a-zA-Z]{2,})(?:\/(?:[\w\/_~!$&'()*+,;=:@.-]|%[0-9A-Fa-f]{2})*)*(?:\?(?:[\w&=%._~!$'()*+,;:@/?-]|%[0-9A-Fa-f]{2})*)?(?:#(?:[\w._~!$&'()*+,;=:@/?-]|%[0-9A-Fa-f]{2})*)?/gi;
 export const VALID_USERNAME_PATTERN = /^[\w\-_.@]+$/i;
+export const UNSAFE_FILENAME_CHARS_REGEX = /[\u0000-\u001F\u007F/\\:*?"<>|]+/g;
+export const WHITESPACE_COLLAPSE_REGEX = /\s+/g;
+export const CONTROL_CHARS_REGEX = /[\u0000-\u001F\u007F]/g;
+export const NEWLINE_REGEX = /[\r\n]+/g;
 
 export const READ_RECEIPT_PREFIX = 'read-receipt-';
 export const DELIVERY_RECEIPT_PREFIX = 'delivery-receipt-';
@@ -406,3 +410,41 @@ export const SECURE_DB_BLOCKED_MIME_TYPES = [
     'application/x-executable',
     'application/vnd.microsoft.portable-executable',
   ];
+
+// Tor constants
+export const TOR_DEFAULT_MONITOR_INTERVAL_MS = 30_000;
+export const TOR_MAX_BACKOFF_MS = 30_000;
+export const TOR_CIRCUIT_ROTATION_RATE_LIMIT_MS = 5_000;
+
+// WebSocket constants
+export const MAX_PENDING_QUEUE = 500;
+export const MAX_REPLAY_WINDOW_MS = 5 * 60 * 1000;
+export const REPLAY_CACHE_LIMIT = 10_000;
+export const INITIAL_RECONNECT_DELAY_MS = 1_000;
+export const MAX_RECONNECT_DELAY_MS = 60_000;
+export const RATE_LIMIT_BACKOFF_MS = 5_000;
+export const MAX_HANDSHAKE_ATTEMPTS = 3;
+export const MAX_MESSAGE_AAD_LENGTH = 256;
+export const SESSION_REKEY_INTERVAL_MS = 60 * 60 * 1000;
+export const KEY_ROTATION_WARNING_MS = 45 * 60 * 1000;
+export const QUEUE_FLUSH_INTERVAL_MS = 1_000;
+
+export const MAX_MESSAGES_PER_MINUTE = 120;
+export const MAX_BURST_MESSAGES = 20;
+export const RATE_LIMIT_VIOLATION_THRESHOLD = 3;
+
+export const HEARTBEAT_INTERVAL_MS = 35_000;
+export const HEARTBEAT_TIMEOUT_MS = 90_000;
+export const MAX_MISSED_HEARTBEATS = 4;
+export const LATENCY_SAMPLE_WEIGHT = 0.2;
+
+export const MAX_NONCE_SEQUENCE_GAP = 1000;
+export const TIMESTAMP_SKEW_TOLERANCE_MS = 5_000;
+
+export const SESSION_FAILOVER_GRACE_PERIOD_MS = 10_000;
+
+export const MAX_INCOMING_WS_STRING_CHARS = 10_000_000;
+export const MAX_PQ_ENVELOPE_CIPHERTEXT_BYTES = 12 * 1024 * 1024;
+export const MAX_PQ_ENVELOPE_NONCE_BYTES = 1024;
+export const MAX_PQ_ENVELOPE_TAG_BYTES = 1024;
+export const MAX_PQ_ENVELOPE_AAD_BYTES = 1024;

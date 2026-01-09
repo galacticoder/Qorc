@@ -1,5 +1,5 @@
 import { SignalType } from '../types/signal-types';
-import websocketClient from '../websocket';
+import websocketClient from '../websocket/websocket';
 import { quicTransport } from './quic-transport';
 
 // Unified Signal Transport
@@ -84,7 +84,8 @@ class UnifiedSignalTransport {
                 } catch { }
             }
 
-            if (type === SignalType.ENCRYPTED_MESSAGE && payload.encryptedPayload) {
+            // Build envelope if payload has encryptedPayload regardless of original type
+            if (payload.encryptedPayload) {
                 envelopeToSend = {
                     type: SignalType.ENCRYPTED_MESSAGE,
                     to,

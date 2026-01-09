@@ -1,6 +1,13 @@
 import { USERNAME_REGEX } from './constants';
 import { SignalType } from './types/signal-types';
-import { MAX_CONTENT_LENGTH, MAX_USERNAME_LENGTH } from './constants';
+import {
+  MAX_CONTENT_LENGTH,
+  MAX_USERNAME_LENGTH,
+  UNSAFE_FILENAME_CHARS_REGEX,
+  WHITESPACE_COLLAPSE_REGEX,
+  CONTROL_CHARS_REGEX,
+  NEWLINE_REGEX
+} from './constants';
 
 const DEFAULT_ALLOWED_KEYS = ['username', 'type', 'peer', 'at', 'callId', 'status', 'startTime', 'endTime', 'durationMs', 'direction'] as const;
 
@@ -10,9 +17,6 @@ interface TextSanitizeOptions {
   maxLength?: number;
   allowNewlines?: boolean;
 }
-
-const CONTROL_CHARS_REGEX = /[\u0000-\u001F\u007F]/g;
-const NEWLINE_REGEX = /[\r\n]+/g;
 
 export const sanitizeTextInput = (input: string, options: TextSanitizeOptions = {}): string => {
   const { maxLength = 256, allowNewlines = true } = options;
@@ -80,9 +84,6 @@ export const sanitizeEventPayload = (detail: Record<string, unknown>, allowedKey
 
   return sanitized;
 };
-
-const UNSAFE_FILENAME_CHARS_REGEX = /[\u0000-\u001F\u007F/\\:*?"<>|]+/g;
-const WHITESPACE_COLLAPSE_REGEX = /\s+/g;
 
 export const sanitizeFilename = (name: string, maxLength: number = 128): string => {
   if (typeof name !== 'string') return SignalType.FILE;

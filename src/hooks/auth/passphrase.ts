@@ -1,6 +1,6 @@
 import { RefObject } from "react";
 import { SignalType } from "../../lib/types/signal-types";
-import websocketClient from "../../lib/websocket";
+import websocketClient from "../../lib/websocket/websocket";
 import { CryptoUtils } from "../../lib/utils/crypto-utils";
 import type { ServerHybridPublicKeys, HybridKeys, HashParams } from "../../lib/types/auth-types";
 import { EventType } from "../../lib/types/event-types";

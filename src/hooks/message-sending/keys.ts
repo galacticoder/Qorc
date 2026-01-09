@@ -1,7 +1,7 @@
 import { SignalType } from '../../lib/types/signal-types';
 import { EventType } from '../../lib/types/event-types';
 import { CryptoUtils } from '../../lib/utils/crypto-utils';
-import websocketClient from '../../lib/websocket';
+import websocketClient from '../../lib/websocket/websocket';
 import type { HybridPublicKeys, UserWithKeys } from '../../lib/types/message-sending-types';
 
 // Resolve peer hybrid keys with fallback to bundle request

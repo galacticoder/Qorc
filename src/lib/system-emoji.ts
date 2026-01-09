@@ -1,4 +1,3 @@
-import { SecureAuditLogger } from './secure-error-handler';
 import { STORAGE_KEYS } from './database/storage-keys';
 import { SecureDB } from './database/secureDB';
 
@@ -243,10 +242,8 @@ let searchDebounceTimer: ReturnType<typeof setTimeout> | null = null;
 
 const EMOJI_REGEX = /^(\p{Emoji_Presentation}|\p{Extended_Pictographic})(\uFE0F?(\u200D(\p{Emoji_Presentation}|\p{Extended_Pictographic}))*)?$/u;
 
-function logSecurityEvent(event: string, details?: Record<string, unknown>): void {
-  SecureAuditLogger.error('system-emoji', 'security', event, {
-    ...details
-  });
+function logSecurityEvent(event: string, _details?: Record<string, unknown>): void {
+  console.error('[system-emoji] security', event);
 }
 
 function getSearchPenaltyMs(overLimitCount: number): number {
@@ -349,7 +346,7 @@ function getSecureBridge(): SecureBridgeAPI | null {
   }
 }
 
-import { torNetworkManager } from './tor-network';
+import { torNetworkManager } from './transport/tor-network';
 
 function isTorEnvironment(): boolean {
   if (typeof window === 'undefined') {
@@ -476,10 +473,7 @@ export async function getSystemEmojis(secureDB?: SecureDB): Promise<string[]> {
       }
     }
   } catch (_err) {
-    SecureAuditLogger.error('system-emoji', 'bridge', 'getSystemEmojis-failed', {
-      error: _err instanceof Error ? _err.message : 'unknown',
-      circuitOpen: bridgeCircuitBreaker.isOpen()
-    });
+    console.error('[system-emoji] getSystemEmojis-failed', _err instanceof Error ? _err.message : 'unknown');
   }
 
   const torActive = isTorEnvironment();
@@ -727,7 +721,7 @@ export function searchEmojisDebounced(
   }
 
   if (typeof query !== 'string' || !Array.isArray(emojis) || typeof callback !== 'function') {
-    SecureAuditLogger.error('system-emoji', 'search', 'invalid-parameters', {});
+    console.error('[system-emoji] search invalid-parameters');
     callback(emojis);
     return;
   }
@@ -739,11 +733,7 @@ export function searchEmojisDebounced(
       const results = searchEmojis(query, emojis);
       callback(results);
     } catch (error) {
-      SecureAuditLogger.error('system-emoji', 'search', 'search-error', {
-        error: error instanceof Error ? error.message : 'unknown',
-        queryLength: query.length,
-        emojiCount: emojis.length
-      });
+      console.error('[system-emoji] search-error', error instanceof Error ? error.message : 'unknown');
       callback(emojis);
     }
   }, boundedDelay);

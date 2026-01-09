@@ -1,6 +1,6 @@
 import { SignalType } from '../../lib/types/signal-types';
 import { EventType } from '../../lib/types/event-types';
-import websocketClient from '../../lib/websocket';
+import websocketClient from '../../lib/websocket/websocket';
 import { safeJsonParseForMessages } from '../../lib/utils/message-handler-utils';
 import type { DecryptResult, EncryptedEnvelope } from '../../lib/types/message-handling-types';
 

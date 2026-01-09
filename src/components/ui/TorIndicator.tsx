@@ -3,7 +3,7 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { Shield, RotateCw } from 'lucide-react';
-import { torNetworkManager, TorConnectionStats } from '@/lib/tor-network';
+import { torNetworkManager, TorConnectionStats } from '@/lib/transport/tor-network';
 
 export function TorIndicator() {
   const [stats, setStats] = useState<TorConnectionStats>(torNetworkManager.getStats());

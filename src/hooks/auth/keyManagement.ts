@@ -1,5 +1,5 @@
 import { RefObject } from "react";
-import websocketClient from "../../lib/websocket";
+import websocketClient from "../../lib/websocket/websocket";
 import { CryptoUtils } from "../../lib/utils/crypto-utils";
 import { SecureKeyManager } from "../../lib/database/secure-key-manager";
 import { ensureVaultKeyCryptoKey, saveWrappedMasterKey } from "../../lib/cryptography/vault-key";

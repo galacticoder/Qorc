@@ -3,7 +3,7 @@ import { SignalType } from "../../lib/types/signal-types";
 import { EventType } from "../../lib/types/event-types";
 import { Message } from "../../components/chat/messaging/types";
 import type { User } from "../../components/chat/messaging/UserList";
-import websocketClient from "../../lib/websocket";
+import websocketClient from "../../lib/websocket/websocket";
 import { blockingSystem } from "../../lib/blocking/blocking-system";
 import { handleCallSignal } from "../../lib/types/message-handler-types";
 import { resolveSenderHybridKeys, requestBundleOnce } from "./keys";

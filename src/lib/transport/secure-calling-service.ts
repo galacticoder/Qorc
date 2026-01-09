@@ -17,7 +17,7 @@ import { PQNoiseSession } from './pq-noise-session';
 import { screenSharingSettings } from '../screen-sharing-settings';
 import { X25519KeyPair, PeerKeys } from '../types/noise-types';
 import { generateX25519KeyPair } from '../utils/noise-utils';
-import websocketClient from '../websocket';
+import websocketClient from '../websocket/websocket';
 import {
     CALL_TIMEOUT,
     CALL_RING_TIMEOUT,

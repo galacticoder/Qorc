@@ -8,7 +8,6 @@ import {
 } from './screen-sharing-consts';
 import { CryptoUtils } from './utils/crypto-utils';
 import { encryptedStorage } from './database/encrypted-storage';
-import { SecureAuditLogger } from './secure-error-handler';
 import { PostQuantumRandom } from './cryptography/random';
 import { SecureMemory } from './cryptography/secure-memory';
 import { DEFAULT_QUALITY, QUALITY_OPTIONS } from './constants';
@@ -115,7 +114,7 @@ export class ScreenSharingSettingsManager {
         return this.deviceKey;
       }
     } catch (_error) {
-      SecureAuditLogger.warn(AUDIT_CHANNEL, 'screen-sharing', 'device-key-load-failed', { error: (_error as Error).message });
+      console.warn('[screen-sharing] device-key-load-failed', (_error as Error).message);
     }
     const generated = PostQuantumRandom.randomBytes(32);
     try {
@@ -123,7 +122,7 @@ export class ScreenSharingSettingsManager {
       this.deviceKey = generated;
       return this.deviceKey;
     } catch (_error) {
-      SecureAuditLogger.error(AUDIT_CHANNEL, 'screen-sharing', 'device-key-store-failed', { error: (_error as Error).message });
+      console.error('[screen-sharing] device-key-store-failed', (_error as Error).message);
       return generated;
     }
   }
@@ -193,7 +192,7 @@ export class ScreenSharingSettingsManager {
       }
       return parsed;
     } catch (_error) {
-      SecureAuditLogger.error(AUDIT_CHANNEL, 'screen-sharing', 'decrypt-failed', { error: (_error as Error).message });
+      console.error('[screen-sharing] decrypt-failed', (_error as Error).message);
       return null;
     }
   }
@@ -239,7 +238,7 @@ export class ScreenSharingSettingsManager {
       const envelope = await this.encryptSettings(this.settings);
       await encryptedStorage.setItem(STORAGE_KEY, JSON.stringify(envelope));
     } catch (_error) {
-      SecureAuditLogger.error(AUDIT_CHANNEL, 'screen-sharing', 'save-failed', { error: (_error as Error).message });
+      console.error('[screen-sharing] save-failed', (_error as Error).message);
     }
   }
 
@@ -258,7 +257,7 @@ export class ScreenSharingSettingsManager {
     }
     bucket.count += 1;
     if (bucket.count > MAX_REQUESTS_PER_WINDOW) {
-      SecureAuditLogger.warn(AUDIT_CHANNEL, 'screen-sharing', 'rate-limited', { method });
+      console.warn('[screen-sharing] rate-limited', method);
       throw new Error('Screen sharing settings rate limit exceeded');
     }
     this.rateBucket.set(method, bucket);
@@ -361,7 +360,7 @@ export class ScreenSharingSettingsManager {
           listener(snapshot);
         }
       } catch (error) {
-        SecureAuditLogger.error(AUDIT_CHANNEL, 'screen-sharing', 'listener-error', { error: (error as Error).message });
+        console.error('[screen-sharing] listener-error', (error as Error).message);
       }
     });
   }

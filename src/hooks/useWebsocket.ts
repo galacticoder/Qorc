@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef } from "react";
 import { SignalType } from "@/lib/types/signal-types";
 import { EventType } from "../lib/types/event-types";
-import websocketClient from "@/lib/websocket";
+import websocketClient from "@/lib/websocket/websocket";
 import { WEBSOCKET_RATE_LIMIT_MAX_MESSAGES, WEBSOCKET_RATE_LIMIT_WINDOW_MS } from "@/lib/constants";
 import { isPlainObject, hasPrototypePollutionKeys } from "@/lib/sanitizers";
 import { BaseMessage, WebSocketMessageSchema, DEFAULT_ALLOWED_TYPES, DEFAULT_ENCRYPTED_TYPES, DEFAULT_SCHEMAS, WebSocketHookOptions } from "@/lib/types/websocket-types";

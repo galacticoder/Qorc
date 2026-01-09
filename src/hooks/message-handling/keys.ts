@@ -1,6 +1,6 @@
 import { SignalType } from '../../lib/types/signal-types';
 import { EventType } from '../../lib/types/event-types';
-import websocketClient from '../../lib/websocket';
+import websocketClient from '../../lib/websocket/websocket';
 import type { HybridKeys, ResolvedSenderKeys, UserWithHybridKeys } from '../../lib/types/message-handling-types';
 
 // Resolve sender's PQ Kyber and hybrid keys

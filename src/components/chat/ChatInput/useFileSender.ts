@@ -1,7 +1,7 @@
 import { useRef, useState, useCallback, useEffect } from "react";
 import * as pako from "pako";
 import { CryptoUtils } from "../../../lib/utils/crypto-utils";
-import websocketClient from "../../../lib/websocket";
+import websocketClient from "../../../lib/websocket/websocket";
 import { STORAGE_KEYS } from '../../../lib/database/storage-keys';
 import { SignalType } from "../../../lib/types/signal-types";
 import { EventType } from "../../../lib/types/event-types";

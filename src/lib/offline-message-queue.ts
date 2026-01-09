@@ -473,7 +473,7 @@ export class OfflineMessageQueue {
       return;
     }
 
-    void import('./websocket')
+    void import('./websocket/websocket')
       .then(async ({ default: websocketClient }) => {
         if (!websocketClient?.isConnectedToServer() || !websocketClient?.isPQSessionEstablished()) {
           return;
@@ -514,7 +514,7 @@ export class OfflineMessageQueue {
     }
     this.lastRetrieveAttemptAt = now;
 
-    void import('./websocket')
+    void import('./websocket/websocket')
       .then(async ({ default: websocketClient }) => {
         const isConnected = websocketClient?.isConnectedToServer();
         const isPQReady = websocketClient?.isPQSessionEstablished();
@@ -563,9 +563,7 @@ export class OfflineMessageQueue {
     }
 
     this.processOfflineMessagesChunked(ltOnly).catch(error => {
-      SecureAuditLogger.error(AUDIT_CHANNEL, 'offline-message-queue', 'chunked-processing-failed', {
-        error: (error as Error)?.message
-      });
+      console.error('[offline-queue] chunked-processing-failed', (error as Error)?.message);
     });
   }
 
@@ -582,7 +580,7 @@ export class OfflineMessageQueue {
           }
 
           if (!this.ownKyberSecretKey) {
-            SecureAuditLogger.warn(AUDIT_CHANNEL, 'offline-message-queue', 'no-decryption-key', {});
+            console.warn('[offline-queue] no-decryption-key');
             continue;
           }
 
@@ -622,13 +620,7 @@ export class OfflineMessageQueue {
             await this.incomingOfflineEncryptedMessageCallback(incoming);
           }
         } catch (error) {
-          SecureAuditLogger.error(AUDIT_CHANNEL, 'offline-message-queue', 'queue-server-message-failed', {
-            error: (error as Error)?.message,
-            messagePreview: JSON.stringify({
-              id: message.messageId,
-              to: message.to
-            }).slice(0, 200)
-          });
+          console.error('[offline-queue] queue-server-message-failed', (error as Error)?.message);
         }
       }
 
@@ -876,10 +868,7 @@ export class OfflineMessageQueue {
       const sizeBytes = new Blob([serializedData]).size;
 
       if (sizeBytes > MAX_STORAGE_BYTES) {
-        SecureAuditLogger.warn(AUDIT_CHANNEL, 'offline-message-queue', 'storage-limit-exceeded', {
-          sizeBytes,
-          maxBytes: MAX_STORAGE_BYTES
-        });
+        console.warn('[offline-queue] storage-limit-exceeded', sizeBytes);
         for (const [username, messages] of this.queue.entries()) {
           if (messages.length > 10) {
             this.queue.set(username, messages.slice(-10));
@@ -889,9 +878,7 @@ export class OfflineMessageQueue {
 
       await securePersist(STORAGE_KEY, queueData);
     } catch (error) {
-      SecureAuditLogger.error(AUDIT_CHANNEL, 'offline-message-queue', 'save-storage-failed', {
-        error: (error as Error)?.message
-      });
+      console.error('[offline-queue] save-storage-failed', (error as Error)?.message);
     }
   }
 
@@ -917,11 +904,8 @@ export class OfflineMessageQueue {
         this.userStatuses.set(username, { ...status, isOnline: false });
       }
 
-      SecureAuditLogger.info(AUDIT_CHANNEL, 'offline-message-queue', 'restore-complete', this.getStats() as any);
     } catch (error) {
-      SecureAuditLogger.error(AUDIT_CHANNEL, 'offline-message-queue', 'load-storage-failed', {
-        error: (error as Error)?.message
-      });
+      console.error('[offline-queue] load-storage-failed', (error as Error)?.message);
     }
   }
 }
