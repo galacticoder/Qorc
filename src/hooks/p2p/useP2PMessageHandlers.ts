@@ -3,7 +3,7 @@ import { Message } from '../../components/chat/messaging/types';
 import { EventType } from '../../lib/types/event-types';
 import { SignalType } from '../../lib/types/signal-types';
 import { SecurityAuditLogger } from '../../lib/cryptography/audit-logger';
-import { profilePictureSystem } from '../../lib/profile-picture-system';
+import { profilePictureSystem } from '../../lib/avatar/profile-picture-system';
 import type { EncryptedMessage } from './useP2PMessaging';
 
 interface UseP2PMessageHandlersProps {

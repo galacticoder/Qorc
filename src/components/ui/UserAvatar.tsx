@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback, memo } from 'react';
-import { profilePictureSystem } from '../../lib/profile-picture-system';
+import { profilePictureSystem } from '../../lib/avatar/profile-picture-system';
 import { isPlainObject, hasPrototypePollutionKeys } from '../../lib/sanitizers';
 import { sanitizeEventText } from '../../lib/sanitizers';
 import { EventType } from '../../lib/types/event-types';

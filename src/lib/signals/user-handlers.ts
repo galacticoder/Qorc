@@ -4,7 +4,7 @@
 
 import { sanitizeHybridKeys } from '../utils/messaging-validators';
 import { EventType } from '../types/event-types';
-import { profilePictureSystem } from '../profile-picture-system';
+import { profilePictureSystem } from '../avatar/profile-picture-system';
 import type { DatabaseRefs } from '../types/signal-handler-types';
 
 const __userExistsDebounce = new Map<string, number>();

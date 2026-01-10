@@ -452,3 +452,11 @@ export const MAX_PQ_ENVELOPE_CIPHERTEXT_BYTES = 12 * 1024 * 1024;
 export const MAX_PQ_ENVELOPE_NONCE_BYTES = 1024;
 export const MAX_PQ_ENVELOPE_TAG_BYTES = 1024;
 export const MAX_PQ_ENVELOPE_AAD_BYTES = 1024;
+
+// Avatar constants
+export const MAX_AVATAR_SIZE_BYTES = 512 * 1024;
+export const MAX_AVATAR_DIMENSION = 512;
+export const ALLOWED_AVATAR_MIME_TYPES = ['image/jpeg', 'image/png', 'image/webp', 'image/svg+xml'] as const;
+export const AVATAR_CACHE_TTL_MS = 1 * 60 * 1000;
+export const AVATAR_SERVER_FETCH_DEBOUNCE_MS = 3000;
+export const AVATAR_PENDING_REQUEST_TIMEOUT_MS = 30000;

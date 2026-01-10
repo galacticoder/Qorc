@@ -1005,7 +1005,7 @@ const ChatApp: React.FC = () => {
   useEffect(() => {
     if (Database.secureDBRef.current) {
       Promise.all([
-        import('../lib/profile-picture-system'),
+        import('../lib/avatar/profile-picture-system'),
         import('../lib/websocket/websocket')
       ]).then(([{ profilePictureSystem }, { default: _websocketClient }]) => {
         profilePictureSystem.setSecureDB(Database.secureDBRef.current);
@@ -1017,7 +1017,7 @@ const ChatApp: React.FC = () => {
   // Set keys for profile picture system
   useEffect(() => {
     if (Authentication.hybridKeysRef.current?.kyber?.publicKeyBase64 && Authentication.hybridKeysRef.current?.kyber?.secretKey) {
-      import('../lib/profile-picture-system').then(({ profilePictureSystem }) => {
+      import('../lib/avatar/profile-picture-system').then(({ profilePictureSystem }) => {
         profilePictureSystem.setKeys(
           Authentication.hybridKeysRef.current!.kyber!.publicKeyBase64,
           Authentication.hybridKeysRef.current!.kyber!.secretKey

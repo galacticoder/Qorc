@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Camera, Shield, X } from 'lucide-react';
 import { toast } from 'sonner';
-import { profilePictureSystem } from '../../../lib/profile-picture-system';
+import { profilePictureSystem } from '../../../lib/avatar/profile-picture-system';
 import { isPlainObject, hasPrototypePollutionKeys } from '../../../lib/sanitizers';
 import { sanitizeEventText } from '../../../lib/sanitizers';
 import { AnimatedSwitch } from '../../ui/AnimatedSwitch';
