@@ -8,11 +8,10 @@ import { ChatInterface } from "../components/chat/messaging/ChatInterface";
 import { AppSettings } from "../components/settings/AppSettings";
 import { Layout } from "../components/ui/Layout";
 import { CallLogs } from "../components/chat/calls/CallLogs";
-import { Message, MessageReply } from "../components/chat/messaging/types";
+import { Message } from "../components/chat/messaging/types";
 import { Dialog, DialogContent } from "../components/ui/dialog";
 import { EmojiPickerProvider } from "../contexts/EmojiPickerContext";
 import { useCallHistory } from "../contexts/CallHistoryContext";
-import { formatFileSize } from "../lib/utils/file-utils";
 import { useAuth } from "../hooks/auth/useAuth";
 import { useSecureDB } from "../hooks/database/useSecureDB";
 import { useFileHandler } from "../hooks/file-handling/useFileHandler";
@@ -22,80 +21,44 @@ import { useChatSignals } from "../hooks/useChatSignals";
 import { useWebSocket } from "../hooks/useWebsocket";
 import { useConversations } from "../hooks/message-sending/useConversations";
 import { useUsernameDisplay } from "../hooks/database/useUsernameDisplay";
-import { storeUsernameMapping } from "../lib/database/username-display";
-import { useP2PMessaging, type EncryptedMessage } from "../hooks/p2p/useP2PMessaging";
+import { useP2PMessaging } from "../hooks/p2p/useP2PMessaging";
 import { useP2PKeys } from "../hooks/p2p/useP2PKeys";
 import { useMessageReceipts } from "../hooks/message-sending/useMessageReceipts";
-import { p2pConfig, getSignalingServerUrl } from "../config/p2p.config";
 import websocketClient from "../lib/websocket/websocket";
 import { EventType } from "../lib/types/event-types";
 import { TypingIndicatorProvider } from "../contexts/TypingIndicatorContext";
-import { torNetworkManager } from "../lib/transport/tor-network";
 import { ConnectSetup } from "../components/setup/ConnectSetup";
 import { SignalType } from "../lib/types/signal-types";
-import { blockingSystem } from "../lib/blocking/blocking-system";
 import { retrieveAuthTokens } from "../lib/signals/signals";
 import { syncEncryptedStorage } from "../lib/database/encrypted-storage";
-import { secureMessageQueue } from "../lib/secure-message-queue";
-import { offlineMessageQueue } from "../lib/websocket/offline-message-handler";
-import { isValidKyberPublicKeyBase64, sanitizeHybridKeys } from "../lib/utils/messaging-validators";
 import { SecurityAuditLogger } from "../lib/cryptography/audit-logger";
 import { PostQuantumUtils } from "../lib/utils/pq-utils";
-import { CryptoUtils } from "../lib/utils/crypto-utils";
 import { unifiedSignalTransport } from "../lib/transport/unified-signal-transport";
 
-import { sanitizeFilename, isPlainObject, hasPrototypePollutionKeys, isUnsafeObjectKey, sanitizeNonEmptyText } from "../lib/sanitizers";
+import {
+  LOCAL_EVENT_RATE_LIMIT_WINDOW_MS,
+  LOCAL_EVENT_RATE_LIMIT_MAX_EVENTS,
+} from "../lib/constants";
 import { useRateLimiter } from "../hooks/useRateLimiter";
 import { useLocalMessageHandlers } from "../hooks/message-handling/useLocalMessageHandlers";
 import { useP2PMessageHandlers } from "../hooks/p2p/useP2PMessageHandlers";
 import { useP2PConnectionManager } from "../hooks/p2p/useP2PConnectionManager";
 import { useP2PSignalHandlers } from "../hooks/p2p/useP2PSignalHandlers";
 import { useEventHandlers } from "../hooks/useEventHandlers";
-import { toast, Toaster } from 'sonner';
+import { Toaster } from 'sonner';
 import { TorIndicator } from "../components/ui/TorIndicator";
 import { Button } from "../components/ui/button";
 import { ComposeIcon } from "../components/chat/assets/icons";
 import { useCalling } from "../hooks/calling/useCalling";
-import { truncateUsername } from "../lib/utils/avatar-utils";
-import { resolveDisplayUsername } from "../lib/database/unified-username-display";
+import { useCallEventHandlers } from "../hooks/app/useCallEventHandlers";
+import { useAppInitialization } from "../hooks/app/useAppInitialization";
+import { useMessageActions } from "../hooks/app/useMessageActions";
+import { useTokenValidation } from "../hooks/app/useTokenValidation";
+import { useEncryptionProvider } from "../hooks/app/useEncryptionProvider";
+import { useOfflineMessages } from "../hooks/app/useOfflineMessages";
+import { useConnectionSetup } from "../hooks/app/useConnectionSetup";
+import { useBackgroundResume } from "../hooks/app/useBackgroundResume";
 const CallModalLazy = React.lazy(() => import("../components/chat/calls/CallModal"));
-
-const getReplyContent = (message: Message): string => {
-  if (message.type === SignalType.FILE || message.type === SignalType.FILE_MESSAGE || message.filename) {
-    const fileSize = message.fileSize ? ` (${formatFileSize(message.fileSize)})` : '';
-    const filename = message.filename || 'File';
-
-    // For images
-    if (message.filename && /\.(jpg|jpeg|png|gif|bmp|webp|svg|ico|tiff)$/i.test(message.filename)) {
-      return `Image: ${message.filename}${fileSize}`;
-    }
-    // For videos
-    else if (message.filename && /\.(mp4|webm|ogg|avi|mov|wmv|flv|mkv)$/i.test(message.filename)) {
-      return `Video: ${message.filename}${fileSize}`;
-    }
-    // For voice notes
-    else if (message.filename && (message.filename.toLowerCase().includes('voice-note') || /\.(mp3|wav|ogg|webm|m4a|aac|flac)$/i.test(message.filename))) {
-      return `Voice message`;
-    }
-    // For other files
-    else {
-      return `File: ${filename}${fileSize}`;
-    }
-  }
-
-  return message.content || '';
-};
-
-const LOCAL_EVENT_RATE_LIMIT_WINDOW_MS = 10_000;
-const LOCAL_EVENT_RATE_LIMIT_MAX_EVENTS = 120;
-const MAX_LOCAL_MESSAGE_ID_LENGTH = 160;
-const MAX_LOCAL_MESSAGE_LENGTH = 10_000;
-const MAX_LOCAL_USERNAME_LENGTH = 256;
-const MAX_LOCAL_MIMETYPE_LENGTH = 128;
-const MAX_LOCAL_EMOJI_LENGTH = 32;
-const MAX_LOCAL_FILE_SIZE_BYTES = 50 * 1024 * 1024;
-const MAX_INLINE_BASE64_BYTES = 10 * 1024 * 1024;
-
 
 const ChatApp: React.FC = () => {
   const { allowEvent } = useRateLimiter(LOCAL_EVENT_RATE_LIMIT_WINDOW_MS, LOCAL_EVENT_RATE_LIMIT_MAX_EVENTS);
@@ -108,143 +71,21 @@ const ChatApp: React.FC = () => {
   const [showNewChatInput, setShowNewChatInput] = useState(false);
   const [conversationPanelWidth, setConversationPanelWidth] = useState(320);
   const [isResizing, setIsResizing] = useState(false);
-  const [isResumingFromBackground, setIsResumingFromBackground] = useState(true); // Start true to avoid flash
-  const uiEventRateRef = useRef({ windowStart: Date.now(), count: 0 });
-
   const Authentication = useAuth();
   const callHistory = useCallHistory();
 
+  // Background resume
+  const {
+    isResumingFromBackground,
+    serverUrl: resumeServerUrl,
+    setupComplete: resumeSetupComplete,
+  } = useBackgroundResume(Authentication);
+
+  // Sync background resume state
   useEffect(() => {
-    const checkBackgroundState = async () => {
-      try {
-        const api = (window as any).edgeApi;
-        const electronApi = (window as any).electronAPI;
-        if (api?.getBackgroundSessionState) {
-          const state = await api.getBackgroundSessionState();
-
-          if (state && state.isBackgroundMode) {
-            try {
-              const pqKeysResult = await api.getPQSessionKeys?.();
-              if (pqKeysResult?.success && pqKeysResult.keys) {
-                const restored = websocketClient.importSessionKeys(pqKeysResult.keys);
-                if (restored) {
-                  await api.clearPQSessionKeys?.();
-                }
-              }
-            } catch (pqErr) {
-              console.error('[Resume] Failed to restore PQ session keys:', pqErr);
-            }
-
-            try {
-              const torStatus = await electronApi?.getTorStatus?.();
-              if (torStatus?.isRunning || torStatus?.bootstrapped) {
-                torNetworkManager.updateConfig({
-                  enabled: true,
-                  socksPort: torStatus.socksPort || 9150,
-                  controlPort: torStatus.controlPort || 9151,
-                  host: '127.0.0.1'
-                });
-                await torNetworkManager.initialize();
-              }
-            } catch (torErr) {
-              console.error('[Resume] Failed to re-sync Tor:', torErr);
-            }
-
-            const serverResult = await api.getServerUrl?.();
-            if (serverResult?.serverUrl) {
-              setSelectedServerUrl(serverResult.serverUrl);
-              setSetupComplete(true);
-
-              const storedUsername = state.username ||
-                Authentication.loginUsernameRef.current ||
-                (await import('../lib/database/encrypted-storage')).syncEncryptedStorage.getItem('last_authenticated_username');
-
-              let localAuthRestored = false;
-
-              if (storedUsername) {
-                try {
-                  const { loadVaultKeyRaw, loadWrappedMasterKey, ensureVaultKeyCryptoKey } = await import('../lib/cryptography/vault-key');
-                  const { AES } = await import('../lib/utils/crypto-utils');
-
-                  let vaultKey: CryptoKey | null = null;
-                  const rawVaultKey = await loadVaultKeyRaw(storedUsername);
-                  if (rawVaultKey && rawVaultKey.length === 32) {
-                    vaultKey = await AES.importAesKey(rawVaultKey);
-                  } else {
-                    vaultKey = await ensureVaultKeyCryptoKey(storedUsername);
-                  }
-
-                  if (vaultKey) {
-                    const masterKeyBytes = await loadWrappedMasterKey(storedUsername, vaultKey);
-
-                    if (masterKeyBytes && masterKeyBytes.length === 32) {
-                      const masterKey = await AES.importAesKey(masterKeyBytes);
-
-                      Authentication.aesKeyRef.current = masterKey;
-                      Authentication.loginUsernameRef.current = storedUsername;
-
-                      if (!Authentication.keyManagerRef.current) {
-                        const { SecureKeyManager } = await import('../lib/database/secure-key-manager');
-                        Authentication.keyManagerRef.current = new SecureKeyManager(storedUsername);
-                      }
-                      try {
-                        await Authentication.keyManagerRef.current.initializeWithMasterKey(masterKeyBytes);
-                      } catch { }
-
-                      try { masterKeyBytes.fill(0); } catch { }
-
-                      Authentication.setUsername(storedUsername);
-                      Authentication.setIsLoggedIn(true);
-                      Authentication.setAccountAuthenticated(true);
-                      Authentication.setShowPassphrasePrompt(false);
-                      Authentication.setRecoveryActive(false);
-                      Authentication.setMaxStepReached('server');
-                      Authentication.setTokenValidationInProgress(false);
-                      Authentication.setAuthStatus('');
-
-                      localAuthRestored = true;
-                    }
-                  }
-                } catch (vaultErr) {
-                  console.error('[Resume] Vault key restoration failed:', vaultErr);
-                }
-              }
-
-              // Only trigger server auth recovery if local restoration failed
-              if (!localAuthRestored) {
-                try {
-                  Authentication.setTokenValidationInProgress(true);
-                  await websocketClient.attemptTokenValidationOnce?.('background-resume');
-                } catch (tvErr) {
-                  console.error('[Resume] Token validation on resume failed:', tvErr);
-                }
-
-                try {
-                  await Authentication.attemptAuthRecovery();
-                } catch (authErr) {
-                  console.error('[Resume] Auth recovery failed:', authErr);
-                }
-              }
-              setTimeout(async () => {
-                try {
-                  await api.requestPendingMessages?.();
-                } catch (e) {
-                  console.error('[Resume] Failed to request pending messages:', e);
-                }
-              }, 2000);
-
-              await api.clearBackgroundSessionState?.();
-            }
-          }
-        }
-      } catch (e) {
-        console.error('[Resume] Error checking background state:', e);
-      } finally {
-        setIsResumingFromBackground(false);
-      }
-    };
-    checkBackgroundState();
-  }, []);
+    if (resumeServerUrl) setSelectedServerUrl(resumeServerUrl);
+    if (resumeSetupComplete) setSetupComplete(true);
+  }, [resumeServerUrl, resumeSetupComplete]);
 
   const Database = useSecureDB({
     Authentication,
@@ -343,64 +184,11 @@ const ChatApp: React.FC = () => {
     encryptedHandlerRef.current = encryptedHandler;
   }, [encryptedHandler]);
 
-  useEffect(() => {
-    // no-op: this effect is split below to avoid re-registering callbacks on each render
-  }, []);
-
-  const offlineCallbackSetRef = useRef(false);
-  useEffect(() => {
-    if (offlineCallbackSetRef.current) return;
-    offlineCallbackSetRef.current = true;
-
-    try {
-      offlineMessageQueue.setIncomingOfflineEncryptedMessageCallback(async (msg: any) => {
-        await encryptedHandlerRef.current(msg);
-      });
-    } catch { }
-  }, []);
-
-  const offlineDbInitializedRef = useRef(false);
-  useEffect(() => {
-    if (!Authentication.isLoggedIn) {
-      offlineDbInitializedRef.current = false;
-      return;
-    }
-
-    if (offlineDbInitializedRef.current) return;
-    const db = Database.secureDBRef?.current;
-    if (!db) {
-      return;
-    }
-
-    offlineDbInitializedRef.current = true;
-  }, [Authentication.isLoggedIn, Database.dbInitialized]);
-
-  useEffect(() => {
-    const applyKey = () => {
-      const kyberSecret = Authentication.hybridKeysRef?.current?.kyber?.secretKey;
-      if (kyberSecret && kyberSecret instanceof Uint8Array) {
-        try {
-          offlineMessageQueue.setDecryptionKey(kyberSecret);
-        } catch { }
-      } else {
-        try {
-          offlineMessageQueue.clearDecryptionKey();
-        } catch { }
-      }
-    };
-
-    applyKey();
-
-    const onKeysUpdated = () => applyKey();
-    try {
-      window.addEventListener(EventType.HYBRID_KEYS_UPDATED, onKeysUpdated as EventListener);
-    } catch { }
-    return () => {
-      try {
-        window.removeEventListener(EventType.HYBRID_KEYS_UPDATED, onKeysUpdated as EventListener);
-      } catch { }
-    };
-  }, [Authentication.hybridKeysRef.current]);
+  // Offline message handling
+  useOfflineMessages({
+    encryptedHandlerRef,
+    hybridKeysRef: Authentication.hybridKeysRef,
+  });
 
   const {
     sendReadReceipt: sendServerReadReceipt,
@@ -510,8 +298,6 @@ const ChatApp: React.FC = () => {
     }
   );
 
-
-
   // Update P2P sender whenever sendP2PMessage changes or service becomes ready
   useEffect(() => {
     if (p2pMessaging.sendP2PMessage && p2pServiceRef.current && p2pMessaging.p2pStatus.isInitialized) {
@@ -544,10 +330,8 @@ const ChatApp: React.FC = () => {
     },
     [selectedConversation, Database.saveMessageToLocalDB]
   );
-  const saveMessageWithContextRef = useRef(saveMessageWithContext);
-  useEffect(() => { saveMessageWithContextRef.current = saveMessageWithContext; }, [saveMessageWithContext]);
 
-  // Use extracted hooks for event handling
+  // Event handling
   useLocalMessageHandlers({
     setMessages,
     saveMessageWithContext,
@@ -609,514 +393,53 @@ const ChatApp: React.FC = () => {
     Database,
   });
 
-  // Register the E2E Encryption Provider for UnifiedSignalTransport
-  useEffect(() => {
-    if (!Authentication.isLoggedIn) return;
+  // E2E Encryption Provider
+  useEncryptionProvider({
+    isLoggedIn: Authentication.isLoggedIn,
+    loginUsernameRef: Authentication.loginUsernameRef,
+    getPeerHybridKeys,
+    users: Database.users,
+  });
 
-    unifiedSignalTransport.setEncryptionProvider(async (to, payload, type) => {
-      try {
-        const currentUser = Authentication.loginUsernameRef.current;
-        if (!currentUser || to === 'SERVER') return null;
+  // Message actions
+  const { onSendMessage, onSendFile } = useMessageActions({
+    selectedConversation,
+    getOrCreateUser,
+    messageSender,
+    p2pMessaging,
+    setMessages,
+    saveMessageWithContext,
+    loginUsernameRef: Authentication.loginUsernameRef,
+    users: Database.users,
+    saveMessageToLocalDB: Database.saveMessageToLocalDB,
+  });
 
-        let peerKeys = await getPeerHybridKeys(to);
-        let resolvedUsername = to;
+  // Call event handlers
+  useCallEventHandlers({
+    stableGetDisplayUsername,
+    setMessages,
+    selectedConversation,
+    saveMessageToLocalDB: Database.saveMessageToLocalDB,
+    startCall: callingHook.startCall,
+    callHistory,
+  });
 
-        if ((!peerKeys || !peerKeys.kyberPublicBase64) && to.length === 32) {
-          const usersList = Array.isArray(Database.users) ? Database.users : [];
-          const found = usersList.find((u: any) =>
-            (u.id === to || u.pixelId === to || u.uuid === to) && u.username
-          );
-          if (found) {
-            resolvedUsername = found.username;
-            peerKeys = await getPeerHybridKeys(resolvedUsername);
+  // App initialization
+  useAppInitialization({
+    Authentication,
+    Database,
+    fileHandler,
+    encryptedHandlerRef,
+    flushPendingSaves,
+    setShowSettings,
+  });
 
-            try {
-              const { quicTransport } = await import('../lib/transport/quic-transport');
-              quicTransport.registerUsernameAlias(resolvedUsername, to);
-            } catch { }
-          } else {
-            try {
-              const { quicTransport } = await import('../lib/transport/quic-transport');
-              const alias = quicTransport.resolveUsernameAlias(to);
-              if (alias && alias !== to) {
-                console.debug('[UnifiedTransport] Resolved hash', to, 'via QuicTransport alias to', alias);
-                resolvedUsername = alias;
-                peerKeys = await getPeerHybridKeys(resolvedUsername);
-              }
-            } catch (err) {
-              console.warn('[UnifiedTransport] Failed to query QuicTransport alias:', err);
-            }
-          }
-        }
-
-        if (!peerKeys?.kyberPublicBase64) {
-          console.warn('[UnifiedTransport] Auto-encryption failed: No peer keys for', to, resolvedUsername !== to ? `(alias: ${resolvedUsername})` : '');
-          return null;
-        }
-
-        const signalPayload = {
-          type: 'signal-fallback',
-          kind: type,
-          content: payload.content || JSON.stringify(payload),
-          from: currentUser,
-          timestamp: Date.now(),
-          ...payload
-        };
-
-        const result = await (window as any).edgeApi?.encrypt?.({
-          fromUsername: currentUser,
-          toUsername: resolvedUsername,
-          plaintext: JSON.stringify(signalPayload),
-          recipientKyberPublicKey: peerKeys.kyberPublicBase64,
-          recipientHybridKeys: peerKeys
-        });
-
-        if (result?.success && result?.encryptedPayload) {
-          return {
-            encryptedPayload: result.encryptedPayload,
-            messageId: payload.messageId || crypto.randomUUID().replace(/-/g, '')
-          };
-        }
-      } catch (e) {
-        console.error('[UnifiedTransport] Auto-encryption provider failed:', e);
-      }
-      return null;
-    });
-
-    return () => {
-      (unifiedSignalTransport as any).encryptionProvider = null;
-      (unifiedSignalTransport as any).p2pEncryptionProvider = null;
-    };
-  }, [Authentication.isLoggedIn, getPeerHybridKeys, p2pHybridKeys]);
-
-
-  const onSendMessage = useCallback(async (
-    messageId: string,
-    content: string,
-    messageSignalType: string,
-    replyTo?: MessageReply | null
-  ) => {
-    if (!selectedConversation) return;
-
-    const targetUser = getOrCreateUser(selectedConversation);
-
-    const replyToMessage = replyTo ? {
-      id: replyTo.id,
-      sender: replyTo.sender,
-      content: replyTo.content,
-      timestamp: new Date(),
-      type: SignalType.TEXT as const,
-      isCurrentUser: false,
-      version: '1'
-    } as Message : undefined;
-
-    if (messageSignalType === SignalType.TYPING_START || messageSignalType === SignalType.TYPING_STOP) {
-      return messageSender.handleSendMessage(targetUser as any, content, replyToMessage, undefined, messageSignalType);
-    }
-
-    if (messageSignalType === SignalType.DELETE_MESSAGE || messageSignalType === SignalType.EDIT_MESSAGE) {
-      return messageSender.handleSendMessage(targetUser as any, content, replyToMessage, undefined, messageSignalType, messageId);
-    }
-
-    // Standard message send
-    const isConnected = p2pMessaging.isPeerConnected(selectedConversation);
-
-    if (messageSignalType === SignalType.REACTION_ADD || messageSignalType === SignalType.REACTION_REMOVE) {
-      if (p2pConfig.features.textMessages && isConnected && targetUser.hybridPublicKeys) {
-        try {
-          const result = await p2pMessaging.sendP2PMessage(
-            selectedConversation,
-            content,
-            {
-              dilithiumPublicBase64: targetUser.hybridPublicKeys.dilithiumPublicBase64,
-              kyberPublicBase64: targetUser.hybridPublicKeys.kyberPublicBase64,
-              x25519PublicBase64: targetUser.hybridPublicKeys.x25519PublicBase64,
-            },
-            {
-              messageType: SignalType.REACTION,
-              metadata: {
-                targetMessageId: messageId,
-                action: messageSignalType
-              }
-            }
-          );
-
-          if (result.status === 'sent') {
-            window.dispatchEvent(new CustomEvent(EventType.LOCAL_REACTION_UPDATE, {
-              detail: {
-                messageId,
-                emoji: content,
-                isAdd: messageSignalType === SignalType.REACTION_ADD,
-                username: Authentication.loginUsernameRef.current
-              }
-            }));
-            return;
-          }
-        } catch { }
-      }
-      // Fallback to server
-      return messageSender.handleSendMessage(targetUser as any, content, replyToMessage, undefined, messageSignalType, messageId);
-    }
-
-    if (p2pConfig.features.textMessages && isConnected) {
-      try {
-        if (targetUser.hybridPublicKeys) {
-          const result = await p2pMessaging.sendP2PMessage(
-            selectedConversation,
-            content,
-            {
-              dilithiumPublicBase64: targetUser.hybridPublicKeys.dilithiumPublicBase64,
-              kyberPublicBase64: targetUser.hybridPublicKeys.kyberPublicBase64,
-              x25519PublicBase64: targetUser.hybridPublicKeys.x25519PublicBase64,
-            },
-            {
-              metadata: replyTo ? {
-                replyTo: {
-                  id: replyTo.id,
-                  sender: replyTo.sender,
-                  content: replyTo.content
-                }
-              } : undefined
-            }
-          );
-
-          if (result.status === 'sent') {
-            const newMessage: Message = {
-              id: result.messageId || crypto.randomUUID(),
-              content: content,
-              sender: Authentication.loginUsernameRef.current || '',
-              recipient: selectedConversation,
-              timestamp: new Date(),
-              type: SignalType.TEXT,
-              isCurrentUser: true,
-              p2p: true,
-              transport: 'p2p',
-              encrypted: true,
-              receipt: { delivered: false, read: false },
-              ...(replyTo && { replyTo: { id: replyTo.id, sender: replyTo.sender, content: getReplyContent(replyTo as Message) } })
-            } as Message;
-
-            setMessages(prev => [...prev, newMessage]);
-            saveMessageWithContext(newMessage);
-            return;
-          }
-        }
-      } catch { }
-    }
-
-    try {
-      await messageSender.handleSendMessage(
-        targetUser as any,
-        content,
-        replyToMessage,
-        undefined,
-        messageSignalType,
-        messageId
-      );
-    } catch (error) {
-      console.error("Failed to send message:", error);
-      toast.error(error instanceof Error ? error.message : "Failed to send message", {
-        duration: 5000
-      });
-    }
-  }, [selectedConversation, getOrCreateUser, messageSender, p2pMessaging, setMessages, saveMessageWithContext, Authentication.loginUsernameRef]);
-
-  const handleCallLog = useCallback(async (e: Event) => {
-    try {
-      const now = Date.now();
-      const bucket = uiEventRateRef.current;
-      if (now - bucket.windowStart > LOCAL_EVENT_RATE_LIMIT_WINDOW_MS) {
-        bucket.windowStart = now;
-        bucket.count = 0;
-      }
-      bucket.count += 1;
-      if (bucket.count > LOCAL_EVENT_RATE_LIMIT_MAX_EVENTS) {
-        return;
-      }
-
-      if (!(e instanceof CustomEvent)) return;
-      const detail = e.detail;
-      if (!isPlainObject(detail) || hasPrototypePollutionKeys(detail)) return;
-
-      const peer = (detail as any).peer;
-      if (typeof peer !== 'string') return;
-
-      const eventType = (detail as any).type;
-      if (typeof eventType !== 'string') return;
-
-      const callId = (detail as any).callId || crypto.randomUUID();
-      const at = (detail as any).at || Date.now();
-      const durationMs = (detail as any).durationMs || 0;
-      const isVideo = (detail as any).isVideo === true;
-      const isOutgoing = (detail as any).isOutgoing === true;
-
-      const displayPeerName = truncateUsername(await resolveDisplayUsername(peer, stableGetDisplayUsername));
-      const durationSeconds = Math.round(durationMs / 1000);
-
-      const { addCallLog } = callHistory;
-      if (['ended', 'missed', 'declined'].includes(eventType)) {
-        addCallLog({
-          peerUsername: peer,
-          type: isVideo ? 'video' : 'audio',
-          direction: isOutgoing ? 'outgoing' : 'incoming',
-          status: eventType === 'missed' ? 'missed' : eventType === 'declined' ? 'declined' : 'completed',
-          startTime: at,
-          ...(eventType === 'ended' && durationSeconds > 0 ? { duration: durationSeconds } : {})
-        });
-      }
-
-      const label = eventType === 'incoming' ? `Incoming call from ${displayPeerName}`
-        : eventType === 'connected' ? `Call connected with ${displayPeerName}`
-          : eventType === 'started' ? `Calling ${displayPeerName}...`
-            : eventType === 'ended' ? `Call with ${displayPeerName} ended`
-              : eventType === 'declined' ? (isOutgoing ? `${displayPeerName} missed your call` : `You missed ${displayPeerName}'s call`)
-                : eventType === 'missed' ? (isOutgoing ? `${displayPeerName} missed your call` : `You missed ${displayPeerName}'s call`)
-                  : eventType === 'not-answered' ? (isOutgoing ? `${displayPeerName} missed your call` : `You missed ${displayPeerName}'s call`)
-                    : `Call event: ${eventType}`;
-
-      const shouldHaveActions = ['missed', 'not-answered', 'ended', 'declined'].includes(eventType);
-      const actions = shouldHaveActions
-        ? [{ label: 'Call back', onClick: () => callingHook.startCall(peer, 'audio').catch(() => { }) }]
-        : undefined;
-
-      const newMessage: Message = {
-        id: `call-log-${callId}-${eventType}-${at}`,
-        content: JSON.stringify({ label, actionsType: actions ? 'callback' : undefined, isError: eventType === 'missed' }),
-        sender: peer,
-        recipient: peer,
-        timestamp: new Date(at),
-        isCurrentUser: false,
-        isSystemMessage: true,
-        type: 'system'
-      } as Message;
-
-      if (peer === selectedConversation) {
-        setMessages((prev) => [...prev, newMessage]);
-      }
-      void Database.saveMessageToLocalDB(newMessage, peer);
-    } catch { }
-  }, [stableGetDisplayUsername, setMessages, selectedConversation, Database.saveMessageToLocalDB, callingHook.startCall, callHistory]);
-
-  useEffect(() => {
-    window.addEventListener(EventType.UI_CALL_LOG, handleCallLog as EventListener);
-    return () => window.removeEventListener(EventType.UI_CALL_LOG, handleCallLog as EventListener);
-  }, [handleCallLog]);
-
-  const handleCallRequest = useCallback((e: Event) => {
-    try {
-      const now = Date.now();
-      const bucket = uiEventRateRef.current;
-      if (now - bucket.windowStart > LOCAL_EVENT_RATE_LIMIT_WINDOW_MS) {
-        bucket.windowStart = now;
-        bucket.count = 0;
-      }
-      bucket.count += 1;
-      if (bucket.count > LOCAL_EVENT_RATE_LIMIT_MAX_EVENTS) {
-        return;
-      }
-
-      if (!(e instanceof CustomEvent)) return;
-      const detail = e.detail;
-      if (!isPlainObject(detail) || hasPrototypePollutionKeys(detail)) return;
-
-      const peer = (detail as any).peer;
-      if (typeof peer !== 'string') return;
-
-      const requestedType = (detail as any).type;
-      const callType = requestedType === 'video' ? 'video' : 'audio';
-
-      callingHook.startCall(peer, callType).catch(() => { });
-    } catch { }
-  }, [callingHook.startCall]);
-
-  useEffect(() => {
-    window.addEventListener(EventType.UI_CALL_REQUEST, handleCallRequest as EventListener);
-    return () => window.removeEventListener(EventType.UI_CALL_REQUEST, handleCallRequest as EventListener);
-  }, [handleCallRequest]);
-
-  // Store username mapping for current user only when SecureDB is available
-  useEffect(() => {
-    if (Database.secureDBRef.current && Authentication.originalUsernameRef.current) {
-      const storeCurrentUserMapping = async () => {
-        try {
-          await Authentication.storeUsernameMapping(Database.secureDBRef.current!);
-        } catch {
-          SecurityAuditLogger.log(SignalType.ERROR, 'user-mapping-store-failed', { error: 'unknown' });
-        }
-      };
-      storeCurrentUserMapping();
-    }
-  }, [Database.secureDBRef.current, Authentication.originalUsernameRef.current]);
-
-  // Restore original username from SecureDB after auth recovery (when username appears hashed)
-  useEffect(() => {
-    const restoreOriginalUsername = async () => {
-      const db = Database.secureDBRef.current;
-      const hashedUsername = Authentication.loginUsernameRef.current;
-      const currentOriginal = Authentication.originalUsernameRef.current;
-
-      // Skip if DB not ready or not logged in
-      if (!db || !hashedUsername || !Authentication.isLoggedIn) {
-        return;
-      }
-
-      // Skip if we already have a valid original username (different from hashed)
-      if (currentOriginal && currentOriginal !== hashedUsername) {
-        return;
-      }
-
-      try {
-        const original = await db.getOriginalUsername(hashedUsername);
-        if (original && original !== hashedUsername) {
-          Authentication.originalUsernameRef.current = original;
-          // Trigger re-render for components using the username
-          window.dispatchEvent(new CustomEvent(EventType.USERNAME_MAPPING_UPDATED, {
-            detail: { username: hashedUsername, original }
-          }));
-          SecurityAuditLogger.log('info', 'original-username-restored', {});
-        }
-      } catch {
-        SecurityAuditLogger.log('warn', 'original-username-restore-failed', {});
-      }
-    };
-
-    restoreOriginalUsername();
-  }, [Database.secureDBRef.current, Authentication.isLoggedIn, Authentication.loginUsernameRef.current]);
-
-  // Initialize secure message queue when SecureDB is ready
-  useEffect(() => {
-    if (Database.secureDBRef.current && Authentication.loginUsernameRef.current) {
-      const initMessageQueue = async () => {
-        try {
-          await secureMessageQueue.initialize(
-            Authentication.loginUsernameRef.current,
-            Database.secureDBRef.current!
-          );
-          SecurityAuditLogger.log('info', 'message-queue-initialized', {});
-        } catch {
-          SecurityAuditLogger.log(SignalType.ERROR, 'message-queue-init-failed', { error: 'unknown' });
-        }
-      };
-      initMessageQueue();
-    }
-  }, [Database.secureDBRef.current, Authentication.loginUsernameRef.current]);
-
-  // Initialize profile picture system when SecureDB is ready
-  useEffect(() => {
-    if (Database.secureDBRef.current) {
-      Promise.all([
-        import('../lib/avatar/profile-picture-system'),
-        import('../lib/websocket/websocket')
-      ]).then(([{ profilePictureSystem }, { default: _websocketClient }]) => {
-        profilePictureSystem.setSecureDB(Database.secureDBRef.current);
-        profilePictureSystem.initialize().catch(() => { });
-      }).catch(() => { });
-    }
-  }, [Database.secureDBRef.current]);
-
-  // Set keys for profile picture system
-  useEffect(() => {
-    if (Authentication.hybridKeysRef.current?.kyber?.publicKeyBase64 && Authentication.hybridKeysRef.current?.kyber?.secretKey) {
-      import('../lib/avatar/profile-picture-system').then(({ profilePictureSystem }) => {
-        profilePictureSystem.setKeys(
-          Authentication.hybridKeysRef.current!.kyber!.publicKeyBase64,
-          Authentication.hybridKeysRef.current!.kyber!.secretKey
-        );
-      });
-    }
-  }, [Authentication.hybridKeysRef.current]);
-
-  // Bridge P2P file chunks into file handler
-  useEffect(() => {
-    const onP2PChunk = (e: Event) => {
-      try {
-        const d: any = (e as CustomEvent).detail || {};
-        if (d && d.payload) {
-          fileHandler.handleFileMessageChunk(d.payload, { from: d.from, to: d.to });
-        }
-      } catch { }
-    };
-    window.addEventListener(EventType.P2P_FILE_CHUNK, onP2PChunk as EventListener);
-    return () => window.removeEventListener(EventType.P2P_FILE_CHUNK, onP2PChunk as EventListener);
-  }, [fileHandler]);
-
-
-  // Ensure token-based auth recovery is attempted when validation is in progress
-  const tokenRecoveryAttemptedRef = useRef(false);
-  useEffect(() => {
-    if (!Authentication.tokenValidationInProgress) {
-      tokenRecoveryAttemptedRef.current = false;
-      return;
-    }
-    if (Authentication.isLoggedIn || Authentication.accountAuthenticated) return;
-    if (!setupComplete || !selectedServerUrl) return;
-    if (tokenRecoveryAttemptedRef.current) return;
-
-    tokenRecoveryAttemptedRef.current = true;
-    (async () => {
-      try {
-        const recovered = await Authentication.attemptAuthRecovery();
-        if (!recovered) {
-          Authentication.setTokenValidationInProgress(false);
-          Authentication.setAuthStatus('');
-        }
-      } catch {
-        Authentication.setTokenValidationInProgress(false);
-        Authentication.setAuthStatus('');
-      }
-    })();
-  }, [Authentication.tokenValidationInProgress, Authentication.isLoggedIn, Authentication.accountAuthenticated, setupComplete, selectedServerUrl]);
-
-  // Ensure token validation actually gets sent; retry once with session reset if needed
-  const tokenValidationEnsureRef = useRef<{ attempts: number; retryTimer: NodeJS.Timeout | null }>({ attempts: 0, retryTimer: null });
-  useEffect(() => {
-    const state = tokenValidationEnsureRef.current;
-    if (!Authentication.tokenValidationInProgress || Authentication.isLoggedIn || Authentication.accountAuthenticated) {
-      state.attempts = 0;
-      if (state.retryTimer) {
-        clearTimeout(state.retryTimer);
-        state.retryTimer = null;
-      }
-      return;
-    }
-    if (!setupComplete || !selectedServerUrl) return;
-
-    const trySend = async (reason: string, resetFirst: boolean) => {
-      try {
-        await (window as any).edgeApi?.wsConnect?.();
-      } catch { }
-      try {
-        if (resetFirst && (websocketClient as any)?.resetSessionKeys) {
-          (websocketClient as any).resetSessionKeys(false);
-        }
-      } catch { }
-      try {
-        await websocketClient.attemptTokenValidationOnce?.(`ensure-${reason}`);
-      } catch { }
-    };
-
-    if (state.attempts === 0) {
-      state.attempts = 1;
-      void trySend('initial', false);
-      state.retryTimer = setTimeout(() => {
-        state.retryTimer = null;
-        if (Authentication.tokenValidationInProgress && !Authentication.isLoggedIn && !Authentication.accountAuthenticated && state.attempts === 1) {
-          state.attempts = 2;
-          void trySend('retry', true);
-        }
-      }, 8000);
-    }
-
-    return () => {
-      if (state.retryTimer) {
-        clearTimeout(state.retryTimer);
-        state.retryTimer = null;
-      }
-    };
-  }, [Authentication.tokenValidationInProgress, Authentication.isLoggedIn, Authentication.accountAuthenticated, setupComplete, selectedServerUrl]);
-
-
-
+  // Token validation
+  useTokenValidation({
+    Authentication,
+    setupComplete,
+    selectedServerUrl,
+  });
 
   // Get messages for the selected conversation
   const conversationMessagesCacheRef = useRef(new Map<string, { arr: Message[]; length: number; lastId?: string; lastTs?: number; receiptHash?: string; reactionHash?: string; contentHash?: string }>());
@@ -1158,91 +481,8 @@ const ChatApp: React.FC = () => {
     return p2pMessaging.isPeerConnected(selectedConversation);
   }, [selectedConversation, p2pConnectedPeers.includes(selectedConversation)]);
 
-
-
-  // Restore encrypted block list from server when logged in and passphrase available
-  useEffect(() => {
-    const tryRestoreBlockList = async () => {
-      const passphrase = Authentication.passphrasePlaintextRef?.current || '';
-      const kyberSecret = Authentication.hybridKeysRef?.current?.kyber?.secretKey || null;
-      const key = passphrase ? passphrase : (kyberSecret ? { kyberSecret } : null);
-      if (!Authentication.isLoggedIn || !Authentication.accountAuthenticated || !key || !Database.dbInitialized) return;
-      try {
-        await blockingSystem.downloadFromServer(key as any);
-      } catch { }
-    };
-    tryRestoreBlockList();
-  }, [Authentication.isLoggedIn, Authentication.accountAuthenticated, Authentication.passphrasePlaintextRef?.current, Authentication.aesKeyRef?.current]);
-
-  // Handle settings open/close events
-  useEffect(() => {
-    const handleOpenSettings = () => setShowSettings(true);
-    const handleCloseSettings = () => setShowSettings(false);
-    window.addEventListener(EventType.OPEN_SETTINGS, handleOpenSettings);
-    window.addEventListener(EventType.CLOSE_SETTINGS, handleCloseSettings);
-    return () => {
-      window.removeEventListener(EventType.OPEN_SETTINGS, handleOpenSettings);
-      window.removeEventListener(EventType.CLOSE_SETTINGS, handleCloseSettings);
-    };
-  }, []);
-
-  useEffect(() => {
-    try {
-      const stored = syncEncryptedStorage.getItem('app_settings_v1');
-      if (stored) {
-        const parsed = JSON.parse(stored);
-        if (parsed.notifications) {
-          (window as any).edgeApi?.setNotificationsEnabled?.(parsed.notifications.desktop !== false).catch(() => { });
-        }
-      }
-    } catch { }
-  }, []);
-
-  const isEnteringBackgroundRef = useRef(false);
-
-  useEffect(() => {
-    const handleEnteringBackground = async () => {
-      isEnteringBackgroundRef.current = true;
-
-      try {
-        await flushPendingSaves();
-      } catch (e) {
-        console.error('[App] Failed to flush pending saves:', e);
-      }
-
-      const currentUsername = Authentication.loginUsernameRef.current ||
-        syncEncryptedStorage.getItem('last_authenticated_username');
-      if (currentUsername) {
-        try {
-          await (window as any).edgeApi?.setBackgroundUsername?.(currentUsername);
-        } catch (e) {
-          console.error('[App] Failed to store background username:', e);
-        }
-      }
-
-      try {
-        const sessionKeys = websocketClient.exportSessionKeys();
-        if (sessionKeys) {
-          await (window as any).edgeApi?.storePQSessionKeys?.(sessionKeys);
-        }
-      } catch (e) {
-        console.error('[App] Failed to store PQ session keys:', e);
-      }
-    };
-    window.addEventListener(EventType.APP_ENTERING_BACKGROUND, handleEnteringBackground);
-
-    return () => {
-      window.removeEventListener(EventType.APP_ENTERING_BACKGROUND, handleEnteringBackground);
-      if (!isEnteringBackgroundRef.current && torNetworkManager.isSupported()) {
-        torNetworkManager.shutdown();
-      }
-    };
-  }, []);
-
   const handleConnectSetupComplete = async (serverUrl: string) => {
     try {
-      SecurityAuditLogger.log('info', 'connect-setup-completed', {});
-
       const storedUsername = syncEncryptedStorage.getItem('last_authenticated_username');
       const tokens = await retrieveAuthTokens();
       const hasExistingSession = !!(storedUsername || (tokens?.accessToken && tokens?.refreshToken));
@@ -1259,61 +499,13 @@ const ChatApp: React.FC = () => {
     }
   };
 
-  // Initialize WebSocket after setup is complete
-  const attemptedRecoveryRef = useRef(false);
-  useEffect(() => {
-    if (!selectedServerUrl || !setupComplete) return;
-
-    const initializeConnection = async () => {
-      try {
-        await (window as any).edgeApi?.wsConnect?.();
-
-        const hasEncryptedAuth = Database.secureDBRef.current !== null;
-        let storedUsername: string | null = null;
-        let hasStoredTokens = false;
-        try {
-          storedUsername = syncEncryptedStorage.getItem('last_authenticated_username') || null;
-        } catch { }
-        try {
-          const tokens = await retrieveAuthTokens();
-          hasStoredTokens = !!(tokens?.accessToken && tokens?.refreshToken);
-        } catch { }
-
-        const canRecover = (
-          (hasEncryptedAuth || !!storedUsername || hasStoredTokens) &&
-          !Authentication.isLoggedIn &&
-          !Authentication.isRegistrationMode &&
-          !Authentication.showPassphrasePrompt &&
-          !Authentication.showPasswordPrompt &&
-          !Authentication.isSubmittingAuth &&
-          !Authentication.accountAuthenticated &&
-          !Authentication.recoveryActive
-        );
-
-        if (canRecover && !attemptedRecoveryRef.current) {
-          attemptedRecoveryRef.current = true;
-          SecurityAuditLogger.log('info', 'auth-recovery-attempt', {});
-          try {
-            const recovered = await Authentication.attemptAuthRecovery();
-            if (!recovered) {
-              Authentication.setTokenValidationInProgress(false);
-            }
-          } catch (_e) {
-            SecurityAuditLogger.log('warn', 'auth-recovery-failed', { error: (_e as any)?.message || 'unknown' });
-            Authentication.setTokenValidationInProgress(false);
-          }
-        } else if (!canRecover && Authentication.tokenValidationInProgress && !Authentication.isLoggedIn) {
-          if (!storedUsername && !hasStoredTokens && !hasEncryptedAuth) {
-            Authentication.setTokenValidationInProgress(false);
-          }
-        }
-      } catch (_error) {
-        SecurityAuditLogger.log(SignalType.ERROR, 'connection-init-failed', { error: _error instanceof Error ? _error.message : 'unknown' });
-      }
-    };
-
-    void initializeConnection();
-  }, [setupComplete, selectedServerUrl, Authentication.isLoggedIn, Authentication.isRegistrationMode, Authentication.showPassphrasePrompt, Authentication.showPasswordPrompt, Authentication.isSubmittingAuth, Authentication.accountAuthenticated, Authentication.recoveryActive, Authentication.tokenValidationInProgress, Database.dbInitialized]);
+  // Connection setup
+  useConnectionSetup({
+    setupComplete,
+    selectedServerUrl,
+    Authentication,
+    Database,
+  });
 
   useWebSocket(signalHandler, encryptedHandler, Authentication.setLoginError);
 
@@ -1333,12 +525,6 @@ const ChatApp: React.FC = () => {
     window.addEventListener(EventType.AUTH_UI_BACK, handleAuthUiBack as EventListener);
     return () => window.removeEventListener(EventType.AUTH_UI_BACK, handleAuthUiBack as EventListener);
   }, []);
-
-  useEffect(() => {
-    if (Authentication.isLoggedIn && Database.secureDBRef.current && Authentication.originalUsernameRef.current) {
-      Authentication.storeUsernameMapping(Database.secureDBRef.current);
-    }
-  }, [Authentication.isLoggedIn, Database.secureDBRef.current, Authentication.originalUsernameRef.current]);
 
   if (isResumingFromBackground) {
     return (
@@ -1531,87 +717,7 @@ const ChatApp: React.FC = () => {
                       getSmartReceiptStatus={getSmartReceiptStatus}
                       secureDB={Database.secureDBRef.current}
                       onSendMessage={onSendMessage}
-                      onSendFile={async (fileData: any) => {
-                        const MAX_LOCAL_STORAGE_SIZE = 5 * 1024 * 1024; // 5MB
-
-                        const dataToSave = { ...fileData };
-                        if (fileData.size > MAX_LOCAL_STORAGE_SIZE) {
-                          if (dataToSave.originalBase64Data) {
-                            dataToSave.originalBase64Data = null;
-                          }
-                          if (typeof dataToSave.content === 'string' && dataToSave.content.startsWith('data:')) {
-                            dataToSave.content = '';
-                          }
-                          dataToSave.isLocalStorageTruncated = true;
-                        }
-
-                        try {
-                          // Try P2P file transfer if enabled and peer is connected
-                          if (p2pConfig.features.fileTransfers && selectedConversation) {
-                            let isConnected = p2pMessaging.isPeerConnected(selectedConversation);
-
-                            // Try to connect if not connected
-                            if (!isConnected) {
-                              try {
-                                await p2pMessaging.connectToPeer(selectedConversation);
-                                isConnected = true;
-                              } catch { }
-                            }
-
-                            if (isConnected) {
-                              const targetUser = Database.users.find(user => user.username === selectedConversation);
-
-                              if (targetUser && targetUser.hybridPublicKeys) {
-                                try {
-                                  const result = await p2pMessaging.sendP2PMessage(
-                                    selectedConversation,
-                                    JSON.stringify({
-                                      filename: fileData.filename,
-                                      size: fileData.size,
-                                      type: fileData.type,
-                                      url: fileData.url,
-                                    }),
-                                    {
-                                      dilithiumPublicBase64: targetUser.hybridPublicKeys.dilithiumPublicBase64 || '',
-                                      kyberPublicBase64: targetUser.hybridPublicKeys.kyberPublicBase64 || '',
-                                      x25519PublicBase64: targetUser.hybridPublicKeys.x25519PublicBase64,
-                                    },
-                                    {
-                                      messageType: SignalType.FILE,
-                                      metadata: {
-                                        filename: fileData.filename,
-                                        size: fileData.size,
-                                        type: fileData.type,
-                                        url: fileData.url,
-                                      }
-                                    }
-                                  );
-
-                                  if (result.status === 'sent') {
-                                    SecurityAuditLogger.log('info', 'p2p-file-sent', {});
-
-                                    await Database.saveMessageToLocalDB(dataToSave);
-                                    return;
-                                  }
-                                  SecurityAuditLogger.log('info', 'p2p-file-queued-or-not-sent', { status: result.status });
-                                } catch {
-                                  SecurityAuditLogger.log('info', 'p2p-file-failed-fallback-server', {});
-                                }
-                              }
-                            }
-                          }
-
-                          await Database.saveMessageToLocalDB(dataToSave);
-
-                        } catch (error) {
-                          SecurityAuditLogger.log(SignalType.ERROR, 'file-transfer-failed', { error: error instanceof Error ? error.message : 'unknown' });
-                          toast.error(error instanceof Error ? error.message : "Failed to send file", {
-                            duration: 5000
-                          });
-
-                          await Database.saveMessageToLocalDB(dataToSave);
-                        }
-                      }}
+                      onSendFile={onSendFile}
                       isEncrypted={true}
                       users={Database.users}
                       selectedConversation={selectedConversation}

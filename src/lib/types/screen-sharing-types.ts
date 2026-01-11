@@ -1,4 +1,4 @@
-import { QualityOption } from './constants';
+import { QualityOption } from '../constants';
 
 export interface ScreenSharingResolution {
   id: string;

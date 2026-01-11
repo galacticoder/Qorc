@@ -7,8 +7,8 @@ import {
   ScreenSharingSettings as ScreenSharingSettingsType,
   SCREEN_SHARING_RESOLUTIONS,
   SCREEN_SHARING_FRAMERATES
-} from '../../lib/screen-sharing-consts';
-import { screenSharingSettings } from '../../lib/screen-sharing-settings';
+} from '../../lib/types/screen-sharing-types';
+import { screenSharingSettings } from '../../lib/database/screen-sharing-settings';
 import {
   QUALITY_OPTIONS,
   QUALITY_LABELS,

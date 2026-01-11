@@ -3,7 +3,7 @@ import { useTheme } from 'next-themes';
 import { syncEncryptedStorage } from '../../lib/database/encrypted-storage';
 import { BlockedUsersSettings } from './BlockedUsersSettings';
 import { profilePictureSystem } from '../../lib/avatar/profile-picture-system';
-import { screenSharingSettings } from '../../lib/screen-sharing-settings';
+import { screenSharingSettings } from '../../lib/database/screen-sharing-settings';
 import { toast } from 'sonner';
 import { User, Palette, Bell, Volume2, Monitor, Download, Shield, Trash2 } from 'lucide-react';
 

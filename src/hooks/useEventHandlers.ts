@@ -3,7 +3,7 @@ import { Message } from '../components/chat/messaging/types';
 import { isPlainObject, hasPrototypePollutionKeys, sanitizeNonEmptyText, isUnsafeObjectKey } from '../lib/sanitizers';
 import { sanitizeHybridKeys, isValidKyberPublicKeyBase64 } from '../lib/utils/messaging-validators';
 import { SecurityAuditLogger } from '../lib/cryptography/audit-logger';
-import { secureMessageQueue } from '../lib/secure-message-queue';
+import { secureMessageQueue } from '../lib/database/secure-message-queue';
 import { blockingSystem } from '../lib/blocking/blocking-system';
 import { EventType } from '../lib/types/event-types';
 import {

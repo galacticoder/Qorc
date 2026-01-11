@@ -1,24 +1,29 @@
-/** Manages persisted screen sharing preferences. */
+/**
+ * Manages screen sharing preferences
+ */
 
 import {
   ScreenSharingSettings,
   ScreenSharingResolution,
   SCREEN_SHARING_RESOLUTIONS,
   SCREEN_SHARING_FRAMERATES
-} from './screen-sharing-consts';
-import { CryptoUtils } from './utils/crypto-utils';
-import { encryptedStorage } from './database/encrypted-storage';
-import { PostQuantumRandom } from './cryptography/random';
-import { SecureMemory } from './cryptography/secure-memory';
-import { DEFAULT_QUALITY, QUALITY_OPTIONS } from './constants';
-import { STORAGE_KEYS } from './database/storage-keys';
-
-const STORAGE_KEY = STORAGE_KEYS.SCREEN_SHARING_SETTINGS;
-const DEVICE_KEY_STORAGE = STORAGE_KEYS.SCREEN_SHARING_DEVICE_KEY;
-const AUDIT_CHANNEL = 'screen-sharing';
-const RATE_LIMIT_WINDOW_MS = 100;
-const MAX_REQUESTS_PER_WINDOW = 5;
-const SETTINGS_TTL_MS = 24 * 60 * 60 * 1000;
+} from '../types/screen-sharing-types';
+import { CryptoUtils } from '../utils/crypto-utils';
+import { encryptedStorage } from './encrypted-storage';
+import { PostQuantumRandom } from '../cryptography/random';
+import { SecureMemory } from '../cryptography/secure-memory';
+import {
+  DEFAULT_QUALITY,
+  QUALITY_OPTIONS,
+  SCREEN_SHARING_RATE_LIMIT_WINDOW_MS,
+  SCREEN_SHARING_MAX_REQUESTS_PER_WINDOW,
+  SCREEN_SHARING_SETTINGS_TTL_MS,
+  SCREEN_SHARING_HKDF_SALT,
+  SCREEN_SHARING_HKDF_INFO_ENC,
+  SCREEN_SHARING_HKDF_INFO_MAC,
+  SCREEN_SHARING_AAD_CONTEXT
+} from '../constants';
+import { STORAGE_KEYS } from './storage-keys';
 
 interface PersistedEnvelope {
   version: number;
@@ -33,11 +38,12 @@ interface InternalSettings extends ScreenSharingSettings {
   updatedAt: number;
 }
 
-const HKDF_SALT = new TextEncoder().encode('screen-sharing-settings-salt');
-const HKDF_INFO_ENC = new TextEncoder().encode('screen-sharing-settings:enc');
-const HKDF_INFO_MAC = new TextEncoder().encode('screen-sharing-settings:mac');
-const AAD_CONTEXT = new TextEncoder().encode('screen-sharing-settings:v1');
+const HKDF_SALT = new TextEncoder().encode(SCREEN_SHARING_HKDF_SALT);
+const HKDF_INFO_ENC = new TextEncoder().encode(SCREEN_SHARING_HKDF_INFO_ENC);
+const HKDF_INFO_MAC = new TextEncoder().encode(SCREEN_SHARING_HKDF_INFO_MAC);
+const AAD_CONTEXT = new TextEncoder().encode(SCREEN_SHARING_AAD_CONTEXT);
 
+// Check if in Tor mode
 function isTorMode(): boolean {
   try {
     return typeof window !== 'undefined' && !!(window as any).__TOR_ENABLED__;
@@ -46,6 +52,7 @@ function isTorMode(): boolean {
   }
 }
 
+// Build default resolution
 function buildDefaultResolution(): ScreenSharingResolution {
   const viable = SCREEN_SHARING_RESOLUTIONS.filter(r => !r.isNative);
   const pool = viable.length > 0 ? viable : SCREEN_SHARING_RESOLUTIONS;
@@ -53,46 +60,58 @@ function buildDefaultResolution(): ScreenSharingResolution {
   return pool[idx];
 }
 
+// Deep validate settings
 function deepValidateSettings(settings: any): settings is InternalSettings {
   if (!settings || typeof settings !== 'object') {
     return false;
   }
+
   if (typeof settings.updatedAt !== 'number' || !Number.isFinite(settings.updatedAt)) {
     return false;
   }
+  
   const { resolution, frameRate, quality } = settings;
   if (!resolution || typeof resolution !== 'object') {
     return false;
   }
+  
   const { id, name, width, height, isNative } = resolution;
   if (typeof id !== 'string' || typeof name !== 'string') {
     return false;
   }
+  
   if (!Number.isInteger(width) || !Number.isInteger(height) || width < 0 || height < 0) {
     return false;
   }
+  
   if (typeof isNative !== 'boolean' && typeof isNative !== 'undefined') {
     return false;
   }
+  
   if (typeof frameRate !== 'number' || !SCREEN_SHARING_FRAMERATES.includes(frameRate as typeof SCREEN_SHARING_FRAMERATES[number])) {
     return false;
   }
+  
   if (!QUALITY_OPTIONS.includes(quality as any)) {
     return false;
   }
   return true;
 }
 
+// Screen sharing settings manager
 export class ScreenSharingSettingsManager {
   private static instance: ScreenSharingSettingsManager | null = null;
-  private settings: InternalSettings | null = null;
+  private settings: InternalSettings;
+  private requestCount = 0;
   private listeners: Set<(settings: ScreenSharingSettings) => void> = new Set();
-  private readonly rateBucket = new Map<string, { count: number; resetAt: number }>();
+  private lastRequestTime = 0;
+  private requestBucket: Map<string, { count: number; resetAt: number }> = new Map();
   private readonly isTransient = isTorMode();
   private deviceKey: Uint8Array | null = null;
 
   private constructor() { }
 
+  // Get singleton instance
   public static getInstance(): ScreenSharingSettingsManager {
     if (!ScreenSharingSettingsManager.instance) {
       ScreenSharingSettingsManager.instance = new ScreenSharingSettingsManager();
@@ -100,6 +119,7 @@ export class ScreenSharingSettingsManager {
     return ScreenSharingSettingsManager.instance;
   }
 
+  // Get key material for encryption
   private async getKeyMaterial(): Promise<Uint8Array> {
     if (this.isTransient) {
       return PostQuantumRandom.randomBytes(32);
@@ -108,7 +128,7 @@ export class ScreenSharingSettingsManager {
       return this.deviceKey;
     }
     try {
-      const stored = await encryptedStorage.getItem(DEVICE_KEY_STORAGE);
+      const stored = await encryptedStorage.getItem(STORAGE_KEYS.SCREEN_SHARING_DEVICE_KEY);
       if (stored && typeof stored === 'string') {
         this.deviceKey = CryptoUtils.Base64.base64ToUint8Array(stored);
         return this.deviceKey;
@@ -118,7 +138,7 @@ export class ScreenSharingSettingsManager {
     }
     const generated = PostQuantumRandom.randomBytes(32);
     try {
-      await encryptedStorage.setItem(DEVICE_KEY_STORAGE, CryptoUtils.Base64.arrayBufferToBase64(generated));
+      await encryptedStorage.setItem(STORAGE_KEYS.SCREEN_SHARING_DEVICE_KEY, CryptoUtils.Base64.arrayBufferToBase64(generated));
       this.deviceKey = generated;
       return this.deviceKey;
     } catch (_error) {
@@ -127,6 +147,7 @@ export class ScreenSharingSettingsManager {
     }
   }
 
+  // Derive encryption and MAC keys
   private async deriveKeys(): Promise<{ encKey: Uint8Array; macKey: Uint8Array }> {
     const material = await this.getKeyMaterial();
     const encKey = await CryptoUtils.KDF.blake3Hkdf(material, HKDF_SALT, HKDF_INFO_ENC, 32);
@@ -134,29 +155,34 @@ export class ScreenSharingSettingsManager {
     return { encKey, macKey };
   }
 
+  // Encrypt settings
   private async encryptSettings(settings: InternalSettings): Promise<PersistedEnvelope> {
     const { encKey, macKey } = await this.deriveKeys();
     const plaintext = new TextEncoder().encode(JSON.stringify(settings));
     const nonce = PostQuantumRandom.randomBytes(36);
     const { ciphertext, tag } = CryptoUtils.PostQuantumAEAD.encrypt(plaintext, encKey, AAD_CONTEXT, nonce);
+
     const macInput = new Uint8Array(nonce.length + ciphertext.length + tag.length);
     macInput.set(nonce, 0);
     macInput.set(ciphertext, nonce.length);
     macInput.set(tag, nonce.length + ciphertext.length);
     const mac = await CryptoUtils.Hash.generateBlake3Mac(macInput, macKey);
+
     SecureMemory.zeroBuffer(encKey);
     SecureMemory.zeroBuffer(macKey);
     SecureMemory.zeroBuffer(macInput);
+
     return {
       version: 1,
       ciphertext: CryptoUtils.Base64.arrayBufferToBase64(ciphertext),
       tag: CryptoUtils.Base64.arrayBufferToBase64(tag),
       nonce: CryptoUtils.Base64.arrayBufferToBase64(nonce),
       mac: CryptoUtils.Base64.arrayBufferToBase64(mac),
-      expiresAt: Date.now() + SETTINGS_TTL_MS
+      expiresAt: Date.now() + SCREEN_SHARING_SETTINGS_TTL_MS
     };
   }
 
+  // Decrypt settings
   private async decryptSettings(envelope: PersistedEnvelope): Promise<InternalSettings | null> {
     if (!envelope || envelope.version !== 1) {
       return null;
@@ -170,22 +196,29 @@ export class ScreenSharingSettingsManager {
       const tag = CryptoUtils.Base64.base64ToUint8Array(envelope.tag);
       const nonce = CryptoUtils.Base64.base64ToUint8Array(envelope.nonce);
       const storedMac = CryptoUtils.Base64.base64ToUint8Array(envelope.mac);
+
       const macInput = new Uint8Array(nonce.length + ciphertext.length + tag.length);
       macInput.set(nonce, 0);
       macInput.set(ciphertext, nonce.length);
       macInput.set(tag, nonce.length + ciphertext.length);
+
       const computedMac = await CryptoUtils.Hash.generateBlake3Mac(macInput, macKey);
       const macValid = SecureMemory.constantTimeCompare(computedMac, storedMac);
+
       SecureMemory.zeroBuffer(computedMac);
       SecureMemory.zeroBuffer(macInput);
+
       if (!macValid) {
         SecureMemory.zeroBuffer(encKey);
         SecureMemory.zeroBuffer(macKey);
         return null;
       }
+      
       const decrypted = CryptoUtils.PostQuantumAEAD.decrypt(ciphertext, nonce, tag, encKey, AAD_CONTEXT);
+
       SecureMemory.zeroBuffer(encKey);
       SecureMemory.zeroBuffer(macKey);
+      
       const parsed = JSON.parse(new TextDecoder().decode(decrypted));
       if (!deepValidateSettings(parsed)) {
         return null;
@@ -197,6 +230,7 @@ export class ScreenSharingSettingsManager {
     }
   }
 
+  // Load settings from storage or return default
   private async loadSettings(): Promise<InternalSettings> {
     if (this.isTransient) {
       return {
@@ -207,7 +241,7 @@ export class ScreenSharingSettingsManager {
       };
     }
     try {
-      const stored = await encryptedStorage.getItem(STORAGE_KEY);
+      const stored = await encryptedStorage.getItem(STORAGE_KEYS.SCREEN_SHARING_SETTINGS);
       if (!stored || typeof stored !== 'string') {
         return {
           resolution: buildDefaultResolution(),
@@ -216,6 +250,7 @@ export class ScreenSharingSettingsManager {
           updatedAt: Date.now()
         };
       }
+
       const envelope = JSON.parse(stored) as PersistedEnvelope;
       const decrypted = await this.decryptSettings(envelope);
       if (decrypted) {
@@ -230,63 +265,73 @@ export class ScreenSharingSettingsManager {
     };
   }
 
+  // Save settings to storage
   private async saveSettings(): Promise<void> {
     if (this.settings === null || this.isTransient) {
       return;
     }
     try {
       const envelope = await this.encryptSettings(this.settings);
-      await encryptedStorage.setItem(STORAGE_KEY, JSON.stringify(envelope));
+      await encryptedStorage.setItem(STORAGE_KEYS.SCREEN_SHARING_SETTINGS, JSON.stringify(envelope));
     } catch (_error) {
       console.error('[screen-sharing] save-failed', (_error as Error).message);
     }
   }
 
+  // Ensure settings are loaded
   private async ensureSettingsLoaded(): Promise<void> {
     if (this.settings === null) {
       this.settings = await this.loadSettings();
     }
   }
 
+  // Enforce rate limit
   private enforceRateLimit(method: string): void {
     const now = Date.now();
-    const bucket = this.rateBucket.get(method) ?? { count: 0, resetAt: now + RATE_LIMIT_WINDOW_MS };
+    const bucket = this.requestBucket.get(method) ?? { count: 0, resetAt: now + SCREEN_SHARING_RATE_LIMIT_WINDOW_MS };
     if (now > bucket.resetAt) {
       bucket.count = 0;
-      bucket.resetAt = now + RATE_LIMIT_WINDOW_MS;
+      bucket.resetAt = now + SCREEN_SHARING_RATE_LIMIT_WINDOW_MS;
     }
+
     bucket.count += 1;
-    if (bucket.count > MAX_REQUESTS_PER_WINDOW) {
+    if (bucket.count > SCREEN_SHARING_MAX_REQUESTS_PER_WINDOW) {
       console.warn('[screen-sharing] rate-limited', method);
       throw new Error('Screen sharing settings rate limit exceeded');
     }
-    this.rateBucket.set(method, bucket);
+    this.requestBucket.set(method, bucket);
   }
 
+  // Get current settings
   public async getSettings(): Promise<ScreenSharingSettings> {
     await this.ensureSettingsLoaded();
     const { resolution, frameRate, quality } = this.settings!;
     return { resolution, frameRate, quality };
   }
 
+  // Set resolution
   public async setResolution(resolution: ScreenSharingResolution): Promise<void> {
     this.enforceRateLimit('setResolution');
     await this.ensureSettingsLoaded();
+
     const validResolution = SCREEN_SHARING_RESOLUTIONS.find(r => r.id === resolution.id);
     if (!validResolution) {
       throw new Error('Invalid resolution preset');
     }
+
     this.settings!.resolution = validResolution;
     this.settings!.updatedAt = Date.now();
     await this.saveSettings();
     this.notifyListeners();
   }
 
+  // Set frame rate
   public async setFrameRate(frameRate: number): Promise<void> {
     this.enforceRateLimit('setFrameRate');
     if (!SCREEN_SHARING_FRAMERATES.includes(frameRate as typeof SCREEN_SHARING_FRAMERATES[number])) {
       throw new Error('Invalid frame rate preset');
     }
+    
     await this.ensureSettingsLoaded();
     this.settings!.frameRate = frameRate;
     this.settings!.updatedAt = Date.now();
@@ -294,11 +339,13 @@ export class ScreenSharingSettingsManager {
     this.notifyListeners();
   }
 
+  // Set quality
   public async setQuality(quality: string): Promise<void> {
     this.enforceRateLimit('setQuality');
     if (!QUALITY_OPTIONS.includes(quality as any)) {
       throw new Error('Invalid quality preset');
     }
+
     await this.ensureSettingsLoaded();
     this.settings!.quality = quality as any;
     this.settings!.updatedAt = Date.now();
@@ -306,9 +353,11 @@ export class ScreenSharingSettingsManager {
     this.notifyListeners();
   }
 
+  // Update settings
   public async updateSettings(newSettings: Partial<ScreenSharingSettings>): Promise<void> {
     this.enforceRateLimit('updateSettings');
     await this.ensureSettingsLoaded();
+
     if (newSettings.resolution) {
       const validResolution = SCREEN_SHARING_RESOLUTIONS.find(r => r.id === newSettings.resolution!.id);
       if (!validResolution) {
@@ -316,23 +365,38 @@ export class ScreenSharingSettingsManager {
       }
       this.settings!.resolution = validResolution;
     }
+
     if (newSettings.frameRate !== undefined) {
       if (!SCREEN_SHARING_FRAMERATES.includes(newSettings.frameRate as typeof SCREEN_SHARING_FRAMERATES[number])) {
         throw new Error('Invalid frame rate preset');
       }
       this.settings!.frameRate = newSettings.frameRate;
     }
+
     if (newSettings.quality) {
+      const now = Date.now();
+      if (now - this.lastRequestTime < SCREEN_SHARING_RATE_LIMIT_WINDOW_MS) {
+        if (this.requestCount >= SCREEN_SHARING_MAX_REQUESTS_PER_WINDOW) {
+          throw new Error('Too many requests');
+        }
+        this.requestCount++;
+      } else {
+        this.requestCount = 1;
+      }
+
+      this.lastRequestTime = now;
       if (!QUALITY_OPTIONS.includes(newSettings.quality as any)) {
         throw new Error('Invalid quality preset');
       }
       this.settings!.quality = newSettings.quality;
     }
+
     this.settings!.updatedAt = Date.now();
     await this.saveSettings();
     this.notifyListeners();
   }
 
+  // Reset to defaults
   public async resetToDefaults(): Promise<void> {
     this.enforceRateLimit('resetToDefaults');
     this.settings = {
@@ -341,10 +405,12 @@ export class ScreenSharingSettingsManager {
       quality: DEFAULT_QUALITY,
       updatedAt: Date.now()
     };
+    
     await this.saveSettings();
     this.notifyListeners();
   }
 
+  // Subscribe to settings changes
   public subscribe(listener: (settings: ScreenSharingSettings) => void): () => void {
     this.listeners.add(listener);
     return () => {
@@ -352,6 +418,7 @@ export class ScreenSharingSettingsManager {
     };
   }
 
+  // Notify all listeners
   private notifyListeners(): void {
     const snapshot = this.settings ? { resolution: this.settings.resolution, frameRate: this.settings.frameRate, quality: this.settings.quality } : undefined;
     this.listeners.forEach(listener => {
@@ -365,12 +432,14 @@ export class ScreenSharingSettingsManager {
     });
   }
 
+  // Get video constraints
   public async getVideoConstraints(): Promise<MediaTrackConstraints> {
     await this.ensureSettingsLoaded();
     const { resolution, frameRate } = this.settings!;
     const constraints: MediaTrackConstraints = {
       frameRate: { ideal: frameRate, max: frameRate }
     };
+   
     if (!resolution.isNative) {
       constraints.width = { ideal: resolution.width, max: resolution.width };
       constraints.height = { ideal: resolution.height, max: resolution.height };
@@ -378,6 +447,7 @@ export class ScreenSharingSettingsManager {
     return constraints;
   }
 
+  // Get Electron video constraints
   public async getElectronVideoConstraints(): Promise<any> {
     await this.ensureSettingsLoaded();
     const { resolution, frameRate } = this.settings!;
@@ -407,10 +477,11 @@ export class ScreenSharingSettingsManager {
     };
   }
 
+  // Dispose of the settings manager
   public dispose(): void {
     this.listeners.clear();
     this.settings = null;
-    this.rateBucket.clear();
+    this.requestBucket.clear();
     if (this.deviceKey) {
       SecureMemory.zeroBuffer(this.deviceKey);
       this.deviceKey = null;

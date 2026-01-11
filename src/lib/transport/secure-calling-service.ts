@@ -14,7 +14,7 @@ import { SecureMemory } from '../cryptography/secure-memory';
 import { QuicTransport, quicTransport } from './quic-transport';
 import { SecureConnection, SecureStream } from './secure-transport';
 import { PQNoiseSession } from './pq-noise-session';
-import { screenSharingSettings } from '../screen-sharing-settings';
+import { screenSharingSettings } from '../database/screen-sharing-settings';
 import { X25519KeyPair, PeerKeys } from '../types/noise-types';
 import { generateX25519KeyPair } from '../utils/noise-utils';
 import websocketClient from '../websocket/websocket';

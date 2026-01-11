@@ -1,28 +1,17 @@
-/** Encrypted offline message queue stored in SecureDB. */
+/** 
+ * Encrypted offline message queue stored in database
+*/
 
-import { SecureDB } from './database/secureDB';
-
-import { isPlainObject, hasPrototypePollutionKeys, isValidUsername } from './sanitizers';
-import { STORAGE_KEYS } from './database/storage-keys';
-
-const validateUsername = (username: string): void => {
-  if (!isValidUsername(username)) {
-    throw new Error('Invalid username format or reserved identifier');
-  }
-};
-
-const sanitizeContent = (content: string): string => {
-  if (typeof content !== 'string') {
-    throw new Error('Content must be a string');
-  }
-  if (/\x00/.test(content)) {
-    throw new Error('Content contains null bytes');
-  }
-  if (content.length > 1024 * 1024) {
-    throw new Error('Content exceeds maximum size');
-  }
-  return content;
-};
+import { SecureDB } from './secureDB';
+import { STORAGE_KEYS } from './storage-keys';
+import { isPlainObject, hasPrototypePollutionKeys, isValidUsername, sanitizeContent } from '../sanitizers';
+import {
+  SECURE_QUEUE_MESSAGE_EXPIRY_MS,
+  SECURE_QUEUE_MAX_MESSAGES_PER_USER,
+  SECURE_QUEUE_MAX_PROCESSED_IDS,
+  SECURE_QUEUE_CLEANUP_INTERVAL_MS,
+  SECURE_QUEUE_SAVE_DEBOUNCE_MS
+} from '../constants';
 
 interface QueuedMessage {
   id: string;
@@ -37,6 +26,7 @@ interface QueuedMessage {
   expiresAt: number;
 }
 
+// Normalize queued message
 const normalizeQueuedMessage = (value: unknown, username: string): QueuedMessage | null => {
   if (!isPlainObject(value)) return null;
   if (hasPrototypePollutionKeys(value)) return null;
@@ -46,17 +36,11 @@ const normalizeQueuedMessage = (value: unknown, username: string): QueuedMessage
   const id = typeof record.id === 'string' ? record.id : null;
   if (!id) return null;
 
-  try {
-    validateUsername(username);
-  } catch {
-    return null;
-  }
+  if (!isValidUsername(username)) return null;
 
   if (typeof record.content !== 'string') return null;
-  let content: string;
-  try {
-    content = sanitizeContent(record.content);
-  } catch {
+  const content = sanitizeContent(record.content);
+  if (!content) {
     return null;
   }
 
@@ -66,7 +50,7 @@ const normalizeQueuedMessage = (value: unknown, username: string): QueuedMessage
   const expiresAt =
     typeof record.expiresAt === 'number' && Number.isFinite(record.expiresAt)
       ? record.expiresAt
-      : timestamp + MESSAGE_EXPIRY;
+      : timestamp + SECURE_QUEUE_MESSAGE_EXPIRY_MS;
 
   let replyTo: { id: string; sender?: string; content?: string } | undefined;
   if (record.replyTo != null) {
@@ -102,13 +86,6 @@ const normalizeQueuedMessage = (value: unknown, username: string): QueuedMessage
   };
 };
 
-const STORAGE_KEY = STORAGE_KEYS.SECURE_MESSAGE_QUEUE;
-const MESSAGE_EXPIRY = 4 * 60 * 60 * 1000; // 4 hours - if keys don't arrive by then, they won't
-const MAX_MESSAGES_PER_USER = 50;
-const MAX_PROCESSED_IDS = 5000;
-const CLEANUP_INTERVAL = 5 * 60 * 1000; // 5 minutes
-const SAVE_DEBOUNCE_MS = 1000;
-
 class SecureMessageQueue {
   private queue: Map<string, QueuedMessage[]> = new Map();
   private processedIds: Set<string> = new Set();
@@ -119,20 +96,16 @@ class SecureMessageQueue {
   private pendingSave: boolean = false;
 
   constructor() {
-    this.cleanupTimer = setInterval(() => this.cleanupExpired(), CLEANUP_INTERVAL);
+    this.cleanupTimer = setInterval(() => this.cleanupExpired(), SECURE_QUEUE_CLEANUP_INTERVAL_MS);
   }
 
-  /**
-     * Initialize with SecureDB instance for encrypted storage.
-     */
+  // Initialize with SecureDB instance
   async initialize(_username: string, secureDB: SecureDB): Promise<void> {
     this.secureDB = secureDB;
     await this.loadFromStorage();
   }
 
-  /**
-   * Queue a message for an offline recipient
-   */
+  // Queue a message for an offline recipient
   async queueMessage(
     to: string,
     content: string,
@@ -149,8 +122,16 @@ class SecureMessageQueue {
       throw new Error('SecureMessageQueue not initialized');
     }
 
-    validateUsername(to);
+    if (!isValidUsername(to)) {
+      throw new Error('Invalid username format or reserved identifier');
+    }
     const sanitized = sanitizeContent(content);
+    if (!sanitized) {
+      throw new Error('Content invalid or empty');
+    }
+    if (sanitized.length > 1024 * 1024) {
+      throw new Error('Content exceeds maximum size');
+    }
 
     const messageId = options?.messageId ?? crypto.randomUUID();
 
@@ -159,7 +140,7 @@ class SecureMessageQueue {
     }
 
     const userQueue = this.queue.get(to) ?? [];
-    if (userQueue.length >= MAX_MESSAGES_PER_USER) {
+    if (userQueue.length >= SECURE_QUEUE_MAX_MESSAGES_PER_USER) {
       throw new Error(`Message queue limit reached for recipient`);
     }
 
@@ -169,7 +150,7 @@ class SecureMessageQueue {
       to,
       content: sanitized,
       timestamp: now,
-      expiresAt: now + MESSAGE_EXPIRY,
+      expiresAt: now + SECURE_QUEUE_MESSAGE_EXPIRY_MS,
       replyTo: options?.replyTo,
       fileData: options?.fileData,
       messageSignalType: options?.messageSignalType,
@@ -181,9 +162,9 @@ class SecureMessageQueue {
     this.queue.set(to, userQueue);
 
     this.processedIds.add(messageId);
-    if (this.processedIds.size > MAX_PROCESSED_IDS) {
+    if (this.processedIds.size > SECURE_QUEUE_MAX_PROCESSED_IDS) {
       const idsArray = Array.from(this.processedIds);
-      this.processedIds = new Set(idsArray.slice(-MAX_PROCESSED_IDS / 2));
+      this.processedIds = new Set(idsArray.slice(-SECURE_QUEUE_MAX_PROCESSED_IDS / 2));
     }
 
     this.scheduleSave();
@@ -191,16 +172,12 @@ class SecureMessageQueue {
     return messageId;
   }
 
-  /**
-   * Get all queued messages for a specific user
-   */
+  // Get all queued messages for a specific user
   getMessagesForUser(username: string): QueuedMessage[] {
     return this.queue.get(username) ?? [];
   }
 
-  /**
-   * Remove a specific message from the queue
-   */
+  // Remove a specific message from the queue
   async removeMessage(messageId: string, username: string): Promise<boolean> {
     const userQueue = this.queue.get(username);
     if (!userQueue) return false;
@@ -220,9 +197,7 @@ class SecureMessageQueue {
     return true;
   }
 
-  /**
-   * Clear all messages for a specific user
-   */
+  // Clear all messages for a specific user
   async clearUserQueue(username: string): Promise<number> {
     const userQueue = this.queue.get(username);
     if (!userQueue) return 0;
@@ -234,9 +209,7 @@ class SecureMessageQueue {
     return count;
   }
 
-  /**
-   * Get total number of queued messages
-   */
+  // Get total number of queued messages
   getTotalQueuedMessages(): number {
     let total = 0;
     for (const userQueue of this.queue.values()) {
@@ -245,16 +218,12 @@ class SecureMessageQueue {
     return total;
   }
 
-  /**
-   * Get users with queued messages
-   */
+  // Get users with queued messages
   getUsersWithQueuedMessages(): string[] {
     return Array.from(this.queue.keys());
   }
 
-  /**
-   * Process queued messages when recipient comes online
-   */
+  // Process queued messages when recipient comes online
   async processQueueForUser(username: string): Promise<QueuedMessage[]> {
     const userQueue = this.queue.get(username);
     if (!userQueue || userQueue.length === 0) {
@@ -294,7 +263,6 @@ class SecureMessageQueue {
     const totalExpired = Array.from(expiredByUser.values()).reduce((a, b) => a + b, 0);
     if (totalExpired > 0) {
       this.scheduleSave();
-      // Dispatch event so UI can notify user
       if (typeof window !== 'undefined') {
         window.dispatchEvent(new CustomEvent('secure-queue-messages-expired', {
           detail: { count: totalExpired, byUser: Object.fromEntries(expiredByUser) }
@@ -303,9 +271,7 @@ class SecureMessageQueue {
     }
   }
 
-  /**
-   * Schedule a debounced save operation
-   */
+  // Schedule a debounced save operation
   private scheduleSave(): void {
     if (this.saveTimer) {
       return;
@@ -320,12 +286,10 @@ class SecureMessageQueue {
           console.error('[SecureMessageQueue] Scheduled save failed:', err);
         });
       }
-    }, SAVE_DEBOUNCE_MS);
+    }, SECURE_QUEUE_SAVE_DEBOUNCE_MS);
   }
 
-  /**
-   * Save queue to encrypted SecureDB
-   */
+  // Save queue to database
   private async saveToStorage(): Promise<void> {
     if (!this.secureDB) {
       return;
@@ -339,16 +303,14 @@ class SecureMessageQueue {
         timestamp: Date.now()
       };
 
-      await this.secureDB.storeEphemeral(STORAGE_KEY, queueData);
+      await this.secureDB.storeEphemeral(STORAGE_KEYS.SECURE_MESSAGE_QUEUE, queueData);
 
     } catch (_error) {
       console.error('[SecureMessageQueue] Storage save failed:', _error);
     }
   }
 
-  /**
-   * Load queue from encrypted SecureDB
-   */
+  // Load queue from database
   private async loadFromStorage(): Promise<void> {
     if (!this.secureDB) {
       return;
@@ -361,7 +323,7 @@ class SecureMessageQueue {
 
     this.loadPromise = (async () => {
       try {
-        const stored = await this.secureDB!.retrieveEphemeral(STORAGE_KEY);
+        const stored = await this.secureDB!.retrieveEphemeral(STORAGE_KEYS.SECURE_MESSAGE_QUEUE);
 
         if (!stored) {
           return;
@@ -393,11 +355,7 @@ class SecureMessageQueue {
             const username = entry[0];
             const messagesRaw = entry[1];
             if (typeof username !== 'string') continue;
-            try {
-              validateUsername(username);
-            } catch {
-              continue;
-            }
+            if (!isValidUsername(username)) continue;
             if (!Array.isArray(messagesRaw)) continue;
 
             const sanitizedMessages: QueuedMessage[] = [];
@@ -406,7 +364,7 @@ class SecureMessageQueue {
               if (normalized) {
                 sanitizedMessages.push(normalized);
               }
-              if (sanitizedMessages.length >= MAX_MESSAGES_PER_USER) {
+              if (sanitizedMessages.length >= SECURE_QUEUE_MAX_MESSAGES_PER_USER) {
                 break;
               }
             }
@@ -426,7 +384,7 @@ class SecureMessageQueue {
               ids.push(id);
             }
           }
-          const start = Math.max(0, ids.length - MAX_PROCESSED_IDS);
+          const start = Math.max(0, ids.length - SECURE_QUEUE_MAX_PROCESSED_IDS);
           for (let i = start; i < ids.length; i++) {
             nextProcessedIds.add(ids[i]);
           }
@@ -444,9 +402,7 @@ class SecureMessageQueue {
     await this.loadPromise;
   }
 
-  /**
-   * Cleanup on destruction
-   */
+  // Cleanup on destruction
   destroy(): void {
     if (this.cleanupTimer) {
       clearInterval(this.cleanupTimer);

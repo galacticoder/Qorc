@@ -414,6 +414,18 @@ export const SECURE_DB_BLOCKED_MIME_TYPES = [
     'application/x-executable',
     'application/vnd.microsoft.portable-executable',
   ];
+export const SECURE_QUEUE_MESSAGE_EXPIRY_MS = 4 * 60 * 60 * 1000;
+export const SECURE_QUEUE_MAX_MESSAGES_PER_USER = 50;
+export const SECURE_QUEUE_MAX_PROCESSED_IDS = 5000;
+export const SECURE_QUEUE_CLEANUP_INTERVAL_MS = 5 * 60 * 1000;
+export const SECURE_QUEUE_SAVE_DEBOUNCE_MS = 1000;
+export const SCREEN_SHARING_RATE_LIMIT_WINDOW_MS = 100;
+export const SCREEN_SHARING_MAX_REQUESTS_PER_WINDOW = 5;
+export const SCREEN_SHARING_SETTINGS_TTL_MS = 24 * 60 * 60 * 1000;
+export const SCREEN_SHARING_HKDF_SALT = 'screen-sharing-settings-salt';
+export const SCREEN_SHARING_HKDF_INFO_ENC = 'screen-sharing-settings:enc';
+export const SCREEN_SHARING_HKDF_INFO_MAC = 'screen-sharing-settings:mac';
+export const SCREEN_SHARING_AAD_CONTEXT = 'screen-sharing-settings:v1';
 
 // Tor constants
 export const TOR_DEFAULT_MONITOR_INTERVAL_MS = 30_000;
