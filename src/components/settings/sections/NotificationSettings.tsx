@@ -1,5 +1,6 @@
 import React from 'react';
 import { AnimatedSwitch } from '../../ui/AnimatedSwitch';
+import { notifications as notificationsApi } from '../../../lib/tauri-bindings';
 
 interface NotificationSettingsProps {
     notifications: { desktop: boolean; sound: boolean };
@@ -26,7 +27,7 @@ export const NotificationSettings = ({ notifications, setNotifications, saveSett
                             const updated = { ...notifications, desktop: checked };
                             setNotifications(updated);
                             saveSettings({ notifications: updated });
-                            (window as any).edgeApi?.setNotificationsEnabled?.(checked).catch(() => { });
+                            notificationsApi.setEnabled(checked).catch(() => { });
                         }}
                     />
                 </div>

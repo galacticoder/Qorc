@@ -5,6 +5,7 @@ import { SecureKeyManager } from "../../lib/database/secure-key-manager";
 import { ensureVaultKeyCryptoKey, saveWrappedMasterKey } from "../../lib/cryptography/vault-key";
 import { validateServerKeys, deriveCombinedSecretInput } from "../../lib/utils/auth-utils";
 import type { ServerHybridPublicKeys, HybridKeys } from "../../lib/types/auth-types";
+import { signal } from "../../lib/tauri-bindings";
 
 export interface KeyManagementRefs {
   loginUsernameRef: RefObject<string>;
@@ -151,7 +152,7 @@ export const createInitializeKeys = (
       if (!currentUsername) {
         throw new Error("Username not available");
       }
-
+      
       await new Promise(resolve => setTimeout(resolve, 0));
 
       if (!refs.keyManagerRef.current || refs.keyManagerOwnerRef.current !== currentUsername) {
@@ -196,8 +197,8 @@ export const createInitializeKeys = (
             try {
               const pub = existingKeys.kyber.publicKeyBase64;
               const secB64 = CryptoUtils.Base64.arrayBufferToBase64(existingKeys.kyber.secretKey);
-              if (typeof (window as any).edgeApi?.setStaticMlkemKeys === 'function' && pub && secB64) {
-                await (window as any).edgeApi.setStaticMlkemKeys({ username: currentUsername, publicKeyBase64: pub, secretKeyBase64: secB64 });
+              if (pub && secB64) {
+                await signal.setStaticMlkemKeys(currentUsername, pub, secB64);
               }
             } catch { }
 
@@ -278,8 +279,8 @@ export const createInitializeKeys = (
         try {
           const pub = hybridKeyPair.kyber.publicKeyBase64;
           const secB64 = CryptoUtils.Base64.arrayBufferToBase64(hybridKeyPair.kyber.secretKey);
-          if (typeof (window as any).edgeApi?.setStaticMlkemKeys === 'function' && pub && secB64) {
-            await (window as any).edgeApi.setStaticMlkemKeys({ username: currentUsername, publicKeyBase64: pub, secretKeyBase64: secB64 });
+          if (pub && secB64) {
+            await signal.setStaticMlkemKeys(currentUsername, pub, secB64);
           }
         } catch { }
       }

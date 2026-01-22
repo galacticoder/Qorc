@@ -3,7 +3,8 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { Shield, RotateCw } from 'lucide-react';
-import { torNetworkManager, TorConnectionStats } from '@/lib/transport/tor-network';
+import { torNetworkManager } from '@/lib/transport/tor-network';
+import { TorConnectionStats } from '@/lib/types/tor-types';
 
 export function TorIndicator() {
   const [stats, setStats] = useState<TorConnectionStats>(torNetworkManager.getStats());
@@ -78,8 +79,11 @@ export function TorIndicator() {
               <Shield className="h-4 w-4 text-green-600" />
               <span className="font-semibold">Tor Network</span>
             </div>
-            <Badge variant={stats.isConnected ? 'default' : 'secondary'} className={stats.isConnected ? 'bg-green-600 hover:bg-[#3b8e3f]' : 'bg-gray-600 hover:bg-[#657389]'}>
-              {stats.isConnected ? 'Connected' : 'Disconnected'}
+            <Badge 
+              variant={stats.isConnected ? 'default' : 'secondary'} 
+              className={stats.isConnected ? 'bg-green-600 hover:bg-[#3b8e3f]' : 'bg-gray-600 hover:bg-[#657389]'}
+            >
+              {stats.isConnected ? 'Connected' : (stats.bootstrapProgress && stats.bootstrapProgress < 100 ? `Bootstrapping ${stats.bootstrapProgress}%` : 'Disconnected')}
             </Badge>
           </div>
 

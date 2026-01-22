@@ -10,7 +10,7 @@ const stripCrossorigin = (): Plugin => ({
 })
 
 export default defineConfig({
-  plugins: [stripCrossorigin(), react()],
+  plugins: [stripCrossorigin(), react({ babel: { plugins: ['babel-plugin-react-compiler'] } })],
   base: './',
   server: {
     port: 5173,
@@ -50,8 +50,6 @@ export default defineConfig({
   define: {
     global: 'globalThis',
   },
-  optimizeDeps: {
-    exclude: ['electron']
-  }
+
 })
 

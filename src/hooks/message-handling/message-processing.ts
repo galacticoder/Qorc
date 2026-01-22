@@ -2,7 +2,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { SignalType } from '../../lib/types/signal-types';
 import { Message } from '../../components/chat/messaging/types';
 import { safeJsonParseForMessages, safeJsonParseForFileMessages, createBlobUrlFromBase64 } from '../../lib/utils/message-handler-utils';
-import { toast } from 'sonner';
+import { messageVault } from '../../lib/security/message-vault';
 
 // Process text message and add to state
 export const processTextMessage = async (
@@ -34,21 +34,20 @@ export const processTextMessage = async (
     }
   }
 
-  const directReplyTo = payload.replyTo;
-  if (!payload.replyTo && directReplyTo) {
-    payload.replyTo = directReplyTo;
-  }
-
   let messageExists = false;
   let messageAdded = false;
-  let replyToForSave: { id: string; sender: string; content: string } | undefined;
+  let replyToToStore: { id: string; content: string } | null = null;
+  let replyToForSave: Message['replyTo'] | undefined;
+
+  // Store in vault first
+  await messageVault.store(messageId, messageContent);
 
   setMessages(prev => {
     messageExists = prev.some(msg => msg.id === messageId);
     if (messageExists) return prev;
 
     messageAdded = true;
-    let replyToFilled: { id: string; sender: string; content: string } | undefined;
+    let replyToFilled: Message['replyTo'] | undefined;
 
     if (payload.replyTo && typeof payload.replyTo === 'object' && payload.replyTo.id) {
       let replyContent = payload.replyTo.content || '';
@@ -56,6 +55,8 @@ export const processTextMessage = async (
       if (!replyContent) {
         if (ref?.isDeleted) {
           replyContent = 'Message deleted';
+        } else if (ref?.secureContentId) {
+          replyContent = "[Message]";
         } else if (ref?.content) {
           replyContent = ref.content;
         }
@@ -63,17 +64,23 @@ export const processTextMessage = async (
       if (!replyContent || replyContent.trim().length === 0) {
         replyContent = "Message doesn't exist";
       }
+
+      const replyId = `reply-${payload.replyTo.id}-${messageId}`;
+      replyToToStore = { id: replyId, content: replyContent };
+
       replyToFilled = {
         id: payload.replyTo.id,
         sender: payload.replyTo.sender || (ref?.sender ?? payload.from),
-        content: replyContent
+        content: '',
+        secureContentId: replyId
       };
-      replyToForSave = replyToFilled;
+      replyToForSave = { ...replyToFilled, content: replyContent };
     }
 
     const message: Message = {
       id: messageId,
-      content: messageContent,
+      content: '',
+      secureContentId: messageId,
       sender: payload.from,
       recipient: payload?.to || loginUsername,
       timestamp: new Date(payload.timestamp || Date.now()),
@@ -82,11 +89,17 @@ export const processTextMessage = async (
       p2p: payload.p2p || false,
       encrypted: true,
       version: payload.version || '1.0',
+      fromOriginal: payload.fromOriginal,
       ...(replyToFilled && { replyTo: replyToFilled })
     };
 
     return [...prev, message];
   });
+
+  // Handle reply vault storage outside of setMessages
+  if (replyToToStore) {
+    await messageVault.store(replyToToStore.id, replyToToStore.content);
+  }
 
   if (!messageExists && messageAdded) {
     try {
@@ -102,6 +115,7 @@ export const processTextMessage = async (
         type: SignalType.TEXT,
         isCurrentUser: false,
         version: payload.version || '1.0',
+        fromOriginal: payload.fromOriginal,
         ...(replyToForSave && { replyTo: replyToForSave })
       });
     } catch (dbError) {
@@ -144,6 +158,10 @@ export const processFileMessage = async (
     }
   }
 
+  if (dataBase64) {
+    await messageVault.store(`${messageId}-file`, dataBase64);
+  }
+
   let messageExists = false;
   setMessages(prev => {
     messageExists = prev.some(msg => msg.id === messageId);
@@ -155,7 +173,6 @@ export const processFileMessage = async (
       if (blobUrl) {
         fileContent = blobUrl;
       } else {
-        console.error('[EncryptedMessageHandler] Failed to create blob URL, skipping invalid file');
         messageExists = true;
         return prev;
       }
@@ -172,8 +189,10 @@ export const processFileMessage = async (
       filename: fileName,
       mimeType: fileType,
       fileSize: fileSize,
-      originalBase64Data: dataBase64,
+      originalBase64Data: '',
+      secureContentId: messageId,
       version: payload.version || '1.0',
+      fromOriginal: payload.fromOriginal,
       fileInfo: {
         name: fileName || 'File',
         type: fileType,
@@ -199,6 +218,7 @@ export const processFileMessage = async (
       fileSize: fileSize,
       originalBase64Data: dataBase64,
       version: payload.version || '1.0',
+      fromOriginal: payload.fromOriginal,
       fileInfo: {
         name: fileName || 'File',
         type: fileType,
@@ -216,13 +236,8 @@ export const processFileMessage = async (
         }
         const binary = Uint8Array.from(atob(cleanBase64), char => char.charCodeAt(0));
         const blob = new Blob([binary], { type: fileType || 'application/octet-stream' });
-        const saveResult = await secureDBRef.current.saveFile(messageId, blob);
-        if (!saveResult.success && saveResult.quotaExceeded) {
-          toast.warning('Storage limit reached. This file will not persist after restart.', { duration: 5000 });
-        }
-      } catch (saveErr) {
-        console.error('[EncryptedMessageHandler] Failed to save file to SecureDB:', saveErr);
-      }
+        await secureDBRef.current.saveFile(messageId, blob);
+      } catch { }
     }
   }
 
@@ -240,17 +255,12 @@ export const checkBlockingFilter = async (
     payload.type !== SignalType.TYPING_START && payload.type !== SignalType.TYPING_STOP &&
     payload.type !== SignalType.TYPING_INDICATOR) {
     try {
-      let passphrase = null;
-      if (passphrase) {
-        const shouldFilter = await blockingSystem.filterIncomingMessage({
-          sender: payload.from,
-          content: payload.content || ''
-        }, passphrase);
-        return shouldFilter;
-      }
-    } catch (_error) {
-      console.error('[EncryptedMessageHandler] Error checking blocking filter:', _error);
-    }
+      const shouldFilter = await blockingSystem.filterIncomingMessage({
+        sender: payload.from,
+        content: payload.content || ''
+      }, null);
+      return shouldFilter;
+    } catch { }
   }
   return true;
 };

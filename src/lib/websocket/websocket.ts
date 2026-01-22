@@ -27,6 +27,7 @@ import { WebSocketQueue } from './queue';
 import { WebSocketEncryption } from './encryption';
 import { WebSocketHandshake } from './handshake';
 import { WebSocketMessageHandler } from './message-handler';
+import { websocket, session, storage, events } from '../tauri-bindings';
 
 // WebSocket Connection Manager
 export class WebSocketConnection {
@@ -38,6 +39,10 @@ export class WebSocketConnection {
   private tokenValidationAttempted = false;
   private _username?: string;
   private connectivityWatchdog?: ReturnType<typeof setInterval>;
+  private bridgeReadyPromise: Promise<void>;
+  private connectingPromise: Promise<void> | null = null;
+  private transportEventReceived: boolean = false;
+  private trustTransportUntil: number = 0;
 
   // Connection metrics
   metrics: ConnectionMetrics = {
@@ -61,7 +66,7 @@ export class WebSocketConnection {
   };
 
   private connectionStateCallbacks = new Set<(health: ConnectionHealth) => void>();
-  
+
   // Session key material
   sessionKeyMaterial?: SessionKeyMaterial;
   private previousSessionFingerprint?: string;
@@ -120,7 +125,23 @@ export class WebSocketConnection {
       getQueueLength: () => this.queue.getQueueLength(),
       getTorAdaptedTimeout: (timeout) => this.torIntegration.getAdaptedTimeout(timeout),
       onSessionEstablished: (session, serverSigKey) => this.onSessionEstablished(session, serverSigKey),
-      onHandshakeError: (error) => this.handleConnectionError(error, 'handshake')
+      onHandshakeError: (error) => this.handleConnectionError(error, 'handshake'),
+      isConnected: async () => {
+        const isInternalHealthy = this.lifecycleState !== 'disconnected' && this.lifecycleState !== 'idle' && this.lifecycleState !== SignalType.ERROR;
+        if (!isInternalHealthy) return false;
+
+        const now = Date.now();
+        const isTrusted = now < this.trustTransportUntil;
+
+        try {
+          const state = await websocket.getState();
+          const isHealthy = state.connected || state.connecting || isTrusted;
+          return isHealthy;
+        } catch (err) {
+          console.warn('[WebSocket] Error in isConnected check:', err);
+          return true;
+        }
+      }
     });
 
     this.messageHandler = new WebSocketMessageHandler({
@@ -128,7 +149,34 @@ export class WebSocketConnection {
       handleHeartbeatResponse: (msg) => this.heartbeat.handleResponse(msg)
     });
 
-    void this.initializeSigningKeys();
+    this.bridgeReadyPromise = this.initializeBridge();
+  }
+
+  private async initializeBridge(): Promise<void> {
+    await this.initializeSigningKeys();
+    await this.setupTauriBridge();
+
+    // Check if already connected
+    try {
+      const state = await websocket.getState();
+      if (state.connected && (this.lifecycleState === 'idle' || this.lifecycleState === 'disconnected')) {
+        void this.handleConnectionOpened();
+      }
+    } catch (err) {
+      console.warn('[WebSocket] Failed to check initial state:', err);
+    }
+  }
+
+  // Setup bridge from Tauri events
+  private async setupTauriBridge(): Promise<void> {
+    if (typeof window === 'undefined') return;
+    try {
+      await events.onWsMessage(async (payload) => {
+        await this.handleEdgeServerMessage(payload);
+      });
+    } catch (err) {
+      console.error('[WebSocket] Failed to setup Tauri bridge:', err);
+    }
   }
 
   // Initialize signing keys
@@ -157,113 +205,168 @@ export class WebSocketConnection {
   getUsername(): string | undefined { return this._username; }
 
   // Handle edge server message
-  handleEdgeServerMessage(message: any): boolean {
+  async handleEdgeServerMessage(message: any, isSecure: boolean = false): Promise<boolean> {
+    const now = Date.now();
+    this.metrics.messagesReceived += 1;
+    this.metrics.bytesReceived += typeof message === 'string' ? message.length : JSON.stringify(message).length;
+
     if (!isPlainObject(message) || hasPrototypePollutionKeys(message)) {
+      console.warn('[WebSocket] Malformed message received:', message);
       return false;
     }
 
     const messageType = typeof message.type === 'string' ? message.type : '';
 
+    if (this.trustTransportUntil > now) {
+      void websocket.getState().then(s => { });
+    }
+
+    // Handle handshake signals internally
+    if (messageType === SignalType.SERVER_PUBLIC_KEY) {
+      const hybridKeys = (message as any).hybridKeys;
+      const sid = (message as any).serverId;
+      if (hybridKeys) {
+        this.setServerKeyMaterial(hybridKeys, sid);
+      } else {
+        console.warn('[WebSocket] server-public-key message missing hybridKeys');
+      }
+      this.dispatchToFrontend(message, isSecure);
+      return true;
+    }
+
+    // Handle PQ envelope internally
+    if (messageType === SignalType.PQ_ENVELOPE) {
+      const decrypted = await this.decryptIncomingEnvelope(message);
+      if (decrypted) {
+        return await this.handleEdgeServerMessage(decrypted, true);
+      }
+      return true;
+    }
+
+    if (messageType === SignalType.PQ_HEARTBEAT_PONG) {
+      this.noteHeartbeatPong(message);
+      return true;
+    }
+
     if (messageType === '__ws_connection_closed') {
-      this.resetSessionKeys(false);
+      this.resetSessionKeys(this.isManualClose);
       this.lifecycleState = 'disconnected';
+      this.dispatchToFrontend(message, isSecure);
       return true;
     }
 
     if (messageType === '__ws_connection_error') {
-      SecurityAuditLogger.log(SignalType.ERROR, 'ws-connection-error-from-electron', { error: message.error });
-      this.resetSessionKeys(false);
+      console.error('[WebSocket] Connection error via bridge:', message.error);
+      SecurityAuditLogger.log(SignalType.ERROR, 'ws-connection-error-from', { error: message.error });
+      this.resetSessionKeys(this.isManualClose);
       this.lifecycleState = SignalType.ERROR;
+      this.dispatchToFrontend(message, isSecure);
       return true;
     }
 
     if (messageType === '__ws_connection_opened') {
-      this.handleConnectionOpened();
+      void this.handleConnectionOpened();
+      this.dispatchToFrontend(message, isSecure);
       return true;
     }
 
+    // Pass through to internal handlers (heartbeat, handshake hooks)
     if (messageType === 'pq-heartbeat-pong' || this.messageHandler.hasHandler(messageType)) {
       void this.messageHandler.handleMessage(message);
       return true;
     }
 
+    // Dispatch all other messages to frontend hooks
+    this.dispatchToFrontend(message, isSecure);
     return false;
+  }
+
+  // Dispatch message to frontend hooks via custom event
+  private dispatchToFrontend(message: any, isSecure: boolean = false): void {
+    if (typeof window === 'undefined') return;
+    const eventType = isSecure ? EventType.SECURE_SERVER_MESSAGE : EventType.EDGE_SERVER_MESSAGE;
+    window.dispatchEvent(new CustomEvent(eventType, { detail: message }));
   }
 
   // Handle connection opened
   private handleConnectionOpened(): void {
-    const wasConnectedBefore = this.lifecycleState !== 'idle' || this.sessionKeyMaterial != null;
+    this.transportEventReceived = true;
+    this.trustTransportUntil = Date.now() + 5000;
 
-    if (this.lifecycleState === 'disconnected' || this.lifecycleState === SignalType.ERROR || this.lifecycleState === 'idle') {
-      (async () => {
-        try {
-          const api = (window as any).edgeApi;
-          const pqKeysResult = await api?.getPQSessionKeys?.();
-          if (pqKeysResult?.success && pqKeysResult.keys && this.importSessionKeys(pqKeysResult.keys)) {
-            await api?.clearPQSessionKeys?.();
-            this.heartbeat.start();
-            void this.queue.flush();
-            window.dispatchEvent(new CustomEvent(EventType.WS_RECONNECTED, { detail: { timestamp: Date.now(), restoredFromBackground: true } }));
-            return;
-          }
-        } catch { }
-
-        this.lifecycleState = 'handshaking';
-        this.performHandshake(false)
-          .then(async () => {
-            this.lifecycleState = 'connected';
-            this.heartbeat.start();
-            void this.queue.flush();
-            void blockingSystem.processQueuedMessages();
-            try { await (window as any).edgeApi?.requestPendingMessages?.(); } catch { }
-            if (wasConnectedBefore) {
-              window.dispatchEvent(new CustomEvent(EventType.WS_RECONNECTED, { detail: { timestamp: Date.now() } }));
-            }
-          })
-          .catch((error) => {
-            SecurityAuditLogger.log(SignalType.ERROR, 'ws-reconnect-handshake-failed', { error: error instanceof Error ? error.message : String(error) });
-            this.lifecycleState = SignalType.ERROR;
-          });
-      })();
+    if (this.connectingPromise) {
+      return;
     }
+
+    void this.connect().catch(() => { });
   }
 
   // Connect to WebSocket
   async connect(): Promise<void> {
     if (this.lifecycleState === 'connecting' || this.lifecycleState === 'handshaking') {
+      if (this.connectingPromise) return this.connectingPromise;
+
       if (this.handshake.isInFlight() && this.handshake.getPromise()) {
         try { await this.handshake.getPromise(); } catch { }
       }
       return;
     }
-    if (this.lifecycleState === 'connected') return;
 
-    this.isManualClose = false;
-    this.torIntegration.ensureTorListener();
-
-    if (!this.torIntegration.ensureTorReady()) {
-      throw new Error('Tor network not ready');
+    if (this.lifecycleState === 'connected') {
+      return;
     }
 
-    try {
-      this.lifecycleState = 'connecting';
-      await this.establishConnection();
-    } catch (_error) {
-      if (this.lifecycleState === 'connecting' || this.lifecycleState === 'handshaking') {
-        this.lifecycleState = SignalType.ERROR;
+    if (this.connectingPromise) {
+      return this.connectingPromise;
+    }
+
+    this.connectingPromise = (async () => {
+      this.isManualClose = false;
+      this.torIntegration.ensureTorListener();
+
+      if (!this.torIntegration.ensureTorReady()) {
+        throw new Error('Tor network not ready');
       }
-      this.handleConnectionError(_error as Error, 'connect');
-      throw _error;
-    }
+
+      try {
+        await this.bridgeReadyPromise;
+        const state = await websocket.getState();
+        const hasGhost = this.transportEventReceived || state.connected;
+
+        if (state.connected) {
+          this.transportEventReceived = false;
+          await this.establishConnection({ forceConnect: false });
+        } else if (hasGhost) {
+          this.transportEventReceived = false;
+          this.lifecycleState = 'connecting';
+          await this.establishConnection({ forceConnect: true });
+        } else {
+          this.lifecycleState = 'connecting';
+          await this.establishConnection({ forceConnect: true });
+        }
+      } catch (_error) {
+        if (this.lifecycleState === 'connecting' || this.lifecycleState === 'handshaking') {
+          this.lifecycleState = SignalType.ERROR;
+        }
+        this.handleConnectionError(_error as Error, 'connect');
+        throw _error;
+      } finally {
+        this.connectingPromise = null;
+      }
+    })();
+
+    return this.connectingPromise;
   }
 
-  // Establish WebSocket connection
-  private async establishConnection(): Promise<void> {
-    const edgeApi = (window as any).edgeApi as { wsConnect?: () => Promise<any> } | undefined;
-    if (!edgeApi?.wsConnect) throw new Error('edgeApi.wsConnect not available');
+  private async establishConnection(options: { forceConnect?: boolean } = {}): Promise<void> {
+    const { forceConnect = true } = options;
 
-    const result = await edgeApi.wsConnect();
-    if (result?.success === false) throw new Error(result.error || 'Failed to establish WebSocket connection');
+    if (forceConnect) {
+      const state = await websocket.getState();
+      if (!state.connected) {
+        const result = await websocket.connect();
+        if (result?.success === false) throw new Error(result.error || 'Failed to establish WebSocket connection');
+      }
+    }
 
     this.lifecycleState = 'handshaking';
     this.metrics.lastConnectedAt = Date.now();
@@ -271,7 +374,27 @@ export class WebSocketConnection {
     this.reconnectAttempts = 0;
     this.reconnectDelayMs = INITIAL_RECONNECT_DELAY_MS;
 
-    await this.performHandshake(false);
+    await this.bridgeReadyPromise;
+
+    // Try to restore session if available
+    let restored = false;
+    try {
+      const pqKeys = await session.getPQKeys('current');
+      if (pqKeys && this.importSessionKeys({
+        sessionId: pqKeys.session_id,
+        sendKey: pqKeys.aes_key,
+        recvKey: pqKeys.mac_key,
+        fingerprint: '',
+        establishedAt: pqKeys.created_at
+      })) {
+        await session.deletePQKeys('current');
+        restored = true;
+      }
+    } catch { }
+
+    if (!restored) {
+      await this.performHandshake(false);
+    }
 
     this.lifecycleState = 'connected';
 
@@ -320,7 +443,7 @@ export class WebSocketConnection {
     SecurityAuditLogger.log(SignalType.ERROR, `ws-${stage}-failure`, { message: error.message });
     this.metrics.lastFailureAt = Date.now();
     this.lifecycleState = SignalType.ERROR;
-    this.resetSessionKeys(false);
+    this.resetSessionKeys(this.isManualClose);
     if (!this.isManualClose) this.attemptReconnect();
   }
 
@@ -365,7 +488,9 @@ export class WebSocketConnection {
 
   // Send data
   send(data: unknown): void {
-    void this.dispatchPayload(data, true).catch(() => {});
+    void this.dispatchPayload(data, true).catch((err) => {
+      console.error('[WebSocket] Send failed:', err);
+    });
   }
 
   // Dispatch payload
@@ -442,12 +567,25 @@ export class WebSocketConnection {
     await this.transmit(JSON.stringify({ type: 'pq-heartbeat-ping', timestamp: Date.now(), sessionId: this.sessionKeyMaterial?.sessionId }));
   }
 
-  // Transmit message
-  async transmit(message: string): Promise<void> {
-    const edgeApi = (window as any).edgeApi as { wsSend?: (payload: string) => Promise<any> } | undefined;
-    if (!edgeApi?.wsSend) throw new Error('edgeApi.wsSend not available');
-    const result = await edgeApi.wsSend(message);
-    if (result?.success === false) throw new Error(result.error || 'Failed to dispatch websocket payload');
+  // Transmit message with local retry for transient queuing failures
+  async transmit(message: string, retryCount = 0): Promise<void> {
+    try {
+      const result = await websocket.send(message);
+      if (result?.success === false) {
+        const error = result.error || 'Unknown error';
+        if (error.includes('Failed to queue message') && retryCount < 5) {
+          await new Promise(resolve => setTimeout(resolve, 300 * (retryCount + 1)));
+          return this.transmit(message, retryCount + 1);
+        }
+        throw new Error(error);
+      }
+    } catch (err: any) {
+      if (err.message?.includes('Failed to queue message') && retryCount < 5) {
+        await new Promise(resolve => setTimeout(resolve, 300 * (retryCount + 1)));
+        return this.transmit(message, retryCount + 1);
+      }
+      throw err;
+    }
   }
 
   // Set global rate limit
@@ -459,27 +597,24 @@ export class WebSocketConnection {
 
   // Check if globally rate limited
   isGloballyRateLimited(): boolean { return Date.now() < this.globalRateLimitUntil; }
-  
+
   // Register message handler
   registerMessageHandler(type: string, handler: MessageHandler): void { this.messageHandler.registerHandler(type, handler); }
-  
+
   // Unregister message handler
   unregisterMessageHandler(type: string): void { this.messageHandler.unregisterHandler(type); }
-  
+
   // Note heartbeat pong
   noteHeartbeatPong(message: any): void { this.heartbeat.handleResponse(message); }
 
   // Attempt token validation once
-  async attemptTokenValidationOnce(source: string = 'auto'): Promise<void> {
-    if (this.tokenValidationAttempted) return;
+  async attemptTokenValidationOnce(source: string = 'auto', force: boolean = false): Promise<void> {
+    if (this.tokenValidationAttempted && !force) return;
     this.tokenValidationAttempted = true;
 
     try {
-      const api = (window as any).electronAPI;
-      if (!api?.secureStore) return;
-      try { await api.secureStore.init?.(); } catch { }
-      const inst = api?.instanceId ? String(api.instanceId) : '1';
-      const raw = await api.secureStore.get?.(`tok:${inst}`);
+      await storage.init();
+      const raw = await storage.get('tok:1');
       if (!raw || typeof raw !== 'string') return;
       let parsed: any;
       try { parsed = JSON.parse(raw); } catch { return; }
@@ -492,24 +627,29 @@ export class WebSocketConnection {
   }
 
   // Close connection
-  close(): void {
+  async close(): Promise<void> {
     this.isManualClose = true;
     this.lifecycleState = 'idle';
     this.messageHandler.clearHandlers();
     this.globalRateLimitUntil = 0;
     this.queue.clear();
-    this.clearSession();
+    this.resetSessionKeys(true);
     this.stopConnectivityWatchdog();
     this.heartbeat.stop();
     this.torIntegration.cleanup();
     this.rateLimiter.reset();
     this.circuitBreaker.fullReset();
     this.connectionStateCallbacks.clear();
+    this.handshake.reset();
+
+    try {
+      await websocket.disconnect().catch(() => { });
+    } catch { }
   }
 
   // Check if connected to server
   isConnectedToServer(): boolean { return this.lifecycleState === 'connected'; }
-  
+
   // Check if PQ session established
   isPQSessionEstablished(): boolean { return !!this.sessionKeyMaterial; }
 
@@ -565,7 +705,9 @@ export class WebSocketConnection {
       const x25519PublicKey = hybridKeys.x25519PublicBase64 ? PostQuantumUtils.base64ToUint8Array(hybridKeys.x25519PublicBase64) : undefined;
       const fingerprint = this.handshake.computeServerFingerprint({ kyber: hybridKeys.kyberPublicBase64, dilithium: hybridKeys.dilithiumPublicBase64 || '', x25519: hybridKeys.x25519PublicBase64 || '' });
       this.handshake.setServerKeyMaterial({ kyberPublicKey, dilithiumPublicKey, x25519PublicKey, fingerprint, serverId });
-    } catch { }
+    } catch (err) {
+      console.error('[WebSocket] setServerKeyMaterial failed:', err);
+    }
   }
 
   // On connection state change
@@ -599,7 +741,7 @@ export class WebSocketConnection {
 
   // Decrypt incoming envelope
   async decryptIncomingEnvelope(envelope: any): Promise<any | null> { return this.encryption.decryptEnvelope(envelope); }
-  
+
   // Flush pending queue
   async flushPendingQueue(): Promise<void> { return this.queue.flush(); }
 }

@@ -23,6 +23,7 @@ export interface UseUnifiedUsernameDisplayProps {
   username: string;
   getDisplayUsername?: (username: string) => Promise<string>;
   fallbackToOriginal?: boolean;
+  originalUsername?: string;
   resolveTimeoutMs?: number;
 }
 

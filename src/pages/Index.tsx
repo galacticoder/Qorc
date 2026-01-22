@@ -5,6 +5,7 @@ import { Login } from "../components/chat/Login";
 import { User } from "../components/chat/messaging/UserList";
 import { ConversationList } from "../components/chat/messaging/ConversationList";
 import { ChatInterface } from "../components/chat/messaging/ChatInterface";
+import { EmptyChatView } from "../components/chat/messaging/EmptyChatView";
 import { AppSettings } from "../components/settings/AppSettings";
 import { Layout } from "../components/ui/Layout";
 import { CallLogs } from "../components/chat/calls/CallLogs";
@@ -30,10 +31,10 @@ import { TypingIndicatorProvider } from "../contexts/TypingIndicatorContext";
 import { ConnectSetup } from "../components/setup/ConnectSetup";
 import { SignalType } from "../lib/types/signal-types";
 import { retrieveAuthTokens } from "../lib/signals/signals";
-import { syncEncryptedStorage } from "../lib/database/encrypted-storage";
 import { SecurityAuditLogger } from "../lib/cryptography/audit-logger";
 import { PostQuantumUtils } from "../lib/utils/pq-utils";
 import { unifiedSignalTransport } from "../lib/transport/unified-signal-transport";
+import { websocket, isTauri, session, storage, tray } from "../lib/tauri-bindings";
 
 import {
   LOCAL_EVENT_RATE_LIMIT_WINDOW_MS,
@@ -87,6 +88,15 @@ const ChatApp: React.FC = () => {
     if (resumeSetupComplete) setSetupComplete(true);
   }, [resumeServerUrl, resumeSetupComplete]);
 
+  // Clear tray unread badge when window gains focus
+  useEffect(() => {
+    const handleFocus = () => {
+      tray.clearUnread().catch(() => { });
+    };
+    window.addEventListener('focus', handleFocus);
+    return () => window.removeEventListener('focus', handleFocus);
+  }, []);
+
   const Database = useSecureDB({
     Authentication,
     setMessages,
@@ -98,6 +108,19 @@ const ChatApp: React.FC = () => {
   useEffect(() => {
     usersRef.current = Database.users;
   }, [Database.users]);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const savedUrl = await websocket.getServerUrl();
+        if (savedUrl) {
+          setSelectedServerUrl(savedUrl);
+        }
+      } catch (err) {
+        console.error('[Index] Failed to load initial server URL:', err);
+      }
+    })();
+  }, []);
 
   useEffect(() => {
     try {
@@ -135,7 +158,7 @@ const ChatApp: React.FC = () => {
   const messageSender = useMessageSender(
     Database.users,
     Authentication.loginUsernameRef,
-    Authentication.username || Authentication.loginUsernameRef.current || '',
+    Authentication.pseudonym || Authentication.loginUsernameRef.current || '',
     Authentication.originalUsernameRef,
     (message: Message) => {
       setMessages(prev => (prev.some(m => m.id === message.id) ? prev : [...prev, message]));
@@ -219,7 +242,7 @@ const ChatApp: React.FC = () => {
     selectConversation,
     removeConversation,
     getConversationMessages,
-  } = useConversations(Authentication.username || Authentication.loginUsernameRef.current || '', Database.users, messages, Database.secureDBRef.current);
+  } = useConversations(Authentication.pseudonym || Authentication.loginUsernameRef.current || '', Database.users, messages, Database.secureDBRef.current);
 
   useEffect(() => {
     if (selectedConversation && typeof messageSender?.prefetchSessionForPeer === 'function') {
@@ -229,7 +252,7 @@ const ChatApp: React.FC = () => {
 
   const usernameDisplay = useUsernameDisplay(
     Database.secureDBRef.current,
-    Authentication.originalUsernameRef.current
+    Authentication.username
   );
 
   const getDisplayUsernameRef = useRef(usernameDisplay.getDisplayUsername);
@@ -298,16 +321,19 @@ const ChatApp: React.FC = () => {
     }
   );
 
-  // Update P2P sender whenever sendP2PMessage changes or service becomes ready
+  // Update P2P sender whenever service becomes ready
   useEffect(() => {
-    if (p2pMessaging.sendP2PMessage && p2pServiceRef.current && p2pMessaging.p2pStatus.isInitialized) {
+    if (p2pServiceRef.current && p2pMessaging.p2pStatus.isInitialized) {
       unifiedSignalTransport.setP2PSender(async (to, payload, type) => {
-        await p2pMessaging.sendP2PMessage(to, payload, undefined, { messageType: type as any });
+        if (p2pServiceRef.current) {
+          const mId = (payload && typeof payload === 'object') ? (payload.messageId || payload.id) : undefined;
+          await p2pServiceRef.current.sendMessage(to, payload, type as any, mId);
+        }
       });
     } else {
       unifiedSignalTransport.setP2PSender(null as any);
     }
-  }, [p2pMessaging.sendP2PMessage, p2pMessaging.p2pStatus.isInitialized]);
+  }, [p2pMessaging.p2pStatus.isInitialized]);
 
   const getOrCreateUser = useCallback((username: string): User => {
     let targetUser = Database.users.find(user => user.username === username);
@@ -378,6 +404,7 @@ const ChatApp: React.FC = () => {
     selectedServerUrl,
     p2pHybridKeys,
     selectedConversation,
+    conversations,
     p2pMessaging,
   });
 
@@ -399,6 +426,8 @@ const ChatApp: React.FC = () => {
     loginUsernameRef: Authentication.loginUsernameRef,
     getPeerHybridKeys,
     users: Database.users,
+    getKeysOnDemand: Authentication.getKeysOnDemand,
+    secureDBRef: Database.secureDBRef,
   });
 
   // Message actions
@@ -483,7 +512,7 @@ const ChatApp: React.FC = () => {
 
   const handleConnectSetupComplete = async (serverUrl: string) => {
     try {
-      const storedUsername = syncEncryptedStorage.getItem('last_authenticated_username');
+      const storedUsername = await storage.get('last_authenticated_username');
       const tokens = await retrieveAuthTokens();
       const hasExistingSession = !!(storedUsername || (tokens?.accessToken && tokens?.refreshToken));
 
@@ -492,7 +521,7 @@ const ChatApp: React.FC = () => {
       }
 
       setSelectedServerUrl(serverUrl);
-      await (window as any).edgeApi?.wsConnect?.();
+      await websocketClient.connect();
       setSetupComplete(true);
     } catch (_error) {
       SecurityAuditLogger.log(SignalType.ERROR, 'connect-setup-failed', { error: _error instanceof Error ? _error.message : 'unknown' });
@@ -514,7 +543,11 @@ const ChatApp: React.FC = () => {
       try {
         const to = (event as any).detail?.to as 'server' | undefined;
         if (to === 'server') {
-          try { await (window as any).electronAPI?.wsDisconnect?.(); } catch { }
+          try {
+            if (isTauri()) {
+              await websocket.disconnect();
+            }
+          } catch { }
           setSelectedServerUrl('');
           setSetupComplete(false);
         }
@@ -547,7 +580,7 @@ const ChatApp: React.FC = () => {
     );
   }
 
-  const isFullyAuthenticated = Authentication.isLoggedIn && Authentication.accountAuthenticated;
+  const isFullyAuthenticated = Authentication.isLoggedIn && Authentication.accountAuthenticated && !Authentication.showPassphrasePrompt && !Authentication.showPasswordPrompt;
   const showValidationScreen = Authentication.tokenValidationInProgress && !isFullyAuthenticated;
   const showLoginScreen = !showValidationScreen && (
     !Authentication.isLoggedIn ||
@@ -576,6 +609,7 @@ const ChatApp: React.FC = () => {
           onPasswordHashSubmit={Authentication.handlePasswordHashSubmit}
           accountAuthenticated={Authentication.accountAuthenticated}
           isRegistrationMode={Authentication.isRegistrationMode}
+          setIsRegistrationMode={Authentication.setIsRegistrationMode}
           serverTrustRequest={Authentication.serverTrustRequest}
           onAcceptServerTrust={Authentication.acceptServerTrust}
           onRejectServerTrust={Authentication.rejectServerTrust}
@@ -725,14 +759,7 @@ const ChatApp: React.FC = () => {
                     />
                   </EmojiPickerProvider>
                 ) : (
-                  <div className="flex-1 flex items-center justify-center text-muted-foreground">
-                    <div className="text-center">
-                      <div className="w-12 h-12 mx-auto mb-4 opacity-20 bg-gray-400 rounded-full flex items-center justify-center">
-                        <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a 2 2 0 0 1 2 -2h14a2 2 0 0 1 2 2z" /></svg>
-                      </div>
-                      <p className="select-none">Select a conversation to start chatting</p>
-                    </div>
-                  </div>
+                  <EmptyChatView onCreateChat={() => setShowNewChatInput(true)} />
                 )}
               </div>
             </div>

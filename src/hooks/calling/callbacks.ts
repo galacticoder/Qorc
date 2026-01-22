@@ -3,6 +3,7 @@ import { unstable_batchedUpdates } from 'react-dom';
 import { SecureCallingService, CallState } from '../../lib/transport/secure-calling-service';
 import { EventType } from '../../lib/types/event-types';
 import { stopMediaStream, EventDebouncer } from '../../lib/utils/calling-utils';
+import { power } from '../../lib/tauri-bindings';
 
 export interface CallbackRefs {
   localStreamRef: React.RefObject<MediaStream | null>;
@@ -59,7 +60,7 @@ export const setupCallStateChangeCallback = (
     const wasConnected = refs.everConnectedRef.current.has(call.id);
 
     if (call.status === 'connecting') {
-      try { (window as any).edgeApi?.powerSaveBlockerStart?.(); } catch { }
+      power.start().catch(() => { });
       refs.eventDebouncer.current.enqueue(EventType.UI_CALL_LOG, {
         type: 'started',
         peer: call.peer,
@@ -70,7 +71,7 @@ export const setupCallStateChangeCallback = (
       });
     } else if (call.status === 'connected') {
       try { refs.everConnectedRef.current.add(call.id); } catch { }
-      try { (window as any).edgeApi?.powerSaveBlockerStart?.(); } catch { }
+      power.start().catch(() => { });
       refs.eventDebouncer.current.enqueue(EventType.UI_CALL_LOG, {
         type: 'connected',
         peer: call.peer,
@@ -82,7 +83,7 @@ export const setupCallStateChangeCallback = (
     }
 
     if (call.status === 'ended' || call.status === 'declined' || call.status === 'missed') {
-      try { (window as any).edgeApi?.powerSaveBlockerStop?.(); } catch { }
+      power.stop(0).catch(() => { });
 
       if (call.status === 'ended') {
         if (!wasConnected) {

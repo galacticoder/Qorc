@@ -1,10 +1,10 @@
-import React, { useRef, useEffect, useCallback, useState } from 'react';
+import { useRef, useEffect, useCallback, useState } from 'react';
 import { SecureDB } from '../../lib/database/secureDB';
 import type { Message } from '../../components/chat/messaging/types';
 import type { User } from '../../components/chat/messaging/UserList';
 import { EventType } from '../../lib/types/event-types';
 import { DB_SAVE_DEBOUNCE_MS } from '../../lib/constants';
-import { prewarmUsernameCache } from '../../lib/utils/database-utils';
+import { prewarmUsernameCache, mergeReceipts } from '../../lib/utils/database-utils';
 import type { UseSecureDBProps, UseSecureDBReturn, MappingPayload, RateLimitBucket } from '../../lib/types/database-types';
 import {
   isValidCryptoKey,
@@ -203,7 +203,7 @@ export const useSecureDB = ({ Authentication, setMessages }: UseSecureDBProps): 
   // Flush pending mappings
   useEffect(() => {
     if (!dbInitialized || !secureDBRef.current || pendingMappingsRef.current.length === 0) return;
-    
+
     const toFlush = [...pendingMappingsRef.current];
     pendingMappingsRef.current = [];
     flushPendingMappings(secureDBRef.current, toFlush);
@@ -346,7 +346,10 @@ export const useSecureDB = ({ Authentication, setMessages }: UseSecureDBProps): 
         for (const [msgId, pendingMsg] of pendingSaveMessagesRef.current.entries()) {
           const idx = msgs.findIndex((m: Message) => m.id === msgId);
           if (idx !== -1) {
-            msgs[idx] = pendingMsg;
+            msgs[idx] = {
+              ...pendingMsg,
+              receipt: mergeReceipts(msgs[idx].receipt, pendingMsg.receipt)
+            };
           } else {
             msgs.push(pendingMsg);
           }
@@ -356,7 +359,10 @@ export const useSecureDB = ({ Authentication, setMessages }: UseSecureDBProps): 
         for (const pendingMsg of pendingMessagesRef.current) {
           const idx = msgs.findIndex((m: Message) => m.id === pendingMsg.id);
           if (idx !== -1) {
-            msgs[idx] = pendingMsg;
+            msgs[idx] = {
+              ...pendingMsg,
+              receipt: mergeReceipts(msgs[idx].receipt, pendingMsg.receipt)
+            };
           } else {
             msgs.push(pendingMsg);
           }

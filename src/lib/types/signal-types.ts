@@ -46,6 +46,7 @@ export enum SignalType {
 
   // Encryption and Security
   ENCRYPTED_MESSAGE = 'encrypted-message',
+  P2P_ENCRYPTED_MESSAGE = 'p2p-encrypted-message',
   PUBLICKEYS = 'public-keys',
   SERVER_PUBLIC_KEY = 'server-public-key',
   REQUEST_SERVER_PUBLIC_KEY = 'request-server-public-key',
@@ -129,5 +130,6 @@ export enum SignalType {
   AVATAR_UPLOAD = 'avatar-upload',
   AVATAR_UPLOAD_RESPONSE = 'avatar-upload-response',
   AVATAR_FETCH = 'avatar-fetch',
-  AVATAR_FETCH_RESPONSE = 'avatar-fetch-response'
+  AVATAR_FETCH_RESPONSE = 'avatar-fetch-response',
+  KEY_CHUNK = 'KEY_CHUNK',
 }

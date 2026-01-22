@@ -31,8 +31,10 @@ class UnifiedSignalTransport {
         type: SignalType,
         options?: { fallbackEnvelope?: any }
     ): Promise<{ success: boolean; transport: 'p2p' | 'server'; error?: string }> {
-        // Try P2P if connected
-        if (quicTransport.isConnected(to)) {
+        // Check for active or pending connection to allow P2P queuing
+        const isQuicConnected = quicTransport.hasActiveConnection(to);
+
+        if (isQuicConnected) {
             try {
                 let attempts = 0;
                 const maxAttempts = 2;
@@ -43,6 +45,12 @@ class UnifiedSignalTransport {
 
                         if (this.p2pEncryptionProvider) {
                             payloadToSend = await this.p2pEncryptionProvider(to, payload, type);
+                            if (payloadToSend === null) {
+                                throw new Error('P2P encryption failed or skipped');
+                            }
+                            if (payloadToSend && typeof payloadToSend === 'object' && 'routing' in payloadToSend && 'kemCiphertext' in payloadToSend) {
+                                (type as any) = SignalType.P2P_ENCRYPTED_MESSAGE;
+                            }
                         }
 
                         if (this.p2pSender) {
@@ -54,10 +62,14 @@ class UnifiedSignalTransport {
                         return { success: true, transport: 'p2p' };
                     } catch (p2pErr: any) {
                         const msg = p2pErr?.message || String(p2pErr);
-                        if (msg.includes('Not connected') || msg.includes('no P2P session')) {
+                        if (msg.includes('Not connected') ||
+                            msg.includes('no P2P session') ||
+                            msg.includes('is not connected') ||
+                            msg.includes('failed') ||
+                            msg.includes('disconnected')) {
                             break;
                         }
-                        if (attempts < maxAttempts) await new Promise(r => setTimeout(r, 100));
+                        if (attempts < maxAttempts) await new Promise(r => setTimeout(r, 200));
                     }
                 }
             } catch (err) {

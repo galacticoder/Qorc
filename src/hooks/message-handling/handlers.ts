@@ -2,8 +2,9 @@ import { EventType } from '../../lib/types/event-types';
 import { SignalType } from '../../lib/types/signal-types';
 import { CryptoUtils } from '../../lib/utils/crypto-utils';
 import { safeJsonParse } from '../../lib/utils/message-handler-utils';
-import { sanitizeTextInput } from '../../lib/sanitizers';
 import type { Message } from '../../components/chat/messaging/types';
+import { notifications, tray } from '../../lib/tauri-bindings';
+import { messageVault } from '../../lib/security/message-vault';
 
 // Dispatch read receipt event
 export const dispatchReadReceiptEvent = (messageId: string, from: string): void => {
@@ -110,13 +111,18 @@ export const handleMessageEdit = async (
 ): Promise<void> => {
   const messageIdToEdit = payload.messageId;
   const newContent = payload.content;
-  if (!messageIdToEdit || !newContent) return;
+  await messageVault.store(messageIdToEdit, newContent);
 
   let messageToPersist: Message | null = null;
   setMessages(prev => {
     const updatedMessages = prev.map(msg => {
       if (msg.id === messageIdToEdit) {
-        const updated = { ...msg, content: newContent, isEdited: true } as Message;
+        const updated = {
+          ...msg,
+          content: '',
+          secureContentId: messageIdToEdit,
+          isEdited: true
+        } as Message;
         messageToPersist = updated;
         return updated;
       }
@@ -126,7 +132,7 @@ export const handleMessageEdit = async (
   });
 
   if (messageToPersist) {
-    try { await saveMessageToLocalDB(messageToPersist); } catch { }
+    try { await saveMessageToLocalDB({ ...messageToPersist, content: newContent }); } catch { }
   }
 
   try {
@@ -179,7 +185,7 @@ export const handleReaction = (
   }));
 };
 
-// Show notification when window is unfocused
+// Show notification when window is unfocused or hidden
 export const showNotification = (
   payload: { from: string; type?: string; content?: string; fileName?: string },
   loginUsername: string,
@@ -189,23 +195,24 @@ export const showNotification = (
   if (payload.from === loginUsername) return;
 
   try {
+    // Check if window is hidden or unfocused
+    const isHidden = document.hidden;
     const isFocused = document.hasFocus();
-    if (!isFocused && (window as any).electronAPI?.showNotification) {
+    const shouldNotify = isHidden || !isFocused;
+
+    if (shouldNotify) {
       const senderName = payload.from || 'Someone';
       const title = isCallSignal ? 'Incoming Call' : (isFileMessage ? 'New File' : 'New Message');
-      const preview = sanitizeTextInput(payload.content || '', { maxLength: 50, allowNewlines: false });
       const body = isCallSignal
         ? `${senderName} is calling you`
         : isFileMessage
-          ? `${senderName} sent a file: ${payload.fileName}`
-          : `${senderName}: ${preview}`;
+          ? `${senderName} sent you a file`
+          : `${senderName} sent you a message`;
 
-      (window as any).electronAPI.showNotification({
-        title,
-        body,
-        silent: false,
-        data: { from: payload.from, type: isCallSignal ? 'call' : SignalType.MESSAGE }
-      }).catch((e: Error) => console.error('[EncryptedMessageHandler] Notification failed:', e));
+      notifications.show(title, body).catch((e: Error) => console.error('[EncryptedMessageHandler] Notification failed:', e));
+
+      tray.incrementUnread().catch(() => { });
+    } else {
     }
   } catch (e) {
     console.error('[EncryptedMessageHandler] Notification error:', e);

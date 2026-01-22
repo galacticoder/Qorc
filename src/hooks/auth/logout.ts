@@ -7,6 +7,9 @@ import { SecureDB } from "../../lib/database/secureDB";
 import { SecureKeyManager } from "../../lib/database/secure-key-manager";
 import { secureWipeStringRef } from "../../lib/utils/auth-utils";
 import type { HybridKeys } from "../../lib/types/auth-types";
+import { storage, session } from "../../lib/tauri-bindings";
+import { messageVault } from "../../lib/security/message-vault";
+import { removeVaultKey, removeWrappedMasterKey } from "../../lib/cryptography/vault-key";
 
 export interface LogoutRefs {
   loginUsernameRef: RefObject<string>;
@@ -25,12 +28,13 @@ export interface LogoutSetters {
   setIsRegistrationMode: (v: boolean) => void;
   setIsSubmittingAuth: (v: boolean) => void;
   setUsername: (v: string) => void;
+  setTokenValidationInProgress: (v: boolean) => void;
 }
 
 export const createLogout = (
   refs: LogoutRefs,
   setters: LogoutSetters,
-  clearAuthenticationState: () => void
+  clearAuthenticationState: () => Promise<void>
 ) => {
   return async (secureDBRef?: RefObject<SecureDB | null>, loginErrorMessage: string = "") => {
     try {
@@ -43,11 +47,21 @@ export const createLogout = (
           }
         } catch { }
       }
-      try { websocketClient.close(); } catch { }
+      try { await websocketClient.close(); } catch { }
     } catch { }
 
-    clearAuthenticationState();
-    clearTokenEncryptionKey();
+    try {
+      setters.setTokenValidationInProgress(false);
+    } catch { }
+
+    // Clear background state definitively to prevent automatic resume on next launch
+    try {
+      await session.setBackgroundState(false);
+    } catch { }
+
+    await clearAuthenticationState();
+    await clearTokenEncryptionKey();
+    messageVault.clear();
 
     try {
       secureWipeStringRef(refs.passwordRef as any);
@@ -67,16 +81,28 @@ export const createLogout = (
 
     try {
       const pseudonym = refs.loginUsernameRef.current || '';
-      if (pseudonym && (window as any).electronAPI?.secureStore) {
-        await (window as any).electronAPI.secureStore.init();
-        try { await (window as any).electronAPI.secureStore.remove(`aes:${pseudonym}`); } catch { }
-        try { await (window as any).electronAPI.secureStore.remove(`pph:${pseudonym}`); } catch { }
-        try { await (window as any).electronAPI.secureStore.remove(`tok:${(window as any).electronAPI?.instanceId || '1'}`); } catch { }
+      if (pseudonym) {
+        // Detailed cleanup of user-specific cryptographic material and tokens
+        await storage.init();
+        await Promise.allSettled([
+          removeVaultKey(pseudonym),
+          removeWrappedMasterKey(pseudonym),
+          refs.keyManagerRef.current?.deleteDatabase() || Promise.resolve(),
+          storage.remove(`key_meta:${pseudonym}`),
+          storage.remove(`key_bundle:${pseudonym}`),
+          storage.remove('tok:1'), // Final redundant safety purge
+          storage.remove('last_authenticated_username'),
+          storage.remove('last_authenticated_display_name'),
+          storage.remove('bg_session_active'),
+          storage.remove('bg_session_last_activity'),
+          storage.remove('bg_session_pending')
+        ]);
       }
     } catch { }
 
     try {
-      syncEncryptedStorage.removeItem('qorchat_server_pin_v2');
+      await syncEncryptedStorage.removeItem('qorchat_server_pin_v2');
+      await syncEncryptedStorage.removeItem('last_authenticated_username');
     } catch { }
 
     if (refs.keyManagerRef.current) {

@@ -2,7 +2,7 @@ import { RefObject } from "react";
 import { SignalType } from "../../lib/types/signal-types";
 import { EventType } from "../../lib/types/event-types";
 import websocketClient from "../../lib/websocket/websocket";
-import { syncEncryptedStorage } from "../../lib/database/encrypted-storage";
+import { storage } from "../../lib/tauri-bindings";
 import { SecureDB } from "../../lib/database/secureDB";
 
 export interface RecoveryRefs {
@@ -12,6 +12,7 @@ export interface RecoveryRefs {
 
 export interface RecoverySetters {
   setUsername: (v: string) => void;
+  setPseudonym: (v: string) => void;
   setAuthStatus: (v: string) => void;
   setTokenValidationInProgress: (v: boolean) => void;
 }
@@ -23,7 +24,19 @@ export const createAttemptAuthRecovery = (
   isLoggedIn: boolean
 ) => {
   return async (): Promise<boolean> => {
-    const storedUsername = refs.loginUsernameRef.current || syncEncryptedStorage.getItem('last_authenticated_username');
+    // Attempt to recover username from global storage
+    let storedUsername = refs.loginUsernameRef.current;
+    let storedDisplayName = refs.originalUsernameRef.current;
+
+    if (!storedUsername || !storedDisplayName) {
+      try {
+        const recoveringUsername = await storage.get('last_authenticated_username');
+        const recoveringDisplayName = await storage.get('last_authenticated_display_name');
+
+        if (!storedUsername) storedUsername = recoveringUsername;
+        if (!storedDisplayName) storedDisplayName = recoveringDisplayName || storedUsername;
+      } catch (err) { }
+    }
 
     if (!storedUsername) {
       return false;
@@ -41,8 +54,14 @@ export const createAttemptAuthRecovery = (
       }
 
       refs.loginUsernameRef.current = storedUsername;
-      try { refs.originalUsernameRef.current = storedUsername; } catch { }
-      setters.setUsername(storedUsername);
+      if (storedDisplayName) {
+        refs.originalUsernameRef.current = storedDisplayName;
+        setters.setUsername(storedDisplayName);
+        setters.setPseudonym(storedUsername);
+      } else {
+        setters.setUsername(storedUsername);
+        setters.setPseudonym(storedUsername);
+      }
 
       websocketClient.send(JSON.stringify({
         type: SignalType.AUTH_RECOVERY,
@@ -61,18 +80,34 @@ export const createAttemptAuthRecovery = (
 };
 
 export const createStoreAuthenticationState = () => {
-  return (username: string) => {
+  return async (username: string, originalUsername?: string) => {
     try {
-      syncEncryptedStorage.setItem('last_authenticated_username', username);
-    } catch { }
+      await storage.init();
+      await storage.set('last_authenticated_username', username);
+      if (originalUsername) {
+        await storage.set('last_authenticated_display_name', originalUsername);
+      }
+    } catch (err) {
+      console.error('[Recovery] Failed to store authentication state:', err);
+    }
   };
 };
 
 export const createClearAuthenticationState = () => {
-  return () => {
+  return async () => {
     try {
-      syncEncryptedStorage.removeItem('last_authenticated_username');
-    } catch { }
+      await storage.init();
+      await Promise.allSettled([
+        storage.remove('last_authenticated_username'),
+        storage.remove('last_authenticated_display_name'),
+        storage.remove('tok:1'),
+        storage.remove('bg_session_active'),
+        storage.remove('bg_session_last_activity'),
+        storage.remove('bg_session_pending')
+      ]);
+    } catch (err) {
+      console.error('[Recovery] Failed to clear authentication state:', err);
+    }
   };
 };
 

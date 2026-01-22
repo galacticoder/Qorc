@@ -4,6 +4,8 @@
 
 import { EventType } from '../types/event-types';
 import { SignalType } from '../types/signal-types';
+import { p2p, events, isTauri } from '../tauri-bindings';
+import { UnlistenFn } from '@tauri-apps/api/event';
 import { PostQuantumRandom } from '../cryptography/random';
 import { PostQuantumUtils } from '../utils/pq-utils';
 import { PQNoiseSession } from './pq-noise-session';
@@ -30,7 +32,8 @@ import {
     QUIC_MAX_STREAMS_PER_CONNECTION,
     QUIC_RECONNECT_BACKOFF_BASE_MS,
     QUIC_MAX_RECONNECT_ATTEMPTS,
-    QUIC_BUFFER_LOW_THRESHOLD
+    QUIC_BUFFER_LOW_THRESHOLD,
+    BASE64_STANDARD_REGEX
 } from '../constants';
 
 class QuicStream implements SecureStream {
@@ -210,11 +213,17 @@ class QuicConnection implements SecureConnection {
 
     // Keepalive
     private keepaliveTimer: ReturnType<typeof setInterval> | null = null;
-    private _pendingHandshakeToRespond: any = null;
+    private tauriUnlisten: UnlistenFn | null = null;
+    private _bridgeHandshakeResolve: ((data: any) => void) | null = null;
+    private _bridgeHandshakeReject: ((err: any) => void) | null = null;
     private _isResponderPending: boolean = false;
+    private _pendingHandshakeToRespond: any = null;
     private connectPromise: Promise<void> | null = null;
-    private role: 'initiator' | 'responder' | 'auto' = 'auto';
+    public role: 'initiator' | 'responder' | 'auto' = 'auto';
     private collisionDetected: boolean = false;
+
+    private processedFrameHashes: Set<string> = new Set();
+    private readonly FRAME_DEDUP_EXPIRY_MS = 5000;
 
     constructor(
         peerId: string,
@@ -233,13 +242,15 @@ class QuicConnection implements SecureConnection {
     }
 
     public getEffectiveRole(): 'initiator' | 'responder' {
-        // If no collision occurred we are initiator
-        if (this.role !== 'auto') return this.role;
-        if (!this.collisionDetected) return 'initiator';
-
-        // Lexicographical arbitration lower username initiates
+        // lower username initiates
         const isLower = this.localUsername < this.peerId;
-        return isLower ? 'initiator' : 'responder';
+        const detRole = isLower ? 'initiator' : 'responder';
+
+        // If no collision and role is explicit then use that
+        if (this.role !== 'auto' && !this.collisionDetected) return this.role;
+
+        // else use deterministic arbitration
+        return detRole;
     }
 
     // Update peer identity
@@ -304,12 +315,136 @@ class QuicConnection implements SecureConnection {
     private async connectViaRelay(): Promise<void> {
         return new Promise<void>((resolve, reject) => {
             const timeout = setTimeout(() => {
+                console.error(`[QuicConnection] connectViaRelay to ${this.peerId} timed out`);
                 reject(new Error('Handshake response timeout'));
             }, QUIC_CONNECTION_TIMEOUT_MS);
 
             try {
                 // Connect to relay server
                 const url = `${this.relayUrl}/relay?peer=${encodeURIComponent(this.peerId)}&username=${encodeURIComponent(this.localUsername)}&ts=${Date.now()}`;
+
+                const isOnion = this.relayUrl.toLowerCase().includes('.onion');
+                const useTauriBridge = isOnion && isTauri();
+
+                if (useTauriBridge) {
+                    (async () => {
+                        try {
+                            this.tauriUnlisten = await events.onP2PMessage((evt: any) => {
+                                const isMatch = evt?.connectionId === this.peerId;
+
+                                // Filter by connection ID
+                                if (!isMatch) {
+                                    return;
+                                }
+
+                                if (evt?.type === '__p2p_signaling_connected') {
+                                    clearTimeout(timeout);
+                                    this._transport = 'relay';
+                                    this.handleTauriBridgeOpened(resolve, reject);
+                                } else if (evt?.type === '__p2p_signaling_closed') {
+                                    console.warn(`[P2P Bridge] ${this.peerId} signaling closed:`, evt.reason);
+                                    this.handleTauriBridgeClosed();
+                                    reject(new Error(evt.reason || 'Signaling closed'));
+                                } else if (evt?.type === 'message' || !evt?.type) {
+                                    let data: any = evt.data;
+                                    let binaryData: Uint8Array | null = null;
+                                    let signalObj: any = null;
+
+                                    // Type Analysis
+                                    if (typeof data === 'string') {
+                                        const trimmed = data.trim();
+                                        if (trimmed.startsWith('{')) {
+                                            try { signalObj = JSON.parse(trimmed); } catch { }
+                                        } else {
+                                            try {
+                                                binaryData = PostQuantumUtils.base64ToUint8Array(data);
+
+                                                if (binaryData.length > 4) {
+                                                    const view = new DataView(binaryData.buffer, binaryData.byteOffset, binaryData.byteLength);
+                                                    const len = view.getUint32(0, false);
+
+                                                    if (len > 50 * 1024 * 1024) {
+                                                        try {
+                                                            const text = new TextDecoder().decode(binaryData);
+
+                                                            if (BASE64_STANDARD_REGEX.test(text.trim())) {
+                                                                const innerDecoded = PostQuantumUtils.base64ToUint8Array(text);
+                                                                if (innerDecoded.length > 4) {
+                                                                    const innerView = new DataView(innerDecoded.buffer, innerDecoded.byteOffset, innerDecoded.byteLength);
+                                                                    const innerLen = innerView.getUint32(0, false);
+                                                                    if (innerLen <= 50 * 1024 * 1024) {
+                                                                        binaryData = innerDecoded;
+                                                                    }
+                                                                }
+                                                            }
+                                                        } catch { }
+                                                    }
+                                                }
+                                            } catch (err) {
+                                                console.error(`[QuicConnection] Base64 decoding failed for ${this.peerId}:`, err, { dataPrefix: data.substring(0, 50) });
+                                            }
+                                        }
+                                    } else if (data instanceof Uint8Array) {
+                                        binaryData = data;
+                                    } else if (data && typeof data === 'object' && !Array.isArray(data)) {
+                                        signalObj = data;
+                                    }
+
+                                    // Binary analysis
+                                    if (binaryData && !signalObj) {
+                                        if (binaryData[0] === 123) {
+                                            try {
+                                                const text = new TextDecoder().decode(binaryData);
+                                                const parsed = JSON.parse(text);
+                                                if (parsed && typeof parsed === 'object' && parsed.type) {
+                                                    signalObj = parsed;
+                                                }
+                                            } catch { }
+                                        }
+
+                                        if (!signalObj && binaryData.length > 4 && binaryData[0] === 101 && binaryData[1] === 121 && binaryData[2] === 74) {
+                                            try {
+                                                const text = new TextDecoder().decode(binaryData);
+                                                const decodedBin = PostQuantumUtils.base64ToUint8Array(text);
+                                                const decodedText = new TextDecoder().decode(decodedBin);
+                                                if (decodedText.trim().startsWith('{')) {
+                                                    signalObj = JSON.parse(decodedText);
+                                                }
+                                            } catch { }
+                                        }
+                                    }
+
+                                    // Dispatching
+                                    if (signalObj && (signalObj.type === 'init' || signalObj.type === 'response' || signalObj.type === 'ice' || signalObj.type === 'relay-request')) {
+                                        this.handleBridgedSignal(signalObj);
+                                    } else if (binaryData) {
+                                        if (this._bridgeHandshakeResolve) {
+                                            this.handleIncomingData(binaryData);
+                                        } else {
+                                            this.handleIncomingData(binaryData);
+                                        }
+                                    } else if (signalObj) {
+                                        console.warn(`[QuicConnection] Received unknown signal/data for ${this.peerId}:`, signalObj);
+                                    }
+                                }
+                            });
+
+                            const wsUrl = url.replace(/^http/, 'ws');
+                            const res = await p2p.connect(this.peerId, wsUrl, {
+                                username: this.localUsername,
+                                registrationPayload: { peer: this.peerId }
+                            });
+
+                            if (!res.success) {
+                                throw new Error(res.error || 'Failed to connect via Tauri P2P bridge');
+                            }
+                        } catch (err) {
+                            clearTimeout(timeout);
+                            reject(err);
+                        }
+                    })();
+                    return;
+                }
 
                 const socket = new WebSocket(url);
                 socket.binaryType = 'arraybuffer';
@@ -380,59 +515,101 @@ class QuicConnection implements SecureConnection {
     private async performHandshake(): Promise<void> {
         this.setState('handshaking');
 
+        const isDeterministicInitiator = this.localUsername < this.peerId;
+
         if (!this.peerIdentity.kyberPublicKey || this.peerIdentity.kyberPublicKey.length === 0) {
-            return this.waitForInitiatorHandshakeAndRespond();
+            const start = Date.now();
+            while ((!this.peerIdentity.kyberPublicKey || this.peerIdentity.kyberPublicKey.length === 0) && (Date.now() - start) < 10000) {
+                if (this._state === 'disconnected' || this._state === 'failed') {
+                    throw new Error('Connection closed while waiting for peer identity');
+                }
+                await new Promise(resolve => setTimeout(resolve, 200));
+            }
+        }
+
+        if (!this.peerIdentity.kyberPublicKey || this.peerIdentity.kyberPublicKey.length === 0) {
+            if (isDeterministicInitiator) {
+                this.setState('failed');
+                throw new Error('Peer Kyber public key missing after timeout');
+            } else {
+                return this.waitForInitiatorHandshakeAndRespond();
+            }
         }
 
         const peerKeys: PeerKeys = {
-            kyberPublicKey: this.peerIdentity.kyberPublicKey,
-            dilithiumPublicKey: this.peerIdentity.dilithiumPublicKey,
-            x25519PublicKey: this.peerIdentity.x25519PublicKey
+            kyberPublicKey: this.peerIdentity.kyberPublicKey!,
+            dilithiumPublicKey: this.peerIdentity.dilithiumPublicKey!,
+            x25519PublicKey: this.peerIdentity.x25519PublicKey!
         };
 
-        // Create initiator session
-        const { session, message } = PQNoiseSession.createInitiatorSession(
-            this.peerId,
-            this.ownKeys,
-            peerKeys
-        );
+        if (!isDeterministicInitiator && this.role === 'auto') {
+            return this.waitForInitiatorHandshakeAndRespond();
+        }
 
-        // Send handshake
-        const handshakeData = this.serializeHandshakeMessage(message);
+        if (!this.ownKeys) {
+            throw new Error('Own keys missing for handshake');
+        }
+
+        // Create initiator session
+        let session, message;
+        try {
+            const result = PQNoiseSession.createInitiatorSession(
+                this.peerId,
+                this.ownKeys,
+                peerKeys
+            );
+            session = result.session;
+            message = result.message;
+        } catch (err) {
+            throw err;
+        }
+
+        const handshakeData = this.tauriUnlisten ? this.prepareHandshakeObject(message) : this.serializeHandshakeMessage(message);
         await this.sendRaw(handshakeData);
 
         const response = await this.waitForHandshakeResponse();
 
         if (response.type === 'init') {
             await this.handleIncomingHandshake(response);
-            this._connectedAt = Date.now();
-            this.setState('connected');
-            this.startKeepalive();
             return;
         }
 
-        session.completeHandshake(response);
-        this.session = session;
+        try {
+            session.completeHandshake(response);
+            this.session = session;
 
-        if (response.signerPublicKey) {
-            const harvestedIdentity: PeerIdentity = {
-                ...this.peerIdentity,
-                dilithiumPublicKey: response.signerPublicKey || this.peerIdentity.dilithiumPublicKey
-            };
-            this.updatePeerIdentity(harvestedIdentity);
+            if (response.signerPublicKey) {
+                const harvestedIdentity: PeerIdentity = {
+                    ...this.peerIdentity,
+                    dilithiumPublicKey: response.signerPublicKey || this.peerIdentity.dilithiumPublicKey
+                };
+                this.updatePeerIdentity(harvestedIdentity);
+            }
+
+            for (const stream of Array.from(this.streams.values())) {
+                stream.updateSession(session);
+            }
+
+            this._connectedAt = Date.now();
+            this.setState('connected');
+            this.startKeepalive();
+        } catch (err) {
+            this.setState('failed');
+            throw err;
         }
     }
 
-    // Serialize handshake message
-    private serializeHandshakeMessage(message: any): Uint8Array {
+    // Prepare handshake object
+    private prepareHandshakeObject(message: any): any {
         const toBase64 = (value?: Uint8Array | string): string | undefined => {
             if (!value) return undefined;
             if (typeof value === 'string') return value;
             return PostQuantumUtils.uint8ArrayToBase64(value);
         };
 
-        const json = JSON.stringify({
+        return {
             ...message,
+            from: this.localUsername,
             version: message.version || 'hybrid-session-v1',
             type: message.type,
             sessionId: message.sessionId,
@@ -442,48 +619,116 @@ class QuicConnection implements SecureConnection {
             ephemeralX25519Public: toBase64(message.ephemeralX25519Public),
             signature: toBase64(message.signature)!,
             signerPublicKey: toBase64(message.signerPublicKey)!
-        });
+        };
+    }
+
+    // Serialize handshake message
+    private serializeHandshakeMessage(message: any): Uint8Array {
+        const obj = this.prepareHandshakeObject(message);
+        const json = JSON.stringify(obj);
         return new TextEncoder().encode(json);
     }
 
-    // Deserialize handshake message
-    private deserializeHandshakeMessage(data: Uint8Array): any {
+    // Normalize handshake message
+    private normalizeHandshakeMessage(json: any): any {
+        if (!json || typeof json !== 'object') return json;
+        if (json.type === 'relay-request') return json;
+
+        const toUint8 = (value?: string | Uint8Array): Uint8Array | undefined => {
+            if (!value) return undefined;
+            if (value instanceof Uint8Array) return value;
+            try {
+                return PostQuantumUtils.base64ToUint8Array(value);
+            } catch {
+                return undefined;
+            }
+        };
+
+        return {
+            ...json,
+            version: json.version || 'hybrid-session-v1',
+            type: json.type,
+            sessionId: json.sessionId,
+            timestamp: json.timestamp,
+            kemCiphertext: toUint8(json.kemCiphertext),
+            ephemeralKyberPublic: toUint8(json.ephemeralKyberPublic),
+            ephemeralX25519Public: toUint8(json.ephemeralX25519Public),
+            signature: toUint8(json.signature),
+            signerPublicKey: toUint8(json.signerPublicKey)
+        };
+    }
+
+    private deserializeHandshakeMessage(data: Uint8Array | any): any {
+        if (!data) return null;
+
+        // If its already an object then normalize it
+        if (data && typeof data === 'object' && !(data instanceof Uint8Array)) {
+            return this.normalizeHandshakeMessage(data);
+        }
+
         try {
             const decoded = new TextDecoder().decode(data);
-            const json = JSON.parse(decoded);
+            const trimmed = decoded.trim();
 
-            if (json.type === 'relay-request') {
-                return json;
+            if (trimmed.startsWith('{')) {
+                const json = JSON.parse(trimmed);
+                return this.normalizeHandshakeMessage(json);
             }
 
-            const toUint8 = (value?: string): Uint8Array | undefined => {
-                if (!value) return undefined;
+            if (trimmed.startsWith('ey')) {
                 try {
-                    return PostQuantumUtils.base64ToUint8Array(value);
-                } catch {
-                    return undefined;
-                }
-            };
+                    const bin = PostQuantumUtils.base64ToUint8Array(trimmed);
+                    const text = new TextDecoder().decode(bin);
+                    if (text.trim().startsWith('{')) {
+                        return this.normalizeHandshakeMessage(JSON.parse(text));
+                    }
+                } catch { }
+            }
 
-            return {
-                ...json,
-                version: json.version || 'hybrid-session-v1',
-                type: json.type,
-                sessionId: json.sessionId,
-                timestamp: json.timestamp,
-                kemCiphertext: toUint8(json.kemCiphertext),
-                ephemeralKyberPublic: toUint8(json.ephemeralKyberPublic),
-                ephemeralX25519Public: toUint8(json.ephemeralX25519Public),
-                signature: toUint8(json.signature),
-                signerPublicKey: toUint8(json.signerPublicKey)
-            };
-        } catch {
+            return null;
+        } catch (err) {
             return null;
         }
     }
 
     // Wait for handshake response
     private async waitForHandshakeResponse(): Promise<any> {
+        if (this.tauriUnlisten) {
+            return new Promise((resolve, reject) => {
+                const timeout = setTimeout(() => {
+                    console.error(`[QuicConnection] Handshake response timeout (bridge) from ${this.peerId}`);
+                    this._bridgeHandshakeResolve = null;
+                    this._bridgeHandshakeReject = null;
+                    reject(new Error('Handshake response timeout (bridge)'));
+                }, QUIC_CONNECTION_TIMEOUT_MS);
+
+                this._bridgeHandshakeResolve = (data) => {
+                    if (data && typeof data === 'object' && !(data instanceof Uint8Array)) {
+                        const response = this.normalizeHandshakeMessage(data);
+                        clearTimeout(timeout);
+                        this._bridgeHandshakeResolve = null;
+                        this._bridgeHandshakeReject = null;
+                        resolve(response);
+                        return;
+                    }
+
+                    const response = this.deserializeHandshakeMessage(data);
+                    if (response) {
+                        clearTimeout(timeout);
+                        this._bridgeHandshakeResolve = null;
+                        this._bridgeHandshakeReject = null;
+                        resolve(response);
+                    }
+                };
+                this._bridgeHandshakeReject = (err) => {
+                    clearTimeout(timeout);
+                    this._bridgeHandshakeResolve = null;
+                    this._bridgeHandshakeReject = null;
+                    reject(err);
+                };
+            });
+        }
+
         return new Promise((resolve, reject) => {
             const socket = this.socket;
             if (!socket) {
@@ -512,6 +757,7 @@ class QuicConnection implements SecureConnection {
                 clearTimeout(timeout);
                 cleanup();
                 reject(new Error(`Socket closed while waiting for handshake response (${event.code}${event.reason ? `: ${event.reason}` : ''})`));
+
                 if (typeof originalCloseHandler === 'function') {
                     try {
                         originalCloseHandler.call(socket, event);
@@ -537,30 +783,19 @@ class QuicConnection implements SecureConnection {
                     if (response.type === 'init') {
                         this.collisionDetected = true;
 
-                        // Force a re-evaluation of role given the new collision context
-                        const role = this.getEffectiveRole();
-                        if (role === 'responder') {
-                            clearTimeout(timeout);
-                            cleanup();
-                            resolve(response);
-                            return;
-                        } else {
-                            return;
-                        }
-                    }
-
-                    if (response.type !== 'response') {
+                        clearTimeout(timeout);
+                        cleanup();
+                        resolve(response);
                         return;
                     }
 
-                    clearTimeout(timeout);
-                    cleanup();
-                    resolve(response);
-                } catch (err) {
-                    clearTimeout(timeout);
-                    cleanup();
-                    reject(err);
-                }
+                    if (response.type === 'response') {
+                        clearTimeout(timeout);
+                        cleanup();
+                        resolve(response);
+                        return;
+                    }
+                } catch (err) { }
             };
         });
     }
@@ -569,9 +804,93 @@ class QuicConnection implements SecureConnection {
     private async waitForInitiatorHandshakeAndRespond(): Promise<void> {
         this.setState('handshaking');
 
+        // Check if an init message already arrived before started waiting
+        if (this._pendingHandshakeToRespond) {
+            const msg = this._pendingHandshakeToRespond;
+            this._pendingHandshakeToRespond = null;
+            await this.handleIncomingHandshake(msg);
+            this._connectedAt = Date.now();
+            this.setState('connected');
+            this.startKeepalive();
+            return;
+        }
+
+        if (this.tauriUnlisten) {
+            return new Promise<void>((resolve, reject) => {
+                const timeout = setTimeout(() => {
+                    this._bridgeHandshakeResolve = null;
+                    this._bridgeHandshakeReject = null;
+                    reject(new Error('Timeout waiting for initiator handshake (bridge)'));
+                }, QUIC_CONNECTION_TIMEOUT_MS);
+
+                this._bridgeHandshakeResolve = async (data) => {
+                    if (data && typeof data === 'object' && !(data instanceof Uint8Array)) {
+                        const handshakeMsg = this.normalizeHandshakeMessage(data);
+                        if (handshakeMsg && handshakeMsg.type === 'init') {
+                            clearTimeout(timeout);
+                            this._bridgeHandshakeResolve = null;
+                            this._bridgeHandshakeReject = null;
+                            try {
+                                await this.handleIncomingHandshake(handshakeMsg);
+                                this._connectedAt = Date.now();
+                                this.setState('connected');
+                                this.startKeepalive();
+                                resolve();
+                            } catch (err) {
+                                reject(err);
+                            }
+                        }
+                        return;
+                    }
+
+                    const handshakeMsg = this.deserializeHandshakeMessage(data);
+                    if (handshakeMsg && handshakeMsg.type === 'init') {
+                        clearTimeout(timeout);
+                        this._bridgeHandshakeResolve = null;
+                        this._bridgeHandshakeReject = null;
+                        try {
+                            await this.handleIncomingHandshake(handshakeMsg);
+                            this._connectedAt = Date.now();
+                            this.setState('connected');
+                            this.startKeepalive();
+                            resolve();
+                        } catch (err) {
+                            reject(err);
+                        }
+                    }
+                };
+
+                this._bridgeHandshakeReject = (err) => {
+                    clearTimeout(timeout);
+                    this._bridgeHandshakeResolve = null;
+                    this._bridgeHandshakeReject = null;
+                    reject(err);
+                };
+
+                // Check again if an init arrived in window between the first check and setting up the resolver
+                if (this._pendingHandshakeToRespond) {
+                    const msg = this._pendingHandshakeToRespond;
+                    this._pendingHandshakeToRespond = null;
+                    clearTimeout(timeout);
+                    this._bridgeHandshakeResolve = null;
+                    this._bridgeHandshakeReject = null;
+                    this.handleIncomingHandshake(msg).then(() => {
+                        this._connectedAt = Date.now();
+                        this.setState('connected');
+                        this.startKeepalive();
+                        resolve();
+                    }).catch((err) => {
+                        reject(err);
+                    });
+                }
+            });
+        }
+
         return new Promise<void>((resolve, reject) => {
             const socket = this.socket;
-            if (!socket) return reject(new Error('Socket vanished before handshake wait'));
+            if (!socket) {
+                return reject(new Error('Socket vanished before handshake wait'));
+            }
 
             const originalCloseHandler = socket.onclose;
 
@@ -647,7 +966,30 @@ class QuicConnection implements SecureConnection {
     }
 
     // Send raw data over the socket
-    private async sendRaw(data: Uint8Array): Promise<void> {
+    private async sendRaw(data: Uint8Array | any): Promise<void> {
+        if (this.tauriUnlisten) {
+            let messageToSend: any = data;
+            if (data instanceof Uint8Array) {
+                messageToSend = PostQuantumUtils.uint8ArrayToBase64(messageToSend);
+            }
+
+            const res = await p2p.send(this.peerId, messageToSend);
+            if (!res.success) {
+                console.error('[QuicConnection] Failed to send via Tauri P2P bridge:', res.error);
+
+                // If the Rust side lost the connection sync JS state
+                if (res.error === 'Connection not found' || res.error === 'Not connected') {
+                    this.handleDisconnect();
+                }
+
+                throw new Error(res.error || 'Failed to send via Tauri P2P bridge');
+            }
+
+            this.bufferedAmount += data.length;
+            this._lastActivity = Date.now();
+            return;
+        }
+
         if (!this.socket || this.socket.readyState !== WebSocket.OPEN) {
             throw new Error('Not connected');
         }
@@ -678,9 +1020,31 @@ class QuicConnection implements SecureConnection {
         await this.sendRaw(frame);
     }
 
+    private quickHash(data: Uint8Array): string {
+        let hash = 0;
+        const len = data.length;
+        const step = Math.max(1, Math.floor(len / 42));
+        for (let i = 0; i < len; i += step) {
+            hash = ((hash << 5) - hash + data[i]) | 0;
+        }
+        return `${len}:${hash}`;
+    }
+
     // Handle incoming data over the socket
     private handleIncomingData(data: Uint8Array): void {
         this._lastActivity = Date.now();
+
+        // Deduplication check
+        const frameHash = this.quickHash(data);
+        if (this.processedFrameHashes.has(frameHash)) {
+            return;
+        }
+
+        this.processedFrameHashes.add(frameHash);
+
+        setTimeout(() => {
+            this.processedFrameHashes.delete(frameHash);
+        }, this.FRAME_DEDUP_EXPIRY_MS);
 
         if (!this.session) {
             return;
@@ -743,12 +1107,45 @@ class QuicConnection implements SecureConnection {
 
         this.stopKeepalive();
 
+        if (this.tauriUnlisten) {
+            this.tauriUnlisten();
+            this.tauriUnlisten = null;
+        }
+
         if (this._state === 'connected') {
             this.setState('reconnecting');
             this.attemptReconnect();
         } else {
             this.setState('disconnected');
         }
+    }
+
+    private async handleTauriBridgeOpened(resolve: () => void, reject: (err: any) => void): Promise<void> {
+        try {
+            const effectiveRole = this.getEffectiveRole();
+
+            if (this._pendingHandshakeToRespond) {
+                const msg = this._pendingHandshakeToRespond;
+                this._pendingHandshakeToRespond = null;
+                await this.handleIncomingHandshake(msg);
+            } else if (effectiveRole === 'responder') {
+                await this.waitForInitiatorHandshakeAndRespond();
+            } else {
+                await this.performHandshake();
+            }
+
+            this._connectedAt = Date.now();
+            this.setState('connected');
+            this.startKeepalive();
+            resolve();
+        } catch (err) {
+            p2p.disconnect(this.peerId);
+            reject(err);
+        }
+    }
+
+    private handleTauriBridgeClosed(): void {
+        this.handleDisconnect();
     }
 
     // Attempt to reconnect
@@ -810,26 +1207,27 @@ class QuicConnection implements SecureConnection {
     async handleIncomingHandshake(handshakeMsg: any): Promise<void> {
         this.setState('handshaking');
         try {
+            const normalized = this.normalizeHandshakeMessage(handshakeMsg);
             const { session, response } = PQNoiseSession.processInitiatorMessage(
                 this.peerId,
                 this.ownKeys,
-                handshakeMsg
+                normalized
             );
 
-            const responseData = this.serializeHandshakeMessage(response);
+            const responseData = this.tauriUnlisten ? this.prepareHandshakeObject(response) : this.serializeHandshakeMessage(response);
             await this.sendRaw(responseData);
 
             this.session = session;
 
-            if (handshakeMsg.signerPublicKey) {
+            if (normalized.signerPublicKey) {
                 const harvestedIdentity: PeerIdentity = {
                     ...this.peerIdentity,
-                    dilithiumPublicKey: handshakeMsg.signerPublicKey || this.peerIdentity.dilithiumPublicKey
+                    dilithiumPublicKey: normalized.signerPublicKey || this.peerIdentity.dilithiumPublicKey
                 };
                 this.updatePeerIdentity(harvestedIdentity);
             }
 
-            for (const stream of this.streams.values()) {
+            for (const stream of Array.from(this.streams.values())) {
                 stream.updateSession(session);
             }
 
@@ -842,12 +1240,27 @@ class QuicConnection implements SecureConnection {
         }
     }
 
+    // Handle a signal arriving
+    public handleBridgedSignal(msg: any): void {
+        this._lastActivity = Date.now();
+        if (!this._transport) this._transport = 'relay';
+
+        if (this._bridgeHandshakeResolve) {
+            this._bridgeHandshakeResolve(msg);
+            return;
+        }
+
+        if (msg.type === 'init') {
+            this._pendingHandshakeToRespond = msg;
+        }
+    }
+
     // Set state
     private setState(state: ConnectionState): void {
         if (this._state === state) return;
 
         this._state = state;
-        for (const handler of this.stateHandlers) {
+        for (const handler of Array.from(this.stateHandlers)) {
             try {
                 handler(state);
             } catch { }
@@ -893,12 +1306,13 @@ class QuicConnection implements SecureConnection {
 
     // Get buffered amount
     getBufferedAmount(): number {
+        if (this.tauriUnlisten) return 0;
         return this.socket?.bufferedAmount || 0;
     }
 
     // Get a stream by type
     getStream(type: StreamType): SecureStream | null {
-        for (const stream of this.streams.values()) {
+        for (const stream of Array.from(this.streams.values())) {
             if (stream.type === type && !stream.closed) {
                 return stream;
             }
@@ -927,7 +1341,7 @@ class QuicConnection implements SecureConnection {
         }
 
         // Close all streams
-        for (const stream of this.streams.values()) {
+        for (const stream of Array.from(this.streams.values())) {
             await stream.close();
         }
         this.streams.clear();
@@ -936,6 +1350,13 @@ class QuicConnection implements SecureConnection {
         if (this.socket) {
             this.socket.close();
             this.socket = null;
+        }
+
+        // Close bridge if using Tauri
+        if (this.tauriUnlisten) {
+            try { this.tauriUnlisten(); } catch (e) { }
+            this.tauriUnlisten = null;
+            p2p.disconnect(this.peerId).catch(() => { });
         }
 
         // Destroy session
@@ -967,7 +1388,7 @@ class QuicConnection implements SecureConnection {
     // Internal: deliver incoming stream
     _deliverIncomingStream(stream: QuicStream): void {
         this.streams.set(stream.id, stream);
-        for (const handler of this.streamHandlers) {
+        for (const handler of Array.from(this.streamHandlers)) {
             try {
                 handler(stream);
             } catch { }
@@ -978,25 +1399,28 @@ class QuicConnection implements SecureConnection {
     private async startControlMessageReader(stream: QuicStream): Promise<void> {
         try {
             for await (const data of stream) {
+                if (!data || data.length === 0) continue;
+                
+                let text = '';
                 try {
-                    const text = new TextDecoder().decode(data);
+                    text = new TextDecoder().decode(data);
                     const msg = JSON.parse(text);
 
                     // Dispatch to transport level handlers
                     this.owner.dispatchMessage({
-                        from: msg.from,
+                        from: msg.from || this.peerId,
                         to: msg.to || this.localUsername,
                         type: msg.type as SignalType,
-                        payload: msg.payload,
+                        payload: msg.payload, 
                         timestamp: msg.timestamp || Date.now(),
                         sequence: BigInt(0),
                         verified: true,
                         routeProof: msg.routeProof,
                         signature: msg.signature
                     });
-                } catch { }
+                } catch (err) { }
             }
-        } catch { }
+        } catch (err) { }
     }
 
     // Get the session
@@ -1077,8 +1501,52 @@ export class QuicTransport implements SecureTransport {
             }
         }
 
-        return new Promise<void>((resolve, reject) => {
-            const url = `${this.relayServerUrl}/relay?register=true&username=${encodeURIComponent(this.localUsername)}`;
+        const url = `${this.relayServerUrl}/relay?register=true&username=${encodeURIComponent(this.localUsername)}`;
+        const isTor = typeof window !== 'undefined' && window.location.hostname.endsWith('.onion');
+        const isTauriEnv = isTauri();
+
+        if (isTauriEnv && (url.includes('.onion') || isTor)) {
+            const wsUrl = url.replace(/^http/, 'ws');
+            const connectionId = 'registration';
+
+            // Unlisten previous if exists
+            if ((this as any).tauriRegUnlisten) {
+                (this as any).tauriRegUnlisten();
+            }
+
+            (this as any).tauriRegUnlisten = await events.onP2PMessage(async (event: any) => {
+                if (event.connectionId !== connectionId) {
+                    return;
+                }
+
+                if (event.type === '__p2p_signaling_connected') {
+                } else if (event.type === 'message') {
+                    let data = event.data;
+                    if (typeof data === 'string' && !data.trim().startsWith('{')) {
+                        try {
+                            data = PostQuantumUtils.base64ToUint8Array(data);
+                        } catch { }
+                    }
+                    this.handleRegistrationMessage(data);
+                } else if (event.type === '__p2p_signaling_closed') {
+                    console.warn('[QUIC Transport] Registration bridge closed');
+                    if (this.initialized) {
+                        const retryUrl = wsUrl;
+                        p2p.connect(connectionId, retryUrl, { username: this.localUsername }).catch(() => { });
+                    }
+                }
+            });
+
+            p2p.connect(connectionId, wsUrl, { username: this.localUsername }).then(res => {
+                if (!res.success) console.error('[QUIC Transport] P2P bridge registration failed:', res.error);
+            }).catch(err => {
+                console.error('[QUIC Transport] P2P bridge registration error:', err);
+            });
+
+            return;
+        }
+
+        return new Promise<void>((resolve) => {
             this.registrationSocket = new WebSocket(url);
             this.registrationSocket.binaryType = 'arraybuffer';
 
@@ -1096,91 +1564,10 @@ export class QuicTransport implements SecureTransport {
             }, 5_000);
 
             this.registrationSocket.onopen = () => {
-                console.log('[QUIC Transport] Registered with relay');
                 resolve();
             };
 
-            // Handle incoming connection attempts from others
-            this.registrationSocket.onmessage = async (event) => {
-                let data: Uint8Array;
-                if (typeof event.data === 'string') {
-                    data = new TextEncoder().encode(event.data);
-                } else {
-                    data = new Uint8Array(event.data as ArrayBuffer);
-                }
-
-                if (data.length <= 2) {
-                    return;
-                }
-
-                try {
-                    const msg = this.deserializeHandshakeMessage(data);
-                    if (!msg) { return; }
-
-                    // Handle relay matchmaking request
-                    if (msg.type === 'relay-request') {
-                        const failures = this.recentRelayFailures.get(msg.from);
-                        if (failures) {
-                            if (failures.count > 4 && Date.now() - failures.lastTime < 60000) {
-                                return;
-                            }
-                            if (Date.now() - failures.lastTime >= 60000) { this.recentRelayFailures.delete(msg.from); }
-                        }
-
-                        // Check if already has a connection to this peer
-                        let connection = this.connections.get(msg.from) as QuicConnection | undefined;
-
-                        // Extract peer metadata
-                        const peerIdentity: PeerIdentity = {
-                            username: msg.from,
-                            kyberPublicKey: msg.ephemeralKyberPublic ? PostQuantumUtils.asUint8Array(msg.ephemeralKyberPublic) : new Uint8Array(0),
-                            dilithiumPublicKey: msg.signerPublicKey ? PostQuantumUtils.asUint8Array(msg.signerPublicKey) : new Uint8Array(0),
-                            x25519PublicKey: msg.ephemeralX25519Public ? PostQuantumUtils.asUint8Array(msg.ephemeralX25519Public) : new Uint8Array(0)
-                        };
-
-                        if (connection && (connection.state === 'connected' || connection.state === 'handshaking' || connection.state === 'connecting')) {
-                            connection.notifyCollision();
-                            return;
-                        }
-
-                        if (!connection || connection.state === 'disconnected' || connection.state === 'failed') {
-                            connection = new QuicConnection(
-                                msg.from,
-                                peerIdentity,
-                                this.ownKeys!,
-                                this.relayServerUrl,
-                                this.localUsername,
-                                this
-                            );
-                            connection.onStateChange((state) => {
-                                if (state === 'connected') {
-                                    for (const handler of this.connectHandlers) {
-                                        try { handler(msg.from); } catch { }
-                                    }
-                                } else if (state === 'disconnected' || state === 'failed') {
-                                    this.connections.delete(msg.from);
-                                    for (const handler of this.disconnectHandlers) {
-                                        try { handler(msg.from, state); } catch { }
-                                    }
-                                }
-                            });
-
-                            this.connections.set(msg.from, connection);
-                            connection.connectAsResponderPending().then(() => {
-                                this.recentRelayFailures.delete(msg.from);
-                            }).catch(err => {
-                                this.connections.delete(msg.from);
-
-                                const current = this.recentRelayFailures.get(msg.from) || { count: 0, lastTime: 0 };
-                                this.recentRelayFailures.set(msg.from, {
-                                    count: current.count + 1,
-                                    lastTime: Date.now()
-                                });
-                            });
-                        }
-                    }
-                } catch { }
-            };
+            this.registrationSocket.onmessage = (event) => this.handleRegistrationMessage(event.data);
 
             this.registrationSocket.onerror = () => {
                 resolve();
@@ -1188,18 +1575,15 @@ export class QuicTransport implements SecureTransport {
 
             this.registrationSocket.onclose = (event) => {
                 this.registrationSocket = null;
-
-                // Clear keepalive timer
                 if (this.registrationKeepaliveTimer) {
                     clearInterval(this.registrationKeepaliveTimer);
                     this.registrationKeepaliveTimer = null;
                 }
 
-                // Auto-reconnect if unexpected closure and still initialized
                 if (this.initialized && event.code !== 1000) {
                     setTimeout(() => {
-                        this.registerWithRelay().catch(err => { });
-                    }, 500);
+                        this.registerWithRelay().catch(() => { });
+                    }, 5000);
                 }
             };
         });
@@ -1217,7 +1601,10 @@ export class QuicTransport implements SecureTransport {
                 signature: json.signature ? PostQuantumUtils.base64ToUint8Array(json.signature) : undefined,
                 dilithiumPublicKey: json.dilithiumPublicKey ? PostQuantumUtils.base64ToUint8Array(json.dilithiumPublicKey) : undefined
             };
-        } catch { return null; }
+        } catch (err) {
+            console.error('[QUIC Transport] Deserialization failed:', err, 'Data len:', data.length);
+            return null;
+        }
     }
 
     // Connect to a peer
@@ -1235,6 +1622,7 @@ export class QuicTransport implements SecureTransport {
                 if (existing.state === 'connecting' || existing.state === 'handshaking') {
                     return new Promise((resolve, reject) => {
                         const timeout = setTimeout(() => {
+                            console.error(`[QUIC Transport] connect(${peerId}) timed out waiting for existing connection (state was ${existing.state})`);
                             reject(new Error('Connection timeout waiting for existing connection'));
                         }, options.timeout || QUIC_CONNECTION_TIMEOUT_MS);
 
@@ -1248,6 +1636,10 @@ export class QuicTransport implements SecureTransport {
                             }
                         });
                     });
+                }
+                const isInitiator = this.localUsername < peerId;
+                if (isInitiator && existing.role === 'responder') {
+                    existing.connect(true).catch(() => { });
                 }
                 return existing;
             }
@@ -1265,19 +1657,18 @@ export class QuicTransport implements SecureTransport {
             this
         );
 
+        // Deterministic initiator
+        const isInitiator = this.localUsername < peerId;
+
         connection.onStateChange((state) => {
             if (state === 'connected') {
-                for (const handler of this.connectHandlers) {
-                    try {
-                        handler(peerId);
-                    } catch { }
+                for (const handler of Array.from(this.connectHandlers)) {
+                    try { handler(peerId); } catch { }
                 }
             } else if (state === 'disconnected' || state === 'failed') {
                 this.connections.delete(peerId);
-                for (const handler of this.disconnectHandlers) {
-                    try {
-                        handler(peerId, state);
-                    } catch { }
+                for (const handler of Array.from(this.disconnectHandlers)) {
+                    try { handler(peerId, state); } catch { }
                 }
             }
 
@@ -1293,7 +1684,16 @@ export class QuicTransport implements SecureTransport {
             setTimeout(() => reject(new Error('Connection timeout')), timeout);
         });
 
-        await Promise.race([connection.connect(), timeoutPromise]);
+        try {
+            if (isInitiator) {
+                await Promise.race([connection.connect(true), timeoutPromise]);
+            } else {
+                await Promise.race([connection.connectAsResponderPending(), timeoutPromise]);
+            }
+        } catch (error) {
+            this.connections.delete(peerId);
+            throw error;
+        }
 
         return connection;
     }
@@ -1322,6 +1722,12 @@ export class QuicTransport implements SecureTransport {
             this.registrationSocket = null;
         }
 
+        if ((this as any).tauriRegUnlisten) {
+            try { (this as any).tauriRegUnlisten(); } catch (e) { }
+            (this as any).tauriRegUnlisten = null;
+            p2p.disconnect('registration').catch(() => { });
+        }
+
         this.initialized = false;
     }
 
@@ -1343,7 +1749,26 @@ export class QuicTransport implements SecureTransport {
             const alias = this.usernameAliases.get(peerId);
             if (alias) connection = this.connections.get(alias);
         }
-        return connection?.state === 'connected' || false;
+
+        const state = connection?.state;
+        const result = state === 'connected';
+        return result;
+    }
+
+    // Check if there is an active or pending connection
+    hasActiveConnection(peerId: string): boolean {
+        let connection = this.connections.get(peerId);
+        if (!connection) {
+            const alias = this.usernameAliases.get(peerId);
+            if (alias) connection = this.connections.get(alias);
+        }
+
+        if (!connection) return false;
+
+        return connection.state === 'connected' ||
+            connection.state === 'handshaking' ||
+            connection.state === 'connecting' ||
+            connection.state === 'reconnecting';
     }
 
     // Register a bidirectional alias between original username and hashed peerId
@@ -1400,7 +1825,7 @@ export class QuicTransport implements SecureTransport {
             } catch { }
         }
 
-        for (const handler of this.messageHandlers) {
+        for (const handler of Array.from(this.messageHandlers)) {
             try {
                 handler(message);
             } catch { }
@@ -1423,6 +1848,107 @@ export class QuicTransport implements SecureTransport {
     onPeerDisconnected(handler: (peerId: string, reason?: string) => void): () => void {
         this.disconnectHandlers.add(handler);
         return () => this.disconnectHandlers.delete(handler);
+    }
+
+    // Handle registration message shared between WebSocket and P2P bridge
+    private async handleRegistrationMessage(eventData: any): Promise<void> {
+        let data: Uint8Array;
+        if (eventData instanceof Uint8Array) {
+            data = eventData;
+        } else if (eventData instanceof ArrayBuffer) {
+            data = new Uint8Array(eventData);
+        } else if (typeof eventData === 'string') {
+            data = new TextEncoder().encode(eventData);
+        } else if (typeof eventData === 'object' && eventData !== null) {
+            const msg = eventData;
+            return this.processRegistrationSignal(msg);
+        } else {
+            return;
+        }
+
+        if (data.length <= 2) return;
+
+        try {
+            const msg = this.deserializeHandshakeMessage(data);
+            if (msg) this.processRegistrationSignal(msg);
+        } catch { }
+    }
+
+    private async processRegistrationSignal(msg: any): Promise<void> {
+        if (msg.type === 'relay-request') {
+            const failures = this.recentRelayFailures.get(msg.from);
+            if (failures) {
+                if (failures.count > 4 && Date.now() - failures.lastTime < 60000) {
+                    console.warn(`[QUIC Transport] Ignoring relay-request from ${msg.from} due to rate limiting`);
+                    return;
+                }
+                if (Date.now() - failures.lastTime >= 60000) this.recentRelayFailures.delete(msg.from);
+            }
+
+            let connection = this.connections.get(msg.from) as QuicConnection | undefined;
+
+            const peerIdentity: PeerIdentity = {
+                username: msg.from,
+                kyberPublicKey: msg.ephemeralKyberPublic ? PostQuantumUtils.asUint8Array(msg.ephemeralKyberPublic) : new Uint8Array(0),
+                dilithiumPublicKey: msg.signerPublicKey ? PostQuantumUtils.asUint8Array(msg.signerPublicKey) : new Uint8Array(0),
+                x25519PublicKey: msg.ephemeralX25519Public ? PostQuantumUtils.asUint8Array(msg.ephemeralX25519Public) : new Uint8Array(0)
+            };
+
+            const isInitiator = this.localUsername < msg.from;
+
+            if (connection && (connection.state === 'connected' || connection.state === 'handshaking' || connection.state === 'connecting')) {
+                // If we are initiator but existing connection is responder then upgrade it
+                if (isInitiator && connection.role === 'responder') {
+                    connection.connect(true).catch(() => { });
+                }
+
+                return;
+            }
+
+            if (!connection || connection.state === 'disconnected' || connection.state === 'failed') {
+                connection = new QuicConnection(
+                    msg.from,
+                    peerIdentity,
+                    this.ownKeys!,
+                    this.relayServerUrl,
+                    this.localUsername,
+                    this
+                );
+                connection.onStateChange((state) => {
+                    if (state === 'connected') {
+                        for (const handler of Array.from(this.connectHandlers)) {
+                            try { handler(msg.from); } catch { }
+                        }
+                    } else if (state === 'disconnected' || state === 'failed') {
+                        this.connections.delete(msg.from);
+                        for (const handler of Array.from(this.disconnectHandlers)) {
+                            try { handler(msg.from, state); } catch { }
+                        }
+                    }
+                });
+
+                this.connections.set(msg.from, connection);
+
+                const isInitiator = this.localUsername < msg.from;
+                const connectAction = isInitiator ? connection.connect(true) : connection.connectAsResponderPending();
+
+                connectAction.then(() => {
+                    this.recentRelayFailures.delete(msg.from);
+                }).catch(() => {
+                    this.connections.delete(msg.from);
+                    const current = this.recentRelayFailures.get(msg.from) || { count: 0, lastTime: 0 };
+                    this.recentRelayFailures.set(msg.from, {
+                        count: current.count + 1,
+                        lastTime: Date.now()
+                    });
+                });
+            }
+        } else if (msg.from && (msg.type === 'init' || msg.type === 'response' || msg.type === 'ice')) {
+            const connection = this.connections.get(msg.from) as QuicConnection | undefined;
+            if (connection) {
+                connection.handleBridgedSignal(msg);
+            }
+        }
     }
 }
 

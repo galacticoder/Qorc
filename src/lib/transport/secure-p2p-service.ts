@@ -8,7 +8,11 @@ import { PostQuantumRandom } from '../cryptography/random';
 import { PostQuantumUtils } from '../utils/pq-utils';
 import { PostQuantumKEM } from '../cryptography/kem';
 import { CryptoUtils } from '../utils/crypto-utils';
-import { P2P_MESSAGE_RATE_LIMIT, P2P_MESSAGE_RATE_WINDOW_MS, P2P_MAX_MESSAGE_SIZE, P2P_MAX_PEERS } from '../constants';
+import { X25519KeyPair } from '../types/noise-types';
+import { generateX25519KeyPair } from '../utils/noise-utils';
+import { HybridKeys, PeerSession, P2PMessage } from '../types/p2p-types';
+import { toUint8, getChannelId, buildRouteProof } from '../utils/p2p-utils';
+import { P2P_MESSAGE_RATE_LIMIT, P2P_MESSAGE_RATE_WINDOW_MS, P2P_MAX_PEERS } from '../constants';
 import {
     isPlainObject,
     hasPrototypePollutionKeys,
@@ -24,12 +28,29 @@ import {
     ConnectionState,
     PeerIdentity,
 } from './secure-transport';
-import { X25519KeyPair } from '../types/noise-types';
-import { generateX25519KeyPair } from '../utils/noise-utils';
-import { HybridKeys, PeerSession, P2PMessage } from '../types/p2p-types';
-import { toUint8, getChannelId, buildRouteProof } from '../utils/p2p-utils';
+    
+// Deterministic JSON stringifier
+const stringifyDeterministic = (obj: any): string | undefined => {
+    if (obj === undefined) return undefined;
+    if (typeof obj !== 'object' || obj === null) return JSON.stringify(obj);
 
-// P2P service
+    if (Array.isArray(obj)) {
+        return '[' + obj.map(item => {
+            const val = stringifyDeterministic(item);
+            return val === undefined ? 'null' : val;
+        }).join(',') + ']';
+    }
+
+    const keys = Object.keys(obj).sort();
+    const props = keys.map(key => {
+        const val = stringifyDeterministic(obj[key]);
+        if (val === undefined) return undefined;
+        return JSON.stringify(key) + ':' + val;
+    }).filter(v => v !== undefined);
+
+    return '{' + props.join(',') + '}';
+};
+
 export class SecureP2PService {
     private localUsername: string = '';
     private peers: Map<string, PeerSession> = new Map();
@@ -163,6 +184,9 @@ export class SecureP2PService {
 
             this.transport.onMessage((ctx) => {
                 if (ctx.type === SignalType.CHAT ||
+                    ctx.type === SignalType.MESSAGE ||
+                    ctx.type === SignalType.TEXT ||
+                    ctx.type === SignalType.P2P_ENCRYPTED_MESSAGE ||
                     ctx.type === SignalType.SIGNAL ||
                     ctx.type === SignalType.TYPING ||
                     ctx.type === SignalType.TYPING_START ||
@@ -190,9 +214,14 @@ export class SecureP2PService {
             this.startDummyTraffic();
             this.startHeartbeat();
         } catch (error) {
-            console.error('P2P initialization failed:', error);
+            console.error('[SecureP2PService] Failed to initialize:', error);
             throw error;
         }
+    }
+
+    // Connects the service to the shared sequence map from the messaging hook
+    public setChannelSequenceMap(map: Map<string, number>): void {
+        this.channelSequence = map;
     }
 
     // Set Dilithium signing keys
@@ -332,10 +361,45 @@ export class SecureP2PService {
     async sendMessage(
         to: string,
         message: any,
-        messageType: SignalType = SignalType.CHAT
+        messageType: SignalType = SignalType.CHAT,
+        messageId?: string
     ): Promise<void> {
         let session = this.peers.get(to);
 
+        if (!session) {
+            // Check if transport has an active/pending connection that hasnt been mapped to a session yet
+            if (this.transport.hasActiveConnection(to)) {
+                try {
+                    let attempts = 0;
+                    while (attempts < 30) {
+                        session = this.peers.get(to);
+
+                        if (!session) {
+                            const alias = this.transport.resolveUsernameAlias(to);
+                            if (alias) session = this.peers.get(alias);
+                        }
+
+                        if (session && session.state === 'connected') break;
+                        // Early exit if connection is failing
+                        if (session && (session.state === 'failed' || session.state === 'disconnected')) {
+                            console.warn(`[SecureP2PService] session for ${to} entered ${session.state} state, aborting wait`);
+                            break;
+                        }
+                        // Exit if transport is no longer active
+                        if (!this.transport.hasActiveConnection(to)) {
+                            console.warn('[SecureP2PService] transport no longer active, aborting wait');
+                            break;
+                        }
+                        attempts++;
+                        await new Promise(r => setTimeout(r, 100));
+                    }
+                } catch (err) {
+                    console.warn('[SecureP2PService] wait for P2P session interrupted:', err);
+                }
+            }
+        }
+
+        // Re-fetch session after potential wait
         if (!session) {
             const alias = this.transport.resolveUsernameAlias(to);
             if (alias && alias !== to) {
@@ -344,17 +408,49 @@ export class SecureP2PService {
         }
 
         if (!session) { throw new Error(`No active P2P connection to ${to}`); }
+
+        // Wait for session to be fully connected if it exists but looks roughly ready
+        if (session.state === 'connecting' || session.connection.state === 'handshaking') {
+            try {
+                // Wait up to 3 seconds for connection
+                let attempts = 0;
+                while (attempts < 30) {
+                    if (session.state === 'connected' && session.connection.state === 'connected') break;
+                    // Early exit on failure
+                    if (session.state === 'failed' || session.state === 'disconnected') {
+                        console.warn(`[SecureP2PService] connection entered ${session.state} state during wait`);
+                        break;
+                    }
+                    if (session.connection.state === 'failed' || session.connection.state === 'disconnected') {
+                        console.warn(`[SecureP2PService] underlying connection entered ${session.connection.state} state`);
+                        break;
+                    }
+                    attempts++;
+                    await new Promise(r => setTimeout(r, 100));
+                }
+            } catch (err) {
+                console.warn('[SecureP2PService] wait for P2P connection interrupted:', err);
+            }
+        }
+
         if (session.state !== 'connected') { throw new Error(`P2P connection to ${to} is not connected (state: ${session.state})`); }
 
         if (!session.messageStream || session.messageStream.closed) {
             session.messageStream = await session.connection.createStream({ type: SignalType.MESSAGE });
         }
 
-        // Generate route proof
+        const isTransient = messageType === SignalType.TYPING ||
+            messageType === SignalType.TYPING_START ||
+            messageType === SignalType.TYPING_STOP ||
+            messageType === SignalType.READ_RECEIPT ||
+            messageType === SignalType.DELIVERY_ACK ||
+            messageType === SignalType.SIGNAL;
+
+        // Generate route proof (only for persistent/data messages)
         let routeProof: any = undefined;
         const peerIdentity = (session.connection as any).peerIdentity;
 
-        if (this.dilithiumKeys && peerIdentity?.dilithiumPublicKey) {
+        if (!isTransient && this.dilithiumKeys && peerIdentity?.dilithiumPublicKey) {
             try {
                 const peerDilithiumBase64 = CryptoUtils.Base64.arrayBufferToBase64(peerIdentity.dilithiumPublicKey);
                 const localDilithiumBase64 = CryptoUtils.Base64.arrayBufferToBase64(this.dilithiumKeys.publicKey);
@@ -378,35 +474,41 @@ export class SecureP2PService {
         }
 
         const p2pMessage: P2PMessage = {
+            id: messageId || (typeof message === 'object' ? message.messageId || message.id : undefined),
             type: messageType as any,
             from: this.localUsername,
             to,
             timestamp: Date.now(),
+            p2p: true,
+            encrypted: true,
             payload: message,
             routeProof,
         };
 
-        // Sign message
-        if (!this.dilithiumKeys) {
-            throw new Error('Dilithium keys not available; cannot send unsigned P2P message');
-        }
+        // Sign message 
+        if (!isTransient) {
+            if (!this.dilithiumKeys) {
+                throw new Error('Dilithium keys not available; cannot send unsigned P2P message');
+            }
 
-        try {
-            const messageBytes = new TextEncoder().encode(JSON.stringify({
-                type: p2pMessage.type,
-                from: p2pMessage.from,
-                to: p2pMessage.to,
-                timestamp: p2pMessage.timestamp,
-                payload: p2pMessage.payload,
-                routeProof: p2pMessage.routeProof
-            }));
-            const signature = await CryptoUtils.Dilithium.sign(
-                this.dilithiumKeys.secretKey,
-                messageBytes
-            );
-            p2pMessage.signature = CryptoUtils.Base64.arrayBufferToBase64(signature);
-        } catch (err) {
-            throw new Error('Failed to sign P2P message');
+            try {
+                const messageBytes = new TextEncoder().encode(stringifyDeterministic({
+                    type: p2pMessage.type,
+                    from: p2pMessage.from,
+                    to: p2pMessage.to,
+                    timestamp: p2pMessage.timestamp,
+                    payload: p2pMessage.payload,
+                    routeProof: p2pMessage.routeProof
+                }));
+                const signature = await CryptoUtils.Dilithium.sign(
+                    this.dilithiumKeys.secretKey,
+                    messageBytes
+                );
+                p2pMessage.signature = CryptoUtils.Base64.arrayBufferToBase64(signature);
+            } catch (err) {
+                console.error('[SecureP2PService] Failed to sign P2P message:', err);
+                throw new Error('Failed to sign P2P message');
+            }
         }
 
         const data = new TextEncoder().encode(JSON.stringify(p2pMessage));
@@ -417,19 +519,14 @@ export class SecureP2PService {
 
     // Handle incoming P2P message
     private async handleP2PMessage(message: P2PMessage): Promise<void> {
-        const messageStr = JSON.stringify(message);
-
-        // Rate limit and size check
-        if (messageStr.length > P2P_MAX_MESSAGE_SIZE) { console.log('[SecureP2PService] handleP2PMessage - message too large', { size: messageStr.length }); return; }
-        if (!this.checkMessageRateLimit(message.from)) { console.log('[SecureP2PService] handleP2PMessage - rate limited', { from: message.from }); return; }
-
+        if (!this.checkMessageRateLimit(message.from)) return;
 
         // Verify signature
         if (message.signature && message.from) {
             const peerPublicKey = this.peerDilithiumKeys.get(message.from);
             if (peerPublicKey) {
                 try {
-                    const messageBytes = new TextEncoder().encode(JSON.stringify({
+                    const messageBytes = new TextEncoder().encode(stringifyDeterministic({
                         type: message.type,
                         from: message.from,
                         to: message.to,
@@ -441,9 +538,18 @@ export class SecureP2PService {
                     const isValid = await CryptoUtils.Dilithium.verify(signature, messageBytes, peerPublicKey);
 
                     if (!isValid) {
+                        console.warn('[SecureP2PService] Signature verification failed for:', message.from, {
+                            type: message.type,
+                            timestamp: message.timestamp
+                        });
                         return;
                     }
-                } catch { return; }
+                } catch (err) {
+                    console.error('[SecureP2PService] Error verifying signature:', err);
+                    return;
+                }
+            } else {
+                console.warn('[SecureP2PService] Received signed message but no public key for:', message.from);
             }
         }
 

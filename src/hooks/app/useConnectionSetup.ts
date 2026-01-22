@@ -3,6 +3,8 @@ import { SecurityAuditLogger } from '../../lib/cryptography/audit-logger';
 import { SignalType } from '../../lib/types/signal-types';
 import { syncEncryptedStorage } from '../../lib/database/encrypted-storage';
 import { retrieveAuthTokens } from '../../lib/signals/signals';
+import websocketClient from '../../lib/websocket/websocket';
+import { storage } from '../../lib/tauri-bindings';
 
 interface ConnectionSetupProps {
   setupComplete: boolean;
@@ -38,13 +40,13 @@ export function useConnectionSetup({
 
     const initializeConnection = async () => {
       try {
-        await (window as any).edgeApi?.wsConnect?.();
+        await websocketClient.connect();
 
         const hasEncryptedAuth = Database.secureDBRef.current !== null;
         let storedUsername: string | null = null;
         let hasStoredTokens = false;
         try {
-          storedUsername = syncEncryptedStorage.getItem('last_authenticated_username') || null;
+          storedUsername = await storage.get('last_authenticated_username');
         } catch { }
         try {
           const tokens = await retrieveAuthTokens();

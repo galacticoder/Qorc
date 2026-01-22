@@ -22,6 +22,7 @@ export interface AuthRefs {
 
 export interface AuthSetters {
   setUsername: (v: string) => void;
+  setPseudonym: (v: string) => void;
   setIsLoggedIn: (v: boolean) => void;
   setIsGeneratingKeys: (v: boolean) => void;
   setAuthStatus: (v: string) => void;
@@ -51,7 +52,7 @@ export const createHandleAccountSubmit = (
     waitForServerKeys: () => Promise<ServerHybridPublicKeys>;
     initializeKeys: (isRecoveryMode?: boolean, providedSalt?: string, providedArgon2Params?: any) => Promise<void>;
     getKeysOnDemand: () => Promise<HybridKeys | null>;
-    storeAuthenticationState: (username: string) => void;
+    storeAuthenticationState: (username: string, originalUsername?: string) => void;
     clearSecureDBForUser: (pseudonym: string) => Promise<void>;
   }
 ) => {
@@ -99,13 +100,14 @@ export const createHandleAccountSubmit = (
     }
 
     refs.loginUsernameRef.current = pseudonym;
-    setters.setUsername(pseudonym);
+    setters.setUsername(trimmedUsername);
+    setters.setPseudonym(pseudonym);
     websocketClient.setUsername(pseudonym);
 
     refs.passwordRef.current = password;
-    refs.passphraseRef.current = passphrase || "";
+    refs.confirmPasswordRef.current = passphrase || "";
 
-    helpers.storeAuthenticationState(pseudonym);
+    await helpers.storeAuthenticationState(pseudonym, trimmedUsername);
 
     try {
       if (!websocketClient.isConnectedToServer()) {
@@ -149,6 +151,7 @@ export const createHandleAccountSubmit = (
         const t = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
         p.then((v) => { clearTimeout(t); resolve(v as T); }).catch((e) => { clearTimeout(t); reject(e); });
       });
+
       const encryptedPayload = await withTimeout(
         CryptoUtils.Hybrid.encryptForServer(
           userPayload,
@@ -181,7 +184,6 @@ export const createHandleAccountSubmit = (
             resolve(message.challenge);
           });
         });
-
         websocketClient.send(JSON.stringify({ type: SignalType.DEVICE_CHALLENGE_REQUEST }));
         const challenge = await challengePromise;
 
@@ -239,8 +241,10 @@ export const createHandleAccountSubmit = (
       setters.setAuthStatus("Sending...");
       websocketClient.send(JSON.stringify(payload));
     } catch (_error) {
+      const errorMessage = _error instanceof Error ? _error.message : String(_error);
+      console.error('[Auth] Error during account submit:', errorMessage);
       setters.setAuthStatus('');
-      setters.setLoginError(_error instanceof Error ? _error.message : 'Authentication request failed');
+      setters.setLoginError(errorMessage || 'Authentication request failed');
       setters.setIsSubmittingAuth(false);
     } finally {
       setters.setIsGeneratingKeys(false);

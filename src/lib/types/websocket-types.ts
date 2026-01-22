@@ -59,6 +59,7 @@ export const DEFAULT_ALLOWED_TYPES: Set<string> = new Set([
   SignalType.OFFLINE_MESSAGES_RESPONSE,
   SignalType.DELIVERY_RECEIPT,
   SignalType.READ_RECEIPT,
+  SignalType.KEY_CHUNK,
 ]);
 
 export const DEFAULT_ENCRYPTED_TYPES = new Set<string>([
@@ -185,6 +186,7 @@ export interface HandshakeCallbacks {
   getTorAdaptedTimeout: (baseTimeout: number) => number;
   onSessionEstablished: (session: SessionKeyMaterial, serverSignatureKey?: Uint8Array) => void;
   onHandshakeError: (error: Error) => void;
+  isConnected: () => boolean | Promise<boolean>;
 }
 
 export interface HeartbeatCallbacks {

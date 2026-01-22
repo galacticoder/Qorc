@@ -9,6 +9,7 @@ import {
   SECURE_DB_MAX_TOTAL_FILE_STORAGE,
   SECURE_DB_BLOCKED_MIME_TYPES,
 } from '../constants';
+import type { MessageReceipt } from '../../components/chat/messaging/types';
 import type { MappingPayload, ResolveCache } from '../types/database-types';
 
 // Sanitize username for database operations
@@ -148,3 +149,14 @@ export const getFilesStorageUsage = async (kv: any): Promise<{ used: number; lim
     return { used: 0, limit: SECURE_DB_MAX_TOTAL_FILE_STORAGE, available: SECURE_DB_MAX_TOTAL_FILE_STORAGE };
   }
 }
+
+// Merge receipt fields to avoid overwriting more recent updates
+export const mergeReceipts = (
+  existing: MessageReceipt | undefined,
+  pending: MessageReceipt | undefined
+): MessageReceipt => ({
+  delivered: existing?.delivered || pending?.delivered || false,
+  read: existing?.read || pending?.read || false,
+  deliveredAt: existing?.deliveredAt || pending?.deliveredAt,
+  readAt: existing?.readAt || pending?.readAt,
+});

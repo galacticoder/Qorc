@@ -38,8 +38,38 @@ function loadDotEnv(filePath) {
   } catch { }
 }
 
-// Read project .env before computing CONFIG
 loadDotEnv(path.join(repoRoot, '.env'));
+
+function safeUpdateEnv(updates) {
+  try {
+    const envPath = path.join(repoRoot, '.env');
+    let envText = '';
+    try {
+      envText = fs.readFileSync(envPath, 'utf8');
+    } catch { }
+    const lines = envText ? envText.split(/\r?\n/) : [];
+
+    for (const [key, value] of Object.entries(updates)) {
+      const line = `${key}=${value}`;
+      const idx = lines.findIndex(l => l.trim().startsWith(key + '='));
+      if (idx >= 0) {
+        lines[idx] = line;
+      } else {
+        lines.push(line);
+      }
+      
+      process.env[key] = value;
+      if (key in CONFIG) CONFIG[key] = value;
+    }
+
+    const newEnv = lines.filter(Boolean).join('\n') + '\n';
+    fs.writeFileSync(envPath, newEnv, 'utf8');
+    log(`[OK] Updated .env: ${Object.keys(updates).join(', ')}`);
+  } catch (e) {
+    logErr(`[WARN] Failed to persist updates to .env: ${e.message}`);
+    log(`[INFO] Current in-memory configuration is still valid.`);
+  }
+}
 
 function fileExistsMaybeRelative(p) {
   if (!p) return false;
@@ -67,6 +97,7 @@ const CONFIG = {
 };
 
 const serverDir = path.join(repoRoot, 'server');
+const CERT_DIR = path.join(serverDir, 'config', 'certs');
 const localRedisTls = path.join(repoRoot, 'server', 'bin', 'redis-server-tls');
 const REDIS_SERVER_BIN = process.env.TLS_REDIS_SERVER ||
   (fs.existsSync(localRedisTls) ? localRedisTls : null) ||
@@ -77,7 +108,21 @@ function log(...args) { console.log('[START]', ...args); }
 function logErr(...args) { console.error('[START]', ...args); }
 
 function buildRedisCliCommand(redisUrl, ...args) {
-  let cmd = `redis-cli -u "${redisUrl}"`;
+  let url;
+  try {
+    url = new URL(redisUrl);
+  } catch (e) {
+    return { cmd: `redis-cli -u "${redisUrl}" ${args.join(' ')}`, env: {} };
+  }
+
+  const env = {};
+  if (url.password) {
+    env.REDISCLI_AUTH = url.password;
+    url.password = '';
+  }
+
+  const sanitizedUrl = url.toString();
+  let cmd = `redis-cli -u "${sanitizedUrl}"`;
 
   if (process.env.REDIS_CA_CERT_PATH) {
     cmd += ` --cacert "${process.env.REDIS_CA_CERT_PATH}"`;
@@ -93,7 +138,7 @@ function buildRedisCliCommand(redisUrl, ...args) {
     cmd += ' ' + args.join(' ');
   }
 
-  return cmd;
+  return { cmd, env };
 }
 
 class CircularBuffer {
@@ -203,12 +248,55 @@ function validateTLSCertificates() {
     : path.join(repoRoot, CONFIG.TLS_KEY_PATH);
 
   if (!fs.existsSync(certPath)) {
+    // If in Docker try to see if host path that we can Dockerize
+    if (require('fs').existsSync('/.dockerenv') && certPath.startsWith('/')) {
+      // find 'server/config/certs'
+      const parts = certPath.split(path.sep);
+      const certIdx = parts.indexOf('certs');
+      if (certIdx > 0 && parts[certIdx - 1] === 'config' && parts[certIdx - 2] === 'server') {
+        const guessedRel = path.join('server', 'config', 'certs', parts.slice(certIdx + 1).join(path.sep));
+        const guessedAbs = path.join(repoRoot, guessedRel);
+        if (fs.existsSync(guessedAbs)) {
+          log(`[DOCKER] Resolving host cert path ${certPath} -> ${guessedAbs}`);
+          CONFIG.TLS_CERT_PATH = guessedAbs;
+          return validateTLSCertificates();
+        }
+      }
+      // 2. try to find the filename anywhere in CERT_DIR
+      const fileName = path.basename(certPath);
+      const possible = path.join(CERT_DIR, fileName);
+      if (fs.existsSync(possible)) {
+        log(`[DOCKER] Correcting cert path to found file: ${possible}`);
+        CONFIG.TLS_CERT_PATH = possible;
+        return validateTLSCertificates();
+      }
+    }
     logErr(`ERROR: TLS cert not found: ${certPath}`);
     logErr('Generate certificates with: node scripts/generate_ts_tls.cjs');
     process.exit(1);
   }
 
   if (!fs.existsSync(keyPath)) {
+    if (require('fs').existsSync('/.dockerenv') && keyPath.startsWith('/')) {
+      const parts = keyPath.split(path.sep);
+      const certIdx = parts.indexOf('certs');
+      if (certIdx > 0 && parts[certIdx - 1] === 'config' && parts[certIdx - 2] === 'server') {
+        const guessedRel = path.join('server', 'config', 'certs', parts.slice(certIdx + 1).join(path.sep));
+        const guessedAbs = path.join(repoRoot, guessedRel);
+        if (fs.existsSync(guessedAbs)) {
+          log(`[DOCKER] Resolving host key path ${keyPath} -> ${guessedAbs}`);
+          CONFIG.TLS_KEY_PATH = guessedAbs;
+          return validateTLSCertificates();
+        }
+      }
+      const fileName = path.basename(keyPath);
+      const possible = path.join(CERT_DIR, fileName);
+      if (fs.existsSync(possible)) {
+        log(`[DOCKER] Correcting key path to found file: ${possible}`);
+        CONFIG.TLS_KEY_PATH = possible;
+        return validateTLSCertificates();
+      }
+    }
     logErr(`ERROR: TLS key not found: ${keyPath}`);
     logErr('Generate certificates with: node scripts/generate_ts_tls.cjs');
     process.exit(1);
@@ -546,6 +634,10 @@ class ServerUI {
   }
 
   addLog(line) {
+    if (line.includes('\r')) {
+      const parts = line.split('\r');
+      line = parts[parts.length - 1];
+    }
     this.logBuffer.push(line);
     this.renderDebouncer.call();
   }
@@ -581,11 +673,20 @@ class ServerUI {
       // Redis cluster info
       try {
         if (!this.selfServerId) {
-          const keys = execSync(buildRedisCliCommand(this.config.REDIS_URL, 'hkeys', 'cluster:servers'),
-            { encoding: 'utf8', timeout: 700 }).trim().split('\n');
+          const { cmd: hkeysCmd, env: hkeysEnv } = buildRedisCliCommand(this.config.REDIS_URL, 'hkeys', 'cluster:servers');
+          const keys = execSync(hkeysCmd, {
+            encoding: 'utf8',
+            timeout: 700,
+            env: { ...process.env, ...hkeysEnv }
+          }).trim().split('\n');
+
           for (const key of keys) {
-            const val = execSync(buildRedisCliCommand(this.config.REDIS_URL, 'hget', 'cluster:servers', `"${key}"`),
-              { encoding: 'utf8', timeout: 700 }).trim();
+            const { cmd: hgetCmd, env: hgetEnv } = buildRedisCliCommand(this.config.REDIS_URL, 'hget', 'cluster:servers', `"${key}"`);
+            const val = execSync(hgetCmd, {
+              encoding: 'utf8',
+              timeout: 700,
+              env: { ...process.env, ...hgetEnv }
+            }).trim();
             try {
               const data = JSON.parse(val);
               if (data.port == this.config.PORT || data.pid == this.serverPid) {
@@ -597,8 +698,12 @@ class ServerUI {
         }
 
         if (this.selfServerId) {
-          const val = execSync(buildRedisCliCommand(this.config.REDIS_URL, 'hget', 'cluster:servers', `"${this.selfServerId}"`),
-            { encoding: 'utf8', timeout: 700 }).trim();
+          const { cmd: hgetCmd, env: hgetEnv } = buildRedisCliCommand(this.config.REDIS_URL, 'hget', 'cluster:servers', `"${this.selfServerId}"`);
+          const val = execSync(hgetCmd, {
+            encoding: 'utf8',
+            timeout: 700,
+            env: { ...process.env, ...hgetEnv }
+          }).trim();
           const data = JSON.parse(val);
           metrics.heartbeatAge = Math.floor((Date.now() - (data.lastHeartbeat || 0)) / 1000);
           metrics.registered = true;
@@ -879,7 +984,15 @@ async function ensureTLSIfMissing() {
 
   log('TLS certificates not found. Generating new certificates...');
 
-  const child = spawn(process.execPath, [path.join(repoRoot, 'scripts', 'generate_ts_tls.cjs')], { cwd: repoRoot, stdio: 'inherit' });
+  const child = spawn(process.execPath, [path.join(repoRoot, 'scripts', 'generate_ts_tls.cjs')], { cwd: repoRoot, stdio: ['inherit', 'pipe', 'inherit'] });
+
+  let capturedOutput = '';
+  child.stdout.on('data', (data) => {
+    const str = data.toString();
+    process.stdout.write(str);
+    capturedOutput += str;
+  });
+
   const code = await new Promise((r) => child.on('exit', (c) => r(c || 0)));
 
   if (code !== 0) {
@@ -888,13 +1001,55 @@ async function ensureTLSIfMissing() {
   }
 
   loadDotEnv(path.join(repoRoot, '.env'));
-  if (process.env.TLS_CERT_PATH) {
-    CONFIG.TLS_CERT_PATH = process.env.TLS_CERT_PATH;
-    log(`TLS certificate: ${process.env.TLS_CERT_PATH}`);
+
+  // 1. Try output from child
+  let capturedPaths = null;
+  const jsonMatch = capturedOutput.match(/\[JSON_PATHS\] (.+)/);
+  if (jsonMatch) {
+    try {
+      capturedPaths = JSON.parse(jsonMatch[1]);
+      log(`[START] Captured TLS paths from generator: ${JSON.stringify(capturedPaths)}`);
+    } catch { }
   }
-  if (process.env.TLS_KEY_PATH) {
+
+  if (capturedPaths) {
+    if (capturedPaths.TLS_CERT_PATH) CONFIG.TLS_CERT_PATH = capturedPaths.TLS_CERT_PATH;
+    if (capturedPaths.TLS_KEY_PATH) CONFIG.TLS_KEY_PATH = capturedPaths.TLS_KEY_PATH;
+  }
+
+  // 2. If reload or capture didnt work try to guess by scanning CERT_DIR
+  try {
+    if (!fs.existsSync(CERT_DIR)) fs.mkdirSync(CERT_DIR, { recursive: true });
+    const dnsMatch = fs.readdirSync(CERT_DIR).find(f => f.endsWith('.crt'));
+    if (dnsMatch) {
+      const dns = dnsMatch.replace('.crt', '');
+      const relCert = `server/config/certs/${dns}.crt`;
+      const relKey = `server/config/certs/${dns}.key`;
+
+      const absCert = path.join(repoRoot, relCert);
+      if (!CONFIG.TLS_CERT_PATH || !fs.existsSync(path.isAbsolute(CONFIG.TLS_CERT_PATH) ? CONFIG.TLS_CERT_PATH : path.join(repoRoot, CONFIG.TLS_CERT_PATH))) {
+        if (fs.existsSync(absCert)) {
+          log(`[START] Found generated certificate via scan: ${relCert}`);
+          CONFIG.TLS_CERT_PATH = relCert;
+        }
+      }
+      const absKey = path.join(repoRoot, relKey);
+      if (!CONFIG.TLS_KEY_PATH || !fs.existsSync(path.isAbsolute(CONFIG.TLS_KEY_PATH) ? CONFIG.TLS_KEY_PATH : path.join(repoRoot, CONFIG.TLS_KEY_PATH))) {
+        if (fs.existsSync(absKey)) {
+          log(`[START] Found generated key via scan: ${relKey}`);
+          CONFIG.TLS_KEY_PATH = relKey;
+        }
+      }
+    }
+  } catch (e) {
+    logErr(`[START] Warning: Failed to scan ${CERT_DIR} for certs: ${e.message}`);
+  }
+
+  if (process.env.TLS_CERT_PATH && !CONFIG.TLS_CERT_PATH) {
+    CONFIG.TLS_CERT_PATH = process.env.TLS_CERT_PATH;
+  }
+  if (process.env.TLS_KEY_PATH && !CONFIG.TLS_KEY_PATH) {
     CONFIG.TLS_KEY_PATH = process.env.TLS_KEY_PATH;
-    log(`TLS key: ${process.env.TLS_KEY_PATH}`);
   }
   log('');
 }
@@ -1017,37 +1172,14 @@ async function ensureDbCaBundleEnv() {
     process.env.DB_CONNECT_HOST = connectHost;
     process.env.DB_CA_CERT_PATH = caOutPath;
 
-    try {
-      const envPath = path.join(repoRoot, '.env');
-      let envText = '';
-      try {
-        envText = fs.readFileSync(envPath, 'utf8');
-      } catch { }
-      const lines = envText ? envText.split(/\r?\n/) : [];
-
-      const upsert = (key, value) => {
-        const line = `${key}=${value}`;
-        const idx = lines.findIndex(l => l.trim().startsWith(key + '='));
-        if (idx >= 0) {
-          lines[idx] = line;
-        } else {
-          lines.push(line);
-        }
-      };
-
-      upsert('DB_CA_CERT_PATH', caOutPath);
-      upsert('DB_CONNECT_HOST', connectHost);
-      if (process.env.DB_TLS_SERVERNAME === cn) {
-        upsert('DB_TLS_SERVERNAME', cn);
-      }
-
-      const newEnv = lines.filter(Boolean).join('\n') + '\n';
-      fs.writeFileSync(envPath, newEnv, 'utf8');
-    } catch (e) {
-      logErr('[START] WARN: Failed to persist DB_CA_CERT_PATH/PGHOST to .env: ' + e.message);
-    }
+    const relCaPath = path.relative(repoRoot, caOutPath);
+    safeUpdateEnv({
+      'DB_CA_CERT_PATH': relCaPath,
+      'DB_CONNECT_HOST': connectHost,
+      ...(process.env.DB_TLS_SERVERNAME === cn ? { 'DB_TLS_SERVERNAME': cn } : {})
+    });
   } catch (e) {
-    logErr('[START] WARN: Failed to generate Postgres CA bundle: ' + e.message);
+    logErr('[START] WARN: Failed to generate or persist Postgres CA bundle: ' + e.message);
   }
 }
 
@@ -1154,7 +1286,7 @@ async function ensureRedisTls() {
     process.exit(1);
   }
 
-  const args = [
+  const redisArgs = [
     '--port', '0',
     '--tls-port', String(port),
     '--tls-cert-file', CONFIG.TLS_CERT_PATH,
@@ -1162,31 +1294,20 @@ async function ensureRedisTls() {
     '--tls-auth-clients', 'no',
   ];
 
-  log('[START] Auto-starting local TLS Redis:', `${REDIS_SERVER_BIN} ${args.join(' ')}`);
-  const child = spawn(REDIS_SERVER_BIN, args, { cwd: repoRoot, stdio: 'ignore' });
-
-  const newUrl = `rediss://${host}:${port}`;
-  CONFIG.REDIS_URL = newUrl;
-  process.env.REDIS_URL = newUrl;
-
   try {
-    const envPath = path.join(repoRoot, '.env');
-    let envText = '';
-    try { envText = fs.readFileSync(envPath, 'utf8'); } catch { }
-    const lines = envText ? envText.split(/\r?\n/) : [];
-    const upsert = (key, value) => {
-      const line = `${key}=${value}`;
-      const idx = lines.findIndex(l => l.trim().startsWith(key + '='));
-      if (idx >= 0) lines[idx] = line; else lines.push(line);
-    };
-    upsert('REDIS_URL', newUrl);
-    if (process.env.REDIS_TLS_SERVERNAME) {
-      upsert('REDIS_TLS_SERVERNAME', process.env.REDIS_TLS_SERVERNAME);
-    }
-    const newEnv = lines.filter(Boolean).join('\n') + '\n';
-    fs.writeFileSync(envPath, newEnv, 'utf8');
+    log('[START] Auto-starting local TLS Redis:', `${REDIS_SERVER_BIN} ${redisArgs.join(' ')}`);
+    spawn(REDIS_SERVER_BIN, redisArgs, { cwd: repoRoot, stdio: 'ignore' });
+
+    const newUrl = `rediss://${host}:${port}`;
+    CONFIG.REDIS_URL = newUrl;
+    process.env.REDIS_URL = newUrl;
+
+    safeUpdateEnv({
+      'REDIS_URL': newUrl,
+      ...(process.env.REDIS_TLS_SERVERNAME ? { 'REDIS_TLS_SERVERNAME': process.env.REDIS_TLS_SERVERNAME } : {})
+    });
   } catch (e) {
-    logErr('[START] WARN: Failed to persist REDIS_URL/REDIS_TLS_SERVERNAME to .env: ' + e.message);
+    logErr('[START] WARN: Failed to handle local TLS Redis: ' + e.message);
   }
 }
 
@@ -1222,23 +1343,10 @@ async function ensureCorrectCertificateConfig() {
         CONFIG.TLS_CERT_PATH = expectedCert;
         CONFIG.TLS_KEY_PATH = expectedKey;
 
-        const envPath = path.join(repoRoot, '.env');
-        let envText = '';
-        try { envText = fs.readFileSync(envPath, 'utf8'); } catch { }
-        const lines = envText ? envText.split(/\r?\n/) : [];
-
-        const upsert = (key, value) => {
-          const line = `${key}=${value}`;
-          const idx = lines.findIndex(l => l.trim().startsWith(key + '='));
-          if (idx >= 0) lines[idx] = line; else lines.push(line);
-        };
-
-        upsert('TLS_CERT_PATH', expectedCert);
-        upsert('TLS_KEY_PATH', expectedKey);
-
-        const newEnv = lines.filter(Boolean).join('\n') + '\n';
-        fs.writeFileSync(envPath, newEnv, 'utf8');
-        log(`[CONFIG] Updated .env with new certificate paths`);
+        safeUpdateEnv({
+          'TLS_CERT_PATH': expectedCert,
+          'TLS_KEY_PATH': expectedKey
+        });
       }
     }
   } catch (e) {
@@ -1292,160 +1400,118 @@ async function main() {
   await ensureDbCaBundleEnv();
   await ensurePostgresBootstrap();
   await ensureServerDeps();
+  try {
+    if (!process.env.REDIS_CA_CERT_PATH || !process.env.REDIS_CLIENT_CERT_PATH || !process.env.REDIS_CLIENT_KEY_PATH) {
+      const dockerCertsDir = '/app/redis-certs';
+      const isDocker = fs.existsSync(dockerCertsDir);
 
-  if (!process.env.REDIS_CA_CERT_PATH || !process.env.REDIS_CLIENT_CERT_PATH || !process.env.REDIS_CLIENT_KEY_PATH) {
-    const dockerCertsDir = '/app/redis-certs';
-    const isDocker = fs.existsSync(dockerCertsDir);
+      const certsDir = isDocker ? dockerCertsDir : path.join(repoRoot, 'redis-certs');
 
-    const certsDir = isDocker ? dockerCertsDir : path.join(repoRoot, 'redis-certs');
+      const redisCaCert = path.join(certsDir, 'redis-ca.crt');
+      const redisClientCert = path.join(certsDir, 'redis-client.crt');
+      const redisClientKey = path.join(certsDir, 'redis-client.key');
 
-    const redisCaCert = path.join(certsDir, 'redis-ca.crt');
-    const redisClientCert = path.join(certsDir, 'redis-client.crt');
-    const redisClientKey = path.join(certsDir, 'redis-client.key');
+      let certsExist = false;
+      const maxWaitTime = 30000;
+      const checkInterval = 500;
+      const startTime = Date.now();
 
-    let certsExist = false;
-    const maxWaitTime = 30000;
-    const checkInterval = 500;
-    const startTime = Date.now();
-
-    if (isDocker) {
-      log('[START] Waiting for Redis SSL certificates to be ready...');
-      while (!certsExist && (Date.now() - startTime) < maxWaitTime) {
-        if (fs.existsSync(redisCaCert) && fs.existsSync(redisClientCert) && fs.existsSync(redisClientKey)) {
-          try {
-            const caCert = fs.readFileSync(redisCaCert, 'utf8');
-            const clientCert = fs.readFileSync(redisClientCert, 'utf8');
-            const clientKey = fs.readFileSync(redisClientKey, 'utf8');
-            if (caCert && caCert.includes('BEGIN CERTIFICATE') &&
-              clientCert && clientCert.includes('BEGIN CERTIFICATE') &&
-              clientKey && (clientKey.includes('BEGIN') && clientKey.includes('KEY'))) {
-              certsExist = true;
-              break;
+      if (isDocker) {
+        log('[START] Waiting for Redis SSL certificates to be ready...');
+        while (!certsExist && (Date.now() - startTime) < maxWaitTime) {
+          if (fs.existsSync(redisCaCert) && fs.existsSync(redisClientCert) && fs.existsSync(redisClientKey)) {
+            try {
+              const caCert = fs.readFileSync(redisCaCert, 'utf8');
+              const clientCert = fs.readFileSync(redisClientCert, 'utf8');
+              const clientKey = fs.readFileSync(redisClientKey, 'utf8');
+              if (caCert && caCert.includes('BEGIN CERTIFICATE') &&
+                clientCert && clientCert.includes('BEGIN CERTIFICATE') &&
+                clientKey && (clientKey.includes('BEGIN') && clientKey.includes('KEY'))) {
+                certsExist = true;
+                break;
+              }
+            } catch (e) {
             }
-          } catch (e) {
           }
+          await new Promise(resolve => setTimeout(resolve, checkInterval));
         }
-        await new Promise(resolve => setTimeout(resolve, checkInterval));
+
+        if (!certsExist) {
+          logErr(`[START] WARN: Redis certificates not found in ${certsDir} after ${maxWaitTime}ms`);
+        }
+      } else {
+        certsExist = fs.existsSync(redisCaCert) && fs.existsSync(redisClientCert) && fs.existsSync(redisClientKey);
       }
 
-      if (!certsExist) {
-        logErr(`[START] WARN: Redis certificates not found in ${certsDir} after ${maxWaitTime}ms`);
-      }
-    } else {
-      certsExist = fs.existsSync(redisCaCert) && fs.existsSync(redisClientCert) && fs.existsSync(redisClientKey);
-    }
+      if (certsExist) {
+        if (!process.env.REDIS_CA_CERT_PATH) {
+          process.env.REDIS_CA_CERT_PATH = redisCaCert;
+          log(`[START] Set REDIS_CA_CERT_PATH=${redisCaCert}`);
+        }
+        if (!process.env.REDIS_CLIENT_CERT_PATH) {
+          process.env.REDIS_CLIENT_CERT_PATH = redisClientCert;
+          log(`[START] Set REDIS_CLIENT_CERT_PATH=${redisClientCert}`);
+        }
+        if (!process.env.REDIS_CLIENT_KEY_PATH) {
+          process.env.REDIS_CLIENT_KEY_PATH = redisClientKey;
+          log(`[START] Set REDIS_CLIENT_KEY_PATH=${redisClientKey}`);
+        }
 
-    if (certsExist) {
-      if (!process.env.REDIS_CA_CERT_PATH) {
-        process.env.REDIS_CA_CERT_PATH = redisCaCert;
-        log(`[START] Set REDIS_CA_CERT_PATH=${redisCaCert}`);
-      }
-      if (!process.env.REDIS_CLIENT_CERT_PATH) {
-        process.env.REDIS_CLIENT_CERT_PATH = redisClientCert;
-        log(`[START] Set REDIS_CLIENT_CERT_PATH=${redisClientCert}`);
-      }
-      if (!process.env.REDIS_CLIENT_KEY_PATH) {
-        process.env.REDIS_CLIENT_KEY_PATH = redisClientKey;
-        log(`[START] Set REDIS_CLIENT_KEY_PATH=${redisClientKey}`);
-      }
-
-      try {
-        const envPath = path.join(repoRoot, '.env');
-        let envText = '';
-        try {
-          envText = fs.readFileSync(envPath, 'utf8');
-        } catch { }
-        const lines = envText ? envText.split(/\r?\n/) : [];
-
-        const upsert = (key, value) => {
-          const line = `${key}=${value}`;
-          const idx = lines.findIndex(l => l.trim().startsWith(key + '='));
-          if (idx >= 0) {
-            lines[idx] = line;
-          } else {
-            lines.push(line);
-          }
-        };
-
-        upsert('REDIS_CA_CERT_PATH', redisCaCert);
-        upsert('REDIS_CLIENT_CERT_PATH', redisClientCert);
-        upsert('REDIS_CLIENT_KEY_PATH', redisClientKey);
-
-        const newEnv = lines.filter(Boolean).join('\n') + '\n';
-        fs.writeFileSync(envPath, newEnv, 'utf8');
-        log('[START] Updated .env with Redis certificate paths');
-      } catch (e) {
-        logErr('[START] WARN: Failed to persist Redis certificate paths to .env: ' + e.message);
+        safeUpdateEnv({
+          'REDIS_CA_CERT_PATH': path.relative(repoRoot, redisCaCert),
+          'REDIS_CLIENT_CERT_PATH': path.relative(repoRoot, redisClientCert),
+          'REDIS_CLIENT_KEY_PATH': path.relative(repoRoot, redisClientKey)
+        });
       }
     }
+  } catch (e) {
+    logErr('[START] WARN: Failed to handle Redis certificates: ' + e.message);
   }
 
   // Auto-set Postgres TLS certificate path if not already configured
   if (!process.env.DB_CA_CERT_PATH) {
-    const dockerCertsDir = '/app/postgres-certs';
-    const isDocker = fs.existsSync(dockerCertsDir);
+    try {
+      const dockerCertsDir = '/app/postgres-certs';
+      const isDockerMode = fs.existsSync(dockerCertsDir);
+      const certsDir = isDockerMode ? dockerCertsDir : path.join(repoRoot, 'postgres-certs');
+      const postgresCaCert = path.join(certsDir, 'root.crt');
 
-    const certsDir = isDocker ? dockerCertsDir : path.join(repoRoot, 'postgres-certs');
-    const postgresCaCert = path.join(certsDir, 'root.crt');
+      let certExists = false;
+      const maxWaitTime = 30000;
+      const checkInterval = 500;
+      const startTime = Date.now();
 
-    let certExists = false;
-    const maxWaitTime = 30000;
-    const checkInterval = 500;
-    const startTime = Date.now();
-
-    if (isDocker) {
-      log('[START] Waiting for Postgres SSL certificates to be ready...');
-      while (!certExists && (Date.now() - startTime) < maxWaitTime) {
-        if (fs.existsSync(postgresCaCert)) {
-          try {
-            const content = fs.readFileSync(postgresCaCert, 'utf8');
-            if (content && content.includes('BEGIN CERTIFICATE')) {
-              certExists = true;
-              break;
+      if (isDockerMode) {
+        log('[START] Waiting for Postgres SSL certificates to be ready...');
+        while (!certExists && (Date.now() - startTime) < maxWaitTime) {
+          if (fs.existsSync(postgresCaCert)) {
+            try {
+              const content = fs.readFileSync(postgresCaCert, 'utf8');
+              if (content && content.includes('BEGIN CERTIFICATE')) {
+                certExists = true;
+                break;
+              }
+            } catch (e) {
             }
-          } catch (e) {
           }
+          await new Promise(resolve => setTimeout(resolve, checkInterval));
         }
-        await new Promise(resolve => setTimeout(resolve, checkInterval));
+
+        if (!certExists) {
+          logErr(`[START] WARN: Postgres certificate not found at ${postgresCaCert} after ${maxWaitTime}ms`);
+        }
+      } else {
+        certExists = fs.existsSync(postgresCaCert);
       }
 
-      if (!certExists) {
-        logErr(`[START] WARN: Postgres certificate not found at ${postgresCaCert} after ${maxWaitTime}ms`);
+      if (certExists) {
+        process.env.DB_CA_CERT_PATH = postgresCaCert;
+        safeUpdateEnv({
+          'DB_CA_CERT_PATH': path.relative(repoRoot, postgresCaCert)
+        });
       }
-    } else {
-      certExists = fs.existsSync(postgresCaCert);
-    }
-
-    if (certExists) {
-      process.env.DB_CA_CERT_PATH = postgresCaCert;
-      log(`[START] Set DB_CA_CERT_PATH=${postgresCaCert}`);
-
-      try {
-        const envPath = path.join(repoRoot, '.env');
-        let envText = '';
-        try {
-          envText = fs.readFileSync(envPath, 'utf8');
-        } catch { }
-        const lines = envText ? envText.split(/\r?\n/) : [];
-
-        const upsert = (key, value) => {
-          const line = `${key}=${value}`;
-          const idx = lines.findIndex(l => l.trim().startsWith(key + '='));
-          if (idx >= 0) {
-            lines[idx] = line;
-          } else {
-            lines.push(line);
-          }
-        };
-
-        upsert('DB_CA_CERT_PATH', postgresCaCert);
-
-        const newEnv = lines.filter(Boolean).join('\n') + '\n';
-        fs.writeFileSync(envPath, newEnv, 'utf8');
-        log('[START] Updated .env with Postgres certificate path');
-      } catch (e) {
-        logErr('[START] WARN: Failed to persist Postgres certificate path to .env: ' + e.message);
-      }
+    } catch (e) {
+      logErr('[START] WARN: Failed to handle Postgres certificate: ' + e.message);
     }
   }
 
@@ -1498,7 +1564,7 @@ async function main() {
   log(`  TLS Cert: ${CONFIG.TLS_CERT_PATH}`);
   log(`  TLS Key: ${CONFIG.TLS_KEY_PATH}`);
 
-  const env = {
+  const serverEnv = {
     ...process.env,
     PORT: String(CONFIG.PORT),
     BIND_ADDRESS: CONFIG.BIND_ADDRESS,
@@ -1528,7 +1594,7 @@ async function main() {
   if (CONFIG.NO_GUI) {
     const child = spawn(process.execPath, [serverJs], {
       cwd: repoRoot,
-      env,
+      env: serverEnv,
       stdio: 'inherit',
     });
 
@@ -1576,48 +1642,48 @@ async function main() {
     return;
   }
 
-  const tmpDir = os.tmpdir();
-  const logFile = path.join(tmpDir, `server-ui-${Date.now()}.log`);
-  const logStream = fs.createWriteStream(logFile, { flags: 'a' });
+  const tmpD = os.tmpdir();
+  const logF = path.join(tmpD, `server-ui-${Date.now()}.log`);
+  const logS = fs.createWriteStream(logF, { flags: 'a' });
 
-  const child = spawn(process.execPath, [serverJs], {
+  const childServer = spawn(process.execPath, [serverJs], {
     cwd: repoRoot,
-    env,
+    env: serverEnv,
     stdio: ['ignore', 'pipe', 'pipe']
   });
 
   // Setup TUI
-  const ui = new ServerUI(child.pid, CONFIG);
+  const uiTui = new ServerUI(childServer.pid, CONFIG);
 
-  const lastLines = [];
-  const MAX_LAST = 80;
-  const pushLast = (line) => {
-    lastLines.push(line);
-    if (lastLines.length > MAX_LAST) lastLines.shift();
+  const lastLinesArr = [];
+  const MAX_LAST_LOG = 80;
+  const pushLastLog = (line) => {
+    lastLinesArr.push(line);
+    if (lastLinesArr.length > MAX_LAST_LOG) lastLinesArr.shift();
   };
-  const processOutput = (data) => {
+  const processOutputLog = (data) => {
     const lines = data.toString().split('\n');
     for (const line of lines) {
       if (line.trim()) {
-        logStream.write(line + '\n');
-        ui.addLog(line);
-        pushLast(line);
+        logS.write(line + '\n');
+        uiTui.addLog(line);
+        pushLastLog(line);
       }
     }
   };
 
-  child.stdout.on('data', processOutput);
-  child.stderr.on('data', processOutput);
+  childServer.stdout.on('data', processOutputLog);
+  childServer.stderr.on('data', processOutputLog);
 
-  child.on('exit', (code) => {
-    ui.stop(false);
-    logStream.end();
+  childServer.on('exit', (code) => {
+    uiTui.stop(false);
+    logS.end();
 
     if (code !== 0) {
       console.error(`\n[ERROR] Server exited with code ${code}`);
-      if (lastLines.length) {
+      if (lastLinesArr.length) {
         console.error('[ERROR] Last server log lines:');
-        for (const l of lastLines) console.error('  ' + l);
+        for (const l of lastLinesArr) console.error('  ' + l);
       } else {
         console.error('[ERROR] No logs captured. Re-run with NO_GUI=true for raw output.');
       }
@@ -1626,7 +1692,7 @@ async function main() {
     setTimeout(() => process.exit(code || 0), 200);
   });
 
-  ui.start();
+  uiTui.start();
 }
 
 main().catch((e) => { logErr(e.message); process.exit(1); });

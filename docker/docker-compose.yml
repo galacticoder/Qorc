@@ -82,6 +82,7 @@ services:
       - /dev/net/tun:/dev/net/tun
     volumes:
       - ../.env:/app/.env 
+      - ../scripts:/app/scripts:rw
       - ../server:/app/server:rw
       - tailscale-data:/var/lib/tailscale
       - redis-certs:/app/redis-certs:ro

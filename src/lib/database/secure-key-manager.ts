@@ -2,9 +2,9 @@ import { CryptoUtils } from '../utils/crypto-utils';
 import * as argon2 from "argon2-wasm";
 import { blake3 as nobleBlake3 } from '@noble/hashes/blake3.js';
 import { PostQuantumUtils } from '../utils/pq-utils';
-import { SQLiteKV } from './sqlite-kv';
 import { PostQuantumAEAD } from '../cryptography/aead';
 import { EncryptedKeyData, DecryptedKeys } from '../types/database-types';
+import { storage } from '../tauri-bindings';
 
 const getCrypto = () => {
 	if (typeof globalThis !== 'undefined' && globalThis.crypto) {
@@ -104,23 +104,36 @@ export class SecureKeyManager {
 		}
 	}
 
-	// Internal storage helpers
-	private async kv() { return SQLiteKV.forUser(this.username); }
-
 	private async storeKeyMetadata(metadata: any): Promise<void> {
-		await (await this.kv()).setJsonKey('metadata', metadata);
+		const key = `key_meta:${this.username}`;
+		await storage.set(key, JSON.stringify(metadata));
 	}
 
 	async getKeyMetadata(): Promise<any | null> {
-		return (await this.kv()).getJsonKey('metadata');
+		const key = `key_meta:${this.username}`;
+		const data = await storage.get(key);
+		if (!data) return null;
+		try {
+			return JSON.parse(data);
+		} catch {
+			return null;
+		}
 	}
 
 	private async storeEncryptedKeys(payload: EncryptedKeyData): Promise<void> {
-		await (await this.kv()).setJsonKey('keys', payload);
+		const key = `key_bundle:${this.username}`;
+		await storage.set(key, JSON.stringify(payload));
 	}
 
 	private async getEncryptedKeys(): Promise<EncryptedKeyData | null> {
-		return (await this.kv()).getJsonKey<EncryptedKeyData>('keys');
+		const key = `key_bundle:${this.username}`;
+		const data = await storage.get(key);
+		if (!data) return null;
+		try {
+			return JSON.parse(data);
+		} catch {
+			return null;
+		}
 	}
 
 	// Initialize key manager
@@ -159,7 +172,8 @@ export class SecureKeyManager {
 		try {
 			existingMetadata = await this.getKeyMetadata();
 		} catch (_error) {
-			throw new Error('Failed to load key metadata: ' + (_error as Error).message);
+			const msg = typeof _error === 'string' ? _error : ((_error as Error)?.message || String(_error));
+			throw new Error('Failed to load key metadata: ' + msg);
 		}
 
 		// Use stored salt if available otherwise use provided salt or generate new one
@@ -313,7 +327,8 @@ export class SecureKeyManager {
 		try {
 			encryptedData = await this.getEncryptedKeys();
 		} catch (_error) {
-			throw new Error(`Failed to retrieve encrypted keys: ${_error instanceof Error ? _error.message : String(_error)}`);
+			const msg = typeof _error === 'string' ? _error : ((_error as Error)?.message || String(_error));
+			throw new Error(`Failed to retrieve encrypted keys: ${msg}`);
 		}
 
 		if (!encryptedData) {
@@ -431,10 +446,11 @@ export class SecureKeyManager {
 			return false;
 		}
 	}
-	
+
 	// Delete database
 	async deleteDatabase(): Promise<void> {
 		this.masterKey = null;
-		await (await this.kv()).clearSecureKeys();
+		await storage.remove(`key_meta:${this.username}`).catch(() => { });
+		await storage.remove(`key_bundle:${this.username}`).catch(() => { });
 	}
 }

@@ -6,6 +6,7 @@
 import websocketClient from '../websocket/websocket';
 import { SignalType } from '../types/signal-types';
 import { EventType } from '../types/event-types';
+import { signal } from '../tauri-bindings';
 
 // Handle libsignal deliver bundle
 export async function handleLibsignalDeliverBundle(data: any, loginUsernameRef: React.RefObject<string> | undefined): Promise<void> {
@@ -28,27 +29,33 @@ export async function handleLibsignalDeliverBundle(data: any, loginUsernameRef: 
 
     // Check if session already exists
     await new Promise(resolve => setTimeout(resolve, 0));
-    const sessionCheck = await (window as any).edgeApi?.hasSession?.({
-      selfUsername: currentUser, peerUsername: targetUser, deviceId: 1
-    });
+    const sessionCheck = await signal.hasSession(currentUser, targetUser, 1);
 
-    if (sessionCheck?.hasSession) return;
+    if (sessionCheck) return;
+
+    // Register Kyber/ML-KEM key if present in bundle
+    if (data.bundle?.kyberPreKey?.publicKeyBase64 || data.bundle?.pqKyber?.publicKeyBase64) {
+      try {
+        const kyberKey = data.bundle.pqKyber?.publicKeyBase64 || data.bundle.kyberPreKey?.publicKeyBase64;
+        if (kyberKey) {
+          await signal.setPeerKyberKey(targetUser, kyberKey);
+        }
+      } catch (err) {
+        console.warn('[signals] Failed to register peer Kyber key:', err);
+      }
+    }
 
     // Process bundle if no existing session
     await new Promise(resolve => setTimeout(resolve, 0));
-    const result = await (window as any).edgeApi?.processPreKeyBundle?.({
-      selfUsername: currentUser, peerUsername: targetUser, bundle: data.bundle
-    });
+    const result = await signal.processPreKeyBundle(currentUser, targetUser, data.bundle);
 
-    if (!result?.success) throw new Error(result?.error || 'Failed to process pre-key bundle');
+    if (!result) throw new Error('Failed to process pre-key bundle');
 
     await new Promise(resolve => setTimeout(resolve, 0));
-    const confirm = await (window as any).edgeApi?.hasSession?.({
-      selfUsername: currentUser, peerUsername: targetUser, deviceId: 1
-    });
+    const confirm = await signal.hasSession(currentUser, targetUser, 1);
 
-    if (confirm?.hasSession) {
-      try { await (window as any).edgeApi?.trustPeerIdentity?.({ selfUsername: currentUser, peerUsername: targetUser, deviceId: 1 }); } catch { }
+    if (confirm) {
+      try { await signal.trustPeerIdentity(currentUser, targetUser, 1); } catch { }
       window.dispatchEvent(new CustomEvent(EventType.LIBSIGNAL_SESSION_READY, { detail: { peer: targetUser } }));
       await websocketClient.sendSecureControlMessage({
         type: SignalType.SESSION_ESTABLISHED,
@@ -60,11 +67,12 @@ export async function handleLibsignalDeliverBundle(data: any, loginUsernameRef: 
       throw new Error('Session not present after bundle processing');
     }
   } catch (_error) {
-    console.error('[signals] libsignal bundle-processing-failed', (_error as Error).message);
     const targetUser = data?.username;
+    const errorMessage = _error instanceof Error ? _error.message : String(_error);
+    console.error('[signals] libsignal bundle-processing-failed', errorMessage);
     if (targetUser) {
       window.dispatchEvent(new CustomEvent(EventType.LIBSIGNAL_BUNDLE_FAILED, {
-        detail: { peer: targetUser, error: String(_error) }
+        detail: { peer: targetUser, error: errorMessage }
       }));
     }
   }
@@ -81,11 +89,7 @@ export async function handleSessionResetRequest(data: any, loginUsernameRef: Rea
   }
 
   try {
-    await (window as any).edgeApi?.deleteSession?.({
-      selfUsername: loginUsernameRef.current,
-      peerUsername: peerUsername,
-      deviceId: deviceId
-    });
+    await signal.deleteSession(loginUsernameRef.current, peerUsername, deviceId);
 
     window.dispatchEvent(new CustomEvent(EventType.SESSION_RESET_RECEIVED, {
       detail: { peerUsername, reason: data?.reason || 'peer-request' }
@@ -111,6 +115,8 @@ export function handleSessionEstablished(data: any): void {
 export async function handleError(data: any, message: string | undefined, auth: any): Promise<void> {
   const errorMsg = message || '';
   try { auth.setIsSubmittingAuth?.(false); } catch { }
+  try { auth.setTokenValidationInProgress?.(false); } catch { }
+  try { auth.setAuthStatus?.(''); } catch { }
 
   if ((data as any)?.code === 'OFFLINE_LONGTERM_REQUIRED') {
     try { window.dispatchEvent(new CustomEvent(EventType.OFFLINE_LONGTERM_REQUIRED, { detail: data })); } catch { }

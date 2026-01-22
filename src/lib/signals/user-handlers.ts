@@ -9,7 +9,7 @@ import type { DatabaseRefs } from '../types/signal-handler-types';
 
 const __userExistsDebounce = new Map<string, number>();
 
-// Handle user exists response
+// Handle user exists response 
 export function handleUserExistsResponse(data: any, db: DatabaseRefs): void {
   try {
     const uname = typeof data?.username === 'string' ? data.username : '';

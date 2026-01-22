@@ -8,7 +8,6 @@ import { logger as cryptoLogger } from '../crypto/crypto-logger.js';
 import { withRedisClient } from '../presence/presence.js';
 import { sendSecureMessage } from '../messaging/pq-envelope-handler.js';
 import fs from 'fs';
-import { gzipSync } from 'zlib';
 
 // Attach WebSocket gateway
 export function attachGateway({
@@ -134,12 +133,12 @@ export function attachGateway({
     }
   };
 
-  let cachedPublicKeyChunks = null;
+  let cachedPublicKeyMessage = null;
   let cachedPublicKeyLogInfo = null;
 
-  const getCachedPublicKeyChunks = () => {
-    if (cachedPublicKeyChunks) {
-      return { chunks: cachedPublicKeyChunks, logInfo: cachedPublicKeyLogInfo };
+  const getCachedPublicKeyMessage = () => {
+    if (cachedPublicKeyMessage) {
+      return { message: cachedPublicKeyMessage, logInfo: cachedPublicKeyLogInfo };
     }
 
     if (!serverHybridKeyPair ||
@@ -163,31 +162,15 @@ export function attachGateway({
       }
     });
 
-    const compressedMessage = gzipSync(Buffer.from(keyMessage, 'utf8'));
-    const compressionRatio = ((1 - compressedMessage.length / keyMessage.length) * 100).toFixed(1);
-
-    const CHUNK_SIZE = 2048;
-    const totalChunks = Math.ceil(compressedMessage.length / CHUNK_SIZE);
-    const chunks = [];
-    for (let i = 0; i < totalChunks; i++) {
-      const start = i * CHUNK_SIZE;
-      const end = Math.min(start + CHUNK_SIZE, compressedMessage.length);
-      chunks.push(compressedMessage.slice(start, end).toString('base64'));
-    }
-
-    cachedPublicKeyChunks = { totalChunks, chunkSize: CHUNK_SIZE, chunks };
+    cachedPublicKeyMessage = keyMessage;
     cachedPublicKeyLogInfo = {
       serverId: serverId || 'default',
       dilithiumPublicKeyLength: Buffer.from(dilithiumPublicBase64, 'base64').length,
       kyberPublicKeyLength: serverHybridKeyPair.kyber.publicKey.length,
       originalSize: keyMessage.length,
-      compressedSize: compressedMessage.length,
-      compressionRatio: compressionRatio + '%',
-      totalChunks,
-      chunkSize: CHUNK_SIZE,
     };
 
-    return { chunks: cachedPublicKeyChunks, logInfo: cachedPublicKeyLogInfo };
+    return { message: cachedPublicKeyMessage, logInfo: cachedPublicKeyLogInfo };
   };
 
   // Add local WebSocket connection to delivery map
@@ -470,7 +453,7 @@ export function attachGateway({
     ws._username = null;
 
     try {
-      const { chunks: cachedChunks, logInfo } = getCachedPublicKeyChunks();
+      const { message, logInfo } = getCachedPublicKeyMessage();
 
       if (ws.readyState !== 1) {
         logger.warn('[WS] Connection closed before key exchange', {
@@ -480,33 +463,22 @@ export function attachGateway({
         return;
       }
 
-      logger.info('[WS] Preparing chunked compressed server public keys', {
+      logger.info('[WS] Sending server public keys', {
         sessionId: sessionId?.slice(0, 8) + '...',
         ...logInfo,
         readyState: ws.readyState,
         bufferedAmount: ws.bufferedAmount
       });
 
-      for (let i = 0; i < cachedChunks.totalChunks; i++) {
-        const chunkBase64 = cachedChunks.chunks[i];
-        const chunkEnvelope = JSON.stringify({
-          type: 'KEY_CHUNK',
-          chunkIndex: i,
-          totalChunks: cachedChunks.totalChunks,
-          data: chunkBase64
-        });
-        ws.send(chunkEnvelope, (error) => {
-          if (error) {
-            logger.error('[WS] Failed to send key chunk', {
-              sessionId: sessionId?.slice(0, 8) + '...',
-              chunkIndex: i,
-              totalChunks: cachedChunks.totalChunks,
-              error: error.message,
-              readyState: ws.readyState
-            });
-          }
-        });
-      }
+      ws.send(message, (error) => {
+        if (error) {
+          logger.error('[WS] Failed to send server public keys', {
+            sessionId: sessionId?.slice(0, 8) + '...',
+            error: error.message,
+            readyState: ws.readyState
+          });
+        }
+      });
     } catch (error) {
       logger.error('[WS] Failed to send server public keys', {
         sessionId: sessionId?.slice(0, 8) + '...',

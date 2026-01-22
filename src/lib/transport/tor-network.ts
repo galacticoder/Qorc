@@ -2,19 +2,18 @@
  * Tor network manager
  */
 
-import { 
+import {
   TorConfig,
   TorConnectionStats,
-  TorElectronNetworkAPI,
   TorRequestResult,
-  TorCircuitHealth,
-  REQUIRED_ELECTRON_METHODS
- } from '../types/tor-types';
-import { 
+  TorCircuitHealth
+} from '../types/tor-types';
+import {
   TOR_DEFAULT_MONITOR_INTERVAL_MS,
   TOR_MAX_BACKOFF_MS,
   TOR_CIRCUIT_ROTATION_RATE_LIMIT_MS
- } from '../constants';
+} from '../constants';
+import { tor as tauriTor, isTauri } from '../tauri-bindings';
 
 export class TorNetworkManager {
   private config: TorConfig;
@@ -49,32 +48,16 @@ export class TorNetworkManager {
       bytesReceived: 0,
       averageLatency: 0,
       lastHealthCheck: 0,
-      circuitHealth: 'unknown'
+      circuitHealth: 'unknown',
+      bootstrapProgress: 0
     };
 
-    if (typeof window !== 'undefined') {
-      this.validateElectronAPI();
-    }
+    if (typeof window !== 'undefined') { }
   }
 
-  // Validate Electron API
-  private validateElectronAPI(): TorElectronNetworkAPI {
-    if (typeof window === 'undefined') {
-      throw new Error('[TOR] Electron APIs unavailable outside renderer environment');
-    }
-
-    const api = window.electronAPI as any;
-    if (!api) {
-      throw new Error('[TOR] Electron API not available');
-    }
-
-    for (const method of REQUIRED_ELECTRON_METHODS) {
-      if (typeof api[method] !== 'function') {
-        throw new Error(`[TOR] Missing required Electron API method: ${method}`);
-      }
-    }
-
-    return api as TorElectronNetworkAPI;
+  // Check if Tauri is available
+  private checkTauriAvailable(): boolean {
+    return isTauri();
   }
 
   // Retry with exponential backoff
@@ -138,8 +121,12 @@ export class TorNetworkManager {
 
       try {
         const wasConnected = this.stats.isConnected;
-        const connected = await this.testTorConnection();
+        const info = await tauriTor.info();
+        const connected = info.bootstrapped;
         this.stats.isConnected = connected;
+        this.stats.isBootstrapped = info.bootstrapped;
+        this.stats.bootstrapProgress = info.bootstrap_progress;
+        
         this.notifyConnectionCallbacks(connected);
         await this.checkCircuitHealth();
 
@@ -193,7 +180,7 @@ export class TorNetworkManager {
   // Check circuit health
   private async checkCircuitHealth(): Promise<void> {
     const start = performance.now();
-    const test = await this.validateElectronAPI().testTorConnection();
+    const test = await tauriTor.testConnection();
     const latency = performance.now() - start;
 
     this.stats.connectionAttempts += 1;
@@ -227,20 +214,25 @@ export class TorNetworkManager {
     }
 
     this.isInitializing = true;
-    const api = this.validateElectronAPI();
 
     try {
-      const result = await this.retryWithBackoff(() => api.initializeTor(this.config));
+      // Configure Tor
+      await tauriTor.configure(`SocksPort ${this.config.socksPort}\nControlPort ${this.config.controlPort}`);
+
+      // Start Tor
+      const result = await this.retryWithBackoff(() => tauriTor.start());
 
       if (!result.success) {
-        throw new Error(result.error ?? 'Failed to initialize Tor');
+        throw new Error('Failed to start Tor');
       }
 
-      if (result.socksPort) {
-        this.config.socksPort = result.socksPort;
+      // Get info
+      const info = await tauriTor.info();
+      if (info.socks_port) {
+        this.config.socksPort = info.socks_port;
       }
-      if (result.controlPort) {
-        this.config.controlPort = result.controlPort;
+      if (info.control_port) {
+        this.config.controlPort = info.control_port;
       }
 
       this.isInitialized = true;
@@ -276,10 +268,8 @@ export class TorNetworkManager {
 
   // Test Tor connection
   private async testTorConnection(): Promise<boolean> {
-    const api = this.validateElectronAPI();
-
     try {
-      const result = await api.testTorConnection();
+      const result = await tauriTor.testConnection();
       if (!result.success && result.error) {
         console.error('[TOR] Connection test failed:', result.error);
       }
@@ -297,39 +287,12 @@ export class TorNetworkManager {
       return null;
     }
 
-    const api = this.validateElectronAPI();
-
     try {
-      const result = await api.getTorWebSocketUrl(url);
-      let torUrl: string | null = null;
-      if (typeof result === 'string') {
-        torUrl = result;
-      } else if (result && typeof result === 'object') {
-        const candidate = (result as { url?: unknown }).url;
-        if (typeof candidate === 'string' && candidate) {
-          torUrl = candidate;
-        } else {
-          const error = (result as { error?: unknown }).error;
-          if (typeof error === 'string' && error) {
-            throw new Error(error);
-          }
-        }
-      }
-
-      if (!torUrl) {
-        throw new Error('Invalid Tor WebSocket URL result');
-      }
-
-      if (!torUrl || typeof torUrl !== 'string') {
-        throw new Error('Invalid Tor WebSocket URL: empty or non-string');
-      }
-
-      const lowerUrl = torUrl.toLowerCase();
+      const lowerUrl = url.toLowerCase();
       if (!lowerUrl.startsWith('ws://') && !lowerUrl.startsWith('wss://')) {
-        throw new Error(`Invalid Tor WebSocket URL scheme: ${torUrl.split(':')[0]}. Only ws:// or wss:// allowed.`);
+        throw new Error(`Invalid WebSocket URL scheme: ${url.split(':')[0]}. Only ws:// or wss:// allowed.`);
       }
-
-      return new WebSocket(torUrl);
+      return new WebSocket(url);
     } catch (_error) {
       console.error('[TOR] Failed to create Tor WebSocket:', _error);
       return null;
@@ -352,34 +315,7 @@ export class TorNetworkManager {
       throw new Error('Invalid URL provided');
     }
 
-    const api = this.validateElectronAPI();
-
-    return this.retryWithBackoff(async () => {
-      const result = await api.makeTorRequest({
-        url: options.url,
-        method: options.method ?? 'GET',
-        headers: options.headers ?? {},
-        body: options.body,
-        timeout: options.timeout ?? this.config.connectionTimeout
-      });
-
-      if (!result || typeof result !== 'object') {
-        throw new Error('Invalid Tor request result');
-      }
-      if (typeof result.body !== 'string') {
-        throw new Error('Unexpected Tor response body type');
-      }
-
-      if (result.body) {
-        this.stats.bytesReceived += result.body.length;
-      }
-      if (options.body) {
-        this.stats.bytesTransmitted += options.body.length;
-      }
-      this.notifyStatsCallbacks();
-
-      return result;
-    });
+    throw new Error('Direct Tor HTTP requests not supported - use Tauri backend');
   }
 
   // Rotate Tor circuit
@@ -394,10 +330,8 @@ export class TorNetworkManager {
       return false;
     }
 
-    const api = this.validateElectronAPI();
-
     try {
-      const result = await this.retryWithBackoff(() => api.rotateTorCircuit());
+      const result = await this.retryWithBackoff(() => tauriTor.rotateCircuit());
 
       if (!result.success) {
         console.error('[TOR] Circuit rotation failed');
@@ -433,12 +367,7 @@ export class TorNetworkManager {
 
   // Check if Tor is supported
   isSupported(): boolean {
-    try {
-      this.validateElectronAPI();
-      return true;
-    } catch {
-      return false;
-    }
+    return this.checkTauriAvailable();
   }
 
   // Register connection change callback

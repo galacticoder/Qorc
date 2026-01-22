@@ -6,7 +6,7 @@ import websocketClient from "../../lib/websocket/websocket";
 import { CryptoUtils } from "../../lib/utils/crypto-utils";
 import { SecureDB } from "../../lib/database/secureDB";
 import { SecureKeyManager } from "../../lib/database/secure-key-manager";
-import { encryptedStorage, syncEncryptedStorage } from "../../lib/database/encrypted-storage";
+import { encryptedStorage } from "../../lib/database/encrypted-storage";
 import { secureWipeStringRef, PinnedServer } from "../../lib/utils/auth-utils";
 import type { ServerHybridPublicKeys, HybridKeys, ServerTrustRequest, HashParams, MaxStepReached } from "../../lib/types/auth-types";
 import { createDeriveEffectivePassphrase, createGetKeysOnDemand, createWaitForServerKeys, createInitializeKeys } from "./keyManagement";
@@ -15,9 +15,11 @@ import { createHandlePassphraseSubmit } from "./passphrase";
 import { createHandleAuthSuccess } from "./authSuccess";
 import { createAttemptAuthRecovery, createStoreAuthenticationState, createClearAuthenticationState, createStoreUsernameMapping } from "./recovery";
 import { createLogout, createGetLogout } from "./logout";
+import { signal, storage } from "../../lib/tauri-bindings";
 
 export const useAuth = (_secureDB?: SecureDB) => {
   const [username, setUsername] = useState("");
+  const [pseudonym, setPseudonym] = useState("");
   const [isLoggedIn, setIsLoggedIn] = useState(false);
   const [isGeneratingKeys, setIsGeneratingKeys] = useState(false);
   const [authStatus, setAuthStatus] = useState<string>("");
@@ -25,14 +27,7 @@ export const useAuth = (_secureDB?: SecureDB) => {
   const [isSubmittingAuth, setIsSubmittingAuth] = useState(false);
   const [accountAuthenticated, setAccountAuthenticated] = useState(false);
   const [isRegistrationMode, setIsRegistrationMode] = useState(false);
-  const [tokenValidationInProgress, setTokenValidationInProgress] = useState(() => {
-    try {
-      const storedUsername = syncEncryptedStorage.getItem('last_authenticated_username');
-      return !!storedUsername;
-    } catch {
-      return false;
-    }
-  });
+  const [tokenValidationInProgress, setTokenValidationInProgress] = useState(false);
 
   const passphraseRef = useRef<string>("");
   const passphrasePlaintextRef = useRef<string>("");
@@ -52,10 +47,13 @@ export const useAuth = (_secureDB?: SecureDB) => {
 
     const onAuthError = () => {
       setIsSubmittingAuth(false);
+      setTokenValidationInProgress(false);
+      setAuthStatus('');
     };
 
     const onAuthRateLimited = (event: any) => {
       setIsSubmittingAuth(false);
+      setTokenValidationInProgress(false);
       setAuthStatus('');
       setIsGeneratingKeys(false);
 
@@ -164,7 +162,7 @@ export const useAuth = (_secureDB?: SecureDB) => {
   const attemptAuthRecovery = useCallback(
     createAttemptAuthRecovery(
       { loginUsernameRef, originalUsernameRef },
-      { setUsername, setAuthStatus, setTokenValidationInProgress },
+      { setUsername, setPseudonym, setAuthStatus, setTokenValidationInProgress },
       accountAuthenticated,
       isLoggedIn
     ),
@@ -195,6 +193,7 @@ export const useAuth = (_secureDB?: SecureDB) => {
 
   const authSetters = {
     setUsername,
+    setPseudonym,
     setIsLoggedIn,
     setIsGeneratingKeys,
     setAuthStatus,
@@ -230,15 +229,15 @@ export const useAuth = (_secureDB?: SecureDB) => {
   );
 
   const handlePassphraseSubmit = createHandlePassphraseSubmit(
-    { loginUsernameRef, passphrasePlaintextRef, passphraseRef, passphraseLimiterRef, keyManagerRef },
+    { loginUsernameRef, passphrasePlaintextRef, passphraseRef, passwordRef, passphraseLimiterRef, keyManagerRef },
     { setAuthStatus, setLoginError, setShowPassphrasePrompt, setRecoveryActive, setAccountAuthenticated, setIsLoggedIn, setMaxStepReached },
     { isLoggedIn, accountAuthenticated, recoveryActive, passphraseHashParams, serverHybridPublic },
     { initializeKeys, deriveEffectivePassphrase, getKeysOnDemand }
   );
 
   const handleAuthSuccess = createHandleAuthSuccess(
-    { loginUsernameRef, passphrasePlaintextRef, keyManagerRef },
-    { setAuthStatus, setUsername, setIsLoggedIn, setAccountAuthenticated, setRecoveryActive, setShowPassphrasePrompt, setIsRegistrationMode, setLoginError },
+    { loginUsernameRef, originalUsernameRef, passphrasePlaintextRef, keyManagerRef },
+    { setAuthStatus, setUsername, setPseudonym, setIsLoggedIn, setAccountAuthenticated, setRecoveryActive, setShowPassphrasePrompt, setIsRegistrationMode, setLoginError },
     { storeAuthenticationState, deriveEffectivePassphrase, getKeysOnDemand }
   );
 
@@ -389,12 +388,12 @@ export const useAuth = (_secureDB?: SecureDB) => {
   useEffect(() => {
     (async () => {
       try {
-        if (isLoggedIn && loginUsernameRef.current && (window as any).edgeApi?.setStaticMlkemKeys) {
+        if (isLoggedIn && loginUsernameRef.current) {
           const keys = await getKeysOnDemand?.();
           const pub = keys?.kyber?.publicKeyBase64;
           const secB64 = keys?.kyber?.secretKey ? CryptoUtils.Base64.arrayBufferToBase64(keys.kyber.secretKey) : undefined;
           if (typeof pub === 'string' && typeof secB64 === 'string' && pub && secB64) {
-            await (window as any).edgeApi.setStaticMlkemKeys({ username: loginUsernameRef.current, publicKeyBase64: pub, secretKeyBase64: secB64 });
+            await signal.setStaticMlkemKeys(loginUsernameRef.current, pub, secB64);
           }
         }
       } catch { }
@@ -459,27 +458,28 @@ export const useAuth = (_secureDB?: SecureDB) => {
     (async () => {
       try {
         const tokens = await retrieveAuthTokens();
-        if (tokens?.accessToken && tokens?.refreshToken) {
+        const storedUsername = await storage.get('last_authenticated_username');
+        const storedDisplayName = await storage.get('last_authenticated_display_name');
+
+        if ((tokens?.accessToken && tokens?.refreshToken) || storedUsername) {
           setTokenValidationInProgress(true);
           setAuthStatus('Verifying session...');
-          const storedUsername = syncEncryptedStorage.getItem('last_authenticated_username');
+
           if (storedUsername) {
             loginUsernameRef.current = storedUsername;
-            setUsername(storedUsername);
+            const displayName = storedDisplayName || storedUsername;
+            setUsername(displayName);
+            originalUsernameRef.current = displayName;
+
           }
         } else {
-          const storedUsername = syncEncryptedStorage.getItem('last_authenticated_username');
-          if (!storedUsername) {
-            setTokenValidationInProgress(false);
-            setAuthStatus('');
-          }
-        }
-      } catch {
-        const storedUsername = syncEncryptedStorage.getItem('last_authenticated_username');
-        if (!storedUsername) {
           setTokenValidationInProgress(false);
           setAuthStatus('');
         }
+      } catch (err) {
+        console.error('[useAuth] Session restoration failed:', err);
+        setTokenValidationInProgress(false);
+        setAuthStatus('');
       }
     })();
   }, []);
@@ -578,6 +578,8 @@ export const useAuth = (_secureDB?: SecureDB) => {
   return {
     username,
     setUsername,
+    pseudonym,
+    setPseudonym,
     tokenValidationInProgress,
     setTokenValidationInProgress,
     serverHybridPublic,
@@ -595,6 +597,7 @@ export const useAuth = (_secureDB?: SecureDB) => {
     loginError,
     accountAuthenticated,
     isRegistrationMode,
+    setIsRegistrationMode,
     loginUsernameRef,
     originalUsernameRef,
     storeUsernameMapping,

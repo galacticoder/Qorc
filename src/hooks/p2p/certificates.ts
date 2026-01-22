@@ -65,11 +65,11 @@ export function createGetPeerCertificate(
       if (!valid) {
         throw new Error('CERT_INVALID_SIGNATURE');
       }
-      
+
       if (options?.trustedIssuerDilithiumPublicKeyBase64 && cert.proof !== options.trustedIssuerDilithiumPublicKeyBase64) {
         throw new Error('CERT_UNTRUSTED_ISSUER');
       }
-      
+
       const notYetValid = cert.issuedAt > (now + CERT_CLOCK_SKEW_MS);
       const alreadyExpired = cert.expiresAt <= (now - CERT_CLOCK_SKEW_MS);
       if (notYetValid || alreadyExpired) {
@@ -144,7 +144,10 @@ export function createEnsurePeerAuthenticated(
       return false;
     }
 
-    if (envelope?.metadata?.sender?.dilithiumPublicKey !== cert.dilithiumPublicKey) {
+    const senderKey = envelope?.metadata?.sender?.dilithiumPublicKey ||
+      (envelope?.routing && typeof envelope.routing === 'object' ? envelope.routing.from : null);
+
+    if (senderKey && senderKey !== cert.dilithiumPublicKey) {
       return false;
     }
 

@@ -14,6 +14,7 @@ interface UseP2PConnectionManagerProps {
   selectedServerUrl: string;
   p2pHybridKeys: any;
   selectedConversation: string | null;
+  conversations?: any[];
   p2pMessaging: {
     p2pStatus: P2PStatus | null;
     initializeP2P: (url: string) => Promise<void>;
@@ -27,6 +28,7 @@ export function useP2PConnectionManager({
   selectedServerUrl,
   p2pHybridKeys,
   selectedConversation,
+  conversations = [],
   p2pMessaging,
 }: UseP2PConnectionManagerProps) {
   const p2pMessagingRef = useRef(p2pMessaging);
@@ -119,13 +121,70 @@ export function useP2PConnectionManager({
       } catch { }
     };
 
+    const handlePeerInteraction = (evt: Event) => {
+      try {
+        const peer = (evt as CustomEvent).detail?.peer || (evt as CustomEvent).detail?.from;
+        if (peer && p2pMessagingRef.current.p2pStatus?.signalingConnected) {
+          const p2p = p2pMessagingRef.current;
+          if (!p2p.isPeerConnected(peer)) {
+            const now = Date.now();
+            const attemptInfo = connectionAttemptsRef.current.get(peer);
+            if (attemptInfo?.inProgress) return;
+            if (attemptInfo && (now - attemptInfo.lastAttempt) < 10000) return;
+
+            connectionAttemptsRef.current.set(peer, { inProgress: true, lastAttempt: now });
+            p2p.connectToPeer(peer)
+              .finally(() => {
+                const info = connectionAttemptsRef.current.get(peer);
+                if (info) info.inProgress = false;
+              });
+          }
+        }
+      } catch { }
+    };
+
     window.addEventListener(EventType.P2P_PEER_CONNECTED, handlePeerConnected as EventListener);
     window.addEventListener(EventType.P2P_PEER_DISCONNECTED, handlePeerDisconnected as EventListener);
+    window.addEventListener('peer-interaction', handlePeerInteraction as EventListener);
+
     return () => {
       window.removeEventListener(EventType.P2P_PEER_CONNECTED, handlePeerConnected as EventListener);
       window.removeEventListener(EventType.P2P_PEER_DISCONNECTED, handlePeerDisconnected as EventListener);
+      window.removeEventListener('peer-interaction', handlePeerInteraction as EventListener);
     };
   }, []);
+
+  // Proactively connect to online peers in the conversation list
+  useEffect(() => {
+    const isInitialized = p2pMessaging.p2pStatus?.isInitialized ?? false;
+    const signalingConnected = p2pMessaging.p2pStatus?.signalingConnected ?? false;
+
+    if (!isInitialized || !signalingConnected || !p2pHybridKeys) return;
+
+    const p2p = p2pMessagingRef.current;
+    const now = Date.now();
+
+    // Limit to online peers or top 10 recent conversations to avoid flooding
+    const activePeers = conversations
+      .filter(c => c.isOnline || (c.unreadCount && c.unreadCount > 0))
+      .slice(0, 10);
+
+    for (const conv of activePeers) {
+      const peer = conv.username;
+      if (p2p.isPeerConnected(peer)) continue;
+
+      const attemptInfo = connectionAttemptsRef.current.get(peer);
+      if (attemptInfo?.inProgress) continue;
+      if (attemptInfo && (now - attemptInfo.lastAttempt) < 30000) continue;
+
+      connectionAttemptsRef.current.set(peer, { inProgress: true, lastAttempt: now });
+      p2p.connectToPeer(peer)
+        .finally(() => {
+          const info = connectionAttemptsRef.current.get(peer);
+          if (info) info.inProgress = false;
+        });
+    }
+  }, [conversations, p2pHybridKeys, p2pMessaging.p2pStatus?.isInitialized, p2pMessaging.p2pStatus?.signalingConnected]);
 
   // Connect to peer when conversation is selected
   useEffect(() => {
@@ -168,3 +227,4 @@ export function useP2PConnectionManager({
     }
   }, [selectedConversation, p2pHybridKeys, p2pMessaging.p2pStatus?.isInitialized, p2pMessaging.p2pStatus?.signalingConnected]);
 }
+

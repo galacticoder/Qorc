@@ -302,8 +302,15 @@ export class Hybrid {
         },
         metadata: options?.metadata
       };
+      
+      if (envelope.metadata?.sender?.dilithiumPublicKey === header.from) {
+        delete envelope.metadata!.sender!.dilithiumPublicKey;
+        if (Object.keys(envelope.metadata!.sender!).length === 0) {
+          delete envelope.metadata!.sender;
+        }
+      }
 
-      if (routingParams.senderDilithiumPublicKey) {
+      if (routingParams.senderDilithiumPublicKey && header.from !== routingParams.senderDilithiumPublicKey) {
         const senderKeyBytes =
           typeof routingParams.senderDilithiumPublicKey === 'string'
             ? Base64.base64ToUint8Array(routingParams.senderDilithiumPublicKey)
@@ -444,7 +451,7 @@ export class Hybrid {
           payloadText,
           payloadJson,
           metadata: envelope.metadata,
-          senderDilithiumPublicKey: envelope.metadata?.sender?.dilithiumPublicKey
+          senderDilithiumPublicKey: envelope.metadata?.sender?.dilithiumPublicKey || (header.from.length > 128 ? header.from : undefined)
         };
       } finally {
         SecureMemory.zeroBuffer(x25519Secret);

@@ -81,8 +81,20 @@ export const storeAuthMetadata = async (
   try {
     const existingOriginal = await secureDB.retrieve('auth_metadata', 'original_username');
     if (typeof existingOriginal === 'string' && existingOriginal) {
-      try { await secureDB.storeUsernameMapping(hashedUsername, existingOriginal); } catch { }
-      try { window.dispatchEvent(new CustomEvent(EventType.USERNAME_MAPPING_UPDATED, { detail: { username: hashedUsername, original: existingOriginal } })); } catch { }
+      try {
+        await secureDB.storeUsernameMapping(hashedUsername, existingOriginal);
+      } catch { }
+      try {
+        window.dispatchEvent(new CustomEvent(EventType.USERNAME_MAPPING_UPDATED, {
+          detail: { username: hashedUsername, original: existingOriginal }
+        }));
+      } catch { }
+    } else if (originalUsername) {
+      try {
+        window.dispatchEvent(new CustomEvent(EventType.USERNAME_MAPPING_UPDATED, {
+          detail: { username: hashedUsername, original: originalUsername }
+        }));
+      } catch { }
     }
   } catch { }
 };

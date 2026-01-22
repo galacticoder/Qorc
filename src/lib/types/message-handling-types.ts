@@ -48,10 +48,25 @@ export interface ResolvedSenderKeys {
   retried: boolean;
 }
 
+// Post-quantum envelope
+export interface PQEnvelope {
+  version: string;
+  pqKeyId: number;
+  kemCiphertext: string;
+  nonce: string;
+  ciphertext: string;
+  tag: string;
+  mac: string;
+  aad: string;
+  salt: string;
+}
+
 // Encrypted message envelope
-export interface EncryptedEnvelope {
-  kemCiphertext?: string;
-  ciphertext?: string;
+export interface EncryptedMessage {
+  messageType: number;
+  ciphertext: string;
+  registrationId?: number;
+  pqEnvelope?: PQEnvelope;
   chunkData?: string;
   [key: string]: unknown;
 }

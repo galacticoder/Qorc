@@ -133,14 +133,23 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
     const scrollContainer = scrollAreaRef.current?.querySelector('[data-radix-scroll-area-viewport]');
     if (!scrollContainer) return;
 
-    const t1 = setTimeout(() => scrollToBottom(scrollContainer), 80);
-    const t2 = setTimeout(() => scrollToBottom(scrollContainer), 400);
+    // Wait for messages to be loaded before scrolling
+    const t1 = setTimeout(() => {
+      if (messages.length > 0) scrollToBottom(scrollContainer);
+    }, 150);
+    const t2 = setTimeout(() => {
+      scrollToBottom(scrollContainer);
+    }, 500);
+    const t3 = setTimeout(() => {
+      scrollToBottom(scrollContainer);
+    }, 1000);
 
     return () => {
       clearTimeout(t1);
       clearTimeout(t2);
+      clearTimeout(t3);
     };
-  }, [selectedConversation, scrollToBottom]);
+  }, [selectedConversation, messages.length, scrollToBottom]);
 
   useEffect(() => {
     if (!selectedConversation) return;
@@ -562,15 +571,6 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
     }
   }, [selectedConversation]);
 
-  const emptyMessagesUI = useMemo(() => (
-    <div
-      className="flex items-center justify-center h-full min-h-[200px] text-sm select-none"
-      style={{ color: 'var(--color-text-secondary)' }}
-    >
-      {selectedConversation ? "No messages yet. Start the conversation!" : "Select a conversation to view messages"}
-    </div>
-  ), [selectedConversation]);
-
   // Handle reply click navigation
   const handleReplyClick = useCallback((replyId: string) => {
     const el = document.getElementById(`message-${replyId}`);
@@ -679,7 +679,11 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
         ref={scrollAreaRef}
       >
         <div className="space-y-4 pb-24 pt-20">
-          {messages.length === 0 ? emptyMessagesUI : (
+          {messages.length === 0 ? (
+            <div className="flex items-center justify-center h-full min-h-[200px] text-sm text-muted-foreground select-none">
+              No messages yet. Start the conversation!
+            </div>
+          ) : (
             messages.map((message, index) => {
               const smartReceipt = getSmartReceiptStatus(message);
               const isMine = message.isCurrentUser || message.sender === currentUsername;

@@ -25,6 +25,7 @@ import {
     CALL_KEY_ROTATION_INTERVAL,
     QualityOption
 } from '../constants';
+import { signal as signalApi, system, isTauri } from '../tauri-bindings';
 import {
     CallState,
     CallSignal,
@@ -440,11 +441,11 @@ export class SecureCallingService {
             const resolution = settings.resolution;
 
             let screenStream: MediaStream;
-            if (typeof window !== 'undefined' && (window as any).electronAPI?.getScreenSources) {
+            if (typeof window !== 'undefined' && isTauri()) {
                 let sourceId = selectedSource?.id;
 
                 if (!sourceId) {
-                    const sources = await (window as any).electronAPI.getScreenSources();
+                    const sources = await system.getScreenSources();
                     if (sources && sources.length > 0) {
                         sourceId = sources[0].id;
                     }
@@ -599,7 +600,7 @@ export class SecureCallingService {
 
         try {
             await this.transport.disconnect(peer);
-        } catch {}
+        } catch { }
 
         this.callConnection = await this.transport.connect(peer, {
             peerIdentity: effectivePeerIdentity,
@@ -1144,34 +1145,26 @@ export class SecureCallingService {
     }
 
     // Send a call signal to the peer
-    private async sendCallSignal(signal: CallSignal): Promise<void> {
+    private async sendCallSignal(callSig: CallSignal): Promise<void> {
         try {
-            // Sign the signal
             if (this.pqSigningKey) {
-                const payload = `${signal.callId}:${signal.type}:${signal.timestamp}:${signal.from}:${signal.to}`;
+                const payload = `${callSig.callId}:${callSig.type}:${callSig.timestamp}:${callSig.from}:${callSig.to}`;
                 const message = new TextEncoder().encode(payload);
                 const signature = PostQuantumSignature.sign(message, this.pqSigningKey.privateKey);
 
-                signal.pqSignature = {
+                callSig.pqSignature = {
                     signature: PostQuantumUtils.uint8ArrayToBase64(signature),
                     publicKey: PostQuantumUtils.uint8ArrayToBase64(this.pqSigningKey.publicKey)
                 };
             }
 
-            const edgeApi = (window as any).edgeApi;
-            if (!edgeApi) throw new Error('System encryption API not available');
+            const hasSes = await signalApi.hasSession(this.localUsername, callSig.to, 1);
 
-            const hasSession = await edgeApi.hasSession({
-                selfUsername: this.localUsername,
-                peerUsername: signal.to,
-                deviceId: 1
-            });
-
-            if (!hasSession?.hasSession) {
+            if (!hasSes) {
                 // Request bundle
                 await websocketClient.sendSecureControlMessage({
                     type: SignalType.LIBSIGNAL_REQUEST_BUNDLE,
-                    username: signal.to,
+                    username: callSig.to,
                     from: this.localUsername,
                     timestamp: Date.now(),
                     deviceId: 1
@@ -1184,7 +1177,7 @@ export class SecureCallingService {
                     }, 10000);
 
                     const onSessionReady = (event: CustomEvent) => {
-                        if (event.detail?.peer === signal.to) {
+                        if (event.detail?.peer === callSig.to) {
                             cleanup();
                             resolve();
                         }
@@ -1199,41 +1192,40 @@ export class SecureCallingService {
                 });
             }
 
-            if (this.callConnection && (this.callConnection as any).state === 'connected' && this.callConnection.peerId === signal.to) {
+            if (this.callConnection && (this.callConnection as any).state === 'connected' && this.callConnection.peerId === callSig.to) {
                 try {
-                    await (this.transport as any).sendMessage(signal.to, signal, SignalType.CALL_SIGNAL as any);
+                    await (this.transport as any).sendMessage(callSig.to, callSig, SignalType.CALL_SIGNAL as any);
                     return;
                 } catch (err) {
                     console.error('[SecureCallingService] Direct P2P signaling failed, falling back to WS:', err);
                 }
             }
 
-            const peerKeys = this.peerKeysCache.get(signal.to);
+            const peerKeys = this.peerKeysCache.get(callSig.to);
             if (!peerKeys || !peerKeys.kyberPublicKey) { throw new Error('Missing peer cryptographic keys'); }
 
             const signalPayload = {
                 type: EventType.CALL_SIGNAL,
-                content: JSON.stringify(signal),
+                content: JSON.stringify(callSig),
                 from: this.localUsername,
-                callId: signal.callId,
+                callId: callSig.callId,
                 timestamp: Date.now()
             };
 
-            const encryptionResult = await edgeApi.encrypt({
-                fromUsername: this.localUsername,
-                toUsername: signal.to,
-                plaintext: JSON.stringify(signalPayload),
-                recipientKyberPublicKey: PostQuantumUtils.uint8ArrayToBase64(peerKeys.kyberPublicKey)
-            });
+            const encryptionResult = await signalApi.encrypt(
+                this.localUsername,
+                callSig.to,
+                JSON.stringify(signalPayload)
+            );
 
-            if (!encryptionResult?.success || !encryptionResult.encryptedPayload) {
-                throw new Error(encryptionResult?.error || 'Encryption failed');
+            if (!encryptionResult || !encryptionResult.ciphertext) {
+                throw new Error('Encryption failed');
             }
 
             const payload = {
                 type: SignalType.ENCRYPTED_MESSAGE,
-                to: signal.to,
-                encryptedPayload: encryptionResult.encryptedPayload
+                to: callSig.to,
+                encryptedPayload: PostQuantumUtils.uint8ArrayToBase64(new Uint8Array(JSON.parse(encryptionResult.ciphertext)))
             };
 
             websocketClient.send(JSON.stringify(payload));
@@ -1509,22 +1501,11 @@ export class SecureCallingService {
 
     // Get available screen sources
     async getAvailableScreenSources(): Promise<Array<{ id: string; name: string; type: 'screen' | 'window' }>> {
-        const electronApi = (window as any).electronAPI;
-        const edgeApi = (window as any).edgeApi;
-
-        const getScreenSourcesFn =
-            (typeof electronApi?.getScreenSources === 'function' ? electronApi.getScreenSources : null) ||
-            (typeof edgeApi?.getScreenSources === 'function' ? edgeApi.getScreenSources : null);
-
-        if (!getScreenSourcesFn) {
-            return [];
-        }
-
         try {
-            const sources = await getScreenSourcesFn();
-            return sources.map((s: any) => ({
-                id: s.id as string,
-                name: s.name as string,
+            const sources = await system.getScreenSources();
+            return sources.map((s) => ({
+                id: s.id,
+                name: s.name,
                 type: s.id?.startsWith('screen:') ? 'screen' : 'window' as 'screen' | 'window'
             }));
         } catch {

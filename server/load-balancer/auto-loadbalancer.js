@@ -12,7 +12,7 @@ import { withRedisClient } from '../presence/presence.js';
 import { HAProxyConfigGenerator } from './haproxy-config-generator.js';
 import { logger as cryptoLogger } from '../crypto/crypto-logger.js';
 import { HAProxyManager } from './haproxy-manager.js';
-import { TunnelManager } from './tunnel-manager.js';
+import { TorManager } from './tor-manager.js';
 import { LBCommandListener } from './lb-command-listener.js';
 import fs from 'fs/promises';
 import { existsSync } from 'fs';
@@ -44,34 +44,13 @@ class AutoLoadBalancer {
     this.scriptsDir = path.resolve(this.repoRoot, 'scripts');
 
     this.haproxyManager = new HAProxyManager();
-    this.tunnelManager = new TunnelManager(this.scriptsDir);
+    this.torManager = new TorManager(this.scriptsDir);
     this.commandListener = new LBCommandListener(this.repoRoot, this.handleCommand.bind(this));
   }
 
   // Handle commands from TUI
   async handleCommand(cmd) {
-    if (cmd.cmd === 'restart_tunnel') {
-      console.log('\n[COMMAND] Restarting tunnel (requested from TUI)...');
-
-      const previousDisabled = this.tunnelManager.disabled;
-      this.tunnelManager.disabled = true;
-
-      const success = await this.tunnelManager.restart(this.listenPort);
-      if (success) {
-        console.log('[COMMAND] Tunnel restarted successfully\n');
-        this.tunnelManager.disabled = previousDisabled;
-        this.tunnelManager.restartFailures = 0;
-        this.tunnelManager.backoffMs = 10000;
-        this.tunnelManager.lastRestart = Date.now();
-      } else {
-        console.error('[COMMAND] Tunnel restart failed\n');
-        this.tunnelManager.restartFailures += 1;
-        if (this.tunnelManager.restartFailures >= this.tunnelManager.maxRestartFailures) {
-          console.error(`\n[TUNNEL] Disabling automatic tunnel restart after ${this.tunnelManager.restartFailures} failed attempts (manual command).`);
-          this.tunnelManager.disabled = true;
-        }
-      }
-    } else if (cmd.cmd === 'reload') {
+    if (cmd.cmd === 'reload') {
       console.log('\n[COMMAND] Reloading HAProxy (requested from TUI)...');
       const success = await this.haproxyManager.reload();
       if (success) {
@@ -116,7 +95,7 @@ class AutoLoadBalancer {
   }
 
   // Find an available HTTPS listen port
-  async resolveListenPort(servers) {
+  async resolveListenPort(servers, currentPort = null) {
     const backendPorts = new Set();
     for (const s of servers || []) {
       const p = Number(s.port) || 0;
@@ -136,21 +115,55 @@ class AutoLoadBalancer {
     for (let i = 0; i < 20; i += 1) {
       const port = candidate + i;
       if (backendPorts.has(port)) continue;
+
+      // If is current port and HAProxy is running then keep it
+      if (currentPort && port === currentPort && this.haproxyManager.isRunning) {
+        return port;
+      }
+
       const free = await isPortFree(port);
       if (free) return port;
     }
-    return DEFAULT_HTTPS_PORT;
+    return currentPort || candidate;
+  }
+
+  // Find an available stats port
+  async resolveStatsPort(currentPort = null) {
+    const defaultStats = parseInt(process.env.HAPROXY_STATS_PORT || '8404', 10);
+
+    // If we have a current port and HAProxy is running then stay
+    if (currentPort && this.haproxyManager.isRunning) {
+      return currentPort;
+    }
+
+    const isPortFree = (port) => new Promise((resolve) => {
+      const srv = net.createServer();
+      srv.unref();
+      srv.on('error', () => resolve(false));
+      srv.listen({ port, host: '127.0.0.1' }, () => {
+        srv.close(() => resolve(true));
+      });
+    });
+
+    for (let i = 0; i < 20; i += 1) {
+      const port = defaultStats + i;
+      if (await isPortFree(port)) return port;
+    }
+    return currentPort || defaultStats;
   }
 
   // Generate HAProxy configuration
   async generateHAProxyConfig(servers) {
-    const listenPort = await this.resolveListenPort(servers);
+    const listenPort = await this.resolveListenPort(servers, this.listenPort);
     this.listenPort = listenPort;
+
+    const statsPort = await this.resolveStatsPort(this.statsPort);
+    this.statsPort = statsPort;
 
     const generator = new HAProxyConfigGenerator({
       listenPort,
       httpPort: parseInt(process.env.HAPROXY_HTTP_PORT || (isRoot ? '80' : '8080'), 10),
-      statsPort: parseInt(process.env.HAPROXY_STATS_PORT || '8404', 10),
+      statsPort: statsPort,
       tlsCertPath: process.env.HAPROXY_CERT_PATH || '/etc/haproxy/certs',
       statsUsername: process.env.HAPROXY_STATS_USERNAME || 'admin',
       statsPassword: process.env.HAPROXY_STATS_PASSWORD || 'adminpass',
@@ -213,9 +226,9 @@ class AutoLoadBalancer {
           console.log(`\t${s.host}:${s.port}${portStatus}`);
         });
 
-        const tunnelUrl = await this.tunnelManager.getTunnelUrl();
-        if (tunnelUrl) {
-          console.log(`\tTunnel URL: ${tunnelUrl}`);
+        const onionAddr = await this.torManager.getOnionAddress();
+        if (onionAddr) {
+          console.log(`\tOnion URL:  http://${onionAddr}`);
         }
 
         this.lastServerCount = serverCount;
@@ -260,7 +273,15 @@ class AutoLoadBalancer {
         this.lastServerHash = '';
       }
 
-      await this.tunnelManager.monitor(this.listenPort);
+      await this.torManager.monitor(this.listenPort);
+
+      // Periodically update the onion address in Redis for the TUI to display
+      const onionAddr = await this.torManager.getOnionAddress();
+      if (onionAddr) {
+        await withRedisClient(async (client) => {
+          await client.set('cluster:lb:onionAddress', onionAddr);
+        });
+      }
 
     } catch (error) {
       cryptoLogger.error('[AUTO-LB] Monitor cycle failed', error);
@@ -285,9 +306,9 @@ class AutoLoadBalancer {
             console.log(`\tStats Dashboard: http://localhost:${process.env.HAPROXY_STATS_PORT || 8404}/haproxy-stats`);
           }
 
-          const tunnelUrl = await this.tunnelManager.getTunnelUrl();
-          if (tunnelUrl) {
-            console.log(`\tPublic URL: ${tunnelUrl}`);
+          const onionAddr = await this.torManager.getOnionAddress();
+          if (onionAddr) {
+            console.log(`\tOnion URL:  http://${onionAddr}`);
           }
           console.log();
 
@@ -334,18 +355,6 @@ class AutoLoadBalancer {
     console.log(`\tRedis: ${process.env.REDIS_URL || 'redis://127.0.0.1:6379'}`);
     console.log(`\tMin servers: ${MIN_SERVERS_FOR_LB}`);
 
-    try {
-      console.log('\t[INIT] Cleaning up any existing tunnels...');
-      await TunnelManager.deleteCloudflaredTunnels();
-      console.log('\t[INIT] Existing tunnels cleaned');
-      const logPath = path.join(this.scriptsDir, 'config', 'tunnel', 'cloudflared.log');
-      if (existsSync(logPath)) {
-        await fs.unlink(logPath);
-        console.log('\t[INIT] Cleared old tunnel log file');
-      }
-    } catch (error) {
-      cryptoLogger.warn('[AUTO-LB] Failed to clean tunnels on startup', error);
-    }
 
     const noGui = (process.env.NO_GUI || 'false').toLowerCase() === 'true';
     if (!noGui) {
@@ -355,6 +364,7 @@ class AutoLoadBalancer {
     }
 
     await this.monitor();
+    await this.torManager.start(this.listenPort);
 
     this.monitorInterval = setInterval(() => this.monitor(), 1000);
 
@@ -400,9 +410,9 @@ class AutoLoadBalancer {
     }
 
     if (this.haproxyManager.isRunning) {
-      console.log('\t[OK] Killing all tunnels (cloudflared)...');
-      await TunnelManager.deleteCloudflaredTunnels();
-      console.log('\t[OK] All tunnels terminated');
+      console.log('\t[OK] Stopping Tor service...');
+      await this.torManager.stop();
+      console.log('\t[OK] Tor service terminated');
     }
 
     await this.releaseLock();

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef } from "react";
+import { useEffect, useMemo, useRef, useCallback } from "react";
 import { SignalType } from "@/lib/types/signal-types";
 import { EventType } from "../lib/types/event-types";
 import websocketClient from "@/lib/websocket/websocket";
@@ -65,125 +65,69 @@ export const useWebSocket = (
     [encryptedTypes, handleEncryptedMessage, handleServerMessage, onAudit],
   );
 
-  useEffect(() => {
-    const handler = async (raw: unknown) => {
-      try {
-        // Rate limiting
-        const now = Date.now();
-        const bucket = rateLimitRef.current;
-        if (now - bucket.windowStart > WEBSOCKET_RATE_LIMIT_WINDOW_MS) {
-          bucket.windowStart = now;
-          bucket.count = 0;
-        }
-        bucket.count += 1;
-        if (bucket.count > WEBSOCKET_RATE_LIMIT_MAX_MESSAGES) {
-          return;
-        }
-
-        if (raw && typeof raw === 'object' && (raw as any)._decryptedInBackground === true) {
-          const bgData = raw as BaseMessage;
-          await handleEncryptedMessage(bgData);
-          return;
-        }
-
-        const data = sanitizeIncomingMessage(raw, allowedTypes, schemas);
-        if (!data) {
-          return;
-        }
-
-        // Enforce encrypted only mode after PQ session establishment
-        const sessionEstablished = websocketClient.isPQSessionEstablished();
-        const isHandshakeMessage = data.type === SignalType.SERVER_PUBLIC_KEY ||
-          data.type === SignalType.SESSION_ESTABLISHED ||
-          data.type === SignalType.PQ_HANDSHAKE_ACK;
-        const isEncryptedTransport = data.type === SignalType.PQ_ENVELOPE || data.type === SignalType.PQ_HEARTBEAT_PONG;
-        const isErrorMessage = data.type === SignalType.ERROR;
-        const isSafeControl = data.type === SignalType.TOKEN_VALIDATION_RESPONSE ||
-          data.type === SignalType.IN_ACCOUNT ||
-          data.type === SignalType.AUTH_SUCCESS ||
-          data.type === SignalType.AUTH_ERROR ||
-          data.type === SignalType.PASSWORD_HASH_PARAMS ||
-          data.type === SignalType.DEVICE_CHALLENGE ||
-          data.type === SignalType.DEVICE_ATTESTATION_ACK;
-
-        if (sessionEstablished && !isEncryptedTransport && !isHandshakeMessage && !isErrorMessage && !isSafeControl) {
-          console.error('[useWebSocket] Security violation: plaintext after encryption established');
-          setLoginError('Security violation: plaintext message after encryption established');
-          return;
-        }
-
-        if (data.type === SignalType.USER_EXISTS_RESPONSE) {
-          try {
-            window.dispatchEvent(new CustomEvent(EventType.USER_EXISTS_RESPONSE, { detail: data }));
-          } catch {
-          }
-        }
-        if (data.type === SignalType.P2P_PEER_CERT) {
-          try {
-            window.dispatchEvent(new CustomEvent(EventType.P2P_PEER_CERT, { detail: data }));
-          } catch { }
-        }
-
-        // Heartbeat pong from server
-        if (data.type === SignalType.PQ_HEARTBEAT_PONG) {
-          websocketClient.noteHeartbeatPong(data);
-          return;
-        }
-
-        if (data.type === SignalType.DEVICE_CHALLENGE || data.type === SignalType.DEVICE_ATTESTATION_ACK) {
-          return;
-        }
-
-        // Decrypt pq-envelope
-        if (data.type === SignalType.PQ_ENVELOPE) {
-          const decrypted = await websocketClient.decryptIncomingEnvelope(data);
-          if (!decrypted) {
-            return;
-          }
-
-          const inner = sanitizeIncomingMessage(decrypted, allowedTypes, schemas);
-          if (!inner) {
-            return;
-          }
-
-          if (inner.type === SignalType.USER_EXISTS_RESPONSE) {
-            try { window.dispatchEvent(new CustomEvent(EventType.USER_EXISTS_RESPONSE, { detail: inner })); } catch { }
-          }
-          if (inner.type === SignalType.P2P_PEER_CERT) {
-            try { window.dispatchEvent(new CustomEvent(EventType.P2P_PEER_CERT, { detail: inner })); } catch { }
-          }
-
-          if (inner.type === SignalType.DEVICE_CHALLENGE || inner.type === SignalType.DEVICE_ATTESTATION_ACK) {
-            try { websocketClient.handleEdgeServerMessage(inner); } catch { }
-            return;
-          }
-
-          await routeMessage(inner);
-          return;
-        }
-
-        await routeMessage(data);
-      } catch (_error) {
-        console.error('[useWebSocket] Message handler error:', _error instanceof Error ? _error.message : 'Unknown error');
-        setLoginError('Secure transport error');
+  const handler = useCallback(async (raw: unknown, isSecure: boolean = false) => {
+    try {
+      // Rate limiting
+      const now = Date.now();
+      const bucket = rateLimitRef.current;
+      if (now - bucket.windowStart > WEBSOCKET_RATE_LIMIT_WINDOW_MS) {
+        bucket.windowStart = now;
+        bucket.count = 0;
       }
-    };
+      bucket.count += 1;
+      if (bucket.count > WEBSOCKET_RATE_LIMIT_MAX_MESSAGES) {
+        return;
+      }
 
+      const data = sanitizeIncomingMessage(raw, allowedTypes, schemas);
+      if (!data) {
+        return;
+      }
+
+      // Enforce encrypted only mode after PQ session establishment
+      const sessionEstablished = websocketClient.isPQSessionEstablished();
+      const isHandshakeMessage = data.type === SignalType.SERVER_PUBLIC_KEY ||
+        data.type === SignalType.SESSION_ESTABLISHED ||
+        data.type === SignalType.PQ_HANDSHAKE_ACK;
+      const isEncryptedTransport = data.type === SignalType.PQ_ENVELOPE || data.type === SignalType.PQ_HEARTBEAT_PONG;
+      const isErrorMessage = data.type === SignalType.ERROR;
+      const isSafeControl = false; // Hardened: all control messages should be encrypted once session exists
+
+      if (sessionEstablished && !isSecure && !isEncryptedTransport && !isHandshakeMessage && !isErrorMessage && !isSafeControl) {
+        console.error('[useWebSocket] Security violation: plaintext after encryption established', { type: data.type });
+        setLoginError('Security violation: plaintext message after encryption established');
+        return;
+      }
+
+      if (data.type === SignalType.USER_EXISTS_RESPONSE) {
+        try { window.dispatchEvent(new CustomEvent(EventType.USER_EXISTS_RESPONSE, { detail: data })); } catch { }
+      }
+      if (data.type === SignalType.P2P_PEER_CERT) {
+        try { window.dispatchEvent(new CustomEvent(EventType.P2P_PEER_CERT, { detail: data })); } catch { }
+      }
+
+      await routeMessage(data);
+    } catch (_error) {
+      console.error('[useWebSocket] Message handler error:', _error instanceof Error ? _error.message : 'Unknown error');
+      setLoginError('Secure transport error');
+    }
+  }, [allowedTypes, encryptedTypes, routeMessage, schemas, setLoginError]);
+
+  useEffect(() => {
     const listener = (evt: Event) => {
       try {
         const detail = (evt as CustomEvent).detail;
+        if (!detail) return;
 
-        if (detail != null && typeof detail === 'object') {
+        if (typeof detail === 'object' && detail !== null) {
           if (hasPrototypePollutionKeys(detail)) {
             return;
           }
         }
 
-        let consumed = false;
-        try { consumed = websocketClient.handleEdgeServerMessage(detail); } catch { }
-        if (consumed) { return; }
+        const isSecure = evt.type === EventType.SECURE_SERVER_MESSAGE;
 
-        handler(detail ?? evt).catch((error) => {
+        handler(detail, isSecure).catch((error) => {
           console.error('[useWebSocket] Handler error:', error instanceof Error ? error.message : 'Unknown error');
         });
       } catch (_error) {
@@ -192,8 +136,10 @@ export const useWebSocket = (
     };
 
     window.addEventListener(EventType.EDGE_SERVER_MESSAGE, listener as EventListener);
+    window.addEventListener(EventType.SECURE_SERVER_MESSAGE, listener as EventListener);
     return () => {
       window.removeEventListener(EventType.EDGE_SERVER_MESSAGE, listener as EventListener);
+      window.removeEventListener(EventType.SECURE_SERVER_MESSAGE, listener as EventListener);
     };
-  }, [allowedTypes, routeMessage, schemas, setLoginError]);
+  }, [handler]);
 };

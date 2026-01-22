@@ -5,6 +5,7 @@ import websocketClient from '../../lib/websocket/websocket';
 import { storeUsernameMapping } from '../../lib/database/username-display';
 import type { HybridKeys, PeerCertificateBundle } from '../../lib/types/p2p-types';
 import { toUint8 } from '../../lib/utils/p2p-utils';
+import { retrieveAuthTokens } from '../../lib/signals/token-storage';
 
 // Refs and state from authentication needed to derive P2P keys
 export interface AuthenticationRefs {
@@ -251,7 +252,7 @@ export function useP2PKeys(authRefs: AuthenticationRefs, dbRefs: DatabaseRefs) {
 
   const signalingTokenProvider = useCallback(async () => {
     try {
-      const tokens = await (window as any).edgeApi?.retrieveAuthTokens?.();
+      const tokens = await retrieveAuthTokens();
       return tokens?.accessToken || null;
     } catch {
       return null;

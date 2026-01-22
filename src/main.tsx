@@ -4,11 +4,11 @@ import { createRoot } from 'react-dom/client';
 import { ThemeProvider } from 'next-themes';
 import App from './App.tsx';
 import './index.css';
+import { isTauri } from './lib/tauri-bindings';
 
 function bootstrap() {
-  const isElectron = typeof (window as any).electronAPI !== 'undefined';
-
-  if (!isElectron) {
+  // Only run in Tauri
+  if (!isTauri()) {
     const body = document.body || document.documentElement;
     const el = document.getElementById('root') || body;
     const container = document.createElement('div');
@@ -39,7 +39,7 @@ function bootstrap() {
     title.style.marginBottom = '6px';
 
     const description = document.createElement('div');
-    description.textContent = 'This application runs as a desktop app (Electron). Please use the packaged app instead of opening it directly in a web browser.';
+    description.textContent = 'This application requires the Tauri desktop app. Please download and run the packaged application.';
     description.style.fontSize = '14px';
     description.style.lineHeight = '1.45';
     description.style.opacity = '0.9';
@@ -65,8 +65,6 @@ function bootstrap() {
     return;
   }
 
-  try { (window as any)?.edgeApi?.rendererReady?.(); } catch { }
-
   const waitForBody = (callback: () => void) => {
     if (document.body) {
       callback();
@@ -89,10 +87,8 @@ function bootstrap() {
       document.body.appendChild(root);
     }
 
-    // Ensure root is attached to the document before React mounts
     if (!root.isConnected || !document.body.contains(root)) {
       console.error('[React Mount] Root element is not properly attached to DOM');
-      // Re-attach if needed
       if (!document.body.contains(root)) {
         document.body.appendChild(root);
       }

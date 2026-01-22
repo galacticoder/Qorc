@@ -2,6 +2,7 @@ export interface MessageReply {
   id: string;
   sender?: string;
   content?: string;
+  secureContentId?: string;
 }
 
 export interface FileInfo {
@@ -30,7 +31,9 @@ export interface TypingIndicator {
 export interface Message {
   id: string;
   content: string;
+  secureContentId?: string;
   sender: string;
+  fromOriginal?: string;
   recipient?: string;
   timestamp: Date;
   isCurrentUser?: boolean;

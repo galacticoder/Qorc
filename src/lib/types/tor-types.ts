@@ -1,23 +1,10 @@
 // Tor setup
-export interface ElectronTorSetupAPI {
-  checkTorInstallation: () => Promise<{ isInstalled: boolean; version?: string; bundled?: boolean }>;
-  downloadTor: () => Promise<{ success: boolean; error?: string }>;
-  installTor: () => Promise<{ success: boolean; error?: string }>;
-  configureTor: (config: { config: string }) => Promise<{ success: boolean; pending?: boolean; error?: string }>;
-  startTor: () => Promise<{ success: boolean; error?: string }>;
-  stopTor: () => Promise<{ success: boolean; error?: string }>;
-  uninstallTor: () => Promise<{ success: boolean; error?: string }>;
-  verifyTorConnection: () => Promise<{ success: boolean; isTor?: boolean; error?: string }>;
-  getTorStatus: () => Promise<{ isRunning: boolean }>;
-  getTorInfo: () => Promise<{ version?: string; systemTorVersion?: string; socksPort?: number; controlPort?: number }>;
-  onTorConfigureComplete?: (callback: (event: unknown, data: unknown) => void) => () => void;
-  platform?: string;
-}
-
 export interface TorSetupStatus {
   isInstalled: boolean;
   isConfigured: boolean;
   isRunning: boolean;
+  isBootstrapped?: boolean;
+  bootstrapProgress?: number;
   version?: string;
   socksPort?: number;
   controlPort?: number;
@@ -57,28 +44,6 @@ export type TorInitializationResult = { success: boolean; error?: string; socksP
 export type TorTestConnectionResult = { success: boolean; error?: string };
 export type TorRequestResult = { response: unknown; body: string };
 
-export interface TorElectronNetworkAPI {
-  initializeTor(config: TorConfig): Promise<TorInitializationResult>;
-  testTorConnection(): Promise<TorTestConnectionResult>;
-  rotateTorCircuit(): Promise<TorCircuitRotationResult>;
-  makeTorRequest(options: {
-    url: string;
-    method: string;
-    headers: Record<string, string>;
-    body?: string;
-    timeout: number;
-  }): Promise<TorRequestResult>;
-  getTorWebSocketUrl(url: string): Promise<string | { success?: boolean; url?: string; error?: string }>;
-}
-
-export const REQUIRED_ELECTRON_METHODS: Array<keyof TorElectronNetworkAPI> = [
-  'initializeTor',
-  'testTorConnection',
-  'rotateTorCircuit',
-  'makeTorRequest',
-  'getTorWebSocketUrl'
-];
-
 export interface TorConfig {
   enabled: boolean;
   socksPort: number;
@@ -101,4 +66,5 @@ export interface TorConnectionStats {
   lastHealthCheck: number;
   circuitHealth: TorCircuitHealth;
   isBootstrapped?: boolean;
+  bootstrapProgress?: number;
 }

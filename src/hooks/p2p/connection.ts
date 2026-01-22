@@ -119,6 +119,7 @@ export function createInitializeP2P(
       }
 
       const service = new SecureP2PService(username);
+      service.setChannelSequenceMap(refs.channelSequenceRef.current);
       (refs.p2pServiceRef as { current: SecureP2PService | null }).current = service;
       options?.onServiceReady?.(service);
       if (hybridKeys) {

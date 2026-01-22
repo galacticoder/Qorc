@@ -2,6 +2,7 @@ import React, { useMemo, useCallback, useState, useEffect } from 'react';
 import Linkify from 'linkify-react';
 import { LinkExtractor } from '../../../lib/link-extraction';
 import { MAX_CACHE_SIZE, MAX_URL_LENGTH, ALLOWED_PROTOCOLS, IPV4_REGEX, IPV6_REGEX } from '@/lib/constants';
+import { link, system } from '../../../lib/tauri-bindings';
 
 // Cached preview metadata
 interface CachedPreview {
@@ -90,25 +91,7 @@ const CustomLinkPreview = React.memo(({ url, isCurrentUser: _isCurrentUser, show
     const fetchWithRedirects = async (targetUrl: string, attempt: number = 0): Promise<any> => {
       if (attempt >= 5) throw new Error('Too many redirects');
 
-      if (typeof window === 'undefined' || typeof (window as any).electronAPI?.fetchLinkPreview !== 'function') {
-        throw new Error('API unavailable');
-      }
-
-      const result = await (window as any).electronAPI.fetchLinkPreview(targetUrl, {
-        timeout: 25000,
-        maxRedirects: 5
-      });
-
-      if (result?.needsRedirect && result.redirectTo) {
-        try {
-          const nextUrl = new URL(result.redirectTo, targetUrl).href;
-          return fetchWithRedirects(nextUrl, attempt + 1);
-        } catch {
-          throw new Error('Invalid redirect URL');
-        }
-      }
-
-      if (result?.error) throw new Error(result.error);
+      const result = await link.fetchPreview(targetUrl);
 
       return { ...result, originalUrl: url };
     };
@@ -148,11 +131,9 @@ const CustomLinkPreview = React.memo(({ url, isCurrentUser: _isCurrentUser, show
   const handleClick = (e: React.MouseEvent) => {
     e.preventDefault();
     e.stopPropagation();
-    if ((window as any).electronAPI?.openExternal) {
-      (window as any).electronAPI.openExternal(url);
-    } else {
+    system.openExternal(url).catch(() => {
       window.open(url, '_blank', 'noopener,noreferrer');
-    }
+    });
   };
 
   if (error || (!loading && !data)) {
@@ -291,11 +272,9 @@ const LinkifyWithPreviewsComponent: React.FC<LinkifyWithPreviewsProps> = ({
   const handleLinkClick = useCallback((url: string, e: React.MouseEvent) => {
     e.preventDefault();
     e.stopPropagation();
-    if ((window as any).electronAPI?.openExternal) {
-      (window as any).electronAPI.openExternal(url);
-    } else {
+    system.openExternal(url).catch(() => {
       window.open(url, '_blank', 'noopener,noreferrer');
-    }
+    });
   }, []);
 
   const enhancedOptions = useMemo(() => ({

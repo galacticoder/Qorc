@@ -13,6 +13,7 @@ import { EventType } from '../types/event-types';
 import { generateX25519KeyPair, computeX25519SharedSecret } from '../utils/noise-utils';
 import type { ServerKeyMaterial, SessionKeyMaterial, HandshakeCallbacks } from '../types/websocket-types';
 import { MAX_HANDSHAKE_ATTEMPTS, SESSION_REKEY_INTERVAL_MS } from '../constants';
+import { session } from '../tauri-bindings';
 
 export class WebSocketHandshake {
   private handshakeInFlight = false;
@@ -21,7 +22,7 @@ export class WebSocketHandshake {
   private sessionRekeyTimer: ReturnType<typeof setTimeout> | null = null;
   private serverKeyMaterial?: ServerKeyMaterial;
 
-  constructor(private callbacks: HandshakeCallbacks) {}
+  constructor(private callbacks: HandshakeCallbacks) { }
 
   isInFlight(): boolean {
     return this.handshakeInFlight;
@@ -52,6 +53,13 @@ export class WebSocketHandshake {
       clearTimeout(this.sessionRekeyTimer);
       this.sessionRekeyTimer = null;
     }
+  }
+
+  reset(): void {
+    this.handshakeInFlight = false;
+    this.handshakePromise = null;
+    this.handshakeAttempts = 0;
+    this.cancelRekeyTimer();
   }
 
   // Signing keys initialization
@@ -100,22 +108,34 @@ export class WebSocketHandshake {
     let serverMaterial = this.serverKeyMaterial;
 
     if (!serverMaterial) {
+      console.log('[WebSocketHandshake] Server material missing, waiting...');
       const startTime = Date.now();
-      const timeout = 10000;
-      let requested = false;
+      const timeout = 5000;
+      let lastRequestTime = 0;
 
-      while (!serverMaterial && (Date.now() - startTime) < timeout) {
-        if (!requested && (Date.now() - startTime) > 500) {
+      while (!this.serverKeyMaterial && (Date.now() - startTime) < timeout) {
+        if (!await this.callbacks.isConnected()) {
+          throw new Error('Connection lost while waiting for server keys');
+        }
+
+        const now = Date.now();
+        if (now - lastRequestTime > 1500) {
           try {
+            if (lastRequestTime === 0) {
+              await new Promise(resolve => setTimeout(resolve, 200));
+            }
             await this.callbacks.transmit(JSON.stringify({ type: 'request-server-public-key' }));
-          } catch { }
-          requested = true;
+            lastRequestTime = Date.now();
+          } catch (err) {
+            console.error('[WebSocketHandshake] Failed to transmit request:', err);
+          }
         }
         await new Promise(resolve => setTimeout(resolve, 100));
-        serverMaterial = this.serverKeyMaterial;
       }
 
+      serverMaterial = this.serverKeyMaterial;
       if (!serverMaterial) {
+        console.error('[WebSocketHandshake] Handshake timeout waiting for server keys');
         throw new Error('Server key material unavailable (timeout)');
       }
     }
@@ -223,17 +243,13 @@ export class WebSocketHandshake {
 
           // Store session keys for background mode
           try {
-            const api = (window as any).edgeApi;
-            if (api?.storePQSessionKeys) {
-              const keysToStore = {
-                sessionId: pendingSession.sessionId,
-                sendKey: PostQuantumUtils.uint8ArrayToBase64(pendingSession.sendKey),
-                recvKey: PostQuantumUtils.uint8ArrayToBase64(pendingSession.recvKey),
-                fingerprint: pendingSession.fingerprint,
-                establishedAt: pendingSession.establishedAt
-              };
-              api.storePQSessionKeys(keysToStore).catch(() => { });
-            }
+            const keysToStore = {
+              session_id: pendingSession.sessionId,
+              aes_key: PostQuantumUtils.uint8ArrayToBase64(pendingSession.sendKey),
+              mac_key: PostQuantumUtils.uint8ArrayToBase64(pendingSession.recvKey),
+              created_at: pendingSession.establishedAt
+            };
+            session.storePQKeys(keysToStore).catch(() => { });
           } catch { }
 
           resolve();

@@ -49,6 +49,7 @@ interface LoginProps {
   readonly onPasswordHashSubmit?: (password: string) => Promise<void>;
   readonly showPassphrasePrompt: boolean;
   readonly setShowPassphrasePrompt: (show: boolean) => void;
+  readonly setIsRegistrationMode?: (val: boolean) => void;
   readonly showPasswordPrompt?: boolean;
   readonly setShowPasswordPrompt?: (show: boolean) => void;
 }
@@ -101,6 +102,7 @@ export const Login = React.memo<LoginProps>(({
   onAcceptServerTrust,
   onRejectServerTrust,
   setShowPassphrasePrompt,
+  setIsRegistrationMode,
   initialUsername = "",
   initialPassword = "",
   maxStepReached: _maxStepReached = 'login',
@@ -212,8 +214,12 @@ export const Login = React.memo<LoginProps>(({
 
   // Toggle between login and register mode
   const handleModeToggle = useCallback((): void => {
-    setMode((prev) => (prev === 'login' ? 'register' : 'login'));
-  }, []);
+    setMode((prev) => {
+      const newMode = prev === 'login' ? 'register' : 'login';
+      setIsRegistrationMode?.(newMode === 'register');
+      return newMode;
+    });
+  }, [setIsRegistrationMode]);
 
   // Accept server trust change
   const handleAcceptTrust = useCallback(() => {

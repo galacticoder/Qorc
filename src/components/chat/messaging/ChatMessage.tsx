@@ -19,6 +19,7 @@ import { MessageContextMenu } from "./MessageContextMenu";
 import { UserAvatar } from "../../ui/UserAvatar";
 import { EventType } from "../../../lib/types/event-types.ts";
 import { SignalType } from "../../../lib/types/signal-types.ts";
+import { SecureCanvasText } from "./SecureCanvasText";
 
 interface ExtendedChatMessageProps extends ChatMessageProps {
   readonly getDisplayUsername?: (username: string) => Promise<string>;
@@ -80,6 +81,7 @@ export const ChatMessage = React.memo<ExtendedChatMessageProps>(({ message, smar
   const { displayName: displaySender } = useUnifiedUsernameDisplay({
     username: senderKey,
     getDisplayUsername,
+    originalUsername: message.fromOriginal,
     fallbackToOriginal: true
   });
 
@@ -87,6 +89,7 @@ export const ChatMessage = React.memo<ExtendedChatMessageProps>(({ message, smar
   const { displayName: displayReplyToSender } = useUnifiedUsernameDisplay({
     username: replyToSenderKey,
     getDisplayUsername,
+    originalUsername: message.replyTo?.sender, // Note: replyTo.sender might be original or pseudonym, unified hook handles both
     fallbackToOriginal: true
   });
 
@@ -325,7 +328,13 @@ export const ChatMessage = React.memo<ExtendedChatMessageProps>(({ message, smar
               <span className="font-medium text-xs text-foreground/80">{displayReplyToSender}</span>
             </div>
             <div className="text-xs text-muted-foreground truncate opacity-90">
-              {message.replyTo.content}
+              <SecureCanvasText
+                messageId={message.replyTo.secureContentId || message.replyTo.id}
+                maxWidth={250}
+                fontSize={12}
+                color="inherit"
+                onContextMenu={handleContextMenu}
+              />
             </div>
           </div>
         )}
@@ -436,26 +445,23 @@ export const ChatMessage = React.memo<ExtendedChatMessageProps>(({ message, smar
             return (
               <div className="relative max-w-full" ref={bubbleRef}>
                 <div
-                  className="px-4 py-3 text-sm whitespace-pre-wrap break-words"
+                  className="px-4 py-3 text-sm"
                   style={{
                     backgroundColor: safeIsCurrentUser ? 'var(--color-accent-primary)' : 'var(--chat-bubble-received-bg)',
-                    color: safeIsCurrentUser ? 'white' : 'var(--color-text-primary)',
                     borderRadius: 'var(--message-bubble-radius)',
-                    wordBreak: "break-word",
-                    whiteSpace: "pre-wrap",
                     minWidth: '3rem',
                     maxWidth: '100%'
                   }}
                   onContextMenu={handleContextMenu}
                 >
-                  <LinkifyWithPreviews
-                      options={{ rel: "noopener noreferrer" }}
-                      showPreviews={false}
-                      isCurrentUser={safeIsCurrentUser}
-                      urls={urls}
-                    >
-                      {content}
-                    </LinkifyWithPreviews>
+                  <SecureCanvasText
+                    messageId={message.secureContentId || message.id}
+                    maxWidth={350}
+                    fontSize={14}
+                    color={safeIsCurrentUser ? '#ffffff' : '#e5e5e5'}
+                    isCurrentUser={safeIsCurrentUser}
+                    onContextMenu={handleContextMenu}
+                  />
                 </div>
               </div>
             );

@@ -215,6 +215,7 @@ export function useP2PMessaging(
     createSendP2PMessage(
       messagingRefs,
       hybridKeys,
+      username,
       deriveConversationKey,
       ensurePeerAuthenticated,
       getPeerCertificate,
@@ -222,7 +223,7 @@ export function useP2PMessaging(
       connectToPeer,
       setLastError
     ),
-    [hybridKeys?.dilithium, deriveConversationKey, ensurePeerAuthenticated, getPeerCertificate, enqueueOutbound, connectToPeer, setLastError]
+    [username, hybridKeys?.dilithium, deriveConversationKey, ensurePeerAuthenticated, getPeerCertificate, enqueueOutbound, connectToPeer, setLastError]
   );
 
   const handleIncomingP2PMessage = useCallback(

@@ -1,20 +1,15 @@
 {
-  "name": "-chat-client",
+  "name": "qor-chat-client",
   "private": true,
   "version": "0.0.0",
   "description": "meant for maximum privacy and security",
   "author": "galacticoderr",
   "type": "module",
-  "main": "electron/main.cjs",
   "homepage": "./",
   "scripts": {
     "vite": "vite",
     "build": "vite build --config vite.config.simple.ts",
-    "lint": "eslint src --report-unused-disable-directives --max-warnings 0",
-    "electron": "electron .",
-    "prepare-tor": "node electron/prepare-tor-bundles.cjs",
-    "electron-build": "npm run prepare-tor && npm run build && electron-builder",
-    "dist": "npm run prepare-tor && npm run build && electron-builder --publish=never"
+    "lint": "eslint src --report-unused-disable-directives --max-warnings 0"
   },
   "dependencies": {
     "@dhaiwat10/react-link-preview": "^1.15.0",
@@ -63,7 +58,6 @@
     "ws": "^8.18.3"
   },
   "devDependencies": {
-    "@electron/rebuild": "^4.0.1",
     "@tailwindcss/aspect-ratio": "^0.4.2",
     "@tailwindcss/postcss": "^4.1.17",
     "@types/node": "^24.10.0",
@@ -76,8 +70,6 @@
     "@vitejs/plugin-react": "^5.1.0",
     "autoprefixer": "^10.4.20",
     "concurrently": "^9.2.1",
-    "electron": "^39.1.1",
-    "electron-builder": "^26.0.12",
     "eslint": "^9.39.1",
     "eslint-plugin-react-hooks": "^7.0.1",
     "globals": "^16.5.0",
@@ -94,36 +86,6 @@
       "rimraf": "^5.0.5",
       "@npmcli/move-file": "^3.0.0",
       "boolean": "^3.2.0"
-    }
-  },
-  "build": {
-    "appId": "com.example.Qor-chat",
-    "productName": "Qor-Chat",
-    "directories": {
-      "output": "dist-electron"
-    },
-    "files": [
-      "dist/**/*",
-      "electron/**/*",
-      "!electron/.gitignore",
-      "node_modules/**/*",
-      "config/package.json",
-      "package.json"
-    ],
-    "extraResources": [
-      "tor-bundles/**/*"
-    ],
-    "asarUnpack": [
-      "tor-bundles/**/*"
-    ],
-    "mac": {
-      "category": "public.app-category.social-networking"
-    },
-    "win": {
-      "target": "nsis"
-    },
-    "linux": {
-      "target": "AppImage"
     }
   }
 }

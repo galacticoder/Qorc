@@ -7,6 +7,7 @@ import { PostQuantumHash } from './hash';
 import { PostQuantumUtils } from '../utils/pq-utils';
 import { STORAGE_KEYS } from '../database/storage-keys';
 import { CRYPTO_CACHE_TTL_MS } from '../constants';
+import { system } from '../tauri-bindings';
 
 interface ServerPublicKeys {
   kyberPublicBase64: string;
@@ -68,10 +69,10 @@ export class ClusterKeyManager {
   private async _doFetch(serverUrl?: string): Promise<void> {
     try {
       let storedUrl = null;
-      if ((window as any)?.edgeApi?.getServerUrl) {
-        const result = await (window as any).edgeApi.getServerUrl();
-        storedUrl = result?.serverUrl || null;
-      }
+      try {
+        const result = await system.getServerUrl();
+        storedUrl = result || null;
+      } catch { }
 
       const url = serverUrl || storedUrl || import.meta.env.VITE_WS_URL;
 

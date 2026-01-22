@@ -266,13 +266,16 @@ export const useConversations = (currentUsername: string, users: User[], message
 
       let conv = convMap.get(other);
       if (!conv) {
+        const displayName = (msg.sender === other && msg.fromOriginal) ? msg.fromOriginal : undefined;
         conv = {
           id: crypto.randomUUID(),
           username: other,
           isOnline,
           lastMessage: getConversationPreview(msg, currentUsername),
           lastMessageTime: msgTime,
-          unreadCount: unreadIncrement
+          unreadCount: unreadIncrement,
+          secureContentId: msg.secureContentId || msg.id,
+          displayName
         };
         convMap.set(other, conv);
       } else {
@@ -317,6 +320,8 @@ export const useConversations = (currentUsername: string, users: User[], message
             lastMessage: conv.lastMessage,
             lastMessageTime: conv.lastMessageTime,
             unreadCount: username === selectedConversation ? 0 : conv.unreadCount,
+            secureContentId: conv.secureContentId,
+            displayName: exists.displayName || conv.displayName
           });
         } else {
           merged.set(username, conv);
@@ -388,6 +393,8 @@ export const useConversations = (currentUsername: string, users: User[], message
     }
   }, [messages, currentUsername, selectedConversation, removedConversations, userLookup, secureDB]);
 
+  // Auto-selection of first conversation removed as per user request
+  /*
   useEffect(() => {
     if (!selectedConversation && conversations.length > 0) {
       const firstConversationUsername = conversations[0].username;
@@ -396,6 +403,7 @@ export const useConversations = (currentUsername: string, users: User[], message
       }
     }
   }, [conversations, selectedConversation]);
+  */
 
   const removeConversation = useCallback((username: string, clearMessages: boolean = true) => {
     if (!username || typeof username !== 'string') {

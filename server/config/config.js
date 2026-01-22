@@ -1,4 +1,5 @@
 import crypto from 'crypto';
+import fs from 'fs';
 
 function parsePort(portValue) {
   if (!portValue) return 8443;
@@ -15,7 +16,8 @@ function getRandomizedAttempts(min = 5, max = 10) {
   return Math.floor(randomValue * range) + min;
 }
 
-export const PORT = parsePort(process.env.PORT);
+const isDocker = fs.existsSync('/.dockerenv');
+export const PORT = isDocker ? 3000 : parsePort(process.env.PORT);
 export const MAX_CLIENTS = 100;
 export const SERVER_ID = 'Qor-Chat-Server';
 

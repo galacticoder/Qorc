@@ -1,6 +1,7 @@
 import { RefObject } from "react";
 import { SignalType } from "../../lib/types/signal-types";
 import websocketClient from "../../lib/websocket/websocket";
+import { signal, database } from "../../lib/tauri-bindings";
 import { CryptoUtils } from "../../lib/utils/crypto-utils";
 import type { ServerHybridPublicKeys, HybridKeys, HashParams } from "../../lib/types/auth-types";
 import { EventType } from "../../lib/types/event-types";
@@ -10,6 +11,7 @@ export interface PassphraseRefs {
   loginUsernameRef: RefObject<string>;
   passphrasePlaintextRef: RefObject<string>;
   passphraseRef: RefObject<string>;
+  passwordRef: RefObject<string>;
   passphraseLimiterRef: RefObject<{ tokens: number; last: number }>;
   keyManagerRef: RefObject<any>;
 }
@@ -140,7 +142,7 @@ export const createHandlePassphraseSubmit = (
           setters.setAuthStatus("Checking identity...");
           let identityExists = false;
           try {
-            const existing = await (window as any).edgeApi.getPreKeyBundle?.({ username: refs.loginUsernameRef.current });
+            const existing = await signal.createPreKeyBundle(refs.loginUsernameRef.current!);
             if (existing && existing.identityKeyBase64) {
               identityExists = true;
             }
@@ -150,10 +152,10 @@ export const createHandlePassphraseSubmit = (
 
           if (!identityExists) {
             setters.setAuthStatus("Generating identity...");
-            const identityResult = await (window as any).edgeApi.generateIdentity({ username: refs.loginUsernameRef.current });
-
-            if (!identityResult?.success) {
-              const error = identityResult?.error || 'Failed to generate identity (native module may be missing)';
+            try {
+              await signal.generateIdentity(refs.loginUsernameRef.current!);
+            } catch (err) {
+              const error = err instanceof Error ? err.message : 'Failed to generate identity';
 
               websocketClient.send(JSON.stringify({
                 type: ErrorType.SIGNAL_BUNDLE_FAILURE,
@@ -175,14 +177,10 @@ export const createHandlePassphraseSubmit = (
           }
 
           setters.setAuthStatus("Generating prekeys...");
-          const prekeysResult = await (window as any).edgeApi.generatePreKeys({
-            username: refs.loginUsernameRef.current,
-            startId: 1,
-            count: 100
-          });
-
-          if (!prekeysResult?.success) {
-            const error = prekeysResult?.error || 'Failed to generate prekeys';
+          try {
+            await signal.generatePreKeys(refs.loginUsernameRef.current!, 1, 100);
+          } catch (err) {
+            const error = err instanceof Error ? err.message : 'Failed to generate prekeys';
 
             websocketClient.send(JSON.stringify({
               type: ErrorType.SIGNAL_BUNDLE_FAILURE,
@@ -203,10 +201,11 @@ export const createHandlePassphraseSubmit = (
           }
 
           setters.setAuthStatus("Publishing bundle...");
-          const bundle = await (window as any).edgeApi.getPreKeyBundle({ username: refs.loginUsernameRef.current });
-
-          if (bundle?.success === false || bundle?.error) {
-            const error = bundle.error || 'Failed to create pre-key bundle';
+          let bundle;
+          try {
+            bundle = await signal.createPreKeyBundle(refs.loginUsernameRef.current!);
+          } catch (err) {
+            const error = err instanceof Error ? err.message : 'Failed to create pre-key bundle';
 
             websocketClient.send(JSON.stringify({
               type: ErrorType.SIGNAL_BUNDLE_FAILURE,
@@ -226,7 +225,7 @@ export const createHandlePassphraseSubmit = (
             return;
           }
 
-          if (!bundle.registrationId || !bundle.identityKeyBase64 || !bundle.signedPreKey) {
+          if (!bundle || !bundle.registrationId || !bundle.identityKeyBase64 || !bundle.signedPreKey) {
             const error = 'Invalid bundle structure returned from Signal handler';
 
             websocketClient.send(JSON.stringify({
@@ -316,6 +315,9 @@ export const createHandlePassphraseSubmit = (
           }
         }
       }
+
+      if (refs.passwordRef) refs.passwordRef.current = '';
+
     } catch (_error) {
       if (_error instanceof Error && _error.message.includes('Key decryption failed')) {
         return;

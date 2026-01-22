@@ -24,17 +24,17 @@ export const handleMappingReceived = async (
   }
 
   if (!validateEventDetail(detail)) return false;
-  
+
   const sanitized = sanitizeMappingPayload(detail);
   if (!sanitized) return false;
 
   await secureDB.storeUsernameMapping(sanitized.hashed, sanitized.original);
-  try { 
-    window.dispatchEvent(new CustomEvent(EventType.USERNAME_MAPPING_UPDATED, { 
-      detail: { username: sanitized.hashed } 
-    })); 
+  try {
+    window.dispatchEvent(new CustomEvent(EventType.USERNAME_MAPPING_UPDATED, {
+      detail: { username: sanitized.hashed, hashed: sanitized.hashed, original: sanitized.original }
+    }));
   } catch { }
-  
+
   return true;
 };
 
@@ -83,14 +83,14 @@ export const queuePendingMapping = (
   pendingMappings: MappingPayload[]
 ): MappingPayload[] | null => {
   if (!validateEventDetail(detail)) return null;
-  
+
   const sanitized = sanitizeMappingPayload(detail);
   if (!sanitized) return null;
-  
+
   if (pendingMappings.length >= DB_MAX_PENDING_MAPPINGS) {
     return null;
   }
-  
+
   return [...pendingMappings, sanitized];
 };
 
@@ -102,18 +102,18 @@ export const flushPendingMappings = async (
   for (const m of pendingMappings) {
     try {
       await secureDB.storeUsernameMapping(m.hashed, m.original);
-      try { 
-        window.dispatchEvent(new CustomEvent(EventType.USERNAME_MAPPING_UPDATED, { 
-          detail: { username: m.hashed } 
-        })); 
+      try {
+        window.dispatchEvent(new CustomEvent(EventType.USERNAME_MAPPING_UPDATED, {
+          detail: { username: m.hashed, hashed: m.hashed, original: m.original }
+        }));
       } catch { }
     } catch (err) {
       console.error('[flushPendingMappings] Failed to flush mapping:', err);
     }
   }
-  try { 
-    window.dispatchEvent(new CustomEvent(EventType.USERNAME_MAPPING_UPDATED, { 
-      detail: { username: '__all__' } 
-    })); 
+  try {
+    window.dispatchEvent(new CustomEvent(EventType.USERNAME_MAPPING_UPDATED, {
+      detail: { username: '__all__' }
+    }));
   } catch { }
 };

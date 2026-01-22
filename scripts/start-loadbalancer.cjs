@@ -52,7 +52,6 @@ class CircularBuffer { constructor(n = 1000) { this.a = []; this.n = n; } push(x
 class Debouncer { constructor(fn, d = 50) { this.fn = fn; this.d = d; this.t = null; this.p = false; } call() { this.p = true; if (this.t) return; this.t = setTimeout(() => { if (this.p) { this.fn(); this.p = false; } this.t = null; }, this.d); } flush() { if (this.t) { clearTimeout(this.t); this.t = null; } if (this.p) { this.fn(); this.p = false; } } }
 class RateLimiter { constructor(ms = 1000) { this.ms = ms; this.last = 0; } ok() { const now = Date.now(); if (now - this.last >= this.ms) { this.last = now; return true; } return false; } }
 
-async function getTunnelUrl() { try { const logPath = path.join(repoRoot, 'scripts', 'config', 'tunnel', 'cloudflared.log'); if (!fs.existsSync(logPath)) return null; const c = fs.readFileSync(logPath, 'utf8'); const m = c.match(/https:\/\/[a-zA-Z0-9-]+\.trycloudflare\.com/); return m ? m[0] : null; } catch { return null; } }
 function isHAProxyInstalled() { try { execSync('command -v haproxy >/dev/null 2>&1'); return true; } catch { return false; } }
 
 async function runNodeScript(scriptPath, args = [], env = process.env) {
@@ -169,7 +168,7 @@ async function ensureHaproxyBuiltOrReady() {
   // 3) Build 
   log('Building HAProxy with OQS...');
   await runNodeScript(path.join(repoRoot, 'scripts', 'build-quantum-haproxy.cjs'));
-  
+
   if (fs.existsSync(buildMetaPath)) {
     try {
       const meta = JSON.parse(fs.readFileSync(buildMetaPath, 'utf8'));
@@ -208,8 +207,6 @@ class LBTUI {
     // Available commands
     this.commands = [
       { name: '/help', desc: 'Show available commands', aliases: ['/h', '/?'] },
-      { name: '/tunnel restart', desc: 'Restart Cloudflare tunnel', aliases: ['/tr'] },
-      { name: '/tunnel status', desc: 'Show tunnel status', aliases: ['/ts'] },
       { name: '/reload', desc: 'Reload HAProxy configuration', aliases: ['/r'] },
       { name: '/servers', desc: 'Show active servers', aliases: ['/s'] },
       { name: '/clear', desc: 'Clear log buffer', aliases: ['/c'] },
@@ -248,6 +245,10 @@ class LBTUI {
   }
 
   add(line) {
+    if (line.includes('\r')) {
+      const parts = line.split('\r');
+      line = parts[parts.length - 1];
+    }
     this.buf.push(line);
     this.renderDeb.call();
   }
@@ -409,19 +410,7 @@ class LBTUI {
           const aliases = c.aliases && c.aliases.length > 0 ? ` (${c.aliases.join(', ')})` : '';
           this.add(`  \x1b[36m${c.name}\x1b[0m${aliases} - ${c.desc}`);
         }
-      } else if (cmdDef.name === '/tunnel restart') {
-        this.add('Restarting tunnel...');
-        try {
-          await this.sendEncryptedCommand({ cmd: 'restart_tunnel', pid: this.pid });
-          this.add('\x1b[32mTunnel restart command sent\x1b[0m');
-        } catch (error) {
-          this.add(`\x1b[31mError: ${error.message}\x1b[0m`);
-        }
-      } else if (cmdDef.name === '/tunnel status') {
-        const url = this.stats.url || 'Not available';
-        this.add(`Tunnel URL: \x1b[32m${url}\x1b[0m`);
       } else if (cmdDef.name === '/reload') {
-        this.add('Reloading HAProxy configuration...');
         try {
           await this.sendEncryptedCommand({ cmd: 'reload', pid: this.pid });
           this.add('\x1b[32mReload command sent\x1b[0m');
@@ -622,7 +611,19 @@ class LBTUI {
     try { const out = execSync(`ps -p ${this.pid} -o %cpu=,%mem=`, { encoding: 'utf8', timeout: 500 }).trim().split(/\s+/); if (out.length >= 2) { this.stats.cpu = out[0]; this.stats.mem = out[1]; } } catch { }
     this.getActiveServers().then(servers => { this.stats.servers = servers.length; this.stats.serverList = servers; this.renderDeb.call(); }).catch(() => { });
     this.getLbPort().then(port => { if (port) this.stats.lbPort = port; this.renderDeb.call(); }).catch(() => { });
-    getTunnelUrl().then(u => { this.stats.url = u; this.renderDeb.call(); }).catch(() => { });
+    this.getOnionUrl().then(url => { if (url) this.stats.onionUrl = url; this.renderDeb.call(); }).catch(() => { });
+  }
+
+  async getOnionUrl() {
+    try {
+      const mod = await import(path.join(repoRoot, 'server', 'presence', 'presence.js'));
+      const { withRedisClient } = mod;
+      return await withRedisClient(async (client) => {
+        return await client.get('cluster:lb:onionAddress');
+      });
+    } catch (e) {
+      return null;
+    }
   }
 
   async getActiveServers() {
@@ -663,7 +664,7 @@ class LBTUI {
       return null;
     }
   }
-  
+
   start() {
     this.renderDeb.call();
     this.interval = setInterval(() => {
@@ -682,7 +683,7 @@ class LBTUI {
     // Header
     const left = ` Load Balancer `;
     const center = ` PID ${this.pid} | CPU ${this.stats.cpu}% | MEM ${this.stats.mem}% `;
-    const urlShort = this.stats.url ? this.stats.url : 'pending...';
+    const urlShort = this.stats.onionUrl ? this.stats.onionUrl : 'pending...';
     const right = ` ${urlShort} `;
     const leftLen = left.length, centerLen = center.length, rightLen = right.length;
     let cst = Math.max(leftLen + 1, Math.floor((w - centerLen) / 2));
@@ -712,14 +713,35 @@ class LBTUI {
 
     // Log area
     lines.push('┌' + '─'.repeat(Math.max(0, w - 2)) + '┐');
+
+    const truncateWithAnsi = (s, len) => {
+      let visualLen = 0;
+      let result = '';
+      let i = 0;
+      while (i < s.length && visualLen < len) {
+        if (s[i] === '\x1b' && s[i + 1] === '[') {
+          const start = i;
+          i += 2;
+          while (i < s.length && !/[a-zA-Z]/.test(s[i])) i++;
+          result += s.substring(start, i + 1);
+          i++;
+        } else {
+          result += s[i];
+          visualLen++;
+          i++;
+        }
+      }
+      return { text: result, visualLen };
+    };
+
     const vis = Math.max(1, h - 7);
     const start = Math.max(0, this.buf.len() - vis - this.scroll);
     const end = this.buf.len() - this.scroll;
     const slice = this.buf.get().slice(start, end);
     for (let i = 0; i < vis; i++) {
       const ln = slice[i] || '';
-      const tr = ln.substring(0, Math.max(0, w - 4));
-      const pad = tr + ' '.repeat(Math.max(0, w - 4 - tr.length));
+      const { text: tr, visualLen } = truncateWithAnsi(ln, Math.max(0, w - 4));
+      const pad = tr + ' '.repeat(Math.max(0, w - 4 - visualLen));
       const sb = i === 0 && this.scroll > 0 ? '▲' : (i === vis - 1 && (this.buf.len() - end) > 0 ? '▼' : '│');
       lines.push('│ ' + pad + ' ' + sb);
     }
@@ -806,7 +828,21 @@ async function ensureStatsCredentials() {
   const keysFile = path.join(repoRoot, 'server', 'config', '.haproxy-keys.enc');
   const secureCli = path.join(repoRoot, 'server', 'config', 'secure-credentials.js');
 
-  if (process.env.HAPROXY_STATS_USERNAME && process.env.HAPROXY_STATS_PASSWORD) return;
+  const hasEnv = process.env.HAPROXY_STATS_USERNAME && process.env.HAPROXY_STATS_PASSWORD;
+  const hasKeys = fs.existsSync(keysFile);
+
+  if (hasEnv && hasKeys) return;
+
+  // If we have env but no keys then try to save them
+  if (hasEnv && !hasKeys) {
+    try {
+      log('[SECURE-CREDS] Generating missing command encryption keys...');
+      execSync(`${process.execPath} ${JSON.stringify(secureCli)} save ${JSON.stringify(process.env.HAPROXY_STATS_USERNAME)} ${JSON.stringify(process.env.HAPROXY_STATS_PASSWORD)}`, { stdio: 'inherit' });
+      if (fs.existsSync(keysFile)) return;
+    } catch (e) {
+      logErr('[SECURE-CREDS] Failed to generate keys: ' + e.message);
+    }
+  }
   const canPrompt = process.stdin.isTTY;
 
   // Unlock existing creds

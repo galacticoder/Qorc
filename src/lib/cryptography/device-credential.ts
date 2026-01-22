@@ -3,6 +3,7 @@
  */
 
 import { PostQuantumUtils } from '../utils/pq-utils';
+import { auth } from '../tauri-bindings';
 
 interface DeviceCredentials {
     publicKey: Uint8Array;
@@ -29,33 +30,33 @@ class DeviceCredentialManager {
             };
         }
 
-        if (typeof window === 'undefined' || !(window as any).edgeApi?.deviceCredentials) {
-            throw new Error('Device credentials API not available');
+        try {
+            const result = await auth.getDeviceCredentials() as any;
+
+            this.publicKey = PostQuantumUtils.base64ToUint8Array(result.public_key || result.publicKey);
+            this.keyHash = PostQuantumUtils.base64ToUint8Array(result.key_hash || result.keyHash);
+
+            if (this.publicKey.length !== 2592) {
+                console.error('[DeviceCredential] Invalid ML-DSA-87 public key length:', this.publicKey.length);
+                throw new Error(`Invalid ML-DSA-87 public key length: ${this.publicKey.length} (expected 2592)`);
+            }
+
+            return {
+                publicKey: this.publicKey,
+                keyHash: this.keyHash
+            };
+        } catch (e) {
+            const errorMessage = e instanceof Error ? e.message : String(e);
+            console.error('[DeviceCredential] Failed to get device credentials:', errorMessage);
+            throw new Error(`Device credentials API not available: ${errorMessage}`);
         }
-
-        const result = await (window as any).edgeApi.deviceCredentials.getCredentials();
-
-        this.publicKey = PostQuantumUtils.base64ToUint8Array(result.publicKey);
-        this.keyHash = PostQuantumUtils.base64ToUint8Array(result.keyHash);
-
-        if (this.publicKey.length !== 2592) {
-            throw new Error('Invalid ML-DSA-87 public key length');
-        }
-
-        return {
-            publicKey: this.publicKey,
-            keyHash: this.keyHash
-        };
     }
 
     // Sign a challenge with device credentials
     async signChallenge(challenge: string): Promise<DeviceAttestation> {
-        if (typeof window === 'undefined' || !(window as any).edgeApi?.deviceCredentials) {
-            throw new Error('Device credentials API not available');
-        }
-
         const credentials = await this.getCredentials();
-        const signatureBase64 = await (window as any).edgeApi.deviceCredentials.signChallenge(challenge);
+        const result = await auth.signChallenge(challenge) as any;
+        const signatureBase64 = typeof result === 'string' ? result : result?.signature;
 
         return {
             devicePublicKey: PostQuantumUtils.uint8ArrayToBase64(credentials.publicKey),

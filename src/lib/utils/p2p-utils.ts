@@ -104,8 +104,6 @@ export const buildRouteProof = async (
     nonce: CryptoUtils.Base64.arrayBufferToBase64(nonce),
     at: Date.now(),
     expiresAt,
-    from: localDilithiumPublic,
-    to: peerDilithiumPublic,
     channelId,
     sequence,
   };
@@ -113,11 +111,9 @@ export const buildRouteProof = async (
     at: payload.at,
     channelId: payload.channelId,
     expiresAt: payload.expiresAt,
-    from: payload.from,
     kind: payload.kind,
     nonce: payload.nonce,
     sequence: payload.sequence,
-    to: payload.to,
   };
   const canonical = new TextEncoder().encode(JSON.stringify(canonicalPayload));
   const signature = await CryptoUtils.Dilithium.sign(localDilithiumSecret, canonical);
@@ -137,7 +133,7 @@ export const verifyRouteProof = async (
   if (!proof?.payload || !proof.signature) {
     return false;
   }
-  const { kind, nonce, at, from, to, channelId: proofChannel, sequence, expiresAt } = proof.payload;
+  const { kind, nonce, at, channelId: proofChannel, sequence, expiresAt } = proof.payload;
   if (kind !== 'route-proof-v1') {
     return false;
   }
@@ -149,9 +145,6 @@ export const verifyRouteProof = async (
     return false;
   }
   if (typeof sequence !== 'number' || sequence < minSequence) {
-    return false;
-  }
-  if (from !== peerDilithiumPublic || to !== localDilithiumPublic) {
     return false;
   }
   if (proofChannel !== channelId) {
@@ -169,11 +162,9 @@ export const verifyRouteProof = async (
     at: at,
     channelId: proofChannel,
     expiresAt: expiresAt,
-    from: from,
     kind: kind,
     nonce: nonce,
     sequence: sequence,
-    to: to,
   };
   const canonical = new TextEncoder().encode(JSON.stringify(canonicalPayload));
   const peerKey = toUint8(peerDilithiumPublic);

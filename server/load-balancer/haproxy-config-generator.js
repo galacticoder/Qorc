@@ -395,9 +395,17 @@ export async function generateConfigFromCluster(clusterManager, outputPath) {
 
     for (const server of status.servers) {
       if (server.health?.status === 'healthy') {
-        const serverUrl = process.env[`SERVER_${server.serverId}_URL`] || `127.0.0.1:${3000 + parseInt(server.serverId.slice(-4), 16) % 1000}`;
-        const [host, portStr] = serverUrl.split(':');
-        const port = parseInt(portStr, 10);
+        const serverUrlEnv = process.env[`SERVER_${server.serverId}_URL`];
+        let host, port;
+
+        if (serverUrlEnv) {
+          const parts = serverUrlEnv.split(':');
+          host = parts[0];
+          port = parseInt(parts[1], 10);
+        } else {
+          host = server.host || '127.0.0.1';
+          port = parseInt(server.port, 10) || 3000;
+        }
 
         generator.addBackend({
           name: server.serverId,

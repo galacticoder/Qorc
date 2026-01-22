@@ -10,6 +10,8 @@
  */
 
 import crypto from 'crypto';
+import fs from 'fs';
+import os from 'os';
 import { EventEmitter } from 'events';
 import { withRedisClient, createSubscriber } from '../presence/presence.js';
 import { logger as cryptoLogger } from '../crypto/crypto-logger.js';
@@ -152,6 +154,27 @@ export class ClusterManager extends EventEmitter {
     }
   }
 
+  // Get host to advertise to cluster
+  #getAdvertisedHost() {
+    const isDocker = fs.existsSync('/.dockerenv');
+    const hostEnv = process.env.SERVER_HOST || process.env.HOST;
+
+    if (isDocker) {
+      if (!hostEnv || hostEnv === '127.0.0.1' || hostEnv === 'localhost') {
+        return os.hostname();
+      }
+    }
+
+    return hostEnv || '127.0.0.1';
+  }
+
+  // Get port to advertise to cluster
+  #getAdvertisedPort() {
+    const isDocker = fs.existsSync('/.dockerenv');
+    if (isDocker) return 3000;
+    return this.parsePort(process.env.PORT) || 8443;
+  }
+
   // Initialize as primary master server
   async initializePrimaryServer() {
     try {
@@ -167,8 +190,8 @@ export class ClusterManager extends EventEmitter {
           lastHeartbeat: Date.now(),
           status: 'active',
           publicKeys: this.exportPublicKeys(),
-          host: process.env.SERVER_HOST || process.env.HOST || '127.0.0.1',
-          port: this.parsePort(process.env.PORT),
+          host: this.#getAdvertisedHost(),
+          port: this.#getAdvertisedPort(),
         };
         pipeline.hset(CLUSTER_KEYS.SERVERS, this.serverId, JSON.stringify(serverInfo));
 
@@ -223,8 +246,8 @@ export class ClusterManager extends EventEmitter {
           requestedAt: Date.now(),
           publicKeys: this.exportPublicKeys(),
           clusterPublicKey: Buffer.from(this.clusterPublicKey).toString('base64'),
-          host: process.env.SERVER_HOST || process.env.HOST || '127.0.0.1',
-          port: this.parsePort(process.env.PORT),
+          host: this.#getAdvertisedHost(),
+          port: this.#getAdvertisedPort(),
         };
 
         // If auto-approve is enabled then directly register server
@@ -535,8 +558,8 @@ export class ClusterManager extends EventEmitter {
             return;
           }
           const oldPort = info.port;
-          info.port = actualPort;
-          info.host = process.env.SERVER_HOST || process.env.HOST || '127.0.0.1';
+          info.port = isDocker ? 3000 : actualPort;
+          info.host = this.#getAdvertisedHost();
           await client.hset(CLUSTER_KEYS.SERVERS, this.serverId, JSON.stringify(info));
           cryptoLogger.info('[CLUSTER] Updated server port in Redis', {
             serverId: this.serverId,

@@ -1,7 +1,9 @@
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { SecureCallingService, CallState } from '../../lib/transport/secure-calling-service';
+import { PostQuantumRandom } from '../../lib/cryptography/random';
 import type { useAuth } from '../auth/useAuth';
 import { stopMediaStream, debounceEventDispatcher, isValidCallingUsername } from '../../lib/utils/calling-utils';
+import { power } from '../../lib/tauri-bindings';
 import {
   setupIncomingCallCallback,
   setupCallStateChangeCallback,
@@ -95,7 +97,7 @@ export const useCalling = (
       stopMediaStream(localStreamRef.current);
       stopMediaStream(remoteStreamRef.current);
       stopMediaStream(remoteScreenStreamRef.current);
-      try { (window as any).edgeApi?.powerSaveBlockerStop?.(); } catch { }
+      power.stop(0).catch(() => { });
     };
   }, []);
 
@@ -124,7 +126,6 @@ export const useCalling = (
       } catch (_error) {
         if (attempt < 3) {
           const baseDelay = 500;
-          const { PostQuantumRandom } = await import('../../lib/cryptography/random');
           const jitterBytes = PostQuantumRandom.randomBytes(1);
           const jitter = jitterBytes[0] % 200;
           const delay = Math.min(5000, baseDelay * Math.pow(2, attempt)) + jitter;

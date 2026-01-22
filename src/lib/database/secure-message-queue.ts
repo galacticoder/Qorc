@@ -12,13 +12,15 @@ import {
   SECURE_QUEUE_CLEANUP_INTERVAL_MS,
   SECURE_QUEUE_SAVE_DEBOUNCE_MS
 } from '../constants';
+import { messageVault } from '../security/message-vault';
 
 interface QueuedMessage {
   id: string;
   to: string;
   content: string;
   timestamp: number;
-  replyTo?: { id: string; sender?: string; content?: string };
+  secureContentId?: string;
+  replyTo?: { id: string; sender?: string; content?: string; secureContentId?: string };
   fileData?: string;
   messageSignalType?: string;
   originalMessageId?: string;
@@ -139,6 +141,9 @@ class SecureMessageQueue {
       return messageId;
     }
 
+    // Store content in vault not in memory queue
+    await messageVault.store(messageId, sanitized);
+
     const userQueue = this.queue.get(to) ?? [];
     if (userQueue.length >= SECURE_QUEUE_MAX_MESSAGES_PER_USER) {
       throw new Error(`Message queue limit reached for recipient`);
@@ -148,7 +153,8 @@ class SecureMessageQueue {
     const queuedMessage: QueuedMessage = {
       id: messageId,
       to,
-      content: sanitized,
+      content: '',
+      secureContentId: messageId,
       timestamp: now,
       expiresAt: now + SECURE_QUEUE_MESSAGE_EXPIRY_MS,
       replyTo: options?.replyTo,

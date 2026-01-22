@@ -37,6 +37,56 @@ async function sendAuthError(ws, { message, code = 'AUTH_FAILED', category = 'ge
   return { handled: true };
 }
 
+// Generate unique device ID for the connection
+async function generateDeviceId(ws) {
+  const request = ws.upgradeReq || ws._socket;
+  const deviceContext = TokenMiddleware.extractDeviceContext(request);
+
+  const tlsInfo = request?.socket?.encrypted ? {
+    cipher: request.socket.getCipher?.(),
+    protocol: request.socket.getProtocol?.(),
+    sessionId: request.socket.getSession ? request.socket.getSession().slice(0, 16) : undefined
+  } : {};
+
+  const deviceSecret = crypto.randomBytes(32);
+  const deviceData = {
+    secret: deviceSecret.toString('base64'),
+    userAgent: deviceContext.userAgent,
+    ip: deviceContext.ip,
+    tls: tlsInfo,
+    timestamp: Date.now()
+  };
+
+  const hmacKey = CryptoUtils.Hash.blake3(Buffer.from(process.env.DEVICE_ID_KEY || 'derive-device-id-key'));
+  const mac = await CryptoUtils.Hash.generateBlake3Mac(new TextEncoder().encode(JSON.stringify(deviceData)), hmacKey);
+  return Buffer.from(mac).toString('hex').slice(0, 32);
+}
+
+// Extract device name from request headers
+function extractDeviceName(ws) {
+  try {
+    const request = ws.upgradeReq || ws._socket;
+
+    const headers = request?.headers || {};
+    const userAgent = headers['user-agent'] || '';
+    const clientName = headers['x-client-name'] || 'Qor-Chat';
+    const clientVersion = headers['x-client-version'] || 'unknown';
+
+    if (userAgent.includes('Electron')) {
+      return `${clientName} (${clientVersion})`;
+    }
+
+    if (userAgent.includes('Windows')) return `${clientName} on Windows`;
+    if (userAgent.includes('Mac')) return `${clientName} on macOS`;
+    if (userAgent.includes('Linux')) return `${clientName} on Linux`;
+
+    return `${clientName} Desktop`;
+  } catch (error) {
+    console.warn('[AUTH] Failed to extract device name:', error.message);
+    return 'Qor-Chat (unknown)';
+  }
+}
+
 function ensureAttemptState(ws) {
   if (!ws.clientState) ws.clientState = {};
   // Randomize attempts between 5-10
@@ -1078,7 +1128,7 @@ export class AccountAuthHandler {
       return rejectConnection(ws, SignalType.AUTH_ERROR, "Invalid authentication state");
     }
 
-    const deviceId = ws.deviceId || await this.generateDeviceId(ws);
+    const deviceId = ws.deviceId || await generateDeviceId(ws);
     ws.deviceId = deviceId;
 
     try {
@@ -1156,7 +1206,7 @@ export class AccountAuthHandler {
         await TokenDatabase.createOrUpdateDeviceSession({
           deviceId: did,
           userId: username,
-          deviceName: this.extractDeviceName(ws),
+          deviceName: extractDeviceName(ws),
           deviceType: 'desktop',
           fingerprint: null,
           riskScore: 'low',
@@ -1185,7 +1235,7 @@ export class AccountAuthHandler {
   }
 
   async issueTokensAfterDeviceProof(ws, username) {
-    const deviceId = ws.deviceId || await this.generateDeviceId(ws);
+    const deviceId = ws.deviceId || await generateDeviceId(ws);
     const req = ws.upgradeReq || ws._socket;
     const authContext = await TokenMiddleware.createAuthContext(username, deviceId, req);
     let tlsBinding = null;
@@ -1269,56 +1319,7 @@ export class AccountAuthHandler {
     return { username, authenticated: false, tokens: tokenPair };
   }
 
-  // Generate unique device ID for the connection
-  async generateDeviceId(ws) {
-    const request = ws.upgradeReq || ws._socket;
-    const deviceContext = TokenMiddleware.extractDeviceContext(request);
-
-    const tlsInfo = request?.socket?.encrypted ? {
-      cipher: request.socket.getCipher?.(),
-      protocol: request.socket.getProtocol?.(),
-      sessionId: request.socket.getSession ? request.socket.getSession().slice(0, 16) : undefined
-    } : {};
-
-    const deviceSecret = crypto.randomBytes(32);
-    const deviceData = {
-      secret: deviceSecret.toString('base64'),
-      userAgent: deviceContext.userAgent,
-      ip: deviceContext.ip,
-      tls: tlsInfo,
-      timestamp: Date.now()
-    };
-
-    const hmacKey = CryptoUtils.Hash.blake3(Buffer.from(process.env.DEVICE_ID_KEY || 'derive-device-id-key'));
-    const mac = await CryptoUtils.Hash.generateBlake3Mac(new TextEncoder().encode(JSON.stringify(deviceData)), hmacKey);
-    return Buffer.from(mac).toString('hex').slice(0, 32);
-  }
-
   // Extract device name from request headers
-  extractDeviceName(ws) {
-    try {
-      const request = ws.upgradeReq || ws._socket;
-
-      const headers = request?.headers || {};
-      const userAgent = headers['user-agent'] || '';
-      const clientName = headers['x-client-name'] || 'Qor-Chat';
-      const clientVersion = headers['x-client-version'] || 'unknown';
-
-      if (userAgent.includes('Electron')) {
-        return `${clientName} (${clientVersion})`;
-      }
-
-      // Parse basic device info from user agent
-      if (userAgent.includes('Windows')) return `${clientName} on Windows`;
-      if (userAgent.includes('Mac')) return `${clientName} on macOS`;
-      if (userAgent.includes('Linux')) return `${clientName} on Linux`;
-
-      return `${clientName} Desktop`;
-    } catch (error) {
-      console.warn('[AUTH] Failed to extract device name:', error.message);
-      return 'Qor-Chat (unknown)';
-    }
-  }
 
   // Generate password hash parameters for client-side hashing
   async generatePasswordHashParams() {
@@ -1474,7 +1475,7 @@ export class ServerAuthHandler {
           ws.upgradeReq || ws._socket
         );
 
-        const deviceId = ws.deviceId || await this.generateDeviceId(ws);
+        const deviceId = ws.deviceId || await generateDeviceId(ws);
         ws.deviceId = deviceId;
 
         let tlsBinding = null;

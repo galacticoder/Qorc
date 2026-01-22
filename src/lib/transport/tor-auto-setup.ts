@@ -2,8 +2,9 @@
  * Tor setup and management
  */
 
-import { TorSetupStatus, TorInstallOptions, ElectronTorSetupAPI } from '../types/tor-types';
+import { TorSetupStatus, TorInstallOptions } from '../types/tor-types';
 import { sanitizeBinaryPath, isValidBridgeLine } from '../utils/tor-utils';
+import { tor, isTauri } from '../tauri-bindings';
 
 // Tor setup
 export class TorAutoSetup {
@@ -11,6 +12,8 @@ export class TorAutoSetup {
     isInstalled: false,
     isConfigured: false,
     isRunning: false,
+    isBootstrapped: false,
+    bootstrapProgress: 0,
     setupProgress: 0,
     currentStep: 'Initializing'
   };
@@ -26,8 +29,8 @@ export class TorAutoSetup {
     try {
       this.updateStatus(5, 'Checking system requirements...');
 
-      if (!this.isElectronEnvironment()) {
-        this.updateStatus(0, 'Desktop application required', 'Tor setup requires the desktop application.');
+      if (!isTauri()) {
+        this.updateStatus(0, 'Desktop application required', 'Tor setup requires the Tauri desktop application.');
         return false;
       }
 
@@ -122,16 +125,15 @@ export class TorAutoSetup {
   // Check if bundled Tor is available
   private async checkBundledTor(): Promise<{ isInstalled: boolean; version?: string; bundled?: boolean }> {
     try {
-      const api = this.getElectronAPI();
-      if (!api) {
+      if (!isTauri()) {
         return { isInstalled: false };
       }
 
-      const result = await api.checkTorInstallation();
+      const result = await tor.checkInstallation();
       return {
-        isInstalled: result.isInstalled || false,
-        version: result.version,
-        bundled: result.bundled || false
+        isInstalled: result.is_installed || false,
+        version: result.version || undefined,
+        bundled: true
       };
     } catch (_error) {
       console.error('[TOR-SETUP] Failed to check bundled Tor:', _error);
@@ -142,25 +144,29 @@ export class TorAutoSetup {
   // Download Tor Expert Bundle
   private async downloadTor(): Promise<boolean> {
     try {
-      const api = this.getElectronAPI();
-      if (!api) {
-        console.error('[TOR-SETUP] Electron API not available for download');
-        this.updateStatus(0, 'Download failed', 'Electron API not available');
+      if (!isTauri()) {
+        console.error('[TOR-SETUP] Tauri API not available for download');
+        this.updateStatus(0, 'Download failed', 'Tauri API not available');
         return false;
       }
 
-      const result = await api.downloadTor();
+      const result = await tor.download();
       if (!result.success) {
-        const msg = (result && result.error) ? String(result.error) : 'Unable to download Tor.';
+        const msg = result.error ? String(result.error) : 'Unable to download Tor.';
         console.error('[TOR-SETUP] Download error:', msg);
         this.updateStatus(0, 'Download failed', msg);
         return false;
       }
       return true;
     } catch (_error) {
-      const msg = _error instanceof Error ? _error.message : 'Unknown download error';
-      console.error('[TOR-SETUP] Failed to download Tor:', msg);
-      this.updateStatus(0, 'Download failed', msg);
+      let msg = 'Unknown download error';
+      if (_error instanceof Error) {
+        msg = _error.message;
+      } else if (typeof _error === 'string') {
+        msg = _error;
+      }
+      console.error('[TOR-SETUP] Failed to download Tor:', msg, _error);
+      this.updateStatus(0, 'Download failed', `${msg} ${JSON.stringify(_error)}`);
       return false;
     }
   }
@@ -168,13 +174,12 @@ export class TorAutoSetup {
   // Install Tor
   private async installTor(): Promise<boolean> {
     try {
-      const api = this.getElectronAPI();
-      if (!api) {
-        console.error('[TOR-SETUP] Electron API not available for install');
+      if (!isTauri()) {
+        console.error('[TOR-SETUP] Tauri API not available for install');
         return false;
       }
 
-      const result = await api.installTor();
+      const result = await tor.install();
       this.status.isInstalled = result.success;
 
       if (!result.success && result.error) {
@@ -193,40 +198,14 @@ export class TorAutoSetup {
     try {
       const config = this.generateTorConfig(options);
 
-      const api = this.getElectronAPI();
-      if (!api) {
-        console.error('[TOR-SETUP] Electron API not available');
+      if (!isTauri()) {
+        console.error('[TOR-SETUP] Tauri API not available');
         return false;
       }
 
-      const result = await new Promise<{ success: boolean; error?: string }>((resolve) => {
-        let done = false;
-        const finish = (data: any) => {
-          if (done) return; done = true; resolve(data);
-        };
-
-        const listener = (_event: any, data: any) => finish(data);
-        const unsubscribe = typeof api.onTorConfigureComplete === 'function' ? api.onTorConfigureComplete(listener) : null;
-
-        api.configureTor({ config }).then((initialResult) => {
-          if (!initialResult.pending) {
-            finish(initialResult);
-          }
-        }).catch((error) => {
-          console.error('[TOR-SETUP] Configuration failed:', error);
-          finish({ success: false, error: error.message });
-        });
-
-        setTimeout(() => {
-          if (!done) {
-            try { if (typeof unsubscribe === 'function') unsubscribe(); } catch { }
-            finish({ success: false, error: 'Tor configuration timeout' });
-          }
-        }, 20000);
-      });
-
-      this.status.isConfigured = result.success;
-      return result.success;
+      const result = await tor.configure(config);
+      this.status.isConfigured = result;
+      return result;
     } catch (_error) {
       console.error('[TOR-SETUP] Failed to configure Tor:', _error);
       throw _error;
@@ -236,13 +215,12 @@ export class TorAutoSetup {
   // Start Tor
   private async startTor(): Promise<{ success: boolean; error?: string }> {
     try {
-      const api = this.getElectronAPI();
-      if (!api) {
-        console.error('[TOR-SETUP] Electron API not available');
-        return { success: false, error: 'Electron API not available' };
+      if (!isTauri()) {
+        console.error('[TOR-SETUP] Tauri API not available');
+        return { success: false, error: 'Tauri API not available' };
       }
 
-      const result = await api.startTor();
+      const result = await tor.start();
       this.status.isRunning = result.success;
       return result;
     } catch (_error) {
@@ -255,16 +233,15 @@ export class TorAutoSetup {
   // Verify Tor connection
   private async verifyTorConnection(): Promise<boolean> {
     try {
-      const api = this.getElectronAPI();
-      if (!api) {
+      if (!isTauri()) {
         return false;
       }
 
       const maxAttempts = 30;
       const waitMs = 2000;
       for (let attempt = 0; attempt < maxAttempts; attempt++) {
-        const result = await api.verifyTorConnection();
-        if (result && result.success && result.isTor) {
+        const result = await tor.verifyConnection();
+        if (result && result.success) {
           return true;
         }
         await new Promise((res) => setTimeout(res, waitMs));
@@ -297,6 +274,7 @@ export class TorAutoSetup {
       '# Privacy',
       'ExitPolicy reject *:*',
       'ClientOnly 1',
+      'Log notice stdout',
     ];
 
     if (options.enableBridges) {
@@ -358,19 +336,6 @@ export class TorAutoSetup {
     return config.join('\n');
   }
 
-  // Get Electron API
-  private getElectronAPI(): ElectronTorSetupAPI | null {
-    if (typeof window === 'undefined' || !window.electronAPI) {
-      return null;
-    }
-    return window.electronAPI as ElectronTorSetupAPI;
-  }
-
-  // Check if running in Electron environment
-  private isElectronEnvironment(): boolean {
-    return typeof window !== 'undefined' && Boolean(window.electronAPI);
-  }
-
   // Update setup status
   private updateStatus(progress: number, step: string, error?: string): void {
     this.status.setupProgress = progress;
@@ -392,17 +357,18 @@ export class TorAutoSetup {
   // Refresh current setup status
   async refreshStatus(): Promise<TorSetupStatus> {
     try {
-      const api = this.getElectronAPI();
-      if (!api) {
+      if (!isTauri()) {
         return { ...this.status };
       }
 
-      const torStatus = await api.getTorStatus();
-      const torInfo = await api.getTorInfo();
+      const torStatus = await tor.status();
+      const torInfo = await tor.info();
 
-      this.status.isRunning = torStatus.isRunning || false;
+      this.status.isRunning = torStatus.is_running || false;
+      this.status.isBootstrapped = torStatus.bootstrapped || torInfo.bootstrapped || false;
+      this.status.bootstrapProgress = torStatus.bootstrap_progress || torInfo.bootstrap_progress || 0;
 
-      let newVersion = torInfo.systemTorVersion || torInfo.version;
+      let newVersion = torInfo.version;
       if (!newVersion || newVersion === 'unknown') {
         newVersion = this.status.version;
       }
@@ -419,8 +385,8 @@ export class TorAutoSetup {
       }
 
       this.status.version = newVersion;
-      this.status.socksPort = torInfo.socksPort;
-      this.status.controlPort = torInfo.controlPort;
+      this.status.socksPort = torInfo.socks_port;
+      this.status.controlPort = torInfo.control_port;
 
       if (this.status.isRunning && this.status.version && this.status.version !== 'unknown') {
         this.status.isInstalled = true;
@@ -438,19 +404,18 @@ export class TorAutoSetup {
   // Stop Tor
   async stopTor(): Promise<boolean> {
     try {
-      const api = this.getElectronAPI();
-      if (!api) {
+      if (!isTauri()) {
         return false;
       }
 
-      const result = await api.stopTor();
-      if (result.success) {
+      const result = await tor.stop();
+      if (result) {
         this.status.isRunning = false;
         this.status.error = undefined;
         this.status.setupProgress = 0;
         this.status.currentStep = 'Ready to setup';
       }
-      return result.success;
+      return result;
     } catch (_error) {
       console.error('[TOR-SETUP] Failed to stop Tor:', _error);
       return false;
@@ -460,13 +425,12 @@ export class TorAutoSetup {
   // Uninstall Tor
   async uninstallTor(): Promise<boolean> {
     try {
-      const api = this.getElectronAPI();
-      if (!api) {
+      if (!isTauri()) {
         return false;
       }
 
-      const result = await api.uninstallTor();
-      if (result.success) {
+      const result = await tor.uninstall();
+      if (result) {
         this.status.isInstalled = false;
         this.status.isConfigured = false;
         this.status.isRunning = false;
@@ -474,7 +438,7 @@ export class TorAutoSetup {
         this.status.setupProgress = 0;
         this.status.currentStep = 'Ready to setup';
       }
-      return result.success;
+      return result;
     } catch (_error) {
       console.error('[TOR-SETUP] Failed to uninstall Tor:', _error);
       return false;

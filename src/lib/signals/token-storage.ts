@@ -4,17 +4,12 @@
  */
 
 import { JWT_LIKE_REGEX, TOKEN_STORAGE_KEY_BASE } from '../constants';
+import { storage } from '../tauri-bindings';
 
 class SecureTokenStorage {
   // Generate a unique key for each instance
   private static keyForInstance(): string {
-    try {
-      const id = (window as any).electronAPI?.instanceId;
-      const suffix = typeof id === 'string' || typeof id === 'number' ? String(id) : '1';
-      return `${TOKEN_STORAGE_KEY_BASE}:${suffix}`;
-    } catch {
-      return `${TOKEN_STORAGE_KEY_BASE}:1`;
-    }
+    return `${TOKEN_STORAGE_KEY_BASE}:1`;
   }
 
   // Store tokens
@@ -23,20 +18,20 @@ class SecureTokenStorage {
       const access = typeof tokens.accessToken === 'string' ? tokens.accessToken.trim() : '';
       const refresh = typeof tokens.refreshToken === 'string' ? tokens.refreshToken.trim() : '';
 
-      if (!access || !refresh) return false;
-
-      if (!JWT_LIKE_REGEX.test(access) || !JWT_LIKE_REGEX.test(refresh)) {
+      if (!access || !refresh) {
         return false;
       }
 
-      const api = (window as any).electronAPI;
-      if (!api?.secureStore?.set) return false;
+      if (!JWT_LIKE_REGEX.test(access) || !JWT_LIKE_REGEX.test(refresh)) {
+        console.warn('[tokens] Attempted to store malformed tokens');
+        return false;
+      }
 
-      await api.secureStore.init?.();
-      const ok = await api.secureStore.set(
-        this.keyForInstance(),
-        JSON.stringify({ a: access, r: refresh, t: Date.now() })
-      );
+      await storage.init();
+      const key = this.keyForInstance();
+      const payload = JSON.stringify({ a: access, r: refresh, t: Date.now() });
+
+      const ok = await storage.set(key, payload);
       return !!ok;
     } catch (_error) {
       console.error('[tokens] store-failed', (_error as Error).message);
@@ -47,19 +42,21 @@ class SecureTokenStorage {
   // Retrieve tokens
   static async retrieve(): Promise<{ accessToken: string; refreshToken: string } | null> {
     try {
-      const api = (window as any).electronAPI;
-      if (!api?.secureStore?.get) return null;
+      await storage.init();
+      const key = this.keyForInstance();
+      const raw = await storage.get(key);
 
-      await api.secureStore.init?.();
-
-      const raw = await api.secureStore.get(this.keyForInstance());
-      if (!raw || typeof raw !== 'string') return null;
+      if (!raw || typeof raw !== 'string') {
+        return null;
+      }
 
       const parsed = JSON.parse(raw);
       const access = typeof parsed?.a === 'string' ? parsed.a.trim() : '';
       const refresh = typeof parsed?.r === 'string' ? parsed.r.trim() : '';
 
-      if (!access || !refresh) return null;
+      if (!access || !refresh) {
+        return null;
+      }
 
       return { accessToken: access, refreshToken: refresh };
     } catch (_error) {
@@ -69,10 +66,15 @@ class SecureTokenStorage {
   }
 
   // Clear tokens
-  static clear(): void {
+  static async clear(): Promise<boolean> {
     try {
-      (window as any).electronAPI?.secureStore?.remove?.(this.keyForInstance());
-    } catch { }
+      await storage.init();
+      const ok = await storage.remove(this.keyForInstance());
+      return !!ok;
+    } catch (_error) {
+      console.error('[tokens] clear-failed', (_error as Error).message);
+      return false;
+    }
   }
 }
 
@@ -90,11 +92,11 @@ export async function retrieveAuthTokens(): Promise<{ accessToken: string; refre
 }
 
 // Clear tokens
-export function clearAuthTokens(): void {
-  SecureTokenStorage.clear();
+export async function clearAuthTokens(): Promise<void> {
+  await SecureTokenStorage.clear();
 }
 
 // Clear token encryption key
-export function clearTokenEncryptionKey(): void {
-  SecureTokenStorage.clear();
+export async function clearTokenEncryptionKey(): Promise<void> {
+  await SecureTokenStorage.clear();
 }

@@ -11,6 +11,7 @@ import { VoiceRecorderButton } from "./ChatInput/VoiceRecorderButton";
 import { MessageReply } from "./messaging/types";
 import { MAX_FILE_SIZE } from "@/lib/constants";
 import { sanitizeMessage } from "@/lib/sanitizers";
+import { messageVault } from "@/lib/security/message-vault";
 
 interface HybridKeys {
   x25519: { private: Uint8Array; publicKeyBase64: string };
@@ -95,10 +96,17 @@ export function ChatInput({
   );
 
   useEffect(() => {
-    if (editingMessage) {
-      setMessage(editingMessage.content);
-      messageInputRef.current?.focus();
-    }
+    const loadEditingContent = async () => {
+      if (editingMessage) {
+        const contentId = editingMessage.secureContentId || editingMessage.id;
+        const vaultContent = await messageVault.retrieve(contentId);
+
+        setMessage(vaultContent || "");
+        messageInputRef.current?.focus();
+      }
+    };
+
+    loadEditingContent();
   }, [editingMessage]);
 
   // Handle sending text messages or edits
@@ -112,6 +120,7 @@ export function ChatInput({
 
     try {
       setIsSending(true);
+      setMessage("");
 
       if (editingMessage && onEditMessage) {
         await onSendMessage(editingMessage.id, sanitizedMessage, SignalType.EDIT_MESSAGE, editingMessage.replyTo);
@@ -120,8 +129,6 @@ export function ChatInput({
         await onSendMessage("", sanitizedMessage, "chat", replyTo ?? null);
         onCancelReply?.();
       }
-
-      setMessage("");
     } catch (error) {
       console.error('Failed to send message:', error);
       alert('Failed to send message. Please try again.');

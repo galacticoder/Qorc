@@ -11,6 +11,7 @@ import {
   logError,
   createCoverPadding
 } from '../../lib/utils/message-sending-utils';
+import { signal } from '../../lib/tauri-bindings';
 
 // Global caches
 export const globalEncryptedPayloadCache = new Map<string, { encryptedPayload: any; to: string; messageId: string }>();
@@ -40,6 +41,7 @@ export const buildMessagePayload = (
     content: sanitizedContent,
     timestamp,
     type: messageType,
+    messageType,
     signalType: messageSignalType,
     senderKyberPublicBase64: localKeys.kyber.publicKeyBase64,
     ...(senderSignalBundle ? { senderSignalBundle } : {}),
@@ -90,18 +92,13 @@ export const encryptAndSend = async (
   sessionLocksRef: React.RefObject<WeakMap<object, Map<string, Promise<boolean>>>>,
   lockContext: object
 ): Promise<{ success: boolean; encryptedPayload?: any; error?: string }> => {
-  let encrypted = await (window as any).edgeApi.encrypt({
-    fromUsername: currentUser,
-    toUsername: recipientUsername,
-    plaintext: JSON.stringify(payload),
-    recipientKyberPublicKey: recipientKyberKey,
-    recipientHybridKeys: {
-      ...recipientHybridKeys,
-      kyberPublicBase64: recipientKyberKey,
-    }
-  });
+  let encrypted = await signal.encrypt(
+    currentUser,
+    recipientUsername,
+    JSON.stringify(payload)
+  );
 
-  if (!encrypted?.success && encrypted?.error?.includes('session') && encrypted?.error?.includes('not found')) {
+  if (!encrypted || !encrypted.ciphertext) {
     const retrySession = await ensureSession(
       sessionLocksRef.current,
       lockContext,
@@ -111,20 +108,19 @@ export const encryptAndSend = async (
     );
 
     if (retrySession) {
-      encrypted = await (window as any).edgeApi.encrypt({
-        fromUsername: currentUser,
-        toUsername: recipientUsername,
-        plaintext: JSON.stringify(payload),
-        recipientKyberPublicKey: recipientKyberKey,
-        recipientHybridKeys: {
-          ...recipientHybridKeys,
-          kyberPublicBase64: recipientKyberKey,
-        }
-      });
+      encrypted = await signal.encrypt(
+        currentUser,
+        recipientUsername,
+        JSON.stringify(payload)
+      );
     }
   }
 
-  return encrypted;
+  if (!encrypted || !encrypted.ciphertext) {
+    return { success: false, error: 'Encryption failed' };
+  }
+
+  return { success: true, encryptedPayload: encrypted };
 };
 
 // Cache encrypted payload
@@ -136,7 +132,7 @@ export const cacheEncryptedPayload = (recipientUsername: string, wireMessageId: 
       to: recipientUsername,
       messageId: wireMessageId
     });
-    
+
     if (globalEncryptedPayloadCache.size > MAX_PAYLOAD_CACHE_SIZE) {
       const firstKey = globalEncryptedPayloadCache.keys().next().value;
       if (firstKey) {

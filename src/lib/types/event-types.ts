@@ -88,8 +88,9 @@ export const EventType = {
   OPEN_SETTINGS: 'openSettings',
   CLOSE_SETTINGS: 'closeSettings',
 
-  // Edge/Electron events
+  // Edge events
   EDGE_SERVER_MESSAGE: 'edge:server-message',
+  SECURE_SERVER_MESSAGE: 'edge:secure-server-message',
 
   // Error events
   SECURE_CRITICAL_ERROR: 'secure-critical-error',

@@ -12,6 +12,27 @@ import { SecureKeyManager } from '../database/secure-key-manager';
 import { AUTH_USERNAME_REGEX } from '../constants';
 import type { AuthRefs } from '../types/signal-handler-types';
 import { persistAuthTokens, retrieveAuthTokens, clearAuthTokens, clearTokenEncryptionKey } from './token-storage';
+import { signal, auth as authApi, database, storage } from '../tauri-bindings';
+
+// Prevent parallel Signal setup operations
+const signalSetupLocks = new Map<string, Promise<void>>();
+
+async function runSignalSetupWithLock(username: string, action: () => Promise<void>) {
+  const existing = signalSetupLocks.get(username) || Promise.resolve();
+  const next = (async () => {
+    try {
+      await existing;
+    } catch { }
+
+    try {
+      await action();
+    } catch (err) {
+      console.error('[AuthHandlers] Signal lock action failed:', err);
+    }
+  })();
+  signalSetupLocks.set(username, next);
+  return next;
+}
 
 // Send hybrid keys update to server
 async function sendHybridKeysUpdate(
@@ -49,10 +70,8 @@ async function sendHybridKeysUpdate(
   } catch { }
 }
 
-// Configure Signal Storage Key for Edge API
+// Configure Signal Storage Key
 async function configureSignalStorageKey(getKeysOnDemand: (() => Promise<any>) | undefined, hybridKeysRef: any): Promise<void> {
-  if (!(window as any).edgeApi?.setSignalStorageKey) return;
-
   try {
     const label = new TextEncoder().encode('signal-storage-key-v1');
     const keys = await getKeysOnDemand?.();
@@ -62,8 +81,7 @@ async function configureSignalStorageKey(getKeysOnDemand: (() => Promise<any>) |
       const derived = await (CryptoUtils as any).Hash.generateBlake3Mac(label, kyberSecret);
       if (derived) {
         const keyB64 = (CryptoUtils as any).Base64.arrayBufferToBase64(derived);
-
-        await (window as any).edgeApi.setSignalStorageKey({ keyBase64: keyB64 });
+        await signal.setStorageKey(keyB64);
         try {
           derived.fill(0);
         } catch { }
@@ -107,10 +125,14 @@ export async function handleAuthSuccess(data: any, auth: AuthRefs): Promise<void
     if (typeof fallback === 'string') recoveredUser = fallback.trim();
   }
 
-  if (recoveredUser && AUTH_USERNAME_REGEX.test(recoveredUser)) {
+  if (recoveredUser && recoveredUser !== 'undefined' && AUTH_USERNAME_REGEX.test(recoveredUser)) {
     if (loginUsernameRef) loginUsernameRef.current = recoveredUser;
     try {
-      syncEncryptedStorage.setItem('last_authenticated_username', recoveredUser);
+      await storage.set('last_authenticated_username', recoveredUser);
+      const storedOriginal = await storage.get('last_authenticated_display_name');
+      if (storedOriginal && auth.originalUsernameRef) {
+        auth.originalUsernameRef.current = storedOriginal;
+      }
     } catch { }
   } else {
     recoveredUser = '';
@@ -139,37 +161,85 @@ export async function handleAuthSuccess(data: any, auth: AuthRefs): Promise<void
 
       if (vaultKey) {
         const masterKeyBytes = await loadWrappedMasterKey(recoveredUser, vaultKey);
+
         if (masterKeyBytes?.length === 32) {
           const masterKey = await AES.importAesKey(masterKeyBytes);
           if (aesKeyRef) aesKeyRef.current = masterKey;
-
           if (!keyManagerRef?.current) {
             keyManagerRef!.current = new SecureKeyManager(recoveredUser);
           }
 
           try {
             await keyManagerRef!.current!.initializeWithMasterKey(masterKeyBytes);
+            // Initialize native DB with master key for restored session
+            try {
+              const masterKeyB64 = (CryptoUtils as any).Base64.arrayBufferToBase64(masterKeyBytes);
+              const dbResult = await database.init(recoveredUser, masterKeyB64);
+
+              if (dbResult) {
+                const sigResult = await signal.initStorage(recoveredUser).catch(e => {
+                  console.error('[AuthHandlers] Failed to init Signal storage:', e);
+                  return false;
+                });
+              }
+            } catch (dbErr) {
+              console.error('[AuthHandlers] Failed to init DB during restore:', dbErr);
+            }
             masterKeyBytes.fill(0);
           } catch { }
 
           await sendHybridKeysUpdate(keyManagerRef, serverHybridPublic, getKeysOnDemand);
           await configureSignalStorageKey(getKeysOnDemand, hybridKeysRef);
 
+          void runSignalSetupWithLock(recoveredUser, async () => {
+            try {
+              const keys = await getKeysOnDemand?.();
+              if (keys?.kyber?.publicKeyBase64 && keys?.kyber?.secretKey) {
+                const secB64 = (CryptoUtils as any).Base64.arrayBufferToBase64(keys.kyber.secretKey);
+                await signal.setStaticMlkemKeys(recoveredUser, keys.kyber.publicKeyBase64, secB64);
+              }
+
+              const existing = await signal.createPreKeyBundle(recoveredUser).catch(() => null);
+              if (!existing?.identityKeyBase64) {
+                try { await signal.generateIdentity(recoveredUser); } catch (e) { console.error('[AuthHandlers] identity-gen failed:', e); }
+                try { await signal.generatePreKeys(recoveredUser, 1, 100); } catch (e) { console.error('[AuthHandlers] prekey-gen failed:', e); }
+              }
+              try { await signal.trustPeerIdentity(recoveredUser, recoveredUser, 1); } catch { }
+
+              const bundle = await signal.createPreKeyBundle(recoveredUser).catch(() => null);
+              if (bundle) {
+                await websocketClient.sendSecureControlMessage({ type: SignalType.LIBSIGNAL_PUBLISH_BUNDLE, bundle });
+              }
+            } catch (err) {
+              console.warn('[AuthHandlers] Failed to publish signal bundle on restore:', err);
+            }
+          });
+
           setAccountAuthenticated?.(true);
           setIsLoggedIn?.(true);
           setShowPassphrasePrompt?.(false);
-          setUsername?.(recoveredUser);
+          const finalDisplayName = auth.originalUsernameRef?.current || recoveredUser;
+          setUsername?.(finalDisplayName);
           setMaxStepReached?.('server');
           setRecoveryActive?.(false);
           try {
-            window.dispatchEvent(new CustomEvent(EventType.SECURE_CHAT_AUTH_SUCCESS)); 
+            window.dispatchEvent(new CustomEvent(EventType.SECURE_CHAT_AUTH_SUCCESS));
           } catch { }
           vaultKeyUnwrapSuccess = true;
+        } else {
+          console.error('[AuthHandlers] Failed to decrypt master key.');
         }
+      } else {
+        console.error('[AuthHandlers] Vault key not found or invalid');
       }
-    } catch { }
+    } catch (err) {
+      console.error('[AuthHandlers] Key restoration failed:', err);
+    }
 
-    if (vaultKeyUnwrapSuccess) return;
+    if (vaultKeyUnwrapSuccess) {
+      try { auth.setTokenValidationInProgress?.(false); } catch { }
+      return;
+    }
   }
 
   auth.handleAuthSuccess?.(recoveredUser || usernameFromServer || '', Boolean(data?.recovered));
@@ -208,8 +278,18 @@ export async function handleTokenValidationResponse(data: any, auth: AuthRefs): 
   if (data.valid) {
     if (typeof data.username === 'string' && data.username) {
       if (loginUsernameRef) loginUsernameRef.current = data.username;
-      try { syncEncryptedStorage.setItem('last_authenticated_username', data.username); } catch { }
-      setUsername?.(data.username);
+      try {
+        await storage.set('last_authenticated_username', data.username);
+        const storedOriginal = await storage.get('last_authenticated_display_name');
+        if (storedOriginal) {
+          if (auth.originalUsernameRef) auth.originalUsernameRef.current = storedOriginal;
+          setUsername?.(storedOriginal);
+        } else {
+          setUsername?.(data.username);
+        }
+      } catch {
+        setUsername?.(data.username);
+      }
     }
     try { setLoginError?.(''); } catch { }
 
@@ -222,7 +302,7 @@ export async function handleTokenValidationResponse(data: any, auth: AuthRefs): 
     let masterKeyBytes: Uint8Array | null = null;
     if (vaultKey && loginUsernameRef?.current) {
       try {
-        masterKeyBytes = await loadWrappedMasterKey(loginUsernameRef.current, vaultKey); 
+        masterKeyBytes = await loadWrappedMasterKey(loginUsernameRef.current, vaultKey);
       } catch { }
     }
 
@@ -236,6 +316,18 @@ export async function handleTokenValidationResponse(data: any, auth: AuthRefs): 
         }
 
         try { await keyManagerRef!.current!.initializeWithMasterKey(masterKeyBytes); } catch { }
+        // Initialize native DB with master key for token validation
+        try {
+          const masterKeyB64 = (CryptoUtils as any).Base64.arrayBufferToBase64(masterKeyBytes);
+          const dbResult = await database.init(loginUsernameRef!.current, masterKeyB64);
+          if (dbResult) {
+            await signal.initStorage(loginUsernameRef!.current).catch(e => {
+              console.error('[AuthHandlers] token-val: Failed to init Signal storage:', e);
+            });
+          }
+        } catch (dbErr) {
+          console.error('[AuthHandlers] token-val: Failed to init native DB during token validation:', dbErr);
+        }
         try {
           if (!await keyManagerRef!.current!.getKeys().catch(() => null)) {
             const pair = await CryptoUtils.Hybrid.generateHybridKeyPair();
@@ -252,54 +344,70 @@ export async function handleTokenValidationResponse(data: any, auth: AuthRefs): 
     await sendHybridKeysUpdate(keyManagerRef, serverHybridPublic, getKeysOnDemand);
 
     // Configure Signal storage key
-    if (loginUsernameRef?.current && (window as any).edgeApi?.setSignalStorageKey) {
-      try {
-        const label = new TextEncoder().encode('signal-storage-key-v1');
-        let derived: Uint8Array | null = null;
+    void (async () => {
+      if (loginUsernameRef?.current) {
+        try {
+          const label = new TextEncoder().encode('signal-storage-key-v1');
+          let derived: Uint8Array | null = null;
 
-        const keys = await getKeysOnDemand?.();
-        const kyberSecret = keys?.kyber?.secretKey || hybridKeysRef?.current?.kyber?.secretKey;
+          const keys = await getKeysOnDemand?.();
+          const kyberSecret = keys?.kyber?.secretKey || hybridKeysRef?.current?.kyber?.secretKey;
 
-        if (kyberSecret instanceof Uint8Array && kyberSecret.length > 0) {
-          derived = await (CryptoUtils as any).Hash.generateBlake3Mac(label, kyberSecret);
-        } else if (passphrasePlaintextRef?.current) {
-          derived = await (CryptoUtils as any).KDF.argon2id(passphrasePlaintextRef.current, {
-            salt: label,
-            time: 3,
-            memoryCost: 1 << 17,
-            parallelism: 2,
-            hashLen: 32
-          });
+          if (kyberSecret instanceof Uint8Array && kyberSecret.length > 0) {
+            derived = await (CryptoUtils as any).Hash.generateBlake3Mac(label, kyberSecret);
+          } else if (passphrasePlaintextRef?.current) {
+            derived = await (CryptoUtils as any).KDF.argon2id(passphrasePlaintextRef.current, {
+              salt: label,
+              time: 3,
+              memoryCost: 1 << 17,
+              parallelism: 2,
+              hashLen: 32
+            });
+          }
+
+          if (derived) {
+            const keyB64 = (CryptoUtils as any).Base64.arrayBufferToBase64(derived);
+
+            try {
+              await signal.setStorageKey(keyB64);
+            } catch { }
+
+            void runSignalSetupWithLock(loginUsernameRef.current, async () => {
+              try {
+                const keys = await getKeysOnDemand?.();
+                if (keys?.kyber?.publicKeyBase64 && keys?.kyber?.secretKey) {
+                  const secB64 = (CryptoUtils as any).Base64.arrayBufferToBase64(keys.kyber.secretKey);
+                  await signal.setStaticMlkemKeys(loginUsernameRef.current, keys.kyber.publicKeyBase64, secB64);
+                }
+
+                const existing = await signal.createPreKeyBundle(loginUsernameRef.current).catch(() => null);
+
+                if (!existing?.identityKeyBase64) {
+                  try { await signal.generateIdentity(loginUsernameRef.current); } catch (e) { console.error('[AuthHandlers] identity-gen failed:', e); }
+                  try { await signal.generatePreKeys(loginUsernameRef.current, 1, 100); } catch (e) { console.error('[AuthHandlers] prekey-gen failed:', e); }
+                }
+
+                try { await signal.trustPeerIdentity(loginUsernameRef.current, loginUsernameRef.current, 1); } catch { }
+
+                const bundle = await signal.createPreKeyBundle(loginUsernameRef.current).catch(() => null);
+
+                if (bundle) {
+                  await websocketClient.sendSecureControlMessage({ type: SignalType.LIBSIGNAL_PUBLISH_BUNDLE, bundle });
+                } else {
+                  console.warn('[AuthHandlers] token-val: failed to create bundle');
+                }
+              } catch (err) {
+                console.warn('[AuthHandlers] token-val: bundle check failed', err);
+              }
+            });
+
+            try { derived.fill(0); } catch { }
+          }
+        } catch (err) {
+          console.warn('[AuthHandlers] token-val: key config error', err);
         }
-
-        if (derived) {
-          const keyB64 = (CryptoUtils as any).Base64.arrayBufferToBase64(derived);
-
-          try {
-            await (window as any).edgeApi.setSignalStorageKey({ keyBase64: keyB64 });
-          } catch { }
-
-          try {
-            const existing = await (window as any).edgeApi.getPreKeyBundle?.({ username: loginUsernameRef.current });
-
-            if (!existing?.identityKeyBase64) {
-              try { await (window as any).edgeApi.generateIdentity?.({ username: loginUsernameRef.current }); } catch { }
-              try { await (window as any).edgeApi.generatePreKeys?.({ username: loginUsernameRef.current, startId: 1, count: 100 }); } catch { }
-            }
-
-            try { await (window as any).edgeApi.trustPeerIdentity?.({ selfUsername: loginUsernameRef.current, peerUsername: loginUsernameRef.current, deviceId: 1 }); } catch { }
-
-            const bundle = await (window as any).edgeApi.getPreKeyBundle?.({ username: loginUsernameRef.current });
-
-            if (bundle && !bundle.error) {
-              await websocketClient.sendSecureControlMessage({ type: SignalType.LIBSIGNAL_PUBLISH_BUNDLE, bundle });
-            }
-          } catch { }
-
-          try { derived.fill(0); } catch { }
-        }
-      } catch { }
-    }
+      }
+    })();
 
     setAccountAuthenticated?.(true);
     try { window.dispatchEvent(new CustomEvent(EventType.SECURE_CHAT_AUTH_SUCCESS)); } catch { }
@@ -312,7 +420,7 @@ export async function handleTokenValidationResponse(data: any, auth: AuthRefs): 
       await persistAuthTokens({
         accessToken: data.tokens.accessToken,
         refreshToken: data.tokens.refreshToken
-      }).catch(() => {});
+      }).catch(() => { });
     }
   } else {
     if (accountAuthenticated || isLoggedIn) return;
@@ -322,11 +430,11 @@ export async function handleTokenValidationResponse(data: any, auth: AuthRefs): 
       setAuthStatus?.('Refreshing session...');
 
       const tokens = await retrieveAuthTokens();
-      if (tokens?.refreshToken && (window as any).edgeApi?.refreshTokens) {
-        const res = await (window as any).edgeApi.refreshTokens({ refreshToken: tokens.refreshToken });
+      if (tokens?.refreshToken) {
+        const res = await authApi.refreshTokens(tokens.refreshToken);
 
-        if (res?.success && res.tokens?.accessToken && res.tokens?.refreshToken) {
-          await persistAuthTokens({ accessToken: res.tokens.accessToken, refreshToken: res.tokens.refreshToken });
+        if (res?.access_token && res?.refresh_token) {
+          await persistAuthTokens({ accessToken: res.access_token, refreshToken: res.refresh_token });
 
           try { await websocketClient.attemptTokenValidationOnce?.('refresh'); } catch { }
           setAuthStatus?.('');
@@ -345,7 +453,7 @@ export async function handleTokenValidationResponse(data: any, auth: AuthRefs): 
     }
 
     await clearAuthTokens();
-    clearTokenEncryptionKey();
+    await clearTokenEncryptionKey();
     setAccountAuthenticated?.(false);
     setMaxStepReached?.('login');
     setShowPassphrasePrompt?.(false);
@@ -364,10 +472,10 @@ export async function handleInAccount(data: any, auth: AuthRefs): Promise<void> 
   setAuthStatus?.('Account authentication successful. Enter server password.');
   setLoginError?.('');
 
-  if (passwordRef) passwordRef.current = '';
+  setLoginError?.('');
 
   const userCandidate = typeof data?.username === 'string' ? data.username.trim() : loginUsernameRef?.current;
-  
+
   if (userCandidate) {
     if (loginUsernameRef) loginUsernameRef.current = userCandidate;
     try { syncEncryptedStorage.setItem('last_authenticated_username', userCandidate); } catch { }
@@ -378,7 +486,7 @@ export async function handleInAccount(data: any, auth: AuthRefs): Promise<void> 
     await persistAuthTokens({
       accessToken: data.tokens.accessToken,
       refreshToken: data.tokens.refreshToken
-    }).catch(() => {});
+    }).catch(() => { });
   }
   setIsSubmittingAuth?.(false);
 }
@@ -452,10 +560,10 @@ export function handlePasswordHashParams(data: any, auth: AuthRefs): void {
     try {
       setIsSubmittingAuth?.(false);
       setAuthStatus?.('');
-      setMaxStepReached?.('login'); 
-      setAccountAuthenticated?.(false); 
-      setIsLoggedIn?.(false); 
-      setShowPassphrasePrompt?.(false); 
+      setMaxStepReached?.('login');
+      setAccountAuthenticated?.(false);
+      setIsLoggedIn?.(false);
+      setShowPassphrasePrompt?.(false);
     } catch { }
   }
 }
@@ -476,10 +584,25 @@ export async function handlePassphraseSuccess(auth: AuthRefs): Promise<void> {
       const raw = new Uint8Array(await (globalThis as any).crypto?.subtle?.exportKey('raw', aesKeyRef.current));
 
       await saveWrappedMasterKey(user, raw, vaultKey);
+
+      // Initialize native DB with master key for new login
+      try {
+        const masterKeyB64 = (CryptoUtils as any).Base64.arrayBufferToBase64(raw);
+        const dbResult = await database.init(user, masterKeyB64);
+        if (dbResult) {
+          const sigResult = await signal.initStorage(user).catch(e => {
+            console.error('[AuthHandlers] passphrase-success: Failed to init Signal storage:', e);
+            return false;
+          });
+        }
+      } catch (dbErr) {
+        console.error('[AuthHandlers] passphrase-success: Failed to init native DB:', dbErr);
+      }
+
       raw.fill(0);
     }
-  } catch (_error) { 
-    console.error('[signals] passphrase-success derive-key-failed', (_error as Error).message); 
+  } catch (_error) {
+    console.error('[signals] passphrase-success derive-key-failed', (_error as Error).message);
   }
 
   setShowPassphrasePrompt?.(false);
@@ -507,6 +630,7 @@ export function handleAuthError(data: any, message: string | undefined, auth: Au
   setLoginError?.(errorMessage);
   try { setAuthStatus?.(''); } catch { }
   try { setIsSubmittingAuth?.(false); } catch { }
+  try { auth.setTokenValidationInProgress?.(false); } catch { }
   try { window.dispatchEvent(new CustomEvent(EventType.AUTH_ERROR, { detail: { category, code: (data as any)?.code } })); } catch { }
 
   if (category === 'passphrase' && !locked) {

@@ -1,5 +1,6 @@
 import { AES } from '../utils/crypto-utils';
 import { PostQuantumAEAD } from './aead';
+import { storage } from '../tauri-bindings';
 
 function sanitizeId(value: string): string {
   return (value || 'unknown').replace(/[^a-zA-Z0-9_-]/g, '_');
@@ -15,10 +16,8 @@ function getWrappedMasterKeyName(username: string): string {
 
 export async function loadVaultKeyRaw(username: string): Promise<Uint8Array | null> {
   try {
-    const api = (window as any).electronAPI;
-    if (!api?.secureStore?.get) return null;
-    await api.secureStore.init?.();
-    const b64 = await api.secureStore.get(getVaultKeyName(username));
+    await storage.init();
+    const b64 = await storage.get(getVaultKeyName(username));
     if (!b64 || typeof b64 !== 'string') return null;
     const binary = atob(b64);
     const bytes = new Uint8Array(binary.length);
@@ -31,11 +30,9 @@ export async function loadVaultKeyRaw(username: string): Promise<Uint8Array | nu
 
 export async function saveVaultKeyRaw(username: string, keyBytes: Uint8Array): Promise<boolean> {
   try {
-    const api = (window as any).electronAPI;
-    if (!api?.secureStore?.set) return false;
-    await api.secureStore.init?.();
+    await storage.init();
     const b64 = btoa(String.fromCharCode.apply(null, Array.from(keyBytes)));
-    await api.secureStore.set(getVaultKeyName(username), b64);
+    await storage.set(getVaultKeyName(username), b64);
     return true;
   } catch {
     return false;
@@ -47,8 +44,9 @@ export async function ensureVaultKeyCryptoKey(username: string): Promise<CryptoK
   if (existing && existing.length === 32) {
     return await AES.importAesKey(existing);
   }
+
   const fresh = crypto.getRandomValues(new Uint8Array(32));
-  const _saved = await saveVaultKeyRaw(username, fresh);
+  await saveVaultKeyRaw(username, fresh);
   const cryptoKey = await AES.importAesKey(fresh);
   fresh.fill(0);
   return cryptoKey;
@@ -56,9 +54,14 @@ export async function ensureVaultKeyCryptoKey(username: string): Promise<CryptoK
 
 export async function removeVaultKey(username: string): Promise<void> {
   try {
-    const api = (window as any).electronAPI;
-    await api?.secureStore?.remove?.(getVaultKeyName(username));
-  } catch {}
+    await storage.remove(getVaultKeyName(username));
+  } catch { }
+}
+
+export async function removeWrappedMasterKey(username: string): Promise<void> {
+  try {
+    await storage.remove(getWrappedMasterKeyName(username));
+  } catch { }
 }
 
 function b64FromBytes(bytes: Uint8Array): string {
@@ -88,8 +91,8 @@ export async function saveWrappedMasterKey(username: string, masterKeyBytes: Uin
         tag: b64FromBytes(tag),
         ct: b64FromBytes(ciphertext)
       });
-      const api = (window as any).electronAPI;
-      await api?.secureStore?.set?.(getWrappedMasterKeyName(username), payload);
+      await storage.init();
+      await storage.set(getWrappedMasterKeyName(username), payload);
       return true;
     } finally {
       rawVaultKey.fill(0);
@@ -101,8 +104,8 @@ export async function saveWrappedMasterKey(username: string, masterKeyBytes: Uin
 
 export async function loadWrappedMasterKey(username: string, vaultKey: CryptoKey): Promise<Uint8Array | null> {
   try {
-    const api = (window as any).electronAPI;
-    const raw = await api?.secureStore?.get?.(getWrappedMasterKeyName(username));
+    await storage.init();
+    const raw = await storage.get(getWrappedMasterKeyName(username));
     if (!raw || typeof raw !== 'string') return null;
     let parsed: any;
     try { parsed = JSON.parse(raw); } catch { return null; }
@@ -131,3 +134,4 @@ export async function loadWrappedMasterKey(username: string, vaultKey: CryptoKey
     return null;
   }
 }
+

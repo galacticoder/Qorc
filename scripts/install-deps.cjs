@@ -6,7 +6,7 @@
  *   node scripts/install-deps.cjs --client
  *   node scripts/install-deps.cjs --server
  * Components:
- *   haproxy, tailscale, jq, redis, postgres, cloudflared, docker
+ *   haproxy, tailscale, jq, redis, postgres, docker
  *   all  -> installs a reasonable set: haproxy, tailscale, jq
  */
 
@@ -295,33 +295,6 @@ async function installComponent(name) {
       }
       return false;
     }
-    case 'cloudflared': {
-      if (findInPath('cloudflared')) return true;
-      if (plat === 'linux') {
-        if (pmHas('apt-get')) {
-          try {
-            await execFileAsync('curl', ['-L', 'https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb', '-o', '/tmp/cloudflared.deb']);
-            await trySudo(['dpkg', '-i', '/tmp/cloudflared.deb']);
-            return true;
-          } catch (e) { }
-        }
-
-        const arch = os.arch() === 'arm64' ? 'arm64' : 'amd64';
-        const url = `https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${arch}`;
-        const binPath = '/usr/local/bin/cloudflared';
-        try {
-          await trySudo(['curl', '-L', url, '-o', binPath]);
-          await trySudo(['chmod', '+x', binPath]);
-          return true;
-        } catch (e) {
-          return false;
-        }
-      }
-      if (plat === 'darwin' && pmHas('brew')) return await tryExec('brew', ['install', 'cloudflared']);
-
-      console.log('[INFO] Install cloudflared from https://developers.cloudflare.com/cloudflare-one/connections/connect-apps/install-and-setup/installation');
-      return false;
-    }
     case 'nodejs': {
       if (findInPath('node')) return true;
       if (plat === 'linux') return await installLinux('nodejs');
@@ -514,57 +487,22 @@ async function installComponent(name) {
       console.log('[INFO] Failed to install pnpm via corepack or npm');
       return false;
     }
-    case 'electron': {
-      const repoRoot = path.resolve(__dirname, '..');
+    case 'tauri': {
+      if (findInPath('tauri')) return true;
 
-      const findElectronPath = () => {
-        try {
-          const pnpmDir = path.join(repoRoot, 'node_modules', '.pnpm');
-          if (!fs.existsSync(pnpmDir)) return null;
-
-          const entries = fs.readdirSync(pnpmDir);
-          for (const entry of entries) {
-            if (entry.startsWith('electron@')) {
-              const binPath = path.join(pnpmDir, entry, 'node_modules', 'electron', 'dist', 'electron');
-              if (fs.existsSync(binPath)) return { version: entry, binPath };
-
-              const installScript = path.join(pnpmDir, entry, 'node_modules', 'electron', 'install.js');
-              if (fs.existsSync(installScript)) {
-                return { version: entry, binPath, installScript };
-              }
-            }
-          }
-        } catch { }
-        return null;
-      };
-
-      const existing = findElectronPath();
-      if (existing && fs.existsSync(existing.binPath)) return true;
-
-      // Install electron
-      try {
-        const pnpmBin = findInPath('pnpm');
-        if (!pnpmBin) {
-          console.log('[INFO] pnpm required to install electron');
+      if (!findInPath('cargo')) {
+        const rustInstalled = await installComponent('rust');
+        if (!rustInstalled) {
+          console.log('[INFO] Rust (cargo) is required for Tauri CLI.');
           return false;
         }
-        await execFileAsync(pnpmBin, ['add', '-D', 'electron@latest'], { cwd: repoRoot, stdio: 'inherit' });
+      }
 
-        const installed = findElectronPath();
-        if (installed && !fs.existsSync(installed.binPath) && installed.installScript) {
-          console.log('[INFO] Running electron postinstall script...');
-          try {
-            await execFileAsync('node', [installed.installScript], { cwd: repoRoot, stdio: 'inherit' });
-          } catch (e) {
-            console.log('[INFO] Failed to run electron install script:', e.message);
-            return false;
-          }
-        }
-
-        const final = findElectronPath();
-        return final && fs.existsSync(final.binPath);
+      try {
+        await execFileAsync('cargo', ['install', 'tauri-cli', '--locked'], { stdio: 'inherit' });
+        return true;
       } catch (e) {
-        console.log('[INFO] Electron installation failed:', e.message);
+        console.log('[INFO] Failed to install tauri-cli via cargo:', e.message);
         return false;
       }
     }
@@ -707,7 +645,7 @@ async function installComponent(name) {
     console.log('Usage: node scripts/install-deps.cjs <component...>');
     console.log('       node scripts/install-deps.cjs --client');
     console.log('       node scripts/install-deps.cjs --server');
-    console.log('Components: haproxy, tailscale, jq, redis, postgres, cloudflared, docker, nodejs, curl, wget, python3, openssl, build-tools, cmake, ninja, liboqs, oqs-provider, pnpm, electron, libevent, rust');
+    console.log('Components: haproxy, tailscale, jq, redis, postgres, docker, nodejs, curl, wget, python3, openssl, build-tools, cmake, ninja, liboqs, oqs-provider, pnpm, tauri, libevent, rust');
     console.log('Presets:');
     console.log('  all      - All server and edge dependencies');
     console.log('  server   - Server runtime dependencies');
@@ -718,10 +656,10 @@ async function installComponent(name) {
   }
 
   const presets = {
-    all: ['git', 'nodejs', 'redis', 'postgres', 'python3', 'openssl', 'build-tools', 'cmake', 'ninja', 'liboqs', 'oqs-provider', 'haproxy', 'tailscale', 'jq', 'cloudflared', 'docker'],
+    all: ['git', 'nodejs', 'redis', 'postgres', 'python3', 'openssl', 'build-tools', 'cmake', 'ninja', 'liboqs', 'oqs-provider', 'haproxy', 'tailscale', 'jq', 'docker'],
     server: ['nodejs', 'redis', 'postgres', 'python3', 'openssl', 'build-tools', 'tailscale'],
-    client: ['nodejs', 'git', 'curl', 'wget', 'pnpm', 'libevent', 'rust', 'build-tools', 'electron'],
-    edge: ['haproxy', 'cloudflared'],
+    client: ['nodejs', 'git', 'curl', 'wget', 'pnpm', 'rust', 'build-tools', 'tauri'],
+    edge: ['haproxy'],
     quantum: ['git', 'openssl', 'build-tools', 'cmake', 'ninja', 'liboqs', 'oqs-provider']
   };
 

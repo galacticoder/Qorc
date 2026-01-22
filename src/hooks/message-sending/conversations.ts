@@ -67,6 +67,10 @@ export const getConversationPreview = (message: Message, currentUsername: string
     return `${prefix} sent a file`;
   }
 
+  if (message.secureContentId) {
+    return '';
+  }
+
   return sanitizePreviewText(message.content);
 };
 

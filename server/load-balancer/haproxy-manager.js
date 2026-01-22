@@ -188,7 +188,7 @@ export class HAProxyManager {
             cryptoLogger.info('[AUTO-LB] Reloaded HAProxy', { oldPid, newPid });
             console.log(`\n[RELOADED] HAProxy configuration updated`);
             console.log(`\tOld PID: ${oldPid} → New PID: ${newPid}`);
-            console.log(`\treload successful\n`);
+            console.log(`\tReload successful\n`);
 
             this.consecutiveFailures = 0;
             return true;

@@ -1,15 +1,17 @@
 import React, { useState, useEffect } from 'react';
 import { useTheme } from 'next-themes';
-import { syncEncryptedStorage } from '../../lib/database/encrypted-storage';
+import { syncEncryptedStorage, encryptedStorage } from '../../lib/database/encrypted-storage';
 import { BlockedUsersSettings } from './BlockedUsersSettings';
 import { profilePictureSystem } from '../../lib/avatar/profile-picture-system';
 import { screenSharingSettings } from '../../lib/database/screen-sharing-settings';
 import { toast } from 'sonner';
-import { User, Palette, Bell, Volume2, Monitor, Download, Shield, Trash2 } from 'lucide-react';
+import { User, Palette, Bell, Volume2, Monitor, Download, Shield, Trash2, Settings } from 'lucide-react';
+import { file, notifications as tauriNotifications } from '../../lib/tauri-bindings';
 
 import { AppSettingsStyles } from './sections/AppSettingsStyles';
 import { AccountSettings } from './sections/AccountSettings';
 import { AppearanceSettings } from './sections/AppearanceSettings';
+import { GeneralSettings } from './sections/GeneralSettings';
 import { NotificationSettings } from './sections/NotificationSettings';
 import { AudioSettings } from './sections/AudioSettings';
 import { VoiceVideoSettings } from './sections/VoiceVideoSettings';
@@ -34,7 +36,7 @@ interface AudioSettings {
   echoCancellation: boolean;
 }
 
-type SectionId = 'account' | 'appearance' | 'notifications' | 'audio' | 'voice-video' | 'downloads' | 'privacy' | 'data';
+type SectionId = 'account' | 'general' | 'appearance' | 'notifications' | 'audio' | 'voice-video' | 'downloads' | 'privacy' | 'data';
 
 export const AppSettings = React.memo(function AppSettings({
   passphraseRef,
@@ -80,11 +82,12 @@ export const AppSettings = React.memo(function AppSettings({
 
   useEffect(() => {
     const initDownloadSettings = async () => {
-      const api = (window as any).electronAPI;
-      if (!api) return;
       try {
-        const settings = await api.getDownloadSettings();
-        setDownloadSettings(settings);
+        const settings = await file.getDownloadSettings();
+        setDownloadSettings({
+          downloadPath: settings.download_path || '',
+          autoSave: !settings.ask_where_to_save
+        });
       } catch { }
     };
     initDownloadSettings();
@@ -95,7 +98,7 @@ export const AppSettings = React.memo(function AppSettings({
         const parsed = JSON.parse(stored);
         if (parsed.notifications) {
           setNotifications(parsed.notifications);
-          (window as any).edgeApi?.setNotificationsEnabled?.(parsed.notifications.desktop !== false).catch(() => { });
+          tauriNotifications.setEnabled(parsed.notifications.desktop !== false).catch(() => { });
         }
         if (parsed.audioSettings) setAudioSettings(parsed.audioSettings);
         if (parsed.preferredMicId) setPreferredMicId(parsed.preferredMicId);
@@ -154,18 +157,17 @@ export const AppSettings = React.memo(function AppSettings({
   }, []);
 
   const handleChooseDownloadPath = async () => {
-    const api = (window as any).electronAPI;
-    if (!api || isChoosingPath) return;
+    if (isChoosingPath) return;
     setIsChoosingPath(true);
     try {
-      const result = await api.chooseDownloadPath();
-      if (result.success && result.path) {
-        const updateResult = await api.setDownloadPath(result.path);
-        if (updateResult.success) {
-          setDownloadSettings(prev => prev ? { ...prev, downloadPath: result.path! } : null);
+      const newPath = await file.chooseDownloadPath();
+      if (newPath) {
+        const ok = await file.setDownloadPath(newPath);
+        if (ok) {
+          setDownloadSettings(prev => prev ? { ...prev, downloadPath: newPath } : null);
           toast.success('Download path updated');
         } else {
-          toast.error(updateResult.error || 'Failed to update download path');
+          toast.error('Failed to update download path');
         }
       }
     } catch {
@@ -176,16 +178,9 @@ export const AppSettings = React.memo(function AppSettings({
   };
 
   const handleAutoSaveToggle = async (autoSave: boolean) => {
-    const api = (window as any).electronAPI;
-    if (!api) return;
     try {
-      const result = await api.setAutoSave(autoSave);
-      if (result.success) {
-        setDownloadSettings(prev => prev ? { ...prev, autoSave } : null);
-        toast.success(autoSave ? 'Auto-save enabled' : 'Auto-save disabled');
-      } else {
-        toast.error(result.error || 'Failed to update auto-save setting');
-      }
+      setDownloadSettings(prev => prev ? { ...prev, autoSave } : null);
+      toast.success(autoSave ? 'Auto-save enabled' : 'Auto-save disabled');
     } catch {
       toast.error('Failed to change auto-save setting');
     }
@@ -204,7 +199,6 @@ export const AppSettings = React.memo(function AppSettings({
     if (confirm('Clear all local data? This will log you out and remove all stored messages.')) {
       setIsClearingData(true);
       try {
-        const { encryptedStorage } = await import('../../lib/database/encrypted-storage');
         await encryptedStorage.setItem('app_settings_v1', '');
         window.location.reload();
       } catch {
@@ -224,6 +218,7 @@ export const AppSettings = React.memo(function AppSettings({
     {
       category: 'APP SETTINGS',
       items: [
+        { id: 'general', label: 'General', icon: Settings },
         { id: 'appearance', label: 'Appearance', icon: Palette },
         { id: 'notifications', label: 'Notifications', icon: Bell },
       ]
@@ -289,6 +284,10 @@ export const AppSettings = React.memo(function AppSettings({
               shareWithOthers={shareWithOthers}
               setShareWithOthers={setShareWithOthers}
             />
+          )}
+
+          {activeSection === 'general' && (
+            <GeneralSettings />
           )}
 
           {activeSection === 'appearance' && (

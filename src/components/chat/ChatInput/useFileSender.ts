@@ -9,6 +9,7 @@ import { sanitizeFilename } from "../../../lib/sanitizers";
 import { syncEncryptedStorage } from "../../../lib/database/encrypted-storage";
 import { DEFAULT_CHUNK_SIZE_SMALL, DEFAULT_CHUNK_SIZE_LARGE, LARGE_FILE_THRESHOLD, MAX_CHUNKS_PER_SECOND, INACTIVITY_TIMEOUT_MS, P2P_CONNECT_TIMEOUT_MS, RATE_LIMITER_SLEEP_MS, PAUSE_POLL_MS, P2P_POLL_MS, YIELD_INTERVAL, MAC_SALT, SESSION_WAIT_MS, SESSION_POLL_BASE_MS, SESSION_POLL_MAX_MS, BUNDLE_REQUEST_COOLDOWN_MS, SESSION_FRESH_COOLDOWN_MS } from "../../../lib/constants";
 import { unifiedSignalTransport } from "../../../lib/transport/unified-signal-transport";
+import { signal } from "../../../lib/tauri-bindings";
 
 interface HybridPublicKeys {
   readonly x25519PublicBase64?: string;
@@ -242,16 +243,11 @@ export function useFileSender(
 
   // Get session API wrapper for Signal session management
   const getSessionApi = useCallback(() => {
-    const edgeApi = (globalThis as any)?.edgeApi ?? null;
     return {
       async hasSession(args: { selfUsername: string; peerUsername: string; deviceId: number }) {
-        if (typeof edgeApi?.hasSession !== 'function') {
-          return { hasSession: false };
-        }
         try {
-          const promise = edgeApi.hasSession(args);
-          const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), 5000));
-          return await Promise.race([promise, timeout]) as any;
+          const result = await signal.hasSession(args.selfUsername, args.peerUsername, args.deviceId);
+          return { hasSession: result };
         } catch {
           return { hasSession: false };
         }
@@ -265,7 +261,6 @@ export function useFileSender(
       if (!targetUsername || !getKeysOnDemand) return false;
 
       const sessionApi = getSessionApi();
-      const edgeApi: any = (window as any).edgeApi;
       const needsRefresh = forceReestablish || peersNeedingSessionRefresh.current.has(targetUsername);
 
       const initial = await sessionApi.hasSession({
@@ -290,15 +285,7 @@ export function useFileSender(
       // If session needs refresh and is stale, delete it
       if (needsRefresh && initial?.hasSession && !sessionIsFresh) {
         try {
-          const deletePromise = edgeApi?.deleteSession?.({
-            selfUsername: currentUsername,
-            peerUsername: targetUsername,
-            deviceId: 1
-          });
-          if (deletePromise) {
-            const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), 5000));
-            await Promise.race([deletePromise, timeout]);
-          }
+          await signal.deleteSession(currentUsername, targetUsername, 1);
           peersNeedingSessionRefresh.current.delete(targetUsername);
         } catch (e) {
           console.warn('[FILE-SENDER] Failed to delete stale session:', e);
@@ -541,13 +528,17 @@ export function useFileSender(
             let encryptedMetadata: EncryptedMetadataResult | null = null;
             const attemptEncrypt = async (): Promise<EncryptedMetadataResult | null> => {
               const ENCRYPTION_TIMEOUT_MS = 15000;
-              const encryptPromise = (window as any).edgeApi.encrypt({
-                fromUsername: currentUsername,
-                toUsername: uk.username,
-                plaintext: JSON.stringify(chunkMetadata),
-                recipientKyberPublicKey: recipient.hybridPublicKeys.kyberPublicBase64,
-                recipientHybridKeys: recipient.hybridPublicKeys
-              }) as Promise<EncryptedMetadataResult>;
+              const encryptPromise = (async () => {
+                const result = await signal.encrypt(
+                  currentUsername,
+                  uk.username,
+                  JSON.stringify(chunkMetadata)
+                );
+                if (result?.ciphertext) {
+                  return { success: true, encryptedPayload: result as any };
+                }
+                return { success: false, error: 'Encryption failed' } as any;
+              })();
 
               const timeoutPromise = new Promise<EncryptedMetadataResult>((_, reject) => {
                 setTimeout(() => reject(new Error('Encryption timed out')), ENCRYPTION_TIMEOUT_MS);

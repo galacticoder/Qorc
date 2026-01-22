@@ -60,7 +60,7 @@ export function useTokenValidation({
 
     const trySend = async (reason: string, resetFirst: boolean) => {
       try {
-        await (window as any).edgeApi?.wsConnect?.();
+        await websocketClient.connect();
       } catch { }
       try {
         if (resetFirst && (websocketClient as any)?.resetSessionKeys) {
@@ -68,7 +68,7 @@ export function useTokenValidation({
         }
       } catch { }
       try {
-        await websocketClient.attemptTokenValidationOnce?.(`ensure-${reason}`);
+        await websocketClient.attemptTokenValidationOnce?.(`ensure-${reason}`, resetFirst);
       } catch { }
     };
 

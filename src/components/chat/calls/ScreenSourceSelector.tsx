@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import { Monitor, Square, X } from 'lucide-react';
 import { sanitizeTextInput } from '../../../lib/sanitizers';
 import { Dialog, DialogContent } from '../../ui/dialog';
+import { system } from '../../../lib/tauri-bindings';
 
 interface ScreenSource {
   readonly id: string;
@@ -80,44 +81,33 @@ export const ScreenSourceSelector = React.memo<ScreenSourceSelectorProps>(({
           setSources(formattedSources);
         }
       } else {
-        const electronApi = (window as any).electronAPI;
-        const edgeApi = (window as any).edgeApi;
+        const rawSources = await system.getScreenSources();
 
-        const getScreenSourcesFn =
-          (typeof electronApi?.getScreenSources === 'function' ? electronApi.getScreenSources : null) ||
-          (typeof edgeApi?.getScreenSources === 'function' ? edgeApi.getScreenSources : null);
+        if (signal.aborted) return;
 
-        if (getScreenSourcesFn) {
-          const rawSources = await getScreenSourcesFn();
+        if (!rawSources || rawSources.length === 0) {
+          throw new Error('No screen sources available');
+        }
 
-          if (signal.aborted) return;
+        const formattedSources: ScreenSource[] = rawSources.map((source) => {
+          const isScreen = typeof source.id === 'string' && source.id.startsWith('screen:');
 
-          if (!rawSources || rawSources.length === 0) {
-            throw new Error('No screen sources available');
-          }
+          return {
+            id: sanitizeTextInput(String(source.id), { maxLength: 256, allowNewlines: false }),
+            name: sanitizeTextInput(source.name || (isScreen ? 'Screen' : 'Window'), { maxLength: 128, allowNewlines: false }),
+            thumbnail: typeof source.thumbnail === 'string' ? source.thumbnail : undefined,
+            type: isScreen ? 'screen' as const : 'window' as const
+          };
+        });
 
-          const formattedSources: ScreenSource[] = rawSources.map((source: any) => {
-            const isScreen = typeof source.id === 'string' && source.id.startsWith('screen:');
+        formattedSources.sort((a, b) => {
+          if (a.type === 'screen' && b.type !== 'screen') return -1;
+          if (a.type !== 'screen' && b.type === 'screen') return 1;
+          return 0;
+        });
 
-            return {
-              id: sanitizeTextInput(String(source.id), { maxLength: 256, allowNewlines: false }),
-              name: sanitizeTextInput(source.name || (isScreen ? 'Screen' : 'Window'), { maxLength: 128, allowNewlines: false }),
-              thumbnail: typeof source.thumbnail === 'string' ? source.thumbnail : undefined,
-              type: isScreen ? 'screen' as const : 'window' as const
-            };
-          });
-
-          formattedSources.sort((a, b) => {
-            if (a.type === 'screen' && b.type !== 'screen') return -1;
-            if (a.type !== 'screen' && b.type === 'screen') return 1;
-            return 0;
-          });
-
-          if (isMountedRef.current && !signal.aborted) {
-            setSources(formattedSources);
-          }
-        } else {
-          throw new Error('Screen sharing not available');
+        if (isMountedRef.current && !signal.aborted) {
+          setSources(formattedSources);
         }
       }
     } catch (_err) {

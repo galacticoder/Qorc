@@ -1,18 +1,42 @@
 import type { Message } from '../../components/chat/messaging/types';
 import type { SecureDB } from '../../lib/database/secureDB';
 import { DB_MAX_PENDING_MESSAGES, DB_MAX_MESSAGES } from '../../lib/constants';
+import { messageVault } from '../../lib/security/message-vault';
+import { mergeReceipts } from '../../lib/utils/database-utils';
 
 // Process message from DB format to UI format
 export const processMessageFromDB = (msg: any, currentUser: string): Message => ({
   ...msg,
   timestamp: new Date(msg.timestamp),
   isCurrentUser: msg.sender === currentUser,
+  secureContentId: msg.id,
   receipt: msg.receipt ? {
     ...msg.receipt,
     deliveredAt: msg.receipt.deliveredAt ? new Date(msg.receipt.deliveredAt) : undefined,
     readAt: msg.receipt.readAt ? new Date(msg.receipt.readAt) : undefined,
   } : undefined,
 });
+
+// Populate vault with message content
+const populateVaultFromMessages = async (messages: any[]): Promise<void> => {
+  const entries: { id: string; content: string }[] = [];
+
+  for (const msg of messages) {
+    if (msg.id && msg.content) {
+      entries.push({ id: msg.id, content: msg.content });
+
+      // Store reply content if present
+      if (msg.replyTo?.id && msg.replyTo?.content) {
+        const replyId = msg.replyTo.secureContentId || `reply-${msg.replyTo.id}-${msg.id}`;
+        entries.push({ id: replyId, content: msg.replyTo.content });
+      }
+    }
+  }
+
+  if (entries.length > 0) {
+    await messageVault.storeBatch(entries);
+  }
+};
 
 // Merge messages with existing state
 export const mergeMessages = (
@@ -26,13 +50,10 @@ export const mergeMessages = (
     const processed = processMessageFromDB(dbMsg, currentUser);
     const existing = existingMap.get(processed.id);
     if (existing) {
-      const mergedReceipt = {
-        delivered: existing.receipt?.delivered || processed.receipt?.delivered || false,
-        read: existing.receipt?.read || processed.receipt?.read || false,
-        deliveredAt: existing.receipt?.deliveredAt || processed.receipt?.deliveredAt,
-        readAt: existing.receipt?.readAt || processed.receipt?.readAt,
-      };
-      existingMap.set(processed.id, { ...existing, receipt: mergedReceipt });
+      existingMap.set(processed.id, {
+        ...existing,
+        receipt: mergeReceipts(existing.receipt, processed.receipt)
+      });
     } else {
       existingMap.set(processed.id, processed);
     }
@@ -51,6 +72,10 @@ export const loadRecentMessages = async (
 ): Promise<Message[]> => {
   const savedMessages = await secureDB.loadRecentMessagesByConversation(limit, currentUser);
   if (!savedMessages || savedMessages.length === 0) return [];
+
+  // Populate vault with content from DB
+  await populateVaultFromMessages(savedMessages);
+
   return savedMessages.map((msg: any) => processMessageFromDB(msg, currentUser));
 };
 
@@ -61,6 +86,10 @@ export const loadAllMessages = async (
 ): Promise<Message[]> => {
   const allMessages = await secureDB.loadMessages();
   if (!allMessages || allMessages.length === 0) return [];
+
+  // Populate vault with content from DB
+  await populateVaultFromMessages(allMessages);
+
   return allMessages.map((msg: any) => processMessageFromDB(msg, currentUser));
 };
 
@@ -74,7 +103,10 @@ export const loadConversationMessages = async (
 ): Promise<Message[]> => {
   const messages = await secureDB.loadConversationMessages(peerUsername, currentUser, limit, offset);
   if (!messages || messages.length === 0) return [];
-  
+
+  // Populate vault with content from DB
+  await populateVaultFromMessages(messages);
+
   const processed = messages.map((msg: any) => processMessageFromDB(msg, currentUser));
   processed.sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
   return processed;
@@ -89,17 +121,17 @@ export const flushPendingMessages = async (
 
   const currentMessages = (await secureDB.loadMessages()) || [];
   const mergedMap = new Map<string, Message>();
-  
+
   [...currentMessages, ...pendingMessages].forEach((msg: Message) => {
     mergedMap.set(msg.id!, msg);
   });
-  
+
   const limited = Array.from(mergedMap.values()).slice(-DB_MAX_MESSAGES);
   const storedMessages = limited.map(m => ({
     ...m,
     timestamp: m.timestamp instanceof Date ? m.timestamp.getTime() : m.timestamp,
   }));
-  
+
   await secureDB.saveMessages(storedMessages as any);
 };
 
@@ -116,7 +148,10 @@ export const saveMessageBatch = async (
   for (const [msgId, pendingMsg] of pendingMessages.entries()) {
     const idx = msgs.findIndex((m: Message) => m.id === msgId);
     if (idx !== -1) {
-      msgs[idx] = pendingMsg;
+      msgs[idx] = {
+        ...pendingMsg,
+        receipt: mergeReceipts(msgs[idx].receipt, pendingMsg.receipt)
+      };
     } else {
       msgs.push(pendingMsg);
     }

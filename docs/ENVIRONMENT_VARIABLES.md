@@ -81,6 +81,7 @@ Values shown in parentheses indicate typical defaults when the variable is unset
 | `REDIS_CLUSTER_NODES` | unset | `server/presence/presence.js` | Comma-separated `host:port` list enabling ioredis cluster mode for presence and messaging when set. |
 | `REDIS_USERNAME` | unset | `server/presence/presence.js`, `server/rate-limiting/distributed-rate-limiter.js` | Redis ACL username used for both presence and rate limiter clients. |
 | `REDIS_PASSWORD` | unset | same as above | Redis ACL password. |
+| `REDISCLI_AUTH` | derived from `REDIS_URL` | `scripts/start-server.cjs` | Used to securely pass the Redis password to `redis-cli`, preventing the "insecure password" warning in TUI/logs. |
 | `REDIS_POOL_MIN` | `(4)` (clamped 1–100) | `server/presence/presence.js` | Minimum number of Redis connections in the generic-pool-based client pool. |
 | `REDIS_POOL_MAX` | `(50)` (clamped 10–500) | same as above | Maximum number of Redis connections in the pool. |
 | `REDIS_POOL_ACQUIRE_TIMEOUT` | `(15000)` ms (clamped 1000–60000) | same as above | Timeout for acquiring a Redis client from the pool. |
@@ -206,8 +207,7 @@ Several of these secrets (`KEY_ENCRYPTION_SECRET`, `TOKEN_PEPPER`, `AUTH_AUDIT_H
 
 | Name | Default / required | Used by | Description |
 | ---- | ------------------ | ------- | ----------- |
-| `ELECTRON_INSTANCE_ID` | unset → `'1'` | `electron/main.cjs`, `electron/preload.cjs` | When set, each instance uses a separate `userData` directory (`<base>-instance-<id>`) and is exposed to the renderer as `electronAPI.instanceId`. |
-| `INSTANCE_ID` | unset → `'1'` in preload | `electron/preload.cjs`, `server/authentication/token-security.js` | Generic instance identifier used by Electron and embedded in distributed security events; the preload script falls back to this when `ELECTRON_INSTANCE_ID` is not set. |
+| `QOR_INSTANCE_ID` | unset → `'1'` | `electron/main.cjs`, `electron/preload.cjs`, `src-tauri/src/main.rs` | When set, each instance uses a separate data directory (`<base>-instance-<id>`) to allow running multiple isolated instances. |
 
 ---
 

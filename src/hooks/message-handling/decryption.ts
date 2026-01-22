@@ -2,7 +2,8 @@ import { SignalType } from '../../lib/types/signal-types';
 import { EventType } from '../../lib/types/event-types';
 import websocketClient from '../../lib/websocket/websocket';
 import { safeJsonParseForMessages } from '../../lib/utils/message-handler-utils';
-import type { DecryptResult, EncryptedEnvelope } from '../../lib/types/message-handling-types';
+import type { DecryptResult, EncryptedMessage } from '../../lib/types/message-handling-types';
+import { signal } from '../../lib/tauri-bindings';
 
 // Validate P2P message structure
 export const validateP2PMessage = (msg: any, loginUsername: string): boolean => {
@@ -67,11 +68,11 @@ export const validateP2PMessage = (msg: any, loginUsername: string): boolean => 
 // Create P2P payload from validated message
 export const createP2PPayload = (msg: any): any => ({
   id: msg.id,
-  content: msg.content,
+  content: msg.content || msg.payload,
   timestamp: msg.timestamp,
   from: msg.from,
   to: msg.to,
-  type: SignalType.MESSAGE,
+  type: msg.messageType || msg.type || SignalType.MESSAGE,
   p2p: true
 });
 
@@ -81,14 +82,14 @@ export const decryptSignalMessage = async (
   currentUser: string,
   processedPreKeyMessagesRef: React.RefObject<Map<string, number>>
 ): Promise<{ payload: any; attachedChunkData: any } | null> => {
-  const envelope = encryptedMessage.encryptedPayload as EncryptedEnvelope;
+  const envelope = encryptedMessage.encryptedPayload as EncryptedMessage;
 
-  if (!envelope || typeof envelope !== 'object' || !('kemCiphertext' in envelope) || !('ciphertext' in envelope)) {
-    console.error('[EncryptedMessageHandler] Unsupported envelope format');
+  if (!envelope || typeof envelope !== 'object' || !('ciphertext' in envelope)) {
+    console.error('[EncryptedMessageHandler] Unsupported envelope format', { keys: envelope ? Object.keys(envelope) : [] });
     return null;
   }
 
-  const kemCiphertext = envelope?.kemCiphertext;
+  const kemCiphertext = envelope.pqEnvelope?.kemCiphertext;
   if (typeof kemCiphertext === 'string' && kemCiphertext.length > 0) {
     const dedupKey = `${encryptedMessage.from || 'unknown'}:${kemCiphertext}`;
     const retryCount = (encryptedMessage as any)?.__retryCount || 0;
@@ -112,12 +113,7 @@ export const decryptSignalMessage = async (
   }
 
   const senderForDecrypt = encryptedMessage.from || '';
-
-  const decrypted: DecryptResult = await (window as any).edgeApi?.decrypt?.({
-    fromUsername: senderForDecrypt,
-    toUsername: currentUser,
-    encryptedData: cleanedEnvelope
-  });
+  const decrypted = await signal.decrypt(senderForDecrypt, currentUser, cleanedEnvelope as any);
 
   return { payload: decrypted, attachedChunkData };
 };
@@ -131,18 +127,14 @@ export const processBundleDelivery = async (
     const bundle = encryptedMessage.bundle;
     const peerUsername = encryptedMessage.username;
 
-    const bundleResult = await (window as any).edgeApi.processPreKeyBundle({
-      selfUsername: currentUser,
-      peerUsername,
-      bundle
-    });
+    const bundleResult = await signal.processPreKeyBundle(currentUser, peerUsername, bundle);
 
-    if (bundleResult?.success) {
-      const has = await (window as any).edgeApi?.hasSession?.({ selfUsername: currentUser, peerUsername, deviceId: 1 });
+    if (bundleResult) {
+      const has = await signal.hasSession(currentUser, peerUsername, 1);
       try { window.dispatchEvent(new CustomEvent(EventType.LIBSIGNAL_SESSION_READY, { detail: { peer: peerUsername } })); } catch { }
 
       try {
-        if (has?.hasSession) await websocketClient.sendSecureControlMessage({
+        if (has) await websocketClient.sendSecureControlMessage({
           type: SignalType.SESSION_ESTABLISHED,
           from: currentUser,
           username: peerUsername,
@@ -167,16 +159,16 @@ export const processSenderBundle = async (
     const senderUsername = payload?.from;
     if (!currentUser || !senderUsername) return;
 
-    const has = await (window as any).edgeApi?.hasSession?.({ selfUsername: currentUser, peerUsername: senderUsername, deviceId: 1 });
-    if (!has?.hasSession && payload?.senderSignalBundle) {
+    const has = await signal.hasSession(currentUser, senderUsername, 1);
+    if (!has && payload?.senderSignalBundle) {
       try {
-        const bundleResult = await (window as any).edgeApi?.processPreKeyBundle?.({ selfUsername: currentUser, peerUsername: senderUsername, bundle: payload.senderSignalBundle });
-        if (bundleResult?.success) {
-          const hasNow = await (window as any).edgeApi?.hasSession?.({ selfUsername: currentUser, peerUsername: senderUsername, deviceId: 1 });
+        const bundleResult = await signal.processPreKeyBundle(currentUser, senderUsername, payload.senderSignalBundle);
+        if (bundleResult) {
+          const hasNow = await signal.hasSession(currentUser, senderUsername, 1);
           try { window.dispatchEvent(new CustomEvent(EventType.LIBSIGNAL_SESSION_READY, { detail: { peer: senderUsername } })); } catch { }
 
           try {
-            if (hasNow?.hasSession) await websocketClient.sendSecureControlMessage({
+            if (hasNow) await websocketClient.sendSecureControlMessage({
               type: SignalType.SESSION_ESTABLISHED,
               from: currentUser,
               username: senderUsername,
@@ -193,7 +185,7 @@ export const processSenderBundle = async (
 // Trust peer identity on untrusted identity error
 export const trustPeerIdentity = async (currentUser: string, peerUsername: string): Promise<void> => {
   try {
-    await (window as any).edgeApi?.trustPeerIdentity?.({ selfUsername: currentUser, peerUsername, deviceId: 1 });
+    await signal.trustPeerIdentity(currentUser, peerUsername, 1);
   } catch { }
 };
 

@@ -7,6 +7,7 @@ import { p2pConfig } from '../../config/p2p.config';
 import { SecurityAuditLogger } from '../../lib/cryptography/audit-logger';
 import { formatFileSize } from '../../lib/utils/file-utils';
 import { toast } from 'sonner';
+import { messageVault } from '../../lib/security/message-vault';
 
 const getReplyContent = (message: Message): string => {
   if (message.type === SignalType.FILE || message.type === SignalType.FILE_MESSAGE || message.filename) {
@@ -156,9 +157,13 @@ export function useMessageActions({
           );
 
           if (result.status === 'sent') {
+            const mId = result.messageId || crypto.randomUUID();
+            await messageVault.store(mId, content);
+
             const newMessage: Message = {
-              id: result.messageId || crypto.randomUUID(),
-              content: content,
+              id: mId,
+              content: '',
+              secureContentId: mId,
               sender: loginUsernameRef.current || '',
               recipient: selectedConversation,
               timestamp: new Date(),
@@ -168,11 +173,22 @@ export function useMessageActions({
               transport: 'p2p',
               encrypted: true,
               receipt: { delivered: false, read: false },
-              ...(replyTo && { replyTo: { id: replyTo.id, sender: replyTo.sender, content: getReplyContent(replyTo as Message) } })
             } as Message;
 
+            if (replyTo) {
+              const replyId = `reply-${replyTo.id}-${mId}`;
+              const replyContent = getReplyContent(replyTo as Message);
+              await messageVault.store(replyId, replyContent);
+              newMessage.replyTo = {
+                id: replyTo.id,
+                sender: replyTo.sender,
+                content: '',
+                secureContentId: replyId
+              };
+            }
+
             setMessages(prev => [...prev, newMessage]);
-            saveMessageWithContext(newMessage);
+            saveMessageWithContext({ ...newMessage, content });
             return;
           }
         }

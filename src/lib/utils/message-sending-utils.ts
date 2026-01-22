@@ -4,6 +4,8 @@ import { sanitizeContent, sanitizeUsername } from '../sanitizers';
 import { MAX_FILEDATA_LENGTH, BASE64_SAFE_REGEX, MAX_ID_CACHE_SIZE, ID_CACHE_TTL_MS } from '../constants';
 import type { IdCache, SessionApi } from '../types/message-sending-types';
 import { CryptoUtils } from '../utils/crypto-utils';
+import { signal } from '../tauri-bindings';
+import { messageVault } from '../security/message-vault';
 
 export const TEXT_ENCODER = new TextEncoder();
 
@@ -17,16 +19,13 @@ export const SIGNAL_TYPE_MAP: Record<string, string> = {
   [SignalType.REACTION_REMOVE]: SignalType.REACTION_REMOVE,
 };
 
-// Get session API wrapper for edgeApi
+// Get session API wrapper for Tauri signal bindings
 export const getSessionApi = (): SessionApi => {
-  const edgeApi = (globalThis as any)?.edgeApi ?? null;
   return {
     async hasSession(args: { selfUsername: string; peerUsername: string; deviceId: number }) {
-      if (typeof edgeApi?.hasSession !== 'function') {
-        return { hasSession: false };
-      }
       try {
-        return await edgeApi.hasSession(args);
+        const result = await signal.hasSession(args.selfUsername, args.peerUsername, args.deviceId);
+        return { hasSession: result };
       } catch {
         return { hasSession: false };
       }
@@ -119,7 +118,7 @@ export const mapSignalType = (baseType: string, messageSignalType?: string, file
 };
 
 // Create local message for optimistic UI update
-export const createLocalMessage = (
+export const createLocalMessage = async (
   messageId: string,
   sender: string,
   recipient: string,
@@ -127,19 +126,40 @@ export const createLocalMessage = (
   timestamp: number,
   replyToData?: { id: string; sender?: string; content?: string },
   fileData?: string,
-): Message => {
+  fromOriginal?: string,
+): Promise<Message> => {
+  // For text messages, store content in vault and empty the state object
+  const isVaultable = !fileData && content && content.trim().length > 0;
+
+  if (isVaultable) {
+    await messageVault.store(messageId, content);
+  }
+
   const message: Message = {
     id: messageId,
-    content,
+    content: isVaultable ? '' : content,
+    secureContentId: isVaultable ? messageId : undefined,
     sender,
+    fromOriginal,
     recipient,
     timestamp: new Date(timestamp),
     type: fileData ? SignalType.FILE : SignalType.TEXT,
     isCurrentUser: true,
     receipt: { delivered: false, read: false },
     version: '1',
-    ...(replyToData && { replyTo: replyToData }),
   };
+
+  if (replyToData) {
+    const replyId = `reply-${replyToData.id}-${messageId}`;
+    if (replyToData.content) {
+      await messageVault.store(replyId, replyToData.content);
+    }
+    message.replyTo = {
+      ...replyToData,
+      content: '',
+      secureContentId: replyId
+    };
+  }
 
   if (fileData) {
     message.fileInfo = {

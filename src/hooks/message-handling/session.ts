@@ -4,6 +4,7 @@ import websocketClient from '../../lib/websocket/websocket';
 import type { PendingRetryEntry, AttemptsLedgerEntry, ResetCounterEntry } from '../../lib/types/message-handling-types';
 import { computeBackoffMs } from '../../lib/utils/message-handler-utils';
 import { BUNDLE_REQUEST_COOLDOWN_MS, MAX_RETRY_ATTEMPTS, PENDING_QUEUE_MAX_PER_PEER } from '../../lib/constants';
+import { signal } from '../../lib/tauri-bindings';
 
 // Handle session reset and queue message for retry
 export const handleSessionResetAndRetry = async (
@@ -45,11 +46,7 @@ export const handleSessionResetAndRetry = async (
   resetCooldownRef.current.set(senderUsername, nowTs);
 
   try {
-    await (window as any).edgeApi?.deleteSession?.({
-      selfUsername: currentUser,
-      peerUsername: senderUsername,
-      deviceId: 1
-    });
+    await signal.deleteSession(currentUser, senderUsername, 1);
 
     try {
       await websocketClient.sendSecureControlMessage({
@@ -65,7 +62,7 @@ export const handleSessionResetAndRetry = async (
         window.dispatchEvent(new CustomEvent(EventType.P2P_SESSION_RESET_SEND, {
           detail: { to: senderUsername, reason: 'decryption-failure' }
         }));
-        
+
         window.dispatchEvent(new CustomEvent(EventType.LOCAL_INITIATED_RESET, {
           detail: { peerUsername: senderUsername, reason: 'decryption-failure' }
         }));
@@ -172,20 +169,12 @@ export const replenishPqKyberPrekey = async (
     lastPqKeyReplenishRef.current = now;
 
     try {
-      await (window as any).edgeApi?.generatePreKeys?.({ username: loginUsernameRef.current, count: 50 });
+      await signal.generatePreKeys(loginUsernameRef.current, 1, 50);
     } catch { }
 
-    const bundle = await (window as any).edgeApi?.getPreKeyBundle?.({
-      username: loginUsernameRef.current,
-      regeneratePrekeys: true
-    });
+    const bundle = await signal.createPreKeyBundle(loginUsernameRef.current);
 
-    if (!bundle || bundle.success === false || bundle.error) {
-      console.error('[EncryptedMessageHandler] Failed to generate fresh bundle for PQ key replenishment:', bundle?.error);
-      return;
-    }
-
-    if (!bundle.registrationId || !bundle.identityKeyBase64 || !bundle.signedPreKey || !bundle.kyberPreKey) {
+    if (!bundle || !bundle.registrationId || !bundle.identityKeyBase64 || !bundle.signedPreKey || !bundle.kyberPreKey?.keyId) {
       console.error('[EncryptedMessageHandler] Invalid bundle structure during PQ key replenishment');
       return;
     }

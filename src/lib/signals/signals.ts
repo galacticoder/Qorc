@@ -28,10 +28,12 @@ export { persistAuthTokens, retrieveAuthTokens, clearAuthTokens, clearTokenEncry
 
 export async function handleSignalMessages(data: any, handlers: SignalHandlers) {
   const { Authentication, Database, handleFileMessageChunk, handleEncryptedMessagePayload } = handlers;
-  const { type, message } = data ?? {};
-  
+
+  const type = data?.type;
+  const message = data?.message ?? data?.data ?? data?.payload ?? '';
+
   if (!type) {
-    console.warn('[signals] missing-type');
+    console.warn('[signals] missing-type', data);
     return;
   }
 
@@ -43,6 +45,7 @@ export async function handleSignalMessages(data: any, handlers: SignalHandlers) 
     serverHybridPublic: Authentication?.serverHybridPublic,
     handleAuthSuccess: Authentication?.handleAuthSuccess,
     loginUsernameRef: Authentication?.loginUsernameRef,
+    originalUsernameRef: Authentication?.originalUsernameRef,
     aesKeyRef: Authentication?.aesKeyRef,
     setAccountAuthenticated: Authentication?.setAccountAuthenticated,
     setIsLoggedIn: Authentication?.setIsLoggedIn,

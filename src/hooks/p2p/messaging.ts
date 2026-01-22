@@ -14,6 +14,7 @@ import type {
   RouteProofRecord,
   QueuedItem,
 } from "../../lib/types/p2p-types";
+import { HybridDecryptionResult } from "../../lib/types/crypto-types";
 import {
   createP2PError,
   buildRouteProof,
@@ -24,6 +25,7 @@ import {
 } from "../../lib/utils/p2p-utils";
 import { P2P_ROUTE_PROOF_TTL_MS, MAX_MESSAGE_CONTENT_LENGTH, MAX_USERNAME_LENGTH, RATE_LIMIT_WINDOW_MS, RATE_LIMIT_MAX_MESSAGES, MAX_P2P_INCOMING_QUEUE } from "../../lib/constants";
 import { isPlainObject, hasPrototypePollutionKeys } from "../../lib/sanitizers";
+import { messageVault } from "../../lib/security/message-vault";
 
 // Shared refs required by the messaging helpers for queueing, rate limits, and event callbacks 
 export interface MessagingRefs {
@@ -41,6 +43,8 @@ export interface MessagingRefs {
 // Buffers outbound envelopes when a peer is temporarily unreachable
 type SupportedP2PDataSignalType =
   | SignalType.CHAT
+  | SignalType.MESSAGE
+  | SignalType.TEXT
   | SignalType.TYPING
   | SignalType.TYPING_START
   | SignalType.TYPING_STOP
@@ -49,12 +53,16 @@ type SupportedP2PDataSignalType =
   | SignalType.EDIT
   | SignalType.DELETE
   | SignalType.READ_RECEIPT
+  | SignalType.DELIVERY_RECEIPT
   | SignalType.DELIVERY_ACK
   | SignalType.SIGNAL
-  | SignalType.CALL_SIGNAL;
+  | SignalType.CALL_SIGNAL
+  | SignalType.P2P_ENCRYPTED_MESSAGE;
 
 const SUPPORTED_P2P_DATA_SIGNAL_TYPES: SupportedP2PDataSignalType[] = [
   SignalType.CHAT,
+  SignalType.MESSAGE,
+  SignalType.TEXT,
   SignalType.TYPING,
   SignalType.TYPING_START,
   SignalType.TYPING_STOP,
@@ -63,9 +71,11 @@ const SUPPORTED_P2P_DATA_SIGNAL_TYPES: SupportedP2PDataSignalType[] = [
   SignalType.EDIT,
   SignalType.DELETE,
   SignalType.READ_RECEIPT,
+  SignalType.DELIVERY_RECEIPT,
   SignalType.DELIVERY_ACK,
   SignalType.SIGNAL,
   SignalType.CALL_SIGNAL,
+  SignalType.P2P_ENCRYPTED_MESSAGE,
 ];
 
 function isSupportedP2PDataType(type: P2PMessage['type']): type is SupportedP2PDataSignalType {
@@ -128,6 +138,7 @@ export function createFlushPeerQueue(
 export function createSendP2PMessage(
   refs: MessagingRefs,
   hybridKeys: HybridKeys | null,
+  username: string,
   deriveConversationKey: (peer: string) => string | null,
   ensurePeerAuthenticated: (peer: string, envelope?: any) => Promise<boolean>,
   getPeerCertificate: (peer: string, bypassCache?: boolean) => Promise<PeerCertificateBundle | null>,
@@ -234,29 +245,33 @@ export function createSendP2PMessage(
     const messageId = await generateMessageId(channelId, refs.channelSequenceRef.current.get(conversationKey) ?? 0);
 
     try {
-      const messageObj = {
-        id: messageId,
-        content,
-        timestamp: Date.now(),
-        from: hybridKeys.dilithium.publicKeyBase64,
-        to,
-        routeProof: routeProofRecord.proof,
-        messageType: options?.messageType || SignalType.TEXT,
-        metadata: options?.metadata,
-      };
-
-      const encryptedEnvelope = await CryptoUtils.Hybrid.encryptForClient(messageObj, effectiveRemoteKeys, {
-        to: peerCert.dilithiumPublicKey,
-        from: hybridKeys.dilithium.publicKeyBase64,
-        type: `p2p-${options?.messageType || SignalType.MESSAGE}`,
-        senderDilithiumSecretKey: hybridKeys.dilithium.secretKey,
-        senderDilithiumPublicKey: hybridKeys.dilithium.publicKeyBase64,
-        timestamp: Date.now(),
-        extras: {
-          routeProof: routeProofRecord.proof,
+      let finalPayload: any;
+      
+      if (isTyping || isReceipt || isSignal) {
+        finalPayload = content;
+      } else {
+        const messageObj = {
+          id: messageId,
+          content,
+          timestamp: Date.now(),
+          from: username,
+          to,
           messageType: options?.messageType || SignalType.TEXT,
-        },
-      });
+          metadata: options?.metadata,
+        };
+
+        finalPayload = await CryptoUtils.Hybrid.encryptForClient(messageObj, effectiveRemoteKeys, {
+          to: peerCert.dilithiumPublicKey,
+          from: hybridKeys.dilithium.publicKeyBase64,
+          type: `p2p-${options?.messageType || SignalType.MESSAGE}`,
+          senderDilithiumSecretKey: hybridKeys.dilithium.secretKey,
+          senderDilithiumPublicKey: hybridKeys.dilithium.publicKeyBase64,
+          timestamp: Date.now(),
+          extras: {
+            messageType: options?.messageType || SignalType.TEXT,
+          },
+        });
+      }
 
       let p2pType: SignalType.CHAT | SignalType.TYPING | SignalType.TYPING_START | SignalType.TYPING_STOP | SignalType.REACTION | SignalType.FILE | SignalType.READ_RECEIPT | SignalType.DELIVERY_ACK | SignalType.SIGNAL = SignalType.CHAT;
       if (options?.messageType === SignalType.TYPING) p2pType = SignalType.TYPING;
@@ -277,13 +292,13 @@ export function createSendP2PMessage(
       const serviceConnected = connectedPeers.includes(to);
       if (!serviceConnected) {
         const ttl = isTyping ? 5000 : p2pType === SignalType.REACTION ? 30000 : p2pType === SignalType.FILE ? 180000 : 120000;
-        enqueueOutbound(to, encryptedEnvelope, p2pType as any, ttl);
+        enqueueOutbound(to, finalPayload, p2pType as any, ttl);
         connectToPeer(to).catch(() => { });
         setLastError(createP2PError('PEER_NOT_CONNECTED'));
         return { status: 'queued_not_connected', messageId };
       }
 
-      await service.sendMessage(to, encryptedEnvelope, p2pType);
+      await service.sendMessage(to, finalPayload, p2pType);
       return { status: 'sent', messageId };
     } catch (_error) {
       try { SecurityAuditLogger.log('warn', 'p2p-send-error', { to, error: String((_error as any)?.message || _error) }); } catch { }
@@ -441,28 +456,67 @@ export function createHandleIncomingP2PMessage(
       }
 
 
-      if (message.type === SignalType.TYPING || message.type === SignalType.TYPING_START || message.type === SignalType.TYPING_STOP) {
+      const isTyping = message.type === SignalType.TYPING || message.type === SignalType.TYPING_START || message.type === SignalType.TYPING_STOP;
+      const isReceipt = message.type === SignalType.READ_RECEIPT || message.type === SignalType.DELIVERY_ACK || message.type === SignalType.DELIVERY_RECEIPT;
+      const isSignal = message.type === SignalType.SIGNAL;
+
+      if (isTyping || isReceipt || isSignal) {
         try {
-          let actionContent: string = message.type;
-          let timestamp = message.timestamp;
+          if (isTyping) {
+            let actionContent: string = message.type;
+            let timestamp = message.timestamp;
 
-          if (message.payload && typeof message.payload === 'object' && message.payload.type) {
-            actionContent = message.payload.type;
-            if (message.payload.timestamp) timestamp = message.payload.timestamp;
+            if (message.payload && typeof message.payload === 'object' && message.payload.type) {
+              actionContent = message.payload.type;
+              if (message.payload.timestamp) timestamp = message.payload.timestamp;
+            }
+
+            window.dispatchEvent(
+              new CustomEvent(EventType.TYPING_INDICATOR, {
+                detail: {
+                  transport: 'p2p',
+                  from: message.from,
+                  content: actionContent,
+                  timestamp: timestamp,
+                },
+              }),
+            );
+          } else if (isReceipt) {
+            const id = message.payload?.messageId ? String(message.payload.messageId) : null;
+            if (id) {
+              if (message.type === SignalType.READ_RECEIPT) {
+                if (!refs.processedReadReceiptsRef.current.has(id)) {
+                  refs.processedReadReceiptsRef.current.add(id);
+                  window.dispatchEvent(new CustomEvent(EventType.MESSAGE_READ, {
+                    detail: { messageId: id, from: message.from }
+                  }));
+                }
+              } else {
+                window.dispatchEvent(new CustomEvent(EventType.MESSAGE_DELIVERED, {
+                  detail: { messageId: id, from: message.from }
+                }));
+              }
+            }
+          } else if (isSignal) {
+            const payload = message.payload;
+            if (payload?.type === 'profile-picture-request' || payload?.type === 'profile-picture-response') {
+              if (refs.messageCallbackRef.current) {
+                refs.messageCallbackRef.current({
+                  id: 'signal-' + Date.now(),
+                  from: message.from,
+                  to: message.to,
+                  content: payload,
+                  timestamp: Date.now(),
+                  encrypted: false,
+                  p2p: true,
+                  transport: 'p2p',
+                  messageType: SignalType.SIGNAL,
+                });
+              }
+            }
           }
-
-          window.dispatchEvent(
-            new CustomEvent(EventType.TYPING_INDICATOR, {
-              detail: {
-                transport: 'p2p',
-                from: message.from,
-                content: actionContent,
-                timestamp: timestamp,
-              },
-            }),
-          );
         } catch (err) {
-          console.error('[messaging] Error processing typing indicator:', err);
+          console.error('[messaging] Error processing transient signal:', err);
         }
         return;
       }
@@ -528,15 +582,20 @@ export function createHandleIncomingP2PMessage(
         throw createP2PError('PEER_AUTH_FAILED');
       }
 
-      const decryptedEnvelope = await CryptoUtils.Hybrid.decryptIncoming(
-        message.payload,
-        {
-          kyberSecretKey: hybridKeys.kyber.secretKey,
-          x25519SecretKey: hybridKeys.x25519.private,
-          senderDilithiumPublicKey: freshPeerCert.dilithiumPublicKey,
-        },
-        { expectJsonPayload: true },
-      );
+      let decryptedEnvelope: HybridDecryptionResult;
+      try {
+        decryptedEnvelope = await CryptoUtils.Hybrid.decryptIncoming(
+          message.payload,
+          {
+            kyberSecretKey: hybridKeys.kyber.secretKey,
+            x25519SecretKey: hybridKeys.x25519.private,
+            senderDilithiumPublicKey: freshPeerCert.dilithiumPublicKey,
+          },
+          { expectJsonPayload: true },
+        );
+      } catch (err) {
+        throw createP2PError('DECRYPTION_FAILED');
+      }
 
       const decryptedMessage = decryptedEnvelope.payloadJson as any;
       const routeProofPayload = routeProof;
@@ -559,25 +618,39 @@ export function createHandleIncomingP2PMessage(
       }
 
       const messageSequence = routeProofPayload?.payload?.sequence ?? currentSequence;
-      const messageId = await generateMessageId(channelId, messageSequence);
+      const generatedMessageId = await generateMessageId(channelId, messageSequence);
+      const messageId = message.id || generatedMessageId;
 
-      let messageType: SignalType.TEXT | SignalType.TYPING | SignalType.TYPING_START | SignalType.TYPING_STOP | SignalType.REACTION | SignalType.FILE | SignalType.EDIT | SignalType.DELETE | SignalType.READ_RECEIPT | SignalType.DELIVERY_ACK | SignalType.SIGNAL = SignalType.TEXT;
+      let messageType: SignalType.TEXT | SignalType.CHAT | SignalType.MESSAGE | SignalType.TYPING | SignalType.TYPING_START | SignalType.TYPING_STOP | SignalType.REACTION | SignalType.FILE | SignalType.EDIT | SignalType.DELETE | SignalType.READ_RECEIPT | SignalType.DELIVERY_ACK | SignalType.SIGNAL | SignalType.P2P_ENCRYPTED_MESSAGE = SignalType.TEXT;
       if (message.type === SignalType.REACTION) messageType = SignalType.REACTION;
       else if (message.type === SignalType.FILE) messageType = SignalType.FILE;
       else if (message.type === SignalType.READ_RECEIPT) messageType = SignalType.READ_RECEIPT;
-      else if (message.type === SignalType.DELIVERY_ACK) messageType = SignalType.DELIVERY_ACK;
+      else if (message.type === SignalType.DELIVERY_ACK || message.type === SignalType.DELIVERY_RECEIPT) messageType = SignalType.DELIVERY_ACK;
       else if (message.type === SignalType.SIGNAL) messageType = SignalType.SIGNAL;
+      else if (message.type === SignalType.P2P_ENCRYPTED_MESSAGE) {
+        if (decryptedMessage?.type) {
+            if (decryptedMessage.type === SignalType.DELIVERY_RECEIPT) messageType = SignalType.DELIVERY_ACK;
+            else messageType = decryptedMessage.type;
+        }
+        else if (decryptedMessage?.messageType) {
+            if (decryptedMessage.messageType === SignalType.DELIVERY_RECEIPT) messageType = SignalType.DELIVERY_ACK;
+            else messageType = decryptedMessage.messageType;
+        }
+      }
       else if ((message.type as string) === SignalType.EDIT) {
         messageType = SignalType.EDIT;
       } else if ((message.type as string) === SignalType.DELETE) {
         messageType = SignalType.DELETE;
-      } else if (decryptedMessage.messageType) messageType = decryptedMessage.messageType;
+      } else if (decryptedMessage.messageType) {
+        if (decryptedMessage.messageType === SignalType.DELIVERY_RECEIPT) messageType = SignalType.DELIVERY_ACK;
+        else messageType = decryptedMessage.messageType;
+      }
 
       const encryptedMessage: EncryptedMessage = {
         id: decryptedMessage.id || messageId,
         from: message.from,
         to: message.to,
-        content: decryptedMessage.content,
+        content: '',
         timestamp: decryptedMessage.timestamp || message.timestamp,
         encrypted: true,
         p2p: true,
@@ -586,6 +659,11 @@ export function createHandleIncomingP2PMessage(
         messageType,
         metadata: decryptedMessage.metadata,
       };
+
+      // Store content in messageVault for display
+      if (decryptedMessage.content) {
+        await messageVault.store(encryptedMessage.id, decryptedMessage.content);
+      }
 
 
       if (messageType === SignalType.READ_RECEIPT) {
@@ -641,34 +719,34 @@ export function createHandleIncomingP2PMessage(
             messageId: encryptedMessage.id,
             timestamp: Date.now(),
           };
-
-          const encryptedAck = await CryptoUtils.Hybrid.encryptForClient(
-            ackPayload,
-            {
-              kyberPublicBase64: freshPeerCert.kyberPublicKey,
-              dilithiumPublicBase64: freshPeerCert.dilithiumPublicKey,
-              x25519PublicBase64: freshPeerCert.x25519PublicKey,
-            },
-            {
-              to: peerCert.dilithiumPublicKey,
-              from: hybridKeys.dilithium.publicKeyBase64,
-              type: SignalType.DELIVERY_ACK,
-              senderDilithiumSecretKey: hybridKeys.dilithium.secretKey,
-              senderDilithiumPublicKey: hybridKeys.dilithium.publicKeyBase64,
-              timestamp: Date.now(),
-            },
-          );
-
-          await refs.p2pServiceRef.current?.sendMessage(message.from, encryptedAck, SignalType.DELIVERY_ACK);
-        } catch { }
+          const sendP2P = createSendP2PMessage(refs, hybridKeys, username, deriveConversationKey, ensurePeerAuthenticated, getPeerCertificate, () => { }, async () => { }, () => { });
+          await sendP2P(message.from, ackPayload, undefined, { messageType: SignalType.DELIVERY_ACK });
+        } catch (err) {
+          console.warn('[P2P] Failed to send delivery ACK:', err);
+        }
       }
     } catch (_error) {
-      console.error('[P2P-Messaging] handleIncomingP2PMessage - ERROR', { from: (message as any)?.from, type: (message as any)?.type, error: _error instanceof Error ? _error.message : String(_error) });
+      const errorMsg = _error instanceof Error ? _error.message : String(_error);
+      console.error('[P2P-Messaging] handleIncomingP2PMessage - ERROR', { from: (message as any)?.from, type: (message as any)?.type, error: errorMsg });
+
+      // Trigger session reset and peer cert refresh for decryption failures
+      if (errorMsg.includes('DECRYPTION_FAILED') || errorMsg.includes('ROUTE_PROOF_INVALID') || errorMsg.includes('PEER_AUTH_FAILED')) {
+        const peer = (message as any)?.from;
+        if (peer) {
+          try {
+            invalidatePeerCert(peer);
+            window.dispatchEvent(new CustomEvent(EventType.P2P_SESSION_RESET_REQUEST, {
+              detail: { from: peer, reason: 'p2p-decryption-failure' }
+            }));
+          } catch { }
+        }
+      }
+
       try {
         SecurityAuditLogger.log(SignalType.ERROR, 'p2p-incoming-error', {
           from: (message as any)?.from || null,
           type: (message as any)?.type || null,
-          error: _error instanceof Error ? _error.message : String(_error),
+          error: errorMsg,
         });
       } catch { }
     }

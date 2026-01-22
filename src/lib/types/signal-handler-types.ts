@@ -14,6 +14,7 @@ export interface AuthRefs {
   serverHybridPublic?: any;
   handleAuthSuccess?: (username: string, recovered: boolean) => void;
   loginUsernameRef?: React.RefObject<string>;
+  originalUsernameRef?: React.RefObject<string>;
   aesKeyRef?: React.RefObject<CryptoKey | null>;
   setAccountAuthenticated?: (val: boolean) => void;
   setIsLoggedIn?: (val: boolean) => void;

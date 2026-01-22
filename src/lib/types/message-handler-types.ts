@@ -14,6 +14,7 @@ import {
   createBlobUrlFromBase64,
   createBlobCache
 } from '../utils/message-handler-utils';
+import { signal } from '../tauri-bindings';
 
 export interface DeliveryReceiptContext {
   currentUser: string;
@@ -169,13 +170,21 @@ export async function sendEncryptedDeliveryReceipt(
   try {
     const deliveryReceiptData = createDeliveryReceiptPayload(messageId, currentUser, payloadFrom);
 
-    let encryptedMessage = await (window as any).edgeApi?.encrypt?.({
-      fromUsername: currentUser,
-      toUsername: payloadFrom,
-      plaintext: JSON.stringify(deliveryReceiptData),
-      recipientKyberPublicKey: kyber,
-      recipientHybridKeys: hybrid || undefined
-    });
+    let encryptedMessage: { success: boolean; encryptedPayload?: any; error?: string } | null = null;
+    try {
+      const result = await signal.encrypt(
+        currentUser,
+        payloadFrom,
+        JSON.stringify(deliveryReceiptData)
+      );
+      if (result?.ciphertext) {
+        encryptedMessage = { success: true, encryptedPayload: result };
+      } else {
+        encryptedMessage = { success: false, error: 'Encryption failed' };
+      }
+    } catch (e) {
+      encryptedMessage = { success: false, error: (e as Error)?.message };
+    }
 
     // Retry once if session error
     if (!encryptedMessage?.success || !encryptedMessage?.encryptedPayload) {
@@ -183,13 +192,16 @@ export async function sendEncryptedDeliveryReceipt(
       if (/session|no valid sessions|no session|invalid whisper message|decryption failed/i.test(errMsg)) {
         const sessionReady = await requestBundleAndWait(senderUsername, true, 1500);
         if (sessionReady) {
-          encryptedMessage = await (window as any).edgeApi?.encrypt?.({
-            fromUsername: currentUser,
-            toUsername: payloadFrom,
-            plaintext: JSON.stringify(deliveryReceiptData),
-            recipientKyberPublicKey: kyber,
-            recipientHybridKeys: hybrid || undefined
-          });
+          try {
+            const result = await signal.encrypt(
+              currentUser,
+              payloadFrom,
+              JSON.stringify(deliveryReceiptData)
+            );
+            if (result?.ciphertext) {
+              encryptedMessage = { success: true, encryptedPayload: result };
+            }
+          } catch { }
         }
       }
     }

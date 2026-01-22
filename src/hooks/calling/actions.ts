@@ -3,6 +3,7 @@ import { unstable_batchedUpdates } from 'react-dom';
 import { SecureCallingService } from '../../lib/transport/secure-calling-service';
 import { isValidCallingUsername, isValidCallId, stopMediaStream } from '../../lib/utils/calling-utils';
 import { PostQuantumUtils } from '../../lib/utils/pq-utils';
+import { isTauri } from '../../lib/tauri-bindings';
 
 export interface ActionRefs {
   serviceRef: React.RefObject<SecureCallingService | null>;
@@ -80,6 +81,11 @@ export const createStartCall = (
         return '';
       }
       console.error('[useCalling] Failed to start call:', _error);
+
+      if (_error instanceof Error && _error.name === 'NotAllowedError') {
+        console.warn('[useCalling] Permission denied for camera/microphone. Please check your system privacy settings.');
+      }
+
       unstable_batchedUpdates(() => {
         setters.setCurrentCall(null);
         stopMediaStream(refs.localStreamRef.current);
@@ -312,11 +318,7 @@ export const createStopScreenShare = (refs: ActionRefs) => {
 
 // Callback for exposing screen sources on desktop
 export const createGetAvailableScreenSources = (refs: ActionRefs) => {
-  const electronApi = (window as any).electronAPI;
-  const edgeApi = (window as any).edgeApi;
-  const isElectron = !!(electronApi || edgeApi);
-
-  if (!isElectron) return undefined;
+  if (!isTauri()) return undefined;
 
   return async () => {
     if (!refs.serviceRef.current) {

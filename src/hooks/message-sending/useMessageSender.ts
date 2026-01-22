@@ -9,7 +9,6 @@ import { encryptLongTerm } from '../../lib/cryptography/long-term-encryption';
 import { sanitizeContent, sanitizeUsername } from '../../lib/sanitizers';
 import type { HybridPublicKeys, UserWithKeys, PendingRetryMessage } from '../../lib/types/message-sending-types';
 import { validateFileData, sanitizeReply, logError, getIdCache, mapSignalType, createLocalMessage, getSessionApi, TEXT_ENCODER } from '../../lib/utils/message-sending-utils';
-import { ensureSession } from './session';
 import { recipientKeyValidator } from './validation';
 import { createDefaultResolvePeerHybridKeys } from './keys';
 import { createSessionResetHandler, createSessionEstablishedHandler, createSessionReadyHandler, createSessionResetRetryHandler } from './handlers';
@@ -17,6 +16,7 @@ import { globalEncryptedPayloadCache, globalLongTermStoreAttempted, buildMessage
 import { CryptoUtils } from '../../lib/utils/crypto-utils';
 import type { SecureP2PService } from '../../lib/transport/secure-p2p-service';
 import { unifiedSignalTransport } from '../../lib/transport/unified-signal-transport';
+import { messageVault } from '../../lib/security/message-vault';
 
 export function useMessageSender(
   users: UserWithKeys[],
@@ -139,7 +139,7 @@ export function useMessageSender(
         idCacheRef.current.add(messageId);
 
         if (messageSignalType !== SignalType.TYPING_START && messageSignalType !== SignalType.TYPING_STOP) {
-          const localMessage = createLocalMessage(messageId, currentUser, recipientUsername, sanitizedContent ?? '', timestamp, replyToData, fileDataToSend);
+          const localMessage = await createLocalMessage(messageId, currentUser, recipientUsername, sanitizedContent ?? '', timestamp, replyToData, fileDataToSend, originalUsernameRef.current || undefined);
           (localMessage as any).pending = true;
           onNewMessage(localMessage);
           if (secureDBRef?.current) { try { await secureDBRef.current.storeMessage({ ...localMessage, timestamp: localMessage.timestamp.getTime() }); } catch { } }
@@ -149,7 +149,6 @@ export function useMessageSender(
         return;
       }
 
-      const recipientKyberKey = recipient.hybridPublicKeys.kyberPublicBase64;
       if (messageType === SignalType.MESSAGE && !sanitizedContent) return;
       if ((messageType === SignalType.REACTION_ADD || messageType === SignalType.REACTION_REMOVE) && !sanitizedContent) return;
 
@@ -160,40 +159,49 @@ export function useMessageSender(
       let messageId = originalMessageId || (() => { let id; do { id = crypto.randomUUID().replace(/-/g, ''); } while (!idCacheRef.current.isStale(id)); idCacheRef.current.add(id); return id; })();
 
       try {
-        const sessionReady = await ensureSession(sessionLocksRef.current, lockContext, currentUser, recipientUsername, { secretKey: localKeys.dilithium.secretKey, publicKeyBase64: localKeys.dilithium.publicKeyBase64 });
-        if (!sessionReady) throw new Error('Failed to establish session');
-
-        let senderSignalBundle: any;
-        if (!peerCanDecryptRef.current.get(recipientUsername) && (preKeyFailureCountRef.current.get(recipientUsername) || 0) < 3) {
-          try { senderSignalBundle = await (window as any).edgeApi?.getPreKeyBundle?.({ selfUsername: currentUser, deviceId: 1 }); } catch { }
-        }
-
         const wireMessageId = (messageType === SignalType.EDIT_MESSAGE && editMessageId) ? editMessageId : messageId;
-        const payload = buildMessagePayload(wireMessageId, currentUser, recipientUsername, sanitizedContent, timestamp, messageType, messageSignalType, localKeys, originalUsernameRef, replyToData, fileData, originalMessageId, editMessageId, senderSignalBundle);
+        const isControlMessage = messageType === SignalType.TYPING_INDICATOR || messageType === SignalType.DELIVERY_RECEIPT || messageType === SignalType.READ_RECEIPT;
 
-        const encrypted = await encryptAndSend(payload, currentUser, recipientUsername, recipientKyberKey, recipient.hybridPublicKeys, localKeys, sessionLocksRef, lockContext);
-        if (!encrypted?.success || !encrypted?.encryptedPayload) { logError('encryption-failed', new Error(encrypted?.error || 'Unknown')); throw new Error(`Encryption failed: ${encrypted?.error}`); }
-
-        cacheEncryptedPayload(recipientUsername, wireMessageId, encrypted.encryptedPayload);
-        await unifiedSignalTransport.send(recipientUsername, { messageId: wireMessageId, encryptedPayload: encrypted.encryptedPayload }, messageType as SignalType);
-
-        if (messageType !== SignalType.TYPING_INDICATOR && messageType !== SignalType.DELIVERY_RECEIPT && messageType !== SignalType.READ_RECEIPT) {
-          await storeUnacknowledgedMessage(secureDBRef, recipientUsername, timestamp, { user, content, replyTo, fileData, messageSignalType, originalMessageId: messageId, editMessageId, timestamp });
+        if (!isControlMessage) {
+          if (originalMessageId || editMessageId) {
+            dispatchLocalEvents(messageType, messageSignalType, originalMessageId, editMessageId, wireMessageId, sanitizedContent, currentUser);
+          } else {
+            const localMessage = await createLocalMessage(messageId, currentUser, recipientUsername, sanitizedContent ?? '', timestamp, replyToData, fileData, originalUsernameRef.current || undefined);
+            onNewMessage(localMessage);
+            if (secureDBRef?.current) {
+              try { await secureDBRef.current.storeMessage({ ...localMessage, timestamp: localMessage.timestamp.getTime() }); } catch { }
+            }
+          }
         }
 
-        if (dispatchLocalEvents(messageType, messageSignalType, originalMessageId, editMessageId, wireMessageId, sanitizedContent, currentUser)) return;
+        const payload = buildMessagePayload(wireMessageId, currentUser, recipientUsername, sanitizedContent, timestamp, messageType, messageSignalType, localKeys, originalUsernameRef, replyToData, fileData, originalMessageId, editMessageId);
+        const sendResult = await unifiedSignalTransport.send(recipientUsername, payload, messageType as SignalType);
 
-        if (!originalMessageId) {
-          const localMessage = createLocalMessage(messageId, currentUser, recipientUsername, sanitizedContent ?? '', timestamp, replyToData, fileData);
-          onNewMessage(localMessage);
-          if (secureDBRef?.current) { try { await secureDBRef.current.storeMessage({ ...localMessage, timestamp: localMessage.timestamp.getTime() }); } catch { } }
+        if (!sendResult.success) {
+          throw new Error(sendResult.error || 'Transport failed');
+        }
+
+        if (!isControlMessage) {
+          await storeUnacknowledgedMessage(secureDBRef, recipientUsername, timestamp, { user, content, replyTo, fileData, messageSignalType, originalMessageId: messageId, editMessageId, timestamp });
         }
       } catch (_error) {
         const errorMessage = _error instanceof Error ? _error.message : String(_error);
         if (errorMessage.toLowerCase().includes('prekey') && recipientUsername) preKeyFailureCountRef.current.set(recipientUsername, (preKeyFailureCountRef.current.get(recipientUsername) || 0) + 1);
         if ((errorMessage.includes('session') || errorMessage.includes('Encryption failed')) && recipientUsername) {
           const retryCount = (pendingRetryMessagesRef.current.get(recipientUsername)?.retryCount || 0) + 1;
-          if (retryCount <= 2) pendingRetryMessagesRef.current.set(recipientUsername, { user, content, replyTo, fileData, messageSignalType, originalMessageId: messageId, editMessageId, retryCount });
+          if (retryCount <= 2) {
+            if (content) { await messageVault.store(messageId, content); }
+            pendingRetryMessagesRef.current.set(recipientUsername, {
+              user,
+              content: '',
+              replyTo,
+              fileData,
+              messageSignalType,
+              originalMessageId: messageId,
+              editMessageId,
+              retryCount
+            });
+          }
           await requestBundleForRetry(recipientUsername, currentUser, getKeysOnDemand, lastSessionBundleReqTsRef);
         }
         logError('SEND', _error);

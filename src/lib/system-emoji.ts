@@ -1,5 +1,6 @@
 import { STORAGE_KEYS } from './database/storage-keys';
 import { SecureDB } from './database/secureDB';
+import { isTauri } from './tauri-bindings';
 
 async function computeIntegrityHash(emojis: ReadonlyArray<string>): Promise<string> {
   const text = emojis.join('');
@@ -291,59 +292,10 @@ function getSecureBridge(): SecureBridgeAPI | null {
   if (typeof window === 'undefined') {
     return null;
   }
-  try {
-    const candidate = (window as any).edgeApi || (window as any).electronAPI;
-    if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) {
-      return null;
-    }
-    if (candidate !== Object.prototype.valueOf.call(candidate)) {
-      return null;
-    }
-    const propNames = Object.getOwnPropertyNames(candidate);
-    if (propNames.length > 5) {
-      return null;
-    }
-    const proto = Object.getPrototypeOf(candidate);
-    if (proto !== Object.prototype && proto !== null) {
-      return null;
-    }
-    const forbiddenProps = ['__proto__', 'constructor', '__defineGetter__'];
-    if (forbiddenProps.some((prop) => prop in candidate)) {
-      return null;
-    }
-    try {
-      Object.getOwnPropertyDescriptor(candidate, 'constructor');
-    } catch {
-      return null;
-    }
-    const fn = candidate.getSystemEmojis;
-    if (typeof fn !== 'function') {
-      return null;
-    }
-    const descriptor = Object.getOwnPropertyDescriptor(candidate, 'getSystemEmojis');
-    if (descriptor && (descriptor.get || descriptor.set)) {
-      return null;
-    }
-    const source = Function.prototype.toString.call(fn);
-    const allowedPatterns = [
-      /native\s*code/i,
-      /Electron\.ipcRenderer/i,
-      /postMessage/i
-    ];
-    if (!source.includes('[native code]') && !allowedPatterns.some((pattern) => pattern.test(source))) {
-      return null;
-    }
-    try {
-      const testResult = fn();
-      if (testResult && typeof testResult.then !== 'function') {
-        return null;
-      }
-    } catch {
-    }
-    return candidate as SecureBridgeAPI;
-  } catch {
+  if (!isTauri()) {
     return null;
   }
+  return null;
 }
 
 import { torNetworkManager } from './transport/tor-network';

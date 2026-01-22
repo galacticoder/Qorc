@@ -1,6 +1,5 @@
 import { RefObject } from "react";
 import { SecureP2PService } from "../../lib/transport/secure-p2p-service";
-import { CryptoUtils } from "../../lib/utils/crypto-utils";
 import type { HybridKeys, PeerCertificateBundle } from "../../lib/types/p2p-types";
 import { RECEIPT_RETENTION_MS } from "../../lib/constants";
 import { SignalType } from "../../lib/types/signal-types";
@@ -28,34 +27,12 @@ export function createSendP2PReadReceipt(
     } catch { }
 
     try {
-      const peerCert = await getPeerCertificate(recipient);
-      if (!peerCert) {
-        return;
-      }
-
       const readReceiptPayload = {
         messageId,
         timestamp: Date.now(),
       };
 
-      const encryptedReceipt = await CryptoUtils.Hybrid.encryptForClient(
-        readReceiptPayload,
-        {
-          kyberPublicBase64: peerCert.kyberPublicKey,
-          dilithiumPublicBase64: peerCert.dilithiumPublicKey,
-          x25519PublicBase64: peerCert.x25519PublicKey,
-        },
-        {
-          to: peerCert.dilithiumPublicKey,
-          from: hybridKeys.dilithium.publicKeyBase64,
-          type: SignalType.READ_RECEIPT,
-          senderDilithiumSecretKey: hybridKeys.dilithium.secretKey,
-          senderDilithiumPublicKey: hybridKeys.dilithium.publicKeyBase64,
-          timestamp: Date.now(),
-        },
-      );
-
-      await refs.p2pServiceRef.current.sendMessage(recipient, encryptedReceipt, SignalType.READ_RECEIPT);
+      await refs.p2pServiceRef.current.sendMessage(recipient, readReceiptPayload, SignalType.READ_RECEIPT);
       try { refs.sentP2PReceiptsRef.current.set(messageId, Date.now()); } catch { }
     } catch { }
   };

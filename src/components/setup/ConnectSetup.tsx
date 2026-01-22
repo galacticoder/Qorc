@@ -9,6 +9,7 @@ import { torNetworkManager } from '../../lib/transport/tor-network';
 import { ShieldCheck, Server, Settings, ChevronDown, ChevronUp, RefreshCw, Loader2 } from 'lucide-react';
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '../ui/collapsible';
 import { toast } from 'sonner';
+import { websocket, p2p } from '../../lib/tauri-bindings';
 
 interface ConnectSetupProps {
   onComplete?: (serverUrl: string) => Promise<void> | void;
@@ -66,8 +67,7 @@ export function ConnectSetup({ onComplete, initialServerUrl = '' }: ConnectSetup
         const initialStatus = await getTorAutoSetup().refreshStatus();
         setStatus(initialStatus);
 
-        const stored = await (window as any).edgeApi?.getServerUrl?.();
-        const storedUrl = typeof stored?.serverUrl === 'string' ? stored.serverUrl : '';
+        const storedUrl = await websocket.getServerUrl();
         const envUrl = (import.meta as any)?.env?.VITE_WS_URL || '';
         let preferred = initialServerUrl || '';
         if (!preferred) {
@@ -112,7 +112,7 @@ export function ConnectSetup({ onComplete, initialServerUrl = '' }: ConnectSetup
     return normalizeToWss(customServerUrl);
   }, [customServerUrl]);
 
-  const canContinue = status.isRunning && !!chosenServerUrl && !isSetupRunning && !isTesting && !isContinuing;
+  const canContinue = status.isRunning && status.isBootstrapped && !!chosenServerUrl && !isSetupRunning && !isTesting && !isContinuing;
 
   const handleAutoSetup = async () => {
     setIsSetupRunning(true);
@@ -129,8 +129,21 @@ export function ConnectSetup({ onComplete, initialServerUrl = '' }: ConnectSetup
         }
       });
       if (success) {
-        const refreshed = await getTorAutoSetup().refreshStatus();
+        // Poll for bootstrapping if not immediate
+        let refreshed = await getTorAutoSetup().refreshStatus();
+        let attempts = 0;
+        while (!refreshed.isBootstrapped && attempts < 30 && refreshed.isRunning) {
+          await new Promise(r => setTimeout(r, 2000));
+          refreshed = await getTorAutoSetup().refreshStatus();
+          setStatus(refreshed);
+          attempts++;
+        }
+
         setStatus(refreshed);
+
+        // Notify backend that Tor is ready
+        await websocket.setTorReady(true, refreshed.socksPort);
+        await p2p.setTorReady(true, refreshed.socksPort);
 
         torNetworkManager.updateConfig({
           enabled: true,
@@ -139,12 +152,6 @@ export function ConnectSetup({ onComplete, initialServerUrl = '' }: ConnectSetup
         });
         await torNetworkManager.initialize();
         (window as any).__TOR_MODE__ = true;
-
-        try {
-          await (window as any).electronAPI?.torSetupComplete?.();
-        } catch (e) {
-          console.warn('[ConnectSetup] Failed to notify Electron of Tor completion:', e);
-        }
       }
     } catch (_error) {
       console.error('[ConnectSetup] Auto-setup failed:', _error);
@@ -157,12 +164,7 @@ export function ConnectSetup({ onComplete, initialServerUrl = '' }: ConnectSetup
   };
 
   const testConnection = async (url: string, timeoutMs = 15000): Promise<void> => {
-    const edgeApi: any = (window as any).edgeApi;
-    if (!edgeApi?.wsProbeConnect) {
-      console.error('[ConnectSetup] wsProbeConnect not available on edgeApi');
-      throw new Error('Electron WebSocket probe is required');
-    }
-    const res = await edgeApi.wsProbeConnect(url, timeoutMs);
+    const res = await websocket.probeConnect(url, timeoutMs);
     if (!res || res.success === false) {
       throw new Error(res?.error || 'Connection failed');
     }
@@ -179,20 +181,6 @@ export function ConnectSetup({ onComplete, initialServerUrl = '' }: ConnectSetup
       });
 
       const ok = await torNetworkManager.initialize();
-
-      if (ok) {
-        try {
-          const edgeApi = (window as any).edgeApi;
-          if (edgeApi?.torSetupComplete) {
-            await edgeApi.torSetupComplete();
-          } else {
-            await (window as any).electronAPI?.torSetupComplete?.();
-          }
-        } catch (e) {
-          console.warn('[ConnectSetup] Failed to notify backend after init:', e);
-        }
-      }
-
       return !!ok;
     } catch {
       return false;
@@ -255,15 +243,7 @@ export function ConnectSetup({ onComplete, initialServerUrl = '' }: ConnectSetup
 
       // Persist server URL
       try {
-        const electronAPI = (window as any).electronAPI;
-        if (electronAPI && electronAPI.setServerUrl) {
-          await electronAPI.setServerUrl(serverUrl);
-        } else {
-          const edgeApi = (window as any).edgeApi;
-          if (edgeApi && edgeApi.setServerUrl) {
-            await edgeApi.setServerUrl(serverUrl);
-          }
-        }
+        await websocket.setServerUrl(serverUrl);
       } catch { }
 
       await (onComplete?.(serverUrl));
@@ -312,7 +292,9 @@ export function ConnectSetup({ onComplete, initialServerUrl = '' }: ConnectSetup
               </div>
               <div className="flex items-center gap-2">
                 <div className="text-sm font-medium text-muted-foreground">
-                  {(status.isRunning && !isSetupRunning) ? 'Active' : 'Inactive'}
+                  {status.isRunning ? (
+                    status.isBootstrapped ? 'Active' : 'Initialising...'
+                  ) : 'Inactive'}
                 </div>
                 {status.isRunning && status.version && status.version !== 'unknown' && (
                   <span className="text-xs font-bold text-muted-foreground/70 animate-in fade-in-0 duration-300">v{status.version}</span>
@@ -321,15 +303,17 @@ export function ConnectSetup({ onComplete, initialServerUrl = '' }: ConnectSetup
             </div>
 
             {/* Setup Button */}
-            {(!status.isRunning || isSetupRunning) && (
+            {(!status.isRunning || isSetupRunning || (status.isRunning && !status.isBootstrapped)) && (
               <Button
                 onClick={handleAutoSetup}
-                disabled={isSetupRunning}
+                disabled={isSetupRunning || (status.isRunning && !status.isBootstrapped)}
                 className="w-full bg-primary/10 hover:bg-primary/20 text-primary border border-primary/20 hover:border-primary/40 transition-all"
                 variant="outline"
               >
-                <RefreshCw className={`w-4 h-4 mr-2 ${isSetupRunning ? 'animate-spin' : ''}`} />
-                {isSetupRunning ? status.currentStep : 'Initialize Tor'}
+                <RefreshCw className={`w-4 h-4 mr-2 ${isSetupRunning || (status.isRunning && !status.isBootstrapped) ? 'animate-spin' : ''}`} />
+                {isSetupRunning ? status.currentStep : 
+                 (status.isRunning && !status.isBootstrapped) ? `Verifying Tor (${status.bootstrapProgress || 0}%)` : 
+                 'Initialize Tor'}
               </Button>
             )}
 

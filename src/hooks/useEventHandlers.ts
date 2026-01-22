@@ -17,6 +17,7 @@ import {
 } from '../lib/constants';
 import type { User } from '../components/chat/messaging/UserList';
 import { SignalType } from '../lib/types/signal-types';
+import { signal } from '../lib/tauri-bindings';
 
 interface UseEventHandlersProps {
   allowEvent: (eventType: string) => boolean;
@@ -62,8 +63,8 @@ export function useEventHandlers({
         const maybeKyber = (hybridKeysRaw as any).kyberPublicBase64;
         const maybeDilithium = (hybridKeysRaw as any).dilithiumPublicBase64;
         const maybeX25519 = (hybridKeysRaw as any).x25519PublicBase64;
-        if ((typeof maybeKyber === 'string' && maybeKyber.length > 10_000) || 
-            (typeof maybeDilithium === 'string' && maybeDilithium.length > 10_000)) return;
+        if ((typeof maybeKyber === 'string' && maybeKyber.length > 10_000) ||
+          (typeof maybeDilithium === 'string' && maybeDilithium.length > 10_000)) return;
         if (typeof maybeX25519 === 'string' && maybeX25519.length > 1_000) return;
 
         const hybridKeys = sanitizeHybridKeys(hybridKeysRaw as any) as any;
@@ -140,22 +141,15 @@ export function useEventHandlers({
 
         const maybeKyber = (hybridPublicKeys as any).kyberPublicBase64;
         const maybeDilithium = (hybridPublicKeys as any).dilithiumPublicBase64;
-        if ((typeof maybeKyber === 'string' && maybeKyber.length > 10_000) || 
-            (typeof maybeDilithium === 'string' && maybeDilithium.length > 10_000)) return;
+        if ((typeof maybeKyber === 'string' && maybeKyber.length > 10_000) ||
+          (typeof maybeDilithium === 'string' && maybeDilithium.length > 10_000)) return;
 
         const sanitized = sanitizeHybridKeys(hybridPublicKeys as any);
         if (!sanitized?.kyberPublicBase64 || !sanitized?.dilithiumPublicBase64) return;
 
         if (sanitized?.kyberPublicBase64 && isValidKyberPublicKeyBase64(sanitized.kyberPublicBase64)) {
           try {
-            if (typeof (window as any).edgeApi?.storePQKeys === 'function') {
-              await (window as any).edgeApi.storePQKeys({
-                username,
-                kyberPublicKey: sanitized.kyberPublicBase64,
-                dilithiumPublicKey: sanitized.dilithiumPublicBase64,
-                x25519PublicKey: sanitized.x25519PublicBase64
-              });
-            }
+            await signal.setPeerKyberKey(username, sanitized.kyberPublicBase64);
           } catch { }
         }
 

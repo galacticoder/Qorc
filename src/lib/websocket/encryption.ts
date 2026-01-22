@@ -34,7 +34,7 @@ export class WebSocketEncryption {
     private context: EncryptionContext,
     private metrics: ConnectionMetrics,
     private recordCircuitBreakerFailure: () => void
-  ) {}
+  ) { }
 
   // Get current session nonce counter
   getSessionNonceCounter(): number {
@@ -315,15 +315,15 @@ export class WebSocketEncryption {
     const currentFingerprint = this.context.sessionKeyMaterial.fingerprint;
     const receivedFingerprint = envelope.sessionFingerprint;
 
-    if (receivedFingerprint !== currentFingerprint) {
-      const now = Date.now();
-      const isWithinGracePeriod = this.context.previousSessionFingerprint &&
-        this.context.sessionTransitionTime &&
-        (now - this.context.sessionTransitionTime) < SESSION_FAILOVER_GRACE_PERIOD_MS;
+    // Check for previous session grace period
+    const now = Date.now();
+    const isWithinGracePeriod = this.context.previousSessionFingerprint &&
+      this.context.sessionTransitionTime &&
+      (now - this.context.sessionTransitionTime) < SESSION_FAILOVER_GRACE_PERIOD_MS;
 
+    if (receivedFingerprint !== currentFingerprint) {
       if (isWithinGracePeriod && receivedFingerprint === this.context.previousSessionFingerprint) {
         if (!this.validateTimestamp(envelope.timestamp)) {
-          this.recordCircuitBreakerFailure();
           return null;
         }
         
@@ -382,6 +382,7 @@ export class WebSocketEncryption {
       );
 
       const decodedText = new TextDecoder().decode(decrypted);
+
       const canonical = JSON.parse(decodedText);
 
       try {
@@ -404,6 +405,7 @@ export class WebSocketEncryption {
 
       return canonical;
     } catch (_error) {
+      console.error('[Encryption] Decrypt execution failed:', _error);
       SecurityAuditLogger.log(SignalType.ERROR, 'ws-decrypt-failed', {
         error: _error instanceof Error ? _error.message : String(_error)
       });

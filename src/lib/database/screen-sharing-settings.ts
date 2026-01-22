@@ -432,51 +432,6 @@ export class ScreenSharingSettingsManager {
     });
   }
 
-  // Get video constraints
-  public async getVideoConstraints(): Promise<MediaTrackConstraints> {
-    await this.ensureSettingsLoaded();
-    const { resolution, frameRate } = this.settings!;
-    const constraints: MediaTrackConstraints = {
-      frameRate: { ideal: frameRate, max: frameRate }
-    };
-   
-    if (!resolution.isNative) {
-      constraints.width = { ideal: resolution.width, max: resolution.width };
-      constraints.height = { ideal: resolution.height, max: resolution.height };
-    }
-    return constraints;
-  }
-
-  // Get Electron video constraints
-  public async getElectronVideoConstraints(): Promise<any> {
-    await this.ensureSettingsLoaded();
-    const { resolution, frameRate } = this.settings!;
-    if (resolution.isNative) {
-      return {
-        mandatory: {
-          chromeMediaSource: 'desktop',
-          minWidth: 1280,
-          maxWidth: 3840,
-          minHeight: 720,
-          maxHeight: 2160,
-          minFrameRate: Math.max(1, frameRate - 2),
-          maxFrameRate: frameRate
-        }
-      };
-    }
-    return {
-      mandatory: {
-        chromeMediaSource: 'desktop',
-        minWidth: resolution.width,
-        maxWidth: resolution.width,
-        minHeight: resolution.height,
-        maxHeight: resolution.height,
-        minFrameRate: Math.max(1, frameRate - 2),
-        maxFrameRate: frameRate
-      }
-    };
-  }
-
   // Dispose of the settings manager
   public dispose(): void {
     this.listeners.clear();

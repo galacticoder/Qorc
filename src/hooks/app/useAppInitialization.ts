@@ -8,6 +8,9 @@ import { offlineMessageQueue } from '../../lib/websocket/offline-message-handler
 import { syncEncryptedStorage } from '../../lib/database/encrypted-storage';
 import websocketClient from '../../lib/websocket/websocket';
 import { torNetworkManager } from '../../lib/transport/tor-network';
+import { notifications, session } from '../../lib/tauri-bindings';
+import { profilePictureSystem } from '../../lib/avatar/profile-picture-system';
+import { messageVault } from '../../lib/security/message-vault';
 
 interface AppInitializationProps {
   Authentication: {
@@ -40,7 +43,12 @@ export function useAppInitialization({
   flushPendingSaves,
   setShowSettings,
 }: AppInitializationProps) {
-  // Set offline message callback once
+  // Initialize message vault
+  useEffect(() => {
+    messageVault.initialize();
+  }, []);
+
+  // Set offline message callback
   const offlineCallbackSetRef = useRef(false);
   useEffect(() => {
     if (offlineCallbackSetRef.current) return;
@@ -141,25 +149,18 @@ export function useAppInitialization({
   // Initialize profile picture system
   useEffect(() => {
     if (Database.secureDBRef.current) {
-      Promise.all([
-        import('../../lib/avatar/profile-picture-system'),
-        import('../../lib/websocket/websocket')
-      ]).then(([{ profilePictureSystem }, { default: _websocketClient }]) => {
-        profilePictureSystem.setSecureDB(Database.secureDBRef.current);
-        profilePictureSystem.initialize().catch(() => { });
-      }).catch(() => { });
+      profilePictureSystem.setSecureDB(Database.secureDBRef.current);
+      profilePictureSystem.initialize().catch(() => { });
     }
   }, [Database.secureDBRef.current]);
 
   // Set keys for profile picture system
   useEffect(() => {
     if (Authentication.hybridKeysRef.current?.kyber?.publicKeyBase64 && Authentication.hybridKeysRef.current?.kyber?.secretKey) {
-      import('../../lib/avatar/profile-picture-system').then(({ profilePictureSystem }) => {
-        profilePictureSystem.setKeys(
-          Authentication.hybridKeysRef.current!.kyber!.publicKeyBase64,
-          Authentication.hybridKeysRef.current!.kyber!.secretKey
-        );
-      });
+      profilePictureSystem.setKeys(
+        Authentication.hybridKeysRef.current!.kyber!.publicKeyBase64,
+        Authentication.hybridKeysRef.current!.kyber!.secretKey
+      );
     }
   }, [Authentication.hybridKeysRef.current]);
 
@@ -210,7 +211,7 @@ export function useAppInitialization({
       if (stored) {
         const parsed = JSON.parse(stored);
         if (parsed.notifications) {
-          (window as any).edgeApi?.setNotificationsEnabled?.(parsed.notifications.desktop !== false).catch(() => { });
+          notifications.setEnabled(parsed.notifications.desktop !== false).catch(() => { });
         }
       }
     } catch { }
@@ -232,7 +233,7 @@ export function useAppInitialization({
         syncEncryptedStorage.getItem('last_authenticated_username');
       if (currentUsername) {
         try {
-          await (window as any).edgeApi?.setBackgroundUsername?.(currentUsername);
+          await session.setBackgroundState(true);
         } catch (e) {
           console.error('[App] Failed to store background username:', e);
         }
@@ -241,7 +242,12 @@ export function useAppInitialization({
       try {
         const sessionKeys = websocketClient.exportSessionKeys();
         if (sessionKeys) {
-          await (window as any).edgeApi?.storePQSessionKeys?.(sessionKeys);
+          await session.storePQKeys({
+            session_id: sessionKeys.sessionId,
+            aes_key: sessionKeys.sendKey,
+            mac_key: sessionKeys.recvKey,
+            created_at: sessionKeys.establishedAt,
+          });
         }
       } catch (e) {
         console.error('[App] Failed to store PQ session keys:', e);

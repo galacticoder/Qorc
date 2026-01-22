@@ -30,11 +30,16 @@ export function useUnifiedUsernameDisplay({
   username,
   getDisplayUsername,
   fallbackToOriginal = true,
+  originalUsername,
   resolveTimeoutMs = USERNAME_DISPLAY_RESOLVE_TIMEOUT_MS,
 }: UseUnifiedUsernameDisplayProps): UseUnifiedUsernameDisplayReturn {
   const sanitizedUsername = useMemo(() => sanitizeDbUsername(username) ?? '', [username]);
   const [displayName, setDisplayName] = useState(() => {
     if (!sanitizedUsername) return '';
+    if (originalUsername && !USERNAME_HEX_PATTERN.test(originalUsername)) {
+      setCachedDisplayName(sanitizedUsername, originalUsername);
+      return originalUsername;
+    }
     return fallbackToOriginal ? sanitizedUsername : anonymizeUsername(sanitizedUsername);
   });
   const [isLoading, setIsLoading] = useState(false);
@@ -44,6 +49,13 @@ export function useUnifiedUsernameDisplay({
   const resolveUsername = useCallback(async () => {
     if (!sanitizedUsername) {
       setDisplayName('');
+      setError(null);
+      return;
+    }
+
+    if (originalUsername && !USERNAME_HEX_PATTERN.test(originalUsername)) {
+      setDisplayName(originalUsername);
+      setCachedDisplayName(sanitizedUsername, originalUsername);
       setError(null);
       return;
     }
@@ -115,7 +127,7 @@ export function useUnifiedUsernameDisplay({
     } finally {
       setIsLoading(false);
     }
-  }, [fallbackToOriginal, getDisplayUsername, sanitizedUsername, resolveTimeoutMs]);
+  }, [fallbackToOriginal, getDisplayUsername, sanitizedUsername, originalUsername, resolveTimeoutMs]);
 
   const retry = useCallback(() => {
     resolveUsername();

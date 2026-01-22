@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /*
- * Starts the Electron client
+ * Rebuilds and starts the Tauri client
  */
 
 const fs = require('fs');
@@ -11,14 +11,14 @@ const repoRoot = path.resolve(__dirname, '..');
 function logErr(...args) { console.error('[CLIENT]', ...args); }
 
 if (process.argv.slice(2).some(arg => arg === '-h' || arg === '--help')) {
-    console.log('Usage: node start-client.cjs - Starts Qor-Chat client');
+    console.log('Usage: node start-client.cjs - Starts Qor-Chat client (Tauri)');
     console.log('Prerequisites: Run `node scripts/install-deps.cjs --client` first');
     process.exit(0);
 }
 
 process.chdir(repoRoot);
 
-const criticalDeps = ['pnpm'];
+const criticalDeps = ['pnpm', 'cargo'];
 const missing = criticalDeps.filter(cmd => {
     try {
         const checkCmd = process.platform === 'win32' ? 'where' : 'command -v';
@@ -31,79 +31,52 @@ const missing = criticalDeps.filter(cmd => {
 
 if (missing.length > 0) {
     logErr(`Missing required dependencies: ${missing.join(', ')}`);
-    logErr('Run: node scripts/install-deps.cjs --client');
+    logErr('Please ensure Node.js, pnpm, and Rust are installed.');
     process.exit(1);
 }
 
-const configFiles = [
-    'package.json',
-    'postcss.config.js',
-    'tailwind.config.ts',
-    'vite.config.ts',
-    'tsconfig.json',
-    'tsconfig.app.json',
-    'tsconfig.node.json'
-];
-
-for (const file of configFiles) {
-    const target = path.join(repoRoot, file);
-    const source = path.join(repoRoot, 'config', file);
-
-    try {
-        fs.unlinkSync(target);
-    } catch {
-    }
-
-    try {
-        if (fs.existsSync(source)) {
-            fs.linkSync(source, target);
-        }
-    } catch (err) {
-        try {
-            const relativePath = path.relative(path.dirname(target), source);
-            fs.symlinkSync(relativePath, target);
-        } catch {
-            logErr(`Failed to link ${file}:`, err.message);
-        }
-    }
-}
-
 const nodeModulesPath = path.join(repoRoot, 'node_modules');
-const pnpmLockPath = path.join(repoRoot, 'config', 'pnpm-lock.yaml');
-const modulesYamlPath = path.join(nodeModulesPath, '.modules.yaml');
-
-let needsInstall = false;
-
 if (!fs.existsSync(nodeModulesPath)) {
-    needsInstall = true;
-} else if (fs.existsSync(pnpmLockPath) && fs.existsSync(modulesYamlPath)) {
-    const lockStat = fs.statSync(pnpmLockPath);
-    const modulesStat = fs.statSync(modulesYamlPath);
-    if (lockStat.mtime > modulesStat.mtime) needsInstall = true;
+    console.log('[CLIENT] Installing dependencies...');
+    execSync('pnpm install', { stdio: 'inherit', cwd: repoRoot });
 }
 
-if (needsInstall) {
-    execSync('pnpm install --prefer-offline', { stdio: 'inherit', cwd: repoRoot });
-}
+console.log('[CLIENT] Building Tauri app (release)...');
 
-if (process.platform === 'linux') {
-    try {
-        const pnpmRoot = execSync('pnpm root', { encoding: 'utf8', cwd: repoRoot }).trim();
-        const chromeSandbox = path.join(pnpmRoot, 'electron', 'dist', 'chrome-sandbox');
-
-        if (fs.existsSync(chromeSandbox)) {
-            try {
-                execSync(`sudo chown root:root "${chromeSandbox}"`, { stdio: 'ignore' });
-                execSync(`sudo chmod 4755 "${chromeSandbox}"`, { stdio: 'ignore' });
-            } catch { }
-        }
-    } catch { }
-}
-
-const electronProc = spawn('pnpm', ['electron'], {
+const buildProc = spawn('pnpm', ['tauri', 'build'], {
     stdio: 'inherit',
     cwd: repoRoot,
-    shell: true
+    shell: true,
+    env: {
+        ...process.env,
+    }
 });
 
-electronProc.on('exit', code => process.exit(code));
+buildProc.on('exit', code => {
+    if (code !== 0) {
+        logErr(`Tauri build failed with code ${code}`);
+        process.exit(code || 1);
+    }
+
+    const binName = process.platform === 'win32' ? 'qor-chat.exe' : 'qor-chat';
+    const releaseBin = path.join(repoRoot, 'src-tauri', 'target', 'release', binName);
+    const debugBin = path.join(repoRoot, 'src-tauri', 'target', 'debug', binName);
+    const runPath = fs.existsSync(releaseBin) ? releaseBin : debugBin;
+
+    if (!fs.existsSync(runPath)) {
+        logErr('Built Tauri binary not found. Expected at:', releaseBin, 'or', debugBin);
+        process.exit(1);
+    }
+
+    console.log('[CLIENT] Launching built app...');
+    const runProc = spawn(runPath, [], {
+        stdio: 'inherit',
+        cwd: repoRoot,
+        shell: false,
+        env: {
+            ...process.env,
+        }
+    });
+
+    runProc.on('exit', exitCode => process.exit(exitCode));
+});

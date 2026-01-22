@@ -39,7 +39,7 @@ const moveScriptsToBody = (): Plugin => ({
 })
 
 export default defineConfig({
-  plugins: [stripCrossorigin(), react(), moveScriptsToBody()],
+  plugins: [stripCrossorigin(), react({ babel: { plugins: ['babel-plugin-react-compiler'] } }), moveScriptsToBody()],
   base: './',
   server: {
     port: 5173,

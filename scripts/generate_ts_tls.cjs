@@ -15,7 +15,7 @@ const repoRoot = path.resolve(__dirname, '..');
 const CERT_DIR = path.join(repoRoot, 'server', 'config', 'certs');
 const ENV_PATH = path.join(repoRoot, '.env');
 const DB_TLS_LINES = [
-  'DB_CA_CERT_PATH=/app/postgres-certs/root.crt',
+  'DB_CA_CERT_PATH=postgres-certs/root.crt',
   'DB_TLS_SERVERNAME=postgres'
 ];
 const AUTH_WAIT_SECONDS = 120;
@@ -48,13 +48,12 @@ async function mergeEnv(targetPath, newLines, ownership = null) {
   });
 
   const merged = [...map.values()].join('\n') + '\n';
-  const tmp = `${targetPath}.tmp`;
-  await fs.promises.writeFile(tmp, merged, 'utf8');
+  await fs.promises.writeFile(targetPath, merged, 'utf8');
+
   if (ownership) {
     const { uid, gid } = ownership;
-    try { await fs.promises.chown(tmp, uid, gid); } catch { }
+    try { await fs.promises.chown(targetPath, uid, gid); } catch { }
   }
-  await fs.promises.rename(tmp, targetPath);
 }
 
 async function getTailscaleDNS() {
@@ -238,13 +237,13 @@ async function tailscaleSupportsCertFiles() {
 
       const currentCert = process.env.TLS_CERT_PATH;
       const currentKey = process.env.TLS_KEY_PATH;
-      
+
       const envCertMatch = currentCert && (currentCert === certPath || currentCert === `/app/server/config/certs/${dns}.crt`);
       const envKeyMatch = currentKey && (currentKey === keyPath || currentKey === `/app/server/config/certs/${dns}.key`);
 
       if (envCertMatch && envKeyMatch) {
-          console.log('[INFO] .env already points to these certificates.');
-          process.exit(0);
+        console.log('[INFO] .env already points to these certificates.');
+        process.exit(0);
       }
 
       const readline = require('readline');
@@ -262,10 +261,12 @@ async function tailscaleSupportsCertFiles() {
 
       if (!answer.trim().match(/^y(es)?$/i)) {
         console.log('[INFO] Keeping existing certificates');
-        
+
+        const relCert = path.relative(repoRoot, certPath);
+        const relKey = path.relative(repoRoot, keyPath);
         const tlsLines = [
-          `TLS_CERT_PATH=/app/server/config/certs/${dns}.crt`,
-          `TLS_KEY_PATH=/app/server/config/certs/${dns}.key`
+          `TLS_CERT_PATH=${relCert}`,
+          `TLS_KEY_PATH=${relKey}`
         ];
         try {
           await mergeEnv(ENV_PATH, [...tlsLines, ...DB_TLS_LINES, 'SERVER_HOST=127.0.0.1']);
@@ -273,6 +274,8 @@ async function tailscaleSupportsCertFiles() {
         } catch (e) {
           console.log('[WARN] Could not update .env with existing paths');
         }
+        
+        console.log(`[JSON_PATHS] ${JSON.stringify({ TLS_CERT_PATH: relCert, TLS_KEY_PATH: relKey })}`);
         process.exit(0);
       }
 
@@ -310,9 +313,12 @@ async function tailscaleSupportsCertFiles() {
     console.log('Cert:', certPath);
     console.log('Key :', keyPath, '(600)');
 
+    const relCert = path.relative(repoRoot, certPath);
+    const relKey = path.relative(repoRoot, keyPath);
+
     const tlsLines = [
-      `TLS_CERT_PATH=/app/server/config/certs/${dns}.crt`,
-      `TLS_KEY_PATH=/app/server/config/certs/${dns}.key`
+      `TLS_CERT_PATH=${relCert}`,
+      `TLS_KEY_PATH=${relKey}`
     ];
 
     try {
@@ -321,6 +327,7 @@ async function tailscaleSupportsCertFiles() {
         : null;
       await mergeEnv(ENV_PATH, [...tlsLines, ...DB_TLS_LINES, 'SERVER_HOST=127.0.0.1'], ownership);
       console.log('[OK] Updated .env with TLS_CERT_PATH, TLS_KEY_PATH, SERVER_HOST');
+      console.log(`[JSON_PATHS] ${JSON.stringify({ TLS_CERT_PATH: relCert, TLS_KEY_PATH: relKey })}`);
     } catch (err) {
       if (err.code === 'EACCES' && process.platform !== 'win32' && findInPath('sudo')) {
         const chownSpec = (process.getuid && process.getgid)
@@ -333,6 +340,8 @@ async function tailscaleSupportsCertFiles() {
           await execFileAsync('sudo', ['bash', '-lc', cmd]);
           try { await fsp.unlink(tmp); } catch { }
           console.log('[OK] Updated .env with TLS_CERT_PATH, TLS_KEY_PATH, SERVER_HOST');
+          // Machine-readable output for start-server.cjs
+          console.log(`[JSON_PATHS] ${JSON.stringify({ TLS_CERT_PATH: relCert, TLS_KEY_PATH: relKey })}`);
           return;
         } catch (e2) {
           try { await fsp.unlink(tmp); } catch { }
@@ -341,9 +350,10 @@ async function tailscaleSupportsCertFiles() {
       }
       console.log('[WARN] Could not write .env (permission denied)');
       console.log('[INFO] Manually add to .env:');
-      console.log(`  TLS_CERT_PATH=${certPath}`);
-      console.log(`  TLS_KEY_PATH=${keyPath}`);
+      console.log(`  TLS_CERT_PATH=${relCert}`);
+      console.log(`  TLS_KEY_PATH=${relKey}`);
       console.log('  SERVER_HOST=127.0.0.1');
+      console.log(`[JSON_PATHS] ${JSON.stringify({ TLS_CERT_PATH: relCert, TLS_KEY_PATH: relKey })}`);
     }
   } catch (e) {
     if (e && String(e.message || e) === 'aborted') {

@@ -16,6 +16,7 @@ import {
 } from './receipts';
 import { validateHybridKeys } from './validation';
 import { unifiedSignalTransport } from '../../lib/transport/unified-signal-transport';
+import { signal } from '../../lib/tauri-bindings';
 
 export function useMessageReceipts(
   messages: Message[],
@@ -186,15 +187,13 @@ export function useMessageReceipts(
           return;
         }
 
-        const hybridKeys = user.hybridPublicKeys;
+        const sessionCheck = await signal.hasSession(
+          currentUsername,
+          safeSender,
+          1
+        );
 
-        const sessionCheck = await (window as any).edgeApi?.hasSession?.({
-          selfUsername: currentUsername,
-          peerUsername: safeSender,
-          deviceId: 1,
-        });
-
-        if (!sessionCheck?.hasSession) {
+        if (!sessionCheck) {
           try {
             await websocketClient.sendSecureControlMessage?.({
               type: SignalType.LIBSIGNAL_REQUEST_BUNDLE,
@@ -277,6 +276,7 @@ export function useMessageReceipts(
       const safeMessageId = sanitizeMessageId(
         rawId.startsWith(DELIVERY_RECEIPT_PREFIX) ? rawId.replace(DELIVERY_RECEIPT_PREFIX, '') : rawId
       );
+
       if (!safeMessageId) {
         return;
       }
@@ -317,14 +317,17 @@ export function useMessageReceipts(
   useEffect(() => {
     const handler = async (event: Event) => {
       const customEvent = event as CustomEvent;
+
       if (!isReceiptEventDetail(customEvent.detail)) {
         return;
       }
+
       const detail = customEvent.detail;
       const rawId = detail.messageId || '';
       const safeMessageId = sanitizeMessageId(
         rawId.startsWith(READ_RECEIPT_PREFIX) ? rawId.replace(READ_RECEIPT_PREFIX, '') : rawId
       );
+      
       if (!safeMessageId) {
         return;
       }

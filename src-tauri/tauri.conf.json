@@ -1,0 +1,123 @@
+{
+    "$schema": "https://schema.tauri.app/config/2",
+    "productName": "Qor-Chat",
+    "version": "0.0.1",
+    "identifier": "com.qor.chat",
+    "build": {
+        "frontendDist": "../dist",
+        "beforeBuildCommand": "npm run build"
+    },
+    "app": {
+        "withGlobalTauri": false,
+        "trayIcon": {
+            "iconPath": "icons/tray-icon.png",
+            "iconAsTemplate": true
+        },
+        "windows": [
+            {
+                "title": "Qor Chat",
+                "width": 1200,
+                "height": 800,
+                "minWidth": 800,
+                "minHeight": 600,
+                "resizable": true,
+                "fullscreen": false,
+                "center": true,
+                "visible": false,
+                "decorations": true,
+                "transparent": false,
+                "focus": true,
+                "devtools": true,
+                "shadow": true
+            }
+        ],
+        "security": {
+            "csp": {
+                "default-src": "'self'",
+                "script-src": "'self' 'wasm-unsafe-eval'",
+                "style-src": "'self' 'unsafe-inline'",
+                "style-src-elem": "'self' 'unsafe-inline'",
+                "style-src-attr": "'unsafe-inline'",
+                "img-src": "'self' data: blob: https:",
+                "media-src": "'self' blob: data: mediastream:",
+                "connect-src": "* 'self' wss: ws: https: http: blob: ipc: ipc://localhost http://ipc.localhost https://ipc.localhost",
+                "font-src": "'self' data:",
+                "object-src": "'none'",
+                "base-uri": "'self'",
+                "frame-ancestors": "'none'"
+            },
+            "dangerousDisableAssetCspModification": false,
+            "freezePrototype": true,
+            "pattern": {
+                "use": "brownfield"
+            }
+        }
+    },
+    "bundle": {
+        "active": true,
+        "targets": [
+            "deb",
+            "rpm"
+        ],
+        "icon": [
+            "icons/32x32.png",
+            "icons/128x128.png",
+            "icons/128x128@2x.png",
+            "icons/icon.icns",
+            "icons/icon.ico"
+        ],
+        "resources": [
+            "tor-bundles/**/*"
+        ],
+        "category": "SocialNetworking",
+        "shortDescription": "Secure messaging with post-quantum cryptography",
+        "longDescription": "Qor-Chat is a secure messaging application designed for maximum privacy and security, featuring end-to-end encryption with post-quantum cryptography, Signal Protocol, and Tor integration.",
+        "copyright": "Copyright © 2025 galacticoderr",
+        "linux": {
+            "appimage": {
+                "bundleMediaFramework": true
+            },
+            "deb": {
+                "depends": [
+                    "libwebkit2gtk-4.1-0",
+                    "libgtk-3-0"
+                ]
+            },
+            "rpm": {
+                "depends": [
+                    "webkit2gtk4.1",
+                    "gtk3"
+                ]
+            }
+        },
+        "macOS": {
+            "minimumSystemVersion": "10.15",
+            "exceptionDomain": "",
+            "signingIdentity": null,
+            "entitlements": null
+        },
+        "windows": {
+            "certificateThumbprint": null,
+            "tsp": false,
+            "webviewInstallMode": {
+                "type": "downloadBootstrapper"
+            },
+            "nsis": {
+                "installerIcon": "icons/icon.ico",
+                "headerImage": null,
+                "sidebarImage": null,
+                "installMode": "currentUser",
+                "languages": [
+                    "English"
+                ],
+                "displayLanguageSelector": false
+            }
+        }
+    },
+    "plugins": {
+        "shell": {
+            "open": "^https?://"
+        },
+        "fs": {}
+    }
+}

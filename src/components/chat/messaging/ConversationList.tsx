@@ -11,6 +11,9 @@ import { isPlainObject, hasPrototypePollutionKeys, sanitizeUiText } from "../../
 import { EventType } from "../../../lib/types/event-types";
 import { UI_CALL_STATUS_RATE_WINDOW_MS, UI_CALL_STATUS_RATE_MAX, MAX_UI_CALL_STATUS_PEER_LENGTH, MAX_UI_CALL_STATUS_VALUE_LENGTH } from "../../../lib/constants";
 import { formatRelativeAge } from "../../../lib/utils/date-utils";
+import { SecureCanvasText } from "./SecureCanvasText";
+import { UnreadIndicator } from "./UnreadIndicator";
+import { useUnifiedUsernameDisplay } from "../../../hooks/database/useUnifiedUsernameDisplay";
 
 export interface Conversation {
   readonly id: string;
@@ -20,6 +23,7 @@ export interface Conversation {
   readonly lastMessageTime?: Date;
   readonly unreadCount?: number;
   readonly displayName?: string;
+  readonly secureContentId?: string;
 }
 
 interface ConversationListProps {
@@ -66,38 +70,14 @@ const ConversationItem = memo<ConversationItemProps>(({
   callStatus,
   getDisplayUsername
 }) => {
-  const [resolvedName, setResolvedName] = useState<string | null>(null);
+  const { displayName: resolvedName } = useUnifiedUsernameDisplay({
+    username: conversation.username,
+    getDisplayUsername,
+    originalUsername: conversation.displayName,
+    fallbackToOriginal: true
+  });
 
-  const resolverRef = React.useRef(getDisplayUsername);
-  useEffect(() => { resolverRef.current = getDisplayUsername; }, [getDisplayUsername]);
-
-  useEffect(() => {
-    let ignore = false;
-
-    const resolveName = async () => {
-      try {
-        if (resolverRef.current && typeof conversation.username === 'string') {
-          const dn = await resolverRef.current(conversation.username);
-          if (!ignore && typeof dn === 'string' && dn.trim().length > 0) {
-            setResolvedName(dn);
-          }
-        }
-      } catch { }
-    };
-
-    resolveName();
-    return () => { ignore = true; };
-  }, [conversation.username]);
-
-  const displayName = useMemo(() => {
-    if (conversation.displayName && conversation.displayName.trim().length > 0) {
-      return conversation.displayName;
-    }
-    if (resolvedName && resolvedName.trim().length > 0) {
-      return resolvedName;
-    }
-    return anonymize(conversation.username);
-  }, [conversation.displayName, conversation.username, resolvedName]);
+  const displayName = resolvedName || anonymize(conversation.username);
 
   // Handle conversation selection
   const handleClick = useCallback(() => {
@@ -153,7 +133,10 @@ const ConversationItem = memo<ConversationItemProps>(({
       <div className="flex-1 min-w-0 w-0">
         <div className="flex items-center gap-2 mb-1 min-w-0 w-full">
           <span
-            className="font-medium text-sm truncate flex-1 min-w-0 block select-none"
+            className={cn(
+              "text-sm truncate flex-1 min-w-0 block select-none",
+              !isSelected && (conversation.unreadCount ?? 0) > 0 ? "font-bold" : "font-medium"
+            )}
             style={{ color: isSelected ? 'white' : 'var(--color-text-primary)' }}
             title={displayName}
           >
@@ -161,7 +144,10 @@ const ConversationItem = memo<ConversationItemProps>(({
           </span>
           {conversation.lastMessageTime && (
             <span
-              className="text-xs flex-shrink-0 select-none"
+              className={cn(
+                "text-xs flex-shrink-0 select-none",
+                !isSelected && (conversation.unreadCount ?? 0) > 0 && "font-bold"
+              )}
               style={{ color: isSelected ? 'rgba(255, 255, 255, 0.7)' : 'var(--color-text-secondary)' }}
             >
               {formatRelativeAge(conversation.lastMessageTime)}
@@ -169,15 +155,25 @@ const ConversationItem = memo<ConversationItemProps>(({
           )}
         </div>
 
-        {conversation.lastMessage && (
+        {/* Show unread indicator if there are unread messages and conversation is not selected */}
+        {!isSelected && (conversation.unreadCount ?? 0) > 0 ? (
+          <div className="text-xs pr-2 select-none">
+            <UnreadIndicator count={conversation.unreadCount ?? 0} isSelected={isSelected} />
+          </div>
+        ) : (conversation.lastMessage || conversation.secureContentId) ? (
           <div
             className="text-xs truncate pr-2 select-none"
             style={{ color: isSelected ? 'rgba(255, 255, 255, 0.8)' : 'var(--color-text-secondary)' }}
             title={conversation.lastMessage}
           >
-            {conversation.lastMessage.replace(conversation.username, displayName)}
+            <SecureCanvasText
+              messageId={conversation.secureContentId || conversation.id}
+              maxWidth={200}
+              fontSize={12}
+              color="inherit"
+            />
           </div>
-        )}
+        ) : null}
       </div>
 
       {(callStatus || onRemove) && (

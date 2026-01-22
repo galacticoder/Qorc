@@ -1,5 +1,4 @@
 import { SignalType } from '../../lib/types/signal-types';
-import { EventType } from '../../lib/types/event-types';
 import websocketClient from '../../lib/websocket/websocket';
 import { unifiedSignalTransport } from '../../lib/transport/unified-signal-transport';
 import type { FailedDeliveryReceipt, HybridKeys, UserWithHybridKeys } from '../../lib/types/message-handling-types';
@@ -11,7 +10,7 @@ export const createDeliveryReceiptPayload = (
   fromUsername: string,
   toUsername: string
 ): Record<string, unknown> => ({
-  messageId: `${DELIVERY_RECEIPT_PREFIX}-${messageId}`,
+  messageId: `${DELIVERY_RECEIPT_PREFIX}${messageId}`,
   from: fromUsername,
   to: toUsername,
   content: SignalType.DELIVERY_RECEIPT,
@@ -31,74 +30,29 @@ export const sendEncryptedDeliveryReceipt = async (
   hybrid: HybridKeys | null,
   failedDeliveryReceiptsRef: React.RefObject<Map<string, FailedDeliveryReceipt>>
 ): Promise<boolean> => {
-  if (!hybrid || !hybrid.dilithiumPublicBase64) {
-    return false;
-  }
-
   try {
     const deliveryReceiptData = createDeliveryReceiptPayload(messageId, currentUser, senderUsername);
 
-    let encryptedMessage = await (window as any).edgeApi?.encrypt?.({
-      fromUsername: currentUser,
-      toUsername: senderUsername,
-      plaintext: JSON.stringify(deliveryReceiptData),
-      recipientKyberPublicKey: kyber,
-      recipientHybridKeys: hybrid || undefined
-    });
+    const result = await unifiedSignalTransport.send(
+      senderUsername,
+      deliveryReceiptData,
+      SignalType.DELIVERY_RECEIPT
+    );
 
-    if (!encryptedMessage?.success || !encryptedMessage?.encryptedPayload) {
-      const errMsg = String(encryptedMessage?.error || '');
-      if (/session|no valid sessions|no session|invalid whisper message|decryption failed/i.test(errMsg)) {
-        const quickWait = new Promise<void>((resolve) => {
-          let settled = false;
-          const timeout = setTimeout(() => { if (!settled) { settled = true; resolve(); } }, 1500);
-          const onReady = (evt: Event) => {
-            const d = (evt as CustomEvent).detail;
-            if (d?.peer === senderUsername) {
-              if (!settled) { settled = true; clearTimeout(timeout); }
-              resolve();
-            }
-          };
-          window.addEventListener(EventType.LIBSIGNAL_SESSION_READY, onReady as EventListener, { once: true });
-        });
-        try { await websocketClient.sendSecureControlMessage({ type: SignalType.LIBSIGNAL_REQUEST_BUNDLE, username: senderUsername }); } catch { }
-        await quickWait;
-        try {
-          encryptedMessage = await (window as any).edgeApi?.encrypt?.({
-            fromUsername: currentUser,
-            toUsername: senderUsername,
-            plaintext: JSON.stringify(deliveryReceiptData),
-            recipientKyberPublicKey: kyber,
-            recipientHybridKeys: hybrid || undefined
-          });
-        } catch { }
-      }
-
-      if (!encryptedMessage?.success || !encryptedMessage?.encryptedPayload) {
-        const receiptKey = `${senderUsername}:${messageId}`;
-        const existing = failedDeliveryReceiptsRef.current.get(receiptKey);
-        const attempts = (existing?.attempts || 0) + 1;
-        if (attempts <= 3) {
-          failedDeliveryReceiptsRef.current.set(receiptKey, {
-            messageId,
-            peerUsername: senderUsername,
-            timestamp: Date.now(),
-            attempts
-          });
-        }
-        return false;
-      }
+    if (result.success) {
+      const receiptKey = `${senderUsername}:${messageId}`;
+      failedDeliveryReceiptsRef.current.delete(receiptKey);
+      return true;
+    } else {
+      throw new Error(result.error || 'Transport send failed');
+    }
+  } catch (_error: any) {
+    // Attempt session healing if it looks like a session error
+    const errMsg = _error?.message || String(_error);
+    if (/session|no valid sessions|no session|invalid whisper message|decryption failed|Secure fallback envelope required/i.test(errMsg)) {
+      try { await websocketClient.sendSecureControlMessage({ type: SignalType.LIBSIGNAL_REQUEST_BUNDLE, username: senderUsername }); } catch { }
     }
 
-    await unifiedSignalTransport.send(senderUsername, {
-      messageId: `${DELIVERY_RECEIPT_PREFIX}-${messageId}`,
-      encryptedPayload: encryptedMessage.encryptedPayload
-    }, SignalType.ENCRYPTED_MESSAGE);
-
-    const receiptKey = `${senderUsername}:${messageId}`;
-    failedDeliveryReceiptsRef.current.delete(receiptKey);
-    return true;
-  } catch (_error) {
     console.error('[EncryptedMessageHandler] Failed to send delivery receipt:', _error);
     const receiptKey = `${senderUsername}:${messageId}`;
     const existing = failedDeliveryReceiptsRef.current.get(receiptKey);
@@ -132,40 +86,20 @@ export const retryFailedDeliveryReceipts = async (
 
   if (receiptsToRetry.length === 0) return;
 
-  const keys = await getKeysOnDemand?.();
-  if (!keys?.kyber?.publicKeyBase64 || !keys?.dilithium?.secretKey) return;
-
-  const user = usersRef?.current?.find?.((u: any) => u.username === peerUsername);
-  if (!user?.hybridPublicKeys) return;
-
-  const hybrid = user.hybridPublicKeys;
-  const kyber = hybrid?.kyberPublicBase64;
-
   for (const { key, data } of receiptsToRetry) {
     try {
       const deliveryReceiptData = createDeliveryReceiptPayload(data.messageId, loginUsernameRef.current || '', peerUsername);
 
-      const encryptedMessage = await (window as any).edgeApi?.encrypt?.({
-        fromUsername: loginUsernameRef.current,
-        toUsername: peerUsername,
-        plaintext: JSON.stringify(deliveryReceiptData),
-        recipientKyberPublicKey: kyber,
-        recipientHybridKeys: hybrid
-      });
+      const result = await unifiedSignalTransport.send(
+        peerUsername,
+        deliveryReceiptData,
+        SignalType.DELIVERY_RECEIPT
+      );
 
-      if (encryptedMessage?.success && encryptedMessage?.encryptedPayload) {
-        await unifiedSignalTransport.send(peerUsername, {
-          messageId: `${DELIVERY_RECEIPT_PREFIX}-${data.messageId}`,
-          encryptedPayload: encryptedMessage.encryptedPayload
-        }, SignalType.ENCRYPTED_MESSAGE);
+      if (result.success) {
         failedDeliveryReceiptsRef.current.delete(key);
       } else {
-        data.attempts++;
-        if (data.attempts > 3) {
-          failedDeliveryReceiptsRef.current.delete(key);
-        } else {
-          failedDeliveryReceiptsRef.current.set(key, data);
-        }
+        throw new Error(result.error);
       }
     } catch (_error) {
       console.error(`[EncryptedMessageHandler] Failed to retry delivery receipt:`, _error);
