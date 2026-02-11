@@ -4,7 +4,7 @@
 
 import { CryptoUtils } from '../utils/crypto-utils';
 import { SecureDB } from '../database/secureDB';
-import { pseudonymizeUsernameWithCache } from '../database/username-hash';
+import { computeBlindUserId } from '../utils/auth-utils';
 import { isPlainObject, hasPrototypePollutionKeys } from '../sanitizers';
 import { hexToBytes, bytesToHex, validateUsername, isPseudonymizedUsername } from '../utils/blocking-utils';
 import { BlockToken, BlockedUser, EncryptedBlockList, KeyMaterial } from '../types/blocking-types';
@@ -21,7 +21,7 @@ export const generateUserHash = async (username: string, secureDB?: SecureDB): P
   if (isPseudonymizedUsername(username)) {
     return username.toLowerCase();
   }
-  return pseudonymizeUsernameWithCache(username, secureDB);
+  return computeBlindUserId(username);
 };
 
 export const generateBlockToken = async (

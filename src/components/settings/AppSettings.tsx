@@ -21,7 +21,6 @@ import { DataManagementSettings } from './sections/DataManagementSettings';
 interface AppSettingsProps {
   passphraseRef?: React.RefObject<string>;
   kyberSecretRef?: React.RefObject<Uint8Array | null>;
-  getDisplayUsername?: (username: string) => Promise<string>;
   currentUsername?: string;
   currentDisplayName?: string;
 }
@@ -41,7 +40,6 @@ type SectionId = 'account' | 'general' | 'appearance' | 'notifications' | 'audio
 export const AppSettings = React.memo(function AppSettings({
   passphraseRef,
   kyberSecretRef,
-  getDisplayUsername,
   currentUsername = '',
   currentDisplayName = ''
 }: AppSettingsProps) {
@@ -344,7 +342,6 @@ export const AppSettings = React.memo(function AppSettings({
                 <BlockedUsersSettings
                   passphraseRef={passphraseRef}
                   kyberSecretRef={kyberSecretRef}
-                  getDisplayUsername={getDisplayUsername}
                 />
               </div>
             </div>

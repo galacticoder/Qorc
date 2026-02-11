@@ -1,10 +1,10 @@
 import React, { useCallback, useEffect, useRef } from "react";
 import { SignalType } from "../../lib/types/signal-types";
+import { invalidateDiscoveryCache } from "../discovery/useDiscovery";
 import { CryptoUtils } from "../../lib/utils/crypto-utils";
 import { EventType } from "../../lib/types/event-types";
 import { Message } from "../../components/chat/messaging/types";
 import type { User } from "../../components/chat/messaging/UserList";
-import websocketClient from "../../lib/websocket/websocket";
 import { blockingSystem } from "../../lib/blocking/blocking-system";
 import { handleCallSignal } from "../../lib/types/message-handler-types";
 import { resolveSenderHybridKeys, requestBundleOnce } from "./keys";
@@ -25,7 +25,8 @@ import {
   MAX_GLOBAL_PENDING_MESSAGES,
   PQ_KEY_REPLENISH_COOLDOWN_MS,
   MAX_RESETS_PER_PEER,
-  RESET_WINDOW_MS
+  RESET_WINDOW_MS,
+  COVER_TRAFFIC_PAYLOAD_TYPE
 } from "../../lib/constants";
 import {
   dispatchReadReceiptEvent,
@@ -35,19 +36,21 @@ import {
   handleMessageDeletion,
   handleMessageEdit,
   handleReaction,
-  showNotification,
-  storeUsernameMapping
+  showNotification
 } from "./handlers";
 import {
-  validateP2PMessage,
-  createP2PPayload,
-  decryptSignalMessage,
   processBundleDelivery,
   processSenderBundle,
   trustPeerIdentity,
-  parseDecryptedPayload
+  parseDecryptedPayload,
+  decryptSignalMessage
 } from "./decryption";
 import { signal } from "../../lib/tauri-bindings";
+import { getBlindRoutingClient } from "../../lib/transport/blind-routing-client";
+import { profilePictureSystem } from "../../lib/avatar/profile-picture-system";
+import { shouldAttemptDiscovery } from "../../lib/utils/discovery-utils";
+
+const ENVELOPE_DEDUP_TTL_MS = 5 * 60 * 1000;
 
 export function useEncryptedMessageHandler(
   loginUsernameRef: React.RefObject<string>,
@@ -58,7 +61,8 @@ export function useEncryptedMessageHandler(
   usersRef?: React.RefObject<User[]>,
   options?: { rateLimit?: Partial<RateLimitConfig> },
   handleFileMessageChunk?: (data: any, meta: any) => Promise<void>,
-  secureDBRef?: React.RefObject<any | null>
+  secureDBRef?: React.RefObject<any | null>,
+  findUser?: (handle: string) => Promise<any>
 ) {
   const blobCacheRef = useRef(createBlobCache());
   const rateStateRef = useRef<{ windowStart: number; count: number }>({ windowStart: 0, count: 0 });
@@ -76,15 +80,59 @@ export function useEncryptedMessageHandler(
   const lastPqKeyReplenishRef = useRef<number>(0);
   const replenishmentInProgressRef = useRef<boolean>(false);
   const processedPreKeyMessagesRef = useRef<Map<string, number>>(new Map());
+  const processedEnvelopeIdsRef = useRef<Map<string, number>>(new Map());
+  const processedSignalCiphertextsRef = useRef<Map<string, number>>(new Map());
   const resetCooldownRef = useRef<Map<string, number>>(new Map());
 
-  const requestBundleOnceCallback = useCallback(async (peerUsername: string, reason?: string) => {
-    await requestBundleOnce(peerUsername, keyRequestCacheRef, inFlightBundleRequestsRef, getKeysOnDemand, loginUsernameRef, reason);
-  }, [getKeysOnDemand, loginUsernameRef]);
+  const requestBundleOnceCallback = useCallback(async (peerUsername: string, _reason?: string) => {
+    await requestBundleOnce(peerUsername, keyRequestCacheRef, inFlightBundleRequestsRef, loginUsernameRef, findUser);
+  }, [getKeysOnDemand, loginUsernameRef, usersRef, findUser]);
 
   const replenishCallback = useCallback(async (opts?: { force?: boolean }) => {
     await replenishPqKyberPrekey(isAuthenticated, loginUsernameRef, lastPqKeyReplenishRef, replenishmentInProgressRef, PQ_KEY_REPLENISH_COOLDOWN_MS, opts);
   }, [isAuthenticated, loginUsernameRef]);
+
+  const getSignalCiphertextKey = useCallback((payload: any): string | null => {
+    if (!payload || typeof payload !== 'object') return null;
+    const kem = payload.kem_ciphertext || payload.kemCiphertext ||
+      payload?.pqEnvelope?.kemCiphertext || payload?.pq_envelope?.kem_ciphertext;
+    if (typeof kem === 'string' && kem.length > 0) {
+      return `kem:${kem}`;
+    }
+    const cipher = payload.ciphertext || payload.signal_message;
+    if (typeof cipher === 'string' && cipher.length > 0) {
+      return `ct:${cipher}`;
+    }
+    return null;
+  }, []);
+
+  const resolvePeerInboxId = useCallback(async (peer: string): Promise<string | null> => {
+    if (!peer) return null;
+    const users = usersRef?.current || [];
+    const existing = users.find((u: any) => u.username === peer);
+    const cachedInbox = existing?.inboxId || existing?.hybridPublicKeys?.inboxId;
+    if (cachedInbox) return cachedInbox;
+
+    if (!findUser) return null;
+    try {
+      const known = usersRef?.current?.map?.((u: any) => u.username).filter(Boolean) ?? [];
+      if (!shouldAttemptDiscovery(peer, known)) {
+        return null;
+      }
+      const material = await findUser(peer);
+      if (material?.inboxId) {
+        window.dispatchEvent(new CustomEvent(EventType.USER_KEYS_AVAILABLE, {
+          detail: {
+            username: peer,
+            hybridKeys: material.publicKeys,
+            inboxId: material.inboxId
+          }
+        }));
+        return material.inboxId;
+      }
+    } catch { }
+    return null;
+  }, [usersRef, findUser]);
 
   // Cleanup intervals
   useEffect(() => {
@@ -93,6 +141,16 @@ export function useEncryptedMessageHandler(
       const now = Date.now();
       for (const [username, timestamp] of keyRequestCacheRef.current.entries()) {
         if (now - timestamp > KEY_REQUEST_CACHE_DURATION) keyRequestCacheRef.current.delete(username);
+      }
+      for (const [messageId, timestamp] of processedEnvelopeIdsRef.current.entries()) {
+        if (now - timestamp > ENVELOPE_DEDUP_TTL_MS) {
+          processedEnvelopeIdsRef.current.delete(messageId);
+        }
+      }
+      for (const [cipherKey, timestamp] of processedSignalCiphertextsRef.current.entries()) {
+        if (now - timestamp > ENVELOPE_DEDUP_TTL_MS) {
+          processedSignalCiphertextsRef.current.delete(cipherKey);
+        }
       }
 
       const pendingMessages = pendingRetryMessagesRef.current;
@@ -148,54 +206,44 @@ export function useEncryptedMessageHandler(
       blobCacheRef.current.clearAll();
       keyRequestCacheRef.current.clear();
       pendingRetryMessagesRef.current.clear();
+      processedEnvelopeIdsRef.current.clear();
+      processedSignalCiphertextsRef.current.clear();
     };
   }, []);
 
-  // P2P peer reconnection handler
+  // Handler for when a session with a peer becomes ready
   useEffect(() => {
-    const handlePeerReconnection = async (event: Event) => {
-      try {
-        const { peer } = (event as CustomEvent).detail || {};
-        if (typeof peer !== 'string' || !loginUsernameRef.current) return;
-
-        try { await signal.deleteSession(loginUsernameRef.current!, peer, 1); } catch { }
-        pendingRetryMessagesRef.current.delete(peer);
-        pendingRetryIdsRef.current.delete(peer);
-        attemptsLedgerRef.current.forEach((_, key) => { if (key.startsWith(`${peer}|`)) attemptsLedgerRef.current.delete(key); });
-        resetCooldownRef.current.delete(peer);
-        keyRequestCacheRef.current.delete(peer);
-        try { await websocketClient.sendSecureControlMessage({ type: SignalType.CHECK_USER_EXISTS, username: peer }); } catch { }
-      } catch { }
-    };
-
-    window.addEventListener(EventType.P2P_PEER_RECONNECTED, handlePeerReconnection as EventListener);
-    return () => window.removeEventListener(EventType.P2P_PEER_RECONNECTED, handlePeerReconnection as EventListener);
-  }, [loginUsernameRef]);
-
-  // Session established handler retry failed receipts
-  useEffect(() => {
-    const handleSessionEstablished = async (event: Event) => {
+    const handleReady = async (event: Event) => {
       try {
         const { peer, fromPeer } = (event as CustomEvent).detail || {};
         const peerUsername = peer || fromPeer;
-        if (typeof peerUsername !== 'string') return;
-        await retryFailedDeliveryReceipts(peerUsername, failedDeliveryReceiptsRef, getKeysOnDemand, usersRef as any, loginUsernameRef);
+        if (typeof peerUsername !== 'string' || !loginUsernameRef.current) return;
+
+        // Retry pending messages
+        retryPendingMessages(peerUsername, pendingRetryMessagesRef, pendingRetryIdsRef, callbackRef);
+
+        // Clear reset cooldowns and ledger to allow fresh attempts if needed later
+        attemptsLedgerRef.current.forEach((_, key) => { if (key.startsWith(`${peerUsername}|`)) attemptsLedgerRef.current.delete(key); });
+        resetCooldownRef.current.delete(peerUsername);
+        keyRequestCacheRef.current.delete(peerUsername);
+
+        // Trigger retries for failed delivery receipts
+        await retryFailedDeliveryReceipts(peerUsername, failedDeliveryReceiptsRef, usersRef as any, loginUsernameRef, resolvePeerInboxId);
       } catch (_error) {
-        console.error('[EncryptedMessageHandler] Error handling session-established event:', _error);
+        console.error('[EncryptedMessageHandler] Error handling ready event:', _error);
       }
     };
 
-    window.addEventListener(EventType.SESSION_ESTABLISHED_RECEIVED, handleSessionEstablished as EventListener);
-    window.addEventListener(EventType.LIBSIGNAL_SESSION_READY, handleSessionEstablished as EventListener);
-    window.addEventListener(EventType.P2P_PEER_CONNECTED, handleSessionEstablished as EventListener);
-    window.addEventListener(EventType.P2P_PEER_RECONNECTED, handleSessionEstablished as EventListener);
+    window.addEventListener(EventType.SESSION_ESTABLISHED_RECEIVED, handleReady as EventListener);
+    window.addEventListener(EventType.LIBSIGNAL_SESSION_READY, handleReady as EventListener);
+    window.addEventListener(EventType.P2P_PEER_CONNECTED, handleReady as EventListener);
+
     return () => {
-      window.removeEventListener(EventType.SESSION_ESTABLISHED_RECEIVED, handleSessionEstablished as EventListener);
-      window.removeEventListener(EventType.LIBSIGNAL_SESSION_READY, handleSessionEstablished as EventListener);
-      window.removeEventListener(EventType.P2P_PEER_CONNECTED, handleSessionEstablished as EventListener);
-      window.removeEventListener(EventType.P2P_PEER_RECONNECTED, handleSessionEstablished as EventListener);
+      window.removeEventListener(EventType.SESSION_ESTABLISHED_RECEIVED, handleReady as EventListener);
+      window.removeEventListener(EventType.LIBSIGNAL_SESSION_READY, handleReady as EventListener);
+      window.removeEventListener(EventType.P2P_PEER_CONNECTED, handleReady as EventListener);
     };
-  }, [getKeysOnDemand, usersRef, loginUsernameRef]);
+  }, [getKeysOnDemand, usersRef, loginUsernameRef, resolvePeerInboxId]);
 
   // File transfer complete handler
   useEffect(() => {
@@ -206,7 +254,7 @@ export function useEncryptedMessageHandler(
         const messageId: string | undefined = typeof detail.messageId === 'string' ? detail.messageId : undefined;
         if (!senderUsername || !messageId) return;
 
-        const { kyber, hybrid } = await resolveSenderHybridKeys(senderUsername, usersRef as any, keyRequestCacheRef, getKeysOnDemand, loginUsernameRef, KEY_REQUEST_CACHE_DURATION);
+        const { kyber, hybrid } = await resolveSenderHybridKeys(senderUsername, usersRef as any, keyRequestCacheRef, loginUsernameRef, KEY_REQUEST_CACHE_DURATION, findUser);
         if (!kyber || !hybrid) {
           const key = `${senderUsername}|${messageId}`;
           failedDeliveryReceiptsRef.current.set(key, { messageId, peerUsername: senderUsername, timestamp: Date.now(), attempts: 0 });
@@ -241,7 +289,7 @@ export function useEncryptedMessageHandler(
   }, [loginUsernameRef, requestBundleOnceCallback]);
 
   const handleEncryptedMessageCallback = useCallback(
-    async (encryptedMessage: any) => {
+    async (encryptedMessage: any, options: { isRecursive?: boolean } = {}) => {
       const now = Date.now();
       const rateState = rateStateRef.current;
       const config = rateConfigRef.current;
@@ -249,14 +297,15 @@ export function useEncryptedMessageHandler(
       rateState.count += 1;
       if (rateState.count > config.max) return;
 
-      const isP2PMessage = encryptedMessage?.p2p === true && encryptedMessage?.encrypted === true;
-      const isOfflineMessage = encryptedMessage?.offline === true;
-      const isSignalProtocolMessage = encryptedMessage?.type === SignalType.ENCRYPTED_MESSAGE;
-      const isHybridFallbackMessage = encryptedMessage?.type === SignalType.P2P_ENCRYPTED_MESSAGE;
+      const isSealedEnvelope = encryptedMessage?.type === SignalType.SEALED_ENVELOPE;
       const isBundleMessage = encryptedMessage?.type === SignalType.LIBSIGNAL_DELIVER_BUNDLE;
       const isBackgroundMessage = encryptedMessage?._decryptedInBackground === true;
+      const isRecursive = !!options.isRecursive || !!encryptedMessage?.__isRecursive;
+      const isP2PTransport = (encryptedMessage as any)?.__transport === 'p2p';
 
-      if (!isAuthenticated && !isP2PMessage && !isOfflineMessage && !isSignalProtocolMessage && !isHybridFallbackMessage && !isBundleMessage && !isBackgroundMessage) return;
+      if (!isAuthenticated && !isBundleMessage && !isBackgroundMessage && !isSealedEnvelope && !isRecursive) return;
+
+      if (!isSealedEnvelope && !isRecursive && !isBackgroundMessage && !isBundleMessage) return;
 
       try {
         if (typeof encryptedMessage !== "object" || encryptedMessage === null || Array.isArray(encryptedMessage)) {
@@ -270,6 +319,15 @@ export function useEncryptedMessageHandler(
 
         let payload: any;
         const currentUser = loginUsernameRef.current || '';
+        const envelopeMessageId = isSealedEnvelope && typeof encryptedMessage?.messageId === 'string'
+          ? encryptedMessage.messageId
+          : null;
+        if (envelopeMessageId) {
+          const seenAt = processedEnvelopeIdsRef.current.get(envelopeMessageId);
+          if (seenAt && (now - seenAt) < ENVELOPE_DEDUP_TTL_MS) {
+            return;
+          }
+        }
 
         // Pre-decrypted background messages
         if (isBackgroundMessage) {
@@ -277,57 +335,41 @@ export function useEncryptedMessageHandler(
           payload = rest;
           if (!payload.from && _originalFrom) payload.from = _originalFrom;
         }
-        // P2P messages
-        else if (isP2PMessage) {
-          if (!validateP2PMessage(encryptedMessage, currentUser)) return;
-          payload = createP2PPayload(encryptedMessage);
-        }
-        // Hybrid fallback messages
-        else if (isHybridFallbackMessage) {
-          try {
-            const localKeys = await getKeysOnDemand?.();
-            const senderKeys = await resolveSenderHybridKeys(encryptedMessage.from, usersRef as any, keyRequestCacheRef, getKeysOnDemand, loginUsernameRef, KEY_REQUEST_CACHE_DURATION);
-
-            if (localKeys?.kyber?.secretKey && senderKeys?.hybrid?.dilithiumPublicBase64) {
-              const decryptedEnvelope = await CryptoUtils.Hybrid.decryptIncoming(
-                encryptedMessage.payload || encryptedMessage.content,
-                {
-                  kyberSecretKey: localKeys.kyber.secretKey,
-                  x25519SecretKey: localKeys.x25519.private,
-                  senderDilithiumPublicKey: senderKeys.hybrid.dilithiumPublicBase64,
-                },
-                { expectJsonPayload: true }
-              );
-              payload = decryptedEnvelope.payloadJson;
-              if (payload && !payload.from) payload.from = encryptedMessage.from;
-              payload.encrypted = true;
-            } else {
-              console.warn('[EncryptedMessageHandler] Hybrid fallback decryption failed: Missing keys');
-              return;
-            }
-          } catch (err) {
-            console.error('[EncryptedMessageHandler] Hybrid fallback decryption error:', err);
-            return;
-          }
+        // Bundle delivery
+        else if (isBundleMessage) {
+          await processBundleDelivery(encryptedMessage, currentUser);
+          return;
         }
         // Signal Protocol messages
-        else if (isSignalProtocolMessage && encryptedMessage?.encryptedPayload && getKeysOnDemand) {
-          const result = await decryptSignalMessage(encryptedMessage, currentUser, processedPreKeyMessagesRef);
+        else if (encryptedMessage?.type === SignalType.ENCRYPTED_MESSAGE && encryptedMessage?.encryptedPayload) {
+          if (!isRecursive && !isBackgroundMessage) return;
 
-          if (!result) return;
+          // LibSignal decryption
+          const senderUsername = encryptedMessage.from || '';
+          const legacyMessageType = (encryptedMessage.encryptedPayload as any)?.messageType ?? (encryptedMessage.encryptedPayload as any)?.message_type;
+          const isLegacyPreKey = legacyMessageType === 3;
+          const directCipherKey = getSignalCiphertextKey(encryptedMessage.encryptedPayload);
+          if (directCipherKey) {
+            const seenAt = processedSignalCiphertextsRef.current.get(directCipherKey);
+            if (seenAt && (now - seenAt) < ENVELOPE_DEDUP_TTL_MS) {
+              return;
+            }
+            processedSignalCiphertextsRef.current.set(directCipherKey, now);
+          }
+          const decrypted = await signal.decrypt(
+            senderUsername,
+            currentUser,
+            encryptedMessage.encryptedPayload
+          );
 
-          const { payload: decrypted, attachedChunkData } = result;
           if (!decrypted?.success || typeof decrypted?.plaintext !== 'string') {
             const errMsg = String(decrypted?.error || '').toLowerCase();
-            const senderUsername = encryptedMessage.from || '';
 
-            // Handle untrusted identity errors
             if (errMsg.includes('untrusted identity') && senderUsername) {
               await trustPeerIdentity(currentUser, senderUsername);
             }
 
-            // Handle session errors with retry
-            const isSessionError = /session|no valid sessions|no session|invalid whisper message|decryption failed|bad mac|message keys|counter/i.test(errMsg);
+            const isSessionError = /session|no valid sessions|no session|invalid whisper message|invalid prekey identifier|decryption failed|bad mac|message keys|counter/i.test(errMsg);
             if (isSessionError && senderUsername) {
               await handleSessionResetAndRetry(
                 senderUsername,
@@ -342,23 +384,28 @@ export function useEncryptedMessageHandler(
                 resetCounterRef,
                 requestBundleOnceCallback,
                 MAX_RESETS_PER_PEER,
-                RESET_WINDOW_MS
+                RESET_WINDOW_MS,
+                { resolvePeerInboxId }
               );
             }
             return;
           }
 
-          payload = parseDecryptedPayload(decrypted.plaintext, encryptedMessage.from);
+          if (isLegacyPreKey && senderUsername) {
+            try {
+              window.dispatchEvent(new CustomEvent(EventType.LIBSIGNAL_SESSION_READY, { detail: { peer: senderUsername } }));
+            } catch { }
+          }
 
-          // Unwrap signal-fallback messages
-          if (payload.type === 'signal-fallback') {
+          payload = parseDecryptedPayload(decrypted.plaintext, senderUsername);
+
+          // Unwrap signal-payload messages
+          if (payload.type === 'signal-payload') {
             if (payload.content && typeof payload.content === 'string') {
               try {
                 const inner = JSON.parse(payload.content);
                 payload = { ...payload, ...inner };
-              } catch (e) {
-                console.warn('[EncryptedMessageHandler] Failed to parse signal-fallback content:', e);
-              }
+              } catch { }
             }
             if (payload.kind) {
               payload.type = payload.kind;
@@ -367,21 +414,213 @@ export function useEncryptedMessageHandler(
 
           await processSenderBundle(payload, currentUser);
           replenishCallback().catch(() => { });
-
-          if (payload.type === SignalType.FILE_MESSAGE_CHUNK && attachedChunkData) {
-            payload.chunkData = attachedChunkData;
-          }
         }
-        // Bundle delivery
-        else if (isBundleMessage) {
-          await processBundleDelivery(encryptedMessage, currentUser);
-          return;
+        // Sealed envelope
+        else if (isSealedEnvelope) {
+          try {
+            if (!currentUser || currentUser === 'unknown') {
+              console.warn('[EncryptedMessageHandler] Cannot decrypt - current user not ready');
+              return;
+            }
+
+            const sealedEnvelope = encryptedMessage.envelope || encryptedMessage.payload;
+            if (!sealedEnvelope) return;
+
+            const localKeys = await getKeysOnDemand?.();
+            let hybridEnvelope: any = sealedEnvelope;
+            let senderInboxId: string | null = null;
+            let senderUsernameFromBlind: string | undefined;
+
+            if (sealedEnvelope?.version === 'ss-v1') {
+              try {
+                if (localKeys?.kyber?.secretKey && localKeys?.kyber?.publicKeyBase64) {
+                  const blindClient = getBlindRoutingClient();
+                  blindClient.setKyberKeys({
+                    publicKey: CryptoUtils.Base64.base64ToUint8Array(localKeys.kyber.publicKeyBase64),
+                    secretKey: localKeys.kyber.secretKey
+                  });
+
+                  const opened = await blindClient.openSealedEnvelope(sealedEnvelope);
+                  if (!opened) {
+                    console.warn('[EncryptedMessageHandler] Failed to open blind-route envelope');
+                    return;
+                  }
+
+                  senderUsernameFromBlind = opened.from;
+                  senderInboxId = opened.fromInbox || null;
+                  const innerPayload = opened.payload;
+                  if (innerPayload?.type === COVER_TRAFFIC_PAYLOAD_TYPE) {
+                    return;
+                  }
+                  hybridEnvelope = innerPayload?.envelope ?? innerPayload?.hybridEnvelope ?? innerPayload;
+                }
+              } catch (err) {
+                console.warn('[EncryptedMessageHandler] Blind-route envelope open failed:', err);
+                return;
+              }
+            }
+
+            const senderDilithiumPublicKey = hybridEnvelope?.routing?.from;
+
+            if (!localKeys?.kyber?.secretKey || !senderDilithiumPublicKey) {
+              console.warn('[EncryptedMessageHandler] Missing keys for sealed-envelope decryption');
+              return;
+            }
+
+            // Decrypt Hybrid envelope
+            const decrypted = await CryptoUtils.Hybrid.decryptIncoming(
+              hybridEnvelope,
+              {
+                kyberSecretKey: localKeys.kyber.secretKey,
+                x25519SecretKey: localKeys.x25519.private,
+                senderDilithiumPublicKey: senderDilithiumPublicKey
+              },
+              { expectJsonPayload: true }
+            );
+
+            if (!(decrypted?.payloadJson as any)?.signalCiphertext) {
+              console.warn('[EncryptedMessageHandler] No signalCiphertext in decrypted envelope');
+              return;
+            }
+
+            // Decrypt LibSignal message
+            const signalPayload = (decrypted.payloadJson as any).signalCiphertext;
+            const senderUsername = (decrypted.payloadJson as any).from ||
+              senderUsernameFromBlind ||
+              (encryptedMessage as any)?.from ||
+              (usersRef?.current as any)?.find((u: any) =>
+                u.hybridPublicKeys?.dilithiumPublicBase64 === senderDilithiumPublicKey
+              )?.username;
+            if (!senderInboxId && typeof (decrypted.payloadJson as any).fromInbox === 'string') {
+              senderInboxId = (decrypted.payloadJson as any).fromInbox;
+            }
+
+            const messageType = (signalPayload as any)?.messageType ?? (signalPayload as any)?.message_type;
+            const kemCiphertext = (signalPayload as any)?.pqEnvelope?.kemCiphertext ||
+              (signalPayload as any)?.pq_envelope?.kem_ciphertext;
+            const isPreKey = messageType === 3 && typeof kemCiphertext === 'string' && kemCiphertext.length > 0;
+            let preKeyDedupKey: string | null = null;
+
+            if (isPreKey && senderUsername) {
+              preKeyDedupKey = `${senderUsername}:${kemCiphertext}`;
+              if (processedPreKeyMessagesRef.current.has(preKeyDedupKey)) return;
+            }
+
+            const signalCipherKey = getSignalCiphertextKey(signalPayload);
+            if (signalCipherKey) {
+              const seenAt = processedSignalCiphertextsRef.current.get(signalCipherKey);
+              if (seenAt && (now - seenAt) < ENVELOPE_DEDUP_TTL_MS) {
+                return;
+              }
+              processedSignalCiphertextsRef.current.set(signalCipherKey, now);
+            }
+
+            const decryptedSignal = await signal.decrypt(
+              senderUsername || 'unknown',
+              currentUser,
+              signalPayload
+            );
+
+            if (!decryptedSignal?.success || typeof decryptedSignal.plaintext !== 'string') {
+              const errMsg = String(decryptedSignal?.error || '').toLowerCase();
+
+              // Check for duplicate messages
+              const isDuplicate = errMsg.includes('old counter') || errMsg.includes('duplicate');
+              if (isDuplicate) return;
+
+              if (errMsg.includes('untrusted identity') && senderUsername) {
+                await trustPeerIdentity(currentUser, senderUsername);
+              }
+
+              const isSessionError = decryptedSignal?.requires_key_refresh ||
+                /session|no valid sessions|no session|invalid whisper message|invalid prekey identifier|decryption failed|bad mac|message keys/i.test(errMsg);
+
+              if (isSessionError && senderUsername && !isPreKey) {
+                const retryMessage = (encryptedMessage && (encryptedMessage as any).encryptedPayload)
+                  ? encryptedMessage
+                  : { ...encryptedMessage, encryptedPayload: signalPayload };
+
+                await handleSessionResetAndRetry(
+                  senderUsername,
+                  retryMessage,
+                  currentUser,
+                  pendingRetryMessagesRef,
+                  pendingRetryIdsRef,
+                  attemptsLedgerRef,
+                  lastKyberFpRef,
+                  bundleRequestCooldownRef,
+                  resetCooldownRef,
+                  resetCounterRef,
+                  requestBundleOnceCallback,
+                  MAX_RESETS_PER_PEER,
+                  RESET_WINDOW_MS,
+                  { resolvePeerInboxId, senderInboxId }
+                );
+              }
+
+              const messageId = typeof (signalPayload as any)?.messageId === 'string'
+                ? (signalPayload as any).messageId
+                : envelopeMessageId;
+              console.warn('[EncryptedMessageHandler] LibSignal decryption failed', {
+                from: senderUsername || senderUsernameFromBlind,
+                messageId,
+                messageType,
+                isPreKey,
+                kemCiphertextPrefix: typeof kemCiphertext === 'string' ? kemCiphertext.slice(0, 16) : null,
+                error: decryptedSignal?.error || 'unknown'
+              });
+              return;
+            }
+
+            if (isPreKey && preKeyDedupKey) {
+              processedPreKeyMessagesRef.current.set(preKeyDedupKey, Date.now());
+              const nowTs = Date.now();
+              for (const [key, timestamp] of processedPreKeyMessagesRef.current.entries()) {
+                if (nowTs - timestamp > 60000) {
+                  processedPreKeyMessagesRef.current.delete(key);
+                }
+              }
+            }
+
+            if (isPreKey && senderUsername) {
+              try {
+                window.dispatchEvent(new CustomEvent(EventType.LIBSIGNAL_SESSION_READY, { detail: { peer: senderUsername } }));
+              } catch { }
+            }
+
+            // Parse and process inner payload
+            payload = parseDecryptedPayload(decryptedSignal.plaintext, senderUsername);
+
+            // Unwrap signal-payload wrapper
+            if (payload.type === 'signal-payload') {
+              if (payload.content && typeof payload.content === 'string') {
+                try {
+                  const inner = JSON.parse(payload.content);
+                  payload = { ...payload, ...inner };
+                } catch { }
+              }
+              if (payload.kind) payload.type = payload.kind;
+            }
+
+            if (envelopeMessageId) {
+              processedEnvelopeIdsRef.current.set(envelopeMessageId, Date.now());
+            }
+
+            if (isP2PTransport) {
+              payload.p2p = true;
+              payload.transport = 'p2p';
+            }
+
+            await processSenderBundle(payload, currentUser);
+            replenishCallback().catch(() => { });
+          } catch (err) {
+            console.error('[EncryptedMessageHandler] Failed to decrypt sealed envelope:', err);
+            return;
+          }
         }
         else {
           return;
         }
-
-        storeUsernameMapping(payload);
 
         // Request sender keys if needed
         if (payload.from && payload.from !== currentUser) {
@@ -391,14 +630,29 @@ export function useEncryptedMessageHandler(
             const lastReq = keyRequestCacheRef.current.get(payload.from);
             if (!lastReq || (now - lastReq) > KEY_REQUEST_CACHE_DURATION) {
               keyRequestCacheRef.current.set(payload.from, now);
-              await websocketClient.sendSecureControlMessage({ type: SignalType.CHECK_USER_EXISTS, username: payload.from });
-              try { await requestBundleOnceCallback(payload.from); } catch { }
+              try { await requestBundleOnceCallback(payload.from, 'passive-discovery'); } catch { }
             }
           }
         }
 
         // Check blocking filter
         if (!await checkBlockingFilter(payload, currentUser, blockingSystem)) return;
+
+        // Handle profile picture request/response messages
+        if (
+          payload?.type === 'profile-picture-request' ||
+          payload?.type === 'profile-picture-response'
+        ) {
+          const fromUsername = payload?.from;
+          if (typeof fromUsername === 'string' && fromUsername.length > 0) {
+            try {
+              await profilePictureSystem.handleIncomingMessage(payload, fromUsername);
+            } catch (err) {
+              console.warn('[EncryptedMessageHandler] Profile picture message handling failed', err);
+            }
+          }
+          return;
+        }
 
         // Handle receipts
         if (payload.type === SignalType.READ_RECEIPT && payload.messageId) {
@@ -410,10 +664,56 @@ export function useEncryptedMessageHandler(
           return;
         }
 
+        // Handle profile updates
+        if (payload.type === SignalType.PROFILE_UPDATE && payload.from) {
+          invalidateDiscoveryCache(payload.from);
+          if (findUser) {
+            const known = usersRef?.current?.map?.((u: any) => u.username).filter(Boolean) ?? [];
+            if (shouldAttemptDiscovery(payload.from, known)) {
+              findUser(payload.from).catch(err => console.warn('[EncryptedMessageHandler] Refetch failed after profile update', err));
+            }
+          }
+          return;
+        }
+
+        // Handle P2P session reset requests
+        if (payload.type === SignalType.SESSION_RESET_REQUEST) {
+          try {
+            window.dispatchEvent(new CustomEvent(EventType.P2P_SESSION_RESET_REQUEST, {
+              detail: { from: payload.from, reason: payload.reason }
+            }));
+          } catch { }
+          return;
+        }
+
         // Handle file chunks
         if (payload.type === SignalType.FILE_MESSAGE_CHUNK) {
+          let chunkPayload = payload;
+          if (payload?.encryptedPayload && !payload?.chunkData) {
+            try {
+              const inner = await decryptSignalMessage(
+                { encryptedPayload: payload.encryptedPayload, from: payload.from },
+                currentUser,
+                processedPreKeyMessagesRef
+              );
+              if (inner?.payload?.success && typeof inner.payload.plaintext === 'string') {
+                const meta = parseDecryptedPayload(inner.payload.plaintext, payload.from);
+                if (inner.attachedChunkData && !meta.chunkData) {
+                  meta.chunkData = inner.attachedChunkData;
+                }
+                chunkPayload = meta;
+              }
+            } catch (err) {
+              console.warn('[EncryptedMessageHandler] Failed to unwrap file chunk metadata', err);
+            }
+          }
+
           if (handleFileMessageChunk) {
-            try { await handleFileMessageChunk(payload, { from: payload.from }); } catch (_error) { console.error('[EncryptedMessageHandler] Failed to handle file chunk:', _error); }
+            try {
+              await handleFileMessageChunk(chunkPayload, { from: chunkPayload.from ?? payload.from, to: chunkPayload.to });
+            } catch (_error) {
+              console.error('[EncryptedMessageHandler] Failed to handle file chunk:', _error);
+            }
           }
           return;
         }
@@ -454,7 +754,7 @@ export function useEncryptedMessageHandler(
         if (isTextMessage && payload.type !== SignalType.FILE_MESSAGE) {
           const { messageId, messageAdded } = await processTextMessage(payload, currentUser, setMessages, saveMessageToLocalDB);
           if (messageAdded && messageId) {
-            const { kyber, hybrid } = await resolveSenderHybridKeys(payload.from, usersRef as any, keyRequestCacheRef, getKeysOnDemand, loginUsernameRef, KEY_REQUEST_CACHE_DURATION);
+            const { kyber, hybrid } = await resolveSenderHybridKeys(payload.from, usersRef as any, keyRequestCacheRef, loginUsernameRef, KEY_REQUEST_CACHE_DURATION, findUser);
             if (kyber && hybrid) {
               await sendEncryptedDeliveryReceipt(currentUser, payload.from, messageId, kyber, hybrid, failedDeliveryReceiptsRef);
             } else {
@@ -474,7 +774,7 @@ export function useEncryptedMessageHandler(
         if (payload.type === SignalType.FILE_MESSAGE) {
           const { messageId, messageAdded } = await processFileMessage(payload, currentUser, setMessages, saveMessageToLocalDB, blobCacheRef.current, secureDBRef);
           if (messageAdded && messageId) {
-            const { kyber, hybrid } = await resolveSenderHybridKeys(payload.from, usersRef as any, keyRequestCacheRef, getKeysOnDemand, loginUsernameRef, KEY_REQUEST_CACHE_DURATION);
+            const { kyber, hybrid } = await resolveSenderHybridKeys(payload.from, usersRef as any, keyRequestCacheRef, loginUsernameRef, KEY_REQUEST_CACHE_DURATION, findUser);
             if (kyber && hybrid) {
               await sendEncryptedDeliveryReceipt(currentUser, payload.from, messageId, kyber, hybrid, failedDeliveryReceiptsRef);
             } else {
@@ -492,13 +792,13 @@ export function useEncryptedMessageHandler(
 
         // Handle call signals
         if (payload.type === EventType.CALL_SIGNAL) {
-          handleCallSignal({ payload: { content: payload.content, from: payload.from, fromOriginal: payload?.fromOriginal } });
+          handleCallSignal({ payload: { content: payload.content, from: payload.from } });
         }
       } catch (_error) {
         console.error('[EncryptedMessageHandler] Error processing encrypted message:', _error);
       }
     },
-    [setMessages, saveMessageToLocalDB, isAuthenticated, getKeysOnDemand, usersRef, handleFileMessageChunk, replenishCallback, requestBundleOnceCallback, loginUsernameRef, secureDBRef]
+    [setMessages, saveMessageToLocalDB, isAuthenticated, getKeysOnDemand, usersRef, handleFileMessageChunk, replenishCallback, requestBundleOnceCallback, loginUsernameRef, secureDBRef, findUser, getSignalCiphertextKey]
   );
 
   useEffect(() => { callbackRef.current = handleEncryptedMessageCallback; }, [handleEncryptedMessageCallback]);

@@ -50,7 +50,7 @@ services:
       - Qor-Chat-net
     restart: unless-stopped
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      test: ["CMD-SHELL", "pg_isready -h localhost"]
       interval: 2s
       timeout: 5s
       retries: 30
@@ -99,7 +99,6 @@ services:
     hostname: loadbalancer
     ports:
       - "${HAPROXY_HTTPS_PORT:-8443}:8443"
-      - "${HAPROXY_HTTP_PORT:-8080}:8080"
       - "${HAPROXY_STATS_PORT:-8404}:8404"
     env_file:
       - ../.env

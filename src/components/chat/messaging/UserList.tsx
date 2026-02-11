@@ -13,10 +13,14 @@ export interface User {
   readonly username: string;
   readonly isOnline: boolean;
   readonly isTyping?: boolean;
+  readonly inboxId?: string;
+  readonly peerCertificateFingerprint?: string;
+  readonly peerCertificatePinnedAt?: number;
   readonly hybridPublicKeys?: {
     readonly x25519PublicBase64?: string;
     readonly kyberPublicBase64: string;
     readonly dilithiumPublicBase64: string;
+    readonly inboxId?: string;
   };
 }
 

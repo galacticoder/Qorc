@@ -102,8 +102,8 @@ export const VIDEO_EXTENSIONS = ['mp4', 'webm', 'ogg', 'avi', 'mov', 'wmv', 'flv
 export const AUDIO_EXTENSIONS = ['mp3', 'wav', 'ogg', 'webm', 'm4a', 'aac', 'flac'] as const;
 
 // useFileSender.ts
-export const DEFAULT_CHUNK_SIZE_SMALL = 192 * 1024;
-export const DEFAULT_CHUNK_SIZE_LARGE = 384 * 1024;
+export const DEFAULT_CHUNK_SIZE_SMALL = 32 * 1024;
+export const DEFAULT_CHUNK_SIZE_LARGE = 32 * 1024;
 export const LARGE_FILE_THRESHOLD = 10 * 1024 * 1024;
 export const MAX_CHUNKS_PER_SECOND = 50;
 export const INACTIVITY_TIMEOUT_MS = 120000;
@@ -119,6 +119,13 @@ export const SESSION_POLL_BASE_MS = 200;
 export const SESSION_POLL_MAX_MS = 1_500;
 export const BUNDLE_REQUEST_COOLDOWN_MS = 5000;
 export const SESSION_FRESH_COOLDOWN_MS = 10_000;
+
+// WebSocket fixed-size transport + cover traffic
+export const WS_FIXED_MESSAGE_SIZE_BYTES = 256 * 1024;
+export const WS_COVER_TRAFFIC_INTERVAL_MS = 5000;
+export const WS_COVER_TRAFFIC_JITTER_MS = 500;
+export const WS_COVER_TRAFFIC_IDLE_GRACE_MS = 300;
+export const COVER_TRAFFIC_PAYLOAD_TYPE = 'cover-traffic';
 
 // PassphrasePrompt.tsx
 export const PASSPHRASE_MIN_LENGTH = 12;
@@ -147,6 +154,8 @@ export const P2P_MESSAGE_RATE_LIMIT = 100;
 export const P2P_MESSAGE_RATE_WINDOW_MS = 60_000;
 export const P2P_MAX_MESSAGE_SIZE = 5 * 1024 * 1024;
 export const P2P_MAX_PEERS = 100;
+export const P2P_PEER_CERT_TTL_MS = 24 * 60 * 60 * 1000;
+export const MIN_ENVELOPE_SIZE = 2048;
 
 // General rate limit
 export const RATE_LIMIT_WINDOW_MS = 60_000;
@@ -298,6 +307,7 @@ export const COMMON_COMPOUND_TLDS = new Set([
 // Message Handling
 export const MAX_MESSAGE_JSON_BYTES = 64 * 1024;
 export const MAX_FILE_JSON_BYTES = 256 * 1024;
+export const MAX_SIGNAL_PAYLOAD_JSON_BYTES = 2 * 1024 * 1024;
 export const MAX_CALL_SIGNAL_BYTES = 256 * 1024;
 export const MAX_INLINE_FILE_BYTES = 5 * 1024 * 1024;
 export const MAX_BLOB_URLS = 32;
@@ -366,7 +376,7 @@ export const HASH_TIMEOUT_MAX_MS = 300000;
 export const HASH_DEFAULT_TIMEOUT_MS = 30000;
 
 // Worker constants
-export const WORKER_MAX_KEYS = 256;
+export const WORKER_MAX_KEYS = 50;
 export const WORKER_AUTH_TOKEN_LIFETIME_MS = 60 * 60 * 1000;
 export const WORKER_RATE_LIMIT_DEFAULT_WINDOW_MS = 60_000;
 export const WORKER_RATE_LIMIT_DEFAULT_MAX = 100;

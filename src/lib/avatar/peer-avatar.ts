@@ -1,7 +1,7 @@
 import { SignalType } from '../types/signal-types';
 import { unifiedSignalTransport } from '../transport/unified-signal-transport';
-import { AVATAR_PENDING_REQUEST_TIMEOUT_MS } from '../constants';
 import type { AvatarSystemState } from '../types/avatar-types';
+import { createProfilePictureRequest } from './messaging';
 
 // Get peer avatar
 export function getPeerAvatar(state: AvatarSystemState, username: string): string | null {
@@ -36,29 +36,35 @@ export async function requestPeerAvatar(
     username: string,
     fetchFromServerFn: (username: string) => Promise<void>
 ): Promise<void> {
+    if (!username) return;
+
+    const now = Date.now();
+    const last = state.serverFetchTimestamps.get(username) || 0;
+    if (now - last < 5000) {
+        return;
+    }
+
     if (state.pendingRequests.has(username)) {
         return;
     }
 
-    // Check for cached avatar
-    const cached = state.avatarCache.get(username);
-
-    // If cached and not stale, don't fetch
-    if (cached && cached.expiresAt > Date.now()) {
-        return;
-    }
-
+    state.serverFetchTimestamps.set(username, now);
     state.pendingRequests.add(username);
 
+    let sent = false;
     try {
-        await unifiedSignalTransport.send(username, { type: 'profile-picture-request' }, SignalType.SIGNAL);
-    } catch (p2pError) {
+        const request = createProfilePictureRequest();
+        const result = await unifiedSignalTransport.send(username, request, SignalType.SIGNAL);
+        sent = !!result?.success;
+    } catch {
+    }
+
+    try {
         await fetchFromServerFn(username);
-    } finally {
-        setTimeout(() => {
-            if (state.pendingRequests.has(username)) {
-                state.pendingRequests.delete(username);
-            }
-        }, AVATAR_PENDING_REQUEST_TIMEOUT_MS);
+    } catch {
+    }
+
+    if (!sent) {
+        state.pendingRequests.delete(username);
     }
 }

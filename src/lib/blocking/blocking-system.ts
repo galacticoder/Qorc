@@ -7,7 +7,8 @@ import { blockStatusCache } from './block-status-cache';
 import { EventType } from '../types/event-types';
 import { isPlainObject, hasPrototypePollutionKeys } from '../sanitizers';
 import { validateUsername } from '../utils/blocking-utils';
-import { BlockToken, BlockedUser, EncryptedBlockList, KeyMaterial, RateLimitConfig } from '../types/blocking-types';
+import { BlockedUser, EncryptedBlockList, KeyMaterial, RateLimitConfig } from '../types/blocking-types';
+export type { BlockedUser };
 import { NOTIFICATION_TITLE, NOTIFICATION_BODY, MAX_BLOCK_LIST_SIZE } from '../constants';
 import {
   CircuitBreakerState,
@@ -19,7 +20,6 @@ import { BlockingRateLimiter } from './rate-limiter';
 import { BlockingMessageQueue } from './queue';
 import {
   generateUserHash,
-  generateBlockToken,
   encryptBlockList,
   decryptBlockList,
   computeBlockListHash
@@ -122,7 +122,7 @@ export class BlockingSystem {
     }
   }
 
-  private async updateBlockTokens(blockList: BlockedUser[]): Promise<void> {
+  private async updateBlockTokens(blockList: BlockedUser[], previousList?: BlockedUser[]): Promise<void> {
     try {
       const currentUser = await this.getCurrentAuthenticatedUser();
       if (!currentUser) {
@@ -130,20 +130,38 @@ export class BlockingSystem {
         return;
       }
 
-      const tokens: BlockToken[] = [];
+      const prev = previousList ?? this.cachedBlockList ?? [];
+      const prevSet = new Set(prev.map(u => u.username));
+      const nextSet = new Set(blockList.map(u => u.username));
 
-      for (const blockedUser of blockList) {
-        const token = await generateBlockToken(currentUser, blockedUser.username, this.secureDB || undefined);
-        tokens.push(token);
+      const added = Array.from(nextSet).filter(u => !prevSet.has(u));
+      const removed = Array.from(prevSet).filter(u => !nextSet.has(u));
+
+      if (added.length === 0 && removed.length === 0) {
+        return;
       }
 
-      const blockerHash = await generateUserHash(currentUser, this.secureDB || undefined);
+      const blockerIdentityKeyHash = await generateUserHash(currentUser, this.secureDB || undefined);
 
-      await this.sendToServer({
-        type: SignalType.BLOCK_TOKENS_UPDATE,
-        blockerHash,
-        blockTokens: tokens
-      });
+      for (const username of added) {
+        const blockedIdentityKeyHash = await generateUserHash(username, this.secureDB || undefined);
+        await this.sendToServer({
+          type: SignalType.BLOCK_TOKENS_UPDATE,
+          action: 'block',
+          blockerIdentityKeyHash,
+          blockedIdentityKeyHash
+        });
+      }
+
+      for (const username of removed) {
+        const blockedIdentityKeyHash = await generateUserHash(username, this.secureDB || undefined);
+        await this.sendToServer({
+          type: SignalType.BLOCK_TOKENS_UPDATE,
+          action: 'unblock',
+          blockerIdentityKeyHash,
+          blockedIdentityKeyHash
+        });
+      }
     } catch {
       this.log('updateBlockTokens.error', { error: 'Failed to update block tokens' });
     }
@@ -202,9 +220,10 @@ export class BlockingSystem {
         lastUpdated: Date.now()
       });
 
+      const previousList = this.cachedBlockList ? [...this.cachedBlockList] : [];
       this.cachedBlockList = blockList;
 
-      await this.updateBlockTokens(blockList);
+      await this.updateBlockTokens(blockList, previousList);
       await this.messageQueue.persist();
       resetCircuitBreaker(this.circuitBreaker);
     } catch {

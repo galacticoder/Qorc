@@ -34,7 +34,11 @@ export class PostQuantumRandom {
     PostQuantumRandom.ensureSecureRandom();
 
     const bytes = new Uint8Array(length);
-    globalThis.crypto.getRandomValues(bytes);
+    const maxChunk = 65536;
+    for (let offset = 0; offset < length; offset += maxChunk) {
+      const slice = bytes.subarray(offset, Math.min(offset + maxChunk, length));
+      globalThis.crypto.getRandomValues(slice);
+    }
     return bytes;
   }
 

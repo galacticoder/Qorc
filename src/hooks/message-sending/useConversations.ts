@@ -4,10 +4,10 @@ import { Message } from "../../components/chat/messaging/types";
 import { User } from "../../components/chat/messaging/UserList";
 import { SignalType } from "../../lib/types/signal-types";
 import { EventType } from "../../lib/types/event-types";
-import { pseudonymizeUsernameWithCache } from "../../lib/database/username-hash";
+import { computeBlindUserId } from "../../lib/utils/auth-utils";
+import { shouldAttemptDiscovery } from "../../lib/utils/discovery-utils";
 import { SecureDB } from "../../lib/database/secureDB";
 import { MAX_CONVERSATIONS, CONVERSATION_RATE_LIMIT_WINDOW_MS, CONVERSATION_RATE_LIMIT_MAX, VALIDATION_TIMEOUT_MS } from "../../lib/constants";
-import { unifiedSignalTransport } from "../../lib/transport/unified-signal-transport";
 import {
   dispatchSafeEvent,
   getConversationPreview,
@@ -16,10 +16,17 @@ import {
   createConversation
 } from "./conversations";
 
-export const useConversations = (currentUsername: string, users: User[], messages: Message[], secureDB: SecureDB | null) => {
+export const useConversations = (
+  currentUsername: string,
+  users: User[],
+  messages: Message[],
+  secureDB: SecureDB | null,
+  findUser: (handle: string) => Promise<any>
+) => {
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [selectedConversation, setSelectedConversation] = useState<string | null>(null);
   const [removedConversations, setRemovedConversations] = useState<Set<string>>(new Set());
+  const [lastReadByConversation, setLastReadByConversation] = useState<Map<string, number>>(new Map());
 
   // Rate limiting state
   const rateStateRef = useRef<{ windowStart: number; count: number }>({ windowStart: 0, count: 0 });
@@ -32,28 +39,32 @@ export const useConversations = (currentUsername: string, users: User[], message
     }
     const trimmed = username?.trim();
     if (!trimmed) {
-      throw new Error('[useConversations] Username cannot be empty');
+      throw new Error('Username cannot be empty');
     }
 
-    // Check if it looks like a pseudonym or validate as username
-    const looksLikePseudonym = isPseudonymHash(trimmed);
-    if (!looksLikePseudonym && !isValidConversationUsername(trimmed)) {
-      throw new Error('[useConversations] Invalid username format (2-64 chars, alphanumeric/._- only)');
+    if (isPseudonymHash(trimmed)) {
+      throw new Error('Please enter a handle, not a pseudonym hash');
+    }
+
+    if (!isValidConversationUsername(trimmed)) {
+      throw new Error('Invalid name format');
     }
 
     if (conversations.length >= MAX_CONVERSATIONS) {
-      throw new Error('[useConversations] Maximum conversation limit reached');
+      throw new Error('Maximum conversation limit reached');
     }
 
-    const pseudonym = looksLikePseudonym ? trimmed.toLowerCase() : await pseudonymizeUsernameWithCache(trimmed, secureDB || undefined);
+    const conversationUsername = trimmed;
+    const discoveryId = computeBlindUserId(trimmed);
 
-    if (pseudonym === currentUsername) {
-      throw new Error('[useConversations] Cannot create conversation with yourself');
+    const currentDiscoveryId = currentUsername ? computeBlindUserId(currentUsername) : '';
+    if (conversationUsername === currentUsername || (currentDiscoveryId && discoveryId === currentDiscoveryId)) {
+      throw new Error('Cannot create conversation with yourself');
     }
 
     const pendingMap = pendingAddsRef.current;
-    if (pendingMap.has(pseudonym)) {
-      return pendingMap.get(pseudonym)!;
+    if (pendingMap.has(discoveryId)) {
+      return pendingMap.get(discoveryId)!;
     }
 
     const now = Date.now();
@@ -63,34 +74,24 @@ export const useConversations = (currentUsername: string, users: User[], message
       rateState.count = 0;
     }
     if (rateState.count >= CONVERSATION_RATE_LIMIT_MAX) {
-      throw new Error('[useConversations] Rate limit exceeded - too many conversation requests');
+      throw new Error('Rate limit exceeded - too many conversation requests');
     }
     rateState.count += 1;
 
     const operation = (async (): Promise<Conversation | null> => {
       try {
-        if (!looksLikePseudonym && trimmed !== pseudonym) {
-          try {
-            await secureDB.storeUsernameMapping(pseudonym, trimmed);
-            dispatchSafeEvent(EventType.USERNAME_MAPPING_UPDATED, { username: pseudonym, original: trimmed }, ['username', 'original']);
-          } catch (_error) {
-            console.error('[useConversations] Failed to store username mapping:', _error);
-            throw new Error('[useConversations] Failed to store username mapping');
-          }
-        }
-
-        if (removedConversations.has(pseudonym)) {
+        if (removedConversations.has(conversationUsername)) {
           setRemovedConversations(prev => {
             const newSet = new Set(prev);
-            newSet.delete(pseudonym);
+            newSet.delete(conversationUsername);
             return newSet;
           });
         }
 
-        const existingConversation = conversations.find(conv => conv.username === pseudonym);
+        const existingConversation = conversations.find(conv => conv.username === conversationUsername);
         if (existingConversation) {
           if (autoSelect) {
-            setSelectedConversation(pseudonym);
+            setSelectedConversation(conversationUsername);
           }
           return existingConversation;
         }
@@ -104,74 +105,50 @@ export const useConversations = (currentUsername: string, users: User[], message
               clearTimeout(timeoutId);
               timeoutId = null;
             }
-            window.removeEventListener(EventType.USER_EXISTS_RESPONSE, handleUserExistsResponse as EventListener);
-            eventCleanupRef.current.delete(pseudonym);
+            eventCleanupRef.current.delete(conversationUsername);
           };
 
-          const handleUserExistsResponse = (event: Event) => {
-            if (resolved) return;
-
-            const customEvent = event as CustomEvent;
-            const detail = typeof customEvent.detail === 'object' && customEvent.detail !== null ? customEvent.detail : {};
-            const { username: responseUsername, exists, error, hybridPublicKeys } = detail as { username?: string; exists?: boolean; error?: string; hybridPublicKeys?: any };
-
-            if ((responseUsername || '').toLowerCase() !== pseudonym.toLowerCase()) {
-              return;
-            }
-
-            resolved = true;
-            cleanup();
-
-            if (error) {
-              reject(new Error(`User validation failed: ${error}`));
-              return;
-            }
-
-            if (!exists) {
-              reject(new Error('User does not exist'));
-              return;
-            }
-
-            if (hybridPublicKeys) {
-              try {
-                dispatchSafeEvent(EventType.USER_KEYS_AVAILABLE, { username: pseudonym, hybridKeys: hybridPublicKeys }, ['username', 'hybridKeys']);
-              } catch (dispatchError) {
-                console.error('Failed to dispatch user-keys-available:', dispatchError);
-              }
-            }
-
-            const isOnline = users.some(user => user.username === pseudonym && user.isOnline);
-            const newConversation = createConversation(pseudonym, isOnline);
-
-            setConversations(prev => {
-              return [...prev, newConversation];
-            });
-            if (autoSelect && selectedConversation !== pseudonym) {
-              setSelectedConversation(pseudonym);
-            }
-            resolve(newConversation);
-          };
-
-          window.addEventListener(EventType.USER_EXISTS_RESPONSE, handleUserExistsResponse as EventListener);
-
+          // Blind discovery
           try {
-            await unifiedSignalTransport.send('SERVER', { username: pseudonym }, SignalType.CHECK_USER_EXISTS);
-          } catch (_error) {
+            if (!shouldAttemptDiscovery(conversationUsername, users.map(u => u.username).filter(Boolean))) {
+              reject(new Error('User not eligible for discovery'));
+              resolved = true;
+              cleanup();
+              return;
+            }
+            const material = await findUser(conversationUsername);
+            if (material) {
+              const { inboxId, publicKeys } = material;
+              dispatchSafeEvent(EventType.USER_KEYS_AVAILABLE, {
+                username: conversationUsername,
+                hybridKeys: publicKeys,
+                inboxId
+              }, ['username', 'hybridKeys', 'inboxId']);
+
+              const isOnline = users.some(user => user.username === conversationUsername && user.isOnline);
+              const newConversation = createConversation(conversationUsername, isOnline, inboxId);
+
+              setConversations(prev => [...prev, newConversation]);
+              if (autoSelect && selectedConversation !== conversationUsername) {
+                setSelectedConversation(conversationUsername);
+              }
+              resolve(newConversation);
+              resolved = true;
+              cleanup();
+              return;
+            } else {
+              reject(new Error('User not found via discovery billboard'));
+              resolved = true;
+              cleanup();
+              return;
+            }
+          } catch (discoveryErr) {
+            console.error('[useConversations] Discovery error:', discoveryErr);
+            reject(new Error('Discovery service error'));
             resolved = true;
             cleanup();
-            console.error('Failed to send check-user-exists:', _error);
-            reject(new Error('Failed to validate user'));
             return;
           }
-
-          timeoutId = window.setTimeout(() => {
-            if (resolved) return;
-            resolved = true;
-            cleanup();
-            reject(new Error('User validation timeout'));
-          }, VALIDATION_TIMEOUT_MS);
-
-          eventCleanupRef.current.set(pseudonym, cleanup);
         });
       } catch (_error) {
         rateState.count = Math.max(rateState.count - 1, 0);
@@ -180,11 +157,67 @@ export const useConversations = (currentUsername: string, users: User[], message
     })();
 
     const wrapped = operation.finally(() => {
-      pendingMap.delete(pseudonym);
+      pendingMap.delete(discoveryId);
     });
-    pendingMap.set(pseudonym, wrapped);
+    pendingMap.set(discoveryId, wrapped);
     return wrapped;
-  }, [conversations, currentUsername, removedConversations, selectedConversation, users, secureDB]);
+  }, [conversations, currentUsername, removedConversations, selectedConversation, users, secureDB, findUser]);
+
+  const getLatestConversationTimestamp = useCallback((username: string) => {
+    if (!username) return 0;
+    let latest = 0;
+    for (const msg of messages) {
+      if (!msg?.sender || !msg?.recipient) continue;
+      const other = msg.sender === currentUsername ? msg.recipient : msg.sender;
+      if (other !== username) continue;
+      const ts = msg.timestamp instanceof Date ? msg.timestamp.getTime() : new Date(msg.timestamp).getTime();
+      if (!Number.isNaN(ts) && ts > latest) latest = ts;
+    }
+    return latest;
+  }, [messages, currentUsername]);
+
+  const persistConversationReadState = useCallback(async (username: string, lastReadTimestamp: number) => {
+    if (!secureDB || !username || !lastReadTimestamp) return;
+    try {
+      let metadata = await secureDB.loadConversationMetadata().catch(() => []);
+      if (!metadata || metadata.length === 0) {
+        metadata = await secureDB.rebuildConversationMetadata().catch(() => []);
+      }
+      if (!metadata || metadata.length === 0) return;
+
+      let changed = false;
+      const next = metadata.map((entry) => {
+        if (entry.peerUsername !== username) return entry;
+        const nextRead = Math.max(entry.lastReadTimestamp || 0, lastReadTimestamp);
+        if (nextRead !== entry.lastReadTimestamp || (entry.unreadCount || 0) !== 0) {
+          changed = true;
+          return { ...entry, lastReadTimestamp: nextRead, unreadCount: 0 };
+        }
+        return entry;
+      });
+
+      if (changed) {
+        await secureDB.saveConversationMetadata(next);
+      }
+    } catch (err) {
+      console.error('[useConversations] Failed to persist conversation read state', err);
+    }
+  }, [secureDB]);
+
+  const markConversationAsRead = useCallback((username: string) => {
+    if (!username) return;
+    const latest = getLatestConversationTimestamp(username);
+    if (!latest) return;
+    setLastReadByConversation(prev => {
+      const next = new Map(prev);
+      const current = next.get(username) || 0;
+      if (latest > current) {
+        next.set(username, latest);
+      }
+      return next;
+    });
+    void persistConversationReadState(username, latest);
+  }, [getLatestConversationTimestamp, persistConversationReadState]);
 
   const selectConversation = useCallback((username: string) => {
     if (!username || typeof username !== 'string') {
@@ -196,8 +229,9 @@ export const useConversations = (currentUsername: string, users: User[], message
       setConversations(prev => prev.map(conv =>
         conv.username === username ? { ...conv, unreadCount: 0 } : conv
       ));
+      markConversationAsRead(username);
     }
-  }, [selectedConversation]);
+  }, [selectedConversation, markConversationAsRead]);
 
   useEffect(() => {
     return () => {
@@ -205,6 +239,31 @@ export const useConversations = (currentUsername: string, users: User[], message
       eventCleanupRef.current.clear();
     };
   }, []);
+
+  useEffect(() => {
+    if (!secureDB) return;
+    let cancelled = false;
+    const loadReadState = async () => {
+      try {
+        let metadata = await secureDB.loadConversationMetadata().catch(() => []);
+        if (!metadata || metadata.length === 0) {
+          metadata = await secureDB.rebuildConversationMetadata().catch(() => []);
+        }
+        if (cancelled || !metadata) return;
+        const next = new Map<string, number>();
+        for (const entry of metadata) {
+          if (entry?.peerUsername) {
+            next.set(entry.peerUsername, entry.lastReadTimestamp || 0);
+          }
+        }
+        setLastReadByConversation(next);
+      } catch (err) {
+        console.error('[useConversations] Failed to load read state', err);
+      }
+    };
+    loadReadState();
+    return () => { cancelled = true; };
+  }, [secureDB]);
 
   const getConversationMessages = useCallback((conversationUsername?: string) => {
     if (!conversationUsername) return [];
@@ -262,11 +321,14 @@ export const useConversations = (currentUsername: string, users: User[], message
       if (!other || other === currentUsername || other === 'System') continue;
       const isOnline = userLookup.get(other) ?? false;
       const msgTime = new Date(msg.timestamp);
-      const unreadIncrement = (msg.sender !== currentUsername && (!msg.receipt || !msg.receipt.read)) ? 1 : 0;
+      const lastReadTs = lastReadByConversation.get(other) || 0;
+      const isIncoming = msg.sender !== currentUsername;
+      const msgTimeMs = msgTime.getTime();
+      const isUnread = isIncoming && !msg.receipt?.read && (lastReadTs === 0 || msgTimeMs > lastReadTs);
+      const unreadIncrement = isUnread ? 1 : 0;
 
       let conv = convMap.get(other);
       if (!conv) {
-        const displayName = (msg.sender === other && msg.fromOriginal) ? msg.fromOriginal : undefined;
         conv = {
           id: crypto.randomUUID(),
           username: other,
@@ -275,7 +337,6 @@ export const useConversations = (currentUsername: string, users: User[], message
           lastMessageTime: msgTime,
           unreadCount: unreadIncrement,
           secureContentId: msg.secureContentId || msg.id,
-          displayName
         };
         convMap.set(other, conv);
       } else {
@@ -361,49 +422,12 @@ export const useConversations = (currentUsername: string, users: User[], message
 
       return next;
     });
+  }, [messages, currentUsername, selectedConversation, removedConversations, userLookup, lastReadByConversation]);
 
-    if (secureDB) {
-      const usernames = Array.from(convMap.keys());
-      Promise.allSettled(
-        usernames.map(async (u) => {
-          try {
-            const original = await secureDB.getOriginalUsername(u);
-            return original && typeof original === 'string' ? { username: u, displayName: original } : null;
-          } catch {
-            return null;
-          }
-        })
-      ).then(results => {
-        const resolvedMap = new Map<string, string>();
-        for (const result of results) {
-          if (result.status === 'fulfilled' && result.value) {
-            resolvedMap.set(result.value.username, result.value.displayName);
-          }
-        }
-
-        if (resolvedMap.size > 0) {
-          setConversations(prev =>
-            prev.map(c => {
-              const resolved = resolvedMap.get(c.username);
-              return resolved ? { ...c, displayName: resolved } : c;
-            })
-          );
-        }
-      });
-    }
-  }, [messages, currentUsername, selectedConversation, removedConversations, userLookup, secureDB]);
-
-  // Auto-selection of first conversation removed as per user request
-  /*
   useEffect(() => {
-    if (!selectedConversation && conversations.length > 0) {
-      const firstConversationUsername = conversations[0].username;
-      if (selectedConversation !== firstConversationUsername) {
-        setSelectedConversation(firstConversationUsername);
-      }
-    }
-  }, [conversations, selectedConversation]);
-  */
+    if (!selectedConversation) return;
+    markConversationAsRead(selectedConversation);
+  }, [selectedConversation, messages, markConversationAsRead]);
 
   const removeConversation = useCallback((username: string, clearMessages: boolean = true) => {
     if (!username || typeof username !== 'string') {
@@ -437,4 +461,4 @@ export const useConversations = (currentUsername: string, users: User[], message
     removeConversation,
     getConversationMessages,
   };
-}
+};

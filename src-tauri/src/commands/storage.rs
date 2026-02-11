@@ -9,13 +9,12 @@ use crate::state::AppState;
 pub async fn secure_init(app_handle: tauri::AppHandle, state: State<'_, AppState>) -> Result<bool, String> {
     let mut config_dir = app_handle.path().app_config_dir().map_err(|e| e.to_string())?;
     
-    if let Some(instance_id) = crate::system::get_instance_id() {
-        let suffix = format!("-instance-{}", instance_id);
-        let config_name = config_dir.file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_else(|| "Qor-chat-client".to_string());
-        config_dir.set_file_name(format!("{}{}", config_name, suffix));
-    }
+    let instance_id = crate::system::get_instance_id();
+    let suffix = format!("-instance-{}", instance_id);
+    let config_name = config_dir.file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "Qor-chat-client".to_string());
+    config_dir.set_file_name(format!("{}{}", config_name, suffix));
 
     crate::storage::init(&state, config_dir).await
         .map(|_| true)

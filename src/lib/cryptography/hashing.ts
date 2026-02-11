@@ -124,7 +124,18 @@ export class HashingService {
       hashLen: ARGON2_HASH_LEN
     };
 
-    const result = await PostQuantumWorker.argon2Hash(opts);
+    try {
+      const result = await PostQuantumWorker.argon2Hash(opts);
+      return result.encoded;
+    } catch (err) {
+      console.warn('[HashingService] Worker hash failed, falling back to local', err);
+      return this.hashDataUsingInfoLocal(opts);
+    }
+  }
+
+  static async hashDataUsingInfoLocal(opts: any) {
+    const argon2 = await import('argon2-wasm');
+    const result = await argon2.hash(opts);
     return result.encoded;
   }
 
@@ -152,12 +163,18 @@ export class HashingService {
     };
 
     return Promise.race([
-      PostQuantumWorker.argon2Hash(opts).then((res) => {
-        if (!res || !res.encoded) {
-          throw new Error('Argon2 hash operation failed');
+      (async () => {
+        try {
+          const res = await PostQuantumWorker.argon2Hash(opts);
+          if (!res || !res.encoded) {
+            throw new Error('Argon2 hash operation failed');
+          }
+          return res.encoded;
+        } catch (err) {
+          console.warn('[HashingService] Worker hash failed, falling back to local', err);
+          return this.hashDataUsingInfoLocal(opts);
         }
-        return res.encoded;
-      }),
+      })(),
       new Promise<never>((_, reject) =>
         setTimeout(() => reject(new Error('Argon2 hash operation timed out')), timeoutMs)
       )
@@ -165,8 +182,15 @@ export class HashingService {
   }
 
   static async verifyHash(encoded: string, data: string) {
-    const verified = await PostQuantumWorker.argon2Verify({ pass: data, encoded });
-    return verified;
+    try {
+      const verified = await PostQuantumWorker.argon2Verify({ pass: data, encoded });
+      return verified;
+    } catch (err) {
+      console.warn('[HashingService] Worker verify failed, falling back to local', err);
+      const argon2 = await import('argon2-wasm');
+      const res = await argon2.verify({ pass: data, encoded });
+      return res.verified === true;
+    }
   }
 
   static async generateBlake3Mac(message: Uint8Array, key: Uint8Array): Promise<Uint8Array> {
@@ -232,8 +256,15 @@ export class HashingService {
       hashLen
     };
 
-    const result = await PostQuantumWorker.argon2Hash(hashOptions);
-    return result.hash;
+    try {
+      const result = await PostQuantumWorker.argon2Hash(hashOptions);
+      return result.hash;
+    } catch (err) {
+      console.warn('[HashingService] Worker derive failed, falling back to local', err);
+      const argon2 = await import('argon2-wasm');
+      const res = await argon2.hash(hashOptions);
+      return res.hash;
+    }
   }
 }
 

@@ -152,7 +152,7 @@ export const createInitializeKeys = (
       if (!currentUsername) {
         throw new Error("Username not available");
       }
-      
+
       await new Promise(resolve => setTimeout(resolve, 0));
 
       if (!refs.keyManagerRef.current || refs.keyManagerOwnerRef.current !== currentUsername) {
@@ -189,18 +189,24 @@ export const createInitializeKeys = (
           } else {
             await refs.keyManagerRef.current.initialize(effectivePassphrase);
           }
+          
+          await new Promise(resolve => requestAnimationFrame(() => setTimeout(resolve, 100)));
           const existingKeys = await refs.keyManagerRef.current.getKeys();
 
           if (existingKeys) {
             setters.setAuthStatus("Verifying...");
+            await new Promise(resolve => requestAnimationFrame(() => setTimeout(resolve, 100)));
             refs.hybridKeysRef.current = existingKeys;
             try {
               const pub = existingKeys.kyber.publicKeyBase64;
               const secB64 = CryptoUtils.Base64.arrayBufferToBase64(existingKeys.kyber.secretKey);
               if (pub && secB64) {
                 await signal.setStaticMlkemKeys(currentUsername, pub, secB64);
+                console.log('[KeyManagement] Static ML-KEM keys set successfully for', currentUsername);
               }
-            } catch { }
+            } catch (e) {
+              console.error('[KeyManagement] Failed to set static ML-KEM keys:', e);
+            }
 
             const masterKey = refs.keyManagerRef.current.getMasterKey();
             if (masterKey) {
@@ -233,9 +239,6 @@ export const createInitializeKeys = (
             setters.setShowPassphrasePrompt(true);
             throw new Error('Key decryption failed');
           } else {
-            try {
-              websocketClient.send({ type: 'client-error', error: _error instanceof Error ? _error.message : 'Unknown error' });
-            } catch { }
             throw _error;
           }
         }
@@ -248,15 +251,19 @@ export const createInitializeKeys = (
         }
 
         setters.setAuthStatus("Generating keys...");
+        await new Promise(resolve => requestAnimationFrame(() => setTimeout(resolve, 100)));
         const hybridKeyPair = await CryptoUtils.Hybrid.generateHybridKeyPair();
 
         setters.setAuthStatus("Securing...");
+        await new Promise(resolve => requestAnimationFrame(() => setTimeout(resolve, 100)));
         if (providedSalt && providedArgon2Params) {
           await refs.keyManagerRef.current.initialize(effectivePassphrase, providedSalt, providedArgon2Params);
         } else {
           await refs.keyManagerRef.current.initialize(effectivePassphrase);
         }
+        
         setters.setAuthStatus("Storing...");
+        await new Promise(resolve => requestAnimationFrame(() => setTimeout(resolve, 100)));
         await refs.keyManagerRef.current.storeKeys(hybridKeyPair);
 
         const masterKey = refs.keyManagerRef.current.getMasterKey();
@@ -270,6 +277,7 @@ export const createInitializeKeys = (
           } catch { }
         }
 
+        await new Promise(resolve => requestAnimationFrame(() => setTimeout(resolve, 50)));
         const encodedHash = await refs.keyManagerRef.current.getEncodedPassphraseHash(effectivePassphrase);
         if (encodedHash) {
           refs.passphraseRef.current = encodedHash;
@@ -282,7 +290,9 @@ export const createInitializeKeys = (
           if (pub && secB64) {
             await signal.setStaticMlkemKeys(currentUsername, pub, secB64);
           }
-        } catch { }
+        } catch (e) {
+          console.error('[KeyManagement] Failed to set static ML-KEM keys:', e);
+        }
       }
     } catch (_error) {
       const errorMessage = _error instanceof Error ? _error.message : String(_error);

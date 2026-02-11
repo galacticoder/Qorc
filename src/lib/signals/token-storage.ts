@@ -3,33 +3,31 @@
  * Handles secure storage and retrieval of auth tokens
  */
 
-import { JWT_LIKE_REGEX, TOKEN_STORAGE_KEY_BASE } from '../constants';
+import { BASE64_URLSAFE_REGEX, TOKEN_STORAGE_KEY_BASE } from '../constants';
 import { storage } from '../tauri-bindings';
 
 class SecureTokenStorage {
   // Generate a unique key for each instance
   private static keyForInstance(): string {
-    return `${TOKEN_STORAGE_KEY_BASE}:1`;
+    return `${TOKEN_STORAGE_KEY_BASE}:v3`;
   }
 
-  // Store tokens
-  static async store(tokens: { accessToken: string; refreshToken: string }): Promise<boolean> {
+  // Store anonymous session token
+  static async store(token: string): Promise<boolean> {
     try {
-      const access = typeof tokens.accessToken === 'string' ? tokens.accessToken.trim() : '';
-      const refresh = typeof tokens.refreshToken === 'string' ? tokens.refreshToken.trim() : '';
+      const trimmedToken = typeof token === 'string' ? token.trim() : '';
 
-      if (!access || !refresh) {
+      if (!trimmedToken) {
         return false;
       }
 
-      if (!JWT_LIKE_REGEX.test(access) || !JWT_LIKE_REGEX.test(refresh)) {
-        console.warn('[tokens] Attempted to store malformed tokens');
+      if (!BASE64_URLSAFE_REGEX.test(trimmedToken)) {
         return false;
       }
 
       await storage.init();
       const key = this.keyForInstance();
-      const payload = JSON.stringify({ a: access, r: refresh, t: Date.now() });
+      const payload = JSON.stringify({ a: trimmedToken, t: Date.now() });
 
       const ok = await storage.set(key, payload);
       return !!ok;
@@ -39,8 +37,8 @@ class SecureTokenStorage {
     }
   }
 
-  // Retrieve tokens
-  static async retrieve(): Promise<{ accessToken: string; refreshToken: string } | null> {
+  // Retrieve anonymous session token
+  static async retrieve(): Promise<string | null> {
     try {
       await storage.init();
       const key = this.keyForInstance();
@@ -51,14 +49,13 @@ class SecureTokenStorage {
       }
 
       const parsed = JSON.parse(raw);
-      const access = typeof parsed?.a === 'string' ? parsed.a.trim() : '';
-      const refresh = typeof parsed?.r === 'string' ? parsed.r.trim() : '';
+      const token = typeof parsed?.a === 'string' ? parsed.a.trim() : '';
 
-      if (!access || !refresh) {
+      if (!token) {
         return null;
       }
 
-      return { accessToken: access, refreshToken: refresh };
+      return token;
     } catch (_error) {
       console.error('[tokens] retrieve-failed', (_error as Error).message);
       return null;
@@ -78,25 +75,34 @@ class SecureTokenStorage {
   }
 }
 
-// Persist tokens
-export async function persistAuthTokens(tokens: {
-  accessToken: string;
-  refreshToken: string;
-}): Promise<boolean> {
-  return await SecureTokenStorage.store(tokens);
+/**
+ * Persist anonymous session token
+ */
+export async function persistAuthTokens(token: any): Promise<boolean> {
+  const tokenString = typeof token === 'string' ? token : null;
+  if (!tokenString) return false;
+  return await SecureTokenStorage.store(tokenString);
 }
 
-// Retrieve tokens
-export async function retrieveAuthTokens(): Promise<{ accessToken: string; refreshToken: string } | null> {
-  return await SecureTokenStorage.retrieve();
+/**
+ * Retrieve anonymous session token
+ */
+export async function retrieveAuthTokens(): Promise<string | null> {
+  const token = await SecureTokenStorage.retrieve();
+  if (!token) return null;
+  return token;
 }
 
-// Clear tokens
+/**
+ * Clear stored auth tokens
+ */
 export async function clearAuthTokens(): Promise<void> {
   await SecureTokenStorage.clear();
 }
 
-// Clear token encryption key
+/**
+ * Clear token encryption key
+ */
 export async function clearTokenEncryptionKey(): Promise<void> {
   await SecureTokenStorage.clear();
 }

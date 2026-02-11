@@ -1,6 +1,6 @@
 /**
  * Tauri API Bindings
- * Pure Tauri TypeScript bindings for all commands
+ * Tauri TypeScript bindings for all commands
  */
 
 import { invoke } from '@tauri-apps/api/core';
@@ -92,6 +92,7 @@ export interface EncryptedMessage {
     sender: string;
     recipient: string;
     their_kem_fingerprint: string;
+    registrationId?: number;
 }
 
 export interface DecryptResult {
@@ -105,6 +106,10 @@ export interface DeviceCredentials {
     device_id: string;
     public_key_pem: string;
     fingerprint: string;
+    private_key_base64?: string;
+    public_key_base64?: string;
+    privateKeyBase64?: string;
+    publicKeyBase64?: string;
 }
 
 export interface LinkPreview {

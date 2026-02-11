@@ -8,7 +8,7 @@ function parsePort(portValue) {
   return isNaN(parsed) ? 8443 : parsed;
 }
 
-// Generates a cryptographically random number of attempts between min and max
+// Generates random number of attempts between min and max
 function getRandomizedAttempts(min = 5, max = 10) {
   const range = max - min + 1;
   const randomBytes = crypto.randomBytes(4);
@@ -22,36 +22,33 @@ export const MAX_CLIENTS = 100;
 export const SERVER_ID = 'Qor-Chat-Server';
 
 export const TTL_CONFIG = {
-  SESSION_TTL: 3600,       // 1 hour - Redis session state (refreshed on activity)
-  PRESENCE_TTL: 600,       // 10 minutes - User online status (refreshed on heartbeat)
-  CONNECTION_COUNTER_TTL: 3600, // 1 hour - Connection counting
-  RATE_LIMIT_TTL: 3600,    // 1 hour - Rate limiting data
-  AUTH_STATE_TTL: 604800   // 7 days - Persisted auth state 
+  SESSION_TTL: 31536000,
+  CONNECTION_COUNTER_TTL: 31536000,
+  RATE_LIMIT_TTL: 31536000,
+  AUTH_STATE_TTL: 604800
 };
 let _serverPasswordHash = null;
 
 // Rate limiting config
 export const RATE_LIMIT_CONFIG = {
   CONNECTION: {
-    WINDOW_MS: 60000, // 1 minute window
-    MAX_NEW_CONNECTIONS: 30, // max connections per minute
-    BLOCK_DURATION_MS: 300000 // block time (5 minutes)
+    WINDOW_MS: 60000,
+    MAX_NEW_CONNECTIONS: 30,
+    BLOCK_DURATION_MS: 300000
   },
 
   AUTHENTICATION: {
-    WINDOW_MS: 60000, // 1 minute
-    MAX_ATTEMPTS_PER_CONNECTION: 10, // max auth tries per connection
-    BLOCK_DURATION_MS: 60000 // block time (60 seconds / 1 minute)
+    WINDOW_MS: 60000,
+    MAX_ATTEMPTS_PER_CONNECTION: 10,
+    BLOCK_DURATION_MS: 60000
   },
 
   AUTH_PER_USER: {
-    WINDOW_MS: 600000, // 10 minutes
-    MAX_ATTEMPTS: 50, // allow server rate limiter plenty of headroom
-    BLOCK_DURATION_MS: 900000 // block time (900 seconds / 15 minutes)
+    WINDOW_MS: 600000,
+    MAX_ATTEMPTS: 50,
+    BLOCK_DURATION_MS: 900000
   },
 
-  // Category-specific auth attempt limits (short windows)
-  // Randomized between 5-10 attempts for security
   AUTH_CATEGORIES: {
     ACCOUNT_PASSWORD: {
       WINDOW_MS: 60000,
@@ -71,15 +68,15 @@ export const RATE_LIMIT_CONFIG = {
   },
 
   MESSAGES: {
-    WINDOW_MS: 60000, // 1 minute
-    MAX_MESSAGES: 500, // max messages per user per minute
-    BLOCK_DURATION_MS: 60000 // block time (60 seconds / 1 minute)
+    WINDOW_MS: 60000,
+    MAX_MESSAGES: 500,
+    BLOCK_DURATION_MS: 60000
   },
 
   BUNDLE_OPERATIONS: {
-    WINDOW_MS: 60000, // 1 minute
-    MAX_OPERATIONS: 200, // max bundle ops per user per minute
-    BLOCK_DURATION_MS: 60000 // block time (60 seconds / 1 minute)
+    WINDOW_MS: 60000,
+    MAX_OPERATIONS: 200,
+    BLOCK_DURATION_MS: 60000
   }
 };
 
@@ -138,11 +135,4 @@ export function validateConfig() {
     throw new Error('Invalid MAX_CLIENTS - must be between 1 and 100000');
   }
 
-}
-
-export function setServerPortForTests(port) {
-  if (typeof port !== 'number' || !Number.isInteger(port) || port < 1 || port > 65535) {
-    throw new Error('setServerPortForTests requires a valid port number');
-  }
-  process.env.PORT = String(port);
 }

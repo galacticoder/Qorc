@@ -1,7 +1,5 @@
 import { SignalType } from '../../lib/types/signal-types';
 import { EventType } from '../../lib/types/event-types';
-import { CryptoUtils } from '../../lib/utils/crypto-utils';
-import websocketClient from '../../lib/websocket/websocket';
 import { secureMessageQueue } from '../../lib/database/secure-message-queue';
 import { MAX_PAYLOAD_CACHE_SIZE } from '../../lib/constants';
 import type { HybridPublicKeys } from '../../lib/types/message-sending-types';
@@ -12,6 +10,7 @@ import {
   createCoverPadding
 } from '../../lib/utils/message-sending-utils';
 import { signal } from '../../lib/tauri-bindings';
+import { shouldAttemptDiscovery } from '../../lib/utils/discovery-utils';
 
 // Global caches
 export const globalEncryptedPayloadCache = new Map<string, { encryptedPayload: any; to: string; messageId: string }>();
@@ -47,10 +46,6 @@ export const buildMessagePayload = (
     ...(senderSignalBundle ? { senderSignalBundle } : {}),
     ...(editMessageId ? { editMessageId } : {}),
   };
-
-  if (originalUsernameRef.current && originalUsernameRef.current !== currentUser) {
-    payload.fromOriginal = originalUsernameRef.current;
-  }
 
   if (replyToData) {
     payload.replyTo = replyToData;
@@ -90,7 +85,8 @@ export const encryptAndSend = async (
   recipientHybridKeys: HybridPublicKeys,
   localKeys: { dilithium: { publicKeyBase64: string; secretKey: Uint8Array } },
   sessionLocksRef: React.RefObject<WeakMap<object, Map<string, Promise<boolean>>>>,
-  lockContext: object
+  lockContext: object,
+  findUser?: (handle: string) => Promise<any>
 ): Promise<{ success: boolean; encryptedPayload?: any; error?: string }> => {
   let encrypted = await signal.encrypt(
     currentUser,
@@ -105,6 +101,7 @@ export const encryptAndSend = async (
       currentUser,
       recipientUsername,
       { secretKey: localKeys.dilithium.secretKey, publicKeyBase64: localKeys.dilithium.publicKeyBase64 },
+      findUser
     );
 
     if (retrySession) {
@@ -240,34 +237,37 @@ export const queueMessageForLater = async (
   });
 };
 
-// Request bundle for retry
+// Request bundle for retry using discovery
 export const requestBundleForRetry = async (
   recipientUsername: string,
   currentUser: string,
-  getKeysOnDemand: () => Promise<any>,
-  lastSessionBundleReqTsRef: React.RefObject<Map<string, number>>
+  _getKeysOnDemand: () => Promise<any>,
+  lastSessionBundleReqTsRef: React.RefObject<Map<string, number>>,
+  _inboxId?: string,
+  findUser?: (handle: string) => Promise<any>
 ) => {
   try {
     const now = Date.now();
     const last = lastSessionBundleReqTsRef.current.get(recipientUsername) || 0;
     if (now - last >= 3000) {
       lastSessionBundleReqTsRef.current.set(recipientUsername, now);
-      const keys = await getKeysOnDemand();
-      if (keys?.dilithium?.secretKey && keys.dilithium.publicKeyBase64) {
-        const req = {
-          type: SignalType.LIBSIGNAL_REQUEST_BUNDLE,
-          username: recipientUsername,
-          from: currentUser,
-          timestamp: now,
-          challenge: CryptoUtils.Base64.arrayBufferToBase64(globalThis.crypto.getRandomValues(new Uint8Array(32))),
-          senderDilithium: keys.dilithium.publicKeyBase64,
-          reason: 'retry-after-session-error',
-        } as const;
-        const canonical = TEXT_ENCODER.encode(JSON.stringify(req));
-        const sigRaw = await CryptoUtils.Dilithium.sign(keys.dilithium.secretKey, canonical);
-        const signature = CryptoUtils.Base64.arrayBufferToBase64(sigRaw);
-        await websocketClient.sendSecureControlMessage({ ...req, signature });
+
+      if (!findUser) {
+        console.warn('[Send] findUser not available for bundle retry');
+        return;
+      }
+
+      if (!shouldAttemptDiscovery(recipientUsername)) {
+        return;
+      }
+
+      const material = await findUser(recipientUsername);
+      if (material && material.fullBundle) {
+        await signal.processPreKeyBundle(currentUser, recipientUsername, material.fullBundle);
+        window.dispatchEvent(new CustomEvent(EventType.LIBSIGNAL_SESSION_READY, { detail: { peer: recipientUsername } }));
       }
     }
-  } catch { }
+  } catch (_err) {
+    console.error('[Send] Bundle retry via Discovery failed:', _err);
+  }
 };

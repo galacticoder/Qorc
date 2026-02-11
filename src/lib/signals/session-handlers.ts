@@ -3,10 +3,9 @@
  * Handles LIBSIGNAL_DELIVER_BUNDLE, SESSION_RESET_REQUEST, SESSION_ESTABLISHED
  */
 
-import websocketClient from '../websocket/websocket';
-import { SignalType } from '../types/signal-types';
 import { EventType } from '../types/event-types';
 import { signal } from '../tauri-bindings';
+import websocketClient from '../websocket/websocket';
 
 // Handle libsignal deliver bundle
 export async function handleLibsignalDeliverBundle(data: any, loginUsernameRef: React.RefObject<string> | undefined): Promise<void> {
@@ -57,12 +56,6 @@ export async function handleLibsignalDeliverBundle(data: any, loginUsernameRef: 
     if (confirm) {
       try { await signal.trustPeerIdentity(currentUser, targetUser, 1); } catch { }
       window.dispatchEvent(new CustomEvent(EventType.LIBSIGNAL_SESSION_READY, { detail: { peer: targetUser } }));
-      await websocketClient.sendSecureControlMessage({
-        type: SignalType.SESSION_ESTABLISHED,
-        from: currentUser,
-        username: targetUser,
-        timestamp: Date.now()
-      });
     } else {
       throw new Error('Session not present after bundle processing');
     }

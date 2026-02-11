@@ -1,5 +1,6 @@
 import { blake3 } from '@noble/hashes/blake3.js';
 import { ml_dsa87 } from '@noble/post-quantum/ml-dsa.js';
+import { ml_kem1024 } from '@noble/post-quantum/ml-kem.js';
 
 const textEncoder = new TextEncoder();
 
@@ -79,12 +80,24 @@ const verifyRoutingHeader = async (header, signatureBase64, dilithiumPublicKey) 
 };
 
 const normalizePayload = (payload) => {
-  if (payload instanceof Uint8Array) return { bytes: new Uint8Array(payload), type: 'binary' };
-  if (payload instanceof ArrayBuffer) return { bytes: new Uint8Array(payload), type: 'binary' };
-  if (typeof payload === 'string') return { bytes: textEncoder.encode(payload), type: 'text', text: payload };
-  const jsonSafe = payload ?? {};
-  const text = JSON.stringify(jsonSafe);
-  return { bytes: textEncoder.encode(text), type: 'json', text, json: jsonSafe };
+  if (payload instanceof Uint8Array) {
+    return { bytes: new Uint8Array(payload), type: 'binary' };
+  }
+  if (Buffer.isBuffer(payload)) {
+    return { bytes: new Uint8Array(payload.buffer, payload.byteOffset, payload.byteLength), type: 'binary' };
+  }
+  if (typeof payload === 'string') {
+    return { bytes: textEncoder.encode(payload), type: 'text', text: payload };
+  }
+  const json = JSON.stringify(payload || {});
+  return { bytes: textEncoder.encode(json), type: 'json', text: json, json: payload };
+};
+
+const xor = (a, b) => {
+  const len = Math.max(a.length, b.length);
+  const out = new Uint8Array(len);
+  for (let i = 0; i < len; i++) out[i] = (a[i] || 0) ^ (b[i] || 0);
+  return out;
 };
 
 export {
@@ -95,5 +108,7 @@ export {
   signRoutingHeader,
   verifyRoutingHeader,
   toUint8Array as base64ToUint8Array,
-  fromUint8Array as uint8ArrayToBase64
+  fromUint8Array as uint8ArrayToBase64,
+  ml_kem1024,
+  xor
 };

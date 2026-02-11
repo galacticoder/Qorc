@@ -8,7 +8,7 @@
  * - Supports cross-machine server discovery
  */
 
-import { withRedisClient } from '../presence/presence.js';
+import { withRedisClient } from '../session/redis-client.js';
 import { HAProxyConfigGenerator } from './haproxy-config-generator.js';
 import { logger as cryptoLogger } from '../crypto/crypto-logger.js';
 import { HAProxyManager } from './haproxy-manager.js';
@@ -162,7 +162,6 @@ class AutoLoadBalancer {
 
     const generator = new HAProxyConfigGenerator({
       listenPort,
-      httpPort: parseInt(process.env.HAPROXY_HTTP_PORT || (isRoot ? '80' : '8080'), 10),
       statsPort: statsPort,
       tlsCertPath: process.env.HAPROXY_CERT_PATH || '/etc/haproxy/certs',
       statsUsername: process.env.HAPROXY_STATS_USERNAME || 'admin',
@@ -228,7 +227,7 @@ class AutoLoadBalancer {
 
         const onionAddr = await this.torManager.getOnionAddress();
         if (onionAddr) {
-          console.log(`\tOnion URL:  http://${onionAddr}`);
+          console.log(`\tOnion URL:  https://${onionAddr}`);
         }
 
         this.lastServerCount = serverCount;
@@ -279,7 +278,7 @@ class AutoLoadBalancer {
       const onionAddr = await this.torManager.getOnionAddress();
       if (onionAddr) {
         await withRedisClient(async (client) => {
-          await client.set('cluster:lb:onionAddress', onionAddr);
+          await client.set('cluster:lb:onionAddress', `https://${onionAddr}`);
         });
       }
 
@@ -308,7 +307,7 @@ class AutoLoadBalancer {
 
           const onionAddr = await this.torManager.getOnionAddress();
           if (onionAddr) {
-            console.log(`\tOnion URL:  http://${onionAddr}`);
+            console.log(`\tOnion URL:  https://${onionAddr}`);
           }
           console.log();
 

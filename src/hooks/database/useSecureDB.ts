@@ -2,10 +2,9 @@ import { useRef, useEffect, useCallback, useState } from 'react';
 import { SecureDB } from '../../lib/database/secureDB';
 import type { Message } from '../../components/chat/messaging/types';
 import type { User } from '../../components/chat/messaging/UserList';
-import { EventType } from '../../lib/types/event-types';
 import { DB_SAVE_DEBOUNCE_MS } from '../../lib/constants';
-import { prewarmUsernameCache, mergeReceipts } from '../../lib/utils/database-utils';
-import type { UseSecureDBProps, UseSecureDBReturn, MappingPayload, RateLimitBucket } from '../../lib/types/database-types';
+import { mergeReceipts } from '../../lib/utils/database-utils';
+import type { UseSecureDBProps, UseSecureDBReturn } from '../../lib/types/database-types';
 import {
   isValidCryptoKey,
   initializeSecureDB,
@@ -23,12 +22,6 @@ import {
   addToPendingQueue,
 } from './message-persistence';
 import { loadUsers, saveUsers } from './user-persistence';
-import {
-  handleMappingReceived,
-  handleUserKeysAvailable,
-  queuePendingMapping,
-  flushPendingMappings,
-} from './mapping-handlers';
 
 export const useSecureDB = ({ Authentication, setMessages }: UseSecureDBProps): UseSecureDBReturn => {
   const secureDBRef = useRef<SecureDB | null>(null);
@@ -36,14 +29,11 @@ export const useSecureDB = ({ Authentication, setMessages }: UseSecureDBProps): 
   const [users, setUsers] = useState<User[]>([]);
 
   const pendingMessagesRef = useRef<Message[]>([]);
-  const pendingMappingsRef = useRef<MappingPayload[]>([]);
   const debouncedSaveRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pendingSavesRef = useRef<Set<string>>(new Set());
   const pendingSaveMessagesRef = useRef<Map<string, Message>>(new Map());
   const messageMapRef = useRef<Map<string, Message>>(new Map());
   const inflightDbOpRef = useRef<Promise<void>>(Promise.resolve());
-  const eventRateLimitRef = useRef<RateLimitBucket>({ windowStart: Date.now(), count: 0 });
-  const keysEventRateLimitRef = useRef<RateLimitBucket>({ windowStart: Date.now(), count: 0 });
 
   // Reset on logout
   useEffect(() => {
@@ -56,6 +46,7 @@ export const useSecureDB = ({ Authentication, setMessages }: UseSecureDBProps): 
   // Initialize database
   useEffect(() => {
     if (!Authentication?.isLoggedIn || dbInitialized || secureDBRef.current) return;
+    if (!Authentication.vaultReady) return;
     if (!Authentication.loginUsernameRef.current || !Authentication.aesKeyRef?.current) return;
 
     const initializeDB = async () => {
@@ -80,14 +71,17 @@ export const useSecureDB = ({ Authentication, setMessages }: UseSecureDBProps): 
 
         await storeAuthMetadata(
           db,
-          Authentication.loginUsernameRef.current,
+          Authentication.pseudonym || Authentication.loginUsernameRef.current,
           Authentication.originalUsernameRef?.current || null
         );
 
         await initializeEncryptedStorage(db);
 
         setDbInitialized(true);
-        Authentication.passphraseRef.current = '';
+        Authentication.setVaultReady?.(true);
+        if (Authentication.passphraseRef) {
+          Authentication.passphraseRef.current = '';
+        }
       } catch (err) {
         console.error('[useSecureDB] Failed to initialize SecureDB', err);
         Authentication.setLoginError?.('Failed to initialize secure storage');
@@ -95,7 +89,7 @@ export const useSecureDB = ({ Authentication, setMessages }: UseSecureDBProps): 
     };
 
     initializeDB();
-  }, [Authentication?.isLoggedIn, Authentication?.username, dbInitialized]);
+  }, [Authentication?.isLoggedIn, Authentication?.username, dbInitialized, Authentication?.vaultReady]);
 
   // Load data after initialization
   useEffect(() => {
@@ -103,14 +97,6 @@ export const useSecureDB = ({ Authentication, setMessages }: UseSecureDBProps): 
 
     const loadData = async () => {
       if (!secureDBRef.current) return;
-
-      // Prewarm username cache
-      try {
-        const mappings = await secureDBRef.current.getAllUsernameMappings();
-        if (Array.isArray(mappings) && mappings.length > 0) {
-          prewarmUsernameCache(mappings);
-        }
-      } catch { }
 
       const currentUser = Authentication?.loginUsernameRef?.current;
       if (!currentUser) return;
@@ -152,68 +138,6 @@ export const useSecureDB = ({ Authentication, setMessages }: UseSecureDBProps): 
     loadData();
   }, [Authentication?.isLoggedIn, dbInitialized, setMessages]);
 
-  // Username mapping listener
-  useEffect(() => {
-    if (!Authentication?.isLoggedIn || !dbInitialized || !secureDBRef.current) return;
-
-    const mappingListener = async (e: Event) => {
-      try {
-        await handleMappingReceived(
-          (e as CustomEvent).detail,
-          secureDBRef.current!,
-          eventRateLimitRef.current
-        );
-      } catch (err) {
-        console.error('[useSecureDB] Failed to store username mapping', err);
-      }
-    };
-
-    const keysListener = (e: Event) => {
-      try {
-        const newUsers = handleUserKeysAvailable(
-          (e as CustomEvent).detail,
-          users,
-          keysEventRateLimitRef.current
-        );
-        if (newUsers) setUsers(newUsers);
-      } catch { }
-    };
-
-    window.addEventListener(EventType.USERNAME_MAPPING_RECEIVED, mappingListener as EventListener);
-    window.addEventListener(EventType.USER_KEYS_AVAILABLE, keysListener as EventListener);
-    return () => {
-      window.removeEventListener(EventType.USERNAME_MAPPING_RECEIVED, mappingListener as EventListener);
-      window.removeEventListener(EventType.USER_KEYS_AVAILABLE, keysListener as EventListener);
-    };
-  }, [Authentication?.isLoggedIn, dbInitialized, users]);
-
-  // Pre initialize mapping queue
-  useEffect(() => {
-    if (dbInitialized) return;
-
-    const preInitListener = (e: Event) => {
-      const result = queuePendingMapping((e as CustomEvent).detail, pendingMappingsRef.current);
-      if (result) pendingMappingsRef.current = result;
-    };
-
-    window.addEventListener(EventType.USERNAME_MAPPING_RECEIVED, preInitListener as EventListener);
-    return () => window.removeEventListener(EventType.USERNAME_MAPPING_RECEIVED, preInitListener as EventListener);
-  }, [dbInitialized]);
-
-  // Flush pending mappings
-  useEffect(() => {
-    if (!dbInitialized || !secureDBRef.current || pendingMappingsRef.current.length === 0) return;
-
-    const toFlush = [...pendingMappingsRef.current];
-    pendingMappingsRef.current = [];
-    flushPendingMappings(secureDBRef.current, toFlush);
-  }, [dbInitialized]);
-
-  // Trigger mapping update on init
-  useEffect(() => {
-    if (!Authentication?.isLoggedIn || !dbInitialized || !secureDBRef.current) return;
-    try { window.dispatchEvent(new CustomEvent(EventType.USERNAME_MAPPING_UPDATED, { detail: { username: '__all__' } })); } catch { }
-  }, [Authentication?.isLoggedIn, dbInitialized]);
 
   // Flush pending messages
   useEffect(() => {

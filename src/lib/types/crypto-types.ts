@@ -121,7 +121,22 @@ export interface EncryptedMessagePayload {
   timestamp: number;
 }
 
-export type WorkerRequestType = 'kem.generateKeyPair' | 'kem.destroyKey' | 'argon2.hash' | 'argon2.verify';
+export type WorkerRequestType =
+  | 'kem.generateKeyPair'
+  | 'kem.destroyKey'
+  | 'sig.generateKeyPair'
+  | 'sig.sign'
+  | 'sig.verify'
+  | 'pp.generateTokenBatch'
+  | 'pp.unblindTokens'
+  | 'opaque.startRegistration'
+  | 'opaque.finishRegistration'
+  | 'opaque.startLogin'
+  | 'opaque.finishLogin'
+  | 'opaque.startOTLogin'
+  | 'opaque.finishOTLogin'
+  | 'argon2.hash'
+  | 'argon2.verify';
 
 export interface WorkerRequestMessage {
   id: string;
@@ -129,6 +144,25 @@ export interface WorkerRequestMessage {
   auth: string;
   keyId?: string;
   params?: unknown;
+  message?: Uint8Array;
+  secretKey?: Uint8Array;
+  publicKey?: Uint8Array;
+  signature?: Uint8Array;
+  count?: number;
+  tokenSecrets?: any[];
+  signedBlindedTokens?: Uint8Array[];
+  proof?: Uint8Array;
+  serverPublicKey?: Uint8Array;
+  passwordBytes?: Uint8Array;
+  blindingFactor?: Uint8Array;
+  clientSecretKey?: Uint8Array;
+  serverResponse?: any;
+  shardSize?: number;
+  myIndex?: number;
+  myPrivKey?: Uint8Array;
+  otRecords?: { ct: Uint8Array; masked: Uint8Array }[];
+  evaluatedElement?: Uint8Array;
+  serverNonce?: Uint8Array;
 }
 
 export interface SessionRecord {

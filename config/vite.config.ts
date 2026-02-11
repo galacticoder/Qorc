@@ -12,6 +12,9 @@ const stripCrossorigin = (): Plugin => ({
 export default defineConfig({
   plugins: [stripCrossorigin(), react({ babel: { plugins: ['babel-plugin-react-compiler'] } })],
   base: './',
+  worker: {
+    format: 'es',
+  },
   server: {
     port: 5173,
     strictPort: true,

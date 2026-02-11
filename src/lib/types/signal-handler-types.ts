@@ -12,6 +12,7 @@ export interface SignalHandlers {
 export interface AuthRefs {
   setServerHybridPublic?: (keys: any) => void;
   serverHybridPublic?: any;
+  serverHybridPublicRef?: React.RefObject<any>;
   handleAuthSuccess?: (username: string, recovered: boolean) => void;
   loginUsernameRef?: React.RefObject<string>;
   originalUsernameRef?: React.RefObject<string>;
@@ -23,6 +24,7 @@ export interface AuthRefs {
   passphrasePlaintextRef?: React.RefObject<string>;
   passphraseRef?: React.RefObject<string>;
   setShowPassphrasePrompt?: (val: boolean) => void;
+  setShowPasswordPrompt?: (val: boolean) => void;
   passwordRef?: React.RefObject<string>;
   setIsSubmittingAuth?: (val: boolean) => void;
   setAuthStatus?: (status: string) => void;
@@ -32,11 +34,24 @@ export interface AuthRefs {
   setUsername?: (name: string) => void;
   setMaxStepReached?: (step: string) => void;
   setRecoveryActive?: (val: boolean) => void;
+  setVaultReady?: (val: boolean) => void;
   getKeysOnDemand?: () => Promise<any>;
   hybridKeysRef?: React.RefObject<any>;
   accountAuthenticated?: boolean;
   isLoggedIn?: boolean;
   isRegistrationMode?: boolean;
+  blindCredentialRef?: React.RefObject<{
+    message: string;
+    blindedMsg: string;
+    blindingFactor: string;
+    n: string;
+    kid: string;
+    modulusLength: number;
+    hash: string;
+    saltLength: number;
+    scheme: string;
+    used?: boolean;
+  } | null>;
 }
 
 export interface DatabaseRefs {

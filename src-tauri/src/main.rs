@@ -219,22 +219,21 @@ async fn initialize_app(app_handle: &tauri::AppHandle) -> Result<(), Box<dyn std
     let mut data_dir = app_handle.path().app_data_dir()?;
 
     // Instance isolation
-    if let Some(instance_id) = system::get_instance_id() {
-        info!("Applying instance isolation: {}", instance_id);
-        let suffix = format!("-instance-{}", instance_id);
-        
-        // Handle config_dir
-        let config_name = config_dir.file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_else(|| "Qor-chat-client".to_string());
-        config_dir.set_file_name(format!("{}{}", config_name, suffix));
-        
-        // Handle data_dir
-        let data_name = data_dir.file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_else(|| "com.qor.chat".to_string());
-        data_dir.set_file_name(format!("{}{}", data_name, suffix));
-    }
+    let instance_id = system::get_instance_id();
+    info!("Applying instance isolation: {}", instance_id);
+    let suffix = format!("-instance-{}", instance_id);
+    
+    // Handle config_dir
+    let config_name = config_dir.file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "Qor-chat-client".to_string());
+    config_dir.set_file_name(format!("{}{}", config_name, suffix));
+    
+    // Handle data_dir
+    let data_name = data_dir.file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "com.qor.chat".to_string());
+    data_dir.set_file_name(format!("{}{}", data_name, suffix));
 
     info!("Config directory: {:?}", config_dir);
     info!("Data directory: {:?}", data_dir);

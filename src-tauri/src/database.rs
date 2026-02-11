@@ -84,8 +84,8 @@ impl DatabaseManager {
         retry_count: u8, 
         err_msg: String
     ) -> QorResult<Self> {
+        // Handle corrupt database files
         if err_msg.contains("file is not a database") && retry_count < 2 {
-            // Close connection
             drop(conn);
             
             let timestamp = chrono::Utc::now().timestamp();
@@ -95,7 +95,19 @@ impl DatabaseManager {
                 return Err(QorError::StorageInitFailed(format!("Recovery failed: {}", rename_err)));
             }
             
-            // Retry opening
+            return Self::open_impl(db_path, master_key, retry_count + 1);
+        }
+        
+        let is_transient = err_msg.contains("disk I/O error") 
+            || err_msg.contains("database is locked")
+            || err_msg.contains("busy");
+            
+        if is_transient && retry_count < 5 {
+            drop(conn);
+            
+            let delay_ms = 50u64 * (1u64 << retry_count);
+            std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+            
             return Self::open_impl(db_path, master_key, retry_count + 1);
         }
 

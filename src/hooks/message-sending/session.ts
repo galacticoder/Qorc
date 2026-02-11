@@ -1,10 +1,6 @@
-import { SignalType } from '../../lib/types/signal-types';
-import { EventType } from '../../lib/types/event-types';
-import { CryptoUtils } from '../../lib/utils/crypto-utils';
-import websocketClient from '../../lib/websocket/websocket';
-import { SESSION_WAIT_MS, SESSION_POLL_BASE_MS, SESSION_POLL_MAX_MS, BUNDLE_REQUEST_COOLDOWN_MS } from '../../lib/constants';
-import { TEXT_ENCODER, getSessionApi } from '../../lib/utils/message-sending-utils';
-import type { SigningKeys } from '../../lib/types/message-sending-types';
+import { getSessionApi } from '../../lib/utils/message-sending-utils';
+import { signal } from '../../lib/tauri-bindings';
+import { shouldAttemptDiscovery } from '../../lib/utils/discovery-utils';
 
 // Track last bundle request time per peer to avoid excessive requests
 export const bundleRequestTracker = new Map<string, number>();
@@ -15,7 +11,7 @@ export const ensureSession = async (
   lockContext: object,
   currentUser: string,
   peer: string,
-  signingKeys: SigningKeys,
+  findUser?: (handle: string) => Promise<any>
 ) => {
   let contextMap = sessionLocks.get(lockContext);
   if (!contextMap) {
@@ -40,100 +36,38 @@ export const ensureSession = async (
         return true;
       }
 
-      const deadline = Date.now() + SESSION_WAIT_MS;
-      let delay = SESSION_POLL_BASE_MS;
-      const MAX_REPLIES = 1;
-      let requestCount = 0;
-
-      let sessionReadyFlag = false;
-      const readyHandler = (event: Event) => {
-        const customEvent = event as CustomEvent;
-        if (customEvent.detail?.peer === peer) {
-          sessionReadyFlag = true;
-          try { window.removeEventListener(EventType.LIBSIGNAL_SESSION_READY, readyHandler as EventListener); } catch { }
-        }
-      };
-      window.addEventListener(EventType.LIBSIGNAL_SESSION_READY, readyHandler as EventListener);
-
-      try {
-        let lastRequestAt = 0;
-        // Check if recently requested this peer's bundle
-        const lastBundleRequest = bundleRequestTracker.get(peer) || 0;
-        const nowTs = Date.now();
-        const canRequestBundle = (nowTs - lastBundleRequest) >= BUNDLE_REQUEST_COOLDOWN_MS;
-
-        if (canRequestBundle) {
-          requestCount++;
-          const requestBase = {
-            type: SignalType.LIBSIGNAL_REQUEST_BUNDLE,
-            username: peer,
-            from: currentUser,
-            timestamp: nowTs,
-            challenge: CryptoUtils.Base64.arrayBufferToBase64(
-              globalThis.crypto.getRandomValues(new Uint8Array(32)),
-            ),
-            senderDilithium: signingKeys.publicKeyBase64,
-          } as const;
-          const canonical = TEXT_ENCODER.encode(JSON.stringify(requestBase));
-          const signatureRaw = await CryptoUtils.Dilithium.sign(signingKeys.secretKey, canonical);
-          const signature = CryptoUtils.Base64.arrayBufferToBase64(signatureRaw);
-          await websocketClient.sendSecureControlMessage({ ...requestBase, signature });
-          lastRequestAt = nowTs;
-          bundleRequestTracker.set(peer, nowTs);
-        }
-
-        while (Date.now() < deadline) {
-          await new Promise((r) => setTimeout(r, delay));
-
-          if (sessionReadyFlag) {
-            return true;
-          }
-
-          const check = await sessionApi.hasSession({
-            selfUsername: currentUser,
-            peerUsername: peer,
-            deviceId: 1,
-          });
-          if (check?.hasSession) {
-            return true;
-          }
-
-          if (requestCount <= MAX_REPLIES && Date.now() - lastRequestAt >= 3000) {
-            const nowTs = Date.now();
-            const lastBundleRequest = bundleRequestTracker.get(peer) || 0;
-            const canRetryBundle = (nowTs - lastBundleRequest) >= BUNDLE_REQUEST_COOLDOWN_MS;
-
-            if (canRetryBundle) {
-              requestCount++;
-              const requestBase = {
-                type: SignalType.LIBSIGNAL_REQUEST_BUNDLE,
-                username: peer,
-                from: currentUser,
-                timestamp: nowTs,
-                challenge: CryptoUtils.Base64.arrayBufferToBase64(
-                  globalThis.crypto.getRandomValues(new Uint8Array(32)),
-                ),
-                senderDilithium: signingKeys.publicKeyBase64,
-              } as const;
-              
-              const canonical = TEXT_ENCODER.encode(JSON.stringify(requestBase));
-              const signatureRaw = await CryptoUtils.Dilithium.sign(signingKeys.secretKey, canonical);
-              const signature = CryptoUtils.Base64.arrayBufferToBase64(signatureRaw);
-              await websocketClient.sendSecureControlMessage({ ...requestBase, signature });
-              lastRequestAt = nowTs;
-              bundleRequestTracker.set(peer, nowTs);
-            }
-          }
-
-          const randomSource = globalThis.crypto.getRandomValues(new Uint32Array(1))[0] / 0xffffffff;
-          const poisson = -Math.log(Math.max(1 - randomSource, 1e-6));
-          delay = Math.min(delay + poisson * SESSION_POLL_BASE_MS, SESSION_POLL_MAX_MS);
-        }
-      } finally {
-        try { window.removeEventListener(EventType.LIBSIGNAL_SESSION_READY, readyHandler as EventListener); } catch { }
+      if (!findUser) {
+        console.warn(`[MessageSender] Cannot establish session with ${peer}: findUser not provided`);
+        return false;
       }
 
-      console.error(`[MessageSender] Failed to establish session with ${peer} after ${requestCount} attempts`);
+      try {
+        if (!shouldAttemptDiscovery(peer)) {
+          return false;
+        }
+        const material = await findUser(peer);
+        if (material && material.fullBundle) {
+          const success = await signal.processPreKeyBundle(
+            currentUser,
+            peer,
+            material.fullBundle
+          );
+
+          if (success) {
+            const check = await sessionApi.hasSession({
+              selfUsername: currentUser,
+              peerUsername: peer,
+              deviceId: 1,
+            });
+            return !!check?.hasSession;
+          }
+        } else {
+          console.warn(`[MessageSender] No discovery material found for ${peer}`);
+        }
+      } catch (err) {
+        console.error(`[MessageSender] Discovery-based session establishment failed for ${peer}:`, err);
+      }
+
       return false;
     } finally {
       contextMap?.delete(key);

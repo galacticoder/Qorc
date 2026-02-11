@@ -96,8 +96,14 @@ pub async fn signal_generate_kyber_prekey(
     let handler = state.inner().signal_handler()
         .ok_or_else(|| "Signal handler not initialized".to_string())?;
     
-    run_local(handler.generate_kyber_prekey(&username, key_id))
-        .map_err(|e| e.safe_message())
+    let res = run_local(handler.generate_kyber_prekey(&username, key_id))
+        .map_err(|e| e.safe_message())?;
+
+    if let Some(db) = state.inner().database() {
+        let _ = run_local(handler.persist_to_db(db.as_ref(), &username));
+    }
+
+    Ok(res)
 }
 
 /// Generate PQ Kyber pre-key ML-KEM-1024
@@ -110,8 +116,14 @@ pub async fn signal_generate_pq_kyber_prekey(
     let handler = state.inner().signal_handler()
         .ok_or_else(|| "Signal handler not initialized".to_string())?;
     
-    run_local(handler.generate_pq_kyber_prekey(&username, key_id))
-        .map_err(|e| e.safe_message())
+    let res = run_local(handler.generate_pq_kyber_prekey(&username, key_id))
+        .map_err(|e| e.safe_message())?;
+
+    if let Some(db) = state.inner().database() {
+        let _ = run_local(handler.persist_to_db(db.as_ref(), &username));
+    }
+
+    Ok(res)
 }
 
 /// Create pre-key bundle for key exchange
@@ -123,8 +135,14 @@ pub async fn signal_create_prekey_bundle(
     let handler = state.inner().signal_handler()
         .ok_or_else(|| "Signal handler not initialized".to_string())?;
     
-    run_local(handler.create_prekey_bundle(&username))
-        .map_err(|e| e.safe_message())
+    let res = run_local(handler.create_prekey_bundle(&username))
+        .map_err(|e| e.safe_message())?;
+
+    if let Some(db) = state.inner().database() {
+        let _ = run_local(handler.persist_to_db(db.as_ref(), &username));
+    }
+
+    Ok(res)
 }
 
 /// Process received pre-key bundle to establish session
@@ -327,7 +345,13 @@ pub async fn signal_set_static_mlkem_keys(
     }
     
     run_local(handler.set_static_mlkem_keys(&username, pub_bytes, sec_bytes))
-        .map_err(|e| e.safe_message())
+        .map_err(|e| e.safe_message())?;
+
+    if let Some(db) = state.inner().database() {
+        let _ = run_local(handler.persist_to_db(db.as_ref(), &username));
+    }
+
+    Ok(true)
 }
 
 /// Initialize Signal storage from database

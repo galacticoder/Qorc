@@ -13,6 +13,7 @@
         "notification:default",
         "notification:allow-is-permission-granted",
         "dialog:default",
+        "core:window:default",
         {
             "identifier": "fs:scope",
             "allow": [

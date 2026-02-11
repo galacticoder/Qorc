@@ -1,16 +1,16 @@
-import { SignalType } from '../../lib/types/signal-types';
 import { EventType } from '../../lib/types/event-types';
-import websocketClient from '../../lib/websocket/websocket';
+import { signal } from '../../lib/tauri-bindings';
 import type { HybridKeys, ResolvedSenderKeys, UserWithHybridKeys } from '../../lib/types/message-handling-types';
+import { shouldAttemptDiscovery } from '../../lib/utils/discovery-utils';
 
 // Resolve sender's PQ Kyber and hybrid keys
 export const resolveSenderHybridKeys = async (
   senderUsername: string,
   usersRef: React.RefObject<UserWithHybridKeys[]> | undefined,
   keyRequestCacheRef: React.RefObject<Map<string, number>>,
-  getKeysOnDemand: (() => Promise<any>) | undefined,
   loginUsernameRef: React.RefObject<string>,
-  keyRequestCacheDuration: number
+  keyRequestCacheDuration: number,
+  findUser?: (handle: string) => Promise<any>
 ): Promise<ResolvedSenderKeys> => {
   const user = usersRef?.current?.find?.((u: any) => u.username === senderUsername);
   let kyber = user?.hybridPublicKeys?.kyberPublicBase64 || null;
@@ -22,37 +22,37 @@ export const resolveSenderHybridKeys = async (
     if (!lastReq || (now - lastReq) > keyRequestCacheDuration) {
       keyRequestCacheRef.current.set(senderUsername, now);
       try {
-        await websocketClient.sendSecureControlMessage({
-          type: SignalType.CHECK_USER_EXISTS,
-          username: senderUsername
-        });
-      } catch { }
-      try {
-        const keys = await getKeysOnDemand?.();
-
-        if (keys?.dilithium?.secretKey && keys?.dilithium?.publicKeyBase64) {
-          const requestBase = {
-            type: SignalType.LIBSIGNAL_REQUEST_BUNDLE,
-            username: senderUsername,
-            from: loginUsernameRef.current,
-            timestamp: Date.now(),
-            challenge: btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(32)))),
-            senderDilithium: keys.dilithium.publicKeyBase64,
-          } as const;
-
-          const canonical = new TextEncoder().encode(JSON.stringify(requestBase));
-          let signature: string | undefined;
-          
-          try {
-            const sigRaw = await (window as any).CryptoUtils?.Dilithium?.sign(keys.dilithium.secretKey, canonical);
-            signature = (window as any).CryptoUtils?.Base64?.arrayBufferToBase64
-              ? (window as any).CryptoUtils.Base64.arrayBufferToBase64(sigRaw)
-              : btoa(String.fromCharCode(...new Uint8Array(sigRaw)));
-          } catch { }
-          
-          await websocketClient.sendSecureControlMessage({ ...requestBase, signature });
+        if (!findUser) {
+          console.warn('[Keys] findUser not available for background discovery');
+          return { kyber: null, hybrid: null, retried: false };
         }
-      } catch { }
+
+        const known = usersRef?.current?.map?.((u: any) => u.username).filter(Boolean) ?? [];
+        if (!shouldAttemptDiscovery(senderUsername, known)) {
+          return { kyber: null, hybrid: null, retried: false };
+        }
+        const material = await findUser(senderUsername);
+        if (material) {
+          const { inboxId, publicKeys, fullBundle } = material;
+
+          if (fullBundle && loginUsernameRef.current) {
+            const hasSession = await signal.hasSession(loginUsernameRef.current, senderUsername, 1).catch(() => false);
+            if (!hasSession) {
+              await signal.processPreKeyBundle(loginUsernameRef.current, senderUsername, fullBundle);
+            }
+          }
+
+          window.dispatchEvent(new CustomEvent(EventType.USER_KEYS_AVAILABLE, {
+            detail: {
+              username: senderUsername,
+              hybridKeys: publicKeys,
+              inboxId
+            }
+          }));
+        }
+      } catch (discoveryErr) {
+        console.error('[Keys] Discovery failure:', discoveryErr);
+      }
       retried = true;
 
       await new Promise<void>((resolve) => {
@@ -101,14 +101,13 @@ export const resolveSenderHybridKeys = async (
   return { kyber, hybrid, retried };
 };
 
-// Request bundle once with dedup/throttle
+// Request bundle
 export const requestBundleOnce = async (
   peerUsername: string,
   keyRequestCacheRef: React.RefObject<Map<string, number>>,
   inFlightBundleRequestsRef: React.RefObject<Map<string, Promise<void>>>,
-  getKeysOnDemand: (() => Promise<any>) | undefined,
   loginUsernameRef: React.RefObject<string>,
-  reason?: string
+  findUser?: (handle: string) => Promise<any>
 ): Promise<void> => {
   if (!peerUsername) return;
   const now = Date.now();
@@ -123,24 +122,32 @@ export const requestBundleOnce = async (
 
   const promise = (async () => {
     try {
-      const keys = await getKeysOnDemand?.();
-      if (!keys?.dilithium?.secretKey || !keys?.dilithium?.publicKeyBase64) return;
-      const requestBase = {
-        type: SignalType.LIBSIGNAL_REQUEST_BUNDLE,
-        username: peerUsername,
-        from: loginUsernameRef.current,
-        timestamp: Date.now(),
-        challenge: btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(32)))),
-        senderDilithium: keys.dilithium.publicKeyBase64,
-        reason,
-      } as const;
-      const canonical = new TextEncoder().encode(JSON.stringify(requestBase));
-      let signature: string | undefined;
-      try {
-        const sig = await (window as any).CryptoUtils?.Dilithium?.sign(keys.dilithium.secretKey, canonical);
-        signature = btoa(String.fromCharCode(...new Uint8Array(sig)));
-      } catch { }
-      await websocketClient.sendSecureControlMessage({ ...requestBase, signature });
+      if (!findUser) {
+        return;
+      }
+
+      if (!shouldAttemptDiscovery(peerUsername)) {
+        return;
+      }
+
+      const material = await findUser(peerUsername);
+      if (material) {
+        if (material.fullBundle && loginUsernameRef.current) {
+          const hasSession = await signal.hasSession(loginUsernameRef.current, peerUsername, 1).catch(() => false);
+          if (!hasSession) {
+            await signal.processPreKeyBundle(loginUsernameRef.current, peerUsername, material.fullBundle);
+          }
+        }
+
+        window.dispatchEvent(new CustomEvent(EventType.USER_KEYS_AVAILABLE, {
+          detail: {
+            username: peerUsername,
+            hybridKeys: material.publicKeys,
+            inboxId: material.inboxId
+          }
+        }));
+      }
+
       keyRequestCacheRef.current.set(peerUsername, now);
 
       await new Promise<void>((resolve) => {

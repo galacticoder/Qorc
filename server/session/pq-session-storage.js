@@ -1,4 +1,4 @@
-import { withRedisClient } from '../presence/presence.js';
+import { withRedisClient } from './redis-client.js';
 import { logger as cryptoLogger } from '../crypto/crypto-logger.js';
 import { CryptoUtils } from '../crypto/unified-crypto.js';
 
@@ -201,10 +201,6 @@ export async function getPQSession(sessionId) {
     const data = await client.get(key);
 
     if (!data) {
-      cryptoLogger.debug('[PQ-SESSION] Session not found in Redis', {
-        sessionId: sessionId.slice(0, 16) + '...',
-        serverId: process.env.SERVER_ID
-      });
       return null;
     }
 

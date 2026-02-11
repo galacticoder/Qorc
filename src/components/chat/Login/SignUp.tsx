@@ -10,7 +10,7 @@ import {
 } from "../../../lib/constants";
 
 interface SignUpFormProps {
-  readonly onSubmit: (username: string, password: string) => Promise<void>;
+  readonly onSubmit: (username: string, password: string, passphrase: string) => Promise<void>;
   readonly disabled: boolean;
   readonly authStatus?: string;
   readonly error?: string;
@@ -20,6 +20,7 @@ interface SignUpFormProps {
   readonly onChangeUsername?: (v: string) => void;
   readonly onChangePassword?: (v: string) => void;
   readonly onChangeConfirmPassword?: (v: string) => void;
+  readonly onChangePassphrase?: (v: string) => void;
 }
 
 export function SignUpForm({
@@ -31,11 +32,14 @@ export function SignUpForm({
   initialPassword = "",
   onChangeUsername,
   onChangePassword,
-  onChangeConfirmPassword
+  onChangeConfirmPassword,
+  onChangePassphrase
 }: SignUpFormProps) {
   const [username, setUsername] = useState(initialUsername);
   const [password, setPassword] = useState(initialPassword);
   const [confirmPassword, setConfirmPassword] = useState("");
+  const [passphrase, setPassphrase] = useState("");
+  const [confirmPassphrase, setConfirmPassphrase] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
 
   const handleUsernameChange = useCallback((v: string): void => {
@@ -53,10 +57,25 @@ export function SignUpForm({
     onChangeConfirmPassword?.(v);
   }, [onChangeConfirmPassword]);
 
+  const handlePassphraseChange = useCallback((v: string): void => {
+    setPassphrase(v);
+    onChangePassphrase?.(v);
+  }, [onChangePassphrase]);
+
+  const handleConfirmPassphraseChange = useCallback((v: string): void => {
+    setConfirmPassphrase(v);
+  }, []);
+
   const isUsernameValid = useMemo(() => username.trim().length >= USERNAME_MIN_LENGTH, [username]);
   const isPasswordValid = useMemo(() => password.length > 0, [password]);
   const doPasswordsMatch = useMemo(() => password === confirmPassword, [password, confirmPassword]);
-  const isFormValid = useMemo(() => isUsernameValid && isPasswordValid && doPasswordsMatch, [isUsernameValid, isPasswordValid, doPasswordsMatch]);
+  const isPassphraseValid = useMemo(() => passphrase.trim().length >= 8, [passphrase]);
+  const doPassphrasesMatch = useMemo(() => passphrase === confirmPassphrase, [passphrase, confirmPassphrase]);
+
+  const isFormValid = useMemo(() =>
+    isUsernameValid && isPasswordValid && doPasswordsMatch && isPassphraseValid && doPassphrasesMatch,
+    [isUsernameValid, isPasswordValid, doPasswordsMatch, isPassphraseValid, doPassphrasesMatch]
+  );
 
   const handleSubmit = useCallback(async (e: React.FormEvent): Promise<void> => {
     e.preventDefault();
@@ -65,14 +84,15 @@ export function SignUpForm({
     const sanitizedUsername = username.trim();
     if (!isValidUsername(sanitizedUsername)) return;
     if (password.length > PASSWORD_MAX_LENGTH) return;
+    if (!isPassphraseValid || !doPassphrasesMatch) return;
 
     setIsSubmitting(true);
     try {
-      await onSubmit(sanitizedUsername, password);
+      await onSubmit(sanitizedUsername, password, passphrase.trim());
     } finally {
       setIsSubmitting(false);
     }
-  }, [disabled, isSubmitting, isFormValid, username, password, onSubmit]);
+  }, [disabled, isSubmitting, isFormValid, username, password, passphrase, isPassphraseValid, doPassphrasesMatch, onSubmit]);
 
   return (
     <form onSubmit={handleSubmit} className="space-y-4">
@@ -124,6 +144,42 @@ export function SignUpForm({
         />
         {!doPasswordsMatch && confirmPassword.length > 0 && (
           <p className="text-destructive text-xs font-medium animate-pulse">Passwords do not match</p>
+        )}
+      </div>
+
+      <div className="space-y-2">
+        <Label htmlFor="passphrase" className="text-muted-foreground font-medium">Encryption Passphrase</Label>
+        <Input
+          id="passphrase"
+          type="password"
+          placeholder="New encryption passphrase"
+          value={passphrase}
+          onChange={(e) => handlePassphraseChange(e.target.value)}
+          disabled={disabled || isSubmitting}
+          required
+          autoComplete="new-password"
+          className="bg-background/50 border-border/50 focus:bg-background/80 transition-all duration-200"
+        />
+        {passphrase.length > 0 && !isPassphraseValid && (
+          <p className="text-destructive text-xs font-medium animate-pulse">Passphrase too short (min 8 chars)</p>
+        )}
+      </div>
+
+      <div className="space-y-2">
+        <Label htmlFor="confirmPassphrase" className="text-muted-foreground font-medium">Confirm Passphrase</Label>
+        <Input
+          id="confirmPassphrase"
+          type="password"
+          placeholder="Confirm your passphrase"
+          value={confirmPassphrase}
+          onChange={(e) => handleConfirmPassphraseChange(e.target.value)}
+          disabled={disabled || isSubmitting}
+          required
+          autoComplete="new-password"
+          className="bg-background/50 border-border/50 focus:bg-background/80 transition-all duration-200"
+        />
+        {!doPassphrasesMatch && confirmPassphrase.length > 0 && (
+          <p className="text-destructive text-xs font-medium animate-pulse">Passphrases do not match</p>
         )}
       </div>
 

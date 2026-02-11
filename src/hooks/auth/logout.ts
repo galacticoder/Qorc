@@ -1,5 +1,4 @@
 import { RefObject } from "react";
-import { SignalType } from "../../lib/types/signal-types";
 import { clearTokenEncryptionKey } from "../../lib/signals/signals";
 import websocketClient from "../../lib/websocket/websocket";
 import { syncEncryptedStorage } from "../../lib/database/encrypted-storage";
@@ -38,23 +37,13 @@ export const createLogout = (
 ) => {
   return async (secureDBRef?: RefObject<SecureDB | null>, loginErrorMessage: string = "") => {
     try {
-      const user = refs.loginUsernameRef.current || '';
-      if (user && websocketClient.isConnectedToServer()) {
-        try {
-          if (websocketClient.isPQSessionEstablished?.()) {
-            await websocketClient.sendSecureControlMessage({ type: SignalType.USER_DISCONNECT, username: user, timestamp: Date.now() });
-            try { await new Promise(res => setTimeout(res, 25)); } catch { }
-          }
-        } catch { }
-      }
-      try { await websocketClient.close(); } catch { }
-    } catch { }
+      await websocketClient.close(); }
+    catch { }
 
     try {
       setters.setTokenValidationInProgress(false);
     } catch { }
 
-    // Clear background state definitively to prevent automatic resume on next launch
     try {
       await session.setBackgroundState(false);
     } catch { }
@@ -90,7 +79,7 @@ export const createLogout = (
           refs.keyManagerRef.current?.deleteDatabase() || Promise.resolve(),
           storage.remove(`key_meta:${pseudonym}`),
           storage.remove(`key_bundle:${pseudonym}`),
-          storage.remove('tok:1'), // Final redundant safety purge
+          storage.remove('tok:1'),
           storage.remove('last_authenticated_username'),
           storage.remove('last_authenticated_display_name'),
           storage.remove('bg_session_active'),

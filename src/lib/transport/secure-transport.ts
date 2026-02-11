@@ -154,6 +154,7 @@ export interface SecureTransport {
 // Options for initializing the transport
 export interface TransportInitOptions {
     readonly localUsername: string;
+    readonly localRelayId?: string;
     readonly kyberKeyPair: { publicKey: Uint8Array; secretKey: Uint8Array };
     readonly dilithiumKeyPair: { publicKey: Uint8Array; secretKey: Uint8Array };
     readonly x25519KeyPair: { publicKey: Uint8Array; secretKey: Uint8Array };

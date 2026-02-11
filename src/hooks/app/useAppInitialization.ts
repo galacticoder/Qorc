@@ -21,7 +21,6 @@ interface AppInitializationProps {
     hybridKeysRef: React.RefObject<any>;
     passphrasePlaintextRef: React.RefObject<string | null>;
     aesKeyRef: React.RefObject<CryptoKey | null>;
-    storeUsernameMapping: (db: any) => Promise<void>;
   };
   Database: {
     secureDBRef: React.RefObject<any>;
@@ -89,20 +88,6 @@ export function useAppInitialization({
     };
   }, [Authentication.hybridKeysRef.current]);
 
-  // Store username mapping for current user
-  useEffect(() => {
-    if (Database.secureDBRef.current && Authentication.originalUsernameRef.current) {
-      const storeCurrentUserMapping = async () => {
-        try {
-          await Authentication.storeUsernameMapping(Database.secureDBRef.current!);
-        } catch {
-          SecurityAuditLogger.log(SignalType.ERROR, 'user-mapping-store-failed', { error: 'unknown' });
-        }
-      };
-      storeCurrentUserMapping();
-    }
-  }, [Database.secureDBRef.current, Authentication.originalUsernameRef.current]);
-
   // Restore original username from SecureDB
   useEffect(() => {
     const restoreOriginalUsername = async () => {
@@ -113,17 +98,7 @@ export function useAppInitialization({
       if (!db || !hashedUsername || !Authentication.isLoggedIn) return;
       if (currentOriginal && currentOriginal !== hashedUsername) return;
 
-      try {
-        const original = await db.getOriginalUsername(hashedUsername);
-        if (original && original !== hashedUsername) {
-          Authentication.originalUsernameRef.current = original;
-          window.dispatchEvent(new CustomEvent(EventType.USERNAME_MAPPING_UPDATED, {
-            detail: { username: hashedUsername, original }
-          }));
-        }
-      } catch {
-        SecurityAuditLogger.log('warn', 'original-username-restore-failed', {});
-      }
+      // Original username is now handled via auth metadata only
     };
 
     restoreOriginalUsername();

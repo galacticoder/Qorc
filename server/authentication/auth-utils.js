@@ -1,44 +1,12 @@
 import { CryptoUtils } from '../crypto/unified-crypto.js';
 import * as ServerConfig from '../config/config.js';
 import { TTL_CONFIG } from '../config/config.js';
-import { UserDatabase } from '../database/database.js';
-import { withRedisClient } from '../presence/presence.js';
-
-export const validateUsernameFormat = (username) => {
-  if (!username || typeof username !== 'string') return false;
-  const isPseudonym = /^[a-f0-9]{32,}$/i.test(username);
-  if (isPseudonym) return true;
-
-  return /^[a-zA-Z0-9_-]+$/.test(username);
-};
-
-export const validateUsernameLength = (username) => {
-  if (!username || typeof username !== 'string') return false;
-  const isPseudonym = /^[a-f0-9]{32,}$/i.test(username);
-  if (isPseudonym) {
-    return username.length >= 32 && username.length <= 128;
-  }
-
-  return username.length >= 3 && username.length <= 32;
-};
-export const isUsernameAvailable = async (username) => {
-  try {
-    if (!username || typeof username !== 'string') {
-      throw new Error('Invalid username parameter');
-    }
-    
-    const existingUser = await UserDatabase.loadUser(username);
-    return existingUser === null;
-  } catch (error) {
-    console.error(`[AUTH] Error checking username availability for ${username}:`, error);
-    throw error; 
-  }
-};
+import { withRedisClient } from '../session/redis-client.js';
 
 // Configuration for server capacity
 const MAX_CONNECTIONS = parseInt(process.env.MAX_CONNECTIONS || '1000', 10);
 const CONNECTION_COUNTER_KEY = 'server:active_connections';
-const CONNECTION_COUNTER_TTL = TTL_CONFIG.CONNECTION_COUNTER_TTL; 
+const CONNECTION_COUNTER_TTL = TTL_CONFIG.CONNECTION_COUNTER_TTL;
 
 export const isServerFull = async () => {
   try {
@@ -71,8 +39,8 @@ export const isServerFull = async () => {
       
       return 0  -- Server has capacity
     `;
-    
-    const result = await withRedisClient(client => 
+
+    const result = await withRedisClient(client =>
       client.eval(luaScript, 1, CONNECTION_COUNTER_KEY, MAX_CONNECTIONS, CONNECTION_COUNTER_TTL)
     );
     return result === 1;
@@ -110,12 +78,20 @@ export async function setServerPasswordOnInput() {
       const hash = await CryptoUtils.Password.hashPassword(password);
       ServerConfig.setServerPassword(hash);
 
+      // Initialize Gatekeeper with plaintext before deleting it
+      try {
+        const { ServerGatekeeper } = await import('./gatekeeper.js');
+        await ServerGatekeeper.initializeExplicit(password);
+      } catch (gkErr) {
+        console.warn('[SERVER] Failed to auto-initialize gatekeeper:', gkErr.message);
+      }
+
       process.env.SERVER_PASSWORD_HASH = hash;
       delete process.env.SERVER_PASSWORD;
 
       if (process.env.ENABLE_CLUSTERING === 'true') {
         try {
-          const { withRedisClient } = await import('../presence/presence.js');
+          const { withRedisClient } = await import('../session/redis-client.js');
           await withRedisClient(async (client) => {
             await client.hset('cluster:config', 'SERVER_PASSWORD_HASH', hash);
             console.log('[SERVER] Stored password hash in cluster shared config');

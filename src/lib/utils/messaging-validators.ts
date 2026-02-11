@@ -45,6 +45,34 @@ export function isValidX25519PublicKeyBase64(value: unknown): value is string {
   }
 }
 
+export function isValidBlindPublicKey(value: unknown): value is {
+  kid: string;
+  n: string;
+  e: string;
+  modulusLength: number;
+  hash: string;
+  saltLength: number;
+  scheme: string;
+} {
+  if (!value || typeof value !== 'object') return false;
+  const key = value as any;
+  if (key.scheme !== 'RSABSSA-PSS' || key.hash !== 'SHA-256') return false;
+  if (typeof key.kid !== 'string' || key.kid.length < 8) return false;
+  if (typeof key.n !== 'string' || typeof key.e !== 'string') return false;
+  if (!Number.isFinite(key.modulusLength) || key.modulusLength < 2048) return false;
+  if (!Number.isFinite(key.saltLength) || key.saltLength < 16) return false;
+  try {
+    const nBytes = CryptoUtils.Base64.base64ToUint8Array(key.n);
+    const eBytes = CryptoUtils.Base64.base64ToUint8Array(key.e);
+    const expectedLen = Math.ceil(key.modulusLength / 8);
+    if (nBytes.length !== expectedLen) return false;
+    if (eBytes.length === 0 || eBytes.length > 8) return false;
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 // Return a sanitized copy of input hybrid keys, only keeping fields that validate
 export function sanitizeHybridKeys<T extends Record<string, any> | undefined | null>(keys: T): Partial<T> {
   if (!keys || typeof keys !== 'object') return {} as Partial<T>;
@@ -60,6 +88,16 @@ export function sanitizeHybridKeys<T extends Record<string, any> | undefined | n
 
   if (isValidX25519PublicKeyBase64((keys as any).x25519PublicBase64)) {
     out.x25519PublicBase64 = (keys as any).x25519PublicBase64;
+  }
+
+  // Preserve blind signature public key metadata
+  if (isValidBlindPublicKey((keys as any).blindPublicKey)) {
+    out.blindPublicKey = (keys as any).blindPublicKey;
+  }
+
+  // Preserve inboxId
+  if (typeof (keys as any).inboxId === 'string') {
+    out.inboxId = (keys as any).inboxId;
   }
 
   return out as Partial<T>;

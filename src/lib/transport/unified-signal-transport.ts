@@ -1,21 +1,17 @@
 import { SignalType } from '../types/signal-types';
 import websocketClient from '../websocket/websocket';
 import { quicTransport } from './quic-transport';
+import { getBlindRoutingClient } from './blind-routing-client';
+import { PostQuantumUtils } from '../utils/pq-utils';
 
 // Unified Signal Transport
 class UnifiedSignalTransport {
     private encryptionProvider: ((to: string, payload: any, type: SignalType) => Promise<any>) | null = null;
-    private p2pEncryptionProvider: ((to: string, payload: any, type: SignalType) => Promise<any>) | null = null;
     private p2pSender: ((to: string, payload: any, type: SignalType) => Promise<void>) | null = null;
 
-    // Register a provider that can encrypt raw payloads for Signal Protocol fallback
+    // Register a provider that encrypts payloads
     setEncryptionProvider(provider: (to: string, payload: any, type: SignalType) => Promise<any>): void {
         this.encryptionProvider = provider;
-    }
-
-    // Register a provider that can encrypt raw payloads for P2P delivery
-    setP2PEncryptionProvider(provider: (to: string, payload: any, type: SignalType) => Promise<any>): void {
-        this.p2pEncryptionProvider = provider;
     }
 
     // Register a sender that can sign and send P2P messages with route proofs
@@ -23,16 +19,33 @@ class UnifiedSignalTransport {
         this.p2pSender = sender;
     }
 
-
-    // Send a signal to a peer with mandatory P2P priority
+    // Send a signal to a peer
     async send(
         to: string,
         payload: any,
         type: SignalType,
-        options?: { fallbackEnvelope?: any }
+        options?: { destinationInbox?: string }
     ): Promise<{ success: boolean; transport: 'p2p' | 'server'; error?: string }> {
         // Check for active or pending connection to allow P2P queuing
         const isQuicConnected = quicTransport.hasActiveConnection(to);
+
+        // Get encrypted envelope
+        if (!this.encryptionProvider) {
+            return { success: false, transport: 'server', error: 'Encryption provider not set' };
+        }
+
+        const encryptedResult = await this.encryptionProvider(to, payload, type);
+        if (!encryptedResult) {
+            return { success: false, transport: 'server', error: 'Encryption failed' };
+        }
+
+        const envelopeToSend = {
+            type: SignalType.SEALED_ENVELOPE,
+            destinationInbox: encryptedResult.destinationInbox || options?.destinationInbox,
+            messageId: encryptedResult.messageId,
+            envelope: encryptedResult.encryptedPayload,
+            recipientKyberPublicBase64: encryptedResult.recipientKyberPublicBase64
+        };
 
         if (isQuicConnected) {
             try {
@@ -41,31 +54,21 @@ class UnifiedSignalTransport {
                 while (attempts < maxAttempts) {
                     try {
                         attempts++;
-                        let payloadToSend = payload;
-
-                        if (this.p2pEncryptionProvider) {
-                            payloadToSend = await this.p2pEncryptionProvider(to, payload, type);
-                            if (payloadToSend === null) {
-                                throw new Error('P2P encryption failed or skipped');
-                            }
-                            if (payloadToSend && typeof payloadToSend === 'object' && 'routing' in payloadToSend && 'kemCiphertext' in payloadToSend) {
-                                (type as any) = SignalType.P2P_ENCRYPTED_MESSAGE;
-                            }
-                        }
-
                         if (this.p2pSender) {
-                            await this.p2pSender(to, payloadToSend, type);
+                            await this.p2pSender(to, envelopeToSend, SignalType.SEALED_ENVELOPE);
                         } else {
-                            throw new Error('Encrypted P2P sender required');
+                            throw new Error('P2P sender not configured');
                         }
 
                         return { success: true, transport: 'p2p' };
                     } catch (p2pErr: any) {
                         const msg = p2pErr?.message || String(p2pErr);
+                        if (msg.includes('PEER_CERT_MISSING')) {
+                            break;
+                        }
                         if (msg.includes('Not connected') ||
                             msg.includes('no P2P session') ||
                             msg.includes('is not connected') ||
-                            msg.includes('failed') ||
                             msg.includes('disconnected')) {
                             break;
                         }
@@ -84,51 +87,35 @@ class UnifiedSignalTransport {
                 return { success: true, transport: 'server' };
             }
 
-            let envelopeToSend: any = null;
-
-            let effectiveOptions = options;
-            if (!effectiveOptions?.fallbackEnvelope && this.encryptionProvider) {
-                try {
-                    const fallback = await this.encryptionProvider(to, payload, type);
-                    if (fallback) {
-                        effectiveOptions = { ...options, fallbackEnvelope: fallback };
-                    }
-                } catch { }
+            if (!envelopeToSend.destinationInbox) {
+                console.warn('[UnifiedTransport] Cannot route message without destinationInbox', to);
+                return { success: false, transport: 'server', error: 'destinationInbox required' };
             }
 
-            // Build envelope if payload has encryptedPayload regardless of original type
-            if (payload.encryptedPayload) {
-                envelopeToSend = {
-                    type: SignalType.ENCRYPTED_MESSAGE,
-                    to,
-                    messageId: payload.messageId,
-                    encryptedPayload: payload.encryptedPayload
-                };
-            } else if (effectiveOptions?.fallbackEnvelope) {
-                envelopeToSend = {
-                    ...effectiveOptions.fallbackEnvelope,
-                    type: SignalType.ENCRYPTED_MESSAGE,
-                    to
-                };
+            if (!envelopeToSend.recipientKyberPublicBase64) {
+                console.warn('[UnifiedTransport] Cannot blind-route without recipient Kyber key', to);
+                return { success: false, transport: 'server', error: 'recipientKyberPublicBase64 required' };
             }
 
+            const blindClient = getBlindRoutingClient();
+            const recipientKyber = PostQuantumUtils.base64ToUint8Array(envelopeToSend.recipientKyberPublicBase64);
+            const sealedEnvelope = await blindClient.createSealedEnvelope(
+                envelopeToSend.destinationInbox,
+                recipientKyber,
+                { envelope: envelopeToSend.envelope, messageId: envelopeToSend.messageId }
+            );
 
-            if (!envelopeToSend) {
-                return { success: false, transport: 'server', error: 'Secure fallback envelope required' };
-            }
-
-            websocketClient.send(JSON.stringify(envelopeToSend));
+            websocketClient.send(JSON.stringify({
+                type: SignalType.BLIND_ROUTE,
+                destinationInbox: envelopeToSend.destinationInbox,
+                sealedEnvelope
+            }));
+           
             return { success: true, transport: 'server' };
-
         } catch (serverErr: any) {
             console.error(`[UnifiedTransport] Critical failure sending ${type} to ${to}:`, serverErr);
             return { success: false, transport: 'server', error: serverErr?.message || 'Server send failed' };
         }
-    }
-
-    // Profile picture requests
-    async requestProfilePicture(to: string): Promise<void> {
-        await this.send(to, { type: 'profile-picture-request' }, SignalType.SIGNAL);
     }
 
     // Send a typing indicator

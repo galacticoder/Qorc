@@ -293,13 +293,6 @@ async function main() {
 
         // 4. LoadBalancer
         if (command === 'loadbalancer') {
-            const httpPort = parseInt(env.HAPROXY_HTTP_PORT || '8080', 10);
-            const availableHttpPort = await findAvailablePort(httpPort);
-            if (availableHttpPort !== httpPort) {
-                console.log(`[WARN] Port ${httpPort} is in use. Switching LoadBalancer HTTP to ${availableHttpPort}.`);
-                updates.HAPROXY_HTTP_PORT = availableHttpPort;
-            }
-
             const httpsPort = parseInt(env.HAPROXY_HTTPS_PORT || '8443', 10);
             const availableHttpsPort = await findAvailablePort(httpsPort);
             if (availableHttpsPort !== httpsPort) {

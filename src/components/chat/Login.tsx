@@ -5,8 +5,6 @@ import { EncryptionIcon } from "./assets/icons";
 import { TorIndicator } from "../ui/TorIndicator";
 import { SignInForm } from "./Login/SignIn.tsx";
 import { SignUpForm } from "./Login/SignUp.tsx";
-import { PassphrasePrompt } from "./Login/PassphrasePrompt.tsx";
-import { PasswordHashPrompt } from "./Login/PasswordHashPrompt.tsx";
 import { ServerPasswordForm } from "./Login/ServerPassword.tsx";
 import { toast } from "sonner";
 import { EventType } from "../../lib/types/event-types.ts";
@@ -25,7 +23,6 @@ interface ServerTrustRequest {
 }
 
 interface LoginProps {
-  readonly onServerPasswordSubmit?: (serverPassword: string) => Promise<void>;
   readonly isGeneratingKeys: boolean;
   readonly authStatus?: string;
   readonly error?: string;
@@ -33,7 +30,7 @@ interface LoginProps {
   readonly isRegistrationMode: boolean;
   readonly initialUsername?: string;
   readonly initialPassword?: string;
-  readonly maxStepReached?: 'login' | 'passphrase' | 'server';
+  readonly maxStepReached?: 'login' | 'server';
 
   readonly pseudonym?: string;
   readonly serverTrustRequest?: ServerTrustRequest | null;
@@ -43,15 +40,15 @@ interface LoginProps {
     mode: "login" | "register",
     username: string,
     password: string,
-    passphrase?: string
+    passphrase?: string,
   ) => Promise<void>;
-  readonly onPassphraseSubmit?: (passphrase: string, mode: "login" | "register") => Promise<void>;
-  readonly onPasswordHashSubmit?: (password: string) => Promise<void>;
+  readonly onPassphraseSubmit: (passphrase: string) => Promise<void>;
   readonly showPassphrasePrompt: boolean;
   readonly setShowPassphrasePrompt: (show: boolean) => void;
+  readonly showPasswordPrompt: boolean;
+  readonly setShowPasswordPrompt: (show: boolean) => void;
+  readonly handleServerPasswordSubmit: (password: string) => Promise<void>;
   readonly setIsRegistrationMode?: (val: boolean) => void;
-  readonly showPasswordPrompt?: boolean;
-  readonly setShowPasswordPrompt?: (show: boolean) => void;
 }
 
 const dispatchAuthEvent = (eventName: string, detail: Record<string, unknown>): void => {
@@ -88,30 +85,25 @@ const AnimatedHeightWrapper = ({ children, className }: { children: React.ReactN
 // Main login/register component
 export const Login = React.memo<LoginProps>(({
   onAccountSubmit,
-  onServerPasswordSubmit,
   isGeneratingKeys,
   authStatus,
   error,
-  onPassphraseSubmit,
-  onPasswordHashSubmit,
   accountAuthenticated,
-  showPassphrasePrompt,
-  showPasswordPrompt,
-  setShowPasswordPrompt,
   serverTrustRequest,
   onAcceptServerTrust,
   onRejectServerTrust,
-  setShowPassphrasePrompt,
+  showPasswordPrompt,
+  handleServerPasswordSubmit,
   setIsRegistrationMode,
   initialUsername = "",
   initialPassword = "",
   maxStepReached: _maxStepReached = 'login',
   pseudonym: _pseudonym = "",
 }) => {
-  const [serverPassword, setServerPassword] = useState<string>("");
   const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
   const [mode, setMode] = useState<"login" | "register">("login");
   const [isRateLimited, setIsRateLimited] = useState<boolean>(false);
+  const [serverPassword, setServerPassword] = useState<string>("");
 
   useEffect(() => {
     if (error) {
@@ -123,7 +115,7 @@ export const Login = React.memo<LoginProps>(({
   useEffect(() => {
     const handleRateLimited = () => {
       toast.error('Too many attempts. Please wait before trying again.');
-      setIsSubmitting(false);
+      setIsSubmitting(true);
       setIsRateLimited(true);
     };
     const handleAuthError = () => {
@@ -137,21 +129,11 @@ export const Login = React.memo<LoginProps>(({
     };
   }, []);
 
-  const resetToLogin = useCallback((): void => {
-    setIsSubmitting(false);
-    setIsRateLimited(false);
-    setShowPassphrasePrompt(false);
-    if (setShowPasswordPrompt) {
-      setShowPasswordPrompt(false);
-    }
-    dispatchAuthEvent(EventType.AUTH_UI_BACK, { to: 'server' });
-  }, [setShowPassphrasePrompt, setShowPasswordPrompt]);
-
-  const handleAccountSubmit = useCallback(async (username: string, password: string): Promise<void> => {
+  const handleAccountSubmit = useCallback(async (username: string, password: string, passphrase?: string): Promise<void> => {
     if (isRateLimited) return;
     setIsSubmitting(true);
     try {
-      await onAccountSubmit(mode, username, password);
+      await onAccountSubmit(mode, username, password, passphrase);
       setIsRateLimited(false);
     } catch (err) {
       setIsSubmitting(false);
@@ -160,39 +142,6 @@ export const Login = React.memo<LoginProps>(({
       }
     }
   }, [mode, onAccountSubmit, isRateLimited]);
-
-  const handlePassphraseSubmit = useCallback(async (passphrase: string): Promise<void> => {
-    if (isRateLimited) return;
-    setIsSubmitting(true);
-    try {
-      await onPassphraseSubmit?.(passphrase, mode);
-      setIsRateLimited(false);
-    } catch (err) {
-      setIsSubmitting(false);
-      toast.error(err instanceof Error ? err.message : 'Authentication failed.');
-      resetToLogin();
-    }
-  }, [mode, onPassphraseSubmit, isRateLimited, resetToLogin]);
-
-  const handleServerPasswordSubmit = useCallback(async (e: React.FormEvent): Promise<void> => {
-    e.preventDefault();
-    if (!serverPassword.trim() || isSubmitting || isGeneratingKeys || !onServerPasswordSubmit || isRateLimited) return;
-
-    setIsSubmitting(true);
-    try {
-      await onServerPasswordSubmit(serverPassword);
-      setIsRateLimited(false);
-    } catch (err) {
-      setIsSubmitting(false);
-      toast.error(err instanceof Error ? err.message : 'Server authentication failed.');
-    }
-  }, [serverPassword, isSubmitting, isGeneratingKeys, onServerPasswordSubmit, isRateLimited]);
-
-  useEffect(() => {
-    if (showPassphrasePrompt) {
-      setIsSubmitting(false);
-    }
-  }, [showPassphrasePrompt]);
 
   useEffect(() => {
     if (accountAuthenticated) {
@@ -242,18 +191,16 @@ export const Login = React.memo<LoginProps>(({
               </div>
               <div className="text-center space-y-2">
                 <CardTitle className="text-2xl select-none">
-                  {mode === "login" ? "Sign In" : "Sign Up"}
+                  {showPasswordPrompt ? "Server Access" : mode === "login" ? "Sign In" : "Sign Up"}
                 </CardTitle>
                 <CardDescription className="select-none">
                   {showPasswordPrompt
-                    ? "Enter your password"
-                    : showPassphrasePrompt
-                      ? "Secure your account"
-                      : accountAuthenticated
-                        ? "Complete setup"
-                        : mode === "login"
-                          ? "Enter your credentials"
-                          : "Create your account"}
+                    ? "Identify yourself to the server"
+                    : accountAuthenticated
+                      ? "Complete setup"
+                      : mode === "login"
+                        ? "Enter your credentials"
+                        : "Create your account"}
                 </CardDescription>
               </div>
             </div>
@@ -306,43 +253,19 @@ export const Login = React.memo<LoginProps>(({
           {/* Form Content */}
           <AnimatedHeightWrapper className="w-full">
             <div
-              key={`${showPasswordPrompt}-${showPassphrasePrompt}-${accountAuthenticated}-${mode}`}
+              key={`${accountAuthenticated}-${mode}`}
               className="animate-in fade-in-0 slide-in-from-bottom-2 duration-300 delay-100"
             >
               {showPasswordPrompt ? (
-                <PasswordHashPrompt
-                  onSubmit={async (pwd) => {
-                    try {
-                      await onPasswordHashSubmit?.(pwd);
-                    } catch (err) {
-                      if (err instanceof Error) {
-                        toast.error(err.message);
-                      }
-                    }
-                  }}
-                  disabled={isSubmitting || isGeneratingKeys || isRateLimited}
-                  authStatus={authStatus}
-                  initialPassword={initialPassword}
-                  onChangePassword={(v) => handleInputChange('password', v)}
-                />
-              ) : showPassphrasePrompt ? (
-                <PassphrasePrompt
-                  mode={mode}
-                  onSubmit={handlePassphraseSubmit}
-                  disabled={isSubmitting || isGeneratingKeys || isRateLimited}
-                  authStatus={authStatus}
-                  initialPassphrase={""}
-                  initialConfirmPassphrase={""}
-                  onChangePassphrase={(v) => handleInputChange('passphrase', v)}
-                  onChangeConfirm={(v) => handleInputChange('passphraseConfirm', v)}
-                />
-              ) : accountAuthenticated ? (
                 <ServerPasswordForm
                   serverPassword={serverPassword}
                   setServerPassword={setServerPassword}
-                  disabled={isSubmitting || isGeneratingKeys || isRateLimited}
+                  disabled={isSubmitting || isGeneratingKeys}
                   authStatus={authStatus}
-                  onSubmit={handleServerPasswordSubmit}
+                  onSubmit={(e) => {
+                    e.preventDefault();
+                    handleServerPasswordSubmit(serverPassword);
+                  }}
                 />
               ) : mode === "register" ? (
                 <SignUpForm
@@ -356,6 +279,7 @@ export const Login = React.memo<LoginProps>(({
                   onChangeUsername={(v) => handleInputChange('username', v)}
                   onChangePassword={(v) => handleInputChange('password', v)}
                   onChangeConfirmPassword={(v) => handleInputChange('confirmPassword', v)}
+                  onChangePassphrase={(v) => handleInputChange('passphrase', v)}
                 />
               ) : (
                 <SignInForm
@@ -368,6 +292,7 @@ export const Login = React.memo<LoginProps>(({
                   initialPassword={initialPassword}
                   onChangeUsername={(v) => handleInputChange('username', v)}
                   onChangePassword={(v) => handleInputChange('password', v)}
+                  onChangePassphrase={(v) => handleInputChange('passphrase', v)}
                 />
               )}
             </div>
@@ -375,7 +300,7 @@ export const Login = React.memo<LoginProps>(({
         </CardContent>
 
         <CardFooter className="flex flex-col gap-2 p-8 pt-0 select-none">
-          {!accountAuthenticated && !showPassphrasePrompt && !showPasswordPrompt && (
+          {!accountAuthenticated && !showPasswordPrompt && (
             <div className="text-sm text-center text-muted-foreground">
               {mode === "login" ? (
                 <>

@@ -121,16 +121,13 @@ export class WebSocketHandshake {
         const now = Date.now();
         if (now - lastRequestTime > 1500) {
           try {
-            if (lastRequestTime === 0) {
-              await new Promise(resolve => setTimeout(resolve, 200));
-            }
             await this.callbacks.transmit(JSON.stringify({ type: 'request-server-public-key' }));
             lastRequestTime = Date.now();
           } catch (err) {
             console.error('[WebSocketHandshake] Failed to transmit request:', err);
           }
         }
-        await new Promise(resolve => setTimeout(resolve, 100));
+        await new Promise(resolve => setTimeout(resolve, 250));
       }
 
       serverMaterial = this.serverKeyMaterial;
@@ -143,6 +140,7 @@ export class WebSocketHandshake {
     this.serverKeyMaterial = serverMaterial;
 
     if (this.handshakeInFlight) {
+      if (this.handshakePromise) await this.handshakePromise;
       return;
     }
 
@@ -161,7 +159,7 @@ export class WebSocketHandshake {
     const sessionId = PostQuantumUtils.bytesToHex(PostQuantumRandom.randomBytes(16));
     const handshakeNonce = PostQuantumRandom.randomBytes(32);
     const timestamp = Date.now();
-    const { ciphertext: kemCiphertext, sharedSecret: pqSharedSecret } = PostQuantumKEM.encapsulate(serverMaterial.kyberPublicKey);
+    const { ciphertext: kemCiphertext, sharedSecret: pqSharedSecret } = await PostQuantumKEM.encapsulate(serverMaterial.kyberPublicKey);
 
     if (!serverMaterial.x25519PublicKey) {
       throw new Error('Server X25519 public key not available for hybrid WS handshake');

@@ -5,7 +5,7 @@ import { Button } from "../../ui/button";
 import { USERNAME_MAX_LENGTH, PASSWORD_MAX_LENGTH } from "../../../lib/constants";
 
 interface SignInFormProps {
-  readonly onSubmit: (username: string, password: string) => Promise<void>;
+  readonly onSubmit: (username: string, password: string, passphrase: string) => Promise<void>;
   readonly disabled: boolean;
   readonly authStatus?: string;
   readonly error?: string;
@@ -14,6 +14,7 @@ interface SignInFormProps {
   readonly initialPassword?: string;
   readonly onChangeUsername?: (v: string) => void;
   readonly onChangePassword?: (v: string) => void;
+  readonly onChangePassphrase?: (v: string) => void;
 }
 
 export function SignInForm({
@@ -24,10 +25,12 @@ export function SignInForm({
   initialUsername = "",
   initialPassword = "",
   onChangeUsername,
-  onChangePassword
+  onChangePassword,
+  onChangePassphrase
 }: SignInFormProps) {
   const [username, setUsername] = useState(initialUsername);
   const [password, setPassword] = useState(initialPassword);
+  const [passphrase, setPassphrase] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
 
   const handleUsernameChange = useCallback((v: string): void => {
@@ -40,9 +43,14 @@ export function SignInForm({
     onChangePassword?.(v);
   }, [onChangePassword]);
 
+  const handlePassphraseChange = useCallback((v: string): void => {
+    setPassphrase(v);
+    onChangePassphrase?.(v);
+  }, [onChangePassphrase]);
+
   const isFormValid = useMemo(() =>
-    username.trim().length > 0 && password.length > 0,
-    [username, password]
+    username.trim().length > 0 && password.length > 0 && passphrase.trim().length > 0,
+    [username, password, passphrase]
   );
 
   const handleSubmit = useCallback(async (e: React.FormEvent): Promise<void> => {
@@ -53,14 +61,15 @@ export function SignInForm({
 
     if (sanitizedUsername.length === 0 || sanitizedUsername.length > USERNAME_MAX_LENGTH) return;
     if (password.length < 1 || password.length > PASSWORD_MAX_LENGTH) return;
+    if (passphrase.trim().length === 0) return;
 
     setIsSubmitting(true);
     try {
-      await onSubmit(sanitizedUsername, password);
+      await onSubmit(sanitizedUsername, password, passphrase.trim());
     } finally {
       setIsSubmitting(false);
     }
-  }, [disabled, isSubmitting, isFormValid, username, password, onSubmit]);
+  }, [disabled, isSubmitting, isFormValid, username, password, passphrase, onSubmit]);
 
   return (
     <form onSubmit={handleSubmit} className="space-y-4">
@@ -75,6 +84,21 @@ export function SignInForm({
           required
           maxLength={USERNAME_MAX_LENGTH}
           autoComplete="username"
+          className="bg-background/50 border-border/50 focus:bg-background/80 transition-all duration-200"
+        />
+      </div>
+
+      <div className="space-y-2">
+        <Label htmlFor="passphrase" className="text-muted-foreground font-medium">Encryption Passphrase</Label>
+        <Input
+          id="passphrase"
+          type="password"
+          placeholder="Enter your encryption passphrase"
+          value={passphrase}
+          onChange={(e) => handlePassphraseChange(e.target.value)}
+          disabled={disabled || isSubmitting}
+          required
+          autoComplete="current-password"
           className="bg-background/50 border-border/50 focus:bg-background/80 transition-all duration-200"
         />
       </div>

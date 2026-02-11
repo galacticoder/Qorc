@@ -21,59 +21,39 @@ export const DEFAULT_ALLOWED_TYPES: Set<string> = new Set([
   SignalType.PQ_ENVELOPE,
   SignalType.PQ_HANDSHAKE_ACK,
   SignalType.PQ_HEARTBEAT_PONG,
-  SignalType.CLIENT_ERROR,
-  SignalType.DEVICE_CHALLENGE,
-  SignalType.DEVICE_ATTESTATION_ACK,
-  SignalType.AVATAR_FETCH_RESPONSE,
-  SignalType.AVATAR_UPLOAD_RESPONSE,
-  SignalType.ENCRYPTED_MESSAGE,
-  SignalType.DR_SEND,
   SignalType.SERVERMESSAGE,
-  SignalType.SERVERLIMIT,
   SignalType.AUTH_ERROR,
-  SignalType.NAMEEXISTSERROR,
-  SignalType.INVALIDNAME,
-  SignalType.INVALIDNAMELENGTH,
   SignalType.TOKEN_VALIDATION_RESPONSE,
   SignalType.ERROR,
   SignalType.BLOCK_LIST_UPDATE,
   SignalType.BLOCK_LIST_SYNC,
   SignalType.BLOCK_LIST_RESPONSE,
-  SignalType.PASSPHRASE_HASH,
-  SignalType.PASSPHRASE_SUCCESS,
-  SignalType.PASSWORD_HASH_PARAMS,
-  SignalType.CONNECTION_RESTORED,
   SignalType.SESSION_ESTABLISHED,
   SignalType.SERVER_PUBLIC_KEY,
-  SignalType.IN_ACCOUNT,
-  SignalType.AUTH_SUCCESS,
-  SignalType.USER_EXISTS_RESPONSE,
-  SignalType.P2P_PEER_CERT,
+  SignalType.AUTH_FULL_SUCCESS,
   SignalType.LIBSIGNAL_DELIVER_BUNDLE,
   SignalType.LIBSIGNAL_PUBLISH_STATUS,
   SignalType.SESSION_RESET_REQUEST,
   SignalType.EDIT_MESSAGE,
   SignalType.DELETE_MESSAGE,
-  SignalType.USER_DISCONNECT,
   SignalType.FILE_MESSAGE_CHUNK,
   SignalType.OFFLINE_MESSAGES_RESPONSE,
   SignalType.DELIVERY_RECEIPT,
   SignalType.READ_RECEIPT,
-  SignalType.KEY_CHUNK,
+  SignalType.PUBLISH_DISCOVERY,
+  SignalType.QUERY_DISCOVERY,
+  SignalType.DISCOVERY_RESULT,
+  SignalType.SEALED_ENVELOPE,
 ]);
 
 export const DEFAULT_ENCRYPTED_TYPES = new Set<string>([
   SignalType.PQ_ENVELOPE,
-  SignalType.ENCRYPTED_MESSAGE,
-  SignalType.DR_SEND,
+  SignalType.SEALED_ENVELOPE,
 ]);
 
 export const DEFAULT_SCHEMAS: Record<string, WebSocketMessageSchema> = {
   [SignalType.ENCRYPTED_MESSAGE]: {
     validate: (message) => typeof message.encryptedPayload === 'object' && message.encryptedPayload !== null,
-  },
-  [SignalType.DR_SEND]: {
-    validate: (message) => typeof message.payload === 'object' && message.payload !== null,
   },
   [SignalType.PQ_ENVELOPE]: {
     validate: (message) =>
@@ -172,6 +152,7 @@ export interface SessionKeyMaterial {
 
 export interface EncryptionContext {
   sessionKeyMaterial?: SessionKeyMaterial;
+  previousSessionKeyMaterial?: SessionKeyMaterial;
   previousSessionFingerprint?: string;
   sessionTransitionTime?: number;
   serverSignatureKey?: Uint8Array;

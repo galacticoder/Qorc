@@ -36,7 +36,6 @@ if (!process.env.REDIS_URL) process.env.REDIS_URL = 'redis://127.0.0.1:6379';
 
 const CONFIG = {
   NO_GUI: (process.env.NO_GUI || 'false').toLowerCase() === 'true',
-  HAPROXY_HTTP_PORT: process.env.HAPROXY_HTTP_PORT || '8080',
   HAPROXY_HTTPS_PORT: process.env.HAPROXY_HTTPS_PORT || '8443',
   HAPROXY_STATS_PORT: process.env.HAPROXY_STATS_PORT || '8404',
 };
@@ -1011,7 +1010,7 @@ async function ensureStatsCredentials() {
   const uid = (typeof process.getuid === 'function') ? String(process.getuid()) : 'nouid';
   process.env.HAPROXY_STATS_SOCKET = process.env.HAPROXY_STATS_SOCKET || path.join(os.tmpdir(), `haproxy-admin-${uid}.sock`);
 
-  const env = { ...process.env, REDIS_URL: process.env.REDIS_URL, HAPROXY_HTTP_PORT: String(CONFIG.HAPROXY_HTTP_PORT), HAPROXY_HTTPS_PORT: String(CONFIG.HAPROXY_HTTPS_PORT), HAPROXY_STATS_PORT: String(CONFIG.HAPROXY_STATS_PORT), HAPROXY_STATS_SOCKET: process.env.HAPROXY_STATS_SOCKET };
+  const env = { ...process.env, REDIS_URL: process.env.REDIS_URL, HAPROXY_HTTPS_PORT: String(CONFIG.HAPROXY_HTTPS_PORT), HAPROXY_STATS_PORT: String(CONFIG.HAPROXY_STATS_PORT), HAPROXY_STATS_SOCKET: process.env.HAPROXY_STATS_SOCKET };
 
   if (CONFIG.NO_GUI) {
     const child = spawn(process.execPath, [lbScript], { cwd: repoRoot, env, stdio: 'inherit' });

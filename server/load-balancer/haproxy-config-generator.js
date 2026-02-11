@@ -16,7 +16,6 @@ import { logger as cryptoLogger } from '../crypto/crypto-logger.js';
 export class HAProxyConfigGenerator {
   constructor({
     listenPort = 443,
-    httpPort = 80,
     statsPort = 8404,
     tlsCertPath = process.env.HAPROXY_CERT_PATH || path.join(process.cwd(), 'server', 'config', 'certs'),
     maxConnections = 100000,
@@ -24,15 +23,14 @@ export class HAProxyConfigGenerator {
     statsPassword = 'adminpass', // Will be prompted for a new one. This is the default
     timeouts = {
       connect: '30s',
-      client: '3600s',
-      server: '3600s',
-      tunnel: '3600s',
+      client: '24d',
+      server: '24d',
+      tunnel: '24d',
       httpKeepAlive: '60s',
       httpRequest: '60s',
     }
   } = {}) {
     this.listenPort = listenPort;
-    this.httpPort = httpPort;
     this.statsPort = statsPort;
     this.tlsCertPath = tlsCertPath;
     this.maxConnections = maxConnections;
@@ -94,7 +92,7 @@ export class HAProxyConfigGenerator {
 
   // Generate complete HAProxy configuration
   generateConfig() {
-    return `# HAProxy Configuration for Qor-Chat Server Cluster
+    const config = `# HAProxy Configuration for Qor-Chat Server Cluster
 # Generated automatically - DO NOT EDIT MANUALLY
 # Generated at: ${new Date().toISOString()}
 
@@ -175,21 +173,6 @@ listen stats
     http-request deny if !local_network
 
 #---------------------------------------------------------------------
-# HTTP frontend (redirect to HTTPS)
-#---------------------------------------------------------------------
-frontend http-in
-    bind *:${this.httpPort}
-    
-    # Security headers
-    http-response set-header X-Frame-Options DENY
-    http-response set-header X-Content-Type-Options nosniff
-    http-response set-header X-XSS-Protection "1; mode=block"
-    http-response set-header Referrer-Policy "strict-origin-when-cross-origin"
-    
-    # Redirect all HTTP to HTTPS
-    redirect scheme https code 301 if !{ ssl_fc }
-
-#---------------------------------------------------------------------
 # HTTPS frontend (main entry point)
 #---------------------------------------------------------------------
 frontend https-in
@@ -203,7 +186,7 @@ frontend https-in
     http-response set-header X-Content-Type-Options nosniff
     http-response set-header X-XSS-Protection "1; mode=block"
     http-response set-header Referrer-Policy "strict-origin-when-cross-origin"
-    http-response set-header Permissions-Policy "geolocation=(), microphone=(), camera=(), payment=(), usb=()"
+    http-response set-header Permissions-Policy "microphone=(self), camera=(self), usb=()"
     http-response set-header Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' wss: https:; media-src 'self' blob:; object-src 'none'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
     http-response set-header X-Permitted-Cross-Domain-Policies "none"
     http-response del-header Server
@@ -264,7 +247,7 @@ backend websocket_backend
     balance leastconn
     
     # Sticky sessions for WebSocket using source IP
-    stick-table type ip size 100k expire 3600s
+    stick-table type ip size 100k expire 24d
     stick on src
     
     # WebSocket-specific options
@@ -296,6 +279,11 @@ cache quantum_cache
     max-object-size 10000
     max-age 300
 `;
+    const httpBindPattern = /frontend\s+http-in\b|bind\s+\*:\s*80\b|bind\s+\*:\s*8080\b/i;
+    if (httpBindPattern.test(config)) {
+      throw new Error('HTTP bind detected in HAProxy config; HTTPS-only mode enforced.');
+    }
+    return config;
   }
 
   // Generate backend server configuration
@@ -386,7 +374,6 @@ export async function generateConfigFromCluster(clusterManager, outputPath) {
 
     const generator = new HAProxyConfigGenerator({
       listenPort: parseInt(process.env.HAPROXY_HTTPS_PORT || '8443', 10),
-      httpPort: parseInt(process.env.HAPROXY_HTTP_PORT || '8080', 10),
       statsPort: parseInt(process.env.HAPROXY_STATS_PORT || '8404', 10),
       tlsCertPath: process.env.HAPROXY_CERT_PATH || path.join(process.cwd(), 'server', 'config', 'certs'),
       statsUsername: process.env.HAPROXY_STATS_USERNAME || 'admin',

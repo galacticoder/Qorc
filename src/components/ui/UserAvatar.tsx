@@ -41,7 +41,6 @@ export const UserAvatar = memo(function UserAvatar({
         }
     });
     const [isLoaded, setIsLoaded] = useState(false);
-    const lastRequestTimeRef = React.useRef<number>(0);
     const currentUrlRef = React.useRef<string | null>(avatarUrl);
     const profilePictureEventRateRef = React.useRef<{ windowStart: number; count: number }>({ windowStart: Date.now(), count: 0 });
 
@@ -54,11 +53,6 @@ export const UserAvatar = memo(function UserAvatar({
                 setIsLoaded(false);
             }
 
-            if (!own && Date.now() - lastRequestTimeRef.current > 10000) {
-                lastRequestTimeRef.current = Date.now();
-                profilePictureSystem.fetchOwnFromServer().catch(() => { });
-            }
-
         } else {
             const peer = profilePictureSystem.getPeerAvatar(username);
             if (peer !== currentUrlRef.current) {
@@ -69,17 +63,23 @@ export const UserAvatar = memo(function UserAvatar({
                     setIsLoaded(false);
                 }
             }
-
-            const isStale = profilePictureSystem.isPeerAvatarStale(username);
-            if (isStale && Date.now() - lastRequestTimeRef.current > 10000) {
-                lastRequestTimeRef.current = Date.now();
-                profilePictureSystem.requestPeerAvatar(username);
-            }
         }
+    }, [username, isCurrentUser]);
+
+    const requestPeerAvatar = useCallback(() => {
+        if (isCurrentUser) return;
+        try {
+            const cached = profilePictureSystem.getPeerAvatar(username);
+            const stale = profilePictureSystem.isPeerAvatarStale(username);
+            if (!cached || stale) {
+                void profilePictureSystem.requestPeerAvatar(username);
+            }
+        } catch { }
     }, [username, isCurrentUser]);
 
     useEffect(() => {
         loadAvatar();
+        requestPeerAvatar();
 
         const handleUpdate = (event: Event) => {
             try {
@@ -131,7 +131,7 @@ export const UserAvatar = memo(function UserAvatar({
             window.removeEventListener(EventType.PROFILE_PICTURE_UPDATED, handleUpdate as EventListener);
             window.removeEventListener(EventType.PROFILE_PICTURE_SYSTEM_INITIALIZED, handleUpdate as EventListener);
         };
-    }, [loadAvatar, username, isCurrentUser]);
+    }, [loadAvatar, requestPeerAvatar, username, isCurrentUser]);
 
     // Periodic refresh for peer avatars
     useEffect(() => {
@@ -141,11 +141,12 @@ export const UserAvatar = memo(function UserAvatar({
             const isStale = profilePictureSystem.isPeerAvatarStale(username);
             if (isStale) {
                 loadAvatar();
+                requestPeerAvatar();
             }
         }, 30000);
 
         return () => clearInterval(refreshInterval);
-    }, [username, isCurrentUser, loadAvatar]);
+    }, [username, isCurrentUser, loadAvatar, requestPeerAvatar]);
 
     const pixelSize = SIZE_MAP[size];
     const skeletonColor = 'var(--color-secondary)';

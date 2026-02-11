@@ -64,7 +64,6 @@ export interface CallSignalContext {
   payload: {
     content: string;
     from: string;
-    fromOriginal?: string;
   };
 }
 
@@ -116,23 +115,17 @@ export async function waitForSessionReady(
   });
 }
 
-// Request a bundle and optionally wait for session to be ready
+// Wait for session to be ready
 export async function requestBundleAndWait(
   senderUsername: string,
   waitForSession: boolean = true,
   timeoutMs: number = 10000
 ): Promise<boolean> {
   try {
-    const sessionReadyPromise = waitForSession
-      ? waitForSessionReady(senderUsername, timeoutMs)
-      : Promise.resolve(true);
-
-    await websocketClient.sendSecureControlMessage({
-      type: SignalType.LIBSIGNAL_REQUEST_BUNDLE,
-      username: senderUsername
-    });
-
-    return await sessionReadyPromise;
+    if (waitForSession) {
+      return await waitForSessionReady(senderUsername, timeoutMs);
+    }
+    return true;
   } catch {
     return false;
   }
@@ -383,16 +376,6 @@ export function handleCallSignal(ctx: CallSignalContext): boolean {
   if (!callSignalData) {
     return false;
   }
-
-  try {
-    const originalFrom = ctx.payload.fromOriginal;
-    if (typeof originalFrom === 'string') {
-      window.dispatchEvent(new CustomEvent(EventType.USERNAME_MAPPING_RECEIVED, {
-        detail: { hashed: ctx.payload.from, original: originalFrom }
-      }));
-      (callSignalData as any).fromOriginal = originalFrom;
-    }
-  } catch { }
 
   window.dispatchEvent(new CustomEvent(EventType.CALL_SIGNAL, {
     detail: callSignalData

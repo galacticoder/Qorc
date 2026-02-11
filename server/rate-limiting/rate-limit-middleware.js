@@ -65,7 +65,6 @@ export class RateLimitMiddleware {
 			return false;
 		}
 
-		cryptoLogger.debug('[RATE-LIMIT] Global connection allowed');
 		return true;
 	}
 
@@ -94,56 +93,53 @@ export class RateLimitMiddleware {
 			return false;
 		}
 
-		cryptoLogger.debug('[RATE-LIMIT] Authentication allowed for connection');
 		return true;
 	}
 
 	// Non-consuming per-user auth status check (long-window, aggregated)
-	async checkUserAuthStatus(username) {
-		if (!this.isValidUsername(username)) {
-			cryptoLogger.warn('[RATE-LIMIT-SECURITY] Invalid username format in user auth check');
+	async checkUserAuthStatus(principalId) {
+		if (!this.isValidPrincipalId(principalId)) {
+			cryptoLogger.warn('[RATE-LIMIT-SECURITY] Invalid principalId format in user auth check');
 			return { allowed: false, reason: 'Invalid user' };
 		}
 		const limiter = await this.#limiter();
-		return limiter.getUserAuthStatus(username);
+		return limiter.getUserAuthStatus(principalId);
 	}
 
 	// Non-consuming category status (short-window)
-	async getUserCredentialStatus(username, category, ws = undefined) {
+	async getUserCredentialStatus(principalId, category, _ws = undefined) {
 		const limiter = await this.#limiter();
-		const ip = this._getClientIp(ws);
-		return limiter.getUserCategoryStatus(username, category, ip);
+		return limiter.getUserCategoryStatus(principalId, category, undefined);
 	}
 
 	// Record a credential failure and get attempts/cooldown info
-	async recordCredentialFailure(username, category, ws = undefined) {
+	async recordCredentialFailure(principalId, category, _ws = undefined) {
 		const limiter = await this.#limiter();
-		const ip = this._getClientIp(ws);
-		return limiter.consumeUserAuthAttempt(username, category, ip);
+		return limiter.consumeUserAuthAttempt(principalId, category, undefined);
 	}
 
 	// Check message rate limit
-	async checkMessageLimit(ws, username) {
+	async checkMessageLimit(ws, principalId) {
 		if (!this.isValidWebSocket(ws)) {
 			cryptoLogger.warn('[RATE-LIMIT-SECURITY] Invalid WebSocket object in message check');
 			return false;
 		}
 
-		if (!username) {
-			cryptoLogger.warn('[RATE-LIMIT] No username provided for message rate limit check');
+		if (!principalId) {
+			cryptoLogger.warn('[RATE-LIMIT] No principalId provided for message rate limit check');
 			return false;
 		}
 
-		if (!this.isValidUsername(username)) {
-			cryptoLogger.warn('[RATE-LIMIT-SECURITY] Invalid username format in message check');
+		if (!this.isValidPrincipalId(principalId)) {
+			cryptoLogger.warn('[RATE-LIMIT-SECURITY] Invalid principalId format in message check');
 			return false;
 		}
 
 		const limiter = await this.#limiter();
-		const result = await limiter.checkMessageLimit(username);
+		const result = await limiter.checkMessageLimit(principalId);
 
 		if (!result.allowed) {
-			cryptoLogger.warn('[RATE-LIMIT] Message blocked for user', { username, reason: result.reason });
+			cryptoLogger.warn('[RATE-LIMIT] Message blocked for principal', { principalId, reason: result.reason });
 
 			await sendSecureMessage(ws, {
 				type: SignalType.ERROR,
@@ -157,32 +153,31 @@ export class RateLimitMiddleware {
 			return false;
 		}
 
-		cryptoLogger.debug('[RATE-LIMIT] Message allowed for user', { username });
 		return true;
 	}
 
 	// Check bundle operation rate limit for authenticated users
-	async checkBundleLimit(ws, username) {
+	async checkBundleLimit(ws, principalId) {
 		if (!this.isValidWebSocket(ws)) {
 			cryptoLogger.warn('[RATE-LIMIT-SECURITY] Invalid WebSocket object in bundle check');
 			return false;
 		}
 
-		if (!username) {
-			cryptoLogger.warn('[RATE-LIMIT] No username provided for bundle rate limit check');
+		if (!principalId) {
+			cryptoLogger.warn('[RATE-LIMIT] No principalId provided for bundle rate limit check');
 			return false;
 		}
 
-		if (!this.isValidUsername(username)) {
-			cryptoLogger.warn('[RATE-LIMIT-SECURITY] Invalid username format in bundle check');
+		if (!this.isValidPrincipalId(principalId)) {
+			cryptoLogger.warn('[RATE-LIMIT-SECURITY] Invalid principalId format in bundle check');
 			return false;
 		}
 
 		const limiter = await this.#limiter();
-		const result = await limiter.checkBundleLimit(username);
+		const result = await limiter.checkBundleLimit(principalId);
 
 		if (!result.allowed) {
-			cryptoLogger.warn('[RATE-LIMIT] Bundle operation blocked for user', { username, reason: result.reason });
+			cryptoLogger.warn('[RATE-LIMIT] Bundle operation blocked for principal', { principalId, reason: result.reason });
 
 			await sendSecureMessage(ws, {
 				type: SignalType.ERROR,
@@ -196,12 +191,11 @@ export class RateLimitMiddleware {
 			return false;
 		}
 
-		cryptoLogger.debug('[RATE-LIMIT] Bundle operation allowed for user', { username });
 		return true;
 	}
 
 	// Apply rate limiting to WebSocket message based on message type
-	async applyMessageRateLimiting(ws, messageType, username) {
+	async applyMessageRateLimiting(ws, messageType, principalId) {
 		if (!this.isValidMessageType(messageType)) {
 			cryptoLogger.warn('[RATE-LIMIT-SECURITY] Invalid message type provided');
 			return false;
@@ -211,13 +205,10 @@ export class RateLimitMiddleware {
 			case SignalType.ACCOUNT_SIGN_IN:
 			case SignalType.ACCOUNT_SIGN_UP:
 				return this.checkAuthLimit(ws);
-			case SignalType.ENCRYPTED_MESSAGE:
-			case SignalType.FILE_MESSAGE_CHUNK:
-			case SignalType.DR_SEND:
-				return this.checkMessageLimit(ws, username);
+			case SignalType.SEALED_ENVELOPE:
+				return this.checkMessageLimit(ws, principalId);
 			case SignalType.LIBSIGNAL_PUBLISH_BUNDLE:
-			case SignalType.LIBSIGNAL_REQUEST_BUNDLE:
-				return this.checkBundleLimit(ws, username);
+				return this.checkBundleLimit(ws, principalId);
 			default:
 				return true;
 		}
@@ -361,16 +352,16 @@ export class RateLimitMiddleware {
 	}
 
 	// Reset rate limits for a specific user (admin function)
-	async resetUserLimits(username) {
-		if (!this.isValidUsername(username)) {
-			cryptoLogger.warn('[RATE-LIMIT-SECURITY] Invalid username provided for reset');
+	async resetUserLimits(principalId) {
+		if (!this.isValidPrincipalId(principalId)) {
+			cryptoLogger.warn('[RATE-LIMIT-SECURITY] Invalid principalId provided for reset');
 			return false;
 		}
 
 		const limiter = await this.#limiter();
 		try {
 			const hashed = (await (async () => {
-				try { return crypto.createHash('sha256').update(username).digest('hex'); } catch { return null; }
+				try { return crypto.createHash('sha256').update(principalId.trim()).digest('hex'); } catch { return null; }
 			})());
 			if (hashed) {
 				await limiter.userMessageLimiter.delete(hashed);
@@ -393,20 +384,24 @@ export class RateLimitMiddleware {
 	}
 
 	// Get current rate limit status for a user
-	async getUserStatus(username) {
-		if (!this.isValidUsername(username)) {
-			cryptoLogger.warn('[RATE-LIMIT-SECURITY] Invalid username provided for status check');
+	async getUserStatus(principalId) {
+		if (!this.isValidPrincipalId(principalId)) {
+			cryptoLogger.warn('[RATE-LIMIT-SECURITY] Invalid principalId provided for status check');
 			return null;
 		}
 
 		const limiter = await this.#limiter();
-		const msgInfo = await limiter.userMessageLimiter.get(username);
-		const bunInfo = await limiter.userBundleLimiter.get(username);
+		const hashed = (() => {
+			try { return crypto.createHash('sha256').update(principalId.trim()).digest('hex'); } catch { return null; }
+		})();
+		if (!hashed) return null;
+		const msgInfo = await limiter.userMessageLimiter.get(hashed);
+		const bunInfo = await limiter.userBundleLimiter.get(hashed);
 		const msgCfg = RATE_LIMIT_CONFIG.MESSAGES;
 		const bunCfg = RATE_LIMIT_CONFIG.BUNDLE_OPERATIONS;
 
 		return {
-			username,
+			principalId,
 			messages: msgInfo ? {
 				attempts: msgInfo.consumedPoints || 0,
 				blockedUntil: msgInfo.msBeforeNext ? Date.now() + msgInfo.msBeforeNext : 0,
@@ -433,19 +428,13 @@ export class RateLimitMiddleware {
 		return ws && typeof ws === 'object' && typeof ws.send === 'function' && typeof ws.close === 'function';
 	}
 
-	_getClientIp(ws) {
-		try {
-			if (!this.isValidWebSocket(ws)) return undefined;
-			const req = ws.upgradeReq || ws._socket || {};
-			const direct = (req.socket && req.socket.remoteAddress) || req.remoteAddress || undefined;
-			return direct || undefined;
-		} catch { return undefined; }
-	}
-
-	isValidUsername(username) {
-		if (!username || typeof username !== 'string') return false;
-		const USERNAME_REGEX = /^[A-Za-z0-9_-]{3,32}$/;
-		return USERNAME_REGEX.test(username);
+	isValidPrincipalId(principalId) {
+		if (!principalId || typeof principalId !== 'string') return false;
+		const trimmed = principalId.trim();
+		if (!trimmed) return false;
+		const PRINCIPAL_ID_REGEX = /^[A-Za-z0-9_-]{3,128}$/;
+		const HEX_ID_REGEX = /^[a-f0-9]{32,128}$/i;
+		return HEX_ID_REGEX.test(trimmed) || PRINCIPAL_ID_REGEX.test(trimmed);
 	}
 
 	isValidMessageType(messageType) {

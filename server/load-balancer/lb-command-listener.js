@@ -1,6 +1,6 @@
 import { logger as cryptoLogger } from '../crypto/crypto-logger.js';
 import { CryptoUtils } from '../crypto/unified-crypto.js';
-import { withRedisClient } from '../presence/presence.js';
+import { withRedisClient } from '../session/redis-client.js';
 import crypto from 'crypto';
 import path from 'path';
 

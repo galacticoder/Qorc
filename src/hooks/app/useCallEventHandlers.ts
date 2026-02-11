@@ -3,7 +3,7 @@ import { Message } from '../../components/chat/messaging/types';
 import { EventType } from '../../lib/types/event-types';
 import { isPlainObject, hasPrototypePollutionKeys } from '../../lib/sanitizers';
 import { truncateUsername } from '../../lib/utils/avatar-utils';
-import { resolveDisplayUsername } from '../../lib/database/unified-username-display';
+import { getCachedDisplayName, anonymizeUsername } from '../../lib/utils/database-utils';
 import {
   LOCAL_EVENT_RATE_LIMIT_WINDOW_MS,
   LOCAL_EVENT_RATE_LIMIT_MAX_EVENTS,
@@ -66,7 +66,7 @@ export function useCallEventHandlers({
       const isVideo = (detail as any).isVideo === true;
       const isOutgoing = (detail as any).isOutgoing === true;
 
-      const displayPeerName = truncateUsername(await resolveDisplayUsername(peer, stableGetDisplayUsername));
+      const displayPeerName = truncateUsername(getCachedDisplayName(peer) || anonymizeUsername(peer));
       const durationSeconds = Math.round(durationMs / 1000);
 
       const { addCallLog } = callHistory;

@@ -21,7 +21,7 @@ import { useEncryptedMessageHandler } from "../hooks/message-handling/useEncrypt
 import { useChatSignals } from "../hooks/useChatSignals";
 import { useWebSocket } from "../hooks/useWebsocket";
 import { useConversations } from "../hooks/message-sending/useConversations";
-import { useUsernameDisplay } from "../hooks/database/useUsernameDisplay";
+import { useDisplayUsername } from "../hooks/database/useDisplayUsername";
 import { useP2PMessaging } from "../hooks/p2p/useP2PMessaging";
 import { useP2PKeys } from "../hooks/p2p/useP2PKeys";
 import { useMessageReceipts } from "../hooks/message-sending/useMessageReceipts";
@@ -32,9 +32,12 @@ import { ConnectSetup } from "../components/setup/ConnectSetup";
 import { SignalType } from "../lib/types/signal-types";
 import { retrieveAuthTokens } from "../lib/signals/signals";
 import { SecurityAuditLogger } from "../lib/cryptography/audit-logger";
+import { PostQuantumHash } from "../lib/cryptography/hash";
 import { PostQuantumUtils } from "../lib/utils/pq-utils";
+import { shouldAttemptDiscovery } from "../lib/utils/discovery-utils";
 import { unifiedSignalTransport } from "../lib/transport/unified-signal-transport";
-import { websocket, isTauri, session, storage, tray } from "../lib/tauri-bindings";
+import { websocket, isTauri, storage, tray } from "../lib/tauri-bindings";
+import type { PeerCertificateBundle } from "../lib/types/p2p-types";
 
 import {
   LOCAL_EVENT_RATE_LIMIT_WINDOW_MS,
@@ -42,7 +45,6 @@ import {
 } from "../lib/constants";
 import { useRateLimiter } from "../hooks/useRateLimiter";
 import { useLocalMessageHandlers } from "../hooks/message-handling/useLocalMessageHandlers";
-import { useP2PMessageHandlers } from "../hooks/p2p/useP2PMessageHandlers";
 import { useP2PConnectionManager } from "../hooks/p2p/useP2PConnectionManager";
 import { useP2PSignalHandlers } from "../hooks/p2p/useP2PSignalHandlers";
 import { useEventHandlers } from "../hooks/useEventHandlers";
@@ -59,6 +61,7 @@ import { useEncryptionProvider } from "../hooks/app/useEncryptionProvider";
 import { useOfflineMessages } from "../hooks/app/useOfflineMessages";
 import { useConnectionSetup } from "../hooks/app/useConnectionSetup";
 import { useBackgroundResume } from "../hooks/app/useBackgroundResume";
+import { useDiscovery } from "../hooks/discovery/useDiscovery";
 const CallModalLazy = React.lazy(() => import("../components/chat/calls/CallModal"));
 
 const ChatApp: React.FC = () => {
@@ -74,6 +77,13 @@ const ChatApp: React.FC = () => {
   const [isResizing, setIsResizing] = useState(false);
   const Authentication = useAuth();
   const callHistory = useCallHistory();
+
+  // Discovery Service
+  const { findUser } = useDiscovery(
+    Authentication.pseudonym || undefined,
+    Authentication.loginUsernameRef.current || undefined,
+    Authentication.hybridKeysRef
+  );
 
   // Background resume
   const {
@@ -108,6 +118,73 @@ const ChatApp: React.FC = () => {
   useEffect(() => {
     usersRef.current = Database.users;
   }, [Database.users]);
+
+  const peerCertMismatchLoggedRef = useRef<Set<string>>(new Set());
+
+  const computePeerCertFingerprint = useCallback((cert: PeerCertificateBundle): string => {
+    const canonical = JSON.stringify({
+      username: cert.username,
+      dilithiumPublicKey: cert.dilithiumPublicKey,
+      kyberPublicKey: cert.kyberPublicKey,
+      x25519PublicKey: cert.x25519PublicKey,
+      proof: cert.proof
+    });
+    const digest = PostQuantumHash.blake3(new TextEncoder().encode(canonical), { dkLen: 32 });
+    return Array.from(digest).map(b => b.toString(16).padStart(2, '0')).join('');
+  }, []);
+
+  const fetchPeerCertificates = useCallback(async (peer: string): Promise<PeerCertificateBundle | null> => {
+    if (!peer) return null;
+    try {
+      if (!shouldAttemptDiscovery(peer, Database.users.map(u => u.username).filter(Boolean))) {
+        return null;
+      }
+      const material = await findUser(peer);
+      const cert = material?.peerCertificate || null;
+      if (!cert) {
+        return null;
+      }
+
+      const fingerprint = computePeerCertFingerprint(cert);
+      const existingUser = Database.users.find(u => u.username === peer);
+      const pinned = existingUser?.peerCertificateFingerprint;
+
+      if (pinned && pinned !== fingerprint) {
+        if (!peerCertMismatchLoggedRef.current.has(peer)) {
+          peerCertMismatchLoggedRef.current.add(peer);
+        }
+        return null;
+      }
+
+      if (!pinned) {
+        const pinnedAt = Date.now();
+        Database.setUsers(prev => {
+          const idx = prev.findIndex(u => u.username === peer);
+          if (idx === -1) {
+            return [...prev, {
+              id: crypto.randomUUID(),
+              username: peer,
+              isOnline: false,
+              peerCertificateFingerprint: fingerprint,
+              peerCertificatePinnedAt: pinnedAt
+            } as User];
+          }
+          const next = [...prev];
+          next[idx] = {
+            ...next[idx],
+            peerCertificateFingerprint: fingerprint,
+            peerCertificatePinnedAt: pinnedAt
+          };
+          return next;
+        });
+      }
+
+      return cert;
+    } catch (err) {
+      console.warn('[P2P][Cert] Failed to fetch discovery cert', { peer: peer.slice(0, 8), error: String(err) });
+      return null;
+    }
+  }, [findUser, Database.users, Database.setUsers, computePeerCertFingerprint]);
 
   useEffect(() => {
     (async () => {
@@ -158,7 +235,7 @@ const ChatApp: React.FC = () => {
   const messageSender = useMessageSender(
     Database.users,
     Authentication.loginUsernameRef,
-    Authentication.pseudonym || Authentication.loginUsernameRef.current || '',
+    Authentication.loginUsernameRef.current || '',
     Authentication.originalUsernameRef,
     (message: Message) => {
       setMessages(prev => (prev.some(m => m.id === message.id) ? prev : [...prev, message]));
@@ -180,13 +257,8 @@ const ChatApp: React.FC = () => {
       }
     },
     Database.secureDBRef,
-    async (peerUsername: string) => {
-      if (getPeerHybridKeysRef.current) {
-        return getPeerHybridKeysRef.current(peerUsername);
-      }
-      return null;
-    },
-    p2pServiceRef
+    undefined,
+    findUser
   );
 
 
@@ -199,7 +271,8 @@ const ChatApp: React.FC = () => {
     usersRef,
     undefined,
     fileHandler.handleFileMessageChunk,
-    Database.secureDBRef
+    Database.secureDBRef,
+    findUser
   );
 
   const encryptedHandlerRef = useRef(encryptedHandler);
@@ -242,7 +315,13 @@ const ChatApp: React.FC = () => {
     selectConversation,
     removeConversation,
     getConversationMessages,
-  } = useConversations(Authentication.pseudonym || Authentication.loginUsernameRef.current || '', Database.users, messages, Database.secureDBRef.current);
+  } = useConversations(
+    Authentication.loginUsernameRef.current || '',
+    Database.users,
+    messages,
+    Database.secureDBRef.current,
+    findUser
+  );
 
   useEffect(() => {
     if (selectedConversation && typeof messageSender?.prefetchSessionForPeer === 'function') {
@@ -250,32 +329,17 @@ const ChatApp: React.FC = () => {
     }
   }, [selectedConversation, messageSender]);
 
-  const usernameDisplay = useUsernameDisplay(
-    Database.secureDBRef.current,
-    Authentication.username
-  );
-
-  const getDisplayUsernameRef = useRef(usernameDisplay.getDisplayUsername);
-  useEffect(() => {
-    getDisplayUsernameRef.current = usernameDisplay.getDisplayUsername;
-  }, [usernameDisplay.getDisplayUsername]);
+  const currentDisplayName = useDisplayUsername({
+    username: Authentication.originalUsernameRef.current || Authentication.loginUsernameRef.current || ''
+  });
 
   const stableGetDisplayUsername = useCallback(
-    (username: string) => getDisplayUsernameRef.current(username),
+    async (username: string) => {
+      const { getCachedDisplayName, anonymizeUsername } = await import('../lib/utils/database-utils');
+      return getCachedDisplayName(username) || anonymizeUsername(username);
+    },
     []
   );
-
-  const [currentDisplayName, setCurrentDisplayName] = useState<string>('');
-  useEffect(() => {
-    (async () => {
-      try {
-        const raw = Authentication.originalUsernameRef.current || Authentication.loginUsernameRef.current || '';
-        if (!raw) { setCurrentDisplayName(''); return; }
-        const dn = await usernameDisplay.getDisplayUsername(raw);
-        if (typeof dn === 'string') setCurrentDisplayName(dn);
-      } catch { }
-    })();
-  }, [Authentication.originalUsernameRef.current, Authentication.loginUsernameRef.current, usernameDisplay]);
 
   const kyberSecretRefForSettings = useMemo(() => {
     const kyberSecret = Authentication.hybridKeysRef?.current?.kyber?.secretKey;
@@ -284,7 +348,6 @@ const ChatApp: React.FC = () => {
 
   const {
     p2pHybridKeys,
-    fetchPeerCertificates,
     getPeerHybridKeys,
     trustedIssuerDilithiumPublicKeyBase64,
     signalingTokenProvider,
@@ -314,6 +377,7 @@ const ChatApp: React.FC = () => {
       fetchPeerCertificates,
       signalingTokenProvider,
       trustedIssuerDilithiumPublicKeyBase64,
+      handleEncryptedMessagePayload: encryptedHandler,
       onServiceReady: (service) => {
         try { (window as any).p2pService = service; } catch { }
         p2pServiceRef.current = service;
@@ -327,7 +391,10 @@ const ChatApp: React.FC = () => {
       unifiedSignalTransport.setP2PSender(async (to, payload, type) => {
         if (p2pServiceRef.current) {
           const mId = (payload && typeof payload === 'object') ? (payload.messageId || payload.id) : undefined;
-          await p2pServiceRef.current.sendMessage(to, payload, type as any, mId);
+          if (type !== SignalType.SEALED_ENVELOPE) {
+            throw new Error('Invalid message type');
+          }
+          await p2pServiceRef.current.sendMessage(to, payload, SignalType.SEALED_ENVELOPE, mId);
         }
       });
     } else {
@@ -363,13 +430,6 @@ const ChatApp: React.FC = () => {
     saveMessageWithContext,
     secureDBRef: Database.secureDBRef,
     allowEvent,
-  });
-
-  useP2PMessageHandlers({
-    p2pMessaging,
-    setMessages,
-    saveMessageWithContext,
-    loginUsernameRef: Authentication.loginUsernameRef,
   });
 
   // Pre-fetch peer keys for calling when conversation opens
@@ -428,6 +488,7 @@ const ChatApp: React.FC = () => {
     users: Database.users,
     getKeysOnDemand: Authentication.getKeysOnDemand,
     secureDBRef: Database.secureDBRef,
+    findUser
   });
 
   // Message actions
@@ -514,10 +575,12 @@ const ChatApp: React.FC = () => {
     try {
       const storedUsername = await storage.get('last_authenticated_username');
       const tokens = await retrieveAuthTokens();
-      const hasExistingSession = !!(storedUsername || (tokens?.accessToken && tokens?.refreshToken));
+      const hasExistingSession = !!(storedUsername);
 
       if (hasExistingSession) {
         Authentication.setTokenValidationInProgress(true);
+      } else {
+        Authentication.setIsRegistrationMode(true);
       }
 
       setSelectedServerUrl(serverUrl);
@@ -580,11 +643,11 @@ const ChatApp: React.FC = () => {
     );
   }
 
-  const isFullyAuthenticated = Authentication.isLoggedIn && Authentication.accountAuthenticated && !Authentication.showPassphrasePrompt && !Authentication.showPasswordPrompt;
+  const isFullyAuthenticated = Authentication.isLoggedIn && Authentication.accountAuthenticated && !Authentication.showPassphrasePrompt;
   const showValidationScreen = Authentication.tokenValidationInProgress && !isFullyAuthenticated;
   const showLoginScreen = !showValidationScreen && (
     !Authentication.isLoggedIn ||
-    (!isFullyAuthenticated && (Authentication.showPassphrasePrompt || Authentication.showPasswordPrompt))
+    (!isFullyAuthenticated && Authentication.showPassphrasePrompt)
   );
 
   if (showValidationScreen) {
@@ -605,8 +668,6 @@ const ChatApp: React.FC = () => {
           authStatus={Authentication.authStatus}
           error={Authentication.loginError}
           onAccountSubmit={Authentication.handleAccountSubmit}
-          onServerPasswordSubmit={Authentication.handleServerPasswordSubmit}
-          onPasswordHashSubmit={Authentication.handlePasswordHashSubmit}
           accountAuthenticated={Authentication.accountAuthenticated}
           isRegistrationMode={Authentication.isRegistrationMode}
           setIsRegistrationMode={Authentication.setIsRegistrationMode}
@@ -615,13 +676,13 @@ const ChatApp: React.FC = () => {
           onRejectServerTrust={Authentication.rejectServerTrust}
           showPassphrasePrompt={Authentication.showPassphrasePrompt}
           setShowPassphrasePrompt={Authentication.setShowPassphrasePrompt}
+          onPassphraseSubmit={Authentication.handlePassphraseSubmit}
           showPasswordPrompt={Authentication.showPasswordPrompt}
           setShowPasswordPrompt={Authentication.setShowPasswordPrompt}
-          onPassphraseSubmit={Authentication.handlePassphraseSubmit}
+          handleServerPasswordSubmit={Authentication.handleServerPasswordSubmit}
           initialUsername={Authentication.originalUsernameRef.current || ''}
           initialPassword={Authentication.passwordRef.current || ''}
           maxStepReached={Authentication.maxStepReached}
-
           pseudonym={Authentication.loginUsernameRef.current || ''}
         />
         <Toaster position="top-right" theme={theme as any} richColors toastOptions={{ className: 'select-none', style: { width: 'fit-content', maxWidth: '400px', minWidth: '0px' } }} />
@@ -630,7 +691,7 @@ const ChatApp: React.FC = () => {
   }
 
   // Wait for DB initialization before showing the main app
-  if (!Database.dbInitialized) {
+  if (!Database.dbInitialized || !Authentication.vaultReady) {
     return (
       <div className="flex items-center justify-center min-h-screen p-4 bg-white dark:bg-[hsl(var(--background))] select-none">
         <div className="text-center text-sm" style={{ color: 'var(--color-text-secondary)' }}>
@@ -776,7 +837,6 @@ const ChatApp: React.FC = () => {
             <AppSettings
               passphraseRef={Authentication.passphrasePlaintextRef}
               kyberSecretRef={kyberSecretRefForSettings as any}
-              getDisplayUsername={stableGetDisplayUsername}
               currentUsername={Authentication.loginUsernameRef.current || ''}
               currentDisplayName={currentDisplayName || Authentication.originalUsernameRef.current || ''}
             />

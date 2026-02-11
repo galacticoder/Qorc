@@ -1,4 +1,3 @@
-import websocketClient from '../websocket/websocket';
 import type { SecureDB } from '../database/secureDB';
 import type { ProfilePictureMessage, AvatarData } from '../types/avatar-types';
 import { createInitialState } from './state';
@@ -7,10 +6,7 @@ import { setSecureDB, setKeys, initialize } from './init';
 import { clearPeerCache, cachePeerAvatar } from './cache';
 import { setOwnAvatar, removeOwnAvatar, getOwnAvatar, getOwnAvatarHash, isOwnAvatarDefault, setShareWithOthers, getShareWithOthers } from './own-avatar';
 import { getPeerAvatar, getPeerAvatarHash, isPeerAvatarStale, requestPeerAvatar } from './peer-avatar';
-import { uploadToServer, fetchOwnFromServer, fetchPeerFromServer, handleServerAvatarResponse } from './server-sync';
 import { createProfilePictureRequest, createProfilePictureResponse, handleIncomingMessage } from './messaging';
-
-export type { LongTermEnvelope } from './server-sync';
 
 class ProfilePictureSystem {
     private static instance: ProfilePictureSystem | null = null;
@@ -40,12 +36,12 @@ class ProfilePictureSystem {
 
     // Initialize
     async initialize(): Promise<void> {
-        await initialize(this.state, () => this.ensureHandlerRegistered());
+        await initialize(this.state, () => { });
     }
 
     // Set own avatar
     async setOwnAvatar(imageDataUrl: string, isDefault: boolean = false): Promise<{ success: boolean; error?: string }> {
-        return setOwnAvatar(this.state, imageDataUrl, isDefault, () => this.uploadToServer());
+        return setOwnAvatar(this.state, imageDataUrl, isDefault, () => Promise.resolve());
     }
 
     // Remove own avatar
@@ -56,6 +52,12 @@ class ProfilePictureSystem {
     // Get own avatar
     getOwnAvatar(): string | null {
         return getOwnAvatar(this.state);
+    }
+
+    // Get own avatar data
+    getOwnAvatarData(): AvatarData | null {
+        if (!this.state.ownAvatar) return null;
+        return { ...this.state.ownAvatar };
     }
 
     // Get own avatar hash
@@ -70,7 +72,7 @@ class ProfilePictureSystem {
 
     // Set share with others
     async setShareWithOthers(share: boolean): Promise<void> {
-        return setShareWithOthers(this.state, share, () => this.uploadToServer());
+        return setShareWithOthers(this.state, share, () => Promise.resolve());
     }
 
     // Get share with others
@@ -95,7 +97,7 @@ class ProfilePictureSystem {
 
     // Request peer avatar
     async requestPeerAvatar(username: string): Promise<void> {
-        return requestPeerAvatar(this.state, username, (u) => this.fetchPeerFromServer(u));
+        return requestPeerAvatar(this.state, username, async () => { });
     }
 
     // Clear peer cache
@@ -122,66 +124,7 @@ class ProfilePictureSystem {
     async handleIncomingMessage(message: ProfilePictureMessage, fromUsername: string): Promise<ProfilePictureMessage | null> {
         return handleIncomingMessage(this.state, message, fromUsername);
     }
-
-    // Upload to server
-    async uploadToServer(): Promise<{ success: boolean; error?: string }> {
-        return uploadToServer(this.state);
-    }
-
-    // Fetch own from server
-    async fetchOwnFromServer(): Promise<{ success: boolean; error?: string }> {
-        this.ensureHandlerRegistered();
-        return fetchOwnFromServer(this.state);
-    }
-
-    // Fetch peer from server
-    async fetchPeerFromServer(username: string): Promise<void> {
-        this.ensureHandlerRegistered();
-        return fetchPeerFromServer(this.state, username);
-    }
-
-    // Handle server avatar response
-    public async handleServerAvatarResponse(response: {
-        target: string;
-        envelope?: any;
-        found: boolean;
-        isDefault?: boolean;
-        publicData?: any;
-    }): Promise<void> {
-        return handleServerAvatarResponse(this.state, response, () => this.removeOwnAvatar());
-    }
-
-    // Ensure handler registered
-    public ensureHandlerRegistered(): void {
-        if (this.state.handlerRegistered) return;
-
-        try {
-            websocketClient.registerMessageHandler('avatar-fetch-response', (msg: any) => {
-                if (msg && typeof msg.target === 'string') {
-                    this.handleServerAvatarResponse({
-                        target: msg.target,
-                        envelope: msg.envelope,
-                        found: !!msg.found,
-                        isDefault: !!msg.isDefault
-                    }).catch(() => { });
-                }
-            });
-
-            this.state.handlerRegistered = true;
-        } catch { }
-    }
 }
 
 export const profilePictureSystem = ProfilePictureSystem.getInstance();
 export type { ProfilePictureMessage, AvatarData };
-
-try {
-    profilePictureSystem.ensureHandlerRegistered();
-    if (typeof window !== 'undefined') {
-        const onPQSessionEstablished = () => {
-            profilePictureSystem.ensureHandlerRegistered();
-        };
-        window.addEventListener('pq-session-established', onPQSessionEstablished, { once: true });
-    }
-} catch {
-}

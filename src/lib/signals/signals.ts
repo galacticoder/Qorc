@@ -5,23 +5,24 @@
 import type { SignalHandlers } from '../types/signal-handler-types';
 import { SignalType } from '../types/signal-types';
 import {
-  handleAuthSuccess, handleTokenValidationResponse, handleInAccount,
-  handlePassphraseHash, handlePasswordHashParams, handlePassphraseSuccess,
-  handleAuthError, handleLoginErrors, handleConnectionRestored
+  handleTokenValidationResponse,
+  handleAuthError,
+  handleAuthFullSuccess,
+  handleZKRefreshChallenge,
+  handlePrivacyPassIssuance
 } from './auth-handlers';
 import {
-  handlePublicKeys, handleServerPublicKey, handleHybridKeys,
-  handlePQSessionInit, handlePQSessionResponse
+  handleServerPublicKey, handleHybridKeys
 } from './key-handlers';
 import {
   handleLibsignalDeliverBundle, handleSessionResetRequest,
   handleSessionEstablished, handleError
 } from './session-handlers';
 import {
-  handleUserExistsResponse, handleOfflineMessagesResponse,
+  handleOfflineMessagesResponse,
   handleBlockTokensUpdate, handleBlockListSync, handleBlockListUpdate,
-  handleBlockListResponse, handleClientGeneratePrekeys, handlePrekeyStatus,
-  handleLibsignalPublishStatus, handleAvatarFetchResponse, handleProfilePictureSignal
+  handleBlockListResponse,
+  handleLibsignalPublishStatus
 } from './user-handlers';
 
 export { persistAuthTokens, retrieveAuthTokens, clearAuthTokens, clearTokenEncryptionKey } from './token-storage';
@@ -54,6 +55,7 @@ export async function handleSignalMessages(data: any, handlers: SignalHandlers) 
     passphrasePlaintextRef: Authentication?.passphrasePlaintextRef,
     passphraseRef: Authentication?.passphraseRef,
     setShowPassphrasePrompt: Authentication?.setShowPassphrasePrompt,
+    setShowPasswordPrompt: Authentication?.setShowPasswordPrompt,
     passwordRef: Authentication?.passwordRef,
     setIsSubmittingAuth: Authentication?.setIsSubmittingAuth,
     setAuthStatus: Authentication?.setAuthStatus,
@@ -63,11 +65,14 @@ export async function handleSignalMessages(data: any, handlers: SignalHandlers) 
     setUsername: Authentication?.setUsername,
     setMaxStepReached: Authentication?.setMaxStepReached,
     setRecoveryActive: Authentication?.setRecoveryActive,
+    setVaultReady: Authentication?.setVaultReady,
     getKeysOnDemand: Authentication?.getKeysOnDemand,
     hybridKeysRef: Authentication?.hybridKeysRef,
     accountAuthenticated: Authentication?.accountAuthenticated,
     isLoggedIn: Authentication?.isLoggedIn,
-    isRegistrationMode: Authentication?.isRegistrationMode
+    isRegistrationMode: Authentication?.isRegistrationMode,
+    blindCredentialRef: Authentication?.blindCredentialRef,
+    serverHybridPublicRef: Authentication?.serverHybridPublicRef
   };
 
   const db = { setUsers: Database?.setUsers };
@@ -75,10 +80,6 @@ export async function handleSignalMessages(data: any, handlers: SignalHandlers) 
   try {
     switch (type) {
       case 'pq-handshake-ack':
-        break;
-
-      case SignalType.PUBLICKEYS:
-        handlePublicKeys(data, db);
         break;
 
       case SignalType.SERVER_PUBLIC_KEY:
@@ -89,41 +90,30 @@ export async function handleSignalMessages(data: any, handlers: SignalHandlers) 
         handleHybridKeys(data, db);
         break;
 
-      case SignalType.PQ_SESSION_INIT:
-        await handlePQSessionInit(data);
+      case SignalType.AUTH_FULL_SUCCESS:
+        await handleAuthFullSuccess(data, auth);
         break;
 
-      case SignalType.PQ_SESSION_RESPONSE:
-        handlePQSessionResponse(data);
-        break;
-
-      case SignalType.AUTH_SUCCESS:
-        await handleAuthSuccess(data, auth);
+      case SignalType.AUTH_OT_REGISTER_RESPONSE:
+      case SignalType.AUTH_OT_RESPONSE:
+        // handled in handlers.ts
         break;
 
       case SignalType.TOKEN_VALIDATION_RESPONSE:
         await handleTokenValidationResponse(data, auth);
         break;
 
-      case SignalType.IN_ACCOUNT:
-        await handleInAccount(data, auth);
+      case SignalType.ZK_REFRESH_CHALLENGE:
+        await handleZKRefreshChallenge(data, auth);
+        break;
+      case SignalType.ZK_DEVICE_REGISTER_RESPONSE:
         break;
 
-      case SignalType.PASSPHRASE_HASH:
-        handlePassphraseHash(data, auth);
-        break;
-
-      case SignalType.PASSWORD_HASH_PARAMS:
-        handlePasswordHashParams(data, auth);
-        break;
-
-      case SignalType.PASSPHRASE_SUCCESS:
-        await handlePassphraseSuccess(auth);
+      case SignalType.PRIVACY_PASS_ISSUANCE:
+        await handlePrivacyPassIssuance(data, auth);
         break;
 
       case SignalType.ENCRYPTED_MESSAGE:
-      case SignalType.DR_SEND:
-      case SignalType.USER_DISCONNECT:
       case SignalType.EDIT_MESSAGE:
       case SignalType.DELETE_MESSAGE:
         await handleEncryptedMessagePayload(data);
@@ -135,10 +125,6 @@ export async function handleSignalMessages(data: any, handlers: SignalHandlers) 
 
       case SignalType.FILE_MESSAGE_CHUNK:
         await handleFileMessageChunk(data, { from: data?.from, to: data?.to });
-        break;
-
-      case SignalType.USER_EXISTS_RESPONSE:
-        handleUserExistsResponse(data, db);
         break;
 
       case SignalType.OFFLINE_MESSAGES_RESPONSE:
@@ -161,30 +147,11 @@ export async function handleSignalMessages(data: any, handlers: SignalHandlers) 
         handleBlockListResponse(data);
         break;
 
-      case SignalType.CLIENT_GENERATE_PREKEYS:
-        handleClientGeneratePrekeys(data);
-        break;
-
-      case SignalType.PREKEY_STATUS:
-        handlePrekeyStatus(data);
-        break;
-
       case 'libsignal-publish-status':
         handleLibsignalPublishStatus(data);
         break;
 
       case SignalType.RATE_LIMIT_STATUS:
-        break;
-
-      case SignalType.CONNECTION_RESTORED:
-        handleConnectionRestored(data, auth);
-        break;
-
-      case SignalType.NAMEEXISTSERROR:
-      case SignalType.INVALIDNAMELENGTH:
-      case SignalType.INVALIDNAME:
-      case SignalType.SERVERLIMIT:
-        handleLoginErrors(type, message, auth);
         break;
 
       case SignalType.AUTH_ERROR:
@@ -201,15 +168,6 @@ export async function handleSignalMessages(data: any, handlers: SignalHandlers) 
 
       case SignalType.ERROR:
         await handleError(data, message, auth);
-        break;
-
-      case 'avatar-fetch-response':
-        handleAvatarFetchResponse(data);
-        break;
-
-      case 'profile-picture-request':
-      case 'profile-picture-response':
-        handleProfilePictureSignal(data, message);
         break;
 
       default:

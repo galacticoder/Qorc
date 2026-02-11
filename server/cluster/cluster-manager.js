@@ -1,19 +1,12 @@
 /**
  * Server Cluster Manager
- * 
- * Manages server clustering with:
- * - Redis-based server discovery and registration
- * - Mutual authentication using post-quantum crypto
- * - Health monitoring and automatic failover
- * - Server-to-server secure communication
- * - Approval-based cluster joining
  */
 
 import crypto from 'crypto';
 import fs from 'fs';
 import os from 'os';
 import { EventEmitter } from 'events';
-import { withRedisClient, createSubscriber } from '../presence/presence.js';
+import { withRedisClient, createSubscriber } from '../session/redis-client.js';
 import { logger as cryptoLogger } from '../crypto/crypto-logger.js';
 import { ml_dsa87 } from '@noble/post-quantum/ml-dsa.js';
 

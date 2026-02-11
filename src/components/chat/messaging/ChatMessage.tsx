@@ -11,7 +11,7 @@ import { DeletedMessage } from "./ChatMessage/DeletedMessage";
 import { FileContent } from "./ChatMessage/FileMessage";
 import { VoiceMessage } from "../calls/VoiceMessage";
 import { MessageReceipt } from "./MessageReceipt";
-import { useUnifiedUsernameDisplay } from "../../../hooks/database/useUnifiedUsernameDisplay";
+import { useDisplayUsername } from "../../../hooks/database/useDisplayUsername";
 import { LinkifyWithPreviews } from "./LinkifyWithPreviews.tsx";
 import { LinkExtractor } from "../../../lib/link-extraction.ts";
 import { copyTextToClipboard } from "../../../lib/clipboard";
@@ -77,21 +77,8 @@ export const ChatMessage = React.memo<ExtendedChatMessageProps>(({ message, smar
   const { content, sender, timestamp, isCurrentUser, isSystemMessage, isDeleted, type } = message;
   const effectiveReceipt = smartReceipt;
 
-  const senderKey = useMemo(() => sender, [sender]);
-  const { displayName: displaySender } = useUnifiedUsernameDisplay({
-    username: senderKey,
-    getDisplayUsername,
-    originalUsername: message.fromOriginal,
-    fallbackToOriginal: true
-  });
-
-  const replyToSenderKey = useMemo(() => message.replyTo?.sender || '', [message.replyTo?.sender]);
-  const { displayName: displayReplyToSender } = useUnifiedUsernameDisplay({
-    username: replyToSenderKey,
-    getDisplayUsername,
-    originalUsername: message.replyTo?.sender, // Note: replyTo.sender might be original or pseudonym, unified hook handles both
-    fallbackToOriginal: true
-  });
+  const displaySender = useDisplayUsername({ username: sender });
+  const displayReplyToSender = useDisplayUsername({ username: message.replyTo?.sender || '' });
 
   // Group messages within 3 minutes from same sender
   const isGrouped = useMemo(() => {

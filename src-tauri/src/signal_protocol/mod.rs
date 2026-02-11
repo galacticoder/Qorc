@@ -271,14 +271,6 @@ impl SignalHandler {
         let identity_key_pair = identity_store.get_identity_key_pair()
             .ok_or_else(|| QorError::NotInitialized("No identity key pair".to_string()))?;
 
-        let keypair = post_quantum::kyber_generate_keypair()?;
-        
-        let key = format!("{}:{}", username, key_id);
-        self.pq_kyber_keypairs.write().insert(
-            key,
-            (keypair.public_key.clone(), Zeroizing::new(keypair.secret_key)),
-        );
-
         // Generate Kyber record
         let kyber_record = KyberPreKeyRecord::generate(
             KemKeyType::Kyber1024,
@@ -286,6 +278,7 @@ impl SignalHandler {
             identity_key_pair.private_key(),
         ).map_err(|e| QorError::SignalProtocol(e.to_string()))?;
 
+        // Extract the public key from the record
         let public_key_bytes = kyber_record.public_key()
             .map_err(|e| QorError::SignalProtocol(e.to_string()))?
             .serialize();
@@ -340,9 +333,12 @@ impl SignalHandler {
         // Ensure identity exists
         self.generate_identity(username).await?;
         
-        // Ensure pre-key exists
-        if prekey_store.lock().await.get_pre_key(1.into()).is_none() {
-            self.generate_prekeys(username, 1, 1).await?;
+        // Ensure pre-keys exist
+        let prekey_count = prekey_store.lock().await.prekey_count();
+        if prekey_count < 100 {
+            let start_id = prekey_count + 1;
+            let count = 100 - prekey_count;
+            self.generate_prekeys(username, start_id, count).await?;
         }
         
         // Ensure signed pre-key exists
@@ -454,6 +450,11 @@ impl SignalHandler {
         let peer_device = DeviceId::try_from(1u32)
             .map_err(|_| QorError::InvalidArgument("Invalid peer device id".to_string()))?;
         let peer_address = ProtocolAddress::new(peer_username.to_string(), peer_device);
+
+        // If session already exists with peer then skip bundle processing
+        if session_store.has_session(&peer_address) {
+            return Ok(true);
+        }
         
         let peer_identity_key = IdentityKey::decode(&base64::Engine::decode(
             &base64::engine::general_purpose::STANDARD,
@@ -786,17 +787,24 @@ impl SignalHandler {
         
         let our_secret_key = if pq_key_id == 1 {
             self.static_mlkem_keys.read().get(username)
-                .map(|(_, sk)| sk.clone())
+                .map(|(_, sk)| {
+                    sk.clone()
+                })
                 .or_else(|| {
                     let pq_key = format!("{}:1", username);
                     self.pq_kyber_keypairs.read().get(&pq_key)
-                        .map(|(_, sk)| sk.clone())
+                        .map(|(_, sk)| {
+                            sk.clone()
+                        })
                 })
         } else {
             let pq_key = format!("{}:{}", username, pq_key_id);
             self.pq_kyber_keypairs.read().get(&pq_key)
                 .map(|(_, sk)| sk.clone())
-        }.ok_or_else(|| QorError::SignalProtocol(format!("Missing PQ Kyber secret key for id {}", pq_key_id)))?;
+        }.ok_or_else(|| {
+            log::error!("[unwrap_pq_hybrid] Missing PQ Kyber secret key for id {} for user {}", pq_key_id, username);
+            QorError::SignalProtocol(format!("Missing PQ Kyber secret key for id {}", pq_key_id))
+        })?;
         
         let sec_fp = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &blake3::hash(&our_secret_key).as_bytes()[..8]);
         
@@ -915,6 +923,10 @@ impl SignalHandler {
             &base64::engine::general_purpose::STANDARD,
             &signal_message.ciphertext,
         ).map_err(|e| QorError::DecryptionFailed(format!("Invalid message: {}", e)))?;
+        let msg_fp = base64::Engine::encode(
+            &base64::engine::general_purpose::STANDARD,
+            &blake3::hash(&message_bytes).as_bytes()[..8]
+        );
         
         let mut rng = StdRng::from_os_rng();
 
@@ -922,7 +934,13 @@ impl SignalHandler {
             3 => {
                 // PreKey message
                 let prekey_message = PreKeySignalMessage::try_from(message_bytes.as_slice())
-                    .map_err(|e| QorError::SignalProtocol(e.to_string()))?;
+                    .map_err(|e| {
+                        log::error!(
+                            "[decrypt_with_signal_protocol] Failed to parse PreKey message from {}: {} (msg_fp={}, len={})",
+                            from_username, e, msg_fp, message_bytes.len()
+                        );
+                        QorError::SignalProtocol(e.to_string())
+                    })?;
                 
                 libsignal_protocol::message_decrypt_prekey(
                     &prekey_message,
@@ -934,12 +952,35 @@ impl SignalHandler {
                     &mut *kyber_prekey_store,
                     &mut rng,
                 ).await
-                    .map_err(|e| QorError::SignalProtocol(e.to_string()))?
+                    .map_err(|e| {
+                        log::error!(
+                            "[decrypt_with_signal_protocol] PreKey decryption failed from {}: {} (msg_fp={}, len={})",
+                            from_username, e, msg_fp, message_bytes.len()
+                        );
+                        QorError::SignalProtocol(e.to_string())
+                    })?
             }
             _ => {
                 // Regular Signal message
                 let signal_msg = SignalMessage::try_from(message_bytes.as_slice())
-                    .map_err(|e| QorError::SignalProtocol(e.to_string()))?;
+                    .map_err(|e| {
+                        log::error!(
+                            "[decrypt_with_signal_protocol] Failed to parse Signal message from {}: {} (msg_fp={}, len={})",
+                            from_username, e, msg_fp, message_bytes.len()
+                        );
+                        QorError::SignalProtocol(e.to_string())
+                    })?;
+                
+                // Check if session exists before attempting decryption
+                if !session_store.has_session(&from_address) {
+                    log::error!(
+                        "[decrypt_with_signal_protocol] No session exists for {} when trying to decrypt message type {} (msg_fp={}, len={})",
+                        from_username, signal_message.message_type, msg_fp, message_bytes.len()
+                    );
+                    return Err(QorError::SignalProtocol(
+                        format!("No session with {} for decryption", from_username)
+                    ));
+                }
                 
                 libsignal_protocol::message_decrypt_signal(
                     &signal_msg,
@@ -948,7 +989,13 @@ impl SignalHandler {
                     &mut *identity_store,
                     &mut rng,
                 ).await
-                    .map_err(|e| QorError::SignalProtocol(e.to_string()))?
+                    .map_err(|e| {
+                        log::error!(
+                            "[decrypt_with_signal_protocol] Signal decryption failed from {}: {} (msg_fp={}, len={})",
+                            from_username, e, msg_fp, message_bytes.len()
+                        );
+                        QorError::SignalProtocol(e.to_string())
+                    })?
             }
         };
         
@@ -1022,8 +1069,10 @@ impl SignalHandler {
         secret_key: Vec<u8>,
     ) -> QorResult<bool> {
         Self::validate_username(username)?;
-        
+    
         if public_key.len() != post_quantum::KYBER_PUBLIC_KEY_SIZE {
+            log::error!("[set_static_mlkem_keys] Invalid public key length: expected {}, got {}", 
+                post_quantum::KYBER_PUBLIC_KEY_SIZE, public_key.len());
             return Err(QorError::InvalidKeyLength {
                 expected: post_quantum::KYBER_PUBLIC_KEY_SIZE,
                 actual: public_key.len(),
@@ -1031,6 +1080,8 @@ impl SignalHandler {
         }
         
         if secret_key.len() != post_quantum::KYBER_SECRET_KEY_SIZE {
+            log::error!("[set_static_mlkem_keys] Invalid secret key length: expected {}, got {}", 
+                post_quantum::KYBER_SECRET_KEY_SIZE, secret_key.len());
             return Err(QorError::InvalidKeyLength {
                 expected: post_quantum::KYBER_SECRET_KEY_SIZE,
                 actual: secret_key.len(),
@@ -1081,6 +1132,25 @@ impl SignalHandler {
             .map_err(|e| QorError::SignalProtocol(format!("Failed to serialize kyber prekeys: {}", e)))?;
         db.set_secure("signal_kyber_prekey_store_v1", username, &kyber_prekeys_blob)?;
 
+        // PQ Kyber Keypairs
+        let pq_keys_map = self.pq_kyber_keypairs.read();
+        let pq_keys_serializable: HashMap<String, (Vec<u8>, Vec<u8>)> = pq_keys_map.iter()
+            .map(|(k, (pk, sk))| (k.clone(), (pk.clone(), sk.to_vec())))
+            .collect();
+            
+        let pq_keys_blob = serde_json::to_vec(&pq_keys_serializable)
+            .map_err(|e| QorError::SignalProtocol(format!("Failed to serialize pq kyber keys: {}", e)))?;
+        db.set_secure("signal_pq_kyber_store_v1", username, &pq_keys_blob)?;
+
+        // Static ML-KEM Keys
+        let static_keys_map = self.static_mlkem_keys.read();
+        if let Some((pk, sk)) = static_keys_map.get(username) {
+            let static_keys_serializable = (pk.clone(), sk.to_vec());
+            let static_keys_blob = serde_json::to_vec(&static_keys_serializable)
+                .map_err(|e| QorError::SignalProtocol(format!("Failed to serialize static mlkem keys: {}", e)))?;
+            db.set_secure("signal_static_mlkem_store_v1", username, &static_keys_blob)?;
+        }
+
         Ok(())
     }
 
@@ -1122,6 +1192,28 @@ impl SignalHandler {
             let data: Vec<(u32, Vec<u8>)> = serde_json::from_slice(&blob)
                 .map_err(|e| QorError::SignalProtocol(format!("Failed to deserialize kyber prekeys: {}", e)))?;
             kyber_prekey_store.lock().await.load(data);
+        }
+        
+        // PQ Kyber Keypairs
+        if let Some(blob) = db.get_secure("signal_pq_kyber_store_v1", username)? {
+            let data: HashMap<String, (Vec<u8>, Vec<u8>)> = serde_json::from_slice(&blob)
+                .map_err(|e| QorError::SignalProtocol(format!("Failed to deserialize pq kyber keys: {}", e)))?;
+            
+            let mut pq_map = self.pq_kyber_keypairs.write();
+            for (k, (pk, sk)) in data {
+                pq_map.insert(k, (pk, Zeroizing::new(sk)));
+            }
+        }
+
+        // Static ML-KEM Keys
+        if let Some(blob) = db.get_secure("signal_static_mlkem_store_v1", username)? {
+            let (pk, sk): (Vec<u8>, Vec<u8>) = serde_json::from_slice(&blob)
+                .map_err(|e| QorError::SignalProtocol(format!("Failed to deserialize static mlkem keys: {}", e)))?;
+                
+            self.static_mlkem_keys.write().insert(
+                username.to_string(),
+                (pk, Zeroizing::new(sk)),
+            );
         }
         
         Ok(())

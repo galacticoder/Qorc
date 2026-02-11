@@ -12,7 +12,7 @@ import { ml_dsa87 } from '@noble/post-quantum/ml-dsa.js';
 import { ed25519 } from '@noble/curves/ed25519.js';
 import { x25519 } from '@noble/curves/ed25519.js';
 import { blake3 } from '@noble/hashes/blake3.js';
-import { withRedisClient } from '../server/presence/presence.js';
+import { withRedisClient } from '../server/session/redis-client.js';
 import { logger as cryptoLogger } from '../server/crypto/crypto-logger.js';
 import { CryptoUtils } from '../server/crypto/unified-crypto.js';
 

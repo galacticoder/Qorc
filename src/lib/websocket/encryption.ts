@@ -15,12 +15,12 @@ import {
   MAX_MESSAGE_AAD_LENGTH,
   MAX_REPLAY_WINDOW_MS,
   MAX_NONCE_SEQUENCE_GAP,
-  TIMESTAMP_SKEW_TOLERANCE_MS,
   SESSION_FAILOVER_GRACE_PERIOD_MS,
   MAX_PQ_ENVELOPE_CIPHERTEXT_BYTES,
   MAX_PQ_ENVELOPE_NONCE_BYTES,
   MAX_PQ_ENVELOPE_TAG_BYTES,
   MAX_PQ_ENVELOPE_AAD_BYTES,
+  WS_FIXED_MESSAGE_SIZE_BYTES,
   REPLAY_CACHE_LIMIT,
 } from '../constants';
 
@@ -105,7 +105,7 @@ export class WebSocketEncryption {
     try {
       const payload = `${envelope.messageId}:${envelope.timestamp}:${envelope.counter}:${envelope.sessionId}`;
       const message = new TextEncoder().encode(payload);
-      const signature = PostQuantumSignature.sign(message, this.context.signingKeyPair.privateKey);
+      const signature = await PostQuantumSignature.sign(message, this.context.signingKeyPair.privateKey);
       return PostQuantumUtils.uint8ArrayToBase64(signature);
     } catch {
       SecurityAuditLogger.log(SignalType.ERROR, 'ws-message-signing-failed', {});
@@ -136,7 +136,7 @@ export class WebSocketEncryption {
       const payload = `${envelope.messageId}:${envelope.timestamp}:${envelope.counter}:${envelope.sessionId}`;
       const message = new TextEncoder().encode(payload);
       const signature = PostQuantumUtils.base64ToUint8Array(envelope.signature);
-      const valid = PostQuantumSignature.verify(signature, message, this.context.serverSignatureKey);
+      const valid = await PostQuantumSignature.verify(signature, message, this.context.serverSignatureKey);
 
       if (!valid) {
         this.metrics.securityEvents.signatureFailures += 1;
@@ -217,13 +217,14 @@ export class WebSocketEncryption {
       canonical.body.type = canonical.type;
     }
 
-    const isEncryptedMessage = canonical.type === 'encrypted-message';
+    const isSealedEnvelope = canonical.type === SignalType.SEALED_ENVELOPE || canonical.type === 'sealed-envelope';
     let payloadToEncrypt: any;
 
-    if (isEncryptedMessage && canonical.body.to && canonical.body.encryptedPayload) {
+    if (isSealedEnvelope && canonical.body.destinationInbox && canonical.body.envelope) {
       payloadToEncrypt = {
-        to: canonical.body.to,
-        encryptedPayload: canonical.body.encryptedPayload,
+        type: canonical.type,
+        destinationInbox: canonical.body.destinationInbox,
+        envelope: canonical.body.envelope,
         messageId: canonical.body.messageId
       };
     } else {
@@ -262,31 +263,74 @@ export class WebSocketEncryption {
       (envelope as any).signature = signature;
     }
 
-    const result = JSON.stringify(envelope);
-    return result;
+    return this.padEnvelopeToFixedSize(envelope);
+  }
+
+  private padEnvelopeToFixedSize(envelope: Record<string, unknown>): string {
+    const targetBytes = WS_FIXED_MESSAGE_SIZE_BYTES;
+    const encoder = new TextEncoder();
+
+    const base = { ...envelope, _pad: '' as string };
+    const baseJson = JSON.stringify(base);
+    const baseSize = encoder.encode(baseJson).length;
+
+    if (baseSize > targetBytes) {
+      SecurityAuditLogger.log('warn', 'ws-envelope-oversize', {
+        baseSize,
+        targetBytes
+      });
+      return JSON.stringify(envelope);
+    }
+
+    const padNeeded = targetBytes - baseSize;
+    if (padNeeded === 0) {
+      return baseJson;
+    }
+
+    const paddingBytes = PostQuantumRandom.randomBytes(Math.ceil(padNeeded * 0.75));
+    const padding = PostQuantumUtils.uint8ArrayToBase64(paddingBytes).slice(0, padNeeded);
+    (base as any)._pad = padding;
+
+    const finalJson = JSON.stringify(base);
+    const finalSize = encoder.encode(finalJson).length;
+    if (finalSize !== targetBytes) {
+      throw new Error(`Fixed size padding mismatch: ${finalSize} !== ${targetBytes}`);
+    }
+
+    return finalJson;
   }
 
   // Decrypt incoming envelope
   async decryptEnvelope(envelope: any): Promise<any | null> {
-    if (!this.context.sessionKeyMaterial) {
+    const session = this.context.sessionKeyMaterial;
+    if (!session?.recvKey) {
       SecurityAuditLogger.log('warn', 'ws-decrypt-no-session', {});
       return null;
     }
 
     if (!isPlainObject(envelope) || hasPrototypePollutionKeys(envelope)) {
+      console.warn('[Encryption] decryptEnvelope: rejected - not plain object or prototype pollution');
       return null;
     }
 
     if (typeof envelope.sessionFingerprint !== 'string' || envelope.sessionFingerprint.length > 512) {
+      console.warn('[Encryption] decryptEnvelope: rejected - bad sessionFingerprint');
+      return null;
+    }
+    if (typeof envelope.sessionId !== 'string' || envelope.sessionId.length === 0 || envelope.sessionId.length > 128) {
+      console.warn('[Encryption] decryptEnvelope: rejected - bad sessionId');
       return null;
     }
     if (typeof envelope.messageId !== 'string' || envelope.messageId.length === 0 || envelope.messageId.length > 512) {
+      console.warn('[Encryption] decryptEnvelope: rejected - bad messageId');
       return null;
     }
     if (typeof envelope.timestamp !== 'number' || !Number.isFinite(envelope.timestamp)) {
+      console.warn('[Encryption] decryptEnvelope: rejected - bad timestamp');
       return null;
     }
     if (typeof envelope.nonce !== 'string' || typeof envelope.ciphertext !== 'string' || typeof envelope.tag !== 'string') {
+      console.warn('[Encryption] decryptEnvelope: rejected - missing nonce/ciphertext/tag');
       return null;
     }
     if (envelope.aad != null && typeof envelope.aad !== 'string') {
@@ -295,6 +339,7 @@ export class WebSocketEncryption {
 
     const ciphertextBytes = estimateBase64DecodedBytes(envelope.ciphertext);
     if (ciphertextBytes <= 0 || ciphertextBytes > MAX_PQ_ENVELOPE_CIPHERTEXT_BYTES) {
+      console.warn('[Encryption] decryptEnvelope: rejected - ciphertext size out of bounds', ciphertextBytes);
       return null;
     }
     const nonceBytes = estimateBase64DecodedBytes(envelope.nonce);
@@ -312,7 +357,7 @@ export class WebSocketEncryption {
       }
     }
 
-    const currentFingerprint = this.context.sessionKeyMaterial.fingerprint;
+    const currentFingerprint = session.fingerprint;
     const receivedFingerprint = envelope.sessionFingerprint;
 
     // Check for previous session grace period
@@ -321,24 +366,30 @@ export class WebSocketEncryption {
       this.context.sessionTransitionTime &&
       (now - this.context.sessionTransitionTime) < SESSION_FAILOVER_GRACE_PERIOD_MS;
 
+    const previousSession = this.context.previousSessionKeyMaterial;
+    const isCurrentSession = envelope.sessionId === session.sessionId;
+    const isPreviousSession = !!previousSession &&
+      envelope.sessionId === previousSession.sessionId &&
+      this.context.sessionTransitionTime &&
+      (now - this.context.sessionTransitionTime) < SESSION_FAILOVER_GRACE_PERIOD_MS;
+
     if (receivedFingerprint !== currentFingerprint) {
-      if (isWithinGracePeriod && receivedFingerprint === this.context.previousSessionFingerprint) {
-        if (!this.validateTimestamp(envelope.timestamp)) {
-          return null;
-        }
-        
+      if (!(isPreviousSession && receivedFingerprint === this.context.previousSessionFingerprint)) {
+        this.metrics.securityEvents.fingerprintMismatches += 1;
+        SecurityAuditLogger.log('warn', 'ws-decrypt-fingerprint-mismatch', {
+          expected: currentFingerprint,
+          received: receivedFingerprint,
+          hadPreviousSession: !!this.context.previousSessionFingerprint,
+          gracePeriodExpired: !isWithinGracePeriod
+        });
+
+        this.recordCircuitBreakerFailure();
         return null;
       }
+    }
 
-      this.metrics.securityEvents.fingerprintMismatches += 1;
-      SecurityAuditLogger.log('warn', 'ws-decrypt-fingerprint-mismatch', {
-        expected: currentFingerprint,
-        received: receivedFingerprint,
-        hadPreviousSession: !!this.context.previousSessionFingerprint,
-        gracePeriodExpired: !isWithinGracePeriod
-      });
-
-      this.recordCircuitBreakerFailure();
+    if (!isCurrentSession && !isPreviousSession) {
+      console.warn('[Encryption] decryptEnvelope: rejected - unknown sessionId', envelope.sessionId?.slice(0, 12));
       return null;
     }
 
@@ -354,10 +405,12 @@ export class WebSocketEncryption {
 
     const signatureValid = await this.verifyMessageSignature(envelope);
     if (!signatureValid) {
+      console.warn('[Encryption] decryptEnvelope: rejected - signature verification failed', envelope.messageId);
       return null;
     }
 
-    if (typeof envelope.counter === 'number' && !this.validateNonceSequence(envelope.counter)) {
+    if (isCurrentSession && typeof envelope.counter === 'number' && !this.validateNonceSequence(envelope.counter)) {
+      console.warn('[Encryption] decryptEnvelope: rejected - nonce sequence invalid', { counter: envelope.counter, expected: this.expectedRemoteNonceCounter });
       return null;
     }
 
@@ -373,11 +426,12 @@ export class WebSocketEncryption {
       const tag = PostQuantumUtils.base64ToUint8Array(envelope.tag);
       const aadBytes = typeof envelope.aad === 'string' ? PostQuantumUtils.base64ToUint8Array(envelope.aad) : new Uint8Array();
 
+      const keyMaterial = isPreviousSession && previousSession ? previousSession : session;
       const decrypted = PostQuantumAEAD.decrypt(
         ciphertext,
         nonce,
         tag,
-        this.context.sessionKeyMaterial.recvKey,
+        keyMaterial.recvKey,
         aadBytes
       );
 

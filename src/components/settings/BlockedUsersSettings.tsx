@@ -8,6 +8,7 @@ import { blockingSystem, BlockedUser } from '../../lib/blocking/blocking-system'
 import { format } from 'date-fns';
 import { isPlainObject, hasPrototypePollutionKeys, sanitizeEventUsername, isValidUsername } from '../../lib/sanitizers';
 import { EventType } from '../../lib/types/event-types';
+import { useDisplayUsername } from '../../hooks/database/useDisplayUsername';
 import {
   DEFAULT_EVENT_RATE_WINDOW_MS,
   DEFAULT_EVENT_RATE_MAX,
@@ -17,16 +18,47 @@ import {
 interface BlockedUsersSettingsProps {
   passphraseRef?: React.RefObject<string>;
   kyberSecretRef?: React.RefObject<Uint8Array | null>;
-  getDisplayUsername?: (username: string) => Promise<string>;
 }
 
-export function BlockedUsersSettings({ passphraseRef, kyberSecretRef, getDisplayUsername }: BlockedUsersSettingsProps) {
+const BlockedUserItem = ({ user, loading, onUnblock }: { user: BlockedUser, loading: boolean, onUnblock: (username: string) => void }) => {
+  const dn = useDisplayUsername({ username: user.username });
+  
+  return (
+    <div className="flex items-center justify-between p-3 rounded-md border bg-card">
+      <div className="flex-1 min-w-0">
+        <div className="flex items-center gap-2">
+          <span className="font-medium truncate select-auto" title={dn}>{dn}</span>
+          <span className="text-xs text-muted-foreground">Blocked</span>
+        </div>
+        <div className="text-xs text-muted-foreground mt-1">
+          {format(new Date(user.blockedAt), "MMM d, yyyy 'at' h:mm a")}
+        </div>
+      </div>
+      <Dialog>
+        <DialogTrigger asChild>
+          <Button variant="ghost" size="sm" disabled={loading}>Unblock</Button>
+        </DialogTrigger>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Unblock User</DialogTitle>
+            <DialogDescription>Unblock {dn}?</DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline">Cancel</Button>
+            <Button onClick={() => onUnblock(user.username)}>Unblock</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </div>
+  );
+};
+
+export function BlockedUsersSettings({ passphraseRef, kyberSecretRef }: BlockedUsersSettingsProps) {
   const [blockedUsers, setBlockedUsers] = useState<BlockedUser[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [newBlockUsername, setNewBlockUsername] = useState('');
   const [showBlockDialog, setShowBlockDialog] = useState(false);
-  const [displayMap, setDisplayMap] = useState<Record<string, string>>({});
 
   const blockStatusEventRateRef = useRef<{ windowStart: number; count: number }>({ windowStart: Date.now(), count: 0 });
 
@@ -61,38 +93,6 @@ export function BlockedUsersSettings({ passphraseRef, kyberSecretRef, getDisplay
       loadBlockedUsers();
     }
   }, [passphraseRef, kyberSecretRef, loadBlockedUsers]);
-
-  useEffect(() => {
-    let canceled = false;
-    (async () => {
-      if (!Array.isArray(blockedUsers) || blockedUsers.length === 0) {
-        setDisplayMap({});
-        return;
-      }
-      try {
-        if (!getDisplayUsername) {
-          setDisplayMap({});
-          return;
-        }
-        const entries = await Promise.all(
-          blockedUsers.map(async (u) => {
-            try {
-              const dn = await getDisplayUsername(u.username);
-              return [u.username, dn] as const;
-            } catch {
-              return [u.username, u.username] as const;
-            }
-          })
-        );
-        if (!canceled) {
-          const next: Record<string, string> = {};
-          for (const [k, v] of entries) next[k] = v;
-          setDisplayMap(next);
-        }
-      } catch { }
-    })();
-    return () => { canceled = true; };
-  }, [blockedUsers, getDisplayUsername]);
 
   useEffect(() => {
     const handleVisibilityChange = () => {
@@ -284,37 +284,14 @@ export function BlockedUsersSettings({ passphraseRef, kyberSecretRef, getDisplay
             </div>
           ) : (
             <div className="space-y-2">
-              {blockedUsers.map((user) => {
-                const dn = displayMap[user.username] || user.username;
-                return (
-                  <div key={user.username} className="flex items-center justify-between p-3 rounded-md border bg-card">
-                    <div className="flex-1 min-w-0">
-                      <div className="flex items-center gap-2">
-                        <span className="font-medium truncate select-auto" title={dn}>{dn}</span>
-                        <span className="text-xs text-muted-foreground">Blocked</span>
-                      </div>
-                      <div className="text-xs text-muted-foreground mt-1">
-                        {format(new Date(user.blockedAt), "MMM d, yyyy 'at' h:mm a")}
-                      </div>
-                    </div>
-                    <Dialog>
-                      <DialogTrigger asChild>
-                        <Button variant="ghost" size="sm" disabled={loading}>Unblock</Button>
-                      </DialogTrigger>
-                      <DialogContent>
-                        <DialogHeader>
-                          <DialogTitle>Unblock User</DialogTitle>
-                          <DialogDescription>Unblock {dn}?</DialogDescription>
-                        </DialogHeader>
-                        <DialogFooter>
-                          <Button variant="outline">Cancel</Button>
-                          <Button onClick={() => handleUnblockUser(user.username)}>Unblock</Button>
-                        </DialogFooter>
-                      </DialogContent>
-                    </Dialog>
-                  </div>
-                );
-              })}
+              {blockedUsers.map((user) => (
+                <BlockedUserItem 
+                  key={user.username} 
+                  user={user} 
+                  loading={loading} 
+                  onUnblock={handleUnblockUser} 
+                />
+              ))}
             </div>
           )}
         </div>

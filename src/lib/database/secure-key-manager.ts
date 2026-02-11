@@ -1,10 +1,10 @@
 import { CryptoUtils } from '../utils/crypto-utils';
-import * as argon2 from "argon2-wasm";
 import { blake3 as nobleBlake3 } from '@noble/hashes/blake3.js';
 import { PostQuantumUtils } from '../utils/pq-utils';
 import { PostQuantumAEAD } from '../cryptography/aead';
 import { EncryptedKeyData, DecryptedKeys } from '../types/database-types';
 import { storage } from '../tauri-bindings';
+import { PostQuantumWorker } from '../cryptography/worker-bridge';
 
 const getCrypto = () => {
 	if (typeof globalThis !== 'undefined' && globalThis.crypto) {
@@ -86,7 +86,7 @@ export class SecureKeyManager {
 
 			const saltBytes = CryptoUtils.Base64.base64ToUint8Array(metadata.salt);
 
-			const hashResult = await argon2.hash({
+			const hashResult = await PostQuantumWorker.argon2Hash({
 				pass: passphrase,
 				salt: saltBytes,
 				time: metadata.argon2Params.timeCost,
@@ -204,7 +204,7 @@ export class SecureKeyManager {
 
 		const startTime = performance.now();
 
-		const argon2Result = await argon2.hash({
+		const argon2Result = await PostQuantumWorker.argon2Hash({
 			pass: passphrase,
 			salt: keySalt,
 			time: storedArgon2Params.timeCost,
@@ -269,21 +269,27 @@ export class SecureKeyManager {
 			throw new Error('Failed to export master key for post-quantum encryption.');
 		}
 
-		// Encrypt secret keys
-		const kyberSecretBytes = new TextEncoder().encode(JSON.stringify(Array.from(keys.kyber.secretKey)));
-		const dilithiumSecretBytes = new TextEncoder().encode(JSON.stringify(Array.from(keys.dilithium.secretKey)));
-		const x25519SecretBytes = new TextEncoder().encode(JSON.stringify(Array.from(keys.x25519.private)));
+		const kyberLen = keys.kyber.secretKey.length;
+		const dilithiumLen = keys.dilithium.secretKey.length;
+		const x25519Len = keys.x25519.private.length;
+		
+		const payloadBytes = new Uint8Array(4 + 4 + 4 + kyberLen + dilithiumLen + x25519Len);
+		const dv = new DataView(payloadBytes.buffer);
+		dv.setUint32(0, kyberLen, true);
+		dv.setUint32(4, dilithiumLen, true);
+		dv.setUint32(8, x25519Len, true);
+		
+		payloadBytes.set(keys.kyber.secretKey, 12);
+		payloadBytes.set(keys.dilithium.secretKey, 12 + kyberLen);
+		payloadBytes.set(keys.x25519.private, 12 + kyberLen + dilithiumLen);
 
-		const payload = {
-			kyber: CryptoUtils.Base64.arrayBufferToBase64(kyberSecretBytes),
-			dilithium: CryptoUtils.Base64.arrayBufferToBase64(dilithiumSecretBytes),
-			x25519: CryptoUtils.Base64.arrayBufferToBase64(x25519SecretBytes)
-		};
+		await new Promise(resolve => setTimeout(resolve, 0));
 
-		const payloadBytes = new TextEncoder().encode(JSON.stringify(payload));
 		const pqNonce = getCrypto().getRandomValues(new Uint8Array(36));
-		const pqAad = new TextEncoder().encode(`secure-key-manager-pq-${this.username}`);
+		const pqAad = new TextEncoder().encode(`secure-key-manager-pq-v2-${this.username}`);
 		const pqEncResult = PostQuantumAEAD.encrypt(payloadBytes, key, pqAad, pqNonce);
+
+		await new Promise(resolve => setTimeout(resolve, 0));
 
 		const fullCiphertext = new Uint8Array(pqEncResult.ciphertext.length + pqEncResult.tag.length);
 		fullCiphertext.set(pqEncResult.ciphertext, 0);
@@ -293,6 +299,8 @@ export class SecureKeyManager {
 		macInput.set(fullCiphertext, 0);
 		macInput.set(pqAad, fullCiphertext.length);
 		const mac = nobleBlake3(macInput, { key });
+
+		await new Promise(resolve => setTimeout(resolve, 0));
 
 		const encryptedData: EncryptedKeyData = {
 			bundleCiphertext: CryptoUtils.Base64.arrayBufferToBase64(pqEncResult.ciphertext),
@@ -304,7 +312,7 @@ export class SecureKeyManager {
 			dilithiumPublicBase64: keys.dilithium.publicKeyBase64,
 			x25519PublicBase64: keys.x25519.publicKeyBase64,
 			salt: metadata.salt,
-			version: 4,
+			version: 5,
 			argon2Params: metadata.argon2Params,
 			createdAt: Date.now(),
 			expiresAt: Date.now() + 365 * 24 * 60 * 60 * 1000,
@@ -371,42 +379,36 @@ export class SecureKeyManager {
 			throw new Error('Payload integrity verification failed');
 		}
 
+		await new Promise(resolve => setTimeout(resolve, 0));
+
 		const decryptedPayload = PostQuantumAEAD.decrypt(ciphertext, nonce, tag, key, storedAad);
-		const parsed = JSON.parse(new TextDecoder().decode(decryptedPayload));
-		if (!parsed?.kyber || !parsed?.dilithium || !parsed?.x25519) {
-			throw new Error('Decrypted payload missing required key material');
+		
+		await new Promise(resolve => setTimeout(resolve, 0));
+
+		let kyberSecret: Uint8Array;
+		let dilithiumSecret: Uint8Array;
+		let x25519Secret: Uint8Array;
+
+		if (encryptedData.version >= 5) {
+			const dv = new DataView(decryptedPayload.buffer, decryptedPayload.byteOffset, decryptedPayload.byteLength);
+			const kyberLen = dv.getUint32(0, true);
+			const dilithiumLen = dv.getUint32(4, true);
+			const x25519Len = dv.getUint32(8, true);
+			
+			kyberSecret = new Uint8Array(decryptedPayload.subarray(12, 12 + kyberLen));
+			dilithiumSecret = new Uint8Array(decryptedPayload.subarray(12 + kyberLen, 12 + kyberLen + dilithiumLen));
+			x25519Secret = new Uint8Array(decryptedPayload.subarray(12 + kyberLen + dilithiumLen, 12 + kyberLen + dilithiumLen + x25519Len));
+		} else {
+			key.fill(0);
+			return null;
 		}
 
-		const decodeKey = (base64: string, expectedLength: number): Uint8Array => {
-			const jsonBytes = CryptoUtils.Base64.base64ToUint8Array(base64);
-			const jsonString = new TextDecoder().decode(jsonBytes);
-			const array = JSON.parse(jsonString);
-			const bytes = new Uint8Array(array);
-
-			if (bytes.length !== expectedLength) {
-				throw new Error(`Invalid key length (${bytes.length}), expected ${expectedLength}`);
-			}
-			return bytes;
-		};
-
-		const kyberSecret = decodeKey(parsed.kyber, 3168);
-		const dilithiumSecret = decodeKey(parsed.dilithium, 4896);
-		const x25519Secret = decodeKey(parsed.x25519, 32);
-
 		key.fill(0);
+
 		return {
-			kyber: {
-				publicKeyBase64: encryptedData.kyberPublicBase64,
-				secretKey: kyberSecret
-			},
-			dilithium: {
-				publicKeyBase64: encryptedData.dilithiumPublicBase64,
-				secretKey: dilithiumSecret
-			},
-			x25519: {
-				publicKeyBase64: encryptedData.x25519PublicBase64,
-				private: x25519Secret
-			}
+			kyber: { publicKeyBase64: encryptedData.kyberPublicBase64, secretKey: kyberSecret },
+			dilithium: { publicKeyBase64: encryptedData.dilithiumPublicBase64, secretKey: dilithiumSecret },
+			x25519: { publicKeyBase64: encryptedData.x25519PublicBase64, private: x25519Secret }
 		};
 	}
 

@@ -1,32 +1,33 @@
 // Server configuration constants
 export const SERVER_CONSTANTS = {
   // Bandwidth and rate limiting
-  BANDWIDTH_QUOTA: 5 * 1024 * 1024, // 5MB per minute
-  BANDWIDTH_WINDOW: 60 * 1000, // 1 minute window
+  BANDWIDTH_QUOTA: 12 * 1024 * 1024,
+  BANDWIDTH_WINDOW: 60 * 1000,
   MESSAGE_HARD_LIMIT_PER_MINUTE: 1000,
-  MESSAGE_RATE_RESET_INTERVAL: 60000, // 1 minute
+  MESSAGE_RATE_RESET_INTERVAL: 60000,
   
   // WebSocket configuration
-  HEARTBEAT_INTERVAL: 30000, // 30 seconds
-  CONNECTION_TIMEOUT: 30000, // 30 seconds
+  HEARTBEAT_INTERVAL: 30000,
+  CONNECTION_TIMEOUT: 30000,
+  WS_FIXED_MESSAGE_SIZE_BYTES: 256 * 1024,
   
   // Batch processing
   BATCH_SIZE: 10,
-  BATCH_TIMEOUT: 1000, // 1 second
+  BATCH_TIMEOUT: 1000,
   MAX_BATCH_SIZE: 100,
   
   // Blocking cache
-  BLOCKING_CACHE_TTL: 30000, // 30 seconds
+  BLOCKING_CACHE_TTL: 30000,
   BLOCKING_CACHE_MAX_SIZE: 1000,
-  BLOCKING_MIN_DELAY: 50, // 50ms minimum delay for timing attack protection
+  BLOCKING_MIN_DELAY: 50,
   
   // Cleanup intervals
-  BLOCK_TOKEN_CLEANUP_INTERVAL: 60 * 60 * 1000, // 1 hour
-  STATUS_LOG_INTERVAL: 60000, // 1 minute
+  BLOCK_TOKEN_CLEANUP_INTERVAL: 60 * 60 * 1000,
+  STATUS_LOG_INTERVAL: 60000,
   
   // Message size limits
-  MAX_MESSAGE_SIZE: 5 * 1024 * 1024, // 5MB
-  MAX_JSON_PAYLOAD_SIZE: 5 * 1024 * 1024, // 5MB
+  MAX_MESSAGE_SIZE: 5 * 1024 * 1024,
+  MAX_JSON_PAYLOAD_SIZE: 5 * 1024 * 1024,
   
   // Certificate validation
   MAX_CERT_PATH_LENGTH: 1000,
@@ -36,19 +37,19 @@ export const SERVER_CONSTANTS = {
   // Cluster configuration
   MAX_CLUSTER_WORKERS: 32,
   DEFAULT_CLUSTER_WORKERS: 1,
-  WORKER_BOOTSTRAP_TIMEOUT: 30000, // 30 seconds
+  WORKER_BOOTSTRAP_TIMEOUT: 30000,
   
   // Security timeouts
-  AUTH_LOCK_TTL: 5000, // 5 seconds
-  SESSION_CLEANUP_TIMEOUT: 10000, // 10 seconds
-  TUNNEL_CLEANUP_TIMEOUT: 10000, // 10 seconds
+  AUTH_LOCK_TTL: 5000,
+  SESSION_CLEANUP_TIMEOUT: 10000,
+  TUNNEL_CLEANUP_TIMEOUT: 10000,
 };
 
 // Rate limiting configuration
 export const RATE_LIMIT_CONFIG = {
   // Connection limits
   MAX_CONNECTIONS_PER_IP: 10,
-  CONNECTION_WINDOW: 60000, // 1 minute
+  CONNECTION_WINDOW: 60000,
   
   // Message limits
   MAX_MESSAGES_PER_USER_PER_MINUTE: 100,
@@ -56,8 +57,8 @@ export const RATE_LIMIT_CONFIG = {
   
   // Auth attempt limits
   MAX_AUTH_ATTEMPTS_PER_USER: 5,
-  AUTH_LOCKOUT_DURATION: 3600000, // 1 hour
-  AUTH_ATTEMPT_WINDOW: 3600000, // 1 hour
+  AUTH_LOCKOUT_DURATION: 3600000,
+  AUTH_ATTEMPT_WINDOW: 3600000,
   
   // Backoff configuration
   MAX_BACKOFF_MINUTES: 60,
@@ -70,26 +71,13 @@ export const DATABASE_CONFIG = {
   MAX_OFFLINE_MESSAGES_PER_USER: 1000,
   
   // Session storage
-  SESSION_TTL: 24 * 60 * 60 * 1000, // 24 hours
-  SESSION_CLEANUP_INTERVAL: 60 * 60 * 1000, // 1 hour
+  SESSION_TTL: 24 * 60 * 60 * 1000,
+  SESSION_CLEANUP_INTERVAL: 60 * 60 * 1000,
   
   // Blocking storage
   BLOCK_LIST_VERSION: 1,
   BLOCK_LIST_MAX_SIZE: 10000,
 };
-
-// WebSocket message types for validation
-export const VALID_MESSAGE_TYPES = [
-  'ENCRYPTED_MESSAGE',
-  'STORE_OFFLINE_MESSAGE',
-  'RETRIEVE_OFFLINE_MESSAGES',
-  'RATE_LIMIT_STATUS',
-  'PASSWORD_HASH_RESPONSE',
-  'SERVER_LOGIN',
-  'BLOCK_LIST_SYNC',
-  'RETRIEVE_BLOCK_LIST',
-  'request-server-public-key',
-];
 
 // Security headers
 export const SECURITY_HEADERS = {
@@ -98,7 +86,7 @@ export const SECURITY_HEADERS = {
   'X-XSS-Protection': '1; mode=block',
   'Strict-Transport-Security': 'max-age=31536000; includeSubDomains',
   'Referrer-Policy': 'strict-origin-when-cross-origin',
-  'Permissions-Policy': 'geolocation=(), microphone=(), camera=()',
+  'Permissions-Policy': 'microphone=(self), camera=(self)',
   'Content-Security-Policy': "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; connect-src 'self' ws: wss:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' data: blob:; worker-src 'self' blob:;",
 };
 
@@ -112,7 +100,7 @@ export const CORS_CONFIG = {
       .filter(origin => origin.length > 0);
   })(),
   ALLOWED_METHODS: 'GET, POST, PUT, DELETE, OPTIONS',
-  ALLOWED_HEADERS: 'Content-Type, Authorization, X-Device-ID',
+  ALLOWED_HEADERS: 'Content-Type, Authorization',
   ALLOW_CREDENTIALS: true,
-  MAX_AGE_SECONDS: 86400, // 24 hours
+  MAX_AGE_SECONDS: 86400,
 };

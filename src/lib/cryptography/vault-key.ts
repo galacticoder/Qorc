@@ -135,3 +135,27 @@ export async function loadWrappedMasterKey(username: string, vaultKey: CryptoKey
   }
 }
 
+/**
+ * Derive a stable Inbox ID from the Vault Key
+ */
+export async function deriveInboxId(vaultKey: CryptoKey): Promise<string> {
+  const subtle = (globalThis as any).crypto?.subtle as SubtleCrypto;
+  const rawVaultKey = new Uint8Array(await subtle.exportKey('raw', vaultKey));
+
+  try {
+    const encoder = new TextEncoder();
+    const prefix = encoder.encode('qor-chat-inbox-v1-derivation');
+    const combined = new Uint8Array(prefix.length + rawVaultKey.length);
+    combined.set(prefix);
+    combined.set(rawVaultKey, prefix.length);
+
+    const hashBuffer = await subtle.digest('SHA-256', combined);
+    const hashArray = Array.from(new Uint8Array(hashBuffer));
+
+    const hex = hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+    return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-4${hex.slice(13, 16)}-a${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
+  } finally {
+    rawVaultKey.fill(0);
+  }
+}
+

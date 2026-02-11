@@ -1,8 +1,4 @@
 export const EventType = {
-  // Username mapping events
-  USERNAME_MAPPING_UPDATED: 'username-mapping-updated',
-  USERNAME_MAPPING_RECEIVED: 'username-mapping-received',
-
   // Session events
   SESSION_RESET_RECEIVED: 'session-reset-received',
   SESSION_ESTABLISHED_RECEIVED: 'session-established-received',
@@ -15,19 +11,15 @@ export const EventType = {
   P2P_SESSION_RESET_SEND: 'p2p-session-reset-send',
   P2P_SESSION_RESET: 'p2p-session-reset',
   P2P_SESSION_RESET_REQUEST: 'p2p-session-reset-request',
-  P2P_SESSION_RESET_ACK: 'p2p-session-reset-ack',
-  P2P_PQ_ESTABLISHED: 'p2p-pq-established',
   P2P_PEER_CONNECTED: 'p2p-peer-connected',
   P2P_PEER_DISCONNECTED: 'p2p-peer-disconnected',
   P2P_PEER_RECONNECTED: 'p2p-peer-reconnected',
   P2P_FETCH_PEER_CERT: 'p2p-fetch-peer-cert',
-  P2P_PEER_CERT: 'p2p-peer-cert',
   P2P_CALL_SIGNAL_SEND: 'p2p-call-signal-send',
   P2P_CALL_SIGNAL_RESULT: 'p2p-call-signal-result',
   P2P_INIT_REQUIRED: 'p2p-init-required',
   P2P_FILE_CHUNK: 'p2p-file-chunk',
   P2P_CONNECTION_STATE_CHANGE: 'p2p-connection-state-change',
-  P2P_MESSAGE_RECEIVED: 'p2p-message-received',
 
 
   // Message events
@@ -48,7 +40,6 @@ export const EventType = {
   TYPING_INDICATOR: 'typing-indicator',
 
   // User events
-  USER_EXISTS_RESPONSE: 'user-exists-response',
   USER_KEYS_AVAILABLE: 'user-keys-available',
   HYBRID_KEYS_UPDATED: 'hybrid-keys-updated',
   USER_BLOCKED: 'user-blocked',
@@ -115,6 +106,8 @@ export const EventType = {
   AUTH_UI_INPUT: 'auth-ui-input',
   TOKEN_VALIDATION_START: 'token-validation-start',
   TOKEN_VALIDATION_TIMEOUT: 'token-validation-timeout',
+  SERVER_ENTRY_GRANTED: 'server-entry-granted',
+  UNLINKED_SESSION_READY: 'unlinked-session-ready',
 
   // Signal events
   PASSWORD_HASH_PARAMS: 'password-hash-params',

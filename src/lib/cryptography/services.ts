@@ -1,26 +1,25 @@
 /**
- * Crypto Services - Dilithium, Kyber, Encrypt, Decrypt
+ * Crypto Services
  */
 
 import { Base64 } from './base64';
 import { AES } from './aes-gcm';
 import { PostQuantumKEM } from './kem';
 import { PostQuantumSignature } from './signature';
-import { PostQuantumWorker } from './worker-bridge';
 
 const textEncoder = new TextEncoder();
 
 export class DilithiumService {
   static async generateKeyPair() {
-    return PostQuantumSignature.generateKeyPair();
+    return await PostQuantumSignature.generateKeyPair();
   }
 
   static async sign(secretKey: Uint8Array, message: Uint8Array) {
-    return PostQuantumSignature.sign(message, secretKey);
+    return await PostQuantumSignature.sign(message, secretKey);
   }
 
   static async verify(signature: Uint8Array, message: Uint8Array, publicKey: Uint8Array) {
-    return PostQuantumSignature.verify(signature, message, publicKey);
+    return await PostQuantumSignature.verify(signature, message, publicKey);
   }
 
   static serializePublicKey(publicKey: Uint8Array): string {
@@ -42,14 +41,11 @@ export class DilithiumService {
 
 export class KyberService {
   static async generateKeyPair() {
-    if (PostQuantumWorker.supportsWorkers()) {
-      return await PostQuantumWorker.generateKemKeyPair();
-    }
-    return PostQuantumKEM.generateKeyPair();
+    return await PostQuantumKEM.generateKeyPair();
   }
 
-  static encapsulate(publicKey: Uint8Array) {
-    const { ciphertext, sharedSecret } = PostQuantumKEM.encapsulate(publicKey);
+  static async encapsulate(publicKey: Uint8Array) {
+    const { ciphertext, sharedSecret } = await PostQuantumKEM.encapsulate(publicKey);
     return {
       ciphertext,
       sharedSecret,
@@ -57,8 +53,8 @@ export class KyberService {
     };
   }
 
-  static decapsulate(ciphertext: Uint8Array, secretKey: Uint8Array) {
-    return PostQuantumKEM.decapsulate(ciphertext, secretKey);
+  static async decapsulate(ciphertext: Uint8Array, secretKey: Uint8Array) {
+    return await PostQuantumKEM.decapsulate(ciphertext, secretKey);
   }
 }
 

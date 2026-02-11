@@ -207,7 +207,7 @@ export async function createServer({
       });
     }
 
-    const workerRespawns = new Map(); // workerId -> { count, lastRespawn }
+    const workerRespawns = new Map();
     const RESPAWN_LIMIT = 5;
     const RESPAWN_WINDOW_MS = 60000;
 

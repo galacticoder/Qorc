@@ -1,0 +1,29 @@
+{
+  "$schema": "https://unpkg.com/knip@5/schema.json",
+  "entry": [
+    "src/main.tsx",
+    "src/App.tsx",
+    "src/pages/**/*.tsx",
+    "src-tauri/src/main.rs"
+  ],
+  "project": [
+    "src/**/*.{ts,tsx}",
+    "src-tauri/src/**/*.rs"
+  ],
+  "ignore": [
+    "src/lib/types/*.ts",
+    "src/**/*.d.ts",
+    "src/vite-env.d.ts"
+  ],
+  "ignoreDependencies": [
+    "@tauri-apps/api",
+    "@tauri-apps/plugin-clipboard-manager",
+    "@tauri-apps/plugin-fs",
+    "@tauri-apps/plugin-global-shortcut",
+    "@tauri-apps/plugin-notification",
+    "@tauri-apps/plugin-os",
+    "@tauri-apps/plugin-process",
+    "@tauri-apps/plugin-shell",
+    "@tauri-apps/plugin-updater"
+  ]
+}

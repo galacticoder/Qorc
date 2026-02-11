@@ -89,7 +89,6 @@ export const processTextMessage = async (
       p2p: payload.p2p || false,
       encrypted: true,
       version: payload.version || '1.0',
-      fromOriginal: payload.fromOriginal,
       ...(replyToFilled && { replyTo: replyToFilled })
     };
 
@@ -115,7 +114,6 @@ export const processTextMessage = async (
         type: SignalType.TEXT,
         isCurrentUser: false,
         version: payload.version || '1.0',
-        fromOriginal: payload.fromOriginal,
         ...(replyToForSave && { replyTo: replyToForSave })
       });
     } catch (dbError) {
@@ -192,7 +190,6 @@ export const processFileMessage = async (
       originalBase64Data: '',
       secureContentId: messageId,
       version: payload.version || '1.0',
-      fromOriginal: payload.fromOriginal,
       fileInfo: {
         name: fileName || 'File',
         type: fileType,
@@ -218,7 +215,6 @@ export const processFileMessage = async (
       fileSize: fileSize,
       originalBase64Data: dataBase64,
       version: payload.version || '1.0',
-      fromOriginal: payload.fromOriginal,
       fileInfo: {
         name: fileName || 'File',
         type: fileType,

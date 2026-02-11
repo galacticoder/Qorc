@@ -3,24 +3,9 @@ import { SecureConnection, SecureStream } from "../transport/secure-transport";
 
 export interface P2PMessage {
   type:
-  | SignalType.CHAT
-  | SignalType.MESSAGE
-  | SignalType.TEXT
-  | SignalType.SIGNAL
   | 'heartbeat'
   | 'dummy'
-  | SignalType.TYPING
-  | SignalType.TYPING_START
-  | SignalType.TYPING_STOP
-  | SignalType.REACTION
-  | SignalType.FILE
-  | SignalType.DELIVERY_ACK
-  | SignalType.DELIVERY_RECEIPT
-  | SignalType.READ_RECEIPT
-  | SignalType.EDIT
-  | SignalType.DELETE
-  | SignalType.CALL_SIGNAL
-  | SignalType.P2P_ENCRYPTED_MESSAGE;
+  | SignalType.SEALED_ENVELOPE
   id?: string;
   from: string;
   to: string;
@@ -49,8 +34,10 @@ export interface EncryptedMessage {
   p2p: boolean;
   transport?: 'p2p';
   routeProof?: string;
-  messageType?: SignalType.TEXT | SignalType.CHAT | SignalType.MESSAGE | SignalType.TYPING | SignalType.TYPING_START | SignalType.TYPING_STOP | SignalType.REACTION | SignalType.FILE | SignalType.EDIT | SignalType.DELETE | SignalType.SIGNAL | SignalType.READ_RECEIPT | SignalType.DELIVERY_ACK | SignalType.DELIVERY_RECEIPT | SignalType.CALL_SIGNAL | SignalType.P2P_ENCRYPTED_MESSAGE;
+  messageType?: SignalType.TEXT | SignalType.CHAT | SignalType.MESSAGE | SignalType.TYPING | SignalType.TYPING_START | SignalType.TYPING_STOP | SignalType.REACTION | SignalType.FILE | SignalType.EDIT | SignalType.DELETE | SignalType.SIGNAL | SignalType.READ_RECEIPT | SignalType.DELIVERY_ACK | SignalType.DELIVERY_RECEIPT | SignalType.CALL_SIGNAL | SignalType.SEALED_ENVELOPE;
   metadata?: any;
+  registrationId?: number;
+  __isRecursive?: boolean;
 }
 
 export interface P2PStatus {
@@ -77,6 +64,7 @@ export interface P2PSendResult {
 
 export interface PeerCertificateBundle {
   username: string;
+  inboxId?: string;
   dilithiumPublicKey: string;
   kyberPublicKey: string;
   x25519PublicKey: string;
@@ -134,7 +122,7 @@ export interface CertCacheEntry {
 export type QueuedItem = {
   to: string;
   envelope: any;
-  type: SignalType.TEXT | SignalType.TYPING | SignalType.TYPING_START | SignalType.TYPING_STOP | SignalType.REACTION | SignalType.FILE | SignalType.READ_RECEIPT | SignalType.DELIVERY_ACK | SignalType.DELIVERY_RECEIPT | SignalType.SIGNAL | SignalType.CALL_SIGNAL | SignalType.P2P_ENCRYPTED_MESSAGE;
+  type: SignalType.TEXT | SignalType.TYPING | SignalType.TYPING_START | SignalType.TYPING_STOP | SignalType.REACTION | SignalType.FILE | SignalType.READ_RECEIPT | SignalType.DELIVERY_ACK | SignalType.DELIVERY_RECEIPT | SignalType.SIGNAL | SignalType.CALL_SIGNAL | SignalType.SEALED_ENVELOPE;
   enqueuedAt: number;
   ttlMs: number;
 };

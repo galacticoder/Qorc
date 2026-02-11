@@ -35,7 +35,7 @@ export const useCalling = (
   }
 ) => {
   if (!authContext) {
-    throw new Error('[useCalling] Auth context is required');
+    throw new Error('Auth context is required');
   }
 
   const eventDebouncer = useRef(debounceEventDispatcher());
@@ -57,6 +57,7 @@ export const useCalling = (
 
   const serviceRef = useRef<SecureCallingService | null>(null);
   const everConnectedRef = useRef<Set<string>>(new Set());
+  const lastCallTypeRef = useRef<Map<string, 'audio' | 'video'>>(new Map());
 
   const currentUsername = username || loginUsernameRef?.current || '';
   const isFullyAuthenticated = isLoggedIn && accountAuthenticated;
@@ -66,6 +67,7 @@ export const useCalling = (
     remoteStreamRef,
     remoteScreenStreamRef,
     everConnectedRef,
+    lastCallTypeRef,
     eventDebouncer
   };
 
@@ -133,7 +135,7 @@ export const useCalling = (
           await initializeService(attempt + 1);
           return;
         }
-        console.error('[useCalling] Failed to initialize calling service:', _error);
+        console.error('Failed to initialize calling service:', _error);
         serviceRef.current = null;
         setCallingService(null);
         setCurrentCall(null);

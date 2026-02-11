@@ -7,15 +7,15 @@ import { CryptoUtils } from "../../lib/utils/crypto-utils";
 import { SecureDB } from "../../lib/database/secureDB";
 import { SecureKeyManager } from "../../lib/database/secure-key-manager";
 import { encryptedStorage } from "../../lib/database/encrypted-storage";
-import { secureWipeStringRef, PinnedServer } from "../../lib/utils/auth-utils";
-import type { ServerHybridPublicKeys, HybridKeys, ServerTrustRequest, HashParams, MaxStepReached } from "../../lib/types/auth-types";
+import { secureWipeStringRef, PinnedServer, generateBlindCredential } from "../../lib/utils/auth-utils";
+import type { ServerHybridPublicKeys, HybridKeys, ServerTrustRequest, MaxStepReached } from "../../lib/types/auth-types";
 import { createDeriveEffectivePassphrase, createGetKeysOnDemand, createWaitForServerKeys, createInitializeKeys } from "./keyManagement";
-import { createHandleAccountSubmit, createHandleServerPasswordSubmit } from "./handlers";
-import { createHandlePassphraseSubmit } from "./passphrase";
+import { createHandleAccountSubmit } from "./handlers";
 import { createHandleAuthSuccess } from "./authSuccess";
-import { createAttemptAuthRecovery, createStoreAuthenticationState, createClearAuthenticationState, createStoreUsernameMapping } from "./recovery";
+import { createAttemptAuthRecovery, createStoreAuthenticationState, createClearAuthenticationState } from "./recovery";
 import { createLogout, createGetLogout } from "./logout";
 import { signal, storage } from "../../lib/tauri-bindings";
+import { toast } from "sonner";
 
 export const useAuth = (_secureDB?: SecureDB) => {
   const [username, setUsername] = useState("");
@@ -28,12 +28,29 @@ export const useAuth = (_secureDB?: SecureDB) => {
   const [accountAuthenticated, setAccountAuthenticated] = useState(false);
   const [isRegistrationMode, setIsRegistrationMode] = useState(false);
   const [tokenValidationInProgress, setTokenValidationInProgress] = useState(false);
+  const [showPassphrasePrompt, setShowPassphrasePrompt] = useState(false);
+  const [maxStepReached, setMaxStepReached] = useState<MaxStepReached>('login');
+  const [recoveryActive, setRecoveryActive] = useState(false);
+  const [showPasswordPrompt, setShowPasswordPrompt] = useState(false);
+  const [vaultReady, setVaultReady] = useState(false);
 
   const passphraseRef = useRef<string>("");
   const passphrasePlaintextRef = useRef<string>("");
   const aesKeyRef = useRef<CryptoKey | null>(null);
   const getKeysPromiseRef = useRef<Promise<any> | null>(null);
   const passphraseLimiterRef = useRef<{ tokens: number; last: number }>({ tokens: 5, last: Date.now() });
+  const blindCredentialRef = useRef<{
+    message: string;
+    blindedMsg: string;
+    blindingFactor: string;
+    n: string;
+    kid: string;
+    modulusLength: number;
+    hash: string;
+    saltLength: number;
+    scheme: string;
+    used?: boolean;
+  } | null>(null);
 
   const [serverHybridPublic, setServerHybridPublic] = useState<ServerHybridPublicKeys | null>(null);
   const serverHybridPublicRef = useRef<ServerHybridPublicKeys | null>(null);
@@ -44,25 +61,12 @@ export const useAuth = (_secureDB?: SecureDB) => {
 
   useEffect(() => {
     let countdownInterval: NodeJS.Timeout | null = null;
-
-    const onAuthError = () => {
-      setIsSubmittingAuth(false);
-      setTokenValidationInProgress(false);
-      setAuthStatus('');
-    };
-
+    const onAuthError = () => { setIsSubmittingAuth(false); setTokenValidationInProgress(false); setAuthStatus(''); };
     const onAuthRateLimited = (event: any) => {
-      setIsSubmittingAuth(false);
-      setTokenValidationInProgress(false);
-      setAuthStatus('');
-      setIsGeneratingKeys(false);
-
+      setIsSubmittingAuth(false); setTokenValidationInProgress(false); setAuthStatus(''); setIsGeneratingKeys(false);
       const rateLimitUntil = event.detail?.rateLimitUntil;
       if (rateLimitUntil) {
-        if (countdownInterval) {
-          clearInterval(countdownInterval);
-        }
-
+        if (countdownInterval) clearInterval(countdownInterval);
         const updateCountdown = () => {
           const remaining = Math.max(0, Math.ceil((rateLimitUntil - Date.now()) / 1000));
           if (remaining > 0) {
@@ -70,44 +74,44 @@ export const useAuth = (_secureDB?: SecureDB) => {
             setTimeout(updateCountdown, 1000 - (Date.now() % 1000));
           } else {
             setLoginError('');
-            if (countdownInterval) {
-              clearInterval(countdownInterval);
-              countdownInterval = null;
-            }
+            if (countdownInterval) { clearInterval(countdownInterval); countdownInterval = null; }
           }
         };
-
         updateCountdown();
       }
     };
-
     try { window.addEventListener(EventType.AUTH_ERROR, onAuthError as any); } catch { }
     try { window.addEventListener(EventType.AUTH_RATE_LIMITED, onAuthRateLimited as any); } catch { }
-
     return () => {
-      if (countdownInterval) {
-        clearInterval(countdownInterval);
-      }
+      if (countdownInterval) clearInterval(countdownInterval);
       try { window.removeEventListener(EventType.AUTH_ERROR, onAuthError as any); } catch { }
       try { window.removeEventListener(EventType.AUTH_RATE_LIMITED, onAuthRateLimited as any); } catch { }
     };
   }, []);
 
-  const [serverTrustRequest, setServerTrustRequest] = useState<ServerTrustRequest | null>(null);
+  useEffect(() => {
+    const handleAuthError = (event: any) => {
+      const detail = event.detail;
+      if (detail?.type === 'SERVER_ENTRY_REQUIRED') {
+        setShowPasswordPrompt(true);
+        setLoginError("");
+        setAuthStatus("");
+      }
+    };
+    window.addEventListener(EventType.AUTH_ERROR, handleAuthError as any);
+    return () => window.removeEventListener(EventType.AUTH_ERROR, handleAuthError as any);
+  }, []);
 
+  const [serverTrustRequest, setServerTrustRequest] = useState<ServerTrustRequest | null>(null);
   const acceptServerTrust = useCallback(() => {
     if (!serverTrustRequest) return;
-    const { newKeys } = serverTrustRequest;
-    try { PinnedServer.set(newKeys); } catch { }
-    setServerHybridPublic(newKeys);
+    try { PinnedServer.set(serverTrustRequest.newKeys); } catch { }
+    setServerHybridPublic(serverTrustRequest.newKeys);
     setServerTrustRequest(null);
     setLoginError("");
   }, [serverTrustRequest]);
 
-  const rejectServerTrust = useCallback(() => {
-    setServerTrustRequest(null);
-    setLoginError("Server key changed. Trust not granted.");
-  }, []);
+  const rejectServerTrust = useCallback(() => { setServerTrustRequest(null); setLoginError("Server key changed. Trust not granted."); }, []);
 
   const hybridKeysRef = useRef<HybridKeys | null>(null);
   const keyManagerRef = useRef<SecureKeyManager | null>(null);
@@ -116,29 +120,11 @@ export const useAuth = (_secureDB?: SecureDB) => {
   const originalUsernameRef = useRef<string>("");
   const passwordRef = useRef<string>("");
   const confirmPasswordRef = useRef<string>("");
-  const passphraseConfirmRef = useRef<string>("");
-  const lastPasswordParamsForRef = useRef<string>("");
 
-  const [passphraseHashParams, setPassphraseHashParams] = useState<HashParams>(null);
-  const [passwordHashParams, setPasswordHashParams] = useState<HashParams>(null);
-  const [showPassphrasePrompt, setShowPassphrasePrompt] = useState(false);
-  const [showPasswordPrompt, setShowPasswordPrompt] = useState(false);
-  const [maxStepReached, setMaxStepReached] = useState<MaxStepReached>('login');
-  const [recoveryActive, setRecoveryActive] = useState(false);
-
-  // Create refs object for key management
   const keyManagementRefs = {
-    loginUsernameRef,
-    passwordRef,
-    confirmPasswordRef,
-    passphrasePlaintextRef,
-    passphraseRef,
-    aesKeyRef,
-    hybridKeysRef,
-    keyManagerRef,
-    keyManagerOwnerRef,
-    getKeysPromiseRef,
-    serverHybridPublicRef,
+    loginUsernameRef, passwordRef, confirmPasswordRef, passphrasePlaintextRef,
+    passphraseRef, aesKeyRef, hybridKeysRef, keyManagerRef, keyManagerOwnerRef,
+    getKeysPromiseRef, serverHybridPublicRef, blindCredentialRef,
   };
 
   const keyManagementSetters = {
@@ -148,91 +134,49 @@ export const useAuth = (_secureDB?: SecureDB) => {
     setShowPassphrasePrompt,
   };
 
-  // Create helper functions
   const deriveEffectivePassphrase = createDeriveEffectivePassphrase(keyManagementRefs);
   const getKeysOnDemand = useCallback(createGetKeysOnDemand(keyManagementRefs, deriveEffectivePassphrase), []);
-  const waitForServerKeys = useCallback(createWaitForServerKeys(keyManagementRefs, keyManagementSetters), [setAuthStatus]);
+  const waitForServerKeys = useCallback(createWaitForServerKeys(keyManagementRefs, keyManagementSetters), []);
   const initializeKeys = useCallback(createInitializeKeys(keyManagementRefs, keyManagementSetters, deriveEffectivePassphrase, recoveryActive), [recoveryActive]);
 
-  // Recovery helpers
   const storeAuthenticationState = useCallback(createStoreAuthenticationState(), []);
   const clearAuthenticationState = useCallback(createClearAuthenticationState(), []);
-  const storeUsernameMapping = useCallback(createStoreUsernameMapping({ loginUsernameRef, originalUsernameRef }), []);
 
   const attemptAuthRecovery = useCallback(
     createAttemptAuthRecovery(
       { loginUsernameRef, originalUsernameRef },
       { setUsername, setPseudonym, setAuthStatus, setTokenValidationInProgress },
-      accountAuthenticated,
-      isLoggedIn
+      accountAuthenticated, isLoggedIn
     ),
     [accountAuthenticated, isLoggedIn]
   );
 
-  // Clear secure DB helper
-  const clearSecureDBForUser = async (pseudonym: string) => {
+  const clearSecureDBForUser = async (p: string) => {
     try {
       const { SQLiteKV } = await import('../../lib/database/sqlite-kv');
-      await (SQLiteKV as any).purgeUserDb(pseudonym);
+      await (SQLiteKV as any).purgeUserDb(p);
     } catch { }
   };
 
-  // Handler refs and setters
   const authRefs = {
-    loginUsernameRef,
-    originalUsernameRef,
-    passwordRef,
-    confirmPasswordRef,
-    passphraseRef,
-    passphrasePlaintextRef,
-    hybridKeysRef,
-    keyManagerRef,
-    keyManagerOwnerRef,
-    passphraseLimiterRef,
+    loginUsernameRef, originalUsernameRef, passwordRef, confirmPasswordRef,
+    passphraseRef, passphrasePlaintextRef, hybridKeysRef, keyManagerRef,
+    keyManagerOwnerRef, passphraseLimiterRef, aesKeyRef: keyManagementRefs.aesKeyRef,
+    blindCredentialRef: keyManagementRefs.blindCredentialRef,
   };
 
   const authSetters = {
-    setUsername,
-    setPseudonym,
-    setIsLoggedIn,
-    setIsGeneratingKeys,
-    setAuthStatus,
-    setLoginError,
-    setIsSubmittingAuth,
-    setAccountAuthenticated,
-    setIsRegistrationMode,
-    setShowPassphrasePrompt,
-    setRecoveryActive,
-    setMaxStepReached,
+    setUsername, setPseudonym, setIsLoggedIn, setIsGeneratingKeys,
+    setAuthStatus, setLoginError, setIsSubmittingAuth, setAccountAuthenticated,
+    setIsRegistrationMode, setShowPassphrasePrompt, setRecoveryActive, setMaxStepReached,
+    setVaultReady,
   };
 
-  const authState = {
-    isLoggedIn,
-    accountAuthenticated,
-    recoveryActive,
-    passphraseHashParams,
-    serverHybridPublic,
-    isSubmittingAuth,
-  };
+  const authState = { isLoggedIn, accountAuthenticated, recoveryActive, serverHybridPublic, isSubmittingAuth };
 
-  // Create handlers
   const handleAccountSubmit = createHandleAccountSubmit(
-    authRefs,
-    authSetters,
-    authState,
+    authRefs, authSetters, authState,
     { waitForServerKeys, initializeKeys, getKeysOnDemand, storeAuthenticationState, clearSecureDBForUser }
-  );
-
-  const handleServerPasswordSubmit = createHandleServerPasswordSubmit(
-    authSetters,
-    { waitForServerKeys, getKeysOnDemand }
-  );
-
-  const handlePassphraseSubmit = createHandlePassphraseSubmit(
-    { loginUsernameRef, passphrasePlaintextRef, passphraseRef, passwordRef, passphraseLimiterRef, keyManagerRef },
-    { setAuthStatus, setLoginError, setShowPassphrasePrompt, setRecoveryActive, setAccountAuthenticated, setIsLoggedIn, setMaxStepReached },
-    { isLoggedIn, accountAuthenticated, recoveryActive, passphraseHashParams, serverHybridPublic },
-    { initializeKeys, deriveEffectivePassphrase, getKeysOnDemand }
   );
 
   const handleAuthSuccess = createHandleAuthSuccess(
@@ -241,54 +185,33 @@ export const useAuth = (_secureDB?: SecureDB) => {
     { storeAuthenticationState, deriveEffectivePassphrase, getKeysOnDemand }
   );
 
-  // Logout
   const logout = createLogout(
     { loginUsernameRef, passwordRef, passphraseRef, passphrasePlaintextRef, aesKeyRef, hybridKeysRef, keyManagerRef },
-    { setIsLoggedIn, setLoginError, setAccountAuthenticated, setIsRegistrationMode, setIsSubmittingAuth, setUsername },
+    { setIsLoggedIn, setLoginError, setAccountAuthenticated, setIsRegistrationMode, setIsSubmittingAuth, setUsername, setTokenValidationInProgress },
     clearAuthenticationState
   );
 
   const getLogout = createGetLogout(logout);
 
-  // Effects
-  useEffect(() => {
-    if (showPassphrasePrompt) setMaxStepReached(prev => prev === 'server' ? 'server' : 'passphrase');
-  }, [showPassphrasePrompt]);
-
-  useEffect(() => {
-    if (accountAuthenticated) setMaxStepReached('server');
-  }, [accountAuthenticated]);
+  useEffect(() => { if (accountAuthenticated) setMaxStepReached('server'); }, [accountAuthenticated]);
 
   useEffect(() => {
     const handleAuthUiBack = (event: CustomEvent) => {
       try {
-        const to = (event as any).detail?.to as 'login' | 'passphrase' | 'server' | undefined;
-        setLoginError("");
-        setAuthStatus("");
+        const to = (event as any).detail?.to as 'login' | 'server' | undefined;
+        setLoginError(""); setAuthStatus("");
         if (to === 'login') {
-          setShowPassphrasePrompt(false);
-          setRecoveryActive(false);
-          setAccountAuthenticated(false);
-        } else if (to === 'passphrase') {
-          setShowPassphrasePrompt(true);
+          setShowPassphrasePrompt(false); setRecoveryActive(false); setAccountAuthenticated(false);
         } else if (to === 'server') {
-          setShowPassphrasePrompt(false);
-          setRecoveryActive(false);
-          setAccountAuthenticated(false);
-          setIsLoggedIn(false);
-          setMaxStepReached('login');
-          secureWipeStringRef(passwordRef as any);
-          secureWipeStringRef(passphraseRef as any);
+          setShowPassphrasePrompt(false); setRecoveryActive(false); setAccountAuthenticated(false);
+          setIsLoggedIn(false); setMaxStepReached('login');
+          secureWipeStringRef(passwordRef as any); secureWipeStringRef(passphraseRef as any);
           secureWipeStringRef(passphrasePlaintextRef as any);
-          loginUsernameRef.current = "";
-          originalUsernameRef.current = "";
-          setUsername("");
-          setPassphraseHashParams(null);
+          loginUsernameRef.current = ""; originalUsernameRef.current = ""; setUsername("");
           setServerTrustRequest?.(null);
         }
       } catch { }
     };
-
     window.addEventListener(EventType.AUTH_UI_BACK, handleAuthUiBack as EventListener);
     return () => window.removeEventListener(EventType.AUTH_UI_BACK, handleAuthUiBack as EventListener);
   }, []);
@@ -299,11 +222,10 @@ export const useAuth = (_secureDB?: SecureDB) => {
         const { field, value } = (event as any).detail || {};
         if (typeof value !== 'string') return;
         switch (field) {
-          case 'username': setTypedUsername(value); break;
-          case 'password': setTypedPassword(value); break;
-          case 'confirmPassword': setTypedConfirmPassword(value); break;
-          case 'passphrase': setTypedPassphrase(value); break;
-          case 'passphraseConfirm': passphraseConfirmRef.current = value; break;
+          case 'username': originalUsernameRef.current = value; break;
+          case 'password': passwordRef.current = value; break;
+          case 'confirmPassword': confirmPasswordRef.current = value; break;
+          case 'passphrase': passphrasePlaintextRef.current = value; break;
         }
       } catch { }
     };
@@ -314,73 +236,38 @@ export const useAuth = (_secureDB?: SecureDB) => {
   useEffect(() => {
     const handleAuthUiForward = async (event: CustomEvent) => {
       try {
-        const to = (event as any).detail?.to as 'login' | 'passphrase' | 'server_password' | undefined;
-        setLoginError("");
-        setAuthStatus("");
-
-        if (to === 'passphrase') {
-          setShowPassphrasePrompt(true);
-          return;
-        }
-        if (to === 'server_password') {
-          setShowPassphrasePrompt(false);
-          return;
-        }
-
+        const to = (event as any).detail?.to as 'login' | 'passphrase' | undefined;
+        setLoginError(""); setAuthStatus("");
         if (to === 'login' || (!showPassphrasePrompt && !accountAuthenticated)) {
-          const orig = originalUsernameRef.current;
-          const pwd = passwordRef.current;
-          if (orig && pwd) {
-            await handleAccountSubmit(isRegistrationMode ? 'register' : 'login', orig, pwd);
-            return;
-          }
+          const orig = originalUsernameRef.current; const pwd = passwordRef.current;
+          const pps = passphrasePlaintextRef.current;
+          if (orig && pwd) { await handleAccountSubmit(isRegistrationMode ? 'register' : 'login', orig, pwd, pps); }
         }
-
-        if (showPassphrasePrompt) {
-          setShowPassphrasePrompt(true);
-          return;
-        }
-
-        if (accountAuthenticated) return;
       } catch { }
     };
-
     window.addEventListener(EventType.AUTH_UI_FORWARD, handleAuthUiForward as EventListener);
     return () => window.removeEventListener(EventType.AUTH_UI_FORWARD, handleAuthUiForward as EventListener);
-  }, [accountAuthenticated, showPassphrasePrompt, isRegistrationMode]);
+  }, [accountAuthenticated, isRegistrationMode, showPassphrasePrompt, handleAccountSubmit]);
 
   useEffect(() => {
     const handleBeforeUnload = () => {
       if (isLoggedIn && loginUsernameRef.current) {
         try {
           (async () => {
-            try {
-              const queueRaw = await encryptedStorage.getItem('cleanup_queue_pending');
-              let queue: Array<{ username: string; timestamp: number }> = [];
-              if (queueRaw && Array.isArray(queueRaw)) {
-                queue = queueRaw;
-              }
-              queue.push({ username: loginUsernameRef.current, timestamp: Date.now() });
-              await encryptedStorage.setItem('cleanup_queue_pending', queue.slice(-10));
-            } catch { }
+            const qRaw = await encryptedStorage.getItem('cleanup_queue_pending');
+            const q = Array.isArray(qRaw) ? qRaw : [];
+            q.push({ username: loginUsernameRef.current, timestamp: Date.now() });
+            await encryptedStorage.setItem('cleanup_queue_pending', q.slice(-10));
           })();
         } catch { }
       }
     };
-
     window.addEventListener('beforeunload', handleBeforeUnload);
     return () => window.removeEventListener('beforeunload', handleBeforeUnload);
   }, [isLoggedIn]);
 
   useEffect(() => {
-    const handleReconnection = async () => {
-      if (isLoggedIn && loginUsernameRef.current) {
-        try {
-          await attemptAuthRecovery();
-        } catch { }
-      }
-    };
-
+    const handleReconnection = async () => { if (isLoggedIn && loginUsernameRef.current) { try { await attemptAuthRecovery(); } catch { } } };
     window.addEventListener(EventType.WS_RECONNECTED, handleReconnection);
     return () => window.removeEventListener(EventType.WS_RECONNECTED, handleReconnection);
   }, [isLoggedIn, attemptAuthRecovery]);
@@ -391,260 +278,210 @@ export const useAuth = (_secureDB?: SecureDB) => {
         if (isLoggedIn && loginUsernameRef.current) {
           const keys = await getKeysOnDemand?.();
           const pub = keys?.kyber?.publicKeyBase64;
-          const secB64 = keys?.kyber?.secretKey ? CryptoUtils.Base64.arrayBufferToBase64(keys.kyber.secretKey) : undefined;
-          if (typeof pub === 'string' && typeof secB64 === 'string' && pub && secB64) {
-            await signal.setStaticMlkemKeys(loginUsernameRef.current, pub, secB64);
-          }
+          const sec = keys?.kyber?.secretKey ? CryptoUtils.Base64.arrayBufferToBase64(keys.kyber.secretKey) : undefined;
+          if (pub && sec) await signal.setStaticMlkemKeys(loginUsernameRef.current, pub, sec);
         }
       } catch { }
     })();
-  }, [isLoggedIn, loginUsernameRef.current]);
+  }, [isLoggedIn, getKeysOnDemand]);
 
   useEffect(() => {
-    if (!isLoggedIn || !serverHybridPublic || !hybridKeysRef.current) return;
-
+    if (!isLoggedIn || !accountAuthenticated || !serverHybridPublic || !hybridKeysRef.current) return;
+    if (websocketClient.isUnlinkedMode()) return;
+    if (!websocketClient.isServerAuthGranted?.()) return;
     const uploadKeys = async () => {
       try {
         let attempts = 0;
-        while (attempts < 20 && !websocketClient.isPQSessionEstablished?.()) {
-          await new Promise(resolve => setTimeout(resolve, 100));
-          attempts++;
-        }
-
-        if (!websocketClient.isPQSessionEstablished?.()) {
-          return;
-        }
-
+        while (attempts < 20 && !websocketClient.isPQSessionEstablished?.()) { await new Promise(r => setTimeout(r, 100)); attempts++; }
+        if (!websocketClient.isPQSessionEstablished?.()) return;
         const keys = hybridKeysRef.current;
-        if (!keys?.dilithium?.publicKeyBase64 || !keys?.kyber?.publicKeyBase64 || !keys?.dilithium?.secretKey) {
-          return;
+        if (!keys?.dilithium?.publicKeyBase64 || !keys?.kyber?.publicKeyBase64 || !keys?.dilithium?.secretKey) return;
+        const keysToSend: any = { kyberPublicBase64: keys.kyber.publicKeyBase64, dilithiumPublicBase64: keys.dilithium.publicKeyBase64, x25519PublicBase64: keys.x25519?.publicKeyBase64 || '' };
+
+        if (blindCredentialRef.current?.blindedMsg) {
+          keysToSend.blindedToken = blindCredentialRef.current.blindedMsg;
         }
-
-        const keysToSend = {
-          kyberPublicBase64: keys.kyber.publicKeyBase64,
-          dilithiumPublicBase64: keys.dilithium.publicKeyBase64,
-          x25519PublicBase64: keys.x25519?.publicKeyBase64 || ''
-        };
-
-        const hybridKeysPayload = JSON.stringify(keysToSend);
-
-        const encryptedHybridKeys = await CryptoUtils.Hybrid.encryptForServer(
-          hybridKeysPayload,
-          serverHybridPublic,
-          {
-            senderDilithiumSecretKey: keys.dilithium.secretKey,
-            metadata: {
-              context: SignalType.HYBRID_KEYS_UPDATE,
-              sender: { dilithiumPublicKey: keys.dilithium.publicKeyBase64 }
-            }
-          }
-        );
-
-        await websocketClient.sendSecureControlMessage({
-          type: SignalType.HYBRID_KEYS_UPDATE,
-          userData: encryptedHybridKeys,
+        const encryptedHybridKeys = await CryptoUtils.Hybrid.encryptForServer(JSON.stringify(keysToSend), serverHybridPublic, {
+          senderDilithiumSecretKey: keys.dilithium.secretKey,
+          senderDilithiumPublicKey: keys.dilithium.publicKeyBase64,
+          metadata: { context: SignalType.HYBRID_KEYS_UPDATE }
         });
-
-        try {
-          window.dispatchEvent(new CustomEvent(EventType.HYBRID_KEYS_UPDATED));
-        } catch { }
+        await websocketClient.sendSecureControlMessage({ type: SignalType.HYBRID_KEYS_UPDATE, userData: encryptedHybridKeys });
+        window.dispatchEvent(new CustomEvent(EventType.HYBRID_KEYS_UPDATED));
       } catch { }
     };
-
     uploadKeys();
-  }, [isLoggedIn, serverHybridPublic, hybridKeysRef.current]);
+  }, [isLoggedIn, accountAuthenticated, serverHybridPublic, hybridKeysRef]);
 
   useEffect(() => {
     (async () => {
       try {
-        const tokens = await retrieveAuthTokens();
-        const storedUsername = await storage.get('last_authenticated_username');
-        const storedDisplayName = await storage.get('last_authenticated_display_name');
-
-        if ((tokens?.accessToken && tokens?.refreshToken) || storedUsername) {
-          setTokenValidationInProgress(true);
-          setAuthStatus('Verifying session...');
-
-          if (storedUsername) {
-            loginUsernameRef.current = storedUsername;
-            const displayName = storedDisplayName || storedUsername;
-            setUsername(displayName);
-            originalUsernameRef.current = displayName;
-
+        const token = await retrieveAuthTokens();
+        const sU = await storage.get('last_authenticated_username');
+        if (token || sU) {
+          setTokenValidationInProgress(true); setAuthStatus('Verifying session...');
+          if (sU) {
+            const { computeBlindUserId } = await import('../../lib/utils/auth-utils');
+            const pseudonymHash = computeBlindUserId(sU);
+            loginUsernameRef.current = sU;
+            setPseudonym(pseudonymHash);
+            setUsername(sU);
+            originalUsernameRef.current = sU;
           }
         } else {
-          setTokenValidationInProgress(false);
-          setAuthStatus('');
+          setTokenValidationInProgress(false); setAuthStatus('');
         }
-      } catch (err) {
-        console.error('[useAuth] Session restoration failed:', err);
-        setTokenValidationInProgress(false);
-        setAuthStatus('');
-      }
+      } catch { setTokenValidationInProgress(false); setAuthStatus(''); }
     })();
   }, []);
 
   useEffect(() => {
-    const onTokenValidationStart = (_ev: Event) => {
-      try {
-        setTokenValidationInProgress(true);
-        setAuthStatus('Verifying session...');
-      } catch { }
-    };
-    window.addEventListener(EventType.TOKEN_VALIDATION_START, onTokenValidationStart as EventListener);
-    return () => window.removeEventListener(EventType.TOKEN_VALIDATION_START, onTokenValidationStart as EventListener);
+    const onStart = () => { setTokenValidationInProgress(true); setAuthStatus('Verifying session...'); };
+    window.addEventListener(EventType.TOKEN_VALIDATION_START, onStart);
+    return () => window.removeEventListener(EventType.TOKEN_VALIDATION_START, onStart);
   }, []);
 
   useEffect(() => {
     let timeout: NodeJS.Timeout;
-    if (tokenValidationInProgress) {
-      timeout = setTimeout(() => {
-        setTokenValidationInProgress(false);
-        setAuthStatus('');
-      }, 10000);
-    }
+    if (tokenValidationInProgress) timeout = setTimeout(() => { setTokenValidationInProgress(false); setAuthStatus(''); }, 10000);
     return () => clearTimeout(timeout);
   }, [tokenValidationInProgress]);
 
   useEffect(() => {
-    const onTokenValidationTimeout = (_ev: Event) => {
-      try {
-        setTokenValidationInProgress(false);
-        setAuthStatus('');
-        setLoginError('Session validation timed out. Please log in again.');
-      } catch { }
-    };
-    window.addEventListener(EventType.TOKEN_VALIDATION_TIMEOUT, onTokenValidationTimeout as EventListener);
-    return () => window.removeEventListener(EventType.TOKEN_VALIDATION_TIMEOUT, onTokenValidationTimeout as EventListener);
+    const onTimeout = () => { setTokenValidationInProgress(false); setAuthStatus(''); setLoginError('Session validation timed out.'); };
+    window.addEventListener(EventType.TOKEN_VALIDATION_TIMEOUT, onTimeout);
+    return () => window.removeEventListener(EventType.TOKEN_VALIDATION_TIMEOUT, onTimeout);
   }, []);
-
-  useEffect(() => {
-    const handlePasswordHashParams = (event: CustomEvent) => {
-      const params = event.detail;
-      if (!params || !params.salt || !params.memoryCost || !params.timeCost || !params.parallelism) {
-        setLoginError("Server sent invalid password hash parameters");
-        return;
-      }
-
-      setPasswordHashParams(params);
-
-      try { lastPasswordParamsForRef.current = loginUsernameRef.current || ''; } catch { }
-
-      const existingPassword = passwordRef.current || "";
-      if (existingPassword) {
-        (async () => {
-          try {
-            setAuthStatus("Computing hash...");
-            const passwordHash = await CryptoUtils.Hash.hashDataUsingInfo(existingPassword, params);
-            websocketClient.send(JSON.stringify({
-              type: SignalType.PASSWORD_HASH_RESPONSE,
-              passwordHash
-            }));
-            setShowPasswordPrompt(false);
-            setAuthStatus("Verifying...");
-          } catch {
-            setShowPasswordPrompt(true);
-            setAuthStatus("Password required");
-          }
-        })();
-      } else {
-        setShowPasswordPrompt(true);
-        setAuthStatus("Password required");
-      }
-    };
-
-    window.addEventListener(EventType.PASSWORD_HASH_PARAMS, handlePasswordHashParams as EventListener);
-    return () => window.removeEventListener(EventType.PASSWORD_HASH_PARAMS, handlePasswordHashParams as EventListener);
-  }, []);
-
-  const setTypedUsername = (name: string) => { originalUsernameRef.current = name; };
-  const setTypedPassword = (pwd: string) => { passwordRef.current = pwd; };
-  const setTypedConfirmPassword = (pwd: string) => { confirmPasswordRef.current = pwd; };
-  const setTypedPassphrase = (pp: string) => { passphrasePlaintextRef.current = pp; };
 
   useEffect(() => {
     try {
       const pinned = PinnedServer.get();
-      if (pinned) {
-        setServerHybridPublic(pinned);
-      } else {
-        setServerHybridPublic(null);
+      if (pinned) setServerHybridPublic(pinned); else setServerHybridPublic(null);
+    } catch { setServerHybridPublic(null); }
+  }, []);
+
+  useEffect(() => {
+    const onServerEntryGranted = async () => {
+      try {
+        if (websocketClient.isUnlinkedMode()) {
+          return;
+        }
+
+        const savedUsername = await storage.get('last_authenticated_username');
+        const token = await retrieveAuthTokens();
+
+        if (token) {
+          setTokenValidationInProgress(true);
+          setAuthStatus('Resuming session...');
+
+          if (savedUsername) {
+            const { computeBlindUserId } = await import('../../lib/utils/auth-utils');
+            const pseudonymHash = computeBlindUserId(savedUsername);
+            loginUsernameRef.current = savedUsername;
+            setPseudonym(pseudonymHash);
+            setUsername(savedUsername);
+          }
+
+          // Generate blinded token for blind routing credential issuance
+          let blindedToken: string | undefined;
+          if (savedUsername && serverHybridPublicRef.current?.blindPublicKey) {
+            const result = await generateBlindCredential(savedUsername, serverHybridPublicRef.current.blindPublicKey);
+            if (result) {
+              const existing = blindCredentialRef.current;
+              if (!existing || existing.used) {
+                blindCredentialRef.current = { ...result, used: false };
+                blindedToken = result.blindedMsg;
+              } else {
+                blindedToken = existing.blindedMsg;
+              }
+            }
+          }
+
+          // Send token validation request
+          const validationMessage: any = {
+            type: SignalType.TOKEN_VALIDATION,
+            accessToken: token
+          };
+          if (blindedToken) {
+            validationMessage.blindedToken = blindedToken;
+          }
+          await websocketClient.sendSecureControlMessage(validationMessage);
+        } else if (savedUsername) {
+          // Have username but no token then show login with username pre-filled
+          loginUsernameRef.current = savedUsername;
+          setUsername(savedUsername);
+          setTokenValidationInProgress(false);
+        }
+      } catch (err) {
+        console.warn('[Auth] Auto-login after server entry failed:', err);
+        setTokenValidationInProgress(false);
+        setAuthStatus('');
       }
-    } catch {
-      setServerHybridPublic(null);
-    }
+    };
+
+    window.addEventListener(EventType.SERVER_ENTRY_GRANTED, onServerEntryGranted);
+    return () => window.removeEventListener(EventType.SERVER_ENTRY_GRANTED, onServerEntryGranted);
   }, []);
 
   return {
-    username,
-    setUsername,
-    pseudonym,
-    setPseudonym,
-    tokenValidationInProgress,
-    setTokenValidationInProgress,
-    serverHybridPublic,
-    setServerHybridPublic,
-    serverTrustRequest,
-    setServerTrustRequest,
-    acceptServerTrust,
-    rejectServerTrust,
-    isLoggedIn,
-    setIsLoggedIn,
-    isGeneratingKeys,
-    isSubmittingAuth,
-    authStatus,
-    setAuthStatus,
-    loginError,
-    accountAuthenticated,
-    isRegistrationMode,
-    setIsRegistrationMode,
-    loginUsernameRef,
-    originalUsernameRef,
-    storeUsernameMapping,
-    initializeKeys,
-    handleAccountSubmit,
-    handlePassphraseSubmit,
-    handleServerPasswordSubmit,
-    handleAuthSuccess,
-    setAccountAuthenticated,
-    passwordRef,
-    setLoginError,
-    passphraseHashParams,
-    setPassphraseHashParams,
-    passwordHashParams,
-    setPasswordHashParams,
-    passphrasePlaintextRef,
-    passphraseRef,
-    aesKeyRef,
-    setShowPassphrasePrompt,
-    showPassphrasePrompt,
-    setShowPasswordPrompt,
+    username, setUsername, pseudonym, setPseudonym, tokenValidationInProgress, setTokenValidationInProgress,
+    serverHybridPublic, setServerHybridPublic, serverTrustRequest, setServerTrustRequest,
+    acceptServerTrust, rejectServerTrust, isLoggedIn, setIsLoggedIn, isGeneratingKeys, isSubmittingAuth,
+    authStatus, setAuthStatus, loginError, accountAuthenticated, isRegistrationMode, setIsRegistrationMode,
+    loginUsernameRef, originalUsernameRef, initializeKeys,
+    handleAccountSubmit, handleAuthSuccess, setAccountAuthenticated, passwordRef, setLoginError,
+    setShowPassphrasePrompt, showPassphrasePrompt, setMaxStepReached, logout, getLogout,
+    hybridKeysRef, keyManagerRef, getKeysOnDemand, attemptAuthRecovery, storeAuthenticationState,
+    clearAuthenticationState, recoveryActive, setRecoveryActive,
+    aesKeyRef, passphrasePlaintextRef, passphraseRef,
+    vaultReady, setVaultReady,
     showPasswordPrompt,
-    setMaxStepReached,
-    handlePasswordHashSubmit: async (password: string) => {
+    setShowPasswordPrompt,
+    handlePasswordHashSubmit: async () => { },
+    handleServerPasswordSubmit: async (password: string) => {
+      if (!password) return;
+      setIsSubmittingAuth(true);
+      setAuthStatus("Verifying entry...");
       try {
-        if (!passwordHashParams) throw new Error('Missing password params');
-        const passwordHash = await CryptoUtils.Hash.hashDataUsingInfo(password, passwordHashParams);
-        websocketClient.send(JSON.stringify({ type: SignalType.PASSWORD_HASH_RESPONSE, passwordHash }));
-      } catch {
-        setLoginError('Password processing failed');
+        const success = await websocketClient.startServerGatekeeperFlow(password);
+        if (success) {
+          setShowPasswordPrompt(false);
+          setAuthStatus("Entry granted");
+          toast.success("Server access granted anonymously");
+        } else {
+          setLoginError("Invalid server password");
+          setAuthStatus("");
+        }
+      } catch (err) {
+        setLoginError("Entry verification failed");
+        setAuthStatus("");
+      } finally {
+        setIsSubmittingAuth(false);
       }
     },
-    logout,
-    getLogout,
-    hybridKeysRef,
-    keyManagerRef,
-    getKeysOnDemand,
-    attemptAuthRecovery,
-    storeAuthenticationState,
-    clearAuthenticationState,
-    recoveryActive,
-    setRecoveryActive,
-    setTypedUsername,
-    setTypedPassword,
-    setTypedConfirmPassword,
-    setTypedPassphrase,
-    confirmPasswordRef,
-    maxStepReached,
+    handlePassphraseSubmit: async (passphrase: string) => {
+      if (!passphrase) return;
+      setIsSubmittingAuth(true);
+      setAuthStatus("Initializing encryption...");
+      try {
+        passphrasePlaintextRef.current = passphrase;
+        await initializeKeys(false);
+        setVaultReady(true);
+        setShowPassphrasePrompt(false);
+      } catch (err) {
+        setLoginError("Master key generation failed");
+        console.error('[Auth] Passphrase submit error:', err);
+      } finally {
+        setIsSubmittingAuth(false);
+        setAuthStatus("");
+      }
+    },
+    setTypedUsername: (n: string) => { originalUsernameRef.current = n; },
+    setTypedPassword: (p: string) => { passwordRef.current = p; },
+    setTypedConfirmPassword: (p: string) => { confirmPasswordRef.current = p; },
+    setTypedPassphrase: (p: string) => { passphrasePlaintextRef.current = p; },
+    confirmPasswordRef, maxStepReached,
+    blindCredentialRef: keyManagementRefs.blindCredentialRef,
+    serverHybridPublicRef: keyManagementRefs.serverHybridPublicRef,
   };
 };

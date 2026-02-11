@@ -1,4 +1,4 @@
-import React, { useEffect, useRef } from 'react';
+import { useEffect, useRef } from 'react';
 import { SecurityAuditLogger } from '../../lib/cryptography/audit-logger';
 import { getSignalingServerUrl } from '../../config/p2p.config';
 import { EventType } from '../../lib/types/event-types';
@@ -117,7 +117,11 @@ export function useP2PConnectionManager({
     const handlePeerDisconnected = (evt: Event) => {
       try {
         const peer = (evt as CustomEvent).detail?.peer;
-        if (peer) processedPeerConnectionsRef.current.delete(peer);
+        if (peer) {
+          processedPeerConnectionsRef.current.delete(peer);
+          const now = Date.now();
+          connectionAttemptsRef.current.set(peer, { inProgress: false, lastAttempt: now });
+        }
       } catch { }
     };
 
@@ -134,6 +138,7 @@ export function useP2PConnectionManager({
 
             connectionAttemptsRef.current.set(peer, { inProgress: true, lastAttempt: now });
             p2p.connectToPeer(peer)
+              .catch(() => { })
               .finally(() => {
                 const info = connectionAttemptsRef.current.get(peer);
                 if (info) info.inProgress = false;
@@ -179,6 +184,7 @@ export function useP2PConnectionManager({
 
       connectionAttemptsRef.current.set(peer, { inProgress: true, lastAttempt: now });
       p2p.connectToPeer(peer)
+        .catch(() => { })
         .finally(() => {
           const info = connectionAttemptsRef.current.get(peer);
           if (info) info.inProgress = false;
@@ -227,4 +233,3 @@ export function useP2PConnectionManager({
     }
   }, [selectedConversation, p2pHybridKeys, p2pMessaging.p2pStatus?.isInitialized, p2pMessaging.p2pStatus?.signalingConnected]);
 }
-

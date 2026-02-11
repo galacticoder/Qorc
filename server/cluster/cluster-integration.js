@@ -34,7 +34,7 @@ export async function initializeCluster({
       isPrimary = process.env.CLUSTER_PRIMARY === 'true' || process.env.SERVER_ROLE === 'primary';
 
       if (!isPrimary) {
-        const { withRedisClient } = await import('../presence/presence.js');
+        const { withRedisClient } = await import('../session/redis-client.js');
         try {
           const existingMaster = await withRedisClient(async (client) => {
             return await client.get('cluster:master');
@@ -188,7 +188,7 @@ function startHAProxyConfigUpdater(manager) {
 // Update HAProxy configuration
 async function updateHAProxyConfig(manager, configPath) {
   try {
-    cryptoLogger.debug('[CLUSTER] Updating HAProxy configuration');
+    cryptoLogger.log('[CLUSTER] Updating HAProxy configuration');
     const generator = await generateConfigFromCluster(manager, configPath);
 
     if (process.env.HAPROXY_AUTO_RELOAD === 'true') {

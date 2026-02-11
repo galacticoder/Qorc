@@ -3,7 +3,7 @@ import { SecureP2PService } from "../../lib/transport/secure-p2p-service";
 import { CryptoUtils } from "../../lib/utils/crypto-utils";
 import { SecurityAuditLogger } from "../../lib/cryptography/audit-logger";
 import { EventType } from "../../lib/types/event-types";
-import type { P2PStatus, HybridKeys, PeerCertificateBundle, EncryptedMessage, P2PMessage, RouteProofRecord, CertCacheEntry } from "../../lib/types/p2p-types";
+import type { P2PStatus, HybridKeys, PeerCertificateBundle, P2PMessage, RouteProofRecord, CertCacheEntry } from "../../lib/types/p2p-types";
 import {
   createP2PError,
   toUint8,
@@ -13,6 +13,7 @@ import {
   buildAuthenticator
 } from "../../lib/utils/p2p-utils";
 import { P2P_ROUTE_PROOF_TTL_MS } from "../../lib/constants";
+import { quicTransport } from "../../lib/transport/quic-transport";
 
 export interface ConnectionRefs {
   p2pServiceRef: RefObject<SecureP2PService | null>;
@@ -22,15 +23,11 @@ export interface ConnectionRefs {
   channelSequenceRef: RefObject<Map<string, number>>;
   authLockRef: RefObject<Promise<void> | null>;
   peerWaitersRef: RefObject<Map<string, Set<(ok: boolean) => void>>>;
-  incomingQueueRef: RefObject<{ push: (item: EncryptedMessage) => void; items: () => EncryptedMessage[]; clear: () => void }>;
-  outboundQueueRef: RefObject<Map<string, any[]>>;
-  flushTimersRef: RefObject<Map<string, ReturnType<typeof setTimeout>>>;
   handleIncomingP2PMessageRef: RefObject<((message: P2PMessage) => Promise<void>) | null>;
 }
 
 export interface ConnectionSetters {
   setP2PStatus: React.Dispatch<React.SetStateAction<P2PStatus>>;
-  setIncomingMessages: React.Dispatch<React.SetStateAction<EncryptedMessage[]>>;
   setLastError: (error: unknown) => void;
   clearLastError: () => void;
 }
@@ -58,15 +55,6 @@ export function createDestroyService(
     refs.routeProofCacheRef.current.clear();
     refs.peerCertificateCacheRef.current.clear();
     (refs.peerAuthCacheRef as { current: ReturnType<typeof buildAuthenticator> }).current = buildAuthenticator();
-    try {
-      refs.outboundQueueRef.current.forEach((arr) => arr.forEach(it => { try { it.envelope = null; } catch { } }));
-      refs.outboundQueueRef.current.clear();
-    } catch { }
-
-    refs.flushTimersRef.current.forEach(t => clearTimeout(t));
-    refs.flushTimersRef.current.clear();
-    refs.incomingQueueRef.current.clear();
-    setters.setIncomingMessages([]);
     setters.setP2PStatus((prev) => ({
       ...prev,
       isInitialized: false,
@@ -105,15 +93,6 @@ export function createInitializeP2P(
       refs.peerCertificateCacheRef.current.clear();
       (refs.peerAuthCacheRef as { current: ReturnType<typeof buildAuthenticator> }).current = buildAuthenticator();
 
-      refs.outboundQueueRef.current.forEach((arr) => arr.forEach(it => { try { it.envelope = null; } catch { } }));
-      refs.outboundQueueRef.current.clear();
-
-      refs.flushTimersRef.current.forEach(t => clearTimeout(t));
-      refs.flushTimersRef.current.clear();
-
-      refs.incomingQueueRef.current.clear();
-      setters.setIncomingMessages([]);
-
       if (!username || !hybridKeys?.dilithium?.secretKey) {
         throw createP2PError('AUTH_REQUIRED');
       }
@@ -141,10 +120,6 @@ export function createInitializeP2P(
             set.forEach(fn => { try { fn(true); } catch { } });
             refs.peerWaitersRef.current.delete(peerUsername);
           }
-        } catch { }
-
-        try {
-          window.dispatchEvent(new CustomEvent(EventType.P2P_PEER_RECONNECTED, { detail: { peer: peerUsername } }));
         } catch { }
 
         try {
@@ -206,7 +181,10 @@ export function createConnectToPeer(
       throw createP2PError('LOCAL_KEYS_MISSING');
     }
 
-    const cert = await getPeerCertificate(peerUsername);
+    let cert = await getPeerCertificate(peerUsername);
+    if (!cert) {
+      cert = await getPeerCertificate(peerUsername, true);
+    }
     if (!cert) {
       throw createP2PError('PEER_CERT_MISSING');
     }
@@ -245,6 +223,9 @@ export function createConnectToPeer(
         const pk = toUint8(cert.dilithiumPublicKey);
         if (pk) refs.p2pServiceRef.current.addPeerDilithiumKey(peerUsername, pk);
       } catch { }
+      if (cert.inboxId) {
+        try { quicTransport.registerUsernameAlias(peerUsername, cert.inboxId); } catch { }
+      }
 
       await refs.p2pServiceRef.current.connectToPeer(peerUsername, {
         peerCertificate: cert,

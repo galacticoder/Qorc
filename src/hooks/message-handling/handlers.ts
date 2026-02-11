@@ -2,6 +2,7 @@ import { EventType } from '../../lib/types/event-types';
 import { SignalType } from '../../lib/types/signal-types';
 import { CryptoUtils } from '../../lib/utils/crypto-utils';
 import { safeJsonParse } from '../../lib/utils/message-handler-utils';
+import { getCachedDisplayName } from '../../lib/utils/database-utils';
 import type { Message } from '../../components/chat/messaging/types';
 import { notifications, tray } from '../../lib/tauri-bindings';
 import { messageVault } from '../../lib/security/message-vault';
@@ -201,7 +202,8 @@ export const showNotification = (
     const shouldNotify = isHidden || !isFocused;
 
     if (shouldNotify) {
-      const senderName = payload.from || 'Someone';
+      const cachedName = getCachedDisplayName(payload.from);
+      const senderName = cachedName || payload.from || 'Someone';
       const title = isCallSignal ? 'Incoming Call' : (isFileMessage ? 'New File' : 'New Message');
       const body = isCallSignal
         ? `${senderName} is calling you`
@@ -217,17 +219,4 @@ export const showNotification = (
   } catch (e) {
     console.error('[EncryptedMessageHandler] Notification error:', e);
   }
-};
-
-// Store username mapping from decrypted payload
-export const storeUsernameMapping = (payload: { fromOriginal?: string; from?: string }): void => {
-  try {
-    const originalFrom = payload.fromOriginal;
-    const hashedFrom = payload.from;
-    if (typeof originalFrom === 'string' && typeof hashedFrom === 'string') {
-      window.dispatchEvent(new CustomEvent(EventType.USERNAME_MAPPING_RECEIVED, {
-        detail: { hashed: hashedFrom, original: originalFrom }
-      }));
-    }
-  } catch { }
 };

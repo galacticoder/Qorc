@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback, memo } from 'react';
 import { Phone, PhoneOff, Video, VideoOff, Mic, MicOff, Monitor, MonitorOff, Minimize2, Maximize2, ChevronDown } from 'lucide-react';
 import type { CallState } from '../../../lib/transport/secure-calling-service';
-import { useUnifiedUsernameDisplay } from '../../../hooks/database/useUnifiedUsernameDisplay';
+import { useDisplayUsername } from '../../../hooks/database/useDisplayUsername';
 import { UserAvatar } from '../../ui/UserAvatar';
 import { Popover, PopoverContent, PopoverTrigger } from '../../ui/popover';
 import { cn } from '../../../lib/utils/shared-utils';
@@ -229,9 +229,8 @@ export const CallModal: React.FC<CallModalProps> = memo(({
   const initialPosRef = useRef<{ x: number, bottom: number } | null>(null);
   const hasDraggedRef = useRef(false);
 
-  const { displayName: displayPeerName } = useUnifiedUsernameDisplay({
+  const displayPeerName = useDisplayUsername({
     username: call?.peer || '',
-    getDisplayUsername,
     fallbackToOriginal: true
   });
 

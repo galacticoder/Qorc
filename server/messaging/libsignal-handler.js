@@ -1,35 +1,38 @@
 /**
  * LibSignal Protocol Bundle Handler
+ * 
  * Handles Signal Protocol bundle storage, retrieval, and validation
  */
 
 import { LibsignalBundleDB } from '../database/database.js';
-import { SecureStateManager } from '../authentication/authentication.js';
 import { logger as cryptoLogger } from '../crypto/crypto-logger.js';
 import { SignalType } from '../signals.js';
 
 // Handle Signal Protocol bundle publication from client
-export async function handleBundlePublish({ ws, parsed, state, context, sendPQResponse }) {
+export async function handleBundlePublish({ ws, parsed, sendPQResponse }) {
+  const inboxId = ws._primaryInboxId;
+
   cryptoLogger.info('[LIBSIGNAL] Bundle publish request', {
-    username: (state.username || 'unknown').slice(0, 8) + '...'
+    inboxId: inboxId?.slice(0, 8) || 'unknown'
   });
 
   try {
-    const username = state.username;
-    if (!username) {
-      cryptoLogger.error('[LIBSIGNAL] Bundle publish rejected - not authenticated');
+    if (!inboxId) {
+      cryptoLogger.error('[LIBSIGNAL] Bundle publish rejected - no inboxId', {
+        hasInboxId: false
+      });
       await sendPQResponse(ws, {
         type: SignalType.LIBSIGNAL_PUBLISH_STATUS,
         success: false,
-        error: 'User not authenticated'
+        error: 'Not authenticated for blind routing'
       });
-      ws.close(1008, 'User not authenticated for bundle publish');
+      ws.close(1008, 'Inbox ID required for bundle publish');
       return;
     }
 
     const bundle = parsed.bundle;
     if (!bundle) {
-      cryptoLogger.error('[LIBSIGNAL] No bundle provided', { username });
+      cryptoLogger.error('[LIBSIGNAL] No bundle provided');
       await sendPQResponse(ws, {
         type: SignalType.LIBSIGNAL_PUBLISH_STATUS,
         success: false,
@@ -44,7 +47,6 @@ export async function handleBundlePublish({ ws, parsed, state, context, sendPQRe
     if (validationErrors.length > 0) {
       const errorMsg = `Invalid bundle structure: ${validationErrors.join(', ')}`;
       cryptoLogger.error('[LIBSIGNAL] Bundle validation failed', {
-        username,
         errors: validationErrors
       });
       await sendPQResponse(ws, {
@@ -61,36 +63,18 @@ export async function handleBundlePublish({ ws, parsed, state, context, sendPQRe
     }
 
     const flatBundle = transformBundleForStorage(bundle);
-    await LibsignalBundleDB.publish(username, flatBundle);
+    await LibsignalBundleDB.publish(inboxId, flatBundle);
     cryptoLogger.info('[LIBSIGNAL] Bundle stored successfully', {
-      username: username.slice(0, 8) + '...'
+      inboxId: inboxId.slice(0, 8)
     });
-
-    if (ws.clientState?.pendingSignalBundle && context?.authHandler) {
-      cryptoLogger.info('[LIBSIGNAL] Completing authentication after bundle', {
-        username: username.slice(0, 8) + '...'
-      });
-
-      ws.clientState = SecureStateManager.setState(ws, {
-        pendingSignalBundle: false
-      });
-
-      const isNewUser = ws.clientState?.isNewUser || false;
-      await context.authHandler.finalizeAuth(
-        ws,
-        username,
-        isNewUser ? 'User registered with Signal bundle' : 'User logged in with Signal bundle'
-      );
-    }
 
     await sendPQResponse(ws, {
       type: SignalType.LIBSIGNAL_PUBLISH_STATUS,
       success: true
     });
   } catch (error) {
-    const username = state.username || 'unknown';
     cryptoLogger.error('[LIBSIGNAL] Bundle storage failed', {
-      username,
+      inboxId: inboxId?.slice(0, 8) || 'unknown',
       error: error.message
     });
     await sendPQResponse(ws, {
@@ -103,10 +87,10 @@ export async function handleBundlePublish({ ws, parsed, state, context, sendPQRe
 }
 
 // Handle Signal Protocol bundle failure from client
-export async function handleBundleFailure({ ws, parsed, state, sendPQResponse }) {
-  const failureUsername = state.username || parsed.username || 'unknown';
+export async function handleBundleFailure({ ws, parsed, sendPQResponse }) {
+  const inboxId = ws._primaryInboxId;
   cryptoLogger.error('[LIBSIGNAL] Client bundle generation failed', {
-    username: failureUsername.slice(0, 8) + '...',
+    inboxId: inboxId?.slice(0, 8) || 'unknown',
     stage: parsed.stage,
     error: parsed.error
   });
@@ -124,90 +108,6 @@ export async function handleBundleFailure({ ws, parsed, state, sendPQResponse })
   }, 100);
 }
 
-// Handle Signal Protocol bundle request from client
-export async function handleBundleRequest({ ws, parsed, state, sendPQResponse }) {
-  cryptoLogger.info('[LIBSIGNAL] Bundle request', {
-    requester: (state.username || 'unknown').slice(0, 8) + '...',
-    target: (parsed.username || 'unknown').slice(0, 8) + '...'
-  });
-
-  try {
-    const requestedUsername = parsed.username;
-    if (!requestedUsername) {
-      throw new Error('No username provided');
-    }
-
-    const throttleKey = `bundle:throttle:${state.username}:${requestedUsername}`;
-    const now = Date.now();
-
-    try {
-      const { withRedisClient } = await import('../presence/presence.js');
-      const shouldThrottle = await withRedisClient(async (client) => {
-        const lastRequest = await client.get(throttleKey);
-        if (lastRequest && (now - parseInt(lastRequest, 10)) < 1000) {
-          return true;
-        }
-        await client.set(throttleKey, now.toString(), 'EX', 2);
-        return false;
-      });
-
-      if (shouldThrottle) {
-        cryptoLogger.warn('[LIBSIGNAL] Throttling bundle request', {
-          requester: state.username,
-          target: requestedUsername
-        });
-        await sendPQResponse(ws, { type: SignalType.OK });
-        return;
-      }
-    } catch (error) {
-      cryptoLogger.warn('[LIBSIGNAL] Redis throttle check failed, allowing request', { error: error.message });
-    }
-
-    const flatBundle = await LibsignalBundleDB.take(requestedUsername);
-    const bundle = flatBundle ? transformBundleForClient(flatBundle) : null;
-
-    const responsePayload = {
-      type: SignalType.LIBSIGNAL_DELIVER_BUNDLE,
-      username: requestedUsername,
-      bundle,
-      success: !!bundle,
-      error: bundle ? undefined : 'Bundle not found'
-    };
-
-    if (bundle) {
-      cryptoLogger.info('[LIBSIGNAL] Bundle found and sending', {
-        target: requestedUsername.slice(0, 8) + '...'
-      });
-    } else {
-      cryptoLogger.warn('[LIBSIGNAL] Bundle not found', {
-        target: requestedUsername.slice(0, 8) + '...'
-      });
-    }
-
-    if (ws.readyState !== 1) {
-      cryptoLogger.error('[LIBSIGNAL] Cannot send bundle - WebSocket not open', {
-        state: ws.readyState
-      });
-      return;
-    }
-
-    await sendPQResponse(ws, responsePayload);
-    cryptoLogger.debug('[LIBSIGNAL] Bundle response sent');
-  } catch (error) {
-    cryptoLogger.error('[LIBSIGNAL] Bundle retrieval failed', {
-      error: error.message
-    });
-    if (ws.readyState === 1) {
-      await sendPQResponse(ws, {
-        type: SignalType.LIBSIGNAL_DELIVER_BUNDLE,
-        username: parsed.username,
-        bundle: null,
-        success: false,
-        error: error.message
-      });
-    }
-  }
-}
 
 // Validate bundle structure
 function validateBundleStructure(bundle) {
@@ -236,6 +136,8 @@ function validateBundleStructure(bundle) {
     }
   }
 
+  // TODO: fix this the bundle doesnt have the deviceID.
+  // deviceId isnt the users its from the signal protocol and stays anon.
   if (bundle.deviceId !== undefined && typeof bundle.deviceId !== 'number') {
     errors.push('Invalid deviceId type');
   }
@@ -271,28 +173,5 @@ function transformBundleForStorage(bundle) {
     kyberPreKeyId: bundle.kyberPreKey?.keyId,
     kyberPreKeyPublicBase64: bundle.kyberPreKey?.publicKeyBase64,
     kyberPreKeySignatureBase64: bundle.kyberPreKey?.signatureBase64 || bundle.kyberPreKey?.signature
-  };
-}
-
-// Transform flat bundle from database to nested structure for client
-function transformBundleForClient(flatBundle) {
-  return {
-    registrationId: flatBundle.registrationId,
-    deviceId: flatBundle.deviceId,
-    identityKeyBase64: flatBundle.identityKeyBase64,
-    preKey: flatBundle.preKeyId ? {
-      keyId: flatBundle.preKeyId,
-      publicKeyBase64: flatBundle.preKeyPublicBase64
-    } : undefined,
-    signedPreKey: {
-      keyId: flatBundle.signedPreKeyId,
-      publicKeyBase64: flatBundle.signedPreKeyPublicBase64,
-      signatureBase64: flatBundle.signedPreKeySignatureBase64
-    },
-    kyberPreKey: {
-      keyId: flatBundle.kyberPreKeyId,
-      publicKeyBase64: flatBundle.kyberPreKeyPublicBase64,
-      signatureBase64: flatBundle.kyberPreKeySignatureBase64
-    }
   };
 }

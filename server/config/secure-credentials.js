@@ -1,8 +1,5 @@
 /**
- * Quantum-SECURE-CREDS Credentials Manager for HAProxy
- * 
- * Uses ML-KEM-1024 (Kyber) and ML-DSA-87 for post-quantum encryption
- * Generates and manages its own dedicated keypair
+ * Credentials Manager for HAProxy
  */
 
 import crypto from 'crypto';

@@ -60,7 +60,6 @@ export class TorManager {
             `Log notice file ${this.logPath}`,
             `HiddenServiceDir ${this.hiddenServiceDir}`,
             `HiddenServicePort 443 127.0.0.1:${listenPort}`,
-            `HiddenServicePort 80 127.0.0.1:${listenPort}`,
             `SocksPort 0`,
             `RunAsDaemon 0`,
         ].join('\n');
@@ -98,7 +97,7 @@ export class TorManager {
             for (let i = 0; i < 60; i++) {
                 const addr = await this.getOnionAddress();
                 if (addr) {
-                    console.log(`[TOR] Onion URL: http://${addr}`);
+                    console.log(`[TOR] Onion URL: https://${addr}`);
                     this.isRunningState = true;
                     return true;
                 }

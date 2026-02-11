@@ -237,6 +237,10 @@ impl InMemoryPreKeyStore {
         self.pre_keys.read().get(&id).cloned()
     }
 
+    pub fn prekey_count(&self) -> u32 {
+        self.pre_keys.read().len() as u32
+    }
+
     pub fn remove_pre_key(&self, id: PreKeyId) {
         self.pre_keys.write().remove(&id);
     }

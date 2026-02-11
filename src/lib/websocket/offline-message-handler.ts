@@ -74,7 +74,7 @@ class OfflineMessageHandler {
       await websocketClient.sendSecureControlMessage({
         type: 'store-offline-message',
         messageId,
-        to,
+        destinationInbox: to,
         longTermEnvelope,
         version: 'lt-v1'
       });
@@ -96,7 +96,7 @@ class OfflineMessageHandler {
           await websocketClient.sendSecureControlMessage({ type: 'retrieve-offline-messages' });
         } catch { }
       })
-      .catch(() => {});
+      .catch(() => { });
   }
 
   // Process incoming offline messages
@@ -131,7 +131,8 @@ class OfflineMessageHandler {
           to,
           encryptedPayload,
           offline: true,
-          messageId: sanitizeString(message.messageId ?? parsed.messageId)
+          messageId: sanitizeString(message.messageId ?? parsed.messageId),
+          __isRecursive: true
         };
 
         if (this.incomingCallback) {
@@ -156,7 +157,7 @@ export const offlineMessageHandler = new OfflineMessageHandler();
 export const offlineMessageQueue = {
   setDecryptionKey: (key: Uint8Array) => offlineMessageHandler.setDecryptionKey(key),
   clearDecryptionKey: () => offlineMessageHandler.clearDecryptionKey(),
-  setIncomingOfflineEncryptedMessageCallback: (cb: IncomingOfflineMessageCallback) => 
+  setIncomingOfflineEncryptedMessageCallback: (cb: IncomingOfflineMessageCallback) =>
     offlineMessageHandler.setIncomingOfflineEncryptedMessageCallback(cb),
   retrieveOfflineMessagesFromServer: () => offlineMessageHandler.retrieveOfflineMessagesFromServer(),
   queueForOfflineDelivery: (to: string, payload: EncryptedPayload, kyberKey: string, msgId?: string) =>

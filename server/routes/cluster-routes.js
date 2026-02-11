@@ -18,7 +18,7 @@ import { requireAdmin } from '../../scripts/admin-auth.js';
 const router = express.Router();
 
 // Get all server public keys for clients
-router.get('/server-keys', async (req, res) => {
+router.get('/server-keys', async (res) => {
   try {
     const keys = await getAllServerPublicKeys();
 
@@ -42,7 +42,7 @@ router.get('/server-keys', async (req, res) => {
 });
 
 // Health check endpoint for load balancer
-router.get('/health', async (req, res) => {
+router.get('/health', async (res) => {
   try {
     const manager = getClusterManager();
     const isHealthy = manager && manager.isApproved && !manager.isShuttingDown;
@@ -73,7 +73,7 @@ router.get('/health', async (req, res) => {
 });
 
 // Get cluster status (admin)
-router.get('/status', requireAdmin, async (req, res) => {
+router.get('/status', requireAdmin, async (res) => {
   try {
     const status = await getClusterStatus();
     res.json({
@@ -91,7 +91,7 @@ router.get('/status', requireAdmin, async (req, res) => {
 });
 
 // Get pending servers awaiting approval (admin)
-router.get('/pending', requireAdmin, async (req, res) => {
+router.get('/pending', requireAdmin, async (res) => {
   try {
     const pending = await getPendingServers();
     res.json({
@@ -109,7 +109,7 @@ router.get('/pending', requireAdmin, async (req, res) => {
 });
 
 // Approve a pending server (admin)
-router.post('/approve/:serverId', requireAdmin, async (req, res) => {
+router.post('/approve/:serverId', requireAdmin, async (res) => {
   try {
     const { serverId } = req.params;
 

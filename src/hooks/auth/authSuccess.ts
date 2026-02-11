@@ -96,6 +96,10 @@ export const createHandleAuthSuccess = (
       } catch { }
     } catch { }
 
+    try {
+      await signal.initStorage(username);
+    } catch { }
+
     try { await new Promise(resolve => setTimeout(resolve, 0)); } catch { }
 
     if (refs.keyManagerRef.current && refs.passphrasePlaintextRef.current) {

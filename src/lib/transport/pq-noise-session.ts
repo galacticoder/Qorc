@@ -16,12 +16,12 @@ export class PQNoiseSession {
     }
 
     // Create initiator session
-    static createInitiatorSession(
+    static async createInitiatorSession(
         peerId: string,
         ownKeys: OwnKeys,
         peerKeys: PeerKeys
-    ): { session: PQNoiseSession; message: PQNoiseHandshakeMessage } {
-        const { session, message } = PQSession.createInitiatorSession(peerId, ownKeys, peerKeys);
+    ): Promise<{ session: PQNoiseSession; message: PQNoiseHandshakeMessage }> {
+        const { session, message } = await PQSession.createInitiatorSession(peerId, ownKeys, peerKeys);
 
         return {
             session: new PQNoiseSession(session),
@@ -30,13 +30,13 @@ export class PQNoiseSession {
     }
 
     // Process initiator message as responder
-    static processInitiatorMessage(
+    static async processInitiatorMessage(
         peerId: string,
         ownKeys: OwnKeys,
         message: PQNoiseHandshakeMessage
-    ): { session: PQNoiseSession; response: PQNoiseHandshakeMessage } {
+    ): Promise<{ session: PQNoiseSession; response: PQNoiseHandshakeMessage }> {
         const parsed = deserializeHandshake(message);
-        const { session, response } = PQSession.processInitiatorMessage(peerId, ownKeys, parsed);
+        const { session, response } = await PQSession.processInitiatorMessage(peerId, ownKeys, parsed);
 
         return {
             session: new PQNoiseSession(session),
@@ -45,9 +45,9 @@ export class PQNoiseSession {
     }
 
     // Complete initiator handshake
-    completeHandshake(response: PQNoiseHandshakeMessage): void {
+    async completeHandshake(response: PQNoiseHandshakeMessage): Promise<void> {
         const parsed = deserializeHandshake(response);
-        this.session.completeHandshake(parsed);
+        await this.session.completeHandshake(parsed);
     }
 
     // Encrypt message

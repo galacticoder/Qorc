@@ -36,6 +36,9 @@ import {
     BASE64_STANDARD_REGEX
 } from '../constants';
 
+const INBOX_ID_REGEX = /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-a[a-f0-9]{3}-[a-f0-9]{12}$/i;
+const LEGACY_RELAY_ID_REGEX = /^[a-f0-9]{32}$/i;
+
 class QuicStream implements SecureStream {
     readonly id: string;
     readonly type: StreamType;
@@ -218,6 +221,8 @@ class QuicConnection implements SecureConnection {
     private _bridgeHandshakeReject: ((err: any) => void) | null = null;
     private _isResponderPending: boolean = false;
     private _pendingHandshakeToRespond: any = null;
+    private _pendingHandshakeMessage: any = null;
+    private _expectedHandshakeSessionId: string | null = null;
     private connectPromise: Promise<void> | null = null;
     public role: 'initiator' | 'responder' | 'auto' = 'auto';
     private collisionDetected: boolean = false;
@@ -230,7 +235,7 @@ class QuicConnection implements SecureConnection {
         peerIdentity: PeerIdentity,
         private ownKeys: OwnKeys,
         private relayUrl: string,
-        private localUsername: string,
+        private localRelayId: string,
         private owner: QuicTransport
     ) {
         this.peerId = peerId;
@@ -243,7 +248,7 @@ class QuicConnection implements SecureConnection {
 
     public getEffectiveRole(): 'initiator' | 'responder' {
         // lower username initiates
-        const isLower = this.localUsername < this.peerId;
+        const isLower = this.localRelayId < this.peerId;
         const detRole = isLower ? 'initiator' : 'responder';
 
         // If no collision and role is explicit then use that
@@ -316,12 +321,25 @@ class QuicConnection implements SecureConnection {
         return new Promise<void>((resolve, reject) => {
             const timeout = setTimeout(() => {
                 console.error(`[QuicConnection] connectViaRelay to ${this.peerId} timed out`);
+                if (this._state === 'connecting' || this._state === 'handshaking') {
+                    this.setState('failed');
+                }
+                try {
+                    if (this.socket && this.socket.readyState !== WebSocket.CLOSED) {
+                        this.socket.close();
+                    }
+                } catch { }
+                if (this.tauriUnlisten) {
+                    try { this.tauriUnlisten(); } catch { }
+                    this.tauriUnlisten = null;
+                    p2p.disconnect(this.peerId).catch(() => { });
+                }
                 reject(new Error('Handshake response timeout'));
             }, QUIC_CONNECTION_TIMEOUT_MS);
 
             try {
                 // Connect to relay server
-                const url = `${this.relayUrl}/relay?peer=${encodeURIComponent(this.peerId)}&username=${encodeURIComponent(this.localUsername)}&ts=${Date.now()}`;
+                const url = `${this.relayUrl}/relay?relayId=${encodeURIComponent(this.localRelayId)}&peerRelayId=${encodeURIComponent(this.peerId)}&ts=${Date.now()}`;
 
                 const isOnion = this.relayUrl.toLowerCase().includes('.onion');
                 const useTauriBridge = isOnion && isTauri();
@@ -329,6 +347,16 @@ class QuicConnection implements SecureConnection {
                 if (useTauriBridge) {
                     (async () => {
                         try {
+                            const wsUrl = url.replace(/^http/, 'ws');
+                            let bridgeOpened = false;
+                            const openBridge = () => {
+                                if (bridgeOpened) return;
+                                bridgeOpened = true;
+                                clearTimeout(timeout);
+                                this._transport = 'relay';
+                                this.handleTauriBridgeOpened(resolve, reject);
+                            };
+
                             this.tauriUnlisten = await events.onP2PMessage((evt: any) => {
                                 const isMatch = evt?.connectionId === this.peerId;
 
@@ -338,13 +366,14 @@ class QuicConnection implements SecureConnection {
                                 }
 
                                 if (evt?.type === '__p2p_signaling_connected') {
-                                    clearTimeout(timeout);
-                                    this._transport = 'relay';
-                                    this.handleTauriBridgeOpened(resolve, reject);
+                                    openBridge();
                                 } else if (evt?.type === '__p2p_signaling_closed') {
                                     console.warn(`[P2P Bridge] ${this.peerId} signaling closed:`, evt.reason);
                                     this.handleTauriBridgeClosed();
-                                    reject(new Error(evt.reason || 'Signaling closed'));
+                                    if (!bridgeOpened) {
+                                        clearTimeout(timeout);
+                                        reject(new Error(evt.reason || 'Signaling closed'));
+                                    }
                                 } else if (evt?.type === 'message' || !evt?.type) {
                                     let data: any = evt.data;
                                     let binaryData: Uint8Array | null = null;
@@ -429,14 +458,29 @@ class QuicConnection implements SecureConnection {
                                 }
                             });
 
-                            const wsUrl = url.replace(/^http/, 'ws');
-                            const res = await p2p.connect(this.peerId, wsUrl, {
-                                username: this.localUsername,
+                            const connectBridge = () => p2p.connect(this.peerId, wsUrl, {
+                                username: this.localRelayId,
                                 registrationPayload: { peer: this.peerId }
                             });
 
+                            let res = await connectBridge();
                             if (!res.success) {
                                 throw new Error(res.error || 'Failed to connect via Tauri P2P bridge');
+                            }
+
+                            if (res.already_connected) {
+                                // Force-refresh stale bridge state so this connection attempt owns the signaling socket lifecycle.
+                                console.warn(`[QuicConnection] Bridge already_connected for ${this.peerId}; forcing reconnect`);
+                                await p2p.disconnect(this.peerId).catch(() => { });
+                                res = await connectBridge();
+                                if (!res.success) {
+                                    throw new Error(res.error || 'Failed to reconnect via Tauri P2P bridge');
+                                }
+                            }
+
+                            if (res.already_connected) {
+                                // Some backends do not emit a second connected event for already-open sockets.
+                                openBridge();
                             }
                         } catch (err) {
                             clearTimeout(timeout);
@@ -515,7 +559,7 @@ class QuicConnection implements SecureConnection {
     private async performHandshake(): Promise<void> {
         this.setState('handshaking');
 
-        const isDeterministicInitiator = this.localUsername < this.peerId;
+        const isDeterministicInitiator = this.localRelayId < this.peerId;
 
         if (!this.peerIdentity.kyberPublicKey || this.peerIdentity.kyberPublicKey.length === 0) {
             const start = Date.now();
@@ -553,30 +597,34 @@ class QuicConnection implements SecureConnection {
         // Create initiator session
         let session, message;
         try {
-            const result = PQNoiseSession.createInitiatorSession(
+            const result = await PQNoiseSession.createInitiatorSession(
                 this.peerId,
                 this.ownKeys,
                 peerKeys
             );
             session = result.session;
             message = result.message;
+            this._expectedHandshakeSessionId = message.sessionId;
         } catch (err) {
             throw err;
         }
 
         const handshakeData = this.tauriUnlisten ? this.prepareHandshakeObject(message) : this.serializeHandshakeMessage(message);
+        const responsePromise = this.waitForHandshakeResponse(this._expectedHandshakeSessionId || undefined);
         await this.sendRaw(handshakeData);
 
-        const response = await this.waitForHandshakeResponse();
+        const response = await responsePromise;
 
         if (response.type === 'init') {
             await this.handleIncomingHandshake(response);
+            this._expectedHandshakeSessionId = null;
             return;
         }
 
         try {
             session.completeHandshake(response);
             this.session = session;
+            this._expectedHandshakeSessionId = null;
 
             if (response.signerPublicKey) {
                 const harvestedIdentity: PeerIdentity = {
@@ -595,6 +643,7 @@ class QuicConnection implements SecureConnection {
             this.startKeepalive();
         } catch (err) {
             this.setState('failed');
+            this._expectedHandshakeSessionId = null;
             throw err;
         }
     }
@@ -609,7 +658,7 @@ class QuicConnection implements SecureConnection {
 
         return {
             ...message,
-            from: this.localUsername,
+            from: this.localRelayId,
             version: message.version || 'hybrid-session-v1',
             type: message.type,
             sessionId: message.sessionId,
@@ -686,25 +735,46 @@ class QuicConnection implements SecureConnection {
             }
 
             return null;
-        } catch (err) {
+        } catch {
             return null;
         }
     }
 
     // Wait for handshake response
-    private async waitForHandshakeResponse(): Promise<any> {
+    private async waitForHandshakeResponse(expectedSessionId?: string): Promise<any> {
+        if (this._pendingHandshakeMessage) {
+            const pending = this.normalizeHandshakeMessage(this._pendingHandshakeMessage);
+            this._pendingHandshakeMessage = null;
+            if (pending?.type === 'init') {
+                return pending;
+            }
+            if (pending?.type === 'response') {
+                if (!expectedSessionId || pending.sessionId === expectedSessionId) {
+                    return pending;
+                }
+            }
+        }
+
         if (this.tauriUnlisten) {
             return new Promise((resolve, reject) => {
                 const timeout = setTimeout(() => {
                     console.error(`[QuicConnection] Handshake response timeout (bridge) from ${this.peerId}`);
                     this._bridgeHandshakeResolve = null;
                     this._bridgeHandshakeReject = null;
+                    if (this._state === 'connecting' || this._state === 'handshaking') {
+                        this.setState('failed');
+                    }
                     reject(new Error('Handshake response timeout (bridge)'));
                 }, QUIC_CONNECTION_TIMEOUT_MS);
 
                 this._bridgeHandshakeResolve = (data) => {
                     if (data && typeof data === 'object' && !(data instanceof Uint8Array)) {
                         const response = this.normalizeHandshakeMessage(data);
+                        if (response?.type === 'response' && expectedSessionId) {
+                            if (!response.sessionId || response.sessionId !== expectedSessionId) {
+                                return;
+                            }
+                        }
                         clearTimeout(timeout);
                         this._bridgeHandshakeResolve = null;
                         this._bridgeHandshakeReject = null;
@@ -714,6 +784,11 @@ class QuicConnection implements SecureConnection {
 
                     const response = this.deserializeHandshakeMessage(data);
                     if (response) {
+                        if (response?.type === 'response' && expectedSessionId) {
+                            if (!response.sessionId || response.sessionId !== expectedSessionId) {
+                                return;
+                            }
+                        }
                         clearTimeout(timeout);
                         this._bridgeHandshakeResolve = null;
                         this._bridgeHandshakeReject = null;
@@ -726,6 +801,14 @@ class QuicConnection implements SecureConnection {
                     this._bridgeHandshakeReject = null;
                     reject(err);
                 };
+
+                if (this._pendingHandshakeMessage) {
+                    const pending = this._pendingHandshakeMessage;
+                    this._pendingHandshakeMessage = null;
+                    if (this._bridgeHandshakeResolve) {
+                        this._bridgeHandshakeResolve(pending);
+                    }
+                }
             });
         }
 
@@ -749,6 +832,9 @@ class QuicConnection implements SecureConnection {
 
             const timeout = setTimeout(() => {
                 cleanup();
+                if (this._state === 'connecting' || this._state === 'handshaking') {
+                    this.setState('failed');
+                }
                 reject(new Error('Handshake response timeout'));
             }, QUIC_CONNECTION_TIMEOUT_MS);
 
@@ -790,12 +876,17 @@ class QuicConnection implements SecureConnection {
                     }
 
                     if (response.type === 'response') {
+                        if (expectedSessionId) {
+                            if (!response.sessionId || response.sessionId !== expectedSessionId) {
+                                return;
+                            }
+                        }
                         clearTimeout(timeout);
                         cleanup();
                         resolve(response);
                         return;
                     }
-                } catch (err) { }
+                } catch { }
             };
         });
     }
@@ -815,11 +906,27 @@ class QuicConnection implements SecureConnection {
             return;
         }
 
+        if (this._pendingHandshakeMessage) {
+            const pending = this.normalizeHandshakeMessage(this._pendingHandshakeMessage);
+            this._pendingHandshakeMessage = null;
+            if (pending?.type === 'init') {
+                await this.handleIncomingHandshake(pending);
+                this._connectedAt = Date.now();
+                this.setState('connected');
+                this.startKeepalive();
+                return;
+            }
+        }
+
         if (this.tauriUnlisten) {
             return new Promise<void>((resolve, reject) => {
                 const timeout = setTimeout(() => {
                     this._bridgeHandshakeResolve = null;
                     this._bridgeHandshakeReject = null;
+                    if (this._state === 'connecting' || this._state === 'handshaking') {
+                        this.setState('failed');
+                    }
+                    p2p.disconnect(this.peerId).catch(() => { });
                     reject(new Error('Timeout waiting for initiator handshake (bridge)'));
                 }, QUIC_CONNECTION_TIMEOUT_MS);
 
@@ -883,6 +990,24 @@ class QuicConnection implements SecureConnection {
                         reject(err);
                     });
                 }
+
+                if (this._pendingHandshakeMessage) {
+                    const pending = this.normalizeHandshakeMessage(this._pendingHandshakeMessage);
+                    this._pendingHandshakeMessage = null;
+                    if (pending?.type === 'init') {
+                        clearTimeout(timeout);
+                        this._bridgeHandshakeResolve = null;
+                        this._bridgeHandshakeReject = null;
+                        this.handleIncomingHandshake(pending).then(() => {
+                            this._connectedAt = Date.now();
+                            this.setState('connected');
+                            this.startKeepalive();
+                            resolve();
+                        }).catch((err) => {
+                            reject(err);
+                        });
+                    }
+                }
             });
         }
 
@@ -896,6 +1021,9 @@ class QuicConnection implements SecureConnection {
 
             const timeout = setTimeout(() => {
                 if (this.socket !== socket) return;
+                if (this._state === 'connecting' || this._state === 'handshaking') {
+                    this.setState('failed');
+                }
                 try { socket.close(4001, 'Handshake timeout'); } catch { }
                 reject(new Error('Timeout waiting for initiator handshake'));
             }, QUIC_CONNECTION_TIMEOUT_MS);
@@ -1112,6 +1240,15 @@ class QuicConnection implements SecureConnection {
             this.tauriUnlisten = null;
         }
 
+        if (this._bridgeHandshakeReject) {
+            try { this._bridgeHandshakeReject(new Error('Bridge disconnected')); } catch { }
+        }
+        this._bridgeHandshakeResolve = null;
+        this._bridgeHandshakeReject = null;
+        this._pendingHandshakeMessage = null;
+        this._pendingHandshakeToRespond = null;
+        this._expectedHandshakeSessionId = null;
+
         if (this._state === 'connected') {
             this.setState('reconnecting');
             this.attemptReconnect();
@@ -1208,7 +1345,7 @@ class QuicConnection implements SecureConnection {
         this.setState('handshaking');
         try {
             const normalized = this.normalizeHandshakeMessage(handshakeMsg);
-            const { session, response } = PQNoiseSession.processInitiatorMessage(
+            const { session, response } = await PQNoiseSession.processInitiatorMessage(
                 this.peerId,
                 this.ownKeys,
                 normalized
@@ -1250,8 +1387,11 @@ class QuicConnection implements SecureConnection {
             return;
         }
 
-        if (msg.type === 'init') {
-            this._pendingHandshakeToRespond = msg;
+        if (msg.type === 'init' || msg.type === 'response') {
+            this._pendingHandshakeMessage = msg;
+            if (msg.type === 'init') {
+                this._pendingHandshakeToRespond = msg;
+            }
         }
     }
 
@@ -1268,7 +1408,7 @@ class QuicConnection implements SecureConnection {
 
         if (typeof window !== 'undefined') {
             const event = new CustomEvent(EventType.P2P_CONNECTION_STATE_CHANGE, {
-                detail: { peerId: this.peerId, state }
+                detail: { peerId: this.owner.resolveAppPeerId(this.peerId), state }
             });
             window.dispatchEvent(event);
         }
@@ -1326,12 +1466,12 @@ class QuicConnection implements SecureConnection {
     }
 
     // Abort a stream
-    abortStream(streamId: string, reason?: string): void {
+    abortStream(streamId: string, _reason?: string): void {
         this.streams.delete(streamId);
     }
 
     // Close the connection
-    async close(reason?: string): Promise<void> {
+    async close(_reason?: string): Promise<void> {
         this.setState('disconnected');
         this.stopKeepalive();
 
@@ -1354,7 +1494,7 @@ class QuicConnection implements SecureConnection {
 
         // Close bridge if using Tauri
         if (this.tauriUnlisten) {
-            try { this.tauriUnlisten(); } catch (e) { }
+            try { this.tauriUnlisten(); } catch { }
             this.tauriUnlisten = null;
             p2p.disconnect(this.peerId).catch(() => { });
         }
@@ -1407,9 +1547,11 @@ class QuicConnection implements SecureConnection {
                     const msg = JSON.parse(text);
 
                     // Dispatch to transport level handlers
+                    const from = this.owner.resolveAppPeerId(msg.from || this.peerId);
+                    const to = msg.to ? this.owner.resolveAppPeerId(msg.to) : this.owner.getLocalUsername();
                     this.owner.dispatchMessage({
-                        from: msg.from || this.peerId,
-                        to: msg.to || this.localUsername,
+                        from,
+                        to,
                         type: msg.type as SignalType,
                         payload: msg.payload, 
                         timestamp: msg.timestamp || Date.now(),
@@ -1418,9 +1560,9 @@ class QuicConnection implements SecureConnection {
                         routeProof: msg.routeProof,
                         signature: msg.signature
                     });
-                } catch (err) { }
+                } catch { }
             }
-        } catch (err) { }
+        } catch { }
     }
 
     // Get the session
@@ -1436,6 +1578,7 @@ export class QuicTransport implements SecureTransport {
     private initialized: boolean = false;
     private initializing: boolean = false;
     private localUsername: string = '';
+    private localRelayId: string = '';
     private ownKeys: OwnKeys | null = null;
     private relayServerUrl: string = '';
     private signalServerUrl: string = '';
@@ -1446,8 +1589,38 @@ export class QuicTransport implements SecureTransport {
     private disconnectHandlers: Set<(peerId: string, reason?: string) => void> = new Set();
 
     private usernameAliases: Map<string, string> = new Map();
+    private knownPeerIdentities: Map<string, PeerIdentity> = new Map();
+    private peerCertRequestTimestamps: Map<string, number> = new Map();
     private recentRelayFailures: Map<string, { count: number, lastTime: number }> = new Map();
     private registrationSocket: WebSocket | null = null;
+
+    private isRelayId(value: string): boolean {
+        return INBOX_ID_REGEX.test(value);
+    }
+
+    private isSafeRelayId(value: string): boolean {
+        return this.isRelayId(value) || LEGACY_RELAY_ID_REGEX.test(value);
+    }
+
+    private resolveRelayId(peerId: string): string | null {
+        if (!peerId) return null;
+        if (this.isSafeRelayId(peerId)) return peerId;
+        const alias = this.usernameAliases.get(peerId);
+        if (alias && this.isSafeRelayId(alias)) return alias;
+        return null;
+    }
+
+    public resolveAppPeerId(peerId: string): string {
+        if (!peerId) return peerId;
+        if (!this.isSafeRelayId(peerId)) return peerId;
+        const alias = this.usernameAliases.get(peerId);
+        if (alias && !this.isSafeRelayId(alias)) return alias;
+        return peerId;
+    }
+
+    public getLocalUsername(): string {
+        return this.localUsername;
+    }
 
     // Initialize transport
     async initialize(options: TransportInitOptions): Promise<void> {
@@ -1461,7 +1634,9 @@ export class QuicTransport implements SecureTransport {
             }
 
             if (this.initialized) {
+                const nextRelayId = options.localRelayId || this.localRelayId || '';
                 if (this.localUsername === options.localUsername &&
+                    this.localRelayId === nextRelayId &&
                     this.relayServerUrl === (options.relayServerUrl || '') &&
                     this.signalServerUrl === (options.signalServerUrl || '')) {
                     return;
@@ -1473,6 +1648,7 @@ export class QuicTransport implements SecureTransport {
         this.initializing = true;
 
         this.localUsername = options.localUsername;
+        this.localRelayId = options.localRelayId || '';
         this.ownKeys = {
             kyberKeyPair: options.kyberKeyPair,
             dilithiumKeyPair: options.dilithiumKeyPair,
@@ -1480,6 +1656,14 @@ export class QuicTransport implements SecureTransport {
         };
         this.relayServerUrl = options.relayServerUrl || '';
         this.signalServerUrl = options.signalServerUrl || '';
+
+        if (!this.localRelayId) {
+            this.initializing = false;
+            throw new Error('Missing local relay ID for QUIC transport initialization');
+        }
+        if (this.localUsername && this.localRelayId) {
+            this.registerUsernameAlias(this.localUsername, this.localRelayId);
+        }
 
         await this.registerWithRelay();
 
@@ -1501,13 +1685,28 @@ export class QuicTransport implements SecureTransport {
             }
         }
 
-        const url = `${this.relayServerUrl}/relay?register=true&username=${encodeURIComponent(this.localUsername)}`;
+        const url = `${this.relayServerUrl}/relay?register=true&relayId=${encodeURIComponent(this.localRelayId)}`;
         const isTor = typeof window !== 'undefined' && window.location.hostname.endsWith('.onion');
         const isTauriEnv = isTauri();
 
         if (isTauriEnv && (url.includes('.onion') || isTor)) {
             const wsUrl = url.replace(/^http/, 'ws');
             const connectionId = 'registration';
+
+            const stopRegistrationKeepalive = () => {
+                if (this.registrationKeepaliveTimer) {
+                    clearInterval(this.registrationKeepaliveTimer);
+                    this.registrationKeepaliveTimer = null;
+                }
+            };
+
+            const startRegistrationKeepalive = () => {
+                if (this.registrationKeepaliveTimer) return;
+                this.registrationKeepaliveTimer = setInterval(() => {
+                    const pingFrame = PostQuantumUtils.uint8ArrayToBase64(new Uint8Array([0x00, 0x00]));
+                    p2p.send(connectionId, pingFrame).catch(() => { });
+                }, QUIC_KEEPALIVE_INTERVAL_MS);
+            };
 
             // Unlisten previous if exists
             if ((this as any).tauriRegUnlisten) {
@@ -1520,6 +1719,8 @@ export class QuicTransport implements SecureTransport {
                 }
 
                 if (event.type === '__p2p_signaling_connected') {
+                    (this as any)._regBridgeRetries = 0;
+                    startRegistrationKeepalive();
                 } else if (event.type === 'message') {
                     let data = event.data;
                     if (typeof data === 'string' && !data.trim().startsWith('{')) {
@@ -1529,16 +1730,26 @@ export class QuicTransport implements SecureTransport {
                     }
                     this.handleRegistrationMessage(data);
                 } else if (event.type === '__p2p_signaling_closed') {
-                    console.warn('[QUIC Transport] Registration bridge closed');
+                    stopRegistrationKeepalive();
                     if (this.initialized) {
-                        const retryUrl = wsUrl;
-                        p2p.connect(connectionId, retryUrl, { username: this.localUsername }).catch(() => { });
+                        const retries = ((this as any)._regBridgeRetries ?? 0) + 1;
+                        (this as any)._regBridgeRetries = retries;
+                        const delay = Math.min(5000 * Math.pow(2, retries - 1), 30000);
+                        setTimeout(() => {
+                            if (this.initialized) {
+                                p2p.connect(connectionId, wsUrl, { username: this.localRelayId }).catch(() => { });
+                            }
+                        }, delay);
                     }
                 }
             });
 
-            p2p.connect(connectionId, wsUrl, { username: this.localUsername }).then(res => {
-                if (!res.success) console.error('[QUIC Transport] P2P bridge registration failed:', res.error);
+            p2p.connect(connectionId, wsUrl, { username: this.localRelayId }).then(res => {
+                if (!res.success) {
+                    console.error('[QUIC Transport] P2P bridge registration failed:', res.error);
+                } else {
+                    startRegistrationKeepalive();
+                }
             }).catch(err => {
                 console.error('[QUIC Transport] P2P bridge registration error:', err);
             });
@@ -1611,8 +1822,23 @@ export class QuicTransport implements SecureTransport {
     async connect(peerId: string, options: ConnectOptions): Promise<SecureConnection> {
         if (!this.initialized || !this.ownKeys) { throw new Error('Transport not initialized'); }
 
+        if (options.peerIdentity) {
+            this.registerPeerIdentity(peerId, options.peerIdentity);
+        }
+
+        const relayId = this.resolveRelayId(peerId);
+        if (!relayId) {
+            this.requestPeerCertificate(peerId);
+            throw new Error(`Missing relay ID for ${peerId}`);
+        }
+        const appPeerId = this.resolveAppPeerId(peerId);
+
         // Check for existing connection
-        const existing = this.connections.get(peerId);
+        let existing = this.connections.get(relayId);
+        if (!existing) {
+            const alias = this.usernameAliases.get(peerId);
+            if (alias) existing = this.connections.get(alias);
+        }
         if (existing) {
             if (existing.state === 'connected' || existing.state === 'connecting' || existing.state === 'handshaking') {
                 if (options.peerIdentity && options.peerIdentity.kyberPublicKey?.length > 0) {
@@ -1621,54 +1847,66 @@ export class QuicTransport implements SecureTransport {
 
                 if (existing.state === 'connecting' || existing.state === 'handshaking') {
                     return new Promise((resolve, reject) => {
-                        const timeout = setTimeout(() => {
-                            console.error(`[QUIC Transport] connect(${peerId}) timed out waiting for existing connection (state was ${existing.state})`);
-                            reject(new Error('Connection timeout waiting for existing connection'));
-                        }, options.timeout || QUIC_CONNECTION_TIMEOUT_MS);
-
-                        existing.onStateChange((state) => {
+                        let settled = false;
+                        const unsubscribe = existing.onStateChange((state) => {
+                            if (settled) return;
                             if (state === 'connected') {
+                                settled = true;
                                 clearTimeout(timeout);
+                                try { unsubscribe(); } catch { }
                                 resolve(existing);
                             } else if (state === 'failed' || state === 'disconnected') {
+                                settled = true;
                                 clearTimeout(timeout);
+                                try { unsubscribe(); } catch { }
                                 reject(new Error(`Connection failed: ${state}`));
                             }
                         });
+
+                        const timeout = setTimeout(() => {
+                            if (settled) return;
+                            settled = true;
+                            try { unsubscribe(); } catch { }
+                            console.error(`[QUIC Transport] connect(${peerId}) timed out waiting for existing connection (state was ${existing.state})`);
+                            // Tear down stale in-progress state so the next attempt can recreate cleanly.
+                            existing.close('stale-connecting-timeout').catch(() => { });
+                            this.connections.delete(relayId);
+                            reject(new Error('Connection timeout waiting for existing connection'));
+                        }, options.timeout || QUIC_CONNECTION_TIMEOUT_MS);
                     });
                 }
-                const isInitiator = this.localUsername < peerId;
+                const isInitiator = this.localRelayId < relayId;
                 if (isInitiator && existing.role === 'responder') {
                     existing.connect(true).catch(() => { });
                 }
                 return existing;
             }
 
-            this.connections.delete(peerId);
+            this.connections.delete(relayId);
         }
 
         // Create new connection
         const connection = new QuicConnection(
-            peerId,
+            relayId,
             options.peerIdentity,
             this.ownKeys,
             this.relayServerUrl,
-            this.localUsername,
+            this.localRelayId,
             this
         );
 
         // Deterministic initiator
-        const isInitiator = this.localUsername < peerId;
+        const isInitiator = this.localRelayId < relayId;
 
         connection.onStateChange((state) => {
             if (state === 'connected') {
                 for (const handler of Array.from(this.connectHandlers)) {
-                    try { handler(peerId); } catch { }
+                    try { handler(appPeerId); } catch { }
                 }
             } else if (state === 'disconnected' || state === 'failed') {
-                this.connections.delete(peerId);
+                this.connections.delete(relayId);
                 for (const handler of Array.from(this.disconnectHandlers)) {
-                    try { handler(peerId, state); } catch { }
+                    try { handler(appPeerId, state); } catch { }
                 }
             }
 
@@ -1677,7 +1915,7 @@ export class QuicTransport implements SecureTransport {
             }
         });
 
-        this.connections.set(peerId, connection);
+        this.connections.set(relayId, connection);
 
         const timeout = options.timeout || QUIC_CONNECTION_TIMEOUT_MS;
         const timeoutPromise = new Promise<never>((_, reject) => {
@@ -1691,7 +1929,13 @@ export class QuicTransport implements SecureTransport {
                 await Promise.race([connection.connectAsResponderPending(), timeoutPromise]);
             }
         } catch (error) {
-            this.connections.delete(peerId);
+            try {
+                if (connection.state !== 'failed' && connection.state !== 'disconnected') {
+                    await connection.close('connect-attempt-failed');
+                }
+            } catch { }
+            // Connection map is keyed by relayId, not app-level peerId.
+            this.connections.delete(relayId);
             throw error;
         }
 
@@ -1700,9 +1944,15 @@ export class QuicTransport implements SecureTransport {
 
     // Disconnect from a peer
     async disconnect(peerId: string): Promise<void> {
-        const connection = this.connections.get(peerId);
+        const relayId = this.resolveRelayId(peerId) || peerId;
+        let connection = this.connections.get(relayId);
+        if (!connection) {
+            const alias = this.usernameAliases.get(peerId);
+            if (alias) connection = this.connections.get(alias);
+        }
         if (connection) {
             await connection.close();
+            this.connections.delete(relayId);
             this.connections.delete(peerId);
         }
     }
@@ -1723,7 +1973,7 @@ export class QuicTransport implements SecureTransport {
         }
 
         if ((this as any).tauriRegUnlisten) {
-            try { (this as any).tauriRegUnlisten(); } catch (e) { }
+            try { (this as any).tauriRegUnlisten(); } catch { }
             (this as any).tauriRegUnlisten = null;
             p2p.disconnect('registration').catch(() => { });
         }
@@ -1771,15 +2021,59 @@ export class QuicTransport implements SecureTransport {
             connection.state === 'reconnecting';
     }
 
-    // Register a bidirectional alias between original username and hashed peerId
-    registerUsernameAlias(originalUsername: string, hashedPeerId: string): void {
-        this.usernameAliases.set(originalUsername, hashedPeerId);
-        this.usernameAliases.set(hashedPeerId, originalUsername);
+    // Register a bidirectional alias between original username and relay ID (inboxId)
+    registerUsernameAlias(originalUsername: string, relayId: string): void {
+        this.usernameAliases.set(originalUsername, relayId);
+        this.usernameAliases.set(relayId, originalUsername);
+        const existing = this.knownPeerIdentities.get(originalUsername) || this.knownPeerIdentities.get(relayId);
+        if (existing) {
+            this.knownPeerIdentities.set(originalUsername, existing);
+            this.knownPeerIdentities.set(relayId, existing);
+        }
     }
 
     // Resolve a potential alias (hash -> username or username -> hash)
     resolveUsernameAlias(alias: string): string | undefined {
         return this.usernameAliases.get(alias);
+    }
+
+    // Register or update a known peer identity for future connections
+    registerPeerIdentity(peerId: string, identity: PeerIdentity): void {
+        if (!peerId || !identity) return;
+        this.knownPeerIdentities.set(peerId, identity);
+        this.peerCertRequestTimestamps.delete(peerId);
+        const alias = this.usernameAliases.get(peerId);
+        if (alias) {
+            this.knownPeerIdentities.set(alias, identity);
+            this.peerCertRequestTimestamps.delete(alias);
+        }
+
+        let connection = this.connections.get(peerId);
+        if (!connection) {
+            if (alias) connection = this.connections.get(alias);
+        }
+
+        if (connection) {
+            try { connection.updatePeerIdentity(identity); } catch { }
+
+            const isInitiator = this.localRelayId < (this.resolveRelayId(peerId) || peerId);
+            if (isInitiator && connection.role === 'responder') {
+                connection.connect(true).catch(() => { });
+            }
+        }
+    }
+
+    private requestPeerCertificate(peerId: string): void {
+        if (typeof window === 'undefined' || !peerId) return;
+        const appPeerId = this.resolveAppPeerId(peerId);
+        if (this.isSafeRelayId(appPeerId)) return;
+        const now = Date.now();
+        const last = this.peerCertRequestTimestamps.get(appPeerId) || 0;
+        if (now - last < 30_000) return;
+        this.peerCertRequestTimestamps.set(appPeerId, now);
+        try {
+            window.dispatchEvent(new CustomEvent(EventType.P2P_FETCH_PEER_CERT, { detail: { peer: appPeerId } }));
+        } catch { }
     }
 
     // Send a message to a peer
@@ -1803,10 +2097,11 @@ export class QuicTransport implements SecureTransport {
             stream = await connection.createStream({ type: type as any });
         }
 
+        const toUser = this.resolveAppPeerId(peerId);
         const payload = JSON.stringify({
             type,
             from: this.localUsername,
-            to: peerId,
+            to: toUser,
             payload: message,
             timestamp: Date.now()
         });
@@ -1817,14 +2112,6 @@ export class QuicTransport implements SecureTransport {
 
     // Internal: dispatch a message to all handlers
     dispatchMessage(message: IncomingMessage): void {
-        if (typeof window !== 'undefined') {
-            try {
-                window.dispatchEvent(new CustomEvent(EventType.P2P_MESSAGE_RECEIVED, {
-                    detail: message
-                }));
-            } catch { }
-        }
-
         for (const handler of Array.from(this.messageHandlers)) {
             try {
                 handler(message);
@@ -1876,25 +2163,43 @@ export class QuicTransport implements SecureTransport {
 
     private async processRegistrationSignal(msg: any): Promise<void> {
         if (msg.type === 'relay-request') {
-            const failures = this.recentRelayFailures.get(msg.from);
+            const relayFrom = typeof msg.from === 'string' ? msg.from.trim() : '';
+            if (!relayFrom) return;
+            if (!this.isSafeRelayId(relayFrom)) return;
+
+            const appPeerId = this.resolveAppPeerId(relayFrom);
+
+            const failureKey = relayFrom;
+            const failures = this.recentRelayFailures.get(failureKey);
             if (failures) {
                 if (failures.count > 4 && Date.now() - failures.lastTime < 60000) {
-                    console.warn(`[QUIC Transport] Ignoring relay-request from ${msg.from} due to rate limiting`);
+                    console.warn(`[QUIC Transport] Ignoring relay-request from ${failureKey} due to rate limiting`);
                     return;
                 }
-                if (Date.now() - failures.lastTime >= 60000) this.recentRelayFailures.delete(msg.from);
+                if (Date.now() - failures.lastTime >= 60000) this.recentRelayFailures.delete(failureKey);
             }
 
-            let connection = this.connections.get(msg.from) as QuicConnection | undefined;
+            let connection = this.connections.get(relayFrom) as QuicConnection | undefined;
+            if (!connection) {
+                const aliasConn = this.usernameAliases.get(relayFrom);
+                if (aliasConn) connection = this.connections.get(aliasConn) as QuicConnection | undefined;
+            }
 
-            const peerIdentity: PeerIdentity = {
-                username: msg.from,
+            let cachedIdentity = this.knownPeerIdentities.get(relayFrom);
+            if (!cachedIdentity) {
+                const alias = this.usernameAliases.get(relayFrom);
+                if (alias) cachedIdentity = this.knownPeerIdentities.get(alias);
+            }
+
+            const peerIdentity: PeerIdentity = cachedIdentity ?? {
+                username: appPeerId,
                 kyberPublicKey: msg.ephemeralKyberPublic ? PostQuantumUtils.asUint8Array(msg.ephemeralKyberPublic) : new Uint8Array(0),
                 dilithiumPublicKey: msg.signerPublicKey ? PostQuantumUtils.asUint8Array(msg.signerPublicKey) : new Uint8Array(0),
                 x25519PublicKey: msg.ephemeralX25519Public ? PostQuantumUtils.asUint8Array(msg.ephemeralX25519Public) : new Uint8Array(0)
             };
 
-            const isInitiator = this.localUsername < msg.from;
+            const hasPeerKeys = !!(cachedIdentity?.kyberPublicKey && cachedIdentity.kyberPublicKey.length > 0);
+            const isInitiator = hasPeerKeys && this.localRelayId < relayFrom;
 
             if (connection && (connection.state === 'connected' || connection.state === 'handshaking' || connection.state === 'connecting')) {
                 // If we are initiator but existing connection is responder then upgrade it
@@ -1906,45 +2211,52 @@ export class QuicTransport implements SecureTransport {
             }
 
             if (!connection || connection.state === 'disconnected' || connection.state === 'failed') {
+                if (!hasPeerKeys) {
+                    this.requestPeerCertificate(appPeerId);
+                }
                 connection = new QuicConnection(
-                    msg.from,
+                    relayFrom,
                     peerIdentity,
                     this.ownKeys!,
                     this.relayServerUrl,
-                    this.localUsername,
+                    this.localRelayId,
                     this
                 );
                 connection.onStateChange((state) => {
                     if (state === 'connected') {
                         for (const handler of Array.from(this.connectHandlers)) {
-                            try { handler(msg.from); } catch { }
+                            try { handler(appPeerId); } catch { }
                         }
                     } else if (state === 'disconnected' || state === 'failed') {
-                        this.connections.delete(msg.from);
+                        this.connections.delete(relayFrom);
                         for (const handler of Array.from(this.disconnectHandlers)) {
-                            try { handler(msg.from, state); } catch { }
+                            try { handler(appPeerId, state); } catch { }
                         }
                     }
                 });
 
-                this.connections.set(msg.from, connection);
+                this.connections.set(relayFrom, connection);
 
-                const isInitiator = this.localUsername < msg.from;
                 const connectAction = isInitiator ? connection.connect(true) : connection.connectAsResponderPending();
 
                 connectAction.then(() => {
-                    this.recentRelayFailures.delete(msg.from);
+                    this.recentRelayFailures.delete(relayFrom);
                 }).catch(() => {
-                    this.connections.delete(msg.from);
-                    const current = this.recentRelayFailures.get(msg.from) || { count: 0, lastTime: 0 };
-                    this.recentRelayFailures.set(msg.from, {
+                    this.connections.delete(relayFrom);
+                    const current = this.recentRelayFailures.get(relayFrom) || { count: 0, lastTime: 0 };
+                    this.recentRelayFailures.set(relayFrom, {
                         count: current.count + 1,
                         lastTime: Date.now()
                     });
                 });
             }
         } else if (msg.from && (msg.type === 'init' || msg.type === 'response' || msg.type === 'ice')) {
-            const connection = this.connections.get(msg.from) as QuicConnection | undefined;
+            const relayFrom = typeof msg.from === 'string' ? (this.resolveRelayId(msg.from) || msg.from) : msg.from;
+            let connection = this.connections.get(relayFrom) as QuicConnection | undefined;
+            if (!connection && typeof relayFrom === 'string') {
+                const alias = this.usernameAliases.get(relayFrom);
+                if (alias) connection = this.connections.get(alias) as QuicConnection | undefined;
+            }
             if (connection) {
                 connection.handleBridgedSignal(msg);
             }

@@ -6,36 +6,6 @@ function anonymizeForLogging(identifier) {
   return identifier.slice(0, 2) + '****' + identifier.slice(-2);
 }
 
-export class InputValidator {
-  static validateUsername(username) {
-    if (!username || typeof username !== 'string') return false;
-    if (username.length < 3 || username.length > 32) return false;
-    return /^[a-zA-Z0-9_-]+$/.test(username);
-  }
-
-  static validateMessageType(messageType) {
-    if (!messageType || typeof messageType !== 'string') return false;
-    if (messageType.length === 0 || messageType.length > 100) return false;
-    return /^[a-zA-Z0-9_-]+$/.test(messageType);
-  }
-
-  static validateMessageSize(message) {
-    if (!message) return false;
-    return true;
-  }
-
-  static validateJsonStructure(obj) {
-    if (!obj || typeof obj !== 'object') return false;
-    if (Array.isArray(obj)) return false;
-    return true;
-  }
-
-  static sanitizeString(str, maxLength = 1000) {
-    if (!str || typeof str !== 'string') return '';
-    return str.slice(0, maxLength).replace(/[\x00-\x1F\x7F]/g, '');
-  }
-}
-
 // Anonymized logging helper for security-sensitive operations
 export function logEvent(type, payload, { logger = console } = {}) {
   const sanitizedPayload = { ...payload };

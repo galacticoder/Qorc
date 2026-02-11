@@ -4,6 +4,57 @@ import { SecureCallingService } from '../../lib/transport/secure-calling-service
 import { isValidCallingUsername, isValidCallId, stopMediaStream } from '../../lib/utils/calling-utils';
 import { PostQuantumUtils } from '../../lib/utils/pq-utils';
 import { isTauri } from '../../lib/tauri-bindings';
+import { toast } from 'sonner';
+
+type MediaPermissionResult = {
+  granted: boolean;
+  audioOnlyFallback: boolean;
+};
+
+// Request media permissions
+async function requestMediaPermissions(callType: 'audio' | 'video'): Promise<MediaPermissionResult> {
+  if (!navigator.mediaDevices?.getUserMedia) {
+    console.warn('[requestMediaPermissions] mediaDevices.getUserMedia is not available.');
+    return { granted: false, audioOnlyFallback: false };
+  }
+
+  const attempts: Array<{ constraints: MediaStreamConstraints; audioOnlyFallback: boolean }> = callType === 'video'
+    ? [
+      { constraints: { audio: true, video: true }, audioOnlyFallback: false },
+      { constraints: { audio: true }, audioOnlyFallback: true }
+    ]
+    : [{ constraints: { audio: true }, audioOnlyFallback: false }];
+
+  let lastError: any = null;
+
+  for (const attempt of attempts) {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia(attempt.constraints);
+      stream.getTracks().forEach(track => track.stop());
+      return { granted: true, audioOnlyFallback: attempt.audioOnlyFallback };
+    } catch (error: any) {
+      lastError = error;
+      const name = error?.name;
+
+      if (name === 'NotAllowedError' || name === 'SecurityError') {
+        return { granted: false, audioOnlyFallback: false };
+      }
+
+      const canFallback = name === 'OverconstrainedError'
+        || name === 'NotFoundError'
+        || name === 'NotReadableError';
+
+      if (!canFallback) {
+        break;
+      }
+    }
+  }
+
+  if (lastError) {
+    console.warn('[requestMediaPermissions] Failed:', lastError.name, lastError.message);
+  }
+  return { granted: false, audioOnlyFallback: false };
+}
 
 export interface ActionRefs {
   serviceRef: React.RefObject<SecureCallingService | null>;
@@ -28,20 +79,41 @@ export const createStartCall = (
 ) => {
   return async (targetUser: string, callType: 'audio' | 'video' = 'audio') => {
     if (!refs.serviceRef.current) {
-      throw new Error('[useCalling] Calling service not initialized');
+      throw new Error('Calling service not initialized');
+    }
+
+    if (!window.isSecureContext) {
+      toast.error("Security Restriction", {
+        description: "Camera/microphone access is blocked because this session is not secure (HTTPS or localhost required)."
+      });
+      throw new Error('Insecure context');
     }
 
     const peer = targetUser.trim();
     if (!isValidCallingUsername(peer)) {
-      throw new Error('[useCalling] Invalid target username format');
+      throw new Error('Invalid target username format');
     }
 
     if (callType !== 'audio' && callType !== 'video') {
-      throw new Error('[useCalling] Invalid call type');
+      throw new Error('Invalid call type');
     }
 
     if (peer === currentUsername) {
-      throw new Error('[useCalling] Cannot call yourself');
+      throw new Error('Cannot call yourself');
+    }
+
+    // Request media permissions before attempting to start call
+    const permissionResult = await requestMediaPermissions(callType);
+    if (!permissionResult.granted) {
+      toast.error("Permission Denied", {
+        description: "Access to camera/microphone was denied. Please check your system privacy settings and ensure Qor Chat has permission to access these devices."
+      });
+      throw new Error('Media permissions denied');
+    }
+    if (permissionResult.audioOnlyFallback && callType === 'video') {
+      toast.warning("Camera Unavailable", {
+        description: "Video permission or device was unavailable, starting an audio-only call."
+      });
     }
 
     // Make sure keys are available for peer
@@ -70,7 +142,7 @@ export const createStartCall = (
             }
           }
         } catch (keyError) {
-          console.warn('[useCalling] Failed to fetch keys for peer call:', keyError);
+          console.warn('Failed to fetch keys for peer call:', keyError);
         }
       }
 
@@ -80,10 +152,13 @@ export const createStartCall = (
       if (_error.message === 'arbitration-loss') {
         return '';
       }
-      console.error('[useCalling] Failed to start call:', _error);
+      console.error('Failed to start call:', _error);
 
       if (_error instanceof Error && _error.name === 'NotAllowedError') {
-        console.warn('[useCalling] Permission denied for camera/microphone. Please check your system privacy settings.');
+        console.warn('Permission denied for camera/microphone. Please check your system privacy settings.');
+        toast.error("Permission Denied", {
+          description: "Access to camera/microphone was denied. Please check your browser permissions in the address bar and system privacy settings."
+        });
       }
 
       unstable_batchedUpdates(() => {
@@ -107,11 +182,36 @@ export const createStartCall = (
 export const createAnswerCall = (refs: ActionRefs) => {
   return async (callId: string, peer?: string) => {
     if (!refs.serviceRef.current) {
-      throw new Error('[useCalling] Calling service not initialized');
+      throw new Error('Calling service not initialized');
+    }
+
+    if (!window.isSecureContext) {
+      toast.error("Security Restriction", {
+        description: "Camera/microphone access is blocked because this session is not secure (HTTPS or localhost required)."
+      });
+      throw new Error('Insecure context');
     }
 
     if (!isValidCallId(callId)) {
-      throw new Error('[useCalling] Invalid call ID format');
+      throw new Error('Invalid call ID format');
+    }
+
+    // Get call type from current call to request permissions
+    const currentCall = (refs.serviceRef.current as any).currentCall;
+    const callType = currentCall?.type || 'audio';
+
+    // Request media permissions before attempting to answer call
+    const permissionResult = await requestMediaPermissions(callType);
+    if (!permissionResult.granted) {
+      toast.error("Permission Denied", {
+        description: "Access to camera/microphone was denied. Please check your system privacy settings and ensure Qor Chat has permission to access these devices."
+      });
+      throw new Error('Media permissions denied');
+    }
+    if (permissionResult.audioOnlyFallback && callType === 'video') {
+      toast.warning("Camera Unavailable", {
+        description: "Video permission or device was unavailable, answering with audio only."
+      });
     }
 
     try {
@@ -140,13 +240,21 @@ export const createAnswerCall = (refs: ActionRefs) => {
             }
           }
         } catch (keyError) {
-          console.warn('[useCalling] Failed to fetch keys for answering call:', keyError);
+          console.warn('Failed to fetch keys for answering call:', keyError);
         }
       }
 
       await refs.serviceRef.current.answerCall(callId);
-    } catch (_error) {
-      console.error('[useCalling] Failed to answer call:', _error);
+    } catch (_error: any) {
+      console.error('Failed to answer call:', _error);
+
+      if (_error.name === 'NotAllowedError') {
+        console.warn('Permission denied for camera/microphone during answerCall.');
+        toast.error("Permission Denied", {
+          description: "Could not access camera/microphone. Please check your browser and system privacy settings."
+        });
+      }
+
       throw _error;
     }
   };
@@ -156,11 +264,11 @@ export const createAnswerCall = (refs: ActionRefs) => {
 export const createDeclineCall = (refs: ActionRefs) => {
   return async (callId: string) => {
     if (!refs.serviceRef.current) {
-      throw new Error('[useCalling] Calling service not initialized');
+      throw new Error('Calling service not initialized');
     }
 
     if (!isValidCallId(callId)) {
-      throw new Error('[useCalling] Invalid call ID format');
+      throw new Error('Invalid call ID format');
     }
 
     try {
@@ -194,13 +302,13 @@ export const createDeclineCall = (refs: ActionRefs) => {
             }
           }
         } catch (keyError) {
-          console.warn('[useCalling] Failed to fetch keys for decline call:', keyError);
+          console.warn('Failed to fetch keys for decline call:', keyError);
         }
       }
 
       await refs.serviceRef.current.declineCall(callId);
     } catch (_error) {
-      console.error('[useCalling] Failed to decline call:', _error);
+      console.error('Failed to decline call:', _error);
       throw _error;
     }
   };
@@ -210,13 +318,13 @@ export const createDeclineCall = (refs: ActionRefs) => {
 export const createEndCall = (refs: ActionRefs) => {
   return async () => {
     if (!refs.serviceRef.current) {
-      throw new Error('[useCalling] Calling service not initialized');
+      throw new Error('Calling service not initialized');
     }
 
     try {
       await refs.serviceRef.current.endCall();
     } catch (_error) {
-      console.error('[useCalling] Failed to end call:', _error);
+      console.error('Failed to end call:', _error);
       throw _error;
     }
   };
@@ -256,7 +364,7 @@ export const createSwitchCamera = (refs: ActionRefs) => {
     try {
       await refs.serviceRef.current.switchCamera(deviceId);
     } catch (_error) {
-      console.error('[useCalling] Failed to switch camera:', _error);
+      console.error('Failed to switch camera:', _error);
     }
   };
 };
@@ -271,7 +379,7 @@ export const createSwitchMicrophone = (refs: ActionRefs) => {
     try {
       await refs.serviceRef.current.switchMicrophone(deviceId);
     } catch (_error) {
-      console.error('[useCalling] Failed to switch microphone:', _error);
+      console.error('Failed to switch microphone:', _error);
     }
   };
 };
@@ -280,22 +388,29 @@ export const createSwitchMicrophone = (refs: ActionRefs) => {
 export const createStartScreenShare = (refs: ActionRefs) => {
   return async (selectedSource?: { id: string; name: string; type: 'screen' | 'window' }) => {
     if (!refs.serviceRef.current) {
-      throw new Error('[useCalling] Calling service not initialized');
+      throw new Error('Calling service not initialized');
     }
 
     if (selectedSource) {
       if (!selectedSource.id || typeof selectedSource.id !== 'string') {
-        throw new Error('[useCalling] Invalid source ID');
+        throw new Error('Invalid source ID');
       }
       if (!selectedSource.type || !['screen', 'window'].includes(selectedSource.type)) {
-        throw new Error('[useCalling] Invalid source type');
+        throw new Error('Invalid source type');
       }
     }
 
     try {
       await refs.serviceRef.current.startScreenShare(selectedSource);
-    } catch (_error) {
-      console.error('[useCalling] Failed to start screen sharing:', _error);
+    } catch (_error: any) {
+      console.error('Failed to start screen sharing:', _error);
+
+      if (_error.name === 'NotAllowedError') {
+        toast.error("Permission Denied", {
+          description: "Access to screen recording was denied or canceled. Please check your browser and system privacy settings."
+        });
+      }
+
       throw _error;
     }
   };
@@ -311,7 +426,7 @@ export const createStopScreenShare = (refs: ActionRefs) => {
     try {
       await refs.serviceRef.current.stopScreenShare();
     } catch (_error) {
-      console.error('[useCalling] Failed to stop screen sharing:', _error);
+      console.error('Failed to stop screen sharing:', _error);
     }
   };
 };
@@ -322,13 +437,13 @@ export const createGetAvailableScreenSources = (refs: ActionRefs) => {
 
   return async () => {
     if (!refs.serviceRef.current) {
-      throw new Error('[useCalling] Calling service not initialized');
+      throw new Error('Calling service not initialized');
     }
 
     try {
       return await refs.serviceRef.current.getAvailableScreenSources();
     } catch (_error) {
-      console.error('[useCalling] Failed to get screen sources:', _error);
+      console.error('Failed to get screen sources:', _error);
       throw _error;
     }
   };

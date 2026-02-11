@@ -1,10 +1,11 @@
 import { SignalType } from '../../lib/types/signal-types';
 import { EventType } from '../../lib/types/event-types';
-import websocketClient from '../../lib/websocket/websocket';
+import { unifiedSignalTransport } from '../../lib/transport/unified-signal-transport';
 import type { PendingRetryEntry, AttemptsLedgerEntry, ResetCounterEntry } from '../../lib/types/message-handling-types';
 import { computeBackoffMs } from '../../lib/utils/message-handler-utils';
 import { BUNDLE_REQUEST_COOLDOWN_MS, MAX_RETRY_ATTEMPTS, PENDING_QUEUE_MAX_PER_PEER } from '../../lib/constants';
 import { signal } from '../../lib/tauri-bindings';
+import websocketClient from '../../lib/websocket/websocket';
 
 // Handle session reset and queue message for retry
 export const handleSessionResetAndRetry = async (
@@ -20,7 +21,11 @@ export const handleSessionResetAndRetry = async (
   resetCounterRef: React.RefObject<Map<string, ResetCounterEntry>>,
   requestBundleOnce: (peer: string, reason?: string) => Promise<void>,
   maxResetsPerPeer: number,
-  resetWindowMs: number
+  resetWindowMs: number,
+  options?: {
+    resolvePeerInboxId?: (peer: string) => Promise<string | null>;
+    senderInboxId?: string | null;
+  }
 ): Promise<boolean> => {
   const nowTs = Date.now();
   const _lastReset = resetCooldownRef.current.get(senderUsername) || 0;
@@ -45,24 +50,33 @@ export const handleSessionResetAndRetry = async (
 
   resetCooldownRef.current.set(senderUsername, nowTs);
 
+  const resolvePeerInboxId = options?.resolvePeerInboxId;
+  const senderInboxId = options?.senderInboxId;
+
+  const isLikelyInboxId = (value: string | null | undefined): value is string => {
+    if (!value || typeof value !== 'string') return false;
+    return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value);
+  };
+
   try {
     await signal.deleteSession(currentUser, senderUsername, 1);
 
     try {
-      await websocketClient.sendSecureControlMessage({
-        type: SignalType.SESSION_RESET_REQUEST,
-        from: currentUser,
-        targetUsername: senderUsername,
-        deviceId: 1,
-        timestamp: Date.now(),
-        reason: 'decryption-failure'
-      });
+      let targetInbox = senderInboxId || null;
+      if (!isLikelyInboxId(targetInbox) && resolvePeerInboxId) {
+        try {
+          targetInbox = await resolvePeerInboxId(senderUsername);
+        } catch { }
+      }
+
+      await unifiedSignalTransport.send(
+        senderUsername,
+        { reason: 'decryption-failure' },
+        SignalType.SESSION_RESET_REQUEST,
+        isLikelyInboxId(targetInbox) ? { destinationInbox: targetInbox } : undefined
+      );
 
       try {
-        window.dispatchEvent(new CustomEvent(EventType.P2P_SESSION_RESET_SEND, {
-          detail: { to: senderUsername, reason: 'decryption-failure' }
-        }));
-
         window.dispatchEvent(new CustomEvent(EventType.LOCAL_INITIATED_RESET, {
           detail: { peerUsername: senderUsername, reason: 'decryption-failure' }
         }));

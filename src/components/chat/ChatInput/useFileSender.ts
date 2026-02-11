@@ -294,8 +294,6 @@ export function useFileSender(
 
       const deadline = Date.now() + SESSION_WAIT_MS;
       let delay = SESSION_POLL_BASE_MS;
-      const MAX_REQUESTS = 2;
-      let requestCount = 0;
 
       let sessionReadyFlag = false;
       const readyHandler = (event: Event) => {
@@ -308,8 +306,6 @@ export function useFileSender(
       window.addEventListener(EventType.LIBSIGNAL_SESSION_READY, readyHandler as EventListener);
 
       try {
-        let lastRequestAt = 0;
-
         const firstCheck = await sessionApi.hasSession({
           selfUsername: currentUsername,
           peerUsername: targetUsername,
@@ -321,94 +317,26 @@ export function useFileSender(
         }
 
         while (Date.now() < deadline) {
-          const nowTs = Date.now();
-          const lastBundleRequest = bundleRequestTracker.current.get(targetUsername) || 0;
-          const canRequestBundle = (nowTs - lastBundleRequest) >= BUNDLE_REQUEST_COOLDOWN_MS;
+          await new Promise((r) => setTimeout(r, delay));
 
-          if (canRequestBundle) {
-            try {
-              const keys = await getKeysOnDemand();
-              if (keys?.dilithium?.secretKey && keys?.dilithium?.publicKeyBase64) {
-                requestCount++;
-                const requestBase = {
-                  type: SignalType.LIBSIGNAL_REQUEST_BUNDLE,
-                  username: targetUsername,
-                  from: currentUsername,
-                  timestamp: nowTs,
-                  challenge: CryptoUtils.Base64.arrayBufferToBase64(
-                    globalThis.crypto.getRandomValues(new Uint8Array(32)),
-                  ),
-                  senderDilithium: keys.dilithium.publicKeyBase64,
-                  reason: 'file-transfer',
-                } as const;
-                const canonical = new TextEncoder().encode(JSON.stringify(requestBase));
-                const signatureRaw = await CryptoUtils.Dilithium.sign(keys.dilithium.secretKey, canonical);
-                const signature = CryptoUtils.Base64.arrayBufferToBase64(signatureRaw);
-                await websocketClient.sendSecureControlMessage({ ...requestBase, signature });
-                lastRequestAt = nowTs;
-                bundleRequestTracker.current.set(targetUsername, nowTs);
-              }
-            } catch (e) {
-              console.error('[FILE-SENDER] Failed to send initial bundle request:', e);
-            }
+          if (sessionReadyFlag) {
+            sessionEstablishedAt.current.set(targetUsername, Date.now());
+            return true;
           }
 
-          while (Date.now() < deadline) {
-            await new Promise((r) => setTimeout(r, delay));
-
-            if (sessionReadyFlag) {
-              sessionEstablishedAt.current.set(targetUsername, Date.now());
-              return true;
-            }
-
-            const check = await sessionApi.hasSession({
-              selfUsername: currentUsername,
-              peerUsername: targetUsername,
-              deviceId: 1,
-            });
-            if (check?.hasSession) {
-              sessionEstablishedAt.current.set(targetUsername, Date.now());
-              return true;
-            }
-
-            if (requestCount < MAX_REQUESTS && Date.now() - lastRequestAt >= 3000) {
-              const nowTs = Date.now();
-              const lastBundleRequest = bundleRequestTracker.current.get(targetUsername) || 0;
-              const canRetryBundle = (nowTs - lastBundleRequest) >= BUNDLE_REQUEST_COOLDOWN_MS;
-
-              if (canRetryBundle) {
-                try {
-                  const keys = await getKeysOnDemand();
-                  if (keys?.dilithium?.secretKey && keys?.dilithium?.publicKeyBase64) {
-                    requestCount++;
-                    const requestBase = {
-                      type: SignalType.LIBSIGNAL_REQUEST_BUNDLE,
-                      username: targetUsername,
-                      from: currentUsername,
-                      timestamp: nowTs,
-                      challenge: CryptoUtils.Base64.arrayBufferToBase64(
-                        globalThis.crypto.getRandomValues(new Uint8Array(32)),
-                      ),
-                      senderDilithium: keys.dilithium.publicKeyBase64,
-                      reason: 'file-transfer-retry',
-                    } as const;
-                    const canonical = new TextEncoder().encode(JSON.stringify(requestBase));
-                    const signatureRaw = await CryptoUtils.Dilithium.sign(keys.dilithium.secretKey, canonical);
-                    const signature = CryptoUtils.Base64.arrayBufferToBase64(signatureRaw);
-                    await websocketClient.sendSecureControlMessage({ ...requestBase, signature });
-                    lastRequestAt = nowTs;
-                    bundleRequestTracker.current.set(targetUsername, nowTs);
-                  }
-                } catch (e) {
-                  console.error('[FILE-SENDER] Failed to send retry bundle request:', e);
-                }
-              }
-            }
-
-            const randomSource = globalThis.crypto.getRandomValues(new Uint32Array(1))[0] / 0xffffffff;
-            const poisson = -Math.log(Math.max(1 - randomSource, 1e-6));
-            delay = Math.min(delay + poisson * SESSION_POLL_BASE_MS, SESSION_POLL_MAX_MS);
+          const check = await sessionApi.hasSession({
+            selfUsername: currentUsername,
+            peerUsername: targetUsername,
+            deviceId: 1,
+          });
+          if (check?.hasSession) {
+            sessionEstablishedAt.current.set(targetUsername, Date.now());
+            return true;
           }
+
+          const randomSource = globalThis.crypto.getRandomValues(new Uint32Array(1))[0] / 0xffffffff;
+          const poisson = -Math.log(Math.max(1 - randomSource, 1e-6));
+          delay = Math.min(delay + poisson * SESSION_POLL_BASE_MS, SESSION_POLL_MAX_MS);
         }
       } finally {
         try { window.removeEventListener(EventType.LIBSIGNAL_SESSION_READY, readyHandler as EventListener); } catch { }

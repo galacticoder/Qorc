@@ -1,6 +1,6 @@
 # Contributing to Qor-Chat
 
-First off, thank you for considering contributing to Qor-Chat! Contributions from everyone are welcome.
+Thank you for considering contributing to Qor-Chat! Contributions from everyone are welcome.
 
 ## Code of Conduct
 

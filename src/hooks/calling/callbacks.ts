@@ -4,12 +4,14 @@ import { SecureCallingService, CallState } from '../../lib/transport/secure-call
 import { EventType } from '../../lib/types/event-types';
 import { stopMediaStream, EventDebouncer } from '../../lib/utils/calling-utils';
 import { power } from '../../lib/tauri-bindings';
+import { toast } from 'sonner';
 
 export interface CallbackRefs {
   localStreamRef: React.RefObject<MediaStream | null>;
   remoteStreamRef: React.RefObject<MediaStream | null>;
   remoteScreenStreamRef: React.RefObject<MediaStream | null>;
   everConnectedRef: React.RefObject<Set<string>>;
+  lastCallTypeRef: React.RefObject<Map<string, 'audio' | 'video'>>;
   eventDebouncer: React.RefObject<EventDebouncer>;
 }
 
@@ -46,6 +48,14 @@ export const setupCallStateChangeCallback = (
   setters: CallbackSetters
 ) => {
   service.onCallStateChange((call) => {
+    const previousType = refs.lastCallTypeRef.current.get(call.id);
+    if (previousType && previousType !== call.type && previousType === 'video' && call.type === 'audio') {
+      toast.warning('Video unavailable', {
+        description: 'This call has switched to audio-only because video could not be started.'
+      });
+    }
+    refs.lastCallTypeRef.current.set(call.id, call.type);
+
     const statusDetail = {
       peer: call.peer,
       status: call.status,
@@ -84,6 +94,8 @@ export const setupCallStateChangeCallback = (
 
     if (call.status === 'ended' || call.status === 'declined' || call.status === 'missed') {
       power.stop(0).catch(() => { });
+
+      refs.lastCallTypeRef.current.delete(call.id);
 
       if (call.status === 'ended') {
         if (!wasConnected) {

@@ -17,6 +17,11 @@ import {
   SESSION_REKEY_INTERVAL_MS,
   KEY_ROTATION_WARNING_MS,
   MAX_MISSED_HEARTBEATS,
+  WS_COVER_TRAFFIC_INTERVAL_MS,
+  WS_COVER_TRAFFIC_JITTER_MS,
+  WS_COVER_TRAFFIC_IDLE_GRACE_MS,
+  COVER_TRAFFIC_PAYLOAD_TYPE,
+  SESSION_FAILOVER_GRACE_PERIOD_MS,
 } from '../constants';
 
 import { WebSocketRateLimiter } from './rate-limiter';
@@ -27,7 +32,10 @@ import { WebSocketQueue } from './queue';
 import { WebSocketEncryption } from './encryption';
 import { WebSocketHandshake } from './handshake';
 import { WebSocketMessageHandler } from './message-handler';
-import { websocket, session, storage, events } from '../tauri-bindings';
+import { websocket, session, events, signal } from '../tauri-bindings';
+import { GatekeeperClient } from '../cryptography/gatekeeper-client';
+import { Base64 } from '../cryptography/base64';
+import { retrieveAuthTokens } from '../signals/token-storage';
 
 // WebSocket Connection Manager
 export class WebSocketConnection {
@@ -38,11 +46,20 @@ export class WebSocketConnection {
   private globalRateLimitUntil = 0;
   private tokenValidationAttempted = false;
   private _username?: string;
+  private lastAuthUsername?: string;
   private connectivityWatchdog?: ReturnType<typeof setInterval>;
   private bridgeReadyPromise: Promise<void>;
   private connectingPromise: Promise<void> | null = null;
   private transportEventReceived: boolean = false;
   private trustTransportUntil: number = 0;
+  private isInUnlinkedMode: boolean = false;
+  private coverTrafficTimer: ReturnType<typeof setTimeout> | null = null;
+  private coverTrafficInFlight = false;
+  private lastRealSendAt = 0;
+  private gatekeeper?: GatekeeperClient;
+  private gatekeeperPromise?: Promise<GatekeeperClient>;
+  private serverAuthGranted = false;
+  private hasOpenedTransport = false;
 
   // Connection metrics
   metrics: ConnectionMetrics = {
@@ -69,6 +86,7 @@ export class WebSocketConnection {
 
   // Session key material
   sessionKeyMaterial?: SessionKeyMaterial;
+  private previousSessionKeyMaterial?: SessionKeyMaterial;
   private previousSessionFingerprint?: string;
   private sessionTransitionTime?: number;
   signingKeyPair?: { publicKey: Uint8Array; privateKey: Uint8Array };
@@ -109,6 +127,7 @@ export class WebSocketConnection {
     this.encryption = new WebSocketEncryption(
       {
         get sessionKeyMaterial() { return self.sessionKeyMaterial; },
+        get previousSessionKeyMaterial() { return self.previousSessionKeyMaterial; },
         get previousSessionFingerprint() { return self.previousSessionFingerprint; },
         get sessionTransitionTime() { return self.sessionTransitionTime; },
         get serverSignatureKey() { return self.handshake.getServerKeyMaterial()?.dilithiumPublicKey; },
@@ -152,6 +171,29 @@ export class WebSocketConnection {
     this.bridgeReadyPromise = this.initializeBridge();
   }
 
+  private async getGatekeeper(): Promise<GatekeeperClient> {
+    if (this.gatekeeper) {
+      await this.gatekeeper.ensureReady();
+      return this.gatekeeper;
+    }
+    
+    if (this.gatekeeperPromise) return this.gatekeeperPromise;
+
+    this.gatekeeperPromise = (async () => {
+      try {
+        const url = await websocket.getServerUrl() || 'default';
+        const gk = new GatekeeperClient(url);
+        await gk.ensureReady();
+        this.gatekeeper = gk;
+        return gk;
+      } finally {
+        this.gatekeeperPromise = undefined;
+      }
+    })();
+
+    return this.gatekeeperPromise;
+  }
+
   private async initializeBridge(): Promise<void> {
     await this.initializeSigningKeys();
     await this.setupTauriBridge();
@@ -189,6 +231,18 @@ export class WebSocketConnection {
 
   // Handle session established
   private onSessionEstablished(session: SessionKeyMaterial, _serverSignatureKey?: Uint8Array): void {
+    if (this.sessionKeyMaterial?.sessionId && this.sessionKeyMaterial.sessionId !== session.sessionId) {
+      this.previousSessionKeyMaterial = this.sessionKeyMaterial;
+      this.sessionTransitionTime = Date.now();
+      const previousSessionId = this.previousSessionKeyMaterial.sessionId;
+      const transitionTime = this.sessionTransitionTime;
+      setTimeout(() => {
+        if (this.sessionTransitionTime === transitionTime &&
+          this.previousSessionKeyMaterial?.sessionId === previousSessionId) {
+          this.previousSessionKeyMaterial = undefined;
+        }
+      }, SESSION_FAILOVER_GRACE_PERIOD_MS);
+    }
     if (this.sessionKeyMaterial?.fingerprint &&
       this.sessionKeyMaterial.fingerprint !== session.fingerprint) {
       this.previousSessionFingerprint = this.sessionKeyMaterial.fingerprint;
@@ -198,10 +252,14 @@ export class WebSocketConnection {
     this.sessionKeyMaterial = session;
     this.encryption.resetCounters();
     this.encryption.clearReplayCache();
+    this.startCoverTraffic();
   }
 
   // Set and get username
-  setUsername(username: string) { this._username = username; }
+  setUsername(username: string) {
+    this._username = username;
+    this.lastAuthUsername = username;
+  }
   getUsername(): string | undefined { return this._username; }
 
   // Handle edge server message
@@ -218,18 +276,34 @@ export class WebSocketConnection {
     const messageType = typeof message.type === 'string' ? message.type : '';
 
     if (this.trustTransportUntil > now) {
-      void websocket.getState().then(s => { });
+      void websocket.getState().then(_s => { });
     }
 
     // Handle handshake signals internally
     if (messageType === SignalType.SERVER_PUBLIC_KEY) {
       const hybridKeys = (message as any).hybridKeys;
       const sid = (message as any).serverId;
+
       if (hybridKeys) {
         this.setServerKeyMaterial(hybridKeys, sid);
       } else {
         console.warn('[WebSocket] server-public-key message missing hybridKeys');
       }
+
+      // Check if server requires password and no tokens
+      if ((message as any).requiresServerPassword) {
+        void this.getGatekeeper().then(gk => {
+          if (!gk.hasTokens) {
+            window.dispatchEvent(new CustomEvent(EventType.AUTH_ERROR, {
+              detail: {
+                type: 'SERVER_ENTRY_REQUIRED',
+                message: 'This server requires an entry token. Please provide the server password.'
+              }
+            }));
+          }
+        });
+      }
+
       this.dispatchToFrontend(message, isSecure);
       return true;
     }
@@ -238,8 +312,13 @@ export class WebSocketConnection {
     if (messageType === SignalType.PQ_ENVELOPE) {
       const decrypted = await this.decryptIncomingEnvelope(message);
       if (decrypted) {
+        const innerType = typeof decrypted.type === 'string' ? decrypted.type : 'unknown';
+        if (innerType === 'discovery-result' || innerType === 'oprf-blind-evaluate-response' || innerType === 'oprf-discovery-public-key') {
+          console.log('[WebSocket] PQ envelope decrypted → inner type:', innerType);
+        }
         return await this.handleEdgeServerMessage(decrypted, true);
       }
+      console.warn('[WebSocket] PQ envelope decryption FAILED (returned null), fingerprint:', typeof message.sessionFingerprint === 'string' ? message.sessionFingerprint.slice(0, 16) : 'none');
       return true;
     }
 
@@ -265,8 +344,17 @@ export class WebSocketConnection {
     }
 
     if (messageType === '__ws_connection_opened') {
+      const wasReconnect = this.hasOpenedTransport;
+      this.hasOpenedTransport = true;
       void this.handleConnectionOpened();
       this.dispatchToFrontend(message, isSecure);
+      if (wasReconnect) {
+        try {
+          window.dispatchEvent(new CustomEvent(EventType.WS_RECONNECTED, {
+            detail: { timestamp: Date.now() }
+          }));
+        } catch { }
+      }
       return true;
     }
 
@@ -276,7 +364,6 @@ export class WebSocketConnection {
       return true;
     }
 
-    // Dispatch all other messages to frontend hooks
     this.dispatchToFrontend(message, isSecure);
     return false;
   }
@@ -298,6 +385,68 @@ export class WebSocketConnection {
     }
 
     void this.connect().catch(() => { });
+  }
+
+  private startCoverTraffic(): void {
+    if (this.coverTrafficTimer) return;
+    this.scheduleCoverTraffic();
+  }
+
+  private stopCoverTraffic(): void {
+    if (this.coverTrafficTimer) {
+      clearTimeout(this.coverTrafficTimer);
+      this.coverTrafficTimer = null;
+    }
+  }
+
+  private scheduleCoverTraffic(): void {
+    if (this.coverTrafficTimer) return;
+    const variance = WS_COVER_TRAFFIC_JITTER_MS;
+    const jitter = variance > 0 ? (Math.random() * variance * 2 - variance) : 0;
+    const delay = Math.max(500, WS_COVER_TRAFFIC_INTERVAL_MS + jitter);
+
+    this.coverTrafficTimer = setTimeout(async () => {
+      this.coverTrafficTimer = null;
+      await this.sendCoverTraffic();
+      if (this.lifecycleState === 'connected' && this.sessionKeyMaterial) {
+        this.scheduleCoverTraffic();
+      }
+    }, delay);
+  }
+
+  private async sendCoverTraffic(): Promise<void> {
+    if (this.coverTrafficInFlight) return;
+    if (this.lifecycleState !== 'connected' || !this.sessionKeyMaterial) return;
+    if (Date.now() - this.lastRealSendAt < WS_COVER_TRAFFIC_IDLE_GRACE_MS) return;
+    if (this.queue.getQueueLength() > 0) return;
+
+    this.coverTrafficInFlight = true;
+    try {
+      const { getBlindRoutingClient } = await import('../transport/blind-routing-client');
+      const blindClient = getBlindRoutingClient(this.lastAuthUsername);
+      const inboxId = blindClient.getMyInboxId();
+      const recipientKyber = blindClient.getLocalKyberPublicKey();
+      if (!inboxId || !recipientKyber) return;
+
+      const sealedEnvelope = await blindClient.createSealedEnvelope(
+        inboxId,
+        recipientKyber,
+        {
+          type: COVER_TRAFFIC_PAYLOAD_TYPE,
+          timestamp: Date.now(),
+          nonce: PostQuantumUtils.uint8ArrayToBase64(PostQuantumRandom.randomBytes(16))
+        }
+      );
+
+      await this.dispatchPayload({
+        type: SignalType.BLIND_ROUTE,
+        destinationInbox: inboxId,
+        sealedEnvelope
+      }, false, { isCoverTraffic: true });
+    } catch {
+    } finally {
+      this.coverTrafficInFlight = false;
+    }
   }
 
   // Connect to WebSocket
@@ -396,7 +545,108 @@ export class WebSocketConnection {
       await this.performHandshake(false);
     }
 
+    // Redeem entry token
+    try {
+      const gk = await this.getGatekeeper();
+      if (gk.hasTokens) {
+        const redemption = await gk.getRedemptionPayload();
+        if (redemption) {
+          
+          // Wait for server response
+          const waitForOk = new Promise<boolean>((resolve) => {
+            const timeout = setTimeout(() => {
+              window.removeEventListener(EventType.SECURE_SERVER_MESSAGE, handler as any);
+              resolve(false);
+            }, 5000);
+
+            const handler = (ev: Event) => {
+              const detail = (ev as CustomEvent).detail;
+              if (detail?.type === 'ok') {
+                clearTimeout(timeout);
+                window.removeEventListener(EventType.SECURE_SERVER_MESSAGE, handler as any);
+                resolve(true);
+              }
+            };
+            window.addEventListener(EventType.SECURE_SERVER_MESSAGE, handler as any);
+          });
+
+          await this.sendSecureControlMessage(redemption);
+          const entryGranted = await waitForOk;
+          
+          if (entryGranted) {
+            this.serverAuthGranted = true;
+            window.dispatchEvent(new CustomEvent(EventType.SERVER_ENTRY_GRANTED));
+          }
+        }
+      }
+    } catch (e) {
+      console.warn('[WebSocket] Automatic entry token redemption failed', e);
+    }
+
     this.lifecycleState = 'connected';
+
+    // If in unlinked mode then claim inbox anonymously
+    if (this.isInUnlinkedMode) {
+      try {
+        const { getBlindRoutingClient } = await import('../transport/blind-routing-client');
+        const bc = getBlindRoutingClient(this.lastAuthUsername);
+
+        // Restore credentials from storage if not already in memory
+        if (!bc.hasCredentials()) {
+          await bc.loadPersistentCredentials();
+        }
+
+        // Re-set send function for the new PQ session
+        const self = this;
+        bc.setSendFunction(async (message: any) => {
+          await self.sendSecureControlMessage(message);
+        });
+
+        // Wait for claim response before publishing bundle
+        const waitForClaimResponse = new Promise<boolean>((resolve) => {
+          const timeout = setTimeout(() => {
+            window.removeEventListener(EventType.SECURE_SERVER_MESSAGE, handler as any);
+            resolve(false);
+          }, 10000);
+
+          const handler = (ev: Event) => {
+            const detail = (ev as CustomEvent).detail;
+            if (detail?.type === SignalType.CLAIM_INBOX_RESPONSE) {
+              clearTimeout(timeout);
+              window.removeEventListener(EventType.SECURE_SERVER_MESSAGE, handler as any);
+              resolve(!!detail.success);
+            }
+          };
+          window.addEventListener(EventType.SECURE_SERVER_MESSAGE, handler as any);
+        });
+
+        const claimSent = await bc.claimInbox();
+
+        // Only wait for server response if the claim message was actually sent
+        const claimSuccess = claimSent ? await waitForClaimResponse : false;
+
+        // Publish Signal bundle in unlinked mode
+        if (claimSuccess) {
+          try {
+            const username = bc.getLocalUsername();
+            if (username && username !== 'anonymous') {
+              const bundle = await signal.createPreKeyBundle(username);
+              if (bundle && bundle.registrationId) {
+                this.send(JSON.stringify({ type: SignalType.LIBSIGNAL_PUBLISH_BUNDLE, bundle }));
+              }
+            }
+          } catch (bundleErr) {
+            console.warn('[WebSocket] Failed to publish bundle in unlinked mode:', bundleErr);
+          }
+          
+          window.dispatchEvent(new CustomEvent(EventType.UNLINKED_SESSION_READY));
+        } else {
+          console.warn('[WebSocket] Skipping bundle publish - inbox claim failed or timed out');
+        }
+      } catch (e) {
+        console.warn('[WebSocket] Failed to claim inbox in unlinked mode:', e);
+      }
+    }
 
     this.registerSessionErrorHandler();
     this.queue.scheduleFlush();
@@ -416,6 +666,17 @@ export class WebSocketConnection {
           await this.performHandshake(false);
           void this.queue.flush();
         } catch { }
+      }
+    });
+
+    this.messageHandler.registerHandler(SignalType.AUTH_ERROR, async (message: any) => {
+      if (message.code === 'SERVER_ENTRY_REQUIRED') {
+        window.dispatchEvent(new CustomEvent(EventType.AUTH_ERROR, {
+          detail: {
+            type: 'SERVER_ENTRY_REQUIRED',
+            message: 'This server requires an entry token. Please provide the server password.'
+          }
+        }));
       }
     });
   }
@@ -450,6 +711,8 @@ export class WebSocketConnection {
   // Reset session keys
   resetSessionKeys(preserveServerKeys: boolean = true): void {
     this.tokenValidationAttempted = false;
+    this.serverAuthGranted = false;
+    this.stopCoverTraffic();
     if (this.sessionKeyMaterial) {
       PostQuantumUtils.clearMemory(this.sessionKeyMaterial.sendKey);
       PostQuantumUtils.clearMemory(this.sessionKeyMaterial.recvKey);
@@ -494,7 +757,22 @@ export class WebSocketConnection {
   }
 
   // Dispatch payload
-  async dispatchPayload(data: unknown, allowQueue: boolean): Promise<void> {
+  async dispatchPayload(data: unknown, allowQueue: boolean, options: { isCoverTraffic?: boolean } = {}): Promise<void> {
+    const msgObj = typeof data === 'string' ? ((): any => { try { return JSON.parse(data); } catch { return {}; } })() : (data as any);
+
+    // Identity leak protection for unlinked mode
+    if (this.isInUnlinkedMode) {
+      if (
+        msgObj.type === SignalType.HYBRID_KEYS_UPDATE ||
+        msgObj.type === SignalType.TOKEN_VALIDATION ||
+        msgObj.username ||
+        msgObj.accessToken
+      ) {
+        console.warn(`[WebSocket] Blocking account-linked message in unlinked mode: ${msgObj.type || 'unknown'}`);
+        return;
+      }
+    }
+
     if (!this.circuitBreaker.check()) {
       if (allowQueue) this.queue.enqueuePending(this.queue.createEntry(data, Date.now() + (this.circuitBreaker.getOpenUntil() - Date.now())));
       return;
@@ -512,7 +790,7 @@ export class WebSocketConnection {
       if (typeof data === 'string') { try { msgType = JSON.parse(data)?.type || ''; } catch { } }
       else if (typeof data === 'object' && data !== null) { msgType = (data as any)?.type || ''; }
 
-      const isAuthMessage = ['account-sign-in', 'account-sign-up', 'password-hash', 'passphrase-hash', 'server-password'].includes(msgType);
+      const isAuthMessage = ['account-sign-in', 'account-sign-up', 'server-entry-request'].includes(msgType);
       if (isAuthMessage) {
         try { window.dispatchEvent(new CustomEvent(EventType.AUTH_RATE_LIMITED, { detail: { remainingSeconds, rateLimitUntil: this.globalRateLimitUntil } })); } catch { }
         return;
@@ -538,6 +816,9 @@ export class WebSocketConnection {
     this.metrics.bytesSent += message.length;
     this.circuitBreaker.reset();
     await this.transmit(message);
+    if (!options.isCoverTraffic) {
+      this.lastRealSendAt = Date.now();
+    }
   }
 
   // Ensure session keys
@@ -555,16 +836,27 @@ export class WebSocketConnection {
   // Perform handshake
   async performHandshake(force: boolean): Promise<void> {
     await this.handshake.performHandshake(force);
-    if (this.lifecycleState !== 'connected') {
-      this.lifecycleState = 'connected';
-      this.heartbeat.start();
-      void this.queue.flush();
-    }
   }
 
   // Send heartbeat message
   private async sendHeartbeatMessage(): Promise<void> {
+    if (this.sessionKeyMaterial) {
+      await this.dispatchPayload({
+        type: SignalType.PQ_HEARTBEAT_PING,
+        timestamp: Date.now(),
+        sessionId: this.sessionKeyMaterial.sessionId
+      }, false);
+      return;
+    }
     await this.transmit(JSON.stringify({ type: 'pq-heartbeat-ping', timestamp: Date.now(), sessionId: this.sessionKeyMaterial?.sessionId }));
+  }
+
+  markServerAuthGranted(): void {
+    this.serverAuthGranted = true;
+  }
+
+  isServerAuthGranted(): boolean {
+    return this.serverAuthGranted;
   }
 
   // Transmit message with local retry for transient queuing failures
@@ -608,22 +900,105 @@ export class WebSocketConnection {
   noteHeartbeatPong(message: any): void { this.heartbeat.handleResponse(message); }
 
   // Attempt token validation once
-  async attemptTokenValidationOnce(source: string = 'auto', force: boolean = false): Promise<void> {
+  async attemptTokenValidationOnce(_source: string = 'auto', force: boolean = false): Promise<void> {
+    if (this.isInUnlinkedMode) return;
     if (this.tokenValidationAttempted && !force) return;
     this.tokenValidationAttempted = true;
 
     try {
-      await storage.init();
-      const raw = await storage.get('tok:1');
-      if (!raw || typeof raw !== 'string') return;
-      let parsed: any;
-      try { parsed = JSON.parse(raw); } catch { return; }
-      const accessToken = typeof parsed?.a === 'string' ? parsed.a : '';
-      const refreshToken = typeof parsed?.r === 'string' ? parsed.r : '';
-      if (!accessToken || !refreshToken) return;
+      const accessToken = await retrieveAuthTokens();
+      if (!accessToken || typeof accessToken !== 'string') {
+        this.tokenValidationAttempted = false;
+        return;
+      }
 
-      await this.sendSecureControlMessage({ type: SignalType.TOKEN_VALIDATION, accessToken, refreshToken });
+      await this.sendSecureControlMessage({ type: SignalType.TOKEN_VALIDATION, accessToken });
     } catch { }
+  }
+
+  /**
+   * Switch to unlinked mode
+   */
+  async switchToUnlinkedMode(): Promise<void> {
+    this.isInUnlinkedMode = true;
+
+    // Disconnect with reset
+    await this.close();
+
+    const jitter = 500 + Math.random() * 1500;
+    await new Promise(resolve => setTimeout(resolve, jitter));
+
+    // Reconnect
+    await this.connect();
+  }
+
+  /**
+   * Start the server gatekeeper flow to get entry tokens
+   */
+  async startServerGatekeeperFlow(password: string): Promise<boolean> {
+    try {
+      const gk = await this.getGatekeeper();
+      const request = await gk.startEntryRequest(password);
+
+      const responsePromise = new Promise<any>((resolve, reject) => {
+        const timeout = setTimeout(() => {
+          this.messageHandler.unregisterHandler(SignalType.SERVER_ENTRY_CHALLENGE);
+          reject(new Error('Gatekeeper challenge timeout'));
+        }, 10000);
+
+        this.messageHandler.registerHandler(SignalType.SERVER_ENTRY_CHALLENGE, async (msg: any) => {
+          clearTimeout(timeout);
+          this.messageHandler.unregisterHandler(SignalType.SERVER_ENTRY_CHALLENGE);
+          resolve(msg);
+        });
+      });
+
+      await this.sendSecureControlMessage(request);
+      const challenge = await responsePromise;
+
+      // Prepare issuance
+      const issuanceRequest = await gk.prepareTokenIssuance(password, {
+        evaluatedElement: Base64.base64ToUint8Array(challenge.evaluatedElement),
+        serverNonce: Base64.base64ToUint8Array(challenge.serverNonce),
+        envelope: Base64.base64ToUint8Array(challenge.envelope),
+        maskedResponse: Base64.base64ToUint8Array(challenge.maskedResponse),
+        salt: challenge.salt ? Base64.base64ToUint8Array(challenge.salt) : undefined
+      });
+
+      const issuancePromise = new Promise<any>((resolve, reject) => {
+        const timeout = setTimeout(() => {
+          this.messageHandler.unregisterHandler(SignalType.SERVER_ENTRY_TOKEN_ISSUANCE);
+          reject(new Error('Token issuance timeout'));
+        }, 15000);
+
+        this.messageHandler.registerHandler(SignalType.SERVER_ENTRY_TOKEN_ISSUANCE, async (msg: any) => {
+          clearTimeout(timeout);
+          this.messageHandler.unregisterHandler(SignalType.SERVER_ENTRY_TOKEN_ISSUANCE);
+          resolve(msg);
+        });
+      });
+
+      await this.sendSecureControlMessage(issuanceRequest);
+      const tokenBatch = await issuancePromise;
+
+      // Step 3: Finalize
+      await gk.finalizeEntry(
+        tokenBatch.signedBlindedTokens.map((t: string) => Base64.base64ToUint8Array(t)),
+        Base64.base64ToUint8Array(tokenBatch.proof),
+        Base64.base64ToUint8Array(tokenBatch.publicKey)
+      );
+
+      // Auto-redeem to fully establish connection
+      const redemption = await gk.getRedemptionPayload();
+      if (redemption) {
+        await this.sendSecureControlMessage(redemption);
+      }
+
+      return true;
+    } catch (error) {
+      console.error('[WebSocket] Gatekeeper flow failed', error);
+      return false;
+    }
   }
 
   // Close connection
@@ -649,6 +1024,9 @@ export class WebSocketConnection {
 
   // Check if connected to server
   isConnectedToServer(): boolean { return this.lifecycleState === 'connected'; }
+
+  // Check if unlinked mode is active
+  isUnlinkedMode(): boolean { return this.isInUnlinkedMode; }
 
   // Check if PQ session established
   isPQSessionEstablished(): boolean { return !!this.sessionKeyMaterial; }
@@ -698,13 +1076,22 @@ export class WebSocketConnection {
   }
 
   // Set server key material
-  setServerKeyMaterial(hybridKeys: { kyberPublicBase64: string; dilithiumPublicBase64?: string; x25519PublicBase64?: string }, serverId?: string): void {
+  setServerKeyMaterial(
+    hybridKeys: { kyberPublicBase64: string; dilithiumPublicBase64?: string; x25519PublicBase64?: string },
+    serverId?: string
+  ): void {
     try {
       const kyberPublicKey = PostQuantumUtils.base64ToUint8Array(hybridKeys.kyberPublicBase64);
       const dilithiumPublicKey = hybridKeys.dilithiumPublicBase64 ? PostQuantumUtils.base64ToUint8Array(hybridKeys.dilithiumPublicBase64) : undefined;
       const x25519PublicKey = hybridKeys.x25519PublicBase64 ? PostQuantumUtils.base64ToUint8Array(hybridKeys.x25519PublicBase64) : undefined;
       const fingerprint = this.handshake.computeServerFingerprint({ kyber: hybridKeys.kyberPublicBase64, dilithium: hybridKeys.dilithiumPublicBase64 || '', x25519: hybridKeys.x25519PublicBase64 || '' });
-      this.handshake.setServerKeyMaterial({ kyberPublicKey, dilithiumPublicKey, x25519PublicKey, fingerprint, serverId });
+      this.handshake.setServerKeyMaterial({
+        kyberPublicKey,
+        dilithiumPublicKey,
+        x25519PublicKey,
+        fingerprint,
+        serverId
+      });
     } catch (err) {
       console.error('[WebSocket] setServerKeyMaterial failed:', err);
     }

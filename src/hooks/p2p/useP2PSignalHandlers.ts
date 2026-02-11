@@ -1,12 +1,12 @@
 import React, { useEffect } from 'react';
 import { EventType } from '../../lib/types/event-types';
 import { SignalType } from '../../lib/types/signal-types';
+import { unifiedSignalTransport } from '../../lib/transport/unified-signal-transport';
 
 interface UseP2PSignalHandlersProps {
   p2pMessaging: {
     isPeerConnected: (peer: string) => boolean;
     connectToPeer: (peer: string) => Promise<void>;
-    p2pServiceRef?: React.RefObject<any>;
   };
 }
 
@@ -18,6 +18,7 @@ export function useP2PSignalHandlers({ p2pMessaging }: UseP2PSignalHandlersProps
         const d: any = (evt as CustomEvent).detail || {};
         const to: string = d?.to;
         const reason: string | undefined = d?.reason;
+        const destinationInbox: string | undefined = d?.destinationInbox || d?.inboxId;
         if (!to) return;
 
         try {
@@ -25,7 +26,12 @@ export function useP2PSignalHandlers({ p2pMessaging }: UseP2PSignalHandlersProps
             try { await p2pMessaging.connectToPeer(to); } catch { }
             await (p2pMessaging as any).waitForPeerConnection?.(to, 5000).catch(() => { });
           }
-          await (p2pMessaging as any)?.p2pServiceRef?.current?.sendMessage?.(to, { kind: SignalType.SESSION_RESET_REQUEST, reason }, SignalType.SIGNAL);
+          await unifiedSignalTransport.send(
+            to,
+            { reason },
+            SignalType.SESSION_RESET_REQUEST,
+            destinationInbox ? { destinationInbox } : undefined
+          );
         } catch { }
       } catch { }
     };
@@ -51,28 +57,10 @@ export function useP2PSignalHandlers({ p2pMessaging }: UseP2PSignalHandlersProps
             try { await (p2pMessaging as any).waitForPeerConnection?.(to, 2000); } catch { }
           }
 
-          const svc: any = (window as any).p2pService || (p2pMessaging as any)?.p2pServiceRef?.current || null;
-          if (svc && typeof svc.sendMessage === 'function') {
-            try {
-              await svc.sendMessage(to, { kind: EventType.CALL_SIGNAL, signal: signalObj }, SignalType.SIGNAL);
-              success = true;
-            } catch {
-              // Wait for PQ establishment and retry
-              await new Promise<void>((resolve) => {
-                let settled = false;
-                const t = setTimeout(() => { if (!settled) { settled = true; resolve(); } }, 1500);
-                const on = (ev: Event) => {
-                  const p = (ev as CustomEvent).detail?.peer;
-                  if (p === to) { if (!settled) { settled = true; clearTimeout(t); } resolve(); }
-                };
-                window.addEventListener(EventType.P2P_PQ_ESTABLISHED, on as EventListener, { once: true });
-              });
-              try {
-                await svc.sendMessage(to, { kind: EventType.CALL_SIGNAL, signal: signalObj }, SignalType.SIGNAL);
-                success = true;
-              } catch { }
-            }
-          }
+          try {
+            const result = await unifiedSignalTransport.send(to, signalObj, SignalType.CALL_SIGNAL);
+            success = result.success;
+          } catch { }
         } catch { }
 
         try {

@@ -17,7 +17,7 @@ import { PQNoiseSession } from './pq-noise-session';
 import { screenSharingSettings } from '../database/screen-sharing-settings';
 import { X25519KeyPair, PeerKeys } from '../types/noise-types';
 import { generateX25519KeyPair } from '../utils/noise-utils';
-import websocketClient from '../websocket/websocket';
+import { unifiedSignalTransport } from './unified-signal-transport';
 import {
     CALL_TIMEOUT,
     CALL_RING_TIMEOUT,
@@ -120,7 +120,7 @@ export class SecureCallingService {
 
         // Generate ML-KEM-1024 key
         if (!this.kyberKeyPair) {
-            const kp = PostQuantumKEM.generateKeyPair();
+            const kp = await PostQuantumKEM.generateKeyPair();
             this.kyberKeyPair = { publicKey: kp.publicKey, secretKey: kp.secretKey };
         }
 
@@ -1150,7 +1150,7 @@ export class SecureCallingService {
             if (this.pqSigningKey) {
                 const payload = `${callSig.callId}:${callSig.type}:${callSig.timestamp}:${callSig.from}:${callSig.to}`;
                 const message = new TextEncoder().encode(payload);
-                const signature = PostQuantumSignature.sign(message, this.pqSigningKey.privateKey);
+                const signature = await PostQuantumSignature.sign(message, this.pqSigningKey.privateKey);
 
                 callSig.pqSignature = {
                     signature: PostQuantumUtils.uint8ArrayToBase64(signature),
@@ -1161,15 +1161,6 @@ export class SecureCallingService {
             const hasSes = await signalApi.hasSession(this.localUsername, callSig.to, 1);
 
             if (!hasSes) {
-                // Request bundle
-                await websocketClient.sendSecureControlMessage({
-                    type: SignalType.LIBSIGNAL_REQUEST_BUNDLE,
-                    username: callSig.to,
-                    from: this.localUsername,
-                    timestamp: Date.now(),
-                    deviceId: 1
-                });
-
                 await new Promise<void>((resolve, reject) => {
                     const timeout = setTimeout(() => {
                         cleanup();
@@ -1192,43 +1183,15 @@ export class SecureCallingService {
                 });
             }
 
-            if (this.callConnection && (this.callConnection as any).state === 'connected' && this.callConnection.peerId === callSig.to) {
-                try {
-                    await (this.transport as any).sendMessage(callSig.to, callSig, SignalType.CALL_SIGNAL as any);
-                    return;
-                } catch (err) {
-                    console.error('[SecureCallingService] Direct P2P signaling failed, falling back to WS:', err);
-                }
-            }
-
-            const peerKeys = this.peerKeysCache.get(callSig.to);
-            if (!peerKeys || !peerKeys.kyberPublicKey) { throw new Error('Missing peer cryptographic keys'); }
-
-            const signalPayload = {
-                type: EventType.CALL_SIGNAL,
-                content: JSON.stringify(callSig),
-                from: this.localUsername,
-                callId: callSig.callId,
-                timestamp: Date.now()
-            };
-
-            const encryptionResult = await signalApi.encrypt(
-                this.localUsername,
+            const result = await unifiedSignalTransport.send(
                 callSig.to,
-                JSON.stringify(signalPayload)
+                callSig,
+                SignalType.CALL_SIGNAL
             );
 
-            if (!encryptionResult || !encryptionResult.ciphertext) {
-                throw new Error('Encryption failed');
+            if (!result.success) {
+                throw new Error(result.error || 'Call signal send failed');
             }
-
-            const payload = {
-                type: SignalType.ENCRYPTED_MESSAGE,
-                to: callSig.to,
-                encryptedPayload: PostQuantumUtils.uint8ArrayToBase64(new Uint8Array(JSON.parse(encryptionResult.ciphertext)))
-            };
-
-            websocketClient.send(JSON.stringify(payload));
         } catch (error) { throw error; }
     }
 
@@ -1241,7 +1204,7 @@ export class SecureCallingService {
             const signature = PostQuantumUtils.base64ToUint8Array(signal.pqSignature.signature);
             const publicKey = PostQuantumUtils.base64ToUint8Array(signal.pqSignature.publicKey);
 
-            const valid = PostQuantumSignature.verify(signature, message, publicKey);
+            const valid = await PostQuantumSignature.verify(signature, message, publicKey);
             if (!valid) { return; }
         }
 

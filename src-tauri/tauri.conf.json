@@ -28,7 +28,8 @@
                 "transparent": false,
                 "focus": true,
                 "devtools": true,
-                "shadow": true
+                "shadow": true,
+                "backgroundThrottling": "disabled"
             }
         ],
         "security": {

@@ -66,8 +66,11 @@ export function createGetPeerCertificate(
         throw new Error('CERT_INVALID_SIGNATURE');
       }
 
+      const isSelfSigned = cert.proof === cert.dilithiumPublicKey;
       if (options?.trustedIssuerDilithiumPublicKeyBase64 && cert.proof !== options.trustedIssuerDilithiumPublicKeyBase64) {
-        throw new Error('CERT_UNTRUSTED_ISSUER');
+        if (!isSelfSigned) {
+          throw new Error('CERT_UNTRUSTED_ISSUER');
+        }
       }
 
       const notYetValid = cert.issuedAt > (now + CERT_CLOCK_SKEW_MS);

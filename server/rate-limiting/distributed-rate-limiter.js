@@ -23,16 +23,24 @@ function clampNumber(value, defaults) {
   return Math.min(Math.max(parsed, defaults.min), defaults.max);
 }
 
-const USERNAME_REGEX = /^[A-Za-z0-9_-]{3,64}$/;
+const PRINCIPAL_ID_REGEX = /^[A-Za-z0-9_-]{3,128}$/;
+const HEX_ID_REGEX = /^[a-f0-9]{32,128}$/i;
 
-function hashUsername(username) {
-  if (!username || typeof username !== 'string') {
-    throw new Error('Invalid username');
+function isValidPrincipalId(principalId) {
+  if (!principalId || typeof principalId !== 'string') {
+    return false;
   }
-  if (!USERNAME_REGEX.test(username)) {
-    throw new Error('Invalid username format');
+  const trimmed = principalId.trim();
+  if (!trimmed) return false;
+  return HEX_ID_REGEX.test(trimmed) || PRINCIPAL_ID_REGEX.test(trimmed);
+}
+
+function hashPrincipalId(principalId) {
+  if (!isValidPrincipalId(principalId)) {
+    throw new Error('Invalid principalId');
   }
-  return crypto.createHash('sha256').update(username).digest('hex');
+  const normalized = principalId.trim();
+  return crypto.createHash('sha256').update(normalized).digest('hex');
 }
 
 
@@ -200,19 +208,19 @@ export class DistributedRateLimiter {
     this.disableGlobal = disableGlobal;
   }
 
-  _getUserLimiterKey(username) {
+  _getPrincipalLimiterKey(principalId) {
     try {
-      return hashUsername(username);
+      return hashPrincipalId(principalId);
     } catch (error) {
-      cryptoLogger.warn('Invalid username provided for rate limiter operation', { reason: error?.message });
+      cryptoLogger.warn('Invalid principalId provided for rate limiter operation', { reason: error?.message });
       return null;
     }
   }
 
-  _getAttemptKey(username) {
-    const key = this._getUserLimiterKey(username);
+  _getAttemptKey(principalId) {
+    const key = this._getPrincipalLimiterKey(principalId);
     if (key) return key;
-    const base = typeof username === 'string' ? username : String(username ?? '');
+    const base = typeof principalId === 'string' ? principalId.trim() : String(principalId ?? '');
     return 'invalid_' + crypto.createHash('sha256').update(base).digest('hex');
   }
 
@@ -309,8 +317,8 @@ export class DistributedRateLimiter {
     }
   }
 
-  async checkUserAuthLimit(username) {
-    const key = this._getUserLimiterKey(username);
+  async checkUserAuthLimit(principalId) {
+    const key = this._getPrincipalLimiterKey(principalId);
     if (!this.userAuthLimiter) {
       return { allowed: true };
     }
@@ -331,8 +339,8 @@ export class DistributedRateLimiter {
     }
   }
 
-  async consumeUserAuthAttempt(username, category = 'account_password', ip) {
-    const keyForAttempts = this._getAttemptKey(username);
+  async consumeUserAuthAttempt(principalId, category = 'account_password', ip) {
+    const keyForAttempts = this._getAttemptKey(principalId);
 
     const categoryLimiter = this._getCategoryLimiter(category);
     let attemptsRemaining = null;
@@ -369,7 +377,7 @@ export class DistributedRateLimiter {
     let globalBlocked = false;
     let globalBlockMs = 0;
     try {
-      const perUserKey = this._getUserLimiterKey(username);
+      const perUserKey = this._getPrincipalLimiterKey(principalId);
       if (perUserKey) {
         await this.userAuthLimiter.consume(perUserKey, 1);
       }
@@ -385,7 +393,7 @@ export class DistributedRateLimiter {
   }
 
   // Non-consuming check for a specific category
-  async getUserCategoryStatus(username, category = 'account_password', ip) {
+  async getUserCategoryStatus(principalId, category = 'account_password', ip) {
     try {
       try {
         const ipKey = this._getIpKey(ip);
@@ -397,7 +405,7 @@ export class DistributedRateLimiter {
         }
       } catch { }
 
-      const key = this._getAttemptKey(username);
+      const key = this._getAttemptKey(principalId);
       const lim = this._getCategoryLimiter(category);
       const res = await lim.get(key);
       if (!res) return { allowed: true };
@@ -414,8 +422,8 @@ export class DistributedRateLimiter {
   }
 
   // Non-consuming status check for per-user auth limit
-  async getUserAuthStatus(username) {
-    const key = this._getUserLimiterKey(username);
+  async getUserAuthStatus(principalId) {
+    const key = this._getPrincipalLimiterKey(principalId);
     if (!this.userAuthLimiter) {
       return { allowed: true };
     }
@@ -440,8 +448,8 @@ export class DistributedRateLimiter {
     }
   }
 
-  async checkMessageLimit(username) {
-    const key = this._getUserLimiterKey(username);
+  async checkMessageLimit(principalId) {
+    const key = this._getPrincipalLimiterKey(principalId);
     if (!this.userMessageLimiter) {
       return { allowed: true };
     }
@@ -462,8 +470,8 @@ export class DistributedRateLimiter {
     }
   }
 
-  async checkBundleLimit(username) {
-    const key = this._getUserLimiterKey(username);
+  async checkBundleLimit(principalId) {
+    const key = this._getPrincipalLimiterKey(principalId);
     if (!this.userBundleLimiter) {
       return { allowed: true };
     }
@@ -680,9 +688,7 @@ export class DistributedRateLimiter {
     if (ws._connectionId && this.connectionAuthLimiter) {
       try {
         await this.connectionAuthLimiter.delete(ws._connectionId);
-      } catch (error) {
-        cryptoLogger.debug('[RATE-LIMIT] Error cleaning up connection limit', { error: error.message });
-      }
+      } catch {}
       delete ws._connectionId;
     }
   }

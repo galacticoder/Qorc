@@ -2,6 +2,15 @@ export interface ServerHybridPublicKeys {
   x25519PublicBase64: string;
   kyberPublicBase64: string;
   dilithiumPublicBase64: string;
+  blindPublicKey?: {
+    kid: string;
+    n: string;
+    e: string;
+    modulusLength: number;
+    hash: string;
+    saltLength: number;
+    scheme: string;
+  };
 }
 
 export interface HybridKeys {
@@ -23,4 +32,4 @@ export type HashParams = {
   version?: number;
 } | null;
 
-export type MaxStepReached = 'login' | 'passphrase' | 'server';
+export type MaxStepReached = 'login' | 'server';

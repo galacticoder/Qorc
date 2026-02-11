@@ -39,6 +39,7 @@ export interface HybridKeys {
   kyberPublicBase64?: string;
   dilithiumPublicBase64?: string;
   x25519PublicBase64?: string;
+  inboxId?: string;
 }
 
 // Resolved sender keys result

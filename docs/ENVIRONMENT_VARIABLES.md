@@ -39,7 +39,7 @@ Values shown in parentheses indicate typical defaults when the variable is unset
 | `PGSSLROOTCERT` | unset | `server/database/database.js`, `scripts/start-server.cjs` | Alternative to `DB_CA_CERT_PATH` for specifying the Postgres root CA bundle. |
 | `DB_TLS_SERVERNAME` | derived or unset | `server/database/database.js`, `scripts/start-server.cjs` | SNI/hostname used for Postgres TLS hostname verification. Auto-set by `ensureDbCaBundleEnv()` when probing the remote certificate. |
 | `DB_CONNECT_HOST` | derived or `(localhost)` | `server/database/database.js`, `scripts/start-server.cjs` | Host used for TCP connections to Postgres when `DATABASE_URL` is not set. Auto-populated by `scripts/start-server.cjs` when generating the CA bundle. |
-| `REDIS_TLS_SERVERNAME` | derived from HTTPS certificate when possible | `server/presence/presence.js`, `server/rate-limiting/distributed-rate-limiter.js`, `scripts/start-server.cjs` | SNI hostname used for TLS connections to Redis. When unset and a local TLS Redis is used, `start-server.cjs` derives it from the HTTPS certificate CN. |
+| `REDIS_TLS_SERVERNAME` | derived from HTTPS certificate when possible | `server/session/redis-client.js`, `server/rate-limiting/distributed-rate-limiter.js`, `scripts/start-server.cjs` | SNI hostname used for TLS connections to Redis. When unset and a local TLS Redis is used, `start-server.cjs` derives it from the HTTPS certificate CN. |
 | `OPENSSL_CONF` | unset | `scripts/setup-quantum-haproxy.cjs`, `scripts/build-quantum-haproxy.cjs`, `scripts/start-loadbalancer.cjs`, `scripts/start-server.cjs`, `server/load-balancer/auto-loadbalancer.js` | OpenSSL configuration file. Quantum scripts set this to a local `openssl-oqs.cnf` that loads the OQS provider for PQ TLS. |
 | `OPENSSL_MODULES` | unset | same as above | Directory containing OpenSSL provider modules. Set by quantum setup scripts so the `oqsprovider` module can be loaded. |
 | `LD_LIBRARY_PATH` | unset | `scripts/setup-quantum-haproxy.cjs`, `scripts/build-quantum-haproxy.cjs`, `server/cluster/haproxy-config-generator.js`, `server/load-balancer/auto-loadbalancer.js` | Library search path used when invoking `haproxy` or OpenSSL with the PQ provider installed in non-standard locations. |
@@ -77,24 +77,24 @@ Values shown in parentheses indicate typical defaults when the variable is unset
 
 | Name | Default / required | Used by | Description |
 | ---- | ------------------ | ------- | ----------- |
-| `REDIS_URL` | **required** | `server/presence/presence.js`, `server/rate-limiting/distributed-rate-limiter.js`, `scripts/start-server.cjs`, `scripts/start-loadbalancer.cjs`, `server/load-balancer/auto-loadbalancer.js` | Redis connection URL. Must use `rediss://` with TLS; plaintext `redis://` is treated as an error in production paths. |
-| `REDIS_CLUSTER_NODES` | unset | `server/presence/presence.js` | Comma-separated `host:port` list enabling ioredis cluster mode for presence and messaging when set. |
-| `REDIS_USERNAME` | unset | `server/presence/presence.js`, `server/rate-limiting/distributed-rate-limiter.js` | Redis ACL username used for both presence and rate limiter clients. |
+| `REDIS_URL` | **required** | `server/session/redis-client.js`, `server/rate-limiting/distributed-rate-limiter.js`, `scripts/start-server.cjs`, `scripts/start-loadbalancer.cjs`, `server/load-balancer/auto-loadbalancer.js` | Redis connection URL. Must use `rediss://` with TLS; plaintext `redis://` is treated as an error in production paths. |
+| `REDIS_CLUSTER_NODES` | unset | `server/session/redis-client.js` | Comma-separated `host:port` list enabling ioredis cluster mode for presence and messaging when set. |
+| `REDIS_USERNAME` | unset | `server/session/redis-client.js`, `server/rate-limiting/distributed-rate-limiter.js` | Redis ACL username used for both presence and rate limiter clients. |
 | `REDIS_PASSWORD` | unset | same as above | Redis ACL password. |
 | `REDISCLI_AUTH` | derived from `REDIS_URL` | `scripts/start-server.cjs` | Used to securely pass the Redis password to `redis-cli`, preventing the "insecure password" warning in TUI/logs. |
-| `REDIS_POOL_MIN` | `(4)` (clamped 1–100) | `server/presence/presence.js` | Minimum number of Redis connections in the generic-pool-based client pool. |
+| `REDIS_POOL_MIN` | `(4)` (clamped 1–100) | `server/session/redis-client.js` | Minimum number of Redis connections in the generic-pool-based client pool. |
 | `REDIS_POOL_MAX` | `(50)` (clamped 10–500) | same as above | Maximum number of Redis connections in the pool. |
 | `REDIS_POOL_ACQUIRE_TIMEOUT` | `(15000)` ms (clamped 1000–60000) | same as above | Timeout for acquiring a Redis client from the pool. |
 | `REDIS_POOL_IDLE_TIMEOUT` | `(30000)` ms (clamped 10000–120000) | same as above | Idle timeout for pooled Redis clients. |
 | `REDIS_POOL_EVICTION_INTERVAL` | `(60000)` ms (clamped 10000–120000) | same as above | Interval for evicting idle Redis connections from the pool. |
-| `REDIS_CONNECT_TIMEOUT` | `(15000)` ms (clamped 1000–60000) | `server/presence/presence.js` | Network connection timeout for Redis clients. |
-| `REDIS_COMMAND_TIMEOUT` | `(10000)` ms (clamped 1000–30000) | `server/presence/presence.js` | Timeout for individual Redis commands. |
-| `REDIS_DUPLICATE_POOL_MAX` | `(5)` (clamped 1–20) | `server/presence/presence.js` | Upper bound on duplicate Redis connections used for pub/sub and specialized operations. |
-| `PRESENCE_REDIS_QUIET_ERRORS` | `('true')` in load balancer, else `('false')` | `server/presence/presence.js`, `scripts/start-loadbalancer.cjs` | When `'true'`, repeated identical Redis errors are throttled and logged less frequently. Load balancer startup enforces `'true'` by default. |
-| `REDIS_ERROR_THROTTLE_MS` | `(5000)` ms (clamped 1000–60000) | `server/presence/presence.js` | Minimum interval before the same Redis error message is logged again when `PRESENCE_REDIS_QUIET_ERRORS` is enabled. |
+| `REDIS_CONNECT_TIMEOUT` | `(15000)` ms (clamped 1000–60000) | `server/session/redis-client.js` | Network connection timeout for Redis clients. |
+| `REDIS_COMMAND_TIMEOUT` | `(10000)` ms (clamped 1000–30000) | `server/session/redis-client.js` | Timeout for individual Redis commands. |
+| `REDIS_DUPLICATE_POOL_MAX` | `(5)` (clamped 1–20) | `server/session/redis-client.js` | Upper bound on duplicate Redis connections used for pub/sub and specialized operations. |
+| `PRESENCE_REDIS_QUIET_ERRORS` | `('true')` in load balancer, else `('false')` | `server/session/redis-client.js`, `scripts/start-loadbalancer.cjs` | When `'true'`, repeated identical Redis errors are throttled and logged less frequently. Load balancer startup enforces `'true'` by default. |
+| `REDIS_ERROR_THROTTLE_MS` | `(5000)` ms (clamped 1000–60000) | `server/session/redis-client.js` | Minimum interval before the same Redis error message is logged again when `PRESENCE_REDIS_QUIET_ERRORS` is enabled. |
 | `RATE_LIMIT_REDIS_URL` | unset → falls back to `REDIS_URL` | `server/rate-limiting/distributed-rate-limiter.js` | Redis URL override specifically for the distributed rate limiter. Must also use `rediss://`. |
 | `RATE_LIMIT_REDIS_CONNECT_TIMEOUT` | `(10000)` ms (clamped 1000–60000) | `server/rate-limiting/distributed-rate-limiter.js` | Connection timeout for the rate limiter Redis client. |
-| `REDIS_CA_CERT_PATH` | unset | `server/presence/presence.js`, `server/rate-limiting/distributed-rate-limiter.js` | Path to Redis CA certificate used to validate the Redis server's TLS certificate. When set, enables full mutual TLS for Redis connections. In Docker environments, typically `/app/redis-certs/redis-ca.crt`. |
+| `REDIS_CA_CERT_PATH` | unset | `server/session/redis-client.js`, `server/rate-limiting/distributed-rate-limiter.js` | Path to Redis CA certificate used to validate the Redis server's TLS certificate. When set, enables full mutual TLS for Redis connections. In Docker environments, typically `/app/redis-certs/redis-ca.crt`. |
 | `REDIS_CLIENT_CERT_PATH` | unset | same as above | Path to client certificate used for mutual TLS authentication with Redis. Required when Redis is configured with `--tls-auth-clients yes`. In Docker, typically `/app/redis-certs/redis-client.crt`. |
 | `REDIS_CLIENT_KEY_PATH` | unset | same as above | Path to client private key corresponding to `REDIS_CLIENT_CERT_PATH`. Used for mutual TLS authentication with Redis. In Docker, typically `/app/redis-certs/redis-client.key`. |
 
@@ -142,7 +142,6 @@ Several of these secrets (`KEY_ENCRYPTION_SECRET`, `TOKEN_PEPPER`, `AUTH_AUDIT_H
 | Name | Default / required | Used by | Description |
 | ---- | ------------------ | ------- | ----------- |
 | `HAPROXY_HTTPS_PORT` | if root: `(443)`, else `(8443)` | `scripts/start-loadbalancer.cjs`, `server/cluster/haproxy-config-generator.js`, `server/load-balancer/auto-loadbalancer.js`, `scripts/simple-tunnel.cjs` | External HTTPS listen port for the HAProxy load balancer. |
-| `HAPROXY_HTTP_PORT` | if root: `(80)`, else `(8080)` | same as above | Optional HTTP listen port used to redirect HTTP to HTTPS. |
 | `HAPROXY_STATS_PORT` | `(8404)` | same as above | Port for the HAProxy statistics dashboard. |
 | `HAPROXY_STATS_USERNAME` | `'admin'` when first created | `scripts/start-loadbalancer.cjs`, `server/cluster/haproxy-config-generator.js`, `server/load-balancer/auto-loadbalancer.js` | Username for the HAProxy stats HTTP interface and the PQ command-encryption keypair. When unset, tooling loads it from encrypted credentials or initializes it to `admin`. |
 | `HAPROXY_STATS_PASSWORD` | generated or prompted when first created | same as above | Password for the HAProxy stats HTTP interface and PQ command-encryption keypair. When unset, tooling either unlocks the stored value or prompts/generates a strong random password and stores it encrypted under `server/config/.haproxy-*`. |

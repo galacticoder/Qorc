@@ -1,7 +1,8 @@
 import { SecureDB } from '../../lib/database/secureDB';
 import { encryptedStorage, syncEncryptedStorage } from '../../lib/database/encrypted-storage';
 import { blockingSystem } from '../../lib/blocking/blocking-system';
-import { EventType } from '../../lib/types/event-types';
+import { database } from '../../lib/tauri-bindings';
+import { CryptoUtils } from '../../lib/utils/crypto-utils';
 
 // Validate CryptoKey structure
 export const isValidCryptoKey = (key: unknown): key is CryptoKey => {
@@ -20,6 +21,10 @@ export const initializeSecureDB = async (
   username: string,
   aesKey: CryptoKey
 ): Promise<SecureDB> => {
+  const rawKey = await crypto.subtle.exportKey('raw', aesKey);
+  const keyB64 = CryptoUtils.Base64.arrayBufferToBase64(rawKey);
+  await database.init(username, keyB64);
+
   const db = new SecureDB(username);
   await db.initializeWithKey(aesKey);
   return db;
@@ -60,43 +65,17 @@ export const initializeBlockingSystem = async (
 export const storeAuthMetadata = async (
   secureDB: SecureDB,
   hashedUsername: string,
-  originalUsername: string | null
+  originalUsername?: string | null
 ): Promise<void> => {
   try {
-    await secureDB.store('auth_metadata', 'current_user', hashedUsername);
-  } catch (err) {
-    console.error('[storeAuthMetadata] Failed to store authenticated user:', err);
-  }
-
-  if (originalUsername) {
-    try {
-      await secureDB.storeUsernameMapping(hashedUsername, originalUsername);
+    await secureDB.store('auth_metadata', 'username', hashedUsername);
+    if (originalUsername) {
       await secureDB.store('auth_metadata', 'original_username', originalUsername);
-    } catch (err) {
-      console.error('[storeAuthMetadata] Failed to pre-store username mapping:', err);
     }
+  } catch (err) {
+    console.error('[storeAuthMetadata] Failed:', err);
+    throw err;
   }
-
-  // Restore existing mapping if available
-  try {
-    const existingOriginal = await secureDB.retrieve('auth_metadata', 'original_username');
-    if (typeof existingOriginal === 'string' && existingOriginal) {
-      try {
-        await secureDB.storeUsernameMapping(hashedUsername, existingOriginal);
-      } catch { }
-      try {
-        window.dispatchEvent(new CustomEvent(EventType.USERNAME_MAPPING_UPDATED, {
-          detail: { username: hashedUsername, original: existingOriginal }
-        }));
-      } catch { }
-    } else if (originalUsername) {
-      try {
-        window.dispatchEvent(new CustomEvent(EventType.USERNAME_MAPPING_UPDATED, {
-          detail: { username: hashedUsername, original: originalUsername }
-        }));
-      } catch { }
-    }
-  } catch { }
 };
 
 // Initialize encrypted storage systems

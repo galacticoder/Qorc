@@ -1,9 +1,6 @@
 import { RefObject } from "react";
-import { SignalType } from "../../lib/types/signal-types";
-import { EventType } from "../../lib/types/event-types";
 import websocketClient from "../../lib/websocket/websocket";
 import { storage } from "../../lib/tauri-bindings";
-import { SecureDB } from "../../lib/database/secureDB";
 
 export interface RecoveryRefs {
   loginUsernameRef: RefObject<string>;
@@ -53,20 +50,20 @@ export const createAttemptAuthRecovery = (
         await websocketClient.connect();
       }
 
+      const { computeBlindUserId } = await import('../../lib/utils/auth-utils');
+      const pseudonymHash = computeBlindUserId(storedUsername);
       refs.loginUsernameRef.current = storedUsername;
+
       if (storedDisplayName) {
         refs.originalUsernameRef.current = storedDisplayName;
         setters.setUsername(storedDisplayName);
-        setters.setPseudonym(storedUsername);
+        setters.setPseudonym(pseudonymHash);
       } else {
         setters.setUsername(storedUsername);
-        setters.setPseudonym(storedUsername);
+        setters.setPseudonym(pseudonymHash);
       }
 
-      websocketClient.send(JSON.stringify({
-        type: SignalType.AUTH_RECOVERY,
-        username: storedUsername
-      }));
+      await websocketClient.attemptTokenValidationOnce('recovery');
 
       return true;
     } catch {
@@ -107,19 +104,6 @@ export const createClearAuthenticationState = () => {
       ]);
     } catch (err) {
       console.error('[Recovery] Failed to clear authentication state:', err);
-    }
-  };
-};
-
-export const createStoreUsernameMapping = (refs: RecoveryRefs) => {
-  return async (secureDBInstance: SecureDB) => {
-    if (refs.originalUsernameRef.current && refs.loginUsernameRef.current) {
-      try {
-        await secureDBInstance.storeUsernameMapping(refs.loginUsernameRef.current, refs.originalUsernameRef.current);
-        try {
-          window.dispatchEvent(new CustomEvent(EventType.USERNAME_MAPPING_UPDATED, { detail: { username: refs.loginUsernameRef.current } }));
-        } catch { }
-      } catch { }
     }
   };
 };

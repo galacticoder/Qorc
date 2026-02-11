@@ -77,21 +77,21 @@ export class PQSession {
     }
 
     // Session Establishment
-    static createInitiatorSession(
+    static async createInitiatorSession(
         peerId: string,
         ownKeys: OwnKeys,
         peerKeys: PeerKeys
-    ): { session: PQSession; message: HandshakeMessage } {
+    ): Promise<{ session: PQSession; message: HandshakeMessage }> {
         const sessionId = PostQuantumUtils.bytesToHex(PostQuantumRandom.randomBytes(16));
         const session = new PQSession(sessionId, peerId, 'initiator', ownKeys);
         session.peerKeys = peerKeys;
         session.state = 'handshaking';
 
-        session.ephemeralKyberPair = PostQuantumKEM.generateKeyPair();
+        session.ephemeralKyberPair = await PostQuantumKEM.generateKeyPair();
         session.ephemeralX25519Pair = generateX25519KeyPair();
 
         const { ciphertext: kemCiphertext, sharedSecret: pqSecret } =
-            PostQuantumKEM.encapsulate(peerKeys.kyberPublicKey);
+            await PostQuantumKEM.encapsulate(peerKeys.kyberPublicKey);
 
         const x25519Secret = computeX25519SharedSecret(
             session.ephemeralX25519Pair.secretKey,
@@ -111,7 +111,7 @@ export class PQSession {
             session.ephemeralX25519Pair.publicKey
         );
 
-        const signature = PostQuantumSignature.sign(messageData, ownKeys.dilithiumKeyPair.secretKey);
+        const signature = await PostQuantumSignature.sign(messageData, ownKeys.dilithiumKeyPair.secretKey);
 
         const message: HandshakeMessage = {
             version: NOISE_PROTOCOL_VERSION,
@@ -129,11 +129,11 @@ export class PQSession {
     }
 
     // Process initiator message and create response
-    static processInitiatorMessage(
+    static async processInitiatorMessage(
         peerId: string,
         ownKeys: OwnKeys,
         message: HandshakeMessage
-    ): { session: PQSession; response: HandshakeMessage } {
+    ): Promise<{ session: PQSession; response: HandshakeMessage }> {
         if (message.version !== NOISE_PROTOCOL_VERSION || message.type !== 'init') {
             throw new Error('Invalid handshake message');
         }
@@ -154,7 +154,7 @@ export class PQSession {
             message.ephemeralX25519Public
         );
 
-        const signatureValid = PostQuantumSignature.verify(
+        const signatureValid = await PostQuantumSignature.verify(
             message.signature,
             signatureInput,
             message.signerPublicKey
@@ -174,7 +174,7 @@ export class PQSession {
         session.state = 'handshaking';
 
         // Decapsulate initiator KEM ciphertext
-        const initiatorPQSecret = PostQuantumKEM.decapsulate(
+        const initiatorPQSecret = await PostQuantumKEM.decapsulate(
             message.kemCiphertext,
             ownKeys.kyberKeyPair.secretKey
         );
@@ -186,12 +186,12 @@ export class PQSession {
         );
 
         // Generate own ephemeral keys
-        const responderKyberPair = PostQuantumKEM.generateKeyPair();
+        const responderKyberPair = await PostQuantumKEM.generateKeyPair();
         const responderX25519Pair = generateX25519KeyPair();
 
         // Encapsulate to initiator ephemeral KEM key
         const { ciphertext: responseCiphertext, sharedSecret: responderPQSecret } =
-            PostQuantumKEM.encapsulate(message.ephemeralKyberPublic);
+            await PostQuantumKEM.encapsulate(message.ephemeralKyberPublic);
 
         // Compute X25519 with initiator ephemeral key
         const responderX25519Secret = computeX25519SharedSecret(
@@ -224,7 +224,7 @@ export class PQSession {
             responderX25519Pair.publicKey
         );
 
-        const responseSignature = PostQuantumSignature.sign(
+        const responseSignature = await PostQuantumSignature.sign(
             responseData,
             ownKeys.dilithiumKeyPair.secretKey
         );
@@ -248,7 +248,7 @@ export class PQSession {
     }
 
     // Complete initiator handshake with responder message
-    completeHandshake(response: HandshakeMessage): void {
+    async completeHandshake(response: HandshakeMessage): Promise<void> {
         if (this.role !== 'initiator' || this.state !== 'handshaking') {
             throw new Error('Invalid state for completing handshake');
         }
@@ -271,7 +271,7 @@ export class PQSession {
             response.ephemeralX25519Public
         );
 
-        const signatureValid = PostQuantumSignature.verify(
+        const signatureValid = await PostQuantumSignature.verify(
             response.signature,
             signatureInput,
             response.signerPublicKey
@@ -288,7 +288,7 @@ export class PQSession {
         }
 
         // Decapsulate responder KEM ciphertext using own ephemeral key
-        const responderPQSecret = PostQuantumKEM.decapsulate(
+        const responderPQSecret = await PostQuantumKEM.decapsulate(
             response.kemCiphertext,
             this.ephemeralKyberPair.secretKey
         );

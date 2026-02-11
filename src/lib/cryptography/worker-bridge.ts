@@ -1,16 +1,20 @@
 /**
- * Post-Quantum Worker Bridge
- * Handles communication with the post-quantum crypto worker
- */
+* Post-Quantum Worker Bridge
+* Handles communication with the post-quantum crypto worker
+*/
 
-import * as argon2 from 'argon2-wasm';
-import { PostQuantumKEM } from './kem';
 import { PostQuantumRandom } from './random';
 import { isPlainObject, hasPrototypePollutionKeys } from '../sanitizers'
 import { PQ_WORKER_MAX_RESTART_ATTEMPTS } from '../constants';
 import type { WorkerRequestMessage, KemKeyPairResult, Argon2HashResult } from '../types/crypto-types';
 import { SignalType } from '../types/signal-types';
-import { EventType } from '../types/event-types';
+
+// @ts-ignore
+import PQWorker from './post-quantum-worker?worker';
+// @ts-ignore
+import PQWorkerUrl from './post-quantum-worker?worker&url';
+
+const EXPECTED_AUTH_TOKEN_BYTES = 32;
 
 const parseAuthTokenHex = (hex: unknown): Uint8Array | null => {
   if (typeof hex !== 'string') {
@@ -19,6 +23,10 @@ const parseAuthTokenHex = (hex: unknown): Uint8Array | null => {
 
   const normalized = hex.trim().toLowerCase();
   if (!/^[0-9a-f]+$/.test(normalized) || normalized.length % 2 !== 0) {
+    return null;
+  }
+
+  if (normalized.length !== EXPECTED_AUTH_TOKEN_BYTES * 2) {
     return null;
   }
 
@@ -71,6 +79,87 @@ const isKemKeyPairResult = (result: unknown): result is KemKeyPairResult => {
   return true;
 };
 
+const isSigKeyPairResult = (result: unknown): result is { publicKey: Uint8Array; secretKey: Uint8Array } => {
+  if (!isPlainObject(result) || hasPrototypePollutionKeys(result)) return false;
+  if (!(result.publicKey instanceof Uint8Array)) return false;
+  if (!(result.secretKey instanceof Uint8Array)) return false;
+  return true;
+};
+
+const isSigSignResult = (result: unknown): result is { signature: Uint8Array } => {
+  if (!isPlainObject(result) || hasPrototypePollutionKeys(result)) return false;
+  if (!(result.signature instanceof Uint8Array)) return false;
+  return true;
+};
+
+const isPPGenerateResult = (result: unknown): result is { blindedTokens: Uint8Array[]; tokenSecrets: any[] } => {
+  if (!isPlainObject(result) || hasPrototypePollutionKeys(result)) return false;
+  if (!Array.isArray((result as any).blindedTokens)) return false;
+  if (!Array.isArray((result as any).tokenSecrets)) return false;
+  return true;
+};
+
+const isPPUnblindResult = (result: unknown): result is { completedTokens: any[] } => {
+  if (!isPlainObject(result) || hasPrototypePollutionKeys(result)) return false;
+  if (!Array.isArray((result as any).completedTokens)) return false;
+  return true;
+};
+
+const isOpaqueStartRegResult = (result: unknown): result is { blindedElement: Uint8Array; clientPublicKey: Uint8Array; blindingFactor: Uint8Array; clientSecretKey: Uint8Array } => {
+  if (!isPlainObject(result) || hasPrototypePollutionKeys(result)) return false;
+  if (!((result as any).blindedElement instanceof Uint8Array)) return false;
+  if (!((result as any).clientPublicKey instanceof Uint8Array)) return false;
+  if (!((result as any).blindingFactor instanceof Uint8Array)) return false;
+  if (!((result as any).clientSecretKey instanceof Uint8Array)) return false;
+  return true;
+};
+
+const isOpaqueFinishRegResult = (result: unknown): result is { envelope: Uint8Array; exportKey: Uint8Array; maskedResponse: Uint8Array } => {
+  if (!isPlainObject(result) || hasPrototypePollutionKeys(result)) return false;
+  if (!((result as any).envelope instanceof Uint8Array)) return false;
+  if (!((result as any).exportKey instanceof Uint8Array)) return false;
+  if (!((result as any).maskedResponse instanceof Uint8Array)) return false;
+  return true;
+};
+
+const isOpaqueStartLoginResult = (result: unknown): result is { blindedElement: Uint8Array; blindingFactor: Uint8Array } => {
+  if (!isPlainObject(result) || hasPrototypePollutionKeys(result)) return false;
+  if (!((result as any).blindedElement instanceof Uint8Array)) return false;
+  if (!((result as any).blindingFactor instanceof Uint8Array)) return false;
+  return true;
+};
+
+const isOpaqueFinishLoginResult = (result: unknown): result is { success: boolean; sessionKey?: Uint8Array; exportKey?: Uint8Array; authMessage?: Uint8Array; clientSecretKey?: Uint8Array } => {
+  if (!isPlainObject(result) || hasPrototypePollutionKeys(result)) return false;
+  if (typeof (result as any).success !== 'boolean') return false;
+  return true;
+};
+
+const isOpaqueFinishOTLoginResult = (result: unknown): result is {
+  success: boolean;
+  sessionKey?: Uint8Array;
+  exportKey?: Uint8Array;
+  authMessage?: Uint8Array;
+  clientSecretKey?: Uint8Array;
+  serverNonce: Uint8Array;
+  credentialId: string;
+} => {
+  if (!isPlainObject(result) || hasPrototypePollutionKeys(result)) return false;
+  if (typeof (result as any).success !== 'boolean') return false;
+  if (!(result as any).serverNonce || !((result as any).serverNonce instanceof Uint8Array)) return false;
+  if (typeof (result as any).credentialId !== 'string') return false;
+  return true;
+};
+
+const isOpaqueStartOTLoginResult = (result: unknown): result is { pubKeys: Uint8Array[]; blindedElement: Uint8Array; blindingFactor: Uint8Array; myPrivKey: Uint8Array } => {
+  if (!isPlainObject(result) || hasPrototypePollutionKeys(result)) return false;
+  if (!Array.isArray((result as any).pubKeys)) return false;
+  if (!((result as any).blindedElement instanceof Uint8Array)) return false;
+  if (!((result as any).blindingFactor instanceof Uint8Array)) return false;
+  if (!((result as any).myPrivKey instanceof Uint8Array)) return false;
+  return true;
+};
+
 const isDestroyKeyResult = (result: unknown): result is { destroyed: true } => {
   if (!isPlainObject(result) || hasPrototypePollutionKeys(result)) return false;
   return (result as Record<string, unknown>).destroyed === true;
@@ -94,6 +183,26 @@ const validateWorkerResult = (expectedType: WorkerRequestMessage['type'], result
       return isKemKeyPairResult(result);
     case 'kem.destroyKey':
       return isDestroyKeyResult(result);
+    case 'sig.generateKeyPair':
+      return isSigKeyPairResult(result);
+    case 'sig.sign':
+      return isSigSignResult(result);
+    case 'pp.generateTokenBatch':
+      return isPPGenerateResult(result);
+    case 'pp.unblindTokens':
+      return isPPUnblindResult(result);
+    case 'opaque.startRegistration':
+      return isOpaqueStartRegResult(result);
+    case 'opaque.finishRegistration':
+      return isOpaqueFinishRegResult(result);
+    case 'opaque.startLogin':
+      return isOpaqueStartLoginResult(result);
+    case 'opaque.finishLogin':
+      return isOpaqueFinishLoginResult(result);
+    case 'opaque.startOTLogin':
+      return isOpaqueStartOTLoginResult(result);
+    case 'opaque.finishOTLogin':
+      return isOpaqueFinishOTLoginResult(result);
     case 'argon2.hash':
       return isArgon2HashResult(result);
     case 'argon2.verify':
@@ -121,81 +230,94 @@ export class PostQuantumWorker {
   }
 
   private static ensureWorker(): void {
-    if (PostQuantumWorker.worker || typeof Worker === 'undefined') {
+    if (PostQuantumWorker.worker || typeof Worker === 'undefined' || PostQuantumWorker.restarting) {
       return;
     }
 
-    let workerUrl: URL;
     try {
-      workerUrl = new URL('./post-quantum-worker.ts', (import.meta as any).url);
-    } catch {
-      const base = typeof window !== 'undefined' && typeof window.location?.href === 'string' ? window.location.href : '';
-      if (!base) {
-        throw new Error('Unable to resolve post-quantum worker URL');
-      }
-      workerUrl = new URL('./post-quantum-worker.ts', base);
-    }
-
-    const worker = new Worker(workerUrl, { type: 'module' });
-    worker.addEventListener(EventType.MESSAGE, (event: MessageEvent<unknown>) => {
-      try {
-        const data = event.data;
-        if (!isPlainObject(data) || hasPrototypePollutionKeys(data)) {
-          return;
+      let worker: Worker;
+      
+      if (typeof window !== 'undefined' && (window as any)._workerPolicy) {
+        try {
+          const workerSource = (window as any)._workerPolicy.createScriptURL(PQWorkerUrl);
+          worker = new Worker(workerSource, { type: 'module' });
+        } catch (e) {
+          console.error('[PostQuantumWorker] Trusted Types worker spawn failed, trying direct constructor:', e);
+          worker = new PQWorker();
         }
+      } else {
+        worker = new PQWorker();
+      }
 
-        if (isWorkerAuthTokenMessage(data)) {
-          const tokenBytes = parseAuthTokenHex(data.token);
-          if (!tokenBytes) {
+      worker.addEventListener('message', (event: MessageEvent<unknown>) => {
+        try {
+          const data = event.data;
+          if (!isPlainObject(data) || hasPrototypePollutionKeys(data)) {
             return;
           }
-          PostQuantumWorker.authToken = tokenBytes;
-          return;
-        }
 
-        if (isWorkerResponseFailureMessage(data)) {
+          if (isWorkerAuthTokenMessage(data)) {
+            const tokenBytes = parseAuthTokenHex(data.token);
+            if (!tokenBytes) {
+              console.error('[PostQuantumWorker] Invalid auth token received from worker');
+              return;
+            }
+            PostQuantumWorker.authToken = tokenBytes;
+            return;
+          }
+
+          if (isWorkerResponseFailureMessage(data)) {
+            const pending = PostQuantumWorker.pending.get(data.id);
+            if (!pending) {
+              return;
+            }
+            PostQuantumWorker.pending.delete(data.id);
+            const errorText = data.error.length > 2000 ? data.error.slice(0, 2000) : data.error;
+            pending.reject(new Error(errorText));
+            return;
+          }
+
+          if (!isWorkerResponseSuccessMessage(data)) {
+            return;
+          }
+
           const pending = PostQuantumWorker.pending.get(data.id);
           if (!pending) {
             return;
           }
           PostQuantumWorker.pending.delete(data.id);
-          const errorText = data.error.length > 2000 ? data.error.slice(0, 2000) : data.error;
-          pending.reject(new Error(errorText));
+
+          if (!validateWorkerResult(pending.expectedType, data.result)) {
+            pending.reject(new Error('Invalid worker response'));
+            return;
+          }
+
+          if (pending.expectedType === 'kem.generateKeyPair' && isKemKeyPairResult(data.result)) {
+            PostQuantumWorker.trackedKeys.set(data.result.keyId, data.result.keyId);
+          }
+          pending.resolve(data.result);
+        } catch (err) {
+          console.error('[PostQuantumWorker] Message handler error:', err);
           return;
         }
+      });
 
-        if (!isWorkerResponseSuccessMessage(data)) {
-          return;
-        }
+      worker.addEventListener('error', (error) => {
+        console.error('[PostQuantumWorker] Worker script error event:', error);
+        PostQuantumWorker.handleWorkerFailure(error);
+      });
 
-        const pending = PostQuantumWorker.pending.get(data.id);
-        if (!pending) {
-          return;
-        }
-        PostQuantumWorker.pending.delete(data.id);
+      worker.addEventListener('messageerror', (error) => {
+        console.error('[PostQuantumWorker] Worker message error event:', error);
+        PostQuantumWorker.handleWorkerFailure(error);
+      });
 
-        if (!validateWorkerResult(pending.expectedType, data.result)) {
-          pending.reject(new Error('Invalid worker response'));
-          return;
-        }
-
-        if (pending.expectedType === 'kem.generateKeyPair' && isKemKeyPairResult(data.result)) {
-          PostQuantumWorker.trackedKeys.set(data.result.keyId, data.result.keyId);
-        }
-        pending.resolve(data.result);
-      } catch {
-        return;
-      }
-    });
-    worker.addEventListener(SignalType.ERROR, (error) => {
-      PostQuantumWorker.handleWorkerFailure(error);
-    });
-    worker.addEventListener('messageerror', (error) => {
-      PostQuantumWorker.handleWorkerFailure(error);
-    });
-
-    PostQuantumWorker.worker = worker;
-    PostQuantumWorker.restartAttempts = 0;
+      PostQuantumWorker.worker = worker;
+      PostQuantumWorker.restartAttempts = 0;
+    } catch (spawnError) {
+      console.error('[PostQuantumWorker] FATAL: Failed to spawn worker thread:', spawnError);
+      PostQuantumWorker.worker = null;
+    }
   }
 
   private static handleWorkerFailure(error: unknown): void {
@@ -231,7 +353,20 @@ export class PostQuantumWorker {
     }, delay);
   }
 
-  private static getAuthToken(): string {
+  private static async getAuthToken(): Promise<string> {
+    if (!PostQuantumWorker.authToken) {
+      if (!PostQuantumWorker.supportsWorkers() || PostQuantumWorker.restarting) {
+        throw new Error('Worker not available or restarting');
+      }
+      
+      const start = Date.now();
+      while (!PostQuantumWorker.authToken && Date.now() - start < 2000) {
+        if (!PostQuantumWorker.worker) {
+          throw new Error('Worker instance lost during authentication');
+        }
+        await new Promise(resolve => setTimeout(resolve, 50));
+      }
+    }
     if (!PostQuantumWorker.authToken) {
       throw new Error('Worker auth token not initialized');
     }
@@ -240,24 +375,61 @@ export class PostQuantumWorker {
 
   static async generateKemKeyPair(): Promise<{ publicKey: Uint8Array; secretKey: Uint8Array }> {
     if (!PostQuantumWorker.supportsWorkers()) {
-      return PostQuantumKEM.generateKeyPair();
+      throw new Error('Web Workers not supported');
     }
 
     try {
-      try {
-        PostQuantumWorker.ensureWorker();
-      } catch {
-        return PostQuantumKEM.generateKeyPair();
-      }
+      PostQuantumWorker.ensureWorker();
+
       if (!PostQuantumWorker.worker) {
-        return PostQuantumKEM.generateKeyPair();
+        throw new Error('Worker not available');
       }
 
       const id = PostQuantumRandom.randomUUID();
-      const request: WorkerRequestMessage = { 
-        id, 
+      const auth = await PostQuantumWorker.getAuthToken();
+      const request: WorkerRequestMessage = {
+        id,
         type: 'kem.generateKeyPair',
-        auth: PostQuantumWorker.getAuthToken()
+        auth
+      };
+
+      return await new Promise((resolve, reject) => {
+        PostQuantumWorker.pending.set(id, { resolve, reject, expectedType: request.type });
+        try {
+          PostQuantumWorker.worker!.postMessage(request);
+        } catch (error) {
+          PostQuantumWorker.pending.delete(id);
+          reject(error);
+        }
+      });
+    } catch (err) {
+      throw err;
+    }
+  }
+
+  static async generateSigKeyPair(): Promise<{ publicKey: Uint8Array; secretKey: Uint8Array }> {
+    if (!PostQuantumWorker.supportsWorkers()) {
+      const seed = PostQuantumRandom.randomBytes(32);
+      const { ml_dsa87 } = await import('@noble/post-quantum/ml-dsa.js');
+      const kp = await ml_dsa87.keygen(seed);
+      return { publicKey: new Uint8Array(kp.publicKey), secretKey: new Uint8Array(kp.secretKey) };
+    }
+
+    try {
+      PostQuantumWorker.ensureWorker();
+      if (!PostQuantumWorker.worker) {
+        const seed = PostQuantumRandom.randomBytes(32);
+        const { ml_dsa87 } = await import('@noble/post-quantum/ml-dsa.js');
+        const kp = await ml_dsa87.keygen(seed);
+        return { publicKey: new Uint8Array(kp.publicKey), secretKey: new Uint8Array(kp.secretKey) };
+      }
+
+      const id = PostQuantumRandom.randomUUID();
+      const auth = await PostQuantumWorker.getAuthToken();
+      const request: WorkerRequestMessage = {
+        id,
+        type: 'sig.generateKeyPair',
+        auth
       };
 
       return await new Promise((resolve, reject) => {
@@ -270,7 +442,368 @@ export class PostQuantumWorker {
         }
       });
     } catch {
-      return PostQuantumKEM.generateKeyPair();
+      const seed = PostQuantumRandom.randomBytes(32);
+      const { ml_dsa87 } = await import('@noble/post-quantum/ml-dsa.js');
+      const kp = await ml_dsa87.keygen(seed);
+      return { publicKey: new Uint8Array(kp.publicKey), secretKey: new Uint8Array(kp.secretKey) };
+    }
+  }
+
+  static async sigSign(message: Uint8Array, secretKey: Uint8Array): Promise<Uint8Array> {
+    if (!PostQuantumWorker.supportsWorkers()) {
+      const { ml_dsa87 } = await import('@noble/post-quantum/ml-dsa.js');
+      return await ml_dsa87.sign(message, secretKey);
+    }
+
+    try {
+      PostQuantumWorker.ensureWorker();
+      if (!PostQuantumWorker.worker) {
+        const { ml_dsa87 } = await import('@noble/post-quantum/ml-dsa.js');
+        return await ml_dsa87.sign(message, secretKey);
+      }
+
+      const id = PostQuantumRandom.randomUUID();
+      const auth = await PostQuantumWorker.getAuthToken();
+      const request: WorkerRequestMessage = {
+        id,
+        type: 'sig.sign',
+        message,
+        secretKey,
+        auth
+      };
+
+      const response = await new Promise<{ signature: Uint8Array }>((resolve, reject) => {
+        PostQuantumWorker.pending.set(id, { resolve, reject, expectedType: request.type });
+        try {
+          PostQuantumWorker.worker!.postMessage(request);
+        } catch (error) {
+          PostQuantumWorker.pending.delete(id);
+          reject(error);
+        }
+      });
+      return response.signature;
+    } catch {
+      const { ml_dsa87 } = await import('@noble/post-quantum/ml-dsa.js');
+      return await ml_dsa87.sign(message, secretKey);
+    }
+  }
+
+  static async sigVerify(signature: Uint8Array, message: Uint8Array, publicKey: Uint8Array): Promise<boolean> {
+    if (!PostQuantumWorker.supportsWorkers()) {
+      const { ml_dsa87 } = await import('@noble/post-quantum/ml-dsa.js');
+      return await ml_dsa87.verify(signature, message, publicKey);
+    }
+
+    try {
+      PostQuantumWorker.ensureWorker();
+      if (!PostQuantumWorker.worker) {
+        const { ml_dsa87 } = await import('@noble/post-quantum/ml-dsa.js');
+        return await ml_dsa87.verify(signature, message, publicKey);
+      }
+
+      const id = PostQuantumRandom.randomUUID();
+      const auth = await PostQuantumWorker.getAuthToken();
+      const request: WorkerRequestMessage = {
+        id,
+        type: 'sig.verify',
+        message,
+        publicKey,
+        signature,
+        auth
+      };
+
+      const response = await new Promise<{ verified: boolean }>((resolve, reject) => {
+        PostQuantumWorker.pending.set(id, { resolve, reject, expectedType: request.type });
+        try {
+          PostQuantumWorker.worker!.postMessage(request);
+        } catch (error) {
+          PostQuantumWorker.pending.delete(id);
+          reject(error);
+        }
+      });
+      return response.verified;
+    } catch {
+      const { ml_dsa87 } = await import('@noble/post-quantum/ml-dsa.js');
+      return await ml_dsa87.verify(signature, message, publicKey);
+    }
+  }
+
+  static async ppGenerateTokenBatch(count: number): Promise<{ blindedTokens: Uint8Array[]; tokenSecrets: any[] }> {
+    try {
+      PostQuantumWorker.ensureWorker();
+      if (!PostQuantumWorker.worker) {
+        throw new Error('Worker not available');
+      }
+
+      const id = PostQuantumRandom.randomUUID();
+      const auth = await PostQuantumWorker.getAuthToken();
+      const request: WorkerRequestMessage = {
+        id,
+        type: 'pp.generateTokenBatch',
+        count,
+        auth
+      };
+
+      return await new Promise((resolve, reject) => {
+        PostQuantumWorker.pending.set(id, { resolve, reject, expectedType: request.type });
+        try {
+          PostQuantumWorker.worker!.postMessage(request);
+        } catch (error) {
+          PostQuantumWorker.pending.delete(id);
+          reject(error);
+        }
+      });
+    } catch (err) {
+      const { PrivacyPassClient } = await import('./privacy-pass-client');
+      const client = new PrivacyPassClient();
+      return client.generateTokenBatchLocal(count);
+    }
+  }
+
+  static async ppUnblindTokens(tokenSecrets: any[], signedBlindedTokens: Uint8Array[], proof: Uint8Array, serverPublicKey: Uint8Array): Promise<{ completedTokens: any[] }> {
+    try {
+      PostQuantumWorker.ensureWorker();
+      if (!PostQuantumWorker.worker) {
+        throw new Error('Worker not available');
+      }
+
+      const id = PostQuantumRandom.randomUUID();
+      const auth = await PostQuantumWorker.getAuthToken();
+      const request: WorkerRequestMessage = {
+        id,
+        type: 'pp.unblindTokens',
+        tokenSecrets,
+        signedBlindedTokens,
+        proof,
+        serverPublicKey,
+        auth
+      };
+
+      return await new Promise((resolve, reject) => {
+        PostQuantumWorker.pending.set(id, { resolve, reject, expectedType: request.type });
+        try {
+          PostQuantumWorker.worker!.postMessage(request);
+        } catch (error) {
+          PostQuantumWorker.pending.delete(id);
+          reject(error);
+        }
+      });
+    } catch (err) {
+      const { PrivacyPassClient } = await import('./privacy-pass-client');
+      const client = new PrivacyPassClient();
+      const tokens = await client.unblindTokensLocal(tokenSecrets, signedBlindedTokens, proof, serverPublicKey);
+      return { completedTokens: tokens };
+    }
+  }
+
+  static async opaqueStartRegistration(password: Uint8Array): Promise<{ blindedElement: Uint8Array; clientPublicKey: Uint8Array; blindingFactor: Uint8Array; clientSecretKey: Uint8Array }> {
+    try {
+      PostQuantumWorker.ensureWorker();
+      if (!PostQuantumWorker.worker) throw new Error('Worker not available');
+
+      const id = PostQuantumRandom.randomUUID();
+      const auth = await PostQuantumWorker.getAuthToken();
+      const request: WorkerRequestMessage = {
+        id,
+        type: 'opaque.startRegistration',
+        passwordBytes: password,
+        auth
+      };
+
+      return await new Promise((resolve, reject) => {
+        PostQuantumWorker.pending.set(id, { resolve, reject, expectedType: request.type });
+        try {
+          PostQuantumWorker.worker!.postMessage(request);
+        } catch (error) {
+          PostQuantumWorker.pending.delete(id);
+          reject(error);
+        }
+      });
+    } catch (err) {
+      const { OPAQUEClient } = await import('./opaque-client');
+      const client = new OPAQUEClient();
+      const result = await client.startRegistrationLocal(password);
+      return result;
+    }
+  }
+
+  static async opaqueFinishRegistration(password: Uint8Array, blindingFactor: Uint8Array, clientSecretKey: Uint8Array, serverResponse: any): Promise<{ envelope: Uint8Array; exportKey: Uint8Array; maskedResponse: Uint8Array }> {
+    try {
+      PostQuantumWorker.ensureWorker();
+      if (!PostQuantumWorker.worker) throw new Error('Worker not available');
+
+      const id = PostQuantumRandom.randomUUID();
+      const auth = await PostQuantumWorker.getAuthToken();
+      const request: WorkerRequestMessage = {
+        id,
+        type: 'opaque.finishRegistration',
+        passwordBytes: password,
+        blindingFactor,
+        clientSecretKey,
+        serverResponse,
+        auth
+      };
+
+      return await new Promise((resolve, reject) => {
+        PostQuantumWorker.pending.set(id, { resolve, reject, expectedType: request.type });
+        try {
+          PostQuantumWorker.worker!.postMessage(request);
+        } catch (error) {
+          PostQuantumWorker.pending.delete(id);
+          reject(error);
+        }
+      });
+    } catch (err) {
+      const { OPAQUEClient } = await import('./opaque-client');
+      const client = new OPAQUEClient();
+      return client.finishRegistrationLocal(password, serverResponse, blindingFactor, clientSecretKey);
+    }
+  }
+
+  static async opaqueStartLogin(password: Uint8Array): Promise<{ blindedElement: Uint8Array; blindingFactor: Uint8Array }> {
+    try {
+      PostQuantumWorker.ensureWorker();
+      if (!PostQuantumWorker.worker) throw new Error('Worker not available');
+
+      const id = PostQuantumRandom.randomUUID();
+      const auth = await PostQuantumWorker.getAuthToken();
+      const request: WorkerRequestMessage = {
+        id,
+        type: 'opaque.startLogin',
+        passwordBytes: password,
+        auth
+      };
+
+      return await new Promise((resolve, reject) => {
+        PostQuantumWorker.pending.set(id, { resolve, reject, expectedType: request.type });
+        try {
+          PostQuantumWorker.worker!.postMessage(request);
+        } catch (error) {
+          PostQuantumWorker.pending.delete(id);
+          reject(error);
+        }
+      });
+    } catch (err) {
+      const { OPAQUEClient } = await import('./opaque-client');
+      const client = new OPAQUEClient();
+      const result = await client.startLoginLocal(password);
+      return result;
+    }
+  }
+
+  static async opaqueFinishLogin(password: Uint8Array, blindingFactor: Uint8Array, serverResponse: any): Promise<{ success: boolean; sessionKey?: Uint8Array; exportKey?: Uint8Array; authMessage?: Uint8Array; clientSecretKey?: Uint8Array }> {
+    try {
+      PostQuantumWorker.ensureWorker();
+      if (!PostQuantumWorker.worker) throw new Error('Worker not available');
+
+      const id = PostQuantumRandom.randomUUID();
+      const auth = await PostQuantumWorker.getAuthToken();
+      const request: WorkerRequestMessage = {
+        id,
+        type: 'opaque.finishLogin',
+        passwordBytes: password,
+        blindingFactor,
+        serverResponse,
+        auth
+      };
+
+      return await new Promise((resolve, reject) => {
+        PostQuantumWorker.pending.set(id, { resolve, reject, expectedType: request.type });
+        try {
+          PostQuantumWorker.worker!.postMessage(request);
+        } catch (error) {
+          PostQuantumWorker.pending.delete(id);
+          reject(error);
+        }
+      });
+    } catch (err) {
+      const { OPAQUEClient } = await import('./opaque-client');
+      const client = new OPAQUEClient();
+      return client.finishLoginLocal(password, serverResponse, blindingFactor);
+    }
+  }
+
+  static async opaqueStartOTLogin(password: Uint8Array, shardSize: number, myIndex: number): Promise<{ pubKeys: Uint8Array[]; blindedElement: Uint8Array; blindingFactor: Uint8Array; myPrivKey: Uint8Array }> {
+    try {
+      PostQuantumWorker.ensureWorker();
+      if (!PostQuantumWorker.worker) throw new Error('Worker not available');
+
+      const id = PostQuantumRandom.randomUUID();
+      const auth = await PostQuantumWorker.getAuthToken();
+      const request: WorkerRequestMessage = {
+        id,
+        type: 'opaque.startOTLogin',
+        passwordBytes: password,
+        shardSize,
+        myIndex,
+        auth
+      };
+
+      return await new Promise((resolve, reject) => {
+        PostQuantumWorker.pending.set(id, { resolve, reject, expectedType: request.type });
+        try {
+          PostQuantumWorker.worker!.postMessage(request);
+        } catch (error) {
+          PostQuantumWorker.pending.delete(id);
+          reject(error);
+        }
+      });
+    } catch (err) {
+      const { OPAQUEClient } = await import('./opaque-client');
+      const client = new OPAQUEClient();
+      return client.startOTLoginLocalFallback(password, shardSize, myIndex);
+    }
+  }
+
+  static async opaqueFinishOTLogin(
+    password: Uint8Array,
+    blindingFactor: Uint8Array,
+    myPrivKey: Uint8Array,
+    otRecords: { ct: Uint8Array; masked: Uint8Array }[],
+    myIndex: number,
+    evaluatedElement: Uint8Array,
+    serverNonce: Uint8Array
+  ): Promise<{
+    success: boolean;
+    sessionKey?: Uint8Array;
+    exportKey?: Uint8Array;
+    authMessage?: Uint8Array;
+    clientSecretKey?: Uint8Array;
+    serverNonce: Uint8Array;
+    credentialId: string;
+  }> {
+    try {
+      PostQuantumWorker.ensureWorker();
+      if (!PostQuantumWorker.worker) throw new Error('Worker not available');
+
+      const id = PostQuantumRandom.randomUUID();
+      const auth = await PostQuantumWorker.getAuthToken();
+      const request: WorkerRequestMessage = {
+        id,
+        type: 'opaque.finishOTLogin',
+        passwordBytes: password,
+        blindingFactor,
+        myPrivKey,
+        otRecords,
+        myIndex,
+        evaluatedElement,
+        serverNonce,
+        auth
+      };
+
+      return await new Promise((resolve, reject) => {
+        PostQuantumWorker.pending.set(id, { resolve, reject, expectedType: request.type });
+        try {
+          PostQuantumWorker.worker!.postMessage(request);
+        } catch (error) {
+          PostQuantumWorker.pending.delete(id);
+          reject(error);
+        }
+      });
+    } catch (err) {
+      const { OPAQUEClient } = await import('./opaque-client');
+      const client = new OPAQUEClient();
+      return client.finishOTLoginLocalFallback(password, blindingFactor, myPrivKey, otRecords, myIndex, evaluatedElement, serverNonce);
     }
   }
 
@@ -280,11 +813,12 @@ export class PostQuantumWorker {
     }
 
     const id = PostQuantumRandom.randomUUID();
-    const request: WorkerRequestMessage = { 
-      id, 
-      type: 'kem.destroyKey', 
+    const auth = await PostQuantumWorker.getAuthToken();
+    const request: WorkerRequestMessage = {
+      id,
+      type: 'kem.destroyKey',
       keyId,
-      auth: PostQuantumWorker.getAuthToken()
+      auth
     };
 
     PostQuantumWorker.pending.set(id, {
@@ -329,6 +863,7 @@ export class PostQuantumWorker {
 
   static async argon2Hash(params: any): Promise<Argon2HashResult> {
     if (!PostQuantumWorker.supportsWorkers()) {
+      const argon2 = await import('argon2-wasm');
       const result = await argon2.hash(params);
       return { hash: result.hash, encoded: result.encoded };
     }
@@ -336,16 +871,18 @@ export class PostQuantumWorker {
     try {
       PostQuantumWorker.ensureWorker();
       if (!PostQuantumWorker.worker) {
-         const result = await argon2.hash(params);
-         return { hash: result.hash, encoded: result.encoded };
+        const argon2 = await import('argon2-wasm');
+        const result = await argon2.hash(params);
+        return { hash: result.hash, encoded: result.encoded };
       }
 
       const id = PostQuantumRandom.randomUUID();
+      const auth = await PostQuantumWorker.getAuthToken();
       const request: WorkerRequestMessage = {
         id,
         type: 'argon2.hash',
         params,
-        auth: PostQuantumWorker.getAuthToken()
+        auth
       };
 
       return await new Promise((resolve, reject) => {
@@ -358,6 +895,7 @@ export class PostQuantumWorker {
         }
       });
     } catch {
+      const argon2 = await import('argon2-wasm');
       const result = await argon2.hash(params);
       return { hash: result.hash, encoded: result.encoded };
     }
@@ -365,6 +903,7 @@ export class PostQuantumWorker {
 
   static async argon2Verify(params: any): Promise<boolean> {
     if (!PostQuantumWorker.supportsWorkers()) {
+      const argon2 = await import('argon2-wasm');
       const result = await argon2.verify(params);
       // @ts-ignore
       return result.verified === true;
@@ -373,17 +912,19 @@ export class PostQuantumWorker {
     try {
       PostQuantumWorker.ensureWorker();
       if (!PostQuantumWorker.worker) {
+        const argon2 = await import('argon2-wasm');
         const result = await argon2.verify(params);
         // @ts-ignore
         return result.verified === true;
       }
 
       const id = PostQuantumRandom.randomUUID();
+      const auth = await PostQuantumWorker.getAuthToken();
       const request: WorkerRequestMessage = {
         id,
         type: 'argon2.verify',
         params,
-        auth: PostQuantumWorker.getAuthToken()
+        auth
       };
 
       const response = await new Promise<{ verified: boolean }>((resolve, reject) => {
@@ -397,6 +938,7 @@ export class PostQuantumWorker {
       });
       return response.verified;
     } catch {
+      const argon2 = await import('argon2-wasm');
       const result = await argon2.verify(params);
       // @ts-ignore
       return result.verified === true;

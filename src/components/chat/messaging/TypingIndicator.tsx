@@ -1,17 +1,15 @@
 import React, { memo } from "react";
 import { cn } from "../../../lib/utils/shared-utils";
-import { useUnifiedUsernameDisplay } from "../../../hooks/database/useUnifiedUsernameDisplay";
+import { useDisplayUsername } from "../../../hooks/database/useDisplayUsername";
 
 interface TypingIndicatorProps {
   username: string;
   className?: string;
-  getDisplayUsername?: (username: string) => Promise<string>;
 }
 
-export const TypingIndicator = memo(function TypingIndicator({ username, className, getDisplayUsername }: TypingIndicatorProps) {
-  const { displayName } = useUnifiedUsernameDisplay({
+export const TypingIndicator = memo(function TypingIndicator({ username, className }: TypingIndicatorProps) {
+  const displayName = useDisplayUsername({
     username,
-    getDisplayUsername,
     fallbackToOriginal: true
   });
 

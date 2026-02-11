@@ -48,7 +48,7 @@ export async function encryptLongTerm(
         throw new Error(`Invalid Kyber public key length: ${recipientKey.length}, expected ${PQ_KEM_PUBLIC_KEY_SIZE}`);
     }
 
-    const { ciphertext: kemCiphertext, sharedSecret } = PostQuantumKEM.encapsulate(recipientKey);
+    const { ciphertext: kemCiphertext, sharedSecret } = await PostQuantumKEM.encapsulate(recipientKey);
 
     let aeadKey: Uint8Array | null = null;
     try {
@@ -95,7 +95,7 @@ export async function decryptLongTerm(
     const ciphertext = PostQuantumUtils.base64ToUint8Array(envelope.ciphertext);
     const tag = PostQuantumUtils.base64ToUint8Array(envelope.tag);
 
-    const sharedSecret = PostQuantumKEM.decapsulate(kemCiphertext, secretKey);
+    const sharedSecret = await PostQuantumKEM.decapsulate(kemCiphertext, secretKey);
 
     let aeadKey: Uint8Array | null = null;
     try {

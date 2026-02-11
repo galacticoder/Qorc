@@ -1,13 +1,19 @@
 import { SignalType } from '../signals.js';
-import { ConnectionStateManager } from '../presence/connection-state.js';
+import { ConnectionStateManager } from '../session/connection-state.js';
 import { rateLimitMiddleware } from '../rate-limiting/rate-limit-middleware.js';
 import { CryptoUtils } from '../crypto/unified-crypto.js';
-import { processWebSocketMessage } from '../messaging/chunked-message-handler.js';
-import { presenceService } from '../presence/presence-service.js';
 import { logger as cryptoLogger } from '../crypto/crypto-logger.js';
-import { withRedisClient } from '../presence/presence.js';
+import { withRedisClient } from '../session/redis-client.js';
 import { sendSecureMessage } from '../messaging/pq-envelope-handler.js';
-import fs from 'fs';
+import {
+  registerLocalSocket,
+  unregisterLocalSocket,
+  claimInbox,
+  routeToInbox
+} from '../routing/blind-router.js';
+import { validateCapabilityToken } from '../routing/capability-tokens.js';
+import { TimingProtection } from '../routing/timing-protection.js';
+import { BlindSignatureIssuer } from '../security/blind-signatures.js';
 
 // Attach WebSocket gateway
 export function attachGateway({
@@ -16,7 +22,6 @@ export function attachGateway({
   serverId = null,
   createSession = ConnectionStateManager.createSession,
   refreshSession = ConnectionStateManager.refreshSession,
-  getSessionState = ConnectionStateManager.getState,
   rateLimiter = rateLimitMiddleware,
   logger = cryptoLogger,
   config,
@@ -32,54 +37,11 @@ export function attachGateway({
   const {
     bandwidthQuota = 5 * 1024 * 1024,
     bandwidthWindowMs = 60 * 1000,
-    messageHardLimitPerMinute = 1000,
     heartbeatIntervalMs = 30000,
+    fixedMessageSizeBytes = null,
   } = config || {};
 
-  const isTestEnv = false;
-
-  const stats = {
-    connectionsOpened: 0,
-    connectionsClosed: 0,
-    rateLimitExceeded: 0,
-    totalMessages: 0,
-    messagesPerSecond: 0,
-  };
-  let ttyStream = null;
-  let lastProgressUpdate = 0;
-
-
-  if (isTestEnv) {
-    try {
-      ttyStream = fs.createWriteStream('/dev/tty', { flags: 'w' });
-    } catch (_e) {
-    }
-  }
-
-  const updateProgress = () => {
-    if (!isTestEnv || !ttyStream || stats.connectionsOpened === 0) return;
-    const now = Date.now();
-    if (now - lastProgressUpdate < 50 && stats.connectionsClosed < stats.connectionsOpened) return;
-    lastProgressUpdate = now;
-
-    const total = stats.connectionsOpened;
-    const closed = stats.connectionsClosed;
-    const percent = total > 0 ? Math.floor((closed / total) * 100) : 0;
-    const barLength = 30;
-    const filled = Math.floor((percent / 100) * barLength);
-    const bar = '█'.repeat(filled) + '░'.repeat(barLength - filled);
-
-    ttyStream.write(`\r[WS] ${bar} ${closed}/${total} | ${stats.rateLimitExceeded} rate-limited | ${stats.totalMessages} msgs`);
-
-    if (closed === total) {
-      ttyStream.write('\n');
-    }
-  };
-
-
-  const localDeliveryMap = new Map(); // Per-server: username -> Set<ws objects>
-  const REDIS_DELIVERY_KEY_PREFIX = 'ws:delivery:';
-  const REDIS_CONNECTION_TTL = 3600;
+  const REDIS_CONNECTION_TTL = 31536000;
 
   const SESSION_REFRESH_MIN_INTERVAL_MS = 60_000;
   const DELIVERY_STALE_THRESHOLD_MS = 5 * 60_000;
@@ -111,21 +73,19 @@ export function attachGateway({
         });
       });
 
-      const username = ws?._username;
-      const field = ws?._redisDeliveryField;
-      if (!username || !field) return;
+      // Refresh inbox registration in blind router
+      const inboxId = ws?._primaryInboxId;
+      if (!inboxId) return;
 
       void withRedisClient(async (client) => {
-        const key = `${REDIS_DELIVERY_KEY_PREFIX}${username}`;
+        const key = `inbox:${inboxId}`;
         const serverId = process.env.SERVER_ID || 'default';
-        const connectedAt = Number(ws?._connectedAt || now) || now;
-        const value = JSON.stringify({ serverId, sessionId: sid, connectedAt, lastSeen: now });
-        await client.hset(key, field, value);
-        await client.expire(key, REDIS_CONNECTION_TTL);
+        const value = JSON.stringify({ serverId, sessionId: sid, lastSeen: now });
+        await client.setex(key, REDIS_CONNECTION_TTL, value);
       }).catch((error) => {
-        logger.warn('[WS] Failed to touch Redis delivery entry', {
+        logger.warn('[WS] Failed to refresh inbox entry', {
           reason,
-          username,
+          inboxPrefix: inboxId?.slice(0, 8) + '...',
           error: error?.message || String(error)
         });
       });
@@ -136,7 +96,7 @@ export function attachGateway({
   let cachedPublicKeyMessage = null;
   let cachedPublicKeyLogInfo = null;
 
-  const getCachedPublicKeyMessage = () => {
+  const getCachedPublicKeyMessage = async () => {
     if (cachedPublicKeyMessage) {
       return { message: cachedPublicKeyMessage, logInfo: cachedPublicKeyLogInfo };
     }
@@ -152,14 +112,23 @@ export function attachGateway({
     const kyberPublicBase64 = CryptoUtils.Hybrid.exportKyberPublicBase64(serverHybridKeyPair.kyber.publicKey);
     const x25519PublicBase64 = CryptoUtils.Hybrid.exportX25519PublicBase64(serverHybridKeyPair.x25519.publicKey);
 
+    // Check if server password is required
+    const { getServerPasswordHash } = await import('../config/config.js');
+    const serverPasswordHash = getServerPasswordHash();
+
+    // Get blind signature public key metadata (RSABSSA-PSS)
+    const blindPublicKey = await BlindSignatureIssuer.getPublicKey();
+
     const keyMessage = JSON.stringify({
       type: SignalType.SERVER_PUBLIC_KEY,
       serverId: serverId || 'default',
       hybridKeys: {
         kyberPublicBase64,
         dilithiumPublicBase64,
-        x25519PublicBase64
-      }
+        x25519PublicBase64,
+        blindPublicKey
+      },
+      requiresServerPassword: !!serverPasswordHash,
     });
 
     cachedPublicKeyMessage = keyMessage;
@@ -173,105 +142,51 @@ export function attachGateway({
     return { message: cachedPublicKeyMessage, logInfo: cachedPublicKeyLogInfo };
   };
 
-  // Add local WebSocket connection to delivery map
-  const addLocalConnection = async (username, ws) => {
-    if (!username || !ws) return;
+  // Add local WebSocket connection using blind routing
+  const addLocalConnection = async (ws) => {
+    if (!ws) return;
 
-    let set = localDeliveryMap.get(username);
-    if (!set) {
-      set = new Set();
-      localDeliveryMap.set(username, set);
+    // Register socket with blind router
+    if (!ws._blindSocketId) {
+      registerLocalSocket(ws);
     }
-    set.add(ws);
 
-    logger.debug('[WS] Added local connection', {
-      username: username.slice(0, 4) + '...',
-      sessionId: ws._sessionId?.slice(0, 8) + '...',
-      totalConnections: set.size
-    });
-
-    // Register in Redis for distributed delivery
-    if (ws._sessionId) {
+    // If socket has inbox IDs from auth, claim them
+    if (ws._primaryInboxId && ws._capabilityToken) {
       try {
-        await withRedisClient(async (client) => {
-          const key = `${REDIS_DELIVERY_KEY_PREFIX}${username}`;
-          const serverId = process.env.SERVER_ID || 'default';
-          const nowTimestamp = Date.now();
-          const connectedAt = Number(ws?._connectedAt || nowTimestamp) || nowTimestamp;
-          const field = `${serverId}:${ws._sessionId}`;
-          const connectionData = JSON.stringify({
-            serverId,
-            sessionId: ws._sessionId,
-            connectedAt,
-            lastSeen: nowTimestamp
-          });
-          ws._redisDeliveryField = field;
-          await client.hset(key, field, connectionData);
-          await client.expire(key, REDIS_CONNECTION_TTL);
-        });
+        await claimInbox(ws, ws._capabilityToken, ws._primaryInboxId);
       } catch (error) {
-        logger.warn('[WS] Failed to register connection in Redis', { username, error: error.message });
+        logger.warn('[WS] Failed to claim inbox', { error: error.message });
       }
     }
-  };
 
-  // Remove local WebSocket connection from delivery map
-  const removeLocalConnection = async (username, ws) => {
-    if (!username || !ws) return;
-
-    const set = localDeliveryMap.get(username);
-    if (set) {
-      set.delete(ws);
-      if (set.size === 0) localDeliveryMap.delete(username);
-
-      logger.debug('[WS] Removed local connection', {
-        username: username.slice(0, 4) + '...',
-        sessionId: ws._sessionId?.slice(0, 8) + '...',
-        remainingConnections: set.size
-      });
-    }
-
-    // Remove from Redis registry
-    if (ws._sessionId) {
-      try {
-        await withRedisClient(async (client) => {
-          const key = `${REDIS_DELIVERY_KEY_PREFIX}${username}`;
-          const serverId = process.env.SERVER_ID || 'default';
-          const field = ws._redisDeliveryField || `${serverId}:${ws._sessionId}`;
-          await client.hdel(key, field);
-        });
-      } catch (error) {
-        logger.warn('[WS] Failed to remove connection from Redis', { username, error: error.message });
-      }
+    // Register for cover traffic
+    if (ws._primaryInboxId) {
+      TimingProtection.registerForCoverTraffic(ws._primaryInboxId);
     }
   };
 
-  // Get local WebSocket connections for a username
-  const getLocalConnections = (username) => {
-    if (!username) return null;
-    const set = localDeliveryMap.get(username);
-    return set ? new Set(set) : null;
+  // Remove local WebSocket connection using blind routing
+  const removeLocalConnection = async (ws) => {
+    if (!ws) return;
+
+    // Unregister from cover traffic
+    if (ws._primaryInboxId) {
+      TimingProtection.unregisterFromCoverTraffic(ws._primaryInboxId);
+    }
+
+    // Unregister socket from blind router
+    unregisterLocalSocket(ws);
   };
 
-  // Get all server instances that have connections for a username
-  const getDistributedConnectionServers = async (username) => {
-    if (!username) return [];
+  // Route message to inbox
+  const routeToInboxId = async (inboxId, sealedEnvelope, options = {}) => {
+    return await routeToInbox(inboxId, sealedEnvelope, options);
+  };
 
-    try {
-      return await withRedisClient(async (client) => {
-        const key = `${REDIS_DELIVERY_KEY_PREFIX}${username}`;
-        const values = await client.hvals(key);
-        const out = [];
-        for (const raw of values || []) {
-          const parsed = safeJsonParse(raw);
-          if (parsed) out.push(parsed);
-        }
-        return out;
-      });
-    } catch (error) {
-      logger.warn('[WS] Failed to get distributed connections from Redis', { username, error: error.message });
-      return [];
-    }
+  // Validate capability token for blind routing
+  const validateBlindAuthToken = async (token) => {
+    return await validateCapabilityToken(token);
   };
 
   // Handle incoming WebSocket message
@@ -296,8 +211,29 @@ export function attachGateway({
         if (ws?._isP2PSignaling) {
           continue;
         }
+        if (ws.readyState !== 1) {
+          continue;
+        }
         if (ws.isAlive === false) {
-          try { ws.terminate?.(); } catch { }
+          const missed = Number(ws._missedHeartbeats || 0) + 1;
+          ws._missedHeartbeats = missed;
+
+          if (missed >= 2) {
+            logger.warn('[WS] Heartbeat timeout; closing stale connection', {
+              sessionId: ws?._sessionId?.slice(0, 8) + '...',
+              missedHeartbeats: missed
+            });
+            try {
+              ws.close(1011, 'Heartbeat timeout');
+            } catch { }
+            setTimeout(() => {
+              try {
+                if (ws.readyState !== 3) {
+                  ws.terminate?.();
+                }
+              } catch { }
+            }, 5000);
+          }
           continue;
         }
         ws.isAlive = false;
@@ -312,8 +248,6 @@ export function attachGateway({
   }, heartbeatIntervalMs);
 
   let staleCleanupCursor = '0';
-  const staleFieldCleanupCursors = new Map();
-  const STALE_FIELD_SCAN_PAGES_PER_KEY = 5;
   const staleConnectionCleanupInterval = setInterval(async () => {
     try {
       await withRedisClient(async (client) => {
@@ -321,7 +255,7 @@ export function attachGateway({
         const [newCursor, keys] = await client.scan(
           staleCleanupCursor,
           'MATCH',
-          `${REDIS_DELIVERY_KEY_PREFIX}*`,
+          'inbox:*',
           'COUNT',
           50
         );
@@ -331,60 +265,40 @@ export function attachGateway({
 
         for (const key of keys) {
           try {
-            let fieldCursor = staleFieldCleanupCursors.get(key) || '0';
-            let pages = 0;
-            let keyFinished = false;
+            if (typeof key === 'string' && key.startsWith('inbox:queue:')) {
+              continue;
+            }
 
-            do {
-              const [nextFieldCursor, entries] = await client.hscan(key, fieldCursor, 'COUNT', 200);
-              fieldCursor = nextFieldCursor;
-              pages += 1;
+            const keyType = await client.type(key);
+            if (keyType !== 'string') {
+              continue;
+            }
 
-              const toDelete = [];
-              for (let i = 0; i < (entries?.length || 0); i += 2) {
-                const field = entries[i];
-                const raw = entries[i + 1];
-                const parsed = safeJsonParse(raw);
-                const lastSeen = Number(parsed?.lastSeen || parsed?.connectedAt || 0);
-                if (!parsed || !lastSeen || (nowTimestamp - lastSeen) > DELIVERY_STALE_THRESHOLD_MS) {
-                  toDelete.push(field);
-                }
-              }
+            const raw = await client.get(key);
+            const parsed = safeJsonParse(raw);
+            const lastSeen = Number(parsed?.lastSeen || 0);
 
-              if (toDelete.length > 0) {
-                await client.hdel(key, ...toDelete);
-                totalCleaned += toDelete.length;
-              }
-
-              if (fieldCursor === '0') {
-                keyFinished = true;
-                break;
-              }
-            } while (pages < STALE_FIELD_SCAN_PAGES_PER_KEY);
-
-            if (keyFinished) {
-              staleFieldCleanupCursors.delete(key);
-              const remaining = await client.hlen(key);
-              if (remaining === 0) {
-                await client.del(key);
-              }
-            } else {
-              staleFieldCleanupCursors.set(key, fieldCursor);
+            if (!parsed || !lastSeen || (nowTimestamp - lastSeen) > DELIVERY_STALE_THRESHOLD_MS) {
+              await client.del(key);
+              totalCleaned++;
             }
           } catch (err) {
-            logger.warn('[WS] Error cleaning up delivery key', { key, error: err.message });
+            logger.warn('[WS] Error cleaning up inbox key', {
+              keyPrefix: key?.slice(0, 14) + '...',
+              error: err.message
+            });
           }
         }
 
         if (totalCleaned > 0) {
-          logger.info('[WS] Cleaned up stale connections across cluster', {
+          logger.info('[WS] Cleaned up stale inbox entries', {
             totalCleaned,
             keysScanned: keys.length,
           });
         }
       });
     } catch (error) {
-      logger.warn('[WS] Error during stale connection cleanup', { error: error.message });
+      logger.warn('[WS] Error during stale inbox cleanup', { error: error.message });
     }
   }, 60_000);
 
@@ -398,10 +312,6 @@ export function attachGateway({
     try {
       ws.upgradeReq = req;
       ws.headers = req?.headers || {};
-      const hdrId = ws.headers['x-device-id'];
-      if (hdrId && typeof hdrId === 'string') {
-        ws.deviceId = hdrId.trim().slice(0, 64);
-      }
     } catch (_) { }
 
     try {
@@ -418,18 +328,11 @@ export function attachGateway({
     }
 
     let sessionId;
-    let messageCount = 0;
     let bandwidthUsed = 0;
-    const connectionOpenedAt = Date.now();
-
     try {
       sessionId = await createSession();
       ws._sessionId = sessionId;
-      ws._connectedAt = connectionOpenedAt;
-      stats.connectionsOpened++;
-      if (!isTestEnv) {
-        logger.info('[WS] Created session', { sessionId: sessionId?.slice(0, 8) + '...' });
-      }
+      logger.info('[WS] Created session', { sessionId: sessionId?.slice(0, 8) + '...' });
     } catch (error) {
       logger.error('[WS] Failed to create session', { error: error.message });
       ws.close(1011, 'Internal server error');
@@ -437,12 +340,17 @@ export function attachGateway({
     }
 
     ws.isAlive = true;
+    ws._missedHeartbeats = 0;
     ws.on('pong', () => {
       ws.isAlive = true;
+      ws._missedHeartbeats = 0;
+      ws._lastPongAt = Date.now();
     });
 
     ws.on('ping', () => {
       ws.isAlive = true;
+      ws._missedHeartbeats = 0;
+      ws._lastPongAt = Date.now();
       try {
         ws.pong();
       } catch (error) {
@@ -450,10 +358,8 @@ export function attachGateway({
       }
     });
 
-    ws._username = null;
-
     try {
-      const { message, logInfo } = getCachedPublicKeyMessage();
+      const { message, logInfo } = await getCachedPublicKeyMessage();
 
       if (ws.readyState !== 1) {
         logger.warn('[WS] Connection closed before key exchange', {
@@ -489,30 +395,56 @@ export function attachGateway({
       return;
     }
 
-
     ws.on('message', async (messageBuffer) => {
       const now = Date.now();
-      if (!ws._bandwidthWindowStart) {
-        ws._bandwidthWindowStart = connectionOpenedAt;
-      }
-      if (!ws._messageWindowStart) {
-        ws._messageWindowStart = connectionOpenedAt;
+      const messageBytes = Buffer.isBuffer(messageBuffer)
+        ? messageBuffer.length
+        : (messageBuffer instanceof ArrayBuffer
+          ? messageBuffer.byteLength
+          : (typeof messageBuffer === 'string' ? Buffer.byteLength(messageBuffer) : 0));
+
+      if (fixedMessageSizeBytes && ws._pqSessionId) {
+        if (messageBytes !== fixedMessageSizeBytes) {
+          const maxAllowed = fixedMessageSizeBytes * 2;
+          if (messageBytes > maxAllowed) {
+            logger.warn('[WS] Invalid fixed message size', {
+              sessionId: sessionId?.slice(0, 8) + '...',
+              bytes: messageBytes,
+              expected: fixedMessageSizeBytes,
+              maxAllowed
+            });
+            ws.close(1009, 'Invalid message size');
+            return;
+          }
+          logger.warn('[WS] Non-standard message size', {
+            sessionId: sessionId?.slice(0, 8) + '...',
+            bytes: messageBytes,
+            expected: fixedMessageSizeBytes,
+            maxAllowed
+          });
+        }
+      } else if (fixedMessageSizeBytes && messageBytes > fixedMessageSizeBytes) {
+        logger.warn('[WS] Message too large (pre-handshake)', {
+          sessionId: sessionId?.slice(0, 8) + '...',
+          bytes: messageBytes,
+          max: fixedMessageSizeBytes
+        });
+        ws.close(1009, 'Message too large');
+        return;
       }
 
+      if (!ws._bandwidthWindowStart) {
+        ws._bandwidthWindowStart = now;
+      }
       if (now - ws._bandwidthWindowStart > bandwidthWindowMs) {
         ws._bandwidthWindowStart = now;
         bandwidthUsed = 0;
       }
 
-      if (now - ws._messageWindowStart > 60_000) {
-        ws._messageWindowStart = now;
-        messageCount = 0;
-      }
-
-      if (bandwidthUsed + messageBuffer.length > bandwidthQuota) {
+      if (bandwidthUsed + messageBytes > bandwidthQuota) {
         logger.warn('[WS] Bandwidth quota exceeded', {
           sessionId: sessionId?.slice(0, 8) + '...',
-          bytes: bandwidthUsed + messageBuffer.length,
+          bytes: bandwidthUsed + messageBytes,
           quota: bandwidthQuota
         });
         try {
@@ -528,25 +460,7 @@ export function attachGateway({
         return;
       }
 
-      bandwidthUsed += messageBuffer.length;
-
-      if (messageCount >= messageHardLimitPerMinute) {
-        const state = await getSessionState(sessionId);
-        stats.rateLimitExceeded++;
-        if (isTestEnv) {
-          updateProgress();
-        } else {
-          logger.warn('[WS] Message rate limit exceeded', {
-            sessionId: sessionId?.slice(0, 8) + '...',
-            username: state?.username ? state.username.slice(0, 4) + '...' : 'unknown',
-            messageCount
-          });
-        }
-        ws.close(1008, 'Message rate limit exceeded');
-        return;
-      }
-
-      messageCount += 1;
+      bandwidthUsed += messageBytes;
 
       let messageString;
       if (Buffer.isBuffer(messageBuffer)) {
@@ -565,33 +479,15 @@ export function attachGateway({
       }
 
       try {
-        const messageResult = await processWebSocketMessage(sessionId, messageString);
-
-        if (!messageResult || typeof messageResult !== 'object') {
-          throw new Error('Invalid message result structure');
+        const parsed = JSON.parse(messageString);
+        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+          throw new Error('Invalid message structure: expected object');
+        }
+        if (typeof parsed.type !== 'string' || parsed.type.length === 0 || parsed.type.length > 64) {
+          throw new Error('Invalid or missing message type');
         }
 
-        if (!messageResult.type) {
-          throw new Error('Message result missing type field');
-        }
-
-        if (messageResult.type === 'chunk_progress') {
-          logger.debug('[WS] Chunk progress', {
-            sessionId: sessionId?.slice(0, 8) + '...',
-            progress: Math.round(messageResult.progress * 100) + '%'
-          });
-
-          return;
-        }
-
-        if (messageResult.type !== 'complete' || messageResult.data === null || messageResult.data === undefined) {
-          throw new Error(`Unexpected message result type: ${messageResult.type}`);
-        }
-
-        const parsed = messageResult.data;
-        const raw = typeof messageResult.raw === 'string' ? messageResult.raw : messageString;
-        stats.totalMessages++;
-        await handleMessage({ ws, sessionId, message: raw, parsed });
+        await handleMessage({ ws, sessionId, message: messageString, parsed });
         maybeRefreshSession(ws, 'message');
       } catch (error) {
         logger.error('[WS] Message processing error', {
@@ -609,55 +505,7 @@ export function attachGateway({
     });
 
     ws.on('close', async () => {
-      let username = ws._username;
-      let wasAuthenticated = ws.clientState?.hasAuthenticated;
-
-      if (sessionId) {
-        try {
-          const state = await ConnectionStateManager.getState(sessionId);
-          if (!username && state?.username) {
-            username = state.username;
-            logger.debug('[WS] Retrieved username from Redis on close', {
-              username: username?.slice(0, 4) + '...',
-              sessionId: sessionId?.slice(0, 8) + '...'
-            });
-          }
-          if (!wasAuthenticated && state?.hasAuthenticated) {
-            wasAuthenticated = true;
-          }
-        } catch (error) {
-          logger.warn('[WS] Failed to retrieve state from Redis on close', {
-            sessionId: sessionId?.slice(0, 8) + '...',
-            error: error.message
-          });
-        }
-      }
-
-      if (username) {
-        await removeLocalConnection(username, ws);
-
-        if (wasAuthenticated) {
-          try {
-            await presenceService.setUserOffline(username, ws._sessionId || sessionId);
-            logger.debug('[WS] User marked offline on close', {
-              username: username?.slice(0, 4) + '...',
-              sessionId: sessionId?.slice(0, 8) + '...'
-            });
-          } catch (e) {
-            logger.warn('[WS] Failed to mark user offline', {
-              username: username?.slice(0, 4) + '...',
-              error: e?.message
-            });
-          }
-        }
-      } else {
-        logger.warn('[WS] No username found on connection close', {
-          sessionId: sessionId?.slice(0, 8) + '...',
-          hadUsername: !!ws._username,
-          hadClientState: !!ws.clientState
-        });
-      }
-
+      await removeLocalConnection(ws);
       if (sessionId) {
         try {
           await ConnectionStateManager.cleanupConnection(sessionId);
@@ -669,13 +517,8 @@ export function attachGateway({
         }
       }
 
-      const duration = Date.now() - connectionOpenedAt;
-      stats.connectionsClosed++;
-
       logger.info('[WS] Connection closed', {
         sessionId: sessionId?.slice(0, 8) + '...',
-        duration: `${duration}ms`,
-        messages: messageCount
       });
     });
   });
@@ -684,19 +527,13 @@ export function attachGateway({
     stop: () => {
       clearInterval(heartbeatInterval);
       clearInterval(staleConnectionCleanupInterval);
-      localDeliveryMap.clear();
-      if (isTestEnv && stats.connectionsOpened > 0) {
-        updateProgress();
-        if (ttyStream) {
-          ttyStream.end();
-        }
-      }
-      logger.info('[WS] Gateway stopped', { stats });
+      TimingProtection.stopCoverTraffic();
+      logger.info('[WS] Gateway stopped');
     },
     addLocalConnection,
     removeLocalConnection,
-    getLocalConnections,
-    getDistributedConnectionServers,
-    getStats: () => ({ ...stats }),
+    routeToInboxId,
+    validateBlindAuthToken,
+    getServerPublicKeyMessage: getCachedPublicKeyMessage,
   };
 }

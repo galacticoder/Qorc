@@ -198,6 +198,10 @@ async function createInnerLayer(
     throw new Error('Recipient keys must include x25519PublicBase64 for inner layer derivation');
   }
   const recipientX25519 = Base64.base64ToUint8Array(recipientKeys.x25519PublicBase64);
+  
+  if (recipientX25519.length !== 32) {
+    throw new Error(`Invalid x25519 public key length: expected 32, got ${recipientX25519.length}`);
+  }
   const ephemeral = generateEphemeralX25519();
   const classicalShared = computeClassicalSharedSecret(ephemeral.secretKey, recipientX25519);
 
@@ -233,7 +237,7 @@ async function createInnerLayer(
 
 export class Hybrid {
   static async generateHybridKeyPair() {
-    const kyberPair = PostQuantumKEM.generateKeyPair();
+    const kyberPair = await PostQuantumKEM.generateKeyPair();
     const dilithiumPair = await DilithiumService.generateKeyPair();
     const x25519Pair = generateEphemeralX25519();
     return {
@@ -269,7 +273,7 @@ export class Hybrid {
     const routingDigest = computeRoutingDigest(header);
 
     const recipientKyber = Base64.base64ToUint8Array(recipientKeys.kyberPublicBase64);
-    const { ciphertext: kemCiphertext, sharedSecret: pqSharedSecret } = PostQuantumKEM.encapsulate(recipientKyber);
+    const { ciphertext: kemCiphertext, sharedSecret: pqSharedSecret } = await PostQuantumKEM.encapsulate(recipientKyber);
 
     const innerLayer = await createInnerLayer(normalizedPayload, recipientKeys, routingDigest, pqSharedSecret);
 
@@ -302,7 +306,7 @@ export class Hybrid {
         },
         metadata: options?.metadata
       };
-      
+
       if (envelope.metadata?.sender?.dilithiumPublicKey === header.from) {
         delete envelope.metadata!.sender!.dilithiumPublicKey;
         if (Object.keys(envelope.metadata!.sender!).length === 0) {
@@ -372,7 +376,7 @@ export class Hybrid {
 
     const kyberSecret = ensureUint8Array(ownKeys.kyberSecretKey, 'kyberSecretKey');
     const kemCiphertext = Base64.base64ToUint8Array(envelope.kemCiphertext);
-    const pqSharedSecret = PostQuantumKEM.decapsulate(kemCiphertext, kyberSecret);
+    const pqSharedSecret = await PostQuantumKEM.decapsulate(kemCiphertext, kyberSecret);
     SecureMemory.zeroBuffer(kyberSecret);
 
     const outerSalt = Base64.base64ToUint8Array(envelope.outer.salt);

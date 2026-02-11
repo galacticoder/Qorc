@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef } from 'react';
 import { SignalType } from '../../lib/types/signal-types';
 import { TYPING_DOMAIN, TYPING_STOP_DELAY, MIN_TYPING_INTERVAL, CONVERSATION_CHANGE_DEBOUNCE } from '../../lib/constants';
 import { unifiedSignalTransport } from '../../lib/transport/unified-signal-transport';
+import { getSessionApi } from '../../lib/utils/message-sending-utils';
 
 const createRandomHex = (byteLength: number) => {
   const bytes = crypto.getRandomValues(new Uint8Array(byteLength));
@@ -81,6 +82,17 @@ export function useTypingIndicator(
   const sendTypingSignal = useCallback(
     async (kind: 'start' | 'stop') => {
       if (!selectedConversation) return;
+      if (!currentUsername) return;
+
+      const sessionCheck = await getSessionApi().hasSession({
+        selfUsername: currentUsername,
+        peerUsername: selectedConversation,
+        deviceId: 1,
+      });
+
+      if (!sessionCheck?.hasSession) {
+        return;
+      }
 
       const sequence = ++messageSequenceRef.current;
       const id = createTypingMessageId(kind, sequence);

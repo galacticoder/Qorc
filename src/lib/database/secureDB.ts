@@ -664,37 +664,6 @@ export class SecureDB {
     return (await this.getCachedUsernameHash(originalUsername)) !== null;
   }
 
-  // Store username mapping
-  async storeUsernameMapping(hashedUsername: string, originalUsername: string): Promise<void> {
-    if (!hashedUsername || !originalUsername) { return; }
-
-    await this.store('username_mappings', hashedUsername, originalUsername);
-  }
-
-  // Get original username from hash
-  async getOriginalUsername(hashedUsername: string): Promise<string | null> {
-    if (!hashedUsername || typeof hashedUsername !== 'string') return null;
-
-    const result = await this.retrieve('username_mappings', hashedUsername);
-    return typeof result === 'string' ? result : null;
-  }
-
-  // Get all username mappings
-  async getAllUsernameMappings(): Promise<Array<{ hashed: string; original: string }>> {
-    try {
-      const entries = await (await this.kv()).entriesForStore('username_mappings');
-      const out: Array<{ hashed: string; original: string }> = [];
-
-      for (const { key, value } of entries) {
-        try { const original = await this.decryptData(value); if (typeof original === 'string') out.push({ hashed: key, original }); } catch { }
-      }
-
-      return out;
-    } catch (error) {
-      return [];
-    }
-  }
-
   // Append messages to existing messages
   async appendMessages(newMessages: StoredMessage[]): Promise<void> {
     const existing = await this.loadMessages();

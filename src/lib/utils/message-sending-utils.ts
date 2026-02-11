@@ -126,7 +126,6 @@ export const createLocalMessage = async (
   timestamp: number,
   replyToData?: { id: string; sender?: string; content?: string },
   fileData?: string,
-  fromOriginal?: string,
 ): Promise<Message> => {
   // For text messages, store content in vault and empty the state object
   const isVaultable = !fileData && content && content.trim().length > 0;
@@ -140,7 +139,6 @@ export const createLocalMessage = async (
     content: isVaultable ? '' : content,
     secureContentId: isVaultable ? messageId : undefined,
     sender,
-    fromOriginal,
     recipient,
     timestamp: new Date(timestamp),
     type: fileData ? SignalType.FILE : SignalType.TEXT,

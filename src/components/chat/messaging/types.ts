@@ -33,7 +33,6 @@ export interface Message {
   content: string;
   secureContentId?: string;
   sender: string;
-  fromOriginal?: string;
   recipient?: string;
   timestamp: Date;
   isCurrentUser?: boolean;

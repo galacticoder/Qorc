@@ -195,16 +195,8 @@ export function useMessageReceipts(
 
         if (!sessionCheck) {
           try {
-            await websocketClient.sendSecureControlMessage?.({
-              type: SignalType.LIBSIGNAL_REQUEST_BUNDLE,
-              username: safeSender,
-              from: currentUsername,
-              timestamp: now,
-            });
-          } catch { }
-          try {
             await new Promise<void>((resolve, reject) => {
-              const timeout = setTimeout(() => { cleanup(); reject(new Error('bundle-timeout')); }, 6000);
+              const timeout = setTimeout(() => { cleanup(); reject(new Error('session-timeout')); }, 6000);
               const onReady = (evt: Event) => {
                 const d = (evt as CustomEvent).detail;
                 if (d?.peer === safeSender) { cleanup(); resolve(); }
@@ -327,7 +319,7 @@ export function useMessageReceipts(
       const safeMessageId = sanitizeMessageId(
         rawId.startsWith(READ_RECEIPT_PREFIX) ? rawId.replace(READ_RECEIPT_PREFIX, '') : rawId
       );
-      
+
       if (!safeMessageId) {
         return;
       }

@@ -1,5 +1,4 @@
 import { SignalType } from '../../lib/types/signal-types';
-import websocketClient from '../../lib/websocket/websocket';
 import { unifiedSignalTransport } from '../../lib/transport/unified-signal-transport';
 import type { FailedDeliveryReceipt, HybridKeys, UserWithHybridKeys } from '../../lib/types/message-handling-types';
 import { DELIVERY_RECEIPT_PREFIX } from '@/lib/constants';
@@ -47,12 +46,6 @@ export const sendEncryptedDeliveryReceipt = async (
       throw new Error(result.error || 'Transport send failed');
     }
   } catch (_error: any) {
-    // Attempt session healing if it looks like a session error
-    const errMsg = _error?.message || String(_error);
-    if (/session|no valid sessions|no session|invalid whisper message|decryption failed|Secure fallback envelope required/i.test(errMsg)) {
-      try { await websocketClient.sendSecureControlMessage({ type: SignalType.LIBSIGNAL_REQUEST_BUNDLE, username: senderUsername }); } catch { }
-    }
-
     console.error('[EncryptedMessageHandler] Failed to send delivery receipt:', _error);
     const receiptKey = `${senderUsername}:${messageId}`;
     const existing = failedDeliveryReceiptsRef.current.get(receiptKey);
@@ -73,9 +66,9 @@ export const sendEncryptedDeliveryReceipt = async (
 export const retryFailedDeliveryReceipts = async (
   peerUsername: string,
   failedDeliveryReceiptsRef: React.RefObject<Map<string, FailedDeliveryReceipt>>,
-  getKeysOnDemand: (() => Promise<any>) | undefined,
   usersRef: React.RefObject<UserWithHybridKeys[]> | undefined,
-  loginUsernameRef: React.RefObject<string>
+  loginUsernameRef: React.RefObject<string>,
+  resolvePeerInboxId?: (peer: string) => Promise<string | null>
 ): Promise<void> => {
   const receiptsToRetry: Array<{ key: string; data: FailedDeliveryReceipt }> = [];
   for (const [key, data] of failedDeliveryReceiptsRef.current.entries()) {
@@ -88,12 +81,27 @@ export const retryFailedDeliveryReceipts = async (
 
   for (const { key, data } of receiptsToRetry) {
     try {
+      const peer = (usersRef?.current as any[])?.find(u => u.username === peerUsername);
+      let destinationInbox = peer?.inboxId || peer?.hybridPublicKeys?.inboxId;
+
+      if (!destinationInbox && resolvePeerInboxId) {
+        try {
+          destinationInbox = await resolvePeerInboxId(peerUsername);
+        } catch { }
+      }
+
+      if (!destinationInbox) {
+        console.warn('[Receipts] Cannot retry receipt without inboxId', peerUsername);
+        continue;
+      }
+
       const deliveryReceiptData = createDeliveryReceiptPayload(data.messageId, loginUsernameRef.current || '', peerUsername);
 
       const result = await unifiedSignalTransport.send(
         peerUsername,
         deliveryReceiptData,
-        SignalType.DELIVERY_RECEIPT
+        SignalType.DELIVERY_RECEIPT,
+        { destinationInbox }
       );
 
       if (result.success) {

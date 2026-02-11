@@ -12,12 +12,14 @@ export interface HybridPublicKeys {
   kyberPublicBase64: string;
   dilithiumPublicBase64: string;
   x25519PublicBase64?: string;
+  inboxId?: string;
 }
 
 // User with hybrid keys
 export interface UserWithKeys {
   username: string;
   hybridPublicKeys?: HybridPublicKeys;
+  inboxId?: string;
 }
 
 // Signing keys for session establishment

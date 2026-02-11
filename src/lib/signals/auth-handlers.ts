@@ -2,650 +2,375 @@
  * Auth Signal Handlers
  */
 
-import { CryptoUtils, AES } from '../utils/crypto-utils';
+import { CryptoUtils } from '../utils/crypto-utils';
 import websocketClient from '../websocket/websocket';
 import { SignalType } from '../types/signal-types';
 import { EventType } from '../types/event-types';
-import { syncEncryptedStorage } from '../database/encrypted-storage';
-import { loadVaultKeyRaw, ensureVaultKeyCryptoKey, loadWrappedMasterKey, saveWrappedMasterKey } from '../cryptography/vault-key';
-import { SecureKeyManager } from '../database/secure-key-manager';
-import { AUTH_USERNAME_REGEX } from '../constants';
+import { storage } from '../tauri-bindings';
 import type { AuthRefs } from '../types/signal-handler-types';
 import { persistAuthTokens, retrieveAuthTokens, clearAuthTokens, clearTokenEncryptionKey } from './token-storage';
-import { signal, auth as authApi, database, storage } from '../tauri-bindings';
+import { PostQuantumUtils } from '../utils/pq-utils';
+import { auth as authApi } from '../tauri-bindings';
+import { getBlindRoutingClient, BlindRoutingCredentials } from '../transport/blind-routing-client';
+import { tokenVault } from '../database/token-vault';
+import { PrivacyPassClient, PrivacyPassHelpers } from '../cryptography/privacy-pass-client';
+import { ZKDeviceProofGenerator, getOrCreateRingKeyPair } from '../cryptography/zk-device-proof';
+import { unblindSignature } from '../crypto/blind-credentials';
+import { computeBlindUserId } from '../utils/auth-utils';
+import { loadVaultKeyRaw, loadWrappedMasterKey, ensureVaultKeyCryptoKey } from '../cryptography/vault-key';
+import { SecureKeyManager } from '../database/secure-key-manager';
 
-// Prevent parallel Signal setup operations
-const signalSetupLocks = new Map<string, Promise<void>>();
-
-async function runSignalSetupWithLock(username: string, action: () => Promise<void>) {
-  const existing = signalSetupLocks.get(username) || Promise.resolve();
-  const next = (async () => {
-    try {
-      await existing;
-    } catch { }
-
-    try {
-      await action();
-    } catch (err) {
-      console.error('[AuthHandlers] Signal lock action failed:', err);
-    }
-  })();
-  signalSetupLocks.set(username, next);
-  return next;
-}
-
-// Send hybrid keys update to server
-async function sendHybridKeysUpdate(
-  keyManagerRef: React.RefObject<any> | undefined,
-  serverHybridPublic: any,
-  getKeysOnDemand: (() => Promise<any>) | undefined
-): Promise<void> {
-  if (!keyManagerRef?.current || !serverHybridPublic) return;
-
-  try {
-    const maybeKeys = await keyManagerRef.current.getKeys().catch(() => null);
-    if (!maybeKeys) {
-      const pair = await CryptoUtils.Hybrid.generateHybridKeyPair();
-      await keyManagerRef.current.storeKeys(pair);
-    }
-
-    const publicKeys = await keyManagerRef.current.getPublicKeys();
-    if (!publicKeys) return;
-
-    const keysToSend = {
-      kyberPublicBase64: publicKeys.kyberPublicBase64 || '',
-      dilithiumPublicBase64: publicKeys.dilithiumPublicBase64 || '',
-      x25519PublicBase64: publicKeys.x25519PublicBase64 || ''
-    };
-
-    const payload = JSON.stringify(keysToSend);
-    const keys = await getKeysOnDemand?.();
-    const encryptedHybridKeys = await CryptoUtils.Hybrid.encryptForServer(payload, serverHybridPublic, {
-      senderDilithiumSecretKey: keys?.dilithium?.secretKey,
-      senderDilithiumPublicKey: keys?.dilithium?.publicKey,
-      metadata: { context: SignalType.HYBRID_KEYS_UPDATE }
-    });
-
-    websocketClient.send(JSON.stringify({ type: SignalType.HYBRID_KEYS_UPDATE, userData: encryptedHybridKeys }));
-  } catch { }
-}
-
-// Configure Signal Storage Key
-async function configureSignalStorageKey(getKeysOnDemand: (() => Promise<any>) | undefined, hybridKeysRef: any): Promise<void> {
-  try {
-    const label = new TextEncoder().encode('signal-storage-key-v1');
-    const keys = await getKeysOnDemand?.();
-    const kyberSecret: Uint8Array | undefined = keys?.kyber?.secretKey || hybridKeysRef?.current?.kyber?.secretKey;
-
-    if (kyberSecret instanceof Uint8Array && kyberSecret.length > 0) {
-      const derived = await (CryptoUtils as any).Hash.generateBlake3Mac(label, kyberSecret);
-      if (derived) {
-        const keyB64 = (CryptoUtils as any).Base64.arrayBufferToBase64(derived);
-        await signal.setStorageKey(keyB64);
-        try {
-          derived.fill(0);
-        } catch { }
-      }
-    }
-  } catch { }
-}
-
-// Handle authentication success
-export async function handleAuthSuccess(data: any, auth: AuthRefs): Promise<void> {
+/**
+ * Handle Full Authentication Success
+ */
+export async function handleAuthFullSuccess(data: any, auth: AuthRefs): Promise<void> {
   const {
-    loginUsernameRef,
-    aesKeyRef,
-    setAccountAuthenticated,
-    setIsLoggedIn,
-    setShowPassphrasePrompt,
-    setIsSubmittingAuth,
-    setAuthStatus,
-    serverHybridPublic,
-    keyManagerRef,
-    setUsername,
-    setMaxStepReached,
-    setRecoveryActive,
-    getKeysOnDemand,
-    hybridKeysRef
+    setAuthStatus, loginUsernameRef, setIsLoggedIn,
+    setAccountAuthenticated, setIsSubmittingAuth,
+    setUsername, setMaxStepReached, setRecoveryActive,
+    handleAuthSuccess
   } = auth;
 
-  const usernameFromServer = typeof data?.username === 'string' ? data.username.trim() : '';
-  let recoveredUser = usernameFromServer;
+  const currentUsername = loginUsernameRef?.current || '';
 
-  if (!recoveredUser) {
-    let fallback = loginUsernameRef?.current;
-    if (!fallback) {
-      try {
-        fallback = syncEncryptedStorage.getItem('last_authenticated_username') || '';
-      } catch {
-        fallback = '';
-      }
-    }
-
-    if (typeof fallback === 'string') recoveredUser = fallback.trim();
+  // Process masked session result
+  if (data.maskedResult) {
+    setAuthStatus?.('Establishing secure context...');
   }
 
-  if (recoveredUser && recoveredUser !== 'undefined' && AUTH_USERNAME_REGEX.test(recoveredUser)) {
-    if (loginUsernameRef) loginUsernameRef.current = recoveredUser;
-    try {
-      await storage.set('last_authenticated_username', recoveredUser);
-      const storedOriginal = await storage.get('last_authenticated_display_name');
-      if (storedOriginal && auth.originalUsernameRef) {
-        auth.originalUsernameRef.current = storedOriginal;
-      }
-    } catch { }
+  // Handle Privacy Pass issuance
+  if (data.anonymousTokenBatch) {
+    await handlePrivacyPassIssuance(data.anonymousTokenBatch, auth);
+  }
+
+  // Handle anonymous session token and shard metadata
+  const anonymousToken = data.anonymousSession?.token || data.anonymousSessionToken;
+  if (anonymousToken) {
+    const stored = await persistAuthTokens(anonymousToken).catch(() => false);
+  }
+
+  websocketClient.markServerAuthGranted?.();
+
+  if (data.shardId !== undefined && data.credentialIndex !== undefined && (currentUsername || data.userId)) {
+    const blindId = data.userId || (currentUsername ? computeBlindUserId(currentUsername) : null);
+    if (blindId) {
+      await storage.set(`shard_info_${blindId}`, JSON.stringify({
+        shardId: data.shardId,
+        credentialIndex: data.credentialIndex
+      }));
+    }
+  }
+
+  // Initialize blind routing if provided
+  if (data?.blindRouting) {
+    await initializeAnonymousRouting(data, auth, currentUsername);
+  }
+
+  if (handleAuthSuccess) {
+    await handleAuthSuccess(currentUsername, !!data.recovered);
   } else {
-    recoveredUser = '';
-  }
-
-  if (data?.tokens?.accessToken && data?.tokens?.refreshToken) {
-    clearTokenEncryptionKey();
-    await persistAuthTokens({
-      accessToken: String(data.tokens.accessToken),
-      refreshToken: String(data.tokens.refreshToken)
-    }).catch();
-
     setAccountAuthenticated?.(true);
+    setIsLoggedIn?.(true);
     setIsSubmittingAuth?.(false);
-    try {
-      window.dispatchEvent(new CustomEvent(EventType.SECURE_CHAT_AUTH_SUCCESS));
-    } catch { }
+    setAuthStatus?.('');
+    setMaxStepReached?.('server');
+    setRecoveryActive?.(false);
+    if (currentUsername) setUsername?.(currentUsername);
   }
 
-  if (data?.recovered && recoveredUser) {
-    let vaultKeyUnwrapSuccess = false;
-
-    try {
-      const raw = await loadVaultKeyRaw(recoveredUser);
-      const vaultKey = raw?.length === 32 ? await AES.importAesKey(raw) : await ensureVaultKeyCryptoKey(recoveredUser);
-
-      if (vaultKey) {
-        const masterKeyBytes = await loadWrappedMasterKey(recoveredUser, vaultKey);
-
-        if (masterKeyBytes?.length === 32) {
-          const masterKey = await AES.importAesKey(masterKeyBytes);
-          if (aesKeyRef) aesKeyRef.current = masterKey;
-          if (!keyManagerRef?.current) {
-            keyManagerRef!.current = new SecureKeyManager(recoveredUser);
-          }
-
-          try {
-            await keyManagerRef!.current!.initializeWithMasterKey(masterKeyBytes);
-            // Initialize native DB with master key for restored session
-            try {
-              const masterKeyB64 = (CryptoUtils as any).Base64.arrayBufferToBase64(masterKeyBytes);
-              const dbResult = await database.init(recoveredUser, masterKeyB64);
-
-              if (dbResult) {
-                const sigResult = await signal.initStorage(recoveredUser).catch(e => {
-                  console.error('[AuthHandlers] Failed to init Signal storage:', e);
-                  return false;
-                });
-              }
-            } catch (dbErr) {
-              console.error('[AuthHandlers] Failed to init DB during restore:', dbErr);
-            }
-            masterKeyBytes.fill(0);
-          } catch { }
-
-          await sendHybridKeysUpdate(keyManagerRef, serverHybridPublic, getKeysOnDemand);
-          await configureSignalStorageKey(getKeysOnDemand, hybridKeysRef);
-
-          void runSignalSetupWithLock(recoveredUser, async () => {
-            try {
-              const keys = await getKeysOnDemand?.();
-              if (keys?.kyber?.publicKeyBase64 && keys?.kyber?.secretKey) {
-                const secB64 = (CryptoUtils as any).Base64.arrayBufferToBase64(keys.kyber.secretKey);
-                await signal.setStaticMlkemKeys(recoveredUser, keys.kyber.publicKeyBase64, secB64);
-              }
-
-              const existing = await signal.createPreKeyBundle(recoveredUser).catch(() => null);
-              if (!existing?.identityKeyBase64) {
-                try { await signal.generateIdentity(recoveredUser); } catch (e) { console.error('[AuthHandlers] identity-gen failed:', e); }
-                try { await signal.generatePreKeys(recoveredUser, 1, 100); } catch (e) { console.error('[AuthHandlers] prekey-gen failed:', e); }
-              }
-              try { await signal.trustPeerIdentity(recoveredUser, recoveredUser, 1); } catch { }
-
-              const bundle = await signal.createPreKeyBundle(recoveredUser).catch(() => null);
-              if (bundle) {
-                await websocketClient.sendSecureControlMessage({ type: SignalType.LIBSIGNAL_PUBLISH_BUNDLE, bundle });
-              }
-            } catch (err) {
-              console.warn('[AuthHandlers] Failed to publish signal bundle on restore:', err);
-            }
-          });
-
-          setAccountAuthenticated?.(true);
-          setIsLoggedIn?.(true);
-          setShowPassphrasePrompt?.(false);
-          const finalDisplayName = auth.originalUsernameRef?.current || recoveredUser;
-          setUsername?.(finalDisplayName);
-          setMaxStepReached?.('server');
-          setRecoveryActive?.(false);
-          try {
-            window.dispatchEvent(new CustomEvent(EventType.SECURE_CHAT_AUTH_SUCCESS));
-          } catch { }
-          vaultKeyUnwrapSuccess = true;
-        } else {
-          console.error('[AuthHandlers] Failed to decrypt master key.');
-        }
-      } else {
-        console.error('[AuthHandlers] Vault key not found or invalid');
-      }
-    } catch (err) {
-      console.error('[AuthHandlers] Key restoration failed:', err);
-    }
-
-    if (vaultKeyUnwrapSuccess) {
-      try { auth.setTokenValidationInProgress?.(false); } catch { }
-      return;
-    }
-  }
-
-  auth.handleAuthSuccess?.(recoveredUser || usernameFromServer || '', Boolean(data?.recovered));
-
-  try { auth.setTokenValidationInProgress?.(false); } catch { }
-  try { setAuthStatus?.(''); } catch { }
+  window.dispatchEvent(new CustomEvent(EventType.SECURE_CHAT_AUTH_SUCCESS));
 }
 
-// Token validation response handler
+/**
+ * Handle Privacy Pass Token Issuance
+ */
+export async function handlePrivacyPassIssuance(data: any, _auth: AuthRefs): Promise<void> {
+  try {
+    const pendingTokens = tokenVault.getPendingTokens();
+    if (pendingTokens.length === 0) return;
+
+    const ppClient = new PrivacyPassClient();
+    const { signedBlindedTokens, proof, serverPublicKey } = PrivacyPassHelpers.decodeResponse(data);
+
+    const count = Math.min(pendingTokens.length, signedBlindedTokens.length);
+    const completedTokens = await ppClient.unblindTokens(
+      pendingTokens.slice(0, count),
+      signedBlindedTokens.slice(0, count),
+      proof,
+      serverPublicKey
+    );
+
+    await tokenVault.updateTokens(completedTokens);
+  } catch (err) {
+    console.error('[AuthHandlers] Privacy Pass issuance failed:', err);
+  }
+}
+
+/**
+ * Handle ZK Refresh Challenge
+ */
+export async function handleZKRefreshChallenge(data: any, _auth: AuthRefs): Promise<void> {
+  try {
+    const { challengeId, challenge, commitments } = data;
+    if (!challengeId || !challenge) return;
+    const ppClient = new PrivacyPassClient();
+    const { blindedTokens } = await ppClient.generateTokenBatch();
+
+    const creds = await authApi.getDeviceCredentials();
+    const deviceId = creds.device_id || 'default';
+    const ringKeys = await getOrCreateRingKeyPair(deviceId);
+    const ringPublicKeyBase64 = PostQuantumUtils.uint8ArrayToBase64(ringKeys.publicKey);
+
+    const commitmentList = Array.isArray(commitments) ? commitments : [];
+    const hasRingKey = commitmentList.some((c) => c?.ringPublicKey === ringPublicKeyBase64 && !c?.revoked);
+    if (!hasRingKey) {
+      await websocketClient.sendSecureControlMessage({
+        type: SignalType.ZK_DEVICE_REGISTER,
+        ringPublicKey: ringPublicKeyBase64
+      });
+      await websocketClient.sendSecureControlMessage({ type: SignalType.ZK_REFRESH_CHALLENGE });
+      return;
+    }
+
+    const mappedCommitments = commitmentList
+      .filter((c) => c && !c.revoked && typeof c.ringPublicKey === 'string')
+      .map((c) => ({
+        ringPublicKey: PostQuantumUtils.base64ToUint8Array(c.ringPublicKey),
+        registeredAt: typeof c.registeredAt === 'number' ? c.registeredAt : 0,
+        revoked: !!c.revoked,
+        commitmentHash: c.commitmentHash
+      }));
+
+    const proof = await ZKDeviceProofGenerator.generateProof(
+      ringKeys.secretKey,
+      ringKeys.publicKey,
+      mappedCommitments,
+      PostQuantumUtils.base64ToUint8Array(challenge)
+    );
+
+    await websocketClient.sendSecureControlMessage({
+      type: SignalType.ZK_REFRESH_RESPONSE,
+      challengeId,
+      proof: {
+        version: proof.version,
+        challenge: PostQuantumUtils.uint8ArrayToBase64(proof.challenge),
+        c0: PostQuantumUtils.uint8ArrayToBase64(proof.c0),
+        s: proof.s.map((resp) => PostQuantumUtils.uint8ArrayToBase64(resp)),
+        keyImage: PostQuantumUtils.uint8ArrayToBase64(proof.keyImage)
+      },
+      blindedTokens: blindedTokens.map(t => PostQuantumUtils.uint8ArrayToBase64(t))
+    });
+  } catch (err) {
+    console.error('[AuthHandlers] ZK Refresh failed:', err);
+  }
+}
+
+/**
+ * Handle Token Validation Response
+ */
+
 export async function handleTokenValidationResponse(data: any, auth: AuthRefs): Promise<void> {
   const {
     loginUsernameRef,
-    aesKeyRef,
     setAccountAuthenticated,
     setIsLoggedIn,
     setLoginError,
-    setShowPassphrasePrompt,
-    setAuthStatus,
     setTokenValidationInProgress,
-    serverHybridPublic,
-    keyManagerRef,
     setUsername,
     setMaxStepReached,
-    passphrasePlaintextRef,
-    getKeysOnDemand,
     accountAuthenticated,
     isLoggedIn,
+    getKeysOnDemand,
     hybridKeysRef
   } = auth;
 
-  if (!data || typeof data !== 'object') {
-    console.warn('[signals] token-validation invalid-data');
-    return;
-  }
-
-  if (data.valid) {
-    if (typeof data.username === 'string' && data.username) {
-      if (loginUsernameRef) loginUsernameRef.current = data.username;
-      try {
-        await storage.set('last_authenticated_username', data.username);
-        const storedOriginal = await storage.get('last_authenticated_display_name');
-        if (storedOriginal) {
-          if (auth.originalUsernameRef) auth.originalUsernameRef.current = storedOriginal;
-          setUsername?.(storedOriginal);
-        } else {
-          setUsername?.(data.username);
-        }
-      } catch {
-        setUsername?.(data.username);
-      }
-    }
-    try { setLoginError?.(''); } catch { }
-
-    let vaultKey: CryptoKey | null = null;
-    try {
-      const raw = await loadVaultKeyRaw(loginUsernameRef?.current || data.username || '');
-      vaultKey = raw?.length === 32 ? await AES.importAesKey(raw) : loginUsernameRef?.current ? await ensureVaultKeyCryptoKey(loginUsernameRef.current) : null;
-    } catch { }
-
-    let masterKeyBytes: Uint8Array | null = null;
-    if (vaultKey && loginUsernameRef?.current) {
-      try {
-        masterKeyBytes = await loadWrappedMasterKey(loginUsernameRef.current, vaultKey);
-      } catch { }
-    }
-
-    if (masterKeyBytes?.length === 32) {
-      try {
-        const masterKey = await AES.importAesKey(masterKeyBytes);
-        if (aesKeyRef) aesKeyRef.current = masterKey;
-
-        if (!keyManagerRef?.current) {
-          keyManagerRef!.current = new SecureKeyManager(loginUsernameRef!.current);
-        }
-
-        try { await keyManagerRef!.current!.initializeWithMasterKey(masterKeyBytes); } catch { }
-        // Initialize native DB with master key for token validation
-        try {
-          const masterKeyB64 = (CryptoUtils as any).Base64.arrayBufferToBase64(masterKeyBytes);
-          const dbResult = await database.init(loginUsernameRef!.current, masterKeyB64);
-          if (dbResult) {
-            await signal.initStorage(loginUsernameRef!.current).catch(e => {
-              console.error('[AuthHandlers] token-val: Failed to init Signal storage:', e);
-            });
-          }
-        } catch (dbErr) {
-          console.error('[AuthHandlers] token-val: Failed to init native DB during token validation:', dbErr);
-        }
-        try {
-          if (!await keyManagerRef!.current!.getKeys().catch(() => null)) {
-            const pair = await CryptoUtils.Hybrid.generateHybridKeyPair();
-            await keyManagerRef!.current!.storeKeys(pair);
-          }
-        } catch { }
-      } finally {
-        try { masterKeyBytes.fill(0); } catch { }
-      }
-    } else {
-      try { setShowPassphrasePrompt?.(true); setAuthStatus?.('Passphrase required to unlock local keys'); } catch { }
-    }
-
-    await sendHybridKeysUpdate(keyManagerRef, serverHybridPublic, getKeysOnDemand);
-
-    // Configure Signal storage key
-    void (async () => {
-      if (loginUsernameRef?.current) {
-        try {
-          const label = new TextEncoder().encode('signal-storage-key-v1');
-          let derived: Uint8Array | null = null;
-
-          const keys = await getKeysOnDemand?.();
-          const kyberSecret = keys?.kyber?.secretKey || hybridKeysRef?.current?.kyber?.secretKey;
-
-          if (kyberSecret instanceof Uint8Array && kyberSecret.length > 0) {
-            derived = await (CryptoUtils as any).Hash.generateBlake3Mac(label, kyberSecret);
-          } else if (passphrasePlaintextRef?.current) {
-            derived = await (CryptoUtils as any).KDF.argon2id(passphrasePlaintextRef.current, {
-              salt: label,
-              time: 3,
-              memoryCost: 1 << 17,
-              parallelism: 2,
-              hashLen: 32
-            });
-          }
-
-          if (derived) {
-            const keyB64 = (CryptoUtils as any).Base64.arrayBufferToBase64(derived);
-
-            try {
-              await signal.setStorageKey(keyB64);
-            } catch { }
-
-            void runSignalSetupWithLock(loginUsernameRef.current, async () => {
-              try {
-                const keys = await getKeysOnDemand?.();
-                if (keys?.kyber?.publicKeyBase64 && keys?.kyber?.secretKey) {
-                  const secB64 = (CryptoUtils as any).Base64.arrayBufferToBase64(keys.kyber.secretKey);
-                  await signal.setStaticMlkemKeys(loginUsernameRef.current, keys.kyber.publicKeyBase64, secB64);
-                }
-
-                const existing = await signal.createPreKeyBundle(loginUsernameRef.current).catch(() => null);
-
-                if (!existing?.identityKeyBase64) {
-                  try { await signal.generateIdentity(loginUsernameRef.current); } catch (e) { console.error('[AuthHandlers] identity-gen failed:', e); }
-                  try { await signal.generatePreKeys(loginUsernameRef.current, 1, 100); } catch (e) { console.error('[AuthHandlers] prekey-gen failed:', e); }
-                }
-
-                try { await signal.trustPeerIdentity(loginUsernameRef.current, loginUsernameRef.current, 1); } catch { }
-
-                const bundle = await signal.createPreKeyBundle(loginUsernameRef.current).catch(() => null);
-
-                if (bundle) {
-                  await websocketClient.sendSecureControlMessage({ type: SignalType.LIBSIGNAL_PUBLISH_BUNDLE, bundle });
-                } else {
-                  console.warn('[AuthHandlers] token-val: failed to create bundle');
-                }
-              } catch (err) {
-                console.warn('[AuthHandlers] token-val: bundle check failed', err);
-              }
-            });
-
-            try { derived.fill(0); } catch { }
-          }
-        } catch (err) {
-          console.warn('[AuthHandlers] token-val: key config error', err);
-        }
-      }
-    })();
-
-    setAccountAuthenticated?.(true);
-    try { window.dispatchEvent(new CustomEvent(EventType.SECURE_CHAT_AUTH_SUCCESS)); } catch { }
-    setIsLoggedIn?.(true);
-    setMaxStepReached?.('passphrase');
-    try { setTokenValidationInProgress?.(false); } catch { }
-
-    if (data.tokens?.accessToken && data.tokens.refreshToken) {
-      clearTokenEncryptionKey();
-      await persistAuthTokens({
-        accessToken: data.tokens.accessToken,
-        refreshToken: data.tokens.refreshToken
-      }).catch(() => { });
-    }
-  } else {
+  if (!data?.valid) {
     if (accountAuthenticated || isLoggedIn) return;
-
-    try {
-      setTokenValidationInProgress?.(true);
-      setAuthStatus?.('Refreshing session...');
-
-      const tokens = await retrieveAuthTokens();
-      if (tokens?.refreshToken) {
-        const res = await authApi.refreshTokens(tokens.refreshToken);
-
-        if (res?.access_token && res?.refresh_token) {
-          await persistAuthTokens({ accessToken: res.access_token, refreshToken: res.refresh_token });
-
-          try { await websocketClient.attemptTokenValidationOnce?.('refresh'); } catch { }
-          setAuthStatus?.('');
-          setTokenValidationInProgress?.(false);
-
-          return;
-        }
-      }
-    } catch (e) {
-      console.error('[auth] refresh failed', (e as Error)?.message || String(e));
-    } finally {
-      try {
-        setAuthStatus?.('');
-        setTokenValidationInProgress?.(false);
-      } catch { }
-    }
 
     await clearAuthTokens();
     await clearTokenEncryptionKey();
     setAccountAuthenticated?.(false);
     setMaxStepReached?.('login');
-    setShowPassphrasePrompt?.(false);
-
-    try { setTokenValidationInProgress?.(false); } catch { }
-    if (data.error) setLoginError?.(`Token validation failed: ${data.message}`);
-  }
-}
-
-// Handle in-account response
-export async function handleInAccount(data: any, auth: AuthRefs): Promise<void> {
-  const { loginUsernameRef, setAccountAuthenticated, setShowPassphrasePrompt, setAuthStatus, setLoginError, passwordRef, setIsSubmittingAuth } = auth;
-
-  setAccountAuthenticated?.(true);
-  setShowPassphrasePrompt?.(false);
-  setAuthStatus?.('Account authentication successful. Enter server password.');
-  setLoginError?.('');
-
-  setLoginError?.('');
-
-  const userCandidate = typeof data?.username === 'string' ? data.username.trim() : loginUsernameRef?.current;
-
-  if (userCandidate) {
-    if (loginUsernameRef) loginUsernameRef.current = userCandidate;
-    try { syncEncryptedStorage.setItem('last_authenticated_username', userCandidate); } catch { }
+    setTokenValidationInProgress?.(false);
+    if (data?.error) setLoginError?.(`Session expired or invalid: ${data.message}`);
+    return;
   }
 
-  if (data?.tokens?.accessToken && data.tokens.refreshToken) {
-    clearTokenEncryptionKey();
-    await persistAuthTokens({
-      accessToken: data.tokens.accessToken,
-      refreshToken: data.tokens.refreshToken
-    }).catch(() => { });
+  websocketClient.markServerAuthGranted?.();
+
+  // Get username from storage or current ref
+  let username = await storage.get('last_authenticated_username');
+  
+  if (!username && loginUsernameRef?.current) {
+    username = loginUsernameRef.current;
   }
-  setIsSubmittingAuth?.(false);
-}
-
-// Handle passphrase hash response
-export function handlePassphraseHash(data: any, auth: AuthRefs): void {
-  const {
-    setPassphraseHashParams,
-    setShowPassphrasePrompt,
-    setAuthStatus,
-    setLoginError,
-    setIsSubmittingAuth,
-    isRegistrationMode,
-    accountAuthenticated,
-    setRecoveryActive
-  } = auth;
-
-  const requiredFields = ['version', 'algorithm', 'salt', 'memoryCost', 'timeCost', 'parallelism'];
-  const hasAllFields = requiredFields.every((f) => f in (data ?? {}));
-
-  if (hasAllFields) {
-    setPassphraseHashParams?.({
-      version: data.version,
-      algorithm: data.algorithm,
-      salt: data.salt,
-      memoryCost: data.memoryCost,
-      timeCost: data.timeCost,
-      parallelism: data.parallelism,
-      message: data.message ?? ''
-    });
-
-    if (data.recovered && !isRegistrationMode && !accountAuthenticated) {
-      setRecoveryActive?.(true);
-    }
-  } else {
-    console.error('[Signals] PASSPHRASE_HASH missing required fields', {
-      receivedKeys: Object.keys(data || {}),
-      missing: requiredFields.filter((f) => !(f in (data ?? {})))
-    });
-    setPassphraseHashParams?.(null);
+  
+  if (typeof username === 'string' && username) {
+    if (loginUsernameRef) loginUsernameRef.current = username;
+    setUsername?.(username);
   }
 
-  setShowPassphrasePrompt?.(true);
-  setAuthStatus?.('Please enter your passphrase to continue...');
-  setLoginError?.('');
-  setIsSubmittingAuth?.(false);
-}
-
-// Handle password hash params response
-export function handlePasswordHashParams(data: any, auth: AuthRefs): void {
-  const {
-    setIsSubmittingAuth,
-    setAuthStatus,
-    setAccountAuthenticated,
-    setIsLoggedIn,
-    setShowPassphrasePrompt,
-    setMaxStepReached
-  } = auth;
-  try {
-    window.dispatchEvent(new CustomEvent(EventType.PASSWORD_HASH_PARAMS, {
-      detail: {
-        salt: data.salt,
-        timeCost: data.timeCost,
-        memoryCost: data.memoryCost,
-        parallelism: data.parallelism,
-        algorithm: data.algorithm,
-        version: data.version
-      }
-    }));
-  } catch (_error) {
+  // Try to auto-unlock vault with stored master key
+  let vaultUnlocked = false;
+  if (username) {
     try {
-      setIsSubmittingAuth?.(false);
-      setAuthStatus?.('');
-      setMaxStepReached?.('login');
-      setAccountAuthenticated?.(false);
-      setIsLoggedIn?.(false);
-      setShowPassphrasePrompt?.(false);
+      const vaultKey = await (async () => {
+        const rawVaultKey = await loadVaultKeyRaw(username);
+        if (rawVaultKey && rawVaultKey.length === 32) {
+          return await CryptoUtils.AES.importAesKey(rawVaultKey);
+        }
+        return await ensureVaultKeyCryptoKey(username);
+      })();
+
+      if (vaultKey) {
+        const masterKeyBytes = await loadWrappedMasterKey(username, vaultKey);
+        if (masterKeyBytes && masterKeyBytes.length === 32) {
+          const masterKey = await CryptoUtils.AES.importAesKey(masterKeyBytes);
+          
+          if (auth.aesKeyRef) auth.aesKeyRef.current = masterKey;
+          
+          if (!auth.keyManagerRef?.current) {
+            auth.keyManagerRef!.current = new SecureKeyManager(username);
+          }
+          try {
+            await auth.keyManagerRef!.current!.initializeWithMasterKey(masterKeyBytes);
+          } catch { }
+          
+          try { masterKeyBytes.fill(0); } catch { }
+          
+          auth.setVaultReady?.(true);
+          vaultUnlocked = true;
+        }
+      }
+    } catch (err) {
+      console.warn('[Auth] Failed to auto-unlock vault:', err);
+    }
+  }
+
+  if (getKeysOnDemand) {
+    try {
+      const keys = await getKeysOnDemand();
+      if (keys && hybridKeysRef) {
+        hybridKeysRef.current = keys;
+        try { window.dispatchEvent(new CustomEvent(EventType.HYBRID_KEYS_UPDATED)); } catch { }
+      }
     } catch { }
   }
-}
 
-// Handle passphrase success
-export async function handlePassphraseSuccess(auth: AuthRefs): Promise<void> {
-  const {
-    loginUsernameRef,
-    aesKeyRef,
-    setShowPassphrasePrompt,
-    setRecoveryActive,
-    setAccountAuthenticated
-  } = auth;
-  try {
-    const user = loginUsernameRef?.current || '';
-    if (user && aesKeyRef?.current) {
-      const vaultKey = await ensureVaultKeyCryptoKey(user);
-      const raw = new Uint8Array(await (globalThis as any).crypto?.subtle?.exportKey('raw', aesKeyRef.current));
-
-      await saveWrappedMasterKey(user, raw, vaultKey);
-
-      // Initialize native DB with master key for new login
-      try {
-        const masterKeyB64 = (CryptoUtils as any).Base64.arrayBufferToBase64(raw);
-        const dbResult = await database.init(user, masterKeyB64);
-        if (dbResult) {
-          const sigResult = await signal.initStorage(user).catch(e => {
-            console.error('[AuthHandlers] passphrase-success: Failed to init Signal storage:', e);
-            return false;
+  // Initialize blind routing
+  if (username) {
+    try {
+      const blindClient = getBlindRoutingClient(username);
+      
+      if (data?.blindRouting) {
+        // Server issued fresh blind routing credentials
+        await initializeAnonymousRouting(data, auth, username);
+      } else {
+        // Fallback to saved credentials
+        const persistedCreds = await blindClient.loadPersistentCredentials();
+        if (persistedCreds) {
+          blindClient.setSendFunction(async (message: any) => {
+            await websocketClient.sendSecureControlMessage(message);
           });
         }
-      } catch (dbErr) {
-        console.error('[AuthHandlers] passphrase-success: Failed to init native DB:', dbErr);
       }
-
-      raw.fill(0);
+    } catch (err) {
+      console.warn('[Auth] Failed to initialize blind routing:', err);
     }
-  } catch (_error) {
-    console.error('[signals] passphrase-success derive-key-failed', (_error as Error).message);
   }
 
-  setShowPassphrasePrompt?.(false);
-  setRecoveryActive?.(false);
+  setLoginError?.('');
   setAccountAuthenticated?.(true);
+  setIsLoggedIn?.(true);
+  setTokenValidationInProgress?.(false);
+  
+  if (vaultUnlocked) {
+    setMaxStepReached?.('server');
+    auth.setShowPassphrasePrompt?.(false);
+  } else {
+    setMaxStepReached?.('passphrase');
+    auth.setShowPassphrasePrompt?.(true);
+  }
+
+  window.dispatchEvent(new CustomEvent(EventType.SECURE_CHAT_AUTH_SUCCESS));
 }
 
-// Handle authentication error
+/**
+ * Shared routing finalization
+ */
+async function initializeAnonymousRouting(data: any, auth: AuthRefs, recoveredUser: string): Promise<void> {
+  if (!data?.blindRouting) return;
+
+  try {
+    const blindClient = getBlindRoutingClient(recoveredUser);
+    const { blindCredentialRef } = auth;
+    let finalCredentials = { ...data.blindRouting } as BlindRoutingCredentials;
+
+    if (data.blindRouting.signedBlindedToken && blindCredentialRef?.current) {
+      try {
+        const { blindingFactor, n, modulusLength, kid } = blindCredentialRef.current;
+        const signature = unblindSignature(
+          data.blindRouting.signedBlindedToken,
+          blindingFactor,
+          n,
+          modulusLength
+        );
+        finalCredentials.blindSignature = signature;
+        finalCredentials.blindSignatureKid = data.blindRouting.blindSignatureKid || kid;
+        finalCredentials.primaryInboxId = blindCredentialRef.current.message;
+        blindCredentialRef.current.used = true;
+      } catch { }
+    }
+
+    if (!finalCredentials.primaryInboxId) {
+      const existing = await blindClient.loadPersistentCredentials();
+      if (existing?.primaryInboxId) {
+        finalCredentials.primaryInboxId = existing.primaryInboxId;
+      }
+      if (!finalCredentials.blindSignature && existing?.blindSignature) {
+        finalCredentials.blindSignature = existing.blindSignature;
+        finalCredentials.blindSignatureKid = existing.blindSignatureKid;
+      }
+    }
+
+    await blindClient.setCredentials(finalCredentials);
+    blindClient.setSendFunction(async (message: any) => {
+      await websocketClient.sendSecureControlMessage(message);
+    });
+
+    void Promise.resolve().then(async () => {
+      try {
+        await websocketClient.switchToUnlinkedMode();
+      } catch { }
+    });
+  } catch (err) {
+    console.warn('[AuthHandlers] Failed to initialize blind routing:', err);
+  }
+}
+
+/**
+ * Handle authentication error
+ */
 export function handleAuthError(data: any, message: string | undefined, auth: AuthRefs): void {
-  const { setLoginError, setAuthStatus, setIsSubmittingAuth, setAccountAuthenticated, setIsLoggedIn, setShowPassphrasePrompt, setMaxStepReached } = auth;
-  const attemptsRemaining = typeof data?.attemptsRemaining === 'number' ? data.attemptsRemaining : undefined;
+  const { setLoginError, setAuthStatus, setIsSubmittingAuth, setAccountAuthenticated, setIsLoggedIn, setMaxStepReached } = auth;
   const locked = Boolean(data?.locked);
   const cooldownSeconds = typeof data?.cooldownSeconds === 'number' ? data.cooldownSeconds : undefined;
-  const category = typeof data?.category === 'string' ? data.category : undefined;
 
   let errorMessage = message ?? 'Authentication failed';
   if (locked && cooldownSeconds) {
     errorMessage = `Too many attempts. Try again in ${cooldownSeconds}s.`;
-    try { websocketClient.setGlobalRateLimit?.(cooldownSeconds); } catch { }
-    try { setAccountAuthenticated?.(false); setIsLoggedIn?.(false); setShowPassphrasePrompt?.(false); setMaxStepReached?.('login'); } catch { }
-  } else if (typeof attemptsRemaining === 'number' && !locked) {
-    errorMessage += ` (${attemptsRemaining} attempt${attemptsRemaining === 1 ? '' : 's'} remaining)`;
+    websocketClient.setGlobalRateLimit?.(cooldownSeconds);
   }
 
   setLoginError?.(errorMessage);
-  try { setAuthStatus?.(''); } catch { }
-  try { setIsSubmittingAuth?.(false); } catch { }
-  try { auth.setTokenValidationInProgress?.(false); } catch { }
-  try { window.dispatchEvent(new CustomEvent(EventType.AUTH_ERROR, { detail: { category, code: (data as any)?.code } })); } catch { }
+  setAuthStatus?.('');
+  setIsSubmittingAuth?.(false);
+  auth.setTokenValidationInProgress?.(false);
+  window.dispatchEvent(new CustomEvent(EventType.AUTH_ERROR, { detail: { category: data?.category, code: data?.code } }));
 
-  if (category === 'passphrase' && !locked) {
-    setAccountAuthenticated?.(false); setIsLoggedIn?.(false); setShowPassphrasePrompt?.(false); setMaxStepReached?.('login');
+  if (locked) {
+    setAccountAuthenticated?.(false);
+    setIsLoggedIn?.(false);
+    setMaxStepReached?.('login');
   }
-}
-
-// Handle login errors
-export function handleLoginErrors(type: string, message: string | undefined, auth: AuthRefs): void {
-  auth.setLoginError?.(`Login error: ${message ?? type}`);
-  try { auth.setAuthStatus?.(''); } catch { }
-  try { auth.setIsSubmittingAuth?.(false); } catch { }
-}
-
-// Handle connection restored
-export function handleConnectionRestored(data: any, auth: AuthRefs): void {
-  if (data?.hasAuthenticated) { auth.setIsLoggedIn?.(true); auth.setAccountAuthenticated?.(true); }
 }

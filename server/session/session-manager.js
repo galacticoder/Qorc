@@ -1,8 +1,6 @@
-import crypto from 'node:crypto';
-import { CryptoUtils } from '../crypto/unified-crypto.js';
-import { ConnectionStateManager } from '../presence/connection-state.js';
+import { ConnectionStateManager } from './connection-state.js';
 import { logger as cryptoLogger } from '../crypto/crypto-logger.js';
-import { withRedisClient } from '../presence/presence.js';
+import { withRedisClient } from './redis-client.js';
 
 const BATCH_SIZE = 10;
 const BATCH_TIMEOUT = 1000;
@@ -10,25 +8,6 @@ const MAX_BATCH_SIZE = 100;
 const REDIS_BATCH_QUEUE_KEY = 'session:batch:queue';
 let batchTimer = null;
 let batchProcessing = false;
-
-// Generate device ID for WebSocket connections
-export function generateDeviceId(ws, request = null) {
-  const req = request || ws?.upgradeReq || ws?._socket?._httpMessage?.req;
-  const hdrId = req?.headers?.['x-device-id'] || ws?.headers?.['x-device-id'];
-  const isTLS = !!(req && req.socket && req.socket.encrypted);
-  if (isTLS && hdrId && typeof hdrId === 'string') {
-    const trimmed = hdrId.trim();
-    if (trimmed.length >= 8) {
-      return trimmed.length > 64 ? trimmed.slice(0, 64) : trimmed;
-    }
-  }
-
-  const ua = req?.headers?.['user-agent'] || 'unknown';
-  const randomPart = crypto.randomBytes(16).toString('hex');
-  const deviceData = `${ua}-${randomPart}-${Date.now()}`;
-  const hash = CryptoUtils.Hash.blake3(Buffer.from(deviceData));
-  return Buffer.from(hash).slice(0, 16).toString('hex');
-}
 
 // Helper for consistent session refresh error handling
 export function safeRefreshSession(sessionId) {

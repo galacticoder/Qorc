@@ -1,80 +1,9 @@
 import { SignalType } from '../../lib/types/signal-types';
 import { EventType } from '../../lib/types/event-types';
-import websocketClient from '../../lib/websocket/websocket';
-import { safeJsonParseForMessages } from '../../lib/utils/message-handler-utils';
-import type { DecryptResult, EncryptedMessage } from '../../lib/types/message-handling-types';
+import { safeJsonParse, safeJsonParseForMessages } from '../../lib/utils/message-handler-utils';
+import { MAX_SIGNAL_PAYLOAD_JSON_BYTES } from '../../lib/constants';
+import type { EncryptedMessage } from '../../lib/types/message-handling-types';
 import { signal } from '../../lib/tauri-bindings';
-
-// Validate P2P message structure
-export const validateP2PMessage = (msg: any, loginUsername: string): boolean => {
-  if (!msg.from || !msg.to || !msg.id ||
-    typeof msg.from !== 'string' ||
-    typeof msg.to !== 'string' ||
-    typeof msg.id !== 'string') {
-    console.error('[EncryptedMessageHandler] Invalid P2P message structure');
-    return false;
-  }
-
-  const usernameRegex = /^[a-zA-Z0-9_-]{1,32}$/;
-  if (!usernameRegex.test(msg.from) || !usernameRegex.test(msg.to)) {
-    console.error('[EncryptedMessageHandler] Invalid username format in P2P message');
-    return false;
-  }
-
-  const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-  if (!uuidRegex.test(msg.id)) {
-    console.error('[EncryptedMessageHandler] Invalid message ID format');
-    return false;
-  }
-
-  if (msg.to !== loginUsername) {
-    console.error('[EncryptedMessageHandler] P2P message not intended for current user');
-    return false;
-  }
-
-  if (typeof msg.content !== 'string' || msg.content.length === 0 || msg.content.length > 10000) {
-    console.error('[EncryptedMessageHandler] Invalid P2P message content length');
-    return false;
-  }
-
-  const dangerousPatterns = [
-    /<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi,
-    /javascript:/gi, /vbscript:/gi, /data:text\/html/gi,
-    /on\w+\s*=/gi, /<iframe\b/gi, /<object\b/gi,
-    /<embed\b/gi, /<link\b/gi, /<meta\b/gi
-  ];
-  if (dangerousPatterns.some(p => p.test(msg.content))) {
-    console.error('[EncryptedMessageHandler] Potentially dangerous content detected');
-    return false;
-  }
-
-  if (/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/.test(msg.content)) {
-    console.error('[EncryptedMessageHandler] Invalid control characters in P2P message');
-    return false;
-  }
-
-  const now = Date.now();
-  const messageTime = new Date(msg.timestamp).getTime();
-  const maxAge = 24 * 60 * 60 * 1000;
-  const maxFuture = 5 * 60 * 1000;
-  if (isNaN(messageTime) || messageTime < (now - maxAge) || messageTime > (now + maxFuture)) {
-    console.error('[EncryptedMessageHandler] Invalid P2P message timestamp');
-    return false;
-  }
-
-  return true;
-};
-
-// Create P2P payload from validated message
-export const createP2PPayload = (msg: any): any => ({
-  id: msg.id,
-  content: msg.content || msg.payload,
-  timestamp: msg.timestamp,
-  from: msg.from,
-  to: msg.to,
-  type: msg.messageType || msg.type || SignalType.MESSAGE,
-  p2p: true
-});
 
 // Decrypt Signal Protocol message
 export const decryptSignalMessage = async (
@@ -133,15 +62,6 @@ export const processBundleDelivery = async (
       const has = await signal.hasSession(currentUser, peerUsername, 1);
       try { window.dispatchEvent(new CustomEvent(EventType.LIBSIGNAL_SESSION_READY, { detail: { peer: peerUsername } })); } catch { }
 
-      try {
-        if (has) await websocketClient.sendSecureControlMessage({
-          type: SignalType.SESSION_ESTABLISHED,
-          from: currentUser,
-          username: peerUsername,
-          deviceId: 1,
-          timestamp: Date.now()
-        });
-      } catch { }
       return true;
     }
   } catch (_error) {
@@ -150,7 +70,7 @@ export const processBundleDelivery = async (
   return false;
 };
 
-// Process sender's signal bundle from payload
+// Process sender signal bundle from payload
 export const processSenderBundle = async (
   payload: any,
   currentUser: string
@@ -167,15 +87,6 @@ export const processSenderBundle = async (
           const hasNow = await signal.hasSession(currentUser, senderUsername, 1);
           try { window.dispatchEvent(new CustomEvent(EventType.LIBSIGNAL_SESSION_READY, { detail: { peer: senderUsername } })); } catch { }
 
-          try {
-            if (hasNow) await websocketClient.sendSecureControlMessage({
-              type: SignalType.SESSION_ESTABLISHED,
-              from: currentUser,
-              username: senderUsername,
-              deviceId: 1,
-              timestamp: Date.now()
-            });
-          } catch { }
         }
       } catch { }
     }
@@ -191,7 +102,20 @@ export const trustPeerIdentity = async (currentUser: string, peerUsername: strin
 
 // Parse decrypted plaintext to payload
 export const parseDecryptedPayload = (plaintext: string, from?: string): any => {
-  const payload = safeJsonParseForMessages(plaintext) || { content: plaintext, type: SignalType.MESSAGE };
+  let payload = safeJsonParseForMessages(plaintext);
+
+  if (!payload && typeof plaintext === 'string') {
+    const trimmed = plaintext.trim();
+    const looksJson = trimmed.startsWith('{') || trimmed.startsWith('[');
+    const looksLikeSignalPayload = trimmed.includes('"signal-payload"') || trimmed.includes('"file-message-chunk"');
+    if (looksJson && looksLikeSignalPayload) {
+      payload = safeJsonParse(plaintext, MAX_SIGNAL_PAYLOAD_JSON_BYTES);
+    }
+  }
+
+  if (!payload) {
+    payload = { content: plaintext, type: SignalType.MESSAGE };
+  }
   if (from && payload && !payload.from) {
     payload.from = from;
   }

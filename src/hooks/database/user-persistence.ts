@@ -11,7 +11,10 @@ export const loadUsers = async (secureDB: SecureDB): Promise<User[]> => {
     username: su.username || '',
     isOnline: su.isOnline ?? false,
     isTyping: su.isTyping,
+    peerCertificateFingerprint: su.peerCertificateFingerprint,
+    peerCertificatePinnedAt: su.peerCertificatePinnedAt,
     hybridPublicKeys: su.hybridPublicKeys,
+    inboxId: su.inboxId,
   }));
 };
 

@@ -1,73 +1,102 @@
-import { SignalType } from '../../lib/types/signal-types';
 import { EventType } from '../../lib/types/event-types';
-import { CryptoUtils } from '../../lib/utils/crypto-utils';
-import websocketClient from '../../lib/websocket/websocket';
 import type { HybridPublicKeys, UserWithKeys } from '../../lib/types/message-sending-types';
+import { signal } from '../../lib/tauri-bindings';
+import { shouldAttemptDiscovery } from '../../lib/utils/discovery-utils';
 
-// Resolve peer hybrid keys with fallback to bundle request
+const findingCacheMap = new Map<string, Promise<HybridPublicKeys | null>>();
+
+// Resolve peer hybrid keys with fallback to discovery
 export const createDefaultResolvePeerHybridKeys = (
   recipientDirectory: Map<string, UserWithKeys>,
-  getKeysOnDemand: () => Promise<{
+  _getKeysOnDemand: () => Promise<{
     x25519: { private: Uint8Array; publicKeyBase64: string };
     kyber: { publicKeyBase64: string; secretKey: Uint8Array };
     dilithium: { publicKeyBase64: string; secretKey: Uint8Array };
   } | null>,
   loginUsernameRef: React.RefObject<string>,
-  currentUsername: string
+  _currentUsername: string,
+  findUser?: (handle: string) => Promise<any>
 ) => {
   return async (peerUsername: string): Promise<HybridPublicKeys | null> => {
     if (!peerUsername) return null;
 
-    const existing = recipientDirectory.get(peerUsername)?.hybridPublicKeys;
-    if (existing && existing.kyberPublicBase64 && existing.dilithiumPublicBase64) {
-      return existing;
+    const existing = recipientDirectory.get(peerUsername);
+    if (existing?.hybridPublicKeys?.kyberPublicBase64 && existing.hybridPublicKeys.dilithiumPublicBase64) {
+      return existing.hybridPublicKeys;
     }
-    try {
-      await websocketClient.sendSecureControlMessage({ type: SignalType.CHECK_USER_EXISTS, username: peerUsername });
-    } catch { }
 
-    try {
-      const keys = await getKeysOnDemand?.();
-      
-      if (keys?.dilithium?.publicKeyBase64 && keys?.dilithium?.secretKey) {
-        const requestBase = {
-          type: SignalType.LIBSIGNAL_REQUEST_BUNDLE,
-          username: peerUsername,
-          from: currentUsername || loginUsernameRef.current,
-          timestamp: Date.now(),
-          challenge: CryptoUtils.Base64.arrayBufferToBase64(globalThis.crypto.getRandomValues(new Uint8Array(32))),
-          senderDilithium: keys.dilithium.publicKeyBase64,
-          reason: 'resolve-keys',
-        } as const;
+    if (findingCacheMap.has(peerUsername)) {
+      return findingCacheMap.get(peerUsername)!;
+    }
 
-        const canonical = new TextEncoder().encode(JSON.stringify(requestBase));
-        const sigRaw = await CryptoUtils.Dilithium.sign(keys.dilithium.secretKey, canonical);
-        const signature = CryptoUtils.Base64.arrayBufferToBase64(sigRaw);
-        await websocketClient.sendSecureControlMessage({ ...requestBase, signature });
-      }
-    } catch { }
+    const finding = (async () => {
+      // Use Discovery Service
+      if (findUser) {
+        try {
+          if (!shouldAttemptDiscovery(peerUsername)) {
+            return null;
+          }
+          const material = await findUser(peerUsername);
+          if (material) {
+            if (material.fullBundle && loginUsernameRef.current) {
+              const hasSession = await signal.hasSession(loginUsernameRef.current, peerUsername, 1).catch(() => false);
+              if (!hasSession) {
+                await signal.processPreKeyBundle(loginUsernameRef.current, peerUsername, material.fullBundle);
+              }
+            }
 
-    const hybrid = await new Promise<any>((resolve) => {
-      let settled = false;
-      const timeout = setTimeout(() => { if (!settled) { settled = true; resolve(null); } }, 2000);
+            // Notify about the discovered keys
+            window.dispatchEvent(new CustomEvent(EventType.USER_KEYS_AVAILABLE, {
+              detail: {
+                username: peerUsername,
+                hybridKeys: material.publicKeys,
+                inboxId: material.inboxId
+              }
+            }));
 
-      const onKeys = (e: Event) => {
-        const d = (e as CustomEvent).detail || {};
-        if (d?.username === peerUsername && d?.hybridKeys && d.hybridKeys.kyberPublicBase64 && d.hybridKeys.dilithiumPublicBase64) {
-          cleanup();
-          resolve(d.hybridKeys);
+            return {
+              kyberPublicBase64: material.publicKeys?.kyberPublicBase64,
+              dilithiumPublicBase64: material.publicKeys?.dilithiumPublicBase64,
+              inboxId: material.inboxId
+            };
+          }
+        } catch (discoveryErr) {
+          console.warn('[Keys] Discovery-based key resolution failed:', discoveryErr);
         }
-      };
-      const cleanup = () => {
-        try { clearTimeout(timeout); } catch { }
-        try { window.removeEventListener(EventType.USER_KEYS_AVAILABLE, onKeys as EventListener); } catch { }
-      };
+      }
 
-      window.addEventListener(EventType.USER_KEYS_AVAILABLE, onKeys as EventListener);
+      // Fallback wait for keys event
+      const hybrid = await new Promise<any>((resolve) => {
+        let settled = false;
+        const timeout = setTimeout(() => { if (!settled) { settled = true; resolve(null); } }, 3000);
+
+        const onKeys = async (e: Event) => {
+          const d = (e as CustomEvent).detail || {};
+          if (d?.username === peerUsername && d?.hybridKeys && d.hybridKeys.kyberPublicBase64 && d.hybridKeys.dilithiumPublicBase64) {
+            const inboxId = d.inboxId || d.hybridKeys.inboxId;
+            const result = { ...d.hybridKeys, inboxId };
+            cleanup();
+            settled = true;
+            resolve(result);
+          }
+        };
+
+        const cleanup = () => {
+          try { clearTimeout(timeout); } catch { }
+          try { window.removeEventListener(EventType.USER_KEYS_AVAILABLE, onKeys as EventListener); } catch { }
+        };
+
+        window.addEventListener(EventType.USER_KEYS_AVAILABLE, onKeys as EventListener);
+      });
+
+      if (hybrid && hybrid.kyberPublicBase64 && hybrid.dilithiumPublicBase64) return hybrid;
+      const refreshed = recipientDirectory.get(peerUsername)?.hybridPublicKeys || null;
+      return refreshed || null;
+    })().finally(() => {
+      findingCacheMap.delete(peerUsername);
     });
 
-    if (hybrid && hybrid.kyberPublicBase64 && hybrid.dilithiumPublicBase64) return hybrid;
-    const refreshed = recipientDirectory.get(peerUsername)?.hybridPublicKeys || null;
-    return refreshed || null;
+    findingCacheMap.set(peerUsername, finding);
+    return finding;
   };
 };

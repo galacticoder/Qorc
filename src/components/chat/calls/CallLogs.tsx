@@ -6,7 +6,7 @@ import { Button } from '../../ui/button';
 import { ScrollArea } from '../../ui/scroll-area';
 import { UserAvatar } from '../../ui/UserAvatar';
 import { useCallHistory, type CallLogEntry } from '../../../contexts/CallHistoryContext';
-import { useUnifiedUsernameDisplay } from '../../../hooks/database/useUnifiedUsernameDisplay';
+import { useDisplayUsername } from '../../../hooks/database/useDisplayUsername';
 import { blockStatusCache } from '../../../lib/blocking/block-status-cache';
 import { isPlainObject, hasPrototypePollutionKeys, sanitizeUsername } from '../../../lib/sanitizers';
 import { EventType } from '@/lib/types/event-types';
@@ -29,12 +29,10 @@ const CallLogItem: React.FC<CallLogItemProps> = React.memo(({
     log,
     index,
     totalLogs,
-    getDisplayUsername,
     onDelete
 }) => {
-    const { displayName } = useUnifiedUsernameDisplay({
+    const displayName = useDisplayUsername({
         username: log.peerUsername,
-        getDisplayUsername,
         fallbackToOriginal: true
     });
 

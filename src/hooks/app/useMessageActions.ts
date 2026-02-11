@@ -3,7 +3,7 @@ import { Message, MessageReply } from '../../components/chat/messaging/types';
 import { User } from '../../components/chat/messaging/UserList';
 import { SignalType } from '../../lib/types/signal-types';
 import { EventType } from '../../lib/types/event-types';
-import { p2pConfig } from '../../config/p2p.config';
+import { unifiedSignalTransport } from '../../lib/transport/unified-signal-transport';
 import { SecurityAuditLogger } from '../../lib/cryptography/audit-logger';
 import { formatFileSize } from '../../lib/utils/file-utils';
 import { toast } from 'sonner';
@@ -42,12 +42,6 @@ interface MessageActionsProps {
   };
   p2pMessaging: {
     isPeerConnected: (peer: string) => boolean;
-    sendP2PMessage: (
-      peer: string,
-      content: string,
-      keys?: { dilithiumPublicBase64: string; kyberPublicBase64: string; x25519PublicBase64?: string },
-      options?: { messageType?: string; metadata?: any }
-    ) => Promise<{ status: string; messageId?: string }>;
     connectToPeer: (peer: string) => Promise<void>;
   };
   setMessages: React.Dispatch<React.SetStateAction<Message[]>>;
@@ -99,98 +93,88 @@ export function useMessageActions({
     const isConnected = p2pMessaging.isPeerConnected(selectedConversation);
 
     if (messageSignalType === SignalType.REACTION_ADD || messageSignalType === SignalType.REACTION_REMOVE) {
-      if (p2pConfig.features.textMessages && isConnected && targetUser.hybridPublicKeys) {
-        try {
-          const result = await p2pMessaging.sendP2PMessage(
-            selectedConversation,
-            content,
-            {
-              dilithiumPublicBase64: targetUser.hybridPublicKeys.dilithiumPublicBase64,
-              kyberPublicBase64: targetUser.hybridPublicKeys.kyberPublicBase64,
-              x25519PublicBase64: targetUser.hybridPublicKeys.x25519PublicBase64,
-            },
-            {
-              messageType: SignalType.REACTION,
-              metadata: {
-                targetMessageId: messageId,
-                action: messageSignalType
-              }
-            }
-          );
+      try {
+        const payload = {
+          reactTo: messageId,
+          emoji: content,
+          timestamp: Date.now()
+        };
+        const result = await unifiedSignalTransport.send(
+          selectedConversation,
+          payload,
+          messageSignalType as SignalType,
+          { destinationInbox: (targetUser as any)?.inboxId }
+        );
 
-          if (result.status === 'sent') {
-            window.dispatchEvent(new CustomEvent(EventType.LOCAL_REACTION_UPDATE, {
-              detail: {
-                messageId,
-                emoji: content,
-                isAdd: messageSignalType === SignalType.REACTION_ADD,
-                username: loginUsernameRef.current
-              }
-            }));
-            return;
-          }
-        } catch { }
-      }
+        if (result.success) {
+          window.dispatchEvent(new CustomEvent(EventType.LOCAL_REACTION_UPDATE, {
+            detail: {
+              messageId,
+              emoji: content,
+              isAdd: messageSignalType === SignalType.REACTION_ADD,
+              username: loginUsernameRef.current
+            }
+          }));
+          return;
+        }
+      } catch { }
+
       return messageSender.handleSendMessage(targetUser as any, content, replyToMessage, undefined, messageSignalType, messageId);
     }
 
-    if (p2pConfig.features.textMessages && isConnected) {
+    if (isConnected) {
       try {
-        if (targetUser.hybridPublicKeys) {
-          const result = await p2pMessaging.sendP2PMessage(
-            selectedConversation,
-            content,
-            {
-              dilithiumPublicBase64: targetUser.hybridPublicKeys.dilithiumPublicBase64,
-              kyberPublicBase64: targetUser.hybridPublicKeys.kyberPublicBase64,
-              x25519PublicBase64: targetUser.hybridPublicKeys.x25519PublicBase64,
-            },
-            {
-              metadata: replyTo ? {
-                replyTo: {
-                  id: replyTo.id,
-                  sender: replyTo.sender,
-                  content: replyTo.content
-                }
-              } : undefined
-            }
-          );
+        const mId = crypto.randomUUID();
+        const payload = {
+          messageId: mId,
+          content,
+          timestamp: Date.now(),
+          replyTo: replyTo ? {
+            id: replyTo.id,
+            sender: replyTo.sender,
+            content: replyTo.content
+          } : undefined
+        };
+        const result = await unifiedSignalTransport.send(
+          selectedConversation,
+          payload,
+          SignalType.TEXT,
+          { destinationInbox: (targetUser as any)?.inboxId }
+        );
 
-          if (result.status === 'sent') {
-            const mId = result.messageId || crypto.randomUUID();
-            await messageVault.store(mId, content);
+        if (result.success) {
+          await messageVault.store(mId, content);
 
-            const newMessage: Message = {
-              id: mId,
+          const newMessage: Message = {
+            id: mId,
+            content: '',
+            secureContentId: mId,
+            sender: loginUsernameRef.current || '',
+            recipient: selectedConversation,
+            timestamp: new Date(),
+            type: SignalType.TEXT,
+            isCurrentUser: true,
+            p2p: result.transport === 'p2p',
+            transport: result.transport,
+            encrypted: true,
+            receipt: { delivered: false, read: false },
+          } as Message;
+
+          if (replyTo) {
+            const replyId = `reply-${replyTo.id}-${mId}`;
+            const replyContent = getReplyContent(replyTo as Message);
+            await messageVault.store(replyId, replyContent);
+            newMessage.replyTo = {
+              id: replyTo.id,
+              sender: replyTo.sender,
               content: '',
-              secureContentId: mId,
-              sender: loginUsernameRef.current || '',
-              recipient: selectedConversation,
-              timestamp: new Date(),
-              type: SignalType.TEXT,
-              isCurrentUser: true,
-              p2p: true,
-              transport: 'p2p',
-              encrypted: true,
-              receipt: { delivered: false, read: false },
-            } as Message;
-
-            if (replyTo) {
-              const replyId = `reply-${replyTo.id}-${mId}`;
-              const replyContent = getReplyContent(replyTo as Message);
-              await messageVault.store(replyId, replyContent);
-              newMessage.replyTo = {
-                id: replyTo.id,
-                sender: replyTo.sender,
-                content: '',
-                secureContentId: replyId
-              };
-            }
-
-            setMessages(prev => [...prev, newMessage]);
-            saveMessageWithContext({ ...newMessage, content });
-            return;
+              secureContentId: replyId
+            };
           }
+
+          setMessages(prev => [...prev, newMessage]);
+          saveMessageWithContext({ ...newMessage, content });
+          return;
         }
       } catch { }
     }
@@ -227,7 +211,7 @@ export function useMessageActions({
     }
 
     try {
-      if (p2pConfig.features.fileTransfers && selectedConversation) {
+      if (selectedConversation) {
         let isConnected = p2pMessaging.isPeerConnected(selectedConversation);
 
         if (!isConnected) {
@@ -237,41 +221,29 @@ export function useMessageActions({
           } catch { }
         }
 
+        // Try P2P first if connected
         if (isConnected) {
-          const targetUser = users.find(user => user.username === selectedConversation);
+          try {
+            const targetUser = users.find(user => user.username === selectedConversation);
+            const payload = {
+              filename: fileData.filename,
+              size: fileData.size,
+              type: fileData.type,
+              url: fileData.url,
+              timestamp: Date.now()
+            };
+            const result = await unifiedSignalTransport.send(
+              selectedConversation,
+              payload,
+              SignalType.FILE,
+              { destinationInbox: (targetUser as any)?.inboxId }
+            );
 
-          if (targetUser && targetUser.hybridPublicKeys) {
-            try {
-              const result = await p2pMessaging.sendP2PMessage(
-                selectedConversation,
-                JSON.stringify({
-                  filename: fileData.filename,
-                  size: fileData.size,
-                  type: fileData.type,
-                  url: fileData.url,
-                }),
-                {
-                  dilithiumPublicBase64: targetUser.hybridPublicKeys.dilithiumPublicBase64 || '',
-                  kyberPublicBase64: targetUser.hybridPublicKeys.kyberPublicBase64 || '',
-                  x25519PublicBase64: targetUser.hybridPublicKeys.x25519PublicBase64,
-                },
-                {
-                  messageType: SignalType.FILE,
-                  metadata: {
-                    filename: fileData.filename,
-                    size: fileData.size,
-                    type: fileData.type,
-                    url: fileData.url,
-                  }
-                }
-              );
-
-              if (result.status === 'sent') {
-                await saveMessageToLocalDB(dataToSave);
-                return;
-              }
-            } catch { }
-          }
+            if (result.success) {
+              await saveMessageToLocalDB(dataToSave);
+              return;
+            }
+          } catch { }
         }
       }
 

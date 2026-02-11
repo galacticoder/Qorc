@@ -13,11 +13,12 @@ import { UI_CALL_STATUS_RATE_WINDOW_MS, UI_CALL_STATUS_RATE_MAX, MAX_UI_CALL_STA
 import { formatRelativeAge } from "../../../lib/utils/date-utils";
 import { SecureCanvasText } from "./SecureCanvasText";
 import { UnreadIndicator } from "./UnreadIndicator";
-import { useUnifiedUsernameDisplay } from "../../../hooks/database/useUnifiedUsernameDisplay";
+import { useDisplayUsername } from "../../../hooks/database/useDisplayUsername";
 
 export interface Conversation {
   readonly id: string;
   readonly username: string;
+  readonly inboxId?: string;
   readonly isOnline: boolean;
   readonly lastMessage?: string;
   readonly lastMessageTime?: Date;
@@ -68,16 +69,8 @@ const ConversationItem = memo<ConversationItemProps>(({
   onSelect,
   onRemove,
   callStatus,
-  getDisplayUsername
 }) => {
-  const { displayName: resolvedName } = useUnifiedUsernameDisplay({
-    username: conversation.username,
-    getDisplayUsername,
-    originalUsername: conversation.displayName,
-    fallbackToOriginal: true
-  });
-
-  const displayName = resolvedName || anonymize(conversation.username);
+  const displayName = useDisplayUsername({ username: conversation.username });
 
   // Handle conversation selection
   const handleClick = useCallback(() => {

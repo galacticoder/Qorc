@@ -1,5 +1,6 @@
 /**
  * Post-Quantum Envelope Handler
+ * 
  * Handles PQ handshake establishment and encrypted envelope processing
  */
 
@@ -9,6 +10,7 @@ import { PostQuantumHash } from '../crypto/post-quantum-hash.js';
 import { logger as cryptoLogger } from '../crypto/crypto-logger.js';
 import { SignalType } from '../signals.js';
 import { storePQSession, getPQSession, incrementPQSessionCounter } from '../session/pq-session-storage.js';
+import { registerLocalSocket } from '../routing/blind-router.js';
 
 // Server signing key for envelope authentication
 let serverDilithiumSigningKey = null;
@@ -25,14 +27,6 @@ export function initializeEnvelopeHandler(serverHybridKeyPair) {
 
 // Handle PQ handshake initialization from client
 export async function handlePQHandshake({ ws, sessionId, parsed, serverHybridKeyPair }) {
-  cryptoLogger.info('[PQ-HANDSHAKE] Received handshake request', {
-    sessionId,
-    hasPayload: !!parsed?.payload,
-    serverId: process.env.SERVER_ID,
-    isRehandshake: !!ws._pqSessionId,
-    wasAuthenticated: !!ws._authenticated
-  });
-
   const payload = parsed?.payload;
   if (!payload || !payload.kemCiphertext || !payload.sessionId || !payload.clientNonce || !payload.clientX25519PublicKey) {
     cryptoLogger.warn('[PQ-HANDSHAKE] Invalid handshake payload', {
@@ -42,7 +36,7 @@ export async function handlePQHandshake({ ws, sessionId, parsed, serverHybridKey
       hasSessionId: !!payload?.sessionId,
       hasClientNonce: !!payload?.clientNonce,
       hasClientX25519: !!payload?.clientX25519PublicKey
-    });
+    }); 
     return await sendSecureMessage(ws, {
       type: SignalType.ERROR,
       message: 'Invalid handshake payload'
@@ -50,12 +44,6 @@ export async function handlePQHandshake({ ws, sessionId, parsed, serverHybridKey
   }
 
   try {
-    cryptoLogger.info('[PQ-HANDSHAKE] CLIENT SENT SESSION ID:', {
-      clientSessionId: payload.sessionId,
-      clientFingerprint: payload.fingerprint?.slice(0, 16) || 'none',
-      timestamp: payload.timestamp
-    });
-
     const oldSessionId = ws._pqSessionId;
     ws._pqSessionId = undefined;
 
@@ -83,12 +71,6 @@ export async function handlePQHandshake({ ws, sessionId, parsed, serverHybridKey
     const baseInfo = `${payload.fingerprint}:${payload.sessionId}`;
     const sendSalt = encoder.encode(`${baseInfo}:send-${payload.timestamp}`);
     const recvSalt = encoder.encode(`${baseInfo}:recv-${payload.timestamp}`);
-
-    cryptoLogger.debug('[PQ-HANDSHAKE] Deriving hybrid session keys', {
-      sessionId: payload.sessionId.slice(0, 16) + '...',
-      timestamp: payload.timestamp,
-      fingerprint: payload.fingerprint.slice(0, 16) + '...'
-    });
 
     const combinedSecret = new Uint8Array(pqSharedSecret.length);
     for (let i = 0; i < pqSharedSecret.length; i++) {
@@ -137,9 +119,18 @@ export async function handlePQHandshake({ ws, sessionId, parsed, serverHybridKey
 
     ws._pqSessionId = payload.sessionId;
 
+    // Register with blind router if not already registered
+    if (!ws._blindSocketId) {
+      try {
+        registerLocalSocket(ws);
+      } catch (err) {
+        cryptoLogger.warn('[PQ-HANDSHAKE] Failed to register with blind router', { error: err.message });
+      }
+    }
+
     // Update ConnectionStateManager with pqSessionId
     if (ws._sessionId) {
-      const { ConnectionStateManager } = await import('../presence/connection-state.js');
+      const { ConnectionStateManager } = await import('../session/connection-state.js');
       try {
         await ConnectionStateManager.updateState(ws._sessionId, {
           pqSessionId: payload.sessionId
@@ -151,19 +142,6 @@ export async function handlePQHandshake({ ws, sessionId, parsed, serverHybridKey
       }
     }
 
-    setTimeout(async () => {
-      try {
-        await sendSecureMessage(ws, {
-          type: SignalType.PQ_HANDSHAKE_ACK,
-          sessionId: payload.sessionId,
-          timestamp: Date.now(),
-          redundant: true
-        });
-        cryptoLogger.info('[PQ-HANDSHAKE] Redundant secure ack sent');
-      } catch (e) {
-        cryptoLogger.warn('[PQ-HANDSHAKE] Redundant secure ack failed', { error: e?.message });
-      }
-    }, 50);
   } catch (error) {
     cryptoLogger.error('[PQ-HANDSHAKE] Handshake failed', {
       sessionId,
@@ -214,32 +192,22 @@ export async function handlePQEnvelope({ ws, sessionId, envelope, context, handl
     const tag = CryptoUtils.Hash.base64ToUint8Array(envelope.tag);
     const aad = CryptoUtils.Hash.base64ToUint8Array(envelope.aad);
 
-    cryptoLogger.debug('[PQ-ENVELOPE] Decrypting envelope', {
-      pqSessionId: envelope.sessionId.slice(0, 16) + '...',
-      messageId: envelope.messageId,
-      counter: envelope.counter
-    });
-
     // Decrypt
     const pqAead = new CryptoUtils.PostQuantumAEAD(session.recvKey);
     const plaintext = pqAead.decrypt(ciphertext, nonce, tag, aad);
     const decrypted = JSON.parse(new TextDecoder().decode(plaintext));
 
     let innerPayload;
-    if (decrypted.to && decrypted.encryptedPayload) {
+    if (decrypted.destinationInbox && decrypted.encryptedPayload) {
       innerPayload = {
         type: SignalType.ENCRYPTED_MESSAGE,
-        to: decrypted.to,
+        destinationInbox: decrypted.destinationInbox,
         encryptedPayload: decrypted.encryptedPayload,
         messageId: decrypted.messageId || envelope.messageId
       };
     } else {
       innerPayload = decrypted;
     }
-
-    cryptoLogger.debug('[PQ-ENVELOPE] Envelope decrypted successfully', {
-      type: innerPayload?.type
-    });
 
     await handleInnerMessage({
       ws,
@@ -284,8 +252,7 @@ export async function sendPQEncryptedResponse(ws, pqSessionIdOrData, payload) {
     const innerMessage = payload?.type === 'encrypted-message'
       ? {
         type: SignalType.ENCRYPTED_MESSAGE,
-        from: payload.from,
-        to: payload.to,
+        destinationInbox: payload.destinationInbox,
         encryptedPayload: payload.encryptedPayload
       }
       : payload;
@@ -355,13 +322,12 @@ export async function sendSecureMessage(ws, payload) {
   const pqSessionId = ws._pqSessionId;
 
   // Whitelist: Only these message types are allowed without PQ encryption
-  // These are strictly for the initial handshake phase before PQ session exists
   const allowedPlaintextTypes = [
-    'pq-handshake-ack',
-    'error',
-    'server-public-key',
-    'ERROR',
-    'register-ack'
+    SignalType.PQ_HANDSHAKE_ACK,
+    SignalType.PQ_HANDSHAKE_INIT,
+    SignalType.ERROR,
+    SignalType.AUTH_ERROR,
+    SignalType.SERVER_PUBLIC_KEY
   ];
 
   if (pqSessionId) {
