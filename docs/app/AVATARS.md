@@ -2,12 +2,12 @@
 
 ## Overview
 
-The server never receives the actual avatar file in plaintext, and — as of the unlinkable-content-store change — it cannot link a stored avatar to any user. The avatar is **no longer carried inside the discovery blob** (that blob is now served by oblivious YPIR PIR, and PIR cannot serve large records cheaply). Instead the avatar is encrypted into a uniform-size **PURB** and stored in a separate **unlinkable content store**, fetched by an opaque id with cover traffic. The UI always renders from local cache.
+The server never receives the actual avatar file in plaintext, and — as of the unlinkable-content-store change — it cannot link a stored avatar to any user. The avatar is **no longer carried inside the discovery blob**. Instead the avatar is encrypted into a uniform-size **PURB** and stored in a separate **unlinkable content store**, fetched by an opaque id with cover traffic. The UI always renders from local cache.
 
 Core properties:
 - Avatars stored in SecureDB on the client.
 - Sharing is optional and controlled by `shareWithOthers`.
-- Discovery publishes only a small `avatarRef` (opaque blobId + E2E key + hash) inside the oblivious keys-blob — never the avatar bytes.
+- Discovery publishes only a small `avatarRef` (opaque blobId + E2E key + hash) inside the encrypted keys-blob — never the avatar bytes.
 - The avatar bytes live as an E2E-encrypted, uniform-size PURB in the unlinkable content store. The server cannot decrypt them, cannot learn their true size, and cannot link the blob to an identity.
 - Direct avatar messages are end-to-end encrypted.
 
@@ -84,7 +84,7 @@ Code references:
 
 ## 5. Distribution via the Unlinkable Content Store
 
-The avatar is delivered out of band from the oblivious discovery keys-blob, because that blob is served by YPIR PIR and PIR cannot serve large records (≥ record-size download + the whole DB must sit in worker RAM). So:
+The avatar is delivered out of band from the discovery keys-blob because avatar bytes are too large for the discovery record. So:
 
 What rides inside the encrypted discovery keys-blob is only an `AvatarRef`:
 - `avatarRef = { blobId, keyB64, hash, mimeType }` — an opaque random per-publish blobId, the E2E AEAD key, and the content hash. The keys-blob is encrypted with the OPRF-derived key, so the server cannot read the ref.

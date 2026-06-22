@@ -252,7 +252,6 @@ fn main() {
             commands::pir::pir_recover_record,
             commands::pir::pir_query_fetch,
             commands::pir::discovery_api_fetch,
-            commands::pir::ypir_fetch_blob,
             // Offline message spool snapshot
             commands::spool::fetch_spool_snapshot,
             // Notification commands

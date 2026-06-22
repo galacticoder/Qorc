@@ -20,7 +20,7 @@ const command = args[0];
 const flags = args.slice(1);
 
 const validProfiles = ['server', 'loadbalancer'];
-const validServices = ['redis', 'postgres', 'pir-worker', 'ypir-worker', 'server', 'loadbalancer'];
+const validServices = ['redis', 'postgres', 'pir-worker', 'server', 'loadbalancer'];
 
 function showHelp() {
     console.log('Docker Deployment Helper');
@@ -323,13 +323,6 @@ async function main() {
         }
         console.log(`[INFO] Detected ${totalCores} CPU core(s). capping pir-worker at ${pirWorkerCpus} core(s) (PIR_WORKER_CPUS).`);
 
-        // auto-cap for the YPIR worker
-        process.env.YPIR_WORKER_CPUS = pirWorkerCpus;
-        if (env.YPIR_WORKER_CPUS !== pirWorkerCpus) {
-            updates.YPIR_WORKER_CPUS = pirWorkerCpus;
-        }
-        console.log(`[INFO] Capping ypir-worker at ${pirWorkerCpus} core(s) (YPIR_WORKER_CPUS).`);
-
         if (Object.keys(updates).length > 0) {
             updateEnvFile(updates);
             for (const [key, value] of Object.entries(updates)) {
@@ -355,14 +348,14 @@ async function main() {
                 if (runDetached) {
                     process.env.NO_GUI = 'true';
                     let sharedServices = 'redis';
-                    if (command === 'server') sharedServices = 'postgres redis pir-worker ypir-worker';
+                    if (command === 'server') sharedServices = 'postgres redis pir-worker';
 
                     if (sharedServices) {
                         execSync(`docker compose --env-file .env -f docker/docker-compose.yml up -d --remove-orphans --no-recreate ${sharedServices}`, { cwd: repoRoot, stdio: 'inherit' });
                     }
 
                     if (buildFlag) {
-                        const buildTargets = command === 'server' ? 'pir-worker ypir-worker server' : command;
+                        const buildTargets = command === 'server' ? 'pir-worker server' : command;
                         execSync(`docker compose --env-file .env -f docker/docker-compose.yml build ${buildTargets}`, { cwd: repoRoot, stdio: 'inherit' });
                     }
 
@@ -370,17 +363,14 @@ async function main() {
                     execSync(runCommand, { cwd: repoRoot, stdio: 'inherit' });
                 } else {
                     let sharedServices = 'redis';
-                    // ypir-worker is started explicitly here (not via depends_on) because the
-                    // foreground `compose run` path below uses --no-deps. Tier-2 discovery is
-                    // oblivious-only (no fallback), so the server needs the worker reachable.
-                    if (command === 'server') sharedServices = 'postgres redis pir-worker ypir-worker';
+                    if (command === 'server') sharedServices = 'postgres redis pir-worker';
 
                     if (sharedServices) {
                         execSync(`docker compose --env-file .env -f docker/docker-compose.yml up -d --remove-orphans --no-recreate ${sharedServices}`, { cwd: repoRoot, stdio: 'inherit' });
                     }
 
                     if (buildFlag) {
-                        const buildTargets = command === 'server' ? 'pir-worker ypir-worker server' : command;
+                        const buildTargets = command === 'server' ? 'pir-worker server' : command;
                         execSync(`docker compose --env-file .env -f docker/docker-compose.yml build ${buildTargets}`, { cwd: repoRoot, stdio: 'inherit' });
                     }
 

@@ -7,7 +7,6 @@ import { buildSpoolSnapshotResponse, getSpoolSnapshotConfig } from '../routing/s
 import { snapshotGlobalMixSpool } from '../routing/blind-router.js';
 import { getPirDatabase, forcePirWorkerReupload, publicManifest } from '../pir/pir-databases.js';
 import { queryPirWorker } from '../pir/pir-worker-client.js';
-import { ypirTier2Enabled, queryYpirWorker } from '../pir/ypir-tier2.js';
 import { DISCOVERY_PIR_DATABASE_KIND, DISCOVERY_BUCKET_TARGET_SIZE, padDiscoveryBucket } from '../pir/page-layout.js';
 import { oprfDiscoveryServer } from '../crypto/oprf-discovery.js';
 import crypto from 'crypto';
@@ -251,36 +250,6 @@ router.post('/pir/query', async (req, res) => {
     res.status(500).json({ ok: false, error: 'pir_query_unavailable' });
   } finally {
     pirHttpInflight = Math.max(0, pirHttpInflight - 1);
-  }
-});
-
-// Tier 2 discovery blob fetch
-let ypirHttpInflight = 0;
-const YPIR_HTTP_MAX_INFLIGHT = 8;
-router.post('/ypir/query', async (req, res) => {
-  if (!ypirTier2Enabled()) {
-    res.status(503).json({ ok: false, error: 'ypir_disabled' });
-    return;
-  }
-  if (ypirHttpInflight >= YPIR_HTTP_MAX_INFLIGHT) {
-    res.status(503).json({ ok: false, error: 'ypir_busy' });
-    return;
-  }
-  ypirHttpInflight += 1;
-  try {
-    const queryB64 = typeof req.body?.query === 'string' ? req.body.query : '';
-    if (!queryB64 || queryB64.length > 4 * 1024 * 1024) {
-      res.status(400).json({ ok: false, error: 'invalid_ypir_query' });
-      return;
-    }
-    const responseBytes = await queryYpirWorker(Buffer.from(queryB64, 'base64'));
-    res.setHeader('Content-Type', 'application/json');
-    res.status(200).json({ ok: true, response: responseBytes.toString('base64') });
-  } catch (error) {
-    logError(error, { endpoint: '/api/ypir/query' });
-    res.status(503).json({ ok: false, error: 'ypir_query_failed' });
-  } finally {
-    ypirHttpInflight = Math.max(0, ypirHttpInflight - 1);
   }
 });
 

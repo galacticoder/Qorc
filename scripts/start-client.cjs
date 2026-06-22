@@ -141,20 +141,6 @@ if (runOnly) {
         process.exit(1);
     }
 
-    // Build YPIR client daemon
-    console.log('[CLIENT] Building YPIR client binary (workers/ypir)...');
-    try {
-        execSync(`node ${JSON.stringify(path.join(repoRoot, 'scripts', 'build-ypir-client.cjs'))}`, {
-            stdio: 'inherit',
-            cwd: repoRoot,
-            env: process.env
-        });
-    } catch (error) {
-        logErr('Failed to build the YPIR client binary (needs the pinned nightly and AVX-512 build host).');
-        logErr('See workers/ypir/BUILD_NOTES.md.');
-        process.exit(1);
-    }
-
     console.log('[CLIENT] Building Tauri app...');
     const buildProc = spawn('pnpm tauri build', {
         stdio: 'inherit',

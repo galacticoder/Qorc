@@ -286,8 +286,6 @@ export const pir = {
         ),
     discoveryApiFetch: (path: string, body: string) =>
         invoke<any>('discovery_api_fetch', { path, body }),
-    ypirFetchBlob: (slot: number) =>
-        invoke<{ ok?: boolean; blob?: string; error?: string }>('ypir_fetch_blob', { slot }),
 };
 
 // ============================================

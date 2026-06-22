@@ -68,8 +68,7 @@
             "icons/icon.ico"
         ],
         "resources": [
-            "binaries/qor-pir-client",
-            "binaries/ypir-client"
+            "binaries/qor-pir-client"
         ],
         "category": "SocialNetworking",
         "shortDescription": "Secure messaging with post-quantum cryptography",

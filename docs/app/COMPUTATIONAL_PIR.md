@@ -70,10 +70,8 @@ Discovery resolves a user's prekey bundle without revealing the username.
   and decrypt-filters locally. Only the target's blob decrypts under the client's
   OPRF-derived key.
 - The keys-blob content is unchanged: the full post-quantum prekey bundle with the
-  same encryption. Only its delivery differs. PIR cannot carry it — the ~131 KB
-  keys-blob produces a SimplePIR database of `2048 rows × blobLen` whose build
-  exhausts memory. An oblivious YPIR tier-2 was prototyped and abandoned for this
-  reason (see §2).
+  same encryption. Only its delivery differs. PIR cannot carry it efficiently at
+  this size.
 
 Privacy. The bucket fetch is k-anonymous, not oblivious: the server learns the
 target's bucket (one of ~K users), not the exact user. This is reinforced by
@@ -86,7 +84,7 @@ separate unlinkable content store and fetched by opaque id with cover traffic. T
 keys-blob carries only a small `avatarRef`. See `docs/app/AVATARS.md`.
 
 Code references: `server/pir/page-layout.js`, `server/pir/pir-databases.js`,
-`server/pir/ypir-tier2.js`, `workers/ypir/`, `src/hooks/discovery/useDiscovery.ts`.
+`src/hooks/discovery/useDiscovery.ts`.
 
 ### 2.2 Offline messages / global spool (uniform encrypted snapshot)
 
@@ -208,4 +206,3 @@ global mix send + fixed-rate polling + cover + (discovery: HintlessPIR two-tier,
 Discovery PIR is fail-closed: if request generation, the worker response, recovery,
 the bucket fetch, or decryption fails, the lookup stops rather than requesting an
 exact token, handle, or bundle id from the server.
-

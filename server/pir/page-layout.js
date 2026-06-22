@@ -11,10 +11,9 @@
  *     [ slotFingerprint(8) || blobHandle(16) ]   = 24 bytes
  *
  * The client privately retrieves this 24-byte record through PIR, confirms the
- * fingerprint (derived from its OPRF token), then obliviously fetches the full
- * encrypted bundle by its tier-1 slot via YPIR (server/pir/ypir-tier2.js). the
- * server never learns which slot/handle was fetched. The bundle content is
- * unchanged. only its delivery is oblivious.
+ * fingerprint (derived from its OPRF token), then fetches the full encrypted
+ * bundle through the k-anonymous discovery bucket route. The server learns only
+ * the bucket, not the exact user or slot.
  */
 
 import crypto from 'crypto';
