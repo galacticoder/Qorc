@@ -1,9 +1,11 @@
 //! Post-Quantum Cryptography
 
-use pqcrypto_kyber::kyber1024;
 use fips204::ml_dsa_87;
 use fips204::traits::{SerDes, Signer};
-use pqcrypto_traits::kem::{Ciphertext, PublicKey as KemPublicKey, SecretKey as KemSecretKey, SharedSecret};
+use pqcrypto_kyber::kyber1024;
+use pqcrypto_traits::kem::{
+    Ciphertext, PublicKey as KemPublicKey, SecretKey as KemSecretKey, SharedSecret,
+};
 
 use crate::error::{QorError, QorResult};
 
@@ -90,8 +92,9 @@ pub struct DilithiumKeyPair {
 
 /// Generate Dilithium-87 keypair
 pub fn dilithium_generate_keypair() -> QorResult<DilithiumKeyPair> {
-    let (pk, sk) = ml_dsa_87::try_keygen()
-        .map_err(|_| QorError::KeyGenerationFailed("Failed to generate ML-DSA-87 keypair".to_string()))?;
+    let (pk, sk) = ml_dsa_87::try_keygen().map_err(|_| {
+        QorError::KeyGenerationFailed("Failed to generate ML-DSA-87 keypair".to_string())
+    })?;
     Ok(DilithiumKeyPair {
         public_key: pk.into_bytes().to_vec(),
         secret_key: sk.into_bytes().to_vec(),
@@ -107,12 +110,13 @@ pub fn dilithium_sign(message: &[u8], secret_key: &[u8]) -> QorResult<Vec<u8>> {
         });
     }
 
-    let sk_bytes: [u8; DILITHIUM_SECRET_KEY_SIZE] = secret_key.try_into()
-        .map_err(|_| QorError::SigningFailed)?;
-    let sk = ml_dsa_87::PrivateKey::try_from_bytes(sk_bytes)
-        .map_err(|_| QorError::SigningFailed)?;
-        
-    let signature = sk.try_sign(message, &[])
+    let sk_bytes: [u8; DILITHIUM_SECRET_KEY_SIZE] =
+        secret_key.try_into().map_err(|_| QorError::SigningFailed)?;
+    let sk =
+        ml_dsa_87::PrivateKey::try_from_bytes(sk_bytes).map_err(|_| QorError::SigningFailed)?;
+
+    let signature = sk
+        .try_sign(message, &[])
         .map_err(|_| QorError::SigningFailed)?;
 
     Ok(signature.to_vec())

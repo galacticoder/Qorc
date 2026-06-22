@@ -42,31 +42,24 @@ export class PostQuantumKEM {
   static async encapsulate(publicKey: Uint8Array): Promise<{ ciphertext: Uint8Array; sharedSecret: Uint8Array }> {
     if (!publicKey) throw new Error('Public key required');
     if (publicKey.length !== PQ_KEM_PUBLIC_KEY_SIZE) throw new Error(`Invalid public key size: ${publicKey.length}`);
-    const { ml_kem1024 } = await import('@noble/post-quantum/ml-kem.js');
-    const result = ml_kem1024.encapsulate(publicKey);
-    try {
-      if (result.cipherText.length !== PQ_KEM_CIPHERTEXT_SIZE) throw new Error('Invalid ciphertext size');
-      if (result.sharedSecret.length !== PQ_KEM_SHARED_SECRET_SIZE) throw new Error('Invalid shared secret size');
-      const ciphertext = new Uint8Array(result.cipherText);
-      const sharedSecret = new Uint8Array(result.sharedSecret);
-      return { ciphertext, sharedSecret };
-    } finally {
-      PostQuantumUtils.clearMemory(result.cipherText);
-      PostQuantumUtils.clearMemory(result.sharedSecret);
-    }
+
+    const result = await PostQuantumWorker.kemEncapsulate(publicKey);
+
+    if (result.ciphertext.length !== PQ_KEM_CIPHERTEXT_SIZE) throw new Error('Invalid ciphertext size');
+    if (result.sharedSecret.length !== PQ_KEM_SHARED_SECRET_SIZE) throw new Error('Invalid shared secret size');
+
+    return result;
   }
 
   static async decapsulate(ciphertext: Uint8Array, secretKey: Uint8Array): Promise<Uint8Array> {
     if (!ciphertext || !secretKey) throw new Error('Ciphertext and secret key required');
     if (ciphertext.length !== PQ_KEM_CIPHERTEXT_SIZE) throw new Error(`Invalid ciphertext size: ${ciphertext.length}`);
     if (secretKey.length !== PQ_KEM_SECRET_KEY_SIZE) throw new Error(`Invalid secret key size: ${secretKey.length}`);
-    const { ml_kem1024 } = await import('@noble/post-quantum/ml-kem.js');
-    const sharedSecret = ml_kem1024.decapsulate(ciphertext, secretKey);
-    try {
-      if (sharedSecret.length !== PQ_KEM_SHARED_SECRET_SIZE) throw new Error('Invalid shared secret size');
-      return new Uint8Array(sharedSecret);
-    } finally {
-      PostQuantumUtils.clearMemory(sharedSecret);
-    }
+
+    const sharedSecret = await PostQuantumWorker.kemDecapsulate(ciphertext, secretKey);
+
+    if (sharedSecret.length !== PQ_KEM_SHARED_SECRET_SIZE) throw new Error('Invalid shared secret size');
+
+    return sharedSecret;
   }
 }

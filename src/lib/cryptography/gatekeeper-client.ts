@@ -6,8 +6,11 @@ import { OPAQUEClient, OPAQUEClientHelpers } from './opaque-client';
 import { PrivacyPassClient, TokenSerializer, AnonymousToken } from './privacy-pass-client';
 import { SignalType } from '../types/signal-types';
 import { Base64 } from './base64';
+import { storage } from '../tauri-bindings';
 
 export class GatekeeperClient {
+    private static readonly MAX_ACTIVE_TOKENS = 400;
+    private static readonly QUOTA_RETRY_CAPS = [200, 100, 50, 20];
     private opaqueClient: OPAQUEClient;
     private ppClient: PrivacyPassClient;
     private storedTokens: AnonymousToken[] = [];
@@ -16,7 +19,7 @@ export class GatekeeperClient {
 
     constructor(serverId: string) {
         this.opaqueClient = new OPAQUEClient();
-        this.ppClient = new PrivacyPassClient();
+        this.ppClient = new PrivacyPassClient('server-entry');
         this.storageKey = `pp_tokens_${serverId}`;
         this.initPromise = this.loadTokens();
     }
@@ -34,6 +37,9 @@ export class GatekeeperClient {
      * Start the server entry flow by blinding the server password
      */
     async startEntryRequest(password: string): Promise<Record<string, any>> {
+        // Clear any old pending tokens from failed attempts
+        this.storedTokens = this.storedTokens.filter(t => t.unblindedToken);
+        
         const passwordBytes = new TextEncoder().encode(password);
         const { blindedElement } = await this.opaqueClient.startLogin(passwordBytes);
         return {
@@ -59,7 +65,8 @@ export class GatekeeperClient {
         const proof = await this.opaqueClient.finishLogin(passwordBytes, serverResponse);
 
         if (!proof.success || !proof.authMessage) {
-            throw new Error('Failed to derive server entry proof - incorrect password?');
+            console.error('[GATEKEEPER] prepareTokenIssuance proof failed:', proof.error);
+            throw new Error(`Failed to derive server entry proof - incorrect password? ${proof.error || ''}`);
         }
 
         // Generate blinded tokens for Privacy Pass
@@ -99,6 +106,9 @@ export class GatekeeperClient {
         ];
 
         await this.saveTokens();
+        console.log('[AUTOLOGIN] gatekeeper finalizeEntry saved', {
+            completed: completed.length, stored: this.storedTokens.length, usable: this.tokenCount
+        });
     }
 
     /**
@@ -162,14 +172,56 @@ export class GatekeeperClient {
         }
     }
 
+    async commitPendingTokenUsage(): Promise<void> {
+        await this.ensureReady();
+
+        const pendingTokens = this.storedTokens
+            .filter(t => t.unblindedToken && !t.used && t.pending)
+            .sort((a, b) => a.issuedAt - b.issuedAt);
+
+        const token = pendingTokens[0];
+        if (!token) return;
+
+        token.used = true;
+        token.pending = false;
+        delete (token as any).currentNullifier;
+        await this.saveTokens();
+    }
+
+    /**
+     * Release pending tokens without consuming them
+     */
+    async releasePendingTokenUsage(): Promise<void> {
+        await this.ensureReady();
+
+        let changed = false;
+        for (const token of this.storedTokens) {
+            if (token.pending && !token.used) {
+                token.pending = false;
+                delete (token as any).currentNullifier;
+                changed = true;
+            }
+        }
+        if (changed) await this.saveTokens();
+    }
+
     private async loadTokens(): Promise<void> {
         try {
-            const data = localStorage.getItem(this.storageKey);
+            await storage.init();
+            const data = await storage.get(this.storageKey);
             if (data) {
                 this.storedTokens = await TokenSerializer.deserializeBatch(data);
             } else {
                 this.storedTokens = [];
             }
+            const rawCount = this.storedTokens.length;
+            this.storedTokens = this.storedTokens.filter(t => t.purpose === 'server-entry');
+            const afterPurpose = this.storedTokens.length;
+            this.discardPersistedPendingTokens();
+            this.pruneTokensForStorage();
+            console.log('[AUTOLOGIN] gatekeeper loadTokens', {
+                hadData: !!data, rawCount, afterPurpose, usableAfter: this.tokenCount
+            });
         } catch (e) {
             console.error('[GATEKEEPER] Failed to load tokens', e);
             this.storedTokens = [];
@@ -179,18 +231,77 @@ export class GatekeeperClient {
     }
 
     private async saveTokens(): Promise<void> {
+        this.pruneTokensForStorage();
+
         try {
-            localStorage.setItem(this.storageKey, await TokenSerializer.serializeBatch(this.storedTokens));
+            const serialized = await TokenSerializer.serializeBatch(this.storedTokens);
+            await storage.init();
+            await storage.set(this.storageKey, serialized);
         } catch (e) {
+            if (this.isQuotaExceededError(e)) {
+                for (const cap of GatekeeperClient.QUOTA_RETRY_CAPS) {
+                    this.pruneTokensForStorage(cap);
+                    try {
+                        const serialized = await TokenSerializer.serializeBatch(this.storedTokens);
+                        await storage.set(this.storageKey, serialized);
+                        return;
+                    } catch (retryError) {
+                        if (!this.isQuotaExceededError(retryError)) {
+                            console.error('[GATEKEEPER] Failed to save tokens', retryError);
+                            return;
+                        }
+                    }
+                }
+            }
             console.error('[GATEKEEPER] Failed to save tokens', e);
         }
     }
 
+    private pruneTokensForStorage(maxActive: number = GatekeeperClient.MAX_ACTIVE_TOKENS): void {
+        const activeTokens = this.storedTokens
+            .filter(t => t.unblindedToken && !t.used)
+            .sort((a, b) => b.issuedAt - a.issuedAt)
+            .slice(0, maxActive);
+
+        for (const token of activeTokens) {
+            if (!token.pending) {
+                delete (token as any).currentNullifier;
+            }
+        }
+
+        this.storedTokens = activeTokens.sort((a, b) => a.issuedAt - b.issuedAt);
+    }
+
+    private discardPersistedPendingTokens(): void {
+        let discardedCount = 0;
+
+        for (const token of this.storedTokens) {
+            if (!token.pending || token.used) {
+                continue;
+            }
+
+            token.used = true;
+            token.pending = false;
+            delete (token as any).currentNullifier;
+            discardedCount += 1;
+        }
+
+        if (discardedCount > 0) {
+            console.warn('[GATEKEEPER] Discarded stale pending entry tokens', {
+                count: discardedCount
+            });
+        }
+    }
+
+    private isQuotaExceededError(error: unknown): boolean {
+        return error instanceof DOMException && error.name === 'QuotaExceededError';
+    }
+
     get hasTokens(): boolean {
-        return this.storedTokens.some(t => t.unblindedToken && !t.used);
+        return this.storedTokens.some(t => t.unblindedToken && !t.used && !t.pending);
     }
 
     get tokenCount(): number {
-        return this.storedTokens.filter(t => t.unblindedToken && !t.used).length;
+        return this.storedTokens.filter(t => t.unblindedToken && !t.used && !t.pending).length;
     }
 }

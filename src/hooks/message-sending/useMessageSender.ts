@@ -5,18 +5,19 @@ import { Message } from '../../components/chat/messaging/types';
 import websocketClient from '../../lib/websocket/websocket';
 import { isValidKyberPublicKeyBase64 } from '../../lib/utils/messaging-validators';
 import type { SecureDB } from '../../lib/database/secureDB';
-import { encryptLongTerm } from '../../lib/cryptography/long-term-encryption';
 import { sanitizeContent, sanitizeUsername } from '../../lib/sanitizers';
 import type { HybridPublicKeys, UserWithKeys, PendingRetryMessage } from '../../lib/types/message-sending-types';
 import { validateFileData, sanitizeReply, logError, getIdCache, mapSignalType, createLocalMessage, getSessionApi } from '../../lib/utils/message-sending-utils';
 import { recipientKeyValidator } from './validation';
 import { createDefaultResolvePeerHybridKeys } from './keys';
 import { createSessionResetHandler, createSessionEstablishedHandler, createSessionReadyHandler, createSessionResetRetryHandler } from './handlers';
-import { globalEncryptedPayloadCache, globalLongTermStoreAttempted, buildMessagePayload, dispatchLocalEvents, storeUnacknowledgedMessage, queueMessageForLater, requestBundleForRetry } from './send';
+import { buildMessagePayload, dispatchLocalEvents, storeUnacknowledgedMessage, queueMessageForLater, requestBundleForRetry } from './send';
 import { unifiedSignalTransport } from '../../lib/transport/unified-signal-transport';
 import { messageVault } from '../../lib/security/message-vault';
 import { signal } from '../../lib/tauri-bindings';
 import { shouldAttemptDiscovery } from '../../lib/utils/discovery-utils';
+import { validateAndDecodeBase64 } from '../../lib/utils/file-utils';
+import { validateSignalBundleForPeerIdentity } from '../../lib/utils/signal-bundle-utils';
 
 export function useMessageSender(
   users: UserWithKeys[],
@@ -52,45 +53,6 @@ export function useMessageSender(
 
   const resolvePeerHybridKeysToUse = resolvePeerHybridKeys || defaultResolvePeerHybridKeys;
 
-  useEffect(() => {
-    const handler = async (event: Event) => {
-      const detail = (event as CustomEvent).detail || {};
-      const to = typeof detail.to === 'string' ? detail.to : '';
-      const messageId = typeof detail.messageId === 'string' ? detail.messageId : '';
-      if (!to || !messageId) return;
-
-      const attemptKey = `${to}|${messageId}`;
-      if (globalLongTermStoreAttempted.has(attemptKey)) return;
-      globalLongTermStoreAttempted.add(attemptKey);
-
-      const cached = globalEncryptedPayloadCache.get(attemptKey);
-      if (!cached?.encryptedPayload) return;
-
-      const recipient = recipientDirectory.get(to);
-      const inboxId = recipient?.inboxId || recipient?.hybridPublicKeys?.inboxId;
-      if (!inboxId) {
-        console.warn('[useMessageSender] No inboxId for offline storage', to);
-        return;
-      }
-
-      let recipientKyberKey: string | null = recipient?.hybridPublicKeys?.kyberPublicBase64 ?? null;
-      if (!recipientKyberKey) {
-        try { const resolved = await resolvePeerHybridKeysToUse(to); recipientKyberKey = resolved?.kyberPublicBase64 ?? null; } catch { }
-      }
-      if (!recipientKyberKey || !isValidKyberPublicKeyBase64(recipientKyberKey)) return;
-
-      try {
-        const messageData = JSON.stringify({ messageId, encryptedPayload: cached.encryptedPayload, timestamp: Date.now() });
-        const longTermEnvelope = await encryptLongTerm(messageData, recipientKyberKey);
-        await websocketClient.sendSecureControlMessage({ type: SignalType.STORE_OFFLINE_MESSAGE, messageId, destinationInbox: inboxId, longTermEnvelope, version: 'lt-v1' });
-      } catch { }
-    };
-
-    window.addEventListener(EventType.OFFLINE_LONGTERM_REQUIRED, handler as EventListener);
-    return () => window.removeEventListener(EventType.OFFLINE_LONGTERM_REQUIRED, handler as EventListener);
-  }, [recipientDirectory, resolvePeerHybridKeysToUse]);
-
-  const sessionLocksRef = useRef(new WeakMap<object, Map<string, Promise<boolean>>>());
   const idCacheRef = useRef(getIdCache());
   const validatorRef = useRef(recipientKeyValidator());
   const lockContext = useMemo(() => ({}), []);
@@ -161,7 +123,20 @@ export function useMessageSender(
           const localMessage = await createLocalMessage(messageId, currentUser, recipientUsername, sanitizedContent ?? '', timestamp, replyToData, fileDataToSend);
           (localMessage as any).pending = true;
           onNewMessage(localMessage);
-          if (secureDBRef?.current) { try { await secureDBRef.current.storeMessage({ ...localMessage, timestamp: localMessage.timestamp.getTime() }); } catch { } }
+          if (secureDBRef?.current) { 
+            try { await secureDBRef.current.storeMessage({ ...localMessage, timestamp: localMessage.timestamp.getTime() }); } catch { }
+            if (fileDataToSend) {
+              const decoded = validateAndDecodeBase64(fileDataToSend);
+              if (decoded) {
+                try {
+                  const buffer = new ArrayBuffer(decoded.length);
+                  const copy = new Uint8Array(buffer);
+                  copy.set(decoded);
+                  await secureDBRef.current.saveFile(messageId, buffer);
+                } catch { }
+              }
+            }
+          }
         }
         await queueMessageForLater(recipientUsername, sanitizedContent ?? '', messageId, replyToData, fileDataToSend, messageSignalType, editMessageId);
         resolvePeerHybridKeysToUse(recipientUsername).catch(() => { });
@@ -171,31 +146,50 @@ export function useMessageSender(
       if (messageType === SignalType.MESSAGE && !sanitizedContent) return;
       if ((messageType === SignalType.REACTION_ADD || messageType === SignalType.REACTION_REMOVE) && !sanitizedContent) return;
 
-      const localKeys = await getKeysOnDemand();
-      if (!localKeys?.dilithium?.secretKey) { logError('LOCAL-KEYS'); return; }
-
       const timestamp = Date.now();
       let messageId = originalMessageId || (() => { let id; do { id = crypto.randomUUID().replace(/-/g, ''); } while (!idCacheRef.current.isStale(id)); idCacheRef.current.add(id); return id; })();
 
-      try {
-        const wireMessageId = (messageType === SignalType.EDIT_MESSAGE && editMessageId) ? editMessageId : messageId;
-        const isControlMessage = messageType === SignalType.TYPING_INDICATOR || messageType === SignalType.DELIVERY_RECEIPT || messageType === SignalType.READ_RECEIPT;
+      const isControlMessage = messageType === SignalType.TYPING_INDICATOR || messageType === SignalType.DELIVERY_RECEIPT || messageType === SignalType.READ_RECEIPT;
 
-        if (!isControlMessage) {
-          if (originalMessageId || editMessageId) {
-            dispatchLocalEvents(messageType, messageSignalType, originalMessageId, editMessageId, wireMessageId, sanitizedContent, currentUser);
-          } else {
-            const localMessage = await createLocalMessage(messageId, currentUser, recipientUsername, sanitizedContent ?? '', timestamp, replyToData, fileDataToSend);
-            onNewMessage(localMessage);
-            if (secureDBRef?.current) {
-              try { await secureDBRef.current.storeMessage({ ...localMessage, timestamp: localMessage.timestamp.getTime() }); } catch { }
+      // show local message before key resolution and encryption
+      if (!isControlMessage && !originalMessageId && !editMessageId) {
+        const localMessage = await createLocalMessage(messageId, currentUser, recipientUsername, sanitizedContent ?? '', timestamp, replyToData, fileDataToSend);
+        onNewMessage(localMessage);
+        if (secureDBRef?.current) {
+          try { await secureDBRef.current.storeMessage({ ...localMessage, timestamp: localMessage.timestamp.getTime() }); } catch { }
+          if (fileDataToSend) {
+            const decoded = validateAndDecodeBase64(fileDataToSend);
+            if (decoded) {
+              try {
+                const buffer = new ArrayBuffer(decoded.length);
+                const copy = new Uint8Array(buffer);
+                copy.set(decoded);
+                await secureDBRef.current.saveFile(messageId, buffer);
+              } catch { }
             }
           }
         }
+      }
+
+      const localKeys = await getKeysOnDemand();
+      if (!localKeys?.dilithium?.secretKey) { logError('LOCAL-KEYS'); return; }
+
+      try {
+        const wireMessageId = (messageType === SignalType.EDIT_MESSAGE && editMessageId) ? editMessageId : messageId;
+
+        if (!isControlMessage && (originalMessageId || editMessageId)) {
+          dispatchLocalEvents(messageType, messageSignalType, originalMessageId, editMessageId, wireMessageId, sanitizedContent, currentUser);
+        }
 
         const payload = buildMessagePayload(wireMessageId, currentUser, recipientUsername, sanitizedContent, timestamp, messageType, messageSignalType, localKeys, originalUsernameRef, replyToData, fileData, originalMessageId, editMessageId);
-        const destinationInbox = recipient?.inboxId || recipient?.hybridPublicKeys?.inboxId;
-        const sendResult = await unifiedSignalTransport.send(recipientUsername, payload, messageType as SignalType, { destinationInbox });
+        const recipientInboxId = recipient?.inboxId || recipient?.hybridPublicKeys?.inboxId;
+        const destinationRouteId = (recipient as any)?.routeId || (recipient?.hybridPublicKeys as any)?.routeId;
+        const destinationMailboxLookupId = (recipient as any)?.mailboxLookupId || (recipient?.hybridPublicKeys as any)?.mailboxLookupId;
+        const sendResult = await unifiedSignalTransport.send(recipientUsername, payload, messageType as SignalType, {
+          recipientInboxId,
+          destinationRouteId,
+          destinationMailboxLookupId
+        });
 
         if (!sendResult.success) {
           throw new Error(sendResult.error || 'Transport failed');
@@ -222,13 +216,21 @@ export function useMessageSender(
               retryCount
             });
           }
-          const destinationInbox = recipient?.inboxId || recipient?.hybridPublicKeys?.inboxId;
-          await requestBundleForRetry(recipientUsername, currentUser, getKeysOnDemand, lastSessionBundleReqTsRef, destinationInbox);
+          const recipientInboxId = recipient?.inboxId || recipient?.hybridPublicKeys?.inboxId;
+          await requestBundleForRetry(
+            recipientUsername,
+            currentUser,
+            getKeysOnDemand,
+            lastSessionBundleReqTsRef,
+            recipientInboxId,
+            users as any,
+            findUser
+          );
         }
         logError('SEND', _error);
       }
     },
-    [isLoggedIn, loginUsernameRef, recipientDirectory, getKeysOnDemand, onNewMessage, lockContext, hasUsernameMapping],
+    [isLoggedIn, loginUsernameRef, recipientDirectory, getKeysOnDemand, onNewMessage, lockContext, hasUsernameMapping, users, findUser],
   );
 
   const prefetchSessionForPeer = useCallback(async (peer: string) => {
@@ -253,13 +255,17 @@ export function useMessageSender(
         }
         const material = await findUser(peer);
         if (material && material.fullBundle) {
+          const validation = await validateSignalBundleForPeerIdentity(peer, material.fullBundle, users as any, findUser as any);
+          if (!validation.valid) {
+            return;
+          }
           await signal.processPreKeyBundle(loginUsernameRef.current, peer, material.fullBundle);
         }
       } finally { sessionPrefetchMap.current.delete(peer); }
     })();
     sessionPrefetchMap.current.set(peer, p);
     await p.catch(() => { });
-  }, [findUser, isLoggedIn, loginUsernameRef]);
+  }, [findUser, isLoggedIn, loginUsernameRef, users]);
 
   useEffect(() => {
     const handleSessionReady = createSessionReadyHandler(pendingRetryMessagesRef, handleSendMessage);
@@ -275,36 +281,6 @@ export function useMessageSender(
       window.removeEventListener(EventType.SESSION_RESET_RECEIVED, handleSessionReset as EventListener);
     };
   }, [handleSendMessage]);
-
-  useEffect(() => {
-    const handler = (ev: Event) => {
-      const detail = (ev as CustomEvent).detail;
-      const isInternal = (ev as CustomEvent).detail?.internal;
-      if (isInternal) return;
-
-      // Only broadcast if is our own profile changing
-      const isOwnUpdate = ev.type === EventType.PROFILE_SETTINGS_UPDATED || (ev.type === EventType.PROFILE_PICTURE_UPDATED && detail?.type === 'own');
-      if (!isOwnUpdate) return;
-
-      const currentUser = sanitizeUsername(currentUsername || loginUsernameRef.current);
-      if (!currentUser) return;
-
-      setTimeout(() => {
-        users.forEach(user => {
-          if (user.username && user.username !== currentUser) {
-            handleSendMessage(user, '', undefined, undefined, SignalType.PROFILE_UPDATE).catch(() => { });
-          }
-        });
-      }, 5000);
-    };
-
-    window.addEventListener(EventType.PROFILE_PICTURE_UPDATED, handler as EventListener);
-    window.addEventListener(EventType.PROFILE_SETTINGS_UPDATED, handler as EventListener);
-    return () => {
-      window.removeEventListener(EventType.PROFILE_PICTURE_UPDATED, handler as EventListener);
-      window.removeEventListener(EventType.PROFILE_SETTINGS_UPDATED, handler as EventListener);
-    };
-  }, [users, currentUsername, loginUsernameRef, handleSendMessage]);
 
   return { handleSendMessage, prefetchSessionForPeer };
 }

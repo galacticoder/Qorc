@@ -8,6 +8,19 @@ import { cn } from '../../../lib/utils/shared-utils';
 
 const ScreenSourceSelectorLazy = React.lazy(() => import('./ScreenSourceSelector').then(m => ({ default: m.ScreenSourceSelector })));
 
+let micMeterCtx: AudioContext | null = null;
+function getMicMeterContext(): AudioContext | null {
+  try {
+    if (micMeterCtx && micMeterCtx.state !== 'closed') return micMeterCtx;
+    const AudioCtx = (window as any).AudioContext || (window as any).webkitAudioContext;
+    if (!AudioCtx) return null;
+    micMeterCtx = new AudioCtx();
+    return micMeterCtx;
+  } catch {
+    return null;
+  }
+}
+
 interface ScreenSource {
   readonly id: string;
   readonly name: string;
@@ -30,7 +43,6 @@ interface CallModalProps {
   readonly onStopScreenShare?: () => Promise<void>;
   readonly onGetAvailableScreenSources?: () => Promise<readonly ScreenSource[]>;
   readonly isScreenSharing?: boolean;
-  readonly getDisplayUsername?: (username: string) => Promise<string>;
 }
 
 const VideoStreamDisplay = memo(({
@@ -170,8 +182,7 @@ export const CallModal: React.FC<CallModalProps> = memo(({
   onStartScreenShare,
   onStopScreenShare,
   onGetAvailableScreenSources,
-  isScreenSharing = false,
-  getDisplayUsername
+  isScreenSharing = false
 }) => {
   const [isMinimized, setIsMinimized] = useState(true);
   const [isMuted, setIsMuted] = useState(false);
@@ -230,8 +241,7 @@ export const CallModal: React.FC<CallModalProps> = memo(({
   const hasDraggedRef = useRef(false);
 
   const displayPeerName = useDisplayUsername({
-    username: call?.peer || '',
-    fallbackToOriginal: true
+    username: call?.peer || ''
   });
 
   const isConnected = call?.status === 'connected';
@@ -287,20 +297,22 @@ export const CallModal: React.FC<CallModalProps> = memo(({
 
   useEffect(() => {
     if (!localStream) { setMicLevel(0); return; }
-    let audioCtx: AudioContext | null = null;
-    let rafId: number;
+    let rafId = 0;
+    let source: MediaStreamAudioSourceNode | null = null;
+    let analyser: AnalyserNode | null = null;
 
     const analyze = () => {
       try {
-        const AudioCtx = (window as any).AudioContext || (window as any).webkitAudioContext;
-        audioCtx = new AudioCtx();
-        const analyser = audioCtx.createAnalyser();
+        const audioCtx = getMicMeterContext();
+        if (!audioCtx) { setMicLevel(0); return; }
+        analyser = audioCtx.createAnalyser();
         analyser.fftSize = 256;
-        const source = audioCtx.createMediaStreamSource(localStream);
+        source = audioCtx.createMediaStreamSource(localStream);
         source.connect(analyser);
         const data = new Uint8Array(analyser.frequencyBinCount);
 
         const loop = () => {
+          if (!analyser) return;
           analyser.getByteFrequencyData(data);
           const avg = data.reduce((a, b) => a + b, 0) / data.length;
           setMicLevel(avg / 128);
@@ -313,7 +325,8 @@ export const CallModal: React.FC<CallModalProps> = memo(({
 
     return () => {
       if (rafId) cancelAnimationFrame(rafId);
-      audioCtx?.close().catch(() => { });
+      try { source?.disconnect(); } catch { }
+      try { analyser?.disconnect(); } catch { }
     };
   }, [localStream]);
 

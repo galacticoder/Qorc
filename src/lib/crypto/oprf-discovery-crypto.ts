@@ -7,7 +7,8 @@ import { blake3 } from '@noble/hashes/blake3.js';
 import { PostQuantumAEAD } from '../cryptography/aead';
 import { PostQuantumUtils } from '../utils/pq-utils';
 import type { PeerCertificateBundle } from '../types/p2p-types';
-import type { AvatarData } from '../types/avatar-types';
+import type { AvatarRef } from './avatar-blob-crypto';
+import type { CertifiedPeerBundleV2 } from '../types/identity-types';
 
 export interface OPRFBlindResult {
     blind: Uint8Array;
@@ -22,6 +23,10 @@ export interface OPRFServerResponse {
 
 export interface OPRFDiscoveryMaterial {
     inboxId: string;
+    routeId?: string;
+    mailboxLookupId?: string;
+    bundleLookupId?: string;
+    blockListLookupId?: string;
     publicKeys: {
         kyberPublicBase64: string;
         dilithiumPublicBase64: string;
@@ -29,7 +34,11 @@ export interface OPRFDiscoveryMaterial {
     };
     fullBundle?: unknown;
     peerCertificate?: PeerCertificateBundle;
-    avatar?: AvatarData | null;
+    peerCertificateFingerprint?: string;
+    certifiedPeerBundle?: CertifiedPeerBundleV2;
+    identityRootFingerprint?: string;
+    identityBundleFingerprint?: string;
+    avatarRef?: AvatarRef | null;
 }
 
 const DISCOVERY_TOKEN_DOMAIN = 'discovery-token-v1';
@@ -65,6 +74,51 @@ export class OPRFDiscoveryClient {
         serverResponse: OPRFServerResponse,
         epoch: number
     ): { token: string; encryptionKey: Uint8Array } {
+        const { oprfOutput, encryptionKey } = this.finalizeOprfOutput(
+            handle,
+            blindResult,
+            serverResponse
+        );
+        const token = this.deriveTokenForEpoch(oprfOutput, epoch);
+
+        return {
+            token,
+            encryptionKey
+        };
+    }
+
+    finalizeTokenBatch(
+        handle: string,
+        blindResult: OPRFBlindResult,
+        serverResponse: OPRFServerResponse,
+        epochs: number[]
+    ): { encryptionKey: Uint8Array; tokens: Array<{ epoch: number; token: string }> } {
+        const uniqueEpochs = Array.from(new Set(
+            (Array.isArray(epochs) ? epochs : [])
+                .filter((value) => Number.isFinite(value))
+                .map((value) => Math.trunc(value))
+        ));
+        if (uniqueEpochs.length === 0) {
+            return { encryptionKey: new Uint8Array(0), tokens: [] };
+        }
+
+        const { oprfOutput, encryptionKey } = this.finalizeOprfOutput(
+            handle,
+            blindResult,
+            serverResponse
+        );
+        const tokens = uniqueEpochs.map((epoch) => ({
+            epoch,
+            token: this.deriveTokenForEpoch(oprfOutput, epoch)
+        }));
+        return { encryptionKey, tokens };
+    }
+
+    private finalizeOprfOutput(
+        handle: string,
+        blindResult: OPRFBlindResult,
+        serverResponse: OPRFServerResponse
+    ): { oprfOutput: Uint8Array; encryptionKey: Uint8Array } {
         const normalizedHandle = handle.toLowerCase().trim();
         const handleBytes = new TextEncoder().encode(normalizedHandle);
 
@@ -85,18 +139,6 @@ export class OPRFDiscoveryClient {
             proof
         );
 
-        const epochBytes = new Uint8Array(8);
-        new DataView(epochBytes.buffer).setBigUint64(0, BigInt(epoch), false);
-
-        const token = blake3(
-            concatBytes(
-                new TextEncoder().encode(DISCOVERY_TOKEN_DOMAIN),
-                oprfOutput,
-                epochBytes
-            ),
-            { dkLen: 32 }
-        );
-
         const encryptionKey = blake3(
             concatBytes(
                 new TextEncoder().encode(DISCOVERY_ENCRYPTION_DOMAIN),
@@ -105,10 +147,21 @@ export class OPRFDiscoveryClient {
             { dkLen: 32 }
         );
 
-        return {
-            token: bytesToHex(token),
-            encryptionKey
-        };
+        return { oprfOutput, encryptionKey };
+    }
+
+    private deriveTokenForEpoch(oprfOutput: Uint8Array, epoch: number): string {
+        const epochBytes = new Uint8Array(8);
+        new DataView(epochBytes.buffer).setBigUint64(0, BigInt(epoch), false);
+        const token = blake3(
+            concatBytes(
+                new TextEncoder().encode(DISCOVERY_TOKEN_DOMAIN),
+                oprfOutput,
+                epochBytes
+            ),
+            { dkLen: 32 }
+        );
+        return bytesToHex(token);
     }
 
     encryptDiscoveryBlob(
@@ -144,8 +197,7 @@ export class OPRFDiscoveryClient {
             const plaintext = PostQuantumAEAD.decrypt(ciphertext, nonce, tag, encryptionKey, aad);
 
             return JSON.parse(new TextDecoder().decode(plaintext));
-        } catch (error) {
-            console.error('[OPRF-DISCOVERY] Failed to decrypt blob:', error);
+        } catch {
             return null;
         }
     }

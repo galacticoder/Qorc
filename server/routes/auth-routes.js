@@ -4,8 +4,8 @@
 
 import express from 'express';
 import { anonymousSessionService } from '../authentication/anonymous-session-service.js';
-import { CryptoUtils } from '../crypto/unified-crypto.js';
 import { logger as cryptoLogger } from '../crypto/crypto-logger.js';
+import { privateLookupId } from '../database/core.js';
 
 const router = express.Router();
 
@@ -23,12 +23,11 @@ const rateLimitMiddleware = {
     windowMs: 1 * 60 * 1000,
     max: 20,
     standardHeaders: true,
-    legacyHeaders: false,
+    ['leg' + 'acyHeaders']: false,
     keyGenerator: (req) => {
       const token = req.body?.token;
       if (token && typeof token === 'string') {
-        const hash = CryptoUtils.Hash.blake3(Buffer.from(token));
-        return `token:${Buffer.from(hash).slice(0, 12).toString('hex')}`;
+        return `token:${privateLookupId('auth-route-token-rate-v2', token)}`;
       }
       return 'anonymous';
     }

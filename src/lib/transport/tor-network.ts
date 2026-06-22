@@ -13,7 +13,12 @@ import {
   TOR_MAX_BACKOFF_MS,
   TOR_CIRCUIT_ROTATION_RATE_LIMIT_MS
 } from '../constants';
-import { tor as tauriTor, isTauri } from '../tauri-bindings';
+import { tor as tauriTor, websocket as tauriWebsocket, isTauri } from '../tauri-bindings';
+import type { TorInfo, TorStatus } from '../tauri-bindings';
+
+const TOR_DEEP_HEALTH_CHECK_INTERVAL_MS = 5 * 60 * 1000;
+const TOR_BOOTSTRAP_TIMEOUT_MS = 150_000;
+const TOR_BOOTSTRAP_POLL_MS = 1_000;
 
 export class TorNetworkManager {
   private config: TorConfig;
@@ -22,8 +27,11 @@ export class TorNetworkManager {
   private readonly connectionCallbacks = new Set<(connected: boolean) => void>();
   private circuitRotationTimer: ReturnType<typeof setInterval> | null = null;
   private connectionMonitorTimer: ReturnType<typeof setInterval> | null = null;
+  private connectionMonitorInFlight = false;
+  private initializePromise: Promise<boolean> | null = null;
   private monitorBackoffMs = 0;
   private lastManualRotation = 0;
+  private lastDeepHealthCheckAt = 0;
 
   constructor(config?: Partial<TorConfig>) {
     this.config = {
@@ -58,6 +66,118 @@ export class TorNetworkManager {
   // Check if Tauri is available
   private checkTauriAvailable(): boolean {
     return isTauri();
+  }
+
+  private async readDaemonState(): Promise<{ status: TorStatus | null; info: TorInfo | null }> {
+    if (!this.checkTauriAvailable()) {
+      return { status: null, info: null };
+    }
+
+    const [status, info] = await Promise.all([
+      tauriTor.status().catch(() => null),
+      tauriTor.info().catch(() => null)
+    ]);
+
+    return { status, info };
+  }
+
+  private applyDaemonState(status: TorStatus | null, info: TorInfo | null): boolean {
+    const running = Boolean(status?.is_running || info?.bootstrapped);
+    const bootstrapped = Boolean(status?.bootstrapped || info?.bootstrapped);
+    const progress = status?.bootstrap_progress ?? info?.bootstrap_progress ?? 0;
+    const socksPort = info?.socks_port || status?.socks_port;
+    const controlPort = info?.control_port || status?.control_port;
+    const wasConnected = this.stats.isConnected;
+
+    if (socksPort) {
+      this.config.socksPort = socksPort;
+    }
+    if (controlPort) {
+      this.config.controlPort = controlPort;
+    }
+    if (running) {
+      this.config.enabled = true;
+    }
+
+    this.isInitialized = running;
+    this.stats.isConnected = running && bootstrapped;
+    this.stats.isBootstrapped = bootstrapped;
+    this.stats.bootstrapProgress = progress;
+
+    if (!running) {
+      this.stats.circuitHealth = 'unknown';
+      this.stats.averageLatency = 0;
+    } else if (!bootstrapped) {
+      this.stats.circuitHealth = 'poor';
+      this.stats.averageLatency = Number.POSITIVE_INFINITY;
+    } else if (this.stats.circuitHealth === 'unknown' || this.stats.circuitHealth === 'poor') {
+      this.stats.circuitHealth = 'good';
+      this.stats.averageLatency = Number.isFinite(this.stats.averageLatency) ? this.stats.averageLatency : 0;
+    }
+
+    if (wasConnected !== this.stats.isConnected) {
+      this.notifyConnectionCallbacks(this.stats.isConnected);
+    } else {
+      this.notifyStatsCallbacks();
+    }
+
+    return this.stats.isConnected;
+  }
+
+  private markDisconnected(): void {
+    this.isInitialized = false;
+    this.stats.isConnected = false;
+    this.stats.isBootstrapped = false;
+    this.stats.bootstrapProgress = 0;
+    this.stats.circuitHealth = 'unknown';
+    this.stats.averageLatency = 0;
+    this.notifyConnectionCallbacks(false);
+  }
+
+  private async setBackendTorReady(ready: boolean, socksPort?: number): Promise<void> {
+    if (!this.checkTauriAvailable()) {
+      return;
+    }
+
+    try {
+      await tauriWebsocket.setTorReady(ready, socksPort);
+    } catch {
+      // websocket bridge may not be registered during early startup
+    }
+  }
+
+  async syncWithDaemon(): Promise<boolean> {
+    const { status, info } = await this.readDaemonState();
+    const connected = this.applyDaemonState(status, info);
+    await this.setBackendTorReady(connected, info?.socks_port || status?.socks_port);
+
+    if (connected) {
+      this.startCircuitRotation();
+    }
+    if (status?.is_running || connected) {
+      this.startConnectionMonitoring();
+    }
+
+    return connected;
+  }
+
+  private async waitForBootstrap(timeoutMs = TOR_BOOTSTRAP_TIMEOUT_MS): Promise<TorInfo | null> {
+    const deadline = Date.now() + timeoutMs;
+    let latestInfo: TorInfo | null = null;
+
+    while (Date.now() < deadline) {
+      const { status, info } = await this.readDaemonState();
+      latestInfo = info;
+      if (this.applyDaemonState(status, info)) {
+        return info;
+      }
+      if (status && !status.is_running) {
+        return null;
+      }
+      await new Promise((resolve) => setTimeout(resolve, TOR_BOOTSTRAP_POLL_MS));
+    }
+
+    return latestInfo?.bootstrapped ? latestInfo : null;
   }
 
   // Retry with exponential backoff
@@ -118,23 +238,29 @@ export class TorNetworkManager {
       if (!this.isInitialized) {
         return;
       }
+      if (this.connectionMonitorInFlight) {
+        return;
+      }
+
+      this.connectionMonitorInFlight = true;
 
       try {
         const wasConnected = this.stats.isConnected;
-        const info = await tauriTor.info();
-        const connected = info.bootstrapped;
-        this.stats.isConnected = connected;
-        this.stats.isBootstrapped = info.bootstrapped;
-        this.stats.bootstrapProgress = info.bootstrap_progress;
-        
-        this.notifyConnectionCallbacks(connected);
-        await this.checkCircuitHealth();
+        const { status, info } = await this.readDaemonState();
+        const connected = this.applyDaemonState(status, info);
+        await this.setBackendTorReady(connected, info?.socks_port || status?.socks_port);
+        await this.checkCircuitHealth(connected, { forceDeep: connected && !wasConnected });
 
         if (!connected && wasConnected) {
           this.scheduleReinitialization();
         }
       } catch (_error) {
         console.error('[TOR] Connection monitoring failed:', _error);
+        this.markDisconnected();
+        await this.setBackendTorReady(false);
+        this.scheduleReinitialization();
+      } finally {
+        this.connectionMonitorInFlight = false;
       }
     }, TOR_DEFAULT_MONITOR_INTERVAL_MS);
 
@@ -173,22 +299,50 @@ export class TorNetworkManager {
       clearInterval(this.connectionMonitorTimer);
       this.connectionMonitorTimer = null;
     }
+    this.connectionMonitorInFlight = false;
 
     this.stopCircuitRotation();
   }
 
   // Check circuit health
-  private async checkCircuitHealth(): Promise<void> {
+  private async checkCircuitHealth(
+    connected: boolean,
+    options: { forceDeep?: boolean } = {}
+  ): Promise<void> {
+    this.stats.connectionAttempts += 1;
+    this.stats.lastHealthCheck = Date.now();
+
+    if (!connected) {
+      this.stats.circuitHealth = 'poor';
+      this.stats.averageLatency = Number.POSITIVE_INFINITY;
+      this.notifyStatsCallbacks();
+      return;
+    }
+
+    const shouldRunDeepCheck =
+      !!options.forceDeep ||
+      this.lastDeepHealthCheckAt === 0 ||
+      (Date.now() - this.lastDeepHealthCheckAt) >= TOR_DEEP_HEALTH_CHECK_INTERVAL_MS;
+
+    if (!shouldRunDeepCheck) {
+      if (this.stats.circuitHealth === 'unknown') {
+        this.stats.circuitHealth = 'good';
+      } else if (this.stats.circuitHealth === 'poor') {
+        this.stats.circuitHealth = 'degraded';
+      }
+      this.notifyStatsCallbacks();
+      return;
+    }
+
     const start = performance.now();
     const test = await tauriTor.testConnection();
     const latency = performance.now() - start;
-
-    this.stats.connectionAttempts += 1;
-    this.stats.lastHealthCheck = Date.now();
+    this.lastDeepHealthCheckAt = Date.now();
 
     if (!test.success) {
       this.stats.circuitHealth = 'poor';
       this.stats.averageLatency = Number.POSITIVE_INFINITY;
+      this.notifyStatsCallbacks();
       return;
     }
 
@@ -209,69 +363,124 @@ export class TorNetworkManager {
       return false;
     }
 
-    if (this.isInitializing) {
+    if (!this.checkTauriAvailable()) {
       return false;
     }
 
-    this.isInitializing = true;
+    if (this.initializePromise) {
+      return this.initializePromise;
+    }
+
+    if (this.isInitialized && this.stats.isConnected) {
+      await this.setBackendTorReady(true, this.config.socksPort);
+      return true;
+    }
+
+    if (this.isInitializing) {
+      return this.initializePromise ?? false;
+    }
+
+    this.initializePromise = (async () => {
+      this.isInitializing = true;
+
+      try {
+        if (await this.syncWithDaemon()) {
+          return true;
+        }
+
+        const { status } = await this.readDaemonState();
+        if (!status?.is_running) {
+          let result = await this.retryWithBackoff(() => tauriTor.start());
+          if (!result.success && /not configured|torrc|configuration/i.test(result.error || '')) {
+            await tauriTor.configure(`SocksPort ${this.config.socksPort}\nControlPort ${this.config.controlPort}`);
+            result = await this.retryWithBackoff(() => tauriTor.start());
+          }
+          if (!result.success) {
+            throw new Error(result.error || 'Failed to start Tor');
+          }
+        }
+
+        const info = await this.waitForBootstrap(
+          Math.max(TOR_BOOTSTRAP_TIMEOUT_MS, this.config.connectionTimeout || 0)
+        );
+
+        if (!info?.bootstrapped) {
+          this.stats.failedConnections += 1;
+          const latest = await this.readDaemonState();
+          if (latest.status?.is_running) {
+            this.applyDaemonState(latest.status, latest.info);
+            this.startConnectionMonitoring();
+          } else {
+            this.markDisconnected();
+          }
+          await this.setBackendTorReady(false);
+          return false;
+        }
+
+        if (info.socks_port) this.config.socksPort = info.socks_port;
+        if (info.control_port) this.config.controlPort = info.control_port;
+
+        this.isInitialized = true;
+        this.stats.isConnected = true;
+        this.stats.isBootstrapped = true;
+        this.stats.bootstrapProgress = info.bootstrap_progress || 0;
+        this.stats.circuitHealth = 'good';
+        this.stats.failedConnections = 0;
+
+        await this.setBackendTorReady(true, info.socks_port);
+        this.startCircuitRotation();
+        this.startConnectionMonitoring();
+
+        this.testTorConnection().then(verified => {
+          this.stats.lastHealthCheck = Date.now();
+          if (!verified) {
+            this.stats.isConnected = false;
+            this.stats.isBootstrapped = false;
+            this.stats.circuitHealth = 'poor';
+            this.notifyConnectionCallbacks(false);
+          } else {
+            this.stats.isConnected = true;
+            this.stats.isBootstrapped = true;
+            this.stats.circuitHealth = 'good';
+            this.notifyConnectionCallbacks(true);
+          }
+          this.notifyStatsCallbacks();
+        });
+
+        return true;
+      } catch (_error) {
+        console.error('[TOR] Failed to initialize Tor connection:', _error);
+        this.stats.failedConnections += 1;
+        this.markDisconnected();
+        await this.setBackendTorReady(false);
+        return false;
+      } finally {
+        this.isInitializing = false;
+      }
+    })();
 
     try {
-      // Configure Tor
-      await tauriTor.configure(`SocksPort ${this.config.socksPort}\nControlPort ${this.config.controlPort}`);
-
-      // Start Tor
-      const result = await this.retryWithBackoff(() => tauriTor.start());
-
-      if (!result.success) {
-        throw new Error('Failed to start Tor');
-      }
-
-      // Get info
-      const info = await tauriTor.info();
-      if (info.socks_port) {
-        this.config.socksPort = info.socks_port;
-      }
-      if (info.control_port) {
-        this.config.controlPort = info.control_port;
-      }
-
-      this.isInitialized = true;
-      this.stats.isConnected = false;
-      this.stats.failedConnections = 0;
-
-      this.startCircuitRotation();
-      this.startConnectionMonitoring();
-
-      this.testTorConnection().then(verified => {
-        if (!verified) {
-          this.stats.isConnected = false;
-          this.stats.isBootstrapped = false;
-          this.notifyConnectionCallbacks(false);
-        } else {
-          this.stats.isConnected = true;
-          this.stats.isBootstrapped = true;
-          this.notifyConnectionCallbacks(true);
-          this.checkCircuitHealth();
-        }
-      });
-
-      return true;
-    } catch (_error) {
-      console.error('[TOR] Failed to initialize Tor connection:', _error);
-      this.stats.failedConnections += 1;
-      this.notifyConnectionCallbacks(false);
-      return false;
+      return await this.initializePromise;
     } finally {
-      this.isInitializing = false;
+      this.initializePromise = null;
     }
   }
 
   // Test Tor connection
   private async testTorConnection(): Promise<boolean> {
     try {
+      const startedAt = performance.now();
       const result = await tauriTor.testConnection();
+      const latency = performance.now() - startedAt;
+      this.lastDeepHealthCheckAt = Date.now();
+
       if (!result.success && result.error) {
         console.error('[TOR] Connection test failed:', result.error);
+      } else if (result.success) {
+        this.stats.circuitHealth = latency > 5000 ? 'degraded' : 'good';
+        this.stats.averageLatency = Number.isFinite(this.stats.averageLatency)
+          ? this.stats.averageLatency * 0.8 + latency * 0.2
+          : latency;
       }
       return result.success;
     } catch (_error) {
@@ -453,13 +662,11 @@ export class TorNetworkManager {
   // Shutdown Tor network
   async shutdown(): Promise<void> {
     this.stopAllTimers();
-    this.stats.isConnected = false;
-    this.isInitialized = false;
+    this.markDisconnected();
+    await this.setBackendTorReady(false);
 
     this.lastManualRotation = 0;
     this.monitorBackoffMs = 0;
-
-    this.notifyConnectionCallbacks(false);
   }
 
   // Get connection health

@@ -2,6 +2,7 @@ import * as pako from "pako";
 import { CryptoUtils } from "../../lib/utils/crypto-utils";
 import { decodeBase64Chunk, validateEnvelope, releaseFileEntry, dispatchCanceledEvent } from "../../lib/utils/file-utils";
 import type { ExtendedFileState } from "../../lib/types/file-types";
+import { resolveTrustedPeerDilithiumPublicKey, type PeerIdentityLike } from "../../lib/utils/signal-bundle-utils";
 
 export interface DecryptionContext {
   fileEntry: ExtendedFileState;
@@ -39,7 +40,10 @@ export const parseEncryptedChunk = (chunkData: string): { iv: Uint8Array; authTa
 // Decrypt hybrid envelope to get AES/MAC keys
 export const decryptEnvelope = async (
   envelope: any,
-  hybridKeys: { x25519: { private: any }; kyber: { secretKey: Uint8Array } }
+  hybridKeys: { x25519: { private: any }; kyber: { secretKey: Uint8Array } },
+  senderUsername: string,
+  users?: PeerIdentityLike[] | null,
+  findUser?: (handle: string, options?: { forceRefresh?: boolean }) => Promise<any>
 ): Promise<{ aesKey: CryptoKey; macKey: Uint8Array } | null> => {
   if (!envelope || !validateEnvelope(envelope)) {
     return null;
@@ -47,12 +51,21 @@ export const decryptEnvelope = async (
 
   try {
     const senderDilithiumPk = (envelope as any)?.metadata?.sender?.dilithiumPublicKey;
+    const senderIdentity = await resolveTrustedPeerDilithiumPublicKey(
+      senderUsername,
+      senderDilithiumPk,
+      users,
+      findUser
+    );
+    if (!senderIdentity.valid || !senderIdentity.expectedDilithium) {
+      return null;
+    }
     const decrypted = await (CryptoUtils as any).Hybrid.decryptIncoming(
       envelope,
       {
         kyberSecretKey: hybridKeys.kyber?.secretKey,
         x25519SecretKey: hybridKeys.x25519?.private,
-        senderDilithiumPublicKey: senderDilithiumPk
+        senderDilithiumPublicKey: senderIdentity.expectedDilithium
       }
     );
 

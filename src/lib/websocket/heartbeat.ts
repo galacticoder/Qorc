@@ -73,7 +73,7 @@ export class WebSocketHeartbeat {
 
   // Handle heartbeat response
   handleResponse(message: any): void {
-    if (message?.type === 'pq-heartbeat-pong') {
+    if (message?.type === SignalType.PQ_HEARTBEAT_PONG) {
       const currentSessionId = this.callbacks.getSessionId();
       if (!currentSessionId || message.sessionId !== currentSessionId) {
         this.callbacks.onRehandshakeNeeded();

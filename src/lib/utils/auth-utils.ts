@@ -3,8 +3,9 @@ import { CryptoUtils } from "../utils/crypto-utils";
 import { PostQuantumUtils } from "../utils/pq-utils";
 import { syncEncryptedStorage } from "../database/encrypted-storage";
 import { blake3 } from '@noble/hashes/blake3.js';
-import { loadVaultKeyRaw, deriveInboxId } from "../cryptography/vault-key";
+import { loadVaultKeyRaw, deriveInboxId, currentInboxEpoch } from "../cryptography/vault-key";
 import { blindMessage } from "../crypto/blind-credentials";
+import { deriveRendezvousRouteId } from "../transport/rendezvous-routing";
 
 // Securely wipe string reference
 export const secureWipeStringRef = (ref: RefObject<string>) => {
@@ -142,6 +143,8 @@ export const deriveCombinedSecretInput = (username: string, password: string, pa
 
 export interface BlindCredentialResult {
   message: string;
+  inboxId: string;
+  routeId: string;
   blindedMsg: string;
   blindingFactor: string;
   n: string;
@@ -167,17 +170,20 @@ export const generateBlindCredential = async (
     }
 
     const vaultKey = await CryptoUtils.AES.importAesKey(rawVaultKey);
-    const inboxId = await deriveInboxId(vaultKey);
+    const inboxId = await deriveInboxId(vaultKey, currentInboxEpoch());
 
     if (!inboxId) {
       console.warn('[Auth] Failed to derive inboxId');
       return null;
     }
 
-    const blindResult = await blindMessage(inboxId, serverBlindPublicKey);
+    const routeId = deriveRendezvousRouteId(inboxId);
+    const blindResult = await blindMessage(routeId, serverBlindPublicKey);
 
     return {
-      message: inboxId,
+      message: routeId,
+      inboxId,
+      routeId,
       blindedMsg: blindResult.blindedMsg,
       blindingFactor: blindResult.blindingFactor,
       n: blindResult.n,

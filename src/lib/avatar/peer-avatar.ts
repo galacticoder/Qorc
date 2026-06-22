@@ -2,6 +2,7 @@ import { SignalType } from '../types/signal-types';
 import { unifiedSignalTransport } from '../transport/unified-signal-transport';
 import type { AvatarSystemState } from '../types/avatar-types';
 import { createProfilePictureRequest } from './messaging';
+import { AVATAR_PENDING_REQUEST_TIMEOUT_MS } from '../constants';
 
 // Get peer avatar
 export function getPeerAvatar(state: AvatarSystemState, username: string): string | null {
@@ -50,6 +51,9 @@ export async function requestPeerAvatar(
 
     state.serverFetchTimestamps.set(username, now);
     state.pendingRequests.add(username);
+    setTimeout(() => {
+        state.pendingRequests.delete(username);
+    }, AVATAR_PENDING_REQUEST_TIMEOUT_MS);
 
     let sent = false;
     try {

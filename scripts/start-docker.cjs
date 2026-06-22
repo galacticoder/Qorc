@@ -13,13 +13,14 @@ const path = require('path');
 const readline = require('readline');
 const fs = require('fs');
 const net = require('net');
+const os = require('os');
 
 const args = process.argv.slice(2);
 const command = args[0];
 const flags = args.slice(1);
 
 const validProfiles = ['server', 'loadbalancer'];
-const validServices = ['redis', 'postgres', 'server', 'loadbalancer'];
+const validServices = ['redis', 'postgres', 'pir-worker', 'ypir-worker', 'server', 'loadbalancer'];
 
 function showHelp() {
     console.log('Docker Deployment Helper');
@@ -42,6 +43,7 @@ if (!command || command === '-h' || command === '--help') {
 
 const repoRoot = path.resolve(__dirname, '..');
 const envPath = path.join(repoRoot, '.env');
+const hostLogsPath = path.join(repoRoot, 'logs');
 
 // Helper to check if a port is in use
 function isPortInUse(port) {
@@ -115,6 +117,7 @@ async function main() {
                 console.error('Usage:');
                 console.error('  node scripts/start-docker.cjs stop server        - Stop server');
                 console.error('  node scripts/start-docker.cjs stop loadbalancer  - Stop loadbalancer');
+                console.error('  node scripts/start-docker.cjs stop pir-worker    - Stop PIR worker');
                 console.error('  node scripts/start-docker.cjs stop postgres      - Stop postgres');
                 console.error('  node scripts/start-docker.cjs stop all           - Stop all services');
                 console.error('');
@@ -177,6 +180,7 @@ async function main() {
                 console.error('Usage:');
                 console.error('  node scripts/start-docker.cjs delete server        - Delete server containers and images');
                 console.error('  node scripts/start-docker.cjs delete loadbalancer  - Delete loadbalancer containers and images');
+                console.error('  node scripts/start-docker.cjs delete pir-worker    - Delete PIR worker containers and images');
                 console.error('  node scripts/start-docker.cjs delete redis         - Delete redis containers and images');
                 console.error('  node scripts/start-docker.cjs delete postgres      - Delete postgres containers and images');
                 console.error('');
@@ -263,6 +267,8 @@ async function main() {
             showHelp();
         }
 
+        fs.mkdirSync(hostLogsPath, { recursive: true });
+
         console.log('[INFO] Checking for port conflicts...');
         const env = readEnv();
         const updates = {};
@@ -308,6 +314,22 @@ async function main() {
             }
         }
 
+        // Auto-detect a CPU cap for the HintlessPIR worker from host core count
+        const totalCores = os.cpus().length || 1;
+        const pirWorkerCpus = String(Math.max(1, Math.floor((totalCores * 2) / 3)));
+        process.env.PIR_WORKER_CPUS = pirWorkerCpus;
+        if (env.PIR_WORKER_CPUS !== pirWorkerCpus) {
+            updates.PIR_WORKER_CPUS = pirWorkerCpus;
+        }
+        console.log(`[INFO] Detected ${totalCores} CPU core(s). capping pir-worker at ${pirWorkerCpus} core(s) (PIR_WORKER_CPUS).`);
+
+        // auto-cap for the YPIR worker
+        process.env.YPIR_WORKER_CPUS = pirWorkerCpus;
+        if (env.YPIR_WORKER_CPUS !== pirWorkerCpus) {
+            updates.YPIR_WORKER_CPUS = pirWorkerCpus;
+        }
+        console.log(`[INFO] Capping ypir-worker at ${pirWorkerCpus} core(s) (YPIR_WORKER_CPUS).`);
+
         if (Object.keys(updates).length > 0) {
             updateEnvFile(updates);
             for (const [key, value] of Object.entries(updates)) {
@@ -333,28 +355,33 @@ async function main() {
                 if (runDetached) {
                     process.env.NO_GUI = 'true';
                     let sharedServices = 'redis';
-                    if (command === 'server') sharedServices = 'postgres redis';
+                    if (command === 'server') sharedServices = 'postgres redis pir-worker ypir-worker';
 
                     if (sharedServices) {
                         execSync(`docker compose --env-file .env -f docker/docker-compose.yml up -d --remove-orphans --no-recreate ${sharedServices}`, { cwd: repoRoot, stdio: 'inherit' });
                     }
 
                     if (buildFlag) {
-                        execSync(`docker compose --env-file .env -f docker/docker-compose.yml build ${command}`, { cwd: repoRoot, stdio: 'inherit' });
+                        const buildTargets = command === 'server' ? 'pir-worker ypir-worker server' : command;
+                        execSync(`docker compose --env-file .env -f docker/docker-compose.yml build ${buildTargets}`, { cwd: repoRoot, stdio: 'inherit' });
                     }
 
                     const runCommand = `docker compose --env-file .env -f docker/docker-compose.yml --profile ${command} up -d --remove-orphans ${command}`;
                     execSync(runCommand, { cwd: repoRoot, stdio: 'inherit' });
                 } else {
                     let sharedServices = 'redis';
-                    if (command === 'server') sharedServices = 'postgres redis';
+                    // ypir-worker is started explicitly here (not via depends_on) because the
+                    // foreground `compose run` path below uses --no-deps. Tier-2 discovery is
+                    // oblivious-only (no fallback), so the server needs the worker reachable.
+                    if (command === 'server') sharedServices = 'postgres redis pir-worker ypir-worker';
 
                     if (sharedServices) {
                         execSync(`docker compose --env-file .env -f docker/docker-compose.yml up -d --remove-orphans --no-recreate ${sharedServices}`, { cwd: repoRoot, stdio: 'inherit' });
                     }
 
                     if (buildFlag) {
-                        execSync(`docker compose --env-file .env -f docker/docker-compose.yml build ${command}`, { cwd: repoRoot, stdio: 'inherit' });
+                        const buildTargets = command === 'server' ? 'pir-worker ypir-worker server' : command;
+                        execSync(`docker compose --env-file .env -f docker/docker-compose.yml build ${buildTargets}`, { cwd: repoRoot, stdio: 'inherit' });
                     }
 
                     const dockerRun = spawn('docker', ['compose', '--env-file', '.env', '-f', 'docker/docker-compose.yml', 'run', '--no-deps', '--service-ports', '-it', '--rm', command], {

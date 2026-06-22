@@ -4,6 +4,7 @@ import crypto from 'crypto';
 import { RATE_LIMIT_CONFIG } from '../config/config.js';
 import { logger as cryptoLogger } from '../crypto/crypto-logger.js';
 import { sendSecureMessage } from '../messaging/pq-envelope-handler.js';
+import { privateLookupId } from '../database/core.js';
 
 // Rate limiting middleware for WebSocket connections
 export class RateLimitMiddleware {
@@ -156,44 +157,6 @@ export class RateLimitMiddleware {
 		return true;
 	}
 
-	// Check bundle operation rate limit for authenticated users
-	async checkBundleLimit(ws, principalId) {
-		if (!this.isValidWebSocket(ws)) {
-			cryptoLogger.warn('[RATE-LIMIT-SECURITY] Invalid WebSocket object in bundle check');
-			return false;
-		}
-
-		if (!principalId) {
-			cryptoLogger.warn('[RATE-LIMIT] No principalId provided for bundle rate limit check');
-			return false;
-		}
-
-		if (!this.isValidPrincipalId(principalId)) {
-			cryptoLogger.warn('[RATE-LIMIT-SECURITY] Invalid principalId format in bundle check');
-			return false;
-		}
-
-		const limiter = await this.#limiter();
-		const result = await limiter.checkBundleLimit(principalId);
-
-		if (!result.allowed) {
-			cryptoLogger.warn('[RATE-LIMIT] Bundle operation blocked for principal', { principalId, reason: result.reason });
-
-			await sendSecureMessage(ws, {
-				type: SignalType.ERROR,
-				message: result.reason,
-				rateLimitInfo: {
-					blocked: true,
-					remainingBlockTime: result.remainingBlockTime,
-					requestId: this.generateSecureRequestId()
-				}
-			});
-			return false;
-		}
-
-		return true;
-	}
-
 	// Apply rate limiting to WebSocket message based on message type
 	async applyMessageRateLimiting(ws, messageType, principalId) {
 		if (!this.isValidMessageType(messageType)) {
@@ -207,8 +170,6 @@ export class RateLimitMiddleware {
 				return this.checkAuthLimit(ws);
 			case SignalType.SEALED_ENVELOPE:
 				return this.checkMessageLimit(ws, principalId);
-			case SignalType.LIBSIGNAL_PUBLISH_BUNDLE:
-				return this.checkBundleLimit(ws, principalId);
 			default:
 				return true;
 		}
@@ -358,11 +319,11 @@ export class RateLimitMiddleware {
 			return false;
 		}
 
-		const limiter = await this.#limiter();
-		try {
-			const hashed = (await (async () => {
-				try { return crypto.createHash('sha256').update(principalId.trim()).digest('hex'); } catch { return null; }
-			})());
+			const limiter = await this.#limiter();
+			try {
+				const hashed = (await (async () => {
+					try { return privateLookupId('rate-limit-principal-v2', principalId.trim()); } catch { return null; }
+				})());
 			if (hashed) {
 				await limiter.userMessageLimiter.delete(hashed);
 				await limiter.userBundleLimiter.delete(hashed);
@@ -390,19 +351,18 @@ export class RateLimitMiddleware {
 			return null;
 		}
 
-		const limiter = await this.#limiter();
-		const hashed = (() => {
-			try { return crypto.createHash('sha256').update(principalId.trim()).digest('hex'); } catch { return null; }
-		})();
+			const limiter = await this.#limiter();
+			const hashed = (() => {
+				try { return privateLookupId('rate-limit-principal-v2', principalId.trim()); } catch { return null; }
+			})();
 		if (!hashed) return null;
 		const msgInfo = await limiter.userMessageLimiter.get(hashed);
 		const bunInfo = await limiter.userBundleLimiter.get(hashed);
 		const msgCfg = RATE_LIMIT_CONFIG.MESSAGES;
 		const bunCfg = RATE_LIMIT_CONFIG.BUNDLE_OPERATIONS;
 
-		return {
-			principalId,
-			messages: msgInfo ? {
+			return {
+				messages: msgInfo ? {
 				attempts: msgInfo.consumedPoints || 0,
 				blockedUntil: msgInfo.msBeforeNext ? Date.now() + msgInfo.msBeforeNext : 0,
 				isBlocked: (msgInfo.consumedPoints || 0) >= msgCfg.MAX_MESSAGES && (msgInfo.msBeforeNext || 0) > 0,

@@ -45,47 +45,6 @@ export function validateSealedEnvelope(envelope) {
 }
 
 /**
- * Create a routing envelope for the server
- */
-export function createRoutingEnvelope(destinationInboxId, sealedPayload) {
-  return {
-    type: 'blind-route',
-    version: SEALED_ENVELOPE_VERSION,
-    destinationInbox: destinationInboxId,
-    payload: sealedPayload,
-    timestamp: Date.now(),
-  };
-}
-
-/**
- * Parse a routing envelope
- */
-export function parseRoutingEnvelope(envelope) {
-  if (!envelope || envelope.type !== 'blind-route') {
-    return { valid: false, error: 'not_routing_envelope' };
-  }
-  
-  if (!envelope.destinationInbox || typeof envelope.destinationInbox !== 'string') {
-    return { valid: false, error: 'missing_destination' };
-  }
-  
-  if (!envelope.payload) {
-    return { valid: false, error: 'missing_payload' };
-  }
-  
-  const payloadValidation = validateSealedEnvelope(envelope.payload);
-  if (!payloadValidation.valid) {
-    return { valid: false, error: `payload_${payloadValidation.error}` };
-  }
-  
-  return {
-    valid: true,
-    destinationInbox: envelope.destinationInbox,
-    payload: envelope.payload
-  };
-}
-
-/**
  * Anti patterns to check for in envelopes
  */
 export function checkForAntiPatterns(envelope) {
@@ -118,7 +77,5 @@ export const SealedSender = {
   MIN_ENVELOPE_SIZE,
   MAX_ENVELOPE_SIZE,
   validateSealedEnvelope,
-  createRoutingEnvelope,
-  parseRoutingEnvelope,
   checkForAntiPatterns,
 };

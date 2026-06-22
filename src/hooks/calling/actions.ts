@@ -4,56 +4,84 @@ import { SecureCallingService } from '../../lib/transport/secure-calling-service
 import { isValidCallingUsername, isValidCallId, stopMediaStream } from '../../lib/utils/calling-utils';
 import { PostQuantumUtils } from '../../lib/utils/pq-utils';
 import { isTauri } from '../../lib/tauri-bindings';
+import type { PeerCertificateBundle } from '../../lib/types/p2p-types';
+import { p2pTransport } from '../../lib/transport/p2p-transport';
+import { normalizeP2PEndpointUrl } from '../../lib/utils/p2p-endpoint';
 import { toast } from 'sonner';
 
-type MediaPermissionResult = {
-  granted: boolean;
-  audioOnlyFallback: boolean;
+type PeerKeysResponse = {
+  kyberPublicBase64: string;
+  dilithiumPublicBase64: string;
+  x25519PublicBase64?: string;
 };
 
-// Request media permissions
-async function requestMediaPermissions(callType: 'audio' | 'video'): Promise<MediaPermissionResult> {
-  if (!navigator.mediaDevices?.getUserMedia) {
-    console.warn('[requestMediaPermissions] mediaDevices.getUserMedia is not available.');
-    return { granted: false, audioOnlyFallback: false };
+async function ensurePeerMaterial(refs: ActionRefs, peer: string): Promise<void> {
+  const service = refs.serviceRef.current;
+  if (!service) {
+    throw new Error('Calling service not initialized');
   }
 
-  const attempts: Array<{ constraints: MediaStreamConstraints; audioOnlyFallback: boolean }> = callType === 'video'
-    ? [
-      { constraints: { audio: true, video: true }, audioOnlyFallback: false },
-      { constraints: { audio: true }, audioOnlyFallback: true }
-    ]
-    : [{ constraints: { audio: true }, audioOnlyFallback: false }];
-
-  let lastError: any = null;
-
-  for (const attempt of attempts) {
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia(attempt.constraints);
-      stream.getTracks().forEach(track => track.stop());
-      return { granted: true, audioOnlyFallback: attempt.audioOnlyFallback };
-    } catch (error: any) {
-      lastError = error;
-      const name = error?.name;
-
-      if (name === 'NotAllowedError' || name === 'SecurityError') {
-        return { granted: false, audioOnlyFallback: false };
-      }
-
-      const canFallback = name === 'OverconstrainedError'
-        || name === 'NotFoundError'
-        || name === 'NotReadableError';
-
-      if (!canFallback) {
-        break;
-      }
+  let trustedCert: PeerCertificateBundle | null = null;
+  if (refs.getPeerCertificate) {
+    trustedCert = await refs.getPeerCertificate(peer);
+    if (!trustedCert) {
+      throw new Error(`Trusted peer certificate unavailable for ${peer}`);
     }
   }
 
-  if (lastError) {
-    console.warn('[requestMediaPermissions] Failed:', lastError.name, lastError.message);
+  if (!service.hasPeerKeys(peer)) {
+    if (!refs.getPeerKeys) {
+      throw new Error(`No key resolver configured for ${peer}`);
+    }
+
+    const keys = await refs.getPeerKeys(peer);
+    if (!keys) {
+      throw new Error(`No keys available for ${peer}`);
+    }
+
+    const peerKeys = {
+      username: peer,
+      dilithiumPublicKey: PostQuantumUtils.base64ToUint8Array(keys.dilithiumPublicBase64),
+      kyberPublicKey: PostQuantumUtils.base64ToUint8Array(keys.kyberPublicBase64),
+      x25519PublicKey: keys.x25519PublicBase64 ? PostQuantumUtils.base64ToUint8Array(keys.x25519PublicBase64) : undefined
+    };
+
+    if (trustedCert) {
+      if (
+        trustedCert.dilithiumPublicKey !== keys.dilithiumPublicBase64 ||
+        trustedCert.kyberPublicKey !== keys.kyberPublicBase64 ||
+        trustedCert.x25519PublicKey !== keys.x25519PublicBase64
+      ) {
+        throw new Error(`Peer key material mismatch for ${peer}`);
+      }
+    }
+
+    if (
+      peerKeys.dilithiumPublicKey.length === 0 ||
+      peerKeys.kyberPublicKey.length === 0 ||
+      !peerKeys.x25519PublicKey ||
+      peerKeys.x25519PublicKey.length === 0
+    ) {
+      throw new Error(`Invalid key material for ${peer}`);
+    }
+
+    service.setPeerKeys(peer, peerKeys as any);
   }
-  return { granted: false, audioOnlyFallback: false };
+  
+  if (trustedCert) {
+    const kyber = PostQuantumUtils.base64ToUint8Array(trustedCert.kyberPublicKey);
+    const dilithium = PostQuantumUtils.base64ToUint8Array(trustedCert.dilithiumPublicKey);
+    const x25519 = PostQuantumUtils.base64ToUint8Array(trustedCert.x25519PublicKey);
+    if (kyber.length > 0 && dilithium.length > 0 && x25519.length > 0) {
+      p2pTransport.registerPeerIdentity(peer, {
+        username: peer,
+        kyberPublicKey: kyber,
+        dilithiumPublicKey: dilithium,
+        x25519PublicKey: x25519,
+        endpointUrl: normalizeP2PEndpointUrl(trustedCert.p2pEndpointUrl)
+      });
+    }
+  }
 }
 
 export interface ActionRefs {
@@ -61,7 +89,8 @@ export interface ActionRefs {
   localStreamRef: React.RefObject<MediaStream | null>;
   remoteStreamRef: React.RefObject<MediaStream | null>;
   remoteScreenStreamRef: React.RefObject<MediaStream | null>;
-  getPeerKeys?: (username: string) => Promise<{ kyberPublicBase64: string; dilithiumPublicBase64: string; x25519PublicBase64?: string } | null>;
+  getPeerKeys?: (username: string) => Promise<PeerKeysResponse | null>;
+  getPeerCertificate?: (username: string) => Promise<PeerCertificateBundle | null>;
 }
 
 export interface ActionSetters {
@@ -102,49 +131,8 @@ export const createStartCall = (
       throw new Error('Cannot call yourself');
     }
 
-    // Request media permissions before attempting to start call
-    const permissionResult = await requestMediaPermissions(callType);
-    if (!permissionResult.granted) {
-      toast.error("Permission Denied", {
-        description: "Access to camera/microphone was denied. Please check your system privacy settings and ensure Qor Chat has permission to access these devices."
-      });
-      throw new Error('Media permissions denied');
-    }
-    if (permissionResult.audioOnlyFallback && callType === 'video') {
-      toast.warning("Camera Unavailable", {
-        description: "Video permission or device was unavailable, starting an audio-only call."
-      });
-    }
-
-    // Make sure keys are available for peer
     try {
-      if (refs.getPeerKeys) {
-        try {
-          const service = refs.serviceRef.current;
-          let hasKeys = false;
-          if (service && (service as any).hasPeerKeys) {
-            hasKeys = (service as any).hasPeerKeys(peer);
-          }
-
-          if (!hasKeys) {
-            const keys = await refs.getPeerKeys(peer);
-            if (keys) {
-              const peerKeys = {
-                username: peer,
-                dilithiumPublicKey: PostQuantumUtils.base64ToUint8Array(keys.dilithiumPublicBase64),
-                kyberPublicKey: PostQuantumUtils.base64ToUint8Array(keys.kyberPublicBase64),
-                x25519PublicKey: keys.x25519PublicBase64 ? PostQuantumUtils.base64ToUint8Array(keys.x25519PublicBase64) : undefined
-              };
-
-              if (peerKeys.dilithiumPublicKey.length > 0 && peerKeys.kyberPublicKey.length > 0) {
-                refs.serviceRef.current.setPeerKeys(peer, peerKeys as any);
-              }
-            }
-          }
-        } catch (keyError) {
-          console.warn('Failed to fetch keys for peer call:', keyError);
-        }
-      }
+      await ensurePeerMaterial(refs, peer);
 
       const callId = await refs.serviceRef.current.startCall(peer, callType);
       return callId;
@@ -196,53 +184,14 @@ export const createAnswerCall = (refs: ActionRefs) => {
       throw new Error('Invalid call ID format');
     }
 
-    // Get call type from current call to request permissions
     const currentCall = (refs.serviceRef.current as any).currentCall;
-    const callType = currentCall?.type || 'audio';
-
-    // Request media permissions before attempting to answer call
-    const permissionResult = await requestMediaPermissions(callType);
-    if (!permissionResult.granted) {
-      toast.error("Permission Denied", {
-        description: "Access to camera/microphone was denied. Please check your system privacy settings and ensure Qor Chat has permission to access these devices."
-      });
-      throw new Error('Media permissions denied');
-    }
-    if (permissionResult.audioOnlyFallback && callType === 'video') {
-      toast.warning("Camera Unavailable", {
-        description: "Video permission or device was unavailable, answering with audio only."
-      });
-    }
 
     try {
-      if (peer && refs.getPeerKeys) {
-        try {
-          const service = refs.serviceRef.current;
-          let hasKeys = false;
-          if (service && (service as any).hasPeerKeys) {
-            hasKeys = (service as any).hasPeerKeys(peer);
-          }
-
-          if (!hasKeys) {
-            const keys = await refs.getPeerKeys(peer);
-            if (keys) {
-              const peerKeys = {
-                username: peer,
-                dilithiumPublicKey: PostQuantumUtils.base64ToUint8Array(keys.dilithiumPublicBase64),
-                kyberPublicKey: PostQuantumUtils.base64ToUint8Array(keys.kyberPublicBase64),
-                x25519PublicKey: keys.x25519PublicBase64 ? PostQuantumUtils.base64ToUint8Array(keys.x25519PublicBase64) : undefined
-              };
-
-              // Validate keys
-              if (peerKeys.dilithiumPublicKey.length > 0 && peerKeys.kyberPublicKey.length > 0) {
-                refs.serviceRef.current.setPeerKeys(peer, peerKeys as any);
-              }
-            }
-          }
-        } catch (keyError) {
-          console.warn('Failed to fetch keys for answering call:', keyError);
-        }
+      const peerUsername = (peer || currentCall?.peer || '').trim();
+      if (!isValidCallingUsername(peerUsername)) {
+        throw new Error('Missing peer identity for call answer');
       }
+      await ensurePeerMaterial(refs, peerUsername);
 
       await refs.serviceRef.current.answerCall(callId);
     } catch (_error: any) {
@@ -278,28 +227,7 @@ export const createDeclineCall = (refs: ActionRefs) => {
           const currentCall = (service as any).currentCall;
           if (currentCall && currentCall.id === callId && currentCall.peer) {
             const peer = currentCall.peer;
-
-            let hasKeys = false;
-            if (service && (service as any).hasPeerKeys) {
-              hasKeys = (service as any).hasPeerKeys(peer);
-            }
-
-            if (!hasKeys) {
-              const keys = await refs.getPeerKeys(peer);
-
-              if (keys) {
-                const peerKeys = {
-                  username: peer,
-                  dilithiumPublicKey: PostQuantumUtils.base64ToUint8Array(keys.dilithiumPublicBase64),
-                  kyberPublicKey: PostQuantumUtils.base64ToUint8Array(keys.kyberPublicBase64),
-                  x25519PublicKey: keys.x25519PublicBase64 ? PostQuantumUtils.base64ToUint8Array(keys.x25519PublicBase64) : undefined
-                };
-
-                if (peerKeys.dilithiumPublicKey.length > 0 && peerKeys.kyberPublicKey.length > 0) {
-                  service.setPeerKeys(peer, peerKeys as any);
-                }
-              }
-            }
+            await ensurePeerMaterial(refs, peer);
           }
         } catch (keyError) {
           console.warn('Failed to fetch keys for decline call:', keyError);

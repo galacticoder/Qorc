@@ -10,10 +10,11 @@ export const resolveSenderHybridKeys = async (
   keyRequestCacheRef: React.RefObject<Map<string, number>>,
   loginUsernameRef: React.RefObject<string>,
   keyRequestCacheDuration: number,
-  findUser?: (handle: string) => Promise<any>
+  findUser?: (handle: string, options?: { forceRefresh?: boolean }) => Promise<any>
 ): Promise<ResolvedSenderKeys> => {
   const user = usersRef?.current?.find?.((u: any) => u.username === senderUsername);
-  let kyber = user?.hybridPublicKeys?.kyberPublicBase64 || null;
+  const userHasCertifiedIdentity = !!(user?.peerCertificateFingerprint && user?.identityRootFingerprint);
+  let kyber = userHasCertifiedIdentity ? (user?.hybridPublicKeys?.kyberPublicBase64 || null) : null;
   let retried = false;
 
   if (!kyber) {
@@ -31,22 +32,24 @@ export const resolveSenderHybridKeys = async (
         if (!shouldAttemptDiscovery(senderUsername, known)) {
           return { kyber: null, hybrid: null, retried: false };
         }
+        // avoid forcing discovery refresh on every miss
         const material = await findUser(senderUsername);
         if (material) {
           const { inboxId, publicKeys, fullBundle } = material;
 
           if (fullBundle && loginUsernameRef.current) {
-            const hasSession = await signal.hasSession(loginUsernameRef.current, senderUsername, 1).catch(() => false);
-            if (!hasSession) {
-              await signal.processPreKeyBundle(loginUsernameRef.current, senderUsername, fullBundle);
-            }
+            // rust backend handles session deduplication and identity key checks
+            await signal.processPreKeyBundle(loginUsernameRef.current, senderUsername, fullBundle);
           }
 
           window.dispatchEvent(new CustomEvent(EventType.USER_KEYS_AVAILABLE, {
             detail: {
               username: senderUsername,
               hybridKeys: publicKeys,
-              inboxId
+              inboxId,
+              peerCertificateFingerprint: material.peerCertificateFingerprint,
+              identityRootFingerprint: material.identityRootFingerprint,
+              identityBundleFingerprint: material.identityBundleFingerprint
             }
           }));
         }
@@ -68,12 +71,14 @@ export const resolveSenderHybridKeys = async (
         window.addEventListener(EventType.USER_KEYS_AVAILABLE, handler as EventListener, { once: true });
       });
       const refreshed = usersRef?.current?.find?.((u: any) => u.username === senderUsername);
-      kyber = refreshed?.hybridPublicKeys?.kyberPublicBase64 || null;
+      kyber = refreshed?.peerCertificateFingerprint && refreshed?.identityRootFingerprint
+        ? refreshed?.hybridPublicKeys?.kyberPublicBase64 || null
+        : null;
     }
   }
 
   let refreshedUser = usersRef?.current?.find?.((u: any) => u.username === senderUsername);
-  let hybrid: HybridKeys | null = refreshedUser?.hybridPublicKeys
+  let hybrid: HybridKeys | null = (refreshedUser?.peerCertificateFingerprint && refreshedUser?.identityRootFingerprint && refreshedUser?.hybridPublicKeys)
     ? { ...refreshedUser.hybridPublicKeys, kyberPublicBase64: kyber ?? refreshedUser.hybridPublicKeys?.kyberPublicBase64 }
     : null;
 
@@ -93,7 +98,7 @@ export const resolveSenderHybridKeys = async (
       window.addEventListener(EventType.USER_KEYS_AVAILABLE, handler as EventListener, { once: true });
     });
     refreshedUser = usersRef?.current?.find?.((u: any) => u.username === senderUsername);
-    hybrid = refreshedUser?.hybridPublicKeys
+    hybrid = (refreshedUser?.peerCertificateFingerprint && refreshedUser?.identityRootFingerprint && refreshedUser?.hybridPublicKeys)
       ? { ...refreshedUser.hybridPublicKeys, kyberPublicBase64: kyber ?? refreshedUser.hybridPublicKeys?.kyberPublicBase64 }
       : null;
   }
@@ -107,12 +112,15 @@ export const requestBundleOnce = async (
   keyRequestCacheRef: React.RefObject<Map<string, number>>,
   inFlightBundleRequestsRef: React.RefObject<Map<string, Promise<void>>>,
   loginUsernameRef: React.RefObject<string>,
-  findUser?: (handle: string) => Promise<any>
+  findUser?: (handle: string, options?: { forceRefresh?: boolean }) => Promise<any>,
+  options?: { force?: boolean; forceRefreshDiscovery?: boolean }
 ): Promise<void> => {
   if (!peerUsername) return;
+  const force = options?.force === true;
+  const forceRefreshDiscovery = options?.forceRefreshDiscovery === true;
   const now = Date.now();
   const last = keyRequestCacheRef.current.get(peerUsername) || 0;
-  if (now - last < 1200) return;
+  if (!force && (now - last < 1200)) return;
 
   const inflight = inFlightBundleRequestsRef.current.get(peerUsername);
   if (inflight) {
@@ -130,25 +138,38 @@ export const requestBundleOnce = async (
         return;
       }
 
-      const material = await findUser(peerUsername);
+      const material = await findUser(
+        peerUsername,
+        forceRefreshDiscovery ? { forceRefresh: true } : undefined
+      );
       if (material) {
         if (material.fullBundle && loginUsernameRef.current) {
-          const hasSession = await signal.hasSession(loginUsernameRef.current, peerUsername, 1).catch(() => false);
-          if (!hasSession) {
-            await signal.processPreKeyBundle(loginUsernameRef.current, peerUsername, material.fullBundle);
-          }
+          // rust backend handled session deduplication and identity key checks
+          await signal.processPreKeyBundle(loginUsernameRef.current, peerUsername, material.fullBundle);
         }
 
         window.dispatchEvent(new CustomEvent(EventType.USER_KEYS_AVAILABLE, {
           detail: {
             username: peerUsername,
-            hybridKeys: material.publicKeys,
-            inboxId: material.inboxId
+            hybridKeys: {
+              ...material.publicKeys,
+              inboxId: material.inboxId,
+              routeId: material.routeId,
+              mailboxLookupId: material.mailboxLookupId,
+              bundleLookupId: material.bundleLookupId
+            },
+            inboxId: material.inboxId,
+            routeId: material.routeId,
+            mailboxLookupId: material.mailboxLookupId,
+            bundleLookupId: material.bundleLookupId,
+            peerCertificateFingerprint: material.peerCertificateFingerprint,
+            identityRootFingerprint: material.identityRootFingerprint,
+            identityBundleFingerprint: material.identityBundleFingerprint
           }
         }));
       }
 
-      keyRequestCacheRef.current.set(peerUsername, now);
+      keyRequestCacheRef.current.set(peerUsername, Date.now());
 
       await new Promise<void>((resolve) => {
         let settled = false;

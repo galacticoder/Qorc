@@ -89,7 +89,8 @@ impl NotificationHandler {
                 notification.body(&sanitized_body);
             }
 
-            notification.show()
+            notification
+                .show()
                 .map_err(|e| QorError::NotificationFailed(e.to_string()))?;
         }
 
@@ -120,16 +121,6 @@ impl NotificationHandler {
     /// Set badge count
     pub fn set_badge_count(&self, count: u32) -> QorResult<()> {
         *self.badge_count.write() = count;
-        
-        // Platform-specific badge handling
-        // Linux: typically not supported via standard API, but some DEs support it
-        // macOS: dock badge
-        // Windows: taskbar badge
-        
-        // NOTE: In a full Tauri app, you'd typically use app_handle.set_badge_count(count)
-        // but here we are in a system handler that doesn't have the handle.
-        // For now we persist it in state.
-        
         Ok(())
     }
 

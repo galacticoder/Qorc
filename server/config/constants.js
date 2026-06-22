@@ -1,15 +1,21 @@
+function envInt(name, fallback, min, max) {
+  const parsed = Number.parseInt(process.env[name] || String(fallback), 10);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.max(min, Math.min(max, parsed));
+}
+
 // Server configuration constants
 export const SERVER_CONSTANTS = {
   // Bandwidth and rate limiting
-  BANDWIDTH_QUOTA: 12 * 1024 * 1024,
-  BANDWIDTH_WINDOW: 60 * 1000,
+  BANDWIDTH_QUOTA: envInt('WS_BANDWIDTH_QUOTA_BYTES', 512 * 1024 * 1024, 512 * 1024 * 1024, 2 * 1024 * 1024 * 1024),
+  BANDWIDTH_WINDOW: envInt('WS_BANDWIDTH_WINDOW_MS', 60 * 1000, 5 * 1000, 10 * 60 * 1000),
   MESSAGE_HARD_LIMIT_PER_MINUTE: 1000,
   MESSAGE_RATE_RESET_INTERVAL: 60000,
   
   // WebSocket configuration
   HEARTBEAT_INTERVAL: 30000,
   CONNECTION_TIMEOUT: 30000,
-  WS_FIXED_MESSAGE_SIZE_BYTES: 256 * 1024,
+  WS_FIXED_MESSAGE_SIZE_BYTES: 64 * 1024,
   
   // Batch processing
   BATCH_SIZE: 10,

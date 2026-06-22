@@ -1,7 +1,6 @@
 import { useState, useRef, useCallback, useEffect } from "react";
 import { SignalType } from "../../lib/types/signal-types";
 import { EventType } from "../../lib/types/event-types";
-import { retrieveAuthTokens } from "../../lib/signals/signals";
 import websocketClient from "../../lib/websocket/websocket";
 import { CryptoUtils } from "../../lib/utils/crypto-utils";
 import { SecureDB } from "../../lib/database/secureDB";
@@ -16,6 +15,7 @@ import { createAttemptAuthRecovery, createStoreAuthenticationState, createClearA
 import { createLogout, createGetLogout } from "./logout";
 import { signal, storage } from "../../lib/tauri-bindings";
 import { toast } from "sonner";
+import { isExplicitlyLoggedOut } from "../../lib/auth/logout-marker";
 
 export const useAuth = (_secureDB?: SecureDB) => {
   const [username, setUsername] = useState("");
@@ -39,8 +39,11 @@ export const useAuth = (_secureDB?: SecureDB) => {
   const aesKeyRef = useRef<CryptoKey | null>(null);
   const getKeysPromiseRef = useRef<Promise<any> | null>(null);
   const passphraseLimiterRef = useRef<{ tokens: number; last: number }>({ tokens: 5, last: Date.now() });
+  const accountSubmitInFlightRef = useRef<boolean>(false);
   const blindCredentialRef = useRef<{
     message: string;
+    inboxId?: string;
+    routeId?: string;
     blindedMsg: string;
     blindingFactor: string;
     n: string;
@@ -144,7 +147,7 @@ export const useAuth = (_secureDB?: SecureDB) => {
 
   const attemptAuthRecovery = useCallback(
     createAttemptAuthRecovery(
-      { loginUsernameRef, originalUsernameRef },
+      { loginUsernameRef, originalUsernameRef, blindCredentialRef, serverHybridPublicRef },
       { setUsername, setPseudonym, setAuthStatus, setTokenValidationInProgress },
       accountAuthenticated, isLoggedIn
     ),
@@ -161,7 +164,8 @@ export const useAuth = (_secureDB?: SecureDB) => {
   const authRefs = {
     loginUsernameRef, originalUsernameRef, passwordRef, confirmPasswordRef,
     passphraseRef, passphrasePlaintextRef, hybridKeysRef, keyManagerRef,
-    keyManagerOwnerRef, passphraseLimiterRef, aesKeyRef: keyManagementRefs.aesKeyRef,
+    keyManagerOwnerRef, passphraseLimiterRef, accountSubmitInFlightRef,
+    aesKeyRef: keyManagementRefs.aesKeyRef,
     blindCredentialRef: keyManagementRefs.blindCredentialRef,
   };
 
@@ -169,7 +173,7 @@ export const useAuth = (_secureDB?: SecureDB) => {
     setUsername, setPseudonym, setIsLoggedIn, setIsGeneratingKeys,
     setAuthStatus, setLoginError, setIsSubmittingAuth, setAccountAuthenticated,
     setIsRegistrationMode, setShowPassphrasePrompt, setRecoveryActive, setMaxStepReached,
-    setVaultReady,
+    setVaultReady, setShowPasswordPrompt, setTokenValidationInProgress,
   };
 
   const authState = { isLoggedIn, accountAuthenticated, recoveryActive, serverHybridPublic, isSubmittingAuth };
@@ -226,6 +230,7 @@ export const useAuth = (_secureDB?: SecureDB) => {
           case 'password': passwordRef.current = value; break;
           case 'confirmPassword': confirmPasswordRef.current = value; break;
           case 'passphrase': passphrasePlaintextRef.current = value; break;
+          case 'confirmPassphrase': confirmPasswordRef.current = value; break;
         }
       } catch { }
     };
@@ -286,39 +291,36 @@ export const useAuth = (_secureDB?: SecureDB) => {
   }, [isLoggedIn, getKeysOnDemand]);
 
   useEffect(() => {
-    if (!isLoggedIn || !accountAuthenticated || !serverHybridPublic || !hybridKeysRef.current) return;
-    if (websocketClient.isUnlinkedMode()) return;
-    if (!websocketClient.isServerAuthGranted?.()) return;
-    const uploadKeys = async () => {
-      try {
-        let attempts = 0;
-        while (attempts < 20 && !websocketClient.isPQSessionEstablished?.()) { await new Promise(r => setTimeout(r, 100)); attempts++; }
-        if (!websocketClient.isPQSessionEstablished?.()) return;
-        const keys = hybridKeysRef.current;
-        if (!keys?.dilithium?.publicKeyBase64 || !keys?.kyber?.publicKeyBase64 || !keys?.dilithium?.secretKey) return;
-        const keysToSend: any = { kyberPublicBase64: keys.kyber.publicKeyBase64, dilithiumPublicBase64: keys.dilithium.publicKeyBase64, x25519PublicBase64: keys.x25519?.publicKeyBase64 || '' };
+    if (!isLoggedIn || !accountAuthenticated || !hybridKeysRef.current) return;
+    window.dispatchEvent(new CustomEvent(EventType.HYBRID_KEYS_UPDATED));
+  }, [isLoggedIn, accountAuthenticated, hybridKeysRef]);
 
-        if (blindCredentialRef.current?.blindedMsg) {
-          keysToSend.blindedToken = blindCredentialRef.current.blindedMsg;
-        }
-        const encryptedHybridKeys = await CryptoUtils.Hybrid.encryptForServer(JSON.stringify(keysToSend), serverHybridPublic, {
-          senderDilithiumSecretKey: keys.dilithium.secretKey,
-          senderDilithiumPublicKey: keys.dilithium.publicKeyBase64,
-          metadata: { context: SignalType.HYBRID_KEYS_UPDATE }
-        });
-        await websocketClient.sendSecureControlMessage({ type: SignalType.HYBRID_KEYS_UPDATE, userData: encryptedHybridKeys });
-        window.dispatchEvent(new CustomEvent(EventType.HYBRID_KEYS_UPDATED));
-      } catch { }
-    };
-    uploadKeys();
-  }, [isLoggedIn, accountAuthenticated, serverHybridPublic, hybridKeysRef]);
+  useEffect(() => {
+    if (
+      isLoggedIn &&
+      accountAuthenticated &&
+      !vaultReady &&
+      !showPassphrasePrompt &&
+      !showPasswordPrompt &&
+      aesKeyRef.current &&
+      hybridKeysRef.current
+    ) {
+      setVaultReady(true);
+    }
+  }, [isLoggedIn, accountAuthenticated, vaultReady, showPassphrasePrompt, showPasswordPrompt]);
 
   useEffect(() => {
     (async () => {
       try {
-        const token = await retrieveAuthTokens();
+        if (await isExplicitlyLoggedOut()) {
+          setTokenValidationInProgress(false);
+          setAuthStatus('');
+          return;
+        }
+        const { hasResumeToken } = await import('../../lib/signals/resume-tokens');
+        const canResume = await hasResumeToken();
         const sU = await storage.get('last_authenticated_username');
-        if (token || sU) {
+        if (canResume || sU) {
           setTokenValidationInProgress(true); setAuthStatus('Verifying session...');
           if (sU) {
             const { computeBlindUserId } = await import('../../lib/utils/auth-utils');
@@ -343,7 +345,7 @@ export const useAuth = (_secureDB?: SecureDB) => {
 
   useEffect(() => {
     let timeout: NodeJS.Timeout;
-    if (tokenValidationInProgress) timeout = setTimeout(() => { setTokenValidationInProgress(false); setAuthStatus(''); }, 10000);
+    if (tokenValidationInProgress) timeout = setTimeout(() => { setTokenValidationInProgress(false); setAuthStatus(''); }, 45000);
     return () => clearTimeout(timeout);
   }, [tokenValidationInProgress]);
 
@@ -363,14 +365,20 @@ export const useAuth = (_secureDB?: SecureDB) => {
   useEffect(() => {
     const onServerEntryGranted = async () => {
       try {
+        if (await isExplicitlyLoggedOut()) {
+          setTokenValidationInProgress(false);
+          setAuthStatus('');
+          return;
+        }
         if (websocketClient.isUnlinkedMode()) {
           return;
         }
 
         const savedUsername = await storage.get('last_authenticated_username');
-        const token = await retrieveAuthTokens();
+        const { hasResumeToken } = await import('../../lib/signals/resume-tokens');
+        const canResume = await hasResumeToken();
 
-        if (token) {
+        if (canResume) {
           setTokenValidationInProgress(true);
           setAuthStatus('Resuming session...');
 
@@ -397,15 +405,12 @@ export const useAuth = (_secureDB?: SecureDB) => {
             }
           }
 
-          // Send token validation request
-          const validationMessage: any = {
-            type: SignalType.TOKEN_VALIDATION,
-            accessToken: token
-          };
-          if (blindedToken) {
-            validationMessage.blindedToken = blindedToken;
-          }
-          await websocketClient.sendSecureControlMessage(validationMessage);
+          // Resume the session by redeeming a one time anonymous token
+          await websocketClient.attemptTokenValidationOnce(
+            'server-entry-granted',
+            true,
+            blindedToken ? { blindedToken } : {}
+          );
         } else if (savedUsername) {
           // Have username but no token then show login with username pre-filled
           loginUsernameRef.current = savedUsername;
@@ -440,12 +445,15 @@ export const useAuth = (_secureDB?: SecureDB) => {
     handlePasswordHashSubmit: async () => { },
     handleServerPasswordSubmit: async (password: string) => {
       if (!password) return;
+      setLoginError("");
       setIsSubmittingAuth(true);
       setAuthStatus("Verifying entry...");
       try {
-        const success = await websocketClient.startServerGatekeeperFlow(password);
+        const success = await websocketClient.startServerGatekeeperFlow(password, (status) => setAuthStatus(status));
         if (success) {
+          websocketClient.markServerAuthGranted?.();
           setShowPasswordPrompt(false);
+          setMaxStepReached('server');
           setAuthStatus("Entry granted");
           toast.success("Server access granted anonymously");
         } else {
@@ -453,7 +461,7 @@ export const useAuth = (_secureDB?: SecureDB) => {
           setAuthStatus("");
         }
       } catch (err) {
-        setLoginError("Entry verification failed");
+        setLoginError(err instanceof Error && err.message ? err.message : "Entry verification failed");
         setAuthStatus("");
       } finally {
         setIsSubmittingAuth(false);

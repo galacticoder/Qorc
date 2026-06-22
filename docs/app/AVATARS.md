@@ -2,12 +2,13 @@
 
 ## Overview
 
-The server never receives the actual avatar file. Distribution of the avatar happens through encrypted discovery blobs and optional direct encrypted profile-picture request/response messages. The UI always renders from local cache. The avatars are directly included in the inner payload of the discovery payload in the discovery billboard.
+The server never receives the actual avatar file in plaintext, and — as of the unlinkable-content-store change — it cannot link a stored avatar to any user. The avatar is **no longer carried inside the discovery blob** (that blob is now served by oblivious YPIR PIR, and PIR cannot serve large records cheaply). Instead the avatar is encrypted into a uniform-size **PURB** and stored in a separate **unlinkable content store**, fetched by an opaque id with cover traffic. The UI always renders from local cache.
 
 Core properties:
 - Avatars stored in SecureDB on the client.
 - Sharing is optional and controlled by `shareWithOthers`.
-- Discovery publishes an encrypted avatar inside the OPRF blob.
+- Discovery publishes only a small `avatarRef` (opaque blobId + E2E key + hash) inside the oblivious keys-blob — never the avatar bytes.
+- The avatar bytes live as an E2E-encrypted, uniform-size PURB in the unlinkable content store. The server cannot decrypt them, cannot learn their true size, and cannot link the blob to an identity.
 - Direct avatar messages are end-to-end encrypted.
 
 ---
@@ -81,22 +82,51 @@ Code references:
 
 ---
 
-## 5. Distribution via Discovery
+## 5. Distribution via the Unlinkable Content Store
 
-Avatars are included inside the OPRF discovery blob:
-- The avatar is part of `OPRFDiscoveryMaterial`.
-- The blob is encrypted with a key derived from the OPRF output, so the server cannot read it.
+The avatar is delivered out of band from the oblivious discovery keys-blob, because that blob is served by YPIR PIR and PIR cannot serve large records (≥ record-size download + the whole DB must sit in worker RAM). So:
 
-Publishing:
-- During self-publish, the discovery hook calls `getAvatarForDiscovery` and embeds the avatar into the encrypted blob.
+What rides inside the encrypted discovery keys-blob is only an `AvatarRef`:
+- `avatarRef = { blobId, keyB64, hash, mimeType }` — an opaque random per-publish blobId, the E2E AEAD key, and the content hash. The keys-blob is encrypted with the OPRF-derived key, so the server cannot read the ref.
 
-Receiving:
-- `useDiscovery.findUser` decrypts the blob.
-- If an avatar is present and valid, it is cached with TTL.
+The avatar bytes themselves go to the content store as a PURB:
+- **PURB (Padded Uniform Random Blob):** the avatar (`{data, mimeType, hash}`) is padded to a fixed plaintext capacity (`AVATAR_PURB_CAPACITY`, 256 KiB) with the true length encrypted inside, then AEAD-encrypted under a fresh owner-generated key. Every stored blob is therefore byte-identical in size, so the server learns nothing from size and a "miss" can be answered with an identically-sized synthetic blob. (256 KiB fits a 512px WebP avatar with margin. The rare avatar that doesn't fit is simply not shared via the store — `publishAvatarToStore` returns null, the peer shows a default and can still get the picture via the §6 P2P exchange. The cap is kept small because cover traffic fetches ~10 PURBs per lookup.)
+- **Unlinkable upload:** the PURB is POSTed to `/api/avatar/blob/put` over the **dedicated anonymous Tor circuit** (never the account WebSocket), keyed only by the client-chosen random `blobId`. The `avatar_blobs` table has **no identity column**, so the server cannot link the blob to a user.
+
+Publishing (`useDiscovery` self-publish):
+1. `getAvatarForDiscovery` selects the avatar to share (real or default, per `shareWithOthers`).
+2. `ensureAvatarCoverBlobs` (throttled, fire-and-forget) tops up this client's share of **cover PURBs** in the public pool — random-content, uniform-size, fresh-id blobs indistinguishable from real avatars. This guarantees the cover pool stays large enough for a full k-anonymity set even with very few real users. Each cover upload is independently jittered.
+3. `publishAvatarToStore` returns the `AvatarRef` **synchronously** but **decouples the actual upload**: the anonymous PUT is scheduled at a random delay (`AVATAR_UPLOAD_JITTER_*`), not fired during the publish. This is the key timing fix — the account's discovery publish goes over the authenticated WebSocket at a known time, so doing the anonymous upload at that same instant would let the server timing-correlate the two and relink the blob to the account. An **unchanged** avatar (state persisted in `localStorage`) reuses its existing ref and uploads nothing at all, so the vast majority of publishes produce no avatar-store traffic.
+4. The `AvatarRef` (not the avatar) is embedded in `OPRFDiscoveryMaterial.avatarRef` and published in the encrypted keys-blob.
+
+The avatar's `blobId` rotates when the **avatar changes** (or near its TTL), not on every publish — so its upload is a rare, jittered event rather than a per-epoch one coincident with publishing. The brief window where a freshly-rotated blob isn't up yet (peer shows a default + can still get it via the §6 P2P exchange) only occurs right after an actual avatar change.
+
+Receiving (`useDiscovery.finalizeDiscoveryResult` / snapshot path):
+1. After the discovery lookup (tier-1 PIR match + k-anonymous bucket fetch) recovers and decrypts the keys-blob, `cachePeerAvatarFromRef` runs in the **background** (never blocking the discovery result) and is skipped entirely if we already hold this exact (hash-matching, fresh) avatar — so most repeat lookups don't hit the network at all.
+2. `fetchAvatarFromStore` fetches the avatar by `blobId` with **cover traffic** (`AVATAR_COVER_TOTAL_IDS`, default 10): it mixes the real target with a **stable decoy set** drawn from the public pool (`/api/avatar/pool`) and shuffles the order, then POSTs the batch to `/api/avatar/blob/get`. All ids are real pool entries, so the server sees k equally-plausible fetches and cannot tell which the client wanted (k-anonymity). Every id returns an identically-sized response (real PURB or synthetic miss).
+3. The target PURB is decrypted with `avatarRef.keyB64`, the content hash re-verified against `avatarRef.hash`, and the avatar cached with TTL.
+
+**Why the decoy set is *stable* per target:** if decoys were re-randomized each fetch while the target stayed the same, an observer could intersect the batches across repeated lookups of one peer and the target would fall out (the only common element). Reusing the same decoy companions for a given target (cached for `DECOY_CACHE_TTL_MS`) makes repeated batches a constant set, so an intersection yields the whole set, never the target alone. The target's blobId itself also rotates each publish, bounding any analysis to one epoch.
+
+Privacy summary: lookups are oblivious (PIR). The avatar fetch is by an opaque id the server cannot link to a peer (unlinkable upload + ref only inside ciphertext). The **upload timing is decoupled** from the account's publish (random delay + skip-if-unchanged), so the two can't be timing-correlated to relink the blob to the account. The bytes are E2E-encrypted and uniform-size. Cover traffic gives ~k-anonymity per fetch (with client-uploaded cover blobs guaranteeing the crowd even at low user counts), stable decoys defeat the intersection attack, and blobId rotation on avatar change bounds frequency analysis.
+
+Honest residuals: (a) the fetch is **k-anonymous, not oblivious** — the server sees the candidate id set (just not which one you wanted, and none linked to a person). (b) anonymity is ultimately bounded by how many avatars/cover blobs exist. (c) cover traffic costs bandwidth — each lookup pulls ~k × ~342 KB (≈ 3.4 MB at k=10), lazy and cached, tunable via `AVATAR_COVER_TOTAL_IDS` / `AVATAR_GET_MAX_BATCH`. This is strictly stronger than the old in-blob delivery, which exposed avatar size to the server and tied avatar bytes to the (PIR-served) discovery record.
+
+### Circuit isolation
+
+This client's anonymous calls are split across **separate isolated Tor circuits** (Tor `IsolateSOCKSAuth`, keyed by a distinct SOCKS username per concern), so the server cannot link a client's facets to one another — even though all are already unlinkable to the account:
+- `qor-discovery-pir` — discovery lookups (tier-1 PIR query, OPRF eval, manifest, keys-blob bucket fetch).
+- `qor-avatar-pub` — avatar **publishing** (`/api/avatar/blob/put`, real + cover uploads).
+- `qor-avatar-fetch` — avatar **lookups** (`/api/avatar/blob/get`, `/api/avatar/pool`).
+
+So "the entity that published avatar blob B", "the entity that looks up peers' avatars X/Y/Z", and "the entity that runs the PIR lookups" land on three different circuits and are mutually unlinkable. Wiring: `isolated_tor_post(..., circuit)` in `src-tauri/src/commands/pir.rs` (the `circuit` arg is the SOCKS username).
 
 Code references:
-- Discovery publish: `src/hooks/discovery/useDiscovery.ts`
-- OPRF blob crypto: `src/lib/crypto/oprf-discovery-crypto.ts`
+- Avatar PURB crypto: `src/lib/crypto/avatar-blob-crypto.ts`
+- Content-store client (publish/cover-fetch/decrypt): `src/lib/avatar/avatar-store-client.ts`
+- Discovery publish + background fetch: `src/hooks/discovery/useDiscovery.ts`
+- Keys-blob crypto + `avatarRef`: `src/lib/crypto/oprf-discovery-crypto.ts`
+- Server store + endpoints: `server/database/avatar-blob-db.js`, `server/routes/api-routes.js`
 - Cache store: `src/lib/avatar/cache.ts`
 
 ---
@@ -122,15 +152,15 @@ Code references:
 
 ---
 
-## 7. Profile Update Broadcast
+## 7. Avatar Update Propagation
 
-When the local avatar or profile settings change:
-1. `useMessageSender` broadcasts a silent `profile-update` message to peers.
-2. Receivers invalidate discovery cache and re-fetch via `findUser`.
-3. Updated avatar is cached and UI updates.
+There is no peer `profile-update` broadcast message. When the local avatar or profile settings change:
+1. The client updates its local cache and dispatches a local `PROFILE_PICTURE_UPDATED` (or `PROFILE_SETTINGS_UPDATED`) event so the UI refreshes.
+2. The change reaches peers passively: the new `avatarRef` is carried in the republished encrypted discovery keys-blob (peers pick it up on their next `findUser`), and a peer that detects a stale avatar requests the current one directly (§6).
 
 Code references:
-- Broadcast: `src/hooks/message-sending/useMessageSender.ts`
+- Local change + events: `src/lib/avatar/own-avatar.ts`
+- Discovery republish (carries `avatarRef`): `src/hooks/discovery/useDiscovery.ts`
 - Receive handling: `src/hooks/message-handling/useEncryptedMessageHandler.ts`
 
 ---

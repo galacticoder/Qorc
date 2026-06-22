@@ -18,6 +18,7 @@ const OPAQUE_CONFIG = {
     EXPORT_KEY_SIZE: 32,
     SESSION_KEY_SIZE: 32,
     ENVELOPE_NONCE_SIZE: 24,
+    PRIVATE_AUTH_SHARD_SIZE: 2048,
 };
 
 // Domain separation labels
@@ -266,6 +267,7 @@ export class OPAQUEClient {
         sessionKey?: Uint8Array;
         exportKey?: Uint8Array;
         authMessage?: Uint8Array;
+        error?: string;
     }> {
         if (!this.blindingFactor) {
             throw new Error('Login not started');
@@ -287,11 +289,24 @@ export class OPAQUEClient {
                 success: result.success,
                 sessionKey: result.sessionKey,
                 exportKey: result.exportKey,
-                authMessage: result.authMessage
+                authMessage: result.authMessage,
+                error: (result as any).error
             };
-        } catch (err) {
-            console.warn('[OPAQUEClient] Worker finishLogin failed, falling back to local', err);
-            return this.finishLoginLocal(password, serverResponse);
+        } catch (error: any) {
+            console.warn('[OPAQUEClient] Worker finishLogin failed, falling back to local', error);
+            try {
+                const localResult = await this.finishLoginLocal(password, serverResponse);
+                this.blindingFactor = null;
+                return {
+                    success: localResult.success,
+                    sessionKey: localResult.sessionKey,
+                    exportKey: localResult.exportKey,
+                    authMessage: localResult.authMessage
+                };
+            } catch (localError: any) {
+                this.blindingFactor = null;
+                return { success: false, error: localError.message || String(localError) };
+            }
         }
     }
 

@@ -4,7 +4,7 @@
  * Provides anonymous and rate limited authentication tokens
  */
 
-import { ristretto255_oprf as oprf, ristretto255 } from '@noble/curves/ed25519.js';
+import { ristretto255_oprf as oprf } from '@noble/curves/ed25519.js';
 import { blake3 } from '@noble/hashes/blake3.js';
 import { hkdf } from '@noble/hashes/hkdf.js';
 import { xchacha20poly1305 } from '@noble/ciphers/chacha.js';
@@ -34,7 +34,13 @@ const PP_LABELS = {
     NULLIFIER: 'PrivacyPass-Nullifier-v1',
     REDEMPTION_MAC: 'PrivacyPass-Redemption-MAC-v1',
     TOKEN_ENCRYPTION: 'PrivacyPass-Token-Encryption-v1',
+    OPRF_INPUT: 'PrivacyPass-OPRF-Input-v1',
 };
+
+function normalizePurpose(purpose) {
+    const value = typeof purpose === 'string' ? purpose.trim().toLowerCase() : '';
+    return /^[a-z0-9:_-]{1,64}$/.test(value) ? value : 'account-auth';
+}
 
 export class PrivacyPassServer {
     static #tokenKeys = null;
@@ -141,18 +147,28 @@ export class PrivacyPassServer {
     /**
      * Redeem a token
      */
-    static async redeemToken(token, nullifier, mac) {
+    static async redeemToken(token, nullifier, mac, tokenSecret, expectedPurpose = 'account-auth') {
         if (!this.#initialized) {
             throw new Error('PrivacyPass server not initialized');
         }
 
-        if (!token || token.length < 32) {
+        if (!token || token.length !== PP_CONFIG.TOKEN_SIZE) {
             console.log('[PrivacyPass] Token format invalid', { tokenLen: token?.length });
+            return this.#uniformFailureResponse();
+        }
+
+        if (!tokenSecret || tokenSecret.length !== 32) {
+            console.log('[PrivacyPass] Token secret proof missing or invalid');
             return this.#uniformFailureResponse();
         }
 
         if (!nullifier || nullifier.length !== PP_CONFIG.NULLIFIER_SIZE) {
             console.log('[PrivacyPass] Nullifier format invalid', { nullifierLen: nullifier?.length, expected: PP_CONFIG.NULLIFIER_SIZE });
+            return this.#uniformFailureResponse();
+        }
+
+        if (!this.#verifyIssuedToken(token, tokenSecret, expectedPurpose)) {
+            console.log('[PrivacyPass] Token issuance proof invalid');
             return this.#uniformFailureResponse();
         }
 
@@ -193,26 +209,22 @@ export class PrivacyPassServer {
     /**
      * Verify token was signed with our VOPRF key
      */
-    static #verifyTokenSignature(token) {
+    static #verifyIssuedToken(token, tokenSecret, purpose) {
         try {
-            if (!token || token.length !== 32) {
+            if (!token || token.length !== PP_CONFIG.TOKEN_SIZE || !tokenSecret || tokenSecret.length !== 32) {
                 return false;
             }
 
-            // Attempt to decode as Ristretto255 point
-            const point = ristretto255.Point.fromHex(token);
-
-            // Reject identity element
-            if (point.equals(ristretto255.Point.ZERO)) {
-                return false;
-            }
-
-            const order = BigInt('0x1000000000000000000000000000000014def9dea2f79cd65812631a5cf5d3ed');
-            if (!point.multiply(order).equals(ristretto255.Point.ZERO)) {
-                return false;
-            }
-
-            return true;
+            const label = `${PP_LABELS.OPRF_INPUT}:${normalizePurpose(purpose)}`;
+            const oprfInput = hkdf(
+                blake3,
+                tokenSecret,
+                new Uint8Array(0),
+                new TextEncoder().encode(label),
+                32
+            );
+            const expectedToken = oprf.voprf.evaluate(this.#tokenKeys.secretKey, oprfInput);
+            return crypto.timingSafeEqual(Buffer.from(token), Buffer.from(expectedToken));
         } catch {
             return false;
         }
@@ -393,13 +405,15 @@ export const PrivacyPassHelpers = {
      * Parse token redemption request
      */
     parseRedemptionRequest(data) {
-        if (!data.token || !data.nullifier || !data.mac) {
+        if (!data.token || !data.nullifier || !data.mac || !data.tokenSecret) {
             throw new Error('Invalid redemption request');
         }
         return {
             token: Buffer.from(data.token, 'base64'),
             nullifier: Buffer.from(data.nullifier, 'base64'),
             mac: Buffer.from(data.mac, 'base64'),
+            tokenSecret: Buffer.from(data.tokenSecret, 'base64'),
+            purpose: typeof data.purpose === 'string' ? data.purpose : undefined,
         };
     },
 

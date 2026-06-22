@@ -272,16 +272,22 @@ export class SecureKeyManager {
 		const kyberLen = keys.kyber.secretKey.length;
 		const dilithiumLen = keys.dilithium.secretKey.length;
 		const x25519Len = keys.x25519.private.length;
+		if (!keys.accountRoot?.secretKey || !keys.accountRoot.publicKeyBase64) {
+			throw new Error('Account identity root key is required');
+		}
+		const accountRootLen = keys.accountRoot.secretKey.length;
 		
-		const payloadBytes = new Uint8Array(4 + 4 + 4 + kyberLen + dilithiumLen + x25519Len);
+		const payloadBytes = new Uint8Array(4 + 4 + 4 + 4 + kyberLen + dilithiumLen + x25519Len + accountRootLen);
 		const dv = new DataView(payloadBytes.buffer);
 		dv.setUint32(0, kyberLen, true);
 		dv.setUint32(4, dilithiumLen, true);
 		dv.setUint32(8, x25519Len, true);
+		dv.setUint32(12, accountRootLen, true);
 		
-		payloadBytes.set(keys.kyber.secretKey, 12);
-		payloadBytes.set(keys.dilithium.secretKey, 12 + kyberLen);
-		payloadBytes.set(keys.x25519.private, 12 + kyberLen + dilithiumLen);
+		payloadBytes.set(keys.kyber.secretKey, 16);
+		payloadBytes.set(keys.dilithium.secretKey, 16 + kyberLen);
+		payloadBytes.set(keys.x25519.private, 16 + kyberLen + dilithiumLen);
+		payloadBytes.set(keys.accountRoot.secretKey, 16 + kyberLen + dilithiumLen + x25519Len);
 
 		await new Promise(resolve => setTimeout(resolve, 0));
 
@@ -311,8 +317,9 @@ export class SecureKeyManager {
 			kyberPublicBase64: keys.kyber.publicKeyBase64,
 			dilithiumPublicBase64: keys.dilithium.publicKeyBase64,
 			x25519PublicBase64: keys.x25519.publicKeyBase64,
+			accountRootPublicBase64: keys.accountRoot.publicKeyBase64,
 			salt: metadata.salt,
-			version: 5,
+			version: 6,
 			argon2Params: metadata.argon2Params,
 			createdAt: Date.now(),
 			expiresAt: Date.now() + 365 * 24 * 60 * 60 * 1000,
@@ -388,19 +395,22 @@ export class SecureKeyManager {
 		let kyberSecret: Uint8Array;
 		let dilithiumSecret: Uint8Array;
 		let x25519Secret: Uint8Array;
+		let accountRootSecret: Uint8Array;
 
-		if (encryptedData.version >= 5) {
+		if (encryptedData.version >= 6 && encryptedData.accountRootPublicBase64) {
 			const dv = new DataView(decryptedPayload.buffer, decryptedPayload.byteOffset, decryptedPayload.byteLength);
 			const kyberLen = dv.getUint32(0, true);
 			const dilithiumLen = dv.getUint32(4, true);
 			const x25519Len = dv.getUint32(8, true);
+			const accountRootLen = dv.getUint32(12, true);
 			
-			kyberSecret = new Uint8Array(decryptedPayload.subarray(12, 12 + kyberLen));
-			dilithiumSecret = new Uint8Array(decryptedPayload.subarray(12 + kyberLen, 12 + kyberLen + dilithiumLen));
-			x25519Secret = new Uint8Array(decryptedPayload.subarray(12 + kyberLen + dilithiumLen, 12 + kyberLen + dilithiumLen + x25519Len));
+			kyberSecret = new Uint8Array(decryptedPayload.subarray(16, 16 + kyberLen));
+			dilithiumSecret = new Uint8Array(decryptedPayload.subarray(16 + kyberLen, 16 + kyberLen + dilithiumLen));
+			x25519Secret = new Uint8Array(decryptedPayload.subarray(16 + kyberLen + dilithiumLen, 16 + kyberLen + dilithiumLen + x25519Len));
+			accountRootSecret = new Uint8Array(decryptedPayload.subarray(16 + kyberLen + dilithiumLen + x25519Len, 16 + kyberLen + dilithiumLen + x25519Len + accountRootLen));
 		} else {
 			key.fill(0);
-			return null;
+			throw new Error('Stored key bundle missing account identity root');
 		}
 
 		key.fill(0);
@@ -408,12 +418,13 @@ export class SecureKeyManager {
 		return {
 			kyber: { publicKeyBase64: encryptedData.kyberPublicBase64, secretKey: kyberSecret },
 			dilithium: { publicKeyBase64: encryptedData.dilithiumPublicBase64, secretKey: dilithiumSecret },
-			x25519: { publicKeyBase64: encryptedData.x25519PublicBase64, private: x25519Secret }
+			x25519: { publicKeyBase64: encryptedData.x25519PublicBase64, private: x25519Secret },
+			accountRoot: { publicKeyBase64: encryptedData.accountRootPublicBase64, secretKey: accountRootSecret }
 		};
 	}
 
 	// Get public keys from encrypted data
-	async getPublicKeys(): Promise<{ kyberPublicBase64: string; dilithiumPublicBase64: string; x25519PublicBase64: string } | null> {
+	async getPublicKeys(): Promise<{ kyberPublicBase64: string; dilithiumPublicBase64: string; x25519PublicBase64: string; accountRootPublicBase64: string } | null> {
 		const encryptedData = await this.getEncryptedKeys();
 		if (!encryptedData) {
 			return null;
@@ -426,11 +437,15 @@ export class SecureKeyManager {
 		if (!encryptedData.x25519PublicBase64) {
 			throw new Error('X25519 public key missing from stored key bundle');
 		}
+		if (!encryptedData.accountRootPublicBase64) {
+			throw new Error('Account identity root public key missing from stored key bundle');
+		}
 
 		return {
 			kyberPublicBase64: encryptedData.kyberPublicBase64,
 			dilithiumPublicBase64: encryptedData.dilithiumPublicBase64,
 			x25519PublicBase64: encryptedData.x25519PublicBase64,
+			accountRootPublicBase64: encryptedData.accountRootPublicBase64,
 		};
 	}
 

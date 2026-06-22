@@ -1,7 +1,4 @@
 import React from "react";
-import { Label } from "../../ui/label";
-import { Input } from "../../ui/input";
-import { Button } from "../../ui/button";
 import { SERVER_PASSWORD_MAX_LENGTH } from "../../../lib/constants";
 
 interface ServerPasswordFormProps {
@@ -20,10 +17,15 @@ export function ServerPasswordForm({
   onSubmit,
 }: ServerPasswordFormProps) {
   return (
-    <form onSubmit={onSubmit} className="space-y-4">
-      <div className="space-y-2">
-        <Label htmlFor="serverPassword" className="text-muted-foreground font-medium">Server Password</Label>
-        <Input
+    <form
+      onSubmit={onSubmit}
+      className={`login-simple-form${disabled ? " is-submitting" : ""}`}
+      aria-busy={disabled}
+    >
+      <div className="login-simple-field">
+        <label htmlFor="serverPassword">Server password</label>
+        <input
+          className="login-simple-input"
           id="serverPassword"
           type="password"
           placeholder="Enter server password"
@@ -33,18 +35,15 @@ export function ServerPasswordForm({
           required
           autoComplete="current-password"
           maxLength={SERVER_PASSWORD_MAX_LENGTH}
-          className="bg-background/50 border-border/50 focus:bg-background/80 transition-all duration-200"
         />
       </div>
-      <Button
+      <button
         type="submit"
-        size="lg"
-        variant="ghost"
-        className="w-full h-14 text-base font-semibold transition-all shadow-xl shadow-primary/20 hover:shadow-primary/40 hover:scale-[1.02] active:scale-[0.98] bg-primary hover:bg-primary/90 border-0"
+        className="login-simple-submit"
         disabled={disabled}
       >
-        {disabled ? (authStatus || "Verifying...") : "Submit Server Password"}
-      </Button>
+        {disabled ? (authStatus || "Verifying...") : "Submit server password"}
+      </button>
     </form>
   );
 }

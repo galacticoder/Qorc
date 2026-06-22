@@ -10,8 +10,10 @@ import { PostQuantumKEM } from '../cryptography/kem';
 import { CryptoUtils } from '../utils/crypto-utils';
 import { X25519KeyPair } from '../types/noise-types';
 import { generateX25519KeyPair } from '../utils/noise-utils';
-import { HybridKeys, PeerSession, P2PMessage } from '../types/p2p-types';
-import { toUint8, getChannelId, buildRouteProof } from '../utils/p2p-utils';
+import { HybridKeys, PeerCertificateBundle, PeerSession, P2PMessage } from '../types/p2p-types';
+import { toUint8, getChannelId, buildRouteProof, verifyRouteProof } from '../utils/p2p-utils';
+import { normalizeP2PEndpointUrl } from '../utils/p2p-endpoint';
+import { blockingSystem } from '../blocking/blocking-system';
 import { P2P_MESSAGE_RATE_LIMIT, P2P_MESSAGE_RATE_WINDOW_MS, P2P_MAX_PEERS } from '../constants';
 import {
     isPlainObject,
@@ -23,8 +25,7 @@ import {
     DEFAULT_EVENT_RATE_MAX,
     MAX_EVENT_USERNAME_LENGTH,
 } from '../constants';
-import { QuicTransport, quicTransport } from './quic-transport';
-import { getBlindRoutingClient } from './blind-routing-client';
+import { P2PTransport, p2pTransport } from './p2p-transport';
 import {
     ConnectionState,
     PeerIdentity,
@@ -54,10 +55,9 @@ const stringifyDeterministic = (obj: any): string | undefined => {
 
 export class SecureP2PService {
     private localUsername: string = '';
-    private localRelayId: string = '';
     private peers: Map<string, PeerSession> = new Map();
     private channelSequence: Map<string, number> = new Map();
-    private transport: QuicTransport;
+    private transport: P2PTransport;
 
     // Callbacks
     private onMessageCallback: ((message: P2PMessage) => void) | null = null;
@@ -67,6 +67,7 @@ export class SecureP2PService {
     // Crypto keys
     private dilithiumKeys: { publicKey: Uint8Array; secretKey: Uint8Array } | null = null;
     private peerDilithiumKeys: Map<string, Uint8Array> = new Map();
+    private incomingRouteProofSequence: Map<string, number> = new Map();
     private kyberKeyPair: { publicKey: Uint8Array; secretKey: Uint8Array } | null = null;
     private x25519KeyPair: X25519KeyPair | null = null;
 
@@ -77,11 +78,15 @@ export class SecureP2PService {
 
     // Heartbeat
     private heartbeatInterval: ReturnType<typeof setInterval> | null = null;
-    private dummyTrafficInterval: ReturnType<typeof setInterval> | null = null;
+    private dummyTrafficInterval: ReturnType<typeof setTimeout> | null = null;
+    private connectInFlight: Map<string, Promise<void>> = new Map();
+    private sessionWatchers: Map<string, Set<(session: PeerSession | null) => void>> = new Map();
+    private transportUnsubscribers: Array<() => void> = [];
+    private initialized: boolean = false;
 
     constructor(username: string) {
         this.localUsername = username;
-        this.transport = quicTransport;
+        this.transport = p2pTransport;
 
         // Set up blocked user handler
         if (typeof window !== 'undefined') {
@@ -112,15 +117,180 @@ export class SecureP2PService {
         }
     }
 
-    // Initialize the P2P service
-    async initialize(
-        signalingServerUrl: string,
-        options?: {
-            registerPayload: Record<string, unknown>;
-            registrationSignature: string;
-            registrationPublicKey: string;
+    private clearTransportSubscriptions(): void {
+        if (this.transportUnsubscribers.length === 0) return;
+        for (const unsubscribe of this.transportUnsubscribers.splice(0)) {
+            try { unsubscribe(); } catch { }
         }
-    ): Promise<void> {
+    }
+
+    // Is peer in any of its id/alias forms currently blocked
+    private isBlockedPeer(peerId: string): boolean {
+        try {
+            const appPeerId = this.transport.resolveAppPeerId(peerId);
+            if (blockingSystem.isBlockedSync(appPeerId)) return true;
+            if (peerId !== appPeerId && blockingSystem.isBlockedSync(peerId)) return true;
+        } catch { }
+        return false;
+    }
+
+    private emitSessionUpdate(peer: string): void {
+        const listeners = this.sessionWatchers.get(peer);
+        if (!listeners || listeners.size === 0) return;
+        const session = this.getSessionForPeer(peer) || null;
+        for (const fn of Array.from(listeners)) {
+            try { fn(session); } catch { }
+        }
+    }
+
+    private resolvePeerKeys(peer: string): string[] {
+        const keys = new Set<string>();
+        const push = (value?: string | null) => {
+            if (!value || typeof value !== 'string') return;
+            const normalized = value.trim();
+            if (!normalized) return;
+            keys.add(normalized);
+        };
+
+        push(peer);
+        try { push(this.transport.resolveUsernameAlias(peer)); } catch { }
+        try { push(this.transport.resolveAppPeerId(peer)); } catch { }
+
+        for (const key of Array.from(keys)) {
+            try { push(this.transport.resolveUsernameAlias(key)); } catch { }
+            try { push(this.transport.resolveAppPeerId(key)); } catch { }
+        }
+
+        return Array.from(keys);
+    }
+
+    private getSessionForPeer(peer: string): PeerSession | null {
+        const candidates = this.resolvePeerKeys(peer);
+        for (const candidate of candidates) {
+            const session = this.peers.get(candidate);
+            if (session) return session;
+        }
+        return null;
+    }
+
+    private setSessionForPeer(peer: string, session: PeerSession): string {
+        const candidates = this.resolvePeerKeys(peer);
+        const canonical = this.transport.resolveAppPeerId(peer) || peer;
+        const canonicalCandidates = this.resolvePeerKeys(canonical);
+
+        for (const candidate of [...candidates, ...canonicalCandidates]) {
+            this.peers.set(candidate, session);
+        }
+
+        // fresh authenticated handshake/session with peer restarts the route proof sequence
+        try {
+            const peerDilithium = (session.connection as any)?.peerIdentity?.dilithiumPublicKey;
+            if (this.dilithiumKeys?.publicKey && peerDilithium?.length) {
+                const channelId = getChannelId(
+                    CryptoUtils.Base64.arrayBufferToBase64(this.dilithiumKeys.publicKey),
+                    CryptoUtils.Base64.arrayBufferToBase64(peerDilithium)
+                );
+                this.incomingRouteProofSequence.delete(channelId);
+            }
+        } catch { }
+
+        return canonical;
+    }
+
+    private emitSessionUpdatesForPeer(peer: string): void {
+        for (const candidate of this.resolvePeerKeys(peer)) {
+            this.emitSessionUpdate(candidate);
+        }
+    }
+
+    private removeSessionAliases(session: PeerSession): void {
+        for (const [key, value] of Array.from(this.peers.entries())) {
+            if (value === session || value.connection === session.connection) {
+                this.peers.delete(key);
+                this.messageRateLimiter.delete(key);
+                this.emitSessionUpdate(key);
+            }
+        }
+    }
+
+    private hasConnectInFlight(peer: string): boolean {
+        for (const candidate of this.resolvePeerKeys(peer)) {
+            if (this.connectInFlight.has(candidate)) return true;
+        }
+        return false;
+    }
+
+    private watchSession(peer: string, handler: (session: PeerSession | null) => void): () => void {
+        let set = this.sessionWatchers.get(peer);
+        if (!set) {
+            set = new Set();
+            this.sessionWatchers.set(peer, set);
+        }
+        set.add(handler);
+        return () => {
+            const current = this.sessionWatchers.get(peer);
+            if (!current) return;
+            current.delete(handler);
+            if (current.size === 0) this.sessionWatchers.delete(peer);
+        };
+    }
+
+    private async waitForConnectedSession(peer: string, timeoutMs: number = 5000): Promise<PeerSession | null> {
+        const initial = this.getSessionForPeer(peer);
+        if (initial?.state === 'connected' && initial.connection.state === 'connected') {
+            return initial;
+        }
+
+        return new Promise<PeerSession | null>((resolve) => {
+            let settled = false;
+            let connectionUnsub: (() => void) | null = null;
+
+            const finish = (session: PeerSession | null) => {
+                if (settled) return;
+                settled = true;
+                try { clearTimeout(timeoutId); } catch { }
+                try { unwatch(); } catch { }
+                if (connectionUnsub) {
+                    try { connectionUnsub(); } catch { }
+                    connectionUnsub = null;
+                }
+                resolve(session);
+            };
+
+            const evaluate = (session: PeerSession | null) => {
+                if (!session) {
+                    finish(null);
+                    return;
+                }
+                if (!connectionUnsub) {
+                    connectionUnsub = session.connection.onStateChange((state) => {
+                        if (state === 'connected') {
+                            finish(this.getSessionForPeer(peer));
+                        } else if (state === 'failed' || state === 'disconnected') {
+                            finish(null);
+                        }
+                    });
+                }
+                if (session.state === 'connected' && session.connection.state === 'connected') {
+                    finish(session);
+                    return;
+                }
+                if (session.state === 'failed' || session.state === 'disconnected' || session.connection.state === 'failed' || session.connection.state === 'disconnected') {
+                    finish(null);
+                }
+            };
+
+            const timeoutId = setTimeout(() => finish(null), Math.max(1000, timeoutMs | 0));
+            const unwatch = this.watchSession(peer, evaluate);
+            evaluate(this.getSessionForPeer(peer));
+        });
+    }
+
+    // Initialize the P2P service
+    async initialize(): Promise<void> {
+        if (this.initialized) {
+            return;
+        }
         try {
             // Generate Kyber key
             if (!this.kyberKeyPair) {
@@ -133,78 +303,94 @@ export class SecureP2PService {
 
             // Initialize transport
             if (this.dilithiumKeys && this.kyberKeyPair && this.x25519KeyPair) {
-                let relayId: string | null = null;
-                try {
-                    relayId = getBlindRoutingClient().getMyInboxId();
-                } catch { }
-
-                if (!relayId) {
-                    const waitStart = Date.now();
-                    while (!relayId && Date.now() - waitStart < 3000) {
-                        await new Promise(r => setTimeout(r, 100));
-                        try { relayId = getBlindRoutingClient().getMyInboxId(); } catch { break; }
-                    }
-                }
-
-                if (!relayId) {
-                    throw new Error('Missing inbox ID for relay registration');
-                }
-                this.localRelayId = relayId;
-
                 await this.transport.initialize({
                     localUsername: this.localUsername,
-                    localRelayId: relayId,
+                    localPeerId: this.localUsername,
                     kyberKeyPair: this.kyberKeyPair,
                     dilithiumKeyPair: this.dilithiumKeys,
                     x25519KeyPair: this.x25519KeyPair,
-                    relayServerUrl: signalingServerUrl.replace('wss://', 'https://').replace('ws://', 'http://'),
-                    signalServerUrl: signalingServerUrl
                 });
             }
 
             // Set up transport handlers
-            this.transport.onPeerConnected((peerId) => {
+            this.clearTransportSubscriptions();
+            const offPeerConnected = this.transport.onPeerConnected((peerId) => {
+                const appPeerId = this.transport.resolveAppPeerId(peerId);
+                // Refuse to form a session with a blocked peer
+                if (this.isBlockedPeer(peerId)) {
+                    try { this.transport.getConnection(peerId)?.close(); } catch { }
+                    void this.disconnectPeer(appPeerId).catch(() => { });
+                    return;
+                }
                 const connection = this.transport.getConnection(peerId);
+                let session = this.getSessionForPeer(peerId);
                 if (connection) {
                     const existingStream = connection.getStream(SignalType.MESSAGE);
-                    const session = this.peers.get(peerId);
                     if (session && !session.messageStream && existingStream) {
                         session.messageStream = existingStream;
                     }
 
                     // Populate peer Dilithium key from connection identity
-                    if (connection.peerIdentity?.dilithiumPublicKey) {
-                        this.peerDilithiumKeys.set(peerId, connection.peerIdentity.dilithiumPublicKey);
+                    if (connection.peerIdentity?.dilithiumPublicKey?.length) {
+                        const candidates = this.resolvePeerKeys(peerId);
+                        for (const candidate of candidates) {
+                            this.peerDilithiumKeys.set(candidate, connection.peerIdentity.dilithiumPublicKey);
+                        }
                     }
                 }
 
-                const session = this.peers.get(peerId);
                 if (session) {
                     session.state = 'connected';
                     session.lastSeen = Date.now();
                 } else if (connection) {
                     const existingStream = connection.getStream(SignalType.MESSAGE);
-                    this.peers.set(peerId, {
+                    session = {
                         connection,
                         messageStream: existingStream || undefined,
                         lastSeen: Date.now(),
                         state: 'connected'
-                    });
+                    };
                 }
-                this.onPeerConnectedCallback?.(peerId);
-            });
 
-            this.transport.onPeerDisconnected((peerId, reason) => {
-                const session = this.peers.get(peerId);
+                if (session) {
+                    this.setSessionForPeer(peerId, session);
+                    this.setSessionForPeer(appPeerId, session);
+                    this.emitSessionUpdatesForPeer(peerId);
+                    this.emitSessionUpdatesForPeer(appPeerId);
+                    this.onPeerConnectedCallback?.(appPeerId);
+                }
+            });
+            this.transportUnsubscribers.push(offPeerConnected);
+
+            const offPeerDisconnected = this.transport.onPeerDisconnected((peerId, _reason) => {
+                const appPeerId = this.transport.resolveAppPeerId(peerId);
+                const session = this.getSessionForPeer(peerId);
                 if (session) {
                     session.state = 'disconnected';
                 }
-                this.onPeerDisconnectedCallback?.(peerId);
+                this.emitSessionUpdatesForPeer(peerId);
+                this.emitSessionUpdatesForPeer(appPeerId);
+                this.onPeerDisconnectedCallback?.(appPeerId);
                 this.cleanupPeer(peerId);
             });
+            this.transportUnsubscribers.push(offPeerDisconnected);
 
-            this.transport.onMessage((ctx) => {
+            const offMessage = this.transport.onMessage((ctx) => {
+                // Drop any frame from a blocked peer at the transport boundary and sever the channel
+                if (this.isBlockedPeer(ctx.from)) {
+                    void this.disconnectPeer(this.transport.resolveAppPeerId(ctx.from)).catch(() => { });
+                    return;
+                }
+                console.log('[MSG-RECV] SecureP2PService.onMessage', {
+                    type: ctx.type, from: String(ctx.from).slice(0, 24),
+                    payloadLen: typeof ctx.payload === 'string' ? ctx.payload.length : undefined
+                });
+                const messageType = String(ctx.type);
+                if (messageType === 'heartbeat' || messageType === 'dummy') {
+                    return;
+                }
                 if (ctx.type !== SignalType.SEALED_ENVELOPE) {
+                    console.warn('[MSG-RECV] DROP: not a SEALED_ENVELOPE', { type: ctx.type });
                     return;
                 }
 
@@ -217,13 +403,18 @@ export class SecureP2PService {
                     routeProof: ctx.routeProof,
                     signature: ctx.signature
                 };
-                this.handleP2PMessage(p2pMsg).catch(() => { });
+                this.handleP2PMessage(p2pMsg).catch((err) => {
+                    console.error('[MSG-RECV] handleP2PMessage threw:', (err as Error)?.message || err);
+                });
             });
+            this.transportUnsubscribers.push(offMessage);
 
             this.startDummyTraffic();
             this.startHeartbeat();
+            this.initialized = true;
         } catch (error) {
             console.error('[SecureP2PService] Failed to initialize:', error);
+            this.clearTransportSubscriptions();
             throw error;
         }
     }
@@ -262,37 +453,34 @@ export class SecureP2PService {
 
     // Add peer Dilithium public key for verification
     addPeerDilithiumKey(username: string, publicKey: Uint8Array): void {
-        this.peerDilithiumKeys.set(username, publicKey);
+        for (const candidate of this.resolvePeerKeys(username)) {
+            this.peerDilithiumKeys.set(candidate, publicKey);
+        }
     }
 
     // Connect to a peer
     async connectToPeer(
         username: string,
         options?: {
-            peerCertificate?: {
-                dilithiumPublicKey: string;
-                kyberPublicKey: string;
-                x25519PublicKey: string;
-            };
+            peerCertificate?: PeerCertificateBundle;
             routeProof?: { payload: any; signature: string };
         }
     ): Promise<void> {
-        // Check blocked status
-        try {
-            const { blockStatusCache } = await import('../blocking/block-status-cache');
-            const isBlocked = blockStatusCache.get(username);
-            if (isBlocked === true) {
-                throw new Error(`Cannot connect to blocked user: ${username}`);
-            }
-        } catch (error) {
-            if ((error as Error).message?.includes('blocked')) {
-                throw error;
-            }
+        const existingInflight = this.connectInFlight.get(username);
+        if (existingInflight) {
+            return existingInflight;
+        }
+
+        const singleflight = (async () => {
+
+        // Refuse outbound connections to blocked users
+        if (blockingSystem.isBlockedSync(username)) {
+            throw new Error(`Cannot connect to blocked user: ${username}`);
         }
 
         // Check if already connected
-        const existing = this.peers.get(username);
-        if (existing?.state === 'connected') {
+        const existing = this.getSessionForPeer(username);
+        if (existing?.state === 'connected' && existing.connection.state === 'connected') {
             return;
         }
 
@@ -306,15 +494,12 @@ export class SecureP2PService {
             throw new Error('Peer certificate required for connection');
         }
 
-        if (options.peerCertificate.inboxId) {
-            try { this.transport.registerUsernameAlias(username, options.peerCertificate.inboxId); } catch { }
-        }
-
         const peerIdentity: PeerIdentity = {
             username,
             kyberPublicKey: PostQuantumUtils.base64ToUint8Array(options.peerCertificate.kyberPublicKey),
             dilithiumPublicKey: PostQuantumUtils.base64ToUint8Array(options.peerCertificate.dilithiumPublicKey),
-            x25519PublicKey: PostQuantumUtils.base64ToUint8Array(options.peerCertificate.x25519PublicKey)
+            x25519PublicKey: PostQuantumUtils.base64ToUint8Array(options.peerCertificate.x25519PublicKey),
+            endpointUrl: normalizeP2PEndpointUrl(options.peerCertificate.p2pEndpointUrl)
         };
 
         // Store dilithium key for verification
@@ -325,25 +510,53 @@ export class SecureP2PService {
                 peerIdentity,
                 timeout: 30_000,
                 onStateChange: (state) => {
-                    const session = this.peers.get(username);
+                    const session = this.getSessionForPeer(username);
                     if (session) {
                         session.state = this.connectionStateToSessionState(state);
+                        this.emitSessionUpdatesForPeer(username);
                     }
                 }
             });
 
-            // Create message stream
-            const messageStream = await connection.createStream({ type: SignalType.MESSAGE });
+            const existingSession = this.getSessionForPeer(username);
+            if (
+                existingSession &&
+                existingSession.connection === connection &&
+                existingSession.messageStream &&
+                !existingSession.messageStream.closed
+            ) {
+                existingSession.state = 'connected';
+                existingSession.lastSeen = Date.now();
+                this.setSessionForPeer(username, existingSession);
+                this.emitSessionUpdatesForPeer(username);
+                return;
+            }
 
-            this.peers.set(username, {
+            // Reuse existing stream when possible
+            let messageStream = connection.getStream(SignalType.MESSAGE);
+            if (!messageStream || messageStream.closed) {
+                messageStream = await connection.createStream({ type: SignalType.MESSAGE });
+            }
+
+            const session: PeerSession = {
                 connection,
                 messageStream,
                 lastSeen: Date.now(),
                 state: 'connected'
-            });
+            };
+            this.setSessionForPeer(username, session);
+            this.emitSessionUpdatesForPeer(username);
 
         } catch (error) {
             throw error;
+        }
+        })();
+
+        this.connectInFlight.set(username, singleflight);
+        try {
+            await singleflight;
+        } finally {
+            this.connectInFlight.delete(username);
         }
     }
 
@@ -372,80 +585,42 @@ export class SecureP2PService {
         messageType: SignalType = SignalType.SEALED_ENVELOPE,
         messageId?: string
     ): Promise<void> {
+        
+        console.log('[MSG-SEND] SecureP2PService.sendMessage', {
+            to: String(to).slice(0, 24), type: messageType, messageId
+        });
+
         if (messageType !== SignalType.SEALED_ENVELOPE) {
             throw new Error('Invalid message type');
         }
 
-        let session = this.peers.get(to);
+        let session = this.getSessionForPeer(to);
 
         if (!session) {
-            // Check if transport has an active/pending connection that hasnt been mapped to a session yet
-            if (this.transport.hasActiveConnection(to)) {
-                try {
-                    let attempts = 0;
-                    while (attempts < 30) {
-                        session = this.peers.get(to);
-
-                        if (!session) {
-                            const alias = this.transport.resolveUsernameAlias(to);
-                            if (alias) session = this.peers.get(alias);
-                        }
-
-                        if (session && session.state === 'connected') break;
-                        // Early exit if connection is failing
-                        if (session && (session.state === 'failed' || session.state === 'disconnected')) {
-                            console.warn(`[SecureP2PService] session for ${to} entered ${session.state} state, aborting wait`);
-                            break;
-                        }
-                        // Exit if transport is no longer active
-                        if (!this.transport.hasActiveConnection(to)) {
-                            console.warn('[SecureP2PService] transport no longer active, aborting wait');
-                            break;
-                        }
-                        attempts++;
-                        await new Promise(r => setTimeout(r, 100));
-                    }
-                } catch (err) {
-                    console.warn('[SecureP2PService] wait for P2P session interrupted:', err);
-                }
+            if (this.transport.isConnected(to) || this.hasConnectInFlight(to)) {
+                session = await this.waitForConnectedSession(to, 1200);
             }
         }
 
-        // Re-fetch session after potential wait
-        if (!session) {
-            const alias = this.transport.resolveUsernameAlias(to);
-            if (alias && alias !== to) {
-                session = this.peers.get(alias);
-            }
+        if (!session) { 
+            console.error('[SecureP2PService] No active P2P connection');
+            throw new Error('No active P2P connection'); 
         }
 
-        if (!session) { throw new Error(`No active P2P connection to ${to}`); }
-
-        // Wait for session to be fully connected if it exists but looks roughly ready
         if (session.state === 'connecting' || session.connection.state === 'handshaking') {
-            try {
-                // Wait up to 3 seconds for connection
-                let attempts = 0;
-                while (attempts < 30) {
-                    if (session.state === 'connected' && session.connection.state === 'connected') break;
-                    // Early exit on failure
-                    if (session.state === 'failed' || session.state === 'disconnected') {
-                        console.warn(`[SecureP2PService] connection entered ${session.state} state during wait`);
-                        break;
-                    }
-                    if (session.connection.state === 'failed' || session.connection.state === 'disconnected') {
-                        console.warn(`[SecureP2PService] underlying connection entered ${session.connection.state} state`);
-                        break;
-                    }
-                    attempts++;
-                    await new Promise(r => setTimeout(r, 100));
-                }
-            } catch (err) {
-                console.warn('[SecureP2PService] wait for P2P connection interrupted:', err);
+            const readySession = await this.waitForConnectedSession(to, 1000);
+            if (readySession) {
+                session = readySession;
             }
         }
 
-        if (session.state !== 'connected') { throw new Error(`P2P connection to ${to} is not connected (state: ${session.state})`); }
+        if (session.state !== 'connected' || session.connection.state !== 'connected') {
+            console.error('[SecureP2PService] P2P connection not connected:', { 
+                sessionState: session.state, 
+                connectionState: session.connection.state 
+            });
+            throw new Error(`P2P connection is not connected (state: ${session.state})`);
+        }
 
         if (!session.messageStream || session.messageStream.closed) {
             session.messageStream = await session.connection.createStream({ type: SignalType.MESSAGE });
@@ -473,8 +648,8 @@ export class SecureP2PService {
                     channelId,
                     nextSeq
                 );
-            } catch (err) {
-                console.warn('[SecureP2PService] Failed to generate route proof:', err);
+            } catch {
+                console.warn('[SecureP2PService] Failed to generate route proof');
             }
         }
 
@@ -509,32 +684,78 @@ export class SecureP2PService {
                 messageBytes
             );
             p2pMessage.signature = CryptoUtils.Base64.arrayBufferToBase64(signature);
-        } catch (err) {
-            console.error('[SecureP2PService] Failed to sign P2P message:', err);
+        } catch {
+            console.error('[SecureP2PService] Failed to sign P2P message');
             throw new Error('Failed to sign P2P message');
         }
 
         const data = new TextEncoder().encode(JSON.stringify(p2pMessage));
+        console.log('[MSG-SEND] writing to P2P message stream', {
+            to: String(to).slice(0, 24), bytes: data.byteLength,
+            streamId: (session.messageStream as any)?.id, hasSig: !!p2pMessage.signature, hasRouteProof: !!routeProof
+        });
         await session.messageStream.write(data);
+        console.log('[MSG-SEND] write() resolved OK', { to: String(to).slice(0, 24) });
 
         session.lastSeen = Date.now();
     }
 
     // Handle incoming P2P message
     private async handleP2PMessage(message: P2PMessage): Promise<void> {
-        if (!this.checkMessageRateLimit(message.from)) return;
+        console.log('[MSG-RECV] handleP2PMessage enter', {
+            type: message.type, from: String(message.from).slice(0, 24),
+            hasSig: !!message.signature, hasRouteProof: !!message.routeProof
+        });
+        if (!this.checkMessageRateLimit(message.from)) {
+            console.warn('[MSG-RECV] DROP: rate limited', { from: String(message.from).slice(0, 24) });
+            return;
+        }
+
+        if (message.type === SignalType.SEALED_ENVELOPE) {
+            if (!message.from || !message.signature || !message.routeProof) {
+                console.warn('[SecureP2PService] Rejecting unsigned or unauthenticated P2P sealed envelope');
+                return;
+            }
+            if (message.to && message.to !== this.localUsername) {
+                console.warn('[SecureP2PService] Rejecting P2P sealed envelope addressed to a different local identity');
+                return;
+            }
+        }
+
+        const session = this.getSessionForPeer(message.from);
+        const expectedPeerUsername = session?.connection?.peerIdentity?.username;
+        if (expectedPeerUsername && expectedPeerUsername !== message.from) {
+            console.warn('[SecureP2PService] Rejecting P2P message with mismatched peer identity');
+            return;
+        }
 
         // Verify signature
         if (message.signature && message.from) {
-            let peerPublicKey = this.peerDilithiumKeys.get(message.from);
+            const keyCandidates = this.resolvePeerKeys(message.from);
+            let peerPublicKey: Uint8Array | undefined;
+            for (const candidate of keyCandidates) {
+                const key = this.peerDilithiumKeys.get(candidate);
+                if (key?.length) {
+                    peerPublicKey = key;
+                    break;
+                }
+            }
 
             // Resolve key from connection identity if not cached
             if (!peerPublicKey) {
                 try {
-                    const connection = this.transport.getConnection(message.from);
-                    if (connection?.peerIdentity?.dilithiumPublicKey) {
+                    let connection = this.transport.getConnection(message.from);
+                    if (!connection) {
+                        for (const candidate of keyCandidates) {
+                            connection = this.transport.getConnection(candidate);
+                            if (connection) break;
+                        }
+                    }
+                    if (connection?.peerIdentity?.dilithiumPublicKey?.length) {
                         peerPublicKey = connection.peerIdentity.dilithiumPublicKey;
-                        this.peerDilithiumKeys.set(message.from, peerPublicKey);
+                        for (const candidate of keyCandidates) {
+                            this.peerDilithiumKeys.set(candidate, peerPublicKey);
+                        }
                     }
                 } catch { }
             }
@@ -553,23 +774,65 @@ export class SecureP2PService {
                     const isValid = await CryptoUtils.Dilithium.verify(signature, messageBytes, peerPublicKey);
 
                     if (!isValid) {
-                        console.warn('[SecureP2PService] Signature verification failed for:', message.from, {
+                        console.warn('[SecureP2PService] Signature verification failed', {
                             type: message.type,
-                            timestamp: message.timestamp
+                            hasTimestamp: !!message.timestamp
                         });
                         return;
                     }
-                } catch (err) {
-                    console.error('[SecureP2PService] Error verifying signature:', err);
+                } catch {
+                    console.error('[SecureP2PService] Error verifying signature');
                     return;
                 }
             } else {
-                console.warn('[SecureP2PService] Received signed message but no public key for:', message.from);
+                console.warn('[SecureP2PService] Received signed message but no public key');
+                this.transport.requestPeerCertificate(message.from);
                 return;
+            }
+
+            if (message.type === SignalType.SEALED_ENVELOPE) {
+                if (!this.dilithiumKeys?.publicKey) {
+                    console.warn('[SecureP2PService] Rejecting P2P sealed envelope without local certified identity');
+                    return;
+                }
+                try {
+                    const peerDilithiumBase64 = CryptoUtils.Base64.arrayBufferToBase64(peerPublicKey);
+                    const localDilithiumBase64 = CryptoUtils.Base64.arrayBufferToBase64(this.dilithiumKeys.publicKey);
+                    const channelId = getChannelId(localDilithiumBase64, peerDilithiumBase64);
+                    const minSequence = (this.incomingRouteProofSequence.get(channelId) || 0) + 1;
+                    const routeProofValid = await verifyRouteProof(
+                        message.routeProof,
+                        localDilithiumBase64,
+                        peerDilithiumBase64,
+                        channelId,
+                        minSequence
+                    );
+                    if (!routeProofValid) {
+                        console.warn('[SecureP2PService] Rejecting P2P sealed envelope with invalid route proof', {
+                            proofSequence: Number(message.routeProof?.payload?.sequence ?? -1),
+                            expectedMinSequence: minSequence,
+                            expiresAt: message.routeProof?.payload?.expiresAt,
+                            now: Date.now()
+                        });
+                        return;
+                    }
+                    this.incomingRouteProofSequence.set(
+                        channelId,
+                        Math.max(minSequence, Number(message.routeProof?.payload?.sequence || minSequence))
+                    );
+
+                    // Hand cryptographically verified sender identity to message handler
+                    (message as any).__p2pVerifiedSender = {
+                        username: message.from,
+                        dilithiumBase64: peerDilithiumBase64
+                    };
+                } catch {
+                    console.warn('[SecureP2PService] Rejecting P2P sealed envelope after route proof verification error');
+                    return;
+                }
             }
         }
 
-        const session = this.peers.get(message.from);
         if (session) {
             session.lastSeen = Date.now();
         }
@@ -580,6 +843,13 @@ export class SecureP2PService {
             case 'dummy':
                 break;
             default:
+                console.log('[MSG-RECV] verified -> onMessageCallback (to app)', {
+                    type: message.type, from: String(message.from).slice(0, 24),
+                    hasCallback: !!this.onMessageCallback
+                });
+                if (!this.onMessageCallback) {
+                    console.warn('[MSG-RECV] DROP: onMessageCallback not set (app not listening)');
+                }
                 this.onMessageCallback?.(message);
                 break;
         }
@@ -608,7 +878,7 @@ export class SecureP2PService {
 
     // Disconnect from a peer
     async disconnectPeer(username: string): Promise<void> {
-        const session = this.peers.get(username);
+        const session = this.getSessionForPeer(username);
         if (!session) return;
 
         try {
@@ -618,14 +888,34 @@ export class SecureP2PService {
             await session.connection.close();
         } catch { }
 
-        this.peers.delete(username);
+        this.removeSessionAliases(session);
         this.onPeerDisconnectedCallback?.(username);
     }
 
     // Clean up peer resources
     private cleanupPeer(username: string): void {
-        this.peers.delete(username);
-        this.messageRateLimiter.delete(username);
+        const session = this.getSessionForPeer(username);
+        if (!session) {
+            this.messageRateLimiter.delete(username);
+            this.emitSessionUpdate(username);
+            return;
+        }
+        this.removeSessionAliases(session);
+    }
+
+    private getUniqueConnectedSessions(): Array<{ peer: string; session: PeerSession }> {
+        const seen = new Set<PeerSession>();
+        const unique: Array<{ peer: string; session: PeerSession }> = [];
+        for (const [username, session] of this.peers) {
+            if (session.state !== 'connected' || !session.messageStream) continue;
+            if (seen.has(session)) continue;
+            seen.add(session);
+            unique.push({
+                peer: this.transport.resolveAppPeerId(username),
+                session
+            });
+        }
+        return unique;
     }
 
     // Start dummy traffic generation
@@ -636,20 +926,18 @@ export class SecureP2PService {
         const scheduleNext = () => {
             const delay = 10_000 + Math.random() * 20_000;
             this.dummyTrafficInterval = setTimeout(() => {
-                for (const [username, session] of this.peers) {
-                    if (session.state === 'connected' && session.messageStream) {
-                        if (Math.random() < 0.3) {
-                            const dummy: P2PMessage = {
-                                type: 'dummy',
-                                from: this.localUsername,
-                                to: username,
-                                timestamp: Date.now(),
-                                payload: { padding: PostQuantumUtils.bytesToHex(PostQuantumRandom.randomBytes(64)) }
-                            };
+                for (const { peer, session } of this.getUniqueConnectedSessions()) {
+                    if (Math.random() < 0.3) {
+                        const dummy: P2PMessage = {
+                            type: 'dummy',
+                            from: this.localUsername,
+                            to: peer,
+                            timestamp: Date.now(),
+                            payload: { padding: PostQuantumUtils.bytesToHex(PostQuantumRandom.randomBytes(64)) }
+                        };
 
-                            const data = new TextEncoder().encode(JSON.stringify(dummy));
-                            session.messageStream.write(data).catch(() => { });
-                        }
+                        const data = new TextEncoder().encode(JSON.stringify(dummy));
+                        session.messageStream.write(data).catch(() => { });
                     }
                 }
                 scheduleNext();
@@ -664,36 +952,23 @@ export class SecureP2PService {
         if (this.heartbeatInterval) return;
 
         this.heartbeatInterval = setInterval(() => {
-            for (const [username, session] of this.peers) {
-                if (session.state === 'connected' && session.messageStream) {
-                    const heartbeat: P2PMessage = {
-                        type: 'heartbeat',
-                        from: this.localUsername,
-                        to: username,
-                        timestamp: Date.now(),
-                        payload: {}
-                    };
-                    const data = new TextEncoder().encode(JSON.stringify(heartbeat));
-                    session.messageStream.write(data).catch(() => { });
-                }
+            for (const { peer, session } of this.getUniqueConnectedSessions()) {
+                const heartbeat: P2PMessage = {
+                    type: 'heartbeat',
+                    from: this.localUsername,
+                    to: peer,
+                    timestamp: Date.now(),
+                    payload: {}
+                };
+                const data = new TextEncoder().encode(JSON.stringify(heartbeat));
+                session.messageStream.write(data).catch(() => { });
             }
         }, 25_000);
     }
 
     // Check if service is compatible with given configuration
-    isCompatible(username: string, signalingUrl: string): boolean {
+    isCompatible(username: string): boolean {
         if (this.localUsername !== username) return false;
-        try {
-            const currentRelayId = getBlindRoutingClient().getMyInboxId();
-            if (currentRelayId && this.localRelayId && currentRelayId !== this.localRelayId) return false;
-        } catch { }
-
-        // Check transport compatibility
-        const currentRelayUrl = this.transport.getRelayServerUrl();
-        const targetRelayUrl = signalingUrl.replace('wss://', 'https://').replace('ws://', 'http://');
-
-        if (currentRelayUrl !== targetRelayUrl) return false;
-
         return true;
     }
 
@@ -714,19 +989,25 @@ export class SecureP2PService {
 
     // Shutdown service
     async shutdown(): Promise<void> {
+        this.initialized = false;
+        this.clearTransportSubscriptions();
         if (this.heartbeatInterval) {
             clearInterval(this.heartbeatInterval);
             this.heartbeatInterval = null;
         }
 
         if (this.dummyTrafficInterval) {
-            clearInterval(this.dummyTrafficInterval);
+            clearTimeout(this.dummyTrafficInterval);
             this.dummyTrafficInterval = null;
         }
 
         if (this.userBlockedListener && typeof window !== 'undefined') {
             window.removeEventListener(EventType.USER_BLOCKED, this.userBlockedListener);
         }
+
+        this.connectInFlight.clear();
+        this.sessionWatchers.clear();
+        this.incomingRouteProofSequence.clear();
 
         // Disconnect all peers
         for (const username of this.peers.keys()) {
@@ -743,19 +1024,23 @@ export class SecureP2PService {
 
     // Get list of connected peer usernames
     getConnectedPeers(): string[] {
-        const connected: string[] = [];
+        const connected = new Set<string>();
         for (const [username, session] of this.peers) {
             if (session.state === 'connected') {
-                connected.push(username);
+                connected.add(this.transport.resolveAppPeerId(username));
             }
         }
-        return connected;
+        return Array.from(connected);
     }
 
-    // Check if specific peer is P2P-connected
+    // Check if specific peer is P2P connected
     isConnected(username: string): boolean {
-        const session = this.peers.get(username);
-        return !!session && session.state === 'connected';
+        const session = this.getSessionForPeer(username);
+        if (!session || session.state !== 'connected') return false;
+        const connState = session.connection?.state;
+        if (connState && connState !== 'connected') return false;
+        if (session.messageStream && session.messageStream.closed) return false;
+        return true;
     }
 }
 

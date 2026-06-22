@@ -31,11 +31,4 @@ export interface EncryptedBlockList {
   lastUpdated: number;
 }
 
-export interface BlockToken {
-  tokenHash: string;
-  blockerHash: string;
-  blockedHash: string;
-  expiresAt?: number;
-}
-
 export type KeyMaterial = { passphrase?: string; kyberSecret?: Uint8Array };

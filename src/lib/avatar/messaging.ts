@@ -2,7 +2,7 @@ import { SignalType } from '../types/signal-types';
 import { EventType } from '../types/event-types';
 import { unifiedSignalTransport } from '../transport/unified-signal-transport';
 import { MAX_AVATAR_SIZE_BYTES, AVATAR_CACHE_TTL_MS } from '../constants';
-import { generateDefaultAvatar, validateImageData, hashAvatarData } from '../utils/avatar-utils';
+import { validateImageData, hashAvatarData } from '../utils/avatar-utils';
 import { persistCache } from './cache';
 import type { ProfilePictureMessage, CachedAvatar } from '../types/avatar-types';
 import type { AvatarSystemState } from '../types/avatar-types';
@@ -21,11 +21,22 @@ export function createProfilePictureResponse(state: AvatarSystemState): ProfileP
         return { type: 'profile-picture-response' };
     }
 
+    const maxInlineAvatarChars = Math.floor(MAX_AVATAR_SIZE_BYTES * 1.4);
+    if (typeof state.ownAvatar.data !== 'string' || state.ownAvatar.data.length > maxInlineAvatarChars) {
+        return {
+            type: 'profile-picture-response',
+            hash: state.ownAvatar.hash,
+            mimeType: state.ownAvatar.mimeType,
+            isDefault: state.ownAvatar.isDefault === true
+        };
+    }
+
     return {
         type: 'profile-picture-response',
         hash: state.ownAvatar.hash,
         data: state.ownAvatar.data,
-        mimeType: state.ownAvatar.mimeType
+        mimeType: state.ownAvatar.mimeType,
+        isDefault: state.ownAvatar.isDefault === true
     };
 }
 
@@ -49,19 +60,6 @@ export async function handleIncomingMessage(
         state.pendingRequests.delete(fromUsername);
 
         if (!message.data || !message.hash) {
-            const defaultAvatar = generateDefaultAvatar(fromUsername);
-            const defaultHash = await hashAvatarData(defaultAvatar);
-
-            state.avatarCache.set(fromUsername, {
-                data: defaultAvatar,
-                hash: defaultHash,
-                cachedAt: Date.now(),
-                expiresAt: Date.now() + AVATAR_CACHE_TTL_MS
-            });
-
-            window.dispatchEvent(new CustomEvent(EventType.PROFILE_PICTURE_UPDATED, {
-                detail: { type: 'peer', username: fromUsername, fromServer: false, usedDefault: true }
-            }));
             return null;
         }
 
@@ -87,7 +85,8 @@ export async function handleIncomingMessage(
             data: message.data,
             hash: message.hash,
             cachedAt: Date.now(),
-            expiresAt: Date.now() + AVATAR_CACHE_TTL_MS
+            expiresAt: Date.now() + AVATAR_CACHE_TTL_MS,
+            isDefault: message.isDefault === true
         };
 
         state.avatarCache.set(fromUsername, cached);

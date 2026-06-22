@@ -1,19 +1,17 @@
 import React, { RefObject } from "react";
 import { SecureP2PService } from "../../lib/transport/secure-p2p-service";
-import { CryptoUtils } from "../../lib/utils/crypto-utils";
 import { SecurityAuditLogger } from "../../lib/cryptography/audit-logger";
 import { EventType } from "../../lib/types/event-types";
+import { p2pTransport } from "../../lib/transport/p2p-transport";
 import type { P2PStatus, HybridKeys, PeerCertificateBundle, P2PMessage, RouteProofRecord, CertCacheEntry } from "../../lib/types/p2p-types";
+import { P2P_ROUTE_PROOF_TTL_MS } from "../../lib/constants";
 import {
   createP2PError,
   toUint8,
   buildRouteProof,
   getChannelId,
-  generateRandomBase64,
   buildAuthenticator
 } from "../../lib/utils/p2p-utils";
-import { P2P_ROUTE_PROOF_TTL_MS } from "../../lib/constants";
-import { quicTransport } from "../../lib/transport/quic-transport";
 
 export interface ConnectionRefs {
   p2pServiceRef: RefObject<SecureP2PService | null>;
@@ -33,7 +31,6 @@ export interface ConnectionSetters {
 }
 
 export interface ConnectionOptions {
-  signalingTokenProvider?: () => Promise<string | null>;
   onServiceReady?: (service: SecureP2PService | null) => void;
 }
 
@@ -45,9 +42,7 @@ export function createDestroyService(
 ) {
   return () => {
     if (refs.p2pServiceRef.current) {
-      try {
-        refs.p2pServiceRef.current.destroy();
-      } catch { }
+      void refs.p2pServiceRef.current.shutdown().catch(() => { });
       options?.onServiceReady?.(null);
       (refs.p2pServiceRef as { current: SecureP2PService | null }).current = null;
     }
@@ -59,7 +54,7 @@ export function createDestroyService(
       ...prev,
       isInitialized: false,
       connectedPeers: [],
-      signalingConnected: false,
+      transportConnected: false,
     }));
   };
 }
@@ -73,18 +68,16 @@ export function createInitializeP2P(
   destroyService: () => void,
   options?: ConnectionOptions
 ) {
-  return async (signalingServerUrl: string) => {
+  return async () => {
     setters.clearLastError();
     try {
       if (refs.p2pServiceRef.current) {
         const currentService = refs.p2pServiceRef.current;
-        if (currentService.isCompatible(username, signalingServerUrl)) {
+        if (currentService.isCompatible(username)) {
           return;
         }
 
-        try {
-          currentService.destroy();
-        } catch { }
+        await currentService.shutdown().catch(() => { });
         options?.onServiceReady?.(null);
         (refs.p2pServiceRef as { current: SecureP2PService | null }).current = null;
       }
@@ -106,7 +99,16 @@ export function createInitializeP2P(
       }
 
       service.onMessage((message: P2PMessage) => {
-        refs.handleIncomingP2PMessageRef.current?.(message).catch(() => { });
+        console.log('[MSG-RECV] -> handleIncomingP2PMessage (app)', {
+          type: (message as any)?.type, from: String((message as any)?.from).slice(0, 24),
+          hasHandler: !!refs.handleIncomingP2PMessageRef.current
+        });
+        if (!refs.handleIncomingP2PMessageRef.current) {
+          console.warn('[MSG-RECV] DROP: handleIncomingP2PMessageRef not set');
+        }
+        refs.handleIncomingP2PMessageRef.current?.(message).catch((err) => {
+          console.error('[MSG-RECV] handleIncomingP2PMessage threw:', (err as Error)?.message || err);
+        });
       });
 
       service.onPeerConnected((peerUsername: string) => {
@@ -135,26 +137,12 @@ export function createInitializeP2P(
         }));
       });
 
-      const token = (await options?.signalingTokenProvider?.()) ?? null;
-      const registerPayload = {
-        username,
-        timestamp: Date.now(),
-        nonce: generateRandomBase64(32),
-        token,
-      };
-      const canonical = new TextEncoder().encode(JSON.stringify(registerPayload));
-      const registrationSig = await CryptoUtils.Dilithium.sign(hybridKeys.dilithium.secretKey, canonical);
-
-      await service.initialize(signalingServerUrl, {
-        registerPayload,
-        registrationSignature: CryptoUtils.Base64.arrayBufferToBase64(registrationSig),
-        registrationPublicKey: hybridKeys.dilithium.publicKeyBase64,
-      });
+      await service.initialize();
 
       setters.setP2PStatus((prev) => ({
         ...prev,
         isInitialized: true,
-        signalingConnected: true,
+        transportConnected: true,
         lastError: null,
       }));
     } catch (_error) {
@@ -181,6 +169,7 @@ export function createConnectToPeer(
       throw createP2PError('LOCAL_KEYS_MISSING');
     }
 
+    // Prefer cached certificate first
     let cert = await getPeerCertificate(peerUsername);
     if (!cert) {
       cert = await getPeerCertificate(peerUsername, true);
@@ -223,9 +212,6 @@ export function createConnectToPeer(
         const pk = toUint8(cert.dilithiumPublicKey);
         if (pk) refs.p2pServiceRef.current.addPeerDilithiumKey(peerUsername, pk);
       } catch { }
-      if (cert.inboxId) {
-        try { quicTransport.registerUsernameAlias(peerUsername, cert.inboxId); } catch { }
-      }
 
       await refs.p2pServiceRef.current.connectToPeer(peerUsername, {
         peerCertificate: cert,
@@ -248,7 +234,34 @@ export function createDisconnectPeer(refs: ConnectionRefs) {
 
 // Queries whether the peer currently appears connected in state
 export function createIsPeerConnected(connectedPeers: string[]) {
-  return (peerUsername: string): boolean => connectedPeers.includes(peerUsername);
+  return (peerUsername: string): boolean => {
+    if (!peerUsername) return false;
+
+    if (connectedPeers.includes(peerUsername)) {
+      return true;
+    }
+
+    let alias: string | undefined;
+    try {
+      alias = p2pTransport.resolveUsernameAlias(peerUsername);
+    } catch {
+      alias = undefined;
+    }
+    if (alias && connectedPeers.includes(alias)) {
+      return true;
+    }
+
+    try {
+      if (p2pTransport.isConnected(peerUsername)) {
+        return true;
+      }
+      if (alias && p2pTransport.isConnected(alias)) {
+        return true;
+      }
+    } catch { }
+
+    return false;
+  };
 }
 
 // Returns a promise that resolves once the peer connects or the timeout elapses

@@ -1,271 +1,266 @@
-# Offline Messaging (Long-Term Storage + Local Queue)
+# Offline Messaging
 
-## Overview
+Offline messaging in Qor-Chat is not a per-user mailbox. The server does not store messages under usernames, inbox IDs, route IDs, buckets, or contact-specific queues.
 
-Offline messaging covers two distinct "message can't be delivered right now" scenarios:
-1. **Recipient inbox is offline** -> the sender stores a long-term encrypted envelope on the server.
-2. **Recipient keys or inbox are unavailable locally** -> the sender queues the message locally until keys become available.
+The current design has two parts:
 
-The server never receives plaintext message contents and does not use usernames for routing. All offline storage is indexed by **inboxId**.
+1. Server-routed encrypted delivery through the global mix spool.
+2. A local encrypted retry queue when the sender cannot build an encrypted message yet.
 
-Code references:
-- Server offline handlers: `server/handlers/offline-handlers.js`
-- Server storage: `server/database/message-db.js`
-- Client offline handler: `src/lib/websocket/offline-message-handler.ts`
-- Client long-term crypto: `src/lib/cryptography/long-term-encryption.ts`
-- Local queue: `src/lib/database/secure-message-queue.ts`
-- Offline event wiring: `src/lib/signals/session-handlers.ts`, `src/hooks/message-sending/useMessageSender.ts`
+## Server-Routed Delivery
 
----
+When a message cannot go directly over P2P, the sender builds the normal encrypted message stack and wraps it in a sealed envelope:
 
-## 1. Terminology
+1. Signal message payload.
+2. Hybrid/PQ message envelope.
+3. Blind-routing sealed envelope.
+4. `blind-route` transport message.
 
-### 1.1 InboxId (Blind Routing)
-The server routes offline messages by `inboxId`, not by username. `inboxId` is treated as an anonymous routing identifier.
+The server receives only:
 
-Code references:
-- Schema: `server/database/schema.js`
-- Offline storage: `server/database/message-db.js`
-
-### 1.2 Long-Term Envelope (`lt-v1`)
-A long-term envelope is a Kyber KEM + PQ AEAD encrypted blob that can be decrypted later on any device holding the Kyber secret key.
-
-Code references:
-- Envelope format: `src/lib/cryptography/long-term-encryption.ts`
-- Version constant: `src/lib/constants.ts` (`LONG_TERM_ENVELOPE_VERSION`)
-
-### 1.3 Local Secure Queue
-If the client cannot encrypt a message due to missing keys or inbox metadata, it stores the message locally in SecureDB and retries after keys are available.
-
-Code references:
-- Queue: `src/lib/database/secure-message-queue.ts`
-- Retry on keys available: `src/hooks/useEventHandlers.ts`
-
----
-
-## 2. Offline Long-Term Storage Flow (Recipient Offline)
-
-### 2.1 Trigger: Live delivery fails
-When the server cannot deliver a blind-routed sealed envelope to a destination inbox, it replies with an error:
-
-```json
-{ "type": "error", "code": "OFFLINE_LONGTERM_REQUIRED" }
-```
-
-Code references:
-- Error emit: `server/handlers/message-handlers.js`
-
-### 2.2 Client signal -> event
-`handleError` dispatches `EventType.OFFLINE_LONGTERM_REQUIRED` so the sender can attempt long-term storage.
-
-Code references:
-- Event dispatch: `src/lib/signals/session-handlers.ts`
-
-### 2.3 Sender constructs a long-term envelope
-The message sender listens for `OFFLINE_LONGTERM_REQUIRED` and:
-1. Pulls the encrypted payload from `globalEncryptedPayloadCache`.
-2. Resolves `destinationInbox` and recipient Kyber public key.
-3. Encrypts `{ messageId, encryptedPayload, timestamp }` into a `lt-v1` envelope.
-4. Sends `store-offline-message` to the server.
-
-Code references:
-- Offline event listener: `src/hooks/message-sending/useMessageSender.ts`
-- Long-term encryption: `src/lib/cryptography/long-term-encryption.ts`
-
-### 2.4 Server stores the offline payload
-`handleStoreOfflineMessage`:
-- Requires authenticated or unlinked session.
-- Optionally checks blocking if `senderIdentityKeyHash` and `recipientIdentityKeyHash` are provided.
-- Stores a server payload that includes the `longTermEnvelope`.
-
-Code references:
-- Store handler: `server/handlers/offline-handlers.js`
-- Blocking check: `server/handlers/offline-handlers.js` -> `checkBlockingByIdentityKeys`
-- Database insert: `server/database/message-db.js`
-
-### 2.5 Server ACK
-The server replies with an ACK payload indicating success or failure.
-
-Code references:
-- ACK send: `server/handlers/offline-handlers.js`
-
----
-
-## 3. Retrieval and Delivery
-
-### 3.1 Retrieval on login
-After authentication succeeds, the client calls `retrieveOfflineMessages()` which sends:
-
-```json
-{ "type": "retrieve-offline-messages" }
-```
-
-Code references:
-- Trigger after auth: `src/hooks/auth/authSuccess.ts`
-- Client request: `src/lib/websocket/offline-message-handler.ts`
-
-### 3.2 Server response
-The server retrieves up to 500 queued messages for the inbox and returns:
-
-```json
-{ "type": "offline-messages-response", "messages": [ ... ], "count": 3 }
-```
-
-Code references:
-- Retrieve handler: `server/handlers/offline-handlers.js`
-- DB delete-on-read: `server/database/message-db.js`
-
-### 3.3 Immediate delivery after inbox claim
-When a client claims an inbox, the server attempts to deliver any queued offline messages immediately. On send failure, it re-queues the payload.
-
-Code references:
-- Claim handler: `server/handlers/inbox-handlers.js`
-
-### 3.4 Client decryption and injection into message pipeline
-The offline handler:
-1. Decrypts `longTermEnvelope` using the recipient's Kyber secret key.
-2. Extracts `encryptedPayload` and wraps it as `SignalType.ENCRYPTED_MESSAGE`.
-3. Marks the message `__isRecursive: true` and forwards it to the encrypted message handler.
-
-Code references:
-- Decrypt + inject: `src/lib/websocket/offline-message-handler.ts`
-- Recursive decrypt path: `src/hooks/message-handling/useEncryptedMessageHandler.ts`
-
----
-
-## 4. Local Secure Queue (Keys/Inbox Missing)
-
-When the sender cannot encrypt (missing keys/inbox), it queues locally:
-- Stored in SecureDB (no plaintext message in memory queue).
-- Message content is placed in the `messageVault` and referenced by ID.
-- On `EventType.USER_KEYS_AVAILABLE`, the queue is flushed for that user.
-
-Limits and TTLs:
-- Max per user: `SECURE_QUEUE_MAX_MESSAGES_PER_USER` = 50
-- Expiry: `SECURE_QUEUE_MESSAGE_EXPIRY_MS` = 4 hours
-- Cleanup interval: `SECURE_QUEUE_CLEANUP_INTERVAL_MS` = 5 minutes
-
-Code references:
-- Queue store: `src/lib/database/secure-message-queue.ts`
-- Flush on keys: `src/hooks/useEventHandlers.ts`
-- Constants: `src/lib/constants.ts`
-
----
-
-## 5. Data Formats
-
-### 5.1 `store-offline-message` request
 ```json
 {
-  "type": "store-offline-message",
-  "messageId": "<uuid>",
-  "destinationInbox": "<inboxId>",
-  "longTermEnvelope": { "version": "lt-v1", "kemCiphertext": "...", "nonce": "...", "ciphertext": "...", "tag": "...", "timestamp": 1730000000000 },
-  "version": "lt-v1",
-  "senderIdentityKeyHash": "<optional>",
-  "recipientIdentityKeyHash": "<optional>"
+  "type": "blind-route",
+  "sealedEnvelope": {
+    "version": "ss-v1",
+    "ciphertext": "...",
+    "ephemeralKey": "...",
+    "nonce": "..."
+  }
 }
 ```
 
-Code references:
-- Client send: `src/hooks/message-sending/useMessageSender.ts`
-- Server handler: `server/handlers/offline-handlers.js`
+The active send request must not contain a destination selector. The server rejects fields such as usernames, handles, raw inbox IDs, route IDs, mailbox lookup IDs, bucket IDs, shard IDs, recipient IDs, and top-level message IDs.
 
-### 5.2 Stored server payload
+Code references:
+
+- `src/lib/transport/unified-signal-transport.ts`
+- `src/lib/transport/blind-routing-client.ts`
+- `server/handlers/inbox-handlers.js`
+- `server/routing/destination-selector-policy.js`
+- `server/routing/sealed-sender.js`
+
+## Server Acceptance
+
+`handleBlindRoute` validates the request, applies rate and size limits, accepts the sealed envelope into the global mix path, and returns `blind-route-ack`.
+
+The ACK only means the opaque envelope was accepted by ingress. It does not say whether the recipient is online, offline, known, unknown, blocked, or able to decrypt.
+
+Relevant server-side limits:
+
+- `BLIND_ROUTE_WINDOW_MS`
+- `BLIND_ROUTE_MAX_PER_WINDOW`
+- `BLIND_ROUTE_MAX_BYTES_PER_WINDOW`
+- `BLIND_ROUTE_MAX_ENVELOPE_BYTES`
+
+## Global Mix Path
+
+Server-routed envelopes enter `mixnet:delay:pool:v1` first. Each entry gets a randomized release time. A relay worker later claims due entries, shuffles the batch, adds live cover writes, and writes real envelopes to the global spool.
+
+The global spool is one Redis sorted set:
+
+```txt
+mixnet:global:spool:v1
+```
+
+It is a rolling shared stream of sealed envelopes. It is not keyed by recipient, route, mailbox, bucket, shard, username, or account.
+
+The server may also broadcast candidate envelopes live to connected PQ sockets. Recipients try to decrypt locally. Non-recipients receive undecryptable candidates and drop them.
+
+Code references:
+
+- `server/routing/blind-router.js`
+- `server/websocket/gateway.js`
+
+## Offline Catch-Up
+
+Offline clients catch up by downloading the same global spool snapshot as every other client:
+
+```txt
+GET /api/spool/snapshot
+```
+
+The response is a uniform per-epoch encrypted snapshot. It is padded, shuffled, gzipped, digest-verified, and byte-identical for all clients in the same epoch.
+
+Example shape:
+
 ```json
 {
-  "type": "offline-message-delivery",
-  "messageId": "<uuid>",
-  "longTermEnvelope": { "version": "lt-v1", "kemCiphertext": "...", "nonce": "...", "ciphertext": "...", "tag": "...", "timestamp": 1730000000000 },
-  "version": 1,
-  "timestamp": 1730000000000
+  "ok": true,
+  "distribution": "uniform-anonymous-cdn-tor-suitable",
+  "snapshot": {
+    "version": "qor-spool-snapshot-gzip-v1",
+    "encoding": "base64url+gzip",
+    "compression": "gzip",
+    "digestAlgorithm": "sha256-uncompressed-snapshot",
+    "digest": "...",
+    "epochId": "...",
+    "epochStart": 0,
+    "epochEndsAt": 0,
+    "generatedAt": 0,
+    "realCountHidden": true,
+    "sourceCountHidden": true,
+    "paddedEntryCount": 256,
+    "compressed": "..."
+  }
 }
 ```
 
-Code references:
-- Payload creation: `server/handlers/offline-handlers.js`
+The decoded body has this shape:
 
-### 5.3 `offline-messages-response`
 ```json
-{ "type": "offline-messages-response", "messages": [ ... ], "count": 3 }
+{
+  "version": "qor-spool-snapshot-v1",
+  "epochId": "...",
+  "entries": [
+    { "version": "ss-v1", "ciphertext": "...", "ephemeralKey": "...", "nonce": "..." }
+  ],
+  "realCountHidden": true,
+  "sourceCountHidden": true,
+  "paddingStrategy": "power-of-two-floor-with-shape-matched-decoys-v1",
+  "paddedEntryCount": 256
+}
 ```
 
-Code references:
-- Server response: `server/handlers/offline-handlers.js`
-- Client handler dispatch: `src/lib/signals/user-handlers.ts`
-
----
-
-## 6. Cryptography Details
-
-### 6.1 Envelope construction
-- **KEM**: Kyber (encapsulate -> shared secret)
-- **KDF**: `PostQuantumHash.deriveKey(sharedSecret, "long-term-encryption-v1", "long-term-aead-key-v1", 32)`
-- **AEAD**: `PostQuantumAEAD` with nonce length 36 bytes
-- **AAD**: `"lt-v1:<timestamp>"`
+The client verifies the digest, decompresses the snapshot, tries every entry against its local keys, and forwards successful candidates into the normal sealed-envelope receive path. Failed decrypts stay local and are not reported to the server.
 
 Code references:
-- Long-term encrypt/decrypt: `src/lib/cryptography/long-term-encryption.ts`
-- Sizes: `src/lib/constants.ts` (`PQ_KEM_PUBLIC_KEY_SIZE`, `PQ_KEM_SECRET_KEY_SIZE`, `PQ_AEAD_NONCE_SIZE`)
 
-### 6.2 Payload contents
-The encrypted plaintext is a JSON object containing:
-```json
-{ "messageId": "<uuid>", "encryptedPayload": { ... }, "timestamp": 1730000000000 }
-```
-`encryptedPayload` is the LibSignal ciphertext that feeds the recursive `SignalType.ENCRYPTED_MESSAGE` path.
+- `server/routes/api-routes.js`
+- `server/routing/spool-snapshot-service.js`
+- `src-tauri/src/commands/spool.rs`
+- `src/lib/websocket/global-spool-pir-handler.ts`
+- `src/hooks/app/useOfflineMessages.ts`
+- `src/hooks/message-handling/useEncryptedMessageHandler.ts`
 
-Code references:
-- Payload creation: `src/hooks/message-sending/useMessageSender.ts`
-- Recursive decrypt path: `src/hooks/message-handling/useEncryptedMessageHandler.ts`
+## Client Delivery Loop
 
----
+The app-level offline hook wires the snapshot handler to the encrypted message handler.
 
-## 7. Storage & Retention
+The delivery loop starts when the app is ready and restarts after:
 
-### 7.1 Database schema
-`offline_messages` table:
-- `toInboxId` (TEXT)
-- `payload` (TEXT)
-- `queuedAt` (BIGINT)
+- WebSocket reconnect.
+- PQ session establishment.
 
-Code references:
-- Schema: `server/database/schema.js`
+The snapshot fetch goes through Tauri via `fetch_spool_snapshot`, which requests `/api/spool/snapshot` through the configured Tor SOCKS proxy.
 
-### 7.2 Limits
-- Payload size limit: **1 MB** (`MessageDatabase.queueOfflineMessage`)
-- Retrieval limit: **up to 500** per call
-- Cleanup: messages older than **30 days** removed
+Client-side timing constants:
 
-Code references:
-- Storage/limits: `server/database/message-db.js`
+- `GLOBAL_SPOOL_PIR_CATCHUP_DELAY_MS`: first catch-up delay, currently 25 seconds.
+- `GLOBAL_SPOOL_PIR_LOOP_INTERVAL_MS`: regular polling interval, currently 15 minutes.
+- `GLOBAL_SPOOL_PIR_NOT_READY_RETRY_MS`: retry delay while WebSocket/PQ is not ready, currently 5 seconds.
+- `GLOBAL_SPOOL_PIR_RESPONSE_TIMEOUT_MS`: snapshot response timeout, currently 10 minutes.
 
----
+These constants configure the snapshot loop. The offline-message path fetches a uniform snapshot; it does not send a PIR query or recipient selector.
 
-## 8. Security and Privacy Properties
+## Local Retry Queue
 
-- Server does not store usernames or plaintext message bodies.
-- Offline storage is indexed by anonymous inbox IDs.
-- Blocking is enforced at store time if identity key hashes are supplied.
-- Long-term envelopes are sealed with Kyber + PQ AEAD; the server cannot decrypt.
+The local retry queue is only for messages the sender cannot encrypt yet, usually because recipient keys or discovery material are not available locally.
+
+Queued messages are stored in the local encrypted database. Message content is kept in the local message vault and referenced by ID. When `USER_KEYS_AVAILABLE` fires for that recipient, the app removes valid messages from the queue and sends them through the normal send path.
+
+Local queue limits:
+
+- `SECURE_QUEUE_MAX_MESSAGES_PER_USER`: 50 messages per recipient.
+- `SECURE_QUEUE_MESSAGE_EXPIRY_MS`: 4 hours.
+- `SECURE_QUEUE_CLEANUP_INTERVAL_MS`: 5 minutes.
+- `SECURE_QUEUE_MAX_PROCESSED_IDS`: 5000 processed IDs.
+- `SECURE_QUEUE_SAVE_DEBOUNCE_MS`: 1 second.
 
 Code references:
-- Blocking check: `server/handlers/offline-handlers.js`
-- Envelope crypto: `src/lib/cryptography/long-term-encryption.ts`
 
----
+- `src/lib/database/secure-message-queue.ts`
+- `src/hooks/message-sending/send.ts`
+- `src/hooks/useEventHandlers.ts`
+- `src/lib/database/storage-keys.ts`
 
-## 10. Implementation Reference
+## Retention And Limits
 
-### Server
-- `server/handlers/message-handlers.js` -> emits `OFFLINE_LONGTERM_REQUIRED`
-- `server/handlers/offline-handlers.js` -> store/retrieve logic
-- `server/database/message-db.js` -> offline queue persistence
-- `server/handlers/inbox-handlers.js` -> deliver queued messages on claim
+Global spool defaults:
 
-### Client
-- `src/lib/signals/session-handlers.ts` -> dispatch `OFFLINE_LONGTERM_REQUIRED`
-- `src/hooks/message-sending/useMessageSender.ts` -> build long-term envelope
-- `src/lib/websocket/offline-message-handler.ts` -> decrypt and forward
-- `src/lib/cryptography/long-term-encryption.ts` -> long-term crypto
-- `src/lib/database/secure-message-queue.ts` -> local queue
+- `GLOBAL_MIX_SPOOL_TTL_SECONDS`: 24 hours.
+- `GLOBAL_MIX_SPOOL_MAX_MESSAGES`: 1024 entries.
+- `GLOBAL_MIX_SPOOL_MAX_BYTES`: 16 MiB.
+
+Mix delay defaults:
+
+- `MIXNET_RELAY_ENABLED`: enabled by default.
+- `MIXNET_DELAY_MIN_MS`: 1.5 seconds.
+- `MIXNET_DELAY_MAX_MS`: 9 seconds.
+- `MIXNET_FLUSH_MIN_MS`: 700 ms.
+- `MIXNET_FLUSH_MAX_MS`: 2.5 seconds.
+- `MIXNET_BATCH_MAX_MESSAGES`: 24.
+- `MIXNET_POOL_TTL_SECONDS`: 7 days.
+- `MIXNET_AVOID_SAME_WRITER`: enabled by default.
+- `MIXNET_SAME_WRITER_FALLBACK_MS`: 60 seconds.
+
+Snapshot defaults:
+
+- `SPOOL_SNAPSHOT_EPOCH_MS`: 30 seconds.
+- `SPOOL_SNAPSHOT_PADDING_FLOOR`: 256 entries.
+- `SPOOL_SNAPSHOT_MAX_ROWS`: 256 rows.
+- `SPOOL_SNAPSHOT_MAX_PLAINTEXT_BYTES`: 16 MiB.
+- `SPOOL_SNAPSHOT_GZIP_LEVEL`: 6.
+- `SPOOL_SNAPSHOT_RESPONSE_MAX_BYTES`: 8 MiB.
+
+Code references:
+
+- `server/routing/blind-router.js`
+- `server/routing/spool-snapshot-service.js`
+- `server/routes/api-routes.js`
+
+## Privacy Properties
+
+The server can see:
+
+- connection timing;
+- blind-route ingress timing;
+- sealed-envelope size class;
+- mix delay enqueue and release timing;
+- snapshot request timing and response size;
+- local/live broadcast attempts to connected sockets;
+- coarse rate-limit and server-health information.
+
+The server does not receive:
+
+- plaintext message content;
+- sender identity inside the sealed envelope;
+- recipient username or handle;
+- raw destination inbox ID;
+- destination route ID;
+- mailbox lookup ID;
+- bucket ID;
+- shard or record index;
+- server-visible recipient cursor;
+- decrypt success or failure.
+
+Every client in the same snapshot epoch receives the same snapshot bytes. The server cannot tell which entries, if any, decrypted for a client.
+
+## Calls And Files
+
+Offline catch-up carries normal sealed-envelope messages only.
+
+Real-time call setup state, SDP, ICE candidates, ringing state, and live media negotiation are not persisted as offline server state.
+
+File/control messages can use this path only when they fit the normal sealed-envelope framing limits. Large file transfer state should use live transfer or local retry behavior, not the global spool as object storage.
+
+## Implementation Index
+
+Server:
+
+- `server/handlers/inbox-handlers.js`
+- `server/routing/destination-selector-policy.js`
+- `server/routing/blind-router.js`
+- `server/routing/spool-snapshot-service.js`
+- `server/routes/api-routes.js`
+- `server/database/schema.js`
+
+Client:
+
+- `src/lib/transport/unified-signal-transport.ts`
+- `src/lib/transport/blind-routing-client.ts`
+- `src/lib/websocket/global-spool-pir-handler.ts`
+- `src/hooks/app/useOfflineMessages.ts`
+- `src/hooks/message-handling/useEncryptedMessageHandler.ts`
+- `src/lib/database/secure-message-queue.ts`
+- `src-tauri/src/commands/spool.rs`

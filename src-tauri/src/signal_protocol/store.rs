@@ -3,14 +3,12 @@
 use std::collections::HashMap;
 
 use async_trait::async_trait;
-use parking_lot::RwLock;
 use libsignal_protocol::{
-    Direction, IdentityKey, IdentityKeyPair, PreKeyId, PreKeyRecord,
-    ProtocolAddress, SessionRecord, SignedPreKeyId, SignedPreKeyRecord,
-    KyberPreKeyId, KyberPreKeyRecord, PrivateKey, GenericSignedPreKey,
+    Direction, GenericSignedPreKey, IdentityKey, IdentityKeyPair, KyberPreKeyId, KyberPreKeyRecord,
+    PreKeyId, PreKeyRecord, PrivateKey, ProtocolAddress, SessionRecord, SignedPreKeyId,
+    SignedPreKeyRecord,
 };
-
-// Session Store
+use parking_lot::RwLock;
 
 /// In-memory session store
 pub struct InMemorySessionStore {
@@ -29,11 +27,16 @@ impl InMemorySessionStore {
     }
 
     pub fn load_session(&self, address: &ProtocolAddress) -> Option<SessionRecord> {
-        self.sessions.read().get(&Self::session_key(address)).cloned()
+        self.sessions
+            .read()
+            .get(&Self::session_key(address))
+            .cloned()
     }
 
     pub fn store_session(&self, address: &ProtocolAddress, record: &SessionRecord) {
-        self.sessions.write().insert(Self::session_key(address), record.clone());
+        self.sessions
+            .write()
+            .insert(Self::session_key(address), record.clone());
     }
 
     pub fn delete_session(&self, address: &ProtocolAddress) {
@@ -42,11 +45,15 @@ impl InMemorySessionStore {
 
     #[allow(dead_code)]
     pub fn has_session(&self, address: &ProtocolAddress) -> bool {
-        self.sessions.read().contains_key(&Self::session_key(address))
+        self.sessions
+            .read()
+            .contains_key(&Self::session_key(address))
     }
 
     pub fn dump(&self) -> Vec<(String, Vec<u8>)> {
-        self.sessions.read().iter()
+        self.sessions
+            .read()
+            .iter()
             .filter_map(|(k, v)| v.serialize().ok().map(|b| (k.clone(), b)))
             .collect()
     }
@@ -69,11 +76,18 @@ impl Default for InMemorySessionStore {
 
 #[async_trait(?Send)]
 impl libsignal_protocol::SessionStore for InMemorySessionStore {
-    async fn load_session(&self, address: &ProtocolAddress) -> Result<Option<SessionRecord>, libsignal_protocol::SignalProtocolError> {
+    async fn load_session(
+        &self,
+        address: &ProtocolAddress,
+    ) -> Result<Option<SessionRecord>, libsignal_protocol::SignalProtocolError> {
         Ok(self.load_session(address))
     }
 
-    async fn store_session(&mut self, address: &ProtocolAddress, record: &SessionRecord) -> Result<(), libsignal_protocol::SignalProtocolError> {
+    async fn store_session(
+        &mut self,
+        address: &ProtocolAddress,
+        record: &SessionRecord,
+    ) -> Result<(), libsignal_protocol::SignalProtocolError> {
         InMemorySessionStore::store_session(self, address, record);
         Ok(())
     }
@@ -116,7 +130,9 @@ impl InMemoryIdentityKeyStore {
     }
 
     pub fn save_identity(&self, address: &ProtocolAddress, identity: &IdentityKey) {
-        self.known_identities.write().insert(address.name().to_string(), identity.clone());
+        self.known_identities
+            .write()
+            .insert(address.name().to_string(), identity.clone());
     }
 
     pub fn get_identity(&self, name: &str) -> Option<IdentityKey> {
@@ -137,15 +153,27 @@ impl InMemoryIdentityKeyStore {
         let ikp = guard.as_ref()?;
         let identity_key = ikp.identity_key().serialize().to_vec();
         let private_key = ikp.private_key().serialize().to_vec();
-        let known_identities = self.known_identities.read().iter()
+        let known_identities = self
+            .known_identities
+            .read()
+            .iter()
             .map(|(k, v)| (k.clone(), v.serialize().to_vec()))
             .collect();
         Some((registration_id, identity_key, private_key, known_identities))
     }
 
-    pub fn load(&self, registration_id: u32, identity_key_bytes: Vec<u8>, private_key_bytes: Vec<u8>, known_identities_data: Vec<(String, Vec<u8>)>) {
+    pub fn load(
+        &self,
+        registration_id: u32,
+        identity_key_bytes: Vec<u8>,
+        private_key_bytes: Vec<u8>,
+        known_identities_data: Vec<(String, Vec<u8>)>,
+    ) {
         *self.registration_id.write() = Some(registration_id);
-        if let (Ok(ik), Ok(pk)) = (IdentityKey::decode(&identity_key_bytes), PrivateKey::deserialize(&private_key_bytes)) {
+        if let (Ok(ik), Ok(pk)) = (
+            IdentityKey::decode(&identity_key_bytes),
+            PrivateKey::deserialize(&private_key_bytes),
+        ) {
             *self.identity_key_pair.write() = Some(IdentityKeyPair::new(ik, pk));
         } else {
             log::warn!("[InMemoryIdentityKeyStore] Failed to decode identity key pair");
@@ -167,7 +195,9 @@ impl Default for InMemoryIdentityKeyStore {
 
 #[async_trait(?Send)]
 impl libsignal_protocol::IdentityKeyStore for InMemoryIdentityKeyStore {
-    async fn get_identity_key_pair(&self) -> Result<IdentityKeyPair, libsignal_protocol::SignalProtocolError> {
+    async fn get_identity_key_pair(
+        &self,
+    ) -> Result<IdentityKeyPair, libsignal_protocol::SignalProtocolError> {
         self.get_identity_key_pair()
             .ok_or(libsignal_protocol::SignalProtocolError::InvalidState(
                 "IdentityKeyStore",
@@ -175,18 +205,25 @@ impl libsignal_protocol::IdentityKeyStore for InMemoryIdentityKeyStore {
             ))
     }
 
-    async fn get_local_registration_id(&self) -> Result<u32, libsignal_protocol::SignalProtocolError> {
-        self.get_local_registration_id()
-            .ok_or(libsignal_protocol::SignalProtocolError::InvalidState(
+    async fn get_local_registration_id(
+        &self,
+    ) -> Result<u32, libsignal_protocol::SignalProtocolError> {
+        self.get_local_registration_id().ok_or(
+            libsignal_protocol::SignalProtocolError::InvalidState(
                 "IdentityKeyStore",
                 "No registration ID".to_string(),
-            ))
+            ),
+        )
     }
 
-    async fn save_identity(&mut self, address: &ProtocolAddress, identity: &IdentityKey) -> Result<libsignal_protocol::IdentityChange, libsignal_protocol::SignalProtocolError> {
+    async fn save_identity(
+        &mut self,
+        address: &ProtocolAddress,
+        identity: &IdentityKey,
+    ) -> Result<libsignal_protocol::IdentityChange, libsignal_protocol::SignalProtocolError> {
         let existing = self.known_identities.read().get(address.name()).cloned();
         InMemoryIdentityKeyStore::save_identity(self, address, identity);
-        
+
         let changed = existing.map_or(true, |known| &known != identity);
         Ok(libsignal_protocol::IdentityChange::from_changed(changed))
     }
@@ -201,7 +238,7 @@ impl libsignal_protocol::IdentityKeyStore for InMemoryIdentityKeyStore {
         if self.is_trusted(address.name()) {
             return Ok(true);
         }
-        
+
         // If no known identity then tofu
         let known = self.known_identities.read().get(address.name()).cloned();
         match known {
@@ -210,12 +247,13 @@ impl libsignal_protocol::IdentityKeyStore for InMemoryIdentityKeyStore {
         }
     }
 
-    async fn get_identity(&self, address: &ProtocolAddress) -> Result<Option<IdentityKey>, libsignal_protocol::SignalProtocolError> {
+    async fn get_identity(
+        &self,
+        address: &ProtocolAddress,
+    ) -> Result<Option<IdentityKey>, libsignal_protocol::SignalProtocolError> {
         Ok(InMemoryIdentityKeyStore::get_identity(self, address.name()))
     }
 }
-
-// Pre-Key Store
 
 /// In-memory pre-key store
 pub struct InMemoryPreKeyStore {
@@ -237,6 +275,14 @@ impl InMemoryPreKeyStore {
         self.pre_keys.read().get(&id).cloned()
     }
 
+    pub fn get_any_pre_key(&self) -> Option<(PreKeyId, PreKeyRecord)> {
+        let guard = self.pre_keys.read();
+        guard
+            .iter()
+            .next()
+            .map(|(id, record)| (*id, record.clone()))
+    }
+
     pub fn prekey_count(&self) -> u32 {
         self.pre_keys.read().len() as u32
     }
@@ -246,7 +292,9 @@ impl InMemoryPreKeyStore {
     }
 
     pub fn dump(&self) -> Vec<(u32, Vec<u8>)> {
-        self.pre_keys.read().iter()
+        self.pre_keys
+            .read()
+            .iter()
             .filter_map(|(k, v)| v.serialize().ok().map(|b| (u32::from(*k), b)))
             .collect()
     }
@@ -269,17 +317,27 @@ impl Default for InMemoryPreKeyStore {
 
 #[async_trait(?Send)]
 impl libsignal_protocol::PreKeyStore for InMemoryPreKeyStore {
-    async fn get_pre_key(&self, id: PreKeyId) -> Result<PreKeyRecord, libsignal_protocol::SignalProtocolError> {
+    async fn get_pre_key(
+        &self,
+        id: PreKeyId,
+    ) -> Result<PreKeyRecord, libsignal_protocol::SignalProtocolError> {
         InMemoryPreKeyStore::get_pre_key(self, id)
             .ok_or(libsignal_protocol::SignalProtocolError::InvalidPreKeyId)
     }
 
-    async fn save_pre_key(&mut self, id: PreKeyId, record: &PreKeyRecord) -> Result<(), libsignal_protocol::SignalProtocolError> {
+    async fn save_pre_key(
+        &mut self,
+        id: PreKeyId,
+        record: &PreKeyRecord,
+    ) -> Result<(), libsignal_protocol::SignalProtocolError> {
         InMemoryPreKeyStore::store_pre_key(self, id, record);
         Ok(())
     }
 
-    async fn remove_pre_key(&mut self, id: PreKeyId) -> Result<(), libsignal_protocol::SignalProtocolError> {
+    async fn remove_pre_key(
+        &mut self,
+        id: PreKeyId,
+    ) -> Result<(), libsignal_protocol::SignalProtocolError> {
         InMemoryPreKeyStore::remove_pre_key(self, id);
         Ok(())
     }
@@ -307,8 +365,18 @@ impl InMemorySignedPreKeyStore {
         self.signed_pre_keys.read().get(&id).cloned()
     }
 
+    pub fn get_any_signed_pre_key(&self) -> Option<(SignedPreKeyId, SignedPreKeyRecord)> {
+        let guard = self.signed_pre_keys.read();
+        guard
+            .iter()
+            .next()
+            .map(|(id, record)| (*id, record.clone()))
+    }
+
     pub fn dump(&self) -> Vec<(u32, Vec<u8>)> {
-        self.signed_pre_keys.read().iter()
+        self.signed_pre_keys
+            .read()
+            .iter()
             .filter_map(|(k, v)| v.serialize().ok().map(|b| (u32::from(*k), b)))
             .collect()
     }
@@ -331,18 +399,23 @@ impl Default for InMemorySignedPreKeyStore {
 
 #[async_trait(?Send)]
 impl libsignal_protocol::SignedPreKeyStore for InMemorySignedPreKeyStore {
-    async fn get_signed_pre_key(&self, id: SignedPreKeyId) -> Result<SignedPreKeyRecord, libsignal_protocol::SignalProtocolError> {
+    async fn get_signed_pre_key(
+        &self,
+        id: SignedPreKeyId,
+    ) -> Result<SignedPreKeyRecord, libsignal_protocol::SignalProtocolError> {
         InMemorySignedPreKeyStore::get_signed_pre_key(self, id)
             .ok_or(libsignal_protocol::SignalProtocolError::InvalidSignedPreKeyId)
     }
 
-    async fn save_signed_pre_key(&mut self, id: SignedPreKeyId, record: &SignedPreKeyRecord) -> Result<(), libsignal_protocol::SignalProtocolError> {
+    async fn save_signed_pre_key(
+        &mut self,
+        id: SignedPreKeyId,
+        record: &SignedPreKeyRecord,
+    ) -> Result<(), libsignal_protocol::SignalProtocolError> {
         InMemorySignedPreKeyStore::store_signed_pre_key(self, id, record);
         Ok(())
     }
 }
-
-// Kyber Pre-Key Store
 
 /// In-memory Kyber pre-key store
 pub struct InMemoryKyberPreKeyStore {
@@ -367,14 +440,24 @@ impl InMemoryKyberPreKeyStore {
         self.kyber_pre_keys.read().get(&id).cloned()
     }
 
+    pub fn get_any_kyber_pre_key(&self) -> Option<(KyberPreKeyId, KyberPreKeyRecord)> {
+        let guard = self.kyber_pre_keys.read();
+        guard
+            .iter()
+            .next()
+            .map(|(id, record)| (*id, record.clone()))
+    }
+
     #[allow(dead_code)]
     pub fn mark_kyber_pre_key_used(&self, id: KyberPreKeyId) {
         self.used_kyber_pre_keys.write().insert(id);
     }
 
     pub fn dump(&self) -> Vec<(u32, Vec<u8>)> {
-        self.kyber_pre_keys.read().iter()
-             .filter_map(|(k, v)| v.serialize().ok().map(|b| (u32::from(*k), b)))
+        self.kyber_pre_keys
+            .read()
+            .iter()
+            .filter_map(|(k, v)| v.serialize().ok().map(|b| (u32::from(*k), b)))
             .collect()
     }
 
@@ -396,17 +479,29 @@ impl Default for InMemoryKyberPreKeyStore {
 
 #[async_trait(?Send)]
 impl libsignal_protocol::KyberPreKeyStore for InMemoryKyberPreKeyStore {
-    async fn get_kyber_pre_key(&self, id: KyberPreKeyId) -> Result<KyberPreKeyRecord, libsignal_protocol::SignalProtocolError> {
+    async fn get_kyber_pre_key(
+        &self,
+        id: KyberPreKeyId,
+    ) -> Result<KyberPreKeyRecord, libsignal_protocol::SignalProtocolError> {
         InMemoryKyberPreKeyStore::get_kyber_pre_key(self, id)
             .ok_or(libsignal_protocol::SignalProtocolError::InvalidKyberPreKeyId)
     }
 
-    async fn save_kyber_pre_key(&mut self, id: KyberPreKeyId, record: &KyberPreKeyRecord) -> Result<(), libsignal_protocol::SignalProtocolError> {
+    async fn save_kyber_pre_key(
+        &mut self,
+        id: KyberPreKeyId,
+        record: &KyberPreKeyRecord,
+    ) -> Result<(), libsignal_protocol::SignalProtocolError> {
         InMemoryKyberPreKeyStore::store_kyber_pre_key(self, id, record);
         Ok(())
     }
 
-    async fn mark_kyber_pre_key_used(&mut self, _id: KyberPreKeyId, _signed_id: SignedPreKeyId, _public_key: &libsignal_protocol::PublicKey) -> Result<(), libsignal_protocol::SignalProtocolError> {
+    async fn mark_kyber_pre_key_used(
+        &mut self,
+        _id: KyberPreKeyId,
+        _signed_id: SignedPreKeyId,
+        _public_key: &libsignal_protocol::PublicKey,
+    ) -> Result<(), libsignal_protocol::SignalProtocolError> {
         Ok(())
     }
 }

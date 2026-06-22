@@ -50,7 +50,8 @@ export class PQSession {
     private state: 'pending' | 'handshaking' | 'established' | 'failed' = 'pending';
     private createdAt: number;
     private lastRotation: number;
-    private messageCount: number = 0;
+    private sendMessageCount: number = 0;
+    private receiveMessageCount: number = 0;
 
     // Keys
     private ownKeys: OwnKeys;
@@ -363,7 +364,7 @@ export class PQSession {
     }
 
     // Encrypt message
-    encrypt(plaintext: Uint8Array, aad?: Uint8Array): EncryptedFrame {
+    async encrypt(plaintext: Uint8Array, aad?: Uint8Array): Promise<EncryptedFrame> {
         if (this.state !== 'established' || !this.sendKey) {
             throw new Error('Session not established');
         }
@@ -372,12 +373,12 @@ export class PQSession {
 
         const sequence = this.sendSequence;
         this.sendSequence = this.sendSequence + BigInt(1);
-        this.messageCount++;
+        this.sendMessageCount++;
 
         const effectiveAad = aad || new Uint8Array(0);
         const nonce = this.deriveNonce(sequence);
 
-        const { ciphertext, tag } = PostQuantumAEAD.encrypt(
+        const { ciphertext, tag } = await PostQuantumAEAD.encryptAsync(
             plaintext,
             this.sendKey,
             effectiveAad,
@@ -388,7 +389,7 @@ export class PQSession {
     }
 
     // Decrypt message
-    decrypt(frame: EncryptedFrame, aad?: Uint8Array): Uint8Array {
+    async decrypt(frame: EncryptedFrame, aad?: Uint8Array): Promise<Uint8Array> {
         if (this.state !== 'established' || !this.receiveKey) {
             throw new Error('Session not established');
         }
@@ -402,7 +403,7 @@ export class PQSession {
         const effectiveAad = aad || new Uint8Array(0);
         const nonce = this.deriveNonce(frame.sequence);
 
-        const plaintext = PostQuantumAEAD.decrypt(
+        const plaintext = await PostQuantumAEAD.decryptAsync(
             frame.ciphertext,
             nonce,
             frame.tag,
@@ -411,7 +412,7 @@ export class PQSession {
         );
 
         this.updateReplayWindow(frame.sequence);
-        this.messageCount++;
+        this.receiveMessageCount++;
 
         return plaintext;
     }
@@ -429,7 +430,7 @@ export class PQSession {
         const now = Date.now();
         const age = now - this.lastRotation;
 
-        if (age >= NOISE_KEY_ROTATION_INTERVAL_MS || this.messageCount >= NOISE_MAX_MESSAGES_PER_SESSION) {
+        if (age >= NOISE_KEY_ROTATION_INTERVAL_MS || this.sendMessageCount + this.receiveMessageCount >= NOISE_MAX_MESSAGES_PER_SESSION) {
             this.rotateKeys();
         }
     }
@@ -461,7 +462,8 @@ export class PQSession {
         this.sendKey = newSendKey;
         this.receiveKey = newReceiveKey;
         this.lastRotation = Date.now();
-        this.messageCount = 0;
+        this.sendMessageCount = 0;
+        this.receiveMessageCount = 0;
     }
 
     // Validate sequence number
@@ -540,7 +542,7 @@ export class PQSession {
             role: this.role,
             createdAt: this.createdAt,
             lastRotation: this.lastRotation,
-            messageCount: this.messageCount
+            messageCount: this.sendMessageCount + this.receiveMessageCount
         };
     }
 

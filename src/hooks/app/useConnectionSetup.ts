@@ -2,7 +2,6 @@ import { useEffect, useRef } from 'react';
 import { SecurityAuditLogger } from '../../lib/cryptography/audit-logger';
 import { SignalType } from '../../lib/types/signal-types';
 import { syncEncryptedStorage } from '../../lib/database/encrypted-storage';
-import { retrieveAuthTokens } from '../../lib/signals/signals';
 import websocketClient from '../../lib/websocket/websocket';
 import { storage } from '../../lib/tauri-bindings';
 
@@ -44,17 +43,12 @@ export function useConnectionSetup({
 
         const hasEncryptedAuth = Database.secureDBRef.current !== null;
         let storedUsername: string | null = null;
-        let hasStoredTokens = false;
         try {
           storedUsername = await storage.get('last_authenticated_username');
         } catch { }
-        try {
-          const tokens = await retrieveAuthTokens();
-          hasStoredTokens = !!(tokens?.accessToken && tokens?.refreshToken);
-        } catch { }
 
         const canRecover = (
-          (hasEncryptedAuth || !!storedUsername || hasStoredTokens) &&
+          (hasEncryptedAuth || !!storedUsername) &&
           !Authentication.isLoggedIn &&
           !Authentication.isRegistrationMode &&
           !Authentication.showPassphrasePrompt &&

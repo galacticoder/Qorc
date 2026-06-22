@@ -3,12 +3,20 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { Shield, RotateCw } from 'lucide-react';
+import { cn } from '@/lib/utils/shared-utils';
 import { torNetworkManager } from '@/lib/transport/tor-network';
 import { TorConnectionStats } from '@/lib/types/tor-types';
 
-export function TorIndicator() {
+interface TorIndicatorProps {
+  readonly variant?: 'default' | 'login' | 'signup';
+}
+
+export function TorIndicator({ variant = 'default' }: TorIndicatorProps) {
   const [stats, setStats] = useState<TorConnectionStats>(torNetworkManager.getStats());
   const [isRotating, setIsRotating] = useState(false);
+  const authPrefix = variant === 'login' || variant === 'signup' ? variant : null;
+  const isSupported = torNetworkManager.isSupported();
+  const isConnected = isSupported && stats.isConnected;
 
   useEffect(() => {
     let mounted = true;
@@ -53,26 +61,47 @@ export function TorIndicator() {
     return `${hours}h ago`;
   };
 
-  if (!torNetworkManager.isSupported()) {
+  if (!isSupported && !authPrefix) {
     return null;
   }
 
   const formattedLatency = stats.averageLatency ? `${Math.round(stats.averageLatency)} ms` : 'N/A';
+  const statusLabel = !isSupported
+    ? 'Unavailable'
+    : isConnected
+      ? 'Connected'
+      : stats.bootstrapProgress && stats.bootstrapProgress < 100
+        ? `Bootstrapping ${stats.bootstrapProgress}%`
+        : 'Disconnected';
 
   return (
     <Popover>
       <PopoverTrigger asChild>
-        <Button variant="ghost" size="sm" className="h-8 px-2 select-none">
-          <Badge
-            variant={stats.isConnected ? 'default' : 'secondary'}
-            className={`flex items-center gap-1 ${stats.isConnected ? 'bg-green-600 hover:bg-[#3b8e3f]' : 'bg-gray-600 hover:bg-[#657389]'}`}
-          >
-            <Shield className="h-3 w-3" />
-            <span className="hidden sm:inline">Tor</span>
-          </Badge>
+        <Button
+          variant="ghost"
+          size="sm"
+          className={cn(authPrefix ? `${authPrefix}-screen-tor` : "qor-tor-trigger", !isConnected && "is-off")}
+          aria-label="Tor status"
+        >
+          {authPrefix ? (
+            <>
+              <Shield aria-hidden="true" />
+              <span>Tor</span>
+            </>
+          ) : (
+          <span className={cn("qor-tor-badge", !isConnected && "is-off")}>
+            <Shield className="h-3 w-3" aria-hidden="true" />
+            <span>Tor</span>
+          </span>
+          )}
         </Button>
       </PopoverTrigger>
-      <PopoverContent className="w-80 select-none" align="end">
+      <PopoverContent
+        className="qor-tor-popover w-80 select-none"
+        side="bottom"
+        align={authPrefix ? "end" : "start"}
+        sideOffset={8}
+      >
         <div className="space-y-4">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2">
@@ -80,10 +109,10 @@ export function TorIndicator() {
               <span className="font-semibold">Tor Network</span>
             </div>
             <Badge 
-              variant={stats.isConnected ? 'default' : 'secondary'} 
-              className={stats.isConnected ? 'bg-green-600 hover:bg-[#3b8e3f]' : 'bg-gray-600 hover:bg-[#657389]'}
+              variant={isConnected ? 'default' : 'secondary'} 
+              className={isConnected ? 'bg-green-600 hover:bg-[#3b8e3f]' : 'bg-gray-600 hover:bg-[#657389]'}
             >
-              {stats.isConnected ? 'Connected' : (stats.bootstrapProgress && stats.bootstrapProgress < 100 ? `Bootstrapping ${stats.bootstrapProgress}%` : 'Disconnected')}
+              {statusLabel}
             </Badge>
           </div>
 
@@ -106,7 +135,7 @@ export function TorIndicator() {
             </div>
           </div>
 
-          {stats.isConnected && (
+          {isConnected && (
             <Button
               onClick={handleRotateCircuit}
               disabled={isRotating}

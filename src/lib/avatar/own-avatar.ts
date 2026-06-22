@@ -81,6 +81,13 @@ export function getOwnAvatarHash(state: AvatarSystemState): string | null {
     return state.ownAvatar?.hash || null;
 }
 
+// Get own profile version
+export function getOwnProfileVersion(state: AvatarSystemState): number {
+    const avatarUpdatedAt = state.ownAvatar?.updatedAt || 0;
+    const settingsUpdatedAt = state.settings?.lastUpdated || 0;
+    return Math.max(avatarUpdatedAt, settingsUpdatedAt);
+}
+
 // Check if own avatar is default
 export function isOwnAvatarDefault(state: AvatarSystemState): boolean {
     return !!state.ownAvatar?.isDefault;

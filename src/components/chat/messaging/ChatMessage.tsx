@@ -73,7 +73,7 @@ const parseSystemMessage = (content: string, message: any): { label: string; act
   }
 };
 
-export const ChatMessage = React.memo<ExtendedChatMessageProps>(({ message, smartReceipt, onReply, previousMessage, onDelete, onEdit, onReact, onReplyClick, getDisplayUsername, currentUsername, secureDB }) => {
+export const ChatMessage = React.memo<ExtendedChatMessageProps>(({ message, smartReceipt, onReply, previousMessage, onDelete, onEdit, onReact, onReplyClick, getDisplayUsername: _getDisplayUsername, currentUsername, secureDB }) => {
   const { content, sender, timestamp, isCurrentUser, isSystemMessage, isDeleted, type } = message;
   const effectiveReceipt = smartReceipt;
 
@@ -104,6 +104,7 @@ export const ChatMessage = React.memo<ExtendedChatMessageProps>(({ message, smar
   const pickerOpen = isPickerOpen(messageTriggerId);
 
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null);
+  const [isContentRendered, setIsContentRendered] = useState(false);
 
   const { isUrlOnly, urls } = useMemo(() => {
     const urlOnly = LinkExtractor.isUrlOnlyMessage(content);
@@ -253,7 +254,7 @@ export const ChatMessage = React.memo<ExtendedChatMessageProps>(({ message, smar
         safeIsCurrentUser ? "flex-row-reverse" : "flex-row"
       )}
       style={{
-        marginBottom: isGrouped ? 'var(--spacing-xs)' : 'var(--spacing-md)'
+        marginBottom: isGrouped ? 'var(--spacing-xxs)' : 'var(--spacing-sm)'
       }}
     >
       <div className="flex-shrink-0 w-10">
@@ -357,102 +358,146 @@ export const ChatMessage = React.memo<ExtendedChatMessageProps>(({ message, smar
           </details>
         )}
 
-        {!isUrlOnly && !isSystemMessage && !isDeleted && urls.length > 0 && type !== SignalType.FILE_MESSAGE && type !== SignalType.FILE && (
-          <div
-            className="mb-3 w-full flex self-stretch"
-            style={{
-              justifyContent: safeIsCurrentUser ? 'flex-end' : 'flex-start',
-              alignSelf: safeIsCurrentUser ? 'flex-end' : 'flex-start',
-              maxWidth: 'min(var(--message-bubble-max-width), 320px)',
-              width: '100%',
-              flex: '0 1 auto'
-            }}
-          >
-            <LinkifyWithPreviews
-              options={{ rel: "noopener noreferrer" }}
-              showPreviews={true}
-              isCurrentUser={safeIsCurrentUser}
-              previewsOnly={true}
-              urls={urls}
+        {/* Message body container (bubbles, previews, etc) */}
+        <div
+          style={{
+            visibility: isContentRendered ? 'visible' : 'hidden',
+            width: '100%',
+            display: 'contents'
+          }}
+        >
+          {message.replyTo && (
+            <div
+              className="mb-1 p-3 rounded text-sm max-w-full select-none cursor-pointer hover:opacity-90 transition-opacity relative overflow-hidden"
+              style={{
+                backgroundColor: 'hsl(var(--secondary))',
+                borderLeft: `4px solid ${safeIsCurrentUser ? 'hsl(var(--primary-foreground))' : 'hsl(var(--primary))'}`,
+              }}
+              role="note"
+              aria-label={`Reply to ${displayReplyToSender}`}
+              onClick={() => onReplyClick?.(message.replyTo!.id)}
             >
-              {content}
-            </LinkifyWithPreviews>
-          </div>
-        )}
-
-        {/* Message bubble */}
-        <div className={cn("flex items-end gap-2", safeIsCurrentUser ? "flex-row-reverse" : "flex-row")}>
-          {/* Render file content or text content */}
-          {isFileMessageType ? (
-            <div className="relative" ref={bubbleRef} onContextMenu={handleContextMenu}>
-              {isVoiceNote ? (
-                <VoiceMessage
-                  audioUrl={typeof content === 'string' ? content : ''}
-                  timestamp={timestamp}
-                  isCurrentUser={safeIsCurrentUser}
-                  filename={message.filename}
-                  originalBase64Data={message.originalBase64Data}
-                  mimeType={message.mimeType}
-                  messageId={message.id}
-                  secureDB={secureDB}
-                />
-              ) : (
-                <FileContent message={message} isCurrentUser={safeIsCurrentUser} secureDB={secureDB} />
-              )}
-            </div>
-          ) : (() => {
-            const showPreviews = !isSystemMessage && !isDeleted;
-
-            if (isUrlOnly && showPreviews) {
-              return (
-                <div
-                  className="relative self-start w-full flex"
-                  style={{
-                    alignSelf: safeIsCurrentUser ? 'flex-end' : 'flex-start',
-                    maxWidth: 'min(var(--message-bubble-max-width), 320px)',
-                    width: '100%',
-                    flex: '0 1 auto',
-                    justifyContent: safeIsCurrentUser ? 'flex-end' : 'flex-start'
-                  }}
-                  ref={bubbleRef}
+              <div className="flex items-center gap-2 mb-0.5">
+                <span className="font-medium text-xs text-foreground/80">{displayReplyToSender}</span>
+              </div>
+              <div className="text-xs text-muted-foreground truncate opacity-90">
+                <SecureCanvasText
+                  messageId={message.replyTo.secureContentId || message.replyTo.id}
+                  maxWidth={250}
+                  fontSize={12}
+                  color="inherit"
                   onContextMenu={handleContextMenu}
-                >
-                  <LinkifyWithPreviews
-                    options={{ rel: "noopener noreferrer" }}
-                    showPreviews={true}
+                />
+              </div>
+            </div>
+          )}
+
+          {!isUrlOnly && !isSystemMessage && !isDeleted && urls.length > 0 && type !== SignalType.FILE_MESSAGE && type !== SignalType.FILE && (
+            <div
+              className="mb-3 w-full flex self-stretch"
+              style={{
+                justifyContent: safeIsCurrentUser ? 'flex-end' : 'flex-start',
+                alignSelf: safeIsCurrentUser ? 'flex-end' : 'flex-start',
+                maxWidth: 'min(var(--message-bubble-max-width), 320px)',
+                width: '100%',
+                flex: '0 1 auto'
+              }}
+            >
+              <LinkifyWithPreviews
+                options={{ rel: "noopener noreferrer" }}
+                showPreviews={true}
+                isCurrentUser={safeIsCurrentUser}
+                previewsOnly={true}
+                urls={urls}
+                onRendered={() => setIsContentRendered(true)}
+              >
+                {content}
+              </LinkifyWithPreviews>
+            </div>
+          )}
+
+          {/* Message bubble */}
+          <div className={cn("flex items-end gap-2", safeIsCurrentUser ? "flex-row-reverse" : "flex-row")}>
+            {/* Render file content or text content */}
+            {isFileMessageType ? (
+              <div className="relative" ref={bubbleRef} onContextMenu={handleContextMenu}>
+                {isVoiceNote ? (
+                  <VoiceMessage
+                    audioUrl={typeof content === 'string' ? content : ''}
+                    timestamp={timestamp}
                     isCurrentUser={safeIsCurrentUser}
-                    urls={urls}
+                    filename={message.filename}
+                    originalBase64Data={message.originalBase64Data}
+                    mimeType={message.mimeType}
+                    messageId={message.id}
+                    secureDB={secureDB}
+                    onRendered={() => setIsContentRendered(true)}
+                  />
+                ) : (
+                  <FileContent
+                    message={message}
+                    isCurrentUser={safeIsCurrentUser}
+                    secureDB={secureDB}
+                    onRendered={() => setIsContentRendered(true)}
+                  />
+                )}
+              </div>
+            ) : (() => {
+              const showPreviews = !isSystemMessage && !isDeleted;
+
+              if (isUrlOnly && showPreviews) {
+                return (
+                  <div
+                    className="relative self-start w-full flex"
+                    style={{
+                      alignSelf: safeIsCurrentUser ? 'flex-end' : 'flex-start',
+                      maxWidth: 'min(var(--message-bubble-max-width), 320px)',
+                      width: '100%',
+                      flex: '0 1 auto',
+                      justifyContent: safeIsCurrentUser ? 'flex-end' : 'flex-start'
+                    }}
+                    ref={bubbleRef}
+                    onContextMenu={handleContextMenu}
                   >
-                    {content}
-                  </LinkifyWithPreviews>
+                    <LinkifyWithPreviews
+                      options={{ rel: "noopener noreferrer" }}
+                      showPreviews={true}
+                      isCurrentUser={safeIsCurrentUser}
+                      urls={urls}
+                      onRendered={() => setIsContentRendered(true)}
+                    >
+                      {content}
+                    </LinkifyWithPreviews>
+                  </div>
+                );
+              }
+
+              return (
+                <div className="relative max-w-full" ref={bubbleRef}>
+                  <div
+                    className="px-4 py-3 text-sm transition-opacity duration-200"
+                    style={{
+                      backgroundColor: safeIsCurrentUser ? 'var(--color-accent-primary)' : 'var(--chat-bubble-received-text-bg, var(--chat-bubble-received-bg))',
+                      borderRadius: 'var(--message-bubble-radius)',
+                      minWidth: '3rem',
+                      maxWidth: '100%'
+                    }}
+                    onContextMenu={handleContextMenu}
+                  >
+                    <SecureCanvasText
+                      messageId={message.secureContentId || message.id}
+                      maxWidth={350}
+                      fontSize={14}
+                      color="var(--color-on-accent)"
+                      isCurrentUser={safeIsCurrentUser}
+                      onRendered={() => setIsContentRendered(true)}
+                      onContextMenu={handleContextMenu}
+                    />
+                  </div>
                 </div>
               );
-            }
-
-            return (
-              <div className="relative max-w-full" ref={bubbleRef}>
-                <div
-                  className="px-4 py-3 text-sm"
-                  style={{
-                    backgroundColor: safeIsCurrentUser ? 'var(--color-accent-primary)' : 'var(--chat-bubble-received-bg)',
-                    borderRadius: 'var(--message-bubble-radius)',
-                    minWidth: '3rem',
-                    maxWidth: '100%'
-                  }}
-                  onContextMenu={handleContextMenu}
-                >
-                  <SecureCanvasText
-                    messageId={message.secureContentId || message.id}
-                    maxWidth={350}
-                    fontSize={14}
-                    color={safeIsCurrentUser ? '#ffffff' : '#e5e5e5'}
-                    isCurrentUser={safeIsCurrentUser}
-                    onContextMenu={handleContextMenu}
-                  />
-                </div>
-              </div>
-            );
-          })()}
+            })()}
+          </div>
         </div>
 
         <div

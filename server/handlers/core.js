@@ -2,26 +2,17 @@
  * Handler Core
  */
 
+import crypto from 'crypto';
 import { SignalType } from '../signals.js';
 import { CryptoUtils } from '../crypto/unified-crypto.js';
-import { MessageDatabase, UserDatabase, BlockingDatabase } from '../database/database.js';
+import { UserDatabase, BlockingDatabase } from '../database/database.js';
 import { logEvent, logError, logDeliveryEvent } from '../security/logging.js';
 import { getPQSession } from '../session/pq-session-storage.js';
 import { sendPQEncryptedResponse, sendSecureMessage, createPQResponseSender } from '../messaging/pq-envelope-handler.js';
-import { handleBundlePublish, handleBundleFailure } from '../messaging/libsignal-handler.js';
 import { rateLimitMiddleware } from '../rate-limiting/rate-limit-middleware.js';
 import { logger as cryptoLogger } from '../crypto/crypto-logger.js';
-import crypto from 'crypto';
-import { routeToInbox } from '../routing/blind-router.js';
 import { SealedSender } from '../routing/sealed-sender.js';
 import { TimingProtection } from '../routing/timing-protection.js';
-
-// Anonymize identifiers in logs
-const logSalt = crypto.randomBytes(16).toString('hex');
-export function anonId(id) {
-  if (!id) return '[none]';
-  return crypto.createHash('blake2b512').update(`${logSalt}:${id}`).digest('hex').slice(0, 8);
-}
 
 // Key length constants
 export const KYBER_PUBLIC_KEY_LENGTH = 1568;
@@ -48,11 +39,17 @@ export function sanitizeHybridKeysServer(keys) {
   return out;
 }
 
-// Re-export commonly used modules
+export function hasAccountAuthentication(ws, state = {}) {
+  return !!state?.hasAuthenticated || !!ws?._authenticated || !!ws?._hasAuthenticated;
+}
+
+export function hasServerOrAccountAuthentication(ws, state = {}) {
+  return hasAccountAuthentication(ws, state) || !!state?.hasServerAuth || !!ws?._hasServerAuth;
+}
+
 export {
   SignalType,
   CryptoUtils,
-  MessageDatabase,
   UserDatabase,
   BlockingDatabase,
   logEvent,
@@ -62,12 +59,9 @@ export {
   sendPQEncryptedResponse,
   sendSecureMessage,
   createPQResponseSender,
-  handleBundlePublish,
-  handleBundleFailure,
   rateLimitMiddleware,
   cryptoLogger,
   crypto,
-  routeToInbox,
   SealedSender,
   TimingProtection
 };

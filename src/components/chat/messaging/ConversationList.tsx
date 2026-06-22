@@ -1,9 +1,10 @@
 import React, { memo, useMemo, useEffect, useState, useCallback } from "react";
+import { motion, AnimatePresence } from "framer-motion";
 import { cn } from "../../../lib/utils/shared-utils";
 import { ScrollArea } from "../../ui/scroll-area";
 import { Button } from "../../ui/button";
-import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from "../../ui/dialog";
-import { Trash2, Search, Phone, Video, Loader2 } from "lucide-react";
+import { Dialog, DialogContent, DialogTitle, DialogDescription } from "../../ui/dialog";
+import { Trash2, Search, Phone, Video, Loader2, Pin, PinOff } from "lucide-react";
 import { Input } from "../../ui/input";
 import { toast } from "sonner";
 import { UserAvatar } from "../../ui/UserAvatar";
@@ -25,6 +26,8 @@ export interface Conversation {
   readonly unreadCount?: number;
   readonly displayName?: string;
   readonly secureContentId?: string;
+  readonly isPinned?: boolean;
+  readonly pinnedAt?: number;
 }
 
 interface ConversationListProps {
@@ -35,24 +38,12 @@ interface ConversationListProps {
   readonly onAddConversation?: (username: string) => Promise<void>;
   readonly getDisplayUsername?: (username: string) => Promise<string>;
   readonly showNewChatInput?: boolean;
+  readonly onNewChatOpenChange?: (open: boolean) => void;
+  readonly onTogglePin?: (username: string) => void;
 }
 
 // Call status type
 type CallStatus = { status: 'ringing' | 'connecting' | 'connected'; isVideo: boolean } | null;
-
-// Anonymize username for display
-const anonymize = (value: string): string => {
-  if (typeof value !== 'string' || value.length === 0) {
-    return 'anon:user';
-  }
-  try {
-    const bytes = new TextEncoder().encode(value);
-    const hex = Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('');
-    return `anon:${hex.slice(0, 12)}`;
-  } catch {
-    return 'anon:user';
-  }
-};
 
 interface ConversationItemProps {
   readonly conversation: Conversation;
@@ -61,6 +52,7 @@ interface ConversationItemProps {
   readonly onRemove?: (username: string) => void;
   readonly callStatus?: CallStatus;
   readonly getDisplayUsername?: (username: string) => Promise<string>;
+  readonly onTogglePin?: (username: string) => void;
 }
 
 const ConversationItem = memo<ConversationItemProps>(({
@@ -69,6 +61,7 @@ const ConversationItem = memo<ConversationItemProps>(({
   onSelect,
   onRemove,
   callStatus,
+  onTogglePin,
 }) => {
   const displayName = useDisplayUsername({ username: conversation.username });
 
@@ -85,26 +78,27 @@ const ConversationItem = memo<ConversationItemProps>(({
     }
   }, [onRemove, conversation.username]);
 
+  const handleTogglePin = useCallback((e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (onTogglePin) {
+      onTogglePin(conversation.username);
+    }
+  }, [onTogglePin, conversation.username]);
+
   return (
-    <div
+    <motion.div
+      layout
+      initial={{ opacity: 0, y: 10 }}
+      animate={{ opacity: 1, y: 0 }}
+      exit={{ opacity: 0, scale: 0.95 }}
+      transition={{ 
+        layout: { type: "spring", stiffness: 600, damping: 45, mass: 1 },
+        opacity: { duration: 0.2 }
+      }}
       className={cn(
-        "flex items-center gap-3 p-3 cursor-pointer transition-all duration-200 group relative",
-        "hover:bg-opacity-80 min-w-0 w-full max-w-full overflow-hidden"
+        "qor-conversation-item group",
+        isSelected && "is-selected"
       )}
-      style={{
-        backgroundColor: isSelected ? 'var(--color-accent-primary)' : 'transparent',
-        borderRadius: 'var(--radius-medium)'
-      }}
-      onMouseEnter={(e) => {
-        if (!isSelected) {
-          e.currentTarget.style.backgroundColor = 'rgba(59, 130, 246, 0.05)';
-        }
-      }}
-      onMouseLeave={(e) => {
-        if (!isSelected) {
-          e.currentTarget.style.backgroundColor = 'transparent';
-        }
-      }}
       onClick={handleClick}
       role="button"
       tabIndex={0}
@@ -120,17 +114,16 @@ const ConversationItem = memo<ConversationItemProps>(({
       <UserAvatar
         username={conversation.username}
         size="md"
-        className={isSelected ? 'opacity-80' : ''}
+        className={cn("qor-conversation-avatar", isSelected && 'opacity-80')}
       />
 
-      <div className="flex-1 min-w-0 w-0">
-        <div className="flex items-center gap-2 mb-1 min-w-0 w-full">
+      <div className="qor-conversation-main">
+        <div className="qor-conversation-title-row">
           <span
             className={cn(
-              "text-sm truncate flex-1 min-w-0 block select-none",
+              "qor-conversation-name",
               !isSelected && (conversation.unreadCount ?? 0) > 0 ? "font-bold" : "font-medium"
             )}
-            style={{ color: isSelected ? 'white' : 'var(--color-text-primary)' }}
             title={displayName}
           >
             {displayName}
@@ -138,10 +131,9 @@ const ConversationItem = memo<ConversationItemProps>(({
           {conversation.lastMessageTime && (
             <span
               className={cn(
-                "text-xs flex-shrink-0 select-none",
+                "qor-conversation-time",
                 !isSelected && (conversation.unreadCount ?? 0) > 0 && "font-bold"
               )}
-              style={{ color: isSelected ? 'rgba(255, 255, 255, 0.7)' : 'var(--color-text-secondary)' }}
             >
               {formatRelativeAge(conversation.lastMessageTime)}
             </span>
@@ -150,13 +142,12 @@ const ConversationItem = memo<ConversationItemProps>(({
 
         {/* Show unread indicator if there are unread messages and conversation is not selected */}
         {!isSelected && (conversation.unreadCount ?? 0) > 0 ? (
-          <div className="text-xs pr-2 select-none">
+          <div className="qor-conversation-preview">
             <UnreadIndicator count={conversation.unreadCount ?? 0} isSelected={isSelected} />
           </div>
         ) : (conversation.lastMessage || conversation.secureContentId) ? (
           <div
-            className="text-xs truncate pr-2 select-none"
-            style={{ color: isSelected ? 'rgba(255, 255, 255, 0.8)' : 'var(--color-text-secondary)' }}
+            className="qor-conversation-preview"
             title={conversation.lastMessage}
           >
             <SecureCanvasText
@@ -169,8 +160,8 @@ const ConversationItem = memo<ConversationItemProps>(({
         ) : null}
       </div>
 
-      {(callStatus || onRemove) && (
-        <div className="absolute bottom-1 right-1 flex items-center gap-1">
+      {(callStatus || onRemove || onTogglePin) && (
+        <div className="qor-conversation-controls">
           {callStatus && (
             <div
               className={cn(
@@ -192,22 +183,27 @@ const ConversationItem = memo<ConversationItemProps>(({
             </div>
           )}
 
+          {onTogglePin && (
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={handleTogglePin}
+              className={cn(
+                "qor-conversation-tiny-btn",
+                conversation.isPinned ? "opacity-100" : "opacity-0 group-hover:opacity-100"
+              )}
+              aria-label={`${conversation.isPinned ? 'Unpin' : 'Pin'} conversation with ${displayName}`}
+            >
+              {conversation.isPinned ? <PinOff className="h-3 w-3" /> : <Pin className="h-3 w-3" />}
+            </Button>
+          )}
+
           {onRemove && (
             <Button
               variant="ghost"
               size="sm"
               onClick={handleRemove}
-              className="opacity-0 group-hover:opacity-100 transition-opacity p-1 h-6 w-6"
-              style={{
-                backgroundColor: 'transparent',
-                color: 'var(--color-error)'
-              }}
-              onMouseEnter={(e) => {
-                e.currentTarget.style.backgroundColor = 'rgba(239, 68, 68, 0.1)';
-              }}
-              onMouseLeave={(e) => {
-                e.currentTarget.style.backgroundColor = 'transparent';
-              }}
+              className="qor-conversation-tiny-btn danger opacity-0 group-hover:opacity-100"
               aria-label={`Remove conversation with ${displayName}`}
             >
               <Trash2 className="h-3 w-3" />
@@ -215,7 +211,7 @@ const ConversationItem = memo<ConversationItemProps>(({
           )}
         </div>
       )}
-    </div>
+    </motion.div>
   );
 });
 
@@ -227,7 +223,9 @@ export const ConversationList = memo<ConversationListProps>(function Conversatio
   onRemoveConversation,
   onAddConversation,
   getDisplayUsername,
-  showNewChatInput = false
+  showNewChatInput = false,
+  onNewChatOpenChange,
+  onTogglePin
 }: ConversationListProps) {
   const [activePeer, setActivePeer] = useState<string | null>(null);
   const [activeStatus, setActiveStatus] = useState<CallStatus>(null);
@@ -265,12 +263,13 @@ export const ConversationList = memo<ConversationListProps>(function Conversatio
     try {
       await onAddConversation(newChatUsername.trim());
       setNewChatUsername("");
+      onNewChatOpenChange?.(false);
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Failed to add conversation");
     } finally {
       setIsAdding(false);
     }
-  }, [newChatUsername, onAddConversation]);
+  }, [newChatUsername, onAddConversation, onNewChatOpenChange]);
 
   const callStatusRateRef = React.useRef<{ windowStart: number; count: number }>({ windowStart: Date.now(), count: 0 });
 
@@ -316,7 +315,7 @@ export const ConversationList = memo<ConversationListProps>(function Conversatio
     return () => window.removeEventListener(EventType.UI_CALL_STATUS, handleCallStatus as EventListener);
   }, [handleCallStatus]);
 
-  const [refreshTick, setRefreshTick] = useState(0);
+  const [_refreshTick, setRefreshTick] = useState(0);
 
   useEffect(() => {
     const getRefreshInterval = (): number => {
@@ -353,84 +352,205 @@ export const ConversationList = memo<ConversationListProps>(function Conversatio
     return () => clearInterval(timer);
   }, [conversations]);
 
-  const displayUsername = useMemo(() => {
-    if (!conversationToDelete) return 'User';
-    return /^[a-f0-9]{32,}$/i.test(conversationToDelete) ? 'User' : conversationToDelete;
-  }, [conversationToDelete]);
+  const deleteConversationDisplayName = useDisplayUsername({ username: conversationToDelete || '' });
+  const displayUsername = deleteConversationDisplayName || conversationToDelete || 'User';
+
+  const { pinnedChats, unpinnedChats } = useMemo(() => {
+    const pinned: Conversation[] = [];
+    const unpinned: Conversation[] = [];
+
+    for (const c of conversations) {
+      if (c.isPinned) {
+        pinned.push(c);
+      } else {
+        unpinned.push(c);
+      }
+    }
+
+    pinned.sort((a, b) => (b.pinnedAt || 0) - (a.pinnedAt || 0));
+
+    return { pinnedChats: pinned, unpinnedChats: unpinned };
+  }, [conversations]);
+
+  const itemsToRender = useMemo(() => {
+    const result: ({ type: 'header'; label: string; id: string } | { type: 'conversation'; data: Conversation })[] = [];
+    
+    if (pinnedChats.length > 0) {
+      result.push({ type: 'header', label: 'PINNED CHATS', id: 'header-pinned' });
+      pinnedChats.forEach(c => result.push({ type: 'conversation', data: c }));
+    }
+    
+    if (unpinnedChats.length > 0) {
+      if (pinnedChats.length > 0) {
+        result.push({ type: 'header', label: 'CHATS', id: 'header-unpinned' });
+      }
+      unpinnedChats.forEach(c => result.push({ type: 'conversation', data: c }));
+    }
+    
+    return result;
+  }, [pinnedChats, unpinnedChats]);
+
+  const handleNewChatOpenChange = useCallback((open: boolean) => {
+    onNewChatOpenChange?.(open);
+    if (!open) {
+      setNewChatUsername("");
+    }
+  }, [onNewChatOpenChange]);
 
   return (
-    <div className="flex flex-col h-full">
-      {showNewChatInput && (
-        <div className="p-4 space-y-4">
-          <div className="relative">
-            {isAdding ? (
-              <Loader2 className="absolute left-2 top-2.5 h-4 w-4 text-muted-foreground animate-spin" />
-            ) : (
-              <Search className="absolute left-2 top-2.5 h-4 w-4 text-muted-foreground" />
-            )}
-            <Input
-              placeholder="Username..."
-              value={newChatUsername}
-              onChange={(e) => setNewChatUsername(e.target.value)}
-              className="pl-8 select-none"
-              disabled={isAdding}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter' && !isAdding) {
-                  handleAddChat();
-                }
-              }}
+    <div className="qor-conversation-list">
+      <Dialog open={showNewChatInput} onOpenChange={handleNewChatOpenChange}>
+        <DialogContent
+          className="qor-conversation-dialog"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="conversation-modal-title"
+          aria-describedby="conversation-modal-description"
+        >
+          <div className="qor-conversation-modal-head">
+            <div className="qor-conversation-modal-title">
+              <DialogTitle id="conversation-modal-title">Add conversation</DialogTitle>
+              <DialogDescription id="conversation-modal-description">Find a user, start a chat, or manage blocked users.</DialogDescription>
+            </div>
+            <button
+              type="button"
+              className="qor-conversation-close"
+              onClick={() => handleNewChatOpenChange(false)}
+              aria-label="Back to empty screen"
             />
           </div>
-        </div>
-      )}
 
-      <ScrollArea className="flex-1">
-        <div className="p-2">
-          {conversations.length === 0 ? (
-            <div
-              className="text-center text-xs py-8 select-none"
-              style={{ color: 'var(--color-text-secondary)' }}
-            >
-              No conversations yet
-            </div>
-          ) : (
-            <div className="space-y-1">
-              {conversations.map((conversation) => (
-                <ConversationItem
-                  key={conversation.id}
-                  conversation={conversation}
-                  isSelected={selectedConversation === conversation.username}
-                  onSelect={onSelectConversation}
-                  onRemove={handleRemoveClick}
-                  callStatus={conversation.username === activePeer ? activeStatus : null}
-                  getDisplayUsername={getDisplayUsername}
+          <div className="qor-conversation-modal-body">
+            <div className="qor-conversation-modal-controls">
+              <label className="qor-conversation-modal-search" aria-label="Search users">
+                {isAdding ? (
+                  <Loader2 className="animate-spin" aria-hidden="true" />
+                ) : (
+                  <Search aria-hidden="true" />
+                )}
+                <Input
+                  type="search"
+                  placeholder="Search username"
+                  value={newChatUsername}
+                  onChange={(e) => setNewChatUsername(e.target.value)}
+                  className="qor-conversation-search-input"
+                  disabled={isAdding}
+                  autoFocus
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' && !isAdding) {
+                      handleAddChat();
+                    }
+                  }}
                 />
-              ))}
+              </label>
             </div>
-          )}
+
+            <div className="conversation-empty qor-add-conversation-empty">
+              <div className="conversation-empty-copy">
+                <h2>No users found</h2>
+                <p>When a username is available, it will show here with the same chat, block, and call controls.</p>
+              </div>
+              <div className="conversation-empty-lines" aria-hidden="true">
+                {Array.from({ length: 9 }).map((_, index) => (
+                  <span key={index} />
+                ))}
+              </div>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {conversations.length === 0 ? (
+        <div className="qor-conversation-static">
+          <div className="qor-conversation-scroll-inner">
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              className="qor-conversation-empty"
+            >
+              <div>
+                <h3>No conversations yet</h3>
+              </div>
+              <div className="conversation-empty-lines qor-conversation-empty-lines" aria-hidden="true">
+                {Array.from({ length: 9 }).map((_, index) => (
+                  <span key={index} />
+                ))}
+              </div>
+            </motion.div>
+          </div>
         </div>
-      </ScrollArea>
+      ) : (
+        <ScrollArea className="qor-conversation-scroll">
+          <div className="qor-conversation-scroll-inner">
+            <div className="qor-conversation-items">
+              <AnimatePresence initial={false} mode="popLayout">
+                {itemsToRender.map((item) => {
+                  if (item.type === 'header') {
+                    return (
+                      <motion.div
+                        key={item.id}
+                        layout
+                        initial={{ opacity: 0 }}
+                        animate={{ opacity: 1 }}
+                        exit={{ opacity: 0 }}
+                        className="qor-conversation-section-label"
+                      >
+                        {item.label}
+                      </motion.div>
+                    );
+                  }
+                  
+                  const conversation = item.data;
+                  return (
+                    <ConversationItem
+                      key={conversation.id}
+                      conversation={conversation}
+                      isSelected={selectedConversation === conversation.username}
+                      onSelect={onSelectConversation}
+                      onRemove={handleRemoveClick}
+                      onTogglePin={onTogglePin}
+                      callStatus={conversation.username === activePeer ? activeStatus : null}
+                      getDisplayUsername={getDisplayUsername}
+                    />
+                  );
+                })}
+              </AnimatePresence>
+            </div>
+          </div>
+        </ScrollArea>
+      )}
 
       <Dialog open={showConfirmDialog} onOpenChange={setShowConfirmDialog}>
         <DialogContent
-          style={{ backgroundColor: 'var(--color-surface)', borderColor: 'var(--color-border)' }}
-          aria-describedby="dialog-description"
+          className="remove-dialog"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="remove-title"
+          aria-describedby="remove-description"
         >
-          <DialogHeader>
-            <DialogTitle className="text-foreground">Remove Conversation</DialogTitle>
-            <DialogDescription id="dialog-description" className="text-muted-foreground">
-              Are you sure you want to remove the conversation with {displayUsername}?
-              This action cannot be undone and will delete all message history.
+          <div className="dialog-head">
+            <div className="danger-mark" aria-hidden="true">
+              <svg viewBox="0 0 24 24">
+                <path d="M12 9v4m0 4h.01M10.3 3.9 2.6 17.2A2.4 2.4 0 0 0 4.7 21h14.6a2.4 2.4 0 0 0 2.1-3.8L13.7 3.9a2 2 0 0 0-3.4 0Z" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
+            </div>
+            <DialogTitle className="dialog-title" id="remove-title">Remove conversation?</DialogTitle>
+            <DialogDescription className="dialog-copy" id="remove-description">
+              This removes the conversation from this device. Messages with this user will no longer appear in your chat list.
             </DialogDescription>
-          </DialogHeader>
-          <DialogFooter>
-            <Button variant="outline" onClick={handleCancelRemove} aria-label="Cancel removal">
+          </div>
+          <div className="target-user">
+            <div className="avatar" aria-hidden="true" />
+            <div><strong>{displayUsername}</strong></div>
+          </div>
+          <div className="dialog-actions">
+            <button className="dialog-button" type="button" onClick={handleCancelRemove} aria-label="Cancel removal">
               Cancel
-            </Button>
-            <Button variant="destructive" onClick={handleConfirmRemove} aria-label="Confirm removal">
+            </button>
+            <button className="dialog-button remove" type="button" onClick={handleConfirmRemove} aria-label="Confirm removal">
               Remove
-            </Button>
-          </DialogFooter>
+            </button>
+          </div>
         </DialogContent>
       </Dialog>
     </div>

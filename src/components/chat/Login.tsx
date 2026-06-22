@@ -1,22 +1,19 @@
 import React, { useState, useEffect, useCallback } from "react";
-import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "../ui/card";
-import { Button } from "../ui/button";
-import { EncryptionIcon } from "./assets/icons";
-import { TorIndicator } from "../ui/TorIndicator";
 import { SignInForm } from "./Login/SignIn.tsx";
 import { SignUpForm } from "./Login/SignUp.tsx";
 import { ServerPasswordForm } from "./Login/ServerPassword.tsx";
+import { TorIndicator } from "../ui/TorIndicator";
 import { toast } from "sonner";
+import { system } from "../../lib/tauri-bindings";
 import { EventType } from "../../lib/types/event-types.ts";
+import { QorBrandLogo } from "../ui/QorBrandLogo";
 
-// Server public key bundle
 interface ServerKeys {
   readonly x25519PublicBase64: string;
   readonly kyberPublicBase64: string;
   readonly dilithiumPublicBase64: string;
 }
 
-// Server trust change request payload
 interface ServerTrustRequest {
   readonly newKeys: ServerKeys;
   readonly pinned: ServerKeys | null;
@@ -51,20 +48,21 @@ interface LoginProps {
   readonly setIsRegistrationMode?: (val: boolean) => void;
 }
 
+const TERMS_URL = "https://qor.chat/terms";
+const PRIVACY_URL = "https://qor.chat/privacy";
+
 const dispatchAuthEvent = (eventName: string, detail: Record<string, unknown>): void => {
   try {
     window.dispatchEvent(new CustomEvent(eventName, { detail }));
   } catch { }
 };
 
-// Truncate keys for display
 const truncateKey = (key: string, maxLength: number = 16): string => {
   if (typeof key !== 'string' || key.length === 0) return '';
   const safeLength = Math.min(maxLength, key.length);
   return key.slice(0, safeLength) + '...';
 };
 
-// Wrapper to animate height transitions
 const AnimatedHeightWrapper = ({ children, className }: { children: React.ReactNode; className?: string }) => {
   return (
     <div
@@ -82,13 +80,13 @@ const AnimatedHeightWrapper = ({ children, className }: { children: React.ReactN
   );
 };
 
-// Main login/register component
 export const Login = React.memo<LoginProps>(({
   onAccountSubmit,
   isGeneratingKeys,
   authStatus,
   error,
   accountAuthenticated,
+  isRegistrationMode,
   serverTrustRequest,
   onAcceptServerTrust,
   onRejectServerTrust,
@@ -101,9 +99,13 @@ export const Login = React.memo<LoginProps>(({
   pseudonym: _pseudonym = "",
 }) => {
   const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
-  const [mode, setMode] = useState<"login" | "register">("login");
+  const [mode, setMode] = useState<"login" | "register">(isRegistrationMode ? "register" : "login");
   const [isRateLimited, setIsRateLimited] = useState<boolean>(false);
   const [serverPassword, setServerPassword] = useState<string>("");
+
+  useEffect(() => {
+    setMode(isRegistrationMode ? "register" : "login");
+  }, [isRegistrationMode]);
 
   useEffect(() => {
     if (error) {
@@ -156,13 +158,12 @@ export const Login = React.memo<LoginProps>(({
     }
   }, [accountAuthenticated, isGeneratingKeys]);
 
-  // Track input changes for analytics
   const handleInputChange = useCallback((field: string, value: string): void => {
     dispatchAuthEvent(EventType.AUTH_UI_INPUT, { field, value });
   }, []);
 
-  // Toggle between login and register mode
-  const handleModeToggle = useCallback((): void => {
+  const handleModeToggle = useCallback((event: React.MouseEvent<HTMLAnchorElement>): void => {
+    event.preventDefault();
     setMode((prev) => {
       const newMode = prev === 'login' ? 'register' : 'login';
       setIsRegistrationMode?.(newMode === 'register');
@@ -170,104 +171,110 @@ export const Login = React.memo<LoginProps>(({
     });
   }, [setIsRegistrationMode]);
 
-  // Accept server trust change
+  const handleBackToSetup = useCallback((event: React.MouseEvent<HTMLAnchorElement>): void => {
+    event.preventDefault();
+    dispatchAuthEvent(EventType.AUTH_UI_BACK, { to: 'server' });
+  }, []);
+
+  const handleExternalLink = useCallback((event: React.MouseEvent<HTMLAnchorElement>, url: string): void => {
+    event.preventDefault();
+    void system.openExternal(url).catch(() => {
+      window.open(url, '_blank', 'noopener,noreferrer');
+    });
+  }, []);
+
   const handleAcceptTrust = useCallback(() => {
     onAcceptServerTrust?.();
   }, [onAcceptServerTrust]);
 
-  // Reject server trust change
   const handleRejectTrust = useCallback(() => {
     onRejectServerTrust?.();
   }, [onRejectServerTrust]);
 
-  return (
-    <div className="w-full max-w-md mx-auto select-none">
-      <Card className="w-full bg-card/30 border border-white/10 hover:border-primary/30 hover:bg-card/50 transition-all duration-500 backdrop-blur-md shadow-lg rounded-2xl overflow-hidden">
-        <CardHeader className="space-y-6 p-8 select-none">
-          <div className="flex flex-col sm:flex-row justify-between items-center sm:items-start gap-4">
-            <div className="flex-1 flex flex-col items-center gap-4 w-full">
-              <div className="w-16 h-16 rounded-full bg-primary/10 flex items-center justify-center" aria-hidden="true">
-                <EncryptionIcon className="h-8 w-8 text-primary" />
-              </div>
-              <div className="text-center space-y-2">
-                <CardTitle className="text-2xl select-none">
-                  {showPasswordPrompt ? "Server Access" : mode === "login" ? "Sign In" : "Sign Up"}
-                </CardTitle>
-                <CardDescription className="select-none">
-                  {showPasswordPrompt
-                    ? "Identify yourself to the server"
-                    : accountAuthenticated
-                      ? "Complete setup"
-                      : mode === "login"
-                        ? "Enter your credentials"
-                        : "Create your account"}
-                </CardDescription>
-              </div>
-            </div>
-            <div className="sm:absolute sm:top-8 sm:right-8">
-              <TorIndicator />
-            </div>
-          </div>
-        </CardHeader>
+  const isSignup = mode === "register" && !showPasswordPrompt;
+  const prefix = isSignup ? "signup" : "login";
+  const heading = showPasswordPrompt ? "Server access" : isSignup ? "Create account" : "Sign in";
+  const description = showPasswordPrompt
+    ? "Identify yourself to the server."
+    : isSignup
+      ? "Choose your username, password, and local encryption passphrase."
+      : "Use the account for this server and unlock your local encryption key.";
 
-        <CardContent className="space-y-6 p-8 pt-0 select-none transition-all duration-300 ease-in-out">
-          {/* Server Trust Request */}
+  return (
+    <section className={`screen screen-${prefix}`}>
+      <div className={`${prefix}-scene`}>
+        <div className={`${prefix}-screen-brand`} aria-label="Qor Chat">
+          <QorBrandLogo className={`${prefix}-brand-mark`} imageClassName={`${prefix}-brand-logo`} />
+          <span className={`${prefix}-brand-name`}>Qor Chat</span>
+        </div>
+
+        <TorIndicator variant={prefix} />
+
+        <a className={`${prefix}-back-setup`} href="setup.html" onClick={handleBackToSetup}>
+          Back to setup
+        </a>
+
+        <main className={`${prefix}-simple`} aria-label={isSignup ? "Create account" : "Sign in"}>
+          <header className={`${prefix}-simple-head`}>
+            <h1>{heading}</h1>
+            {!isSignup && !showPasswordPrompt && <p aria-hidden="true"></p>}
+            <p>{description}</p>
+          </header>
+
           {serverTrustRequest && (
-            <div className="p-6 rounded-lg bg-card/30 border border-primary/30 space-y-4 backdrop-blur-sm overflow-hidden transition-all duration-300 ease-in-out animate-in fade-in-0">
-              <div className="space-y-2">
-                <p className="font-semibold text-primary select-none">Server Keys Changed</p>
-                <p className="text-sm text-muted-foreground select-none">Review the new server keys before proceeding</p>
+            <div className="auth-simple-trust" role="status" aria-live="polite">
+              <div>
+                <p>Server keys changed</p>
+                <span>Review the new server keys before proceeding.</span>
               </div>
-              <div className="grid grid-cols-1 gap-2 text-xs font-mono bg-muted/30 p-3 rounded select-none">
+              <dl>
                 <div>
-                  <span className="text-muted-foreground">Old X25519:</span>{' '}
-                  <span>{truncateKey(serverTrustRequest.pinned?.x25519PublicBase64 || 'None')}</span>
+                  <dt>Old X25519</dt>
+                  <dd>{truncateKey(serverTrustRequest.pinned?.x25519PublicBase64 || 'None')}</dd>
                 </div>
                 <div>
-                  <span className="text-muted-foreground">New X25519:</span>{' '}
-                  <span className="text-primary">{truncateKey(serverTrustRequest.newKeys.x25519PublicBase64)}</span>
+                  <dt>New X25519</dt>
+                  <dd>{truncateKey(serverTrustRequest.newKeys.x25519PublicBase64)}</dd>
                 </div>
-              </div>
-              <div className="flex gap-2">
-                <Button
+              </dl>
+              <div className="auth-simple-trust-actions">
+                <button
+                  type="button"
                   onClick={handleAcceptTrust}
                   disabled={isSubmitting || isGeneratingKeys || isRateLimited}
-                  className="flex-1"
-                  size="sm"
                 >
-                  Trust Server
-                </Button>
-                <Button
+                  Trust server
+                </button>
+                <button
+                  type="button"
                   onClick={handleRejectTrust}
                   disabled={isSubmitting || isGeneratingKeys || isRateLimited}
-                  variant="outline"
-                  size="sm"
-                  className="flex-1"
                 >
                   Reject
-                </Button>
+                </button>
               </div>
             </div>
           )}
 
-          {/* Form Content */}
-          <AnimatedHeightWrapper className="w-full">
-            <div
-              key={`${accountAuthenticated}-${mode}`}
-              className="animate-in fade-in-0 slide-in-from-bottom-2 duration-300 delay-100"
-            >
+          <AnimatedHeightWrapper>
+            <div key={`${accountAuthenticated}-${mode}-${showPasswordPrompt}`}>
               {showPasswordPrompt ? (
                 <ServerPasswordForm
                   serverPassword={serverPassword}
                   setServerPassword={setServerPassword}
                   disabled={isSubmitting || isGeneratingKeys}
                   authStatus={authStatus}
-                  onSubmit={(e) => {
-                    e.preventDefault();
-                    handleServerPasswordSubmit(serverPassword);
+                  onSubmit={async (event) => {
+                    event.preventDefault();
+                    setIsSubmitting(true);
+                    try {
+                      await handleServerPasswordSubmit(serverPassword);
+                    } finally {
+                      setIsSubmitting(false);
+                    }
                   }}
                 />
-              ) : mode === "register" ? (
+              ) : isSignup ? (
                 <SignUpForm
                   onSubmit={handleAccountSubmit}
                   disabled={isSubmitting || isGeneratingKeys || !!serverTrustRequest || isRateLimited}
@@ -280,6 +287,7 @@ export const Login = React.memo<LoginProps>(({
                   onChangePassword={(v) => handleInputChange('password', v)}
                   onChangeConfirmPassword={(v) => handleInputChange('confirmPassword', v)}
                   onChangePassphrase={(v) => handleInputChange('passphrase', v)}
+                  onChangeConfirmPassphrase={(v) => handleInputChange('confirmPassphrase', v)}
                 />
               ) : (
                 <SignInForm
@@ -297,42 +305,33 @@ export const Login = React.memo<LoginProps>(({
               )}
             </div>
           </AnimatedHeightWrapper>
-        </CardContent>
 
-        <CardFooter className="flex flex-col gap-2 p-8 pt-0 select-none">
           {!accountAuthenticated && !showPasswordPrompt && (
-            <div className="text-sm text-center text-muted-foreground">
-              {mode === "login" ? (
-                <>
-                  Don't have an account?{" "}
-                  <button
-                    type="button"
-                    className="text-primary underline hover:no-underline disabled:opacity-50 disabled:cursor-not-allowed transition-all"
-                    onClick={handleModeToggle}
-                    disabled={isSubmitting || isGeneratingKeys || isRateLimited}
-                    aria-label="Switch to registration"
-                  >
-                    Sign Up
-                  </button>
-                </>
-              ) : (
-                <>
-                  Already have an account?{" "}
-                  <button
-                    type="button"
-                    className="text-primary underline hover:no-underline disabled:opacity-50 disabled:cursor-not-allowed transition-all"
-                    onClick={handleModeToggle}
-                    disabled={isSubmitting || isGeneratingKeys || isRateLimited}
-                    aria-label="Switch to login"
-                  >
-                    Sign In
-                  </button>
-                </>
-              )}
-            </div>
+            <>
+              <p className={`${prefix}-simple-legal`}>
+                By signing {isSignup ? "up" : "in"}, you agree to the{' '}
+                <a href={TERMS_URL} target="_blank" rel="noreferrer" onClick={(event) => handleExternalLink(event, TERMS_URL)}>
+                  Terms of Service
+                </a>{' '}
+                and{' '}
+                <a href={PRIVACY_URL} target="_blank" rel="noreferrer" onClick={(event) => handleExternalLink(event, PRIVACY_URL)}>
+                  Privacy Policy
+                </a>.
+              </p>
+              <p className={`${prefix}-simple-switch`}>
+                {isSignup ? "Already have an account? " : "Don't have an account? "}
+                <a
+                  href={isSignup ? "login.html" : "signup.html"}
+                  onClick={handleModeToggle}
+                  aria-label={isSignup ? "Switch to login" : "Switch to registration"}
+                >
+                  {isSignup ? "Sign in" : "Create one"}
+                </a>
+              </p>
+            </>
           )}
-        </CardFooter>
-      </Card>
-    </div>
+        </main>
+      </div>
+    </section>
   );
 });

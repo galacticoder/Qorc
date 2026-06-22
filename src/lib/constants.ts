@@ -36,17 +36,17 @@ export const MAX_ID_CACHE_SIZE = 4_096;
 export const KYBER_PUBLIC_KEY_LENGTH = 1_568;
 export const DILITHIUM_PUBLIC_KEY_LENGTH = 2_592;
 export const X25519_PUBLIC_KEY_LENGTH = 32;
-export const MAX_PAYLOAD_CACHE_SIZE = 2000;
 
 // Event metadata + rate limits
 export const MAX_EVENT_TYPE_LENGTH = 32;
 export const MAX_EVENT_USERNAME_LENGTH = 256;
 export const MAX_CONTENT_LENGTH = 16 * 1024;
 export const RATE_LIMIT_MAX_RECEIPTS = 100;
+export const RECEIPT_BATCH_WINDOW_MS = 300;
 
 export const RESET_FEEDBACK_DURATION_MS = 1000;
 export const DEFAULT_MAX_TYPING_USERS = 200;
-export const DEFAULT_TYPING_TIMEOUT_MS = 5500;
+export const DEFAULT_TYPING_TIMEOUT_MS = 8000;
 export const DEFAULT_TYPING_EVENT_RATE_WINDOW_MS = 60_000;
 export const DEFAULT_RATE_LIMIT_PER_MINUTE = 240;
 export const DEFAULT_EVENT_RATE_WINDOW_MS = 10_000;
@@ -55,7 +55,10 @@ export const DEFAULT_UI_EVENT_RATE_MAX = 500;
 
 // Typing
 export const TYPING_STOP_DELAY = 1500;
-export const MIN_TYPING_INTERVAL = 4000;
+// How often a still-typing user re-sends typing-start to refresh the peer's indicator.
+// Widened from 4000 to halve the signed re-sends during long typing; stays well under
+// DEFAULT_TYPING_TIMEOUT_MS so the indicator never lapses between refreshes.
+export const MIN_TYPING_INTERVAL = 6000;
 export const CONVERSATION_CHANGE_DEBOUNCE = 100;
 export const TYPING_DOMAIN = 'typing-indicator-v1';
 
@@ -103,8 +106,8 @@ export const AUDIO_EXTENSIONS = ['mp3', 'wav', 'ogg', 'webm', 'm4a', 'aac', 'fla
 
 // useFileSender.ts
 export const DEFAULT_CHUNK_SIZE_SMALL = 32 * 1024;
-export const DEFAULT_CHUNK_SIZE_LARGE = 32 * 1024;
-export const LARGE_FILE_THRESHOLD = 10 * 1024 * 1024;
+export const DEFAULT_CHUNK_SIZE_LARGE = 1024 * 1024;
+export const LARGE_FILE_THRESHOLD = 50 * 1024 * 1024;
 export const MAX_CHUNKS_PER_SECOND = 50;
 export const INACTIVITY_TIMEOUT_MS = 120000;
 export const P2P_CONNECT_TIMEOUT_MS = 3500;
@@ -119,13 +122,16 @@ export const SESSION_POLL_BASE_MS = 200;
 export const SESSION_POLL_MAX_MS = 1_500;
 export const BUNDLE_REQUEST_COOLDOWN_MS = 5000;
 export const SESSION_FRESH_COOLDOWN_MS = 10_000;
-
-// WebSocket fixed-size transport + cover traffic
-export const WS_FIXED_MESSAGE_SIZE_BYTES = 256 * 1024;
-export const WS_COVER_TRAFFIC_INTERVAL_MS = 5000;
-export const WS_COVER_TRAFFIC_JITTER_MS = 500;
-export const WS_COVER_TRAFFIC_IDLE_GRACE_MS = 300;
+export const WS_FIXED_MESSAGE_SIZE_BYTES = 64 * 1024;
+export const WS_COVER_TRAFFIC_MIN_INTERVAL_MS = 10_000;
+export const WS_COVER_TRAFFIC_MAX_INTERVAL_MS = 45_000;
+export const WS_COVER_TRAFFIC_IDLE_GRACE_MS = 0;
 export const COVER_TRAFFIC_PAYLOAD_TYPE = 'cover-traffic';
+export const GLOBAL_SPOOL_PIR_RESPONSE_TIMEOUT_MS = 600_000;
+export const GLOBAL_SPOOL_PIR_LOOP_INTERVAL_MS = 900_000;
+export const GLOBAL_SPOOL_PIR_RECORDS_PER_POLL = 4;
+export const GLOBAL_SPOOL_PIR_CATCHUP_DELAY_MS = 25_000;
+export const GLOBAL_SPOOL_PIR_NOT_READY_RETRY_MS = 5_000;
 
 // PassphrasePrompt.tsx
 export const PASSPHRASE_MIN_LENGTH = 12;
@@ -137,7 +143,7 @@ export const MAX_URL_LENGTH = 2048;
 export const ALLOWED_PROTOCOLS = new Set(['http:', 'https:']);
 
 // General size caps
-export const MAX_FILE_SIZE = 50 * 1024 * 1024;
+export const MAX_FILE_SIZE = 1024 * 1024 * 1024;
 export const MAX_PROFILE_IMAGE_SIZE = 5 * 1024 * 1024;
 
 export const MAX_P2P_INCOMING_QUEUE = 256;
@@ -176,7 +182,7 @@ export const MAX_LOCAL_MESSAGE_LENGTH = 10_000;
 export const MAX_LOCAL_USERNAME_LENGTH = 256;
 export const MAX_LOCAL_MIMETYPE_LENGTH = 128;
 export const MAX_LOCAL_EMOJI_LENGTH = 32;
-export const MAX_LOCAL_FILE_SIZE_BYTES = 50 * 1024 * 1024;
+export const MAX_LOCAL_FILE_SIZE_BYTES = 1024 * 1024 * 1024;
 export const MAX_INLINE_BASE64_BYTES = 10 * 1024 * 1024;
 export const LOCAL_EVENT_RATE_LIMIT_WINDOW_MS = 10_000;
 export const LOCAL_EVENT_RATE_LIMIT_MAX_EVENTS = 120;
@@ -191,7 +197,7 @@ export const REPLY_RATE_LIMIT_MAX_EVENTS = 100;
 export const WEBSOCKET_RATE_LIMIT_WINDOW_MS = 1_000;
 export const WEBSOCKET_RATE_LIMIT_MAX_MESSAGES = 500;
 
-export const MAX_FILE_SIZE_BYTES = 50 * 1024 * 1024;
+export const MAX_FILE_SIZE_BYTES = 1024 * 1024 * 1024;
 export const MAX_TOTAL_CHUNKS = 10_000;
 export const MAX_CHUNK_SIZE_BYTES = 384 * 1024;
 export const MAX_CONCURRENT_TRANSFERS = 16;
@@ -213,9 +219,7 @@ export const USERNAME_DISPLAY_RATE_LIMIT_MAX_EVENTS = 50;
 export const USERNAME_DISPLAY_CACHE_TTL_MS = 5 * 60 * 1000;
 export const USERNAME_DISPLAY_MAX_CACHE_SIZE = 512;
 export const USERNAME_DISPLAY_RESOLVE_TIMEOUT_MS = 10_000;
-export const USERNAME_ANON_PREFIX = 'anon:';
 export const USERNAME_HEX_PATTERN = /^[a-f0-9]{32}$/i;
-export const USERNAME_OBFUSCATED_LENGTH = 12;
 
 export const PSEUDONYM_SALT_BASE64 = "cHNldWRvbnltLXYxLWdsb2JhbC1zYWx0";
 
@@ -238,6 +242,7 @@ export const CALLING_EVENT_ALLOWED_PAYLOAD_KEYS = new Set([
 export const CALL_TIMEOUT = 60_000;
 export const CALL_RING_TIMEOUT = 60_000;
 export const CALL_AUDIO_PADDING_BLOCK = 128;
+export const CALL_DEVICE_SETTLE_MS = 800;
 export const CALL_KEY_ROTATION_INTERVAL = 10_000;
 
 // Blocking constants
@@ -245,7 +250,6 @@ export const NOTIFICATION_TITLE = 'Message Blocked';
 export const NOTIFICATION_BODY = 'A message was blocked. See app for details.';
 export const QUEUE_STORAGE_VERSION = 1;
 export const QUEUE_SESSION_KEY_ID = 'queue_session_key';
-export const BLOCK_TOKEN_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 export const MAX_BLOCK_LIST_SIZE = 10000;
 export const BLOCK_QUEUE_OVERFLOW_LIMIT = 1000;
 export const BLOCK_MAX_QUEUE_AGE_MS = 5 * 60 * 1000;
@@ -313,7 +317,7 @@ export const MAX_INLINE_FILE_BYTES = 5 * 1024 * 1024;
 export const MAX_BLOB_URLS = 32;
 export const BLOB_URL_TTL_MS = 15 * 60 * 1000;
 export const MESSAGE_RATE_LIMIT_WINDOW_MS = 5_000;
-export const MESSAGE_RATE_LIMIT_MAX = 300;
+export const MESSAGE_RATE_LIMIT_MAX = 2000;
 
 export const MAX_RETRY_ATTEMPTS = 3;
 export const PENDING_QUEUE_TTL_MS = 120_000;
@@ -347,7 +351,6 @@ export const PQ_SIG_SIGNATURE_SIZE = 4627;
 export const PQ_WORKER_MAX_RESTART_ATTEMPTS = 5;
 export const SECURE_MEMORY_MAX_BUFFER_SIZE = 1_048_576;
 export const CRYPTO_CACHE_TTL_MS = 5 * 60 * 1000;
-export const LONG_TERM_ENVELOPE_VERSION = 'lt-v1';
 export const REPLAY_WINDOW_MS = 5 * 60 * 1000;
 export const MAX_PROCESSED_IDS = 2048;
 export const KEY_LIFETIME_MS = 60 * 60 * 1000;
@@ -387,7 +390,6 @@ export const WORKER_RATE_LIMIT_ARGON2_VERIFY_MAX = 50;
 
 // Crypto HKDF Info
 export const CRYPTO_HKDF_INFO = 'Qor-chat hybrid key v2';
-export const LONG_TERM_ENVELOPE_KDF_INFO = 'long-term-aead-key-v1';
 
 // Noise Protocol
 export const NOISE_PROTOCOL_VERSION = 'hybrid-session-v1';
@@ -397,13 +399,14 @@ export const NOISE_MAX_MESSAGES_PER_SESSION = 1_000_000;
 export const NOISE_MAX_SESSION_AGE_MS = 24 * 60 * 60 * 1000;
 export const NOISE_REPLAY_WINDOW_SIZE = BigInt(32768);
 
-// QUIC Transport
-export const QUIC_CONNECTION_TIMEOUT_MS = 30_000;
-export const QUIC_KEEPALIVE_INTERVAL_MS = 10_000;
-export const QUIC_MAX_STREAMS_PER_CONNECTION = 100;
-export const QUIC_RECONNECT_BACKOFF_BASE_MS = 1000;
-export const QUIC_MAX_RECONNECT_ATTEMPTS = 5;
-export const QUIC_BUFFER_LOW_THRESHOLD = 256 * 1024;
+// P2P Transport
+export const P2P_CONNECTION_TIMEOUT_MS = 30_000;
+export const P2P_KEEPALIVE_INTERVAL_MS = 10_000;
+export const P2P_MAX_STREAMS_PER_CONNECTION = 100;
+export const P2P_RECONNECT_BACKOFF_BASE_MS = 1000;
+export const P2P_MAX_RECONNECT_ATTEMPTS = 5;
+export const P2P_STUCK_STATE_TIMEOUT_MS = 60_000;
+export const P2P_BUFFER_LOW_THRESHOLD = 256 * 1024;
 
 // Encrypted storage
 export const STORAGE_MAX_QUEUE_SIZE = 100;
@@ -414,7 +417,7 @@ export const STORAGE_RATE_LIMIT_MAX_OPS = 100;
 export const SECURE_DB_MAX_VALUE_SIZE = 100 * 1024 * 1024;
 export const SECURE_DB_MIN_CLEANUP_INTERVAL = 60_000;
 export const SECURE_DB_MAX_EPHEMERAL_BATCH = 1000;
-export const SECURE_DB_MAX_FILE_SIZE = 50 * 1024 * 1024;
+export const SECURE_DB_MAX_FILE_SIZE = 1024 * 1024 * 1024;
 export const SECURE_DB_MAX_TOTAL_FILE_STORAGE = 10 * 1024 * 1024 * 1024;
 export const SECURE_DB_BLOCKED_MIME_TYPES = [
     'application/x-msdownload',
@@ -467,7 +470,7 @@ export const LATENCY_SAMPLE_WEIGHT = 0.2;
 export const MAX_NONCE_SEQUENCE_GAP = 1000;
 export const TIMESTAMP_SKEW_TOLERANCE_MS = 5_000;
 
-export const SESSION_FAILOVER_GRACE_PERIOD_MS = 10_000;
+export const SESSION_FAILOVER_GRACE_PERIOD_MS = 30_000;
 
 export const MAX_INCOMING_WS_STRING_CHARS = 10_000_000;
 export const MAX_PQ_ENVELOPE_CIPHERTEXT_BYTES = 12 * 1024 * 1024;
@@ -479,6 +482,6 @@ export const MAX_PQ_ENVELOPE_AAD_BYTES = 1024;
 export const MAX_AVATAR_SIZE_BYTES = 512 * 1024;
 export const MAX_AVATAR_DIMENSION = 512;
 export const ALLOWED_AVATAR_MIME_TYPES = ['image/jpeg', 'image/png', 'image/webp', 'image/svg+xml'] as const;
-export const AVATAR_CACHE_TTL_MS = 1 * 60 * 1000;
+export const AVATAR_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 export const AVATAR_SERVER_FETCH_DEBOUNCE_MS = 3000;
 export const AVATAR_PENDING_REQUEST_TIMEOUT_MS = 30000;

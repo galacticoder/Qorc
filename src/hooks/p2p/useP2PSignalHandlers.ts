@@ -4,13 +4,10 @@ import { SignalType } from '../../lib/types/signal-types';
 import { unifiedSignalTransport } from '../../lib/transport/unified-signal-transport';
 
 interface UseP2PSignalHandlersProps {
-  p2pMessaging: {
-    isPeerConnected: (peer: string) => boolean;
-    connectToPeer: (peer: string) => Promise<void>;
-  };
+  p2pMessaging?: unknown;
 }
 
-export function useP2PSignalHandlers({ p2pMessaging }: UseP2PSignalHandlersProps) {
+export function useP2PSignalHandlers({ p2pMessaging: _p2pMessaging }: UseP2PSignalHandlersProps) {
   // Handle outgoing P2P session reset requests
   useEffect(() => {
     const handler = async (evt: Event) => {
@@ -18,19 +15,17 @@ export function useP2PSignalHandlers({ p2pMessaging }: UseP2PSignalHandlersProps
         const d: any = (evt as CustomEvent).detail || {};
         const to: string = d?.to;
         const reason: string | undefined = d?.reason;
-        const destinationInbox: string | undefined = d?.destinationInbox || d?.inboxId;
+        const recipientInboxId: string | undefined = d?.recipientInboxId || d?.inboxId;
+        const destinationRouteId: string | undefined = d?.destinationRouteId || d?.routeId;
+        const destinationMailboxLookupId: string | undefined = d?.destinationMailboxLookupId || d?.mailboxLookupId;
         if (!to) return;
 
         try {
-          if (!p2pMessaging.isPeerConnected(to)) {
-            try { await p2pMessaging.connectToPeer(to); } catch { }
-            await (p2pMessaging as any).waitForPeerConnection?.(to, 5000).catch(() => { });
-          }
           await unifiedSignalTransport.send(
             to,
             { reason },
             SignalType.SESSION_RESET_REQUEST,
-            destinationInbox ? { destinationInbox } : undefined
+            recipientInboxId || destinationRouteId ? { recipientInboxId, destinationRouteId, destinationMailboxLookupId } : undefined
           );
         } catch { }
       } catch { }
@@ -38,7 +33,7 @@ export function useP2PSignalHandlers({ p2pMessaging }: UseP2PSignalHandlersProps
 
     try { window.addEventListener(EventType.P2P_SESSION_RESET_SEND, handler as EventListener); } catch { }
     return () => { try { window.removeEventListener(EventType.P2P_SESSION_RESET_SEND, handler as EventListener); } catch { } };
-  }, [p2pMessaging]);
+  }, []);
 
   // Handle outgoing P2P call signals
   useEffect(() => {
@@ -52,11 +47,6 @@ export function useP2PSignalHandlers({ p2pMessaging }: UseP2PSignalHandlersProps
 
         let success = false;
         try {
-          if (!p2pMessaging.isPeerConnected(to)) {
-            try { await p2pMessaging.connectToPeer(to); } catch { }
-            try { await (p2pMessaging as any).waitForPeerConnection?.(to, 2000); } catch { }
-          }
-
           try {
             const result = await unifiedSignalTransport.send(to, signalObj, SignalType.CALL_SIGNAL);
             success = result.success;
@@ -71,5 +61,5 @@ export function useP2PSignalHandlers({ p2pMessaging }: UseP2PSignalHandlersProps
 
     try { window.addEventListener(EventType.P2P_CALL_SIGNAL_SEND, handler as EventListener); } catch { }
     return () => { try { window.removeEventListener(EventType.P2P_CALL_SIGNAL_SEND, handler as EventListener); } catch { } };
-  }, [p2pMessaging]);
+  }, []);
 }

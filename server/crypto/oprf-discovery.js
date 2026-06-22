@@ -23,17 +23,31 @@ const OPRF_PUBLIC_FILE = path.join(CONFIG_DIR, 'oprf-discovery-public.key');
 
 const OPRF_VERSION = 'oprf-discovery-v1';
 const RATE_LIMIT_WINDOW_MS = 60000;
-const MAX_REQUESTS_PER_WINDOW = 30;
+const MAX_REQUESTS_PER_WINDOW = 60;
+const GLOBAL_MAX_REQUESTS_PER_WINDOW = Math.max(
+  MAX_REQUESTS_PER_WINDOW,
+  Number.parseInt(process.env.OPRF_GLOBAL_MAX_PER_MIN || '1200', 10) || 1200
+);
 
 class OPRFRateLimiter {
   constructor() {
     this.requests = new Map();
+    this.globalTimestamps = [];
     this.cleanupInterval = setInterval(() => this.cleanup(), 60000);
   }
 
   check(identifier) {
     const now = Date.now();
     const windowStart = now - RATE_LIMIT_WINDOW_MS;
+
+    // Global cap first
+    this.globalTimestamps = this.globalTimestamps.filter(t => t > windowStart);
+    if (this.globalTimestamps.length >= GLOBAL_MAX_REQUESTS_PER_WINDOW) {
+      logger.warn('[OPRF-RATE-LIMIT] GLOBAL rate limit exceeded', {
+        count: this.globalTimestamps.length, windowMs: RATE_LIMIT_WINDOW_MS
+      });
+      return false;
+    }
 
     if (!this.requests.has(identifier)) {
       this.requests.set(identifier, []);
@@ -43,16 +57,23 @@ class OPRFRateLimiter {
     this.requests.set(identifier, timestamps);
 
     if (timestamps.length >= MAX_REQUESTS_PER_WINDOW) {
+      logger.warn('[OPRF-RATE-LIMIT] Rate limit exceeded', {
+        count: timestamps.length,
+        windowMs: RATE_LIMIT_WINDOW_MS
+      });
       return false;
     }
 
     timestamps.push(now);
+    this.globalTimestamps.push(now);
     return true;
   }
 
   cleanup() {
     const now = Date.now();
     const windowStart = now - RATE_LIMIT_WINDOW_MS;
+
+    this.globalTimestamps = this.globalTimestamps.filter(t => t > windowStart);
 
     for (const [key, timestamps] of this.requests.entries()) {
       const valid = timestamps.filter(t => t > windowStart);
@@ -189,7 +210,7 @@ export class OPRFDiscoveryServer {
       };
     } catch (error) {
       logger.error('[OPRF-DISCOVERY] Blind evaluation failed:', error.message);
-      throw new Error('OPRF evaluation failed');
+      throw new Error(error.message?.toLowerCase().includes('oprf') ? error.message : `OPRF evaluation failed: ${error.message}`);
     }
   }
 
@@ -228,7 +249,7 @@ export class OPRFDiscoveryServer {
       };
     } catch (error) {
       logger.error('[OPRF-DISCOVERY] Batch evaluation failed:', error.message);
-      throw new Error('OPRF batch evaluation failed');
+      throw new Error(error.message?.toLowerCase().includes('oprf') ? error.message : `OPRF batch evaluation failed: ${error.message}`);
     }
   }
 

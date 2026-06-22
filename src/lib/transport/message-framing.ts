@@ -8,6 +8,7 @@ import { PostQuantumUtils } from '../utils/pq-utils';
 
 // Fixed frame size
 export const FrameSize = {
+  SMALL: 8192,
   XLARGE: 262144
 } as const;
 
@@ -54,7 +55,10 @@ export function getMaxContentSize(frameSize: number = FrameSize.XLARGE): number 
 /**
  * Select appropriate frame size for content
  */
-export function selectFrameSize(_contentLength: number): number {
+export function selectFrameSize(contentLength: number): number {
+  if (contentLength <= 8128) {
+    return FrameSize.SMALL;
+  }
   return FrameSize.XLARGE;
 }
 
@@ -142,7 +146,7 @@ export function createPaddedFrame(
  */
 export function parsePaddedFrame(frameData: Uint8Array): ParsedFrame {
   // Validate frame size
-  if (frameData.length !== FrameSize.XLARGE) {
+  if (frameData.length !== FrameSize.SMALL && frameData.length !== FrameSize.XLARGE) {
     return { valid: false, error: 'invalid_frame_size' };
   }
   

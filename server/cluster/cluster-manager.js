@@ -639,7 +639,7 @@ export class ClusterManager extends EventEmitter {
 
               const timeSinceHeartbeat = now - serverInfo.lastHeartbeat;
 
-              if (timeSinceHeartbeat > CONFIG.SERVER_TIMEOUT) {
+              if (serverId !== this.serverId && timeSinceHeartbeat > CONFIG.SERVER_TIMEOUT) {
                 await this.handleDeadServer(serverId, serverInfo);
               } else {
                 this.clusterServers.set(serverId, serverInfo);
@@ -903,7 +903,7 @@ export class ClusterManager extends EventEmitter {
         break;
 
       default:
-        cryptoLogger.debug('[CLUSTER] Unknown message type', { type: msg.type });
+        break;
     }
   }
 

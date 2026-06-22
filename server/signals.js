@@ -6,9 +6,6 @@ export const SignalType = {
 
   //messaging
   ENCRYPTED_MESSAGE: "encrypted-message",
-  STORE_OFFLINE_MESSAGE: "store-offline-message",
-  RETRIEVE_OFFLINE_MESSAGES: "retrieve-offline-messages",
-  OFFLINE_MESSAGES_RESPONSE: "offline-messages-response",
 
   //errors and status
   ERROR: "error",
@@ -17,15 +14,8 @@ export const SignalType = {
   SERVERMESSAGE: "server-message",
 
   HYBRID_KEYS: "hybrid-keys",
-  HYBRID_KEYS_UPDATE: "hybrid-keys-update",
-  KEYS_STORED: "keys-stored",
 
   REQUEST_SERVER_PUBLIC_KEY: "request-server-public-key",
-
-  // libsignal session bootstrap
-  LIBSIGNAL_PUBLISH_BUNDLE: "libsignal-publish-bundle",
-  LIBSIGNAL_PUBLISH_STATUS: "libsignal-publish-status",
-  SIGNAL_BUNDLE_FAILURE: "signal-bundle-failure",
 
   //rate limiting and admin
   RATE_LIMIT_STATUS: "rate-limit-status",
@@ -40,7 +30,6 @@ export const SignalType = {
   // Blocking system
   BLOCK_LIST_SYNC: "block-list-sync",
   BLOCK_LIST_UPDATE: "block-list-update",
-  BLOCK_TOKENS_UPDATE: "block-tokens-update",
   RETRIEVE_BLOCK_LIST: "retrieve-block-list",
   BLOCK_LIST_RESPONSE: "block-list-response",
 
@@ -60,9 +49,6 @@ export const SignalType = {
   ROTATE_INBOX: "rotate-inbox",
   ROTATE_INBOX_RESPONSE: "rotate-inbox-response",
 
-  OWNERSHIP_PROOF: "ownership-proof",
-  OWNERSHIP_PROOF_RESPONSE: "ownership-proof-response",
-
   // Blind Credentials
   BLIND_SIGNATURE_REQUEST: "blind-signature-request",
   BLIND_SIGNATURE_RESPONSE: "blind-signature-response",
@@ -81,14 +67,19 @@ export const SignalType = {
   AUTH_OT_REQUEST: "auth-ot-request",
   AUTH_OT_RESPONSE: "auth-ot-response",
   AUTH_OT_FINALIZE: "auth-ot-finalize",
+  SECURE_CHUNK: "secure-chunk",
 
   // Discovery
   OPRF_DISCOVERY_PUBLIC_KEY: "oprf-discovery-public-key",
   OPRF_BLIND_EVALUATE: "oprf-blind-evaluate",
   OPRF_BLIND_EVALUATE_RESPONSE: "oprf-blind-evaluate-response",
   PUBLISH_DISCOVERY: "publish-discovery",
-  QUERY_DISCOVERY: "query-discovery",
-  DISCOVERY_RESULT: "discovery-result",
+  DISCOVERY_SNAPSHOT_REQUEST: "discovery-snapshot-request",
+  DISCOVERY_SNAPSHOT: "discovery-snapshot",
+  PIR_MANIFEST_REQUEST: "pir-manifest-request",
+  PIR_MANIFEST: "pir-manifest",
+  PIR_QUERY: "pir-query",
+  PIR_RESPONSE: "pir-response",
 
   // Server Gatekeeper
   SERVER_ENTRY_REQUEST: "server-entry-request",

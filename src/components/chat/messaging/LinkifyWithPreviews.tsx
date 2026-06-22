@@ -69,6 +69,7 @@ interface LinkifyWithPreviewsProps {
   readonly style?: React.CSSProperties;
   readonly previewsOnly?: boolean;
   readonly urls?: string[];
+  readonly onRendered?: () => void;
 }
 
 // Render a single link preview
@@ -254,8 +255,13 @@ const LinkifyWithPreviewsComponent: React.FC<LinkifyWithPreviewsProps> = ({
   className,
   style,
   previewsOnly = false,
-  urls: providedUrls
+  urls: providedUrls,
+  onRendered
 }) => {
+  useEffect(() => {
+    onRendered?.();
+  }, [onRendered]);
+
   const urls = useMemo(() => {
     const baseUrls = providedUrls ?? LinkExtractor.extractUrlStrings(children);
     return baseUrls

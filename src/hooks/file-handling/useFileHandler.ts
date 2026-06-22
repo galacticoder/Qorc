@@ -7,12 +7,15 @@ import type { ExtendedFileState } from "../../lib/types/file-types";
 import { extractChunkData, validateNewTransfer, createFileEntry, isValidChunkIndex } from "./chunk-validation";
 import { parseEncryptedChunk, decryptEnvelope, verifyChunkMac, decryptChunk, decompressChunk, cleanupFailedTransfer } from "./chunk-decryption";
 import { completeFileTransfer, handleAssemblyFailure } from "./file-assembly";
+import type { User } from "../../components/chat/messaging/UserList";
 
 export function useFileHandler(
   getKeysOnDemand: () => Promise<{ x25519: { private: any; publicKeyBase64: string }; kyber: { publicKeyBase64: string; secretKey: Uint8Array } } | null>,
   onNewMessage: (message: Message) => void,
   setLoginError: (err: string) => void,
-  secureDBRef?: React.RefObject<any | null>
+  secureDBRef?: React.RefObject<any | null>,
+  usersRef?: React.RefObject<User[]>,
+  findUser?: (handle: string, options?: { forceRefresh?: boolean }) => Promise<any>
 ) {
   const incomingFileChunksRef = useRef<IncomingFileChunks>({});
   const macStateRef = useRef<Map<string, { macKey: Uint8Array; fileSize: number }>>(new Map());
@@ -97,7 +100,7 @@ export function useFileHandler(
             throw new Error(`Hybrid keys not available for file decryption (${safeFilename})`);
           }
 
-          const keys = await decryptEnvelope(envelope, hybridKeys);
+          const keys = await decryptEnvelope(envelope, hybridKeys, from, usersRef?.current, findUser);
           if (!keys) {
             cleanupFailedTransfer(fileEntry, fileKey, store, macStateRef.current, cleanupTimersRef.current, blobCacheRef.current, from, safeFilename, 'envelope-decrypt-failed', setLoginError, 'File transfer rejected (key envelope invalid)');
             return;

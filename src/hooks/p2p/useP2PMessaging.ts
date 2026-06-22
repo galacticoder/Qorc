@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, useCallback } from 'react';
 import { SecureP2PService } from '../../lib/transport/secure-p2p-service';
 import { EventType } from '../../lib/types/event-types';
 import { RECEIPT_RETENTION_MS } from '../../lib/constants';
-import { quicTransport } from '../../lib/transport/quic-transport';
+import { p2pTransport } from '../../lib/transport/p2p-transport';
 import { createSendP2PReadReceipt } from './receipts';
 import { sanitizeErrorMessage } from '../../lib/sanitizers';
 import type {
@@ -16,7 +16,9 @@ import type {
 import {
   buildAuthenticator,
   toUint8,
+  createP2PError,
 } from '../../lib/utils/p2p-utils';
+import { normalizeP2PEndpointUrl } from '../../lib/utils/p2p-endpoint';
 import {
   createGetPeerCertificate,
   createInvalidatePeerCert,
@@ -33,6 +35,7 @@ import {
 import {
   createHandleIncomingP2PMessage,
 } from './messaging';
+import { invalidateDiscoveryCache } from '../discovery/useDiscovery';
 
 export { type P2PMessage, type P2PStatus, type PeerCertificateBundle, type HybridKeys } from '../../lib/types/p2p-types';
 
@@ -41,18 +44,17 @@ export function useP2PMessaging(
   username: string,
   hybridKeys: HybridKeys | null,
   options?: {
-    fetchPeerCertificates?: (peer: string) => Promise<PeerCertificateBundle | null>;
-    signalingTokenProvider?: () => Promise<string | null>;
+    fetchPeerCertificates?: (peer: string, bypassCache?: boolean) => Promise<PeerCertificateBundle | null>;
     onServiceReady?: (service: SecureP2PService | null) => void;
-    trustedIssuerDilithiumPublicKeyBase64?: string;
     handleEncryptedMessagePayload?: (msg: any) => Promise<void>;
+    ensureDiscoveryPublished?: (force?: boolean) => Promise<boolean>;
   },
 ) {
   const p2pServiceRef = useRef<SecureP2PService | null>(null);
   const [p2pStatus, setP2PStatus] = useState<P2PStatus>({
     isInitialized: false,
     connectedPeers: [],
-    signalingConnected: false,
+    transportConnected: false,
     lastError: null,
   });
   const peerAuthCacheRef = useRef(buildAuthenticator());
@@ -68,6 +70,7 @@ export function useP2PMessaging(
   const sentP2PReceiptsRef = useRef<Map<string, number>>(new Map());
   const connectInFlightRef = useRef(new Map<string, Promise<void>>());
   const connectBackoffRef = useRef(new Map<string, { until: number; failures: number }>());
+  const initInFlightRef = useRef<Promise<void> | null>(null);
 
   const setLastError = useCallback((error: unknown) => {
     const sanitized = sanitizeErrorMessage(error);
@@ -124,9 +127,8 @@ export function useP2PMessaging(
   const getPeerCertificateBase = useCallback(
     createGetPeerCertificate(certificateRefs, {
       fetchPeerCertificates: options?.fetchPeerCertificates,
-      trustedIssuerDilithiumPublicKeyBase64: options?.trustedIssuerDilithiumPublicKeyBase64,
     }),
-    [options?.fetchPeerCertificates, options?.trustedIssuerDilithiumPublicKeyBase64]
+    [options?.fetchPeerCertificates]
   );
 
   const getPeerCertificate = useCallback(
@@ -141,18 +143,16 @@ export function useP2PMessaging(
       const cert = await getPeerCertificateBase(peer, bypassCache);
       if (cert) {
         peerCertFailureRef.current.delete(peer);
-        if (cert.inboxId) {
-          try { quicTransport.registerUsernameAlias(peer, cert.inboxId); } catch { }
-        }
         const kyber = toUint8(cert.kyberPublicKey);
         const dilithium = toUint8(cert.dilithiumPublicKey);
         const x25519 = toUint8(cert.x25519PublicKey);
         if (kyber && dilithium && x25519) {
-          quicTransport.registerPeerIdentity(peer, {
+          p2pTransport.registerPeerIdentity(peer, {
             username: peer,
             kyberPublicKey: kyber,
             dilithiumPublicKey: dilithium,
-            x25519PublicKey: x25519
+            x25519PublicKey: x25519,
+            endpointUrl: normalizeP2PEndpointUrl(cert.p2pEndpointUrl)
           });
         }
         return cert;
@@ -181,6 +181,24 @@ export function useP2PMessaging(
     [username, hybridKeys, destroyService, options]
   );
 
+  const ensureInitialized = useCallback(async (): Promise<boolean> => {
+    if (p2pServiceRef.current && p2pStatus.isInitialized) {
+      return true;
+    }
+    if (!username || !hybridKeys?.dilithium?.secretKey) {
+      return false;
+    }
+
+    if (!initInFlightRef.current) {
+      initInFlightRef.current = initializeP2P().finally(() => {
+        initInFlightRef.current = null;
+      });
+    }
+
+    await initInFlightRef.current;
+    return !!p2pServiceRef.current;
+  }, [initializeP2P, username, hybridKeys?.dilithium?.secretKey, p2pStatus.isInitialized]);
+
   const isPeerConnected = useCallback(
     createIsPeerConnected(p2pStatus.connectedPeers),
     [p2pStatus.connectedPeers]
@@ -194,7 +212,15 @@ export function useP2PMessaging(
   const connectToPeer = useCallback(async (peer: string): Promise<void> => {
     if (!peer) return;
     if (isPeerConnected(peer)) return;
-    if (quicTransport.hasActiveConnection(peer)) return;
+
+    if (options?.ensureDiscoveryPublished) {
+      void options.ensureDiscoveryPublished(false).catch(() => false);
+    }
+
+    const ready = await ensureInitialized();
+    if (!ready) {
+      throw createP2PError('SERVICE_UNINITIALIZED');
+    }
 
     const now = Date.now();
     const cooldown = connectBackoffRef.current.get(peer);
@@ -210,11 +236,97 @@ export function useP2PMessaging(
         await connectToPeerBase(peer);
         connectBackoffRef.current.delete(peer);
       } catch (err) {
+        let finalError: unknown = err;
+        let errorCode = String((err as any)?.code || (err as any)?.message || '');
+        let errorLower = errorCode.toLowerCase();
+        let isHandshakeSigningKeyMismatch =
+          errorLower.includes('peer handshake signing key mismatch') ||
+          errorCode.includes('PEER_HANDSHAKE_SIGNING_KEY_MISMATCH');
+        let isCertOrDescriptorIssue =
+          errorCode.includes('PEER_CERT_MISSING') ||
+          isHandshakeSigningKeyMismatch;
+        let isEndpointUnavailable =
+          errorLower.includes('p2p_endpoint_missing') ||
+          errorLower.includes('no endpoint available') ||
+          errorLower.includes('no p2p endpoint available') ||
+          errorLower.includes('invalid endpoint url') ||
+          errorLower.includes('unsupported endpoint protocol') ||
+          errorLower.includes('unsupported endpoint');
+        let isHostUnreachable =
+          errorLower.includes('host unreachable') ||
+          errorLower.includes('socks5') ||
+          errorLower.includes('resolve failed') ||
+          errorLower.includes('no more hsdir');
+        let isTimeoutLike =
+          errorLower.includes('timeout') ||
+          errorLower.includes('timed out') ||
+          errorLower.includes('handshake response timeout');
+
+        const shouldForceRefreshAndRetry =
+          isCertOrDescriptorIssue || isEndpointUnavailable || isHostUnreachable || isTimeoutLike;
+
+        if (shouldForceRefreshAndRetry) {
+          // Flush both cert cache layers so endpoint rotations are picked up
+          invalidateDiscoveryCache(peer);
+          invalidatePeerCert(peer);
+          const refreshedCert = await getPeerCertificate(peer, true).catch(() => null);
+          if (refreshedCert) {
+            try {
+              await connectToPeerBase(peer);
+              connectBackoffRef.current.delete(peer);
+              return;
+            } catch (retryErr) {
+              finalError = retryErr;
+              errorCode = String((retryErr as any)?.code || (retryErr as any)?.message || '');
+              errorLower = errorCode.toLowerCase();
+              isHandshakeSigningKeyMismatch =
+                errorLower.includes('peer handshake signing key mismatch') ||
+                errorCode.includes('PEER_HANDSHAKE_SIGNING_KEY_MISMATCH');
+              isCertOrDescriptorIssue =
+                errorCode.includes('PEER_CERT_MISSING') ||
+                isHandshakeSigningKeyMismatch;
+              isEndpointUnavailable =
+                errorLower.includes('p2p_endpoint_missing') ||
+                errorLower.includes('no endpoint available') ||
+                errorLower.includes('no p2p endpoint available') ||
+                errorLower.includes('invalid endpoint url') ||
+                errorLower.includes('unsupported endpoint protocol') ||
+                errorLower.includes('unsupported endpoint');
+              isHostUnreachable =
+                errorLower.includes('host unreachable') ||
+                errorLower.includes('socks5') ||
+                errorLower.includes('resolve failed') ||
+                errorLower.includes('no more hsdir');
+              isTimeoutLike =
+                errorLower.includes('timeout') ||
+                errorLower.includes('timed out') ||
+                errorLower.includes('handshake response timeout');
+            }
+          }
+        }
+
         const prior = connectBackoffRef.current.get(peer);
         const failures = (prior?.failures ?? 0) + 1;
-        const backoff = Math.min(2000 * Math.pow(2, failures - 1), 20000);
+        const backoff =
+          isEndpointUnavailable
+            ? Math.min(60_000 * Math.pow(2, failures - 1), 10 * 60_000)
+            : isCertOrDescriptorIssue
+              ? Math.min(5000 * failures, 30_000)
+            : isHostUnreachable
+              ? Math.min(15000 * Math.pow(2, failures - 1), 180000)
+              : isTimeoutLike
+                ? Math.min(5000 * Math.pow(2, failures - 1), 90000)
+                : Math.min(2000 * Math.pow(2, failures - 1), 30000);
         connectBackoffRef.current.set(peer, { until: Date.now() + backoff, failures });
-        throw err;
+        console.warn('[P2P] connectToPeer failed', {
+          peer,
+          error: errorCode,
+          category: isEndpointUnavailable
+            ? 'endpoint-unavailable'
+            : (isCertOrDescriptorIssue ? 'descriptor' : (isHostUnreachable ? 'network-unreachable' : (isTimeoutLike ? 'timeout' : 'generic'))),
+          backoffMs: backoff
+        });
+        throw finalError;
       } finally {
         connectInFlightRef.current.delete(peer);
       }
@@ -222,7 +334,7 @@ export function useP2PMessaging(
 
     connectInFlightRef.current.set(peer, promise);
     return promise;
-  }, [connectToPeerBase, isPeerConnected]);
+  }, [connectToPeerBase, getPeerCertificate, invalidatePeerCert, isPeerConnected, ensureInitialized, options?.ensureDiscoveryPublished]);
 
   const disconnectPeer = useCallback(
     createDisconnectPeer(connectionRefs),
@@ -252,7 +364,7 @@ export function useP2PMessaging(
       isInitialized: p2pStatus.isInitialized,
       connectedPeers: [...p2pStatus.connectedPeers],
       totalConnections: p2pStatus.connectedPeers.length,
-      signalingConnected: p2pStatus.signalingConnected,
+      transportConnected: p2pStatus.transportConnected,
       lastError: p2pStatus.lastError,
     }),
     [p2pStatus]
@@ -268,6 +380,18 @@ export function useP2PMessaging(
       destroyService();
     };
   }, [destroyService]);
+
+  useEffect(() => {
+    if (!username || !hybridKeys?.dilithium?.secretKey) {
+      return;
+    }
+    if (p2pStatus.isInitialized && p2pServiceRef.current) {
+      return;
+    }
+    ensureInitialized().catch((error) => {
+      console.warn('[P2P] initialize failed', error);
+    });
+  }, [username, hybridKeys?.dilithium?.secretKey, p2pStatus.isInitialized, ensureInitialized]);
 
   useEffect(() => {
     const interval = setInterval(() => {

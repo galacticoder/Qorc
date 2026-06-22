@@ -22,11 +22,15 @@ import {
   addToPendingQueue,
 } from './message-persistence';
 import { loadUsers, saveUsers } from './user-persistence';
+import { signal } from '../../lib/tauri-bindings';
 
 export const useSecureDB = ({ Authentication, setMessages }: UseSecureDBProps): UseSecureDBReturn => {
   const secureDBRef = useRef<SecureDB | null>(null);
   const [dbInitialized, setDbInitialized] = useState(false);
+  const [dbInitError, setDbInitError] = useState<string | null>(null);
+  const [dbInitAttempt, setDbInitAttempt] = useState(0);
   const [users, setUsers] = useState<User[]>([]);
+  const initializingDbRef = useRef(false);
 
   const pendingMessagesRef = useRef<Message[]>([]);
   const debouncedSaveRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -39,6 +43,8 @@ export const useSecureDB = ({ Authentication, setMessages }: UseSecureDBProps): 
   useEffect(() => {
     if (!Authentication?.isLoggedIn) {
       setDbInitialized(false);
+      setDbInitError(null);
+      initializingDbRef.current = false;
       secureDBRef.current = null;
     }
   }, [Authentication?.isLoggedIn]);
@@ -46,10 +52,13 @@ export const useSecureDB = ({ Authentication, setMessages }: UseSecureDBProps): 
   // Initialize database
   useEffect(() => {
     if (!Authentication?.isLoggedIn || dbInitialized || secureDBRef.current) return;
+    if (initializingDbRef.current) return;
     if (!Authentication.vaultReady) return;
     if (!Authentication.loginUsernameRef.current || !Authentication.aesKeyRef?.current) return;
 
     const initializeDB = async () => {
+      initializingDbRef.current = true;
+      setDbInitError(null);
       try {
         const key = Authentication.aesKeyRef.current;
         if (!isValidCryptoKey(key)) {
@@ -62,6 +71,13 @@ export const useSecureDB = ({ Authentication, setMessages }: UseSecureDBProps): 
 
         const db = await initializeSecureDB(Authentication.loginUsernameRef.current, key);
         secureDBRef.current = db;
+
+        // Restore
+        try {
+          await signal.initStorage(Authentication.loginUsernameRef.current);
+        } catch (sigErr) {
+          console.error('[useSecureDB] Signal store restore failed', sigErr);
+        }
 
         await initializeBlockingSystem(
           db,
@@ -84,12 +100,26 @@ export const useSecureDB = ({ Authentication, setMessages }: UseSecureDBProps): 
         }
       } catch (err) {
         console.error('[useSecureDB] Failed to initialize SecureDB', err);
-        Authentication.setLoginError?.('Failed to initialize secure storage');
+        const message = err instanceof Error ? err.message : String(err);
+        secureDBRef.current = null;
+        setDbInitialized(false);
+        setDbInitError(message || 'Failed to initialize secure storage');
+        Authentication.setLoginError?.(`Failed to initialize secure storage: ${message || 'unknown error'}`);
+      } finally {
+        initializingDbRef.current = false;
       }
     };
 
     initializeDB();
-  }, [Authentication?.isLoggedIn, Authentication?.username, dbInitialized, Authentication?.vaultReady]);
+  }, [Authentication?.isLoggedIn, Authentication?.username, dbInitialized, Authentication?.vaultReady, dbInitAttempt]);
+
+  const retryInitializeDB = useCallback(() => {
+    initializingDbRef.current = false;
+    secureDBRef.current = null;
+    setDbInitialized(false);
+    setDbInitError(null);
+    setDbInitAttempt((attempt) => attempt + 1);
+  }, []);
 
   // Load data after initialization
   useEffect(() => {
@@ -310,6 +340,8 @@ export const useSecureDB = ({ Authentication, setMessages }: UseSecureDBProps): 
     users,
     setUsers,
     dbInitialized,
+    dbInitError,
+    retryInitializeDB,
     secureDBRef,
     saveMessageToLocalDB,
     loadMoreConversationMessages,

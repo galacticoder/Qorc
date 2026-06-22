@@ -1,6 +1,6 @@
 import React, { useMemo } from 'react';
 import { MessageReceipt as ReceiptType } from './types';
-import { Check, CheckCheck } from 'lucide-react';
+import { Check, CheckCheck, Loader2 } from 'lucide-react';
 import { cn } from '../../../lib/utils/shared-utils';
 import { formatReceiptTime } from '../../../lib/utils/date-utils';
 
@@ -12,6 +12,15 @@ interface MessageReceiptProps {
 
 export const MessageReceipt: React.FC<MessageReceiptProps> = ({ receipt, isCurrentUser, className }) => {
 	if (!isCurrentUser || !receipt) return null;
+
+	if (receipt.sending) {
+		return (
+			<div className={cn('flex items-center gap-1 text-xs text-gray-400 select-none italic', className)} role="status" aria-label="Sending">
+				<Loader2 size={12} className="animate-spin" aria-hidden="true" />
+				<span>Sending...</span>
+			</div>
+		);
+	}
 
 	const readTime = useMemo(() => formatReceiptTime(receipt.readAt), [receipt?.readAt]);
 	const deliveredTime = useMemo(() => formatReceiptTime(receipt.deliveredAt), [receipt?.deliveredAt]);

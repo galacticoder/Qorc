@@ -9,6 +9,7 @@ import type { HybridKeys } from "../../lib/types/auth-types";
 import { storage, session } from "../../lib/tauri-bindings";
 import { messageVault } from "../../lib/security/message-vault";
 import { removeVaultKey, removeWrappedMasterKey } from "../../lib/cryptography/vault-key";
+import { markExplicitLogout } from "../../lib/auth/logout-marker";
 
 export interface LogoutRefs {
   loginUsernameRef: RefObject<string>;
@@ -28,6 +29,9 @@ export interface LogoutSetters {
   setIsSubmittingAuth: (v: boolean) => void;
   setUsername: (v: string) => void;
   setTokenValidationInProgress: (v: boolean) => void;
+  setVaultReady?: (v: boolean) => void;
+  setShowPassphrasePrompt?: (v: boolean) => void;
+  setShowPasswordPrompt?: (v: boolean) => void;
 }
 
 export const createLogout = (
@@ -36,8 +40,30 @@ export const createLogout = (
   clearAuthenticationState: () => Promise<void>
 ) => {
   return async (secureDBRef?: RefObject<SecureDB | null>, loginErrorMessage: string = "") => {
+    const usernamesToClear = new Set<string>();
+    const addUsername = (value: unknown) => {
+      if (typeof value === 'string' && value.trim()) {
+        usernamesToClear.add(value.trim());
+      }
+    };
+
+    addUsername(refs.loginUsernameRef.current);
     try {
-      await websocketClient.close(); }
+      await storage.init();
+      addUsername(await storage.get('last_authenticated_username'));
+      addUsername(await storage.get('last_authenticated_display_name'));
+    } catch { }
+    try {
+      addUsername(await syncEncryptedStorage.getItem('last_authenticated_username'));
+    } catch { }
+
+    try {
+      await markExplicitLogout();
+    } catch { }
+
+    try {
+      // Kill PQ session on logout
+      await websocketClient.close({ killSession: true }); }
     catch { }
 
     try {
@@ -51,6 +77,10 @@ export const createLogout = (
     await clearAuthenticationState();
     await clearTokenEncryptionKey();
     messageVault.clear();
+    try {
+      const { tokenVault } = await import('../../lib/database/token-vault');
+      tokenVault.lock();
+    } catch { }
 
     try {
       secureWipeStringRef(refs.passwordRef as any);
@@ -90,6 +120,32 @@ export const createLogout = (
     } catch { }
 
     try {
+      await storage.init();
+      const perUserCleanup = Array.from(usernamesToClear).flatMap((username) => [
+        removeVaultKey(username),
+        removeWrappedMasterKey(username),
+        storage.remove(`key_meta:${username}`),
+        storage.remove(`key_bundle:${username}`)
+      ]);
+      await Promise.allSettled([
+        ...perUserCleanup,
+        storage.remove('qor_token_vault'),
+        storage.remove('tok:1'),
+        storage.remove('last_authenticated_username'),
+        storage.remove('last_authenticated_display_name'),
+        storage.remove('bg_session_active'),
+        storage.remove('bg_session_last_activity'),
+        storage.remove('bg_session_pending')
+      ]);
+    } catch { }
+
+    // Clear anonymous resume token pool
+    try {
+      const { clearResumePool } = await import('../../lib/signals/resume-tokens');
+      await clearResumePool();
+    } catch { }
+
+    try {
       await syncEncryptedStorage.removeItem('qorchat_server_pin_v2');
       await syncEncryptedStorage.removeItem('last_authenticated_username');
     } catch { }
@@ -109,6 +165,9 @@ export const createLogout = (
     setters.setIsRegistrationMode(false);
     setters.setIsSubmittingAuth(false);
     setters.setUsername("");
+    setters.setVaultReady?.(false);
+    setters.setShowPassphrasePrompt?.(false);
+    setters.setShowPasswordPrompt?.(false);
   };
 };
 

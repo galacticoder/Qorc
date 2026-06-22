@@ -6,7 +6,6 @@ import websocketClient from '../websocket/websocket';
 import { sanitizeHybridKeys } from '../utils/messaging-validators';
 import { clusterKeyManager } from '../cryptography/cluster-key-manager';
 import { encryptedStorage } from '../database/encrypted-storage';
-import { EventType } from '../types/event-types';
 import type { AuthRefs, DatabaseRefs } from '../types/signal-handler-types';
 
 // Handle server public key
@@ -20,7 +19,7 @@ export async function handleServerPublicKey(data: any, auth: AuthRefs): Promise<
   }
 
   const hybridKeys = sanitizeHybridKeys(rawKeys);
-  if (!hybridKeys || !hybridKeys.kyberPublicBase64) {
+  if (!hybridKeys || !hybridKeys.kyberPublicBase64 || !hybridKeys.dilithiumPublicBase64 || !hybridKeys.x25519PublicBase64) {
     console.warn('[signals] server-key invalid-key-material');
     return;
   }
@@ -42,13 +41,10 @@ export async function handleServerPublicKey(data: any, auth: AuthRefs): Promise<
 // Handle hybrid keys
 export function handleHybridKeys(data: any, db: DatabaseRefs): void {
   if (!db.setUsers) return;
-  const { username, hybridKeys } = data ?? {};
-  if (typeof username !== 'string' || !hybridKeys) {
+  const { username } = data ?? {};
+  if (typeof username !== 'string') {
     console.warn('[signals] hybrid-keys invalid-payload');
     return;
   }
-
-  const sanitized = sanitizeHybridKeys(hybridKeys);
-  db.setUsers((prev: any[]) => prev.map((user: any) => user.username === username ? { ...user, hybridPublicKeys: sanitized } : user));
-  window.dispatchEvent(new CustomEvent(EventType.USER_KEYS_AVAILABLE, { detail: { username, hybridKeys: sanitized } }));
+  console.warn('[signals] rejected unauthenticated peer hybrid key update; use certified discovery material', { hasUsername: !!username });
 }

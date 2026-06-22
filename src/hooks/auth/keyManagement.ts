@@ -90,7 +90,7 @@ export const createGetKeysOnDemand = (
             }
           }
 
-          if (!keys || !keys.kyber || !keys.dilithium) {
+          if (!keys || !keys.kyber || !keys.dilithium || !keys.x25519 || !keys.accountRoot) {
             return null;
           }
 
@@ -202,7 +202,6 @@ export const createInitializeKeys = (
               const secB64 = CryptoUtils.Base64.arrayBufferToBase64(existingKeys.kyber.secretKey);
               if (pub && secB64) {
                 await signal.setStaticMlkemKeys(currentUsername, pub, secB64);
-                console.log('[KeyManagement] Static ML-KEM keys set successfully for', currentUsername);
               }
             } catch (e) {
               console.error('[KeyManagement] Failed to set static ML-KEM keys:', e);

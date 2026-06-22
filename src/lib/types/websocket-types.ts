@@ -1,7 +1,6 @@
 import { SignalType } from "./signal-types";
-import { LongTermEnvelope } from '../cryptography/long-term-encryption';
 
-export type IncomingOfflineMessageCallback = (message: any) => void | Promise<void>;
+export type IncomingGlobalSpoolCandidateCallback = (message: any) => void | Promise<void>;
 
 export interface WebSocketMessageSchema {
   validate: (message: BaseMessage) => boolean;
@@ -32,17 +31,16 @@ export const DEFAULT_ALLOWED_TYPES: Set<string> = new Set([
   SignalType.SERVER_PUBLIC_KEY,
   SignalType.AUTH_FULL_SUCCESS,
   SignalType.LIBSIGNAL_DELIVER_BUNDLE,
-  SignalType.LIBSIGNAL_PUBLISH_STATUS,
   SignalType.SESSION_RESET_REQUEST,
   SignalType.EDIT_MESSAGE,
   SignalType.DELETE_MESSAGE,
   SignalType.FILE_MESSAGE_CHUNK,
-  SignalType.OFFLINE_MESSAGES_RESPONSE,
   SignalType.DELIVERY_RECEIPT,
   SignalType.READ_RECEIPT,
   SignalType.PUBLISH_DISCOVERY,
-  SignalType.QUERY_DISCOVERY,
-  SignalType.DISCOVERY_RESULT,
+  SignalType.DISCOVERY_SNAPSHOT,
+  SignalType.PIR_MANIFEST,
+  SignalType.PIR_RESPONSE,
   SignalType.SEALED_ENVELOPE,
 ]);
 
@@ -67,7 +65,8 @@ export const DEFAULT_SCHEMAS: Record<string, WebSocketMessageSchema> = {
       typeof (message as any).nonce === 'string' &&
       typeof (message as any).ciphertext === 'string' &&
       typeof (message as any).tag === 'string' &&
-      typeof (message as any).aad === 'string',
+      typeof (message as any).aad === 'string' &&
+      typeof (message as any).signature === 'string',
   },
 };
 
@@ -148,6 +147,7 @@ export interface SessionKeyMaterial {
   recvKey: Uint8Array;
   establishedAt: number;
   fingerprint: string;
+  clientSigningPublicKey?: Uint8Array;
 }
 
 export interface EncryptionContext {
@@ -162,12 +162,17 @@ export interface EncryptionContext {
 export interface HandshakeCallbacks {
   transmit: (message: string) => Promise<void>;
   registerMessageHandler: (type: string, handler: MessageHandler) => void;
-  unregisterMessageHandler: (type: string) => void;
+  unregisterMessageHandler: (type: string, handler?: MessageHandler) => void;
   getQueueLength: () => number;
   getTorAdaptedTimeout: (baseTimeout: number) => number;
-  onSessionEstablished: (session: SessionKeyMaterial, serverSignatureKey?: Uint8Array) => void;
+  onSessionEstablished: (
+    session: SessionKeyMaterial,
+    serverSignatureKey?: Uint8Array,
+    signingKeyPair?: { publicKey: Uint8Array; privateKey: Uint8Array }
+  ) => void;
   onHandshakeError: (error: Error) => void;
   isConnected: () => boolean | Promise<boolean>;
+  getTrustedNow?: () => number;
 }
 
 export interface HeartbeatCallbacks {
@@ -208,15 +213,11 @@ export interface QueuedMessage {
   sizeBytes: number;
 }
 
-export interface OfflineMessage {
-  encryptedPayload?: EncryptedPayload;
-  longTermEnvelope?: LongTermEnvelope;
-  version?: string;
-  messageId?: string;
-  to?: string;
-  from?: string;
-  expiresAt?: number;
-  maxRetries?: number;
+export interface GlobalSpoolCandidateItem {
+  kind?: 'message' | 'pad';
+  type?: string;
+  envelope?: Record<string, unknown>;
+  pad?: string;
 }
 
 export interface UserStatus {

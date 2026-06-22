@@ -50,7 +50,6 @@ pub enum QorError {
     #[error("Storage initialization failed: {0}")]
     StorageInitFailed(String),
 
-
     // ============================================
     // Tor Errors
     // ============================================
@@ -130,7 +129,11 @@ impl QorError {
     /// Check if error requires key refresh
     pub fn requires_key_refresh(&self) -> bool {
         match self {
-            QorError::SignalProtocol(e) => e.contains("untrusted") || e.contains("Untrusted") || e.contains("identity mismatch"),
+            QorError::SignalProtocol(e) => {
+                e.contains("untrusted")
+                    || e.contains("Untrusted")
+                    || e.contains("identity mismatch")
+            }
             _ => false,
         }
     }

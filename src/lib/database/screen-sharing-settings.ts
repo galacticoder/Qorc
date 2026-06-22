@@ -101,7 +101,7 @@ function deepValidateSettings(settings: any): settings is InternalSettings {
 // Screen sharing settings manager
 export class ScreenSharingSettingsManager {
   private static instance: ScreenSharingSettingsManager | null = null;
-  private settings: InternalSettings;
+  private settings: InternalSettings | null = null;
   private requestCount = 0;
   private listeners: Set<(settings: ScreenSharingSettings) => void> = new Set();
   private lastRequestTime = 0;
@@ -280,7 +280,7 @@ export class ScreenSharingSettingsManager {
 
   // Ensure settings are loaded
   private async ensureSettingsLoaded(): Promise<void> {
-    if (this.settings === null) {
+    if (!this.settings) {
       this.settings = await this.loadSettings();
     }
   }

@@ -5,18 +5,67 @@
 
 const fs = require('fs');
 const path = require('path');
+const os = require('os');
 const { spawn, execSync } = require('child_process');
 
 const repoRoot = path.resolve(__dirname, '..');
 function logErr(...args) { console.error('[CLIENT]', ...args); }
 
 if (process.argv.slice(2).some(arg => arg === '-h' || arg === '--help')) {
-    console.log('Usage: node start-client.cjs - Starts Qor-Chat client (Tauri)');
+    console.log('Usage: node start-client.cjs [--run-only] - Starts Qor-Chat client (Tauri)');
+    console.log('  --run-only   Skip the rebuild and just launch the already built binary.');
     console.log('Prerequisites: Run `node scripts/install-deps.cjs --client` first');
+    console.log('Logs are mirrored to logs/client-instance-<QOR_INSTANCE_ID>.log');
     process.exit(0);
 }
 
 process.chdir(repoRoot);
+
+const runOnly = process.argv.slice(2).some(arg => arg === '--run-only' || arg === '--no-build');
+
+// Save all logs to logs/client-instance-<id>.log
+const instanceId = (process.env.QOR_INSTANCE_ID || '1').trim() || '1';
+const logsDir = path.join(repoRoot, 'logs');
+const logFilePath = path.join(logsDir, `client-instance-${instanceId}.log`);
+
+function clientRuntimeEnv() {
+    const env = { ...process.env };
+    if (process.platform === 'linux') {
+        for (const key of Object.keys(env)) {
+            if (
+                key.startsWith('SNAP') ||
+                key.startsWith('GIO_LAUNCHED_DESKTOP_FILE') ||
+                key === 'GIO_MODULE_DIR' ||
+                key === 'GTK_EXE_PREFIX' ||
+                key === 'GTK_IM_MODULE_FILE' ||
+                key === 'GTK_PATH'
+            ) {
+                delete env[key];
+            }
+        }
+        if (env.XDG_DATA_DIRS_VSCODE_SNAP_ORIG) {
+            env.XDG_DATA_DIRS = env.XDG_DATA_DIRS_VSCODE_SNAP_ORIG;
+            delete env.XDG_DATA_DIRS_VSCODE_SNAP_ORIG;
+        }
+        if (env.XDG_CONFIG_DIRS_VSCODE_SNAP_ORIG) {
+            env.XDG_CONFIG_DIRS = env.XDG_CONFIG_DIRS_VSCODE_SNAP_ORIG;
+            delete env.XDG_CONFIG_DIRS_VSCODE_SNAP_ORIG;
+        }
+        if (env.LD_LIBRARY_PATH?.includes('/snap/')) {
+            delete env.LD_LIBRARY_PATH;
+        }
+        const localLib = path.join(os.homedir(), '.local', 'lib');
+        if (fs.existsSync(localLib)) {
+            env.LIBRARY_PATH = env.LIBRARY_PATH ? `${localLib}${path.delimiter}${env.LIBRARY_PATH}` : localLib;
+        }
+        env.WEBKIT_DISABLE_DMABUF_RENDERER ??= '1';
+        env.GST_PLUGIN_FEATURE_RANK ??= 'pulsesrc:512,pulsesink:512';
+        if (env.QOR_CHAT_SOFTWARE_RENDERING) {
+            env.LIBGL_ALWAYS_SOFTWARE ??= '1';
+        }
+    }
+    return env;
+}
 
 const criticalDeps = ['pnpm', 'cargo'];
 const missing = criticalDeps.filter(cmd => {
@@ -31,7 +80,7 @@ const missing = criticalDeps.filter(cmd => {
 
 if (missing.length > 0) {
     logErr(`Missing required dependencies: ${missing.join(', ')}`);
-    logErr('Please ensure Node.js, pnpm, and Rust are installed.');
+    logErr('Please check if Node.js, pnpm, and Rust are installed.');
     process.exit(1);
 }
 
@@ -41,42 +90,84 @@ if (!fs.existsSync(nodeModulesPath)) {
     execSync('pnpm install', { stdio: 'inherit', cwd: repoRoot });
 }
 
-console.log('[CLIENT] Building Tauri app (release)...');
-
-const buildProc = spawn('pnpm', ['tauri', 'build'], {
-    stdio: 'inherit',
-    cwd: repoRoot,
-    shell: true,
-    env: {
-        ...process.env,
-    }
-});
-
-buildProc.on('exit', code => {
-    if (code !== 0) {
-        logErr(`Tauri build failed with code ${code}`);
-        process.exit(code || 1);
-    }
-
+function launchApp() {
     const binName = process.platform === 'win32' ? 'qor-chat.exe' : 'qor-chat';
-    const releaseBin = path.join(repoRoot, 'src-tauri', 'target', 'release', binName);
-    const debugBin = path.join(repoRoot, 'src-tauri', 'target', 'debug', binName);
-    const runPath = fs.existsSync(releaseBin) ? releaseBin : debugBin;
+    const runPath = path.join(repoRoot, 'src-tauri', 'target', 'release', binName);
 
     if (!fs.existsSync(runPath)) {
-        logErr('Built Tauri binary not found. Expected at:', releaseBin, 'or', debugBin);
+        logErr('Built Tauri binary not found. Expected at:', runPath);
+        logErr('Run without --run-only once to build it.');
         process.exit(1);
     }
 
-    console.log('[CLIENT] Launching built app...');
+    try { fs.mkdirSync(logsDir, { recursive: true }); } catch { }
+    const logStream = fs.createWriteStream(logFilePath, { flags: 'w' });
+    logStream.write(`# Qor-Chat client (instance ${instanceId}) started ${new Date().toISOString()}\n`);
+    console.log(`[CLIENT] Launching built app (instance ${instanceId})... logging to ${path.relative(repoRoot, logFilePath)}`);
+
     const runProc = spawn(runPath, [], {
-        stdio: 'inherit',
+        stdio: ['inherit', 'pipe', 'pipe'],
         cwd: repoRoot,
         shell: false,
-        env: {
-            ...process.env,
-        }
+        env: clientRuntimeEnv()
     });
 
-    runProc.on('exit', exitCode => process.exit(exitCode));
-});
+    // Tee both streams: terminal stays live, file captures everything.
+    runProc.stdout.pipe(process.stdout);
+    runProc.stdout.pipe(logStream);
+    runProc.stderr.pipe(process.stderr);
+    runProc.stderr.pipe(logStream);
+
+    runProc.on('exit', exitCode => {
+        try { logStream.end(); } catch { }
+        process.exit(exitCode);
+    });
+}
+
+if (runOnly) {
+    console.log('[CLIENT] --run-only: skipping rebuild, launching existing binary.');
+    launchApp();
+} else {
+    try {
+        execSync(`node ${JSON.stringify(path.join(repoRoot, 'scripts', 'ensure-pir-worker-binaries.cjs'))}`, {
+            stdio: 'inherit',
+            cwd: repoRoot,
+            env: process.env
+        });
+    } catch (error) {
+        logErr('Failed to build the PIR client binary.');
+        logErr('It builds from workers/hintless via Docker, so Docker must be installed and running.');
+        logErr('(Override the binary path with QOR_PIR_CLIENT_BIN, or build manually: node scripts/build-pir-client.cjs)');
+        process.exit(1);
+    }
+
+    // Build YPIR client daemon
+    console.log('[CLIENT] Building YPIR client binary (workers/ypir)...');
+    try {
+        execSync(`node ${JSON.stringify(path.join(repoRoot, 'scripts', 'build-ypir-client.cjs'))}`, {
+            stdio: 'inherit',
+            cwd: repoRoot,
+            env: process.env
+        });
+    } catch (error) {
+        logErr('Failed to build the YPIR client binary (needs the pinned nightly and AVX-512 build host).');
+        logErr('See workers/ypir/BUILD_NOTES.md.');
+        process.exit(1);
+    }
+
+    console.log('[CLIENT] Building Tauri app...');
+    const buildProc = spawn('pnpm tauri build', {
+        stdio: 'inherit',
+        cwd: repoRoot,
+        shell: true,
+        env: clientRuntimeEnv()
+    });
+
+    buildProc.on('exit', code => {
+        if (code !== 0) {
+            logErr(`Tauri build failed with code ${code}`);
+            process.exit(code || 1);
+        }
+        launchApp();
+    });
+}

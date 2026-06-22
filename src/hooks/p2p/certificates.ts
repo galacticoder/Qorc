@@ -1,5 +1,4 @@
 import { RefObject } from "react";
-import { CryptoUtils } from "../../lib/utils/crypto-utils";
 import type { PeerCertificateBundle, HybridKeys, RouteProofRecord, CertCacheEntry } from "../../lib/types/p2p-types";
 import {
   toUint8,
@@ -7,7 +6,9 @@ import {
   getChannelId,
   buildAuthenticator
 } from "../../lib/utils/p2p-utils";
-import { CERT_CLOCK_SKEW_MS, P2P_ROUTE_PROOF_TTL_MS, MAX_P2P_CERT_CACHE_SIZE, MAX_P2P_ROUTE_PROOF_CACHE_SIZE, P2P_PEER_CACHE_TTL_MS } from "../../lib/constants";
+import { validatePeerCertificateBundle } from "../../lib/utils/peer-certificate-utils";
+import { loadPersistedPeerCert, savePersistedPeerCert, removePersistedPeerCert } from "../../lib/p2p/persisted-peer-cert";
+import { P2P_ROUTE_PROOF_TTL_MS, MAX_P2P_CERT_CACHE_SIZE, MAX_P2P_ROUTE_PROOF_CACHE_SIZE, P2P_PEER_CACHE_TTL_MS } from "../../lib/constants";
 
 // Core cache references used by all certificate helpers
 export interface CertificateRefs {
@@ -19,8 +20,7 @@ export interface CertificateRefs {
 
 // Optional hooks injected by the hook consumer to fetch certificates or pin a trusted issuer
 export interface CertificateOptions {
-  fetchPeerCertificates?: (peer: string) => Promise<PeerCertificateBundle | null>;
-  trustedIssuerDilithiumPublicKeyBase64?: string;
+  fetchPeerCertificates?: (peer: string, bypassCache?: boolean) => Promise<PeerCertificateBundle | null>;
 }
 
 // Certificate retriever that validates signatures
@@ -28,61 +28,11 @@ export function createGetPeerCertificate(
   refs: CertificateRefs,
   options: CertificateOptions
 ) {
-  return async (peerUsername: string, bypassCache = false): Promise<PeerCertificateBundle | null> => {
-    const now = Date.now();
-    const cached = bypassCache ? null : refs.peerCertificateCacheRef.current.get(peerUsername);
-    if (cached && cached.expiresAt > now) {
-      return cached.cert;
-    }
-    if (!options?.fetchPeerCertificates) {
-      return null;
-    }
-    try {
-      const cert = await options.fetchPeerCertificates(peerUsername);
-      if (!cert) {
-        return null;
-      }
-      const dilithiumKey = toUint8(cert.dilithiumPublicKey);
-      const signature = toUint8(cert.signature);
-      if (!dilithiumKey || !signature) {
-        return null;
-      }
-      const canonical = new TextEncoder().encode(
-        JSON.stringify({
-          username: cert.username,
-          dilithiumPublicKey: cert.dilithiumPublicKey,
-          kyberPublicKey: cert.kyberPublicKey,
-          x25519PublicKey: cert.x25519PublicKey,
-          proof: cert.proof,
-          issuedAt: cert.issuedAt,
-          expiresAt: cert.expiresAt,
-        }),
-      );
-      const issuerKey = toUint8(cert.proof);
-      if (!issuerKey) return null;
-
-      const valid = await CryptoUtils.Dilithium.verify(signature, canonical, issuerKey);
-      if (!valid) {
-        throw new Error('CERT_INVALID_SIGNATURE');
-      }
-
-      const isSelfSigned = cert.proof === cert.dilithiumPublicKey;
-      if (options?.trustedIssuerDilithiumPublicKeyBase64 && cert.proof !== options.trustedIssuerDilithiumPublicKeyBase64) {
-        if (!isSelfSigned) {
-          throw new Error('CERT_UNTRUSTED_ISSUER');
-        }
-      }
-
-      const notYetValid = cert.issuedAt > (now + CERT_CLOCK_SKEW_MS);
-      const alreadyExpired = cert.expiresAt <= (now - CERT_CLOCK_SKEW_MS);
-      if (notYetValid || alreadyExpired) {
-        throw new Error('CERT_INVALID_WINDOW');
-      }
+    const cacheValidatedCert = (peerUsername: string, cert: PeerCertificateBundle): void => {
       refs.peerCertificateCacheRef.current.set(peerUsername, {
         cert,
-        expiresAt: Math.min(cert.expiresAt, now + P2P_PEER_CACHE_TTL_MS),
+        expiresAt: Math.min(cert.expiresAt, Date.now() + P2P_PEER_CACHE_TTL_MS),
       });
-
       if (refs.peerCertificateCacheRef.current.size > MAX_P2P_CERT_CACHE_SIZE) {
         const entries = [...refs.peerCertificateCacheRef.current.entries()].sort((a, b) => a[1].expiresAt - b[1].expiresAt);
         while (entries.length > MAX_P2P_CERT_CACHE_SIZE) {
@@ -90,6 +40,34 @@ export function createGetPeerCertificate(
           refs.peerCertificateCacheRef.current.delete(key);
         }
       }
+    };
+
+  return async (peerUsername: string, bypassCache = false): Promise<PeerCertificateBundle | null> => {
+    const now = Date.now();
+    const cached = bypassCache ? null : refs.peerCertificateCacheRef.current.get(peerUsername);
+    if (cached && cached.expiresAt > now) {
+      return cached.cert;
+    }
+
+    if (!bypassCache) {
+      const persisted = await loadPersistedPeerCert(peerUsername);
+      if (persisted) {
+        cacheValidatedCert(peerUsername, persisted);
+        return persisted;
+      }
+    }
+
+    if (!options?.fetchPeerCertificates) {
+      return null;
+    }
+    try {
+      const fetched = await options.fetchPeerCertificates(peerUsername, bypassCache);
+      const cert = await validatePeerCertificateBundle(fetched, peerUsername, now);
+      if (!cert) {
+        return null;
+      }
+      cacheValidatedCert(peerUsername, cert);
+      savePersistedPeerCert(peerUsername, cert);
       return cert;
     } catch {
       return null;
@@ -102,6 +80,8 @@ export function createInvalidatePeerCert(refs: CertificateRefs) {
   return (peerUsername: string) => {
     if (!peerUsername) return;
     refs.peerCertificateCacheRef.current.delete(peerUsername);
+    
+    removePersistedPeerCert(peerUsername);
     const keysToDelete: string[] = [];
     for (const [key] of refs.routeProofCacheRef.current) {
       if (key.includes(peerUsername)) {

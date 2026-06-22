@@ -236,6 +236,18 @@ export class SecureDB {
 
   // Rebuild conversation metadata from messages
   async rebuildConversationMetadata(): Promise<ConversationMetadata[]> {
+    let existingPins = new Map<string, { isPinned?: boolean; pinnedAt?: number }>();
+    try {
+        const existingMetadata = await this.loadConversationMetadata();
+        if (existingMetadata) {
+            for (const m of existingMetadata) {
+                if (m.isPinned) {
+                    existingPins.set(m.peerUsername, { isPinned: m.isPinned, pinnedAt: m.pinnedAt });
+                }
+            }
+        }
+    } catch {}
+
     const allMessages = await this.loadMessages();
     const map = new Map<string, StoredMessage[]>();
     const currentUser = this.username;
@@ -259,13 +271,45 @@ export class SecureDB {
           peerUsername: peer,
           lastMessage: lastMsgLight,
           unreadCount: 0,
-          lastReadTimestamp: 0
+          lastReadTimestamp: 0,
+          isPinned: existingPins.get(peer)?.isPinned,
+          pinnedAt: existingPins.get(peer)?.pinnedAt
         });
       }
     }
 
     await this.saveConversationMetadata(metadata);
     return metadata;
+  }
+
+  // Toggle conversation pin status
+  async toggleConversationPin(peerUsername: string, isPinned: boolean): Promise<void> {
+    try {
+      let metadata = await this.loadConversationMetadata();
+      if (!metadata || metadata.length === 0) {
+        metadata = await this.rebuildConversationMetadata();
+      }
+      
+      const idx = metadata.findIndex(m => m.peerUsername === peerUsername);
+      if (idx !== -1) {
+        metadata[idx].isPinned = isPinned;
+        metadata[idx].pinnedAt = isPinned ? Date.now() : undefined;
+        await this.saveConversationMetadata(metadata);
+      } else if (isPinned) {
+        metadata.push({
+            peerUsername,
+            lastMessage: {} as any,
+            unreadCount: 0,
+            lastReadTimestamp: 0,
+            isPinned: true,
+            pinnedAt: Date.now()
+        });
+        await this.saveConversationMetadata(metadata);
+      }
+    } catch (err) {
+      console.error('[SecureDB] Failed to toggle conversation pin', err);
+      throw err;
+    }
   }
 
   // Save messages
@@ -594,6 +638,7 @@ export class SecureDB {
       const kv = await this.kv();
       const candidates = await kv.scanByStorePrefix(SECURE_DB_EPHEMERAL_PREFIX);
       const toDeleteByStore = new Map<string, string[]>();
+      let totalDeleted = 0;
 
       for (const { store, key, value } of candidates) {
         try {
@@ -601,13 +646,26 @@ export class SecureDB {
 
           if (data?.expiresAt && now > data.expiresAt && data.autoDelete) {
             const arr = toDeleteByStore.get(store) || []; arr.push(key); toDeleteByStore.set(store, arr);
-
+            totalDeleted++;
             if (arr.length >= SECURE_DB_MAX_EPHEMERAL_BATCH) { await kv.deleteMany(store, arr.splice(0, arr.length)); }
           }
         } catch { }
       }
 
-      for (const [store, keys] of toDeleteByStore.entries()) if (keys.length) await kv.deleteMany(store, keys);
+      for (const [store, keys] of toDeleteByStore.entries()) {
+        if (keys.length) {
+            await kv.deleteMany(store, keys);
+        }
+      }
+
+      if (totalDeleted > 20) {
+        try {
+          await kv.compact();
+          console.log('[SecureDB] Automatically compacted database after background cleanup');
+        } catch (e) {
+          console.error('[SecureDB] Automatic compaction failed', e);
+        }
+      }
     } catch { }
   }
 
@@ -677,6 +735,11 @@ export class SecureDB {
 
   // Clear a specific store
   async clearStore(storeName: string): Promise<number> { return (await this.kv()).clearStore(storeName); }
+
+  // Compact database
+  async compactDatabase(): Promise<void> {
+    await (await this.kv()).compact();
+  }
 
   // Save a file
   async saveFile(fileId: string, data: ArrayBuffer | Blob): Promise<{ success: boolean; quotaExceeded?: boolean }> {

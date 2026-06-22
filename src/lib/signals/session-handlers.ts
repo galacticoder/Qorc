@@ -6,9 +6,15 @@
 import { EventType } from '../types/event-types';
 import { signal } from '../tauri-bindings';
 import websocketClient from '../websocket/websocket';
+import { validateSignalBundleForPeerIdentity, type PeerIdentityLike } from '../utils/signal-bundle-utils';
 
 // Handle libsignal deliver bundle
-export async function handleLibsignalDeliverBundle(data: any, loginUsernameRef: React.RefObject<string> | undefined): Promise<void> {
+export async function handleLibsignalDeliverBundle(
+  data: any,
+  loginUsernameRef: React.RefObject<string> | undefined,
+  users?: PeerIdentityLike[] | null,
+  findUser?: (handle: string, options?: { forceRefresh?: boolean }) => Promise<any>
+): Promise<void> {
   try {
     const currentUser = loginUsernameRef?.current;
     const targetUser = data?.username;
@@ -24,6 +30,11 @@ export async function handleLibsignalDeliverBundle(data: any, loginUsernameRef: 
     if (!currentUser || !targetUser) {
       console.warn('[signals] libsignal missing-fields');
       return;
+    }
+
+    const validation = await validateSignalBundleForPeerIdentity(targetUser, data.bundle, users, findUser);
+    if (!validation.valid) {
+      throw new Error(validation.reason || 'BUNDLE_IDENTITY_VALIDATION_FAILED');
     }
 
     // Check if session already exists
@@ -107,16 +118,23 @@ export function handleSessionEstablished(data: any): void {
 // Handle error
 export async function handleError(data: any, message: string | undefined, auth: any): Promise<void> {
   const errorMsg = message || '';
-  try { auth.setIsSubmittingAuth?.(false); } catch { }
-  try { auth.setTokenValidationInProgress?.(false); } catch { }
-  try { auth.setAuthStatus?.(''); } catch { }
+  const requestId = typeof data?.requestId === 'string' ? data.requestId : '';
+  const op = typeof data?.op === 'string' ? data.op : '';
+  const code = typeof data?.code === 'string' ? data.code : '';
+  const requestScoped = !!requestId || !!op || typeof data?.stage === 'string';
+  const authenticationRequired =
+    code === 'AUTHENTICATION_REQUIRED' ||
+    data?.error === 'authentication_required' ||
+    errorMsg.toLowerCase() === 'authentication required';
+  const sessionError = errorMsg.includes('Unknown PQ session') || errorMsg.includes('PQ session');
 
-  if ((data as any)?.code === 'OFFLINE_LONGTERM_REQUIRED') {
-    try { window.dispatchEvent(new CustomEvent(EventType.OFFLINE_LONGTERM_REQUIRED, { detail: data })); } catch { }
-    return;
+  if (!requestScoped && !authenticationRequired && !sessionError) {
+    try { auth.setIsSubmittingAuth?.(false); } catch { }
+    try { auth.setTokenValidationInProgress?.(false); } catch { }
+    try { auth.setAuthStatus?.(''); } catch { }
   }
 
-  if (errorMsg.includes('Unknown PQ session') || errorMsg.includes('PQ session')) {
+  if (sessionError) {
     console.warn('[signals] session-error unknown-session', errorMsg);
     try {
       websocketClient.resetSessionKeys();
@@ -124,6 +142,18 @@ export async function handleError(data: any, message: string | undefined, auth: 
       void websocketClient.flushPendingQueue();
     } catch (_error) {
       console.error('[signals] session-error rehandshake-failed', _error instanceof Error ? _error.message : String(_error));
+    }
+  } else if (requestScoped) {
+    const detail = {
+      requestId: requestId || undefined,
+      op: op || undefined,
+      code: code || undefined,
+      message: errorMsg || undefined
+    };
+    if (authenticationRequired) {
+      console.info('[signals] request-auth-required', detail);
+    } else {
+      console.warn('[signals] request-error received', detail);
     }
   } else {
     console.warn('[signals] server-error received', errorMsg);

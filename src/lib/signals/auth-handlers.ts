@@ -8,7 +8,7 @@ import { SignalType } from '../types/signal-types';
 import { EventType } from '../types/event-types';
 import { storage } from '../tauri-bindings';
 import type { AuthRefs } from '../types/signal-handler-types';
-import { persistAuthTokens, retrieveAuthTokens, clearAuthTokens, clearTokenEncryptionKey } from './token-storage';
+import { clearAuthTokens, clearTokenEncryptionKey } from './token-storage';
 import { PostQuantumUtils } from '../utils/pq-utils';
 import { auth as authApi } from '../tauri-bindings';
 import { getBlindRoutingClient, BlindRoutingCredentials } from '../transport/blind-routing-client';
@@ -19,6 +19,85 @@ import { unblindSignature } from '../crypto/blind-credentials';
 import { computeBlindUserId } from '../utils/auth-utils';
 import { loadVaultKeyRaw, loadWrappedMasterKey, ensureVaultKeyCryptoKey } from '../cryptography/vault-key';
 import { SecureKeyManager } from '../database/secure-key-manager';
+import { OPAQUE_CONFIG } from '../cryptography/opaque-client';
+
+let unlinkedModeSwitchInFlight = false;
+let unlinkedModeSwitchRetryCount = 0;
+let unlinkedModeSwitchRetryTimer: ReturnType<typeof setTimeout> | null = null;
+const MAX_UNLINKED_SWITCH_BACKOFF_MS = 10000;
+const MAX_UNLINKED_SWITCH_RETRIES = 5;
+
+function promptForServerEntry(auth: AuthRefs, message = 'This server requires an entry token. Please provide the server password.'): void {
+  auth.setShowPasswordPrompt?.(true);
+  auth.setIsSubmittingAuth?.(false);
+  auth.setTokenValidationInProgress?.(false);
+  auth.setAuthStatus?.('');
+  auth.setLoginError?.('');
+  window.dispatchEvent(new CustomEvent(EventType.AUTH_ERROR, {
+    detail: {
+      type: 'SERVER_ENTRY_REQUIRED',
+      code: 'SERVER_ENTRY_REQUIRED',
+      message
+    }
+  }));
+}
+
+const scheduleUnlinkedModeSwitch = () => {
+  if (unlinkedModeSwitchInFlight) return;
+  try {
+    if (
+      websocketClient.isUnlinkedMode?.()
+      && websocketClient.isConnectedToServer?.()
+      && websocketClient.isUnlinkedSessionReady?.()
+    ) {
+      unlinkedModeSwitchRetryCount = 0;
+      return;
+    }
+  } catch { }
+
+  unlinkedModeSwitchInFlight = true;
+  void Promise.resolve().then(async () => {
+    try {
+      await websocketClient.switchToUnlinkedMode();
+      const ready = !!(
+        websocketClient.isUnlinkedMode?.()
+        && websocketClient.isConnectedToServer?.()
+        && websocketClient.isUnlinkedSessionReady?.()
+      );
+      if (!ready) {
+        throw new Error('Unlinked mode switch completed but session is not ready');
+      }
+      unlinkedModeSwitchRetryCount = 0;
+    } catch (err) {
+      const retryAttempt = ++unlinkedModeSwitchRetryCount;
+      if (retryAttempt >= MAX_UNLINKED_SWITCH_RETRIES) {
+        console.error('[AuthHandlers] Unlinked switch exhausted retries, giving up', { retryAttempt });
+        unlinkedModeSwitchRetryCount = 0;
+        unlinkedModeSwitchInFlight = false;
+        return;
+      }
+      const delayMs = Math.min(MAX_UNLINKED_SWITCH_BACKOFF_MS, 1000 * Math.pow(2, Math.max(0, retryAttempt - 1)));
+      console.warn('[AuthHandlers] Unlinked switch failed - scheduling retry', {
+        retryAttempt,
+        delayMs,
+        error: err instanceof Error ? err.message : String(err)
+      });
+      if (unlinkedModeSwitchRetryTimer) {
+        clearTimeout(unlinkedModeSwitchRetryTimer);
+      }
+      unlinkedModeSwitchRetryTimer = setTimeout(() => {
+        unlinkedModeSwitchRetryTimer = null;
+        unlinkedModeSwitchInFlight = false;
+        scheduleUnlinkedModeSwitch();
+      }, delayMs);
+      return;
+    } finally {
+      if (!unlinkedModeSwitchRetryTimer) {
+        unlinkedModeSwitchInFlight = false;
+      }
+    }
+  });
+};
 
 /**
  * Handle Full Authentication Success
@@ -43,27 +122,47 @@ export async function handleAuthFullSuccess(data: any, auth: AuthRefs): Promise<
     await handlePrivacyPassIssuance(data.anonymousTokenBatch, auth);
   }
 
-  // Handle anonymous session token and shard metadata
-  const anonymousToken = data.anonymousSession?.token || data.anonymousSessionToken;
-  if (anonymousToken) {
-    const stored = await persistAuthTokens(anonymousToken).catch(() => false);
-  }
-
-  websocketClient.markServerAuthGranted?.();
+  try {
+    const { replenishResumePool } = await import('./resume-tokens');
+    await replenishResumePool();
+  } catch { /* non-fatal */ }
 
   if (data.shardId !== undefined && data.credentialIndex !== undefined && (currentUsername || data.userId)) {
     const blindId = data.userId || (currentUsername ? computeBlindUserId(currentUsername) : null);
     if (blindId) {
       await storage.set(`shard_info_${blindId}`, JSON.stringify({
         shardId: data.shardId,
-        credentialIndex: data.credentialIndex
+        credentialIndex: data.credentialIndex,
+        shardSize: data.shardSize || OPAQUE_CONFIG.PRIVATE_AUTH_SHARD_SIZE
       }));
     }
   }
 
+  if (data?.serverEntryRequired) {
+    setAccountAuthenticated?.(false);
+    setIsLoggedIn?.(false);
+    setMaxStepReached?.('login');
+    setRecoveryActive?.(false);
+    promptForServerEntry(auth);
+    return;
+  }
+
+  websocketClient.markServerAuthGranted?.();
+
   // Initialize blind routing if provided
   if (data?.blindRouting) {
     await initializeAnonymousRouting(data, auth, currentUsername);
+  } else if (currentUsername) {
+    try {
+      const blindClient = getBlindRoutingClient(currentUsername);
+      const persistedCreds = await blindClient.loadPersistentCredentials();
+      if (persistedCreds?.primaryInboxId && persistedCreds?.blindSignature) {
+        blindClient.setSendFunction(async (message: any) => {
+          await websocketClient.sendSecureControlMessage(message);
+        });
+        scheduleUnlinkedModeSwitch();
+      }
+    } catch { }
   }
 
   if (handleAuthSuccess) {
@@ -78,6 +177,7 @@ export async function handleAuthFullSuccess(data: any, auth: AuthRefs): Promise<
     if (currentUsername) setUsername?.(currentUsername);
   }
 
+  websocketClient.markApplicationAuthReady?.();
   window.dispatchEvent(new CustomEvent(EventType.SECURE_CHAT_AUTH_SUCCESS));
 }
 
@@ -189,10 +289,23 @@ export async function handleTokenValidationResponse(data: any, auth: AuthRefs): 
 
     await clearAuthTokens();
     await clearTokenEncryptionKey();
+    try {
+      const { clearResumePool } = await import('./resume-tokens');
+      await clearResumePool();
+    } catch { /* ignore */ }
     setAccountAuthenticated?.(false);
     setMaxStepReached?.('login');
     setTokenValidationInProgress?.(false);
     if (data?.error) setLoginError?.(`Session expired or invalid: ${data.message}`);
+    return;
+  }
+
+  if (data?.serverEntryRequired) {
+    setAccountAuthenticated?.(false);
+    setIsLoggedIn?.(false);
+    setTokenValidationInProgress?.(false);
+    setMaxStepReached?.('login');
+    promptForServerEntry(auth);
     return;
   }
 
@@ -272,6 +385,9 @@ export async function handleTokenValidationResponse(data: any, auth: AuthRefs): 
           blindClient.setSendFunction(async (message: any) => {
             await websocketClient.sendSecureControlMessage(message);
           });
+          if (persistedCreds.primaryInboxId && persistedCreds.blindSignature) {
+            scheduleUnlinkedModeSwitch();
+          }
         }
       }
     } catch (err) {
@@ -292,6 +408,7 @@ export async function handleTokenValidationResponse(data: any, auth: AuthRefs): 
     auth.setShowPassphrasePrompt?.(true);
   }
 
+  websocketClient.markApplicationAuthReady?.();
   window.dispatchEvent(new CustomEvent(EventType.SECURE_CHAT_AUTH_SUCCESS));
 }
 
@@ -317,7 +434,9 @@ async function initializeAnonymousRouting(data: any, auth: AuthRefs, recoveredUs
         );
         finalCredentials.blindSignature = signature;
         finalCredentials.blindSignatureKid = data.blindRouting.blindSignatureKid || kid;
-        finalCredentials.primaryInboxId = blindCredentialRef.current.message;
+        finalCredentials.primaryInboxId = blindCredentialRef.current.inboxId || blindCredentialRef.current.message;
+        finalCredentials.primaryRouteId = blindCredentialRef.current.routeId || blindCredentialRef.current.message;
+        finalCredentials.blindSignatureSubject = 'route-v1';
         blindCredentialRef.current.used = true;
       } catch { }
     }
@@ -338,11 +457,7 @@ async function initializeAnonymousRouting(data: any, auth: AuthRefs, recoveredUs
       await websocketClient.sendSecureControlMessage(message);
     });
 
-    void Promise.resolve().then(async () => {
-      try {
-        await websocketClient.switchToUnlinkedMode();
-      } catch { }
-    });
+    scheduleUnlinkedModeSwitch();
   } catch (err) {
     console.warn('[AuthHandlers] Failed to initialize blind routing:', err);
   }
@@ -366,7 +481,14 @@ export function handleAuthError(data: any, message: string | undefined, auth: Au
   setAuthStatus?.('');
   setIsSubmittingAuth?.(false);
   auth.setTokenValidationInProgress?.(false);
-  window.dispatchEvent(new CustomEvent(EventType.AUTH_ERROR, { detail: { category: data?.category, code: data?.code } }));
+  window.dispatchEvent(new CustomEvent(EventType.AUTH_ERROR, {
+    detail: {
+      type: data?.code === 'SERVER_ENTRY_REQUIRED' ? 'SERVER_ENTRY_REQUIRED' : data?.type,
+      category: data?.category,
+      code: data?.code,
+      message: errorMessage
+    }
+  }));
 
   if (locked) {
     setAccountAuthenticated?.(false);

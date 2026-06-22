@@ -86,16 +86,17 @@ pub async fn list_files(dir: &Path) -> QorResult<Vec<String>> {
 
 /// Convert key to safe filename
 pub fn to_safe_filename(key: &str) -> String {
-    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
     use base64::Engine;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
     URL_SAFE_NO_PAD.encode(key.as_bytes())
 }
 
 /// Convert safe filename back to key
 pub fn from_safe_filename(safe_name: &str) -> String {
-    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
     use base64::Engine;
-    URL_SAFE_NO_PAD.decode(safe_name)
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    URL_SAFE_NO_PAD
+        .decode(safe_name)
         .ok()
         .and_then(|bytes| String::from_utf8(bytes).ok())
         .unwrap_or_else(|| safe_name.to_string())

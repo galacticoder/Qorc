@@ -211,7 +211,7 @@ async function createInnerLayer(
 
   try {
     const aad = textEncoder.encode(payload.type);
-    const { ciphertext, tag } = PostQuantumAEAD.encrypt(payload.bytes, encKey, aad, innerNonce);
+    const { ciphertext, tag } = await PostQuantumAEAD.encryptAsync(payload.bytes, encKey, aad, innerNonce);
     const macInput = concatUint8Arrays(innerNonce, ciphertext, tag, routingDigest, ephemeral.publicKey, aad);
     const mac = await HashingService.generateBlake3Mac(macInput, macKey);
 
@@ -239,6 +239,7 @@ export class Hybrid {
   static async generateHybridKeyPair() {
     const kyberPair = await PostQuantumKEM.generateKeyPair();
     const dilithiumPair = await DilithiumService.generateKeyPair();
+    const accountRootPair = await DilithiumService.generateKeyPair();
     const x25519Pair = generateEphemeralX25519();
     return {
       kyber: {
@@ -249,6 +250,10 @@ export class Hybrid {
       dilithium: {
         publicKeyBase64: Base64.arrayBufferToBase64(dilithiumPair.publicKey),
         secretKey: dilithiumPair.secretKey
+      },
+      accountRoot: {
+        publicKeyBase64: Base64.arrayBufferToBase64(accountRootPair.publicKey),
+        secretKey: accountRootPair.secretKey
       },
       x25519: {
         publicKeyBase64: Base64.arrayBufferToBase64(x25519Pair.publicKey),
@@ -294,8 +299,8 @@ export class Hybrid {
       const envelope: HybridEnvelope = {
         version: HYBRID_ENVELOPE_VERSION,
         routing: header,
-        routingSignature: { algorithm: 'dilithium3', signature: signatureBase64 },
-        algorithms: { outer: 'mlkem1024', inner: 'x25519', aead: 'aes-256-gcm', mac: 'blake3' },
+        routingSignature: { algorithm: 'ML-DSA-87', signature: signatureBase64 },
+        algorithms: { outer: 'ML-KEM-1024', inner: 'X25519', aead: 'AES-256-GCM', mac: 'BLAKE3' },
         kemCiphertext: Base64.arrayBufferToBase64(kemCiphertext),
         outer: {
           salt: Base64.arrayBufferToBase64(outerSalt),
@@ -422,7 +427,7 @@ export class Hybrid {
         }
 
         const aad = textEncoder.encode(innerLayer.payloadType);
-        const plaintextBytes = PostQuantumAEAD.decrypt(innerCiphertext, innerNonce, innerTag, encKey, aad);
+        const plaintextBytes = await PostQuantumAEAD.decryptAsync(innerCiphertext, innerNonce, innerTag, encKey, aad);
         let payloadText: string | undefined;
         let payloadJson: unknown | undefined;
         if (innerLayer.payloadType === SignalType.TEXT || innerLayer.payloadType === 'json') {

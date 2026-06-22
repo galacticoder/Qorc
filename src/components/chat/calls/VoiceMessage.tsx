@@ -16,6 +16,7 @@ interface VoiceMessageProps {
   mimeType?: string;
   messageId?: string;
   secureDB?: SecureDB | null;
+  onRendered?: () => void;
 }
 
 // Voice message playback component
@@ -28,6 +29,7 @@ export function VoiceMessage({
   mimeType,
   messageId,
   secureDB,
+  onRendered
 }: VoiceMessageProps) {
   const { url: resolvedUrl, loading: _urlLoading, error: urlError } = useFileUrl({
     secureDB: secureDB || null,
@@ -312,6 +314,7 @@ export function VoiceMessage({
 
         peaksRef.current = peaks;
         drawWaveform();
+        onRendered?.();
         try {
           audioCtx.close();
         } catch { }
@@ -319,6 +322,7 @@ export function VoiceMessage({
         peaksRef.current = null;
         setError('Failed to load audio');
         drawWaveform();
+        onRendered?.();
       }
     };
 
@@ -330,7 +334,7 @@ export function VoiceMessage({
       cancelled = true;
       if (drawRafRef.current) cancelAnimationFrame(drawRafRef.current);
     };
-  }, [audioUrl, originalBase64Data]);
+  }, [audioUrl, originalBase64Data, onRendered]);
 
   useEffect(() => {
     drawWaveform();

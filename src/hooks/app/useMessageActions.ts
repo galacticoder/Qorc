@@ -90,7 +90,9 @@ export function useMessageActions({
       return messageSender.handleSendMessage(targetUser as any, content, replyToMessage, undefined, messageSignalType, messageId);
     }
 
-    const isConnected = p2pMessaging.isPeerConnected(selectedConversation);
+    if (!p2pMessaging.isPeerConnected(selectedConversation)) {
+      p2pMessaging.connectToPeer(selectedConversation).catch(() => { });
+    }
 
     if (messageSignalType === SignalType.REACTION_ADD || messageSignalType === SignalType.REACTION_REMOVE) {
       try {
@@ -103,7 +105,11 @@ export function useMessageActions({
           selectedConversation,
           payload,
           messageSignalType as SignalType,
-          { destinationInbox: (targetUser as any)?.inboxId }
+          {
+            recipientInboxId: (targetUser as any)?.inboxId,
+            destinationRouteId: (targetUser as any)?.routeId || (targetUser as any)?.hybridPublicKeys?.routeId,
+            destinationMailboxLookupId: (targetUser as any)?.mailboxLookupId || (targetUser as any)?.hybridPublicKeys?.mailboxLookupId
+          }
         );
 
         if (result.success) {
@@ -122,61 +128,97 @@ export function useMessageActions({
       return messageSender.handleSendMessage(targetUser as any, content, replyToMessage, undefined, messageSignalType, messageId);
     }
 
-    if (isConnected) {
-      try {
-        const mId = crypto.randomUUID();
-        const payload = {
-          messageId: mId,
-          content,
-          timestamp: Date.now(),
-          replyTo: replyTo ? {
-            id: replyTo.id,
-            sender: replyTo.sender,
-            content: replyTo.content
-          } : undefined
+    try {
+      const mId = crypto.randomUUID();
+
+      // Create Optimistic Message
+      const newMessage: Message = {
+        id: mId,
+        content: '',
+        secureContentId: mId,
+        sender: loginUsernameRef.current || '',
+        recipient: selectedConversation,
+        timestamp: new Date(),
+        type: SignalType.TEXT,
+        isCurrentUser: true,
+        encrypted: true,
+        receipt: { delivered: false, read: false, sending: true },
+        version: '1'
+      } as Message;
+
+      if (replyTo) {
+        const replyId = `reply-${replyTo.id}-${mId}`;
+        const replyContent = getReplyContent(replyTo as Message);
+        await messageVault.store(replyId, replyContent);
+        newMessage.replyTo = {
+          id: replyTo.id,
+          sender: replyTo.sender,
+          content: '',
+          secureContentId: replyId
         };
-        const result = await unifiedSignalTransport.send(
-          selectedConversation,
-          payload,
-          SignalType.TEXT,
-          { destinationInbox: (targetUser as any)?.inboxId }
-        );
+      }
 
-        if (result.success) {
-          await messageVault.store(mId, content);
+      // Store content in vault before updating UI
+      await messageVault.store(mId, content);
 
-          const newMessage: Message = {
-            id: mId,
-            content: '',
-            secureContentId: mId,
-            sender: loginUsernameRef.current || '',
-            recipient: selectedConversation,
-            timestamp: new Date(),
-            type: SignalType.TEXT,
-            isCurrentUser: true,
-            p2p: result.transport === 'p2p',
-            transport: result.transport,
-            encrypted: true,
-            receipt: { delivered: false, read: false },
-          } as Message;
+      setMessages(prev => [...prev, newMessage]);
 
-          if (replyTo) {
-            const replyId = `reply-${replyTo.id}-${mId}`;
-            const replyContent = getReplyContent(replyTo as Message);
-            await messageVault.store(replyId, replyContent);
-            newMessage.replyTo = {
-              id: replyTo.id,
-              sender: replyTo.sender,
-              content: '',
-              secureContentId: replyId
-            };
-          }
+      const payload = {
+        messageId: mId,
+        content,
+        timestamp: Date.now(),
+        replyTo: replyTo ? {
+          id: replyTo.id,
+          sender: replyTo.sender,
+          content: replyTo.content
+        } : undefined
+      };
 
-          setMessages(prev => [...prev, newMessage]);
-          saveMessageWithContext({ ...newMessage, content });
-          return;
+      // Send
+      const result = await unifiedSignalTransport.send(
+        selectedConversation,
+        payload,
+        SignalType.TEXT,
+        {
+          recipientInboxId: (targetUser as any)?.inboxId,
+          destinationRouteId: (targetUser as any)?.routeId || (targetUser as any)?.hybridPublicKeys?.routeId,
+          destinationMailboxLookupId: (targetUser as any)?.mailboxLookupId || (targetUser as any)?.hybridPublicKeys?.mailboxLookupId
         }
-      } catch { }
+      );
+
+      // Update with final transport details
+      if (result.success) {
+        setMessages(prev => prev.map(msg =>
+          msg.id === mId
+            ? {
+              ...msg,
+              p2p: result.transport === 'p2p',
+              transport: result.transport === 'p2p' ? 'p2p' : 'websocket',
+              receipt: { ...msg.receipt!, sending: false }
+            }
+            : msg
+        ));
+
+        saveMessageWithContext({
+          ...newMessage,
+          content,
+          p2p: result.transport === 'p2p',
+          transport: result.transport === 'p2p' ? 'p2p' : 'websocket',
+          receipt: { ...newMessage.receipt!, sending: false }
+        });
+        return;
+      } else {
+        setMessages(prev => prev.filter(msg => msg.id !== mId));
+        try {
+          messageVault.remove(mId);
+        } catch {
+          // Ignore vault cleanup failures when the send itself failed
+        }
+        toast.error("Failed to send: No route to peer", { duration: 5000 });
+      }
+    } catch (error) {
+      // Catch unexpected errors
+      console.error("Optimistic send failed:", error);
     }
 
     try {
@@ -190,9 +232,12 @@ export function useMessageActions({
       );
     } catch (error) {
       console.error("Failed to send message:", error);
-      toast.error(error instanceof Error ? error.message : "Failed to send message", {
-        duration: 5000
-      });
+      const msg = error instanceof Error ? error.message : String(error || '');
+      
+      const isColdStartTransient = /not ready|not connected|no p2p|p2p_endpoint|connecting|establish|discovery_publish_required/i.test(msg);
+      if (!isColdStartTransient) {
+        toast.error(msg || "Failed to send message", { duration: 5000 });
+      }
     }
   }, [selectedConversation, getOrCreateUser, messageSender, p2pMessaging, setMessages, saveMessageWithContext, loginUsernameRef]);
 
@@ -213,38 +258,35 @@ export function useMessageActions({
     try {
       if (selectedConversation) {
         let isConnected = p2pMessaging.isPeerConnected(selectedConversation);
-
         if (!isConnected) {
-          try {
-            await p2pMessaging.connectToPeer(selectedConversation);
-            isConnected = true;
-          } catch { }
+          p2pMessaging.connectToPeer(selectedConversation).catch(() => { });
         }
 
-        // Try P2P first if connected
-        if (isConnected) {
-          try {
-            const targetUser = users.find(user => user.username === selectedConversation);
-            const payload = {
-              filename: fileData.filename,
-              size: fileData.size,
-              type: fileData.type,
-              url: fileData.url,
-              timestamp: Date.now()
-            };
-            const result = await unifiedSignalTransport.send(
-              selectedConversation,
-              payload,
-              SignalType.FILE,
-              { destinationInbox: (targetUser as any)?.inboxId }
-            );
-
-            if (result.success) {
-              await saveMessageToLocalDB(dataToSave);
-              return;
+        try {
+          const targetUser = users.find(user => user.username === selectedConversation);
+          const payload = {
+            filename: fileData.filename,
+            size: fileData.size,
+            type: fileData.type,
+            url: fileData.url,
+            timestamp: Date.now()
+          };
+          const result = await unifiedSignalTransport.send(
+            selectedConversation,
+            payload,
+            SignalType.FILE,
+            {
+              recipientInboxId: (targetUser as any)?.inboxId,
+              destinationRouteId: (targetUser as any)?.routeId || (targetUser as any)?.hybridPublicKeys?.routeId,
+              destinationMailboxLookupId: (targetUser as any)?.mailboxLookupId || (targetUser as any)?.hybridPublicKeys?.mailboxLookupId
             }
-          } catch { }
-        }
+          );
+
+          if (result.success) {
+            await saveMessageToLocalDB(dataToSave);
+            return;
+          }
+        } catch { }
       }
 
       await saveMessageToLocalDB(dataToSave);

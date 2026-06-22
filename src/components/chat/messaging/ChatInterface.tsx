@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState, useCallback, useMemo } from "react";
+import React, { useEffect, useRef, useState, useCallback } from "react";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Button } from "@/components/ui/button";
 import { ChatMessage } from "./ChatMessage";
@@ -582,12 +582,9 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
   }, []);
 
   return (
-    <div className="flex flex-col h-full relative" style={{ backgroundColor: 'var(--chat-background)' }}>
+    <div className="qor-chat-interface">
       <div
-        className="p-4 flex items-center justify-between absolute top-0 left-0 right-0 z-10"
-        style={{
-          border: 'none'
-        }}
+        className="qor-chat-toolbar"
       >
         <div className="min-w-0 flex-1 pr-3" />
         <div className="flex items-center gap-2">
@@ -602,28 +599,29 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
           )}
 
           {selectedConversation && (
-            <>
+            <div className="qor-call-pill" role="group" aria-label="Call actions">
               <Button
                 size="sm"
                 variant="outline"
                 onClick={handleAudioCall}
                 disabled={!!currentCall || isUserBlocked || isBlockedByUser}
-                className="flex items-center justify-center select-none dark:border-gray-600 [&:hover]:!bg-background [&:hover]:!text-foreground dark:[&:hover]:!border-gray-600"
+                className="qor-call-pill-btn"
                 title="Audio call"
               >
                 <CallIcon className="w-4 h-4" />
               </Button>
+              <span className="qor-call-pill-divider" aria-hidden="true" />
               <Button
                 size="sm"
                 variant="outline"
                 onClick={handleVideoCall}
                 disabled={!!currentCall || isUserBlocked || isBlockedByUser}
-                className="flex items-center justify-center select-none dark:border-gray-600 [&:hover]:!bg-background [&:hover]:!text-foreground dark:[&:hover]:!border-gray-600"
+                className="qor-call-pill-btn"
                 title="Video call"
               >
                 <Video className="w-4 h-4" />
               </Button>
-            </>
+            </div>
           )}
 
           {/* 3-dot menu */}
@@ -633,10 +631,7 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
                 <Button
                   size="sm"
                   variant="ghost"
-                  className="p-2"
-                  style={{
-                    color: 'var(--color-text-primary)'
-                  }}
+                  className="qor-chat-action-btn qor-chat-more-btn"
                 >
                   <MoreVertical className="w-4 h-4" />
                 </Button>
@@ -668,19 +663,12 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
         </div>
       </div>
       <ScrollArea
-        className="absolute inset-0"
-        style={{
-          paddingTop: '0px',
-          paddingLeft: '16px',
-          paddingRight: '16px',
-          backgroundColor: 'var(--chat-background)',
-          zIndex: 0
-        }}
+        className="qor-message-scroll"
         ref={scrollAreaRef}
       >
-        <div className="space-y-4 pb-24 pt-20">
+        <div className="qor-message-stack">
           {messages.length === 0 ? (
-            <div className="flex items-center justify-center h-full min-h-[200px] text-sm text-muted-foreground select-none">
+            <div className="qor-thread-empty">
               No messages yet. Start the conversation!
             </div>
           ) : (
@@ -720,11 +708,7 @@ export const ChatInterface = React.memo<ChatInterfaceProps>(({
       </ScrollArea>
 
       <div
-        className="absolute bottom-0 left-0 right-0 px-4 pb-4 z-20"
-        style={{
-          backgroundColor: 'transparent',
-          backgroundImage: 'linear-gradient(to top, var(--chat-background), transparent)'
-        }}
+        className="qor-chat-composer-wrap"
       >
         <ChatInput
           onSendMessage={handleMessageSend}

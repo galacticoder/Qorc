@@ -157,7 +157,6 @@ export class LBCommandListener {
 
                     try {
                         if (!encryptedMessage || typeof encryptedMessage !== 'string' || encryptedMessage.trim().length === 0) {
-                            cryptoLogger.debug('[AUTO-LB] Received empty or invalid message, ignoring');
                             return;
                         }
 

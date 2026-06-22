@@ -24,6 +24,10 @@ import { fileURLToPath } from 'url';
 const isRoot = typeof process.getuid === 'function' && process.getuid() === 0;
 const TMPDIR = os.tmpdir();
 const DEFAULT_HTTPS_PORT = parseInt(process.env.HAPROXY_HTTPS_PORT || (isRoot ? '443' : '8443'), 10);
+const SERVER_ACTIVE_TIMEOUT_MS = Math.min(
+  Math.max(parseInt(process.env.LB_SERVER_ACTIVE_TIMEOUT_MS || '45000', 10) || 45000, 10000),
+  300000
+);
 
 const LOADBALANCER_LOCK_FILE = process.env.LOADBALANCER_LOCK_FILE ||
   (isRoot && process.platform !== 'win32' ? '/var/run/auto-loadbalancer.pid' : path.join(TMPDIR, 'auto-loadbalancer.pid'));
@@ -76,7 +80,7 @@ class AutoLoadBalancer {
           const lastHeartbeat = serverInfo.lastHeartbeat || 0;
           const age = now - lastHeartbeat;
 
-          if (age < 10000) {
+          if (age < SERVER_ACTIVE_TIMEOUT_MS) {
             activeServers.push({
               serverId,
               host: serverInfo.host || '127.0.0.1',

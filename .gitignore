@@ -119,3 +119,5 @@ server/config/.haproxy-stats-creds.pqc
 scripts/config
 dump.rdb
 theme-playground.html
+
+logs/

@@ -7,6 +7,7 @@ export const recipientKeyValidator = () => {
   const cache = new Map<string, { valid: boolean; expiresAt: number }>();
   return (keys: HybridPublicKeys | undefined) => {
     if (!keys) return false;
+    if (!keys.x25519PublicBase64) return false;
     const compositeKey = `${keys.kyberPublicBase64}:${keys.dilithiumPublicBase64}:${keys.x25519PublicBase64 ?? ''}`;
     const cached = cache.get(compositeKey);
     if (cached && cached.expiresAt > Date.now()) {
@@ -19,11 +20,9 @@ export const recipientKeyValidator = () => {
       if (kyber.length !== KYBER_PUBLIC_KEY_LENGTH || dilithium.length !== DILITHIUM_PUBLIC_KEY_LENGTH) {
         valid = false;
       }
-      if (keys.x25519PublicBase64) {
-        const x25519 = CryptoUtils.Base64.base64ToUint8Array(keys.x25519PublicBase64);
-        if (x25519.length !== X25519_PUBLIC_KEY_LENGTH) {
-          valid = false;
-        }
+      const x25519 = CryptoUtils.Base64.base64ToUint8Array(keys.x25519PublicBase64);
+      if (x25519.length !== X25519_PUBLIC_KEY_LENGTH) {
+        valid = false;
       }
     } catch {
       valid = false;
@@ -43,6 +42,8 @@ export const validateHybridKeys = (keys: any): boolean => {
     typeof keys.kyberPublicBase64 === 'string' &&
     keys.kyberPublicBase64.length > 0 &&
     typeof keys.dilithiumPublicBase64 === 'string' &&
-    keys.dilithiumPublicBase64.length > 0
+    keys.dilithiumPublicBase64.length > 0 &&
+    typeof keys.x25519PublicBase64 === 'string' &&
+    keys.x25519PublicBase64.length > 0
   );
 };

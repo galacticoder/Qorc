@@ -4,6 +4,7 @@ import { RATE_LIMIT_CONFIG } from '../config/config.js';
 import crypto from 'crypto';
 import { logger as cryptoLogger } from '../crypto/crypto-logger.js';
 import fs from 'fs';
+import { privateLookupId } from '../database/core.js';
 
 function sanitizeRedisUrl(url) {
   try {
@@ -40,7 +41,7 @@ function hashPrincipalId(principalId) {
     throw new Error('Invalid principalId');
   }
   const normalized = principalId.trim();
-  return crypto.createHash('sha256').update(normalized).digest('hex');
+  return privateLookupId('rate-limit-principal-v2', normalized);
 }
 
 
@@ -465,28 +466,6 @@ export class DistributedRateLimiter {
       return {
         allowed: false,
         reason: `Message rate limit exceeded. Try again in ${friendly}.`,
-        remainingBlockTime: Math.max(1, Math.ceil(ms / 1000))
-      };
-    }
-  }
-
-  async checkBundleLimit(principalId) {
-    const key = this._getPrincipalLimiterKey(principalId);
-    if (!this.userBundleLimiter) {
-      return { allowed: true };
-    }
-    if (!key) {
-      return { allowed: false, reason: 'Invalid user' };
-    }
-    try {
-      await this.userBundleLimiter.consume(key, 1);
-      return { allowed: true };
-    } catch (res) {
-      const ms = res.msBeforeNext || 1000;
-      const friendly = this._formatDuration(ms);
-      return {
-        allowed: false,
-        reason: `Bundle operation rate limit exceeded. Try again in ${friendly}.`,
         remainingBlockTime: Math.max(1, Math.ceil(ms / 1000))
       };
     }

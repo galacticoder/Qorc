@@ -2,6 +2,7 @@ import { CryptoUtils } from '../crypto/unified-crypto.js';
 import * as ServerConfig from '../config/config.js';
 import { TTL_CONFIG } from '../config/config.js';
 import { withRedisClient } from '../session/redis-client.js';
+import { logger as cryptoLogger } from '../crypto/crypto-logger.js';
 
 // Configuration for server capacity
 const MAX_CONNECTIONS = parseInt(process.env.MAX_CONNECTIONS || '1000', 10);
@@ -45,7 +46,7 @@ export const isServerFull = async () => {
     );
     return result === 1;
   } catch (error) {
-    console.error('[AUTH] Redis error in isServerFull. Treating server as full:', error);
+    cryptoLogger.error('[AUTH] Redis error in isServerFull. Treating server as full', { error: error?.message });
     return true;
   }
 };
@@ -55,22 +56,20 @@ export const decrementConnectionCount = async () => {
   try {
     await withRedisClient(client => client.decr(CONNECTION_COUNTER_KEY));
   } catch (error) {
-    console.error('[AUTH] Error decrementing connection count:', error);
+    cryptoLogger.error('[AUTH] Error decrementing connection count', { error: error?.message });
   }
 };
 
 export async function setServerPasswordOnInput() {
   try {
-    if (process.env.SERVER_PASSWORD_HASH && process.env.SERVER_PASSWORD_HASH.length > 0) {
-      ServerConfig.setServerPassword(process.env.SERVER_PASSWORD_HASH);
-      console.log('[SERVER] Server password hash set from environment');
-      return;
-    }
+    const plaintextPassword = typeof process.env.SERVER_PASSWORD === 'string'
+      ? process.env.SERVER_PASSWORD.trim()
+      : '';
 
-    if (process.env.SERVER_PASSWORD && process.env.SERVER_PASSWORD.length > 0) {
-      const password = process.env.SERVER_PASSWORD;
+    if (plaintextPassword.length > 0) {
+      const password = plaintextPassword;
       if (password.length > 512) {
-        console.error('SERVER_PASSWORD too long (max 512 characters). Exiting...');
+        cryptoLogger.error('[SERVER] SERVER_PASSWORD too long');
         process.emit('SIGTERM');
         return;
       }
@@ -83,7 +82,7 @@ export async function setServerPasswordOnInput() {
         const { ServerGatekeeper } = await import('./gatekeeper.js');
         await ServerGatekeeper.initializeExplicit(password);
       } catch (gkErr) {
-        console.warn('[SERVER] Failed to auto-initialize gatekeeper:', gkErr.message);
+        cryptoLogger.warn('[SERVER] Failed to auto-initialize gatekeeper', { error: gkErr?.message });
       }
 
       process.env.SERVER_PASSWORD_HASH = hash;
@@ -94,14 +93,14 @@ export async function setServerPasswordOnInput() {
           const { withRedisClient } = await import('../session/redis-client.js');
           await withRedisClient(async (client) => {
             await client.hset('cluster:config', 'SERVER_PASSWORD_HASH', hash);
-            console.log('[SERVER] Stored password hash in cluster shared config');
+            cryptoLogger.info('[SERVER] Stored password hash in cluster shared config');
           });
         } catch (error) {
-          console.log('[SERVER] Could not store password in cluster:', error.message);
+          cryptoLogger.warn('[SERVER] Could not store password in cluster', { error: error?.message });
         }
       }
 
-      console.log('[SERVER] Server password set from environment');
+      cryptoLogger.info('[SERVER] Server password set from environment');
       return;
     }
 
@@ -111,35 +110,30 @@ export async function setServerPasswordOnInput() {
         const sharedPasswordHash = await ClusterManager.getSharedConfig('SERVER_PASSWORD_HASH');
         if (sharedPasswordHash && sharedPasswordHash.length > 0) {
           ServerConfig.setServerPassword(sharedPasswordHash);
-          console.log('[SERVER] Server password hash loaded from cluster shared config');
+          cryptoLogger.info('[SERVER] Server password hash loaded from cluster shared config');
           return;
         }
       } catch (error) {
-        console.log('[SERVER] Could not load password from cluster: ' + error.message);
+        cryptoLogger.warn('[SERVER] Could not load password from cluster', { error: error?.message });
       }
     }
 
     console.error('\n' + '='.repeat(80));
     console.error('ERROR: Server password required but not provided');
     console.error('='.repeat(80));
-    console.error('\nPlease provide server password using one of these methods:');
-    console.error('\n1. Environment variable');
-    console.error('   export SERVER_PASSWORD_HASH="your_argon2_hash"');
+    console.error('\nPlease provide server password using an environment variable:');
     console.error('   export SERVER_PASSWORD="your_password"');
+    console.error('\nblind server entry requires the plaintext SERVER_PASSWORD at boot to initialize the gatekeeper.');
     console.error('\n' + '='.repeat(80) + '\n');
     process.exit(1);
   } catch (error) {
     if (error?.message?.includes('Password must be at least')) {
-      console.error(`[SERVER] Password too short: ${error.message}`);
-      console.error('Please set a server password with at least 12 characters via SERVER_PASSWORD or SERVER_PASSWORD_HASH.');
-      console.error('Exiting...');
+      cryptoLogger.error('[SERVER] Password too short');
     } else {
-      console.error('[SERVER] Failed to set server password:', {
-        message: error?.message || error,
-        stack: error?.stack,
+      cryptoLogger.error('[SERVER] Failed to set server password', {
+        error: error?.message,
         type: error?.constructor?.name
       });
-      console.error('Password setting failed. Exiting...');
     }
     process.emit('SIGTERM');
   }

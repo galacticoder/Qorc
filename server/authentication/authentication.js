@@ -7,11 +7,13 @@ import { OPAQUEServer, OPAQUEHelpers } from '../crypto/opaque-service.js';
 import { PrivacyPassServer, PrivacyPassHelpers, NullifierStore } from './privacy-pass-server.js';
 import { ZKDeviceProofVerifier, DeviceCommitmentHelpers } from './zk-verifier.js';
 import { BlindSignatureIssuer } from '../security/blind-signatures.js';
-import { sendSecureMessage } from '../messaging/pq-envelope-handler.js';
+import { sendSecureMessage, sendSecureMessageChunked } from '../messaging/pq-envelope-handler.js';
 import { ServerGatekeeper } from './gatekeeper.js';
+import { logger as cryptoLogger } from '../crypto/crypto-logger.js';
+import * as ServerConfig from '../config/config.js';
 
 async function rejectConnection(ws, type, reason, code = 1008) {
-  console.log(`[AUTH] Rejecting connection: ${type} - ${reason}`);
+  cryptoLogger.warn('[AUTH] Rejecting connection', { type });
   await sendSecureMessage(ws, { type, message: reason });
   ws.close(code, reason);
   return;
@@ -21,7 +23,7 @@ async function sendAuthError(ws, { message, code = 'AUTH_FAILED', category = 'ge
   const payload = {
     type: SignalType.AUTH_ERROR,
     message,
-    code,
+    code, 
     category,
     locked,
   };
@@ -29,9 +31,21 @@ async function sendAuthError(ws, { message, code = 'AUTH_FAILED', category = 'ge
   if (cooldownSeconds !== undefined) payload.cooldownSeconds = cooldownSeconds;
   if (logout) payload.logout = true;
   try { await sendSecureMessage(ws, payload); } catch (e) {
-    console.error('[AUTH] Failed to send soft auth error:', e?.message || e);
+    cryptoLogger.error('[AUTH] Failed to send soft auth error', { error: e?.message });
   }
   return { handled: true };
+}
+
+function requiresServerEntry(ws) {
+  return Boolean(ServerConfig.getServerPasswordHash()) && !ws?._hasServerAuth;
+}
+
+function serverEntryResponseFields(ws) {
+  const serverEntryRequired = requiresServerEntry(ws);
+  return {
+    serverEntryRequired,
+    serverEntryGranted: !serverEntryRequired
+  };
 }
 
 // Immutable state manager
@@ -53,11 +67,6 @@ export class SecureStateManager {
   }
 }
 
-function anonId(username) {
-  if (!username) return '[unknown]';
-  return `${username.slice(0, 3)}...${username.slice(-3)}`;
-}
-
 export class AccountAuthHandler {
   constructor(serverHybridKeyPair, db) {
     this.serverHybridKeyPair = serverHybridKeyPair;
@@ -76,15 +85,19 @@ export class AccountAuthHandler {
   async handleOTRegisterRequest(ws, data) {
     try {
       const { blindedElement, clientPublicKey } = OPAQUEHelpers.parseRegistrationRequest(data);
+      cryptoLogger.info('[AUTH] OT registration request received', {
+        hasBlindedElement: !!blindedElement,
+        hasClientPublicKey: !!clientPublicKey,
+        hasPqSession: !!ws._pqSessionId
+      });
 
       // OPRF evaluation
       const registrationResponse = await this.opaqueServer.createRegistrationResponse(blindedElement, clientPublicKey);
 
-      const pool = await (await import('../database/database.js')).getPgPool();
-      const { rows } = await pool.query('SELECT COUNT(*) FROM users');
-      const count = parseInt(rows[0].count, 10);
-      const shardId = Math.floor(count / 100);
-      const slotIndex = count % 100;
+      const allocatedSlot = await UserDatabase.allocatePrivateAuthSlot();
+      const shardId = allocatedSlot.shard_id;
+      const slotIndex = allocatedSlot.credential_index;
+      const shardSize = OPAQUEServer.getShardSize();
 
       // Store registration state
       ws.clientState = SecureStateManager.setState(ws, {
@@ -93,7 +106,7 @@ export class AccountAuthHandler {
         registrationSalt: registrationResponse.serverNonce,
         assignedShardId: shardId,
         assignedSlotIndex: slotIndex,
-        blindedTokens: data.blindedTokens
+        assignedShardSize: shardSize
       });
 
       await sendSecureMessage(ws, {
@@ -104,13 +117,18 @@ export class AccountAuthHandler {
           serverNonce: registrationResponse.serverNonce
         }),
         shardId,
-        slotIndex
+        slotIndex,
+        shardSize
       });
 
-      console.log(`[AUTH] OT Registration slot assigned`);
+      cryptoLogger.info('[AUTH] OT registration response sent', {
+        shardId,
+        slotIndex,
+        shardSize
+      });
       return { pending: true };
     } catch (error) {
-      console.error('[AUTH] OT Registration request error:', error.message);
+      cryptoLogger.error('[AUTH] OT registration request error', { error: error?.message });
       return sendAuthError(ws, {
         message: "Registration request failed",
         code: 'REGISTRATION_REQUEST_FAILED'
@@ -122,7 +140,7 @@ export class AccountAuthHandler {
    * OT Registration finalization
    */
   async handleOTRegisterFinalize(ws, data) {
-    const { serverPrivateKey, registrationSalt, assignedShardId, assignedSlotIndex, blindedTokens } = SecureStateManager.getState(ws);
+    const { serverPrivateKey, registrationSalt, assignedShardId, assignedSlotIndex, assignedShardSize, blindedTokens } = SecureStateManager.getState(ws);
 
     if (!serverPrivateKey || assignedShardId === undefined) {
       return rejectConnection(ws, SignalType.AUTH_ERROR, "Registration state lost");
@@ -130,23 +148,29 @@ export class AccountAuthHandler {
 
     try {
       const { credentialId, envelope, maskedResponse } = data;
+      cryptoLogger.info('[AUTH] OT registration finalize received', {
+        hasCredentialId: !!credentialId,
+        hasEnvelope: !!envelope,
+        blindedTokenBatchCount: Array.isArray(data.blindedTokens) ? data.blindedTokens.length : 0,
+        hasPqSession: !!ws._pqSessionId
+      });
 
       if (!credentialId || !envelope) {
         return sendAuthError(ws, { message: "Missing credential data", code: 'INVALID_REQUEST' });
       }
 
-      // Create OPAQUE record using password derived credentialId
+      const credentialLookupId = UserDatabase.credentialLookupId(credentialId);
+
       const record = this.opaqueServer.createRegistrationRecord(
-        Buffer.from(credentialId, 'base64'),
+        credentialLookupId,
         Buffer.from(envelope, 'base64'),
         serverPrivateKey,
         Buffer.from(maskedResponse, 'base64'),
         registrationSalt
       );
 
-      // Store record using credentialId as the lookup key
       const userRecord = {
-        credentialId: credentialId,
+        credentialId: credentialLookupId,
         opaqueRecord: JSON.stringify(record),
         shard_id: assignedShardId,
         credential_index: assignedSlotIndex
@@ -154,17 +178,19 @@ export class AccountAuthHandler {
 
       const shardResult = await UserDatabase.saveUserRecord(userRecord);
 
-      console.log(`[AUTH] OT Registration complete: Shard ${shardResult.shard_id}, Index ${shardResult.credential_index}`);
+      cryptoLogger.info('[AUTH] OT registration complete');
 
       // Issue session token
       const { anonymousSessionService } = await import('./anonymous-session-service.js');
       const anonymousSession = await anonymousSessionService.createSessionWithCapabilities();
-      console.log(`[AUTH] Created session token for registration: ${anonymousSession.token?.length} chars`);
+      cryptoLogger.info('[AUTH] Created session token for registration', { hasToken: !!anonymousSession.token });
 
       const responsePayload = {
         type: SignalType.AUTH_FULL_SUCCESS,
+        ...serverEntryResponseFields(ws),
         shardId: shardResult.shard_id,
         credentialIndex: shardResult.credential_index,
+        shardSize: assignedShardSize || OPAQUEServer.getShardSize(),
         anonymousSession: {
           token: anonymousSession.token,
           expiresAt: anonymousSession.expiresAt,
@@ -173,7 +199,7 @@ export class AccountAuthHandler {
       };
 
       // Issue blind routing credentials if blinded token was provided
-      if (data.blindedToken) {
+      if (data.blindedToken && !requiresServerEntry(ws)) {
         try {
           const { generateCapabilityToken, storeCapabilityToken } = await import('../routing/capability-tokens.js');
 
@@ -183,7 +209,7 @@ export class AccountAuthHandler {
               ttl: Math.max(1, Math.floor((cap.expiresAt - Date.now()) / 1000))
             });
           } catch (e) {
-            console.warn('[AUTH] Failed to store capability token for registration', { error: e?.message });
+            cryptoLogger.warn('[AUTH] Failed to store capability token for registration', { error: e?.message });
           }
 
           const signed = await BlindSignatureIssuer.signBlindedMessage(data.blindedToken);
@@ -195,16 +221,20 @@ export class AccountAuthHandler {
             blindSignatureKid: signed.kid,
             serverBlindPublicKey
           };
-          console.log('[AUTH] Issued blind routing credentials for registration');
+          cryptoLogger.info('[AUTH] Issued blind routing credentials for registration');
         } catch (e) {
-          console.error('[AUTH] Failed to issue blind routing for registration:', e.message);
+          cryptoLogger.error('[AUTH] Failed to issue blind routing for registration', { error: e?.message });
         }
+      } else if (data.blindedToken) {
+        cryptoLogger.info('[AUTH] Deferring blind routing credentials until server entry is granted');
       }
 
+      const requestedTokenBatch = Array.isArray(data.blindedTokens) ? data.blindedTokens : blindedTokens;
+
       // Issue initial Privacy Pass tokens if blinded tokens were provided
-      if (blindedTokens && blindedTokens.length > 0) {
+      if (requestedTokenBatch && requestedTokenBatch.length > 0) {
         const tokenBatch = await this.ppServer.issueTokenBatch(
-          blindedTokens.map(t => Buffer.from(t, 'base64')),
+          requestedTokenBatch.map(t => Buffer.from(t, 'base64')),
           Buffer.from('INITIAL_REGISTRATION_PROOF_AUTH_V1')
         );
 
@@ -222,13 +252,12 @@ export class AccountAuthHandler {
 
       ws.clientState = SecureStateManager.setState(ws, {
         pendingRegistration: false,
-        hasAuthenticated: true,
-        credentialId: credentialId
+        hasAuthenticated: true
       });
 
-      return { success: true, credentialId };
+      return { success: true };
     } catch (error) {
-      console.error('[AUTH] OT Registration finalization error:', error.message);
+      cryptoLogger.error('[AUTH] OT registration finalization error', { error: error?.message });
       return sendAuthError(ws, {
         message: "Failed to finalize account creation: " + error.message,
         code: 'REGISTRATION_FINALIZATION_FAILED'
@@ -242,12 +271,21 @@ export class AccountAuthHandler {
   async handleOTSignIn(ws, data) {
     try {
       const { shardId, clientPubKeys, blindedElement, anonymousTokenData } = data;
+      if (!Number.isInteger(shardId) || shardId < 0 || !Array.isArray(clientPubKeys) || clientPubKeys.length !== OPAQUEServer.getShardSize()) {
+        return sendAuthError(ws, { message: 'Invalid private auth request', code: 'INVALID_PRIVATE_AUTH_REQUEST' });
+      }
       
       // Verify Anonymous Token
       let redemptionResult = null;
       if (anonymousTokenData) {
         const parsedRequest = PrivacyPassHelpers.parseRedemptionRequest(anonymousTokenData);
-        redemptionResult = await this.ppServer.redeemToken(parsedRequest.token, parsedRequest.nullifier, parsedRequest.mac);
+        redemptionResult = await this.ppServer.redeemToken(
+          parsedRequest.token,
+          parsedRequest.nullifier,
+          parsedRequest.mac,
+          parsedRequest.tokenSecret,
+          'account-auth'
+        );
       }
 
       // Load the shard from DB
@@ -261,11 +299,13 @@ export class AccountAuthHandler {
       // Encrypt the entire shard for OT
       const otRecords = await OPAQUEServer.encryptShardForOT(shardRecords, clientPubKeys);
 
-      // Generate a server nonce for this attempt
+      // Generate a server nonce for this attempt and bind it to this connection
       const serverNonce = crypto.randomBytes(32);
+      ws._loginServerNonce = serverNonce.toString('base64');
+      ws._loginServerNonceAt = Date.now();
 
       // Send back to client
-      await sendSecureMessage(ws, {
+      await sendSecureMessageChunked(ws, {
         type: SignalType.AUTH_OT_RESPONSE,
         otRecords,
         serverNonce: serverNonce.toString('base64'),
@@ -274,8 +314,8 @@ export class AccountAuthHandler {
       });
 
     } catch (error) {
-      console.error('[AUTH] OT Login failed:', error);
-      ws.send(JSON.stringify({ type: 'AUTH_ERROR', error: 'internal_error' }));
+      cryptoLogger.error('[AUTH] OT login failed', { error: error?.message });
+      return sendAuthError(ws, { message: 'Login request failed', code: 'LOGIN_REQUEST_FAILED' });
     }
   }
 
@@ -284,22 +324,25 @@ export class AccountAuthHandler {
    */
   async handleSignInFinalize(ws, data) {
     try {
-      const { authProof, serverNonce, credentialId } = data;
+      const { authProof, shardId } = data;
 
-      if (!credentialId || !authProof || !serverNonce) {
-        return ws.send(JSON.stringify({ type: 'AUTH_ERROR', error: 'invalid_finalize_request' }));
+      const stashedNonce = ws._loginServerNonce;
+      ws._loginServerNonce = null;
+      ws._loginServerNonceAt = null;
+
+      if (!authProof || !stashedNonce || !Number.isInteger(shardId) || shardId < 0) {
+        return sendAuthError(ws, { message: 'Invalid login finalization request', code: 'INVALID_FINALIZE_REQUEST' });
       }
 
-      const recordBase = await UserDatabase.loadUser(credentialId);
-      if (!recordBase) return ws.send(JSON.stringify({ type: 'AUTH_ERROR', error: 'auth_failed' }));
+      const shardRecords = await UserDatabase.getShardRecords(shardId);
+      if (!Array.isArray(shardRecords) || shardRecords.length === 0) {
+        return sendAuthError(ws, { message: 'Authentication failed', code: 'AUTH_FAILED' });
+      }
 
-      // Parse record if was stored as JSON string
-      const record = typeof recordBase.opaqueRecord === 'string' ? JSON.parse(recordBase.opaqueRecord) : recordBase.opaqueRecord;
-
-      const loginResult = await OPAQUEServer.finishLogin(
+      const loginResult = await OPAQUEServer.finishLoginAcrossShard(
+        shardRecords,
         Buffer.from(authProof, 'base64'),
-        record,
-        Buffer.from(serverNonce, 'base64')
+        Buffer.from(stashedNonce, 'base64')
       );
 
       if (loginResult.success) {
@@ -315,7 +358,7 @@ export class AccountAuthHandler {
 
         // Issue blind routing credentials if blinded token was provided
         let blindRouting = null;
-        if (data.blindedToken) {
+        if (data.blindedToken && !requiresServerEntry(ws)) {
           try {
             const { generateCapabilityToken, storeCapabilityToken } = await import('../routing/capability-tokens.js');
 
@@ -325,7 +368,7 @@ export class AccountAuthHandler {
                 ttl: Math.max(1, Math.floor((cap.expiresAt - Date.now()) / 1000))
               });
             } catch (e) {
-              console.warn('[AUTH] Failed to store capability token for login', { error: e?.message });
+              cryptoLogger.warn('[AUTH] Failed to store capability token for login', { error: e?.message });
             }
 
             const signed = await BlindSignatureIssuer.signBlindedMessage(data.blindedToken);
@@ -337,14 +380,17 @@ export class AccountAuthHandler {
               blindSignatureKid: signed.kid,
               serverBlindPublicKey
             };
-            console.log('[AUTH] Issued blind routing credentials for login');
+            cryptoLogger.info('[AUTH] Issued blind routing credentials for login');
           } catch (e) {
-            console.error('[AUTH] Failed to issue blind routing for login:', e.message);
+            cryptoLogger.error('[AUTH] Failed to issue blind routing for login', { error: e?.message });
           }
+        } else if (data.blindedToken) {
+          cryptoLogger.info('[AUTH] Deferring blind routing credentials until server entry is granted');
         }
 
         await sendSecureMessage(ws, {
           type: SignalType.AUTH_FULL_SUCCESS,
+          ...serverEntryResponseFields(ws),
           maskedResult: Buffer.from(uniformResponse).toString('base64'),
           anonymousSession: {
             token: anonymousSession.token,
@@ -355,14 +401,11 @@ export class AccountAuthHandler {
         });
 
         ws.clientState = SecureStateManager.setState(ws, {
-          hasAuthenticated: true,
-          sessionId: anonymousSession.sessionId,
-          credentialId: recordBase.credentialId
+          hasAuthenticated: true
         });
-        ws._primaryInboxId = recordBase.credentialId;
 
-        console.log(`[AUTH] Successful blind login for credentialId: ${credentialId.slice(0, 8)}...`);
-        return { success: true, credentialId: recordBase.credentialId };
+        cryptoLogger.info('[AUTH] Successful blind login');
+        return { success: true };
       } else {
         const uniformResponse = OPAQUEServer.generateUniformResponse({ success: false }, randomBytes(32));
         await sendSecureMessage(ws, {
@@ -371,8 +414,8 @@ export class AccountAuthHandler {
         });
       }
     } catch (error) {
-      console.error('[AUTH] Login finalization failed:', error);
-      ws.send(JSON.stringify({ type: 'AUTH_ERROR', error: 'internal_error' }));
+      cryptoLogger.error('[AUTH] Login finalization failed', { error: error?.message });
+      return sendAuthError(ws, { message: 'Login finalization failed', code: 'LOGIN_FINALIZATION_FAILED' });
     }
   }
 
@@ -396,7 +439,7 @@ export class AccountAuthHandler {
         serverBlindPublicKey
       });
     } catch (e) {
-      console.error('[AUTH] Blind signature failed:', e.message);
+      cryptoLogger.error('[AUTH] Blind signature failed', { error: e?.message });
     }
   }
 
@@ -427,7 +470,7 @@ export class AccountAuthHandler {
 
       return { success: true };
     } catch (e) {
-      console.error('[AUTH] ZK Proof error:', e);
+      cryptoLogger.error('[AUTH] ZK proof error', { error: e?.message });
       return rejectConnection(ws, SignalType.AUTH_ERROR, "Verification failed");
     }
   }
@@ -443,7 +486,7 @@ export class AccountAuthHandler {
         ...DeviceCommitmentHelpers.formatChallengeResponse(challengeData)
       });
     } catch (e) {
-      console.error('[AUTH] ZK Challenge error:', e);
+      cryptoLogger.error('[AUTH] ZK challenge error', { error: e?.message });
       return rejectConnection(ws, SignalType.AUTH_ERROR, "Failed to generate challenge");
     }
   }
@@ -466,7 +509,7 @@ export class AccountAuthHandler {
         commitmentHash
       });
     } catch (e) {
-      console.error('[AUTH] ZK device registration failed:', e.message);
+      cryptoLogger.error('[AUTH] ZK device registration failed', { error: e?.message });
       await sendSecureMessage(ws, {
         type: SignalType.ZK_DEVICE_REGISTER_RESPONSE,
         success: false,
@@ -480,12 +523,12 @@ export class AccountAuthHandler {
    */
   async processAuthRequest(ws, str) {
     if (!str || typeof str !== 'string') {
-      console.error('[AUTH] Invalid authentication request format');
+      cryptoLogger.warn('[AUTH] Invalid authentication request format');
       return rejectConnection(ws, SignalType.AUTH_ERROR, "Invalid request format");
     }
 
     if (str.length > 1048576) {
-      console.error('[AUTH] Authentication request too large');
+      cryptoLogger.warn('[AUTH] Authentication request too large');
       return rejectConnection(ws, SignalType.AUTH_ERROR, "Request too large");
     }
 
@@ -500,7 +543,7 @@ export class AccountAuthHandler {
       } = parsed;
 
       if (!parsed || typeof parsed !== 'object') {
-        console.error('[AUTH] Invalid authentication data structure');
+        cryptoLogger.warn('[AUTH] Invalid authentication data structure');
         return rejectConnection(ws, SignalType.AUTH_ERROR, "Invalid request structure");
       }
 
@@ -521,7 +564,7 @@ export class AccountAuthHandler {
       // Validate credentialId format
       if (credentialId) {
         if (typeof credentialId !== 'string' || credentialId.length < 32 || !/^[a-f0-9]+$/i.test(credentialId)) {
-          console.error(`[AUTH] Invalid credentialId format`);
+          cryptoLogger.warn('[AUTH] Invalid credentialId format');
           return rejectConnection(ws, SignalType.AUTH_ERROR, "Invalid credential ID format");
         }
       }
@@ -529,41 +572,41 @@ export class AccountAuthHandler {
       // Route to OT-based handlers
       switch (type) {
         case SignalType.AUTH_OT_REGISTER_REQUEST:
-          console.log(`[AUTH] Handling OT registration request`);
+          cryptoLogger.info('[AUTH] Handling OT registration request');
           return this.handleOTRegisterRequest(ws, parsed);
         case SignalType.AUTH_OT_REGISTER_FINALIZE:
-          console.log(`[AUTH] Handling OT registration finalize`);
+          cryptoLogger.info('[AUTH] Handling OT registration finalize');
           return this.handleOTRegisterFinalize(ws, parsed);
         case SignalType.BLIND_SIGNATURE_REQUEST:
-          console.log(`[AUTH] Handling blind signature request`);
+          cryptoLogger.info('[AUTH] Handling blind signature request');
           return this.handleBlindSignatureRequest(ws, blindedToken);
         case SignalType.ZK_REFRESH_CHALLENGE:
-          console.log(`[AUTH] Handling ZK refresh challenge`);
+          cryptoLogger.info('[AUTH] Handling ZK refresh challenge');
           return this.handleZKChallengeRequest(ws);
         case SignalType.ZK_DEVICE_REGISTER:
-          console.log(`[AUTH] Handling ZK device register`);
+          cryptoLogger.info('[AUTH] Handling ZK device register');
           return this.handleZKDeviceRegisterRequest(ws, parsed);
         case SignalType.ZK_PROOF_RESPONSE:
-          console.log(`[AUTH] Handling ZK proof response`);
+          cryptoLogger.info('[AUTH] Handling ZK proof response');
           return this.processDeviceProofResponse(ws, str);
         case SignalType.AUTH_OT_REQUEST:
-          console.log(`[AUTH] Handling blind OT sign in`);
+          cryptoLogger.info('[AUTH] Handling blind OT sign in');
           return this.handleOTSignIn(ws, parsed);
         case SignalType.AUTH_OT_FINALIZE:
-          console.log(`[AUTH] Handling blind OT login finalize`);
+          cryptoLogger.info('[AUTH] Handling blind OT login finalize');
           return this.handleSignInFinalize(ws, parsed);
         case SignalType.SERVER_ENTRY_REQUEST:
-          console.log(`[AUTH] Handling server entry request`);
+          cryptoLogger.info('[AUTH] Handling server entry request');
           return this.gatekeeper.handleEntryRequest(ws, blindedElement);
         case SignalType.SERVER_ENTRY_TOKEN_ISSUANCE:
-          console.log(`[AUTH] Handling server entry token issuance`);
+          cryptoLogger.info('[AUTH] Handling server entry token issuance');
           return this.gatekeeper.handleTokenIssuance(ws, blindedTokens, proofOfKnowledge);
         default:
-          console.error(`[AUTH] Invalid auth type: ${type}`);
+          cryptoLogger.warn('[AUTH] Invalid auth type', { type });
           return rejectConnection(ws, SignalType.AUTH_ERROR, "Invalid auth type");
       }
     } catch (error) {
-      console.error('[AUTH] Auth processing error:', error);
+      cryptoLogger.error('[AUTH] Auth processing error', { error: error?.message });
       return rejectConnection(ws, SignalType.AUTH_ERROR, "Authentication failed");
     }
   }
@@ -603,7 +646,7 @@ export class ServerAuthHandler {
    * Currently delegates to Gatekeeper for anonymous entry
    */
   async handleServerOperation() {
-    console.log('[SERVER-AUTH] Processing server-level operation');
+    cryptoLogger.info('[SERVER-AUTH] Processing server-level operation');
     // TODO: implementation for admin/server tasks
   }
 }

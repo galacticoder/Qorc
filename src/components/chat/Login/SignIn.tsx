@@ -1,7 +1,4 @@
 import React, { useState, useCallback, useMemo } from "react";
-import { Input } from "../../ui/input";
-import { Label } from "../../ui/label";
-import { Button } from "../../ui/button";
 import { USERNAME_MAX_LENGTH, PASSWORD_MAX_LENGTH } from "../../../lib/constants";
 
 interface SignInFormProps {
@@ -72,10 +69,15 @@ export function SignInForm({
   }, [disabled, isSubmitting, isFormValid, username, password, passphrase, onSubmit]);
 
   return (
-    <form onSubmit={handleSubmit} className="space-y-4">
-      <div className="space-y-2">
-        <Label htmlFor="username" className="text-muted-foreground font-medium">Username</Label>
-        <Input
+    <form
+      onSubmit={handleSubmit}
+      className={`login-simple-form${isSubmitting ? " is-submitting" : ""}`}
+      aria-busy={isSubmitting}
+    >
+      <div className="login-simple-field">
+        <label htmlFor="username">Username</label>
+        <input
+          className="login-simple-input"
           id="username"
           placeholder="Enter your username"
           value={username}
@@ -84,13 +86,13 @@ export function SignInForm({
           required
           maxLength={USERNAME_MAX_LENGTH}
           autoComplete="username"
-          className="bg-background/50 border-border/50 focus:bg-background/80 transition-all duration-200"
         />
       </div>
 
-      <div className="space-y-2">
-        <Label htmlFor="passphrase" className="text-muted-foreground font-medium">Encryption Passphrase</Label>
-        <Input
+      <div className="login-simple-field">
+        <label htmlFor="passphrase">Encryption passphrase</label>
+        <input
+          className="login-simple-input"
           id="passphrase"
           type="password"
           placeholder="Enter your encryption passphrase"
@@ -99,13 +101,13 @@ export function SignInForm({
           disabled={disabled || isSubmitting}
           required
           autoComplete="current-password"
-          className="bg-background/50 border-border/50 focus:bg-background/80 transition-all duration-200"
         />
       </div>
 
-      <div className="space-y-2">
-        <Label htmlFor="password" className="text-muted-foreground font-medium">Password</Label>
-        <Input
+      <div className="login-simple-field">
+        <label htmlFor="password">Password</label>
+        <input
+          className="login-simple-input"
           id="password"
           type="password"
           placeholder="Enter your password"
@@ -115,25 +117,22 @@ export function SignInForm({
           required
           autoComplete="current-password"
           maxLength={PASSWORD_MAX_LENGTH}
-          className="bg-background/50 border-border/50 focus:bg-background/80 transition-all duration-200"
         />
       </div>
 
       {hasServerTrustRequest && !isSubmitting && (
-        <p className="text-destructive text-sm text-center font-medium animate-pulse">
+        <p className="auth-simple-message">
           Verify server identity before proceeding
         </p>
       )}
 
-      <Button
+      <button
         type="submit"
-        size="lg"
-        variant="ghost"
-        className="w-full h-14 text-base font-semibold transition-all shadow-xl shadow-primary/20 hover:shadow-primary/40 hover:scale-[1.02] active:scale-[0.98] bg-primary hover:bg-primary/90 border-0"
+        className="login-simple-submit"
         disabled={disabled || isSubmitting || !isFormValid}
       >
-        {isSubmitting ? (authStatus || "Logging In...") : "Sign In"}
-      </Button>
+        {isSubmitting ? (authStatus || "Signing in...") : "Sign in"}
+      </button>
     </form>
   );
 }

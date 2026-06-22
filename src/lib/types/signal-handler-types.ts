@@ -7,6 +7,7 @@ export interface SignalHandlers {
   Database: any;
   handleFileMessageChunk: (data: any, meta: any) => Promise<void>;
   handleEncryptedMessagePayload: (message: any) => Promise<void>;
+  findUser?: (handle: string, options?: { forceRefresh?: boolean }) => Promise<any>;
 }
 
 export interface AuthRefs {
@@ -42,6 +43,8 @@ export interface AuthRefs {
   isRegistrationMode?: boolean;
   blindCredentialRef?: React.RefObject<{
     message: string;
+    inboxId?: string;
+    routeId?: string;
     blindedMsg: string;
     blindingFactor: string;
     n: string;
@@ -56,4 +59,5 @@ export interface AuthRefs {
 
 export interface DatabaseRefs {
   setUsers?: (fn: any) => void;
+  users?: any[];
 }

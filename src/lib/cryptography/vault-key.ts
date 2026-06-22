@@ -135,19 +135,28 @@ export async function loadWrappedMasterKey(username: string, vaultKey: CryptoKey
   }
 }
 
+export const INBOX_EPOCH_MS = 6 * 60 * 60 * 1000;
+
+export function currentInboxEpoch(now: number = Date.now()): number {
+  return Math.floor(now / INBOX_EPOCH_MS);
+}
+
 /**
- * Derive a stable Inbox ID from the Vault Key
+ * Derive the current epoch Inbox ID from the Vault Key. Deterministic from (vaultKey, epoch)
  */
-export async function deriveInboxId(vaultKey: CryptoKey): Promise<string> {
+export async function deriveInboxId(vaultKey: CryptoKey, epoch: number): Promise<string> {
   const subtle = (globalThis as any).crypto?.subtle as SubtleCrypto;
   const rawVaultKey = new Uint8Array(await subtle.exportKey('raw', vaultKey));
 
   try {
     const encoder = new TextEncoder();
-    const prefix = encoder.encode('qor-chat-inbox-v1-derivation');
-    const combined = new Uint8Array(prefix.length + rawVaultKey.length);
-    combined.set(prefix);
+    const prefix = encoder.encode('qor-chat-inbox-v2-derivation');
+    const epochBytes = new Uint8Array(8);
+    new DataView(epochBytes.buffer).setBigUint64(0, BigInt(Math.trunc(epoch)), false);
+    const combined = new Uint8Array(prefix.length + rawVaultKey.length + epochBytes.length);
+    combined.set(prefix, 0);
     combined.set(rawVaultKey, prefix.length);
+    combined.set(epochBytes, prefix.length + rawVaultKey.length);
 
     const hashBuffer = await subtle.digest('SHA-256', combined);
     const hashArray = Array.from(new Uint8Array(hashBuffer));

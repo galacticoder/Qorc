@@ -28,6 +28,11 @@ const PP_LABELS = {
     OPRF_INPUT: 'PrivacyPass-OPRF-Input-v1',
 };
 
+function normalizePurpose(purpose?: string): string {
+    const value = typeof purpose === 'string' ? purpose.trim().toLowerCase() : '';
+    return /^[a-z0-9:_-]{1,64}$/.test(value) ? value : 'account-auth';
+}
+
 /**
  * Anonymous Token structure
  */
@@ -38,6 +43,7 @@ export interface AnonymousToken {
     blindedElement?: Uint8Array;
     signature?: Uint8Array;
     unblindedToken?: Uint8Array;
+    purpose?: string;
     issuedAt: number;
     used: boolean;
     pending: boolean;
@@ -50,6 +56,11 @@ export interface AnonymousToken {
  */
 export class PrivacyPassClient {
     private pendingBlinds: Map<string, { blind: Uint8Array; input: Uint8Array }> = new Map();
+    private readonly purpose: string;
+
+    constructor(purpose: string = 'account-auth') {
+        this.purpose = normalizePurpose(purpose);
+    }
 
     /**
      * Generate a batch of tokens to be signed by server
@@ -59,7 +70,7 @@ export class PrivacyPassClient {
         tokenSecrets: AnonymousToken[];
     }> {
         try {
-            const result = await PostQuantumWorker.ppGenerateTokenBatch(count);
+            const result = await PostQuantumWorker.ppGenerateTokenBatch(count, this.purpose);
             return {
                 blindedTokens: result.blindedTokens,
                 tokenSecrets: result.tokenSecrets as AnonymousToken[]
@@ -74,7 +85,7 @@ export class PrivacyPassClient {
         blindedTokens: Uint8Array[];
         tokenSecrets: AnonymousToken[];
     }> {
-        const result = PrivacyPassOps.generateTokenBatch(count);
+        const result = PrivacyPassOps.generateTokenBatch(count, this.purpose);
         
         // Track pending blinds for unblinding
         for (const token of result.tokenSecrets) {
@@ -84,7 +95,7 @@ export class PrivacyPassClient {
                 blake3,
                 token.tokenSecret,
                 new Uint8Array(0),
-                new TextEncoder().encode(PP_LABELS.OPRF_INPUT),
+                new TextEncoder().encode(`${PP_LABELS.OPRF_INPUT}:${normalizePurpose(token.purpose || this.purpose)}`),
                 32
             );
             this.pendingBlinds.set(token.id, {
@@ -134,10 +145,12 @@ export class PrivacyPassClient {
      * Prepare a token for redemption
      */
     async prepareRedemption(token: AnonymousToken): Promise<{
+        tokenSecret: Uint8Array;
         token: Uint8Array;
         nullifier: Uint8Array;
         mac: Uint8Array;
         decryptionKey: Uint8Array;
+        purpose: string;
     }> {
         if (!token.unblindedToken) {
             throw new Error('Token not finalized');
@@ -176,10 +189,12 @@ export class PrivacyPassClient {
         );
 
         return {
+            tokenSecret: token.tokenSecret,
             token: token.unblindedToken,
             nullifier,
             mac,
             decryptionKey,
+            purpose: normalizePurpose(token.purpose || this.purpose),
         };
     }
 
@@ -243,6 +258,7 @@ export const TokenSerializer = {
             unblindedToken: token.unblindedToken
                 ? Base64.arrayBufferToBase64(token.unblindedToken)
                 : null,
+            purpose: token.purpose || 'account-auth',
             issuedAt: token.issuedAt,
             used: token.used,
             pending: token.pending,
@@ -264,6 +280,7 @@ export const TokenSerializer = {
             unblindedToken: parsed.unblindedToken
                 ? Base64.base64ToUint8Array(parsed.unblindedToken)
                 : undefined,
+            purpose: typeof parsed.purpose === 'string' ? parsed.purpose : 'legacy',
             issuedAt: parsed.issuedAt,
             used: parsed.used,
             pending: parsed.pending,
@@ -285,6 +302,7 @@ export const TokenSerializer = {
                 unblindedToken: t.unblindedToken
                     ? Base64.arrayBufferToBase64(t.unblindedToken)
                     : null,
+                purpose: t.purpose || 'account-auth',
                 issuedAt: t.issuedAt,
                 used: t.used,
                 pending: t.pending,
@@ -316,6 +334,7 @@ export const TokenSerializer = {
                 unblindedToken: p.unblindedToken
                     ? Base64.base64ToUint8Array(p.unblindedToken as string)
                     : undefined,
+                purpose: typeof p.purpose === 'string' ? p.purpose : 'legacy',
                 issuedAt: p.issuedAt as number,
                 used: p.used as boolean,
                 pending: p.pending as boolean,

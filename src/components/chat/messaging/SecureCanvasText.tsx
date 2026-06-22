@@ -13,6 +13,7 @@ export interface SecureCanvasTextProps {
     fontFamily?: string;
     isCurrentUser?: boolean;
     onCopy?: () => void;
+    onRendered?: () => void;
     onContextMenu?: (e: React.MouseEvent) => void;
 }
 
@@ -41,17 +42,24 @@ const wrapText = (ctx: CanvasRenderingContext2D, text: string, maxWidth: number)
     return lines;
 };
 
-// Measurement context for synchronous dimension calculation
-let measurementCanvas: HTMLCanvasElement | null = null;
-let measurementContext: CanvasRenderingContext2D | null = null;
-
-const getMeasurementContext = () => {
-    if (typeof document === 'undefined') return null;
-    if (!measurementContext) {
-        measurementCanvas = document.createElement('canvas');
-        measurementContext = measurementCanvas.getContext('2d');
+const resolveCanvasColor = (requestedColor: string, element: HTMLElement | null, isCurrentUser: boolean): string => {
+    const fallback = isCurrentUser ? '#ffffff' : '#0f172a';
+    if (!element || typeof window === 'undefined') {
+        return requestedColor === 'inherit' || requestedColor === 'currentColor' ? fallback : requestedColor;
     }
-    return measurementContext;
+
+    const styles = window.getComputedStyle(element);
+    if (requestedColor === 'inherit' || requestedColor === 'currentColor') {
+        return styles.color || fallback;
+    }
+
+    const varMatch = requestedColor.match(/^var\((--[A-Za-z0-9-_]+)(?:,\s*([^)]+))?\)$/);
+    if (!varMatch) return requestedColor;
+
+    const [, varName, fallbackValue] = varMatch;
+    const resolved = styles.getPropertyValue(varName).trim()
+        || window.getComputedStyle(document.documentElement).getPropertyValue(varName).trim();
+    return resolved || fallbackValue?.trim() || fallback;
 };
 
 // Renders text to a canvas element
@@ -63,6 +71,7 @@ export const SecureCanvasText = memo(function SecureCanvasText({
     fontFamily = 'Inter, system-ui, sans-serif',
     isCurrentUser = false,
     onCopy,
+    onRendered,
     onContextMenu,
 }: SecureCanvasTextProps) {
     const containerRef = useRef<HTMLDivElement>(null);
@@ -76,8 +85,6 @@ export const SecureCanvasText = memo(function SecureCanvasText({
     const [dimensions, setDimensions] = useState(initialDimensions);
     const [isVisible, setIsVisible] = useState(false);
     const [selectableText, setSelectableText] = useState('');
-    const renderedRef = useRef(false);
-
     useEffect(() => {
         if (!containerRef.current) return;
 
@@ -97,9 +104,12 @@ export const SecureCanvasText = memo(function SecureCanvasText({
 
     // Render to canvas when visible
     useEffect(() => {
-        if (!isVisible || !canvasRef.current || renderedRef.current) return;
+        if (!isVisible || !canvasRef.current) return;
 
         let cancelled = false;
+        const existingCtx = canvasRef.current.getContext('2d');
+        existingCtx?.clearRect(0, 0, canvasRef.current.width, canvasRef.current.height);
+        setSelectableText('');
 
         const renderSecureContent = async () => {
             let plaintext: string | null = null;
@@ -125,7 +135,7 @@ export const SecureCanvasText = memo(function SecureCanvasText({
             if (!ctx) return;
 
             // Set font for measurement
-            const resolvedColor = color === 'inherit' ? (isCurrentUser ? '#ffffff' : '#e5e5e5') : color;
+            const resolvedColor = resolveCanvasColor(color, containerRef.current, isCurrentUser);
             ctx.font = `${fontSize}px ${fontFamily}`;
 
             // Word wrap
@@ -167,7 +177,7 @@ export const SecureCanvasText = memo(function SecureCanvasText({
             // Store text for selection overlay
             setSelectableText(plaintext);
 
-            renderedRef.current = true;
+            onRendered?.();
 
             // @ts-ignore
             plaintext = null;

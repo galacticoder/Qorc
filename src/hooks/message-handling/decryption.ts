@@ -4,6 +4,7 @@ import { safeJsonParse, safeJsonParseForMessages } from '../../lib/utils/message
 import { MAX_SIGNAL_PAYLOAD_JSON_BYTES } from '../../lib/constants';
 import type { EncryptedMessage } from '../../lib/types/message-handling-types';
 import { signal } from '../../lib/tauri-bindings';
+import { validateSignalBundleForPeerIdentity, type PeerIdentityLike } from '../../lib/utils/signal-bundle-utils';
 
 // Decrypt Signal Protocol message
 export const decryptSignalMessage = async (
@@ -50,11 +51,20 @@ export const decryptSignalMessage = async (
 // Process bundle delivery message
 export const processBundleDelivery = async (
   encryptedMessage: any,
-  currentUser: string
+  currentUser: string,
+  users?: PeerIdentityLike[] | null,
+  findUser?: (handle: string, options?: { forceRefresh?: boolean }) => Promise<any>
 ): Promise<boolean> => {
   try {
     const bundle = encryptedMessage.bundle;
     const peerUsername = encryptedMessage.username;
+    if (!peerUsername) {
+      throw new Error('BUNDLE_DELIVERY_MISSING_PEER');
+    }
+    const validation = await validateSignalBundleForPeerIdentity(peerUsername, bundle, users, findUser);
+    if (!validation.valid) {
+      throw new Error(validation.reason || 'BUNDLE_IDENTITY_VALIDATION_FAILED');
+    }
 
     const bundleResult = await signal.processPreKeyBundle(currentUser, peerUsername, bundle);
 
@@ -73,7 +83,9 @@ export const processBundleDelivery = async (
 // Process sender signal bundle from payload
 export const processSenderBundle = async (
   payload: any,
-  currentUser: string
+  currentUser: string,
+  users?: PeerIdentityLike[] | null,
+  findUser?: (handle: string, options?: { forceRefresh?: boolean }) => Promise<any>
 ): Promise<void> => {
   try {
     const senderUsername = payload?.from;
@@ -82,13 +94,27 @@ export const processSenderBundle = async (
     const has = await signal.hasSession(currentUser, senderUsername, 1);
     if (!has && payload?.senderSignalBundle) {
       try {
+        const validation = await validateSignalBundleForPeerIdentity(
+          senderUsername,
+          payload.senderSignalBundle,
+          users,
+          findUser
+        );
+        if (!validation.valid) {
+          throw new Error(validation.reason || 'SENDER_BUNDLE_IDENTITY_VALIDATION_FAILED');
+        }
         const bundleResult = await signal.processPreKeyBundle(currentUser, senderUsername, payload.senderSignalBundle);
         if (bundleResult) {
           const hasNow = await signal.hasSession(currentUser, senderUsername, 1);
           try { window.dispatchEvent(new CustomEvent(EventType.LIBSIGNAL_SESSION_READY, { detail: { peer: senderUsername } })); } catch { }
 
         }
-      } catch { }
+      } catch (error) {
+        console.warn('[EncryptedMessageHandler] Rejected senderSignalBundle', {
+          peer: senderUsername,
+          error: error instanceof Error ? error.message : String(error)
+        });
+      }
     }
   } catch { }
 };

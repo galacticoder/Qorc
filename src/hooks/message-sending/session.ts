@@ -1,6 +1,7 @@
 import { getSessionApi } from '../../lib/utils/message-sending-utils';
 import { signal } from '../../lib/tauri-bindings';
 import { shouldAttemptDiscovery } from '../../lib/utils/discovery-utils';
+import { validateSignalBundleForPeerIdentity } from '../../lib/utils/signal-bundle-utils';
 
 // Track last bundle request time per peer to avoid excessive requests
 export const bundleRequestTracker = new Map<string, number>();
@@ -11,6 +12,7 @@ export const ensureSession = async (
   lockContext: object,
   currentUser: string,
   peer: string,
+  users?: Array<{ username: string; hybridPublicKeys?: any; peerCertificateFingerprint?: string; identityRootFingerprint?: string }>,
   findUser?: (handle: string) => Promise<any>
 ) => {
   let contextMap = sessionLocks.get(lockContext);
@@ -37,7 +39,7 @@ export const ensureSession = async (
       }
 
       if (!findUser) {
-        console.warn(`[MessageSender] Cannot establish session with ${peer}: findUser not provided`);
+        console.warn('[MessageSender] Cannot establish session: findUser not provided');
         return false;
       }
 
@@ -47,6 +49,15 @@ export const ensureSession = async (
         }
         const material = await findUser(peer);
         if (material && material.fullBundle) {
+          const validation = await validateSignalBundleForPeerIdentity(
+            peer,
+            material.fullBundle,
+            users as any,
+            findUser as any
+          );
+          if (!validation.valid) {
+            return false;
+          }
           const success = await signal.processPreKeyBundle(
             currentUser,
             peer,
@@ -62,10 +73,10 @@ export const ensureSession = async (
             return !!check?.hasSession;
           }
         } else {
-          console.warn(`[MessageSender] No discovery material found for ${peer}`);
+          console.warn('[MessageSender] No discovery material found');
         }
       } catch (err) {
-        console.error(`[MessageSender] Discovery-based session establishment failed for ${peer}:`, err);
+        console.error('[MessageSender] Discovery-based session establishment failed');
       }
 
       return false;

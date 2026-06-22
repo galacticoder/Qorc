@@ -1,2 +1,6 @@
+allowBuilds:
+  '@signalapp/libsignal-client': true
+  canvas: true
+  esbuild: true
 ignoredBuiltDependencies:
   - electron

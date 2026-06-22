@@ -13,8 +13,13 @@ export const loadUsers = async (secureDB: SecureDB): Promise<User[]> => {
     isTyping: su.isTyping,
     peerCertificateFingerprint: su.peerCertificateFingerprint,
     peerCertificatePinnedAt: su.peerCertificatePinnedAt,
+    identityRootFingerprint: su.identityRootFingerprint,
+    identityBundleFingerprint: su.identityBundleFingerprint,
     hybridPublicKeys: su.hybridPublicKeys,
     inboxId: su.inboxId,
+    routeId: su.routeId,
+    mailboxLookupId: su.mailboxLookupId,
+    bundleLookupId: su.bundleLookupId,
   }));
 };
 

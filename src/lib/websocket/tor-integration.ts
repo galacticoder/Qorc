@@ -51,6 +51,26 @@ export class WebSocketTorIntegration {
     }
   }
 
+  async ensureTorReadyAsync(): Promise<boolean> {
+    if (this.ensureTorReady()) {
+      return true;
+    }
+
+    try {
+      const synced = await torNetworkManager.syncWithDaemon();
+      if (synced && this.ensureTorReady()) {
+        return true;
+      }
+
+      const initialized = await torNetworkManager.initialize();
+      this.torReady = initialized && torNetworkManager.isConnected();
+      return this.torReady;
+    } catch {
+      this.torReady = false;
+      return false;
+    }
+  }
+
   // Attach Tor circuit rotation listener
   attachCircuitListener(onCircuitRotation: () => void): void {
     if (!torNetworkManager.isSupported() || this.torCircuitListener) {
@@ -107,10 +127,10 @@ export class WebSocketTorIntegration {
           multiplier = 1.0;
       }
 
-      if (stats.averageLatency > 1000) {
-        multiplier *= 1.5;
-      } else if (stats.averageLatency > 2000) {
+      if (stats.averageLatency > 2000) {
         multiplier *= 2.0;
+      } else if (stats.averageLatency > 1000) {
+        multiplier *= 1.5;
       }
 
       const adapted = Math.floor(baseTimeout * multiplier);

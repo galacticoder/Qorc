@@ -17,6 +17,7 @@ export interface HybridKeys {
   x25519: { private: Uint8Array; publicKeyBase64: string };
   kyber: { publicKeyBase64: string; secretKey: Uint8Array };
   dilithium: { publicKeyBase64: string; secretKey: Uint8Array };
+  accountRoot: { publicKeyBase64: string; secretKey: Uint8Array };
 }
 
 export interface ServerTrustRequest {

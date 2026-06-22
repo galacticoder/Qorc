@@ -56,21 +56,21 @@ pub async fn get_sources(options: Option<CaptureOptions>) -> QorResult<Vec<Scree
 #[cfg(target_os = "linux")]
 async fn get_sources_linux(options: &CaptureOptions) -> QorResult<Vec<ScreenSource>> {
     use std::process::Command;
-    
+
     let mut sources = Vec::new();
-    
+
     // Get screens
     if options.types.contains(&"screen".to_string()) {
         if let Ok(output) = Command::new("xrandr").arg("--query").output() {
             let stdout = String::from_utf8_lossy(&output.stdout);
-            
+
             let mut screen_idx = 0;
             for line in stdout.lines() {
                 if line.contains(" connected") {
                     // Parse monitor name and resolution
                     let parts: Vec<&str> = line.split_whitespace().collect();
                     let name = parts.first().unwrap_or(&"Screen");
-                    
+
                     // Extract resolution if present
                     let mut width = 1920u32;
                     let mut height = 1080u32;
@@ -85,7 +85,7 @@ async fn get_sources_linux(options: &CaptureOptions) -> QorResult<Vec<ScreenSour
                             }
                         }
                     }
-                    
+
                     sources.push(ScreenSource {
                         id: format!("screen:{}", screen_idx),
                         name: format!("Screen {} ({})", screen_idx + 1, name),
@@ -98,7 +98,7 @@ async fn get_sources_linux(options: &CaptureOptions) -> QorResult<Vec<ScreenSour
                 }
             }
         }
-        
+
         // Fallback add at least one screen
         if sources.is_empty() {
             sources.push(ScreenSource {
@@ -111,18 +111,18 @@ async fn get_sources_linux(options: &CaptureOptions) -> QorResult<Vec<ScreenSour
             });
         }
     }
-    
+
     // Get windows
     if options.types.contains(&"window".to_string()) {
         if let Ok(output) = Command::new("wmctrl").arg("-l").output() {
             let stdout = String::from_utf8_lossy(&output.stdout);
-            
+
             for line in stdout.lines() {
                 let parts: Vec<&str> = line.split_whitespace().collect();
                 if parts.len() >= 4 {
                     let window_id = parts[0];
                     let name = parts[3..].join(" ");
-                    
+
                     if !name.is_empty() && !name.starts_with("N/A") {
                         sources.push(ScreenSource {
                             id: format!("window:{}", window_id),
@@ -137,7 +137,7 @@ async fn get_sources_linux(options: &CaptureOptions) -> QorResult<Vec<ScreenSour
             }
         }
     }
-    
+
     Ok(sources)
 }
 
@@ -146,9 +146,9 @@ async fn get_sources_linux(options: &CaptureOptions) -> QorResult<Vec<ScreenSour
 #[cfg(target_os = "macos")]
 async fn get_sources_macos(options: &CaptureOptions) -> QorResult<Vec<ScreenSource>> {
     use std::process::Command;
-    
+
     let mut sources = Vec::new();
-    
+
     // Get screens
     if options.types.contains(&"screen".to_string()) {
         sources.push(ScreenSource {
@@ -159,23 +159,24 @@ async fn get_sources_macos(options: &CaptureOptions) -> QorResult<Vec<ScreenSour
             app_icon: None,
             display_size: None,
         });
-        
+
         // Try to get display info
         if let Ok(output) = Command::new("system_profiler")
             .args(["SPDisplaysDataType", "-json"])
             .output()
         {
             if let Ok(json) = serde_json::from_slice::<serde_json::Value>(&output.stdout) {
-                if let Some(displays) = json.get("SPDisplaysDataType")
-                    .and_then(|d| d.as_array())
-                {
+                if let Some(displays) = json.get("SPDisplaysDataType").and_then(|d| d.as_array()) {
                     for (idx, display) in displays.iter().enumerate() {
-                        if idx == 0 { continue; }
-                        
-                        let name = display.get("_name")
+                        if idx == 0 {
+                            continue;
+                        }
+
+                        let name = display
+                            .get("_name")
                             .and_then(|n| n.as_str())
                             .unwrap_or("Display");
-                        
+
                         sources.push(ScreenSource {
                             id: format!("screen:{}", idx),
                             name: format!("Display {}: {}", idx + 1, name),
@@ -189,7 +190,7 @@ async fn get_sources_macos(options: &CaptureOptions) -> QorResult<Vec<ScreenSour
             }
         }
     }
-    
+
     // Get windows
     if options.types.contains(&"window".to_string()) {
         let script = r#"
@@ -205,20 +206,16 @@ async fn get_sources_macos(options: &CaptureOptions) -> QorResult<Vec<ScreenSour
                 return windowList
             end tell
         "#;
-        
-        if let Ok(output) = Command::new("osascript")
-            .arg("-e")
-            .arg(script)
-            .output()
-        {
+
+        if let Ok(output) = Command::new("osascript").arg("-e").arg(script).output() {
             let stdout = String::from_utf8_lossy(&output.stdout);
-            
+
             for (idx, item) in stdout.trim().split(", ").enumerate() {
                 let parts: Vec<&str> = item.split('|').collect();
                 if parts.len() >= 2 {
                     let app_name = parts[0];
                     let window_name = parts[1];
-                    
+
                     sources.push(ScreenSource {
                         id: format!("window:{}", idx),
                         name: format!("{} - {}", app_name, window_name),
@@ -231,7 +228,7 @@ async fn get_sources_macos(options: &CaptureOptions) -> QorResult<Vec<ScreenSour
             }
         }
     }
-    
+
     Ok(sources)
 }
 
@@ -239,19 +236,26 @@ async fn get_sources_macos(options: &CaptureOptions) -> QorResult<Vec<ScreenSour
 
 #[cfg(target_os = "windows")]
 async fn get_sources_windows(options: &CaptureOptions) -> QorResult<Vec<ScreenSource>> {
-    use windows::Win32::UI::WindowsAndMessaging::{EnumWindows, GetWindowTextW, IsWindowVisible, GetWindowThreadProcessId};
-    use windows::Win32::Foundation::{HWND, LPARAM, BOOL};
     use std::sync::Mutex;
+    use windows::Win32::Foundation::{BOOL, HWND, LPARAM};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        EnumWindows, GetWindowTextW, GetWindowThreadProcessId, IsWindowVisible,
+    };
 
     let mut sources = Vec::new();
-    
+
     // Get displays
     if options.types.contains(&"screen".to_string()) {
         let displays = scrap::Display::all().unwrap_or_default();
         for (idx, display) in displays.iter().enumerate() {
             sources.push(ScreenSource {
                 id: format!("screen:{}", idx),
-                name: format!("Display {} ({}x{})", idx + 1, display.width(), display.height()),
+                name: format!(
+                    "Display {} ({}x{})",
+                    idx + 1,
+                    display.width(),
+                    display.height()
+                ),
                 thumbnail: None,
                 source_type: "screen".to_string(),
                 app_icon: None,
@@ -259,7 +263,7 @@ async fn get_sources_windows(options: &CaptureOptions) -> QorResult<Vec<ScreenSo
             });
         }
     }
-    
+
     // Get windows using EnumWindows
     if options.types.contains(&"window".to_string()) {
         struct WindowInfo {
@@ -267,11 +271,11 @@ async fn get_sources_windows(options: &CaptureOptions) -> QorResult<Vec<ScreenSo
             name: String,
         }
         let windows_list = Arc::new(Mutex::new(Vec::new()));
-        
+
         unsafe {
             extern "system" fn enum_window(hwnd: HWND, lparam: LPARAM) -> BOOL {
                 let list = unsafe { &*(lparam.0 as *const Mutex<Vec<WindowInfo>>) };
-                
+
                 if unsafe { IsWindowVisible(hwnd).as_bool() } {
                     let mut text: [u16; 512] = [0; 512];
                     let len = unsafe { GetWindowTextW(hwnd, &mut text) };
@@ -288,10 +292,13 @@ async fn get_sources_windows(options: &CaptureOptions) -> QorResult<Vec<ScreenSo
                 }
                 true.into()
             }
-            
-            let _ = EnumWindows(Some(enum_window), LPARAM(Arc::as_ptr(&windows_list) as isize));
+
+            let _ = EnumWindows(
+                Some(enum_window),
+                LPARAM(Arc::as_ptr(&windows_list) as isize),
+            );
         }
-        
+
         let list = windows_list.lock().unwrap();
         for info in list.iter() {
             sources.push(ScreenSource {
@@ -304,26 +311,29 @@ async fn get_sources_windows(options: &CaptureOptions) -> QorResult<Vec<ScreenSo
             });
         }
     }
-    
+
     Ok(sources)
 }
 
-/// Capture a specific source (returns raw image data)
+/// Capture a specific source
 pub async fn capture_source(source_id: &str) -> QorResult<Vec<u8>> {
     if source_id.starts_with("screen:") {
-        let idx: usize = source_id.split(':').nth(1)
+        let idx: usize = source_id
+            .split(':')
+            .nth(1)
             .and_then(|s| s.parse().ok())
             .unwrap_or(0);
-            
+
         let display = scrap::Display::all()
             .map_err(|_| QorError::Internal("Failed to list displays".to_string()))?
-            .into_iter().nth(idx)
+            .into_iter()
+            .nth(idx)
             .ok_or_else(|| QorError::NotFound("Display not found".to_string()))?;
-            
+
         let mut capturer = scrap::Capturer::new(display)
             .map_err(|e| QorError::Internal(format!("Failed to create capturer: {}", e)))?;
-            
-        // Capture a frame (might need retries if WOULDBLOCK)
+
+        // Capture a frame
         let frame = loop {
             match capturer.frame() {
                 Ok(f) => break f,
@@ -334,10 +344,11 @@ pub async fn capture_source(source_id: &str) -> QorResult<Vec<u8>> {
                 Err(e) => return Err(QorError::Internal(format!("Capture failed: {}", e))),
             }
         };
-        
-        // Convert frame to Vec<u8> (BGRA to RGBA if needed, scrap is usually BGRA on Windows)
+
         return Ok(frame.to_vec());
     }
-    
-    Err(QorError::NotImplemented("Window capture not yet implemented with scrap".to_string()))
+
+    Err(QorError::NotImplemented(
+        "Window capture not yet implemented with scrap".to_string(),
+    ))
 }

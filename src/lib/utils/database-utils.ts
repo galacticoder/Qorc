@@ -1,8 +1,6 @@
 import {
   USERNAME_DISPLAY_MAX_LENGTH,
-  USERNAME_ANON_PREFIX,
   USERNAME_HEX_PATTERN,
-  USERNAME_OBFUSCATED_LENGTH,
   USERNAME_DISPLAY_CACHE_TTL_MS,
   USERNAME_DISPLAY_MAX_CACHE_SIZE,
   SECURE_DB_MAX_FILE_SIZE,
@@ -28,19 +26,6 @@ export const sanitizeMappingPayload = (value: unknown): MappingPayload | null =>
   const original = sanitizeDbUsername((value as any).original);
   if (!hashed || !original) return null;
   return { hashed, original };
-};
-
-// Anonymize username for display
-export const anonymizeUsername = (username: string): string => {
-  let hexCandidate: string;
-  if (USERNAME_HEX_PATTERN.test(username)) {
-    hexCandidate = username;
-  } else {
-    const encoder = new TextEncoder();
-    const bytes = encoder.encode(username);
-    hexCandidate = Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('');
-  }
-  return `${USERNAME_ANON_PREFIX}${hexCandidate.slice(0, USERNAME_OBFUSCATED_LENGTH)}`;
 };
 
 // Global username display cache

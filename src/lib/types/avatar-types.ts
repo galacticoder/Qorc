@@ -18,6 +18,7 @@ export interface CachedAvatar {
     hash: string;
     cachedAt: number;
     expiresAt: number;
+    isDefault?: boolean;
 }
 
 export interface ProfilePictureMessage {
@@ -25,6 +26,7 @@ export interface ProfilePictureMessage {
     hash?: string;
     data?: string;
     mimeType?: string;
+    isDefault?: boolean;
 }
 
 export interface AvatarSystemState {

@@ -5,6 +5,7 @@ import { ThemeProvider } from 'next-themes';
 import App from './App.tsx';
 import './index.css';
 import { isTauri } from './lib/tauri-bindings';
+import { installTerminalLogForwarder } from './lib/debug/terminal-log-forwarder';
 
 function bootstrap() {
   // Only run in Tauri
@@ -65,6 +66,8 @@ function bootstrap() {
     return;
   }
 
+  installTerminalLogForwarder();
+
   const waitForBody = (callback: () => void) => {
     if (document.body) {
       callback();
@@ -95,7 +98,7 @@ function bootstrap() {
     }
 
     createRoot(root as HTMLElement).render(
-      <ThemeProvider attribute="class" defaultTheme="system" enableSystem>
+      <ThemeProvider attribute="class" defaultTheme="dark" enableSystem>
         <App />
       </ThemeProvider>
     );

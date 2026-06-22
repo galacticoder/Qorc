@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::database::DatabaseManager;
-use crate::network::p2p::P2PSignalingHandler;
+use crate::network::p2p::P2PTransportHandler;
 use crate::network::websocket::WebSocketHandler;
 use crate::signal_protocol::SignalHandler;
 use crate::storage::SecureStorage;
@@ -21,21 +21,9 @@ pub struct BackgroundSessionState {
     pub is_background_mode: bool,
     pub timestamp: i64,
     pub ws_connected: bool,
-    pub p2p_signaling_connected: bool,
+    pub p2p_connected: bool,
     pub session_id: Option<String>,
     pub username: Option<String>,
-    pub pq_session_keys: Option<PQSessionKeys>,
-}
-
-/// Post-quantum session keys for background persistence
-#[derive(Debug, Clone)]
-#[allow(dead_code)]
-pub struct PQSessionKeys {
-    pub session_id: String,
-    pub send_key: String,
-    pub recv_key: String,
-    pub fingerprint: String,
-    pub established_at: i64,
 }
 
 /// Pending message for delivery after window restore
@@ -61,15 +49,15 @@ pub struct AppState {
     /// WebSocket handler
     pub websocket_handler: RwLock<Option<Arc<WebSocketHandler>>>,
 
-    /// P2P signaling handler
-    pub p2p_handler: RwLock<Option<Arc<P2PSignalingHandler>>>,
+    /// P2P transport handler
+    pub p2p_handler: RwLock<Option<Arc<P2PTransportHandler>>>,
 
     /// Notification handler
     pub notification_handler: RwLock<Option<Arc<NotificationHandler>>>,
-    
+
     /// Native Encrypted Database
     pub database: RwLock<Option<Arc<DatabaseManager>>>,
-    
+
     /// Background session state
     pub background_state: RwLock<Option<BackgroundSessionState>>,
 
@@ -115,7 +103,9 @@ impl AppState {
             peer_kyber_keys: RwLock::new(HashMap::new()),
             download_path: RwLock::new(None),
             auto_save: RwLock::new(true),
-            power_blocker: RwLock::new(Some(Arc::new(crate::system::power::PowerSaveBlocker::new()))),
+            power_blocker: RwLock::new(Some(Arc::new(
+                crate::system::power::PowerSaveBlocker::new(),
+            ))),
             close_to_tray: RwLock::new(true),
         }
     }
@@ -151,12 +141,12 @@ impl AppState {
     }
 
     /// Get P2P handler
-    pub fn p2p(&self) -> Option<Arc<P2PSignalingHandler>> {
+    pub fn p2p(&self) -> Option<Arc<P2PTransportHandler>> {
         self.p2p_handler.read().clone()
     }
 
     /// Get P2P handler alias
-    pub fn p2p_handler(&self) -> Option<Arc<P2PSignalingHandler>> {
+    pub fn p2p_handler(&self) -> Option<Arc<P2PTransportHandler>> {
         self.p2p_handler.read().clone()
     }
 
@@ -201,13 +191,12 @@ impl AppState {
                     .websocket()
                     .map(|ws| ws.is_connected())
                     .unwrap_or(false),
-                p2p_signaling_connected: self
+                p2p_connected: self
                     .p2p()
                     .map(|p2p| p2p.has_active_connections())
                     .unwrap_or(false),
                 session_id: None,
                 username: None,
-                pq_session_keys: None,
             });
         } else {
             *state = None;
@@ -258,5 +247,13 @@ impl AppState {
 impl Default for AppState {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl Drop for AppState {
+    fn drop(&mut self) {
+        if let Some(tor) = self.tor_manager.get_mut().as_ref().cloned() {
+            tor.shutdown_now();
+        }
     }
 }

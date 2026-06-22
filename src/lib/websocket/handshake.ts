@@ -13,7 +13,9 @@ import { EventType } from '../types/event-types';
 import { generateX25519KeyPair, computeX25519SharedSecret } from '../utils/noise-utils';
 import type { ServerKeyMaterial, SessionKeyMaterial, HandshakeCallbacks } from '../types/websocket-types';
 import { MAX_HANDSHAKE_ATTEMPTS, SESSION_REKEY_INTERVAL_MS } from '../constants';
-import { session } from '../tauri-bindings';
+
+const WS_CLIENT_SIGNING_KEY_STORAGE_KEY = 'ws_client_signing_key_v1';
+const WS_SIGNING_KEY_SELF_TEST_MESSAGE = new TextEncoder().encode('qor-ws-client-signing-key-self-test-v1');
 
 export class WebSocketHandshake {
   private handshakeInFlight = false;
@@ -23,6 +25,24 @@ export class WebSocketHandshake {
   private serverKeyMaterial?: ServerKeyMaterial;
 
   constructor(private callbacks: HandshakeCallbacks) { }
+
+  private async isUsableSigningKeyPair(keyPair: { publicKey: Uint8Array; privateKey: Uint8Array }): Promise<boolean> {
+    if (
+      !(keyPair.publicKey instanceof Uint8Array) ||
+      !(keyPair.privateKey instanceof Uint8Array) ||
+      keyPair.publicKey.length !== PostQuantumSignature.sizes.publicKey ||
+      keyPair.privateKey.length !== PostQuantumSignature.sizes.secretKey
+    ) {
+      return false;
+    }
+
+    try {
+      const signature = await PostQuantumSignature.sign(WS_SIGNING_KEY_SELF_TEST_MESSAGE, keyPair.privateKey);
+      return await PostQuantumSignature.verify(signature, WS_SIGNING_KEY_SELF_TEST_MESSAGE, keyPair.publicKey);
+    } catch {
+      return false;
+    }
+  }
 
   isInFlight(): boolean {
     return this.handshakeInFlight;
@@ -65,31 +85,16 @@ export class WebSocketHandshake {
   // Signing keys initialization
   async initializeSigningKeys(): Promise<{ publicKey: Uint8Array; privateKey: Uint8Array } | undefined> {
     try {
-      const { encryptedStorage } = await import('../database/encrypted-storage');
-      const stored = await encryptedStorage.getItem('ws_client_signing_key_v1');
-      if (stored) {
-        try {
-          const parsed = typeof stored === 'string' ? JSON.parse(stored) : stored;
-          if (parsed?.publicKey && parsed?.privateKey) {
-            return {
-              publicKey: PostQuantumUtils.base64ToUint8Array(parsed.publicKey),
-              privateKey: PostQuantumUtils.base64ToUint8Array(parsed.privateKey)
-            };
-          }
-        } catch { }
-      }
+      try {
+        const { encryptedStorage } = await import('../database/encrypted-storage');
+        await encryptedStorage.removeItem(WS_CLIENT_SIGNING_KEY_STORAGE_KEY).catch(() => { });
+      } catch { }
 
       const kp = await PostQuantumSignature.generateKeyPair();
       const signingKeyPair = { publicKey: kp.publicKey, privateKey: kp.secretKey };
-      try {
-        const publicKey = PostQuantumUtils.asUint8Array(signingKeyPair.publicKey);
-        const privateKey = PostQuantumUtils.asUint8Array(signingKeyPair.privateKey);
-        await encryptedStorage.setItem('ws_client_signing_key_v1', JSON.stringify({
-          publicKey: PostQuantumUtils.uint8ArrayToBase64(publicKey),
-          privateKey: PostQuantumUtils.uint8ArrayToBase64(privateKey)
-        }));
-      } catch { }
-
+      if (!await this.isUsableSigningKeyPair(signingKeyPair)) {
+        throw new Error('Generated ML-DSA signing key failed self-test');
+      }
       return signingKeyPair;
     } catch {
       return undefined;
@@ -108,7 +113,6 @@ export class WebSocketHandshake {
     let serverMaterial = this.serverKeyMaterial;
 
     if (!serverMaterial) {
-      console.log('[WebSocketHandshake] Server material missing, waiting...');
       const startTime = Date.now();
       const timeout = 5000;
       let lastRequestTime = 0;
@@ -158,9 +162,16 @@ export class WebSocketHandshake {
   private async executeHandshake(serverMaterial: ServerKeyMaterial): Promise<void> {
     const sessionId = PostQuantumUtils.bytesToHex(PostQuantumRandom.randomBytes(16));
     const handshakeNonce = PostQuantumRandom.randomBytes(32);
-    const timestamp = Date.now();
+    const timestamp = this.callbacks.getTrustedNow?.() ?? Date.now();
     const { ciphertext: kemCiphertext, sharedSecret: pqSharedSecret } = await PostQuantumKEM.encapsulate(serverMaterial.kyberPublicKey);
+    const signingKeyPair = await this.initializeSigningKeys();
+    if (!signingKeyPair) {
+      throw new Error('Client ML-DSA signing key unavailable');
+    }
 
+    if (!serverMaterial.dilithiumPublicKey) {
+      throw new Error('Server Dilithium public key not available for authenticated PQ handshake');
+    }
     if (!serverMaterial.x25519PublicKey) {
       throw new Error('Server X25519 public key not available for hybrid WS handshake');
     }
@@ -176,10 +187,9 @@ export class WebSocketHandshake {
       const sendSalt = encoder.encode(`${baseInfo}:send-${timestamp}`);
       const recvSalt = encoder.encode(`${baseInfo}:recv-${timestamp}`);
 
-      const combined = new Uint8Array(pqSharedSecret.length);
-      for (let i = 0; i < pqSharedSecret.length; i++) {
-        combined[i] = pqSharedSecret[i] ^ classicalShared[i % classicalShared.length];
-      }
+      const combined = new Uint8Array(pqSharedSecret.length + classicalShared.length);
+      combined.set(pqSharedSecret, 0);
+      combined.set(classicalShared, pqSharedSecret.length);
 
       sendKey = PostQuantumHash.deriveKey(combined, sendSalt, 'ws-pq-hybrid-send', 32);
       recvKey = PostQuantumHash.deriveKey(combined, recvSalt, 'ws-pq-hybrid-recv', 32);
@@ -196,18 +206,29 @@ export class WebSocketHandshake {
       sendKey: sendKey!,
       recvKey: recvKey!,
       establishedAt: timestamp,
-      fingerprint: serverMaterial.fingerprint
+      fingerprint: serverMaterial.fingerprint,
+      clientSigningPublicKey: signingKeyPair?.publicKey
     };
 
     const handshakeMessage = {
-      type: 'pq-handshake-init',
+      type: SignalType.PQ_HANDSHAKE_INIT,
       payload: {
         version: 'pq-ws-1',
+        algorithms: {
+          kem: 'ML-KEM-1024',
+          signature: 'ML-DSA-87',
+          classicalKeyAgreement: 'X25519',
+          kdf: 'BLAKE3-HKDF-SHA256-DOMAIN-SEPARATED',
+          aead: 'QOR-PQ-AEAD'
+        },
         sessionId,
         timestamp,
         clientNonce: PostQuantumUtils.uint8ArrayToBase64(handshakeNonce),
         kemCiphertext: PostQuantumUtils.uint8ArrayToBase64(kemCiphertext),
         clientX25519PublicKey: PostQuantumUtils.uint8ArrayToBase64(ephemeral.publicKey),
+        clientSigningPublicKey: signingKeyPair
+          ? PostQuantumUtils.uint8ArrayToBase64(signingKeyPair.publicKey)
+          : undefined,
         fingerprint: serverMaterial.fingerprint,
         capabilities: {
           queueSize: this.callbacks.getQueueLength(),
@@ -217,49 +238,78 @@ export class WebSocketHandshake {
     };
 
     const ackPromise = new Promise<void>((resolve, reject) => {
-      const timeoutDuration = this.callbacks.getTorAdaptedTimeout(15000);
+      const timeoutDuration = this.callbacks.getTorAdaptedTimeout(30000);
+      let settled = false;
+
+      const cleanup = () => {
+        this.callbacks.unregisterMessageHandler(SignalType.PQ_HANDSHAKE_ACK);
+        if (typeof window !== 'undefined') {
+          window.removeEventListener(EventType.EDGE_SERVER_MESSAGE, handleAckEvent as EventListener);
+          window.removeEventListener(EventType.SECURE_SERVER_MESSAGE, handleAckEvent as EventListener);
+        }
+      };
+
+      const settleSuccess = () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeout);
+        cleanup();
+        this.callbacks.onSessionEstablished(
+          pendingSession,
+          serverMaterial.dilithiumPublicKey,
+          signingKeyPair
+        );
+
+        try {
+          window.dispatchEvent(new CustomEvent(EventType.PQ_SESSION_ESTABLISHED, {
+            detail: { timestamp: Date.now() }
+          }));
+        } catch { }
+
+        resolve();
+      };
+
       const timeout = setTimeout(() => {
-        this.callbacks.unregisterMessageHandler('pq-handshake-ack');
+        if (settled) return;
+        settled = true;
+        cleanup();
         SecurityAuditLogger.log(SignalType.ERROR, 'ws-handshake-ack-timeout', {
-          sessionId: sessionId.slice(0, 16),
           timeoutMs: timeoutDuration
         });
         reject(new Error('Handshake acknowledgment timeout'));
       }, timeoutDuration);
 
-      const handleAck = (msg: any) => {
-        if (msg.sessionId === sessionId) {
-          clearTimeout(timeout);
-          this.callbacks.unregisterMessageHandler('pq-handshake-ack');
-          this.callbacks.onSessionEstablished(pendingSession, serverMaterial.dilithiumPublicKey);
-
-          try {
-            window.dispatchEvent(new CustomEvent(EventType.PQ_SESSION_ESTABLISHED, {
-              detail: { timestamp: Date.now(), sessionId: sessionId.slice(0, 16) }
-            }));
-          } catch { }
-
-          // Store session keys for background mode
-          try {
-            const keysToStore = {
-              session_id: pendingSession.sessionId,
-              aes_key: PostQuantumUtils.uint8ArrayToBase64(pendingSession.sendKey),
-              mac_key: PostQuantumUtils.uint8ArrayToBase64(pendingSession.recvKey),
-              created_at: pendingSession.establishedAt
-            };
-            session.storePQKeys(keysToStore).catch(() => { });
-          } catch { }
-
-          resolve();
-        } else {
-          SecurityAuditLogger.log('warn', 'ws-handshake-ack-session-mismatch', {
-            receivedSessionId: msg.sessionId?.slice(0, 16),
-            expectedSessionId: sessionId.slice(0, 16)
-          });
+      const getAckSessionId = (msg: any): string | undefined => {
+        if (!msg || typeof msg !== 'object') return undefined;
+        if (typeof msg.sessionId === 'string') return msg.sessionId;
+        if (msg.payload && typeof msg.payload === 'object' && typeof msg.payload.sessionId === 'string') {
+          return msg.payload.sessionId;
         }
+        return undefined;
       };
 
-      this.callbacks.registerMessageHandler('pq-handshake-ack', handleAck);
+      const handleAckMessage = (msg: any) => {
+        const ackSessionId = getAckSessionId(msg);
+        if (ackSessionId === sessionId) {
+          settleSuccess();
+          return;
+        }
+        SecurityAuditLogger.log('warn', 'ws-handshake-ack-session-mismatch', {
+          hasReceivedSessionId: !!ackSessionId
+        });
+      };
+
+      const handleAckEvent = (ev: Event) => {
+        const detail = (ev as CustomEvent).detail;
+        if (detail?.type !== SignalType.PQ_HANDSHAKE_ACK) return;
+        handleAckMessage(detail);
+      };
+
+      this.callbacks.registerMessageHandler(SignalType.PQ_HANDSHAKE_ACK, handleAckMessage);
+      if (typeof window !== 'undefined') {
+        window.addEventListener(EventType.EDGE_SERVER_MESSAGE, handleAckEvent as EventListener);
+        window.addEventListener(EventType.SECURE_SERVER_MESSAGE, handleAckEvent as EventListener);
+      }
     });
 
     await this.callbacks.transmit(JSON.stringify(handshakeMessage));

@@ -3,7 +3,12 @@
  */
 
 import { TorSetupStatus, TorInstallOptions } from '../types/tor-types';
-import { sanitizeBinaryPath, isValidBridgeLine } from '../utils/tor-utils';
+import {
+  DEFAULT_BRIDGE_TRANSPORT_PATH,
+  DEFAULT_SNOWFLAKE_BRIDGE,
+  sanitizeBinaryPath,
+  isValidBridgeLine
+} from '../utils/tor-utils';
 import { tor, isTauri } from '../tauri-bindings';
 
 // Tor setup
@@ -18,19 +23,43 @@ export class TorAutoSetup {
     currentStep: 'Initializing'
   };
 
-  private progressCallback?: (status: TorSetupStatus) => void;
-  private bridgeFallbackAllowed = false;
+  private readonly progressCallbacks = new Set<(status: TorSetupStatus) => void>();
+  private setupPromise: Promise<boolean> | null = null;
 
   // Automatically setup Tor
   async autoSetup(options: TorInstallOptions = { autoStart: true, enableBridges: false }): Promise<boolean> {
-    this.progressCallback = options.onProgress;
-    this.bridgeFallbackAllowed = Boolean(options.allowBridgeFallback);
+    if (options.onProgress) {
+      this.progressCallbacks.add(options.onProgress);
+      options.onProgress({ ...this.status });
+    }
 
+    if (!this.setupPromise) {
+      this.setupPromise = this.runAutoSetup(options).finally(() => {
+        this.setupPromise = null;
+      });
+    }
+
+    try {
+      return await this.setupPromise;
+    } finally {
+      if (options.onProgress) {
+        this.progressCallbacks.delete(options.onProgress);
+      }
+    }
+  }
+
+  private async runAutoSetup(options: TorInstallOptions): Promise<boolean> {
+    const bridgeFallbackAllowed = Boolean(options.allowBridgeFallback);
     try {
       this.updateStatus(5, 'Checking system requirements...');
 
       if (!isTauri()) {
         this.updateStatus(0, 'Desktop application required', 'Tor setup requires the Tauri desktop application.');
+        return false;
+      }
+
+      if (this.isKnownOffline()) {
+        this.updateStatus(0, 'Offline', 'No internet connection detected. Reconnect and retry Tor setup.');
         return false;
       }
 
@@ -73,14 +102,14 @@ export class TorAutoSetup {
         const startResult = await this.startTor();
 
         if (!startResult.success) {
-          this.updateStatus(0, 'Startup failed', 'Unable to start Tor service.');
+          this.updateStatus(0, 'Startup failed', startResult.error || 'Unable to start Tor service.');
           return false;
         }
 
-        this.updateStatus(90, 'Verifying Tor connection...');
+        this.updateStatus(90, 'Waiting for Tor network...');
         let verifySuccess = await this.verifyTorConnection();
 
-        if (!verifySuccess && this.bridgeFallbackAllowed) {
+        if (!verifySuccess && bridgeFallbackAllowed) {
           try {
             this.updateStatus(85, 'Enabling bridge transport...');
             const fallbackOptions: TorInstallOptions = {
@@ -94,7 +123,7 @@ export class TorAutoSetup {
             if (reconfigOk) {
               const restart = await this.startTor();
               if (restart.success) {
-                this.updateStatus(90, 'Verifying Tor connection...');
+                this.updateStatus(90, 'Waiting for Tor network...');
                 verifySuccess = await this.verifyTorConnection();
               }
             }
@@ -103,11 +132,11 @@ export class TorAutoSetup {
           }
 
           if (!verifySuccess) {
-            this.updateStatus(0, 'Connection failed', 'Unable to establish Tor connection.');
+            this.updateStatus(0, 'Connection failed', 'Tor could not bootstrap. Check your internet connection or try bridges.');
             return false;
           }
         } else if (!verifySuccess) {
-          this.updateStatus(0, 'Verification failed', 'Unable to verify Tor connection.');
+          this.updateStatus(0, 'Verification failed', 'Tor could not bootstrap. Check your internet connection or try bridges.');
           return false;
         }
       }
@@ -117,7 +146,7 @@ export class TorAutoSetup {
 
     } catch (_error) {
       console.error('[TOR-SETUP] Auto setup failed:', _error);
-      this.updateStatus(0, 'Setup failed', _error instanceof Error ? _error.message : 'Unknown error');
+      this.updateStatus(0, 'Setup failed', this.humanizeError(_error, 'Unknown setup error'));
       throw _error;
     }
   }
@@ -152,7 +181,7 @@ export class TorAutoSetup {
 
       const result = await tor.download();
       if (!result.success) {
-        const msg = result.error ? String(result.error) : 'Unable to download Tor.';
+        const msg = this.humanizeError(result.error, 'Unable to download Tor.');
         console.error('[TOR-SETUP] Download error:', msg);
         this.updateStatus(0, 'Download failed', msg);
         return false;
@@ -165,8 +194,9 @@ export class TorAutoSetup {
       } else if (typeof _error === 'string') {
         msg = _error;
       }
+      msg = this.humanizeError(msg, 'Unknown download error');
       console.error('[TOR-SETUP] Failed to download Tor:', msg, _error);
-      this.updateStatus(0, 'Download failed', `${msg} ${JSON.stringify(_error)}`);
+      this.updateStatus(0, 'Download failed', msg);
       return false;
     }
   }
@@ -237,12 +267,35 @@ export class TorAutoSetup {
         return false;
       }
 
-      const maxAttempts = 30;
+      const maxAttempts = 90;
       const waitMs = 2000;
+      let localVerifyAttempts = 0;
       for (let attempt = 0; attempt < maxAttempts; attempt++) {
-        const result = await tor.verifyConnection();
-        if (result && result.success) {
-          return true;
+        const status = await tor.status().catch(() => null);
+        const info = await tor.info().catch(() => null);
+        const progress = status?.bootstrap_progress || info?.bootstrap_progress || 0;
+        const bootstrapped = Boolean(status?.bootstrapped || info?.bootstrapped);
+
+        this.status.isRunning = Boolean(status?.is_running || this.status.isRunning);
+        this.status.isBootstrapped = bootstrapped;
+        this.status.bootstrapProgress = progress;
+        if (info?.socks_port) this.status.socksPort = info.socks_port;
+        if (info?.control_port) this.status.controlPort = info.control_port;
+
+        this.updateStatus(
+          Math.max(90, Math.min(99, 90 + Math.floor(progress / 10))),
+          bootstrapped ? 'Verifying Tor connection...' : `Bootstrapping Tor (${progress || 0}%)`
+        );
+
+        if (bootstrapped) {
+          localVerifyAttempts += 1;
+          const result = await tor.verifyConnection();
+          if (result && result.success) {
+            return true;
+          }
+          if (localVerifyAttempts >= 5) {
+            return false;
+          }
         }
         await new Promise((res) => setTimeout(res, waitMs));
       }
@@ -250,6 +303,34 @@ export class TorAutoSetup {
     } catch {
       return false;
     }
+  }
+
+  private humanizeError(error: unknown, fallback: string): string {
+    const raw = error instanceof Error ? error.message : (typeof error === 'string' ? error : '');
+    const text = raw.toLowerCase();
+
+    if (
+      text.includes('offline') ||
+      text.includes('network') ||
+      text.includes('dns') ||
+      text.includes('timed out') ||
+      text.includes('timeout') ||
+      text.includes('failed to reach') ||
+      text.includes('connection refused') ||
+      text.includes('connection reset') ||
+      text.includes('could not resolve') ||
+      text.includes('temporary failure') ||
+      text.includes('eai_again') ||
+      text.includes('enotfound')
+    ) {
+      return 'Network unavailable. Check your internet connection and retry.';
+    }
+
+    return raw || fallback;
+  }
+
+  private isKnownOffline(): boolean {
+    return typeof navigator !== 'undefined' && navigator.onLine === false;
   }
 
   // Generate Tor configuration
@@ -280,14 +361,13 @@ export class TorAutoSetup {
     if (options.enableBridges) {
       const hasBridges = Array.isArray(options.bridges) && options.bridges.length > 0;
       const transport = hasBridges ? (options.transport || 'obfs4') : 'snowflake';
-      config.push('', '# Bridge configuration', 'UseBridges 1');
+      config.push('', '# Bridge configuration', 'UseBridges 1', 'ConfluxEnabled 0');
 
-      if (transport === 'obfs4') {
-        const obfs4Path = sanitizeBinaryPath(options.obfs4ProxyPath?.trim() || './pluggable_transports/lyrebird');
-        config.push(`ClientTransportPlugin obfs4 exec ${obfs4Path}`);
-      } else if (transport === 'snowflake') {
-        config.push('ClientTransportPlugin snowflake exec snowflake-client');
-        config.push('Bridge snowflake');
+      const transportPath = sanitizeBinaryPath(options.obfs4ProxyPath?.trim() || DEFAULT_BRIDGE_TRANSPORT_PATH);
+      config.push(`ClientTransportPlugin meek_lite,obfs4,snowflake,webtunnel exec ${transportPath}`);
+
+      if (transport === 'snowflake' && !hasBridges) {
+        config.push(`Bridge ${DEFAULT_SNOWFLAKE_BRIDGE}`);
       }
 
       if (hasBridges) {
@@ -316,6 +396,9 @@ export class TorAutoSetup {
     if (options.customConfig) {
       config.push('', '# Custom configuration');
       for (const [key, value] of Object.entries(options.customConfig)) {
+        if (key === 'socksPort' || key === 'controlPort') {
+          continue;
+        }
         if (typeof key !== 'string' || !key.trim()) {
           continue;
         }
@@ -344,9 +427,8 @@ export class TorAutoSetup {
       this.status.error = error;
     }
 
-    if (this.progressCallback) {
-      this.progressCallback({ ...this.status });
-    }
+    const snapshot = { ...this.status };
+    this.progressCallbacks.forEach((callback) => callback(snapshot));
   }
 
   // Get current setup status

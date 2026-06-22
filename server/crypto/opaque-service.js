@@ -26,6 +26,8 @@ const OPAQUE_CONFIG = {
     EXPORT_KEY_SIZE: 32,
     SESSION_KEY_SIZE: 32,
     ENVELOPE_NONCE_SIZE: 24,
+    PRIVATE_AUTH_SHARD_SIZE: 2048,
+    OT_RECORD_PADDED_BYTES: 1024,
 };
 
 // Domain separation labels
@@ -34,7 +36,8 @@ const LABELS = {
     ENVELOPE_KEY: 'OPAQUE-Envelope-Key-v1',
     EXPORT_KEY: 'OPAQUE-Export-Key-v1',
     SESSION_KEY: 'OPAQUE-Session-Key-v1',
-    AUTH_KEY: 'OPAQUE-Auth-Key-v1',
+    AUTH_KEY: 'OPAQUE-Auth-Key-v2',
+    AUTH_MAC_CONTEXT: 'OPAQUE-Auth-MAC-v2',
     CREDENTIAL_ID: 'OPAQUE-Credential-ID-v1',
 };
 
@@ -164,7 +167,7 @@ export class OPAQUEServer {
      */
     static createRegistrationRecord(credentialId, envelope, serverPrivateKey, maskedResponse, salt) {
         return {
-            credentialId: Buffer.from(credentialId).toString('base64'),
+            credentialId: typeof credentialId === 'string' ? credentialId : Buffer.from(credentialId).toString('base64'),
             envelope: Buffer.from(envelope).toString('base64'),
             serverPrivateKey: Buffer.from(serverPrivateKey).toString('base64'),
             maskedResponse: Buffer.from(maskedResponse).toString('base64'),
@@ -212,10 +215,12 @@ export class OPAQUEServer {
      * Compute auth MAC for login verification
      */
     static #computeAuthMac(maskedResponse, serverNonce) {
-        const key = hkdf(blake3, maskedResponse, serverNonce, new TextEncoder().encode(LABELS.AUTH_KEY), 32);
-
-        const mac = blake3(key, { dkLen: 32 });
-        return mac;
+        const authKey = hkdf(blake3, maskedResponse, serverNonce, new TextEncoder().encode(LABELS.AUTH_KEY), 32);
+        const transcript = Buffer.concat([
+            Buffer.from(LABELS.AUTH_MAC_CONTEXT, 'utf8'),
+            Buffer.from(serverNonce)
+        ]);
+        return blake3(transcript, { key: authKey, dkLen: 32 });
     }
 
     /**
@@ -234,7 +239,7 @@ export class OPAQUEServer {
             Buffer.from(clientAuthMessage),
             Buffer.from(expectedMac)
         )) {
-            console.warn(`[OPAQUE] finishLogin: MAC mismatch. Client: ${Buffer.from(clientAuthMessage).toString('hex').slice(0, 8)}, Expected: ${Buffer.from(expectedMac).toString('hex').slice(0, 8)}`);
+            console.warn('[OPAQUE] finishLogin: MAC mismatch');
             return {
                 success: false,
                 encryptedSessionKey: randomBytes(OPAQUE_CONFIG.SESSION_KEY_SIZE + 16),
@@ -268,6 +273,36 @@ export class OPAQUEServer {
             sessionKey,
             encryptedSessionKey,
         };
+    }
+
+    /**
+     * Verify a login auth proof against an ENTIRE shard without learning which account matched
+     */
+    static async finishLoginAcrossShard(shardRecords, clientAuthMessage, serverNonce) {
+        let matched = null;
+        const records = Array.isArray(shardRecords) ? shardRecords : [];
+        for (const row of records) {
+            let parsed = null;
+            try {
+                parsed = typeof row?.opaqueRecord === 'string'
+                    ? JSON.parse(row.opaqueRecord)
+                    : row?.opaqueRecord;
+            } catch {
+                parsed = null;
+            }
+            let attempt;
+            try {
+                attempt = await this.finishLogin(clientAuthMessage, parsed, serverNonce);
+            } catch {
+                attempt = { success: false };
+            }
+
+            // Record the first match but keep scanning so timing is position independent.
+            if (attempt?.success && !matched) {
+                matched = attempt;
+            }
+        }
+        return matched || { success: false };
     }
 
     /**
@@ -322,7 +357,18 @@ export class OPAQUEServer {
      * Get maximum entries per shard
      */
     static getShardSize() {
-        return 100;
+        return OPAQUE_CONFIG.PRIVATE_AUTH_SHARD_SIZE;
+    }
+
+    static #padOtRecord(rawRecord) {
+        const paddedSize = OPAQUE_CONFIG.OT_RECORD_PADDED_BYTES;
+        if (!rawRecord || rawRecord.length + 4 > paddedSize) {
+            throw new Error('OPAQUE record exceeds padded transfer size');
+        }
+        const padded = crypto.randomBytes(paddedSize);
+        padded.writeUInt32BE(rawRecord.length, 0);
+        rawRecord.copy(padded, 4);
+        return padded;
     }
 
     /**
@@ -339,7 +385,7 @@ export class OPAQUEServer {
 
             promises.push((async () => {
                 if (!record || !pubKey || !record.opaqueRecord) {
-                    const dummy = crypto.randomBytes(256);
+                    const dummy = crypto.randomBytes(OPAQUE_CONFIG.OT_RECORD_PADDED_BYTES);
                     const { cipherText: ct, sharedSecret: ss } = await MlKem.encapsulate(this.#ensureUint8Array(pubKey || crypto.randomBytes(1568)));
                     const mask = blake3(ss, { dkLen: dummy.length });
                     return {
@@ -350,12 +396,13 @@ export class OPAQUEServer {
 
                 // Real record
                 const rawRecord = Buffer.from(record.opaqueRecord, 'utf8');
+                const paddedRecord = this.#padOtRecord(rawRecord);
                 const { cipherText: ct, sharedSecret: ss } = await MlKem.encapsulate(this.#ensureUint8Array(pubKey));
-                const mask = blake3(ss, { dkLen: rawRecord.length });
+                const mask = blake3(ss, { dkLen: paddedRecord.length });
 
                 return {
                     ct: Buffer.from(ct).toString('base64'),
-                    masked: Buffer.from(xor(rawRecord, mask)).toString('base64')
+                    masked: Buffer.from(xor(paddedRecord, mask)).toString('base64')
                 };
             })());
         }

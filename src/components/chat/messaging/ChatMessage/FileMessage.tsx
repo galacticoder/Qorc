@@ -25,16 +25,25 @@ interface FileContentProps {
   readonly message: Message;
   readonly isCurrentUser: boolean;
   readonly secureDB?: any;
+  readonly onRendered?: () => void;
 }
 
 // Component to render file content based on type
-export const FileContent: React.FC<FileContentProps> = ({ message, isCurrentUser, secureDB }) => {
+export const FileContent: React.FC<FileContentProps> = ({ message, isCurrentUser, secureDB, onRendered }) => {
   const { content, filename, fileSize, mimeType, originalBase64Data } = message;
   const [imageError, setImageError] = React.useState(false);
   const [videoError, setVideoError] = React.useState(false);
   const [audioError, setAudioError] = React.useState(false);
   const [lightboxOpen, setLightboxOpen] = React.useState(false);
   const [imageLoaded, setImageLoaded] = React.useState(false);
+
+  const isImage = useMemo(() => hasExtension(filename || "", IMAGE_EXTENSIONS), [filename]);
+
+  useEffect(() => {
+    if (!isImage) {
+      onRendered?.();
+    }
+  }, [isImage, onRendered]);
 
   const { url: resolvedFileUrl, loading: _fileLoading, error: _fileError } = useFileUrl({
     secureDB: secureDB || null,
@@ -46,7 +55,10 @@ export const FileContent: React.FC<FileContentProps> = ({ message, isCurrentUser
 
   const rawContentUrl = typeof content === 'string' ? content : '';
   const safeContentUrl = isSafeFileUrl(rawContentUrl);
-  const effectiveFileUrl = resolvedFileUrl || safeContentUrl;
+  // Don't use stale blob: URLs as fallback — they become invalid after
+  // app restart and cause "Failed to load resource" errors in the browser.
+  const nonBlobFallback = safeContentUrl && !safeContentUrl.startsWith('blob:') ? safeContentUrl : null;
+  const effectiveFileUrl = resolvedFileUrl || nonBlobFallback;
 
   useEffect(() => {
     if (effectiveFileUrl) {
@@ -89,10 +101,12 @@ export const FileContent: React.FC<FileContentProps> = ({ message, isCurrentUser
                   onLoad={(e) => {
                     void e;
                     setImageLoaded(true);
+                    onRendered?.();
                   }}
                   onError={() => {
                     setImageError(true);
                     setImageLoaded(true);
+                    onRendered?.();
                   }}
                 />
               </div>

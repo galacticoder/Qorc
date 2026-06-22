@@ -1,92 +1,39 @@
 
-// Helper function for anonymization in logs
-function anonymizeForLogging(identifier) {
-  if (!identifier || typeof identifier !== 'string') return 'unknown';
-  if (identifier.length <= 4) return '****';
-  return identifier.slice(0, 2) + '****' + identifier.slice(-2);
+function sanitizeForLogging(value, key = '', depth = 0) {
+  return value;
 }
 
 // Anonymized logging helper for security-sensitive operations
 export function logEvent(type, payload, { logger = console } = {}) {
-  const sanitizedPayload = { ...payload };
-
-  if (sanitizedPayload.username) {
-    sanitizedPayload.username = anonymizeForLogging(sanitizedPayload.username);
-  }
-  if (sanitizedPayload.senderUser) {
-    sanitizedPayload.senderUser = anonymizeForLogging(sanitizedPayload.senderUser);
-  }
-  if (sanitizedPayload.recipientUser) {
-    sanitizedPayload.recipientUser = anonymizeForLogging(sanitizedPayload.recipientUser);
-  }
-  if (sanitizedPayload.sessionId) {
-    sanitizedPayload.sessionId = anonymizeForLogging(sanitizedPayload.sessionId);
-  }
-  if (sanitizedPayload.ip) {
-    sanitizedPayload.ip = anonymizeForLogging(sanitizedPayload.ip);
-  }
+  const sanitizedPayload = sanitizeForLogging(payload);
 
   logger.log(`[SECURITY] ${type}:`, sanitizedPayload);
 }
 
 // Rate limiting event logger
 export function logRateLimitEvent(event, details, { logger = console } = {}) {
-  const sanitizedDetails = { ...details };
-
-  if (sanitizedDetails.username) {
-    sanitizedDetails.username = anonymizeForLogging(sanitizedDetails.username);
-  }
-  if (sanitizedDetails.ip) {
-    sanitizedDetails.ip = anonymizeForLogging(sanitizedDetails.ip);
-  }
+  const sanitizedDetails = sanitizeForLogging(details);
 
   logger.warn(`[RATE-LIMIT] ${event}:`, sanitizedDetails);
 }
 
 // Authentication event logger
 export function logAuthEvent(event, details, { logger = console } = {}) {
-  const sanitizedDetails = { ...details };
-
-  if (sanitizedDetails.username) {
-    sanitizedDetails.username = anonymizeForLogging(sanitizedDetails.username);
-  }
-  if (sanitizedDetails.sessionId) {
-    sanitizedDetails.sessionId = anonymizeForLogging(sanitizedDetails.sessionId);
-  }
+  const sanitizedDetails = sanitizeForLogging(details);
 
   logger.log(`[AUTH] ${event}:`, sanitizedDetails);
 }
 
 // Message delivery event logger
 export function logDeliveryEvent(event, details, { logger = console } = {}) {
-  const sanitizedDetails = { ...details };
-
-  if (sanitizedDetails.from) {
-    sanitizedDetails.from = anonymizeForLogging(sanitizedDetails.from);
-  }
-  if (sanitizedDetails.to) {
-    sanitizedDetails.to = anonymizeForLogging(sanitizedDetails.to);
-  }
-  if (sanitizedDetails.username) {
-    sanitizedDetails.username = anonymizeForLogging(sanitizedDetails.username);
-  }
+  const sanitizedDetails = sanitizeForLogging(details);
 
   logger.log(`[DELIVERY] ${event}:`, sanitizedDetails);
 }
 
 // Error logger
 export function logError(error, context = {}, { logger = console } = {}) {
-  const sanitizedContext = { ...context };
-
-  if (sanitizedContext.username) {
-    sanitizedContext.username = anonymizeForLogging(sanitizedContext.username);
-  }
-  if (sanitizedContext.sessionId) {
-    sanitizedContext.sessionId = anonymizeForLogging(sanitizedContext.sessionId);
-  }
-  if (sanitizedContext.ip) {
-    sanitizedContext.ip = anonymizeForLogging(sanitizedContext.ip);
-  }
+  const sanitizedContext = sanitizeForLogging(context);
 
   logger.error('[ERROR]', {
     message: error?.message || error,

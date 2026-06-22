@@ -44,11 +44,6 @@ export default defineConfig({
   worker: {
     format: 'es',
   },
-  server: {
-    port: 5173,
-    strictPort: true,
-    open: false
-  },
   resolve: {
     alias: {
       '@': path.resolve(__dirname, './src'),
@@ -56,7 +51,7 @@ export default defineConfig({
     },
   },
   build: {
-    sourcemap: true,
+    sourcemap: false,
     outDir: 'dist',
     emptyOutDir: true,
     chunkSizeWarningLimit: 1000,
@@ -81,8 +76,9 @@ export default defineConfig({
     minify: 'terser',
     terserOptions: {
       compress: {
+        // SET FALSE LATER, FOR NOW DEBUG IS ON
         drop_console: false,
-        drop_debugger: false,
+        drop_debugger: true,
       },
       mangle: {
         safari10: true

@@ -7,7 +7,7 @@ import { EventType } from "../../lib/types/event-types";
 import { computeBlindUserId } from "../../lib/utils/auth-utils";
 import { shouldAttemptDiscovery } from "../../lib/utils/discovery-utils";
 import { SecureDB } from "../../lib/database/secureDB";
-import { MAX_CONVERSATIONS, CONVERSATION_RATE_LIMIT_WINDOW_MS, CONVERSATION_RATE_LIMIT_MAX, VALIDATION_TIMEOUT_MS } from "../../lib/constants";
+import { MAX_CONVERSATIONS, CONVERSATION_RATE_LIMIT_WINDOW_MS, CONVERSATION_RATE_LIMIT_MAX } from "../../lib/constants";
 import {
   dispatchSafeEvent,
   getConversationPreview,
@@ -27,6 +27,7 @@ export const useConversations = (
   const [selectedConversation, setSelectedConversation] = useState<string | null>(null);
   const [removedConversations, setRemovedConversations] = useState<Set<string>>(new Set());
   const [lastReadByConversation, setLastReadByConversation] = useState<Map<string, number>>(new Map());
+  const [pinStateByConversation, setPinStateByConversation] = useState<Map<string, { isPinned: boolean; pinnedAt: number }>>(new Map());
 
   // Rate limiting state
   const rateStateRef = useRef<{ windowStart: number; count: number }>({ windowStart: 0, count: 0 });
@@ -98,8 +99,6 @@ export const useConversations = (
 
         return await new Promise<Conversation | null>(async (resolve, reject) => {
           let timeoutId: number | null = null;
-          let resolved = false;
-
           const cleanup = () => {
             if (timeoutId !== null) {
               clearTimeout(timeoutId);
@@ -112,7 +111,6 @@ export const useConversations = (
           try {
             if (!shouldAttemptDiscovery(conversationUsername, users.map(u => u.username).filter(Boolean))) {
               reject(new Error('User not eligible for discovery'));
-              resolved = true;
               cleanup();
               return;
             }
@@ -121,9 +119,21 @@ export const useConversations = (
               const { inboxId, publicKeys } = material;
               dispatchSafeEvent(EventType.USER_KEYS_AVAILABLE, {
                 username: conversationUsername,
-                hybridKeys: publicKeys,
-                inboxId
-              }, ['username', 'hybridKeys', 'inboxId']);
+                hybridKeys: {
+                  ...publicKeys,
+                  inboxId,
+                  routeId: material.routeId,
+                  mailboxLookupId: material.mailboxLookupId,
+                  bundleLookupId: material.bundleLookupId
+                },
+                inboxId,
+                routeId: material.routeId,
+                mailboxLookupId: material.mailboxLookupId,
+                bundleLookupId: material.bundleLookupId,
+                peerCertificateFingerprint: material.peerCertificateFingerprint,
+                identityRootFingerprint: material.identityRootFingerprint,
+                identityBundleFingerprint: material.identityBundleFingerprint
+              }, ['username', 'hybridKeys', 'inboxId', 'routeId', 'mailboxLookupId', 'bundleLookupId', 'peerCertificateFingerprint', 'identityRootFingerprint', 'identityBundleFingerprint']);
 
               const isOnline = users.some(user => user.username === conversationUsername && user.isOnline);
               const newConversation = createConversation(conversationUsername, isOnline, inboxId);
@@ -133,19 +143,16 @@ export const useConversations = (
                 setSelectedConversation(conversationUsername);
               }
               resolve(newConversation);
-              resolved = true;
               cleanup();
               return;
             } else {
               reject(new Error('User not found via discovery billboard'));
-              resolved = true;
               cleanup();
               return;
             }
           } catch (discoveryErr) {
             console.error('[useConversations] Discovery error:', discoveryErr);
             reject(new Error('Discovery service error'));
-            resolved = true;
             cleanup();
             return;
           }
@@ -250,13 +257,18 @@ export const useConversations = (
           metadata = await secureDB.rebuildConversationMetadata().catch(() => []);
         }
         if (cancelled || !metadata) return;
-        const next = new Map<string, number>();
+        const nextReads = new Map<string, number>();
+        const nextPins = new Map<string, { isPinned: boolean; pinnedAt: number }>();
         for (const entry of metadata) {
           if (entry?.peerUsername) {
-            next.set(entry.peerUsername, entry.lastReadTimestamp || 0);
+            nextReads.set(entry.peerUsername, entry.lastReadTimestamp || 0);
+            if (entry.isPinned && entry.pinnedAt) {
+              nextPins.set(entry.peerUsername, { isPinned: entry.isPinned, pinnedAt: entry.pinnedAt });
+            }
           }
         }
-        setLastReadByConversation(next);
+        setLastReadByConversation(nextReads);
+        setPinStateByConversation(nextPins);
       } catch (err) {
         console.error('[useConversations] Failed to load read state', err);
       }
@@ -327,9 +339,9 @@ export const useConversations = (
       const isUnread = isIncoming && !msg.receipt?.read && (lastReadTs === 0 || msgTimeMs > lastReadTs);
       const unreadIncrement = isUnread ? 1 : 0;
 
-      let conv = convMap.get(other);
+      const conv = convMap.get(other);
       if (!conv) {
-        conv = {
+        convMap.set(other, {
           id: crypto.randomUUID(),
           username: other,
           isOnline,
@@ -337,15 +349,19 @@ export const useConversations = (
           lastMessageTime: msgTime,
           unreadCount: unreadIncrement,
           secureContentId: msg.secureContentId || msg.id,
-        };
-        convMap.set(other, conv);
+        });
       } else {
-        if (unreadIncrement > 0) {
-          convMap.set(other, {
-            ...conv,
-            unreadCount: (conv.unreadCount || 0) + unreadIncrement
-          });
+        const updated = { ...conv };
+        
+        if (msgTime.getTime() > (conv.lastMessageTime?.getTime() || 0)) {
+          updated.lastMessage = getConversationPreview(msg, currentUsername);
+          updated.lastMessageTime = msgTime;
+          updated.secureContentId = msg.secureContentId || msg.id;
         }
+        if (unreadIncrement > 0) {
+          updated.unreadCount = (conv.unreadCount || 0) + unreadIncrement;
+        }
+        convMap.set(other, updated);
       }
     }
 
@@ -374,6 +390,7 @@ export const useConversations = (
 
       for (const [username, conv] of convMap.entries()) {
         const exists = merged.get(username);
+        const pinState = pinStateByConversation.get(username);
         if (exists) {
           merged.set(username, {
             ...exists,
@@ -382,10 +399,16 @@ export const useConversations = (
             lastMessageTime: conv.lastMessageTime,
             unreadCount: username === selectedConversation ? 0 : conv.unreadCount,
             secureContentId: conv.secureContentId,
-            displayName: exists.displayName || conv.displayName
+            displayName: exists.displayName || conv.displayName,
+            isPinned: pinState?.isPinned,
+            pinnedAt: pinState?.pinnedAt
           });
         } else {
-          merged.set(username, conv);
+          merged.set(username, {
+            ...conv,
+            isPinned: pinState?.isPinned,
+            pinnedAt: pinState?.pinnedAt
+          });
         }
       }
 
@@ -407,9 +430,12 @@ export const useConversations = (
           if (
             p.isOnline !== c.isOnline ||
             (p.lastMessage || '') !== (c.lastMessage || '') ||
+            (p.secureContentId || '') !== (c.secureContentId || '') ||
             pTime !== cTime ||
             (p.unreadCount || 0) !== (c.unreadCount || 0) ||
-            (p.displayName || '') !== (c.displayName || '')
+            (p.displayName || '') !== (c.displayName || '') ||
+            p.isPinned !== c.isPinned ||
+            p.pinnedAt !== c.pinnedAt
           ) {
             equal = false;
             break;
@@ -422,7 +448,7 @@ export const useConversations = (
 
       return next;
     });
-  }, [messages, currentUsername, selectedConversation, removedConversations, userLookup, lastReadByConversation]);
+  }, [messages, currentUsername, selectedConversation, removedConversations, userLookup, lastReadByConversation, pinStateByConversation]);
 
   useEffect(() => {
     if (!selectedConversation) return;
@@ -453,6 +479,28 @@ export const useConversations = (
     } catch { }
   }, [selectedConversation, secureDB, currentUsername]);
 
+  const toggleConversationPin = useCallback(async (username: string) => {
+    if (!username || !secureDB) return;
+    
+    setPinStateByConversation(prev => {
+        const next = new Map(prev);
+        const current = next.get(username);
+        const isPinned = !current?.isPinned;
+        
+        if (isPinned) {
+            next.set(username, { isPinned: true, pinnedAt: Date.now() });
+        } else {
+            next.delete(username);
+        }
+        
+        secureDB.toggleConversationPin(username, isPinned).catch(e => {
+            console.error('[useConversations] Failed to persist pin state', e);
+        });
+        
+        return next;
+    });
+  }, [secureDB]);
+
   return {
     conversations,
     selectedConversation,
@@ -460,5 +508,6 @@ export const useConversations = (
     selectConversation,
     removeConversation,
     getConversationMessages,
+    toggleConversationPin,
   };
 };

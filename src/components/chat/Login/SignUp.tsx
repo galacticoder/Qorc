@@ -1,7 +1,4 @@
 import React, { useState, useCallback, useMemo } from "react";
-import { Input } from "../../ui/input";
-import { Label } from "../../ui/label";
-import { Button } from "../../ui/button";
 import { isValidUsername } from "../../../lib/sanitizers";
 import {
   USERNAME_MIN_LENGTH,
@@ -21,6 +18,7 @@ interface SignUpFormProps {
   readonly onChangePassword?: (v: string) => void;
   readonly onChangeConfirmPassword?: (v: string) => void;
   readonly onChangePassphrase?: (v: string) => void;
+  readonly onChangeConfirmPassphrase?: (v: string) => void;
 }
 
 export function SignUpForm({
@@ -33,7 +31,8 @@ export function SignUpForm({
   onChangeUsername,
   onChangePassword,
   onChangeConfirmPassword,
-  onChangePassphrase
+  onChangePassphrase,
+  onChangeConfirmPassphrase
 }: SignUpFormProps) {
   const [username, setUsername] = useState(initialUsername);
   const [password, setPassword] = useState(initialPassword);
@@ -64,7 +63,8 @@ export function SignUpForm({
 
   const handleConfirmPassphraseChange = useCallback((v: string): void => {
     setConfirmPassphrase(v);
-  }, []);
+    onChangeConfirmPassphrase?.(v);
+  }, [onChangeConfirmPassphrase]);
 
   const isUsernameValid = useMemo(() => username.trim().length >= USERNAME_MIN_LENGTH, [username]);
   const isPasswordValid = useMemo(() => password.length > 0, [password]);
@@ -95,10 +95,15 @@ export function SignUpForm({
   }, [disabled, isSubmitting, isFormValid, username, password, passphrase, isPassphraseValid, doPassphrasesMatch, onSubmit]);
 
   return (
-    <form onSubmit={handleSubmit} className="space-y-4">
-      <div className="space-y-2">
-        <Label htmlFor="username" className="text-muted-foreground font-medium">Username</Label>
-        <Input
+    <form
+      onSubmit={handleSubmit}
+      className={`signup-simple-form${isSubmitting ? " is-submitting" : ""}`}
+      aria-busy={isSubmitting}
+    >
+      <div className="signup-simple-field">
+        <label htmlFor="username">Username</label>
+        <input
+          className="signup-simple-input"
           id="username"
           placeholder="Choose your username"
           value={username}
@@ -108,48 +113,48 @@ export function SignUpForm({
           minLength={USERNAME_MIN_LENGTH}
           maxLength={USERNAME_MAX_LENGTH}
           autoComplete="username"
-          className="bg-background/50 border-border/50 focus:bg-background/80 transition-all duration-200"
         />
       </div>
 
-      <div className="space-y-2">
-        <Label htmlFor="password" className="text-muted-foreground font-medium">Create Password</Label>
-        <Input
+      <div className="signup-simple-field">
+        <label htmlFor="password">Password</label>
+        <input
+          className="signup-simple-input"
           id="password"
           type="password"
-          placeholder="Choose a password"
+          placeholder="Create password"
           value={password}
           onChange={(e) => handlePasswordChange(e.target.value)}
           disabled={disabled || isSubmitting}
           required
           autoComplete="new-password"
           maxLength={PASSWORD_MAX_LENGTH}
-          className="bg-background/50 border-border/50 focus:bg-background/80 transition-all duration-200"
         />
       </div>
 
-      <div className="space-y-2">
-        <Label htmlFor="confirmPassword" className="text-muted-foreground font-medium">Confirm Password</Label>
-        <Input
+      <div className="signup-simple-field">
+        <label htmlFor="confirmPassword">Confirm password</label>
+        <input
+          className="signup-simple-input"
           id="confirmPassword"
           type="password"
-          placeholder="Confirm your password"
+          placeholder="Confirm password"
           value={confirmPassword}
           onChange={(e) => handleConfirmChange(e.target.value)}
           disabled={disabled || isSubmitting}
           required
           autoComplete="new-password"
           maxLength={PASSWORD_MAX_LENGTH}
-          className="bg-background/50 border-border/50 focus:bg-background/80 transition-all duration-200"
         />
         {!doPasswordsMatch && confirmPassword.length > 0 && (
-          <p className="text-destructive text-xs font-medium animate-pulse">Passwords do not match</p>
+          <p className="auth-simple-message">Passwords do not match</p>
         )}
       </div>
 
-      <div className="space-y-2">
-        <Label htmlFor="passphrase" className="text-muted-foreground font-medium">Encryption Passphrase</Label>
-        <Input
+      <div className="signup-simple-field">
+        <label htmlFor="passphrase">Encryption passphrase</label>
+        <input
+          className="signup-simple-input"
           id="passphrase"
           type="password"
           placeholder="New encryption passphrase"
@@ -158,46 +163,43 @@ export function SignUpForm({
           disabled={disabled || isSubmitting}
           required
           autoComplete="new-password"
-          className="bg-background/50 border-border/50 focus:bg-background/80 transition-all duration-200"
         />
         {passphrase.length > 0 && !isPassphraseValid && (
-          <p className="text-destructive text-xs font-medium animate-pulse">Passphrase too short (min 8 chars)</p>
+          <p className="auth-simple-message">Passphrase too short (min 8 chars)</p>
         )}
       </div>
 
-      <div className="space-y-2">
-        <Label htmlFor="confirmPassphrase" className="text-muted-foreground font-medium">Confirm Passphrase</Label>
-        <Input
+      <div className="signup-simple-field">
+        <label htmlFor="confirmPassphrase">Confirm passphrase</label>
+        <input
+          className="signup-simple-input"
           id="confirmPassphrase"
           type="password"
-          placeholder="Confirm your passphrase"
+          placeholder="Confirm passphrase"
           value={confirmPassphrase}
           onChange={(e) => handleConfirmPassphraseChange(e.target.value)}
           disabled={disabled || isSubmitting}
           required
           autoComplete="new-password"
-          className="bg-background/50 border-border/50 focus:bg-background/80 transition-all duration-200"
         />
         {!doPassphrasesMatch && confirmPassphrase.length > 0 && (
-          <p className="text-destructive text-xs font-medium animate-pulse">Passphrases do not match</p>
+          <p className="auth-simple-message">Passphrases do not match</p>
         )}
       </div>
 
       {hasServerTrustRequest && !isSubmitting && (
-        <p className="text-destructive text-sm text-center font-medium animate-pulse">
+        <p className="auth-simple-message">
           Verify server identity before registering
         </p>
       )}
 
-      <Button
+      <button
         type="submit"
-        size="lg"
-        variant="ghost"
-        className="w-full h-14 text-base font-semibold transition-all shadow-xl shadow-primary/20 hover:shadow-primary/40 hover:scale-[1.02] active:scale-[0.98] bg-primary hover:bg-primary/90 border-0"
+        className="signup-simple-submit"
         disabled={disabled || isSubmitting || !isFormValid}
       >
-        {isSubmitting ? (authStatus || "Registering...") : "Create Account"}
-      </Button>
+        {isSubmitting ? (authStatus || "Creating account...") : "Create account"}
+      </button>
     </form>
   );
 }

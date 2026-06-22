@@ -1,11 +1,15 @@
-import { SignalType } from '../../lib/types/signal-types';
 import { EventType } from '../../lib/types/event-types';
-import { unifiedSignalTransport } from '../../lib/transport/unified-signal-transport';
 import type { PendingRetryEntry, AttemptsLedgerEntry, ResetCounterEntry } from '../../lib/types/message-handling-types';
 import { computeBackoffMs } from '../../lib/utils/message-handler-utils';
 import { BUNDLE_REQUEST_COOLDOWN_MS, MAX_RETRY_ATTEMPTS, PENDING_QUEUE_MAX_PER_PEER } from '../../lib/constants';
 import { signal } from '../../lib/tauri-bindings';
 import websocketClient from '../../lib/websocket/websocket';
+import { getBlindRoutingClient } from '../../lib/transport/blind-routing-client';
+
+const REPLENISH_MISSING_INBOX_WARN_COOLDOWN_MS = 30_000;
+let lastReplenishMissingInboxWarnAt = 0;
+const REPLENISH_NOT_READY_WARN_COOLDOWN_MS = 30_000;
+let lastReplenishNotReadyWarnAt = 0;
 
 // Handle session reset and queue message for retry
 export const handleSessionResetAndRetry = async (
@@ -19,15 +23,20 @@ export const handleSessionResetAndRetry = async (
   bundleRequestCooldownRef: React.RefObject<Map<string, number>>,
   resetCooldownRef: React.RefObject<Map<string, number>>,
   resetCounterRef: React.RefObject<Map<string, ResetCounterEntry>>,
-  requestBundleOnce: (peer: string, reason?: string) => Promise<void>,
+  requestBundleOnce: (peer: string, reason?: string, options?: { force?: boolean; forceRefreshDiscovery?: boolean }) => Promise<void>,
   maxResetsPerPeer: number,
   resetWindowMs: number,
   options?: {
     resolvePeerInboxId?: (peer: string) => Promise<string | null>;
     senderInboxId?: string | null;
+    forceRefreshDiscovery?: boolean;
+    invalidateCache?: (handle: string) => void;
   }
 ): Promise<boolean> => {
   const nowTs = Date.now();
+  if (options?.invalidateCache) {
+    options.invalidateCache(senderUsername);
+  }
   const _lastReset = resetCooldownRef.current.get(senderUsername) || 0;
 
   if (nowTs - _lastReset < 3000) {
@@ -39,7 +48,9 @@ export const handleSessionResetAndRetry = async (
     if (nowTs - counterEntry.windowStart > resetWindowMs) {
       resetCounterRef.current.set(senderUsername, { count: 1, windowStart: nowTs });
     } else if (counterEntry.count >= maxResetsPerPeer) {
-      console.warn(`[EncryptedMessageHandler] Max session resets (${maxResetsPerPeer}) reached for ${senderUsername}, waiting for window to expire`);
+      console.warn('[EncryptedMessageHandler] Max session resets reached, waiting for window to expire', {
+        maxResetsPerPeer
+      });
       return false;
     } else {
       counterEntry.count += 1;
@@ -49,48 +60,6 @@ export const handleSessionResetAndRetry = async (
   }
 
   resetCooldownRef.current.set(senderUsername, nowTs);
-
-  const resolvePeerInboxId = options?.resolvePeerInboxId;
-  const senderInboxId = options?.senderInboxId;
-
-  const isLikelyInboxId = (value: string | null | undefined): value is string => {
-    if (!value || typeof value !== 'string') return false;
-    return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value);
-  };
-
-  try {
-    await signal.deleteSession(currentUser, senderUsername, 1);
-
-    try {
-      let targetInbox = senderInboxId || null;
-      if (!isLikelyInboxId(targetInbox) && resolvePeerInboxId) {
-        try {
-          targetInbox = await resolvePeerInboxId(senderUsername);
-        } catch { }
-      }
-
-      await unifiedSignalTransport.send(
-        senderUsername,
-        { reason: 'decryption-failure' },
-        SignalType.SESSION_RESET_REQUEST,
-        isLikelyInboxId(targetInbox) ? { destinationInbox: targetInbox } : undefined
-      );
-
-      try {
-        window.dispatchEvent(new CustomEvent(EventType.LOCAL_INITIATED_RESET, {
-          detail: { peerUsername: senderUsername, reason: 'decryption-failure' }
-        }));
-      } catch { }
-
-      window.dispatchEvent(new CustomEvent(EventType.SESSION_RESET_RECEIVED, {
-        detail: { peerUsername: senderUsername, reason: EventType.LOCAL_INITIATED_RESET }
-      }));
-    } catch (notifyErr) {
-      console.error('[EncryptedMessageHandler] Failed to send session reset notification:', notifyErr);
-    }
-  } catch {
-    console.error('[EncryptedMessageHandler] Failed to delete stale session');
-  }
 
   const messageRetryCount = (encryptedMessage as any).__retryCount || 0;
   const env = (encryptedMessage as any)?.encryptedPayload;
@@ -126,13 +95,18 @@ export const handleSessionResetAndRetry = async (
     }
   }
 
+  // Request a fresh bundle non destructively
   const lastBundle = bundleRequestCooldownRef.current.get(senderUsername) || 0;
   if (nowTs - lastBundle >= BUNDLE_REQUEST_COOLDOWN_MS) {
     bundleRequestCooldownRef.current.set(senderUsername, nowTs);
     try {
-      await requestBundleOnce(senderUsername, EventType.SESSION_KEY_REFRESH);
+      await requestBundleOnce(
+        senderUsername,
+        EventType.SESSION_KEY_REFRESH,
+        { forceRefreshDiscovery: options?.forceRefreshDiscovery }
+      );
     } catch (bundleReqError) {
-      console.error('[EncryptedMessageHandler] Failed to request bundle for session recovery:', bundleReqError);
+      console.error('[EncryptedMessageHandler] Failed to request bundle for session recovery');
     }
   }
 
@@ -176,33 +150,67 @@ export const replenishPqKyberPrekey = async (
   if (replenishmentInProgressRef.current) return;
   if (!force && now - lastReplenish < pqKeyReplenishCooldownMs) return;
   if (!isAuthenticated || !loginUsernameRef.current) return;
+  if (!websocketClient.isConnectedToServer()) return;
+
+  const warnNotReady = (message: string) => {
+    const nowWarn = Date.now();
+    if (nowWarn - lastReplenishNotReadyWarnAt >= REPLENISH_NOT_READY_WARN_COOLDOWN_MS) {
+      lastReplenishNotReadyWarnAt = nowWarn;
+      console.warn(message);
+    }
+  };
 
   replenishmentInProgressRef.current = true;
 
   try {
+    const isUnlinkedMode = typeof websocketClient.isUnlinkedMode === 'function' && websocketClient.isUnlinkedMode();
+    if (!isUnlinkedMode) {
+      warnNotReady('[EncryptedMessageHandler] Skipping replenishment bundle publish - waiting for unlinked mode');
+      return;
+    }
+
+    const resolveLocalInboxId = (): string | undefined => {
+      const username = loginUsernameRef.current || undefined;
+      const tryGet = (targetUsername?: string): string | undefined => {
+        try {
+          const client = targetUsername ? getBlindRoutingClient(targetUsername) : getBlindRoutingClient();
+          return client.getMyInboxId() || undefined;
+        } catch {
+          return undefined;
+        }
+      };
+
+      // Prefer username scoped client lookup then fall back to singleton access
+      return tryGet(username) || tryGet();
+    };
+
+
+    const unlinkedReady = typeof websocketClient.isUnlinkedSessionReady === 'function'
+      ? websocketClient.isUnlinkedSessionReady()
+      : false;
+    if (!unlinkedReady) {
+      warnNotReady('[EncryptedMessageHandler] Skipping replenishment bundle publish - unlinked session not ready');
+      return;
+    }
+
+    const inboxId = resolveLocalInboxId();
+    if (!inboxId) {
+      const nowWarn = Date.now();
+      if (nowWarn - lastReplenishMissingInboxWarnAt >= REPLENISH_MISSING_INBOX_WARN_COOLDOWN_MS) {
+        lastReplenishMissingInboxWarnAt = nowWarn;
+        const mode = isUnlinkedMode ? 'unlinked' : 'linked';
+        console.warn(`[EncryptedMessageHandler] Skipping replenishment bundle publish - inbox claim not ready (${mode})`);
+      }
+      return;
+    }
+
     lastPqKeyReplenishRef.current = now;
 
+    // Refill the local one-time prekey store for forward secrecy. The refreshed bundle reaches peers
+    // via the discovery blob (republished on its own schedule), not a server-side bundle table.
     try {
       await signal.generatePreKeys(loginUsernameRef.current, 1, 50);
     } catch { }
-
-    const bundle = await signal.createPreKeyBundle(loginUsernameRef.current);
-
-    if (!bundle || !bundle.registrationId || !bundle.identityKeyBase64 || !bundle.signedPreKey || !bundle.kyberPreKey?.keyId) {
-      console.error('[EncryptedMessageHandler] Invalid bundle structure during PQ key replenishment');
-      return;
-    }
-
-    try {
-      await websocketClient.sendSecureControlMessage({
-        type: SignalType.LIBSIGNAL_PUBLISH_BUNDLE,
-        bundle,
-        isReplenishment: true
-      });
-    } catch (sendErr) {
-      console.error('[EncryptedMessageHandler] Failed to publish replenishment bundle:', sendErr);
-      return;
-    }
   } catch (_error) {
     console.error('[EncryptedMessageHandler] Error during PQ key replenishment:', _error);
   } finally {

@@ -2,7 +2,6 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { EventType } from '../../lib/types/event-types';
 import type { HybridKeys } from '../../lib/types/p2p-types';
 import { toUint8 } from '../../lib/utils/p2p-utils';
-import { retrieveAuthTokens } from '../../lib/signals/token-storage';
 
 // Refs and state from authentication needed to derive P2P keys
 export interface AuthenticationRefs {
@@ -12,12 +11,11 @@ export interface AuthenticationRefs {
     x25519?: { private: Uint8Array; publicKeyBase64: string };
   } | null>;
   loginUsernameRef: React.RefObject<string | null>;
-  serverHybridPublic?: { dilithiumPublicBase64?: string };
 }
 
 export interface DatabaseRefs {
   secureDBRef: React.RefObject<{ getOriginalUsername?: (h: string) => Promise<string | null> } | null>;
-  users: Array<{ username: string; hybridPublicKeys?: any }>;
+  users: Array<{ username: string; hybridPublicKeys?: any; peerCertificateFingerprint?: string; identityRootFingerprint?: string }>;
 }
 
 // Derives P2P hybrid keys from authentication state
@@ -57,28 +55,21 @@ export function useP2PKeys(authRefs: AuthenticationRefs, dbRefs: DatabaseRefs) {
 
   const getPeerHybridKeys = useCallback(async (peerUsername: string) => {
     const existingUser = dbRefs.users.find(u => u.username === peerUsername);
-    if (existingUser?.hybridPublicKeys?.kyberPublicBase64 && existingUser?.hybridPublicKeys?.dilithiumPublicBase64) {
+    if (
+      existingUser?.hybridPublicKeys?.kyberPublicBase64 &&
+      existingUser?.hybridPublicKeys?.dilithiumPublicBase64 &&
+      existingUser?.hybridPublicKeys?.x25519PublicBase64 &&
+      existingUser?.peerCertificateFingerprint &&
+      existingUser?.identityRootFingerprint
+    ) {
       return existingUser.hybridPublicKeys;
     }
     return null;
   }, [dbRefs.users]);
 
-  const trustedIssuerDilithiumPublicKeyBase64 = authRefs.serverHybridPublic?.dilithiumPublicBase64 || '';
-
-  const signalingTokenProvider = useCallback(async () => {
-    try {
-      const tokens = await retrieveAuthTokens();
-      return tokens?.accessToken || null;
-    } catch {
-      return null;
-    }
-  }, []);
-
   return {
     p2pHybridKeys,
     getPeerHybridKeys,
-    trustedIssuerDilithiumPublicKeyBase64,
-    signalingTokenProvider,
     username: authRefs.loginUsernameRef.current || '',
   };
 }

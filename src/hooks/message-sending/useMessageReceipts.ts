@@ -17,6 +17,7 @@ import {
 import { validateHybridKeys } from './validation';
 import { unifiedSignalTransport } from '../../lib/transport/unified-signal-transport';
 import { signal } from '../../lib/tauri-bindings';
+import { receiptBatcher } from '../message-handling/receipt-batcher';
 
 export function useMessageReceipts(
   messages: Message[],
@@ -210,12 +211,8 @@ export function useMessageReceipts(
           } catch { }
         }
 
-        const readReceiptData = {
-          messageId: safeMessageId,
-          timestamp: Date.now(),
-        };
-
-        await unifiedSignalTransport.send(safeSender, readReceiptData, SignalType.READ_RECEIPT);
+        // Coalesce into the per peer batched receipt
+        receiptBatcher.queueRead(safeSender, safeMessageId);
 
         markReceiptSent(sentReceiptsRef.current, safeMessageId);
       } catch { }

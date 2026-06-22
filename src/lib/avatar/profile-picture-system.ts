@@ -4,7 +4,7 @@ import { createInitialState } from './state';
 import { AvatarSystemState } from '../types/avatar-types';
 import { setSecureDB, setKeys, initialize } from './init';
 import { clearPeerCache, cachePeerAvatar } from './cache';
-import { setOwnAvatar, removeOwnAvatar, getOwnAvatar, getOwnAvatarHash, isOwnAvatarDefault, setShareWithOthers, getShareWithOthers } from './own-avatar';
+import { setOwnAvatar, removeOwnAvatar, getOwnAvatar, getOwnAvatarHash, getOwnProfileVersion, isOwnAvatarDefault, setShareWithOthers, getShareWithOthers } from './own-avatar';
 import { getPeerAvatar, getPeerAvatarHash, isPeerAvatarStale, requestPeerAvatar } from './peer-avatar';
 import { createProfilePictureRequest, createProfilePictureResponse, handleIncomingMessage } from './messaging';
 
@@ -65,6 +65,11 @@ class ProfilePictureSystem {
         return getOwnAvatarHash(this.state);
     }
 
+    // Get own profile version
+    getOwnProfileVersion(): number {
+        return getOwnProfileVersion(this.state);
+    }
+
     // Check if own avatar is default
     isOwnAvatarDefault(): boolean {
         return isOwnAvatarDefault(this.state);
@@ -106,8 +111,8 @@ class ProfilePictureSystem {
     }
 
     // Cache peer avatar
-    async cachePeerAvatar(username: string, data: string, mimeType: string, hash: string): Promise<void> {
-        return cachePeerAvatar(this.state, username, data, mimeType, hash);
+    async cachePeerAvatar(username: string, data: string, mimeType: string, hash: string, isDefault: boolean = false): Promise<void> {
+        return cachePeerAvatar(this.state, username, data, mimeType, hash, isDefault);
     }
 
     // Create profile picture request

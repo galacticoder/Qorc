@@ -55,6 +55,55 @@ services:
       timeout: 5s
       retries: 30
 
+  pir-worker:
+    profiles: ["server"]
+    build:
+      # builds from hintless source in workers/hintless/upstream
+      context: ../workers/hintless
+      dockerfile: Dockerfile
+    hostname: pir-worker
+    environment:
+      - QOR_PIR_BIND=0.0.0.0:8787
+      - QOR_PIR_PARAMETER_ID=${PIR_WORKER_PARAMETER_ID:-hintless-simplepir-rlwe64-v1}
+      - QOR_PIR_AUTH_TOKEN=${PIR_WORKER_TOKEN:-}
+      - QOR_PIR_MAX_DATABASE_BYTES=${PIR_WORKER_MAX_DATABASE_BYTES:-2147483648}
+      - QOR_PIR_MAX_REQUEST_BYTES=${PIR_WORKER_MAX_REQUEST_BYTES:-268435456}
+    networks:
+      - Qor-Chat-net
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "${PIR_WORKER_CPUS:-0}"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8787/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+  # YPIR tier-2 worker
+  ypir-worker:
+    profiles: ["server"]
+    build:
+      context: ../workers/ypir
+      dockerfile: Dockerfile
+    hostname: ypir-worker
+    environment:
+      - YPIR_WORKER_ADDR=0.0.0.0:8788
+      - YPIR_BLOB_LEN=${YPIR_BLOB_LEN:-65536}
+    networks:
+      - Qor-Chat-net
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "${YPIR_WORKER_CPUS:-0}"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8788/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
   server:
     profiles: ["server"]
     build:
@@ -65,12 +114,23 @@ services:
       - "${PORT:-3000}:3000"
     environment:
       - BIND_ADDRESS=0.0.0.0
+      - PIR_WORKER_URL=${PIR_WORKER_URL:-http://pir-worker:8787}
+      - PIR_WORKER_PARAMETER_ID=${PIR_WORKER_PARAMETER_ID:-hintless-simplepir-rlwe64-v1}
+      - PIR_WORKER_SOURCE_COMMIT=49434e086ec56d19546ca6e97353671b690ba19b
+      - PIR_REQUIRE_WORKER=${PIR_REQUIRE_WORKER:-true}
+      - YPIR_TIER2_WORKER_URL=${YPIR_TIER2_WORKER_URL:-http://ypir-worker:8788}
+      - YPIR_TIER2_BLOB_LEN=${YPIR_BLOB_LEN:-65536}
+      - RUNTIME_DIAGNOSTIC_LOG_DIR=${RUNTIME_DIAGNOSTIC_LOG_DIR:-/app/logs}
       - NO_GUI
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_started
+      pir-worker:
+        condition: service_healthy
+      ypir-worker:
+        condition: service_healthy
     env_file:
       - ../.env
     networks:
@@ -84,6 +144,7 @@ services:
       - ../.env:/app/.env 
       - ../scripts:/app/scripts:rw
       - ../server:/app/server:rw
+      - ../logs:/app/logs:rw
       - tailscale-data:/var/lib/tailscale
       - redis-certs:/app/redis-certs:ro
       - postgres-certs:/app/postgres-certs:ro

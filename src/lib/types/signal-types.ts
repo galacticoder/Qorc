@@ -7,7 +7,6 @@ export enum SignalType {
   TOKEN_VALIDATION_RESPONSE = 'token-validation-response',
 
   // Blocking System
-  BLOCK_TOKENS_UPDATE = 'block-tokens-update',
   BLOCK_LIST_SYNC = 'block-list-sync',
   BLOCK_LIST_UPDATE = 'block-list-update',
   BLOCK_LIST_RESPONSE = 'block-list-response',
@@ -27,15 +26,12 @@ export enum SignalType {
   DELIVERY_ACK = 'delivery-ack',
   DELIVERY_RECEIPT = 'delivery-receipt',
   READ_RECEIPT = 'read-receipt',
-  STORE_OFFLINE_MESSAGE = 'store-offline-message',
-  RETRIEVE_OFFLINE_MESSAGES = 'retrieve-offline-messages',
-  OFFLINE_MESSAGES_RESPONSE = 'offline-messages-response',
+  RECEIPT_BATCH = 'receipt-batch',
 
   // Encryption and Security
   ENCRYPTED_MESSAGE = 'encrypted-message',
   SERVER_PUBLIC_KEY = 'server-public-key',
   REQUEST_SERVER_PUBLIC_KEY = 'request-server-public-key',
-  KEYS_STORED = 'keys-stored',
 
   // File Operations
   FILE = 'file',
@@ -44,10 +40,7 @@ export enum SignalType {
 
   // Hybrid and Signal Protocol
   HYBRID_KEYS = 'hybrid-keys',
-  HYBRID_KEYS_UPDATE = 'hybrid-keys-update',
-  LIBSIGNAL_PUBLISH_BUNDLE = 'libsignal-publish-bundle',
   LIBSIGNAL_DELIVER_BUNDLE = 'libsignal-deliver-bundle',
-  LIBSIGNAL_PUBLISH_STATUS = 'libsignal-publish-status',
   SIGNAL_PROTOCOL = 'signal-protocol',
   SIGNAL = 'signal',
 
@@ -82,18 +75,13 @@ export enum SignalType {
   TYPING_STOP = 'typing-stop',
   TYPING_INDICATOR = 'typing-indicator',
 
-  KEY_CHUNK = 'KEY_CHUNK',
-
   // Blind Routing
   BLIND_ROUTE = 'blind-route',
-  BLIND_ROUTE_ACK = 'blind-route-ack',
   SEALED_ENVELOPE = 'sealed-envelope',
   CLAIM_INBOX = 'claim-inbox',
   CLAIM_INBOX_RESPONSE = 'claim-inbox-response',
   ROTATE_INBOX = 'rotate-inbox',
   ROTATE_INBOX_RESPONSE = 'rotate-inbox-response',
-  OWNERSHIP_PROOF = 'ownership-proof',
-  OWNERSHIP_PROOF_RESPONSE = 'ownership-proof-response',
 
   // Blind Credentials
   BLIND_SIGNATURE_REQUEST = 'blind-signature-request',
@@ -110,19 +98,23 @@ export enum SignalType {
   ZK_DEVICE_REGISTER = 'zk-device-register',
   ZK_DEVICE_REGISTER_RESPONSE = 'zk-device-register-response',
   AUTH_FULL_SUCCESS = 'AUTH_FULL_SUCCESS',
-  PROFILE_UPDATE = 'profile-update',
 
   // OPRF-Based Discovery
   OPRF_DISCOVERY_PUBLIC_KEY = 'oprf-discovery-public-key',
   OPRF_BLIND_EVALUATE = 'oprf-blind-evaluate',
   OPRF_BLIND_EVALUATE_RESPONSE = 'oprf-blind-evaluate-response',
   PUBLISH_DISCOVERY = 'publish-discovery',
-  QUERY_DISCOVERY = 'query-discovery',
-  DISCOVERY_RESULT = 'discovery-result',
+  DISCOVERY_SNAPSHOT_REQUEST = 'discovery-snapshot-request',
+  DISCOVERY_SNAPSHOT = 'discovery-snapshot',
+  PIR_MANIFEST_REQUEST = 'pir-manifest-request',
+  PIR_MANIFEST = 'pir-manifest',
+  PIR_QUERY = 'pir-query',
+  PIR_RESPONSE = 'pir-response',
   SERVER_ENTRY_REQUEST = 'server-entry-request',
   SERVER_ENTRY_CHALLENGE = 'server-entry-challenge',
   SERVER_ENTRY_TOKEN_ISSUANCE = 'server-entry-token-issuance',
   AUTH_OT_REQUEST = 'auth-ot-request',
   AUTH_OT_RESPONSE = 'auth-ot-response',
   AUTH_OT_FINALIZE = 'auth-ot-finalize',
+  SECURE_CHUNK = 'secure-chunk',
 }

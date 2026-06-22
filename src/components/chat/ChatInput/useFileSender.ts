@@ -2,14 +2,13 @@ import { useRef, useState, useCallback, useEffect } from "react";
 import * as pako from "pako";
 import { CryptoUtils } from "../../../lib/utils/crypto-utils";
 import websocketClient from "../../../lib/websocket/websocket";
-import { STORAGE_KEYS } from '../../../lib/database/storage-keys';
 import { SignalType } from "../../../lib/types/signal-types";
 import { EventType } from "../../../lib/types/event-types";
 import { sanitizeFilename } from "../../../lib/sanitizers";
-import { syncEncryptedStorage } from "../../../lib/database/encrypted-storage";
-import { DEFAULT_CHUNK_SIZE_SMALL, DEFAULT_CHUNK_SIZE_LARGE, LARGE_FILE_THRESHOLD, MAX_CHUNKS_PER_SECOND, INACTIVITY_TIMEOUT_MS, P2P_CONNECT_TIMEOUT_MS, RATE_LIMITER_SLEEP_MS, PAUSE_POLL_MS, P2P_POLL_MS, YIELD_INTERVAL, MAC_SALT, SESSION_WAIT_MS, SESSION_POLL_BASE_MS, SESSION_POLL_MAX_MS, BUNDLE_REQUEST_COOLDOWN_MS, SESSION_FRESH_COOLDOWN_MS } from "../../../lib/constants";
+import { DEFAULT_CHUNK_SIZE_SMALL, DEFAULT_CHUNK_SIZE_LARGE, LARGE_FILE_THRESHOLD, MAX_CHUNKS_PER_SECOND, INACTIVITY_TIMEOUT_MS, RATE_LIMITER_SLEEP_MS, PAUSE_POLL_MS, YIELD_INTERVAL, MAC_SALT, SESSION_WAIT_MS, SESSION_POLL_BASE_MS, SESSION_POLL_MAX_MS, BUNDLE_REQUEST_COOLDOWN_MS, SESSION_FRESH_COOLDOWN_MS } from "../../../lib/constants";
 import { unifiedSignalTransport } from "../../../lib/transport/unified-signal-transport";
 import { signal } from "../../../lib/tauri-bindings";
+import { stripImageMetadata } from "../../../lib/utils/file-utils";
 
 interface HybridPublicKeys {
   readonly x25519PublicBase64?: string;
@@ -38,11 +37,6 @@ interface TransferState {
   inactivityTimer?: NodeJS.Timeout;
 }
 
-interface P2PConnector {
-  readonly connectToPeer?: (peer: string) => Promise<void>;
-  readonly getConnectedPeers?: () => readonly string[];
-}
-
 interface LocalKeys {
   readonly dilithium: {
     readonly secretKey: Uint8Array;
@@ -65,7 +59,6 @@ export function useFileSender(
   currentUsername: string,
   targetUsername: string | undefined,
   users: readonly User[],
-  p2pConnector?: P2PConnector,
   getKeysOnDemand?: () => Promise<LocalKeys>,
   getPeerHybridKeys?: (peerUsername: string) => Promise<HybridPublicKeys | null>
 ) {
@@ -73,7 +66,7 @@ export function useFileSender(
   const [isSendingFile, setIsSendingFile] = useState(false);
 
   const currentTransferRef = useRef<TransferState | null>(null);
-  const currentRawBytesRef = useRef<Uint8Array | null>(null);
+  const currentFileRef = useRef<File | null>(null);
   const currentAesKeyRef = useRef<CryptoKey | null>(null);
   const currentMacKeyRef = useRef<Uint8Array | null>(null);
   const rateTokensRef = useRef<number>(MAX_CHUNKS_PER_SECOND);
@@ -182,54 +175,6 @@ export function useFileSender(
       }
     }, INACTIVITY_TIMEOUT_MS);
   }, []);
-
-  // Check if Tor is enabled for routing preferences
-  const isTorEnabled = useCallback((): boolean => {
-    try {
-      const flag = syncEncryptedStorage.getItem(STORAGE_KEYS.TOR_ENABLED);
-      if (typeof flag === 'string') return flag !== 'false';
-    } catch { }
-    return true;
-  }, []);
-
-  // Check if recipient user is currently online
-  const isRecipientOnline = useCallback((): boolean => {
-    if (!targetUsername) return false;
-    const u = users.find(u => u.username === targetUsername);
-    return !!u?.isOnline;
-  }, [users, targetUsername]);
-
-  // Attempt to establish P2P connection for direct transfer
-  const attemptP2P = useCallback(async (): Promise<boolean> => {
-    try {
-      if (!p2pConnector?.connectToPeer || !p2pConnector?.getConnectedPeers || !targetUsername) {
-        return false;
-      }
-
-      let opened = false;
-      const timer = new Promise<boolean>(resolve => setTimeout(() => resolve(false), P2P_CONNECT_TIMEOUT_MS));
-      const attempt = (async () => {
-        try {
-          await p2pConnector.connectToPeer(targetUsername);
-          const t0 = Date.now();
-          while (Date.now() - t0 < P2P_CONNECT_TIMEOUT_MS) {
-            const peers = p2pConnector.getConnectedPeers();
-            if (Array.isArray(peers) && peers.includes(targetUsername)) {
-              opened = true;
-              break;
-            }
-            await new Promise(res => setTimeout(res, P2P_POLL_MS));
-          }
-        } catch { }
-        return opened;
-      })();
-
-      const res = await Promise.race([timer, attempt]);
-      return !!res;
-    } catch {
-      return false;
-    }
-  }, [p2pConnector, targetUsername]);
 
   // Ensure WebSocket connection to server is ready
   const ensureWsReady = useCallback(async (): Promise<void> => {
@@ -352,7 +297,7 @@ export function useFileSender(
     state: TransferState,
     userKeys: readonly UserKeyEnvelope[]
   ): Promise<void> => {
-    const rawBytes = currentRawBytesRef.current!;
+    const file = currentFileRef.current!;
     const aesKey = currentAesKeyRef.current!;
     const macKey = currentMacKeyRef.current!;
 
@@ -411,8 +356,9 @@ export function useFileSender(
 
           const nextIndex = state.lastSentIndex + 1;
           const start = nextIndex * chunkSize;
-          const end = Math.min(start + chunkSize, rawBytes.length);
-          const chunk = rawBytes.slice(start, end);
+          const end = Math.min(start + chunkSize, file.size);
+          const blobSlice = file.slice(start, end);
+          const chunk = new Uint8Array(await blobSlice.arrayBuffer());
           const compressedChunk = pako.deflate(chunk);
 
           const { iv, authTag, encrypted } = await CryptoUtils.Encrypt.encryptBinaryWithAES(
@@ -561,25 +507,22 @@ export function useFileSender(
   }, [computeChunkMacAsync, currentUsername, scheduleInactivityTimer, users]);
 
   // Send a file
-  const sendFile = useCallback(async (file: File): Promise<void> => {
+  const sendFile = useCallback(async (rawFile: File): Promise<void> => {
     if (!targetUsername) {
       throw new Error('No target username specified');
     }
 
     await ensureWsReady();
 
-    const torEnabled = isTorEnabled();
-    const online = isRecipientOnline();
-
     setIsSendingFile(true);
     setProgress(0);
 
     try {
-      const rawBytes = new Uint8Array(await file.arrayBuffer());
-      currentRawBytesRef.current = rawBytes;
+      const file = await stripImageMetadata(rawFile);
+      currentFileRef.current = file;
 
       const chunkSize = file.size > LARGE_FILE_THRESHOLD ? DEFAULT_CHUNK_SIZE_LARGE : DEFAULT_CHUNK_SIZE_SMALL;
-      const totalChunks = Math.ceil(rawBytes.length / chunkSize);
+      const totalChunks = Math.ceil(file.size / chunkSize);
       const fileId = crypto.randomUUID();
 
       const safeName = sanitizeFilename(file.name || SignalType.FILE);
@@ -635,14 +578,14 @@ export function useFileSender(
               }
             }] as any;
           }
-        } catch (fetchError) {
-          console.error('[FILE-SENDER] Failed to fetch recipient keys:', fetchError);
+        } catch {
+          console.error('[FILE-SENDER] Failed to fetch recipient keys');
         }
       }
 
       if (filteredUsers.length === 0) {
-        console.error('[FILE-SENDER] Missing recipient keys', { to: targetUsername });
-        throw new Error(`Cannot send file: Post - quantum hybrid encryption keys are required but not available for ${targetUsername}`);
+        console.error('[FILE-SENDER] Missing recipient keys');
+        throw new Error('Cannot send file: post-quantum hybrid encryption keys are required but not available');
       }
 
       if (!getKeysOnDemand) {
@@ -680,23 +623,23 @@ export function useFileSender(
         })
       );
 
-      if (!torEnabled && online) {
-        try { await attemptP2P(); } catch { }
+      const blobUrl = URL.createObjectURL(file);
+      let fileBase64 = "";
+      
+      // Skip Base64 generation for very large files to avoid memory crashes
+      if (file.size <= 50 * 1024 * 1024) {
+        fileBase64 = await new Promise<string>((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => {
+            const result = reader.result as string;
+            const commaIndex = result.indexOf(',');
+            const payload = commaIndex >= 0 ? result.substring(commaIndex + 1) : result;
+            resolve(payload);
+          };
+          reader.onerror = () => reject(reader.error);
+          reader.readAsDataURL(file);
+        });
       }
-
-      const fileBlob = new Blob([rawBytes], { type: file.type || 'application/octet-stream' });
-      const blobUrl = URL.createObjectURL(fileBlob);
-      const fileBase64 = await new Promise<string>((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onload = () => {
-          const result = reader.result as string;
-          const commaIndex = result.indexOf(',');
-          const payload = commaIndex >= 0 ? result.substring(commaIndex + 1) : result;
-          resolve(payload);
-        };
-        reader.onerror = () => reject(reader.error);
-        reader.readAsDataURL(fileBlob);
-      });
 
       const localMessage = {
         id: fileId,
@@ -713,7 +656,8 @@ export function useFileSender(
         receipt: {
           delivered: false,
           read: false
-        }
+        },
+        fileBlob: file
       };
 
       window.dispatchEvent(new CustomEvent(EventType.LOCAL_FILE_MESSAGE, { detail: localMessage }));
@@ -727,7 +671,7 @@ export function useFileSender(
         }
       } catch { }
       currentTransferRef.current = null;
-      currentRawBytesRef.current = null;
+      currentFileRef.current = null;
       currentAesKeyRef.current = null;
       currentMacKeyRef.current = null;
 
@@ -740,12 +684,9 @@ export function useFileSender(
     }
   }, [
     targetUsername,
-    isTorEnabled,
-    isRecipientOnline,
     currentUsername,
     users,
     getKeysOnDemand,
-    attemptP2P,
     scheduleInactivityTimer,
     sendChunksServer
   ]);
@@ -775,7 +716,7 @@ export function useFileSender(
       st.canceled = true;
       if (st.inactivityTimer) clearTimeout(st.inactivityTimer);
       currentTransferRef.current = null;
-      currentRawBytesRef.current = null;
+      currentFileRef.current = null;
       currentAesKeyRef.current = null;
       currentMacKeyRef.current = null;
       setIsSendingFile(false);

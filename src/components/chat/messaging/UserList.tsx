@@ -14,13 +14,21 @@ export interface User {
   readonly isOnline: boolean;
   readonly isTyping?: boolean;
   readonly inboxId?: string;
+  readonly routeId?: string;
+  readonly mailboxLookupId?: string;
+  readonly bundleLookupId?: string;
   readonly peerCertificateFingerprint?: string;
   readonly peerCertificatePinnedAt?: number;
+  readonly identityRootFingerprint?: string;
+  readonly identityBundleFingerprint?: string;
   readonly hybridPublicKeys?: {
     readonly x25519PublicBase64?: string;
     readonly kyberPublicBase64: string;
     readonly dilithiumPublicBase64: string;
     readonly inboxId?: string;
+    readonly routeId?: string;
+    readonly mailboxLookupId?: string;
+    readonly bundleLookupId?: string;
   };
 }
 

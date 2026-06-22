@@ -10,23 +10,30 @@ export interface MessagingRefs {
 export function createHandleIncomingP2PMessage(refs: MessagingRefs) {
   return async (message: P2PMessage) => {
     if (message.type !== SignalType.SEALED_ENVELOPE) {
+      console.warn('[MSG-RECV] createHandleIncomingP2PMessage DROP: not sealed', { type: message.type });
       return;
     }
 
     const handler = refs.handleEncryptedMessagePayloadRef.current;
-    if (!handler) return;
+    if (!handler) {
+      console.warn('[MSG-RECV] DROP: handleEncryptedMessagePayload not set');
+      return;
+    }
 
     const payload = message.payload ?? message;
     if (payload && typeof payload === 'object') {
       (payload as any).__transport = 'p2p';
-      if (!(payload as any).from && message.from) {
-        (payload as any).from = message.from;
-      }
-      if (!(payload as any).to && message.to) {
-        (payload as any).to = message.to;
+      // Carry the transport verified sender identity
+      const verifiedSender = (message as any).__p2pVerifiedSender;
+      if (verifiedSender && typeof verifiedSender === 'object') {
+        (payload as any).__p2pVerifiedSender = verifiedSender;
       }
     }
 
+    console.log('[MSG-RECV] -> handleEncryptedMessagePayload (libsignal decrypt)', {
+      from: String((message as any)?.from).slice(0, 24),
+      payloadKeys: payload && typeof payload === 'object' ? Object.keys(payload).slice(0, 10) : typeof payload
+    });
     await handler(payload);
   };
 }

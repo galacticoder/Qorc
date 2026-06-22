@@ -9,9 +9,10 @@ interface ChatSignalsProps {
     handleFileMessageChunk: (data: any, meta: any) => Promise<void>;
   };
   encryptedHandler: (message: any) => Promise<void>;
+  findUser?: (handle: string, options?: { forceRefresh?: boolean }) => Promise<any>;
 }
 
-export const useChatSignals = ({ Authentication, Database, fileHandler, encryptedHandler }: ChatSignalsProps) => {
+export const useChatSignals = ({ Authentication, Database, fileHandler, encryptedHandler, findUser }: ChatSignalsProps) => {
   return useCallback(
     async (data: any) => {
       await handleSignalMessages(data, {
@@ -19,8 +20,9 @@ export const useChatSignals = ({ Authentication, Database, fileHandler, encrypte
         Database,
         handleFileMessageChunk: fileHandler.handleFileMessageChunk,
         handleEncryptedMessagePayload: encryptedHandler,
+        findUser,
       });
     },
-    [Authentication, Database, fileHandler, encryptedHandler]
+    [Authentication, Database, fileHandler, encryptedHandler, findUser]
   );
 };

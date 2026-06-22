@@ -123,4 +123,9 @@ export class SQLiteKV {
     await this.clearStore('kv_data');
     await this.clearStore('secure_json');
   }
+
+  // Compact database
+  async compact(): Promise<void> {
+    await database.compact();
+  }
 }

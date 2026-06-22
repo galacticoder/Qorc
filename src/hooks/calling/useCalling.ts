@@ -2,6 +2,7 @@ import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import { SecureCallingService, CallState } from '../../lib/transport/secure-calling-service';
 import { PostQuantumRandom } from '../../lib/cryptography/random';
 import type { useAuth } from '../auth/useAuth';
+import type { PeerCertificateBundle } from '../../lib/types/p2p-types';
 import { stopMediaStream, debounceEventDispatcher, isValidCallingUsername } from '../../lib/utils/calling-utils';
 import { power } from '../../lib/tauri-bindings';
 import {
@@ -32,6 +33,7 @@ export const useCalling = (
   authContext: ReturnType<typeof useAuth>,
   options?: {
     getPeerKeys?: (username: string) => Promise<{ kyberPublicBase64: string; dilithiumPublicBase64: string; x25519PublicBase64?: string } | null>;
+    getPeerCertificate?: (username: string) => Promise<PeerCertificateBundle | null>;
   }
 ) => {
   if (!authContext) {
@@ -83,7 +85,8 @@ export const useCalling = (
     localStreamRef,
     remoteStreamRef,
     remoteScreenStreamRef,
-    getPeerKeys: options?.getPeerKeys
+    getPeerKeys: options?.getPeerKeys,
+    getPeerCertificate: options?.getPeerCertificate
   };
 
   const actionSetters: ActionSetters = {

@@ -19,16 +19,16 @@ import {
   handleSessionEstablished, handleError
 } from './session-handlers';
 import {
-  handleOfflineMessagesResponse,
-  handleBlockTokensUpdate, handleBlockListSync, handleBlockListUpdate,
-  handleBlockListResponse,
-  handleLibsignalPublishStatus
+  handlePirManifest,
+  handlePirResponse,
+  handleBlockListSync, handleBlockListUpdate,
+  handleBlockListResponse
 } from './user-handlers';
 
-export { persistAuthTokens, retrieveAuthTokens, clearAuthTokens, clearTokenEncryptionKey } from './token-storage';
+export { clearAuthTokens, clearTokenEncryptionKey } from './token-storage';
 
 export async function handleSignalMessages(data: any, handlers: SignalHandlers) {
-  const { Authentication, Database, handleFileMessageChunk, handleEncryptedMessagePayload } = handlers;
+  const { Authentication, Database, handleFileMessageChunk, handleEncryptedMessagePayload, findUser } = handlers;
 
   const type = data?.type;
   const message = data?.message ?? data?.data ?? data?.payload ?? '';
@@ -39,7 +39,7 @@ export async function handleSignalMessages(data: any, handlers: SignalHandlers) 
   }
 
   // Skip heartbeat signals
-  if (type === 'pq-heartbeat-pong' || type === 'pq-heartbeat-ping') return;
+  if (type === SignalType.PQ_HEARTBEAT_PONG || type === SignalType.PQ_HEARTBEAT_PING) return;
 
   const auth = {
     setServerHybridPublic: Authentication?.setServerHybridPublic,
@@ -75,11 +75,11 @@ export async function handleSignalMessages(data: any, handlers: SignalHandlers) 
     serverHybridPublicRef: Authentication?.serverHybridPublicRef
   };
 
-  const db = { setUsers: Database?.setUsers };
+  const db = { setUsers: Database?.setUsers, users: Database?.users };
 
   try {
     switch (type) {
-      case 'pq-handshake-ack':
+      case SignalType.PQ_HANDSHAKE_ACK:
         break;
 
       case SignalType.SERVER_PUBLIC_KEY:
@@ -116,23 +116,24 @@ export async function handleSignalMessages(data: any, handlers: SignalHandlers) 
       case SignalType.ENCRYPTED_MESSAGE:
       case SignalType.EDIT_MESSAGE:
       case SignalType.DELETE_MESSAGE:
+      case SignalType.SEALED_ENVELOPE:
         await handleEncryptedMessagePayload(data);
         break;
 
       case SignalType.LIBSIGNAL_DELIVER_BUNDLE:
-        await handleLibsignalDeliverBundle(data, auth.loginUsernameRef);
+        await handleLibsignalDeliverBundle(data, auth.loginUsernameRef, db.users, findUser);
         break;
 
       case SignalType.FILE_MESSAGE_CHUNK:
         await handleFileMessageChunk(data, { from: data?.from, to: data?.to });
         break;
 
-      case SignalType.OFFLINE_MESSAGES_RESPONSE:
-        handleOfflineMessagesResponse(data);
+      case SignalType.PIR_MANIFEST:
+        handlePirManifest(data);
         break;
 
-      case SignalType.BLOCK_TOKENS_UPDATE:
-        handleBlockTokensUpdate(data);
+      case SignalType.PIR_RESPONSE:
+        handlePirResponse(data);
         break;
 
       case SignalType.BLOCK_LIST_SYNC:
@@ -145,10 +146,6 @@ export async function handleSignalMessages(data: any, handlers: SignalHandlers) 
 
       case SignalType.BLOCK_LIST_RESPONSE:
         handleBlockListResponse(data);
-        break;
-
-      case 'libsignal-publish-status':
-        handleLibsignalPublishStatus(data);
         break;
 
       case SignalType.RATE_LIMIT_STATUS:

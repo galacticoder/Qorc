@@ -25,31 +25,16 @@ export async function initDatabase() {
 
   await pool.query('CREATE INDEX IF NOT EXISTS idx_user_shard ON users("shard_id")');
   await pool.query('CREATE INDEX IF NOT EXISTS idx_user_cred_index ON users("credential_index")');
+  await pool.query('CREATE UNIQUE INDEX IF NOT EXISTS idx_user_private_auth_slot ON users("shard_id", "credential_index")');
 
-  // Temporary offline message storage
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS offline_messages (
-      id BIGSERIAL PRIMARY KEY,
-      toInboxId TEXT NOT NULL,
-      payload TEXT NOT NULL,
-      queuedAt BIGINT NOT NULL
-    )
-  `);
+  await pool.query('DROP TABLE IF EXISTS offline_messages');
+  await pool.query('DROP TABLE IF EXISTS offline_mailbox_messages');
+  await pool.query('DROP TABLE IF EXISTS offline_mailbox_bindings');
+  await pool.query('DROP TABLE IF EXISTS offline_mailboxes');
 
-  // Libsignal bundle storage
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS libsignal_bundles (
-      "inboxId" TEXT PRIMARY KEY,
-      "identityKeyHash" TEXT NOT NULL,
-      "identityKeyBase64" TEXT NOT NULL,
-      "preKeyPublicBase64" TEXT,
-      "signedPreKeyPublicBase64" TEXT NOT NULL,
-      "signedPreKeySignatureBase64" TEXT NOT NULL,
-      "kyberPreKeyPublicBase64" TEXT NOT NULL,
-      "kyberPreKeySignatureBase64" TEXT NOT NULL,
-      "updatedAt" BIGINT NOT NULL
-    )
-  `);
+  // Libsignal prekey bundles are distributed via the discovery blob (and in-band), not a server
+  // table — the old write-only libsignal_bundles store was never read, so it is removed here.
+  await pool.query('DROP TABLE IF EXISTS libsignal_bundles');
 
   // Encrypted block lists
   await pool.query(`
@@ -60,15 +45,6 @@ export async function initDatabase() {
       salt TEXT,
       "lastUpdated" BIGINT NOT NULL,
       version INTEGER NOT NULL DEFAULT 1
-    )
-  `);
-
-  // Block tokens using identity key commitment
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS block_tokens (
-      "blockCommitment" TEXT PRIMARY KEY,
-      "createdAt" BIGINT NOT NULL,
-      "expiresAt" BIGINT
     )
   `);
 
@@ -84,19 +60,32 @@ export async function initDatabase() {
       timestamp BIGINT NOT NULL
     )
   `);
-
-  // Discovery billboard: OPRF token -> encrypted blob mapping
-  await pool.query('DROP TABLE IF EXISTS discovery_billboard');
   await pool.query(`
     CREATE TABLE IF NOT EXISTS discovery_billboard (
-      "token" TEXT PRIMARY KEY,
+      "epochId" TEXT NOT NULL,
+      "bucketId" INTEGER NOT NULL,
+      "publishId" TEXT NOT NULL,
       "encryptedBlob" TEXT NOT NULL,
-      "expiresAt" BIGINT NOT NULL
+      "expiresAt" BIGINT NOT NULL,
+      "publishedAt" BIGINT NOT NULL,
+      PRIMARY KEY ("epochId", "publishId")
     )
   `);
 
   await pool.query('CREATE INDEX IF NOT EXISTS idx_discovery_expires ON discovery_billboard("expiresAt")');
-  await pool.query('CREATE INDEX IF NOT EXISTS idx_block_tokens_expires ON block_tokens("expiresAt") WHERE "expiresAt" IS NOT NULL');
+  await pool.query('CREATE INDEX IF NOT EXISTS idx_discovery_published ON discovery_billboard("publishedAt")');
+  await pool.query('CREATE INDEX IF NOT EXISTS idx_discovery_bucket ON discovery_billboard("epochId", "bucketId")');
+
+  // Unlinkable avatar content store. opaque random blobId to uniform-size E2E-encrypted PURB
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS avatar_blobs (
+      "blobId" TEXT PRIMARY KEY,
+      "data" TEXT NOT NULL,
+      "expiresAt" BIGINT NOT NULL,
+      "publishedAt" BIGINT NOT NULL
+    )
+  `);
+  await pool.query('CREATE INDEX IF NOT EXISTS idx_avatar_blobs_expires ON avatar_blobs("expiresAt")');
   await pool.query('CREATE INDEX IF NOT EXISTS idx_user_block_lists_updated ON user_block_lists("lastUpdated")');
   await pool.query('CREATE INDEX IF NOT EXISTS idx_auth_audit_log_timestamp ON auth_audit_log(timestamp)');
 
@@ -119,6 +108,15 @@ export async function initDatabase() {
       revoked BOOLEAN NOT NULL DEFAULT FALSE
     )
   `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS device_key_images (
+      key_image_hash TEXT PRIMARY KEY,
+      recorded_at TIMESTAMP NOT NULL DEFAULT NOW()
+    )
+  `);
+
+  await pool.query('CREATE INDEX IF NOT EXISTS idx_device_key_images_recorded_at ON device_key_images(recorded_at)');
 
   console.log('[DB] Database tables initialized');
 }

@@ -47,8 +47,6 @@ export default [
       'no-case-declarations': 'off',
       'no-prototype-builtins': 'off',
       '@typescript-eslint/no-var-requires': 'off',
-      
-      // Aggressive unused code detection
       '@typescript-eslint/no-unused-vars': [
         'error',
         { 
@@ -60,24 +58,17 @@ export default [
         }
       ],
       
-      // Detect unreachable code
       'no-unreachable': 'error',
       
-      // Detect unused expressions
       'no-unused-expressions': ['error', { 
         allowShortCircuit: true, 
         allowTernary: true, 
         allowTaggedTemplates: true 
       }],
       
-      // Detect unused labels
       'no-unused-labels': 'error',
-      
-      // Detect useless constructors
       'no-useless-constructor': 'off',
       '@typescript-eslint/no-useless-constructor': 'error',
-      
-      // Detect empty functions (can indicate unused/incomplete code)
       '@typescript-eslint/no-empty-function': ['warn', {
         allow: ['arrowFunctions', 'functions', 'methods', 'constructors']
       }],

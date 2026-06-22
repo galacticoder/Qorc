@@ -127,7 +127,7 @@ export const createLocalMessage = async (
   replyToData?: { id: string; sender?: string; content?: string },
   fileData?: string,
 ): Promise<Message> => {
-  // For text messages, store content in vault and empty the state object
+  // For text messages store content in vault and empty state object
   const isVaultable = !fileData && content && content.trim().length > 0;
 
   if (isVaultable) {
@@ -145,6 +145,7 @@ export const createLocalMessage = async (
     isCurrentUser: true,
     receipt: { delivered: false, read: false },
     version: '1',
+    ...(fileData ? { originalBase64Data: fileData } : {})
   };
 
   if (replyToData) {
@@ -171,7 +172,7 @@ export const createLocalMessage = async (
   return message;
 };
 
-// Create cover padding for traffic analysis resistance
+// Create cover padding
 export const createCoverPadding = () => {
   if (!globalThis.crypto?.getRandomValues) {
     return undefined;

@@ -10,6 +10,7 @@ import { bytesToNumberLE, concatBytes, equalBytes } from '@noble/curves/utils.js
 // Configuration
 const ZK_CONFIG = {
   CHALLENGE_SIZE: 32,
+  RING_SIZE_MIN: 128,
   RING_SIZE_MAX: 1024,
   PROOF_VERSION: 2,
   CHALLENGE_EXPIRY_MS: 60000,
@@ -89,6 +90,9 @@ export class ZKDeviceProofVerifier {
 
     // Get all active device commitments
     const commitments = await this.#getActiveCommitments();
+    if (commitments.length < ZK_CONFIG.RING_SIZE_MIN) {
+      throw new Error('Device anonymity set too small');
+    }
 
     return {
       challengeId,
@@ -127,10 +131,19 @@ export class ZKDeviceProofVerifier {
       if (commitments.length === 0) {
         return { valid: false, error: 'No registered devices' };
       }
+      if (commitments.length < ZK_CONFIG.RING_SIZE_MIN) {
+        return { valid: false, error: 'Device anonymity set too small' };
+      }
 
       const isValid = await this.#verifyRingSignature(proof, commitments, pending.challenge);
       if (!isValid) {
         return { valid: false, error: 'Invalid proof' };
+      }
+
+      const keyImageHash = Buffer.from(proof.keyImage).toString('hex');
+      const inserted = await this.#recordKeyImage(keyImageHash);
+      if (!inserted) {
+        return { valid: false, error: 'Key image already used' };
       }
 
       return { valid: true, proofId: Buffer.from(randomBytes(16)).toString('hex') };
@@ -196,12 +209,23 @@ export class ZKDeviceProofVerifier {
     return result.rows;
   }
 
+  async #recordKeyImage(keyImageHash) {
+    const result = await this.#db.query(
+      `INSERT INTO device_key_images (key_image_hash, recorded_at)
+       VALUES ($1, NOW())
+       ON CONFLICT (key_image_hash) DO NOTHING`,
+      [keyImageHash]
+    );
+    return result.rowCount > 0;
+  }
+
   /**
    * Verify ring signature
    */
   async #verifyRingSignature(proof, commitments, challenge) {
     const n = commitments.length;
 
+    if (n < ZK_CONFIG.RING_SIZE_MIN) return false;
     if (proof.s.length !== n) return false;
     for (const resp of proof.s) {
       if (resp.length !== ZK_CONFIG.SCALAR_SIZE) return false;

@@ -11,7 +11,7 @@ import { PostQuantumRandom } from '../cryptography/random';
 import { PostQuantumSignature } from '../cryptography/signature';
 import { PostQuantumUtils } from '../utils/pq-utils';
 import { SecureMemory } from '../cryptography/secure-memory';
-import { QuicTransport, quicTransport } from './quic-transport';
+import { P2PTransport, p2pTransport } from './p2p-transport';
 import { SecureConnection, SecureStream } from './secure-transport';
 import { PQNoiseSession } from './pq-noise-session';
 import { screenSharingSettings } from '../database/screen-sharing-settings';
@@ -22,6 +22,7 @@ import {
     CALL_TIMEOUT,
     CALL_RING_TIMEOUT,
     CALL_AUDIO_PADDING_BLOCK,
+    CALL_DEVICE_SETTLE_MS,
     CALL_KEY_ROTATION_INTERVAL,
     QualityOption
 } from '../constants';
@@ -46,11 +47,24 @@ export class SecureCallingService {
     private preferredCameraDeviceId: string | null = null;
 
     // Transport
-    private transport: QuicTransport;
+    private transport: P2PTransport;
     private callConnection: SecureConnection | null = null;
     private audioStream: SecureStream | null = null;
     private videoStream: SecureStream | null = null;
     private screenShareStream: SecureStream | null = null;
+    private sharedAudioContext: AudioContext | null = null;
+    private audioWorkletLoaded = false;
+    private callAudioSource: MediaStreamAudioSourceNode | null = null;
+    private callAudioNode: AudioWorkletNode | null = null;
+    private sharedReceiveAudioContext: AudioContext | null = null;
+    private receiveAudioWorkletLoaded = false;
+    private callReceiveAudioNode: AudioWorkletNode | null = null;
+
+    private captureVideoEl: HTMLVideoElement | null = null;
+    private screenCaptureVideoEl: HTMLVideoElement | null = null;
+    private remoteVideoEl: HTMLVideoElement | null = null;
+    private remoteVideoRenderId = 0;
+    private lastCaptureReleaseAt = 0;
 
     // Encryption
     private encryptionContext: MediaEncryptionContext | null = null;
@@ -87,7 +101,7 @@ export class SecureCallingService {
 
     constructor(username: string) {
         this.localUsername = username;
-        this.transport = quicTransport;
+        this.transport = p2pTransport;
         this.initializeKeys();
     }
 
@@ -175,6 +189,7 @@ export class SecureCallingService {
 
     // Start a call to peer
     async startCall(targetUser: string, callType: 'audio' | 'video' = 'audio'): Promise<string> {
+        console.log('[SecureCall] startCall', { to: String(targetUser).slice(0, 24), callType, hasPriorCall: !!this.currentCall });
         if (this.currentCall) {
             throw new Error('Another call is already in progress');
         }
@@ -205,7 +220,9 @@ export class SecureCallingService {
             const pendingConn = (this.transport as any).getConnection?.(targetUser);
             if (pendingConn) { this.callConnection = pendingConn; }
 
+            console.log('[SecureCall] local media ready -> establishing call connection', { type: actualCallType });
             const role = await this.establishCallConnection(targetUser, peerKeys);
+            console.log('[SecureCall] call connection established', { role });
 
             if (!this.currentCall || (this.currentCall.id !== callId && this.currentCall.peer !== targetUser)) {
                 throw new Error('Call was cancelled');
@@ -534,6 +551,19 @@ export class SecureCallingService {
 
     // Set up local media capture
     private async setupLocalMedia(callType: 'audio' | 'video'): Promise<'audio' | 'video'> {
+        // release any stale capture stream/<video> from a previous call before reacquiring
+        this.teardownCallMediaElements();
+        if (this.localStream) {
+            try { this.localStream.getTracks().forEach(t => t.stop()); } catch { }
+            this.localStream = null;
+            this.lastCaptureReleaseAt = Date.now();
+        }
+        
+        const sinceRelease = Date.now() - this.lastCaptureReleaseAt;
+        if (this.lastCaptureReleaseAt > 0 && sinceRelease < CALL_DEVICE_SETTLE_MS) {
+            await new Promise(resolve => setTimeout(resolve, CALL_DEVICE_SETTLE_MS - sinceRelease));
+        }
+        console.log('[SecureCall] setupLocalMedia start', { callType });
         const attempts: Array<{ video: boolean | MediaTrackConstraints; resultingType: 'audio' | 'video'; label: string }> = [];
 
         if (callType === 'video') {
@@ -567,6 +597,7 @@ export class SecureCallingService {
                     video: attempt.video
                 });
 
+                console.log('[SecureCall] getUserMedia ok', { label: attempt.label, resultingType: attempt.resultingType });
                 this.onLocalStreamCallback?.(this.localStream);
                 return attempt.resultingType;
 
@@ -597,15 +628,15 @@ export class SecureCallingService {
             x25519PublicKey: peerKeys.x25519PublicKey
         };
         const effectivePeerIdentity: any = peerIdentity;
-
-        try {
-            await this.transport.disconnect(peer);
-        } catch { }
-
-        this.callConnection = await this.transport.connect(peer, {
-            peerIdentity: effectivePeerIdentity,
-            timeout: 30_000
-        });
+        const existingConnection = this.transport.getConnection(peer);
+        if (existingConnection && existingConnection.state === 'connected') {
+            this.callConnection = existingConnection;
+        } else {
+            this.callConnection = await this.transport.connect(peer, {
+                peerIdentity: effectivePeerIdentity,
+                timeout: 30_000
+            });
+        }
 
         const effectiveRole = (this.callConnection as any).getEffectiveRole?.() || 'initiator';
 
@@ -698,49 +729,121 @@ export class SecureCallingService {
         this.startReceivingMedia();
     }
 
+    // Get the single shared capture AudioContext
+    private async getSharedAudioContext(): Promise<AudioContext> {
+        if (this.sharedAudioContext && this.sharedAudioContext.state !== 'closed') {
+            if (this.sharedAudioContext.state === 'suspended') {
+                try { await this.sharedAudioContext.resume(); } catch { }
+            }
+            return this.sharedAudioContext;
+        }
+        const ctx = new AudioContext();
+        this.sharedAudioContext = ctx;
+        this.audioWorkletLoaded = false;
+        return ctx;
+    }
+
+    // Shared playback AudioContext
+    private async getSharedReceiveAudioContext(): Promise<AudioContext> {
+        if (this.sharedReceiveAudioContext && this.sharedReceiveAudioContext.state !== 'closed') {
+            if (this.sharedReceiveAudioContext.state === 'suspended') {
+                try { await this.sharedReceiveAudioContext.resume(); } catch { }
+            }
+            return this.sharedReceiveAudioContext;
+        }
+        const ctx = new AudioContext({ sampleRate: 48000 });
+        this.sharedReceiveAudioContext = ctx;
+        this.receiveAudioWorkletLoaded = false;
+        return ctx;
+    }
+
+    // Tear down this call audio graph nodes
+    private teardownCallAudioNodes(): void {
+        if (this.callAudioNode) {
+            try { this.callAudioNode.port.onmessage = null; } catch { }
+            try { this.callAudioNode.disconnect(); } catch { }
+            this.callAudioNode = null;
+        }
+        if (this.callAudioSource) {
+            try { this.callAudioSource.disconnect(); } catch { }
+            this.callAudioSource = null;
+        }
+        if (this.callReceiveAudioNode) {
+            try { this.callReceiveAudioNode.port.onmessage = null; } catch { }
+            try { this.callReceiveAudioNode.disconnect(); } catch { }
+            this.callReceiveAudioNode = null;
+        }
+    }
+
+    // Detach this call video elements
+    private teardownCallMediaElements(): void {
+        this.remoteVideoRenderId += 1;
+        for (const el of [this.captureVideoEl, this.screenCaptureVideoEl, this.remoteVideoEl]) {
+            if (!el) continue;
+            try { el.pause(); } catch { }
+            try { el.srcObject = null; } catch { }
+            try { el.removeAttribute('src'); } catch { }
+            try { el.load?.(); } catch { }
+            try { el.remove(); } catch { }
+        }
+        this.captureVideoEl = null;
+        this.screenCaptureVideoEl = null;
+        this.remoteVideoEl = null;
+    }
+
     // Stream audio frames
     private async startAudioStreaming(track: MediaStreamTrack): Promise<void> {
         if (!this.audioStream || !this.encryptionContext) return;
 
-        const audioContext = new AudioContext();
-        await this.loadAudioWorklet(audioContext);
+        const audioContext = await this.getSharedAudioContext();
+        if (!this.audioWorkletLoaded) {
+            await this.loadAudioWorklet(audioContext);
+            this.audioWorkletLoaded = true;
+        }
 
         const source = audioContext.createMediaStreamSource(new MediaStream([track]));
+        this.callAudioSource = source;
 
         try {
             const workletNode = new AudioWorkletNode(audioContext, 'audio-sender-processor');
+            this.callAudioNode = workletNode;
 
+            // Backpressure guard
+            let sendInFlight = false;
             workletNode.port.onmessage = async (e) => {
                 if (!this.encryptionContext || !this.audioStream) return;
-
-                const inputData = e.data;
-                const rawData = new Uint8Array(inputData.buffer);
-
-                const paddedLength = Math.ceil(rawData.length / CALL_AUDIO_PADDING_BLOCK) * CALL_AUDIO_PADDING_BLOCK;
-                const paddedData = new Uint8Array(paddedLength);
-                paddedData.set(rawData);
-
-                // Encrypt frame
-                const frameNum = this.encryptionContext.frameCounter;
-                this.encryptionContext.frameCounter += 1n;
-                const nonce = new Uint8Array(12);
-                new DataView(nonce.buffer).setBigUint64(4, frameNum, false);
-
-                const { ciphertext, tag } = PostQuantumAEAD.encrypt(
-                    paddedData,
-                    this.encryptionContext.audioKey,
-                    nonce
-                );
-
-                // Build frame
-                const frame = new Uint8Array(8 + ciphertext.length + 32);
-                new DataView(frame.buffer).setBigUint64(0, BigInt(frameNum), false);
-                frame.set(ciphertext, 8);
-                frame.set(tag, 8 + ciphertext.length);
-
+                if (sendInFlight) return;
+                sendInFlight = true;
                 try {
+                    const inputData = e.data;
+                    const rawData = new Uint8Array(inputData.buffer);
+
+                    const paddedLength = Math.ceil(rawData.length / CALL_AUDIO_PADDING_BLOCK) * CALL_AUDIO_PADDING_BLOCK;
+                    const paddedData = new Uint8Array(paddedLength);
+                    paddedData.set(rawData);
+
+                    // Encrypt frame
+                    const frameNum = this.encryptionContext.frameCounter;
+                    this.encryptionContext.frameCounter += 1n;
+                    const nonce = new Uint8Array(12);
+                    new DataView(nonce.buffer).setBigUint64(4, frameNum, false);
+
+                    const { ciphertext, tag } = PostQuantumAEAD.encrypt(
+                        paddedData,
+                        this.encryptionContext.audioKey,
+                        nonce
+                    );
+
+                    // Build frame
+                    const frame = new Uint8Array(8 + ciphertext.length + 32);
+                    new DataView(frame.buffer).setBigUint64(0, BigInt(frameNum), false);
+                    frame.set(ciphertext, 8);
+                    frame.set(tag, 8 + ciphertext.length);
+
                     await this.audioStream.write(frame);
-                } catch { }
+                } catch { } finally {
+                    sendInFlight = false;
+                }
             };
 
             source.connect(workletNode);
@@ -765,6 +868,7 @@ export class SecureCallingService {
         const video = document.createElement('video');
         video.srcObject = new MediaStream([track]);
         video.play();
+        this.captureVideoEl = video;
 
         const canvas = document.createElement('canvas');
         const ctx = canvas.getContext('2d')!;
@@ -823,6 +927,7 @@ export class SecureCallingService {
         const video = document.createElement('video');
         video.srcObject = this.screenStream;
         video.play();
+        this.screenCaptureVideoEl = video;
 
         const canvas = document.createElement('canvas');
         const ctx = canvas.getContext('2d')!;
@@ -895,11 +1000,15 @@ export class SecureCallingService {
     private async receiveAudioStream(): Promise<void> {
         if (!this.audioStream || !this.encryptionContext) return;
 
-        const audioContext = new AudioContext({ sampleRate: 48000 });
-        await this.loadAudioWorklet(audioContext);
+        const audioContext = await this.getSharedReceiveAudioContext();
+        if (!this.receiveAudioWorkletLoaded) {
+            await this.loadAudioWorklet(audioContext);
+            this.receiveAudioWorkletLoaded = true;
+        }
 
         try {
             const workletNode = new AudioWorkletNode(audioContext, 'audio-receiver-processor');
+            this.callReceiveAudioNode = workletNode;
             workletNode.connect(audioContext.destination);
 
             for await (const data of this.audioStream) {
@@ -948,6 +1057,7 @@ export class SecureCallingService {
         video.autoplay = true;
         video.muted = true;
         video.playsInline = true;
+        this.remoteVideoEl = video;
 
         const canvasStream = canvas.captureStream(settings.frameRate);
 
@@ -963,8 +1073,13 @@ export class SecureCallingService {
 
         const frameQueue: ImageBitmap[] = [];
         let isRendering = false;
+        const renderId = ++this.remoteVideoRenderId;
 
         const renderLoop = async () => {
+            if (this.remoteVideoRenderId !== renderId) {
+                while (frameQueue.length > 0) { try { frameQueue.shift()!.close(); } catch { } }
+                return;
+            }
             if (!isRendering || frameQueue.length === 0) {
                 requestAnimationFrame(renderLoop);
                 return;
@@ -1363,11 +1478,16 @@ export class SecureCallingService {
 
     // Cleanup call resources
     private cleanup(keepConnection: boolean = false): void {
+        this.teardownCallMediaElements();
+
         // Stop local media
         if (this.localStream) {
             this.localStream.getTracks().forEach(track => track.stop());
             this.localStream = null;
+            this.lastCaptureReleaseAt = Date.now();
         }
+
+        this.teardownCallAudioNodes();
 
         // Stop screen share
         if (this.screenStream) {
@@ -1390,11 +1510,9 @@ export class SecureCallingService {
             this.screenShareStream = null;
         }
 
-        // Close connection
-        if (this.callConnection && !keepConnection) {
-            this.callConnection.close('call-cleanup');
-            this.callConnection = null;
-        } else if (keepConnection) { }
+        // Release reference to call connection but dont close it
+        void keepConnection;
+        this.callConnection = null;
 
         // Clear encryption context
         if (this.encryptionContext) {

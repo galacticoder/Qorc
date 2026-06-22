@@ -3,60 +3,14 @@
  */
 
 import { CryptoUtils } from '../utils/crypto-utils';
-import { SecureDB } from '../database/secureDB';
-import { computeBlindUserId } from '../utils/auth-utils';
 import { isPlainObject, hasPrototypePollutionKeys } from '../sanitizers';
-import { hexToBytes, bytesToHex, validateUsername, isPseudonymizedUsername } from '../utils/blocking-utils';
-import { BlockToken, BlockedUser, EncryptedBlockList, KeyMaterial } from '../types/blocking-types';
-import { BLOCK_TOKEN_TTL_MS } from '../constants';
+import { bytesToHex } from '../utils/blocking-utils';
+import { BlockedUser, EncryptedBlockList, KeyMaterial } from '../types/blocking-types';
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 
-const TOKEN_CONTEXT = encoder.encode('block-token-v2');
 const BLOCKLIST_CONTEXT = encoder.encode('block-list-v3');
-
-export const generateUserHash = async (username: string, secureDB?: SecureDB): Promise<string> => {
-  validateUsername(username);
-  if (isPseudonymizedUsername(username)) {
-    return username.toLowerCase();
-  }
-  return computeBlindUserId(username);
-};
-
-export const generateBlockToken = async (
-  blockerUsername: string,
-  blockedUsername: string,
-  secureDB?: SecureDB
-): Promise<BlockToken> => {
-  const blockerHash = await generateUserHash(blockerUsername, secureDB);
-  const blockedHash = await generateUserHash(blockedUsername, secureDB);
-
-  const blockerBytes = hexToBytes(blockerHash);
-  const blockedBytes = hexToBytes(blockedHash);
-  const saltBytes = crypto.getRandomValues(new Uint8Array(16));
-
-  const combined = new Uint8Array(blockerBytes.length + blockedBytes.length + saltBytes.length + TOKEN_CONTEXT.length);
-  let offset = 0;
-  combined.set(blockerBytes, offset);
-  offset += blockerBytes.length;
-  combined.set(blockedBytes, offset);
-  offset += blockedBytes.length;
-  combined.set(saltBytes, offset);
-  offset += saltBytes.length;
-  combined.set(TOKEN_CONTEXT, offset);
-
-  const { blake3 } = await import('@noble/hashes/blake3.js');
-  const hashOutput = blake3(combined, { dkLen: 32 });
-  const tokenHash = bytesToHex(hashOutput).substring(0, 64);
-
-  return {
-    tokenHash,
-    blockerHash,
-    blockedHash,
-    expiresAt: Date.now() + BLOCK_TOKEN_TTL_MS
-  };
-};
 
 export const encryptBlockList = async (
   blockList: BlockedUser[],

@@ -19,7 +19,6 @@ import {
 import { BlockingRateLimiter } from './rate-limiter';
 import { BlockingMessageQueue } from './queue';
 import {
-  generateUserHash,
   encryptBlockList,
   decryptBlockList,
   computeBlockListHash
@@ -122,51 +121,6 @@ export class BlockingSystem {
     }
   }
 
-  private async updateBlockTokens(blockList: BlockedUser[], previousList?: BlockedUser[]): Promise<void> {
-    try {
-      const currentUser = await this.getCurrentAuthenticatedUser();
-      if (!currentUser) {
-        this.log('updateBlockTokens.noUser', { message: 'No current user found' });
-        return;
-      }
-
-      const prev = previousList ?? this.cachedBlockList ?? [];
-      const prevSet = new Set(prev.map(u => u.username));
-      const nextSet = new Set(blockList.map(u => u.username));
-
-      const added = Array.from(nextSet).filter(u => !prevSet.has(u));
-      const removed = Array.from(prevSet).filter(u => !nextSet.has(u));
-
-      if (added.length === 0 && removed.length === 0) {
-        return;
-      }
-
-      const blockerIdentityKeyHash = await generateUserHash(currentUser, this.secureDB || undefined);
-
-      for (const username of added) {
-        const blockedIdentityKeyHash = await generateUserHash(username, this.secureDB || undefined);
-        await this.sendToServer({
-          type: SignalType.BLOCK_TOKENS_UPDATE,
-          action: 'block',
-          blockerIdentityKeyHash,
-          blockedIdentityKeyHash
-        });
-      }
-
-      for (const username of removed) {
-        const blockedIdentityKeyHash = await generateUserHash(username, this.secureDB || undefined);
-        await this.sendToServer({
-          type: SignalType.BLOCK_TOKENS_UPDATE,
-          action: 'unblock',
-          blockerIdentityKeyHash,
-          blockedIdentityKeyHash
-        });
-      }
-    } catch {
-      this.log('updateBlockTokens.error', { error: 'Failed to update block tokens' });
-    }
-  }
-
   private async loadBlockList(_key: KeyMaterial | string): Promise<BlockedUser[]> {
     if (this.cachedBlockList !== null) {
       return this.cachedBlockList;
@@ -220,10 +174,8 @@ export class BlockingSystem {
         lastUpdated: Date.now()
       });
 
-      const previousList = this.cachedBlockList ? [...this.cachedBlockList] : [];
       this.cachedBlockList = blockList;
 
-      await this.updateBlockTokens(blockList, previousList);
       await this.messageQueue.persist();
       resetCircuitBreaker(this.circuitBreaker);
     } catch {
@@ -257,7 +209,6 @@ export class BlockingSystem {
     }
 
     if (blockList.some(user => user.username === username)) {
-      await this.updateBlockTokens(blockList);
       return;
     }
 
@@ -285,18 +236,15 @@ export class BlockingSystem {
 
     if (filteredList.length !== blockList.length) {
       await this.saveBlockList(filteredList, key);
-      blockStatusCache.set(username, false);
-
-      window.dispatchEvent(new CustomEvent(EventType.BLOCK_STATUS_CHANGED, {
-        detail: { username, isBlocked: false }
-      }));
-    } else {
-      blockStatusCache.set(username, false);
-      
-      window.dispatchEvent(new CustomEvent(EventType.BLOCK_STATUS_CHANGED, {
-        detail: { username, isBlocked: false }
-      }));
     }
+    blockStatusCache.set(username, false);
+
+    window.dispatchEvent(new CustomEvent(EventType.BLOCK_STATUS_CHANGED, {
+      detail: { username, isBlocked: false }
+    }));
+    window.dispatchEvent(new CustomEvent(EventType.USER_UNBLOCKED, {
+      detail: { username }
+    }));
   }
 
   async isUserBlocked(username: string, key: KeyMaterial | string): Promise<boolean> {
@@ -310,6 +258,11 @@ export class BlockingSystem {
       }
       return false;
     }
+  }
+
+  isBlockedSync(username: string): boolean {
+    if (!username) return false;
+    return !!this.cachedBlockList?.some(user => user.username === username);
   }
 
   async getBlockedUsers(key: KeyMaterial | string): Promise<BlockedUser[]> {
@@ -423,7 +376,6 @@ export class BlockingSystem {
         lastUpdated: encrypted.lastUpdated
       });
 
-      await this.updateBlockTokens(localBlockList);
       resetCircuitBreaker(this.circuitBreaker);
     } catch (error) {
       recordCircuitFailure(this.circuitBreaker);
@@ -481,8 +433,6 @@ export class BlockingSystem {
       const db = this.getActiveSecureDB();
       await db.store('blockListMeta', storageKey, serverBlockList);
       this.cachedBlockList = blockList;
-
-      await this.updateBlockTokens(blockList);
 
       resetCircuitBreaker(this.circuitBreaker);
     } catch (error) {

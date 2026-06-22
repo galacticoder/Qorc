@@ -20,14 +20,14 @@ export function Layout({
     onLogout
 }: LayoutProps) {
     return (
-        <div className="flex h-screen w-full bg-background overflow-hidden">
+        <div className="qor-app-shell">
             <Sidebar
                 activeTab={activeTab}
                 onTabChange={onTabChange}
                 currentUser={currentUser}
                 onLogout={onLogout}
             />
-            <main className="flex-1 h-full overflow-hidden relative flex flex-col min-w-0">
+            <main className="qor-main-pane">
                 {children}
             </main>
         </div>

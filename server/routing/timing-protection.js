@@ -31,19 +31,30 @@ import { logger as cryptoLogger } from '../crypto/crypto-logger.js';
 const JITTER_MIN_MS = 10;
 const JITTER_MAX_MS = 150;
 const BATCH_WINDOW_MS = 50;
-const COVER_TRAFFIC_INTERVAL_MS = 30000; // 30 seconds
-const COVER_TRAFFIC_VARIANCE_MS = 15000; // ±15 seconds
+const COVER_TRAFFIC_INTERVAL_MS = envInt('SERVER_COVER_TRAFFIC_INTERVAL_MS', 30000, 5000, 10 * 60 * 1000);
+const COVER_TRAFFIC_VARIANCE_MS = envInt('SERVER_COVER_TRAFFIC_VARIANCE_MS', 15000, 0, 10 * 60 * 1000);
+const COVER_TRAFFIC_WRITES_MIN = envInt('SERVER_COVER_TRAFFIC_WRITES_MIN', 1, 1, 32);
+const COVER_TRAFFIC_WRITES_MAX = envInt('SERVER_COVER_TRAFFIC_WRITES_MAX', 3, COVER_TRAFFIC_WRITES_MIN, 64);
 const LOGIN_SOCKET_DELAY_MIN_MS = 100;
 const LOGIN_SOCKET_DELAY_MAX_MS = 2000;
 
 // Batch queue for message coalescing
-const batchQueue = new Map(); // inboxId -> { messages: [], timer: NodeJS.Timeout }
+const batchQueue = new Map();
 const globalBatchQueue = [];
 let globalBatchTimer = null;
 
 // Cover traffic state
 let coverTrafficInterval = null;
-const coverTrafficTargets = new Set();
+
+function envInt(name, fallback, min, max) {
+  const parsed = Number.parseInt(process.env[name] || String(fallback), 10);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.min(max, Math.max(min, parsed));
+}
+
+function randomRouteLookupId() {
+  return crypto.randomBytes(64).toString('base64url');
+}
 
 /**
  * Generate cryptographically random jitter
@@ -198,26 +209,24 @@ function shuffleArray(array) {
  */
 export function startCoverTraffic(sendDummyFn) {
   if (coverTrafficInterval) return;
+  if (COVER_TRAFFIC_WRITES_MAX <= 0) {
+    cryptoLogger.info('[TIMING] Cover traffic disabled by configuration');
+    return;
+  }
   
   const scheduleNext = () => {
-    const variance = crypto.randomInt(0, COVER_TRAFFIC_VARIANCE_MS * 2) - COVER_TRAFFIC_VARIANCE_MS;
-    const delay = COVER_TRAFFIC_INTERVAL_MS + variance;
+    const variance = COVER_TRAFFIC_VARIANCE_MS > 0
+      ? crypto.randomInt(0, COVER_TRAFFIC_VARIANCE_MS * 2) - COVER_TRAFFIC_VARIANCE_MS
+      : 0;
+    const delay = Math.max(1000, COVER_TRAFFIC_INTERVAL_MS + variance);
     
     coverTrafficInterval = setTimeout(async () => {
       try {
-        // Send cover traffic to random subset of registered targets
-        const targets = Array.from(coverTrafficTargets);
-        const targetCount = Math.min(
-          crypto.randomInt(1, 4),
-          targets.length
-        );
-        
-        const selectedTargets = shuffleArray(targets).slice(0, targetCount);
-        
-        for (const target of selectedTargets) {
+        const targetCount = crypto.randomInt(COVER_TRAFFIC_WRITES_MIN, COVER_TRAFFIC_WRITES_MAX + 1);
+        for (let i = 0; i < targetCount; i += 1) {
           await delayWithJitter(10, 50);
           try {
-            await sendDummyFn(target);
+            await sendDummyFn(randomRouteLookupId());
           } catch {
             // Ignore failures for cover traffic
           }
@@ -245,18 +254,36 @@ export function stopCoverTraffic() {
   }
 }
 
-/**
- * Register an inbox for cover traffic
- */
-export function registerForCoverTraffic(inboxId) {
-  coverTrafficTargets.add(inboxId);
+export function getTimingRuntimeStats() {
+  return {
+    batchQueueSize: batchQueue.size,
+    globalBatchQueueSize: globalBatchQueue.length,
+    globalBatchTimerActive: !!globalBatchTimer,
+    coverTrafficRunning: !!coverTrafficInterval,
+    coverTrafficWritesMin: COVER_TRAFFIC_WRITES_MIN,
+    coverTrafficWritesMax: COVER_TRAFFIC_WRITES_MAX
+  };
 }
 
-/**
- * Unregister an inbox from cover traffic
- */
-export function unregisterFromCoverTraffic(inboxId) {
-  coverTrafficTargets.delete(inboxId);
+export function clearTimingRuntimeState() {
+  let batchQueuesCleared = 0;
+  for (const queue of batchQueue.values()) {
+    if (queue?.timer) clearTimeout(queue.timer);
+    batchQueuesCleared += 1;
+  }
+  batchQueue.clear();
+  const globalBatchQueueCleared = globalBatchQueue.length;
+  globalBatchQueue.length = 0;
+  const hadGlobalBatchTimer = !!globalBatchTimer;
+  if (globalBatchTimer) {
+    clearTimeout(globalBatchTimer);
+    globalBatchTimer = null;
+  }
+  return {
+    batchQueuesCleared,
+    globalBatchQueueCleared,
+    globalBatchTimerCleared: hadGlobalBatchTimer
+  };
 }
 
 /**
@@ -380,8 +407,8 @@ export const TimingProtection = {
   queueForGlobalBatch,
   startCoverTraffic,
   stopCoverTraffic,
-  registerForCoverTraffic,
-  unregisterFromCoverTraffic,
+  getTimingRuntimeStats,
+  clearTimingRuntimeState,
   withTimingProtection,
   createRateSmoother,
   recordTimingStat,

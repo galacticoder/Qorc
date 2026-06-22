@@ -43,7 +43,7 @@ export interface EncryptedMessage {
 export interface P2PStatus {
   isInitialized: boolean;
   connectedPeers: string[];
-  signalingConnected: boolean;
+  transportConnected: boolean;
   lastError: string | null;
 }
 
@@ -68,6 +68,7 @@ export interface PeerCertificateBundle {
   dilithiumPublicKey: string;
   kyberPublicKey: string;
   x25519PublicKey: string;
+  p2pEndpointUrl?: string;
   proof: string;
   issuedAt: number;
   expiresAt: number;

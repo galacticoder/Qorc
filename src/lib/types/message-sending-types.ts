@@ -13,6 +13,9 @@ export interface HybridPublicKeys {
   dilithiumPublicBase64: string;
   x25519PublicBase64?: string;
   inboxId?: string;
+  routeId?: string;
+  mailboxLookupId?: string;
+  bundleLookupId?: string;
 }
 
 // User with hybrid keys
@@ -20,6 +23,12 @@ export interface UserWithKeys {
   username: string;
   hybridPublicKeys?: HybridPublicKeys;
   inboxId?: string;
+  routeId?: string;
+  mailboxLookupId?: string;
+  bundleLookupId?: string;
+  peerCertificateFingerprint?: string;
+  identityRootFingerprint?: string;
+  identityBundleFingerprint?: string;
 }
 
 // Signing keys for session establishment

@@ -1,22 +1,22 @@
 //! Native Encrypted Database Module
 //!
-//! Triple Hybrid Encryption
 //! 1. SQLCipher (AES-256) - Page Layer
 //! 2. XChaCha20-Poly1305 - Symmetric Layer
 //! 3. SHAKE256 - Quantum Masking Layer
 
+use parking_lot::Mutex;
+use rusqlite::{Connection, OptionalExtension, params};
 use std::path::PathBuf;
 use std::sync::Arc;
-use parking_lot::Mutex;
-use rusqlite::{params, Connection, OptionalExtension};
+use std::time::Duration;
+use tauri::{AppHandle, Manager, State};
 use zeroize::Zeroizing;
-use tauri::{Manager, State, AppHandle};
 
+use crate::crypto::aead::{xchacha_decrypt, xchacha_encrypt};
+use crate::crypto::hash::{hkdf_sha3_derive, shake256};
+use crate::crypto::random::random_bytes;
 use crate::error::{QorError, QorResult};
 use crate::state::AppState;
-use crate::crypto::aead::{xchacha_encrypt, xchacha_decrypt};
-use crate::crypto::hash::{shake256, hkdf_sha3_derive};
-use crate::crypto::random::random_bytes;
 
 pub struct DatabaseManager {
     /// SQLite connection
@@ -46,27 +46,29 @@ impl DatabaseManager {
 
         // Open connection
 
-
         let conn = Connection::open(&db_path)
             .map_err(|e| QorError::StorageInitFailed(format!("Failed to open DB: {}", e)))?;
+        if let Err(e) = conn.busy_timeout(Duration::from_secs(5)) {
+            return Self::handle_init_error(conn, db_path, master_key, retry_count, e.to_string());
+        }
 
         // Apply SQLCipher key
         let key_hex = hex::encode(k_disk);
         if let Err(e) = conn.execute_batch(&format!("PRAGMA key = \"x'{}'\"", key_hex)) {
-             return Self::handle_init_error(conn, db_path, master_key, retry_count, e.to_string());
+            return Self::handle_init_error(conn, db_path, master_key, retry_count, e.to_string());
         }
 
         if let Err(e) = conn.pragma_update(None, "journal_mode", &"WAL") {
-             return Self::handle_init_error(conn, db_path, master_key, retry_count, e.to_string());
+            return Self::handle_init_error(conn, db_path, master_key, retry_count, e.to_string());
         }
 
         if let Err(e) = conn.pragma_update(None, "synchronous", &"NORMAL") {
-             return Self::handle_init_error(conn, db_path, master_key, retry_count, e.to_string());
+            return Self::handle_init_error(conn, db_path, master_key, retry_count, e.to_string());
         }
 
         // Initialize schema
         if let Err(e) = Self::ensure_schema(&conn) {
-             return Self::handle_init_error(conn, db_path, master_key, retry_count, e.to_string());
+            return Self::handle_init_error(conn, db_path, master_key, retry_count, e.to_string());
         }
 
         Ok(Self {
@@ -78,40 +80,46 @@ impl DatabaseManager {
 
     /// Handle initialization errors by isolating unreadable files and retrying
     fn handle_init_error(
-        conn: Connection, 
-        db_path: PathBuf, 
-        master_key: &[u8], 
-        retry_count: u8, 
-        err_msg: String
+        conn: Connection,
+        db_path: PathBuf,
+        master_key: &[u8],
+        retry_count: u8,
+        err_msg: String,
     ) -> QorResult<Self> {
         // Handle corrupt database files
         if err_msg.contains("file is not a database") && retry_count < 2 {
             drop(conn);
-            
+
             let timestamp = chrono::Utc::now().timestamp();
             let corrupt_path = db_path.with_extension(format!("db.corrupt.{}", timestamp));
-            
+
             if let Err(rename_err) = std::fs::rename(&db_path, &corrupt_path) {
-                return Err(QorError::StorageInitFailed(format!("Recovery failed: {}", rename_err)));
+                return Err(QorError::StorageInitFailed(format!(
+                    "Recovery failed: {}",
+                    rename_err
+                )));
             }
-            
-            return Self::open_impl(db_path, master_key, retry_count + 1);
-        }
-        
-        let is_transient = err_msg.contains("disk I/O error") 
-            || err_msg.contains("database is locked")
-            || err_msg.contains("busy");
-            
-        if is_transient && retry_count < 5 {
-            drop(conn);
-            
-            let delay_ms = 50u64 * (1u64 << retry_count);
-            std::thread::sleep(std::time::Duration::from_millis(delay_ms));
-            
+
             return Self::open_impl(db_path, master_key, retry_count + 1);
         }
 
-        Err(QorError::StorageInitFailed(format!("DB Init failed: {}", err_msg)))
+        let is_transient = err_msg.contains("disk I/O error")
+            || err_msg.contains("database is locked")
+            || err_msg.contains("busy");
+
+        if is_transient && retry_count < 8 {
+            drop(conn);
+
+            let delay_ms = 50u64 * (1u64 << retry_count);
+            std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+
+            return Self::open_impl(db_path, master_key, retry_count + 1);
+        }
+
+        Err(QorError::StorageInitFailed(format!(
+            "DB Init failed: {}",
+            err_msg
+        )))
     }
 
     fn ensure_schema(conn: &Connection) -> QorResult<()> {
@@ -125,7 +133,8 @@ impl DatabaseManager {
                 PRIMARY KEY(store, key)
             );",
             [],
-        ).map_err(|e| QorError::StorageInitFailed(format!("Schema init failed: {}", e)))?;
+        )
+        .map_err(|e| QorError::StorageInitFailed(format!("Schema init failed: {}", e)))?;
 
         conn.execute(
             "CREATE TABLE IF NOT EXISTS secure_keys (
@@ -133,7 +142,8 @@ impl DatabaseManager {
                 value TEXT NOT NULL
             );",
             [],
-        ).map_err(|e| QorError::StorageInitFailed(format!("Schema init failed: {}", e)))?;
+        )
+        .map_err(|e| QorError::StorageInitFailed(format!("Schema init failed: {}", e)))?;
 
         Ok(())
     }
@@ -168,7 +178,8 @@ impl DatabaseManager {
                 value = excluded.value, 
                 updated_at = excluded.updated_at",
             params![store, key, bundle, now, now],
-        ).map_err(|e| QorError::EncryptionFailed(format!("DB save failed: {}", e)))?;
+        )
+        .map_err(|e| QorError::EncryptionFailed(format!("DB save failed: {}", e)))?;
 
         Ok(())
     }
@@ -176,10 +187,12 @@ impl DatabaseManager {
     /// Read
     pub fn get_secure(&self, store: &str, key: &str) -> QorResult<Option<Vec<u8>>> {
         let conn = self.conn.lock();
-        let mut stmt = conn.prepare("SELECT value FROM kv_data WHERE store = ? AND key = ?")
+        let mut stmt = conn
+            .prepare("SELECT value FROM kv_data WHERE store = ? AND key = ?")
             .map_err(|e| QorError::DecryptionFailed(format!("DB query failed: {}", e)))?;
-        
-        let bundle: Option<Vec<u8>> = stmt.query_row(params![store, key], |row| row.get(0))
+
+        let bundle: Option<Vec<u8>> = stmt
+            .query_row(params![store, key], |row| row.get(0))
             .optional()
             .map_err(|e| QorError::DecryptionFailed(format!("DB read failed: {}", e)))?;
 
@@ -189,7 +202,9 @@ impl DatabaseManager {
     /// Decrypt bundle
     fn decrypt_bundle(&self, bundle: &[u8]) -> QorResult<Vec<u8>> {
         if bundle.len() < 24 + 16 {
-            return Err(QorError::DecryptionFailed("Invalid bundle size".to_string()));
+            return Err(QorError::DecryptionFailed(
+                "Invalid bundle size".to_string(),
+            ));
         }
 
         let (nonce_bytes, ciphertext) = bundle.split_at(24);
@@ -211,14 +226,17 @@ impl DatabaseManager {
     /// List all keys in a store
     pub fn list_secure(&self, store: &str) -> QorResult<Vec<(String, Vec<u8>)>> {
         let conn = self.conn.lock();
-        let mut stmt = conn.prepare("SELECT key, value FROM kv_data WHERE store = ?")
+        let mut stmt = conn
+            .prepare("SELECT key, value FROM kv_data WHERE store = ?")
             .map_err(|e| QorError::DecryptionFailed(format!("DB query failed: {}", e)))?;
-        
-        let rows = stmt.query_map(params![store], |row| {
-            let key: String = row.get(0)?;
-            let bundle: Vec<u8> = row.get(1)?;
-            Ok((key, bundle))
-        }).map_err(|e| QorError::DecryptionFailed(format!("DB read failed: {}", e)))?;
+
+        let rows = stmt
+            .query_map(params![store], |row| {
+                let key: String = row.get(0)?;
+                let bundle: Vec<u8> = row.get(1)?;
+                Ok((key, bundle))
+            })
+            .map_err(|e| QorError::DecryptionFailed(format!("DB read failed: {}", e)))?;
 
         let mut results = Vec::new();
         for row in rows {
@@ -234,19 +252,23 @@ impl DatabaseManager {
     pub fn scan_secure(&self, store_prefix: &str) -> QorResult<Vec<(String, String, Vec<u8>)>> {
         let conn = self.conn.lock();
         let pattern = format!("{}%", store_prefix);
-        let mut stmt = conn.prepare("SELECT store, key, value FROM kv_data WHERE store LIKE ?")
+        let mut stmt = conn
+            .prepare("SELECT store, key, value FROM kv_data WHERE store LIKE ?")
             .map_err(|e| QorError::DecryptionFailed(format!("DB query failed: {}", e)))?;
-        
-        let rows = stmt.query_map(params![pattern], |row| {
-            let store: String = row.get(0)?;
-            let key: String = row.get(1)?;
-            let bundle: Vec<u8> = row.get(2)?;
-            Ok((store, key, bundle))
-        }).map_err(|e| QorError::DecryptionFailed(format!("DB read failed: {}", e)))?;
+
+        let rows = stmt
+            .query_map(params![pattern], |row| {
+                let store: String = row.get(0)?;
+                let key: String = row.get(1)?;
+                let bundle: Vec<u8> = row.get(2)?;
+                Ok((store, key, bundle))
+            })
+            .map_err(|e| QorError::DecryptionFailed(format!("DB read failed: {}", e)))?;
 
         let mut results = Vec::new();
         for row in rows {
-            let (store, key, bundle) = row.map_err(|e| QorError::DecryptionFailed(e.to_string()))?;
+            let (store, key, bundle) =
+                row.map_err(|e| QorError::DecryptionFailed(e.to_string()))?;
             if let Ok(plaintext) = self.decrypt_bundle(&bundle) {
                 results.push((store, key, plaintext));
             }
@@ -257,11 +279,13 @@ impl DatabaseManager {
     /// Delete a key
     pub fn delete(&self, store: &str, key: &str) -> QorResult<()> {
         let conn = self.conn.lock();
-        conn.execute("DELETE FROM kv_data WHERE store = ? AND key = ?", params![store, key])
-            .map_err(|e| QorError::StorageInitFailed(format!("DB delete failed: {}", e)))?;
+        conn.execute(
+            "DELETE FROM kv_data WHERE store = ? AND key = ?",
+            params![store, key],
+        )
+        .map_err(|e| QorError::StorageInitFailed(format!("DB delete failed: {}", e)))?;
         Ok(())
     }
-
 }
 
 // Tauri Commands --
@@ -274,17 +298,32 @@ pub async fn db_init(
     username: String,
     master_key_b64: String,
 ) -> Result<bool, String> {
-    let master_key = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, master_key_b64)
-        .map_err(|_| "Invalid master key encoding".to_string())?;
+    let master_key =
+        base64::Engine::decode(&base64::engine::general_purpose::STANDARD, master_key_b64)
+            .map_err(|_| "Invalid master key encoding".to_string())?;
 
-    let app_config_dir = app_handle.path().app_config_dir().map_err(|e| e.to_string())?;
+    let mut app_config_dir = app_handle
+        .path()
+        .app_config_dir()
+        .map_err(|e| e.to_string())?;
+    let instance_id = crate::system::get_instance_id();
+    let suffix = format!("-instance-{}", instance_id);
+    let config_name = app_config_dir
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "Qor-chat-client".to_string());
+    app_config_dir.set_file_name(format!("{}{}", config_name, suffix));
     std::fs::create_dir_all(&app_config_dir).map_err(|e| e.to_string())?;
-    
+
     let sanitized_user = username.replace(|c: char| !c.is_alphanumeric(), "_");
     let db_path = app_config_dir.join(format!("qor_{}.db", sanitized_user));
 
-    let db_manager = DatabaseManager::new(db_path, &master_key)
-        .map_err(|e| e.to_string())?;
+    {
+        let mut db_state = state.inner().database.write();
+        *db_state = None;
+    }
+
+    let db_manager = DatabaseManager::new(db_path, &master_key).map_err(|e| e.to_string())?;
 
     let mut db_state = state.inner().database.write();
     *db_state = Some(Arc::new(db_manager));
@@ -300,9 +339,12 @@ pub async fn db_set_secure(
     key: String,
     value: Vec<u8>,
 ) -> Result<bool, String> {
-    let db = state.inner().database()
+    let db = state
+        .inner()
+        .database()
         .ok_or_else(|| "Database not initialized".to_string())?;
-    db.set_secure(&store, &key, &value).map_err(|e| e.to_string())?;
+    db.set_secure(&store, &key, &value)
+        .map_err(|e| e.to_string())?;
     Ok(true)
 }
 
@@ -313,9 +355,13 @@ pub async fn db_get_secure(
     store: String,
     key: String,
 ) -> Result<Option<Vec<u8>>, String> {
-    let db = state.inner().database()
+    let db = state
+        .inner()
+        .database()
         .ok_or_else(|| "Database not initialized".to_string())?;
-    db.get_secure(&store, &key).map_err(|e| e.to_string()).map(Ok)?
+    db.get_secure(&store, &key)
+        .map_err(|e| e.to_string())
+        .map(Ok)?
 }
 
 /// List all keys in a store
@@ -324,7 +370,9 @@ pub async fn db_list_secure(
     state: State<'_, AppState>,
     store: String,
 ) -> Result<Vec<(String, Vec<u8>)>, String> {
-    let db = state.inner().database()
+    let db = state
+        .inner()
+        .database()
         .ok_or_else(|| "Database not initialized".to_string())?;
     db.list_secure(&store).map_err(|e| e.to_string())
 }
@@ -335,7 +383,9 @@ pub async fn db_scan_secure(
     state: State<'_, AppState>,
     prefix: String,
 ) -> Result<Vec<(String, String, Vec<u8>)>, String> {
-    let db = state.inner().database()
+    let db = state
+        .inner()
+        .database()
         .ok_or_else(|| "Database not initialized".to_string())?;
     db.scan_secure(&prefix).map_err(|e| e.to_string())
 }
@@ -347,7 +397,9 @@ pub async fn db_delete(
     store: String,
     key: String,
 ) -> Result<bool, String> {
-    let db = state.inner().database()
+    let db = state
+        .inner()
+        .database()
         .ok_or_else(|| "Database not initialized".to_string())?;
     db.delete(&store, &key).map_err(|e| e.to_string())?;
     Ok(true)
@@ -355,14 +407,25 @@ pub async fn db_delete(
 
 /// Clear a store
 #[tauri::command]
-pub async fn db_clear_store(
-    state: State<'_, AppState>,
-    store: String,
-) -> Result<bool, String> {
-    let db = state.inner().database()
+pub async fn db_clear_store(state: State<'_, AppState>, store: String) -> Result<bool, String> {
+    let db = state
+        .inner()
+        .database()
         .ok_or_else(|| "Database not initialized".to_string())?;
     let conn = db.conn.lock();
     conn.execute("DELETE FROM kv_data WHERE store = ?", params![store])
         .map_err(|e| e.to_string())?;
+    Ok(true)
+}
+
+/// Compact database
+#[tauri::command]
+pub async fn db_compact(state: State<'_, AppState>) -> Result<bool, String> {
+    let db = state
+        .inner()
+        .database()
+        .ok_or_else(|| "Database not initialized".to_string())?;
+    let conn = db.conn.lock();
+    conn.execute("VACUUM", []).map_err(|e| e.to_string())?;
     Ok(true)
 }

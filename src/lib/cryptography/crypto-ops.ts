@@ -24,20 +24,49 @@ export const OPAQUE_LABELS = {
     ENVELOPE_KEY: 'OPAQUE-Envelope-Key-v1',
     EXPORT_KEY: 'OPAQUE-Export-Key-v1',
     SESSION_KEY: 'OPAQUE-Session-Key-v1',
-    AUTH_KEY: 'OPAQUE-Auth-Key-v1',
+    AUTH_KEY: 'OPAQUE-Auth-Key-v2',
+    AUTH_MAC_CONTEXT: 'OPAQUE-Auth-MAC-v2',
     CLIENT_SECRET: 'OPAQUE-Client-Secret-v1',
     MASKED_RESPONSE: 'OPAQUE-MaskedResponse-v1'
 };
 
 const textEncoder = new TextEncoder();
+const textDecoder = new TextDecoder();
+
+function normalizePrivacyPassPurpose(purpose?: string): string {
+    const value = typeof purpose === 'string' ? purpose.trim().toLowerCase() : '';
+    return /^[a-z0-9:_-]{1,64}$/.test(value) ? value : 'account-auth';
+}
+
+function privacyPassOprfInfo(purpose?: string): Uint8Array {
+    return textEncoder.encode(`${PP_LABELS.OPRF_INPUT}:${normalizePrivacyPassPurpose(purpose)}`);
+}
+
+function decodePaddedOtRecord(rawRecord: Uint8Array): Uint8Array {
+    if (rawRecord.length < 4) {
+        throw new Error('OT record padding header missing');
+    }
+    const view = new DataView(rawRecord.buffer, rawRecord.byteOffset, rawRecord.byteLength);
+    const declaredLength = view.getUint32(0, false);
+    if (declaredLength === 0 || declaredLength > rawRecord.length - 4) {
+        throw new Error('OT record padding length invalid');
+    }
+    const candidate = rawRecord.slice(4, 4 + declaredLength);
+    const first = candidate[0];
+    if (first !== 0x7b && first !== 0x5b) {
+        throw new Error('OT record padding payload invalid');
+    }
+    return candidate;
+}
 
 /**
  * Privacy Pass Operations
  */
 export const PrivacyPassOps = {
-    generateTokenBatch(count: number) {
+    generateTokenBatch(count: number, purpose: string = 'account-auth') {
         const blindedTokens: Uint8Array[] = [];
         const tokenSecrets: any[] = [];
+        const normalizedPurpose = normalizePrivacyPassPurpose(purpose);
 
         for (let i = 0; i < count; i++) {
             const tokenSecret = randomBytes(32);
@@ -45,7 +74,7 @@ export const PrivacyPassOps = {
                 blake3,
                 tokenSecret,
                 new Uint8Array(0),
-                textEncoder.encode(PP_LABELS.OPRF_INPUT),
+                privacyPassOprfInfo(normalizedPurpose),
                 32
             );
             const blindResult = oprf.voprf.blind(oprfInput);
@@ -57,6 +86,7 @@ export const PrivacyPassOps = {
                 tokenSecret,
                 blindingFactor: blindResult.blind,
                 blindedElement: blindResult.blinded,
+                purpose: normalizedPurpose,
                 issuedAt: Date.now(),
                 used: false,
                 pending: false,
@@ -77,7 +107,7 @@ export const PrivacyPassOps = {
                 blake3,
                 token.tokenSecret,
                 new Uint8Array(0),
-                textEncoder.encode(PP_LABELS.OPRF_INPUT),
+                privacyPassOprfInfo(token.purpose),
                 32
             ),
             blind: token.blindingFactor,
@@ -243,7 +273,13 @@ export const OPAQUEOps = {
         const encryptedEnvelope = serverResponse.envelope.slice(24);
 
         const cipher = xchacha20poly1305(envelopeKey, envelopeNonce);
-        const envelopeContents = cipher.decrypt(encryptedEnvelope);
+        let envelopeContents: Uint8Array;
+        try {
+            envelopeContents = cipher.decrypt(encryptedEnvelope);
+        } catch {
+            this.blindingFactor = null;
+            return { success: false };
+        }
 
         const clientSecretKey = envelopeContents.slice(0, 32);
         const serverPublicKey = envelopeContents.slice(32, 64);
@@ -274,7 +310,7 @@ export const OPAQUEOps = {
             32
         );
 
-        // Generate auth message for server using maskedResponse as shared secret
+        // Generate auth message for server
         const authKey = hkdf(
             blake3,
             recoveredMaskedResponse,
@@ -283,7 +319,11 @@ export const OPAQUEOps = {
             32
         );
 
-        const authMessage = blake3(authKey, { dkLen: 32 });
+        const macContext = textEncoder.encode(OPAQUE_LABELS.AUTH_MAC_CONTEXT);
+        const authTranscript = new Uint8Array(macContext.length + serverResponse.serverNonce.length);
+        authTranscript.set(macContext, 0);
+        authTranscript.set(serverResponse.serverNonce, macContext.length);
+        const authMessage = blake3(authTranscript, { key: authKey, dkLen: 32 });
 
         // Clear blinding factor
         this.blindingFactor = null;
@@ -343,12 +383,12 @@ export const OPAQUEOps = {
             for (let i = 0; i < len; i++) out[i] = (a[i] || 0) ^ (b[i] || 0);
             return out;
         };
-        const rawRecord = xor(record.masked, mask);
+        const rawRecord = decodePaddedOtRecord(xor(record.masked, mask));
 
         // Parse recovered OPAQUE record
         let recoveredRecord;
         try {
-            recoveredRecord = JSON.parse(new TextDecoder().decode(rawRecord));
+            recoveredRecord = JSON.parse(textDecoder.decode(rawRecord));
         } catch (e: any) {
             throw new Error(`Failed to parse OPAQUE record: ${e.message}. This usually means the wrong OT index was targeted or the record is corrupted.`);
         }

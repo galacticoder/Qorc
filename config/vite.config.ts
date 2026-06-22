@@ -15,19 +15,14 @@ export default defineConfig({
   worker: {
     format: 'es',
   },
-  server: {
-    port: 5173,
-    strictPort: true,
-    open: false
-  },
   resolve: {
     alias: {
-      '@': path.resolve(__dirname, '../src'),
+      '@': path.resolve(__dirname, './src'),
       'lucide-react$': 'lucide-react/dist/esm/icons/index.js',
     },
   },
   build: {
-    sourcemap: true,
+    sourcemap: false,
     outDir: 'dist',
     emptyOutDir: true,
     chunkSizeWarningLimit: 1000,
@@ -55,4 +50,3 @@ export default defineConfig({
   },
 
 })
-

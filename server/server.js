@@ -9,41 +9,50 @@ import { fileURLToPath } from 'url';
 import { WebSocketServer } from 'ws';
 import { SignalType } from './signals.js';
 import { CryptoUtils } from './crypto/unified-crypto.js';
-import { BlockingDatabase, DiscoveryDB, initDatabase } from './database/database.js';
+import { DiscoveryDB, initDatabase, privateLookupId } from './database/database.js';
 import * as ServerConfig from './config/config.js';
 import * as authentication from './authentication/authentication.js';
 import { setServerPasswordOnInput } from './authentication/auth-utils.js';
 import { rateLimitMiddleware } from './rate-limiting/rate-limit-middleware.js';
 import { ConnectionStateManager } from './session/connection-state.js';
 import authRoutes from './routes/auth-routes.js';
-import apiRoutes from './routes/api-routes.js';
+import apiRoutes, { clearSpoolSnapshotCache, getSpoolSnapshotCacheStats } from './routes/api-routes.js';
 import { createServer as createBootstrapServer, registerShutdownHandlers } from './bootstrap/server-bootstrap.js';
 import { attachGateway } from './websocket/gateway.js';
-import { attachQuicRelay } from './websocket/quic-relay.js';
 import { cleanupSessionManager } from './session/session-manager.js';
 import { logEvent, logError, logRateLimitEvent } from './security/logging.js';
 import { SERVER_CONSTANTS, SECURITY_HEADERS, CORS_CONFIG } from './config/constants.js';
 import { logger as cryptoLogger } from './crypto/crypto-logger.js';
-import { handlePQHandshake, handlePQEnvelope, createPQResponseSender, sendSecureMessage, initializeEnvelopeHandler } from './messaging/pq-envelope-handler.js';
-import { handleBundlePublish, handleBundleFailure } from './messaging/libsignal-handler.js';
+import {
+  handlePQHandshake,
+  handlePQEnvelope,
+  createPQResponseSender,
+  sendSecureMessage,
+  initializeEnvelopeHandler,
+  encryptedResponseSizeClass,
+  getEncryptedResponsePlaintextBudgetBytes
+} from './messaging/pq-envelope-handler.js';
 import { initializeCluster, shutdownCluster } from './cluster/cluster-integration.js';
 import clusterRoutes from './routes/cluster-routes.js';
 import {
-  handleStoreOfflineMessage,
-  handleRetrieveOfflineMessages,
   handleRateLimitStatus,
   handleBlockListSync,
   handleRetrieveBlockList,
-  handleBlockTokensUpdate,
-  handleHybridKeysUpdate,
   handleBlindRoute,
   handleClaimInbox,
   handleRotateInbox,
-  handleOwnershipProof
+  handlePirManifestRequest,
+  handlePirQuery
 } from './handlers/signal-handlers.js';
 import { BlindRouter } from './routing/blind-router.js';
 import { TimingProtection } from './routing/timing-protection.js';
 import { oprfDiscoveryServer } from './crypto/oprf-discovery.js';
+import { assertPirWorkerReadyForRequiredMode, getPirWorkerConfig } from './pir/pir-worker-client.js';
+import { clearPirDatabaseCaches, getPirCacheStats } from './pir/pir-databases.js';
+import { clearPQSessionCache, getPQSessionCacheStats } from './session/pq-session-storage.js';
+import { buildDiscoverySnapshotResponse, getDiscoverySnapshotConfig } from './discovery/snapshot-service.js';
+import { enqueueDiscoveryPublication, startDiscoveryPublicationRelay } from './discovery/publication-privacy.js';
+import { startRuntimeMonitor } from './diagnostics/runtime-monitor.js';
 
 // Discovery epoch manager
 class DiscoveryEpochManager {
@@ -58,18 +67,18 @@ class DiscoveryEpochManager {
     this.rotationInterval = setInterval(() => {
       this.rotateEpoch();
     }, this.EPOCH_DURATION_MS);
-    cryptoLogger.info('[DISCOVERY-EPOCH] Epoch manager started', { 
+    cryptoLogger.info('[DISCOVERY-EPOCH] Epoch manager started', {
       currentEpoch: this.currentEpoch,
-      durationHours: 6 
+      durationHours: 6
     });
   }
 
   rotateEpoch() {
     this.currentEpoch++;
     this.epochStartTime = Date.now();
-    cryptoLogger.info('[DISCOVERY-EPOCH] Rotated to new epoch', { 
+    cryptoLogger.info('[DISCOVERY-EPOCH] Rotated to new epoch', {
       newEpoch: this.currentEpoch,
-      previousEpoch: this.currentEpoch - 1 
+      previousEpoch: this.currentEpoch - 1
     });
   }
 
@@ -100,7 +109,39 @@ class DiscoveryEpochManager {
 
 const discoveryEpochManager = new DiscoveryEpochManager();
 
-let server, wss, serverHybridKeyPair, blockTokenCleanupInterval, statusLogInterval, discoveryCleanupInterval;
+function startServerCoverTraffic() {
+  TimingProtection.startCoverTraffic(async () => {
+    try {
+      await BlindRouter.enqueueMixnetCoverWrite();
+    } catch { }
+  });
+}
+
+function getRuntimeDiagnostics() {
+  return {
+    caches: {
+      pqSessions: getPQSessionCacheStats(),
+      pir: getPirCacheStats(),
+      spoolSnapshot: getSpoolSnapshotCacheStats(),
+      blindRouter: BlindRouter.getBlindRouterRuntimeStats(),
+      timing: TimingProtection.getTimingRuntimeStats()
+    }
+  };
+}
+
+async function cleanupIdleRuntime() {
+  TimingProtection.stopCoverTraffic();
+  return {
+    coverTrafficStopped: true,
+    timing: TimingProtection.clearTimingRuntimeState(),
+    blindRouter: BlindRouter.pruneBlindRouterRuntimeState({ force: true }),
+    pqSessions: clearPQSessionCache(),
+    pir: clearPirDatabaseCaches(),
+    spoolSnapshot: clearSpoolSnapshotCache()
+  };
+}
+
+let server, wss, serverHybridKeyPair, statusLogInterval, discoveryCleanupInterval, stopRuntimeMonitor;
 
 // Cleanup every 30 mins
 discoveryCleanupInterval = setInterval(async () => {
@@ -162,6 +203,28 @@ async function createExpressApp() {
     });
   }
 
+  // Terminal error handler
+  app.use((err, req, res, next) => {
+    const aborted =
+      err?.type === 'request.aborted' ||
+      err?.code === 'ECONNABORTED' ||
+      err?.message === 'request aborted' ||
+      req.aborted === true;
+    if (aborted || res.headersSent || res.writableEnded) {
+      try { if (!res.headersSent && res.writable) res.status(400).end(); } catch { /* socket gone */ }
+      return;
+    }
+    const status = Number.isInteger(err?.status || err?.statusCode)
+      ? (err.status || err.statusCode)
+      : 500;
+    if (status >= 500) {
+      logError(err, { endpoint: req.originalUrl });
+    }
+    try {
+      res.status(status >= 400 && status < 600 ? status : 500).json({ ok: false, error: 'request_failed' });
+    } catch { /* socket gone */ }
+  });
+
   return app;
 }
 
@@ -176,14 +239,14 @@ async function createWebSocketServer({ server: httpsServer }) {
     logError(error, { operation: 'blind-delivery-subscriber-setup' });
   }
 
-  // Set up periodic cleanup
-  blockTokenCleanupInterval = setInterval(async () => {
-    try {
-      await BlockingDatabase.cleanupExpiredBlocks();
-    } catch (error) {
-      logError(error, { operation: 'block-token-cleanup' });
-    }
-  }, SERVER_CONSTANTS.BLOCK_TOKEN_CLEANUP_INTERVAL);
+  try {
+    startDiscoveryPublicationRelay();
+    logEvent('discovery-publication-relay-started', {
+      mode: 'delayed-batch'
+    });
+  } catch (error) {
+    logError(error, { operation: 'discovery-publication-relay-setup' });
+  }
 
   // Set up status logging
   statusLogInterval = setInterval(async () => {
@@ -216,6 +279,16 @@ async function createWebSocketServer({ server: httpsServer }) {
 }
 
 async function prepareWorkerContext() {
+  const pirWorkerState = await assertPirWorkerReadyForRequiredMode();
+  const pirWorkerConfig = getPirWorkerConfig();
+  logEvent('pir-worker-ready', {
+    configured: pirWorkerConfig.configured,
+    required: pirWorkerState.required === true,
+    ready: pirWorkerState.ready === true,
+    scheme: pirWorkerConfig.schemeId,
+    parameterId: pirWorkerConfig.parameterId
+  });
+
   const flatKeyPair = await CryptoUtils.Hybrid.generateHybridKeyPair();
 
   serverHybridKeyPair = {
@@ -249,9 +322,13 @@ async function prepareWorkerContext() {
 
   // Initialize OPRF Discovery server
   await oprfDiscoveryServer.initialize();
-  
+
   // Start discovery epoch manager for rotating tokens
   discoveryEpochManager.start();
+  logEvent('discovery-epoch-started', {
+    currentEpoch: discoveryEpochManager.getCurrentEpoch(),
+    durationHours: 6
+  });
 
   const authHandler = new authentication.AccountAuthHandler(serverHybridKeyPair, db);
   const serverAuthHandler = new authentication.ServerAuthHandler(serverHybridKeyPair, db, ServerConfig);
@@ -351,26 +428,23 @@ async function onServerReady({ server: httpsServer, wss: wsServer, context, work
     onMessage: async ({ ws, sessionId, message, parsed }) => {
       await handleWebSocketMessage({ ws, sessionId, message, parsed, context });
     },
+    onConnectionActive: startServerCoverTraffic
   });
 
   // Store gateway reference for cross instance delivery
   global.gateway = gateway;
-  const quicRelay = attachQuicRelay(wss, cryptoLogger);
-  global.quicRelay = quicRelay;
 
-  // Start blind routing cover traffic for timing correlation resistance
-  TimingProtection.startCoverTraffic(async (inboxId) => {
-    try {
-      const { createDummyFrame } = await import('./routing/message-padding.js');
-      const dummyFrame = createDummyFrame();
-      await gateway.routeToInboxId(inboxId, {
-        version: 'ss-v1',
-        ciphertext: dummyFrame.toString('base64'),
-        ephemeralKey: '',
-        nonce: ''
-      });
-    } catch { }
-  });
+  if (!stopRuntimeMonitor) {
+    stopRuntimeMonitor = startRuntimeMonitor({
+      getWss: () => wss,
+      logger: cryptoLogger,
+      getDiagnostics: getRuntimeDiagnostics,
+      onIdleCleanup: cleanupIdleRuntime
+    });
+  }
+
+  // Start blind routing cover traffic
+  startServerCoverTraffic();
 
   // Subscribe to blind delivery channel for distributed routing
   BlindRouter.subscribeToBlindDelivery().catch(err => {
@@ -381,20 +455,125 @@ async function onServerReady({ server: httpsServer, wss: wsServer, context, work
 // Dedup cache for discovery publish (token -> timestamp)
 const recentPublishTokens = new Map();
 const PUBLISH_DEDUP_WINDOW_MS = 5000;
+const DISCOVERY_EPOCH_DURATION_MS = 6 * 60 * 60 * 1000;
+const DISCOVERY_FORWARD_PUBLISH_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
+const DISCOVERY_LEASE_TTL_MS = DISCOVERY_FORWARD_PUBLISH_WINDOW_MS + DISCOVERY_EPOCH_DURATION_MS;
+const MAX_DISCOVERY_TOKEN_BATCH = 160;
+const DISCOVERY_SNAPSHOT_RESPONSE_BUDGET_BYTES = getEncryptedResponsePlaintextBudgetBytes();
+const DISCOVERY_SNAPSHOT_SAFE_PADDING_FLOOR = 128;
+const DISCOVERY_SNAPSHOT_SAFE_DUMMY_BLOB_CHARS = 2048;
+const DISCOVERY_SNAPSHOT_MAX_INITIAL_ROWS = 512;
+
+function serializedPayloadBytes(payload) {
+  try {
+    return Buffer.byteLength(JSON.stringify(payload), 'utf8');
+  } catch {
+    return Number.POSITIVE_INFINITY;
+  }
+}
+
+function medianEncryptedBlobChars(rows) {
+  const sample = (Array.isArray(rows) ? rows : [])
+    .slice(0, 4096)
+    .map((row) => (typeof row?.encryptedBlob === 'string' ? row.encryptedBlob.length : 0))
+    .filter((length) => length > 0)
+    .sort((a, b) => a - b);
+  if (sample.length === 0) return 0;
+  return sample[Math.floor(sample.length / 2)];
+}
+
+function initialDiscoverySnapshotRowLimit(rows, dummyBlobChars) {
+  const rowCount = Array.isArray(rows) ? rows.length : 0;
+  if (rowCount <= 0) return 0;
+
+  const medianBlobChars = medianEncryptedBlobChars(rows);
+  const estimatedEntryChars = Math.max(512, medianBlobChars, dummyBlobChars) + 160;
+  const entryBudgetBytes = Math.floor(DISCOVERY_SNAPSHOT_RESPONSE_BUDGET_BYTES * 0.35);
+  const estimatedRows = Math.floor(entryBudgetBytes / estimatedEntryChars);
+  return Math.max(1, Math.min(rowCount, DISCOVERY_SNAPSHOT_MAX_INITIAL_ROWS, estimatedRows));
+}
+
+function buildBoundedDiscoverySnapshotPayload({ requestId, rows, snapshotConfig, requestedMode, deltaSince }) {
+  const baseOptions = {
+    deltaSince: requestedMode === 'delta' ? deltaSince : undefined
+  };
+  let dummyBlobChars = Math.min(snapshotConfig.dummyBlobChars, DISCOVERY_SNAPSHOT_SAFE_DUMMY_BLOB_CHARS);
+  let paddingFloor = Math.min(snapshotConfig.paddingFloor, DISCOVERY_SNAPSHOT_SAFE_PADDING_FLOOR);
+  let rowLimit = initialDiscoverySnapshotRowLimit(rows, dummyBlobChars);
+  let lastPayloadBytes = 0;
+
+  for (let attempt = 0; attempt < 18; attempt += 1) {
+    const snapshotRows = Array.isArray(rows) ? rows.slice(0, rowLimit) : [];
+    const snapshotResponse = buildDiscoverySnapshotResponse(snapshotRows, {
+      ...snapshotConfig,
+      ...baseOptions,
+      maxRows: Math.max(1, rowLimit || 1),
+      paddingFloor,
+      dummyBlobChars
+    });
+    const payload = {
+      type: SignalType.DISCOVERY_SNAPSHOT,
+      requestId,
+      success: true,
+      ...snapshotResponse
+    };
+    const payloadBytes = serializedPayloadBytes(payload);
+    lastPayloadBytes = payloadBytes;
+    if (payloadBytes <= DISCOVERY_SNAPSHOT_RESPONSE_BUDGET_BYTES) {
+      return {
+        payload,
+        payloadBytes,
+        rowLimit,
+        paddingFloor,
+        dummyBlobChars
+      };
+    }
+
+    if (dummyBlobChars > 512) {
+      dummyBlobChars = Math.max(512, Math.floor(dummyBlobChars / 2));
+      continue;
+    }
+    if (paddingFloor > 1) {
+      paddingFloor = Math.max(1, Math.floor(paddingFloor / 2));
+      continue;
+    }
+    if (rowLimit > 0) {
+      rowLimit = Math.floor(rowLimit / 2);
+      continue;
+    }
+    break;
+  }
+
+  return {
+    payload: {
+      type: SignalType.DISCOVERY_SNAPSHOT,
+      requestId,
+      success: false,
+      error: 'discovery_snapshot_too_large'
+    },
+    payloadBytes: lastPayloadBytes,
+    rowLimit,
+    paddingFloor,
+    dummyBlobChars,
+    tooLarge: true
+  };
+}
 
 async function handleWebSocketMessage({ ws, sessionId, message, parsed, context }) {
   const { authHandler } = context;
 
   try {
-    const msgString = (typeof message === 'string' ? message : String(message)).trim();
-    if (msgString.length === 0) {
-      return await sendSecureMessage(ws, { type: SignalType.ERROR, message: 'Empty message' });
-    }
-
     let normalizedMessage = null;
-    if (parsed && typeof parsed === 'object') {
+    let msgString = null;
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
       normalizedMessage = parsed;
+      msgString = JSON.stringify(normalizedMessage);
     } else {
+      msgString = (typeof message === 'string' ? message : String(message || '')).trim();
+      if (msgString.length === 0) {
+        return await sendSecureMessage(ws, { type: SignalType.ERROR, message: 'Empty message' });
+      }
+
       try {
         normalizedMessage = JSON.parse(msgString);
       } catch (_parseError) {
@@ -408,26 +587,32 @@ async function handleWebSocketMessage({ ws, sessionId, message, parsed, context 
     const sessionState = await ConnectionStateManager.getState(sessionId) || {};
     const ephemeralState = authentication.SecureStateManager.getState(ws);
     const state = { ...sessionState, ...ephemeralState };
+    if (ws._authenticated || ws._hasAuthenticated) {
+      state.hasAuthenticated = true;
+    }
+    if (ws._hasServerAuth) {
+      state.hasServerAuth = true;
+    }
 
     const serverPasswordHash = ServerConfig.getServerPasswordHash();
 
     // Ensure transport and gatekeeper signals always pass
     const isTransportSignal = [
-      'request-server-public-key',
-      'pq-handshake-init',
-      'pq-handshake-ack',
-      'pq-heartbeat-ping',
-      'pq-heartbeat-pong',
-      'ping',
-      'pong',
+      SignalType.REQUEST_SERVER_PUBLIC_KEY,
+      SignalType.PQ_HANDSHAKE_INIT,
+      SignalType.PQ_HANDSHAKE_ACK,
+      SignalType.PQ_HEARTBEAT_PING,
+      SignalType.PQ_HEARTBEAT_PONG,
+      SignalType.PING,
+      SignalType.PONG,
       SignalType.PQ_ENVELOPE
     ].includes(normalizedMessage.type);
 
     const isGatekeeperSignal = [
-      'server-entry-request',
-      'server-entry-challenge',
-      'server-entry-token-issuance',
-      'privacy-pass-redemption'
+      SignalType.SERVER_ENTRY_REQUEST,
+      SignalType.SERVER_ENTRY_CHALLENGE,
+      SignalType.SERVER_ENTRY_TOKEN_ISSUANCE,
+      SignalType.PRIVACY_PASS_REDEMPTION
     ].includes(normalizedMessage.type);
 
     // Account auth signals are allowed before server entry token
@@ -443,9 +628,25 @@ async function handleWebSocketMessage({ ws, sessionId, message, parsed, context 
       SignalType.CLAIM_INBOX
     ].includes(normalizedMessage.type);
 
-    if (serverPasswordHash && !state.hasServerAuth && !ws._unlinkedSession && !isTransportSignal && !isGatekeeperSignal && !isAccountAuthSignal) {
+    const isDiscoveryBootstrapSignal = [
+      SignalType.OPRF_DISCOVERY_PUBLIC_KEY,
+      SignalType.OPRF_BLIND_EVALUATE
+    ].includes(normalizedMessage.type);
+
+    if (!ws._pqSessionId && !isTransportSignal) {
+      cryptoLogger.warn('[SECURE-MSG] Rejecting pre-PQ message without closing socket', {
+        signalType: normalizedMessage.type
+      });
+      return await sendSecureMessage(ws, {
+        type: SignalType.ERROR,
+        code: 'PQ_SESSION_REQUIRED',
+        message: 'PQ handshake required before this request',
+        requiresHandshake: true
+      });
+    }
+
+    if (serverPasswordHash && !state.hasServerAuth && !ws._unlinkedSession && !isTransportSignal && !isGatekeeperSignal && !isAccountAuthSignal && !isDiscoveryBootstrapSignal) {
       cryptoLogger.warn('[GATEKEEPER] Access denied: Server entry token required', {
-        sessionId: sessionId?.slice(0, 8),
         signalType: normalizedMessage.type,
         state: { hasServerAuth: !!state.hasServerAuth }
       });
@@ -458,7 +659,7 @@ async function handleWebSocketMessage({ ws, sessionId, message, parsed, context 
 
     // Apply per message rate limiting
     try {
-      const rateLimitPrincipalId = state?.credentialId || state?.userId || ws?._sessionId || sessionId;
+      const rateLimitPrincipalId = ws?._blindSocketId || ws?._sessionId || sessionId;
       if (rateLimitPrincipalId) {
         const allowed = await rateLimitMiddleware.applyMessageRateLimiting(
           ws,
@@ -482,11 +683,24 @@ async function handleWebSocketMessage({ ws, sessionId, message, parsed, context 
       case SignalType.AUTH_OT_REGISTER_FINALIZE:
         const otRegRes = await authHandler.handleOTRegisterFinalize(ws, normalizedMessage);
         if (otRegRes?.success) {
+          const grantsServerEntry = !serverPasswordHash || !!ws._hasServerAuth;
+          ws._authenticated = true;
+          ws._hasAuthenticated = true;
+          ws._hasServerAuth = grantsServerEntry;
           await ConnectionStateManager.updateState(sessionId, {
-            hasServerAuth: true,
-            userId: otRegRes.internalId
+            hasServerAuth: grantsServerEntry,
+            hasAuthenticated: true
           });
-          cryptoLogger.info('[GATEKEEPER] Server entry granted via OT registration', { sessionId: sessionId?.slice(0, 8) });
+          if (grantsServerEntry) {
+            try {
+              await global.gateway?.addLocalConnection?.(ws);
+            } catch (e) {
+              cryptoLogger.warn('[AUTH] addLocalConnection after registration failed', { error: e?.message });
+            }
+            cryptoLogger.info('[GATEKEEPER] Server entry granted via OT registration');
+          } else {
+            cryptoLogger.info('[GATEKEEPER] Server entry still required after OT registration');
+          }
         }
         break;
       case SignalType.AUTH_OT_REQUEST:
@@ -495,11 +709,24 @@ async function handleWebSocketMessage({ ws, sessionId, message, parsed, context 
       case SignalType.AUTH_OT_FINALIZE:
         const otFinalRes = await authHandler.handleSignInFinalize(ws, normalizedMessage);
         if (otFinalRes?.success) {
+          const grantsServerEntry = !serverPasswordHash || !!ws._hasServerAuth;
+          ws._authenticated = true;
+          ws._hasAuthenticated = true;
+          ws._hasServerAuth = grantsServerEntry;
           await ConnectionStateManager.updateState(sessionId, {
-            hasServerAuth: true,
-            credentialId: otFinalRes.credentialId
+            hasServerAuth: grantsServerEntry,
+            hasAuthenticated: true
           });
-          cryptoLogger.info('[GATEKEEPER] Server entry granted via OT login', { sessionId: sessionId?.slice(0, 8) });
+          if (grantsServerEntry) {
+            try {
+              await global.gateway?.addLocalConnection?.(ws);
+            } catch (e) {
+              cryptoLogger.warn('[AUTH] addLocalConnection after login failed', { error: e?.message });
+            }
+            cryptoLogger.info('[GATEKEEPER] Server entry granted via OT login');
+          } else {
+            cryptoLogger.info('[GATEKEEPER] Server entry still required after OT login');
+          }
         }
         break;
       case SignalType.ZK_REFRESH_CHALLENGE:
@@ -526,34 +753,57 @@ async function handleWebSocketMessage({ ws, sessionId, message, parsed, context 
           });
           const isValid = await authHandler.gatekeeper.verifyEntryToken(normalizedMessage);
           if (isValid) {
+            ws._hasServerAuth = true;
             await ConnectionStateManager.updateState(sessionId, { hasServerAuth: true });
             await sendSecureMessage(ws, { type: SignalType.OK, message: 'Server entry granted' });
-            cryptoLogger.info('[GATEKEEPER] Server entry granted via Privacy Pass', { sessionId: sessionId?.slice(0, 8) });
+            cryptoLogger.info('[GATEKEEPER] Server entry granted via Privacy Pass');
           } else {
             cryptoLogger.warn('[GATEKEEPER] Privacy Pass token verification returned false');
             await sendSecureMessage(ws, { type: SignalType.AUTH_ERROR, message: 'Invalid entry token' });
           }
         } catch (error) {
-          cryptoLogger.error('[GATEKEEPER] Token redemption failed', { error: error.message, stack: error.stack?.slice(0, 200) });
+          cryptoLogger.error('[GATEKEEPER] Token redemption failed', { error: error.message });
           await sendSecureMessage(ws, { type: SignalType.AUTH_ERROR, message: 'Entry verification failed' });
         }
         break;
       case SignalType.TOKEN_VALIDATION:
         try {
-          const { accessToken } = normalizedMessage;
+          const { resumeRedemption } = normalizedMessage;
 
-          if (!accessToken || typeof accessToken !== 'string') {
+          const { anonymousSessionService } = await import('./authentication/anonymous-session-service.js');
+
+          // Unlinkable autologin: the client resumes ONLY by redeeming a fresh one-time anonymous
+          // Privacy Pass token. There is no stable-token fallback — a replayable token would let the
+          // server link a client's reconnects.
+          let result;
+          if (resumeRedemption) {
+            try {
+              const { PrivacyPassServer, PrivacyPassHelpers } = await import('./authentication/privacy-pass-server.js');
+              const parsed = PrivacyPassHelpers.parseRedemptionRequest(resumeRedemption);
+              const redeemed = await PrivacyPassServer.redeemToken(
+                parsed.token,
+                parsed.nullifier,
+                parsed.mac,
+                parsed.tokenSecret,
+                'account-auth'
+              );
+              if (redeemed?.valid) {
+                // Grant fresh anonymous session for this connection only
+                const session = await anonymousSessionService.createSessionWithCapabilities();
+                result = { valid: true, sessionId: session.sessionId };
+              } else {
+                result = { valid: false, error: 'resume_token_invalid' };
+              }
+            } catch (e) {
+              result = { valid: false, error: 'resume_token_invalid' };
+            }
+          } else {
             return await sendSecureMessage(ws, {
               type: SignalType.TOKEN_VALIDATION_RESPONSE,
               valid: false,
               error: 'Invalid session token'
             });
           }
-
-          const { anonymousSessionService } = await import('./authentication/anonymous-session-service.js');
-
-          // Verify anonymous session token
-          const result = await anonymousSessionService.verifySession(accessToken);
 
           if (!result.valid) {
             cryptoLogger.warn('[TOKEN-VALIDATION] Session validation failed', { error: result.error });
@@ -566,10 +816,15 @@ async function handleWebSocketMessage({ ws, sessionId, message, parsed, context 
 
           // Get session capabilities
           const capabilities = await anonymousSessionService.getSessionCapabilities(result.sessionId);
+          const scopes = Array.isArray(capabilities?.scopes) ? capabilities.scopes : [];
+          const sessionGrantsServerEntry = scopes.includes('server:entry');
+          const serverEntryRequired = Boolean(serverPasswordHash) && !state.hasServerAuth && !ws._hasServerAuth && !sessionGrantsServerEntry;
+          const serverEntryGranted = !serverEntryRequired;
 
           ws._authenticated = true;
           ws._hasAuthenticated = true;
           ws._anonymousSession = true;
+          ws._hasServerAuth = serverEntryGranted;
 
           // Capture blinded token for unlinked credential issuance
           if (normalizedMessage.blindedToken) {
@@ -578,12 +833,23 @@ async function handleWebSocketMessage({ ws, sessionId, message, parsed, context 
 
           await ConnectionStateManager.updateState(sessionId, {
             hasAuthenticated: true,
-            hasServerAuth: true,
+            hasServerAuth: serverEntryGranted,
             pqSessionId: ws._pqSessionId || null,
             connectedAt: Date.now(),
             lastActivity: Date.now(),
-            scopes: capabilities.scopes || []
+            scopes
           });
+
+          if (!serverEntryGranted) {
+            ws._pendingBlindedToken = null;
+            cryptoLogger.warn('[TOKEN-VALIDATION] Session valid but server entry is still required');
+            return await sendSecureMessage(ws, {
+              type: SignalType.TOKEN_VALIDATION_RESPONSE,
+              valid: true,
+              serverEntryRequired: true,
+              serverEntryGranted: false
+            });
+          }
 
           // Register connection for local message delivery
           try {
@@ -594,13 +860,13 @@ async function handleWebSocketMessage({ ws, sessionId, message, parsed, context 
             cryptoLogger.warn('[TOKEN-VALIDATION] addLocalConnection failed', { error: e?.message });
           }
 
-          cryptoLogger.info('[TOKEN-VALIDATION] Anonymous session validation successful', {
-            sessionId: result.sessionId?.slice(0, 8) + '...'
-          });
+          cryptoLogger.info('[TOKEN-VALIDATION] Anonymous session validation successful');
 
           const response = {
             type: SignalType.TOKEN_VALIDATION_RESPONSE,
-            valid: true
+            valid: true,
+            serverEntryRequired: false,
+            serverEntryGranted: true
           };
 
           // Issue blind signature if requested
@@ -645,43 +911,15 @@ async function handleWebSocketMessage({ ws, sessionId, message, parsed, context 
         break;
 
 
-      case SignalType.STORE_OFFLINE_MESSAGE:
-        await handleStoreOfflineMessage({ ws, sessionId, parsed: normalizedMessage, state });
-        break;
-
-      case SignalType.RETRIEVE_OFFLINE_MESSAGES:
-        await handleRetrieveOfflineMessages({ ws, sessionId, parsed: normalizedMessage, state });
-        break;
-
       case SignalType.RATE_LIMIT_STATUS:
         await handleRateLimitStatus({ ws, sessionId, parsed: normalizedMessage, state });
-        break;
-
-      case SignalType.LIBSIGNAL_PUBLISH_BUNDLE:
-        await handleBundlePublish({
-          ws,
-          parsed: normalizedMessage,
-          sendPQResponse: await createPQResponseSender(ws, context)
-        });
-        break;
-
-      case SignalType.SIGNAL_BUNDLE_FAILURE:
-        await handleBundleFailure({
-          ws,
-          parsed: normalizedMessage,
-          sendPQResponse: await createPQResponseSender(ws, context)
-        });
-        break;
-
-      case SignalType.HYBRID_KEYS_UPDATE:
-        await handleHybridKeysUpdate({ ws, parsed: normalizedMessage, state, serverHybridKeyPair });
         break;
 
       case SignalType.REQUEST_SERVER_PUBLIC_KEY:
         try {
           const { message } = await gateway.getServerPublicKeyMessage();
           ws.send(message);
-          cryptoLogger.info('[SERVER] Sent server public keys on request', { sessionId: sessionId?.slice(0, 8) });
+          cryptoLogger.info('[SERVER] Sent server public keys on request');
         } catch (error) {
           cryptoLogger.error('[SERVER] Failed to send server public keys on request', { error: error.message });
           await sendSecureMessage(ws, { type: SignalType.ERROR, message: 'Failed to retrieve server keys' });
@@ -706,171 +944,319 @@ async function handleWebSocketMessage({ ws, sessionId, message, parsed, context 
         break;
 
       case SignalType.OPRF_BLIND_EVALUATE:
-        if (!normalizedMessage.blindedPoint) {
-          return await sendSecureMessage(ws, { type: SignalType.ERROR, message: 'Blinded point required' });
-        }
-        try {
-          const clientId = sessionId || ws._pqSessionId || 'anonymous';
-          const evalResult = oprfDiscoveryServer.blindEvaluate(normalizedMessage.blindedPoint, clientId);
-          const epochInfo = discoveryEpochManager.getEpochInfo();
-          await sendSecureMessage(ws, {
-            type: SignalType.OPRF_BLIND_EVALUATE_RESPONSE,
-            blindedPoint: normalizedMessage.blindedPoint,
-            evaluated: evalResult.evaluated,
-            proof: evalResult.proof,
-            publicKey: evalResult.publicKey,
-            epoch: epochInfo.current
-          });
-        } catch (error) {
-          cryptoLogger.error('[OPRF-DISCOVERY] Blind evaluation failed:', error.message);
-          await sendSecureMessage(ws, { type: SignalType.ERROR, message: error.message || 'OPRF evaluation failed' });
+        {
+          const requestId = typeof normalizedMessage.requestId === 'string'
+            ? normalizedMessage.requestId.slice(0, 128)
+            : undefined;
+          if (!normalizedMessage.blindedPoint) {
+            return await sendSecureMessage(ws, { type: SignalType.ERROR, requestId, message: 'Blinded point required' });
+          }
+          try {
+            const clientId = privateLookupId('oprf-rate-client-v2', sessionId || ws._pqSessionId || 'anonymous');
+            const evalResult = oprfDiscoveryServer.blindEvaluate(normalizedMessage.blindedPoint, clientId);
+            const epochInfo = discoveryEpochManager.getEpochInfo();
+            await sendSecureMessage(ws, {
+              type: SignalType.OPRF_BLIND_EVALUATE_RESPONSE,
+              requestId,
+              blindedPoint: normalizedMessage.blindedPoint,
+              evaluated: evalResult.evaluated,
+              proof: evalResult.proof,
+              publicKey: evalResult.publicKey,
+              epoch: epochInfo.current
+            });
+          } catch (error) {
+            cryptoLogger.error('[OPRF-DISCOVERY] Blind evaluation failed:', {
+              error: error.message
+            });
+            const isRateLimit = error.message?.toLowerCase().includes('rate limit');
+            await sendSecureMessage(ws, {
+              type: SignalType.ERROR,
+              requestId,
+              message: error.message || 'OPRF evaluation failed',
+              code: isRateLimit ? 'OPRF_RATE_LIMIT' : 'OPRF_EVAL_FAILURE'
+            });
+          }
         }
         break;
 
       case SignalType.PUBLISH_DISCOVERY:
-        if ((!normalizedMessage.token && !normalizedMessage.previousEpochToken) || !normalizedMessage.encryptedBlob) {
-          cryptoLogger.warn('[DISCOVERY] Reject publish - invalid payload', {
-            hasToken: !!normalizedMessage.token,
-            hasPreviousEpochToken: !!normalizedMessage.previousEpochToken,
-            hasEncryptedBlob: !!normalizedMessage.encryptedBlob,
-            sessionId: (sessionId || ws._pqSessionId || '').slice(0, 8)
-          });
-          return await sendSecureMessage(ws, { type: SignalType.ERROR, message: 'Invalid discovery payload' });
-        }
+        {
+          const requestId = typeof normalizedMessage.requestId === 'string'
+            ? normalizedMessage.requestId.slice(0, 128)
+            : undefined;
+          const sendPublishAck = async ({ success, error, stage }) => {
+            const ackPayload = {
+              type: SignalType.OK,
+              requestId,
+              success: success === true,
+              op: 'publish-discovery',
+              stage,
+              serverTime: Date.now()
+            };
+            if (typeof error === 'string' && error) {
+              ackPayload.error = error.slice(0, 160);
+            }
+            try {
+              await sendSecureMessage(ws, ackPayload);
+              cryptoLogger.info('[DISCOVERY] Publish ack sent', {
+                success: ackPayload.success,
+                stage,
+                hasRequestId: typeof requestId === 'string' && requestId.length > 0
+              });
+              return true;
+            } catch (ackError) {
+              cryptoLogger.warn('[DISCOVERY] Publish ack send failed', {
+                success: ackPayload.success,
+                stage,
+                hasRequestId: typeof requestId === 'string' && requestId.length > 0
+              });
+              throw ackError;
+            }
+          };
 
-        // Deduplicate rapid publish requests with the same token
-        if (normalizedMessage.token) {
-          const now = Date.now();
-          const lastPublish = recentPublishTokens.get(normalizedMessage.token);
-          if (lastPublish && (now - lastPublish) < PUBLISH_DEDUP_WINDOW_MS) {
-            cryptoLogger.info('[DISCOVERY] Duplicate publish suppressed', {
-              tokenPrefix: String(normalizedMessage.token).slice(0, 8),
-              msSinceLastPublish: now - lastPublish
-            });
-            return await sendSecureMessage(ws, { type: SignalType.OK, success: true, op: 'publish-discovery' });
-          }
-          recentPublishTokens.set(normalizedMessage.token, now);
-          // Periodically clean stale entries
-          if (recentPublishTokens.size > 500) {
-            for (const [token, ts] of recentPublishTokens) {
-              if (now - ts > PUBLISH_DEDUP_WINDOW_MS) recentPublishTokens.delete(token);
+          // K-anon discovery publish. client sends { epochId, bucketId, publishId } entries
+          const normalizedBucketBatch = [];
+          const seenPublish = new Set();
+          const appendBucket = (raw) => {
+            if (!raw || typeof raw !== 'object') return;
+            const epochId = typeof raw.epochId === 'string' ? raw.epochId.trim() : '';
+            const bucketId = Number.isInteger(raw.bucketId) ? raw.bucketId : Number.parseInt(raw.bucketId, 10);
+            const publishId = typeof raw.publishId === 'string' ? raw.publishId.trim().toLowerCase() : '';
+            if (!epochId || epochId.length > 64) return;
+            if (!Number.isInteger(bucketId) || bucketId < 0) return;
+            if (!/^[a-f0-9]{16,128}$/.test(publishId)) return;
+            const key = `${epochId}:${publishId}`;
+            if (seenPublish.has(key)) return;
+            seenPublish.add(key);
+            normalizedBucketBatch.push({ epochId, bucketId, publishId });
+          };
+          if (Array.isArray(normalizedMessage.bucketBatch)) {
+            for (const raw of normalizedMessage.bucketBatch) {
+              if (normalizedBucketBatch.length >= MAX_DISCOVERY_TOKEN_BATCH) break;
+              appendBucket(raw);
             }
           }
-        }
 
-        if (!state?.hasAuthenticated && !ws._unlinkedSession) {
-          cryptoLogger.warn('[DISCOVERY] Reject publish - not authenticated', {
-            tokenPrefix: String(normalizedMessage.token).slice(0, 8),
-            encryptedBlobLen: typeof normalizedMessage.encryptedBlob === 'string' ? normalizedMessage.encryptedBlob.length : null,
+          const primaryToken = normalizedBucketBatch[0]?.publishId || '';
+          const publishLogShape = () => {
+            const blobLen = typeof normalizedMessage.encryptedBlob === 'string'
+              ? normalizedMessage.encryptedBlob.length
+              : 0;
+            const encryptedBlobSizeClass = blobLen <= 0
+              ? 'none'
+              : blobLen <= 16 * 1024
+                ? 'lte-16k'
+                : blobLen <= 64 * 1024
+                  ? 'lte-64k'
+                  : blobLen <= 256 * 1024
+                    ? 'lte-256k'
+                    : 'gt-256k';
+            return {
+              tokenBatchClass: normalizedBucketBatch.length <= 1
+                ? 'single'
+                : normalizedBucketBatch.length >= MAX_DISCOVERY_TOKEN_BATCH
+                  ? 'max'
+                  : 'batch',
+              encryptedBlobSizeClass
+            };
+          };
+
+          if (normalizedBucketBatch.length === 0 || !normalizedMessage.encryptedBlob) {
+            cryptoLogger.warn('[DISCOVERY] Reject publish - invalid payload', {
+              hasBucketBatch: Array.isArray(normalizedMessage.bucketBatch),
+              bucketEntryCount: normalizedBucketBatch.length,
+              hasEncryptedBlob: !!normalizedMessage.encryptedBlob
+            });
+            return await sendPublishAck({
+              success: false,
+              error: 'invalid_discovery_payload',
+              stage: 'invalid-payload'
+            });
+          }
+
+          const publishAuthenticated = !!state?.hasAuthenticated
+            || !!ws._authenticated
+            || !!ws._hasAuthenticated
+            || !!ws._unlinkedSession;
+          if (publishAuthenticated && !state.hasAuthenticated && !ws._unlinkedSession) {
+            state.hasAuthenticated = true;
+          }
+          if (!publishAuthenticated) {
+            cryptoLogger.warn('[DISCOVERY] Reject publish - not authenticated', {
+              ...publishLogShape(),
+              hasAuthenticated: !!state?.hasAuthenticated,
+              wsAuthenticated: !!ws._authenticated,
+              wsHasAuthenticated: !!ws._hasAuthenticated,
+              unlinkedSession: !!ws._unlinkedSession
+            });
+            return await sendPublishAck({
+              success: false,
+              error: 'authentication_required',
+              stage: 'auth-required'
+            });
+          }
+
+          // Deduplicate rapid publish requests with the same primary token
+          if (primaryToken) {
+            const now = Date.now();
+            const primaryTokenKey = privateLookupId('discovery-publish-dedup-v2', primaryToken);
+            const lastPublish = recentPublishTokens.get(primaryTokenKey);
+            if (lastPublish && (now - lastPublish) < PUBLISH_DEDUP_WINDOW_MS) {
+              cryptoLogger.info('[DISCOVERY] Duplicate publish suppressed', {
+                ...publishLogShape(),
+                suppressionWindow: 'recent'
+              });
+              await sendPublishAck({ success: true, stage: 'dedup-suppressed' });
+              return;
+            }
+            recentPublishTokens.set(primaryTokenKey, now);
+            // Periodically clean stale entries
+            if (recentPublishTokens.size > 500) {
+              for (const [token, ts] of recentPublishTokens) {
+                if (now - ts > PUBLISH_DEDUP_WINDOW_MS) recentPublishTokens.delete(token);
+              }
+            }
+          }
+
+          cryptoLogger.info('[DISCOVERY] Publish received', {
+            ...publishLogShape(),
             hasAuthenticated: !!state?.hasAuthenticated,
-            unlinkedSession: !!ws._unlinkedSession,
-            sessionId: (sessionId || ws._pqSessionId || '').slice(0, 8)
+            wsAuthenticated: !!ws._authenticated,
+            wsHasAuthenticated: !!ws._hasAuthenticated,
+            unlinkedSession: !!ws._unlinkedSession
           });
-          return await sendSecureMessage(ws, { type: SignalType.ERROR, message: 'Authentication required' });
-        }
 
-        cryptoLogger.info('[DISCOVERY] Publish received', {
-          tokenPrefix: String(normalizedMessage.token).slice(0, 8),
-          prevTokenPrefix: String(normalizedMessage.previousEpochToken).slice(0, 8),
-          encryptedBlobLen: typeof normalizedMessage.encryptedBlob === 'string' ? normalizedMessage.encryptedBlob.length : null,
-          hasAuthenticated: !!state?.hasAuthenticated,
-          unlinkedSession: !!ws._unlinkedSession,
-          sessionId: (sessionId || ws._pqSessionId || '').slice(0, 8)
-        });
-
-        try {
-          // Store for current epoch token
-          const expiresAt = Date.now() + (31536000 * 1000);
+          // Rolling discoverability lease
+          const expiresAt = Date.now() + DISCOVERY_LEASE_TTL_MS;
           let publishSuccess = false;
-          
-          if (normalizedMessage.token) {
-            const publishedCurrent = await DiscoveryDB.store(
-              normalizedMessage.token,
-              normalizedMessage.encryptedBlob,
+          try {
+            const enqueueResult = await enqueueDiscoveryPublication({
+              bucketBatch: normalizedBucketBatch,
+              encryptedBlob: normalizedMessage.encryptedBlob,
               expiresAt
-            );
-            publishSuccess = publishSuccess || publishedCurrent;
+            });
+            publishSuccess = enqueueResult.queued === true;
+            cryptoLogger.info('[DISCOVERY] Publish enqueue completed', {
+              ...publishLogShape(),
+              success: publishSuccess,
+              backend: enqueueResult.backend || 'unknown'
+            });
+          } catch (e) {
+            cryptoLogger.error('[DISCOVERY] Publish failed', {
+              ...publishLogShape(),
+              error: e?.message || String(e)
+            });
+            await sendPublishAck({ success: false, error: e?.message, stage: 'queue-failed' });
+            break;
           }
-          
-          // Also store for previous epoch token
-          if (normalizedMessage.previousEpochToken) {
-            const publishedPrevious = await DiscoveryDB.store(
-              normalizedMessage.previousEpochToken,
-              normalizedMessage.encryptedBlob,
-              expiresAt
-            );
-            publishSuccess = publishSuccess || publishedPrevious;
-          }
-          
-          cryptoLogger.info('[DISCOVERY] Publish stored', {
-            tokenPrefix: String(normalizedMessage.token).slice(0, 8),
+
+          cryptoLogger.info('[DISCOVERY] Publish queued for delayed batch storage', {
+            ...publishLogShape(),
             success: publishSuccess,
-            expiresAt
+            releaseWindow: 'delayed-batch'
           });
-          await sendSecureMessage(ws, { type: SignalType.OK, success: publishSuccess, op: 'publish-discovery' });
-        } catch (e) {
-          cryptoLogger.error('[DISCOVERY] Publish failed', {
-            tokenPrefix: String(normalizedMessage.token).slice(0, 8),
-            error: e?.message || String(e)
-          });
-          await sendSecureMessage(ws, { type: SignalType.OK, success: false, op: 'publish-discovery' });
+          await sendPublishAck({ success: publishSuccess, stage: 'queued' });
         }
         break;
 
-      case SignalType.QUERY_DISCOVERY:
-        if (!normalizedMessage.token) {
-          return await sendSecureMessage(ws, { type: SignalType.ERROR, message: 'Discovery token required' });
-        }
+      case SignalType.DISCOVERY_SNAPSHOT_REQUEST:
+        {
+          const requestId = typeof normalizedMessage.requestId === 'string'
+            ? normalizedMessage.requestId.slice(0, 128)
+            : undefined;
 
-        cryptoLogger.info('[DISCOVERY] Query received', {
-          tokenPrefix: String(normalizedMessage.token).slice(0, 8),
-          hasPrevEpochToken: !!normalizedMessage.previousEpochToken,
-          hasAuthenticated: !!state?.hasAuthenticated,
-          unlinkedSession: !!ws._unlinkedSession,
-          sessionId: (sessionId || ws._pqSessionId || '').slice(0, 8)
-        });
-
-        let discoveryRow = null;
-        try {
-          // Try current epoch token
-          discoveryRow = await DiscoveryDB.lookup(normalizedMessage.token);
-          
-          // If not found and previous epoch token provided then try that
-          if (!discoveryRow && normalizedMessage.previousEpochToken) {
-            cryptoLogger.info('[DISCOVERY] Current epoch token not found, trying previous epoch', {
-              prevTokenPrefix: String(normalizedMessage.previousEpochToken).slice(0, 8)
-            });
-            discoveryRow = await DiscoveryDB.lookup(normalizedMessage.previousEpochToken);
-          }
-        } catch (e) {
-          cryptoLogger.error('[DISCOVERY] Query lookup failed', {
-            tokenPrefix: String(normalizedMessage.token).slice(0, 8),
-            error: e?.message || String(e)
+          cryptoLogger.info('[DISCOVERY] Target-free snapshot requested', {
+            hasAuthenticated: !!state?.hasAuthenticated,
+            unlinkedSession: !!ws._unlinkedSession
           });
-        }
+          logEvent('discovery-snapshot-requested', {
+            mode: normalizedMessage.snapshotMode === 'delta' ? 'delta' : 'full',
+            gateClass: state?.hasServerAuth ? 'server-entry' : ws._unlinkedSession ? 'unlinked' : 'open'
+          });
 
-        const discoveryBlob = discoveryRow?.encryptedBlob || null;
-        cryptoLogger.info('[DISCOVERY] Query result', {
-          tokenPrefix: String(normalizedMessage.token).slice(0, 8),
-          exists: !!discoveryBlob,
-          usedPrevEpoch: !!discoveryRow && normalizedMessage.previousEpochToken,
-          encryptedBlobLen: typeof discoveryBlob === 'string' ? discoveryBlob.length : null
-        });
-        await sendSecureMessage(ws, {
-          type: SignalType.DISCOVERY_RESULT,
-          token: normalizedMessage.token,
-          requestId: typeof normalizedMessage.requestId === 'string' ? normalizedMessage.requestId.slice(0, 128) : undefined,
-          encryptedBlob: discoveryBlob || null,
-          exists: !!discoveryBlob
-        });
+          const snapshotConfig = getDiscoverySnapshotConfig();
+          const requestedMode = normalizedMessage.snapshotMode === 'delta' ? 'delta' : 'full';
+          const deltaSince = Number(normalizedMessage.deltaSince);
+          const snapshot = requestedMode === 'delta' && Number.isFinite(deltaSince)
+            ? await DiscoveryDB.snapshotSince(deltaSince, snapshotConfig.maxRows)
+            : await DiscoveryDB.snapshotActive(snapshotConfig.maxRows);
+          const boundedSnapshot = buildBoundedDiscoverySnapshotPayload({
+            requestId,
+            rows: snapshot,
+            snapshotConfig,
+            requestedMode,
+            deltaSince
+          });
+          const snapshotResponse = boundedSnapshot.payload?.snapshot
+            ? { snapshot: boundedSnapshot.payload.snapshot }
+            : { snapshot: null };
+          cryptoLogger.info('[DISCOVERY] Snapshot response prepared', {
+            mode: requestedMode,
+            rowCountClass: snapshot.length <= 0
+              ? 'none'
+              : snapshot.length === 1
+                ? 'single'
+                : snapshot.length <= 32
+                  ? 'small'
+                : snapshot.length <= 1024
+                  ? 'medium'
+                  : 'large',
+            payloadSizeClass: encryptedResponseSizeClass(boundedSnapshot.payloadBytes),
+            responseBudgetClass: encryptedResponseSizeClass(DISCOVERY_SNAPSHOT_RESPONSE_BUDGET_BYTES),
+            boundedRowClass: boundedSnapshot.rowLimit <= 0
+              ? 'none'
+              : boundedSnapshot.rowLimit === 1
+                ? 'single'
+                : boundedSnapshot.rowLimit <= 32
+                  ? 'small'
+                  : boundedSnapshot.rowLimit <= 1024
+                    ? 'medium'
+                    : 'large',
+            boundedPaddingClass: boundedSnapshot.paddingFloor <= 1
+              ? 'single'
+              : boundedSnapshot.paddingFloor <= 32
+                ? 'small'
+                : boundedSnapshot.paddingFloor <= 1024
+                  ? 'medium'
+                  : 'large',
+            tooLarge: boundedSnapshot.tooLarge === true,
+            compressedSizeClass: typeof snapshotResponse.snapshot?.compressed === 'string' && snapshotResponse.snapshot.compressed.length <= 16 * 1024
+              ? 'lte-16k'
+              : typeof snapshotResponse.snapshot?.compressed === 'string' && snapshotResponse.snapshot.compressed.length <= 256 * 1024
+                ? 'lte-256k'
+                : 'gt-256k'
+          });
+          logEvent('discovery-snapshot-prepared', {
+            mode: requestedMode,
+            rowClass: snapshot.length <= 0
+              ? 'none'
+              : snapshot.length === 1
+                ? 'single'
+                : snapshot.length <= 32
+                  ? 'small'
+                  : snapshot.length <= 1024
+                    ? 'medium'
+                    : 'large',
+            compressedClass: typeof snapshotResponse.snapshot?.compressed === 'string' && snapshotResponse.snapshot.compressed.length <= 16 * 1024
+              ? 'lte-16k'
+              : typeof snapshotResponse.snapshot?.compressed === 'string' && snapshotResponse.snapshot.compressed.length <= 256 * 1024
+                ? 'lte-256k'
+                : 'gt-256k'
+          });
+          await sendSecureMessage(ws, boundedSnapshot.payload);
+        }
+        break;
+
+      case SignalType.PIR_MANIFEST_REQUEST:
+        await handlePirManifestRequest({ ws, parsed: normalizedMessage, state });
+        break;
+
+      case SignalType.PIR_QUERY:
+        await handlePirQuery({ ws, parsed: normalizedMessage, state });
         break;
 
       case SignalType.BLOCK_LIST_SYNC:
         await handleBlockListSync({ ws, sessionId, parsed: normalizedMessage, state });
-        break;
-
-      case SignalType.BLOCK_TOKENS_UPDATE:
-        await handleBlockTokensUpdate({ ws, parsed: normalizedMessage, state });
         break;
 
       case SignalType.RETRIEVE_BLOCK_LIST:
@@ -918,10 +1304,6 @@ async function handleWebSocketMessage({ ws, sessionId, message, parsed, context 
         await handleRotateInbox({ ws, parsed: normalizedMessage, state });
         break;
 
-      case SignalType.OWNERSHIP_PROOF:
-        await handleOwnershipProof({ ws, parsed: normalizedMessage, state });
-        break;
-
       default:
         logEvent('unknown-message-type', { type: normalizedMessage.type, sessionId });
         await sendSecureMessage(ws, { type: SignalType.ERROR, message: 'Unknown message type' });
@@ -944,13 +1326,14 @@ async function shutdownServer(signal) {
     logError(error, { operation: 'cluster-shutdown' });
   }
 
-  if (blockTokenCleanupInterval) {
-    clearInterval(blockTokenCleanupInterval);
-    blockTokenCleanupInterval = null;
-  }
   if (statusLogInterval) {
     clearInterval(statusLogInterval);
     statusLogInterval = null;
+  }
+
+  if (stopRuntimeMonitor) {
+    stopRuntimeMonitor();
+    stopRuntimeMonitor = null;
   }
 
   try {
@@ -981,7 +1364,7 @@ async function startServer() {
 
     await setServerPasswordOnInput();
     await initDatabase();
-    
+
     logEvent('server-initialized', {
       port: ServerConfig.PORT,
       rateLimiterBackend: rateLimitMiddleware.getStats().backend

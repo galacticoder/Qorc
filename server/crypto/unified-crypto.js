@@ -1268,8 +1268,8 @@ class HybridService {
       const envelope = {
         version: 'hybrid-envelope-v1',
         routing: header,
-        routingSignature: { algorithm: 'dilithium3', signature: signatureBase64 },
-        algorithms: { outer: 'mlkem1024', inner: 'x25519', aead: 'aes-256-gcm', mac: 'blake3' },
+        routingSignature: { algorithm: 'ML-DSA-87', signature: signatureBase64 },
+        algorithms: { outer: 'ML-KEM-1024', inner: 'X25519', aead: 'AES-256-GCM', mac: 'BLAKE3' },
         kemCiphertext: QuantumHashService.arrayBufferToBase64(kemCiphertext),
         outer: {
           salt: QuantumHashService.arrayBufferToBase64(outerSalt),

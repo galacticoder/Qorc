@@ -186,6 +186,25 @@ export class TokenVault {
         return this.tokens.filter(t => !t.used && !t.pending && t.unblindedToken).length;
     }
 
+    async reserveResumeTokens(count: number): Promise<AnonymousToken[]> {
+        if (!this.isUnlocked || !this.encryptionKey || count <= 0) {
+            return [];
+        }
+        const reserved: AnonymousToken[] = [];
+        this.tokens = this.tokens.filter((t) => {
+            if (reserved.length < count && !t.used && !t.pending && t.unblindedToken) {
+                reserved.push(t);
+                // remove from the vault
+                return false; 
+            }
+            return true;
+        });
+        if (reserved.length > 0) {
+            await this.saveToStorage();
+        }
+        return reserved;
+    }
+
     /**
      * Check if token refresh is needed
      */

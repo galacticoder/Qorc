@@ -19,11 +19,6 @@ interface HybridKeys {
   dilithium: { publicKeyBase64: string; secretKey: Uint8Array };
 }
 
-interface P2PConnector {
-  connectToPeer?: (peer: string) => Promise<void>;
-  getConnectedPeers?: () => string[];
-}
-
 interface FileData {
   id: string;
   content: string;
@@ -56,7 +51,6 @@ interface ChatInputProps {
   selectedConversation?: string;
   getDisplayUsername?: (username: string) => Promise<string>;
   disabled?: boolean;
-  p2pConnector?: P2PConnector;
   getKeysOnDemand?: () => Promise<HybridKeys | null>;
   getPeerHybridKeys?: (peerUsername: string) => Promise<{ kyberPublicBase64: string; dilithiumPublicBase64: string; x25519PublicBase64?: string } | null>;
 }
@@ -76,7 +70,6 @@ export function ChatInput({
   selectedConversation,
   getDisplayUsername,
   disabled = false,
-  p2pConnector,
   getKeysOnDemand,
   getPeerHybridKeys,
 }: ChatInputProps) {
@@ -90,7 +83,6 @@ export function ChatInput({
     currentUsername,
     selectedConversation,
     users,
-    p2pConnector,
     getKeysOnDemand,
     getPeerHybridKeys,
   );
@@ -110,32 +102,26 @@ export function ChatInput({
   }, [editingMessage]);
 
   // Handle sending text messages or edits
-  const handleSend = useCallback(async () => {
-    if (!message.trim() || isSending || !selectedConversation || disabled) {
+  const handleSend = useCallback(() => {
+    if (!message.trim() || !selectedConversation || disabled) {
       return;
     }
 
     const sanitizedMessage = sanitizeMessage(message);
     if (!sanitizedMessage) return;
+    setMessage("");
 
-    try {
-      setIsSending(true);
-      setMessage("");
+    const isEdit = !!(editingMessage && onEditMessage);
+    const sendPromise = isEdit
+      ? onSendMessage(editingMessage!.id, sanitizedMessage, SignalType.EDIT_MESSAGE, editingMessage!.replyTo)
+      : onSendMessage("", sanitizedMessage, "chat", replyTo ?? null);
 
-      if (editingMessage && onEditMessage) {
-        await onSendMessage(editingMessage.id, sanitizedMessage, SignalType.EDIT_MESSAGE, editingMessage.replyTo);
-        onCancelEdit?.();
-      } else {
-        await onSendMessage("", sanitizedMessage, "chat", replyTo ?? null);
-        onCancelReply?.();
-      }
-    } catch (error) {
+    if (isEdit) { onCancelEdit?.(); } else { onCancelReply?.(); }
+
+    Promise.resolve(sendPromise).catch((error) => {
       console.error('Failed to send message:', error);
-      alert('Failed to send message. Please try again.');
-    } finally {
-      setIsSending(false);
-    }
-  }, [message, isSending, selectedConversation, disabled, editingMessage, onEditMessage, onSendMessage, onCancelEdit, replyTo, onCancelReply, sanitizeMessage]);
+    });
+  }, [message, selectedConversation, disabled, editingMessage, onEditMessage, onSendMessage, onCancelEdit, replyTo, onCancelReply, sanitizeMessage]);
 
   // Validate file size and type
   const validateFile = useCallback((file: File): string | null => {
@@ -221,12 +207,12 @@ export function ChatInput({
   return (
     <>
       {progress > 0 && progress < 1 && (
-        <div className="px-4 pt-2">
+        <div className="qor-chat-progress">
           <ProgressBar progress={progress} />
         </div>
       )}
 
-      <div className="px-4 py-3">
+      <div className="qor-input-shell">
         {editingMessage && <EditingBanner onCancelEdit={onCancelEdit} />}
         {replyTo && <ReplyBanner replyTo={replyTo} onCancelReply={onCancelReply} getDisplayUsername={getDisplayUsername} />}
 
@@ -234,50 +220,23 @@ export function ChatInput({
           <VoiceRecorder
             onSendVoiceNote={handleSendVoiceNote}
             onCancel={() => setShowVoiceRecorder(false)}
-            disabled={isSending || isSendingFile}
+            disabled={isSendingFile || isSending}
           />
         ) : (
           <div
-            className="messageBox"
-            style={{
-              width: '100%',
-              height: '40px',
-              display: 'flex',
-              alignItems: 'center',
-              gap: '8px',
-              backgroundColor: "var(--chat-background)",
-              padding: '0 15px',
-              borderRadius: editingMessage || replyTo ? '0 0 10px 10px' : '10px',
-              border: '1px solid hsl(var(--border))',
-              borderTop: editingMessage || replyTo ? 'none' : '1px solid hsl(var(--border))',
-              minWidth: 0,
-              userSelect: 'none',
-            }}
+            className={`qor-message-box ${editingMessage || replyTo ? 'has-banner' : ''}`}
           >
             {/* File Upload */}
-            <div
-              className="fileUploadWrapper"
-              style={{
-                flexShrink: 0,
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-              }}
-            >
+            <div className="qor-file-upload-wrapper">
               <label
                 htmlFor="file-input"
-                style={{
-                  cursor: 'pointer',
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                }}
+                className="qor-composer-icon-btn"
               >
                 <svg
                   xmlns="http://www.w3.org/2000/svg"
                   fill="none"
                   viewBox="0 0 337 337"
-                  style={{ height: '18px', width: '20px' }}
+                  aria-hidden="true"
                 >
                   <circle
                     strokeWidth={20}
@@ -312,10 +271,10 @@ export function ChatInput({
             </div>
 
             {/* Voice Recorder Button */}
-            <div style={{ flexShrink: 0 }}>
+            <div className="qor-voice-button-wrap">
               <VoiceRecorderButton
                 onClick={() => setShowVoiceRecorder(true)}
-                disabled={isSendingFile || showVoiceRecorder || disabled}
+                disabled={isSendingFile || isSending || showVoiceRecorder || disabled}
               />
             </div>
 
@@ -329,36 +288,15 @@ export function ChatInput({
               onChange={handleMessageChange}
               onKeyDown={handleKeyDown}
               disabled={disabled}
-              style={{
-                flex: 1,
-                minWidth: 0,
-                height: '100%',
-                backgroundColor: 'transparent',
-                outline: 'none',
-                border: 'none',
-                color: 'hsl(var(--foreground))',
-                userSelect: SignalType.TEXT,
-              }}
+              className="qor-message-input"
             />
 
             {/* Send Button */}
             <button
               id="sendButton"
               onClick={handleSend}
-              disabled={!message.trim() || isSending || !selectedConversation || disabled}
-              style={{
-                flexShrink: 0,
-                width: 'fit-content',
-                height: '100%',
-                backgroundColor: 'transparent',
-                outline: 'none',
-                border: 'none',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                cursor: disabled || !message.trim() ? 'not-allowed' : 'pointer',
-                opacity: disabled || !message.trim() ? 0.5 : 1,
-              }}
+              disabled={!message.trim() || !selectedConversation || disabled}
+              className="qor-send-button"
             >
               <svg
                 xmlns="http://www.w3.org/2000/svg"

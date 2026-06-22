@@ -16,6 +16,7 @@ import { storage } from '../tauri-bindings';
 // ZK Proof configuration
 const ZK_CONFIG = {
   CHALLENGE_SIZE: 32,
+  RING_SIZE_MIN: 128,
   RING_SIZE_MAX: 1024,
   PROOF_VERSION: 2,
   SCALAR_SIZE: 32,
@@ -129,6 +130,9 @@ export class ZKDeviceProofGenerator {
     if (activeCommitments.length === 0) {
       throw new Error('No active device commitments');
     }
+    if (activeCommitments.length < ZK_CONFIG.RING_SIZE_MIN) {
+      throw new Error('Device anonymity set too small');
+    }
     if (activeCommitments.length > ZK_CONFIG.RING_SIZE_MAX) {
       throw new Error('Ring size exceeds maximum');
     }
@@ -213,13 +217,14 @@ export class ZKDeviceProofVerifier {
     if (!equalBytes(proof.challenge, challenge)) return false;
 
     const activeCommitments = allCommitments.filter(c => !c.revoked);
-    if (activeCommitments.length === 0) return false;
+    if (activeCommitments.length < ZK_CONFIG.RING_SIZE_MIN) return false;
     if (proof.s.length !== activeCommitments.length) return false;
     for (const resp of proof.s) {
       if (resp.length !== ZK_CONFIG.SCALAR_SIZE) return false;
     }
     if (proof.c0.length !== ZK_CONFIG.SCALAR_SIZE) return false;
     if (proof.keyImage.length !== ZK_CONFIG.KEY_IMAGE_SIZE) return false;
+    if (proof.keyImage.every(byte => byte === 0)) return false;
 
     const ringPublicKeys = activeCommitments.map(c => c.ringPublicKey);
     return this.verifyRingSignature(proof, ringPublicKeys, challenge);

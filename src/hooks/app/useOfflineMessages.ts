@@ -1,52 +1,71 @@
 import { useEffect, useRef } from 'react';
-import { offlineMessageQueue } from '../../lib/websocket/offline-message-handler';
 import { EventType } from '../../lib/types/event-types';
+import { globalSpoolPirQueue } from '../../lib/websocket/global-spool-pir-handler';
 
 interface OfflineMessagesProps {
   encryptedHandlerRef: React.RefObject<(msg: any) => Promise<void>>;
   hybridKeysRef: React.RefObject<any>;
+  isReady: boolean;
 }
 
 export function useOfflineMessages({
   encryptedHandlerRef,
-  hybridKeysRef,
+  hybridKeysRef: _hybridKeysRef,
+  isReady,
 }: OfflineMessagesProps) {
   const offlineCallbackSetRef = useRef(false);
+  const isReadyRef = useRef(isReady);
+
+  useEffect(() => {
+    isReadyRef.current = isReady;
+  }, [isReady]);
+
   useEffect(() => {
     if (offlineCallbackSetRef.current) return;
     offlineCallbackSetRef.current = true;
 
     try {
-      offlineMessageQueue.setIncomingOfflineEncryptedMessageCallback(async (msg: any) => {
+      globalSpoolPirQueue.setIncomingCandidateCallback(async (msg: any) => {
+        if (!isReadyRef.current) {
+          console.warn('[SPOOL] candidate dropped: app not ready');
+          return;
+        }
         await encryptedHandlerRef.current(msg);
       });
     } catch { }
   }, []);
 
   useEffect(() => {
-    const applyKey = () => {
-      const kyberSecret = hybridKeysRef?.current?.kyber?.secretKey;
-      if (kyberSecret && kyberSecret instanceof Uint8Array) {
+    const startLoop = () => {
+      if (!isReadyRef.current) {
+        console.log('[SPOOL] startLoop skipped: app not ready');
         try {
-          offlineMessageQueue.setDecryptionKey(kyberSecret);
+          globalSpoolPirQueue.stopDeliveryLoop();
         } catch { }
-      } else {
-        try {
-          offlineMessageQueue.clearDecryptionKey();
-        } catch { }
+        return;
       }
-    };
-
-    applyKey();
-
-    const onKeysUpdated = () => applyKey();
-    try {
-      window.addEventListener(EventType.HYBRID_KEYS_UPDATED, onKeysUpdated as EventListener);
-    } catch { }
-    return () => {
+      console.log('[SPOOL] startLoop: (re)arming delivery loop');
       try {
-        window.removeEventListener(EventType.HYBRID_KEYS_UPDATED, onKeysUpdated as EventListener);
+        globalSpoolPirQueue.stopDeliveryLoop();
+        globalSpoolPirQueue.startDeliveryLoop();
       } catch { }
     };
-  }, [hybridKeysRef.current]);
+
+    if (isReady) {
+      startLoop();
+    } else {
+      try {
+        globalSpoolPirQueue.stopDeliveryLoop();
+      } catch { }
+    }
+    window.addEventListener(EventType.WS_RECONNECTED, startLoop);
+    window.addEventListener(EventType.PQ_SESSION_ESTABLISHED, startLoop);
+    return () => {
+      try {
+        globalSpoolPirQueue.stopDeliveryLoop();
+      } catch { }
+      window.removeEventListener(EventType.WS_RECONNECTED, startLoop);
+      window.removeEventListener(EventType.PQ_SESSION_ESTABLISHED, startLoop);
+    };
+  }, [isReady]);
 }

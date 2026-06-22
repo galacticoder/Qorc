@@ -2,15 +2,15 @@ import { RefObject } from "react";
 import { SignalType } from "../../lib/types/signal-types";
 import { EventType } from "../../lib/types/event-types";
 import websocketClient from "../../lib/websocket/websocket";
-import { PostQuantumSignature } from "../../lib/cryptography/signature";
 import { PostQuantumUtils } from "../../lib/utils/pq-utils";
 import type { ServerHybridPublicKeys, HybridKeys, HashParams, MaxStepReached } from "../../lib/types/auth-types";
-import { OPAQUEClient, OPAQUEClientHelpers } from "../../lib/cryptography/opaque-client";
-import { computeBlindUserId, generateBlindCredential } from "../../lib/utils/auth-utils";
+import { OPAQUEClient, OPAQUEClientHelpers, OPAQUE_CONFIG } from "../../lib/cryptography/opaque-client";
+import { computeBlindUserId } from "../../lib/utils/auth-utils";
 import { PrivacyPassClient, PrivacyPassHelpers } from "../../lib/cryptography/privacy-pass-client";
 import { tokenVault } from "../../lib/database/token-vault";
 import { blake3 } from '@noble/hashes/blake3.js';
 import { storage } from "../../lib/tauri-bindings";
+import { deriveRendezvousRouteId } from "../../lib/transport/rendezvous-routing";
 
 /**
  * Derive a composite secret from username, password, and passphrase
@@ -44,9 +44,12 @@ export interface AuthRefs {
   keyManagerRef: RefObject<any>;
   keyManagerOwnerRef: RefObject<string>;
   passphraseLimiterRef: RefObject<{ tokens: number; last: number }>;
+  accountSubmitInFlightRef: RefObject<boolean>;
   aesKeyRef: RefObject<CryptoKey | null>;
   blindCredentialRef?: RefObject<{
     message: string;
+    inboxId?: string;
+    routeId?: string;
     blindedMsg: string;
     blindingFactor: string;
     n: string;
@@ -59,9 +62,13 @@ export interface AuthRefs {
   } | null>;
 }
 
-const waitForAuthFinalize = (timeoutMs: number): Promise<void> => {
-  return new Promise((resolve, reject) => {
+const createAuthFinalizeWaiter = (timeoutMs: number): { promise: Promise<any>; cancel: () => void } => {
+  let cancelWait = () => {};
+  let capturedSuccess: any = null;
+  const promise = new Promise<any>((resolve, reject) => {
     let settled = false;
+    const startedAt = Date.now();
+    let timeout: ReturnType<typeof setTimeout>;
     const cleanup = () => {
       if (settled) return;
       settled = true;
@@ -71,10 +78,14 @@ const waitForAuthFinalize = (timeoutMs: number): Promise<void> => {
       window.removeEventListener(EventType.EDGE_SERVER_MESSAGE, handleServerMessage as any);
       window.removeEventListener(EventType.AUTH_ERROR, handleAuthError as any);
     };
+    cancelWait = cleanup;
 
     const handleSuccess = () => {
+      console.log('[AUTH-FLOW] Finalization success event received', {
+        elapsedMs: Date.now() - startedAt
+      });
       cleanup();
-      resolve();
+      resolve(capturedSuccess);
     };
 
     const handleServerMessage = (evt: Event) => {
@@ -82,11 +93,22 @@ const waitForAuthFinalize = (timeoutMs: number): Promise<void> => {
       if (!detail || typeof detail !== 'object') return;
       const type = detail.type;
       if (type === SignalType.AUTH_FULL_SUCCESS) {
-        cleanup();
-        resolve();
+        console.log('[AUTH-FLOW] AUTH_FULL_SUCCESS received while waiting for finalization', {
+          elapsedMs: Date.now() - startedAt,
+          serverEntryRequired: !!detail?.serverEntryRequired
+        });
+        capturedSuccess = detail;
+        if (detail?.serverEntryRequired) {
+          cleanup();
+          resolve(detail);
+        }
         return;
       }
       if (type === SignalType.AUTH_ERROR) {
+        console.warn('[AUTH-FLOW] Auth error while waiting for finalization', {
+          elapsedMs: Date.now() - startedAt,
+          code: detail?.code
+        });
         cleanup();
         reject(new Error(detail?.message || 'Registration failed'));
       }
@@ -103,26 +125,34 @@ const waitForAuthFinalize = (timeoutMs: number): Promise<void> => {
     window.addEventListener(EventType.EDGE_SERVER_MESSAGE, handleServerMessage as any);
     window.addEventListener(EventType.AUTH_ERROR, handleAuthError as any);
 
-    const timeout = setTimeout(() => {
+    timeout = setTimeout(() => {
+      console.error('[AUTH-FLOW] Registration finalization wait timed out', {
+        timeoutMs,
+        elapsedMs: Date.now() - startedAt
+      });
       cleanup();
       reject(new Error('Registration finalization timeout'));
     }, timeoutMs);
   });
+  return { promise, cancel: cancelWait };
 };
 
-const waitForSignalResponse = <T = any>(
+const createSignalResponseWaiter = <T = any>(
   signalType: SignalType,
   timeoutMs: number,
   timeoutMessage: string
-): Promise<T> => {
-  return new Promise((resolve, reject) => {
+): { promise: Promise<T>; cancel: () => void } => {
+  let cancelWait = () => {};
+  const promise = new Promise<T>((resolve, reject) => {
     let settled = false;
+    let onSignalMessage: (msg: any) => void = () => {};
+    const startedAt = Date.now();
 
     const cleanup = () => {
       if (settled) return;
       settled = true;
       clearTimeout(timeout);
-      try { websocketClient.unregisterMessageHandler(signalType); } catch { }
+      try { websocketClient.unregisterMessageHandler(signalType, onSignalMessage); } catch { }
       try { window.removeEventListener(EventType.EDGE_SERVER_MESSAGE, onEdgeMessage as any); } catch { }
       try { window.removeEventListener(EventType.AUTH_ERROR, onAuthError as any); } catch { }
     };
@@ -142,23 +172,45 @@ const waitForSignalResponse = <T = any>(
       }
     };
 
+    cancelWait = cleanup;
+
     const onAuthError = (event: Event) => {
       const detail = (event as CustomEvent).detail as any;
       fail(detail?.message || 'Authentication failed');
     };
 
+    onSignalMessage = (msg: any) => {
+      console.log('[AUTH-FLOW] Response received', {
+        type: signalType,
+        elapsedMs: Date.now() - startedAt
+      });
+      cleanup();
+      resolve(msg as T);
+    };
+
     const timeout = setTimeout(() => {
+      console.error('[AUTH-FLOW] Response wait timed out', {
+        type: signalType,
+        timeoutMs,
+        elapsedMs: Date.now() - startedAt,
+        connected: websocketClient.isConnectedToServer?.(),
+        pqSessionEstablished: websocketClient.isPQSessionEstablished?.()
+      });
       fail(timeoutMessage);
     }, timeoutMs);
 
-    websocketClient.registerMessageHandler(signalType, (msg: any) => {
-      cleanup();
-      resolve(msg as T);
+    websocketClient.registerMessageHandler(signalType, onSignalMessage);
+    console.log('[AUTH-FLOW] Waiting for response', {
+      type: signalType,
+      timeoutMs,
+      connected: websocketClient.isConnectedToServer?.(),
+      pqSessionEstablished: websocketClient.isPQSessionEstablished?.()
     });
 
     window.addEventListener(EventType.EDGE_SERVER_MESSAGE, onEdgeMessage as any);
     window.addEventListener(EventType.AUTH_ERROR, onAuthError as any);
   });
+  return { promise, cancel: cancelWait };
 };
 
 export interface AuthSetters {
@@ -175,6 +227,7 @@ export interface AuthSetters {
   setRecoveryActive: (v: boolean) => void;
   setMaxStepReached: (v: MaxStepReached | ((prev: MaxStepReached) => MaxStepReached)) => void;
   setVaultReady: (v: boolean) => void;
+  setTokenValidationInProgress: (v: boolean) => void;
 }
 
 export interface AuthState {
@@ -206,9 +259,10 @@ export const createHandleAccountSubmit = (
     password: string,
     passphrase?: string
   ) => {
-    if (state.isSubmittingAuth) {
+    if (state.isSubmittingAuth || refs.accountSubmitInFlightRef.current) {
       return;
     }
+    refs.accountSubmitInFlightRef.current = true;
     setters.setIsSubmittingAuth(true);
     setters.setLoginError("");
     setters.setIsRegistrationMode(mode === "register");
@@ -218,11 +272,13 @@ export const createHandleAccountSubmit = (
     if (!trimmedUsername || trimmedUsername.length > 120 || /[^a-zA-Z0-9._-]/.test(trimmedUsername)) {
       setters.setLoginError('Invalid username format');
       setters.setIsSubmittingAuth(false);
+      refs.accountSubmitInFlightRef.current = false;
       return;
     }
     if (password.length > 1024) {
       setters.setLoginError('Password too long');
       setters.setIsSubmittingAuth(false);
+      refs.accountSubmitInFlightRef.current = false;
       return;
     }
 
@@ -266,20 +322,11 @@ export const createHandleAccountSubmit = (
         await helpers.initializeKeys(false);
       }
 
-      let localKeys = await helpers.getKeysOnDemand();
-      if (!localKeys?.dilithium?.secretKey || !localKeys.dilithium.publicKeyBase64) {
-        setters.setAuthStatus("Generating keys...");
-        await new Promise(resolve => requestAnimationFrame(() => setTimeout(resolve, 100)));
-        const ephemeralDilithium = await PostQuantumSignature.generateKeyPair();
-        localKeys = {
-          dilithium: {
-            secretKey: ephemeralDilithium.secretKey,
-            publicKeyBase64: PostQuantumUtils.uint8ArrayToBase64(ephemeralDilithium.publicKey)
-          },
-          kyber: { secretKey: new Uint8Array(0), publicKeyBase64: "" },
-          x25519: { private: new Uint8Array(0), publicKeyBase64: "" }
-        };
-      }
+      // Ensure on-demand identity keys are initialized for later use (messaging prekey bundle,
+      // etc.). The OPAQUE flow below derives everything it needs from the password directly and
+      // does not consume this result, so we don't build a placeholder key object here (the old
+      // ephemeral fallback was dead code and constructed an invalid, accountRoot-less HybridKeys).
+      await helpers.getKeysOnDemand();
 
       // OPAQUE Flow
       try {
@@ -302,23 +349,32 @@ export const createHandleAccountSubmit = (
           const { blindedTokens, tokenSecrets } = await ppClient.generateTokenBatch(250);
 
           // Request a slot
-          const responsePromise = waitForSignalResponse<any>(
+          const responseWaiter = createSignalResponseWaiter<any>(
             SignalType.AUTH_OT_REGISTER_RESPONSE,
-            30000,
+            60000,
             'Registration response timeout'
           );
 
           setters.setAuthStatus("Requesting registration slot...");
           await new Promise(resolve => requestAnimationFrame(() => setTimeout(resolve, 50)));
 
-          await websocketClient.sendSecureControlMessage({
-            type: SignalType.AUTH_OT_REGISTER_REQUEST,
-            blindedElement: PostQuantumUtils.uint8ArrayToBase64(blindedElement),
-            clientPublicKey: PostQuantumUtils.uint8ArrayToBase64(clientPublicKey),
-            blindedTokens: blindedTokens.map(t => PostQuantumUtils.uint8ArrayToBase64(t))
+          console.log('[AUTH-FLOW] Sending registration slot request', {
+            connected: websocketClient.isConnectedToServer?.(),
+            pqSessionEstablished: websocketClient.isPQSessionEstablished?.()
           });
+          try {
+            await websocketClient.sendSecureControlMessage({
+              type: SignalType.AUTH_OT_REGISTER_REQUEST,
+              blindedElement: PostQuantumUtils.uint8ArrayToBase64(blindedElement),
+              clientPublicKey: PostQuantumUtils.uint8ArrayToBase64(clientPublicKey)
+            }, { failIfQueued: true });
+            console.log('[AUTH-FLOW] Registration slot request sent');
+          } catch (sendError) {
+            responseWaiter.cancel();
+            throw sendError;
+          }
 
-          const serverResponse = await responsePromise;
+          const serverResponse = await responseWaiter.promise;
           setters.setAuthStatus("Creating envelope...");
           await new Promise(resolve => requestAnimationFrame(() => setTimeout(resolve, 50)));
 
@@ -330,9 +386,35 @@ export const createHandleAccountSubmit = (
             OPAQUEClientHelpers.decodeResponse(serverResponse, ['evaluatedElement', 'serverPublicKey', 'serverNonce'])
           );
 
+          // wipe composite secret
+          compositeSecret.fill(0);
+
           // Store export key for vault
           await new Promise(resolve => requestAnimationFrame(() => setTimeout(resolve, 50)));
           await tokenVault.initialize(registrationFinalize.exportKey);
+
+          // Persist vault key
+          try {
+            const { saveVaultKeyRaw } = await import('../../lib/cryptography/vault-key');
+            await saveVaultKeyRaw(trimmedUsername, registrationFinalize.exportKey);
+          } catch (err) {
+            console.warn('[Auth] Failed to persist vault key during registration:', err);
+          }
+
+          // Re wrap master key with export key that persisted as vault key
+          try {
+            const { saveWrappedMasterKey } = await import('../../lib/cryptography/vault-key');
+            const { CryptoUtils } = await import('../../lib/utils/crypto-utils');
+            const masterKey = refs.keyManagerRef.current?.getMasterKey?.();
+            if (masterKey) {
+              const exportVaultKey = await CryptoUtils.AES.importAesKey(registrationFinalize.exportKey);
+              const rawMaster = new Uint8Array(await CryptoUtils.Keys.exportAESKey(masterKey));
+              await saveWrappedMasterKey(trimmedUsername, rawMaster, exportVaultKey);
+              rawMaster.fill(0);
+            }
+          } catch (err) {
+            console.warn('[Auth] Failed to re-wrap master key with export vault key:', err);
+          }
 
           // Store generated tokens in the vault
           await new Promise(resolve => requestAnimationFrame(() => setTimeout(resolve, 50)));
@@ -340,21 +422,23 @@ export const createHandleAccountSubmit = (
 
           // Generate blind credential for blind routing
           let blindedToken: string | undefined;
-          let blindParams: { message: string; blindedMsg: string; blindingFactor: string; n: string; kid: string; modulusLength: number; hash: string; saltLength: number; scheme: string } | undefined;
+          let blindParams: { message: string; inboxId?: string; routeId?: string; blindedMsg: string; blindingFactor: string; n: string; kid: string; modulusLength: number; hash: string; saltLength: number; scheme: string; used?: boolean } | undefined;
           if (state.serverHybridPublic?.blindPublicKey) {
             try {
               const { CryptoUtils } = await import('../../lib/utils/crypto-utils');
-              const { deriveInboxId } = await import('../../lib/cryptography/vault-key');
+              const { deriveInboxId, currentInboxEpoch } = await import('../../lib/cryptography/vault-key');
               const { blindMessage } = await import('../../lib/crypto/blind-credentials');
 
               const vaultKey = await CryptoUtils.AES.importAesKey(registrationFinalize.exportKey);
-              const inboxId = await deriveInboxId(vaultKey);
+              const inboxId = await deriveInboxId(vaultKey, currentInboxEpoch());
 
-              // Blind the inbox ID for server signing
-              const blindResult = await blindMessage(inboxId, state.serverHybridPublic.blindPublicKey);
+              const routeId = deriveRendezvousRouteId(inboxId);
+              const blindResult = await blindMessage(routeId, state.serverHybridPublic.blindPublicKey);
               blindedToken = blindResult.blindedMsg;
               blindParams = {
-                message: inboxId,
+                message: routeId,
+                inboxId,
+                routeId,
                 blindedMsg: blindResult.blindedMsg,
                 blindingFactor: blindResult.blindingFactor,
                 n: blindResult.n,
@@ -365,7 +449,7 @@ export const createHandleAccountSubmit = (
                 scheme: blindResult.scheme,
                 used: false
               };
-              
+
               if (refs.blindCredentialRef) {
                 const existing = refs.blindCredentialRef.current;
                 if (!existing || existing.used) {
@@ -377,59 +461,83 @@ export const createHandleAccountSubmit = (
             }
           }
 
-          // Send credentialId
-          await websocketClient.sendSecureControlMessage({
-            type: SignalType.AUTH_OT_REGISTER_FINALIZE,
-            credentialId: PostQuantumUtils.uint8ArrayToBase64(registrationFinalize.credentialId),
-            blindedToken,
-            ...OPAQUEClientHelpers.encodeRequest({
-              envelope: registrationFinalize.envelope,
-              maskedResponse: registrationFinalize.maskedResponse
-            })
-          });
+          const finalizationWaiter = createAuthFinalizeWaiter(120000);
+          try {
+            await websocketClient.sendSecureControlMessage({
+              type: SignalType.AUTH_OT_REGISTER_FINALIZE,
+              credentialId: PostQuantumUtils.uint8ArrayToBase64(registrationFinalize.credentialId),
+              blindedToken,
+              blindedTokens: blindedTokens.map(t => PostQuantumUtils.uint8ArrayToBase64(t)),
+              ...OPAQUEClientHelpers.encodeRequest({
+                envelope: registrationFinalize.envelope,
+                maskedResponse: registrationFinalize.maskedResponse
+              })
+            }, { failIfQueued: true });
+          } catch (sendError) {
+            finalizationWaiter.cancel();
+            throw sendError;
+          }
 
-          await waitForAuthFinalize(10000);
+          const finalizeSuccess = await finalizationWaiter.promise;
+
+          // Persist assigned shard slot
+          try {
+            const sId = Number.isInteger(finalizeSuccess?.shardId) ? finalizeSuccess.shardId : null;
+            const cIndex = Number.isInteger(finalizeSuccess?.credentialIndex) ? finalizeSuccess.credentialIndex : null;
+            if (sId !== null && cIndex !== null) {
+              await storage.set(`shard_info_${blindUserId}`, JSON.stringify({
+                shardId: sId,
+                credentialIndex: cIndex,
+                shardSize: Number.isInteger(finalizeSuccess?.shardSize)
+                  ? finalizeSuccess.shardSize
+                  : OPAQUE_CONFIG.PRIVATE_AUTH_SHARD_SIZE
+              }));
+            } else {
+              console.warn('[Auth] Registration finished without shard slot metadata. re login may require recovery');
+            }
+          } catch (err) {
+            console.warn('[Auth] Failed to persist shard info during registration:', err);
+          }
 
           if (passphrase) {
             refs.passphrasePlaintextRef.current = passphrase;
-            await helpers.initializeKeys(false);
-
-            if (state.serverHybridPublic?.blindPublicKey) {
-              const blindParams = await generateBlindCredential(trimmedUsername, state.serverHybridPublic.blindPublicKey);
-              if (blindParams && refs.blindCredentialRef) {
-                const existing = refs.blindCredentialRef.current;
-                if (!existing || existing.used) {
-                  refs.blindCredentialRef.current = { ...blindParams, used: false };
-                }
-              }
+            if (!refs.hybridKeysRef.current || !refs.aesKeyRef.current) {
+              await helpers.initializeKeys(false);
             }
-
             setters.setVaultReady(true);
           } else {
             setters.setShowPassphrasePrompt(true);
           }
 
+          registrationFinalize.exportKey.fill(0);
+
           setters.setAccountAuthenticated(true);
           setters.setIsLoggedIn(true);
-          setters.setIsSubmittingAuth(false);
           setters.setIsRegistrationMode(false);
+          setters.setIsSubmittingAuth(false);
         } else {
           setters.setAuthStatus("Preparing anonymous lookup...");
           await new Promise(resolve => requestAnimationFrame(() => setTimeout(resolve, 50)));
 
           // Retrieve shard info
           const shardInfoRaw = await storage.get(`shard_info_${blindUserId}`);
-          let shardId = 0;
-          let myIndex = 0;
+          let shardId: number | null = null;
+          let myIndex: number | null = null;
 
           if (shardInfoRaw && typeof shardInfoRaw === 'string') {
             try {
               const parsed = JSON.parse(shardInfoRaw);
-              shardId = parsed.shardId;
-              myIndex = parsed.credentialIndex;
+              shardId = Number.isInteger(parsed.shardId) ? parsed.shardId : null;
+              myIndex = Number.isInteger(parsed.credentialIndex) ? parsed.credentialIndex : null;
+              if (parsed.shardSize !== OPAQUE_CONFIG.PRIVATE_AUTH_SHARD_SIZE) {
+                throw new Error('Shard anonymity set size mismatch');
+              }
             } catch {
-              console.warn('[Auth] Failed to parse shard info, using deterministic fallback');
+              console.warn('[Auth] Failed to load private auth shard metadata');
             }
+          }
+          if (shardId === null || myIndex === null) {
+            throw new Error('Private auth shard metadata unavailable. recovery flow is required');
           }
 
 
@@ -448,26 +556,63 @@ export const createHandleAccountSubmit = (
           await new Promise(resolve => requestAnimationFrame(() => setTimeout(resolve, 50)));
 
           const compositeSecret = deriveCompositeSecret(trimmedUsername, password, passphrase);
-          const shardSize = 100;
+          const shardSize = OPAQUE_CONFIG.PRIVATE_AUTH_SHARD_SIZE;
           const { pubKeys, blindedElement } = await opaqueClient.startOTLogin(compositeSecret, shardSize, myIndex);
 
           // Send OT Request
-          const otResponsePromise = waitForSignalResponse<any>(
+          const otResponseWaiter = createSignalResponseWaiter<any>(
             SignalType.AUTH_OT_RESPONSE,
-            45000,
+            240000,
             'OT response timeout'
           );
 
           setters.setAuthStatus("Retrieving blind record...");
-          await websocketClient.sendSecureControlMessage({
-            type: SignalType.AUTH_OT_REQUEST,
-            shardId,
-            clientPubKeys: pubKeys.map(pk => PostQuantumUtils.uint8ArrayToBase64(pk)),
-            blindedElement: PostQuantumUtils.uint8ArrayToBase64(blindedElement),
-            anonymousTokenData: redemptionToken ? PrivacyPassHelpers.formatResponse(redemptionToken) : null
-          });
 
-          const otResponse = await otResponsePromise;
+          const onOtChunkProgress = (ev: Event) => {
+            const detail = (ev as CustomEvent).detail;
+            if (
+              detail?.payloadType === SignalType.AUTH_OT_RESPONSE &&
+              Number.isFinite(detail?.total) && detail.total > 0
+            ) {
+              const pct = Math.max(0, Math.min(100, Math.round((detail.received / detail.total) * 100)));
+              setters.setAuthStatus(`Retrieving blind record... (${pct}%)`);
+            }
+          };
+          window.addEventListener(EventType.SECURE_CHUNK_PROGRESS, onOtChunkProgress as EventListener);
+
+          let otResponse: any;
+          try {
+            let sent = false;
+            let lastSendError: unknown = null;
+            for (let attempt = 0; attempt < 3 && !sent; attempt++) {
+              const ready = await websocketClient.waitUntilReady(45000);
+              if (!ready) {
+                lastSendError = new Error('Connection not ready. Please try again.');
+                break;
+              }
+              try {
+                await websocketClient.sendSecureControlMessage({
+                  type: SignalType.AUTH_OT_REQUEST,
+                  shardId,
+                  clientPubKeys: pubKeys.map(pk => PostQuantumUtils.uint8ArrayToBase64(pk)),
+                  blindedElement: PostQuantumUtils.uint8ArrayToBase64(blindedElement),
+                  anonymousTokenData: redemptionToken ? PrivacyPassHelpers.formatResponse(redemptionToken) : null
+                }, { failIfQueued: true });
+                sent = true;
+              } catch (sendError) {
+                lastSendError = sendError;
+                await new Promise(resolve => setTimeout(resolve, 500));
+              }
+            }
+            if (!sent) {
+              otResponseWaiter.cancel();
+              throw lastSendError instanceof Error ? lastSendError : new Error('WebSocket not connected');
+            }
+
+            otResponse = await otResponseWaiter.promise;
+          } finally {
+            window.removeEventListener(EventType.SECURE_CHUNK_PROGRESS, onOtChunkProgress as EventListener);
+          }
 
           setters.setAuthStatus("Decrypting record...");
           await new Promise(resolve => requestAnimationFrame(() => setTimeout(resolve, 50)));
@@ -479,8 +624,11 @@ export const createHandleAccountSubmit = (
             PostQuantumUtils.base64ToUint8Array(otResponse.serverNonce)
           );
 
+          // Wipe composite secret
+          compositeSecret.fill(0);
+
           if (!loginFinalize.success || !loginFinalize.authMessage || !loginFinalize.exportKey) {
-            throw new Error('OT authentication failed - incorrect password or record');
+            throw new Error('Incorrect username, password, or passphrase.');
           }
 
           // Initialize vault and send final auth message
@@ -491,44 +639,83 @@ export const createHandleAccountSubmit = (
           refs.loginUsernameRef.current = trimmedUsername;
           setters.setUsername(trimmedUsername);
 
+          // Generate blind credential from export key
+          let blindedToken: string | undefined;
+          if (state.serverHybridPublic?.blindPublicKey) {
+            try {
+              const { CryptoUtils } = await import('../../lib/utils/crypto-utils');
+              const { deriveInboxId, currentInboxEpoch, saveVaultKeyRaw } = await import('../../lib/cryptography/vault-key');
+              const { blindMessage } = await import('../../lib/crypto/blind-credentials');
+
+              // Persist vault key
+              await saveVaultKeyRaw(trimmedUsername, loginFinalize.exportKey);
+
+              const vaultKey = await CryptoUtils.AES.importAesKey(loginFinalize.exportKey);
+              const inboxId = await deriveInboxId(vaultKey, currentInboxEpoch());
+
+              const routeId = deriveRendezvousRouteId(inboxId);
+              const blindResult = await blindMessage(routeId, state.serverHybridPublic.blindPublicKey);
+              blindedToken = blindResult.blindedMsg;
+              const blindParams = {
+                message: routeId,
+                inboxId,
+                routeId,
+                blindedMsg: blindResult.blindedMsg,
+                blindingFactor: blindResult.blindingFactor,
+                n: blindResult.n,
+                kid: blindResult.kid,
+                modulusLength: blindResult.modulusLength,
+                hash: blindResult.hash,
+                saltLength: blindResult.saltLength,
+                scheme: blindResult.scheme,
+                used: false
+              };
+
+              if (refs.blindCredentialRef) {
+                const existing = refs.blindCredentialRef.current;
+                if (!existing || existing.used) {
+                  refs.blindCredentialRef.current = blindParams;
+                }
+              }
+            } catch (err) {
+              console.warn('[Auth] Failed to generate blind credential for login:', err);
+            }
+          }
+
           if (passphrase) {
             refs.passphrasePlaintextRef.current = passphrase;
             await helpers.initializeKeys(false);
-
-            if (state.serverHybridPublic?.blindPublicKey) {
-              const blindParams = await generateBlindCredential(trimmedUsername, state.serverHybridPublic.blindPublicKey);
-              if (blindParams && refs.blindCredentialRef) {
-                const existing = refs.blindCredentialRef.current;
-                if (!existing || existing.used) {
-                  refs.blindCredentialRef.current = { ...blindParams, used: false };
-                }
-              }
-            }
-
             setters.setVaultReady(true);
           }
 
+          loginFinalize.exportKey.fill(0);
           await websocketClient.sendSecureControlMessage({
             type: SignalType.AUTH_OT_FINALIZE,
             authProof: PostQuantumUtils.uint8ArrayToBase64(loginFinalize.authMessage),
             serverNonce: PostQuantumUtils.uint8ArrayToBase64(loginFinalize.serverNonce),
-            credentialId: loginFinalize.credentialId,
-            blindedToken: refs.blindCredentialRef?.current?.blindedMsg
-          });
+            shardId,
+            blindedToken
+          }, { failIfQueued: true });
         }
       } catch (_error) {
         const errorMessage = _error instanceof Error ? _error.message : String(_error);
         console.error('[Auth] Error during account submit:', errorMessage);
-        setters.setLoginError(errorMessage || 'Authentication request failed');
+        const friendlyMessage = /invalid tag|invalid mac|decrypt|tag mismatch/i.test(errorMessage)
+          ? 'Incorrect username, password, or passphrase.'
+          : (errorMessage || 'Authentication request failed');
+        setters.setLoginError(friendlyMessage);
         setters.setIsSubmittingAuth(false);
+        
+        try { setters.setTokenValidationInProgress(false); } catch { }
       } finally {
         setters.setIsGeneratingKeys(false);
       }
     } catch (err) {
       console.error('[Auth] Connection or key error:', err);
-      setters.setLoginError(String(err));
+      setters.setLoginError(err instanceof Error && err.message ? err.message : 'Connection failed. Please try again.');
       setters.setIsSubmittingAuth(false);
     } finally {
+      refs.accountSubmitInFlightRef.current = false;
       setters.setAuthStatus('');
     }
   };

@@ -1,10 +1,29 @@
 import { RefObject } from "react";
 import websocketClient from "../../lib/websocket/websocket";
 import { storage } from "../../lib/tauri-bindings";
+import { PinnedServer, generateBlindCredential } from "../../lib/utils/auth-utils";
+import { isExplicitlyLoggedOut } from "../../lib/auth/logout-marker";
+
+interface BlindCredentialRefValue {
+  message: string;
+  inboxId?: string;
+  routeId?: string;
+  blindedMsg: string;
+  blindingFactor: string;
+  n: string;
+  kid: string;
+  modulusLength: number;
+  hash: string;
+  saltLength: number;
+  scheme: string;
+  used?: boolean;
+}
 
 export interface RecoveryRefs {
   loginUsernameRef: RefObject<string>;
   originalUsernameRef: RefObject<string>;
+  blindCredentialRef?: RefObject<BlindCredentialRefValue | null>;
+  serverHybridPublicRef?: RefObject<{ blindPublicKey?: any } | null>;
 }
 
 export interface RecoverySetters {
@@ -21,6 +40,12 @@ export const createAttemptAuthRecovery = (
   isLoggedIn: boolean
 ) => {
   return async (): Promise<boolean> => {
+    if (await isExplicitlyLoggedOut()) {
+      setters.setAuthStatus('');
+      try { setters.setTokenValidationInProgress(false); } catch { }
+      return false;
+    }
+
     // Attempt to recover username from global storage
     let storedUsername = refs.loginUsernameRef.current;
     let storedDisplayName = refs.originalUsernameRef.current;
@@ -63,7 +88,31 @@ export const createAttemptAuthRecovery = (
         setters.setPseudonym(pseudonymHash);
       }
 
-      await websocketClient.attemptTokenValidationOnce('recovery');
+      let blindedToken: string | undefined;
+      try {
+        const blindPublicKey =
+          refs.serverHybridPublicRef?.current?.blindPublicKey ||
+          PinnedServer.get()?.blindPublicKey;
+
+        if (blindPublicKey && refs.blindCredentialRef) {
+          const existing = refs.blindCredentialRef.current;
+          if (!existing || existing.used) {
+            const generated = await generateBlindCredential(storedUsername, blindPublicKey);
+            if (generated) {
+              refs.blindCredentialRef.current = { ...generated, used: false };
+              blindedToken = generated.blindedMsg;
+            }
+          } else {
+            blindedToken = existing.blindedMsg;
+          }
+        }
+      } catch { }
+
+      await websocketClient.attemptTokenValidationOnce(
+        'recovery',
+        false,
+        blindedToken ? { blindedToken } : {}
+      );
 
       return true;
     } catch {

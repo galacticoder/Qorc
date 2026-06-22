@@ -4,7 +4,6 @@ import { SignalType } from '../../lib/types/signal-types';
 import { SecurityAuditLogger } from '../../lib/cryptography/audit-logger';
 import { secureMessageQueue } from '../../lib/database/secure-message-queue';
 import { blockingSystem } from '../../lib/blocking/blocking-system';
-import { offlineMessageQueue } from '../../lib/websocket/offline-message-handler';
 import { syncEncryptedStorage } from '../../lib/database/encrypted-storage';
 import websocketClient from '../../lib/websocket/websocket';
 import { torNetworkManager } from '../../lib/transport/tor-network';
@@ -29,7 +28,6 @@ interface AppInitializationProps {
   fileHandler: {
     handleFileMessageChunk: (payload: any, context: { from: string; to: string }) => void;
   };
-  encryptedHandlerRef: React.RefObject<(msg: any) => Promise<void>>;
   flushPendingSaves: () => Promise<void>;
   setShowSettings: (show: boolean) => void;
 }
@@ -38,7 +36,6 @@ export function useAppInitialization({
   Authentication,
   Database,
   fileHandler,
-  encryptedHandlerRef,
   flushPendingSaves,
   setShowSettings,
 }: AppInitializationProps) {
@@ -46,47 +43,6 @@ export function useAppInitialization({
   useEffect(() => {
     messageVault.initialize();
   }, []);
-
-  // Set offline message callback
-  const offlineCallbackSetRef = useRef(false);
-  useEffect(() => {
-    if (offlineCallbackSetRef.current) return;
-    offlineCallbackSetRef.current = true;
-
-    try {
-      offlineMessageQueue.setIncomingOfflineEncryptedMessageCallback(async (msg: any) => {
-        await encryptedHandlerRef.current(msg);
-      });
-    } catch { }
-  }, []);
-
-  // Apply decryption key for offline messages
-  useEffect(() => {
-    const applyKey = () => {
-      const kyberSecret = Authentication.hybridKeysRef?.current?.kyber?.secretKey;
-      if (kyberSecret && kyberSecret instanceof Uint8Array) {
-        try {
-          offlineMessageQueue.setDecryptionKey(kyberSecret);
-        } catch { }
-      } else {
-        try {
-          offlineMessageQueue.clearDecryptionKey();
-        } catch { }
-      }
-    };
-
-    applyKey();
-
-    const onKeysUpdated = () => applyKey();
-    try {
-      window.addEventListener(EventType.HYBRID_KEYS_UPDATED, onKeysUpdated as EventListener);
-    } catch { }
-    return () => {
-      try {
-        window.removeEventListener(EventType.HYBRID_KEYS_UPDATED, onKeysUpdated as EventListener);
-      } catch { }
-    };
-  }, [Authentication.hybridKeysRef.current]);
 
   // Restore original username from SecureDB
   useEffect(() => {
@@ -214,19 +170,6 @@ export function useAppInitialization({
         }
       }
 
-      try {
-        const sessionKeys = websocketClient.exportSessionKeys();
-        if (sessionKeys) {
-          await session.storePQKeys({
-            session_id: sessionKeys.sessionId,
-            aes_key: sessionKeys.sendKey,
-            mac_key: sessionKeys.recvKey,
-            created_at: sessionKeys.establishedAt,
-          });
-        }
-      } catch (e) {
-        console.error('[App] Failed to store PQ session keys:', e);
-      }
     };
     window.addEventListener(EventType.APP_ENTERING_BACKGROUND, handleEnteringBackground);
 

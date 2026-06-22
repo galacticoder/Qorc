@@ -1,20 +1,13 @@
 import { SignalType } from '../../lib/types/signal-types';
 import { EventType } from '../../lib/types/event-types';
 import { secureMessageQueue } from '../../lib/database/secure-message-queue';
-import { MAX_PAYLOAD_CACHE_SIZE } from '../../lib/constants';
-import type { HybridPublicKeys } from '../../lib/types/message-sending-types';
-import { ensureSession } from './session';
 import {
-  TEXT_ENCODER,
   logError,
   createCoverPadding
 } from '../../lib/utils/message-sending-utils';
 import { signal } from '../../lib/tauri-bindings';
 import { shouldAttemptDiscovery } from '../../lib/utils/discovery-utils';
-
-// Global caches
-export const globalEncryptedPayloadCache = new Map<string, { encryptedPayload: any; to: string; messageId: string }>();
-export const globalLongTermStoreAttempted = new Set<string>();
+import { validateSignalBundleForPeerIdentity } from '../../lib/utils/signal-bundle-utils';
 
 // Build message payload
 export const buildMessagePayload = (
@@ -74,69 +67,6 @@ export const buildMessagePayload = (
   }
 
   return payload;
-};
-
-// Encrypt and send message
-export const encryptAndSend = async (
-  payload: Record<string, unknown>,
-  currentUser: string,
-  recipientUsername: string,
-  recipientKyberKey: string,
-  recipientHybridKeys: HybridPublicKeys,
-  localKeys: { dilithium: { publicKeyBase64: string; secretKey: Uint8Array } },
-  sessionLocksRef: React.RefObject<WeakMap<object, Map<string, Promise<boolean>>>>,
-  lockContext: object,
-  findUser?: (handle: string) => Promise<any>
-): Promise<{ success: boolean; encryptedPayload?: any; error?: string }> => {
-  let encrypted = await signal.encrypt(
-    currentUser,
-    recipientUsername,
-    JSON.stringify(payload)
-  );
-
-  if (!encrypted || !encrypted.ciphertext) {
-    const retrySession = await ensureSession(
-      sessionLocksRef.current,
-      lockContext,
-      currentUser,
-      recipientUsername,
-      { secretKey: localKeys.dilithium.secretKey, publicKeyBase64: localKeys.dilithium.publicKeyBase64 },
-      findUser
-    );
-
-    if (retrySession) {
-      encrypted = await signal.encrypt(
-        currentUser,
-        recipientUsername,
-        JSON.stringify(payload)
-      );
-    }
-  }
-
-  if (!encrypted || !encrypted.ciphertext) {
-    return { success: false, error: 'Encryption failed' };
-  }
-
-  return { success: true, encryptedPayload: encrypted };
-};
-
-// Cache encrypted payload
-export const cacheEncryptedPayload = (recipientUsername: string, wireMessageId: string, encryptedPayload: any) => {
-  try {
-    const cacheKey = `${recipientUsername}|${wireMessageId}`;
-    globalEncryptedPayloadCache.set(cacheKey, {
-      encryptedPayload,
-      to: recipientUsername,
-      messageId: wireMessageId
-    });
-
-    if (globalEncryptedPayloadCache.size > MAX_PAYLOAD_CACHE_SIZE) {
-      const firstKey = globalEncryptedPayloadCache.keys().next().value;
-      if (firstKey) {
-        globalEncryptedPayloadCache.delete(firstKey);
-      }
-    }
-  } catch { }
 };
 
 // Dispatch local events after send
@@ -244,6 +174,7 @@ export const requestBundleForRetry = async (
   _getKeysOnDemand: () => Promise<any>,
   lastSessionBundleReqTsRef: React.RefObject<Map<string, number>>,
   _inboxId?: string,
+  users?: Array<{ username: string; hybridPublicKeys?: any; peerCertificateFingerprint?: string; identityRootFingerprint?: string }>,
   findUser?: (handle: string) => Promise<any>
 ) => {
   try {
@@ -263,6 +194,15 @@ export const requestBundleForRetry = async (
 
       const material = await findUser(recipientUsername);
       if (material && material.fullBundle) {
+        const validation = await validateSignalBundleForPeerIdentity(
+          recipientUsername,
+          material.fullBundle,
+          users as any,
+          findUser as any
+        );
+        if (!validation.valid) {
+          return;
+        }
         await signal.processPreKeyBundle(currentUser, recipientUsername, material.fullBundle);
         window.dispatchEvent(new CustomEvent(EventType.LIBSIGNAL_SESSION_READY, { detail: { peer: recipientUsername } }));
       }

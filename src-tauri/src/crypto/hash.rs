@@ -2,9 +2,9 @@
 
 use blake3::Hasher as Blake3Hasher;
 use hkdf::Hkdf;
-use sha3::{Digest, Sha3_256, Sha3_512, Shake256};
 use sha2::Sha256;
 use sha3::digest::{ExtendableOutput, Update, XofReader};
+use sha3::{Digest, Sha3_256, Sha3_512, Shake256};
 
 /// SHA3-256 hash
 pub fn sha3_256(data: &[u8]) -> [u8; 32] {

@@ -39,14 +39,16 @@ export class ServerGatekeeper {
         ServerGatekeeper.#initializationPromise = (async () => {
             if (ServerGatekeeper.#sharedRecord) return;
 
-            let secret = process.env.SERVER_PASSWORD;
+            const secret = typeof process.env.SERVER_PASSWORD === 'string'
+                ? process.env.SERVER_PASSWORD.trim()
+                : '';
 
             if (!secret) {
-                secret = ServerConfig.getServerPasswordHash();
-            }
-
-            if (!secret) {
-                console.warn('[GATEKEEPER] Server password not configured. Gatekeeper disabled.');
+                if (ServerConfig.getServerPasswordHash()) {
+                    console.error('[GATEKEEPER] Cannot initialize blind server entry from SERVER_PASSWORD_HASH. Start with SERVER_PASSWORD so the OPAQUE verifier can be created.');
+                } else {
+                    console.warn('[GATEKEEPER] Server password not configured. Gatekeeper disabled.');
+                }
                 return;
             }
 
@@ -107,7 +109,10 @@ export class ServerGatekeeper {
 
         await this.#ensureInitialized();
         if (!ServerGatekeeper.#sharedRecord) {
-            return await sendSecureMessage(ws, { type: SignalType.AUTH_ERROR, message: 'Server entry disabled' });
+            const message = ServerConfig.getServerPasswordHash()
+                ? 'Server entry verifier unavailable. Restart the server with SERVER_PASSWORD set.'
+                : 'Server entry disabled';
+            return await sendSecureMessage(ws, { type: SignalType.AUTH_ERROR, message, code: 'SERVER_ENTRY_UNAVAILABLE' });
         }
 
         console.log('[GATEKEEPER] Executing VOPRF evaluation for entry request');
@@ -175,8 +180,8 @@ export class ServerGatekeeper {
      * Verify entry token
      */
     async verifyEntryToken(tokenData) {
-        const { token, nullifier, mac } = PrivacyPassHelpers.parseRedemptionRequest(tokenData);
-        const result = await this.ppServer.redeemToken(token, nullifier, mac);
+        const { token, nullifier, mac, tokenSecret } = PrivacyPassHelpers.parseRedemptionRequest(tokenData);
+        const result = await this.ppServer.redeemToken(token, nullifier, mac, tokenSecret, 'server-entry');
         return result.valid;
     }
 
@@ -184,14 +189,15 @@ export class ServerGatekeeper {
      * Explicitly initialize the gatekeeper shared record if plaintext is available
      */
     static async initializeExplicit(plaintextPassword) {
-        if (!plaintextPassword || this.#sharedRecord) return;
+        const secret = typeof plaintextPassword === 'string' ? plaintextPassword.trim() : '';
+        if (!secret || this.#sharedRecord) return;
 
         console.log('[GATEKEEPER] performing explicit initialization with plaintext...');
 
         this.#initializationPromise = (async () => {
             console.log('[GATEKEEPER] Initializing shared OPAQUE record with provided password...');
 
-            const passwordBytes = new TextEncoder().encode(plaintextPassword);
+            const passwordBytes = new TextEncoder().encode(secret);
             const oprfInput = hkdf(blake3, passwordBytes, new Uint8Array(0), new TextEncoder().encode('OPAQUE-OPRF-Input-v1'), 32);
 
             // OPRF Evaluation (Self)

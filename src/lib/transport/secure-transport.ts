@@ -6,7 +6,7 @@ import { SignalType } from '../types/signal-types';
 export type ConnectionState =
     | 'disconnected'    // No connection
     | 'connecting'      // Transport-level connection in progress
-    | 'handshaking'     // PQ + Noise handshake in progress
+    | 'handshaking'     // PQ Noise handshake in progress
     | 'connected'       // Fully established and encrypted
     | 'reconnecting'    // Temporarily disconnected, attempting recovery
     | 'failed';         // Unrecoverable error
@@ -17,8 +17,8 @@ export type StreamType =
     | SignalType.CALL_SIGNAL // 'call-signal'
     | SignalType.CHAT        // 'chat'
     | SignalType.SIGNAL      // 'signal'
-    | 'call-audio'           // Real-time audio (may be lossy)
-    | 'call-video'           // Real-time video (may be lossy)
+    | 'call-audio'           // in audio
+    | 'call-video'           // in video
     | 'call-screen'          // Screen sharing stream
     | 'file';                // Large file transfer
 
@@ -36,13 +36,14 @@ export interface PeerIdentity {
     readonly kyberPublicKey: Uint8Array;      // ML-KEM-1024 public key (1568 bytes)
     readonly dilithiumPublicKey: Uint8Array;  // ML-DSA-87 public key (2592 bytes)
     readonly x25519PublicKey: Uint8Array;     // X25519 public key (32 bytes)
+    readonly endpointUrl?: string;            // libp2p dial endpoint (tcp://host:port)
 }
 
 // Connection options
 export interface ConnectOptions {
     readonly peerIdentity: PeerIdentity;
     readonly timeout?: number;              // Connection timeout in ms (default: 30000)
-    readonly preferDirect?: boolean;        // Prefer direct connection over relay (default: true)
+    readonly preferDirect?: boolean;        // Prefer direct peer path (default: true)
     readonly onStateChange?: (state: ConnectionState) => void;
 }
 
@@ -90,7 +91,7 @@ export interface SecureConnection {
     readonly peerId: string;
     readonly peerIdentity: PeerIdentity;
     readonly state: ConnectionState;
-    readonly transport: 'quic' | 'relay' | 'unknown';
+    readonly transport: 'p2p' | 'unknown';
     readonly connectedAt: number | null;
     readonly lastActivity: number;
 
@@ -154,12 +155,10 @@ export interface SecureTransport {
 // Options for initializing the transport
 export interface TransportInitOptions {
     readonly localUsername: string;
-    readonly localRelayId?: string;
+    readonly localPeerId?: string;
     readonly kyberKeyPair: { publicKey: Uint8Array; secretKey: Uint8Array };
     readonly dilithiumKeyPair: { publicKey: Uint8Array; secretKey: Uint8Array };
     readonly x25519KeyPair: { publicKey: Uint8Array; secretKey: Uint8Array };
-    readonly relayServerUrl?: string;
-    readonly signalServerUrl?: string;
 }
 
 // Incoming message with metadata

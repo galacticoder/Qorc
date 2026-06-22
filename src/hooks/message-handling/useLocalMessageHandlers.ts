@@ -103,23 +103,31 @@ export function useLocalMessageHandlers({
 
       let secureDbSaveSucceeded = false;
       try {
-        if (secureDBRef.current && blobUrl) {
-          const controller = new AbortController();
-          const timeout = setTimeout(() => controller.abort(), 15_000);
-          try {
-            const resp = await fetch(blobUrl, { signal: controller.signal });
-            if (resp.ok) {
-              const fetchedBlob = await resp.blob();
-              if (fetchedBlob.size > 0 && fetchedBlob.size <= MAX_LOCAL_FILE_SIZE_BYTES) {
-                const saveResult = await secureDBRef.current.saveFile(fileId, fetchedBlob);
-                secureDbSaveSucceeded = Boolean(saveResult?.success);
-                if (!saveResult.success && saveResult.quotaExceeded) {
-                  toast.warning('Storage limit reached. This file will not persist after restart.', { duration: 5000 });
+        if (secureDBRef.current) {
+          if (detail.fileBlob instanceof Blob) {
+            const saveResult = await secureDBRef.current.saveFile(fileId, detail.fileBlob);
+            secureDbSaveSucceeded = Boolean(saveResult?.success);
+            if (!saveResult.success && saveResult.quotaExceeded) {
+              toast.warning('Storage limit reached. This file will not save after restart.', { duration: 5000 });
+            }
+          } else if (blobUrl) {
+            const controller = new AbortController();
+            const timeout = setTimeout(() => controller.abort(), 15_000);
+            try {
+              const resp = await fetch(blobUrl, { signal: controller.signal });
+              if (resp.ok) {
+                const fetchedBlob = await resp.blob();
+                if (fetchedBlob.size > 0 && fetchedBlob.size <= MAX_LOCAL_FILE_SIZE_BYTES) {
+                  const saveResult = await secureDBRef.current.saveFile(fileId, fetchedBlob);
+                  secureDbSaveSucceeded = Boolean(saveResult?.success);
+                  if (!saveResult.success && saveResult.quotaExceeded) {
+                    toast.warning('Storage limit reached. This file will not persist after restart.', { duration: 5000 });
+                  }
                 }
               }
+            } finally {
+              clearTimeout(timeout);
             }
-          } finally {
-            clearTimeout(timeout);
           }
         }
       } catch { }

@@ -32,8 +32,7 @@ const CallLogItem: React.FC<CallLogItemProps> = React.memo(({
     onDelete
 }) => {
     const displayName = useDisplayUsername({
-        username: log.peerUsername,
-        fallbackToOriginal: true
+        username: log.peerUsername
     });
 
     const [isBlocked, setIsBlocked] = useState<boolean>(false);
@@ -195,7 +194,7 @@ export const CallLogs = React.memo<CallLogsProps>(({ getDisplayUsername }) => {
     }, [logs, searchQuery, usernameMap]);
 
     return (
-        <div className="flex flex-col h-full relative" style={{ backgroundColor: 'var(--chat-background)' }}>
+        <div className="flex flex-col h-full relative" style={{ backgroundColor: 'var(--qor-chat-bg)' }}>
             <div className="absolute top-0 left-0 right-0 z-10 p-6 space-y-4 bg-gradient-to-b from-background via-background/80 to-transparent">
                 <div className="flex items-center gap-2">
                     <div className="relative flex-1">

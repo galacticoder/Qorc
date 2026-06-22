@@ -113,7 +113,6 @@ if (USING_CLUSTER) {
                 password: process.env.REDIS_PASSWORD
             }
         });
-        clusterClient.on('connect', () => cryptoLogger.debug('Redis cluster client connected'));
         clusterClient.on('ready', () => cryptoLogger.info('Redis cluster client ready'));
         clusterClient.on('error', (error) => logRedisError('Redis cluster error', error));
     } catch (e) {
@@ -134,8 +133,6 @@ const factory = {
         });
 
         client.on('error', (error) => logRedisError('Redis client error', error));
-        client.on('connect', () => cryptoLogger.debug('Redis pool client connected'));
-        client.on('ready', () => cryptoLogger.debug('Redis pool client ready'));
         client.on('close', () => cryptoLogger.warn('Redis client closed'));
         client.on('reconnecting', () => cryptoLogger.warn('Redis client reconnecting'));
 
@@ -228,7 +225,6 @@ export async function createSubscriber() {
     });
 
     sub.on('error', (error) => logRedisError('Redis subscriber error', error));
-    sub.on('ready', () => cryptoLogger.debug('Redis subscriber ready'));
     sub.on('close', () => cryptoLogger.warn('Redis subscriber closed'));
 
     await new Promise((resolve, reject) => {

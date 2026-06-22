@@ -4,8 +4,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use aes_gcm::{
-    aead::{Aead, KeyInit},
     Aes256Gcm, Nonce as AesNonce,
+    aead::{Aead, KeyInit},
 };
 use blake3::Hasher as Blake3Hasher;
 use chacha20poly1305::{XChaCha20Poly1305, XNonce};
@@ -38,7 +38,7 @@ impl SecureStorage {
         let store_dir = config_dir.join("secure-store");
         let master_key_path = config_dir.join("master.key");
 
-        // Ensure directories exist with secure permissions
+        // check directories exist with secure permissions
         file::ensure_dir(&config_dir, 0o700).await?;
         file::ensure_dir(&store_dir, 0o700).await?;
 
@@ -137,8 +137,7 @@ impl SecureStorage {
         // Generate random nonce
         let nonce = crate::crypto::random::random_bytes(NONCE_SIZE);
         let aes_nonce: &[u8; AES_NONCE_SIZE] = nonce[..AES_NONCE_SIZE].try_into().unwrap();
-        let xchacha_nonce: &[u8; XCHACHA_NONCE_SIZE] =
-            nonce[AES_NONCE_SIZE..].try_into().unwrap();
+        let xchacha_nonce: &[u8; XCHACHA_NONCE_SIZE] = nonce[AES_NONCE_SIZE..].try_into().unwrap();
 
         // Build AAD for each layer
         let mut aad1 = Vec::with_capacity(8 + XCHACHA_NONCE_SIZE);
@@ -155,7 +154,13 @@ impl SecureStorage {
 
         let aes_nonce_obj = AesNonce::from_slice(aes_nonce);
         let layer1_ciphertext = aes_cipher
-            .encrypt(aes_nonce_obj, aes_gcm::aead::Payload { msg: value, aad: &aad1 })
+            .encrypt(
+                aes_nonce_obj,
+                aes_gcm::aead::Payload {
+                    msg: value,
+                    aad: &aad1,
+                },
+            )
             .map_err(|_| QorError::EncryptionFailed("AES-GCM encryption failed".to_string()))?;
 
         // XChaCha20-Poly1305 encryption
@@ -187,7 +192,7 @@ impl SecureStorage {
         file_data.extend_from_slice(&layer2_ciphertext);
         file_data.extend_from_slice(&mac);
 
-        // Write 
+        // Write
         let file_path = self.file_path_for_key(key);
         file::atomic_write(&file_path, &file_data, 0o600).await?;
 

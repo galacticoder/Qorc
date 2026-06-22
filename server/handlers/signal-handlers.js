@@ -5,22 +5,19 @@
 export {
   handleBlindRoute,
   handleClaimInbox,
-  handleRotateInbox,
-  handleOwnershipProof
+  handleRotateInbox
 } from './inbox-handlers.js';
 
 export {
-  handleStoreOfflineMessage,
-  handleRetrieveOfflineMessages
-} from './offline-handlers.js';
-
-export {
   handleBlockListSync,
-  handleRetrieveBlockList,
-  handleBlockTokensUpdate
+  handleRetrieveBlockList
 } from './blocking-handlers.js';
 
 export {
-  handleHybridKeysUpdate,
   handleRateLimitStatus
 } from './key-handlers.js';
+
+export {
+  handlePirManifestRequest,
+  handlePirQuery
+} from './pir-handlers.js';

@@ -12,6 +12,8 @@ export interface UseSecureDBReturn {
   users: User[];
   setUsers: React.Dispatch<React.SetStateAction<User[]>>;
   dbInitialized: boolean;
+  dbInitError: string | null;
+  retryInitializeDB: () => void;
   secureDBRef: React.RefObject<any>;
   saveMessageToLocalDB: (message: Message, activeConversationPeer?: string) => Promise<void>;
   loadMoreConversationMessages: (peerUsername: string, currentOffset: number, limit?: number) => Promise<Message[]>;
@@ -22,7 +24,6 @@ export interface UseSecureDBReturn {
 export interface UseUnifiedUsernameDisplayProps {
   username: string;
   getDisplayUsername?: (username: string) => Promise<string>;
-  fallbackToOriginal?: boolean;
   originalUsername?: string;
   resolveTimeoutMs?: number;
 }
@@ -39,7 +40,6 @@ export interface UseUnifiedUsernameDisplayReturn {
 export interface UsernameDisplayProps {
   username: string;
   getDisplayUsername?: (username: string) => Promise<string>;
-  fallbackToOriginal?: boolean;
   className?: string;
   loadingText?: string;
   errorText?: string;
@@ -75,6 +75,7 @@ export interface EncryptedKeyData {
   kyberPublicBase64: string;
   dilithiumPublicBase64: string;
   x25519PublicBase64: string;
+  accountRootPublicBase64: string;
   salt: string;
   version: number;
   argon2Params: {
@@ -103,9 +104,13 @@ export interface DecryptedKeys {
     publicKeyBase64: string;
     private: Uint8Array;
   };
+  accountRoot: {
+    publicKeyBase64: string;
+    secretKey: Uint8Array;
+  };
 }
 
-// SecureDB --
+// SecureDB
 export interface EphemeralConfig {
   enabled: boolean;
   defaultTTL: number;
@@ -138,6 +143,8 @@ export interface ConversationMetadata {
   lastMessage: StoredMessage;
   unreadCount: number;
   lastReadTimestamp: number;
+  isPinned?: boolean;
+  pinnedAt?: number;
 }
 
 export type PostQuantumAEADLike = {

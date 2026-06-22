@@ -80,19 +80,37 @@ export interface PreKeyBundle {
     pqKyber: PQKyberPreKey | null;
 }
 
-export interface EncryptedMessage {
-    signal_message: string;
-    message_type: number;
-    kem_ciphertext: string;
-    salt: string;
+export interface PQEnvelopeAlgorithms {
+    kem: string;
+    kdf: string;
+    aead: string;
+    mac: string;
+}
+
+export interface PQEnvelope {
+    version: string;
+    algorithms: PQEnvelopeAlgorithms;
+    pqKeyId: number;
+    kemCiphertext: string;
     nonce: string;
     ciphertext: string;
     tag: string;
+    mac: string;
     aad: string;
-    sender: string;
-    recipient: string;
-    their_kem_fingerprint: string;
-    registrationId?: number;
+    salt: string;
+}
+
+export interface EncryptedMessage {
+    messageType: number;
+    ciphertext: string;
+    registrationId?: number | null;
+    senderDeviceId?: number | null;
+    recipientDeviceId?: number | null;
+    pqEnvelope: PQEnvelope;
+    message_type?: number;
+    sender_device_id?: number | null;
+    recipient_device_id?: number | null;
+    pq_envelope?: PQEnvelope;
 }
 
 export interface DecryptResult {
@@ -126,6 +144,17 @@ export interface PlatformInfo {
     arch: string;
     version: string;
     hostname: string;
+}
+
+export interface PirRecordQueryResult {
+    success: boolean;
+    request: string;
+    handle: string;
+}
+
+export interface PirRecordRecoverResult {
+    success: boolean;
+    record: string;
 }
 
 // ============================================
@@ -224,17 +253,49 @@ export const websocket = {
 };
 
 // ============================================
-// P2P Signaling
+// P2P Transport
 // ============================================
 
 export const p2p = {
-    connect: (connectionId: string, serverUrl: string, options?: { username?: string; registrationPayload?: unknown }) =>
-        invoke<{ success: boolean; already_connected?: boolean; error?: string }>('p2p_signaling_connect', { connectionId, serverUrl, options }),
-    disconnect: (connectionId: string) => invoke<boolean>('p2p_signaling_disconnect', { connectionId }),
-    send: (connectionId: string, message: unknown) => invoke<{ success: boolean; error?: string }>('p2p_signaling_send', { connectionId, message }),
-    getStatus: () => invoke<{ activeConnections: number; connectionIds: string[]; torReady: boolean; backgroundMode: boolean }>('p2p_signaling_status'),
+    connect: (connectionId: string, endpointUrl: string) =>
+        invoke<{ success: boolean; already_connected?: boolean; error?: string }>('p2p_connect', { connectionId, endpointUrl }),
+    disconnect: (connectionId: string) => invoke<boolean>('p2p_disconnect', { connectionId }),
+    send: (connectionId: string, message: unknown) => invoke<{ success: boolean; error?: string }>('p2p_send', { connectionId, message }),
+    getLocalEndpoint: () => invoke<string | null>('p2p_local_endpoint'),
+    getStatus: () => invoke<{ activeConnections: number; connectionIds: string[]; localEndpoint?: string; torReady: boolean; backgroundMode: boolean }>('p2p_status'),
     setBackgroundMode: (enabled: boolean) => invoke<boolean>('p2p_set_background_mode', { enabled }),
-    setTorReady: (ready: boolean, socksPort?: number) => invoke<boolean>('p2p_set_tor_ready', { ready, socksPort }),
+};
+
+// ============================================
+// Local PIR Client
+// ============================================
+
+export const pir = {
+    queryRecord: (args: {
+        parameterId: string;
+        recordCount: number;
+        recordSize: number;
+        publicParams: string;
+        index: number;
+    }) => invoke<PirRecordQueryResult>('pir_query_record', args),
+    recoverRecord: (handle: string, response: string) =>
+        invoke<PirRecordRecoverResult>('pir_recover_record', { handle, response }),
+    queryFetch: (epochId: string, query: string) =>
+        invoke<{ ok?: boolean; response?: string; proof?: string; recordDigest?: string; error?: string }>(
+            'pir_query_fetch', { epochId, query }
+        ),
+    discoveryApiFetch: (path: string, body: string) =>
+        invoke<any>('discovery_api_fetch', { path, body }),
+    ypirFetchBlob: (slot: number) =>
+        invoke<{ ok?: boolean; blob?: string; error?: string }>('ypir_fetch_blob', { slot }),
+};
+
+// ============================================
+// Offline-message spool
+// ============================================
+
+export const spool = {
+    fetchSnapshot: () => invoke<unknown>('fetch_spool_snapshot'),
 };
 
 // ============================================
@@ -272,6 +333,7 @@ export const system = {
     getPlatformInfo: () => invoke<PlatformInfo>('get_platform_info'),
     getPlatform: () => invoke<string>('get_platform'),
     getArch: () => invoke<string>('get_arch'),
+    getInstanceId: () => invoke<string>('get_instance_id'),
     openExternal: (url: string) => invoke<boolean>('open_external', { url }),
     getScreenSources: (options?: { types?: string[]; thumbnailSize?: { width: number; height: number } }) =>
         invoke<ScreenSource[]>('get_screen_sources', { options }),
@@ -298,11 +360,6 @@ export const power = {
 export const session = {
     getBackgroundState: () => invoke<{ active: boolean; last_activity: number | null; pending_messages: number }>('session_get_background_state'),
     setBackgroundState: (active: boolean) => invoke<boolean>('session_set_background_state', { active }),
-    storePQKeys: (keys: { session_id: string; aes_key: string; mac_key: string; created_at: number }) =>
-        invoke<boolean>('session_store_pq_keys', { keys }),
-    getPQKeys: (sessionId: string) =>
-        invoke<{ session_id: string; aes_key: string; mac_key: string; created_at: number } | null>('session_get_pq_keys', { sessionId }),
-    deletePQKeys: (sessionId: string) => invoke<boolean>('session_delete_pq_keys', { sessionId }),
     updatePendingCount: (count: number) => invoke<boolean>('session_update_pending_count', { count }),
 };
 
@@ -337,6 +394,7 @@ export const database = {
     scanSecure: (prefix: string) => invoke<[string, string, number[]][]>('db_scan_secure', { prefix }).then(v => v.map(([s, k, bytes]) => [s, k, new Uint8Array(bytes)] as [string, string, Uint8Array])),
     delete: (store: string, key: string) => invoke<boolean>('db_delete', { store, key }),
     clearStore: (store: string) => invoke<boolean>('db_clear_store', { store }),
+    compact: () => invoke<boolean>('db_compact'),
 };
 
 // ============================================

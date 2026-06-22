@@ -15,6 +15,7 @@ export interface FileInfo {
 export interface MessageReceipt {
   delivered: boolean;
   read: boolean;
+  sending?: boolean;
   deliveredAt?: Date;
   readAt?: Date;
 }

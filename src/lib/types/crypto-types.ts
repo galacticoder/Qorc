@@ -66,7 +66,7 @@ export interface InnerEnvelope {
 export interface HybridEnvelope {
   version: string;
   routing: RoutingHeader;
-  routingSignature: { algorithm: 'dilithium3'; signature: string };
+  routingSignature: { algorithm: 'ML-DSA-87'; signature: string };
   algorithms: { outer: string; inner: string; aead: string; mac: string };
   kemCiphertext: string;
   outer: HybridOuterLayer;
@@ -124,6 +124,8 @@ export interface EncryptedMessagePayload {
 export type WorkerRequestType =
   | 'kem.generateKeyPair'
   | 'kem.destroyKey'
+  | 'kem.encapsulate'
+  | 'kem.decapsulate'
   | 'sig.generateKeyPair'
   | 'sig.sign'
   | 'sig.verify'
@@ -136,7 +138,9 @@ export type WorkerRequestType =
   | 'opaque.startOTLogin'
   | 'opaque.finishOTLogin'
   | 'argon2.hash'
-  | 'argon2.verify';
+  | 'argon2.verify'
+  | 'aead.encrypt'
+  | 'aead.decrypt';
 
 export interface WorkerRequestMessage {
   id: string;
@@ -147,8 +151,10 @@ export interface WorkerRequestMessage {
   message?: Uint8Array;
   secretKey?: Uint8Array;
   publicKey?: Uint8Array;
+  ciphertext?: Uint8Array;
   signature?: Uint8Array;
   count?: number;
+  purpose?: string;
   tokenSecrets?: any[];
   signedBlindedTokens?: Uint8Array[];
   proof?: Uint8Array;
@@ -163,6 +169,12 @@ export interface WorkerRequestMessage {
   otRecords?: { ct: Uint8Array; masked: Uint8Array }[];
   evaluatedElement?: Uint8Array;
   serverNonce?: Uint8Array;
+  plaintext?: Uint8Array;
+  key?: Uint8Array;
+  additionalData?: Uint8Array;
+  explicitNonce?: Uint8Array;
+  tag?: Uint8Array;
+  nonce?: Uint8Array;
 }
 
 export interface SessionRecord {

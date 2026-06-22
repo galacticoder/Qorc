@@ -6,6 +6,8 @@ npm-debug.log
 docs
 electron
 src
+server/config/tor/
+server/config/tor/**
 config/pnpm-lock.yaml
 config/*.ts
 config/*.js

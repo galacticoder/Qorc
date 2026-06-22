@@ -23,10 +23,13 @@ Code references:
 - Auth flows: `server/authentication/authentication.js`
 
 ### 1.2 Post-Quantum Oblivious Transfer (OT)
-Credential records are stored in shards of 100 records. Login retrieves a record via 1-out-of-100 OT using ML-KEM public keys. The server does not learn which record is fetched.
+Credential records are stored in shards of `PRIVATE_AUTH_SHARD_SIZE` records (default 2048). Login retrieves a record via 1-out-of-2048 OT using ML-KEM-1024 public keys. The server does not learn which record is fetched. The shard is the login anonymity set: the server only ever learns that *some* member of a shard authenticated, never which one (see §4).
+
+> **`shardId` is not a per-account identifier (`PRIVATE_AUTH_SHARD_COUNT = 1`).** All accounts live in a single shard, so the `shardId` named in every login request is the constant `0` — it carries no identity and cannot link logins. (Previously shards were assigned randomly over ~1M buckets, so each shard held ~one real account and `shardId` ≈ identity. Collapsing to one shard removed that leak. Capacity is therefore `PRIVATE_AUTH_SHARD_SIZE` accounts.) Planned next step: replace OT retrieval with **PIR**, which removes the `shardId` field entirely, drops the ~27 MB OT response, derives the record index from credentials (no stored `shard_info`), and scales past one shard — same login anonymity, better performance/scale.
 
 Code references:
 - OT login: `server/authentication/authentication.js` (`handleOTSignIn`)
+- Shard size: `server/crypto/opaque-service.js` (`OPAQUE_CONFIG.PRIVATE_AUTH_SHARD_SIZE`)
 
 ### 1.3 Privacy Pass (VOPRF)
 Privacy Pass is used for anonymous server entry and optional authentication rate limiting.
@@ -36,7 +39,7 @@ Code references:
 - Gatekeeper: `server/authentication/gatekeeper.js`
 
 ### 1.4 Blind Signatures (Unlinked Routing)
-Blind signatures allow a client to prove ownership of an inboxId without revealing it to the server when the signature is issued. The system uses RSABSSA-PSS (RSA blind signatures with PSS verification).
+Blind signatures allow a client to prove authorization for a rendezvous route without revealing the raw inbox secret to the server when the signature is issued. The client blinds the committed `routeId`, not the `inboxId`, and the server verifies the unblinded RSABSSA-PSS signature against that route commitment during `claim-inbox`.
 
 Code references:
 - RSA blinding: `src/lib/crypto/blind-credentials.ts`
@@ -44,6 +47,12 @@ Code references:
 
 ### 1.5 ZK Device Proof (Ring Signatures)
 Device proofs are LSAG ring signatures over Ed25519. Each device registers a ring public key once, then proves membership without revealing which key in the ring it controls.
+
+Hard requirements:
+- Minimum active ring size is 128.
+- Proof version must be `2`.
+- Key images must be valid, nonzero, and unused.
+- Device proof only means "authorized device". It must not become a sender identity.
 
 Code references:
 - Client proof: `src/lib/cryptography/zk-device-proof.ts`
@@ -57,12 +66,16 @@ Code references:
 |---|---|---|---|---|
 | Plaintext username | User input | Client only | Permanent | Never sent to server |
 | Blind user id | BLAKE3(username) | Client only | Permanent | Used for local lookup |
-| CredentialId | OPAQUE OPRF output | Account primary key | Permanent | Stored server-side |
+| CredentialId | OPAQUE OPRF output | Account record key | Permanent | Stored server-side as a derived lookup id. Sent to the server only once at registration, NEVER at login (login is shard-anonymized — see §4). At-rest only. Not linkable to any connection or login. |
 | SessionId | Random | Connection | Ephemeral | Stored in Redis |
-| InboxId | Derived from vault key | Routing | Rotates | Used for blind routing |
+| InboxId | `SHA-256(vault key, 6h epoch)` | Client secret / encrypted discovery | Rotates (per 6h epoch) | **Epoch-bound, not permanent.** It was previously a pure function of the vault key, so the first inbox claimed on every login was identical forever — a stable per-account value the server could link sessions by. It now folds a 6h rotation epoch (aligned with `DISCOVERY_EPOCH_DURATION_MS`) so the inbox and discovery token rotate together. Cross-session linkability via the inbox is bounded to one epoch. Still deterministic from `(vault key, epoch)`, so reconnect/recovery recompute it with no stored state. Not sent in active routing requests. |
+| RouteId | BLAKE3(inboxId, route domain) | Route ownership and bundle authorization | Rotates | Server-visible during claim/rotation, not active send destination. Inherits the inbox's epoch rotation plus in-session ~5-min rotation |
+| MailboxLookupId | BLAKE3(inboxId, mailbox domain) | Encrypted peer metadata / local validation | Rotates | Not accepted by active send, route claim, rotation, or global-spool PIR retrieval |
+| BundleLookupId | BLAKE3(inboxId, bundle domain) | Signal bundle storage | Rotates | Server-visible bundle commitment |
 
 Code references:
-- Vault inbox derivation: `src/lib/utils/auth-utils.ts` (`deriveInboxId`, `generateBlindCredential`)
+- Vault inbox derivation: `src/lib/cryptography/vault-key.ts` (`deriveInboxId(vaultKey, epoch)`, `currentInboxEpoch`, `INBOX_EPOCH_MS`). `src/lib/utils/auth-utils.ts` (`generateBlindCredential`)
+- Rendezvous derivation: `src/lib/transport/rendezvous-routing.ts`
 - Session state: `server/session/connection-state.js`
 
 ---
@@ -74,7 +87,7 @@ Client sends `auth-ot-register-request` with a blinded OPRF element and optional
 
 Server:
 - Evaluates OPRF.
-- Assigns the next shard/slot (100 records per shard).
+- Assigns the next shard/slot (`PRIVATE_AUTH_SHARD_SIZE` records per shard, default 2048). The slot is pre-allocated here, before `credentialId` is known, so `credentialId` is only the record key, not a placement input.
 - Returns `auth-ot-register-response` with `evaluatedElement`, `serverNonce`, `shardId`, and `slotIndex`.
 
 Code references:
@@ -100,43 +113,48 @@ Code references:
 ### Step 1: OT request
 Client sends `auth-ot-request` with:
 - `shardId`
-- `clientPubKeys` (100 ML-KEM public keys, one real and 99 decoys)
+- `clientPubKeys` (`PRIVATE_AUTH_SHARD_SIZE` ML-KEM-1024 public keys, default 2048: one real and the rest decoys)
 - `blindedElement` (OPAQUE login OPRF input)
 
 Server:
 - Loads the shard.
 - Evaluates the OPRF input.
-- Encrypts the 100 records with OT (`encryptShardForOT`).
-- Returns `auth-ot-response` with `otRecords`, `evaluatedElement`, and `serverNonce`.
+- Encrypts all shard records (default 2048) with OT (`encryptShardForOT`).
+- Generates a `serverNonce`, **binds it to this connection** (`ws._loginServerNonce`), and returns `auth-ot-response` with `otRecords`, `evaluatedElement`, and `serverNonce`.
 
 Code references:
 - Server: `server/authentication/authentication.js` (`handleOTSignIn`)
 
-### Step 2: OPAQUE finalize
-Client decrypts its record, derives an `authProof`, and sends `auth-ot-finalize` with `credentialId` and `authProof`.
+### Step 2: OPAQUE finalize (shard-anonymized, no per-account identifier)
+Client decrypts its record, derives an `authProof`, and sends `auth-ot-finalize` with `shardId` and `authProof`. It does **not** send `credentialId`.
 
 Server:
-- Verifies the OPAQUE proof.
-- Issues an anonymous session token.
-- Optionally issues blind routing credentials if a `blindedToken` is provided.
+- Consumes the connection-bound `serverNonce` issued in Step 1 (**one-time**. Cleared immediately) and verifies the proof against it. A replayed finalize, or a captured `(authProof, serverNonce)` pair on a new connection, finds no nonce and is rejected. One OT request backs at most one finalize attempt (no online brute-force amplification).
+- Verifies the proof against **every record in the shard** (`finishLoginAcrossShard`) with constant work and no early exit, so the response time does not leak which record matched. The server learns only that *a member of shard X* authenticated, never which account — preserving the full shard-sized (default 2048) anonymity set through finalize.
+- Issues blind routing credentials if a `blindedToken` is provided.
+
+The auth proof itself is a keyed-BLAKE3 MAC over a domain-separated transcript binding the `serverNonce`, keyed by material derived from the (password-gated) `maskedResponse` (`OPAQUE-Auth-Key-v2` / `OPAQUE-Auth-MAC-v2`). Client and server compute it byte-identically.
 
 Code references:
-- Server: `server/authentication/authentication.js` (`handleSignInFinalize`)
+- Server: `server/authentication/authentication.js` (`handleSignInFinalize`), `server/crypto/opaque-service.js` (`finishLoginAcrossShard`, `#computeAuthMac`)
+- Client: `src/lib/cryptography/crypto-ops.ts` (`OPAQUEOps.finishOTLogin`)
 
 ---
 
-## 5. Anonymous Session Tokens
+## 5. Anonymous Sessions and Unlinkable Autologin
 
-Anonymous session tokens are capability tokens issued after registration or login.
+A successful registration or login establishes an anonymous capability session (BLAKE3-MAC'd, no user identifiers). What is NOT done anymore: persist a single long-lived session token and replay it on every reconnect. Replaying one stable value — even an anonymous one — let the server link all of a client's reconnects for the token's lifetime.
 
-Format:
-- `version (1B) || nonce (24B) || timestamp (8B) || mac (32B)`
-- MAC uses BLAKE3 keyed with a server secret derived via HKDF.
-- No user identifiers are included.
+Unlinkable autologin instead:
+- At login, the client refills a small machine-bound pool of **one-time anonymous Privacy Pass tokens** (blind-signed, so the server can't link issuance to redemption. Each carries a unique nullifier so it can't be reused).
+- On reconnect/restart the client redeems a **fresh** token (`resumeRedemption` in `TOKEN_VALIDATION`). The server verifies it (`PrivacyPassServer.redeemToken`) and grants a new anonymous session for that connection only.
+- The server therefore sees unlinkable, single-use proofs — never a stable session identifier — while passwordless restart still works (the pool and the vault key live in machine-bound storage). The legacy replayable token is never persisted and is cleared on logout.
 
 Code references:
 - Token service: `server/authentication/anonymous-session-service.js`
-- Token validation: `server/server.js` (`TOKEN_VALIDATION`)
+- Resume pool: `src/lib/signals/resume-tokens.ts`, `src/lib/database/token-vault.ts` (`reserveResumeTokens`)
+- Validation/redemption: `server/server.js` (`TOKEN_VALIDATION`), `server/authentication/privacy-pass-server.js`
+- Privacy Pass: `docs/app/AUTHENTICATION.md` §1.3, `src/lib/cryptography/privacy-pass-client.ts`
 
 ---
 
@@ -161,11 +179,17 @@ Code references:
 Unlinked routing allows message delivery without account linkage.
 
 Flow:
-1. Client derives `inboxId` from its vault key (`deriveInboxId`).
-2. Client blinds the inboxId using the server blind signature public key metadata from `server-public-key`.
-3. Server signs the blinded message and returns `signedBlindedToken` plus a capability token and `blindSignatureKid`.
-4. Client unblinds the signature to obtain `blindSignature`.
-5. Client claims the inbox using `claim-inbox` with `capabilityToken`, `blindSignature`, and `blindSignatureKid`.
+1. Client derives the current-epoch `inboxId` from its vault key and the 6h rotation epoch (`deriveInboxId(vaultKey, currentInboxEpoch())`). Because the epoch is folded in, the first inbox claimed each login is no longer a permanent per-account handle (see §2). It stays recomputable from `(vault key, epoch)` so the reconnect/recovery path needs no stored route.
+2. Client derives `routeId = BLAKE3("qor-rendezvous-route-v1" || inboxId)`.
+3. Client blinds the `routeId` using the server blind signature public key metadata from `server-public-key`.
+4. Server signs the blinded message and returns `signedBlindedToken` plus a capability token and `blindSignatureKid`.
+5. Client unblinds the signature to obtain `blindSignature`.
+6. Client claims the route using `claim-inbox` with `routeId`, `bundleLookupId`, `blockListLookupId`, `capabilityToken`, `blindSignature`, and `blindSignatureKid`. `mailboxLookupId` is intentionally not accepted on this server-visible path.
+7. After claim success, the client rotates in-session route commitments on a jittered interval and republishes bundle/discovery material for the new commitments.
+
+The capability token is not an inbox ownership database. It is a short-lived, high-entropy session capability. Raw inbox IDs are not stored inside token claims, and the server has no raw-inbox registration or ownership-proof compatibility route.
+
+Quantum-hardening note: RSABSSA-PSS blind signatures are not treated as the only route-claim authority. A route claim also requires a valid capability token from the authenticated flow, so breaking or weakening the blind-signature layer alone is not enough to claim a route.
 
 Server public key shape:
 ```json
@@ -190,20 +214,22 @@ Server public key shape:
 
 Code references:
 - Inbox id derivation: `src/lib/utils/auth-utils.ts`
+- Route commitment derivation: `src/lib/transport/rendezvous-routing.ts`
 - Blind signature issuance: `server/authentication/authentication.js`
 - Claim inbox: `server/handlers/inbox-handlers.js`, `src/lib/transport/blind-routing-client.ts`
+- Route commitment rotation: `src/lib/transport/blind-routing-client.ts`, `server/routing/blind-router.js`
 
 ---
 
 ## 8. Linked vs Unlinked Routing
 
 Linked mode:
-- Server may set `ws._primaryInboxId` to the credentialId after login.
-- Useful for account-scoped operations but not for privacy-preserving routing.
+- Server-authenticated clients may claim a high-entropy route commitment without a blind signature when the authenticated PQ session is already authorized.
+- Active sends use the global mix stream and submit no raw inbox IDs, exact route IDs, mailbox lookups, or destination buckets.
 
 Unlinked mode:
-- Client claims a derived inboxId with blind signature.
-- Routing and bundle publish are keyed by inboxId without username linkage.
+- Client claims a derived route commitment with a blind signature over `routeId`.
+- Bundle publish and block-list sync are keyed by separate committed lookup IDs without username linkage. Active message sends and global-spool PIR retrieval reveal no destination selector.
 
 Code references:
 - Login finalize: `server/authentication/authentication.js` (`handleSignInFinalize`)
@@ -219,6 +245,8 @@ Flow:
 3. If the client ring key is not registered, it sends `zk-device-register` with its `ringPublicKey`.
 4. Client generates an LSAG ring signature proof over the challenge and sends `zk-device-proof`.
 5. Server verifies the ring signature and marks the device as proven for this session.
+
+If fewer than 128 active commitments are available, the server refuses to issue a challenge and clients refuse to generate a proof. This is deliberate: a tiny ring gives weak anonymity and is treated as unsafe.
 
 Proof fields:
 - `version`: `2`
@@ -236,10 +264,16 @@ Code references:
 ## 10. Cryptography and Security Details
 
 - OPAQUE records are stored as encrypted envelopes inside the user record.
-- OT uses ML-KEM-1024 to encrypt all shard entries for oblivious retrieval.
-- Session tokens use BLAKE3 MACs, not JWTs, to avoid metadata leakage.
+- OT uses ML-KEM-1024 to encrypt all shard entries for oblivious retrieval. The shard (default 2048) is the login anonymity set and is preserved through finalize (shard-wide verification, no `credentialId` on the wire).
+- The OPAQUE auth proof is a keyed-BLAKE3 MAC over a domain-separated transcript binding the `serverNonce` (`OPAQUE-Auth-Key-v2` / `OPAQUE-Auth-MAC-v2`), and the `serverNonce` is server-authoritative, connection-bound, and one-time (replay-resistant by construction).
+- The PQ WebSocket handshake uses an **ephemeral per-connection** client ML-DSA-87 signing key — it is never persisted, so the server gets no stable device fingerprint and cannot link a device's connections across time/accounts. It only authenticates messages within one session.
+- Autologin uses one-time anonymous Privacy Pass tokens (see §5), not a replayable session token.
+- Session/capability tokens use BLAKE3 MACs, not JWTs, to avoid metadata leakage.
 - Blind signatures use RSABSSA-PSS with a persisted server key pair and a key id (`kid`) for verification.
-- ZK device proofs use LSAG ring signatures over Ed25519 with key images to prevent double-use.
+- ZK device proofs use LSAG ring signatures over Ed25519 with a 128-device minimum anonymity set and key images to prevent double-use.
+
+Code references:
+- Ephemeral handshake signing key: `src/lib/websocket/handshake.ts` (`initializeSigningKeys`)
 
 Code references:
 - OPAQUE server: `server/crypto/opaque-service.js`

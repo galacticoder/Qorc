@@ -1,8 +1,8 @@
 import { RefObject } from "react";
 import { CryptoUtils } from "../../lib/utils/crypto-utils";
-import { retrieveOfflineMessages } from '../../lib/websocket/offline-message-handler';
 import type { HybridKeys } from "../../lib/types/auth-types";
 import { signal } from "../../lib/tauri-bindings";
+import { clearExplicitLogout } from "../../lib/auth/logout-marker";
 
 export interface AuthSuccessRefs {
   loginUsernameRef: RefObject<string>;
@@ -34,6 +34,8 @@ export const createHandleAuthSuccess = (
 ) => {
   return async (username: string, isRecovered = false) => {
     const displayName = refs.originalUsernameRef.current || username;
+
+    try { await clearExplicitLogout(); } catch { }
 
     if (isRecovered && !refs.passphrasePlaintextRef.current) {
       setters.setAuthStatus("Passphrase required");
@@ -67,53 +69,48 @@ export const createHandleAuthSuccess = (
     setTimeout(() => setters.setAuthStatus(""), 1000);
     setters.setLoginError("");
 
-    try {
-      const label = new TextEncoder().encode('signal-storage-key-v1');
-      let derived: Uint8Array | null = null;
+    void Promise.resolve().then(async () => {
       try {
-        const keys = await helpers.getKeysOnDemand?.();
-        const kyberSecret: Uint8Array | undefined = keys?.kyber?.secretKey;
-        if (kyberSecret && kyberSecret instanceof Uint8Array && kyberSecret.length > 0) {
-          derived = await (CryptoUtils as any).Hash.generateBlake3Mac(label, kyberSecret);
-        } else {
-          try {
-            const composite = helpers.deriveEffectivePassphrase();
-            const salt = new TextEncoder().encode('signal-storage-key-v1');
-            derived = await (CryptoUtils as any).KDF.argon2id(composite, {
-              salt,
-              time: 3,
-              memoryCost: 1 << 17,
-              parallelism: 2,
-              hashLen: 32
-            });
-          } catch { }
-        }
-        if (derived) {
-          const keyB64 = (CryptoUtils as any).Base64.arrayBufferToBase64(derived);
-          await signal.setStorageKey(keyB64);
-          if ((derived as any)?.fill) (derived as any).fill(0);
-        }
+        const label = new TextEncoder().encode('signal-storage-key-v1');
+        let derived: Uint8Array | null = null;
+        try {
+          const keys = await helpers.getKeysOnDemand?.();
+          const kyberSecret: Uint8Array | undefined = keys?.kyber?.secretKey;
+          if (kyberSecret && kyberSecret instanceof Uint8Array && kyberSecret.length > 0) {
+            derived = await (CryptoUtils as any).Hash.generateBlake3Mac(label, kyberSecret);
+          } else {
+            try {
+              const composite = helpers.deriveEffectivePassphrase();
+              const salt = new TextEncoder().encode('signal-storage-key-v1');
+              derived = await (CryptoUtils as any).KDF.argon2id(composite, {
+                salt,
+                time: 3,
+                memoryCost: 1 << 17,
+                parallelism: 2,
+                hashLen: 32
+              });
+            } catch { }
+          }
+          if (derived) {
+            const keyB64 = (CryptoUtils as any).Base64.arrayBufferToBase64(derived);
+            await signal.setStorageKey(keyB64);
+            if ((derived as any)?.fill) (derived as any).fill(0);
+          }
+        } catch { }
       } catch { }
-    } catch { }
 
-    try {
-      await signal.initStorage(username);
-    } catch { }
-
-    try { await new Promise(resolve => setTimeout(resolve, 0)); } catch { }
-
-    if (refs.keyManagerRef.current && refs.passphrasePlaintextRef.current) {
       try {
-        const effectivePassphrase = helpers.deriveEffectivePassphrase();
-        refs.keyManagerRef.current.initialize(effectivePassphrase).catch((_error: any) => {
-        });
+        await signal.initStorage(username);
       } catch { }
-    }
 
-    try { await new Promise(resolve => setTimeout(resolve, 0)); } catch { }
+      if (refs.keyManagerRef.current && refs.passphrasePlaintextRef.current) {
+        try {
+          const effectivePassphrase = helpers.deriveEffectivePassphrase();
+          refs.keyManagerRef.current.initialize(effectivePassphrase).catch((_error: any) => {
+          });
+        } catch { }
+      }
 
-    try {
-      retrieveOfflineMessages();
-    } catch { }
+    });
   };
 };

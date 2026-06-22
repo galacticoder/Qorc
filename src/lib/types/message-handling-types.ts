@@ -50,8 +50,16 @@ export interface ResolvedSenderKeys {
 }
 
 // Post-quantum envelope
+export interface PQEnvelopeAlgorithms {
+  kem: string;
+  kdf: string;
+  aead: string;
+  mac: string;
+}
+
 export interface PQEnvelope {
   version: string;
+  algorithms: PQEnvelopeAlgorithms;
   pqKeyId: number;
   kemCiphertext: string;
   nonce: string;

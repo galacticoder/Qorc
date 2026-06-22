@@ -8,10 +8,7 @@ interface TypingIndicatorProps {
 }
 
 export const TypingIndicator = memo(function TypingIndicator({ username, className }: TypingIndicatorProps) {
-  const displayName = useDisplayUsername({
-    username,
-    fallbackToOriginal: true
-  });
+  const displayName = useDisplayUsername({ username });
 
   return (
     <div className={cn("flex items-center gap-2 mb-2", className)} style={{ marginLeft: '50px' }} aria-live="polite" aria-atomic="true">

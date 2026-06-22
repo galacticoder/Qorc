@@ -1,0 +1,63 @@
+load("@rules_cc//cc:cc_binary.bzl", "cc_binary")
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+
+# Overlaid into a pinned checkout of github.com/google/hintless_pir as the
+# `//qor` package by workers/hintless/Dockerfile. Build with `-c opt` — the
+# lattice/NTT/RLWE code is 10-50x slower unoptimized (see hintless.lock.json).
+
+package(default_visibility = ["//visibility:public"])
+
+cc_library(
+    name = "qor_pir_common",
+    hdrs = ["qor_pir_common.h"],
+    deps = [
+        "//hintless_simplepir:parameters",
+        "//hintless_simplepir:serialization_cc_proto",
+        "//linpir:parameters",
+        "@com_github_google_shell-encryption//shell_encryption:serialization_cc_proto",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:statusor",
+        "@com_google_absl//absl/strings:string_view",
+    ],
+)
+
+cc_library(
+    name = "httplib",
+    hdrs = ["third_party/httplib.h"],
+    defines = ["CPPHTTPLIB_USE_POLL"],
+    includes = ["third_party"],
+    linkopts = ["-lpthread"],
+)
+
+cc_library(
+    name = "json",
+    hdrs = ["third_party/json.hpp"],
+    includes = ["third_party"],
+)
+
+cc_binary(
+    name = "qor_pir_worker",
+    srcs = ["qor_pir_worker.cc"],
+    deps = [
+        ":httplib",
+        ":json",
+        ":qor_pir_common",
+        "//hintless_simplepir:parameters",
+        "//hintless_simplepir:serialization_cc_proto",
+        "//hintless_simplepir:server",
+        "@com_google_absl//absl/status:statusor",
+    ],
+)
+
+cc_binary(
+    name = "qor_pir_client",
+    srcs = ["qor_pir_client.cc"],
+    deps = [
+        ":json",
+        ":qor_pir_common",
+        "//hintless_simplepir:client",
+        "//hintless_simplepir:parameters",
+        "//hintless_simplepir:serialization_cc_proto",
+        "@com_google_absl//absl/status:statusor",
+    ],
+)

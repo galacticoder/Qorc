@@ -5,7 +5,7 @@
     "identifier": "com.qor.chat",
     "build": {
         "frontendDist": "../dist",
-        "beforeBuildCommand": "npm run build"
+        "beforeBuildCommand": "pnpm run build"
     },
     "app": {
         "withGlobalTauri": false,
@@ -68,12 +68,13 @@
             "icons/icon.ico"
         ],
         "resources": [
-            "tor-bundles/**/*"
+            "binaries/qor-pir-client",
+            "binaries/ypir-client"
         ],
         "category": "SocialNetworking",
         "shortDescription": "Secure messaging with post-quantum cryptography",
         "longDescription": "Qor-Chat is a secure messaging application designed for maximum privacy and security, featuring end-to-end encryption with post-quantum cryptography, Signal Protocol, and Tor integration.",
-        "copyright": "Copyright © 2025 galacticoderr",
+        "copyright": "Copyright © 2026 galacticoderr",
         "linux": {
             "appimage": {
                 "bundleMediaFramework": true

@@ -58,17 +58,12 @@ export function useTokenValidation({
     }
     if (!setupComplete || !selectedServerUrl) return;
 
-    const trySend = async (reason: string, resetFirst: boolean) => {
+    const trySend = async (reason: string, forceResend: boolean) => {
       try {
         await websocketClient.connect();
       } catch { }
       try {
-        if (resetFirst && (websocketClient as any)?.resetSessionKeys) {
-          (websocketClient as any).resetSessionKeys(false);
-        }
-      } catch { }
-      try {
-        await websocketClient.attemptTokenValidationOnce?.(`ensure-${reason}`, resetFirst);
+        await websocketClient.attemptTokenValidationOnce?.(`ensure-${reason}`, forceResend);
       } catch { }
     };
 
@@ -81,7 +76,7 @@ export function useTokenValidation({
           state.attempts = 2;
           void trySend('retry', true);
         }
-      }, 8000);
+      }, 15000);
     }
 
     return () => {

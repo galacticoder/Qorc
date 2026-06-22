@@ -1,68 +1,21 @@
 /**
  * Secure Token Storage
- * Handles secure storage and retrieval of auth tokens
+ *
+ * Purges the legacy stable session-token store. A single long-lived session token, replayed on every
+ * reconnect, let the server link all of a client's reconnects — so it is gone. Autologin now uses a
+ * pool of one-time anonymous (Privacy Pass) tokens redeemed unlinkably instead (see ./resume-tokens).
+ * These helpers only clear any lingering legacy token so a plaintext token never persists.
  */
 
-import { BASE64_URLSAFE_REGEX, TOKEN_STORAGE_KEY_BASE } from '../constants';
+import { TOKEN_STORAGE_KEY_BASE } from '../constants';
 import { storage } from '../tauri-bindings';
 
 class SecureTokenStorage {
-  // Generate a unique key for each instance
   private static keyForInstance(): string {
     return `${TOKEN_STORAGE_KEY_BASE}:v3`;
   }
 
-  // Store anonymous session token
-  static async store(token: string): Promise<boolean> {
-    try {
-      const trimmedToken = typeof token === 'string' ? token.trim() : '';
-
-      if (!trimmedToken) {
-        return false;
-      }
-
-      if (!BASE64_URLSAFE_REGEX.test(trimmedToken)) {
-        return false;
-      }
-
-      await storage.init();
-      const key = this.keyForInstance();
-      const payload = JSON.stringify({ a: trimmedToken, t: Date.now() });
-
-      const ok = await storage.set(key, payload);
-      return !!ok;
-    } catch (_error) {
-      console.error('[tokens] store-failed', (_error as Error).message);
-      return false;
-    }
-  }
-
-  // Retrieve anonymous session token
-  static async retrieve(): Promise<string | null> {
-    try {
-      await storage.init();
-      const key = this.keyForInstance();
-      const raw = await storage.get(key);
-
-      if (!raw || typeof raw !== 'string') {
-        return null;
-      }
-
-      const parsed = JSON.parse(raw);
-      const token = typeof parsed?.a === 'string' ? parsed.a.trim() : '';
-
-      if (!token) {
-        return null;
-      }
-
-      return token;
-    } catch (_error) {
-      console.error('[tokens] retrieve-failed', (_error as Error).message);
-      return null;
-    }
-  }
-
-  // Clear tokens
+  // Clear any stored (legacy) token
   static async clear(): Promise<boolean> {
     try {
       await storage.init();
@@ -73,24 +26,6 @@ class SecureTokenStorage {
       return false;
     }
   }
-}
-
-/**
- * Persist anonymous session token
- */
-export async function persistAuthTokens(token: any): Promise<boolean> {
-  const tokenString = typeof token === 'string' ? token : null;
-  if (!tokenString) return false;
-  return await SecureTokenStorage.store(tokenString);
-}
-
-/**
- * Retrieve anonymous session token
- */
-export async function retrieveAuthTokens(): Promise<string | null> {
-  const token = await SecureTokenStorage.retrieve();
-  if (!token) return null;
-  return token;
 }
 
 /**

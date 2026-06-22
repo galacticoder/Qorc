@@ -51,13 +51,13 @@ export class PQNoiseSession {
     }
 
     // Encrypt message
-    encrypt(plaintext: Uint8Array, aad?: Uint8Array): Uint8Array {
-        const frame = this.session.encrypt(plaintext, aad);
+    async encrypt(plaintext: Uint8Array, aad?: Uint8Array): Promise<Uint8Array> {
+        const frame = await this.session.encrypt(plaintext, aad);
         return encodeFrame(frame.sequence, frame.ciphertext, frame.tag);
     }
 
     // Decrypt message
-    decrypt(data: Uint8Array, aad?: Uint8Array): Uint8Array {
+    async decrypt(data: Uint8Array, aad?: Uint8Array): Promise<Uint8Array> {
         const decoded = decodeFrame(data);
         const frame: EncryptedFrame = {
             sequence: decoded.sequence,
@@ -65,7 +65,7 @@ export class PQNoiseSession {
             nonce: new Uint8Array(36),
             tag: decoded.tag
         };
-        return this.session.decrypt(frame, aad);
+        return await this.session.decrypt(frame, aad);
     }
 
     // Rotate keys

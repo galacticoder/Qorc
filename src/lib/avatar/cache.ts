@@ -38,13 +38,22 @@ export async function cachePeerAvatar(
     username: string,
     data: string,
     mimeType: string,
-    hash: string
+    hash: string,
+    isDefault: boolean = false
 ): Promise<void> {
+    if (isDefault) {
+        const existing = state.avatarCache.get(username);
+        if (existing && existing.isDefault !== true) {
+            return;
+        }
+    }
+
     const cached: CachedAvatar = {
         data,
         hash,
         cachedAt: Date.now(),
-        expiresAt: Date.now() + AVATAR_CACHE_TTL_MS
+        expiresAt: Date.now() + AVATAR_CACHE_TTL_MS,
+        isDefault
     };
 
     state.avatarCache.set(username, cached);

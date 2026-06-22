@@ -73,9 +73,6 @@ const verifyRoutingHeader = async (header, signatureBase64, dilithiumPublicKey) 
   const message = textEncoder.encode(canonicalizeRoutingHeader(header));
   const signature = toUint8Array(signatureBase64, 'signature');
   const publicKey = toUint8Array(dilithiumPublicKey, 'dilithiumPublicKey');
-  if (process.env.COMPAT_DEBUG === 'true') {
-    console.log('[HELPERS][DEBUG] verify pk len', publicKey.length, 'sig len', signature.length, 'msg len', message.length);
-  }
   return ml_dsa87.verify(signature, message, publicKey);
 };
 

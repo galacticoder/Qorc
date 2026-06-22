@@ -179,12 +179,13 @@ export class PostQuantumUtils {
 
   static uint8ArrayToBase64(bytes: Uint8Array | ArrayBuffer | Buffer): string {
     bytes = PostQuantumUtils.asUint8Array(bytes);
-
-    let binary = '';
-    for (let i = 0; i < bytes.length; i++) {
-      binary += String.fromCharCode(bytes[i]);
+    const chunkSize = 0x8000;
+    const chunks: string[] = [];
+    for (let i = 0; i < bytes.length; i += chunkSize) {
+      const chunk = bytes.subarray(i, Math.min(i + chunkSize, bytes.length));
+      chunks.push(String.fromCharCode(...chunk));
     }
-    return btoa(binary);
+    return btoa(chunks.join(''));
   }
 
   static concatBytes(...arrays: Uint8Array[]): Uint8Array {

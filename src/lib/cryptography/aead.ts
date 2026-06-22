@@ -126,4 +126,41 @@ export class PostQuantumAEAD {
       PostQuantumUtils.clearMemory(macKey);
     }
   }
+
+  /**
+   * Async encrypt
+   */
+  static async encryptAsync(
+    plaintext: Uint8Array,
+    key: Uint8Array,
+    additionalData?: Uint8Array,
+    explicitNonce?: Uint8Array
+  ): Promise<{ ciphertext: Uint8Array; nonce: Uint8Array; tag: Uint8Array }> {
+    try {
+      const { PostQuantumWorker } = await import('./worker-bridge');
+      if (PostQuantumWorker.supportsWorkers()) {
+        return await PostQuantumWorker.aeadEncrypt(plaintext, key, additionalData, explicitNonce);
+      }
+    } catch { }
+    return PostQuantumAEAD.encrypt(plaintext, key, additionalData, explicitNonce);
+  }
+
+  /**
+   * Async decrypt
+   */
+  static async decryptAsync(
+    ciphertext: Uint8Array,
+    nonce: Uint8Array,
+    tag: Uint8Array,
+    key: Uint8Array,
+    additionalData?: Uint8Array
+  ): Promise<Uint8Array> {
+    try {
+      const { PostQuantumWorker } = await import('./worker-bridge');
+      if (PostQuantumWorker.supportsWorkers()) {
+        return await PostQuantumWorker.aeadDecrypt(ciphertext, nonce, tag, key, additionalData);
+      }
+    } catch { }
+    return PostQuantumAEAD.decrypt(ciphertext, nonce, tag, key, additionalData);
+  }
 }

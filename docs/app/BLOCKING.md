@@ -4,7 +4,7 @@
 
 Blocking is designed for the blind routing architecture and does not expose usernames to the server. The system has two layers:
 - Encrypted block list sync for UX and cross-device state.
-- Server-side enforcement via commitments derived from pseudonymous identity hashes.
+- Local send/receive enforcement after decrypting peer identity client-side.
 
 The server never stores plaintext usernames and cannot reconstruct a social graph.
 
@@ -14,32 +14,17 @@ The server never stores plaintext usernames and cannot reconstruct a social grap
 
 - No username-based blocking on the server.
 - Encrypted block lists remain opaque to the server.
-- Enforcement uses commitment hashes, not usernames.
-- Compatible with inbox-based routing.
+- Active blind routing does not require recipient or sender identity metadata for blocking.
+- Compatible with global-mix blind routing.
 
 ---
 
 ## 2. Identifiers Used
 
-### 2.1 InboxId
+### 2.1 BlockListLookupId
 - Used to store encrypted block list blobs.
+- Domain-separated commitment derived from the current inbox secret.
 - Ephemeral and rotated in the routing layer.
-
-### 2.2 Pseudonymous identity hash
-- Derived from username using `computeBlindUserId`.
-- Used as a stable, non-reversible identifier in block enforcement.
-
-Code references:
-- Hash derivation: `src/lib/blocking/crypto.ts`
-
-### 2.3 BlockCommitment
-- Server commitment: `blake2b512(BLOCK_SERVER_SECRET || blockerIdentityKeyHash || blockedIdentityKeyHash)`.
-- Not reversible without the server secret.
-
-Code references:
-- Commitment: `server/database/blocking-db.js` (`computeBlockCommitment`)
-
----
 
 ## 3. Encrypted Block List (Client)
 
@@ -63,7 +48,7 @@ Code references:
 ## 4. Server Storage (Encrypted Lists)
 
 Table: `user_block_lists`
-- `inboxId` (PK)
+- `inboxId` (PK column containing the committed `blockListLookupId`)
 - `encryptedBlockList`
 - `blockListHash`
 - `salt`
@@ -74,18 +59,33 @@ Code references:
 - Schema: `server/database/schema.js`
 - DB access: `server/database/blocking-db.js`
 
+The active sync path uses `blockListLookupId`, a domain-separated client commitment derived from the inbox secret during `claim-inbox`. The raw inbox ID is not sent for block-list sync, and the server DB layer exposes only lookup-ID sync methods on the active code path.
+
 ---
 
-## 5. Server Enforcement (Commitments)
+## 5. Enforcement
 
-When a message includes identity hashes in metadata, the server checks:
-- `BlockingDatabase.isBlocked(recipientHash, senderHash)`
-- `BlockingDatabase.isBlocked(senderHash, recipientHash)`
+Blocking is enforced entirely on the client, at two levels.
 
-If blocked, the server skips delivery and responds with a success placeholder.
+### 5.1 Content layer (display)
+- Outgoing sends check the local encrypted block list before sending.
+- Incoming messages are filtered after sealed-envelope, hybrid, and Signal decryption reveal the sender to the client.
+- The global-mix router needs no sender or recipient identity for this.
+
+### 5.2 Transport layer (P2P)
+Blocking a peer also **severs the live direct connection and refuses to re-form it**, so a blocked peer cannot keep a channel open or reach you over P2P at all:
+- `blockUser` dispatches a `USER_BLOCKED` event. The P2P service tears down the existing connection (`disconnectPeer`).
+- The acceptor (`onPeerConnected`) and receive (`onMessage`) paths reject a blocked peer at the transport boundary — a re-dial is closed before a session forms, and any inbound frame is dropped — gated by an authoritative, synchronous `blockingSystem.isBlockedSync()` check (the in-memory block list, no TTL).
+- Outbound `connectToPeer` to a blocked user is refused.
+
+On unblock, `unblockUser` dispatches `USER_UNBLOCKED`. The client immediately re-dials that peer so the first message after unblock isn't stuck on a cold connection.
+
+This preserves the blind-routing invariant — the server still needs no social-graph edge to route or drop a message — while making a block take effect immediately and completely on the direct channel.
 
 Code references:
-- Enforcement: `server/handlers/message-handlers.js`
+- Client content filter: `src/lib/blocking/blocking-system.ts`
+- P2P transport gate + disconnect: `src/lib/transport/secure-p2p-service.ts`
+- Instant reconnect on unblock: `src/pages/Index.tsx`
 
 ---
 
@@ -95,14 +95,13 @@ Signal types:
 - `block-list-sync`
 - `retrieve-block-list`
 - `block-list-response`
-- `block-tokens-update`
 
 ### 6.1 Block list sync
 Client sends:
 ```json
 { "type": "block-list-sync", "encryptedBlockList": "...", "blockListHash": "..." }
 ```
-Server stores by `ws._primaryInboxId`.
+Server stores by `ws._primaryBlockListLookupId`.
 
 Code references:
 - Handler: `server/handlers/blocking-handlers.js`
@@ -117,42 +116,24 @@ Server responds with `block-list-response`.
 Code references:
 - Handler: `server/handlers/blocking-handlers.js`
 
-### 6.3 Block tokens update
-Client sends per-change messages:
-```json
-{
-  "type": "block-tokens-update",
-  "action": "block"|"unblock",
-  "blockerIdentityKeyHash": "...",
-  "blockedIdentityKeyHash": "..."
-}
-```
-
-Code references:
-- Client send: `src/lib/blocking/blocking-system.ts`
-- Server handler: `server/handlers/blocking-handlers.js`
-
 ---
 
 ## 7. Cryptography and Security Notes
 
 - Block list encryption uses PQ AEAD with explicit AAD to prevent malleability.
-- Hashes are derived from usernames using BLAKE3 in the client auth utilities.
-- Block commitments are salted with a server secret to prevent offline enumeration.
+- The server does not receive per-contact block tokens, identity hashes, or sender/recipient edges for blind-route enforcement.
 
 Code references:
 - Block list crypto: `src/lib/blocking/crypto.ts`
-- Server secret: `server/database/core.js`
 
 ---
 
 ## 8. Implementation Reference
 
 ### Server-Side
-- `server/database/blocking-db.js`: commitments and tables
-- `server/handlers/blocking-handlers.js`: sync/retrieve/update
-- `server/handlers/message-handlers.js`: enforcement checks
+- `server/database/blocking-db.js`: encrypted block-list blob storage
+- `server/handlers/blocking-handlers.js`: sync/retrieve
 
 ### Client-Side
 - `src/lib/blocking/blocking-system.ts`: list management and sync
-- `src/lib/blocking/crypto.ts`: encryption and hash derivation
+- `src/lib/blocking/crypto.ts`: encryption and block-list integrity hash

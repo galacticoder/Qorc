@@ -23,7 +23,24 @@ export const initializeSecureDB = async (
 ): Promise<SecureDB> => {
   const rawKey = await crypto.subtle.exportKey('raw', aesKey);
   const keyB64 = CryptoUtils.Base64.arrayBufferToBase64(rawKey);
-  await database.init(username, keyB64);
+  let lastError: unknown = null;
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    try {
+      await database.init(username, keyB64);
+      lastError = null;
+      break;
+    } catch (error) {
+      lastError = error;
+      const message = error instanceof Error ? error.message : String(error);
+      if (!/disk I\/O|database is locked|busy|temporarily unavailable/i.test(message) || attempt === 3) {
+        throw error;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 150 * (attempt + 1)));
+    }
+  }
+  if (lastError) {
+    throw lastError;
+  }
 
   const db = new SecureDB(username);
   await db.initializeWithKey(aesKey);

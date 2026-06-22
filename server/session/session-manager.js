@@ -15,7 +15,6 @@ export function safeRefreshSession(sessionId) {
     ConnectionStateManager.refreshSession(sessionId);
   } catch (error) {
     cryptoLogger.error('[SESSION] Error refreshing session', {
-      sessionId: sessionId?.slice(0, 8) + '...',
       error: error?.message
     });
   }

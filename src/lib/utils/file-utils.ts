@@ -244,3 +244,71 @@ export const validateAndDecodeBase64 = (input: string | null | undefined): Uint8
     return null;
   }
 };
+
+// Strips EXIF and other metadata from image by redrawing it on a canvas. converts image to WebP format
+export async function stripImageMetadata(file: File): Promise<File> {
+  if (!file.type.startsWith('image/') || file.type === 'image/gif' || file.type === 'image/svg+xml') {
+    return file;
+  }
+
+  return new Promise((resolve) => {
+    const img = new Image();
+    const objectUrl = URL.createObjectURL(file);
+
+    img.onload = () => {
+      try {
+        const MAX_CANVAS_DIMENSION = 8192;
+        let width = img.width;
+        let height = img.height;
+
+        if (width > MAX_CANVAS_DIMENSION || height > MAX_CANVAS_DIMENSION) {
+            if (width > height) {
+                height = Math.round((height * MAX_CANVAS_DIMENSION) / width);
+                width = MAX_CANVAS_DIMENSION;
+            } else {
+                width = Math.round((width * MAX_CANVAS_DIMENSION) / height);
+                height = MAX_CANVAS_DIMENSION;
+            }
+        }
+
+        const canvas = document.createElement('canvas');
+        canvas.width = width;
+        canvas.height = height;
+
+        const ctx = canvas.getContext('2d');
+        if (!ctx) {
+          URL.revokeObjectURL(objectUrl);
+          resolve(file); 
+          return;
+        }
+
+        ctx.drawImage(img, 0, 0, width, height);
+
+        canvas.toBlob((blob) => {
+          URL.revokeObjectURL(objectUrl);
+          if (blob) {
+            const newFilename = file.name.replace(/\.[^/.]+$/, "") + ".webp";
+            const newFile = new File([blob], newFilename, {
+              type: 'image/webp',
+              lastModified: Date.now(),
+            });
+            resolve(newFile);
+          } else {
+            resolve(file); 
+          }
+        }, 'image/webp', 0.92);
+      } catch (e) {
+        console.error('Failed to strip EXIF data:', e);
+        URL.revokeObjectURL(objectUrl);
+        resolve(file); 
+      }
+    };
+
+    img.onerror = () => {
+      URL.revokeObjectURL(objectUrl);
+      resolve(file); 
+    };
+
+    img.src = objectUrl;
+  });
+}

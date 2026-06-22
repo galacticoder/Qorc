@@ -1,8 +1,8 @@
 //! Link Commands
 
-use tauri::State;
-use serde::{Deserialize, Serialize};
 use crate::state::AppState;
+use serde::{Deserialize, Serialize};
+use tauri::State;
 
 /// Link preview data
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -25,43 +25,51 @@ pub async fn link_fetch_preview(
     if !url.starts_with("http://") && !url.starts_with("https://") {
         return Err("Invalid URL protocol".to_string());
     }
-    
+
     // Get Tor SOCKS port from state
-    let tor = state.tor_manager()
+    let tor = state
+        .tor_manager()
         .ok_or_else(|| "Tor manager not initialized".to_string())?;
-    
+
     if !tor.is_running() {
         return Err("Tor not running".to_string());
     }
-    
+
     let socks_port = tor.get_socks_port();
-    
+
     // Create client with SOCKS5 proxy
     let client = reqwest::Client::builder()
-        .proxy(reqwest::Proxy::all(format!("socks5://127.0.0.1:{}", socks_port))
-            .map_err(|e| format!("Proxy error: {}", e))?)
+        .proxy(
+            reqwest::Proxy::all(format!("socks5://127.0.0.1:{}", socks_port))
+                .map_err(|e| format!("Proxy error: {}", e))?,
+        )
         .timeout(std::time::Duration::from_secs(15))
         .user_agent("Mozilla/5.0 (compatible; LinkPreview/1.0)")
         .build()
         .map_err(|e| format!("Client error: {}", e))?;
-    
+
     // Fetch the page
-    let response = client.get(&url).send().await
+    let response = client
+        .get(&url)
+        .send()
+        .await
         .map_err(|e| format!("Request failed: {}", e))?;
-    
-    let html = response.text().await
+
+    let html = response
+        .text()
+        .await
         .map_err(|e| format!("Failed to read response: {}", e))?;
-    
+
     // Parse Open Graph and meta tags
     let preview = parse_link_preview(&url, &html);
-    
+
     Ok(preview)
 }
 
 /// Parse Open Graph and meta tags from HTML
 fn parse_link_preview(url: &str, html: &str) -> LinkPreview {
     let document = scraper::Html::parse_document(html);
-    
+
     let mut preview = LinkPreview {
         url: url.to_string(),
         title: None,
@@ -78,7 +86,7 @@ fn parse_link_preview(url: &str, html: &str) -> LinkPreview {
         } else {
             format!("meta[name='{}']", property)
         };
-        
+
         if let Ok(selector) = scraper::Selector::parse(&selector_str) {
             if let Some(element) = document.select(&selector).next() {
                 return element.value().attr("content").map(|s| s.to_string());
