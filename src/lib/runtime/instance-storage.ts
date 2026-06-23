@@ -70,19 +70,11 @@ export async function instanceLocalStorageKey(key: string): Promise<string> {
   return `${STORAGE_PREFIX}:instance:${await getAppInstanceId()}:${key}`;
 }
 
-export function instanceLocalStorageKeySync(key: string): string {
-  return `${STORAGE_PREFIX}:instance:${getCachedInstanceId()}:${key}`;
-}
-
 export async function getInstanceLocalStorageItem(key: string): Promise<string | null> {
   return localStorage.getItem(await instanceLocalStorageKey(key));
 }
 
 export async function setInstanceLocalStorageItem(key: string, value: string): Promise<void> {
   localStorage.setItem(await instanceLocalStorageKey(key), value);
-}
-
-export async function removeInstanceLocalStorageItem(key: string): Promise<void> {
-  localStorage.removeItem(await instanceLocalStorageKey(key));
 }
 

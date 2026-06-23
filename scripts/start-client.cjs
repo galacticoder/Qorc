@@ -10,6 +10,7 @@ const { spawn, execSync } = require('child_process');
 
 const repoRoot = path.resolve(__dirname, '..');
 function logErr(...args) { console.error('[CLIENT]', ...args); }
+const tauriDir = path.join(repoRoot, 'src-tauri');
 
 if (process.argv.slice(2).some(arg => arg === '-h' || arg === '--help')) {
     console.log('Usage: node start-client.cjs [--run-only] - Starts Qor-Chat client (Tauri)');
@@ -91,8 +92,8 @@ if (!fs.existsSync(nodeModulesPath)) {
 }
 
 function launchApp() {
-    const binName = process.platform === 'win32' ? 'qor-chat.exe' : 'qor-chat';
-    const runPath = path.join(repoRoot, 'src-tauri', 'target', 'release', binName);
+    const binName = getTauriBinaryName();
+    const runPath = path.join(tauriDir, 'target', 'release', binName);
 
     if (!fs.existsSync(runPath)) {
         logErr('Built Tauri binary not found. Expected at:', runPath);
@@ -124,6 +125,33 @@ function launchApp() {
     });
 }
 
+function getTauriBinaryName() {
+    try {
+        const metadata = JSON.parse(execSync('cargo metadata --format-version 1 --no-deps', {
+            cwd: tauriDir,
+            encoding: 'utf8',
+            stdio: ['ignore', 'pipe', 'ignore']
+        }));
+        const rootPackage = metadata.packages?.find(pkg => pkg.manifest_path === path.join(tauriDir, 'Cargo.toml'));
+        const binTarget = rootPackage?.targets?.find(target => target.kind?.includes('bin'));
+        if (binTarget?.name) {
+            return process.platform === 'win32' ? `${binTarget.name}.exe` : binTarget.name;
+        }
+    } catch { }
+
+    return process.platform === 'win32' ? 'qor.exe' : 'qor';
+}
+
+function removeOldBundleArtifacts() {
+    const bundleDir = path.join(tauriDir, 'target', 'release', 'bundle');
+    try {
+        fs.rmSync(bundleDir, { recursive: true, force: true });
+    } catch (error) {
+        logErr('Failed to clear old Tauri bundle artifacts:', error.message);
+        process.exit(1);
+    }
+}
+
 if (runOnly) {
     console.log('[CLIENT] --run-only: skipping rebuild, launching existing binary.');
     launchApp();
@@ -142,6 +170,7 @@ if (runOnly) {
     }
 
     console.log('[CLIENT] Building Tauri app...');
+    removeOldBundleArtifacts();
     const buildProc = spawn('pnpm tauri build', {
         stdio: 'inherit',
         cwd: repoRoot,

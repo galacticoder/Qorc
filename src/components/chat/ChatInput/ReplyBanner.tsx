@@ -12,15 +12,6 @@ interface ReplyBannerProps {
   readonly getDisplayUsername?: (username: string) => Promise<string>;
 }
 
-export interface ReplyMessage {
-  sender: string;
-  content: string;
-  filename?: string;
-  mimeType?: string;
-  type?: string;
-  id?: string;
-}
-
 const isVoiceNote = (message: Message): boolean => {
   return Boolean(
     (message.filename && message.filename.toLowerCase().includes('voice-note')) ||
@@ -51,7 +42,6 @@ export function ReplyBanner({ replyTo, onCancelReply, getDisplayUsername }: Repl
         .catch(() => setDisplaySender(sanitizeDisplayName(replyTo.sender)));
     }
   }, [replyTo.sender, getDisplayUsername]);
-
 
   const isImageMsg = useMemo(() => isImage(replyTo), [replyTo]);
   const isVideoMsg = useMemo(() => isVideo(replyTo), [replyTo]);

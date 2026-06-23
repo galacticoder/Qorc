@@ -1044,6 +1044,3 @@ export class SecureP2PService {
     }
 }
 
-export function createSecureP2PService(username: string): SecureP2PService {
-    return new SecureP2PService(username);
-}

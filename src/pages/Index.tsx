@@ -47,7 +47,7 @@ import { useRateLimiter } from "../hooks/useRateLimiter";
 import { useLocalMessageHandlers } from "../hooks/message-handling/useLocalMessageHandlers";
 import { useP2PSignalHandlers } from "../hooks/p2p/useP2PSignalHandlers";
 import { useEventHandlers } from "../hooks/useEventHandlers";
-import { Toaster } from 'sonner';
+import { Toaster, toast } from 'sonner';
 import { TorIndicator } from "../components/ui/TorIndicator";
 import { Button } from "../components/ui/button";
 import { ComposeIcon } from "../components/chat/assets/icons";
@@ -180,7 +180,6 @@ const ChatApp: React.FC = () => {
             return [...prev, {
               id: crypto.randomUUID(),
               username: peer,
-              isOnline: false,
               peerCertificateFingerprint: fingerprint,
               peerCertificatePinnedAt: pinnedAt,
               identityRootFingerprint,
@@ -378,6 +377,28 @@ const ChatApp: React.FC = () => {
     return { current: kyberSecret || null };
   }, [Authentication.hybridKeysRef?.current?.kyber?.secretKey]);
 
+  // Block / unblock user from add conversation modal
+  const handleToggleBlock = useCallback(async (username: string, nextBlocked: boolean) => {
+    const passphrase = Authentication.passphrasePlaintextRef?.current;
+    const kyberSecret = Authentication.hybridKeysRef?.current?.kyber?.secretKey;
+    if (!passphrase && !kyberSecret) {
+      toast.error('Unable to update block list right now');
+      return;
+    }
+    const key = passphrase ? passphrase : ({ kyberSecret } as any);
+    try {
+      if (nextBlocked) {
+        await blockingSystem.blockUser(username, key);
+        toast.success('User blocked');
+      } else {
+        await blockingSystem.unblockUser(username, key);
+        toast.success('User unblocked');
+      }
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Failed to update block list');
+    }
+  }, [Authentication.passphrasePlaintextRef, Authentication.hybridKeysRef]);
+
   const {
     p2pHybridKeys,
     getPeerHybridKeys,
@@ -490,7 +511,6 @@ const ChatApp: React.FC = () => {
       targetUser = {
         id: crypto.randomUUID(),
         username,
-        isOnline: false,
         hybridPublicKeys: undefined
       };
       Database.setUsers(prev => [...prev, targetUser!]);
@@ -938,6 +958,8 @@ const ChatApp: React.FC = () => {
                     onNewChatOpenChange={setShowNewChatInput}
                     onRemoveConversation={removeConversation}
                     onTogglePin={toggleConversationPin}
+                    onStartCall={(username, type) => { void callingHook.startCall(username, type); }}
+                    onToggleBlock={handleToggleBlock}
                   />
                 </div>
               </div>
@@ -988,6 +1010,7 @@ const ChatApp: React.FC = () => {
               currentUsername={Authentication.loginUsernameRef.current || ''}
               currentDisplayName={currentDisplayName || Authentication.originalUsernameRef.current || ''}
               onLogout={async () => await Authentication.logout(Database.secureDBRef)}
+              findUser={findUser}
             />
           </div>
         </div>

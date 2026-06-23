@@ -134,7 +134,6 @@ export function useEventHandlers({
           targetUser = {
             id: crypto.randomUUID(),
             username,
-            isOnline: true,
             hybridPublicKeys: nextHybridKeys,
             inboxId,
             routeId,
@@ -164,7 +163,6 @@ export function useEventHandlers({
             user.username === username ? {
               ...user,
               hybridPublicKeys: nextHybridKeys,
-              isOnline: true,
               inboxId,
               routeId,
               mailboxLookupId,
@@ -178,7 +176,6 @@ export function useEventHandlers({
           targetUser = {
             ...targetUser,
             hybridPublicKeys: nextHybridKeys,
-            isOnline: true,
             inboxId,
             routeId,
             mailboxLookupId,

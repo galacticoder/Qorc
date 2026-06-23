@@ -848,10 +848,6 @@ impl P2PTransportHandler {
         }
     }
 
-    /// Check if any connections are active
-    pub fn has_active_connections(&self) -> bool {
-        !self.active_connections.read().is_empty()
-    }
 
     /// Returns iroh://<node_id> for peer discovery
     pub fn local_endpoint(&self) -> Option<String> {

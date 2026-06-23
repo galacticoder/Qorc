@@ -205,15 +205,6 @@ export const detectMimeType = (filename: string): string => {
   return 'application/octet-stream';
 };
 
-// Check if file is image
-export const isImageFile = (filename: string): boolean => hasExtension(filename, IMAGE_EXTENSIONS);
-
-// Check if file is video
-export const isVideoFile = (filename: string): boolean => hasExtension(filename, VIDEO_EXTENSIONS);
-
-// Check if file is audio
-export const isAudioFile = (filename: string): boolean => hasExtension(filename, AUDIO_EXTENSIONS);
-
 // Check if file is voice note
 export const isVoiceNote = (filename: string): boolean => {
   return (filename || '').toLowerCase().includes('voice-note');
@@ -245,7 +236,7 @@ export const validateAndDecodeBase64 = (input: string | null | undefined): Uint8
   }
 };
 
-// Strips EXIF and other metadata from image by redrawing it on a canvas. converts image to WebP format
+// Strips EXIF and other metadata from image by redrawing on canvas. converts image to WebP format
 export async function stripImageMetadata(file: File): Promise<File> {
   if (!file.type.startsWith('image/') || file.type === 'image/gif' || file.type === 'image/svg+xml') {
     return file;

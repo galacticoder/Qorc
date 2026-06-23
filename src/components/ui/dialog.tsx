@@ -28,30 +28,6 @@ export const Dialog: React.FC<DialogProps> = ({ children, open, onOpenChange }) 
   );
 };
 
-export const DialogTrigger: React.FC<{ children: ReactNode; asChild?: boolean }> = ({
-  children,
-  asChild = false
-}) => {
-  const context = useContext(DialogContext);
-  if (!context) throw new Error('DialogTrigger must be used within Dialog');
-
-  if (asChild && React.isValidElement(children)) {
-    const childProps = children.props as { onClick?: (e: React.MouseEvent) => void };
-    return React.cloneElement(children, {
-      onClick: (e: React.MouseEvent) => {
-        childProps.onClick?.(e);
-        context.setIsOpen(true);
-      }
-    } as any);
-  }
-
-  return (
-    <button onClick={() => context.setIsOpen(true)}>
-      {children}
-    </button>
-  );
-};
-
 export const DialogContent: React.FC<{ children: ReactNode; className?: string } & React.HTMLAttributes<HTMLDivElement>> = ({ children, className, ...props }) => {
   const context = useContext(DialogContext);
   const [isAnimatingOut, setIsAnimatingOut] = React.useState(false);
@@ -165,12 +141,6 @@ export const DialogContent: React.FC<{ children: ReactNode; className?: string }
   );
 };
 
-export const DialogHeader: React.FC<{ children: ReactNode; className?: string } & React.HTMLAttributes<HTMLDivElement>> = ({ children, className, ...props }) => (
-  <div className={cn("mb-4", className)} {...props}>
-    {children}
-  </div>
-);
-
 export const DialogTitle: React.FC<{ children: ReactNode; className?: string } & React.HTMLAttributes<HTMLHeadingElement>> = ({ children, className, ...props }) => (
   <h2
     className={cn("text-lg font-semibold", className)}
@@ -191,8 +161,3 @@ export const DialogDescription: React.FC<{ children: ReactNode; className?: stri
   </p>
 );
 
-export const DialogFooter: React.FC<{ children: ReactNode; className?: string } & React.HTMLAttributes<HTMLDivElement>> = ({ children, className, ...props }) => (
-  <div className={cn("flex justify-end gap-2 mt-6", className)} {...props}>
-    {children}
-  </div>
-);

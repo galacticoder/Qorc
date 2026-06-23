@@ -420,15 +420,12 @@ impl libsignal_protocol::SignedPreKeyStore for InMemorySignedPreKeyStore {
 /// In-memory Kyber pre-key store
 pub struct InMemoryKyberPreKeyStore {
     kyber_pre_keys: RwLock<HashMap<KyberPreKeyId, KyberPreKeyRecord>>,
-    #[allow(dead_code)]
-    used_kyber_pre_keys: RwLock<std::collections::HashSet<KyberPreKeyId>>,
 }
 
 impl InMemoryKyberPreKeyStore {
     pub fn new() -> Self {
         Self {
             kyber_pre_keys: RwLock::new(HashMap::new()),
-            used_kyber_pre_keys: RwLock::new(std::collections::HashSet::new()),
         }
     }
 
@@ -448,10 +445,6 @@ impl InMemoryKyberPreKeyStore {
             .map(|(id, record)| (*id, record.clone()))
     }
 
-    #[allow(dead_code)]
-    pub fn mark_kyber_pre_key_used(&self, id: KyberPreKeyId) {
-        self.used_kyber_pre_keys.write().insert(id);
-    }
 
     pub fn dump(&self) -> Vec<(u32, Vec<u8>)> {
         self.kyber_pre_keys

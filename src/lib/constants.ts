@@ -14,12 +14,10 @@ export const BASE64_STANDARD_REGEX = /^[A-Za-z0-9+/]*={0,2}$/;
 export const BASE64_URLSAFE_REGEX = /^[A-Za-z0-9_-]*={0,2}$/;
 export const CONVERSATION_USERNAME_PATTERN = /^[a-zA-Z0-9._-]{2,64}$/;
 export const AUTH_USERNAME_REGEX = /^[a-zA-Z0-9._-]{3,100}$/;
-export const JWT_LIKE_REGEX = /^[A-Za-z0-9_.~-]+\.[A-Za-z0-9_.~-]+\.[A-Za-z0-9_.~-]*$/;
 export const TOKEN_STORAGE_KEY_BASE = 'tok';
 export const CLIPBOARD_CONTROL_CHARS_REGEX = /[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g;
 export const URL_REGEX = /(https?:\/\/(?:[-\w.]|%[0-9A-Fa-f]{2})+(?::[0-9]+)?(?:\/(?:[\w\/_~!$&'()*+,;=:@.-]|%[0-9A-Fa-f]{2})*)*(?:\?(?:[\w&=%._~!$'()*+,;:@/?-]|%[0-9A-Fa-f]{2})*)?(?:#(?:[\w._~!$&'()*+,;=:@/?-]|%[0-9A-Fa-f]{2})*)?)/gi;
 export const SIMPLE_URL_REGEX = /(?:^|\s)((?:www\.)?(?:[a-zA-Z0-9-]+\.)+[a-zA-Z]{2,})(?:\/(?:[\w\/_~!$&'()*+,;=:@.-]|%[0-9A-Fa-f]{2})*)*(?:\?(?:[\w&=%._~!$'()*+,;:@/?-]|%[0-9A-Fa-f]{2})*)?(?:#(?:[\w._~!$&'()*+,;=:@/?-]|%[0-9A-Fa-f]{2})*)?/gi;
-export const VALID_USERNAME_PATTERN = /^[\w\-_.@]+$/i;
 export const UNSAFE_FILENAME_CHARS_REGEX = /[\u0000-\u001F\u007F/\\:*?"<>|]+/g;
 export const WHITESPACE_COLLAPSE_REGEX = /\s+/g;
 export const CONTROL_CHARS_REGEX = /[\u0000-\u001F\u007F]/g;
@@ -44,7 +42,6 @@ export const MAX_CONTENT_LENGTH = 16 * 1024;
 export const RATE_LIMIT_MAX_RECEIPTS = 100;
 export const RECEIPT_BATCH_WINDOW_MS = 300;
 
-export const RESET_FEEDBACK_DURATION_MS = 1000;
 export const DEFAULT_MAX_TYPING_USERS = 200;
 export const DEFAULT_TYPING_TIMEOUT_MS = 8000;
 export const DEFAULT_TYPING_EVENT_RATE_WINDOW_MS = 60_000;
@@ -94,11 +91,6 @@ export const QUALITY_LABELS: Record<QualityOption, string> = {
   medium: 'Medium',
   high: 'High'
 };
-export const QUALITY_DESCRIPTIONS: Record<QualityOption, string> = {
-  low: 'Lower bandwidth usage',
-  medium: 'Balanced quality and bandwidth',
-  high: 'Best quality, higher bandwidth'
-};
 
 export const IMAGE_EXTENSIONS = ['jpg', 'jpeg', 'png', 'gif', 'bmp', 'webp', 'svg', 'ico', 'tiff'] as const;
 export const VIDEO_EXTENSIONS = ['mp4', 'webm', 'ogg', 'avi', 'mov', 'wmv', 'flv', 'mkv'] as const;
@@ -110,10 +102,8 @@ export const DEFAULT_CHUNK_SIZE_LARGE = 1024 * 1024;
 export const LARGE_FILE_THRESHOLD = 50 * 1024 * 1024;
 export const MAX_CHUNKS_PER_SECOND = 50;
 export const INACTIVITY_TIMEOUT_MS = 120000;
-export const P2P_CONNECT_TIMEOUT_MS = 3500;
 export const RATE_LIMITER_SLEEP_MS = 10;
 export const PAUSE_POLL_MS = 100;
-export const P2P_POLL_MS = 100;
 export const YIELD_INTERVAL = 8;
 export const MAC_SALT = new TextEncoder().encode('ft-mac-salt-v1');
 
@@ -125,17 +115,13 @@ export const SESSION_FRESH_COOLDOWN_MS = 10_000;
 export const WS_FIXED_MESSAGE_SIZE_BYTES = 64 * 1024;
 export const WS_COVER_TRAFFIC_MIN_INTERVAL_MS = 10_000;
 export const WS_COVER_TRAFFIC_MAX_INTERVAL_MS = 45_000;
-export const WS_COVER_TRAFFIC_IDLE_GRACE_MS = 0;
 export const COVER_TRAFFIC_PAYLOAD_TYPE = 'cover-traffic';
 export const GLOBAL_SPOOL_PIR_RESPONSE_TIMEOUT_MS = 600_000;
 export const GLOBAL_SPOOL_PIR_LOOP_INTERVAL_MS = 900_000;
-export const GLOBAL_SPOOL_PIR_RECORDS_PER_POLL = 4;
 export const GLOBAL_SPOOL_PIR_CATCHUP_DELAY_MS = 25_000;
 export const GLOBAL_SPOOL_PIR_NOT_READY_RETRY_MS = 5_000;
 
 // PassphrasePrompt.tsx
-export const PASSPHRASE_MIN_LENGTH = 12;
-export const PASSPHRASE_MAX_LENGTH = 1000;
 
 // Urls and network checks
 export const MAX_CACHE_SIZE = 100;
@@ -146,27 +132,23 @@ export const ALLOWED_PROTOCOLS = new Set(['http:', 'https:']);
 export const MAX_FILE_SIZE = 1024 * 1024 * 1024;
 export const MAX_PROFILE_IMAGE_SIZE = 5 * 1024 * 1024;
 
-export const MAX_P2P_INCOMING_QUEUE = 256;
 export const MAX_P2P_PEER_CACHE = 256;
 export const P2P_PEER_CACHE_TTL_MS = 5 * 60 * 1000;
 export const P2P_ROUTE_PROOF_TTL_MS = 60 * 1000;
 export const MAX_P2P_CERT_CACHE_SIZE = 128;
 export const MAX_P2P_ROUTE_PROOF_CACHE_SIZE = 512;
-export const MAX_MESSAGE_CONTENT_LENGTH = 64 * 1024;
 export const MAX_USERNAME_LENGTH = 96;
 export const CERT_CLOCK_SKEW_MS = 2 * 60 * 1000;
 export const RECEIPT_RETENTION_MS = 24 * 60 * 60 * 1000;
 export const P2P_MESSAGE_RATE_LIMIT = 100;
 export const P2P_MESSAGE_RATE_WINDOW_MS = 60_000;
 export const MAX_INBOUND_PROCESSING_QUEUE = 256;
-export const P2P_MAX_MESSAGE_SIZE = 5 * 1024 * 1024;
 export const P2P_MAX_PEERS = 100;
 export const P2P_PEER_CERT_TTL_MS = 24 * 60 * 60 * 1000;
 export const MIN_ENVELOPE_SIZE = 2048;
 
 // General rate limit
 export const RATE_LIMIT_WINDOW_MS = 60_000;
-export const RATE_LIMIT_MAX_MESSAGES = 200;
 
 // Conversation constants
 export const MAX_PREVIEW_LENGTH = 80;
@@ -175,7 +157,6 @@ export const CONVERSATION_MAX_USERNAME_LENGTH = 64;
 export const MAX_CONVERSATIONS = 1000;
 export const CONVERSATION_RATE_LIMIT_WINDOW_MS = 10_000;
 export const CONVERSATION_RATE_LIMIT_MAX = 8;
-export const VALIDATION_TIMEOUT_MS = 15_000;
 
 // Local message constants
 export const MAX_LOCAL_MESSAGE_ID_LENGTH = 160;
@@ -207,22 +188,14 @@ export const RATE_LIMIT_MAX_EVENTS = 6_000;
 
 // Database constants
 export const DB_MAX_PENDING_MESSAGES = 500;
-export const DB_MAX_PENDING_MAPPINGS = 1000;
 export const DB_MAX_MESSAGES = 5000;
-export const DB_RATE_LIMIT_WINDOW_MS = 10_000;
-export const DB_RATE_LIMIT_MAX_EVENTS = 200;
 export const DB_SAVE_DEBOUNCE_MS = 100;
 
 // Username display constants
 export const USERNAME_DISPLAY_MAX_LENGTH = 256;
-export const USERNAME_DISPLAY_RATE_LIMIT_WINDOW_MS = 5_000;
-export const USERNAME_DISPLAY_RATE_LIMIT_MAX_EVENTS = 50;
 export const USERNAME_DISPLAY_CACHE_TTL_MS = 5 * 60 * 1000;
 export const USERNAME_DISPLAY_MAX_CACHE_SIZE = 512;
-export const USERNAME_DISPLAY_RESOLVE_TIMEOUT_MS = 10_000;
 export const USERNAME_HEX_PATTERN = /^[a-f0-9]{32}$/i;
-
-export const PSEUDONYM_SALT_BASE64 = "cHNldWRvbnltLXYxLWdsb2JhbC1zYWx0";
 
 // Calling constants
 export const CALLING_MAX_USERNAME_LENGTH = 120;
@@ -333,14 +306,8 @@ export const RESET_WINDOW_MS = 60_000;
 export const PQ_RANDOM_MAX_BYTES_LIMIT = 100 * 1024 * 1024;
 export const PQ_RANDOM_DEFAULT_MAX_BYTES = 1_048_576;
 export const PQ_UTILS_MAX_DATA_SIZE = 10 * 1024 * 1024;
-export const PQ_SESSION_DEFAULT_TIMEOUT_MS = 30 * 60 * 1000;
-export const PQ_PROTOCOL_MAX_MESSAGE_AGE_MS = 5 * 60 * 1000;
-export const PQ_PROTOCOL_MAX_SEEN_ENTRIES = 10_000;
-export const PQ_PROTOCOL_SEEN_BUFFER_RATIO = 0.9;
-export const PQ_AEAD_KEY_SIZE = 64;
 export const PQ_AEAD_NONCE_SIZE = 36;
 export const PQ_AEAD_GCM_IV_SIZE = 12;
-export const PQ_AEAD_XCHACHA_NONCE_SIZE = 24;
 export const PQ_AEAD_MAC_SIZE = 32;
 export const PQ_KEM_PUBLIC_KEY_SIZE = 1568;
 export const PQ_KEM_SECRET_KEY_SIZE = 3168;
@@ -350,11 +317,7 @@ export const PQ_SIG_PUBLIC_KEY_SIZE = 2592;
 export const PQ_SIG_SECRET_KEY_SIZE = 4896;
 export const PQ_SIG_SIGNATURE_SIZE = 4627;
 export const PQ_WORKER_MAX_RESTART_ATTEMPTS = 5;
-export const SECURE_MEMORY_MAX_BUFFER_SIZE = 1_048_576;
 export const CRYPTO_CACHE_TTL_MS = 5 * 60 * 1000;
-export const REPLAY_WINDOW_MS = 5 * 60 * 1000;
-export const MAX_PROCESSED_IDS = 2048;
-export const KEY_LIFETIME_MS = 60 * 60 * 1000;
 
 // Crypto Config
 export const CRYPTO_AES_KEY_SIZE = 256;
@@ -377,17 +340,9 @@ export const ARGON2_MAX_ENCODED_LENGTH = 512;
 export const HASH_DATA_MAX_SIZE = 1_000_000;
 export const HASH_TIMEOUT_MIN_MS = 1000;
 export const HASH_TIMEOUT_MAX_MS = 300000;
-export const HASH_DEFAULT_TIMEOUT_MS = 30000;
 
 // Worker constants
 export const WORKER_MAX_KEYS = 50;
-export const WORKER_AUTH_TOKEN_LIFETIME_MS = 60 * 60 * 1000;
-export const WORKER_RATE_LIMIT_DEFAULT_WINDOW_MS = 60_000;
-export const WORKER_RATE_LIMIT_DEFAULT_MAX = 100;
-export const WORKER_RATE_LIMIT_KEM_GENERATE_MAX = 10;
-export const WORKER_RATE_LIMIT_KEM_DESTROY_MAX = 50;
-export const WORKER_RATE_LIMIT_ARGON2_HASH_MAX = 20;
-export const WORKER_RATE_LIMIT_ARGON2_VERIFY_MAX = 50;
 
 // Crypto HKDF Info
 export const CRYPTO_HKDF_INFO = 'Qor-chat hybrid key v2';
@@ -469,7 +424,6 @@ export const MAX_MISSED_HEARTBEATS = 4;
 export const LATENCY_SAMPLE_WEIGHT = 0.2;
 
 export const MAX_NONCE_SEQUENCE_GAP = 1000;
-export const TIMESTAMP_SKEW_TOLERANCE_MS = 5_000;
 
 export const SESSION_FAILOVER_GRACE_PERIOD_MS = 30_000;
 
@@ -484,5 +438,4 @@ export const MAX_AVATAR_SIZE_BYTES = 512 * 1024;
 export const MAX_AVATAR_DIMENSION = 512;
 export const ALLOWED_AVATAR_MIME_TYPES = ['image/jpeg', 'image/png', 'image/webp', 'image/svg+xml'] as const;
 export const AVATAR_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
-export const AVATAR_SERVER_FETCH_DEBOUNCE_MS = 3000;
 export const AVATAR_PENDING_REQUEST_TIMEOUT_MS = 30000;

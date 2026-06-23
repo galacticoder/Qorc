@@ -240,4 +240,3 @@ export const FRAME_OVERHEAD = FRAME_HEADER_SIZE + FRAME_TAG_SIZE;
 // Maximum frame sizes
 export const MAX_MESSAGE_FRAME_SIZE = 16 * 1024 * 1024;
 export const MAX_CALL_FRAME_SIZE = 64 * 1024;
-export const MAX_SIGNAL_FRAME_SIZE = 4 * 1024;

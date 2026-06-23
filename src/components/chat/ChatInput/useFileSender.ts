@@ -18,7 +18,6 @@ interface HybridPublicKeys {
 
 interface User {
   readonly username: string;
-  readonly isOnline?: boolean;
   readonly hybridPublicKeys?: HybridPublicKeys;
 }
 

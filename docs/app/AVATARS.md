@@ -196,5 +196,5 @@ Code references:
 - `src/lib/avatar/init.ts`: initialization and loading
 - `src/lib/avatar/own-avatar.ts`: set/remove avatar
 - `src/lib/avatar/cache.ts`: cache persistence
-- `src/hooks/discovery/useDiscovery.ts`: publish and receive via discovery
+- `src/hooks/discovery/useDiscovery.ts`: publish and receive from discovery
 - `src/components/ui/UserAvatar.tsx`: rendering

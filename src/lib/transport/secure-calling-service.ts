@@ -1622,6 +1622,3 @@ export class SecureCallingService {
     }
 }
 
-export function createSecureCallingService(username: string): SecureCallingService {
-    return new SecureCallingService(username);
-}

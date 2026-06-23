@@ -43,18 +43,3 @@ export function deriveBundleLookupId(inboxId: string): string {
 export function deriveBlockListLookupId(inboxId: string): string {
   return deriveCommitment('qor-block-list-v1', inboxId);
 }
-
-export function deriveRendezvousLookups(inboxId: string): {
-  routeId: string;
-  mailboxLookupId: string;
-  bundleLookupId: string;
-  blockListLookupId: string;
-} {
-  const routeId = deriveRendezvousRouteId(inboxId);
-  return {
-    routeId,
-    mailboxLookupId: deriveMailboxMetadataId(inboxId),
-    bundleLookupId: deriveBundleLookupId(inboxId),
-    blockListLookupId: deriveBlockListLookupId(inboxId)
-  };
-}

@@ -39,8 +39,3 @@ export const validateUsername = (username: string): void => {
     throw new Error('Username contains reserved identifier');
   }
 };
-
-// Check if username is a pseudonymized hash
-export const isPseudonymizedUsername = (username: string): boolean => {
-  return /^(?:[a-f0-9]{32}|[a-f0-9]{64}|[a-f0-9]{128})$/i.test(username);
-};

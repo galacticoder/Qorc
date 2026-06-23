@@ -7,8 +7,6 @@ import { CryptoUtils } from '../utils/crypto-utils';
 import { signal } from '../tauri-bindings';
 import { messageVault } from '../security/message-vault';
 
-export const TEXT_ENCODER = new TextEncoder();
-
 // Signal type mapping for message types
 export const SIGNAL_TYPE_MAP: Record<string, string> = {
   [SignalType.TYPING_START]: SignalType.TYPING_INDICATOR,

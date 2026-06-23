@@ -4,12 +4,13 @@ import { cn } from "../../../lib/utils/shared-utils";
 import { ScrollArea } from "../../ui/scroll-area";
 import { Button } from "../../ui/button";
 import { Dialog, DialogContent, DialogTitle, DialogDescription } from "../../ui/dialog";
-import { Trash2, Search, Phone, Video, Loader2, Pin, PinOff } from "lucide-react";
+import { Trash2, Search, Phone, Video, Loader2, Pin, PinOff, X, Ban, Plus } from "lucide-react";
 import { Input } from "../../ui/input";
 import { toast } from "sonner";
 import { UserAvatar } from "../../ui/UserAvatar";
 import { isPlainObject, hasPrototypePollutionKeys, sanitizeUiText } from "../../../lib/sanitizers";
 import { EventType } from "../../../lib/types/event-types";
+import { blockingSystem } from "../../../lib/blocking/blocking-system";
 import { UI_CALL_STATUS_RATE_WINDOW_MS, UI_CALL_STATUS_RATE_MAX, MAX_UI_CALL_STATUS_PEER_LENGTH, MAX_UI_CALL_STATUS_VALUE_LENGTH } from "../../../lib/constants";
 import { formatRelativeAge } from "../../../lib/utils/date-utils";
 import { SecureCanvasText } from "./SecureCanvasText";
@@ -20,7 +21,6 @@ export interface Conversation {
   readonly id: string;
   readonly username: string;
   readonly inboxId?: string;
-  readonly isOnline: boolean;
   readonly lastMessage?: string;
   readonly lastMessageTime?: Date;
   readonly unreadCount?: number;
@@ -40,6 +40,8 @@ interface ConversationListProps {
   readonly showNewChatInput?: boolean;
   readonly onNewChatOpenChange?: (open: boolean) => void;
   readonly onTogglePin?: (username: string) => void;
+  readonly onStartCall?: (username: string, type: 'audio' | 'video') => void;
+  readonly onToggleBlock?: (username: string, nextBlocked: boolean) => void | Promise<void>;
 }
 
 // Call status type
@@ -215,6 +217,80 @@ const ConversationItem = memo<ConversationItemProps>(({
   );
 });
 
+// manageable row inside add conversation modal
+interface ConversationManageRowProps {
+  readonly username: string;
+  readonly blocked: boolean;
+  readonly onChat: (username: string) => void;
+  readonly onCall?: (username: string, type: 'audio' | 'video') => void;
+  readonly onToggleBlock?: (username: string, nextBlocked: boolean) => void | Promise<void>;
+}
+
+const ConversationManageRow = memo<ConversationManageRowProps>(({
+  username,
+  blocked,
+  onChat,
+  onCall,
+  onToggleBlock,
+}) => {
+  const displayName = useDisplayUsername({ username });
+
+  return (
+    <div
+      className="qor-cm-row"
+      role="button"
+      tabIndex={0}
+      onClick={() => onChat(username)}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          onChat(username);
+        }
+      }}
+      aria-label={`Open chat with ${displayName}`}
+    >
+      <UserAvatar username={username} size="md" className="qor-cm-row-avatar" />
+
+      <div className="qor-cm-row-main">
+        <span className="qor-cm-row-name" title={displayName}>{displayName}</span>
+      </div>
+
+      <div className="qor-cm-row-actions" onClick={(e) => e.stopPropagation()}>
+        <button
+          type="button"
+          className="qor-cm-action"
+          title="Audio call"
+          aria-label={`Call ${displayName}`}
+          disabled={blocked || !onCall}
+          onClick={() => onCall?.(username, 'audio')}
+        >
+          <Phone aria-hidden="true" />
+        </button>
+        <button
+          type="button"
+          className="qor-cm-action"
+          title="Video call"
+          aria-label={`Video call ${displayName}`}
+          disabled={blocked || !onCall}
+          onClick={() => onCall?.(username, 'video')}
+        >
+          <Video aria-hidden="true" />
+        </button>
+        <button
+          type="button"
+          className={cn("qor-cm-action", blocked ? "is-blocked" : "danger")}
+          title={blocked ? "Unblock user" : "Block user"}
+          aria-label={blocked ? `Unblock ${displayName}` : `Block ${displayName}`}
+          disabled={!onToggleBlock}
+          onClick={() => onToggleBlock?.(username, !blocked)}
+        >
+          <Ban aria-hidden="true" />
+        </button>
+      </div>
+    </div>
+  );
+});
+
 // Main conversation list component
 export const ConversationList = memo<ConversationListProps>(function ConversationList({
   conversations,
@@ -225,7 +301,9 @@ export const ConversationList = memo<ConversationListProps>(function Conversatio
   getDisplayUsername,
   showNewChatInput = false,
   onNewChatOpenChange,
-  onTogglePin
+  onTogglePin,
+  onStartCall,
+  onToggleBlock
 }: ConversationListProps) {
   const [activePeer, setActivePeer] = useState<string | null>(null);
   const [activeStatus, setActiveStatus] = useState<CallStatus>(null);
@@ -233,6 +311,35 @@ export const ConversationList = memo<ConversationListProps>(function Conversatio
   const [conversationToDelete, setConversationToDelete] = useState<string | null>(null);
   const [newChatUsername, setNewChatUsername] = useState("");
   const [isAdding, setIsAdding] = useState(false);
+  const [blockVersion, setBlockVersion] = useState(0);
+
+  useEffect(() => {
+    const bump = () => setBlockVersion((v) => v + 1);
+    window.addEventListener(EventType.BLOCK_STATUS_CHANGED, bump as EventListener);
+    window.addEventListener(EventType.USER_BLOCKED, bump as EventListener);
+    window.addEventListener(EventType.USER_UNBLOCKED, bump as EventListener);
+    return () => {
+      window.removeEventListener(EventType.BLOCK_STATUS_CHANGED, bump as EventListener);
+      window.removeEventListener(EventType.USER_BLOCKED, bump as EventListener);
+      window.removeEventListener(EventType.USER_UNBLOCKED, bump as EventListener);
+    };
+  }, []);
+
+  // Conversations shown in modal
+  const trimmedQuery = newChatUsername.trim().toLowerCase();
+  const filteredConversations = useMemo(() => {
+    if (!trimmedQuery) return conversations;
+    return conversations.filter((c) =>
+      c.username.toLowerCase().includes(trimmedQuery) ||
+      (c.displayName ?? "").toLowerCase().includes(trimmedQuery)
+    );
+  }, [conversations, trimmedQuery]);
+
+  const hasExactMatch = useMemo(
+    () => conversations.some((c) => c.username.toLowerCase() === trimmedQuery),
+    [conversations, trimmedQuery]
+  );
+  const canAddTyped = !!newChatUsername.trim() && !hasExactMatch && !!onAddConversation;
 
   // Handle remove conversation click
   const handleRemoveClick = useCallback((username: string) => {
@@ -392,71 +499,122 @@ export const ConversationList = memo<ConversationListProps>(function Conversatio
 
   const handleNewChatOpenChange = useCallback((open: boolean) => {
     onNewChatOpenChange?.(open);
-    if (!open) {
+    if (!open && !isAdding) {
       setNewChatUsername("");
     }
-  }, [onNewChatOpenChange]);
+  }, [onNewChatOpenChange, isAdding]);
+
+  const handleChatFromModal = useCallback((username: string) => {
+    onSelectConversation(username);
+    handleNewChatOpenChange(false);
+  }, [onSelectConversation, handleNewChatOpenChange]);
 
   return (
     <div className="qor-conversation-list">
       <Dialog open={showNewChatInput} onOpenChange={handleNewChatOpenChange}>
         <DialogContent
-          className="qor-conversation-dialog"
+          className="qor-cm-dialog"
           role="dialog"
           aria-modal="true"
           aria-labelledby="conversation-modal-title"
           aria-describedby="conversation-modal-description"
         >
-          <div className="qor-conversation-modal-head">
-            <div className="qor-conversation-modal-title">
+          <div className="qor-cm-head">
+            <div className="qor-cm-head-text">
               <DialogTitle id="conversation-modal-title">Add conversation</DialogTitle>
-              <DialogDescription id="conversation-modal-description">Find a user, start a chat, or manage blocked users.</DialogDescription>
+              <DialogDescription id="conversation-modal-description">
+                Start a new chat, place a call, or block a user.
+              </DialogDescription>
             </div>
             <button
               type="button"
-              className="qor-conversation-close"
+              className="qor-cm-close"
               onClick={() => handleNewChatOpenChange(false)}
-              aria-label="Back to empty screen"
+              aria-label="Close"
+            >
+              <X aria-hidden="true" />
+            </button>
+          </div>
+
+          <div className="qor-cm-search">
+            <span className="qor-cm-search-icon" aria-hidden="true">
+              {isAdding ? <Loader2 className="animate-spin" /> : <Search />}
+            </span>
+            <Input
+              type="text"
+              placeholder="Search or enter a username"
+              value={newChatUsername}
+              onChange={(e) => setNewChatUsername(e.target.value)}
+              className="qor-cm-search-input"
+              disabled={isAdding}
+              autoFocus
+              spellCheck={false}
+              autoComplete="off"
+              aria-label="Search conversations or enter a username"
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && !isAdding && canAddTyped) {
+                  handleAddChat();
+                }
+              }}
             />
           </div>
 
-          <div className="qor-conversation-modal-body">
-            <div className="qor-conversation-modal-controls">
-              <label className="qor-conversation-modal-search" aria-label="Search users">
-                {isAdding ? (
-                  <Loader2 className="animate-spin" aria-hidden="true" />
-                ) : (
-                  <Search aria-hidden="true" />
+          {(filteredConversations.length > 0 || canAddTyped) ? (
+            <ScrollArea className="qor-cm-body">
+              <div className="qor-cm-scroll-inner">
+                {canAddTyped && (
+                  <button
+                    type="button"
+                    className="qor-cm-add-row"
+                    onClick={handleAddChat}
+                    disabled={isAdding}
+                  >
+                    <span className="qor-cm-add-icon" aria-hidden="true">
+                      {isAdding ? <Loader2 className="animate-spin" /> : <Plus />}
+                    </span>
+                    <span className="qor-cm-add-text">
+                      Start chat with <strong>{newChatUsername.trim()}</strong>
+                    </span>
+                  </button>
                 )}
-                <Input
-                  type="search"
-                  placeholder="Search username"
-                  value={newChatUsername}
-                  onChange={(e) => setNewChatUsername(e.target.value)}
-                  className="qor-conversation-search-input"
-                  disabled={isAdding}
-                  autoFocus
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter' && !isAdding) {
-                      handleAddChat();
-                    }
-                  }}
-                />
-              </label>
-            </div>
 
-            <div className="conversation-empty qor-add-conversation-empty">
-              <div className="conversation-empty-copy">
-                <h2>No users found</h2>
-                <p>When a username is available, it will show here with the same chat, block, and call controls.</p>
+                {filteredConversations.length > 0 && (
+                  <div className="qor-cm-list" data-block-version={blockVersion}>
+                    {filteredConversations.map((c) => (
+                      <ConversationManageRow
+                        key={c.id}
+                        username={c.username}
+                        blocked={blockingSystem.isBlockedSync(c.username)}
+                        onChat={handleChatFromModal}
+                        onCall={onStartCall}
+                        onToggleBlock={onToggleBlock}
+                      />
+                    ))}
+                  </div>
+                )}
               </div>
-              <div className="conversation-empty-lines" aria-hidden="true">
-                {Array.from({ length: 9 }).map((_, index) => (
-                  <span key={index} />
-                ))}
+            </ScrollArea>
+          ) : (
+            <div className="qor-cm-body qor-cm-body-static">
+              <div className="qor-cm-scroll-inner">
+                <div className="qor-cm-empty">
+                  <div className="qor-cm-empty-copy">
+                    <h3>{trimmedQuery ? "No matches" : "No conversations yet"}</h3>
+                    <p>
+                      {trimmedQuery
+                        ? "Type a full username above to start a new chat."
+                        : "Search a username above to start your first conversation."}
+                    </p>
+                  </div>
+                  <div className="conversation-empty-lines qor-cm-empty-lines" aria-hidden="true">
+                    {Array.from({ length: 14 }).map((_, index) => (
+                      <span key={index} />
+                    ))}
+                  </div>
+                </div>
               </div>
             </div>
-          </div>
+          )}
         </DialogContent>
       </Dialog>
 
@@ -472,7 +630,7 @@ export const ConversationList = memo<ConversationListProps>(function Conversatio
                 <h3>No conversations yet</h3>
               </div>
               <div className="conversation-empty-lines qor-conversation-empty-lines" aria-hidden="true">
-                {Array.from({ length: 9 }).map((_, index) => (
+                {Array.from({ length: 14 }).map((_, index) => (
                   <span key={index} />
                 ))}
               </div>

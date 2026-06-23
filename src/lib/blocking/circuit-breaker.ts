@@ -30,17 +30,6 @@ export const recordCircuitFailure = (breaker: CircuitBreakerState): void => {
   }
 };
 
-export const circuitBreakerAllows = (breaker: CircuitBreakerState): boolean => {
-  if (breaker.state === 'OPEN') {
-    if (Date.now() - breaker.lastFailure > breaker.timeout) {
-      breaker.state = 'HALF_OPEN';
-      return true;
-    }
-    return false;
-  }
-  return true;
-};
-
 export const resetCircuitBreaker = (breaker: CircuitBreakerState): void => {
   breaker.state = 'CLOSED';
   breaker.failures = 0;

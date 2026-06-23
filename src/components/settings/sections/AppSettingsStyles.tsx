@@ -165,22 +165,13 @@ export const AppSettingsStyles = () => (
       height: 100%;
       overflow-y: auto;
       padding: 78px clamp(32px, 7vw, 96px) 84px;
-      background:
-        linear-gradient(90deg, rgba(255,255,255,.018) 1px, transparent 1px),
-        var(--content);
-      background-size: 64px 64px;
-    }
-
-    .qor-settings-host.light .settings-content {
-      background:
-        linear-gradient(90deg, rgba(15,23,42,.025) 1px, transparent 1px),
-        var(--content);
-      background-size: 64px 64px;
+      background: var(--content);
     }
 
     .pane {
       display: none;
       width: min(100%, 930px);
+      margin-inline: auto;
     }
 
     .pane.active { display: block; }
@@ -540,6 +531,22 @@ export const AppSettingsStyles = () => (
       color: white;
     }
 
+    .confirm-inline {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .danger-action.is-armed {
+      background: var(--danger);
+      color: #fff;
+      box-shadow: 0 0 0 3px color-mix(in srgb, var(--danger) 26%, transparent);
+    }
+
+    .danger-action.is-armed:hover {
+      background: color-mix(in srgb, var(--danger) 88%, black);
+    }
+
     .account-danger-row .danger-action {
       background: var(--danger);
       color: white;
@@ -698,6 +705,159 @@ export const AppSettingsStyles = () => (
       color: color-mix(in srgb, var(--danger) 80%, white);
       font-size: 12px;
       font-weight: 760;
+    }
+
+    .blocked-head {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 18px;
+    }
+
+    .blocked-head .section-title {
+      margin: 0 0 5px;
+    }
+
+    .blocked-subtitle {
+      max-width: 520px;
+      margin: 0;
+      color: var(--muted);
+      font-size: 12.5px;
+      line-height: 1.5;
+    }
+
+    .blocked-head .action {
+      flex: 0 0 auto;
+    }
+
+    /* Custom settings modal (block / unblock) */
+    .qor-modal-overlay {
+      position: fixed;
+      inset: 0;
+      z-index: 60;
+      display: grid;
+      place-items: center;
+      padding: 24px;
+      background: rgba(0,0,0,.55);
+      animation: qorModalOverlayIn .16s ease;
+    }
+
+    .qor-settings-host.light .qor-modal-overlay {
+      background: rgba(15,23,42,.34);
+    }
+
+    .qor-modal {
+      width: min(420px, 100%);
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      background: var(--nav);
+      box-shadow: 0 30px 90px rgba(0,0,0,.5);
+      animation: qorModalIn .18s cubic-bezier(0.16, 1, 0.3, 1);
+    }
+
+    @keyframes qorModalOverlayIn { from { opacity: 0; } to { opacity: 1; } }
+    @keyframes qorModalIn {
+      from { opacity: 0; transform: scale(.96); }
+      to { opacity: 1; transform: scale(1); }
+    }
+
+    .qor-modal-head {
+      padding: 22px 22px 4px;
+    }
+
+    .qor-modal-head h3 {
+      margin: 0 0 7px;
+      color: var(--text);
+      font-size: 18px;
+      font-weight: 900;
+      letter-spacing: -.01em;
+    }
+
+    .qor-modal-head p {
+      margin: 0;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.5;
+    }
+
+    .qor-modal-head p strong {
+      color: var(--text);
+      font-weight: 850;
+    }
+
+    .qor-modal-body {
+      padding: 16px 22px 4px;
+    }
+
+    .qor-modal-field {
+      display: block;
+    }
+
+    .qor-modal-field .field-label {
+      display: block;
+      margin: 0 0 7px;
+      color: var(--quiet);
+      font-size: 10px;
+      font-weight: 950;
+      letter-spacing: .12em;
+      text-transform: uppercase;
+    }
+
+    .qor-modal-field .text-input {
+      height: 44px;
+      font-size: 14px;
+      font-weight: 650;
+    }
+
+    .qor-modal-error {
+      margin: 11px 0 0;
+      padding: 9px 11px;
+      border-radius: 9px;
+      background: color-mix(in srgb, var(--danger) 13%, var(--surface));
+      color: color-mix(in srgb, var(--danger) 82%, white);
+      font-size: 12px;
+      font-weight: 750;
+      line-height: 1.4;
+    }
+
+    .qor-modal-actions {
+      display: grid;
+      grid-template-columns: 1fr 1.3fr;
+      gap: 10px;
+      padding: 20px 22px 22px;
+    }
+
+    .qor-modal-btn {
+      height: 44px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      border: 0;
+      border-radius: 11px;
+      background: var(--surface-2);
+      color: var(--text);
+      font-size: 13px;
+      font-weight: 850;
+      transition: background .15s ease, opacity .15s ease;
+    }
+
+    .qor-modal-btn:hover {
+      background: var(--surface-3);
+    }
+
+    .qor-modal-btn.primary {
+      background: var(--purple);
+      color: #fff;
+    }
+
+    .qor-modal-btn.primary:hover {
+      background: color-mix(in srgb, var(--purple) 86%, white);
+    }
+
+    .qor-modal-btn:disabled {
+      opacity: .55;
+      cursor: not-allowed;
     }
 
     .danger-zone {

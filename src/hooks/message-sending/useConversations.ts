@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect, useMemo, useRef } from "react";
+import { useState, useCallback, useEffect, useRef } from "react";
 import { Conversation } from "../../components/chat/messaging/ConversationList";
 import { Message } from "../../components/chat/messaging/types";
 import { User } from "../../components/chat/messaging/UserList";
@@ -135,8 +135,7 @@ export const useConversations = (
                 identityBundleFingerprint: material.identityBundleFingerprint
               }, ['username', 'hybridKeys', 'inboxId', 'routeId', 'mailboxLookupId', 'bundleLookupId', 'peerCertificateFingerprint', 'identityRootFingerprint', 'identityBundleFingerprint']);
 
-              const isOnline = users.some(user => user.username === conversationUsername && user.isOnline);
-              const newConversation = createConversation(conversationUsername, isOnline, inboxId);
+              const newConversation = createConversation(conversationUsername, inboxId);
 
               setConversations(prev => [...prev, newConversation]);
               if (autoSelect && selectedConversation !== conversationUsername) {
@@ -146,7 +145,7 @@ export const useConversations = (
               cleanup();
               return;
             } else {
-              reject(new Error('User not found via discovery billboard'));
+              reject(new Error('User not found in discovery billboard'));
               cleanup();
               return;
             }
@@ -288,29 +287,6 @@ export const useConversations = (
     return filtered;
   }, [messages, currentUsername]);
 
-  const userLookup = useMemo(() => {
-    const lookup = new Map<string, boolean>();
-    for (const user of users) {
-      lookup.set(user.username, user.isOnline);
-    }
-    return lookup;
-  }, [users]);
-
-  useEffect(() => {
-    setConversations(prev => {
-      let hasChanges = false;
-      const updated = prev.map(conv => {
-        const isOnline = userLookup.get(conv.username) ?? false;
-        if (conv.isOnline !== isOnline) {
-          hasChanges = true;
-          return { ...conv, isOnline };
-        }
-        return conv;
-      });
-      return hasChanges ? updated : prev;
-    });
-  }, [userLookup]);
-
   useEffect(() => {
     if (!messages || messages.length === 0 || !currentUsername) {
       return;
@@ -331,7 +307,6 @@ export const useConversations = (
 
       const other = msg.sender === currentUsername ? msg.recipient : msg.sender;
       if (!other || other === currentUsername || other === 'System') continue;
-      const isOnline = userLookup.get(other) ?? false;
       const msgTime = new Date(msg.timestamp);
       const lastReadTs = lastReadByConversation.get(other) || 0;
       const isIncoming = msg.sender !== currentUsername;
@@ -344,7 +319,6 @@ export const useConversations = (
         convMap.set(other, {
           id: crypto.randomUUID(),
           username: other,
-          isOnline,
           lastMessage: getConversationPreview(msg, currentUsername),
           lastMessageTime: msgTime,
           unreadCount: unreadIncrement,
@@ -394,7 +368,6 @@ export const useConversations = (
         if (exists) {
           merged.set(username, {
             ...exists,
-            isOnline: conv.isOnline,
             lastMessage: conv.lastMessage,
             lastMessageTime: conv.lastMessageTime,
             unreadCount: username === selectedConversation ? 0 : conv.unreadCount,
@@ -428,7 +401,6 @@ export const useConversations = (
           const pTime = p.lastMessageTime?.getTime() || 0;
           const cTime = c.lastMessageTime?.getTime() || 0;
           if (
-            p.isOnline !== c.isOnline ||
             (p.lastMessage || '') !== (c.lastMessage || '') ||
             (p.secureContentId || '') !== (c.secureContentId || '') ||
             pTime !== cTime ||
@@ -448,7 +420,7 @@ export const useConversations = (
 
       return next;
     });
-  }, [messages, currentUsername, selectedConversation, removedConversations, userLookup, lastReadByConversation, pinStateByConversation]);
+  }, [messages, currentUsername, selectedConversation, removedConversations, lastReadByConversation, pinStateByConversation]);
 
   useEffect(() => {
     if (!selectedConversation) return;

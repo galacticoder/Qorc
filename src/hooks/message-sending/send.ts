@@ -208,6 +208,6 @@ export const requestBundleForRetry = async (
       }
     }
   } catch (_err) {
-    console.error('[Send] Bundle retry via Discovery failed:', _err);
+    console.error('[Send] Bundle retry for Discovery failed:', _err);
   }
 };

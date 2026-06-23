@@ -222,7 +222,6 @@ export interface GlobalSpoolCandidateItem {
 
 export interface UserStatus {
   username: string;
-  isOnline: boolean;
   lastSeen: number;
 }
 

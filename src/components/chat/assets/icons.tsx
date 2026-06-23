@@ -1,6 +1,6 @@
 import { SVGProps } from "react";
 import React from "react";
-export { Cross2Icon, PaperPlaneIcon, TrashIcon, Pencil1Icon, CheckIcon, CopyIcon as RadixCopyIcon } from "@radix-ui/react-icons";
+export { Cross2Icon, CheckIcon } from "@radix-ui/react-icons";
 
 // Chat Bubble Icon
 export const ChatBubbleIcon: React.FC<React.SVGProps<SVGSVGElement>> = ({ className, ...props }) => {
@@ -183,25 +183,6 @@ export const UnblockIcon: React.FC<React.SVGProps<SVGSVGElement>> = (props) => {
     </svg>
   );
 };
-
-export function EncryptionIcon(props: SVGProps<SVGSVGElement>) {
-  return (
-    <svg
-      xmlns="http://www.w3.org/2000/svg"
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="2"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      {...props}
-    >
-      <rect width="18" height="11" x="3" y="11" rx="2" ry="2" />
-      <path d="M7 11V7a5 5 0 0 1 10 0v4" />
-      <circle cx="12" cy="16" r="1" />
-    </svg>
-  );
-}
 
 export function PaperclipIcon(props: SVGProps<SVGSVGElement>) {
   return (

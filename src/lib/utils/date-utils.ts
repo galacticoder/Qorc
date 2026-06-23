@@ -46,29 +46,7 @@ export const formatCallDurationSeconds = (seconds?: number): string => {
   }
 };
 
-// Format call duration from milliseconds to M:SS format 
-export const formatCallDurationMs = (duration?: number): string => {
-  if (!duration) return '';
-  const mins = Math.floor(duration / 60000);
-  const secs = Math.floor((duration % 60000) / 1000);
-  return `${mins}:${secs.toString().padStart(2, '0')}`;
-};
-
-// Format timestamp for call history: time if today, short date otherwise
-export const formatCallHistoryTime = (timestamp?: number): string => {
-  if (!timestamp) return '';
-  const date = new Date(timestamp);
-  const now = new Date();
-  const isSameDay = date.toDateString() === now.toDateString();
-
-  if (isSameDay) {
-    return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-  }
-  return date.toLocaleDateString([], { month: 'short', day: 'numeric' });
-};
-
-// Format message timestamp for chat display with context-aware output.
-// today/yesterday/this year/other year formatting.
+// Format message timestamp for chat display
 export const formatMessageTimestamp = (timestamp: Date): string => {
   try {
     if (!(timestamp instanceof Date) || isNaN(timestamp.getTime())) {
@@ -93,8 +71,7 @@ export const formatMessageTimestamp = (timestamp: Date): string => {
   }
 };
 
-// Format time for message receipts.
-// locale-aware time format.
+// Format time for message receipts
 export const formatReceiptTime = (date: Date | undefined): string | undefined => {
   if (!date || !(date instanceof Date) || isNaN(date.getTime())) {
     return undefined;

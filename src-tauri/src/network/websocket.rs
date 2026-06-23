@@ -3,7 +3,6 @@
 //! WebSocket connections through Tor SOCKS5 proxy
 
 use log::{error, info, warn};
-use std::collections::HashMap;
 use std::os::unix::io::{AsRawFd, FromRawFd, OwnedFd};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, AtomicU64, AtomicUsize, Ordering};
@@ -122,8 +121,6 @@ pub struct WebSocketHandler {
     pending_writes: Arc<AtomicUsize>,
     connecting_started_at: RwLock<Option<Instant>>,
     connect_attempt_id: AtomicU64,
-    #[allow(dead_code)]
-    extra_headers: RwLock<HashMap<String, String>>,
     shutdown: Arc<AtomicBool>,
 }
 
@@ -147,7 +144,6 @@ impl WebSocketHandler {
             pending_writes: Arc::new(AtomicUsize::new(0)),
             connecting_started_at: RwLock::new(None),
             connect_attempt_id: AtomicU64::new(0),
-            extra_headers: RwLock::new(HashMap::new()),
             shutdown: Arc::new(AtomicBool::new(false)),
         }
     }

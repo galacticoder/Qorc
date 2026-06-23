@@ -39,6 +39,7 @@ interface AppSettingsProps {
   currentUsername?: string;
   currentDisplayName?: string;
   onLogout?: () => void | Promise<void>;
+  findUser?: (handle: string, opts?: { forceRefresh?: boolean }) => Promise<unknown>;
 }
 
 interface NotificationSettings {
@@ -141,12 +142,50 @@ const BlockedUserRow = React.memo(function BlockedUserRow({
   );
 });
 
+const UnblockConfirmModal = React.memo(function UnblockConfirmModal({
+  username,
+  busy,
+  onCancel,
+  onConfirm,
+}: {
+  username: string;
+  busy: boolean;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  const displayName = useDisplayUsername({ username });
+
+  return (
+    <div className="qor-modal-overlay" onClick={onCancel}>
+      <div
+        className="qor-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="unblock-modal-title"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="qor-modal-head">
+          <h3 id="unblock-modal-title">Unblock user?</h3>
+          <p><strong>{displayName}</strong> will be able to message and call you again.</p>
+        </div>
+        <div className="qor-modal-actions">
+          <button className="qor-modal-btn" type="button" onClick={onCancel} disabled={busy}>Cancel</button>
+          <button className="qor-modal-btn primary" type="button" onClick={onConfirm} disabled={busy}>
+            {busy ? 'Unblocking…' : 'Unblock'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+});
+
 export const AppSettings = React.memo(function AppSettings({
   passphraseRef,
   kyberSecretRef,
   currentUsername = '',
   currentDisplayName = '',
   onLogout,
+  findUser,
 }: AppSettingsProps) {
   const { theme, resolvedTheme } = useTheme();
   const [mounted, setMounted] = useState(false);
@@ -154,6 +193,10 @@ export const AppSettings = React.memo(function AppSettings({
   const [downloadSettings, setDownloadSettings] = useState({ downloadPath: '', autoSave: false });
   const [isChoosingPath, setIsChoosingPath] = useState(false);
   const [isClearingData, setIsClearingData] = useState(false);
+  const [clearArmed, setClearArmed] = useState(false);
+  const clearArmTimerRef = useRef<number | null>(null);
+  const [logoutArmed, setLogoutArmed] = useState(false);
+  const logoutTimerRef = useRef<number | null>(null);
   const [isCompactingDatabase, setIsCompactingDatabase] = useState(false);
   const [notifications, setNotifications] = useState<NotificationSettings>({ desktop: true, sound: true });
   const [audioSettings, setAudioSettings] = useState<AudioSettings>({ noiseSuppression: true, echoCancellation: true });
@@ -172,6 +215,12 @@ export const AppSettings = React.memo(function AppSettings({
   const [blockedUsers, setBlockedUsers] = useState<BlockedUser[]>([]);
   const [blockedUsersLoading, setBlockedUsersLoading] = useState(false);
   const [blockedUsersError, setBlockedUsersError] = useState<string | null>(null);
+  const [blockModalOpen, setBlockModalOpen] = useState(false);
+  const [blockInput, setBlockInput] = useState('');
+  const [blockChecking, setBlockChecking] = useState(false);
+  const [blockModalError, setBlockModalError] = useState<string | null>(null);
+  const [unblockTarget, setUnblockTarget] = useState<string | null>(null);
+  const [unblocking, setUnblocking] = useState(false);
   const avatarInputRef = useRef<HTMLInputElement>(null);
   const profilePictureEventRateRef = useRef({ windowStart: Date.now(), count: 0 });
   const blockStatusEventRateRef = useRef({ windowStart: Date.now(), count: 0 });
@@ -532,9 +581,26 @@ export const AppSettings = React.memo(function AppSettings({
     }
   };
 
-  const handleClearData = async () => {
+  const armClearData = useCallback(() => {
+    setClearArmed(true);
+    if (clearArmTimerRef.current) clearTimeout(clearArmTimerRef.current);
+    clearArmTimerRef.current = window.setTimeout(() => setClearArmed(false), 5000);
+  }, []);
+
+  const cancelClearData = useCallback(() => {
+    setClearArmed(false);
+    if (clearArmTimerRef.current) {
+      clearTimeout(clearArmTimerRef.current);
+      clearArmTimerRef.current = null;
+    }
+  }, []);
+
+  const handleClearData = useCallback(async () => {
     if (isClearingData) return;
-    if (!confirm('Clear all local data? This will log you out and remove all stored messages.')) return;
+    if (clearArmTimerRef.current) {
+      clearTimeout(clearArmTimerRef.current);
+      clearArmTimerRef.current = null;
+    }
 
     setIsClearingData(true);
     try {
@@ -543,62 +609,140 @@ export const AppSettings = React.memo(function AppSettings({
     } catch {
       toast.error('Failed to clear data');
       setIsClearingData(false);
+      setClearArmed(false);
     }
-  };
+  }, [isClearingData]);
 
-  const handleBlockUser = async () => {
-    const username = window.prompt('Username to block')?.trim() || '';
-    if (!username) return;
+  const armLogout = useCallback(() => {
+    setLogoutArmed(true);
+    if (logoutTimerRef.current) clearTimeout(logoutTimerRef.current);
+    logoutTimerRef.current = window.setTimeout(() => setLogoutArmed(false), 5000);
+  }, []);
+
+  const cancelLogout = useCallback(() => {
+    setLogoutArmed(false);
+    if (logoutTimerRef.current) {
+      clearTimeout(logoutTimerRef.current);
+      logoutTimerRef.current = null;
+    }
+  }, []);
+
+  const handleLogout = useCallback(() => {
+    if (logoutTimerRef.current) {
+      clearTimeout(logoutTimerRef.current);
+      logoutTimerRef.current = null;
+    }
+    void onLogout?.();
+  }, [onLogout]);
+
+  useEffect(() => () => {
+    if (clearArmTimerRef.current) clearTimeout(clearArmTimerRef.current);
+    if (logoutTimerRef.current) clearTimeout(logoutTimerRef.current);
+  }, []);
+
+  const openBlockModal = useCallback(() => {
+    setBlockInput('');
+    setBlockModalError(null);
+    setBlockChecking(false);
+    setBlockModalOpen(true);
+  }, []);
+
+  const closeBlockModal = useCallback(() => {
+    if (blockChecking) return;
+    setBlockModalOpen(false);
+  }, [blockChecking]);
+
+  const confirmBlock = useCallback(async () => {
+    const username = blockInput.trim();
+    if (!username || blockChecking) return;
 
     const passphrase = passphraseRef?.current;
     const kyberSecret = kyberSecretRef?.current || null;
     if (!passphrase && !kyberSecret) {
-      setBlockedUsersError('Please log in.');
+      setBlockModalError('Please log in.');
       return;
     }
 
     if (!isValidUsername(username)) {
-      setBlockedUsersError('Invalid username format');
+      setBlockModalError('That username format is invalid.');
       return;
     }
 
-    setBlockedUsersLoading(true);
-    setBlockedUsersError(null);
+    if (username === currentUsername) {
+      setBlockModalError("You can't block yourself.");
+      return;
+    }
+
+    if (blockedUsers.some((u) => u.username === username)) {
+      setBlockModalError('That user is already blocked.');
+      return;
+    }
+
+    setBlockChecking(true);
+    setBlockModalError(null);
     try {
+      // Verify the user actually exists in discovery before blocking
+      if (findUser) {
+        let exists = false;
+        try {
+          exists = Boolean(await findUser(username));
+        } catch {
+          setBlockModalError("Couldn't verify that username right now. Check your connection and try again.");
+          setBlockChecking(false);
+          return;
+        }
+        if (!exists) {
+          setBlockModalError('No user found with that username.');
+          setBlockChecking(false);
+          return;
+        }
+      }
+
       const key = passphrase ? passphrase : { kyberSecret: kyberSecret! } as any;
       await blockingSystem.blockUser(username, key);
       await loadBlockedUsers();
+      setBlockModalOpen(false);
     } catch (error) {
       console.error('Error blocking user:', error);
-      setBlockedUsersError('Failed to block user. Please try again.');
+      setBlockModalError('Failed to block user. Please try again.');
     } finally {
-      setBlockedUsersLoading(false);
+      setBlockChecking(false);
     }
-  };
+  }, [blockInput, blockChecking, passphraseRef, kyberSecretRef, currentUsername, blockedUsers, findUser, loadBlockedUsers]);
 
-  const handleUnblockUser = async (username: string) => {
+  const openUnblockModal = useCallback((username: string) => {
+    setUnblockTarget(username);
+  }, []);
+
+  const closeUnblockModal = useCallback(() => {
+    if (unblocking) return;
+    setUnblockTarget(null);
+  }, [unblocking]);
+
+  const confirmUnblock = useCallback(async () => {
+    if (!unblockTarget || unblocking) return;
     const passphrase = passphraseRef?.current;
     const kyberSecret = kyberSecretRef?.current || null;
     if (!passphrase && !kyberSecret) {
       setBlockedUsersError('Please log in.');
+      setUnblockTarget(null);
       return;
     }
 
-    if (!confirm(`Unblock ${username}?`)) return;
-
-    setBlockedUsersLoading(true);
+    setUnblocking(true);
     setBlockedUsersError(null);
     try {
       const key = passphrase ? passphrase : { kyberSecret: kyberSecret! } as any;
-      await blockingSystem.unblockUser(username, key);
+      await blockingSystem.unblockUser(unblockTarget, key);
       await loadBlockedUsers();
+      setUnblockTarget(null);
     } catch (error) {
       console.error('Error unblocking user:', error);
       setBlockedUsersError('Failed to unblock user. Please try again.');
     } finally {
-      setBlockedUsersLoading(false);
+      setUnblocking(false);
     }
-  };
+  }, [unblockTarget, unblocking, passphraseRef, kyberSecretRef, loadBlockedUsers]);
 
   if (!mounted) return null;
 
@@ -713,16 +857,38 @@ export const AppSettings = React.memo(function AppSettings({
                         <div className="setting-label" style={{ color: 'var(--danger)' }}>Clear All Data</div>
                         <div className="setting-description">Permanently delete messages, conversations, and settings. You will be logged out.</div>
                       </div>
-                      <button className="danger-action" type="button" disabled={isClearingData} onClick={handleClearData}>
-                        {isClearingData ? 'Clearing' : 'Clear All Data'}
-                      </button>
+                      {clearArmed ? (
+                        <div className="confirm-inline">
+                          <button className="action" type="button" onClick={cancelClearData} disabled={isClearingData}>
+                            Cancel
+                          </button>
+                          <button className="danger-action is-armed" type="button" onClick={handleClearData} disabled={isClearingData}>
+                            {isClearingData ? 'Clearing…' : 'Are you sure?'}
+                          </button>
+                        </div>
+                      ) : (
+                        <button className="danger-action" type="button" disabled={isClearingData} onClick={armClearData}>
+                          Clear All Data
+                        </button>
+                      )}
                     </div>
                   </div>
 
                   <div className="logout-row">
-                    <button className="danger-action" type="button" onClick={() => void onLogout?.()}>
-                      Log Out
-                    </button>
+                    {logoutArmed ? (
+                      <div className="confirm-inline">
+                        <button className="action" type="button" onClick={cancelLogout}>
+                          Cancel
+                        </button>
+                        <button className="danger-action is-armed" type="button" onClick={handleLogout}>
+                          Are you sure?
+                        </button>
+                      </div>
+                    ) : (
+                      <button className="danger-action" type="button" onClick={armLogout}>
+                        Log Out
+                      </button>
+                    )}
                   </div>
                 </div>
               </div>
@@ -940,36 +1106,35 @@ export const AppSettings = React.memo(function AppSettings({
                 <div>
                   <span className="pane-kicker">Data</span>
                   <h2 className="pane-title">Privacy & Safety</h2>
-                  <p className="pane-subtitle">Blocked user management.</p>
+                  <p className="pane-subtitle">Manage who can reach you.</p>
                 </div>
               </header>
 
               <div className="settings-section">
-                <h3 className="section-title">Blocks</h3>
-                <div className="settings-list">
-                  <div className="setting-row">
-                    <div>
-                      <div className="setting-label">Blocked Users</div>
-                      <div className="setting-description">Manage users you have blocked.</div>
-                    </div>
-                    <button className="action" type="button" disabled={blockedUsersLoading || !blockingKeyAvailable} onClick={handleBlockUser}>
-                      Block user
-                    </button>
+                <div className="blocked-head">
+                  <div>
+                    <h3 className="section-title">Blocked users</h3>
+                    <p className="blocked-subtitle">
+                      Blocked users can't message or call you. They aren't told they've been blocked.
+                    </p>
                   </div>
-                  <div className="setting-row">
-                    <div>
-                      <div className="setting-label">Blocked Users ({blockedUsers.length})</div>
-                      <div className="setting-description">Refresh the blocked user list.</div>
-                    </div>
-                    <button className="action" type="button" disabled={blockedUsersLoading || !blockingKeyAvailable} onClick={loadBlockedUsers}>
-                      {blockedUsersLoading ? 'Loading' : 'Refresh'}
-                    </button>
-                  </div>
+                  <button
+                    className="action"
+                    type="button"
+                    disabled={!blockingKeyAvailable}
+                    onClick={openBlockModal}
+                  >
+                    Block a user
+                  </button>
                 </div>
 
                 {blockedUsersError && <div className="settings-error">{blockedUsersError}</div>}
 
-                {blockedUsers.length === 0 ? (
+                {blockedUsersLoading && blockedUsers.length === 0 ? (
+                  <div className="blocked-empty">
+                    <div><span>Loading blocked users…</span></div>
+                  </div>
+                ) : blockedUsers.length === 0 ? (
                   <div className="blocked-empty">
                     <div><strong>No blocked users</strong><span>Users you block will appear here.</span></div>
                   </div>
@@ -979,8 +1144,8 @@ export const AppSettings = React.memo(function AppSettings({
                       <BlockedUserRow
                         key={user.username}
                         user={user}
-                        loading={blockedUsersLoading}
-                        onUnblock={handleUnblockUser}
+                        loading={unblocking}
+                        onUnblock={openUnblockModal}
                       />
                     ))}
                   </div>
@@ -989,6 +1154,56 @@ export const AppSettings = React.memo(function AppSettings({
             </section>
           </section>
         </main>
+
+        {blockModalOpen && (
+          <div className="qor-modal-overlay" onClick={closeBlockModal}>
+            <div
+              className="qor-modal"
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="block-modal-title"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="qor-modal-head">
+                <h3 id="block-modal-title">Block a user</h3>
+                <p>Enter the username of the person you want to block.</p>
+              </div>
+              <div className="qor-modal-body">
+                <label className="qor-modal-field">
+                  <span className="field-label">Username</span>
+                  <input
+                    className="text-input"
+                    type="text"
+                    value={blockInput}
+                    placeholder="Enter a username"
+                    autoFocus
+                    spellCheck={false}
+                    autoComplete="off"
+                    disabled={blockChecking}
+                    onChange={(e) => { setBlockInput(e.target.value); if (blockModalError) setBlockModalError(null); }}
+                    onKeyDown={(e) => { if (e.key === 'Enter') confirmBlock(); }}
+                  />
+                </label>
+                {blockModalError && <div className="qor-modal-error">{blockModalError}</div>}
+              </div>
+              <div className="qor-modal-actions">
+                <button className="qor-modal-btn" type="button" onClick={closeBlockModal} disabled={blockChecking}>Cancel</button>
+                <button className="qor-modal-btn primary" type="button" onClick={confirmBlock} disabled={blockChecking || !blockInput.trim()}>
+                  {blockChecking ? 'Checking…' : 'Block user'}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {unblockTarget && (
+          <UnblockConfirmModal
+            username={unblockTarget}
+            busy={unblocking}
+            onCancel={closeUnblockModal}
+            onConfirm={confirmUnblock}
+          />
+        )}
       </div>
     </>
   );

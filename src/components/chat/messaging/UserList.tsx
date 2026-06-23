@@ -11,7 +11,6 @@ import { EventType } from "../../../lib/types/event-types";
 export interface User {
   readonly id: string;
   readonly username: string;
-  readonly isOnline: boolean;
   readonly isTyping?: boolean;
   readonly inboxId?: string;
   readonly routeId?: string;

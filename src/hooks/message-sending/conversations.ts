@@ -87,11 +87,10 @@ export const isPseudonymHash = (value: string): boolean => {
 };
 
 // Create a new conversation object
-export const createConversation = (username: string, isOnline: boolean, inboxId?: string): Conversation => ({
+export const createConversation = (username: string, inboxId?: string): Conversation => ({
   id: crypto.randomUUID(),
   username,
   inboxId,
-  isOnline,
   lastMessage: undefined,
   lastMessageTime: undefined,
   unreadCount: 0

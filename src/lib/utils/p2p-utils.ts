@@ -12,24 +12,6 @@ export const createP2PError = (code: string) => {
 export const getChannelId = (localKey: string, remoteKey: string) =>
   localKey < remoteKey ? `${localKey}|${remoteKey}` : `${remoteKey}|${localKey}`;
 
-export const createBoundedQueue = <T,>(maxSize: number) => {
-  const queue: T[] = [];
-  return {
-    push(item: T) {
-      queue.push(item);
-      if (queue.length > maxSize) {
-        queue.shift();
-      }
-    },
-    items() {
-      return [...queue];
-    },
-    clear() {
-      queue.length = 0;
-    },
-  };
-};
-
 export const buildAuthenticator = () => {
   const cache = new Map<string, { expiresAt: number }>();
   return {
@@ -69,24 +51,6 @@ export const getCrypto = () => {
     throw new Error('WebCrypto unavailable');
   }
   return cryptoObj;
-};
-
-export const generateRandomBase64 = (length = 48) => {
-  const cryptoObj = getCrypto();
-  const bytes = cryptoObj.getRandomValues(new Uint8Array(length));
-  return CryptoUtils.Base64.arrayBufferToBase64(bytes);
-};
-
-export const generateMessageId = async (channelId: string, sequence: number) => {
-  const cryptoObj = getCrypto();
-  const randomBytes = cryptoObj.getRandomValues(new Uint8Array(48));
-  const sequenceBuffer = new Uint8Array(8);
-  new DataView(sequenceBuffer.buffer).setUint32(4, sequence, false);
-  const channelBytes = new TextEncoder().encode(channelId);
-  const material = concatUint8Arrays(randomBytes, sequenceBuffer, channelBytes);
-  const macKey = cryptoObj.getRandomValues(new Uint8Array(32));
-  const mac = await CryptoUtils.Hash.generateBlake3Mac(material, macKey);
-  return CryptoUtils.Base64.arrayBufferToBase64(mac).replace(/[^a-zA-Z0-9]/g, '').slice(0, 48);
 };
 
 export const buildRouteProof = async (

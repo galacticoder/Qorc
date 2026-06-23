@@ -121,3 +121,4 @@ dump.rdb
 theme-playground.html
 
 logs/
+scripts/generate-tauri-icons.py

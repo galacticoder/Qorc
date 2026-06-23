@@ -1,6 +1,6 @@
 [package]
-name = "qor-chat"
-version = "0.0.1"
+name = "qor"
+version = "1.0.0"
 description = "Secure messaging application"
 authors = ["galacticoderr"]
 edition = "2024"

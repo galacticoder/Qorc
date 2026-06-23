@@ -324,11 +324,6 @@ function isTorEnvironment(): boolean {
   }
 }
 
-export interface EmojiCategory {
-  name: string;
-  emojis: string[];
-}
-
 function isValidEmoji(candidate: unknown): candidate is string {
   if (typeof candidate !== 'string') return false;
   const trimmed = candidate.trim();
@@ -450,31 +445,6 @@ export async function getSystemEmojis(secureDB?: SecureDB): Promise<string[]> {
   cacheTimestamp = now;
   emojiCacheHash = await getFallbackEmojisHash();
   return emojiCache.slice();
-}
-
-export async function getEmojiCategories(): Promise<EmojiCategory[]> {
-  const emojis = await getSystemEmojis();
-  return Object.entries(FALLBACK_GROUP_DEFINITIONS).map(([name, group]) => {
-    const intersection = group.filter((emoji) => emojis.includes(emoji));
-    return {
-      name,
-      emojis: intersection.length > 0 ? intersection : emojis.slice(0, Math.min(CONFIG.DEFAULT_CATEGORY_SIZE, emojis.length))
-    };
-  });
-}
-
-export function paginateEmojis(emojis: string[], page: number, pageSize: number): string[] {
-  const currentPage = Number.isInteger(page) && page >= 0 && page <= CONFIG.MAX_PAGE_NUMBER ? page : 0;
-  const currentPageSize = Number.isInteger(pageSize) && pageSize > 0 && pageSize <= CONFIG.MAX_PAGE_SIZE
-    ? pageSize
-    : Math.min(20, CONFIG.MAX_PAGE_SIZE);
-
-  const start = currentPage * currentPageSize;
-  if (start < 0 || start >= emojis.length) {
-    return [];
-  }
-
-  return emojis.slice(start, Math.min(start + currentPageSize, emojis.length));
 }
 
 const EMOJI_KEYWORDS = deepFreeze({
@@ -662,35 +632,6 @@ export function searchEmojis(query: string, emojis: string[]): string[] {
   return behaviorResult;
 }
 
-export function searchEmojisDebounced(
-  query: string,
-  emojis: string[],
-  callback: (results: string[]) => void,
-  delay: number = CONFIG.SEARCH_DEBOUNCE_MS
-): void {
-  if (searchDebounceTimer) {
-    clearTimeout(searchDebounceTimer);
-  }
-
-  if (typeof query !== 'string' || !Array.isArray(emojis) || typeof callback !== 'function') {
-    console.error('[system-emoji] search invalid-parameters');
-    callback(emojis);
-    return;
-  }
-
-  const boundedDelay = Math.min(Math.max(delay, 0), 1000);
-
-  searchDebounceTimer = setTimeout(() => {
-    try {
-      const results = searchEmojis(query, emojis);
-      callback(results);
-    } catch (error) {
-      console.error('[system-emoji] search-error', error instanceof Error ? error.message : 'unknown');
-      callback(emojis);
-    }
-  }, boundedDelay);
-}
-
 export async function clearEmojiCache(): Promise<void> {
   emojiCache = null;
   cacheTimestamp = 0;
@@ -699,52 +640,5 @@ export async function clearEmojiCache(): Promise<void> {
   searchCache.clear();
 }
 
-export async function getEmojiCacheStatus(): Promise<{ cached: boolean; age: number }> {
-  return {
-    cached: emojiCache !== null,
-    age: emojiCache ? Date.now() - cacheTimestamp : 0
-  };
-}
-
-export async function getEmojiSystemHealth(): Promise<{
-  status: 'healthy' | 'degraded' | 'failed';
-  cacheStatus: { cached: boolean; age: number };
-  bridgeAvailable: boolean;
-  circuitBreaker: { open: boolean; failureCount: number };
-  fallbackActive: boolean;
-}> {
-  try {
-    const cacheStatus = await getEmojiCacheStatus();
-    const bridge = getSecureBridge();
-    const bridgeAvailable = Boolean(bridge?.getSystemEmojis);
-    const fallbackActive = isTorEnvironment() || !cacheStatus.cached;
-
-    let status: 'healthy' | 'degraded' | 'failed' = 'healthy';
-    if (!bridgeAvailable && !cacheStatus.cached) {
-      status = 'failed';
-    } else if (!bridgeAvailable || bridgeCircuitBreaker.isOpen()) {
-      status = 'degraded';
-    }
-
-    return {
-      status,
-      cacheStatus,
-      bridgeAvailable,
-      circuitBreaker: {
-        open: bridgeCircuitBreaker.isOpen(),
-        failureCount: (bridgeCircuitBreaker as any).failureCount ?? 0
-      },
-      fallbackActive
-    };
-  } catch {
-    return {
-      status: 'failed',
-      cacheStatus: { cached: false, age: 0 },
-      bridgeAvailable: false,
-      circuitBreaker: { open: true, failureCount: 999 },
-      fallbackActive: true
-    };
-  }
-}
 
 
