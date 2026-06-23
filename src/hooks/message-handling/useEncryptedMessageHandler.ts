@@ -26,7 +26,8 @@ import {
   PQ_KEY_REPLENISH_COOLDOWN_MS,
   MAX_RESETS_PER_PEER,
   RESET_WINDOW_MS,
-  COVER_TRAFFIC_PAYLOAD_TYPE
+  COVER_TRAFFIC_PAYLOAD_TYPE,
+  MAX_INBOUND_PROCESSING_QUEUE
 } from "../../lib/constants";
 import {
   dispatchReadReceiptEvent,
@@ -1081,6 +1082,7 @@ export function useEncryptedMessageHandler(
 
   // FIFO serialization of incoming messages
   const processingChainRef = useRef<Promise<void>>(Promise.resolve());
+  const processingDepthRef = useRef(0);
   const serializedEncryptedMessageHandler = useCallback(
     (encryptedMessage: any, options: { isRecursive?: boolean } = {}): Promise<void> => {
       const bypassQueue =
@@ -1090,10 +1092,24 @@ export function useEncryptedMessageHandler(
       if (bypassQueue) {
         return handleEncryptedMessageCallback(encryptedMessage, options);
       }
+      // Backpressure: the FIFO chain pins each queued payload in memory until it is
+      // drained. Bound the backlog so a flood that slips past the upstream P2P rate
+      // limiter (a modified peer) or arrives over the server/WS path can't grow the
+      // chain without limit and OOM the receiver. Dropped messages are recoverable:
+      // P2P ones are spooled to the server by the sender, server ones stay in the
+      // spool for the next catch-up poll.
+      if (processingDepthRef.current >= MAX_INBOUND_PROCESSING_QUEUE) {
+        console.warn('[EncryptedMessageHandler] inbound processing queue saturated, dropping message', {
+          depth: processingDepthRef.current
+        });
+        return Promise.resolve();
+      }
+      processingDepthRef.current++;
       const run = processingChainRef.current
         .catch(() => { })
         .then(() => handleEncryptedMessageCallback(encryptedMessage, options));
       processingChainRef.current = run.catch(() => { });
+      void run.finally(() => { processingDepthRef.current--; }).catch(() => { });
       return run;
     },
     [handleEncryptedMessageCallback]

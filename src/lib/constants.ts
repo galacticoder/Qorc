@@ -158,6 +158,7 @@ export const CERT_CLOCK_SKEW_MS = 2 * 60 * 1000;
 export const RECEIPT_RETENTION_MS = 24 * 60 * 60 * 1000;
 export const P2P_MESSAGE_RATE_LIMIT = 100;
 export const P2P_MESSAGE_RATE_WINDOW_MS = 60_000;
+export const MAX_INBOUND_PROCESSING_QUEUE = 256;
 export const P2P_MAX_MESSAGE_SIZE = 5 * 1024 * 1024;
 export const P2P_MAX_PEERS = 100;
 export const P2P_PEER_CERT_TTL_MS = 24 * 60 * 60 * 1000;

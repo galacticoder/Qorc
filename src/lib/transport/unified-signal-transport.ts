@@ -18,6 +18,10 @@ const REDELIVER_MAX_PENDING = 400;
 const DELIVERY_ACK_TIMEOUT_MS = 5000;
 const MAX_AWAITING_ACK = 500;
 
+const MAX_QUEUED_SENDS_PER_PEER = 100;
+const MAX_QUEUED_PRIORITY_SENDS = 256;
+const MAX_CONCURRENT_ACK_SPOOLS = 4;
+
 // Unified Signal Transport
 class UnifiedSignalTransport {
     private encryptionProvider: ((to: string, payload: any, type: SignalType, options?: { forceDiscoveryRefresh?: boolean }) => Promise<any>) | null = null;
@@ -29,6 +33,8 @@ class UnifiedSignalTransport {
     private redeliveryPeerListenerBound = false;
     private awaitingDeliveryAck: Map<string, { envelopeToSend: any; timer: ReturnType<typeof setTimeout> }> = new Map();
     private sendQueues: Map<string, { running: boolean; high: Array<() => Promise<void>>; low: Array<() => Promise<void>> }> = new Map();
+    private ackSpoolQueue: any[] = [];
+    private ackSpoolActive = 0;
 
     // Register a provider that encrypts payloads
     setEncryptionProvider(provider: (to: string, payload: any, type: SignalType, options?: { forceDiscoveryRefresh?: boolean }) => Promise<any>): void {
@@ -59,12 +65,24 @@ class UnifiedSignalTransport {
         const key = String(to);
         let q = this.sendQueues.get(key);
         if (!q) { q = { running: false, high: [], low: [] }; this.sendQueues.set(key, q); }
+
+        // refuse to grow the per peer queue without bound
+        const isPriority = UnifiedSignalTransport.PRIORITY_SEND_TYPES.has(type);
+        const depth = isPriority ? q.high.length : q.low.length;
+        const cap = isPriority ? MAX_QUEUED_PRIORITY_SENDS : MAX_QUEUED_SENDS_PER_PEER;
+        if (depth >= cap) {
+            console.warn('[MSG-SEND] per-peer send queue saturated, applying backpressure', {
+                to: key.slice(0, 24), type, depth, cap
+            });
+            return { success: false, transport: 'server', error: 'send-queue-saturated' };
+        }
+
         const result = new Promise<{ success: boolean; transport: 'p2p' | 'server'; error?: string }>((resolve) => {
             const task = () => this.performSend(to, payload, type, options).then(
                 resolve,
                 (err) => resolve({ success: false, transport: 'server', error: err?.message || String(err) })
             );
-            if (UnifiedSignalTransport.PRIORITY_SEND_TYPES.has(type)) q!.high.push(task);
+            if (isPriority) q!.high.push(task);
             else q!.low.push(task);
         });
         this.drainSendQueue(key);
@@ -459,9 +477,25 @@ class UnifiedSignalTransport {
             const entry = this.awaitingDeliveryAck.get(messageId);
             if (!entry) return;
             this.awaitingDeliveryAck.delete(messageId);
-            void this.spoolPersistentToServer(entry.envelopeToSend);
+            this.enqueueAckSpool(entry.envelopeToSend);
         }, DELIVERY_ACK_TIMEOUT_MS);
         this.awaitingDeliveryAck.set(messageId, { envelopeToSend, timer });
+    }
+
+    private enqueueAckSpool(envelopeToSend: any): void {
+        this.ackSpoolQueue.push(envelopeToSend);
+        this.pumpAckSpool();
+    }
+
+    private pumpAckSpool(): void {
+        while (this.ackSpoolActive < MAX_CONCURRENT_ACK_SPOOLS && this.ackSpoolQueue.length > 0) {
+            const envelopeToSend = this.ackSpoolQueue.shift();
+            this.ackSpoolActive++;
+            void this.spoolPersistentToServer(envelopeToSend).finally(() => {
+                this.ackSpoolActive--;
+                this.pumpAckSpool();
+            });
+        }
     }
 
     markDelivered(messageId: string): void {
