@@ -11,7 +11,7 @@ import {
   hasAccountAuthentication,
   hasServerOrAccountAuthentication,
 } from './core.js';
-import { isRouteLookupId, validateCapabilityToken } from '../routing/capability-tokens.js';
+import { isRouteLookupId, validateCapabilityToken, generateCapabilityToken, storeCapabilityToken } from '../routing/capability-tokens.js';
 import { validateBlindRouteSelectorPolicy } from '../routing/destination-selector-policy.js';
 
 function isLookupId(value) {
@@ -173,16 +173,6 @@ export async function handleClaimInbox({ ws, parsed, state }) {
     });
   }
 
-  const capabilityValidation = await validateCapabilityToken(capabilityToken);
-  if (!capabilityValidation.valid) {
-    return await sendSecureMessage(ws, {
-      type: SignalType.CLAIM_INBOX_RESPONSE,
-      success: false,
-      error: capabilityValidation.error || 'invalid_capability_token'
-    });
-  }
-
-  // blind route signature is accepted only when paired with the high entropy capability token for this authenticated flow
   let hasValidBlindSignature = false;
   if (blindSignature) {
     try {
@@ -201,13 +191,29 @@ export async function handleClaimInbox({ ws, parsed, state }) {
     }
   }
 
-  const isAuthorized = hasAccountAuthentication(ws, state) || (capabilityValidation.valid && hasValidBlindSignature);
+  const capabilityValidation = await validateCapabilityToken(capabilityToken);
+
+  const isAuthorized =
+    hasAccountAuthentication(ws, state) || hasValidBlindSignature || capabilityValidation.valid;
   if (!isAuthorized) {
     return await sendSecureMessage(ws, {
       type: SignalType.CLAIM_INBOX_RESPONSE,
       success: false,
-      error: 'authentication_required'
+      error: capabilityValidation.error || 'authentication_required'
     });
+  }
+
+  let refreshedCapability = null;
+  if (!capabilityValidation.valid && (hasValidBlindSignature || hasAccountAuthentication(ws, state))) {
+    try {
+      const cap = generateCapabilityToken();
+      await storeCapabilityToken(cap.token, [], {
+        ttl: Math.max(1, Math.floor((cap.expiresAt - Date.now()) / 1000))
+      });
+      refreshedCapability = cap;
+    } catch (e) {
+      cryptoLogger.warn('[ROUTING] Failed to mint refreshed capability token', { error: e?.message });
+    }
   }
 
   const { claimInboxRoute, registerLocalSocket } = await import('../routing/blind-router.js');
@@ -235,7 +241,10 @@ export async function handleClaimInbox({ ws, parsed, state }) {
   await sendSecureMessage(ws, {
     type: SignalType.CLAIM_INBOX_RESPONSE,
     success: result.success,
-    error: result.error
+    error: result.error,
+    ...(result.success && refreshedCapability
+      ? { capabilityToken: refreshedCapability.token, capabilityTokenExpiresAt: refreshedCapability.expiresAt }
+      : {})
   });
 }
 

@@ -265,10 +265,7 @@ export function useP2PMessaging(
         const shouldForceRefreshAndRetry =
           isCertOrDescriptorIssue || isEndpointUnavailable || isHostUnreachable || isTimeoutLike;
 
-        if (shouldForceRefreshAndRetry) {
-          // Flush both cert cache layers so endpoint rotations are picked up
-          invalidateDiscoveryCache(peer);
-          invalidatePeerCert(peer);
+        if (shouldForceRefreshAndRetry) {          invalidateDiscoveryCache(peer);
           const refreshedCert = await getPeerCertificate(peer, true).catch(() => null);
           if (refreshedCert) {
             try {

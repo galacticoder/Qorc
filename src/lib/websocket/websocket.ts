@@ -879,6 +879,11 @@ export class WebSocketConnection {
             clearTimeout(timeout);
             window.removeEventListener(EventType.SECURE_SERVER_MESSAGE, handler as any);
             window.removeEventListener(EventType.EDGE_SERVER_MESSAGE, handler as any);
+
+            // Adopt server refreshed capability token
+            if (detail?.success && typeof detail?.capabilityToken === 'string') {
+              void bc.refreshCapabilityToken(detail.capabilityToken).catch(() => { });
+            }
             claimFailureReason = detail?.error ? String(detail.error) : (detail?.success ? '' : 'claim-rejected');
             resolve(!!detail.success);
             return;

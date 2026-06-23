@@ -107,6 +107,16 @@ export class BlindRoutingClient {
   }
 
   /**
+   * Replace only short lived capability token in place
+   */
+  async refreshCapabilityToken(token: string): Promise<void> {
+    if (!token || typeof token !== 'string' || !this.credentials) return;
+    if (this.credentials.capabilityToken === token) return;
+    this.credentials.capabilityToken = token;
+    await this.saveCredentials(this.credentials);
+  }
+
+  /**
    * Persist credentials to local storage
    */
   async saveCredentials(credentials: BlindRoutingCredentials): Promise<void> {
