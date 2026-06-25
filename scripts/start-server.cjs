@@ -236,7 +236,7 @@ async function findAvailablePort(basePort = 8443, maxAttempts = 100) {
 function validateTLSCertificates() {
   if (!CONFIG.TLS_CERT_PATH || !CONFIG.TLS_KEY_PATH) {
     logErr('ERROR: TLS_CERT_PATH and TLS_KEY_PATH must be set');
-    logErr('Generate certificates with: node scripts/generate_ts_tls.cjs');
+    logErr('Generate certificates with: node scripts/generate_tls.cjs');
     process.exit(1);
   }
 
@@ -272,7 +272,7 @@ function validateTLSCertificates() {
       }
     }
     logErr(`ERROR: TLS cert not found: ${certPath}`);
-    logErr('Generate certificates with: node scripts/generate_ts_tls.cjs');
+    logErr('Generate certificates with: node scripts/generate_tls.cjs');
     process.exit(1);
   }
 
@@ -298,7 +298,7 @@ function validateTLSCertificates() {
       }
     }
     logErr(`ERROR: TLS key not found: ${keyPath}`);
-    logErr('Generate certificates with: node scripts/generate_ts_tls.cjs');
+    logErr('Generate certificates with: node scripts/generate_tls.cjs');
     process.exit(1);
   }
 
@@ -984,7 +984,7 @@ async function ensureTLSIfMissing() {
 
   log('TLS certificates not found. Generating new certificates...');
 
-  const child = spawn(process.execPath, [path.join(repoRoot, 'scripts', 'generate_ts_tls.cjs')], { cwd: repoRoot, stdio: ['inherit', 'pipe', 'inherit'] });
+  const child = spawn(process.execPath, [path.join(repoRoot, 'scripts', 'generate_tls.cjs')], { cwd: repoRoot, stdio: ['inherit', 'pipe', 'inherit'] });
 
   let capturedOutput = '';
   child.stdout.on('data', (data) => {
@@ -1122,7 +1122,7 @@ async function ensureDbCaBundleEnv() {
           '-showcerts'
         ];
         try {
-          stdout = execFileSync('openssl', args, { encoding: 'utf8' });
+          stdout = execFileSync('openssl', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 10000 });
           usedConnectHost = connectHost;
           break;
         } catch (e) {
@@ -1254,6 +1254,14 @@ async function ensureRedisTls() {
     }
   }
 
+  if (!process.env.REDIS_CA_CERT_PATH && CONFIG.TLS_CERT_PATH) {
+    const absCert = path.isAbsolute(CONFIG.TLS_CERT_PATH) ? CONFIG.TLS_CERT_PATH : path.join(repoRoot, CONFIG.TLS_CERT_PATH);
+    if (fs.existsSync(absCert)) {
+      process.env.REDIS_CA_CERT_PATH = absCert;
+      log(`[START] Using REDIS_CA_CERT_PATH from local TLS cert: ${absCert}`);
+    }
+  }
+
   if (isLoopback && port === 6379) {
     try {
       const altPort = await findAvailablePort(6380, 100);
@@ -1312,83 +1320,7 @@ async function ensureRedisTls() {
 }
 
 
-async function ensureCorrectCertificateConfig() {
-  try {
-    const { execFile } = require('child_process');
-    const { promisify } = require('util');
-    const execFileAsync = promisify(execFile);
-
-    let dnsName = '';
-    try {
-      const { stdout } = await execFileAsync('tailscale', ['status', '--json'], { windowsHide: true });
-      const data = JSON.parse(stdout || '{}');
-      dnsName = (data && data.Self && data.Self.DNSName) ? String(data.Self.DNSName).replace(/\.$/, '') : '';
-    } catch (e) {
-      return;
-    }
-
-    if (!dnsName) return;
-
-    const certDir = path.join(repoRoot, 'server', 'config', 'certs');
-    const expectedCert = path.join(certDir, `${dnsName}.crt`);
-    const expectedKey = path.join(certDir, `${dnsName}.key`);
-    if (fs.existsSync(expectedCert) && fs.existsSync(expectedKey)) {
-      const currentCert = process.env.TLS_CERT_PATH;
-      const currentKey = process.env.TLS_KEY_PATH;
-
-      if (currentCert !== expectedCert || currentKey !== expectedKey) {
-        log(`[CONFIG] Detected hostname mismatch. Switching certs to: ${dnsName}`);
-        process.env.TLS_CERT_PATH = expectedCert;
-        process.env.TLS_KEY_PATH = expectedKey;
-        CONFIG.TLS_CERT_PATH = expectedCert;
-        CONFIG.TLS_KEY_PATH = expectedKey;
-
-        safeUpdateEnv({
-          'TLS_CERT_PATH': expectedCert,
-          'TLS_KEY_PATH': expectedKey
-        });
-      }
-    }
-  } catch (e) {
-    logErr(`[CONFIG] Warning: Failed to auto-configure certificates: ${e.message}`);
-  }
-}
-
 async function main() {
-  await ensureCorrectCertificateConfig();
-  const isDocker = require('fs').existsSync('/.dockerenv');
-  if (process.platform === 'linux' && (isDocker || !process.stdin.isTTY)) {
-    try {
-      const { execSync, spawn } = require('child_process');
-      if (!fs.existsSync('/var/run/tailscale/tailscaled.sock')) {
-        if (fs.existsSync('/usr/sbin/tailscaled')) {
-          console.log('[START] Starting tailscaled daemon...');
-          const logFile = fs.openSync('/tmp/tailscaled.log', 'w');
-          spawn('/usr/sbin/tailscaled', [
-            '--state=/var/lib/tailscale/tailscaled.state',
-            '--socket=/var/run/tailscale/tailscaled.sock'
-          ], {
-            detached: true,
-            stdio: ['ignore', logFile, logFile]
-          }).unref();
-
-          for (let i = 0; i < 10; i++) {
-            await new Promise(r => setTimeout(r, 1000));
-            if (fs.existsSync('/var/run/tailscale/tailscaled.sock')) {
-              try {
-                execSync('tailscale status', { stdio: 'pipe', timeout: 2000 });
-                break;
-              } catch (e) {
-              }
-            }
-          }
-        }
-      }
-    } catch (e) {
-      console.log('[START] WARN: Failed to start tailscaled:', e.message);
-    }
-  }
-
   if (!CONFIG.NO_GUI) {
     console.log("Starting Server...");
   }

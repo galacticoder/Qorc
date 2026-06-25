@@ -28,7 +28,7 @@ This project and everyone participating in it is governed by the [Qor Code of Co
 
 3.  **Generate Certificates:**
     ```bash
-    node scripts/generate_ts_tls.cjs
+    node scripts/generate_tls.cjs
     ```
 
 4.  **Start the Application:**

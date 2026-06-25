@@ -7,20 +7,11 @@ services:
     hostname: redis
     environment:
       - REDIS_PASSWORD=${REDIS_PASSWORD}
-      - TS_AUTHKEY=${TS_AUTHKEY}
     ports:
       - "${REDIS_EXTERNAL_PORT:-6379}:6379"
-    cap_add:
-      - NET_ADMIN
-      - NET_RAW
-    devices:
-      - /dev/net/tun:/dev/net/tun
     volumes:
       - redis-data:/data
       - redis-certs:/certs
-      - tailscale-redis:/var/lib/tailscale
-    tmpfs:
-      - /var/run/tailscale
     networks:
       - Qor-Chat-net
     restart: unless-stopped
@@ -108,21 +99,13 @@ services:
       - ../.env
     networks:
       - Qor-Chat-net
-    cap_add:
-      - NET_ADMIN
-      - SYS_MODULE
-    devices:
-      - /dev/net/tun:/dev/net/tun
     volumes:
-      - ../.env:/app/.env 
+      - ../.env:/app/.env
       - ../scripts:/app/scripts:rw
       - ../server:/app/server:rw
       - ../logs:/app/logs:rw
-      - tailscale-data:/var/lib/tailscale
       - redis-certs:/app/redis-certs:ro
       - postgres-certs:/app/postgres-certs:ro
-    tmpfs:
-      - /var/run/tailscale
     restart: unless-stopped
 
   loadbalancer:
@@ -141,16 +124,10 @@ services:
       - REDIS_CLIENT_CERT_PATH=/app/redis-certs/redis-client.crt
       - REDIS_CLIENT_KEY_PATH=/app/redis-certs/redis-client.key
       - REDIS_TLS_SERVERNAME=redis
-      - TS_AUTHKEY=${TS_AUTHKEY}
       - NO_GUI
     depends_on:
       redis:
         condition: service_healthy
-    cap_add:
-      - NET_ADMIN
-      - SYS_MODULE
-    devices:
-      - /dev/net/tun:/dev/net/tun
     networks:
       - Qor-Chat-net
     volumes:
@@ -158,7 +135,6 @@ services:
       - ../scripts:/app/scripts:rw
       - ../server:/app/server:rw
       - redis-certs:/app/redis-certs:ro
-      - tailscale-loadbalancer:/var/lib/tailscale
     tmpfs:
       - /var/run
     restart: unless-stopped
@@ -177,8 +153,5 @@ networks:
 volumes:
   postgres-data:
   postgres-certs:
-  tailscale-data:
-  tailscale-redis:
-  tailscale-loadbalancer:
   redis-data:
   redis-certs:

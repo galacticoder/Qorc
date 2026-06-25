@@ -6,8 +6,8 @@
  *   node scripts/install-deps.cjs --client
  *   node scripts/install-deps.cjs --server
  * Components:
- *   haproxy, tailscale, jq, redis, postgres, docker
- *   all  -> installs a reasonable set: haproxy, tailscale, jq
+ *   haproxy, jq, redis, postgres, docker
+ *   all  -> installs a reasonable set: haproxy, jq
  */
 
 const os = require('os');
@@ -232,23 +232,6 @@ async function installComponent(name) {
       if (findInPath('haproxy')) return true;
       if (plat === 'linux') return await installLinux('haproxy');
       if (plat === 'darwin' && pmHas('brew')) return await tryExec('brew', ['install', 'haproxy']);
-      return false;
-    }
-    case 'tailscale': {
-      if (findInPath('tailscale') || findInPath('tailscaled')) return true;
-      if (plat === 'linux') {
-        const installed = await installLinux('tailscale');
-        if (installed) return true;
-        try {
-          const { execSync } = require('child_process');
-          execSync('curl -fsSL https://tailscale.com/install.sh | sh', { stdio: 'inherit', shell: true });
-          if (findInPath('tailscale') || findInPath('tailscaled')) return true;
-        } catch (e) {
-          console.log('[INFO] Failed to install via script. See: https://tailscale.com/kb/1031/install-linux');
-          return false;
-        }
-      }
-      if (plat === 'darwin' && pmHas('brew')) return await tryExec('brew', ['install', 'tailscale']);
       return false;
     }
     case 'jq': {
@@ -645,7 +628,7 @@ async function installComponent(name) {
     console.log('Usage: node scripts/install-deps.cjs <component...>');
     console.log('       node scripts/install-deps.cjs --client');
     console.log('       node scripts/install-deps.cjs --server');
-    console.log('Components: haproxy, tailscale, jq, redis, postgres, docker, nodejs, curl, wget, python3, openssl, build-tools, cmake, ninja, liboqs, oqs-provider, pnpm, tauri, libevent, rust');
+    console.log('Components: haproxy, jq, redis, postgres, docker, nodejs, curl, wget, python3, openssl, build-tools, cmake, ninja, liboqs, oqs-provider, pnpm, tauri, libevent, rust');
     console.log('Presets:');
     console.log('  all      - All server and edge dependencies');
     console.log('  server   - Server runtime dependencies');
@@ -656,8 +639,8 @@ async function installComponent(name) {
   }
 
   const presets = {
-    all: ['git', 'nodejs', 'redis', 'postgres', 'python3', 'openssl', 'build-tools', 'cmake', 'ninja', 'liboqs', 'oqs-provider', 'haproxy', 'tailscale', 'jq', 'docker'],
-    server: ['nodejs', 'redis', 'postgres', 'python3', 'openssl', 'build-tools', 'tailscale'],
+    all: ['git', 'nodejs', 'redis', 'postgres', 'python3', 'openssl', 'build-tools', 'cmake', 'ninja', 'liboqs', 'oqs-provider', 'haproxy', 'jq', 'docker'],
+    server: ['nodejs', 'redis', 'postgres', 'python3', 'openssl', 'build-tools'],
     client: ['nodejs', 'git', 'curl', 'wget', 'pnpm', 'rust', 'build-tools', 'tauri'],
     edge: ['haproxy'],
     quantum: ['git', 'openssl', 'build-tools', 'cmake', 'ninja', 'liboqs', 'oqs-provider']

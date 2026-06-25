@@ -239,12 +239,11 @@ served by:
 
 ---
 
-## Tailscale, Tor, and network tooling
+## TLS, Tor, and network tooling
 
 | Name | Default / required | Used by | Description |
 | ---- | ------------------ | ------- | ----------- |
-| `TAILSCALE_HOSTNAME` | `('Qor-chat')` (JSON-encoded in `.env`) | `scripts/generate_ts_tls.cjs` | Device name requested from Tailscale when issuing a TLS certificate. |
-| `TS_AUTHKEY` | **required** for Tailscale certificate generation | `scripts/generate_ts_tls.cjs` | Tailscale auth key used to authenticate the node when requesting TLS certificates via `tailscale cert`. |
+| `TLS_CERT_CN` | `('localhost')` | `scripts/generate_tls.cjs` | Common Name (and certificate filename stem) used when generating the self-signed server TLS certificate. The cert also includes SANs for `localhost`, `127.0.0.1`, `::1`, and the machine hostname. |
 
 ---
 
@@ -269,4 +268,4 @@ served by:
 
 - Secrets and key material are often auto-generated and persisted under `server/config` if not provided via environment variables.
 - `REDIS_URL` is required for normal operation. Presence, rate limiting, PQ session storage, and cluster coordination all depend on Redis.
-- TLS certificate paths (`TLS_CERT_PATH`, `TLS_KEY_PATH`) must be configured explicitly. Separate scripts can be used to obtain certificates (for example, via Tailscale).
+- TLS certificate paths (`TLS_CERT_PATH`, `TLS_KEY_PATH`) must be configured explicitly. Run `node scripts/generate_tls.cjs` to generate a self-signed certificate and populate these paths in `.env`.

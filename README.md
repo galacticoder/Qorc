@@ -29,8 +29,7 @@ Current architecture docs:
 
 Qor-Chat is not a metadata-free system. The server can still observe timing,
 connection state, traffic volume, rounded database sizes, and some bucketed or
-cover-traffic protocol artifacts. Message contents, local history, avatars, and
-discovery payloads are encrypted end-to-end.
+cover-traffic protocol artifacts.
 
 ## Setup
 
@@ -58,7 +57,7 @@ node scripts/install-deps.cjs --client
 ```
 
 The server installer targets Linux/macOS server dependencies such as TLS-capable
-Redis, Postgres, OpenSSL, Tailscale, and build tools. The client installer checks
+Redis, Postgres, OpenSSL, and build tools. The client installer checks
 Node, pnpm, Rust, build tools, and Tauri dependencies.
 
 ### Configure environment
@@ -69,32 +68,22 @@ certificate paths, Redis/Postgres settings, `SERVER_PASSWORD`, and persistent
 server secrets. See [docs/ENVIRONMENT_VARIABLES.md](docs/ENVIRONMENT_VARIABLES.md)
 for the full list.
 
-For Tailscale TLS certificates, use:
+To generate the server's TLS certificate (self-signed), use:
 
 ```bash
-node scripts/generate_ts_tls.cjs
+node scripts/generate_tls.cjs
 ```
+
+Clients reach the server through its Tor onion service, so the onion address is
+the cryptographic root of trust and a self-signed certificate is sufficient. Pass
+`--force` to regenerate, or set `TLS_CERT_CN` to override the certificate CN.
 
 ### Run locally
-
-Start the server:
-
-```bash
-node scripts/start-server.cjs
-```
 
 Start the desktop client:
 
 ```bash
 node scripts/start-client.cjs
-```
-
-`start-client.cjs` builds the pinned HintlessPIR client helper, runs a Tauri
-release build, and then launches the built app. To skip rebuilding and launch an
-existing binary:
-
-```bash
-node scripts/start-client.cjs --run-only
 ```
 
 ### Docker deployment
