@@ -4,6 +4,7 @@ import type { TorSetupStatus } from '../../lib/types/tor-types';
 import { torNetworkManager } from '../../lib/transport/tor-network';
 import { toast } from 'sonner';
 import { websocket, storage } from '../../lib/tauri-bindings';
+import { ThemeToggleButton } from '../ui/ThemeToggleButton';
 
 interface ConnectSetupProps {
   onComplete?: (serverUrl: string) => Promise<void> | void;
@@ -579,6 +580,7 @@ export function ConnectSetup({ onComplete, onDisconnect, initialServerUrl = '', 
   return (
     <section className="screen screen-setup">
       <div className="tor-flat">
+        <ThemeToggleButton className="auth-theme-toggle" />
         <div className="setup-tor-backdrop" aria-hidden="true">
           <div className="setup-protection-field">
             {setupSymbols.map((symbol, index) => (

@@ -512,13 +512,13 @@ export function useEncryptedMessageHandler(
             }
 
             if (!decrypted?.success || typeof decrypted?.plaintext !== 'string') {
-              const isTransient = /bad mac|mac verification|decryption failed|old counter|duplicate/i.test(errMsg);
-              if (isTransient) {
+              const isReplay = /old counter|duplicate/i.test(errMsg);
+              if (isReplay) {
                 return;
               }
 
-              // Only trigger recovery for real session missing errors
-              const isSessionError = /no.?session|no valid sessions|invalid prekey identifier|invalid whisper message/i.test(errMsg);
+              const isSessionError = decrypted?.requires_key_refresh ||
+                /no.?session|no valid sessions|invalid prekey|invalid whisper message|mac verification|bad mac|ratchet|decryption failed/i.test(errMsg);
               if (isSessionError && senderUsername) {
                 await handleSessionResetAndRetry(
                   senderUsername,
@@ -803,13 +803,13 @@ export function useEncryptedMessageHandler(
               }
 
               if (!decryptedSignal?.success || typeof decryptedSignal.plaintext !== 'string') {
-                const isTransient = /bad mac|mac verification|decryption failed|old counter|duplicate/i.test(errMsg);
-                if (isTransient) {
+                const isReplay = /old counter|duplicate/i.test(errMsg);
+                if (isReplay) {
                   return;
                 }
 
                 const isSessionError = decryptedSignal?.requires_key_refresh ||
-                  /no.?session|no valid sessions|invalid prekey identifier|invalid whisper message/i.test(errMsg);
+                  /no.?session|no valid sessions|invalid prekey|invalid whisper message|mac verification|bad mac|ratchet|decryption failed/i.test(errMsg);
 
                 if (isSessionError && senderUsername) {
                   const retryMessage = (encryptedMessage && (encryptedMessage as any).encryptedPayload)

@@ -25,6 +25,14 @@ export const AppSettingsStyles = () => (
       color: var(--text);
       font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
       font-size: 14px;
+      user-select: none;
+      -webkit-user-select: none;
+    }
+
+    .qor-settings-host input,
+    .qor-settings-host textarea {
+      user-select: text;
+      -webkit-user-select: text;
     }
 
     .qor-settings-host.light {

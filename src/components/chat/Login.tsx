@@ -7,6 +7,7 @@ import { toast } from "sonner";
 import { system } from "../../lib/tauri-bindings";
 import { EventType } from "../../lib/types/event-types.ts";
 import { QorBrandLogo } from "../ui/QorBrandLogo";
+import { ThemeToggleButton } from "../ui/ThemeToggleButton";
 
 interface ServerKeys {
   readonly x25519PublicBase64: string;
@@ -213,6 +214,8 @@ export const Login = React.memo<LoginProps>(({
         <a className={`${prefix}-back-setup`} href="setup.html" onClick={handleBackToSetup}>
           Back to setup
         </a>
+
+        <ThemeToggleButton className="auth-theme-toggle" />
 
         <main className={`${prefix}-simple`} aria-label={isSignup ? "Create account" : "Sign in"}>
           <header className={`${prefix}-simple-head`}>

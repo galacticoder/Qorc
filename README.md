@@ -172,10 +172,15 @@ because recipient discovery material is not available locally.
 
 ```bash
 pnpm run build
+node scripts/start-client.cjs --bundle-only
 pnpm run lint
 pnpm run test:security
 pnpm run test:pir-worker
 ```
+
+`start-client.cjs` builds the native PIR client helper and Tauri bundles for the
+current OS. Run it on Windows to produce the Windows `.msi` and NSIS `.exe`
+installers under `src-tauri/target/release/bundle`.
 
 Server package commands are in [server/package.json](server/package.json), and
 Docker orchestration lives in [docker/docker-compose.yml](docker/docker-compose.yml).

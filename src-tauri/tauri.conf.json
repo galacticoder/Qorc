@@ -60,7 +60,12 @@
         "homepage": "https://github.com/galacticoder/Qor-Chat",
         "targets": [
             "deb",
-            "rpm"
+            "rpm",
+            "appimage",
+            "app",
+            "dmg",
+            "msi",
+            "nsis"
         ],
         "icon": [
             "icons/32x32.png",
@@ -71,7 +76,7 @@
             "icons/icon.ico"
         ],
         "resources": [
-            "binaries/qor-pir-client"
+            "binaries/qor-pir-client*"
         ],
         "category": "SocialNetworking",
         "shortDescription": "",

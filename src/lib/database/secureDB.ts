@@ -16,6 +16,24 @@ import {
    SECURE_DB_MAX_TOTAL_FILE_STORAGE
  } from '../constants';
 
+const FILE_B64_FIELD = '__qfb64';
+
+function u8ToBase64(u8: Uint8Array): string {
+  let binary = '';
+  const chunk = 0x8000;
+  for (let i = 0; i < u8.length; i += chunk) {
+    binary += String.fromCharCode.apply(null, Array.from(u8.subarray(i, i + chunk)));
+  }
+  return btoa(binary);
+}
+
+function base64ToU8(b64: string): Uint8Array {
+  const binary = atob(b64);
+  const u8 = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) u8[i] = binary.charCodeAt(i);
+  return u8;
+}
+
 export class SecureDB {
   private static readonly encoder = new TextEncoder();
   private static readonly decoder = new TextDecoder();
@@ -327,8 +345,13 @@ export class SecureDB {
     const currentUser = this.username;
 
     for (const msg of uniqueMap.values()) {
-      if (!(msg as any)?.sender || !(msg as any)?.recipient) continue;
-      const peer = (msg as any).sender === currentUser ? (msg as any).recipient : (msg as any).sender;
+      const m = msg as any;
+      
+      if (m?.sender && !m?.recipient && m.sender !== currentUser) {
+        m.recipient = currentUser;
+      }
+      if (!m?.sender || !m?.recipient) continue;
+      const peer = m.sender === currentUser ? m.recipient : m.sender;
 
       let list = conversationMap.get(peer);
       if (!list) {
@@ -764,40 +787,27 @@ export class SecureDB {
       return { success: false, quotaExceeded: true };
     }
 
-    const encrypted = await this.encryptData(uint8Array);
+    const encrypted = await this.encryptData({ [FILE_B64_FIELD]: u8ToBase64(uint8Array) });
     await (await this.kv()).setBinary('files', fileId, encrypted);
     return { success: true };
   }
 
   // Get a file from storage
   async getFile(fileId: string): Promise<Blob | null> {
-    if (!fileId || typeof fileId !== 'string') {
-      return null;
-    }
+    if (!fileId || typeof fileId !== 'string') return null;
 
     const encrypted = await (await this.kv()).getBinary('files', fileId);
     if (!encrypted) return null;
 
     try {
       const decrypted = await this.decryptData(encrypted);
-
-      if (decrypted instanceof Uint8Array) {
-        const regularBuffer = new ArrayBuffer(decrypted.byteLength);
-        const regularArray = new Uint8Array(regularBuffer);
-        regularArray.set(decrypted);
-        return new Blob([regularArray]);
-      }
-
-      if (Array.isArray(decrypted) || (decrypted && typeof decrypted === 'object' && 'length' in decrypted)) {
-        const arr = new Uint8Array(decrypted as any);
-        const regularBuffer = new ArrayBuffer(arr.byteLength);
-        const regularArray = new Uint8Array(regularBuffer);
-        regularArray.set(arr);
-        return new Blob([regularArray]);
-      }
-
-      return null;
-    } catch (err) {
+      const b64 = (decrypted as any)?.[FILE_B64_FIELD];
+      if (typeof b64 !== 'string') return null;
+      const arr = base64ToU8(b64);
+      const out = new Uint8Array(new ArrayBuffer(arr.byteLength));
+      out.set(arr);
+      return new Blob([out]);
+    } catch {
       return null;
     }
   }

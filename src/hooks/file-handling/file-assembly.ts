@@ -74,11 +74,12 @@ export const createFileMessage = (
   fileBlob: Blob,
   from: string,
   toUser?: string,
-  originalBase64Data?: string
+  originalBase64Data?: string,
+  messageId?: string
 ): Message => {
   const detectedMime = detectMimeType(fileEntry.safeFilename);
   return {
-    id: fileEntry.messageId || uuidv4(),
+    id: messageId || fileEntry.messageId || uuidv4(),
     content: fileUrl,
     sender: from,
     recipient: toUser,
@@ -132,7 +133,7 @@ export const completeFileTransfer = async (
   const originalBase64Data = await blobToBase64(fileBlob);
   const detectedMime = detectMimeType(fileEntry.safeFilename);
 
-  const message = createFileMessage(fileEntry, fileUrl, fileBlob, from, toUser, originalBase64Data);
+  const message = createFileMessage(fileEntry, fileUrl, fileBlob, from, toUser, originalBase64Data, messageId);
   onNewMessage(message);
 
   dispatchCompleteEvent({

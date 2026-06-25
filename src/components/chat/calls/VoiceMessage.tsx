@@ -1,12 +1,9 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { cn } from '../../../lib/utils/shared-utils';
-import { Button } from '../../ui/button';
-import { Play, Pause } from 'lucide-react';
+import { Play, Pause, Mic } from 'lucide-react';
 import { useFileUrl } from '../../../hooks/file-handling/useFileUrl';
 import type { SecureDB } from '../../../lib/database/secureDB';
-import { SignalType } from '../../../lib/types/signal-types';
 
-// Props for voice message bubble
 interface VoiceMessageProps {
   audioUrl: string;
   timestamp: Date;
@@ -19,19 +16,34 @@ interface VoiceMessageProps {
   onRendered?: () => void;
 }
 
-// Voice message playback component
+const WAVEFORM_BARS = 48;
+
+// Format seconds as M:SS
+const formatTime = (seconds: number): string => {
+  if (!isFinite(seconds) || seconds < 0) seconds = 0;
+  const m = Math.floor(seconds / 60);
+  const s = Math.floor(seconds % 60);
+  return `${m}:${s.toString().padStart(2, '0')}`;
+};
+
+const parseFilenameDuration = (filename?: string): number => {
+  const m = /voice-note-(\d+)s/i.exec(filename || '');
+  return m ? parseInt(m[1], 10) : 0;
+};
+
 export function VoiceMessage({
   audioUrl,
   timestamp: _timestamp,
   isCurrentUser,
-  filename: _filename,
+  filename,
   originalBase64Data,
   mimeType,
   messageId,
   secureDB,
   onRendered
 }: VoiceMessageProps) {
-  const { url: resolvedUrl, loading: _urlLoading, error: urlError } = useFileUrl({
+  const filenameDuration = parseFilenameDuration(filename);
+  const { url: resolvedUrl, error: urlError } = useFileUrl({
     secureDB: secureDB || null,
     fileId: messageId,
     mimeType: mimeType || 'audio/webm',
@@ -41,360 +53,168 @@ export function VoiceMessage({
 
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
-  const [duration, setDuration] = useState(0);
-  const [isLoading, setIsLoading] = useState(false);
+  const [duration, setDuration] = useState(filenameDuration);
   const [error, setError] = useState<string | null>(urlError);
+  const [peaks, setPeaks] = useState<number[] | null>(null);
 
   const audioRef = useRef<HTMLAudioElement | null>(null);
-  const canvasRef = useRef<HTMLCanvasElement | null>(null);
-  const peaksRef = useRef<number[] | null>(null);
-  const drawRafRef = useRef<number | null>(null);
 
   const safeAudioUrl = audioUrl && !audioUrl.startsWith('blob:') ? audioUrl : '';
   const effectiveAudioUrl = resolvedUrl || safeAudioUrl;
 
-  // Capture duration when metadata loads
-  const handleLoadedMetadata = useCallback(() => {
-    if (!audioRef.current) return;
-    const dur = audioRef.current.duration;
-    if (isFinite(dur) && dur > 0) {
-      setDuration(dur);
-    } else {
-      try {
-        const el = audioRef.current;
-        const onTimeUpdate = () => {
-          if (isFinite(el.duration) && el.duration > 0) {
-            setDuration(el.duration);
-            el.removeEventListener('timeupdate', onTimeUpdate);
-          }
-        };
-        el.addEventListener('timeupdate', onTimeUpdate);
-        el.play().then(() => { setTimeout(() => el.pause(), 50); }).catch(() => { });
-      } catch { }
-    }
-    setIsLoading(false);
-  }, []);
+  const progress = duration > 0 ? Math.min(1, currentTime / duration) : 0;
+  const remaining = isPlaying ? Math.max(0, duration - currentTime) : duration;
 
-  // Track current playback time
-  const handleTimeUpdate = useCallback(() => {
-    if (audioRef.current) {
-      setCurrentTime(audioRef.current.currentTime);
-    }
-  }, []);
-
-  // Reset state when audio ends
-  const handleEnded = useCallback(() => {
-    setIsPlaying(false);
-    setCurrentTime(0);
-  }, []);
-
-  // Handle playback/load errors
-  const handleError = useCallback(() => {
-    setError('Failed to load audio');
-    setIsLoading(false);
-    setIsPlaying(false);
-  }, []);
-
-  useEffect(() => {
-    return () => {
-      if (audioRef.current) {
-        audioRef.current.pause();
-        audioRef.current.removeEventListener('loadedmetadata', handleLoadedMetadata);
-        audioRef.current.removeEventListener('timeupdate', handleTimeUpdate);
-        audioRef.current.removeEventListener('ended', handleEnded);
-        audioRef.current.removeEventListener(SignalType.ERROR, handleError);
-        audioRef.current = null;
-      }
-      if (drawRafRef.current) {
-        cancelAnimationFrame(drawRafRef.current);
-      }
-    };
-  }, [handleLoadedMetadata, handleTimeUpdate, handleEnded, handleError]);
-
-  // Format duration label
-  const formatDuration = (seconds: number) => {
-    return `${Math.round(seconds)}s`;
-  };
-
-  // Play/pause toggle handler
-  const togglePlayback = async () => {
+  // Play / pause — the <audio> element drives isPlaying via its events
+  const togglePlayback = useCallback(async () => {
+    const audio = audioRef.current;
+    if (!audio || !effectiveAudioUrl) return;
     try {
       setError(null);
-      if (isPlaying) {
-        if (audioRef.current) {
-          audioRef.current.pause();
-          setIsPlaying(false);
+      if (audio.paused) {
+        if (audio.ended || (isFinite(audio.duration) && audio.currentTime >= audio.duration - 0.05)) {
+          audio.load();
+          setCurrentTime(0);
         }
-        return;
+        await audio.play();
+      } else {
+        audio.pause();
       }
-      setIsLoading(true);
-      if (!audioRef.current) {
-        const audio = new Audio(effectiveAudioUrl);
-        audio.preload = 'metadata';
-        audioRef.current = audio;
-        audio.addEventListener('loadedmetadata', handleLoadedMetadata);
-        audio.addEventListener('timeupdate', handleTimeUpdate);
-        audio.addEventListener('ended', handleEnded);
-        audio.addEventListener(SignalType.ERROR, handleError);
-      }
-      await audioRef.current.play();
-      setIsPlaying(true);
-      setIsLoading(false);
     } catch {
       setError('Failed to play audio');
-      setIsLoading(false);
-      setIsPlaying(false);
     }
-  };
+  }, [effectiveAudioUrl]);
 
-  // Seek playback based on waveform click
-  const handleCanvasClick = useCallback(async (e: React.MouseEvent<HTMLCanvasElement>) => {
-    const canvas = canvasRef.current;
-    if (!canvas || !audioRef.current || duration === 0) return;
+  const handleLoadedMetadata = useCallback(() => {
+    if (filenameDuration > 0) return;
+    const d = audioRef.current?.duration;
+    if (d && isFinite(d) && d > 0) setDuration(d);
+  }, [filenameDuration]);
 
-    const rect = canvas.getBoundingClientRect();
-    const clickX = e.clientX - rect.left;
-    const progress = Math.max(0, Math.min(1, clickX / rect.width));
-    const seekTime = progress * duration;
-
-    try {
-      audioRef.current.currentTime = seekTime;
-      setCurrentTime(seekTime);
-
-      if (!isPlaying) {
-        await audioRef.current.play();
-        setIsPlaying(true);
-      }
-    } catch (err) {
-      console.error('Failed to seek:', err);
+  // Seek by clicking the waveform
+  const seekTo = useCallback(async (ratio: number) => {
+    const audio = audioRef.current;
+    if (!audio || duration <= 0) return;
+    const t = Math.max(0, Math.min(1, ratio)) * duration;
+    audio.currentTime = t;
+    setCurrentTime(t);
+    if (audio.paused) {
+      try { await audio.play(); } catch { /* ignore */ }
     }
-  }, [duration, isPlaying]);
+  }, [duration]);
 
-  // Render waveform bars and progress
-  const drawWaveform = () => {
-    const canvas = canvasRef.current;
-    const peaks = peaksRef.current;
-    if (!canvas || !peaks) {
-      if (canvas) {
-        const ctx = canvas.getContext('2d');
-        if (ctx) {
-          ctx.clearRect(0, 0, canvas.width, canvas.height);
-        }
-      }
-      return;
-    }
-    const dpr = window.devicePixelRatio || 1;
-    const rect = canvas.getBoundingClientRect();
+  const handleBarsClick = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
+    const rect = e.currentTarget.getBoundingClientRect();
+    void seekTo((e.clientX - rect.left) / rect.width);
+  }, [seekTo]);
 
-    canvas.width = rect.width * dpr;
-    canvas.height = rect.height * dpr;
-
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
-
-    ctx.scale(dpr, dpr);
-
-    const width = rect.width;
-    const height = rect.height;
-    const centerY = Math.floor(height / 2);
-
-    const styles = getComputedStyle(document.body);
-    const surfaceColor = styles.getPropertyValue('--color-text-primary').trim() || '#000000';
-
-    const hexToRgba = (hex: string, alpha: number) => {
-      if (hex.length === 4) {
-        hex = '#' + hex[1] + hex[1] + hex[2] + hex[2] + hex[3] + hex[3];
-      }
-      const r = parseInt(hex.slice(1, 3), 16);
-      const g = parseInt(hex.slice(3, 5), 16);
-      const b = parseInt(hex.slice(5, 7), 16);
-      return `rgba(${r}, ${g}, ${b}, ${alpha})`;
-    };
-
-    const baseColor = isCurrentUser
-      ? 'rgba(255,255,255,0.45)'
-      : (surfaceColor.startsWith('#') ? hexToRgba(surfaceColor, 0.35) : 'rgba(59,130,246,0.35)');
-
-    const progressColor = isCurrentUser
-      ? 'rgba(255,255,255,0.95)'
-      : (surfaceColor.startsWith('#') ? hexToRgba(surfaceColor, 0.9) : 'rgba(59,130,246,0.9)');
-
-    ctx.clearRect(0, 0, width, height);
-
-    ctx.fillStyle = baseColor;
-    const barWidth = width / peaks.length;
-    const gap = 1;
-    const effectiveBarWidth = Math.max(1, barWidth - gap);
-
-    for (let i = 0; i < peaks.length; i++) {
-      const x = i * barWidth;
-      const amp = peaks[i];
-      const y = Math.max(2, Math.round(amp * (height / 2)));
-
-      ctx.beginPath();
-      ctx.roundRect(x, centerY - y, effectiveBarWidth, y * 2, 2);
-      ctx.fill();
-    }
-
-    const progress = duration > 0 ? Math.min(1, currentTime / duration) : 0;
-
-    ctx.save();
-    ctx.beginPath();
-    ctx.rect(0, 0, width * progress, height);
-    ctx.clip();
-
-    ctx.fillStyle = progressColor;
-    for (let i = 0; i < peaks.length; i++) {
-      const x = i * barWidth;
-      const amp = peaks[i];
-      const y = Math.max(2, Math.round(amp * (height / 2)));
-
-      ctx.beginPath();
-      ctx.roundRect(x, centerY - y, effectiveBarWidth, y * 2, 2);
-      ctx.fill();
-    }
-    ctx.restore();
-  };
-
+  // Decode audio once to compute waveform
   useEffect(() => {
     let cancelled = false;
-    peaksRef.current = null;
+    setPeaks(null);
 
-    const decodeAndComputePeaks = async () => {
+    const run = async () => {
       try {
-        if (!originalBase64Data) {
-          if (!originalBase64Data && typeof audioUrl === 'string' && audioUrl.startsWith('blob:')) {
-          }
-        }
-
         const arrayBuffer = originalBase64Data
           ? (() => {
             const clean = originalBase64Data.trim().replace(/[^A-Za-z0-9+/=]/g, '');
-            const binaryString = atob(clean);
-            const bytes = new Uint8Array(binaryString.length);
-            for (let i = 0; i < binaryString.length; i++) bytes[i] = binaryString.charCodeAt(i);
+            const bin = atob(clean);
+            const bytes = new Uint8Array(bin.length);
+            for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
             return bytes.buffer;
           })()
-          : await (await fetch(effectiveAudioUrl)).arrayBuffer();
+          : effectiveAudioUrl
+            ? await (await fetch(effectiveAudioUrl)).arrayBuffer()
+            : null;
+
+        if (!arrayBuffer) return;
 
         const AudioCtx: typeof AudioContext = (window as any).AudioContext || (window as any).webkitAudioContext;
-        const audioCtx = new AudioCtx();
-        const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer.slice(0));
+        const ctx = new AudioCtx();
+        const buffer = await ctx.decodeAudioData(arrayBuffer.slice(0));
+        try { ctx.close(); } catch { /* ignore */ }
+        if (cancelled) return;
 
-        if (audioBuffer.duration && audioBuffer.duration > 0) {
-          setDuration(audioBuffer.duration);
+        if (!filenameDuration && buffer.duration && buffer.duration > 0) setDuration(buffer.duration);
+
+        const data = buffer.getChannelData(0);
+        const per = Math.max(1, Math.floor(data.length / WAVEFORM_BARS));
+        const out = new Array<number>(WAVEFORM_BARS);
+        let max = 0;
+        for (let i = 0; i < WAVEFORM_BARS; i++) {
+          const start = i * per;
+          const end = Math.min(start + per, data.length);
+          let peak = 0;
+          for (let j = start; j < end; j++) peak = Math.max(peak, Math.abs(data[j]));
+          out[i] = peak;
+          if (peak > max) max = peak;
         }
+        const norm = max > 0.01 ? 1 / max : 1;
+        for (let i = 0; i < WAVEFORM_BARS; i++) out[i] = Math.min(1, Math.max(0.08, out[i] * norm));
 
-        const targetWidth = 120;
-        const channelData = audioBuffer.getChannelData(0);
-        const samplesPerPixel = Math.max(1, Math.floor(channelData.length / targetWidth));
-        const peaks: number[] = new Array(targetWidth);
-        const minThreshold = 0.05;
-
-        let globalMax = 0;
-        for (let i = 0; i < targetWidth; i++) {
-          const start = i * samplesPerPixel;
-          const end = Math.min(start + samplesPerPixel, channelData.length);
-          let min = 1.0;
-          let max = -1.0;
-          for (let j = start; j < end; j++) {
-            const v = channelData[j];
-            if (v < min) min = v;
-            if (v > max) max = v;
-          }
-          let amp = Math.max(-min, max);
-          if (amp > globalMax) globalMax = amp;
-          peaks[i] = amp;
-        }
-
-        const normalizationFactor = globalMax > 0.01 ? 1 / globalMax : 1;
-        for (let i = 0; i < targetWidth; i++) {
-          peaks[i] = Math.min(1, Math.max(minThreshold, peaks[i] * normalizationFactor));
-        }
-
-        peaksRef.current = peaks;
-        drawWaveform();
-        onRendered?.();
-        try {
-          audioCtx.close();
-        } catch { }
+        if (!cancelled) setPeaks(out);
       } catch {
-        peaksRef.current = null;
-        setError('Failed to load audio');
-        drawWaveform();
+        if (!cancelled) setPeaks(new Array(WAVEFORM_BARS).fill(0.18));
+      } finally {
         onRendered?.();
       }
     };
 
-    setTimeout(() => {
-      if (!cancelled) decodeAndComputePeaks();
-    }, 0);
+    void run();
+    return () => { cancelled = true; };
+  }, [effectiveAudioUrl, originalBase64Data, onRendered, filenameDuration]);
 
-    return () => {
-      cancelled = true;
-      if (drawRafRef.current) cancelAnimationFrame(drawRafRef.current);
-    };
-  }, [audioUrl, originalBase64Data, onRendered]);
+  const bars = peaks ?? new Array(WAVEFORM_BARS).fill(0.18);
+  const playedColor = isCurrentUser ? 'rgba(255,255,255,0.95)' : 'var(--qor-accent)';
+  const restColor = isCurrentUser ? 'rgba(255,255,255,0.38)' : 'color-mix(in srgb, var(--qor-accent) 32%, transparent)';
 
-  useEffect(() => {
-    drawWaveform();
-  }, [currentTime, duration, isCurrentUser]);
-
-  if (error) {
-    return (
-      <div
-        className="px-3 py-2 rounded-lg text-sm italic select-none"
-        style={{
-          backgroundColor: 'var(--color-surface)',
-          color: 'var(--color-text-secondary)',
-          border: '1px dashed rgba(255,255,255,0.22)'
-        }}
-      >
-        {urlError || error || 'Failed to load audio'}
-      </div>
-    );
+  if (error || urlError) {
+    return <div className="qor-file-error">{urlError || error || 'Failed to load audio'}</div>;
   }
 
   return (
     <div
-      className={cn(
-        "flex items-end gap-3 w-full min-w-[160px] max-w-[300px] select-none py-2 px-2 rounded-md",
-        isCurrentUser ? "text-primary-foreground" : ""
-      )}
-      style={{
-        backgroundColor: isCurrentUser ? 'var(--color-accent-primary)' : 'var(--chat-bubble-received-bg)',
-        color: isCurrentUser ? 'white' : 'var(--color-text-primary)',
-        borderRadius: 'var(--message-bubble-radius)',
-      }}
+      className={cn('qor-voice', isCurrentUser && 'is-mine')}
+      style={isCurrentUser ? { background: 'var(--qor-accent)' } : undefined}
     >
-      <div className="flex flex-col items-center justify-end gap-1 shrink-0 min-w-[2rem]">
-        <span className="text-[10px] font-mono opacity-80 tabular-nums leading-none">
-          {formatDuration(isPlaying ? Math.max(0, duration - currentTime) : duration)}
-        </span>
-        <Button
-          onClick={togglePlayback}
-          disabled={isLoading}
-          variant="ghost"
-          size="sm"
-          className="h-8 w-8 p-0 rounded-full shrink-0 hover:bg-black/10"
-        >
-          {isLoading ? (
-            <div className="w-4 h-4 border-2 border-current border-t-transparent rounded-full animate-spin" />
-          ) : isPlaying ? (
-            <Pause className="w-4 h-4" />
-          ) : (
-            <Play className="w-4 h-4" />
-          )}
-        </Button>
-      </div>
+      <audio
+        ref={audioRef}
+        src={effectiveAudioUrl || undefined}
+        preload="metadata"
+        onLoadedMetadata={handleLoadedMetadata}
+        onTimeUpdate={() => setCurrentTime(audioRef.current?.currentTime ?? 0)}
+        onPlay={() => setIsPlaying(true)}
+        onPause={() => setIsPlaying(false)}
+        onEnded={() => { setIsPlaying(false); setCurrentTime(0); }}
+        onError={() => setError('Failed to load audio')}
+        style={{ display: 'none' }}
+      />
 
-      <div className="flex-1 h-8 relative flex items-center">
-        <canvas
-          ref={canvasRef}
-          className="w-full h-full block cursor-pointer"
-          onClick={handleCanvasClick}
-          aria-label="Click to seek in voice message"
-        />
+      <button
+        type="button"
+        className="qor-voice-play"
+        onClick={togglePlayback}
+        aria-label={isPlaying ? 'Pause voice message' : 'Play voice message'}
+      >
+        {isPlaying ? <Pause className="w-[18px] h-[18px]" /> : <Play className="w-[18px] h-[18px] translate-x-[1px]" />}
+      </button>
+
+      <div className="qor-voice-body">
+        <div className="qor-voice-bars" onClick={handleBarsClick} role="slider" aria-label="Seek voice message" aria-valuenow={Math.round(progress * 100)} tabIndex={0}>
+          {bars.map((amp, i) => (
+            <span
+              key={i}
+              style={{
+                height: `${Math.round(amp * 100)}%`,
+                background: i / bars.length <= progress ? playedColor : restColor,
+              }}
+            />
+          ))}
+        </div>
+        <div className="qor-voice-foot">
+          <Mic className="w-3 h-3 opacity-70" />
+          <span className="qor-voice-time">{formatTime(remaining)}</span>
+        </div>
       </div>
     </div>
   );

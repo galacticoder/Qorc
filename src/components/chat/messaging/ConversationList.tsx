@@ -147,13 +147,17 @@ const ConversationItem = memo<ConversationItemProps>(({
           <div className="qor-conversation-preview">
             <UnreadIndicator count={conversation.unreadCount ?? 0} isSelected={isSelected} />
           </div>
-        ) : (conversation.lastMessage || conversation.secureContentId) ? (
+        ) : conversation.lastMessage ? (
           <div
             className="qor-conversation-preview"
             title={conversation.lastMessage}
           >
+            {conversation.lastMessage}
+          </div>
+        ) : conversation.secureContentId ? (
+          <div className="qor-conversation-preview">
             <SecureCanvasText
-              messageId={conversation.secureContentId || conversation.id}
+              messageId={conversation.secureContentId}
               maxWidth={200}
               fontSize={12}
               color="inherit"

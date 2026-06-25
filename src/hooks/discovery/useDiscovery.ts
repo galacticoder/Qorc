@@ -95,8 +95,6 @@ const DISCOVERY_TIMEOUT_CACHE_TTL_MS = 25 * 1000;
 const DISCOVERY_TOKEN_CACHE_TTL_MS = 30 * 1000;
 const OPRF_EVAL_SEND_TIMEOUT_MS = 15000;
 const OPRF_EVAL_RESPONSE_TIMEOUT_MS = 60000;
-const HTTP_OPRF_COOLDOWN_MS = 60000;
-let httpOprfUnavailableUntil = 0;
 const OPRF_WAIT_TIMEOUT_MS = 10000;
 const PUBLISH_ACK_TIMEOUT_MS = 15000;
 const PREKEY_BUNDLE_CACHE_TTL_MS = 2 * 60 * 1000;
@@ -1061,11 +1059,6 @@ export const useDiscovery = (
         return defaultAvatar;
     }, []);
 
-    const normalizeBlindedPoint = useCallback((value: unknown): string => {
-        if (typeof value !== 'string') return '';
-        return value.trim().toLowerCase();
-    }, []);
-
     const normalizeRequestId = useCallback((value: unknown): string => {
         if (typeof value !== 'string') return '';
         const trimmed = value.trim();
@@ -1596,193 +1589,29 @@ export const useDiscovery = (
             responseTimeoutMs: OPRF_EVAL_RESPONSE_TIMEOUT_MS
         });
 
-        // Prefer dedicated isolated Tor circuit
-        if (Date.now() >= httpOprfUnavailableUntil) {
-            try {
-                const httpResp: any = await pir.discoveryApiFetch('oprf/evaluate', JSON.stringify({ blindedPoint: blindedHex }));
-                if (httpResp?.ok === true
-                    && typeof httpResp.evaluated === 'string'
-                    && typeof httpResp.proof === 'string'
-                    && typeof httpResp.publicKey === 'string') {
-                    logDiscoveryOprf('info', 'eval-response', {
-                        purpose, handle: normalizedHandle, requestId: oprfRequestId, epoch: oprfState.epoch, via: 'dedicated'
-                    });
-                    return { blindResult, response: { evaluated: httpResp.evaluated, proof: httpResp.proof, publicKey: httpResp.publicKey } };
-                }
-                httpOprfUnavailableUntil = Date.now() + HTTP_OPRF_COOLDOWN_MS;
-            } catch {
-                httpOprfUnavailableUntil = Date.now() + HTTP_OPRF_COOLDOWN_MS;
+        // Dedicated isolated Tor circuit (no WS fallback)
+        try {
+            const httpResp: any = await pir.discoveryApiFetch('oprf/evaluate', JSON.stringify({ blindedPoint: blindedHex }));
+            if (httpResp?.ok === true
+                && typeof httpResp.evaluated === 'string'
+                && typeof httpResp.proof === 'string'
+                && typeof httpResp.publicKey === 'string') {
+                logDiscoveryOprf('info', 'eval-response', {
+                    purpose, handle: normalizedHandle, requestId: oprfRequestId, epoch: oprfState.epoch, via: 'dedicated'
+                });
+                return { blindResult, response: { evaluated: httpResp.evaluated, proof: httpResp.proof, publicKey: httpResp.publicKey } };
             }
+            logDiscoveryOprf('warn', 'eval-error-response', {
+                purpose, handle: normalizedHandle, requestId: oprfRequestId, epoch: oprfState.epoch, via: 'dedicated', err: (httpResp as any)?.error
+            });
+            return null;
+        } catch (e) {
+            logDiscoveryOprf('warn', 'eval-error-response', {
+                purpose, handle: normalizedHandle, requestId: oprfRequestId, epoch: oprfState.epoch, via: 'dedicated', err: e instanceof Error ? e.message : String(e)
+            });
+            return null;
         }
-
-        return await new Promise<{ blindResult: OPRFBlindResult; response: OPRFServerResponse } | null>((resolve) => {
-            let settled = false;
-            let responseTimeoutId: number | null = null;
-            let sendTimeoutId: number | null = null;
-            let sentAt = 0;
-            const cleanup = () => {
-                if (settled) return;
-                settled = true;
-                window.removeEventListener(EventType.SECURE_SERVER_MESSAGE, handler as EventListener);
-                window.removeEventListener(EventType.EDGE_SERVER_MESSAGE, handler as EventListener);
-                if (responseTimeoutId !== null) clearTimeout(responseTimeoutId);
-                if (sendTimeoutId !== null) clearTimeout(sendTimeoutId);
-            };
-            const resolveOnce = (value: { blindResult: OPRFBlindResult; response: OPRFServerResponse } | null) => {
-                cleanup();
-                resolve(value);
-            };
-            const startResponseTimer = () => {
-                if (settled || responseTimeoutId !== null) return;
-                sentAt = Date.now();
-                responseTimeoutId = window.setTimeout(() => {
-                    traceDiscoveryClient('oprf-eval.timeout', {
-                        timeoutMs: OPRF_EVAL_RESPONSE_TIMEOUT_MS
-                    }, 'warn');
-                    logDiscoveryOprf('warn', 'eval-response-timeout', {
-                        purpose,
-                        handle: normalizedHandle,
-                        requestId: oprfRequestId,
-                        epoch: oprfState.epoch,
-                        timeoutMs: OPRF_EVAL_RESPONSE_TIMEOUT_MS
-                    });
-                    resolveOnce(null);
-                }, OPRF_EVAL_RESPONSE_TIMEOUT_MS);
-                logDiscoveryOprf('info', 'eval-dispatched', {
-                    purpose,
-                    handle: normalizedHandle,
-                    requestId: oprfRequestId,
-                    epoch: oprfState.epoch,
-                    responseTimeoutMs: OPRF_EVAL_RESPONSE_TIMEOUT_MS
-                });
-            };
-
-            const handler = (ev: Event) => {
-                const detail = (ev as CustomEvent).detail;
-                const responseBlindedPoint = normalizeBlindedPoint(detail?.blindedPoint);
-                const responseRequestId = normalizeRequestId(detail?.requestId);
-                const matchedByRequestId = responseRequestId === oprfRequestId;
-                const matchedByBlindedPoint = responseBlindedPoint === blindedHex;
-                if (
-                    detail?.type === SignalType.OPRF_BLIND_EVALUATE_RESPONSE &&
-                    (
-                        matchedByRequestId ||
-                        matchedByBlindedPoint
-                    ) &&
-                    typeof detail.evaluated === 'string' &&
-                    typeof detail.proof === 'string' &&
-                    typeof detail.publicKey === 'string'
-                ) {
-                    traceDiscoveryClient('oprf-eval.response', {
-                        via: ev.type,
-                        epoch: oprfState.epoch,
-                        matchedBy: matchedByRequestId ? 'request-id' : 'blinded-point'
-                    });
-                    logDiscoveryOprf('info', 'eval-response', {
-                        purpose,
-                        handle: normalizedHandle,
-                        requestId: oprfRequestId,
-                        epoch: oprfState.epoch,
-                        matchedBy: matchedByRequestId ? 'request-id' : 'blinded-point',
-                        rttMs: sentAt > 0 ? Date.now() - sentAt : undefined
-                    });
-                    resolveOnce({
-                        blindResult,
-                        response: {
-                            evaluated: detail.evaluated,
-                            proof: detail.proof,
-                            publicKey: detail.publicKey
-                        }
-                    });
-                    return;
-                }
-
-                if ((detail?.type === SignalType.ERROR || detail?.type === SignalType.AUTH_ERROR) && typeof detail.message === 'string') {
-                    const code = typeof detail.code === 'string' ? detail.code : '';
-                    const originalType = typeof detail.originalType === 'string' ? detail.originalType : '';
-                    const message = String(detail.message || '');
-                    const appliesToThisRequest = responseRequestId
-                        ? responseRequestId === oprfRequestId
-                        : /oprf/i.test(`${code} ${originalType} ${message}`);
-                    if (!appliesToThisRequest) return;
-
-                    traceDiscoveryClient('oprf-eval.error-response', {
-                        type: detail.type,
-                        message: detail.message
-                    }, 'warn');
-                    logDiscoveryOprf('warn', 'eval-error-response', {
-                        purpose,
-                        handle: normalizedHandle,
-                        requestId: oprfRequestId,
-                        type: detail.type,
-                        code,
-                        message
-                    });
-                    resolveOnce(null);
-                }
-            };
-
-            window.addEventListener(EventType.SECURE_SERVER_MESSAGE, handler as EventListener);
-            window.addEventListener(EventType.EDGE_SERVER_MESSAGE, handler as EventListener);
-            traceDiscoveryClient('oprf-eval.listener-registered', {
-                responseTimeoutMs: OPRF_EVAL_RESPONSE_TIMEOUT_MS
-            });
-
-            sendTimeoutId = window.setTimeout(() => {
-                traceDiscoveryClient('oprf-eval.send-timeout', {
-                    timeoutMs: OPRF_EVAL_SEND_TIMEOUT_MS + 10000
-                }, 'warn');
-                logDiscoveryOprf('warn', 'eval-send-timeout', {
-                    purpose,
-                    handle: normalizedHandle,
-                    requestId: oprfRequestId,
-                    epoch: oprfState.epoch,
-                    timeoutMs: OPRF_EVAL_SEND_TIMEOUT_MS + 10000
-                });
-                resolveOnce(null);
-            }, OPRF_EVAL_SEND_TIMEOUT_MS + 10000);
-
-            void sendSecureDiscoveryMessage(
-                {
-                    type: SignalType.OPRF_BLIND_EVALUATE,
-                    requestId: oprfRequestId,
-                    blindedPoint: blindedHex
-                },
-                'oprf-blind-evaluate-batch',
-                OPRF_EVAL_SEND_TIMEOUT_MS + 6000
-            ).then((sent) => {
-                traceDiscoveryClient('oprf-eval.send-result', { sent });
-                if (sendTimeoutId !== null) {
-                    clearTimeout(sendTimeoutId);
-                    sendTimeoutId = null;
-                }
-                if (settled) return;
-                if (!sent) {
-                    logDiscoveryOprf('warn', 'eval-send-failed', {
-                        purpose,
-                        handle: normalizedHandle,
-                        requestId: oprfRequestId,
-                        epoch: oprfState.epoch
-                    });
-                    resolveOnce(null);
-                    return;
-                }
-                startResponseTimer();
-            }).catch((error) => {
-                traceDiscoveryClient('oprf-eval.send-error', {
-                    error: error instanceof Error ? error.message : String(error)
-                }, 'warn');
-                logDiscoveryOprf('warn', 'eval-send-error', {
-                    purpose,
-                    handle: normalizedHandle,
-                    requestId: oprfRequestId,
-                    epoch: oprfState.epoch,
-                    error: error instanceof Error ? error.message : String(error)
-                });
-                resolveOnce(null);
-            });
-        });
-    }, [normalizeBlindedPoint, normalizeRequestId, sendSecureDiscoveryMessage, waitForOprfState, waitForPqSession, discoveryPublishSnapshot, isDiscoveryTransportReady]);
+    }, [waitForOprfState, waitForPqSession, discoveryPublishSnapshot, isDiscoveryTransportReady]);
 
     /**
      * Publishes current identity to the billboard using OPRF-derived tokens

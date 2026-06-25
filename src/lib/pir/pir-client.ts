@@ -2,8 +2,6 @@
  * Discovery PIR client
  */
 
-import { SignalType } from '../types/signal-types';
-import { EventType } from '../types/event-types';
 import { pir } from '../tauri-bindings';
 
 export type PirDatabaseKind = 'discovery';
@@ -155,54 +153,12 @@ async function deriveSlotFingerprint(manifest: PirManifest, slotKey: string): Pr
   return bytesToBase64Url(digest.slice(0, FINGERPRINT_BYTES));
 }
 
-function randomRequestId(): string {
-  const bytes = new Uint8Array(16);
-  crypto.getRandomValues(bytes);
-  return Array.from(bytes).map((b) => b.toString(16).padStart(2, '0')).join('');
-}
-
-function signalTypeForPirEvent(eventName: string): SignalType | null {
-  if (eventName === EventType.PIR_MANIFEST) return SignalType.PIR_MANIFEST;
-  if (eventName === EventType.PIR_RESPONSE) return SignalType.PIR_RESPONSE;
-  return null;
-}
-
-function waitForEvent<T>(eventName: string, requestId: string, timeoutMs: number): Promise<T | null> {
-  if (typeof window === 'undefined') return Promise.resolve(null);
-  return new Promise((resolve) => {
-    const expectedSignalType = signalTypeForPirEvent(eventName);
-    const timeout = setTimeout(() => { cleanup(); resolve(null); }, timeoutMs);
-    const handler = (event: Event) => {
-      const detail = (event as CustomEvent).detail;
-      if (event.type !== eventName && (!expectedSignalType || detail?.type !== expectedSignalType)) return;
-      if (detail?.requestId !== requestId) return;
-      cleanup();
-      resolve(detail as T);
-    };
-    const cleanup = () => {
-      clearTimeout(timeout);
-      window.removeEventListener(eventName, handler as EventListener);
-      if (expectedSignalType) {
-        window.removeEventListener(EventType.SECURE_SERVER_MESSAGE, handler as EventListener);
-        window.removeEventListener(EventType.EDGE_SERVER_MESSAGE, handler as EventListener);
-      }
-    };
-    window.addEventListener(eventName, handler as EventListener);
-    if (expectedSignalType) {
-      window.addEventListener(EventType.SECURE_SERVER_MESSAGE, handler as EventListener);
-      window.addEventListener(EventType.EDGE_SERVER_MESSAGE, handler as EventListener);
-    }
-  });
-}
-
 export function markPirInteractiveActivity(durationMs = 45_000): void {
   pirInteractiveUntil = Math.max(pirInteractiveUntil, Date.now() + Math.max(0, durationMs));
 }
 
 let activePirQueryCount = 0;
 let pirQueryQuietUntil = 0;
-const HTTP_PIR_COOLDOWN_MS = 60_000;
-let httpPirUnavailableUntil = 0;
 export function isPirInteractive(): boolean {
   return activePirQueryCount > 0 || Date.now() < pirQueryQuietUntil;
 }
@@ -228,57 +184,27 @@ export async function requestPirManifest(
     }
   }
 
-  // Prefer the dedicated isolated Tor circuit
-  if (Date.now() >= httpPirUnavailableUntil) {
-    try {
-      const http = await pir.discoveryApiFetch('pir/manifest', JSON.stringify({
-        kind,
-        prepareWorker: options.prepareWorker === true
-      }));
-      if (http?.ok === true && http.manifest) {
-        const manifest = http.manifest as PirManifest;
-        manifestCache.set(kind, {
-          manifest,
-          expiresAt: Math.min(
-            Number.isFinite(manifest.expiresAt) ? manifest.expiresAt : Date.now() + PIR_MANIFEST_CACHE_MAX_AGE_MS,
-            Date.now() + PIR_MANIFEST_CACHE_MAX_AGE_MS
-          )
-        });
-        return { success: true, manifest };
-      }
-      httpPirUnavailableUntil = Date.now() + HTTP_PIR_COOLDOWN_MS;
-    } catch {
-      httpPirUnavailableUntil = Date.now() + HTTP_PIR_COOLDOWN_MS;
+  // Dedicated isolated Tor circuit
+  try {
+    const http = await pir.discoveryApiFetch('pir/manifest', JSON.stringify({
+      kind,
+      prepareWorker: options.prepareWorker === true
+    }));
+    if (http?.ok === true && http.manifest) {
+      const manifest = http.manifest as PirManifest;
+      manifestCache.set(kind, {
+        manifest,
+        expiresAt: Math.min(
+          Number.isFinite(manifest.expiresAt) ? manifest.expiresAt : Date.now() + PIR_MANIFEST_CACHE_MAX_AGE_MS,
+          Date.now() + PIR_MANIFEST_CACHE_MAX_AGE_MS
+        )
+      });
+      return { success: true, manifest };
     }
+    return { success: false, error: (http as any)?.error || 'pir_manifest_unavailable' };
+  } catch (e) {
+    return { success: false, error: e instanceof Error ? e.message : 'pir_manifest_unavailable' };
   }
-
-  const requestId = randomRequestId();
-  const responsePromise = waitForEvent<any>(
-    EventType.PIR_MANIFEST,
-    requestId,
-    options.timeoutMs || (options.prepareWorker ? 60_000 : 15_000)
-  );
-  const { default: websocketClient } = await import('../websocket/websocket');
-  await websocketClient.sendSecureControlMessage({
-    type: SignalType.PIR_MANIFEST_REQUEST,
-    requestId,
-    prepareWorker: options.prepareWorker === true,
-    kind
-  });
-  const response = await responsePromise;
-  if (!response?.success || !response.manifest) {
-    return response;
-  }
-
-  const manifest = response.manifest as PirManifest;
-  manifestCache.set(kind, {
-    manifest,
-    expiresAt: Math.min(
-      Number.isFinite(manifest.expiresAt) ? manifest.expiresAt : Date.now() + PIR_MANIFEST_CACHE_MAX_AGE_MS,
-      Date.now() + PIR_MANIFEST_CACHE_MAX_AGE_MS
-    )
-  });
-  return { success: true, manifest };
 }
 
 function clearManifestCache(kind: PirDatabaseKind): void {
@@ -288,58 +214,20 @@ function clearManifestCache(kind: PirDatabaseKind): void {
 async function sendPirQuery(
   manifest: PirManifest,
   query: string,
-  options: { timeoutMs?: number; dedicatedOnly?: boolean } = {}
+  _options: { timeoutMs?: number } = {}
 ): Promise<{ success: boolean; response?: string; error?: string } | null> {
   activePirQueryCount += 1;
   try {
-    if (Date.now() >= httpPirUnavailableUntil) {
-      try {
-        const http = await pir.queryFetch(manifest.epochId, query);
-        if (http?.ok === true && typeof http.response === 'string' && http.response.length > 0) {
-          // eslint-disable-next-line no-console
-          console.log('[OPRF-DISCOVERY][pir-transport]', { via: 'dedicated', ok: true });
-          return { success: true, response: http.response };
-        }
-        // eslint-disable-next-line no-console
-        console.warn('[OPRF-DISCOVERY][pir-transport]', { via: 'dedicated', ok: false, httpOk: http?.ok, err: (http as any)?.error });
-        httpPirUnavailableUntil = Date.now() + HTTP_PIR_COOLDOWN_MS;
-      } catch (e) {
-        // eslint-disable-next-line no-console
-        console.warn('[OPRF-DISCOVERY][pir-transport]', { via: 'ws-fallback', err: e instanceof Error ? e.message : String(e) });
-        httpPirUnavailableUntil = Date.now() + HTTP_PIR_COOLDOWN_MS;
-      }
-    } else {
-      // eslint-disable-next-line no-console
-      console.log('[OPRF-DISCOVERY][pir-transport]', { via: 'ws-cooldown' });
-    }
-
-    if (options.dedicatedOnly) {
-      return { success: false, error: 'pir_dedicated_unavailable' };
-    }
-
-    const requestId = randomRequestId();
-    const { default: websocketClient } = await import('../websocket/websocket');
-    if (!websocketClient.isConnectedToServer?.() || !websocketClient.isPQSessionEstablished?.()) {
-      return { success: false, error: 'pir_transport_not_ready' };
-    }
-    const responsePromise = waitForEvent<any>(EventType.PIR_RESPONSE, requestId, options.timeoutMs || 120_000);
+    // Dedicated isolated Tor circuit (no WS fallback)
     try {
-      await websocketClient.sendSecureControlMessage({
-        type: SignalType.PIR_QUERY,
-        requestId,
-        epochId: manifest.epochId,
-        kind: manifest.kind,
-        query
-      }, { failIfQueued: true });
-    } catch (error) {
-      return { success: false, error: error instanceof Error ? error.message : 'pir_query_send_failed' };
+      const http = await pir.queryFetch(manifest.epochId, query);
+      if (http?.ok === true && typeof http.response === 'string' && http.response.length > 0) {
+        return { success: true, response: http.response };
+      }
+      return { success: false, error: (http as any)?.error || 'pir_query_failed' };
+    } catch (e) {
+      return { success: false, error: e instanceof Error ? e.message : 'pir_query_failed' };
     }
-    const response = await responsePromise;
-    if (!response) return { success: false, error: 'pir_query_timeout' };
-    if (response.success !== true || typeof response.response !== 'string') {
-      return { success: false, error: typeof response.error === 'string' ? response.error : 'pir_query_failed' };
-    }
-    return { success: true, response: response.response };
   } finally {
     activePirQueryCount = Math.max(0, activePirQueryCount - 1);
     pirQueryQuietUntil = Date.now() + 4_000;
@@ -354,8 +242,7 @@ function manifestParameterId(manifest: PirManifest): string {
 async function recoverDiscoveryRecordAt(
   manifest: PirManifest,
   index: number,
-  timeoutMs?: number,
-  dedicatedOnly = false
+  timeoutMs?: number
 ): Promise<{ fingerprint: string; handle: string } | null> {
   const q = await pir.queryRecord({
     parameterId: manifestParameterId(manifest),
@@ -366,7 +253,7 @@ async function recoverDiscoveryRecordAt(
   });
   if (!q?.success || !q.request || !q.handle) return null;
 
-  const answer = await sendPirQuery(manifest, q.request, { timeoutMs, dedicatedOnly });
+  const answer = await sendPirQuery(manifest, q.request, { timeoutMs });
   if (!answer?.success || !answer.response) return null;
 
   const recovered = await pir.recoverRecord(q.handle, answer.response);
@@ -473,7 +360,7 @@ export async function runPirCoverQueries(
       const random = new Uint32Array(1);
       crypto.getRandomValues(random);
       const index = manifest.recordCount > 0 ? random[0] % manifest.recordCount : 0;
-      const record = await recoverDiscoveryRecordAt(manifest, index, options.timeoutMs, true);
+      const record = await recoverDiscoveryRecordAt(manifest, index, options.timeoutMs);
       if (record) queried += 1;
     }
     return { success: queried === records, queriedRecords: queried };

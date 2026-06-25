@@ -13,9 +13,11 @@ function logErr(...args) { console.error('[CLIENT]', ...args); }
 const tauriDir = path.join(repoRoot, 'src-tauri');
 
 if (process.argv.slice(2).some(arg => arg === '-h' || arg === '--help')) {
-    console.log('Usage: node start-client.cjs [--run-only] - Starts Qor-Chat client (Tauri)');
-    console.log('  --run-only   Skip the rebuild and just launch the already built binary.');
+    console.log('Usage: node scripts/start-client.cjs [--run-only] [--bundle-only]');
+    console.log('  --run-only     Skip the rebuild and just launch the already built binary.');
+    console.log('  --bundle-only  Build native installer bundles and exit without launching.');
     console.log('Prerequisites: Run `node scripts/install-deps.cjs --client` first');
+    console.log('Bundles are written to src-tauri/target/release/bundle for the current OS.');
     console.log('Logs are mirrored to logs/client-instance-<QOR_INSTANCE_ID>.log');
     process.exit(0);
 }
@@ -23,6 +25,12 @@ if (process.argv.slice(2).some(arg => arg === '-h' || arg === '--help')) {
 process.chdir(repoRoot);
 
 const runOnly = process.argv.slice(2).some(arg => arg === '--run-only' || arg === '--no-build');
+const bundleOnly = process.argv.slice(2).some(arg => arg === '--bundle-only' || arg === '--no-launch');
+
+if (runOnly && bundleOnly) {
+    logErr('--run-only and --bundle-only cannot be used together.');
+    process.exit(1);
+}
 
 // Save all logs to logs/client-instance-<id>.log
 const instanceId = (process.env.QOR_INSTANCE_ID || '1').trim() || '1';
@@ -152,6 +160,44 @@ function removeOldBundleArtifacts() {
     }
 }
 
+function collectBundleArtifacts() {
+    const bundleDir = path.join(tauriDir, 'target', 'release', 'bundle');
+    const artifacts = [];
+    const installerPattern = /\.(appimage|deb|dmg|exe|msi|rpm)$/i;
+
+    function walk(dir) {
+        if (!fs.existsSync(dir)) return;
+        for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+            const fullPath = path.join(dir, entry.name);
+            if (entry.isDirectory()) {
+                if (entry.name.endsWith('.app')) {
+                    artifacts.push(fullPath);
+                } else {
+                    walk(fullPath);
+                }
+            } else if (installerPattern.test(entry.name)) {
+                artifacts.push(fullPath);
+            }
+        }
+    }
+
+    walk(bundleDir);
+    return artifacts.sort();
+}
+
+function printBundleArtifacts() {
+    const artifacts = collectBundleArtifacts();
+    if (artifacts.length === 0) {
+        console.log('[CLIENT] No installer bundle artifacts were found.');
+        return;
+    }
+
+    console.log('[CLIENT] Bundle artifacts:');
+    for (const artifact of artifacts) {
+        console.log(`  - ${path.relative(repoRoot, artifact)}`);
+    }
+}
+
 if (runOnly) {
     console.log('[CLIENT] --run-only: skipping rebuild, launching existing binary.');
     launchApp();
@@ -164,7 +210,6 @@ if (runOnly) {
         });
     } catch (error) {
         logErr('Failed to build the PIR client binary.');
-        logErr('It builds from workers/hintless via Docker, so Docker must be installed and running.');
         logErr('(Override the binary path with QOR_PIR_CLIENT_BIN, or build manually: node scripts/build-pir-client.cjs)');
         process.exit(1);
     }
@@ -182,6 +227,11 @@ if (runOnly) {
         if (code !== 0) {
             logErr(`Tauri build failed with code ${code}`);
             process.exit(code || 1);
+        }
+        printBundleArtifacts();
+        if (bundleOnly) {
+            console.log('[CLIENT] --bundle-only: build complete, not launching app.');
+            process.exit(0);
         }
         launchApp();
     });

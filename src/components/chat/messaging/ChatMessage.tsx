@@ -394,13 +394,11 @@ export const ChatMessage = React.memo<ExtendedChatMessageProps>(({ message, smar
 
           {!isUrlOnly && !isSystemMessage && !isDeleted && urls.length > 0 && type !== SignalType.FILE_MESSAGE && type !== SignalType.FILE && (
             <div
-              className="mb-3 w-full flex self-stretch"
+              className="mb-3"
               style={{
-                justifyContent: safeIsCurrentUser ? 'flex-end' : 'flex-start',
                 alignSelf: safeIsCurrentUser ? 'flex-end' : 'flex-start',
-                maxWidth: 'min(var(--message-bubble-max-width), 320px)',
                 width: '100%',
-                flex: '0 1 auto'
+                maxWidth: 'min(360px, 85vw)'
               }}
             >
               <LinkifyWithPreviews
@@ -448,13 +446,11 @@ export const ChatMessage = React.memo<ExtendedChatMessageProps>(({ message, smar
               if (isUrlOnly && showPreviews) {
                 return (
                   <div
-                    className="relative self-start w-full flex"
+                    className="relative mb-1"
                     style={{
                       alignSelf: safeIsCurrentUser ? 'flex-end' : 'flex-start',
-                      maxWidth: 'min(var(--message-bubble-max-width), 320px)',
                       width: '100%',
-                      flex: '0 1 auto',
-                      justifyContent: safeIsCurrentUser ? 'flex-end' : 'flex-start'
+                      maxWidth: 'min(360px, 85vw)'
                     }}
                     ref={bubbleRef}
                     onContextMenu={handleContextMenu}

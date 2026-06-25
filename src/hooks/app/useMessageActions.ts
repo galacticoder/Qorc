@@ -14,11 +14,13 @@ const getReplyContent = (message: Message): string => {
     const fileSize = message.fileSize ? ` (${formatFileSize(message.fileSize)})` : '';
     const filename = message.filename || 'File';
 
-    if (message.filename && /\.(jpg|jpeg|png|gif|bmp|webp|svg|ico|tiff)$/i.test(message.filename)) {
+    if (message.filename && message.filename.toLowerCase().includes('voice-note')) {
+      return `Voice message`;
+    } else if (message.filename && /\.(jpg|jpeg|png|gif|bmp|webp|svg|ico|tiff)$/i.test(message.filename)) {
       return `Image: ${message.filename}${fileSize}`;
     } else if (message.filename && /\.(mp4|webm|ogg|avi|mov|wmv|flv|mkv)$/i.test(message.filename)) {
       return `Video: ${message.filename}${fileSize}`;
-    } else if (message.filename && (message.filename.toLowerCase().includes('voice-note') || /\.(mp3|wav|ogg|webm|m4a|aac|flac)$/i.test(message.filename))) {
+    } else if (message.filename && /\.(mp3|wav|ogg|m4a|aac|flac)$/i.test(message.filename)) {
       return `Voice message`;
     } else {
       return `File: ${filename}${fileSize}`;

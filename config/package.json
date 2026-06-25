@@ -1,6 +1,7 @@
 {
   "name": "qor-chat-client",
   "private": true,
+  "packageManager": "pnpm@10.33.4",
   "version": "0.0.0",
   "description": "meant for maximum privacy and security",
   "author": "galacticoderr",
@@ -9,7 +10,13 @@
   "scripts": {
     "start": "node scripts/start-client.cjs",
     "build": "vite build --config vite.config.simple.ts",
-    "lint": "eslint src --report-unused-disable-directives --max-warnings 0"
+    "lint": "eslint src --report-unused-disable-directives --max-warnings 0",
+    "test:security": "node scripts/ensure-pir-worker-binaries.cjs && node --test server/test/*.test.js",
+    "test:pir-worker": "node scripts/verify-pir-worker-pin.cjs",
+    "verify:pir-worker-pin": "node scripts/verify-pir-worker-pin.cjs",
+    "build:pir-client": "node scripts/build-pir-client.cjs",
+    "build:pir-client:native": "node scripts/build-pir-client-native.cjs",
+    "bundle": "node scripts/ensure-pir-worker-binaries.cjs && pnpm tauri build"
   },
   "dependencies": {
     "@noble/ciphers": "^2.0.0",
@@ -31,6 +38,7 @@
     "@radix-ui/react-toggle": "^1.0.3",
     "@radix-ui/react-tooltip": "^1.0.7",
     "@signalapp/libsignal-client": "^0.86.0",
+    "@tauri-apps/api": "2.10.1",
     "argon2-wasm": "^0.9.0",
     "class-variance-authority": "^0.7.0",
     "clsx": "^2.1.0",
@@ -53,6 +61,7 @@
   "devDependencies": {
     "@tailwindcss/aspect-ratio": "^0.4.2",
     "@tailwindcss/postcss": "^4.1.17",
+    "@tauri-apps/cli": "2.10.0",
     "@types/node": "^24.10.0",
     "@types/pako": "^2.0.3",
     "@types/react": "^19.2.2",
@@ -62,6 +71,7 @@
     "@typescript-eslint/parser": "^8.46.3",
     "@vitejs/plugin-react": "^5.1.0",
     "autoprefixer": "^10.4.20",
+    "babel-plugin-react-compiler": "^1.0.0",
     "concurrently": "^9.2.1",
     "eslint": "^9.39.1",
     "eslint-plugin-react-hooks": "^7.0.1",
@@ -69,6 +79,7 @@
     "postcss": "^8.4.49",
     "tailwindcss": "^4.1.17",
     "terser": "^5.44.1",
+    "ts-prune": "^0.10.3",
     "typescript": "^5.9.3",
     "vite": "^7.2.2",
     "wait-on": "^9.0.1"

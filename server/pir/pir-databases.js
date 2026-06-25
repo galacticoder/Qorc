@@ -73,25 +73,21 @@ function historyEntryKeepUntil(database, now = Date.now()) {
   return Math.max(Number.isFinite(expiresAt) ? expiresAt : 0, now) + PIR_EPOCH_GRACE_MS;
 }
 
-function compactHistoricalDatabase(database) {
+function retainHistoricalDatabase(database) {
   if (!database?.manifest) return database;
   const {
     recordDigests: _recordDigests,
     payloadDigests: _payloadDigests,
     ...manifest
   } = database.manifest;
-  const upload = database.workerUpload
-    ? {
-      uploaded: database.workerUpload.uploaded === true,
-      error: database.workerUpload.error,
-      checkedAt: database.workerUpload.checkedAt
-    }
-    : undefined;
+  const wasUploaded = database.uploadedToWorker === true;
   return {
     manifest,
-    compacted: true,
-    uploadedToWorker: database.uploadedToWorker === true,
-    workerUpload: upload,
+    records: database.records,
+    blobsByBucket: database.blobsByBucket,
+    blobsBySlot: database.blobsBySlot,
+    uploadedToWorker: wasUploaded,
+    workerUpload: wasUploaded ? database.workerUpload : undefined,
     workerPublicParams: database.workerPublicParams
   };
 }
@@ -131,23 +127,18 @@ function cleanupEpochHistory(now = Date.now(), force = false) {
   }
 }
 
-function rememberPirDatabase(kind, database, now = Date.now(), options = {}) {
+function rememberPirDatabase(kind, database, now = Date.now()) {
   const epochId = database?.manifest?.epochId;
   if (typeof epochId !== 'string' || !epochId) return;
   const key = historyKey(kind, epochId);
   const keepUntil = historyEntryKeepUntil(database, now);
   const existing = epochHistory.get(key);
-  const shouldCompact = options.forceCompact || envBool('PIR_COMPACT_EPOCH_HISTORY', true);
-  const storedDatabase = shouldCompact
-    ? compactHistoricalDatabase(database)
-    : database;
   if (
     !existing ||
     Number(existing.keepUntil) < keepUntil ||
-    existing.database === database ||
-    (shouldCompact && existing.database?.compacted !== true)
+    (database.uploadedToWorker === true && existing.database?.uploadedToWorker !== true)
   ) {
-    epochHistory.set(key, { database: storedDatabase, keepUntil });
+    epochHistory.set(key, { database: retainHistoricalDatabase(database), keepUntil });
   }
   cleanupEpochHistory(now);
 }
@@ -155,7 +146,7 @@ function rememberPirDatabase(kind, database, now = Date.now(), options = {}) {
 function cachePirDatabase(kind, database, now = Date.now()) {
   const previous = epochCache.get(cacheKey(kind));
   if (previous && previous !== database) {
-    rememberPirDatabase(kind, previous, now, { forceCompact: true });
+    rememberPirDatabase(kind, previous, now);
   }
   epochCache.set(cacheKey(kind), database);
   rememberPirDatabase(kind, database, now);
@@ -427,7 +418,7 @@ export async function getPirDatabase(kind, options = {}) {
   }
 
   if (cached) {
-    rememberPirDatabase(kind, cached, now, { forceCompact: true });
+    rememberPirDatabase(kind, cached, now);
   }
 
   try {

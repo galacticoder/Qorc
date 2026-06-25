@@ -12,23 +12,41 @@ const required = [
   path.join(binDir, `qor-pir-client${suffix}`),
 ];
 
-const missing = required.filter((file) => {
+function isValidClientBinary(file) {
   try {
-    fs.accessSync(file, fs.constants.X_OK);
-    return false;
+    fs.accessSync(file, process.platform === 'win32' ? fs.constants.F_OK : fs.constants.X_OK);
+    const stdout = execFileSync(file, [], {
+      input: '{"operation":"ping"}',
+      encoding: 'utf8',
+      stdio: ['pipe', 'pipe', 'ignore'],
+      timeout: 10000,
+      windowsHide: true
+    });
+    return JSON.parse(stdout).success === true;
   } catch {
-    return true;
+    return false;
   }
-});
+}
+
+const missing = required.filter((file) => !isValidClientBinary(file));
 
 if (missing.length === 0) {
-  console.log('[PIR-BINARIES] Local pinned PIR client binary is present');
+  console.log('[PIR-BINARIES] Local pinned PIR client binary is present and runnable');
   process.exit(0);
 }
 
-console.log('[PIR-BINARIES] Missing local pinned PIR client binary. building from workers/hintless');
+console.log('[PIR-BINARIES] Missing or invalid local pinned PIR client binary. building from workers/hintless');
 execFileSync(process.execPath, [path.join(repoRoot, 'scripts', 'build-pir-client.cjs')], {
   cwd: repoRoot,
   stdio: 'inherit',
   env: process.env,
 });
+
+const stillMissing = required.filter((file) => !isValidClientBinary(file));
+if (stillMissing.length > 0) {
+  console.error('[PIR-BINARIES] Failed to produce a runnable PIR client binary:');
+  for (const file of stillMissing) {
+    console.error(`  - ${path.relative(repoRoot, file)}`);
+  }
+  process.exit(1);
+}

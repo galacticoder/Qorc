@@ -855,6 +855,14 @@ body,
   flex-direction: column;
   height: 100%;
   min-height: 0;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.qor-conversation-list input,
+.qor-conversation-list textarea {
+  user-select: text;
+  -webkit-user-select: text;
 }
 
 .qor-conversation-scroll {
@@ -1837,6 +1845,235 @@ html.light .dialog-content.remove-dialog,
   color: #a991ff !important;
 }
 
+/* File messages */
+.qor-file-card {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  max-width: 320px;
+  min-width: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--qor-border);
+  border-radius: 14px;
+  background: var(--qor-control-bg);
+  cursor: pointer;
+  transition: background .15s ease, border-color .15s ease;
+}
+
+.qor-file-card[role="button"]:hover {
+  background: var(--qor-control-hover);
+  border-color: color-mix(in srgb, var(--qor-accent) 40%, var(--qor-border));
+}
+
+.qor-file-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
+}
+
+.qor-file-name {
+  overflow: hidden;
+  color: var(--qor-text);
+  font-size: 13.5px;
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.qor-file-size {
+  color: var(--qor-muted-text);
+  font-size: 11.5px;
+  font-weight: 500;
+}
+
+.qor-file-dl {
+  flex: 0 0 auto;
+  width: 34px;
+  height: 34px;
+  display: grid;
+  place-items: center;
+  border-radius: 9px;
+  color: var(--qor-muted-text);
+  transition: background .15s ease, color .15s ease;
+}
+
+.qor-file-card[role="button"]:hover .qor-file-dl {
+  background: var(--qor-accent);
+  color: #fff;
+}
+
+.qor-file-audio {
+  width: 100%;
+  height: 32px;
+  margin-top: 2px;
+}
+
+/* Image bubble */
+.qor-file-image {
+  position: relative;
+  display: block;
+  width: 100%;
+  max-width: 320px;
+  aspect-ratio: 4 / 3;
+  overflow: hidden;
+  border-radius: 14px;
+  border: 1px solid var(--qor-border);
+  cursor: pointer;
+  background: var(--qor-muted-bg);
+}
+
+.qor-file-image-skeleton {
+  position: absolute;
+  inset: 0;
+  background: var(--qor-muted-bg);
+}
+
+.qor-file-image-img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+  user-select: none;
+  transition: opacity .2s ease, transform .25s ease;
+}
+
+.qor-file-image:hover .qor-file-image-img {
+  transform: scale(1.03);
+}
+
+/* Video bubble */
+.qor-file-media {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  max-width: 340px;
+  overflow: hidden;
+  border: 1px solid var(--qor-border);
+  border-radius: 14px;
+  background: var(--qor-control-bg);
+}
+
+.qor-file-video {
+  width: 100%;
+  max-height: 280px;
+  display: block;
+  background: #000;
+}
+
+.qor-file-media-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 12px;
+}
+
+.qor-file-error {
+  display: inline-block;
+  max-width: 320px;
+  padding: 10px 12px;
+  border: 1px dashed var(--qor-border);
+  border-radius: 12px;
+  background: var(--qor-control-bg);
+  color: var(--qor-muted-text);
+  font-size: 12.5px;
+  font-style: italic;
+  user-select: none;
+}
+
+/* Voice messages */
+.qor-voice {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  min-width: 200px;
+  max-width: 300px;
+  padding: 8px 12px 8px 8px;
+  border: 1px solid var(--qor-border);
+  border-radius: 16px;
+  background: var(--qor-control-bg);
+  user-select: none;
+}
+
+.qor-voice.is-mine {
+  border-color: transparent;
+}
+
+.qor-voice-play {
+  flex: 0 0 auto;
+  width: 38px;
+  height: 38px;
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: 50%;
+  background: var(--qor-accent);
+  color: #fff;
+  cursor: pointer;
+  transition: background .15s ease, transform .05s ease;
+}
+
+.qor-voice-play:hover {
+  background: var(--qor-accent-hover);
+}
+
+.qor-voice-play:active {
+  transform: scale(.94);
+}
+
+.qor-voice.is-mine .qor-voice-play {
+  background: rgba(255, 255, 255, .22);
+}
+
+.qor-voice.is-mine .qor-voice-play:hover {
+  background: rgba(255, 255, 255, .32);
+}
+
+.qor-voice-body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.qor-voice-bars {
+  height: 30px;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  cursor: pointer;
+}
+
+.qor-voice-bars span {
+  flex: 1;
+  min-width: 2px;
+  min-height: 3px;
+  border-radius: 999px;
+  transition: background .1s linear;
+}
+
+.qor-voice-foot {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--qor-muted-text);
+}
+
+.qor-voice.is-mine .qor-voice-foot {
+  color: rgba(255, 255, 255, .85);
+}
+
+.qor-voice-time {
+  font-size: 11px;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+}
+
 .login-simple,
 .signup-simple {
   width: min(100%, 460px);
@@ -2706,3 +2943,521 @@ html.light .tor-flat-shell .tor-flat-textarea:focus,
 
   
   }
+
+
+/* ── Auth screens */
+.screen-login,
+.screen-signup {
+  min-height: 100vh;
+  overflow: auto;
+  background: hsl(var(--background));
+}
+
+.login-scene,
+.signup-scene {
+  min-height: 100vh;
+  position: relative;
+  display: grid;
+  align-items: stretch;
+  padding: 92px 0 0;
+  overflow: auto;
+  isolation: isolate;
+  background: hsl(var(--background));
+}
+
+.login-screen-brand,
+.login-screen-tor,
+.signup-screen-brand,
+.signup-screen-tor {
+  position: fixed;
+  top: 24px;
+  z-index: 90;
+  display: inline-flex;
+  align-items: center;
+  min-height: 38px;
+  color: hsl(var(--foreground));
+}
+
+.login-screen-brand,
+.signup-screen-brand {
+  left: 24px;
+  gap: 12px;
+  font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  font-weight: 900;
+  letter-spacing: 0;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.login-brand-mark,
+.signup-brand-mark {
+  width: 38px;
+  height: 38px;
+  display: grid;
+  place-items: center;
+  border-radius: 9px;
+  background: transparent;
+  color: #fff;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.login-brand-mark .qor-brand-logo-img,
+.signup-brand-mark .qor-brand-logo-img {
+  width: 36px;
+  height: 36px;
+}
+
+.login-brand-name,
+.signup-brand-name {
+  font-size: 15px;
+  font-weight: 900;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.login-screen-tor,
+.signup-screen-tor {
+  right: 24px;
+  height: 38px !important;
+  min-height: 38px;
+  gap: 8px;
+  border: 0;
+  border-radius: 8px;
+  padding: 0 12px !important;
+  background: rgba(22, 163, 74, .16) !important;
+  color: #86efac !important;
+  font-size: 12px;
+  font-weight: 850;
+  box-shadow: none;
+  cursor: pointer;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.login-screen-tor:hover,
+.signup-screen-tor:hover {
+  background: rgba(22, 163, 74, .16) !important;
+  color: #86efac !important;
+}
+
+.login-screen-tor svg,
+.signup-screen-tor svg {
+  width: 14px !important;
+  height: 14px !important;
+  color: #22c55e !important;
+}
+
+.login-screen-tor.is-off,
+.signup-screen-tor.is-off {
+  background: #101015 !important;
+  color: #b9bac4 !important;
+}
+
+.login-screen-tor.is-off svg,
+.signup-screen-tor.is-off svg {
+  color: #8f8f98 !important;
+}
+
+.login-back-setup,
+.signup-back-setup {
+  position: fixed;
+  left: 24px;
+  bottom: 24px;
+  z-index: 90;
+  display: inline-flex;
+  align-items: center;
+  min-height: 38px;
+  padding: 0 12px;
+  border-radius: 8px;
+  color: hsl(var(--muted-foreground));
+  font-size: 12px;
+  font-weight: 850;
+  text-decoration: none;
+  transition: color .18s ease, background .18s ease;
+}
+
+.login-simple,
+.signup-simple {
+  width: min(100%, 460px);
+  display: grid;
+  gap: 22px;
+  margin: auto;
+  padding: 24px;
+}
+
+.login-simple-head,
+.signup-simple-head {
+  display: grid;
+  gap: 10px;
+  text-align: center;
+}
+
+.login-simple-head h1,
+.signup-simple-head h1 {
+  margin: 0;
+  color: hsl(var(--foreground));
+  font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  font-size: 58px;
+  line-height: .9;
+  font-weight: 900;
+  letter-spacing: 0;
+  white-space: nowrap;
+}
+
+.login-simple-head p,
+.signup-simple-head p {
+  margin: 0;
+  color: hsl(var(--muted-foreground));
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.login-simple-form,
+.signup-simple-form {
+  display: grid;
+  gap: 10px;
+}
+
+.login-simple-field,
+.signup-simple-field {
+  display: grid;
+  gap: 7px;
+}
+
+.login-simple-field label,
+.signup-simple-field label {
+  color: hsl(var(--muted-foreground));
+  font-size: 11px;
+  font-weight: 850;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+
+.login-simple-input,
+.signup-simple-input {
+  width: 100%;
+  height: 48px;
+  border: 1px solid rgba(255, 255, 255, .1);
+  border-radius: 8px;
+  padding: 0 17px;
+  background: #05040a;
+  color: hsl(var(--foreground));
+  outline: none;
+  font-size: 14px;
+  font-weight: 650;
+  transition: border-color .18s ease, background .18s ease, color .18s ease, opacity .18s ease;
+}
+
+.login-simple-input:focus,
+.signup-simple-input:focus {
+  border-color: #a991ff;
+}
+
+.login-simple-input:disabled,
+.signup-simple-input:disabled {
+  cursor: not-allowed;
+  opacity: .46;
+  border-color: rgba(255, 255, 255, .06);
+  background: #030207;
+  color: #9b95ad;
+}
+
+.login-simple-form.is-submitting .login-simple-input,
+.signup-simple-form.is-submitting .signup-simple-input {
+  cursor: progress;
+  opacity: .46;
+  border-color: rgba(255, 255, 255, .06);
+  background: #030207;
+  color: #9b95ad;
+}
+
+.login-simple-form.is-submitting label,
+.signup-simple-form.is-submitting label {
+  opacity: .58;
+}
+
+.login-simple-submit,
+.signup-simple-submit {
+  width: 100%;
+  min-height: 50px;
+  border: 0;
+  border-radius: 8px;
+  margin-top: 6px;
+  background: #7057c8;
+  color: #fff;
+  font-size: 13px;
+  font-weight: 850;
+  cursor: pointer;
+  transition: background .18s ease, color .18s ease;
+}
+
+.login-simple-submit:hover,
+.signup-simple-submit:hover {
+  background: #8069d8;
+}
+
+.login-simple-submit:disabled,
+.signup-simple-submit:disabled {
+  cursor: default;
+  background: #2f245a;
+  color: #9f8ddd;
+}
+
+.login-simple-submit:disabled:hover,
+.signup-simple-submit:disabled:hover {
+  background: #2f245a;
+}
+
+.login-simple-legal,
+.login-simple-switch,
+.signup-simple-legal,
+.signup-simple-switch {
+  margin: 0;
+  color: hsl(var(--muted-foreground));
+  font-size: 12px;
+  line-height: 1.55;
+  text-align: center;
+}
+
+.login-simple-legal a,
+.login-simple-switch a,
+.signup-simple-legal a,
+.signup-simple-switch a {
+  color: hsl(var(--foreground));
+  font-weight: 800;
+  text-decoration: none;
+}
+
+.login-back-setup:hover,
+.login-simple a:hover,
+.signup-back-setup:hover,
+.signup-simple a:hover {
+  color: #a991ff;
+}
+
+.login-back-setup:hover,
+.signup-back-setup:hover {
+  background: rgba(112, 87, 200, .12);
+}
+
+/* Theme toggle shown in the same spot across login / sign up / Tor setup */
+.auth-theme-toggle {
+  position: fixed;
+  right: 24px;
+  bottom: 24px;
+  z-index: 90;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 38px;
+  min-width: 38px;
+  padding: 0;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: hsl(var(--muted-foreground));
+  cursor: pointer;
+  transition: color .18s ease, background .18s ease;
+}
+
+.auth-theme-toggle:hover {
+  color: hsl(var(--foreground));
+  background: rgba(112, 87, 200, .12);
+}
+
+.auth-simple-message {
+  margin: 0;
+  color: hsl(var(--destructive));
+  font-size: 12px;
+  font-weight: 750;
+  line-height: 1.45;
+  text-align: center;
+}
+
+.auth-simple-trust {
+  display: grid;
+  gap: 12px;
+  border: 1px solid rgba(169, 145, 255, .28);
+  border-radius: 8px;
+  padding: 14px;
+  background: #05040a;
+  color: hsl(var(--foreground));
+}
+
+.auth-simple-trust p,
+.auth-simple-trust span,
+.auth-simple-trust dl,
+.auth-simple-trust dt,
+.auth-simple-trust dd {
+  margin: 0;
+}
+
+.auth-simple-trust p {
+  font-size: 13px;
+  font-weight: 850;
+}
+
+.auth-simple-trust span {
+  color: hsl(var(--muted-foreground));
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.auth-simple-trust dl {
+  display: grid;
+  gap: 6px;
+  padding: 10px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, .04);
+  font-size: 11px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+}
+
+.auth-simple-trust dl div {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.auth-simple-trust dt {
+  color: hsl(var(--muted-foreground));
+}
+
+.auth-simple-trust dd {
+  color: #a991ff;
+}
+
+.auth-simple-trust-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.auth-simple-trust-actions button {
+  min-height: 38px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: #fff;
+  font-size: 12px;
+  font-weight: 850;
+}
+
+.auth-simple-trust-actions button:hover {
+  background: #8069d8;
+}
+
+.auth-simple-trust-actions button:disabled {
+  cursor: default;
+  background: #2a2a31;
+  color: #77727f;
+}
+
+html.light .login-screen-tor,
+.light .login-screen-tor,
+html.light .signup-screen-tor,
+.light .signup-screen-tor {
+  background: #ecfdf5 !important;
+  color: #166534 !important;
+}
+
+html.light .login-screen-tor:hover,
+.light .login-screen-tor:hover,
+html.light .signup-screen-tor:hover,
+.light .signup-screen-tor:hover {
+  background: #ecfdf5 !important;
+  color: #166534 !important;
+}
+
+html.light .login-screen-tor svg,
+.light .login-screen-tor svg,
+html.light .signup-screen-tor svg,
+.light .signup-screen-tor svg {
+  color: #16a34a !important;
+}
+
+html.light .login-screen-tor.is-off,
+.light .login-screen-tor.is-off,
+html.light .signup-screen-tor.is-off,
+.light .signup-screen-tor.is-off {
+  background: #f6f7f9 !important;
+  color: #6b7280 !important;
+}
+
+html.light .login-screen-tor.is-off svg,
+.light .login-screen-tor.is-off svg,
+html.light .signup-screen-tor.is-off svg,
+.light .signup-screen-tor.is-off svg {
+  color: #9ca3af !important;
+}
+
+html.light .login-simple-input,
+.light .login-simple-input,
+html.light .signup-simple-input,
+.light .signup-simple-input {
+  border-color: rgba(71, 54, 35, .14);
+  background: #fffaf2;
+  color: #17131f;
+}
+
+html.light .login-simple-input:disabled,
+.light .login-simple-input:disabled,
+html.light .signup-simple-input:disabled,
+.light .signup-simple-input:disabled,
+html.light .login-simple-form.is-submitting .login-simple-input,
+.light .login-simple-form.is-submitting .login-simple-input,
+html.light .signup-simple-form.is-submitting .signup-simple-input,
+.light .signup-simple-form.is-submitting .signup-simple-input {
+  opacity: .48;
+  border-color: rgba(71, 54, 35, .09);
+  background: #f1eadf;
+  color: #756e7f;
+}
+
+html.light .login-simple-submit:disabled,
+html.light .login-simple-submit:disabled:hover,
+.light .login-simple-submit:disabled,
+.light .login-simple-submit:disabled:hover,
+html.light .signup-simple-submit:disabled,
+html.light .signup-simple-submit:disabled:hover,
+.light .signup-simple-submit:disabled,
+.light .signup-simple-submit:disabled:hover {
+  background: #2f245a;
+  color: #c9bcff;
+}
+
+html.light .login-simple-legal a,
+html.light .login-simple-switch a,
+.light .login-simple-legal a,
+.light .login-simple-switch a,
+html.light .signup-simple-legal a,
+html.light .signup-simple-switch a,
+.light .signup-simple-legal a,
+.light .signup-simple-switch a {
+  color: #17131f;
+}
+
+html.light .login-back-setup:hover,
+html.light .login-simple a:hover,
+.light .login-back-setup:hover,
+.light .login-simple a:hover,
+html.light .signup-back-setup:hover,
+html.light .signup-simple a:hover,
+.light .signup-back-setup:hover,
+.light .signup-simple a:hover {
+  color: #7057c8;
+}
+
+html.light .auth-simple-trust,
+.light .auth-simple-trust {
+  border-color: rgba(71, 54, 35, .14);
+  background: #fffaf2;
+  color: #17131f;
+}
+
+html.light .auth-simple-trust dl,
+.light .auth-simple-trust dl {
+  background: rgba(23, 19, 31, .05);
+}
+

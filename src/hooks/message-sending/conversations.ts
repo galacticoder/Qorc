@@ -55,13 +55,16 @@ export const getConversationPreview = (message: Message, currentUsername: string
     const hasExtension = (extensions: readonly string[]) =>
       extensions.some(ext => normalizedFilename.endsWith(`.${ext}`));
 
+    if (filename && normalizedFilename.includes('voice-note')) {
+      return `${prefix} sent a voice message`;
+    }
     if (filename && hasExtension(IMAGE_EXTENSIONS)) {
       return `${prefix} sent an image`;
     }
     if (filename && hasExtension(VIDEO_EXTENSIONS)) {
       return `${prefix} sent a video`;
     }
-    if (filename && (normalizedFilename.includes('voice-note') || hasExtension(AUDIO_EXTENSIONS))) {
+    if (filename && hasExtension(AUDIO_EXTENSIONS)) {
       return `${prefix} sent a voice message`;
     }
     return `${prefix} sent a file`;

@@ -3,7 +3,7 @@ import { createPortal } from "react-dom";
 import { Avatar, AvatarFallback } from "../../../ui/avatar";
 import { format } from "date-fns";
 import { cn } from "../../../../lib/utils/shared-utils";
-import { PaperclipIcon } from "../../assets/icons";
+import { Download } from "lucide-react";
 import { Message } from "../types";
 import { MessageReceipt } from "../MessageReceipt";
 import { VoiceMessage } from "../../calls/VoiceMessage";
@@ -68,66 +68,61 @@ export const FileContent: React.FC<FileContentProps> = ({ message, isCurrentUser
     }
   }, [effectiveFileUrl]);
 
+  const isImageFile = hasExtension(filename || "", IMAGE_EXTENSIONS);
+  const isVideoFile = hasExtension(filename || "", VIDEO_EXTENSIONS);
+  const isAudioFile = hasExtension(filename || "", AUDIO_EXTENSIONS) && !filename?.includes('voice-note');
+  const isGenericFile = !isImageFile && !isVideoFile && !isAudioFile;
+
+  const sizeLabel = formatFileSize(fileSize ?? 0);
+
+  const downloadFile = () => {
+    if (effectiveFileUrl) createDownloadLink(effectiveFileUrl, filename || 'download');
+  };
+
+  // Compact card shell shared by audio / generic files
+  const fileCard = (children: React.ReactNode, onClick?: () => void) => (
+    <div
+      className="qor-file-card"
+      role={onClick ? "button" : undefined}
+      tabIndex={onClick ? 0 : undefined}
+      onClick={onClick}
+      onKeyDown={onClick ? (e) => { if (e.key === 'Enter') onClick(); } : undefined}
+    >
+      {children}
+    </div>
+  );
+
   return (
     <>
       {/* Images */}
-      {hasExtension(filename || "", IMAGE_EXTENSIONS) && (
+      {isImageFile && (
         <>
-          <div
-            className="relative cursor-pointer group"
-            onClick={() => setLightboxOpen(true)}
-            title="Click to expand"
-          >
-            {!imageError ? (
-              <div
-                className="rounded-xl overflow-hidden relative"
-                style={{
-                  width: '280px',
-                  height: '200px',
-                  backgroundColor: 'var(--color-surface)'
-                }}
-              >
-                {!imageLoaded && (
-                  <div
-                    className="absolute inset-0 w-full h-full animate-pulse"
-                    style={{ backgroundColor: 'var(--color-secondary)' }}
-                  />
-                )}
-                <img
-                  src={effectiveFileUrl}
-                  alt={filename}
-                  className={`w-full h-full object-cover select-none transition-opacity duration-200 ${imageLoaded ? 'opacity-100' : 'opacity-0'}`}
-                  draggable={false}
-                  onLoad={(e) => {
-                    void e;
-                    setImageLoaded(true);
-                    onRendered?.();
-                  }}
-                  onError={() => {
-                    setImageError(true);
-                    setImageLoaded(true);
-                    onRendered?.();
-                  }}
-                />
-              </div>
-            ) : (
-              <div
-                className="px-3 py-2 rounded-lg text-sm italic select-none"
-                style={{
-                  backgroundColor: 'var(--color-surface)',
-                  color: 'var(--color-text-secondary)',
-                  border: '1px dashed rgba(255,255,255,0.22)'
-                }}
-              >
-                Image cannot be loaded
-              </div>
-            )}
-          </div>
+          {!imageError ? (
+            <div
+              className="qor-file-image group"
+              onClick={() => setLightboxOpen(true)}
+              role="button"
+              tabIndex={0}
+              onKeyDown={(e) => { if (e.key === 'Enter') setLightboxOpen(true); }}
+              title="Click to expand"
+            >
+              {!imageLoaded && <div className="qor-file-image-skeleton animate-pulse" />}
+              <img
+                src={effectiveFileUrl}
+                alt={filename}
+                className={cn("qor-file-image-img", imageLoaded ? "opacity-100" : "opacity-0")}
+                draggable={false}
+                onLoad={() => { setImageLoaded(true); onRendered?.(); }}
+                onError={() => { setImageError(true); setImageLoaded(true); onRendered?.(); }}
+              />
+            </div>
+          ) : (
+            <div className="qor-file-error">Image cannot be loaded</div>
+          )}
 
-          {/* Lightbox Modal */}
           {lightboxOpen && effectiveFileUrl && createPortal(
             <div
-              className="fixed inset-0 flex items-center justify-center bg-black/70"
+              className="fixed inset-0 flex items-center justify-center bg-black/80"
               style={{ zIndex: 9999 }}
               onClick={() => setLightboxOpen(false)}
               onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); }}
@@ -135,11 +130,8 @@ export const FileContent: React.FC<FileContentProps> = ({ message, isCurrentUser
               <img
                 src={effectiveFileUrl}
                 alt={filename}
-                className="object-contain select-none pointer-events-none"
-                style={{
-                  maxWidth: '90vw',
-                  maxHeight: '90vh'
-                }}
+                className="object-contain select-none pointer-events-none rounded-lg"
+                style={{ maxWidth: '92vw', maxHeight: '92vh' }}
                 draggable={false}
               />
             </div>,
@@ -149,127 +141,49 @@ export const FileContent: React.FC<FileContentProps> = ({ message, isCurrentUser
       )}
 
       {/* Videos */}
-      {hasExtension(filename || "", VIDEO_EXTENSIONS) && (
+      {isVideoFile && (
         !videoError ? (
-          <div
-            className={cn(
-              "rounded-lg text-sm break-words",
-              isCurrentUser ? "bg-primary text-primary-foreground" : "bg-muted"
-            )}
-          >
-            <div className="flex flex-col gap-2">
-              <video
-                controls
-                className="max-w-full rounded-md"
-                onError={() => setVideoError(true)}
-              >
-                <source src={effectiveFileUrl} />
-                Your browser does not support the video tag.
-              </video>
-
-              <div className="flex items-center gap-2 text-sm">
-                <span className="font-medium break-all ml-1 mb-1">{filename}</span>
-                <span className="text-xs text-muted-foreground">({formatFileSize(fileSize ?? 0)})</span>
-              </div>
+          <div className="qor-file-media">
+            <video controls className="qor-file-video" onError={() => setVideoError(true)}>
+              <source src={effectiveFileUrl} />
+            </video>
+            <div className="qor-file-media-foot">
+              <span className="qor-file-name" title={filename}>{filename}</span>
+              <span className="qor-file-size">{sizeLabel}</span>
             </div>
           </div>
         ) : (
-          <div
-            className="px-3 py-2 rounded-lg text-sm italic select-none"
-            style={{
-              backgroundColor: 'var(--color-surface)',
-              color: 'var(--color-text-secondary)',
-              border: '1px dashed var(--color-border)'
-            }}
-          >
-            Video cannot be loaded
-          </div>
+          <div className="qor-file-error">Video cannot be loaded</div>
         )
       )}
 
-      {/* Audio files */}
-      {hasExtension(filename || "", AUDIO_EXTENSIONS) && !filename?.includes('voice-note') && (
+      {/* Audio (non-voice) */}
+      {isAudioFile && (
         !audioError ? (
-          <div
-            className="rounded-lg text-sm break-words"
-            style={{
-              backgroundColor: isCurrentUser ? 'var(--color-accent-primary)' : 'var(--chat-bubble-received-bg)',
-              color: isCurrentUser ? 'white' : 'var(--color-text-primary)',
-              borderRadius: 'var(--message-bubble-radius)'
-            }}
-          >
-            <div className="flex flex-col gap-1">
-              <audio
-                controls
-                className="w-full rounded-md"
-                onError={() => setAudioError(true)}
-              >
+          fileCard(
+            <div className="qor-file-meta">
+              <span className="qor-file-name" title={filename}>{filename}</span>
+              <audio controls className="qor-file-audio" onError={() => setAudioError(true)}>
                 <source src={effectiveFileUrl} />
-                Your browser does not support the audio element.
               </audio>
-
-              <div className={cn(
-                "flex items-center gap-1 text-sm",
-                isCurrentUser ? "text-white" : "text-blue-500"
-              )}>
-                <span className="truncate max-w-[250px] ml-1" title={filename}>
-                  {filename}
-                </span>
-              </div>
-
-              <span className="text-xs text-muted-foreground">({formatFileSize(fileSize ?? 0)})</span>
+              <span className="qor-file-size">{sizeLabel}</span>
             </div>
-          </div>
+          )
         ) : (
-          <div
-            className="px-3 py-2 rounded-lg text-sm italic select-none"
-            style={{
-              backgroundColor: 'var(--color-surface)',
-              color: 'var(--color-text-secondary)',
-              border: '1px dashed var(--color-border)'
-            }}
-          >
-            Audio cannot be loaded
-          </div>
+          <div className="qor-file-error">Audio cannot be loaded</div>
         )
       )}
 
-      {/* Other files */}
-      {!hasExtension(filename || "", [...IMAGE_EXTENSIONS, ...VIDEO_EXTENSIONS, ...AUDIO_EXTENSIONS]) && (
-        <div
-          className="rounded-lg px-1 py-1 text-sm break-words"
-          style={{
-            backgroundColor: isCurrentUser ? 'var(--color-accent-primary)' : 'var(--chat-bubble-received-bg)',
-            borderRadius: 'var(--message-bubble-radius)'
-          }}
-          onClick={() => {
-            if (effectiveFileUrl) {
-              createDownloadLink(effectiveFileUrl, filename || 'download');
-            }
-          }}
-        >
-          <div
-            className="flex items-start gap-2 w-full"
-            style={{
-              color: isCurrentUser ? 'white' : 'var(--color-link)'
-            }}
-          >
-            <PaperclipIcon className="h-5 w-5 shrink-0 mt-1" />
-            <div className="flex flex-col min-w-0">
-              <div className="flex items-center gap-2">
-                <span className="text-sm truncate max-w-[250px] w-full" title={filename}>
-                  {filename}
-                </span>
-              </div>
-              <span
-                className="text-xs leading-tight"
-                style={{
-                  color: isCurrentUser ? 'rgba(255,255,255,0.8)' : 'var(--color-text-secondary)'
-                }}
-              >({formatFileSize(fileSize ?? 0)})</span>
-            </div>
+      {/* Generic files */}
+      {isGenericFile && fileCard(
+        <>
+          <div className="qor-file-meta">
+            <span className="qor-file-name" title={filename}>{filename || 'File'}</span>
+            <span className="qor-file-size">{sizeLabel}</span>
           </div>
-        </div>
+          <div className="qor-file-dl" aria-hidden="true"><Download className="w-[18px] h-[18px]" /></div>
+        </>,
+        downloadFile
       )}
     </>
   );

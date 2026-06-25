@@ -4,7 +4,7 @@ import { Square, Play, Pause, Trash2, Send } from 'lucide-react';
 
 // Props for the voice recorder control
 interface VoiceRecorderProps {
-  onSendVoiceNote: (audioBlob: Blob) => void;
+  onSendVoiceNote: (audioBlob: Blob, durationSec: number) => void;
   onCancel: () => void;
   disabled?: boolean;
 }
@@ -30,6 +30,8 @@ export function VoiceRecorder({ onSendVoiceNote, onCancel, disabled }: VoiceReco
   const audioContextRef = useRef<AudioContext | null>(null);
   const blobUrlRef = useRef<string | null>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const recordStartRef = useRef(0);
+  const finalDurationRef = useRef(0);
 
   // Release media resources and reset state
   const cleanup = () => {
@@ -194,6 +196,9 @@ export function VoiceRecorder({ onSendVoiceNote, onCancel, disabled }: VoiceReco
       };
 
       mediaRecorder.onstop = () => {
+        finalDurationRef.current = recordStartRef.current > 0
+          ? (Date.now() - recordStartRef.current) / 1000
+          : 0;
         const blob = new Blob(chunksRef.current, { type: mimeType });
         setRecordedBlob(blob);
         if (streamRef.current) {
@@ -217,6 +222,7 @@ export function VoiceRecorder({ onSendVoiceNote, onCancel, disabled }: VoiceReco
       };
 
       mediaRecorder.start();
+      recordStartRef.current = Date.now();
       setIsRecording(true);
       isRecordingRef.current = true;
       setDuration(0);
@@ -287,7 +293,7 @@ export function VoiceRecorder({ onSendVoiceNote, onCancel, disabled }: VoiceReco
   const sendVoiceNote = async () => {
     if (recordedBlob && !disabled) {
       try {
-        await onSendVoiceNote(recordedBlob);
+        await onSendVoiceNote(recordedBlob, finalDurationRef.current || duration);
       } catch (error) {
         console.error('Error sending voice note:', error);
       }

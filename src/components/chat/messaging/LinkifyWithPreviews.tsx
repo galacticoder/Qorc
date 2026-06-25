@@ -72,11 +72,42 @@ interface LinkifyWithPreviewsProps {
   readonly onRendered?: () => void;
 }
 
+// Open a URL
+const openInBrowser = (url: string): void => {
+  void (async () => {
+    try {
+      const ok = await system.openExternal(url);
+      if (ok === false) window.open(url, '_blank', 'noopener,noreferrer');
+    } catch {
+      window.open(url, '_blank', 'noopener,noreferrer');
+    }
+  })();
+};
+
+const clamp2: React.CSSProperties = {
+  display: '-webkit-box',
+  WebkitLineClamp: 2,
+  WebkitBoxOrient: 'vertical',
+  overflow: 'hidden',
+  overflowWrap: 'anywhere',
+  wordBreak: 'break-word',
+};
+
+const cardBase: React.CSSProperties = {
+  width: '100%',
+  maxWidth: '100%',
+  minWidth: 0,
+  userSelect: 'none',
+  borderColor: 'var(--qor-border)',
+  backgroundColor: 'var(--color-surface)',
+};
+
 // Render a single link preview
 const CustomLinkPreview = React.memo(({ url, isCurrentUser: _isCurrentUser, showFallbackLink }: { url: string; isCurrentUser: boolean; showFallbackLink?: boolean }) => {
   const [data, setData] = useState<CachedPreview | null>(linkPreviewCache.get(url) || null);
   const [loading, setLoading] = useState(!data);
   const [error, setError] = useState(false);
+  const [imgError, setImgError] = useState(false);
 
   useEffect(() => {
     if (data || !isValidUrl(url)) return;
@@ -129,43 +160,24 @@ const CustomLinkPreview = React.memo(({ url, isCurrentUser: _isCurrentUser, show
     return () => { mounted = false; };
   }, [url, data]);
 
-  const handleClick = (e: React.MouseEvent) => {
+  const handleClick = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
     e.stopPropagation();
-    system.openExternal(url).catch(() => {
-      window.open(url, '_blank', 'noopener,noreferrer');
-    });
-  };
+    openInBrowser(url);
+  }, [url]);
 
   if (error || (!loading && !data)) {
     if (showFallbackLink) {
       return (
-        <div
-          className="rounded-lg border overflow-hidden w-full"
-          style={{
-            borderColor: 'rgba(255,255,255,0.22)',
-            backgroundColor: 'var(--color-surface)',
-            width: '100%',
-            maxWidth: 'min(var(--message-bubble-max-width), 320px)',
-            minWidth: '240px',
-            userSelect: 'none'
-          }}
-        >
-          <div className="p-3 flex flex-col gap-1">
-            <a
-              href={url}
-              onClick={handleClick}
-              className="underline decoration-1 underline-offset-2 transition-colors break-all cursor-pointer text-sm"
-              style={{
-                color: 'var(--color-accent-primary)'
-              }}
-            >
-              {url}
-            </a>
-            <span className="text-[10px] uppercase tracking-wider text-muted-foreground/70 font-medium">
-              {getHostname(url) ?? url}
-            </span>
-          </div>
+        <div className="rounded-lg border overflow-hidden" style={cardBase}>
+          <a
+            href={url}
+            onClick={handleClick}
+            className="block p-3 underline decoration-1 underline-offset-2 transition-colors cursor-pointer text-sm"
+            style={{ color: 'var(--color-accent-primary)', overflowWrap: 'anywhere', wordBreak: 'break-word' }}
+          >
+            {url}
+          </a>
         </div>
       );
     }
@@ -174,73 +186,54 @@ const CustomLinkPreview = React.memo(({ url, isCurrentUser: _isCurrentUser, show
 
   if (loading) {
     return (
-      <div
-        className="animate-pulse rounded-lg border overflow-hidden w-full"
-        style={{
-          borderColor: 'rgba(255,255,255,0.22)',
-          backgroundColor: 'var(--color-surface)',
-          width: '100%',
-          maxWidth: 'min(var(--message-bubble-max-width), 320px)',
-          minWidth: '240px',
-          userSelect: 'none'
-        }}
-      >
-        <div className="w-full h-32 md:h-40 bg-muted/20 border-b" style={{ borderColor: 'rgba(255,255,255,0.22)' }} />
-        <div className="p-3 flex flex-col gap-1">
-          <div className="h-4 bg-muted/20 rounded w-3/4" />
-          <div className="h-3 bg-muted/20 rounded w-full" />
-          <div className="h-3 bg-muted/20 rounded w-1/2" />
-          <div className="flex items-center gap-2 mt-1">
-            <div className="h-2.5 bg-muted/20 rounded w-24" />
-          </div>
+      <div className="animate-pulse rounded-lg border overflow-hidden" style={cardBase}>
+        <div className="w-full border-b" style={{ height: '150px', backgroundColor: 'rgba(127,127,127,0.12)', borderColor: 'var(--qor-border)' }} />
+        <div className="p-3 flex flex-col gap-2">
+          <div className="h-4 rounded w-3/4" style={{ backgroundColor: 'rgba(127,127,127,0.14)' }} />
+          <div className="h-3 rounded w-full" style={{ backgroundColor: 'rgba(127,127,127,0.12)' }} />
+          <div className="h-2.5 rounded w-24 mt-1" style={{ backgroundColor: 'rgba(127,127,127,0.1)' }} />
         </div>
       </div>
     );
   }
 
   const { title, description, image, hostname } = data!;
+  const showImage = !!image && !imgError;
 
   return (
     <div
       onClick={handleClick}
-      className="group cursor-pointer rounded-lg border overflow-hidden transition-all hover:bg-muted/10 w-full"
-      style={{
-        borderColor: 'rgba(255,255,255,0.22)',
-        backgroundColor: 'var(--color-surface)',
-        width: '100%',
-        maxWidth: 'min(var(--message-bubble-max-width), 320px)',
-        minWidth: '240px',
-        userSelect: 'none'
-      }}
+      role="link"
+      tabIndex={0}
+      onKeyDown={(e) => { if (e.key === 'Enter') openInBrowser(url); }}
+      className="group cursor-pointer rounded-lg border overflow-hidden transition-colors hover:bg-white/[0.04]"
+      style={cardBase}
     >
-      {image && (
-        <div
-          className="w-full h-32 md:h-40 bg-cover bg-center bg-no-repeat relative border-b"
-          style={{
-            backgroundImage: `url('${image}')`,
-            borderColor: 'rgba(255,255,255,0.22)'
-          }}
+      {showImage && (
+        <img
+          src={image!}
+          alt=""
+          loading="lazy"
+          referrerPolicy="no-referrer"
+          onError={() => setImgError(true)}
+          className="w-full object-cover border-b block"
+          style={{ height: '160px', borderColor: 'var(--qor-border)' }}
         />
       )}
-      <div className="p-3 flex flex-col gap-1">
+      <div className="p-3 flex flex-col gap-1 min-w-0">
         {title && (
-          <h3 className="font-semibold text-sm leading-tight text-foreground">
+          <h3 className="font-semibold text-sm leading-tight text-foreground" style={clamp2}>
             {title}
           </h3>
         )}
         {description && (
-          <p className="text-xs text-muted-foreground leading-relaxed">
+          <p className="text-xs text-muted-foreground leading-relaxed" style={clamp2}>
             {description}
           </p>
         )}
-        <div className="flex items-center gap-2 mt-1">
-          {image && !title && !description && (
-            <span className="text-xs text-muted-foreground break-all">{url}</span>
-          )}
-          <span className="text-[10px] uppercase tracking-wider text-muted-foreground/70 font-medium">
-            {hostname}
-          </span>
-        </div>
+        <span className="text-[10px] uppercase tracking-wider text-muted-foreground/70 font-medium mt-1 block truncate">
+          {hostname ?? getHostname(url) ?? url}
+        </span>
       </div>
     </div>
   );
@@ -278,9 +271,7 @@ const LinkifyWithPreviewsComponent: React.FC<LinkifyWithPreviewsProps> = ({
   const handleLinkClick = useCallback((url: string, e: React.MouseEvent) => {
     e.preventDefault();
     e.stopPropagation();
-    system.openExternal(url).catch(() => {
-      window.open(url, '_blank', 'noopener,noreferrer');
-    });
+    openInBrowser(url);
   }, []);
 
   const enhancedOptions = useMemo(() => ({

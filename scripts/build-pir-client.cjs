@@ -12,12 +12,26 @@ const image = process.env.QOR_PIR_BUILD_IMAGE || 'qor-pir-hintless:build';
 const outDir = path.join(repoRoot, 'src-tauri', 'binaries');
 const clientOutPath = path.join(outDir, process.platform === 'win32' ? 'qor-pir-client.exe' : 'qor-pir-client');
 const workerOutPath = path.join(outDir, process.platform === 'win32' ? 'qor-pir-worker.exe' : 'qor-pir-worker');
+const backend = process.env.QOR_PIR_BUILD_BACKEND || (process.platform === 'linux' ? 'docker' : 'native');
 
 function run(command, args, options = {}) {
   execFileSync(command, args, { cwd: repoRoot, stdio: options.stdio || 'inherit' });
 }
 
 fs.mkdirSync(outDir, { recursive: true });
+
+if (backend === 'native') {
+  run(process.execPath, [path.join(repoRoot, 'scripts', 'build-pir-client-native.cjs')]);
+  process.exit(0);
+}
+
+if (backend !== 'docker') {
+  throw new Error(`Unsupported QOR_PIR_BUILD_BACKEND '${backend}'. Use 'docker' or 'native'.`);
+}
+
+if (process.platform !== 'linux') {
+  throw new Error('The Docker PIR builder emits Linux binaries. Use QOR_PIR_BUILD_BACKEND=native on macOS/Windows.');
+}
 
 run('docker', ['build', '--target', 'build', '-t', image, hintlessDir]);
 

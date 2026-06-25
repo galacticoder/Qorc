@@ -160,14 +160,16 @@ export function ChatInput({
   }, [validateFile, sendFile]);
 
   // Handle sending voice notes as audio files
-  const handleSendVoiceNote = useCallback(async (audioBlob: Blob) => {
+  const handleSendVoiceNote = useCallback(async (audioBlob: Blob, durationSec: number) => {
     if (!selectedConversation) return;
 
     try {
       setIsSending(true);
 
       const timestamp = Date.now();
-      const filename = `voice-note-${timestamp}.webm`;
+      
+      const seconds = Math.max(1, Math.round(durationSec || 0));
+      const filename = `voice-note-${seconds}s-${timestamp}.webm`;
       const file = new File([audioBlob], filename, { type: audioBlob.type || 'audio/webm' });
 
       const validationError = validateFile(file);
